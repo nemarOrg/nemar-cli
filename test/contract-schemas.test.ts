@@ -471,9 +471,9 @@ describe("user /me envelope schema", () => {
       role: "user",
     };
     for (const status of ["pending", "verified", "approved", "revoked"]) {
-      expect(userMeResponseSchema.parse({ user: { ...user, status }, token: null }).user.status).toBe(
-        status,
-      );
+      expect(
+        userMeResponseSchema.parse({ user: { ...user, status }, token: null }).user.status,
+      ).toBe(status);
     }
     // "active" is the DASHBOARD's collapsed value and belongs to /auth/me, not
     // here; mixing the two vocabularies is the confusion the split prevents.
@@ -494,10 +494,7 @@ describe("user /me envelope schema", () => {
         email: "e@x.org",
         github_username: null,
         role: "user",
-        profile_gaps: [
-          { field: "username", blocks: ["upload_access"] },
-          { field: "city" },
-        ],
+        profile_gaps: [{ field: "username", blocks: ["upload_access"] }, { field: "city" }],
       },
       token: null,
     });

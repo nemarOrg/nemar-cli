@@ -108,6 +108,19 @@ describe("POST /admin/datasets/exemplar", () => {
     expect(res.status).toBe(400);
   });
 
+  test("400 on anonymous: false (#1407)", async () => {
+    // The flag has two states, not three: absent means "not anonymous". An
+    // explicit `false` would be a caller trying to say something the column
+    // cannot express, and accepting it invites "was anonymous, is not any
+    // more" to be read into a row where it is simply untrue.
+    const res = await post(
+      "/admin/datasets/exemplar",
+      { dataset_id: EXEMPLAR, source_id: "nm000132", anonymous: false },
+      "development",
+    );
+    expect(res.status).toBe(400);
+  });
+
   test("400 on a malformed source_id", async () => {
     const res = await post(
       "/admin/datasets/exemplar",

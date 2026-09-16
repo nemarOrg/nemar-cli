@@ -86,7 +86,8 @@ import {
   parseRecordingDuration,
   parseSamplingFrequency,
 } from "./channel-montage.js";
-import { ORG_NAME, sampleEvenly } from "./github.js";
+import { sampleEvenly } from "./github.js";
+import { GITHUB_RAW_ORIGIN, rawContentUrl } from "./github/shared.js";
 import type { PresignedUrlOptions } from "./s3.js";
 import {
   ZARR_VERIFIED_AT_PATH,
@@ -140,13 +141,6 @@ export const ZARR_FIDELITY_SWEEP_WIDE_BUDGET = 600;
 export const ZARR_FIDELITY_SWEEP_DEFAULT = 25;
 export const ZARR_FIDELITY_SWEEP_MAX = 25;
 
-/** Exported for `backend/src/mcp/tools/get-events.ts` (epic #1065 phase 3,
- *  issue #1295): the `events.tsv` fallback reads the same public,
- *  credential-free content host this sweep uses (module doc's "WHY
- *  RAW.GITHUBUSERCONTENT.COM" section), rather than duplicating the origin
- *  string. Also the `McpRoutesDeps.rawGithubBase` default. */
-export const GITHUB_RAW_ORIGIN = "https://raw.githubusercontent.com";
-
 export type ZarrFidelityVerdict = "verified" | "failed" | "unverifiable";
 
 export interface ZarrFidelityMismatchExample {
@@ -168,9 +162,21 @@ export interface ZarrFidelityMismatchExample {
  * reproduce the fossil, and this predicate still catches any that already
  * did or ever do again).
  *
- * `status = 'active' AND visibility = 'public'` (item 5): a private repo
- * cannot be read anonymously via raw.githubusercontent.com, so including
- * one here would only ever manufacture `unverifiable` noise.
+ * `status = 'active' AND visibility = 'public' AND anonymous = 0` (item 5): a
+ * private repo cannot be read anonymously via raw.githubusercontent.com, so
+ * including one here would only ever manufacture `unverifiable` noise.
+ *
+ * `anonymous = 0` is the same rule, stated rather than inferred (#1407). An
+ * anonymous deposit is public in the catalog and private on GitHub, which is
+ * exactly the shape `visibility = 'public'` was standing in for and exactly
+ * the shape it no longer catches. Without this the sweep would stamp
+ * `unverifiable` on every anonymous deposit -- once per conversion, not once
+ * per run, since the stamp itself drops the row out of the candidate
+ * predicate until `zarr_source_commit` moves. Fail-safe either way: an absent
+ * sidecar records no mismatch and can never produce a false `failed`. But the
+ * stamp is indistinguishable from a dataset whose sidecars are genuinely
+ * missing, so it would quietly convert a private repository into a data
+ * quality report.
  * `github_repo IS NOT NULL` is a defensive narrowing beyond the brief's
  * literal predicate (not a change to it): a row with no repo has nothing
  * this sweep could ever fetch a sidecar from.
@@ -178,6 +184,7 @@ export interface ZarrFidelityMismatchExample {
 export const ZARR_FIDELITY_SWEEP_CANDIDATE_SQL = `SELECT dataset_id, github_repo FROM datasets
    WHERE status = 'active'
      AND visibility = 'public'
+     AND anonymous = 0
      AND zarr_status = 'ready'
      AND zarr_store_count > 0
      AND github_repo IS NOT NULL
@@ -194,6 +201,7 @@ export const ZARR_FIDELITY_SWEEP_CANDIDATE_SQL = `SELECT dataset_id, github_repo
 export const ZARR_FIDELITY_SWEEP_REMAINING_SQL = `SELECT COUNT(*) AS n FROM datasets
    WHERE status = 'active'
      AND visibility = 'public'
+     AND anonymous = 0
      AND zarr_status = 'ready'
      AND zarr_store_count > 0
      AND github_repo IS NOT NULL
@@ -466,20 +474,6 @@ type SidecarFetchOutcome =
   | { kind: "content"; body: string }
   | { kind: "absent" }
   | { kind: "error"; reason: string };
-
-/** Exported (epic #1065 phase 3, issue #1295) for `get-events.ts`'s
- *  `events.tsv` fallback, which builds the identical
- *  `<base>/<org>/<repo>/<commit>/<encoded path>` shape against the dataset
- *  id as the repo name (nemarDatasets names a dataset's repo after its own
- *  id, `.context/systems-inventory.md`'s org layout) -- no behavior change
- *  here. */
-export function rawContentUrl(base: string, repo: string, commit: string, path: string): string {
-  const encoded = path
-    .split("/")
-    .map((seg) => encodeURIComponent(seg))
-    .join("/");
-  return `${base}/${ORG_NAME}/${repo}/${commit}/${encoded}`;
-}
 
 /**
  * One candidate fetch against the public, credential-free content host (see

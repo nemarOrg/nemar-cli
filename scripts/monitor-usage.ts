@@ -41,15 +41,15 @@ async function queryGraphQL<T>(query: string): Promise<T[]> {
   const response = await fetch("https://api.cloudflare.com/client/v4/graphql", {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${token}`,
+      Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ query }),
   });
 
-  const result = await response.json() as GraphQLResponse<T>;
+  const result = (await response.json()) as GraphQLResponse<T>;
   if (result.errors) {
-    throw new Error(result.errors.map(e => e.message).join(", "));
+    throw new Error(result.errors.map((e) => e.message).join(", "));
   }
   return result.data?.viewer.accounts ?? [];
 }
@@ -164,8 +164,10 @@ async function main() {
   console.log("📈 Summary");
   console.log("─".repeat(60));
 
-  const nemarRequests = invocations.find(i => i.dimensions.scriptName === "nemar-api")?.sum.requests ?? 0;
-  const nemarDevRequests = invocations.find(i => i.dimensions.scriptName === "nemar-api-dev")?.sum.requests ?? 0;
+  const nemarRequests =
+    invocations.find((i) => i.dimensions.scriptName === "nemar-api")?.sum.requests ?? 0;
+  const nemarDevRequests =
+    invocations.find((i) => i.dimensions.scriptName === "nemar-api-dev")?.sum.requests ?? 0;
 
   console.log(`  nemar-api (production): ${nemarRequests} requests`);
   console.log(`  nemar-api-dev (testing): ${nemarDevRequests} requests`);
@@ -177,7 +179,9 @@ async function main() {
   // Cost estimate
   console.log("💰 Estimated Savings");
   console.log("─".repeat(60));
-  console.log(`  Before: ${nemarRequests} requests × 2 KV ops = ${nemarRequests * 2} KV operations`);
+  console.log(
+    `  Before: ${nemarRequests} requests × 2 KV ops = ${nemarRequests * 2} KV operations`,
+  );
   console.log(`  After:  0 KV operations (using Cache API)`);
   console.log();
   console.log("  Free tier limits:");

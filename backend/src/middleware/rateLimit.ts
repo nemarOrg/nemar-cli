@@ -62,10 +62,19 @@ const TOKEN_MAX_REQUESTS_AUTHED = 1000;
 
 // Public read data-plane bucket (`data.nemar.org/*`, which the host fork in
 // index.ts rewrites to `/data/*`; also reachable as `/nemar/data/*`). These
-// endpoints are read-only, anonymous, CDN-cacheable, and never stream bytes
-// through the Worker — the per-file route 302-redirects to a presigned S3 URL
-// or raw.githubusercontent.com, so the actual download egress is on S3/GitHub,
-// not here. A parallel client (e.g. `nemar-py --jobs 16` on its HTTPS backend,
+// endpoints are read-only, anonymous and CDN-cacheable. Annexed bytes still
+// leave as a 302 to a presigned S3 URL, so the bulk egress is on S3 — but
+// since #1403 the Worker DOES carry git-tracked files itself rather than
+// redirecting them to raw.githubusercontent.com, because a private repo
+// cannot be read anonymously and a redirect can never be counted. Those are
+// kilobyte-scale metadata files, about 0.1 percent of a dataset's bytes, so
+// the cap below is still sized for request volume rather than egress. Note
+// what is NOT true: nothing here writes an edge copy (a Worker response on a
+// Custom Domain is not stored automatically — zarr-data.ts reaches
+// caches.default explicitly for that reason), so every one of those requests
+// still costs an upstream fetch. If that egress ever matters, this bucket
+// needs splitting rather than widening. A parallel client (e.g. `nemar-py
+// --jobs 16` on its HTTPS backend,
 // or `rclone`) legitimately bursts hundreds of per-file 302s for one dataset
 // and was tripping the 500/60s anonymous IP floor (#615 follow-up; Bruno's
 // `data.nemar.org` 429 reports). Give the data plane its own much larger
@@ -180,8 +189,31 @@ const AUTH_PATHS = [
   // and cannot be brute-forced at any rate a bucket would help with. Note the
   // comment on MAX_REQUESTS below -- shared CF egress IPs are why that bucket
   // is 500 rather than 100 in the first place.
+  //
+  // `/auth/docs/cli-session` IS here, and unlike the two above it is called by
+  // a person's own machine rather than by a Worker, so the per-IP key is a real
+  // per-caller key for once.
+  //
+  // "Far above any honest use" was the first version of this sentence and it
+  // overclaimed. This bucket is SHARED across every entry in this list, so an
+  // admin who reads a dozen runbook pages as a dozen separate
+  // `nemar admin docs` invocations spends the same ten-per-minute budget that
+  // `nemar auth login` needs, and can lock their own machine out of signing in.
+  // The CLI takes several paths per invocation specifically so that a reading
+  // session costs one mint rather than one per page, which keeps normal use far
+  // inside the cap -- but that is a property of how the CLI is written, not a
+  // property of the limit. Someone scripting a loop over single pages will feel
+  // it. Issue #1354 tracks keying these buckets on something better than the
+  // address; until then, do not read this cap as generous.
+  //
+  // The stronger claim -- that a stolen admin key cannot be turned into a
+  // stream of docs credentials from one address -- was written here first and
+  // was FALSE, because `/nemar/auth/docs/cli-session` matched nothing in this
+  // list. See `__normalizeMountPath` above, which is what makes it true, and
+  // note that it was true of no entry in this list before that.
   "/auth/docs/grant",
   "/auth/docs/exchange",
+  "/auth/docs/cli-session",
   // NOT an /auth path, and deliberately in this list anyway (ADR 0042, #1253):
   // POST /users/me/upload-access/request spends a live GitHub API call on the
   // shared installation token for every attempt, and a refused one writes
@@ -249,11 +281,38 @@ export interface __BucketSelection {
   maxRequests: number;
 }
 
+/**
+ * The API sub-app is mounted TWICE in `backend/src/index.ts`: at `/` and at
+ * `/nemar`. Hono hands middleware the FULL request path, not the path relative
+ * to the mount, so every path rule in this file saw `/nemar/auth/login` for one
+ * of the two spellings and matched none of them.
+ *
+ * FOUND BY REVIEW OF THE DOCS CLI ROUTE (#1384), and it was never specific to
+ * that route: every entry in `AUTH_PATHS` was reachable at 500/min (or, with a
+ * bearer, the 1000/min token bucket and the admin bypass beyond it) by
+ * prefixing `/nemar`. `/auth/login`, `/auth/code/request`, `/auth/keys` and the
+ * device-flow routes all sat behind a strict floor that one extra path segment
+ * stepped over. Measured, not inferred: middleware inside the prefixed mount
+ * reports `c.req.path` as `/nemar/auth/docs/cli-session`, and both spellings
+ * reach the same handler.
+ *
+ * Normalizing here rather than at each call site is deliberate: this is the one
+ * place that turns a path into a bucket, so a rule added later gets the fix for
+ * free. The data and zarr regexes benefit too, for the same reason.
+ */
+const MOUNT_PREFIX = "/nemar";
+
+export function __normalizeMountPath(path: string): string {
+  if (path === MOUNT_PREFIX) return "/";
+  return path.startsWith(`${MOUNT_PREFIX}/`) ? path.slice(MOUNT_PREFIX.length) : path;
+}
+
 export function __selectBucket(
-  path: string,
+  rawPath: string,
   authHeader: string | undefined,
   ip: string,
 ): __BucketSelection {
+  const path = __normalizeMountPath(rawPath);
   if (AUTH_PATHS.some((p) => path === p || path.startsWith(`${p}/`) || path.startsWith(`${p}?`))) {
     return { keyKind: "auth-ip", rawKey: ip, maxRequests: AUTH_MAX_REQUESTS };
   }

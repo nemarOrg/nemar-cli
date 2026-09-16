@@ -37,8 +37,14 @@
  *  couple this pure module to the recovery service. */
 const UPSTREAM_MARKER = "[openneuro-upstream-inaccessible]";
 
+/** Marker the publish gate emits when the bucket cannot back the tree's data keys
+ *  (#1396, ADR 0064). Duplicated from import-openneuro.ts for the same reason as
+ *  UPSTREAM_MARKER above: this module stays pure. */
+const DATA_UNAVAILABLE_MARKER = "[nemar-data-unavailable]";
+
 export type ImportFailureCause =
   | "upstream_inaccessible"
+  | "data_unavailable"
   | "auth_invalid"
   | "annex_uuid_conflict"
   | "branch_protection"
@@ -75,6 +81,17 @@ const RULES: {
       "OpenNeuro's own objects could not be fetched. Verify with an anonymous ranged GET before assuming it is still true -- this has resolved upstream before without notice.",
     // Literal marker, escaped: [ ] are a character class in a regex.
     match: /\[openneuro-upstream-inaccessible\]/,
+  },
+  {
+    // After upstream_inaccessible, which is the more specific claim: that one says
+    // OpenNeuro will not serve the bytes, this one says only that our bucket does
+    // not have them. Before everything else, because the gate's own message is
+    // long and could brush a generic pattern.
+    cause: "data_unavailable",
+    label: "data-unavailable",
+    summary:
+      "NEMAR's bucket has no object for some of the keys this dataset's tree names, so it was not published (ADR 0064 withdraws a dataset below 90% of its data keys). This does NOT yet say the content is gone upstream: run `nemar admin fleet content-recovery <id>` to find out, per key, whether any recorded source is still readable.",
+    match: /\[nemar-data-unavailable\]/,
   },
   {
     cause: "auth_invalid",
@@ -172,3 +189,11 @@ export const IMPORT_FAILURE_CAUSE_LABELS: string[] = [...RULES.map((r) => r.labe
  * together in import-failure-cause.test.ts rather than merely hoped to match.
  */
 export const IMPORT_UPSTREAM_MARKER_FOR_CLASSIFY = UPSTREAM_MARKER;
+
+/**
+ * Same arrangement for the data-availability marker (#1396): pinned against
+ * `DATA_AVAILABILITY_MARKER` in import-openneuro.ts by a test, because a drift
+ * here is silent in the same way -- a publish-gate failure would go back to
+ * classifying as `unknown` with no label, which is the gap this closed.
+ */
+export const IMPORT_DATA_UNAVAILABLE_MARKER_FOR_CLASSIFY = DATA_UNAVAILABLE_MARKER;

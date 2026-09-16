@@ -139,7 +139,11 @@ interface SeedOpts {
   country?: string | null;
 }
 
-async function seedUser(email: string, apiKey: string | null, opts: SeedOpts = {}): Promise<number> {
+async function seedUser(
+  email: string,
+  apiKey: string | null,
+  opts: SeedOpts = {},
+): Promise<number> {
   db.run(
     `INSERT INTO users (username, email, password_hash, status, role, signup_source,
                         email_verified, orcid, orcid_verified, github_username,
@@ -959,15 +963,21 @@ describe("POST /auth/orcid/cli-start", () => {
     // person discovering it at the end of a browser round trip.
     await seedUser("ada@nemar.test", ADA_KEY);
     const withoutOrcid = { ...env(), ORCID_CLIENT_ID: "", ORCID_CLIENT_SECRET: "" } as Bindings;
-    const res = await withToken("/auth/orcid/cli-start", ADA_KEY, { mode: "link" }, "POST", withoutOrcid);
+    const res = await withToken(
+      "/auth/orcid/cli-start",
+      ADA_KEY,
+      { mode: "link" },
+      "POST",
+      withoutOrcid,
+    );
     expect(res.status).toBe(503);
     const body = (await res.json()) as { error: string; message: string };
     expect(body.error).toBe("orcid_unavailable");
     expect(body.message).toContain("unavailable");
     // Nothing was recorded for an intent that can never be used.
-    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM orcid_link_intents").get()?.n).toBe(
-      0,
-    );
+    expect(
+      db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM orcid_link_intents").get()?.n,
+    ).toBe(0);
   });
 
   test("a tampered state links nothing", async () => {
@@ -977,7 +987,13 @@ describe("POST /auth/orcid/cli-start", () => {
     const bob = await seedUser("bob@nemar.test", BOB_KEY);
 
     const forged = await signCliState(
-      { csrf: "forged-csrf", mode: "link", userId: bob, next: "/settings", exp: Date.now() + 60000 },
+      {
+        csrf: "forged-csrf",
+        mode: "link",
+        userId: bob,
+        next: "/settings",
+        exp: Date.now() + 60000,
+      },
       "not-the-worker-key",
     );
     const handoff = await app.request(

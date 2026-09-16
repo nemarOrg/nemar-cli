@@ -69,6 +69,23 @@ export interface CreateConceptDoiOptions {
    * forget it.
    */
   uploaderRequired?: boolean;
+  /**
+   * The dataset is an anonymous deposit (#1407, epic #1406), so the record
+   * carries no DataCurator.
+   *
+   * EZID only. Every concept mint is already `reserved` (see the `_status`
+   * this sets below), so the flag's one effect is dropping the curator; the
+   * Zenodo branch has no unattributed form at all and refuses instead.
+   *
+   * ADR 0041 is satisfied rather than bent: it says a DOI cites the uploader
+   * by real name or not at all, and this is the "not at all" branch, on an
+   * identifier that is not public and therefore not harvested. Withholding
+   * here is defense in depth -- a reserved record is only readable with our
+   * own credentials -- but the alternative is trusting that the publish-time
+   * metadata refresh always overwrites it, and a leak that depends on a later
+   * step running is not a property, it is a hope.
+   */
+  anonymousDeposit?: boolean;
   sandbox?: boolean;
 }
 
@@ -177,6 +194,9 @@ export function buildVersionIdentifier(
  * on one and not the other.
  */
 function assertUploaderPresent(options: CreateConceptDoiOptions, provider: string): void {
+  // An anonymous deposit is the one case where a missing curator is the
+  // intended state rather than an incomplete profile.
+  if (options.anonymousDeposit) return;
   if (options.uploaderRequired && !options.uploader) {
     throw new Error(
       `Refusing to mint a ${provider} DOI for ${options.datasetId}: the uploader has no researcher name on file, and a DOI must not cite a username (#1255).`,
@@ -197,9 +217,10 @@ async function createEzidConceptDoi(
   // repo content and must not be able to name the depositor (before #1255
   // review item 7 a pre-built enrichment silently won over the resolved
   // identity, so a stale file could keep citing an old name).
+  const curator = options.anonymousDeposit ? null : (options.uploader ?? null);
   const enrichment: DataCiteEnrichment = options.enrichment
-    ? { ...options.enrichment, uploader: options.uploader ?? null }
-    : buildOrcidEnrichment(options.bidsDescription, options.uploader);
+    ? { ...options.enrichment, uploader: curator }
+    : buildOrcidEnrichment(options.bidsDescription, curator);
 
   // Use enriched description if available, otherwise fall back to request/database
   if (!enrichment.description && options.datasetDescription) {
@@ -258,6 +279,17 @@ async function createZenodoConceptDoi(
   // the creator is a MANDATORY Zenodo field, so there is no "mint it
   // unattributed" option to fall back to even for an exempt deposit.
   assertUploaderPresent(options, "Zenodo");
+  // An anonymous deposit has no unattributed form here: `creators` is
+  // mandatory and `assertUploaderPresent` waves the anonymous case through,
+  // so without this the branch below would deposit the real name as the sole
+  // creator. Refuse instead. Unreachable today -- the route rejects every
+  // non-EZID provider -- which is exactly why it is written down rather than
+  // left for whoever re-enables Zenodo to rediscover.
+  if (options.anonymousDeposit) {
+    throw new Error(
+      `Cannot create a Zenodo deposition for ${options.datasetId}: it is an anonymous deposit, and Zenodo requires a named creator. Mint through EZID, or de-anonymize first.`,
+    );
+  }
   if (!options.uploader) {
     throw new Error(
       "Cannot create a Zenodo deposition: the uploader has no researcher name on file",
@@ -448,11 +480,83 @@ export type ReadmeBadgePlan =
   | { commit: false; reason: string }
   | { commit: true; content: string; message: string };
 
-/** Decide whether the update_readme step should ship a commit.
+/**
+ * Put NEMAR's concept DOI into a dataset_description.json, keeping whatever DOI was
+ * there before as a source.
  *
- *  Skips when the existing README.md already contains a badge whose URL
- *  encodes the *current* conceptDoi. Without the DOI match, a stale badge
- *  from a re-registered or migrated DOI would be silently kept. */
+ * An imported dataset arrives carrying OpenNeuro's DOI. Overwriting it outright would
+ * erase the provenance link, so the previous value moves into `SourceDatasets` -- the
+ * BIDS field for exactly that -- and only then does `DatasetDOI` become ours. Both
+ * the publication orchestrator and the #1386 repair go through here, because they are
+ * the same edit made at different times and must not drift.
+ *
+ * Pure, and idempotent: re-running on a description that already carries the concept
+ * DOI adds nothing and duplicates no source.
+ */
+export function applyConceptDoiToDescription(
+  description: Record<string, unknown>,
+  conceptDoi: string,
+): { description: Record<string, unknown>; changed: boolean; preservedSourceDoi?: string } {
+  const next = { ...description };
+  let changed = false;
+  let preservedSourceDoi: string | undefined;
+
+  const existingDoi = next.DatasetDOI;
+  if (typeof existingDoi === "string" && existingDoi && existingDoi !== conceptDoi) {
+    // A `SourceDatasets` that is not an array is not ours to discard. BIDS says
+    // array, but an imported description can carry an object or a string, and
+    // replacing it wholesale would erase provenance on published metadata during a
+    // bulk repair. Keep it as the first entry instead.
+    const existing = next.SourceDatasets;
+    const sources: Array<Record<string, unknown>> = Array.isArray(existing)
+      ? [...(existing as Array<Record<string, unknown>>)]
+      : existing === undefined || existing === null
+        ? []
+        : [existing as Record<string, unknown>];
+    const alreadyPresent = sources.some((s) => typeof s.DOI === "string" && s.DOI === existingDoi);
+    if (!alreadyPresent) {
+      sources.push({ DOI: existingDoi });
+      next.SourceDatasets = sources;
+      preservedSourceDoi = existingDoi;
+      changed = true;
+    }
+  }
+
+  if (next.DatasetDOI !== conceptDoi) {
+    next.DatasetDOI = conceptDoi;
+    changed = true;
+  }
+
+  // A published dataset needs a Version; the orchestrator defaults it here so
+  // create_tag does not have to write a separate [skip ci] commit.
+  if (!next.Version) {
+    next.Version = "1.0.0";
+    changed = true;
+  }
+
+  return { description: next, changed, preservedSourceDoi };
+}
+
+/**
+ * The README badge for a concept DOI, in the one spelling NEMAR uses.
+ *
+ * EZID is the sole registrar (ADR 0007, #1182), so it is always the shields.io form;
+ * the Zenodo badge went with the `doi_provider` column. Shared with the #1386 repair
+ * so a re-badged README matches what publish would have written.
+ */
+export function buildDoiBadge(conceptDoi: string): string {
+  const doiUrl = `https://doi.org/${conceptDoi}`;
+  const badgeImg = `https://img.shields.io/badge/DOI-${encodeURIComponent(conceptDoi)}-blue`;
+  return `[![DOI](${badgeImg})](${doiUrl})`;
+}
+
+/**
+ * Decide whether the update_readme step should ship a commit.
+ *
+ * Skips when the existing README.md already contains a badge whose URL encodes the
+ * *current* conceptDoi. Without the DOI match, a stale badge from a re-registered or
+ * migrated DOI would be silently kept.
+ */
 export function planReadmeBadgeCommit(args: {
   readmeContent: string;
   doiBadge: string;

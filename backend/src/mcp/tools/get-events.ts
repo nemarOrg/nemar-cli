@@ -102,7 +102,7 @@ import {
   getEventsOutputSchema,
 } from "../../../../shared/contract/mcp.js";
 import { SOURCE_COMMIT_RE } from "../../../../shared/contract/zarr-index.js";
-import { rawContentUrl } from "../../services/zarr-fidelity-sweep.js";
+import { rawContentUrl } from "../../services/github/shared.js";
 import {
   datasetNotFoundResult,
   isZarrReady,

@@ -9,6 +9,13 @@
 -- stays the single source of truth for who is an admin instead of an
 -- allowlist maintained somewhere else.
 --
+-- CORRECTION (2026-09-13), leaving the paragraph above as it was written: the
+-- gate is NOT ORCID-backed. It checks session scope, account status and role.
+-- Nothing in the flow requires an ORCID link, so an admin holding a passwordless
+-- email-code session passes `/auth/docs/verify` identically, and the admitted
+-- roles are `admin` AND `owner`. The phrase spread from ADR 0056 into three
+-- repositories before anyone checked it. No behavior described below changed.
+--
 -- WHY A HANDOFF EXISTS AT ALL. `WEB_SESSION_COOKIE_DOMAIN` is
 -- `app.nemar.org`, scoped that narrowly on purpose so the session never
 -- attaches to `data.nemar.org` byte-range fetches or `api.nemar.org` search.

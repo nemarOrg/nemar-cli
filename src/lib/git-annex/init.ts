@@ -245,11 +245,27 @@ export function chunkAddTargets(
  * `chunking` overrides the argv chunk bounds; production callers use the
  * defaults. Exposed so tests can drive the multi-chunk loop through this
  * entry point without thousands of fixture files.
+ *
+ * `forceLarge` passes `--force-large`, which annexes every named path whatever
+ * any configuration says. It exists for the import path (#1159), where the
+ * clone carries UPSTREAM's `annex.largefiles` -- and an inherited
+ * `.gitattributes` setting beats both `git annex config` and git config, so
+ * neither `configureLargefiles` nor a `-c annex.largefiles=anything` override
+ * would move the file (verified against git-annex 10.20260901, ADR 0060).
+ * Only ever pass paths the policy in `policy.ts` already called data. Note that
+ * it decides which plane a CONSIDERED file goes to, not whether the file is
+ * considered: an unmodified tracked file is skipped either way.
+ *
+ * `checkGitignore: false` passes `--no-check-gitignore`, for paths that are
+ * already tracked (gitignore never applied to them) but are momentarily
+ * untracked because the caller uncached them to make the add look again.
+ * Without it such a path is skipped silently and ends up in neither plane.
  */
 export async function gitAnnexAdd(
   path: string,
   targets: string | string[] = ".",
   chunking: { maxPaths?: number; maxBytes?: number } = {},
+  options: { forceLarge?: boolean; checkGitignore?: boolean } = {},
 ): Promise<{ success: boolean; error?: string }> {
   const chunks =
     typeof targets === "string"
@@ -259,11 +275,16 @@ export async function gitAnnexAdd(
           chunking.maxPaths ?? ADD_CHUNK_MAX_PATHS,
           chunking.maxBytes ?? ADD_CHUNK_MAX_BYTES,
         );
+  const addFlags = [
+    ...(options.forceLarge ? ["--force-large"] : []),
+    ...(options.checkGitignore === false ? ["--no-check-gitignore"] : []),
+  ];
   try {
     for (const chunk of chunks) {
-      const { stderr, exitCode } = await runCommand(["git", "annex", "add", "--", ...chunk], {
-        cwd: path,
-      });
+      const { stderr, exitCode } = await runCommand(
+        ["git", "annex", "add", ...addFlags, "--", ...chunk],
+        { cwd: path },
+      );
       if (exitCode !== 0) {
         return { success: false, error: stderr.trim() || "Failed to add files to git-annex" };
       }

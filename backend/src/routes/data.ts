@@ -13,6 +13,7 @@
 
 import { Hono } from "hono";
 import { recordAccess } from "../services/access-metrics";
+import { CONCEPT_DOI_SQL } from "../services/anonymity";
 import {
   type CatalogIndexBuildResult,
   type CatalogIndexRow,
@@ -25,6 +26,7 @@ import {
   buildDatasetMetadata,
   buildLandingPayload,
   buildRedirectUrl,
+  contentTypeForBidsPath,
   diffRemovedSince,
   findLastSeenVersion,
   pickResponseFormat,
@@ -42,6 +44,8 @@ import { parseNemarMetadata } from "../services/datacite";
 import { isValidDatasetId } from "../services/datasetId";
 import { resolveDataBaseOrigin } from "../services/environment";
 import { ORG_NAME } from "../services/github";
+import { getDatasetsToken } from "../services/github-auth";
+import { fetchGitTrackedFile } from "../services/github/git-file-broker";
 import type { ManifestFile, VersionManifest } from "../services/manifest";
 import { buildPageBundle } from "../services/page-bundle";
 import {
@@ -63,6 +67,7 @@ function s3OptionsFromEnv(env: Bindings): PresignedUrlOptions {
     region: env.AWS_REGION,
     accessKeyId: env.AWS_ACCESS_KEY_ID,
     secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+    endpointUrl: env.S3_ENDPOINT_URL,
   };
 }
 
@@ -246,14 +251,18 @@ async function manifestJsonHandler(
         checksum_algorithm: checksum.algorithm,
         checksum: checksum.value,
         bytes_url: buildBytesUrl({
-          githubOrg: ORG_NAME,
           datasetId,
           version: resolved.version,
           bidsPath: path,
-          key: file.key,
           origin: resolveDataBaseOrigin(env),
         }),
       };
+      // A git-tracked file has no presigned form: the Worker streams it from
+      // the data plane, so the immediate URL and the durable one are the same
+      // route. Annex files keep the 1h presigned S3 URL in `url`.
+      if (isGitTrackedFile(file)) {
+        return { ...base, url: base.bytes_url };
+      }
       try {
         const url = await buildRedirectUrl({
           datasetId,
@@ -261,7 +270,6 @@ async function manifestJsonHandler(
           bidsPath: path,
           file,
           s3Options,
-          githubOrg: ORG_NAME,
         });
         return { ...base, url };
       } catch (err) {
@@ -315,6 +323,483 @@ async function loadVersionRows(env: Bindings, datasetId: string): Promise<Datase
 }
 
 /**
+ * Ceiling on a git-tracked file the Worker will carry. Chosen far above any
+ * real BIDS sidecar so it is a guard against an annex-policy slip, not a
+ * working limit.
+ */
+const MAX_BROKERED_FILE_BYTES = 32 * 1024 * 1024;
+
+/** Is this manifest entry carried by git rather than git-annex (ADR 0015)? */
+export function isGitTrackedFile(file: ManifestFile): boolean {
+  return file.key.startsWith("git:");
+}
+
+/**
+ * Serve a git-tracked file's bytes from the data plane itself.
+ *
+ * The visibility gate has already run in the caller, and it runs before this
+ * function is ever reached: nothing here mints a token or touches GitHub for
+ * a dataset the catalog will not serve. The two identifiers this uses are
+ * both ours rather than the caller's -- the repo is the catalog row's
+ * `dataset_id`, and the path and blob SHA come from the manifest entry the
+ * resolver matched. A request cannot name a repo, a ref or a blob.
+ *
+ * Nothing caches by blob SHA. The edge caches this response under its request
+ * URL, which is dataset- and version-scoped; a SHA-keyed entry would be
+ * content-addressed and therefore shared between datasets, so an identical
+ * `dataset_description.json` in a private dataset and a public one would be
+ * one cache entry and the gate would be bypassed for whoever asked second.
+ */
+async function streamGitTrackedFile(args: {
+  env: Bindings;
+  datasetId: string;
+  version: string;
+  bidsPath: string;
+  file: ManifestFile;
+  createdIso: string;
+}): Promise<Response> {
+  const { env, datasetId, version, bidsPath, file, createdIso } = args;
+
+  // Read anonymously when no credential is CONFIGURED: a public repo serves
+  // fine without one, and a local or preview deployment with no GitHub App
+  // should not lose every metadata file. What must not happen is the
+  // anonymous read then being mistaken for proof of absence -- GitHub answers
+  // 404, not 403, for a repo the caller cannot see -- so the broker refuses
+  // to report `absent` without a credential, and a mint FAILURE (as opposed
+  // to no credentials at all) is reported rather than downgraded: during a
+  // key rotation every git file in every dataset would otherwise 404 and log
+  // itself as a data-integrity event.
+  let token: string | null = null;
+  try {
+    token = await getDatasetsToken(env);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (env.GITHUB_APP_ID || env.GITHUB_ADMIN_PAT) {
+      console.error(
+        `[data] git-file broker could not mint a token dataset=${datasetId}: ${message}`,
+      );
+      return new Response(
+        JSON.stringify({ error: "Upstream content host unavailable", dataset_id: datasetId }),
+        {
+          status: 503,
+          headers: { "Cache-Control": "no-store", "Content-Type": "application/json" },
+        },
+      );
+    }
+    console.warn(`[data] no GitHub credential configured dataset=${datasetId}: ${message}`);
+  }
+
+  // git is supposed to carry metadata (ADR 0015), and ADR 0031 records that
+  // the annex policy is a judgment call rather than a law of nature. One slip
+  // that commits a recording to git would otherwise make this Worker proxy a
+  // multi-gigabyte file -- the shape the zarr plane refuses on purpose. The
+  // ceiling is far above any real sidecar (the largest measured across the
+  // catalog is 283 KB) so it never fires in normal operation, and when it
+  // does it names the policy rather than timing out.
+  if (file.size > MAX_BROKERED_FILE_BYTES) {
+    console.error(
+      `[data] git-tracked file exceeds the broker ceiling dataset=${datasetId} path=${bidsPath} size=${file.size}`,
+    );
+    return new Response(
+      JSON.stringify({
+        error: "File is too large to serve from git; it should be annexed (ADR 0031)",
+        dataset_id: datasetId,
+      }),
+      { status: 502, headers: { "Cache-Control": "no-store", "Content-Type": "application/json" } },
+    );
+  }
+
+  const outcome = await fetchGitTrackedFile({
+    repo: datasetId,
+    ref: version,
+    path: bidsPath,
+    // `key` is what `isGitTrackedFile` matched on; `checksum` carries the
+    // same value today, but taking it from the field the branch was
+    // decided by is what keeps them from drifting apart.
+    blobSha: file.key.replace(/^git:/, ""),
+    token,
+    // Test seam, and the same shape ORCID_API_BASE uses: unset in production,
+    // where the broker's own default (the real raw host) applies.
+    rawBase: env.GITHUB_RAW_BASE,
+  });
+
+  if (outcome.kind === "absent") {
+    // The manifest promised a blob GitHub does not have. That is a
+    // data-integrity event, not a routine miss, and the operator needs it
+    // named; the caller still gets an ordinary 404.
+    console.error(
+      `[data] MANIFEST DRIFT: git blob absent dataset=${datasetId} version=${version} path=${bidsPath} sha=${file.checksum}`,
+    );
+    return notFound("File not found", undefined, true);
+  }
+
+  if (outcome.kind === "unavailable") {
+    console.error(
+      `[data] git-file broker unavailable dataset=${datasetId} version=${version} path=${bidsPath}: ${outcome.message}`,
+    );
+    const headers = new Headers({
+      "Cache-Control": "no-store",
+      "Content-Type": "application/json",
+    });
+    if (outcome.retryAfter) headers.set("Retry-After", outcome.retryAfter);
+    return new Response(
+      JSON.stringify({ error: "Upstream content host unavailable", dataset_id: datasetId }),
+      { status: outcome.status, headers: headers },
+    );
+  }
+
+  // A size that disagrees with the manifest means the tag moved under us, so
+  // these are not the bytes the manifest describes. Refusing is the same rule
+  // the CLI applies to a short write (#1402): a wrong-length file that looks
+  // healthy is worse than an error.
+  //
+  // This is the FAST path, not the guarantee: it fires only when upstream
+  // declared a length, and it does not on a real raw fetch. The runtime owns
+  // `Accept-Encoding`, so the broker's `identity` request never reaches
+  // GitHub, the raw host gzips, and workerd strips `Content-Length` when it
+  // decodes (ADR 0066, amendment 2026-09-16). Nothing has been observed to
+  // make this fire in production; it is kept because it is cheap, because it
+  // would catch a mismatch before the body is read at all if a runtime or
+  // host change ever restored the declaration, and because the unit suite
+  // exercises it. The measurement below is what actually holds.
+  const where = { datasetId, version, bidsPath, blobSha: file.key.replace(/^git:/, "") };
+  if (outcome.contentLength !== null && outcome.contentLength !== file.size) {
+    console.error(
+      `[data] SIZE MISMATCH (upstream header) dataset=${datasetId} version=${version} path=${bidsPath} sha=${where.blobSha} source=${outcome.source} manifest=${file.size} upstream=${outcome.contentLength}`,
+    );
+    // Nothing will read this body. Cancelling releases the upstream
+    // connection now rather than leaving it to the runtime.
+    await outcome.body.cancel("upstream declared a length the manifest does not").catch(() => {});
+    return new Response(JSON.stringify({ error: "Upstream content did not match the manifest" }), {
+      status: 502,
+      headers: { "Cache-Control": "no-store", "Content-Type": "application/json" },
+    });
+  }
+
+  const outgoing = await sizeCheckedBody(outcome.body, file.size, bufferCeiling(env), where);
+  if (outgoing.kind === "mismatch") {
+    console.error(
+      `[data] SIZE MISMATCH (buffered) dataset=${datasetId} version=${version} path=${bidsPath} sha=${where.blobSha} source=${outcome.source} manifest=${file.size} delivered=${outgoing.atLeast ? ">=" : ""}${outgoing.measured}`,
+    );
+    return new Response(JSON.stringify({ error: "Upstream content did not match the manifest" }), {
+      status: 502,
+      headers: { "Cache-Control": "no-store", "Content-Type": "application/json" },
+    });
+  }
+  if (outgoing.kind === "content-mismatch") {
+    // The right NUMBER of bytes and the wrong bytes: a same-size edit behind
+    // a moved tag. Louder than a length mismatch, because a length mismatch
+    // is usually an accident and this is a file whose content changed while
+    // its identifier did not.
+    console.error(
+      `[data] CONTENT MISMATCH dataset=${datasetId} version=${version} path=${bidsPath} manifest_sha=${where.blobSha} upstream_sha=${outgoing.sha} source=${outcome.source} size=${file.size}`,
+    );
+    return new Response(JSON.stringify({ error: "Upstream content did not match the manifest" }), {
+      status: 502,
+      headers: { "Cache-Control": "no-store", "Content-Type": "application/json" },
+    });
+  }
+  if (outgoing.kind === "unreadable") {
+    console.error(
+      `[data] git-file broker body failed mid-read dataset=${datasetId} version=${version} path=${bidsPath} sha=${where.blobSha} source=${outcome.source}: ${outgoing.message}`,
+    );
+    return new Response(
+      // Its own sentence, not the `unavailable` branch's: "started sending
+      // and stopped" is a different thing for a client to retry than "refused
+      // us", and a mid-body drop is the most transient failure in this
+      // function, so it gets the Retry-After that branch forwards.
+      JSON.stringify({
+        error: "Upstream content host dropped the transfer",
+        dataset_id: datasetId,
+      }),
+      {
+        status: 502,
+        headers: {
+          "Cache-Control": "no-store",
+          "Content-Type": "application/json",
+          "Retry-After": "5",
+        },
+      },
+    );
+  }
+  // Counted before the client finishes reading, so an aborted download still
+  // counts as a full delivery. Closer than the redirect it replaces (which
+  // could only ever record intent), and worth stating rather than
+  // overclaiming.
+  //
+  // "The response is known to be a delivery" holds only on the BUFFERED
+  // branch, where the length and the content have already been checked above.
+  // On the streamed branch nothing has been read yet, so a body that later
+  // fails `countedStream` has already been recorded here as `file.size`
+  // delivered. Accepted because that branch is unreachable for any real
+  // dataset (283 KB measured maximum against an 8 MB ceiling); revisit if it
+  // stops being.
+  recordAccess(env, {
+    datasetId,
+    source: "file",
+    detail: `git-${outcome.source}`,
+    bytes: file.size,
+  });
+
+  const headers = new Headers(fileResponseHeaders(file, createdIso, false));
+  headers.set("Content-Type", contentTypeForBidsPath(bidsPath));
+  // NOT immutable, and not a year. The content at this URL is immutable --
+  // it is version-pinned and content-addressed -- but the AUTHORIZATION is
+  // not: `applyVisibilityTransition` can take a dataset private, and it
+  // purges nothing (per-URL purge caps at 30 URLs and prefix purge is
+  // Enterprise-only, services/cloudflare.ts). A year-long `immutable` would
+  // leave every shared cache serving a withdrawn dataset's participants and
+  // sidecars to other readers, with no recovery and no revalidation. The
+  // redirect this replaces bounded that at 300s; so does this.
+  headers.set("Cache-Control", "public, max-age=300");
+  // The raw host answered `Access-Control-Allow-Origin: *` on exactly these
+  // bytes, and bytes_url invites a consumer to persist the URL. Moving the
+  // host must not quietly revoke browser access for a notebook or a viewer
+  // that is not on a nemar.org origin: this is anonymous public data and the
+  // request carries no credentials.
+  headers.set("Access-Control-Allow-Origin", "*");
+  // A dataset is user-supplied content served from our own origin now. The
+  // type is already an inert one from the allowlist; nosniff stops a browser
+  // from deciding otherwise, and the sandbox CSP makes it inert even then.
+  headers.set("X-Content-Type-Options", "nosniff");
+  headers.set("Content-Security-Policy", "default-src 'none'; sandbox");
+  // Declared only on the buffered branch, where the bytes are in hand and
+  // have just been checked against the manifest. On the streamed branch it is
+  // deliberately absent: a header set on a streamed body does not survive the
+  // runtime (workerd sends it chunked and drops the header, measured on the
+  // deployed worker), so setting one there would be a claim the response does
+  // not carry rather than a fact about it. Pinned by a test asserting the
+  // header is null above the ceiling -- without one, restoring the
+  // unconditional set that #1420 shipped passes the whole suite.
+  if (outgoing.kind === "buffered") {
+    headers.set("Content-Length", String(outgoing.body.byteLength));
+  }
+  return new Response(outgoing.body, { status: 200, headers });
+}
+
+/**
+ * Default size at or below which a brokered git file is read into memory
+ * before it is answered, so the runtime can declare a `Content-Length`.
+ *
+ * Far above anything real -- the largest git-tracked file measured across the
+ * catalog is 283 KB, against the 32 MB ceiling `MAX_BROKERED_FILE_BYTES`
+ * enforces -- so the buffered branch is what every actual dataset takes and
+ * the streamed branch is the escape hatch for a file that should have been
+ * annexed.
+ *
+ * What bounds the MEMORY is this ceiling, not that average, and the budget is
+ * shared: 128 MB is per ISOLATE across every concurrent request (see
+ * `mcp/taste.ts`), and the read below holds the chunks and then the joined
+ * copy, so a worst-case brokered file costs about twice the ceiling while it
+ * is being assembled. That puts the worst case near six simultaneous
+ * ceiling-sized files, not sixteen. Real traffic is three orders of magnitude
+ * under either number; the point is that RAISING this constant raises a
+ * concurrency limit, not just a file limit.
+ */
+const DEFAULT_BROKER_BUFFER_MAX_BYTES = 8 * 1024 * 1024;
+
+function bufferCeiling(env: Bindings): number {
+  const raw = env.BROKER_BUFFER_MAX_BYTES;
+  if (raw === undefined) return DEFAULT_BROKER_BUFFER_MAX_BYTES;
+  // A bare integer or nothing. `Number.parseInt` stops at the first non-digit
+  // and returns what it got, so "8MB" -- the obvious spelling, and the one
+  // this binding's own doc comment writes in prose -- would parse as a
+  // ceiling of EIGHT BYTES. Every file would then exceed it, every response
+  // would take the streamed branch, and every response would ship without a
+  // `Content-Length`: precisely the production state #1419 was filed about,
+  // reached silently through a plausible typo. Refuse it and name the value.
+  if (!/^\d+$/.test(raw.trim())) {
+    console.error(
+      `[data] BROKER_BUFFER_MAX_BYTES is not a byte count; using the default: value=${JSON.stringify(raw)} default=${DEFAULT_BROKER_BUFFER_MAX_BYTES}`,
+    );
+    return DEFAULT_BROKER_BUFFER_MAX_BYTES;
+  }
+  return Number.parseInt(raw, 10);
+}
+
+/**
+ * `buffered` and `streamed` are separate variants rather than one `body` that
+ * is narrowed with `instanceof` later: which branch ran is known here, and
+ * recovering it downstream by testing the runtime type is how a missed check
+ * turns into `Content-Length: undefined` on the wire.
+ */
+type BrokeredBody =
+  | { kind: "buffered"; body: Uint8Array }
+  | { kind: "streamed"; body: ReadableStream<Uint8Array> }
+  /** `atLeast` marks a count cut short by the read bound, not a final total. */
+  | { kind: "mismatch"; measured: number; atLeast: boolean }
+  | { kind: "content-mismatch"; sha: string }
+  | { kind: "unreadable"; message: string };
+
+/**
+ * Make the body prove the manifest before it is answered.
+ *
+ * WHY THIS BUFFERS, when the obvious shape is to stream. Setting
+ * `Content-Length` by hand on a streamed `Response` does not survive: workerd
+ * sends it chunked and drops the header. Measured against the deployed data
+ * plane on 2026-09-16 (`0.10.4-dev17`, the first build that set it): still no
+ * `Content-Length` on the response. A body of known byte length is the only
+ * shape the runtime will declare a length for, so a length that reaches the
+ * client has to be one we already hold.
+ *
+ * It buys the stronger failure too. A mismatch found in a buffer is a clean
+ * 502 before a byte is sent, where a mismatch found mid-stream can only be an
+ * aborted transfer. That matters because the check itself is the point: the
+ * upstream-header comparison it backstops never once ran in production, so
+ * "the tag moved under us and these are not the manifest's bytes" was going
+ * unnoticed rather than being caught.
+ *
+ * THE READ IS BOUNDED BY THE MANIFEST, which is the difference between this
+ * and `new Response(body).arrayBuffer()`. Both size gates upstream of here
+ * test `file.size`, the number the MANIFEST claims; nothing bounds what
+ * GitHub actually sends. Draining first and comparing afterwards would mean a
+ * retag that put a recording where a sidecar was gets read into a 128 MB
+ * isolate in full -- an isolate kill, which takes every unrelated in-flight
+ * request with it and cannot even be caught and logged. The stream this
+ * replaced could not do that: it refused at `seen > expected`. So this reads
+ * chunk by chunk, stops the moment the count passes what was promised, and
+ * cancels upstream.
+ *
+ * AND THE BYTES ARE IDENTIFIED, not just counted. The raw fetch is by REF,
+ * not by blob SHA (`git-file-broker.ts`), so a moved tag serves the new blob
+ * at that path and a length comparison only notices when the size changed
+ * too. A same-size edit -- one participant ID swapped for another, a version
+ * string bumped -- passed every check here and was served as a 200 whose
+ * `ETag` named the OLD blob, cached for five minutes. The manifest already
+ * carries the git object name and the complete bytes are now in hand, so the
+ * real check costs one SHA-1 over a few hundred kilobytes: see `gitBlobSha`.
+ *
+ * Above the ceiling it degrades to the stream with a counter, which can
+ * neither declare a length nor identify the content, but still refuses to let
+ * a short or overrun body finish looking complete.
+ */
+async function sizeCheckedBody(
+  body: ReadableStream<Uint8Array>,
+  expected: number,
+  ceiling: number,
+  where: { datasetId: string; version: string; bidsPath: string; blobSha: string },
+): Promise<BrokeredBody> {
+  if (expected > ceiling) {
+    // Not silent: this branch is supposed to be unreachable for every real
+    // dataset, so one line per occurrence is the right cost for something
+    // that should occur zero times. It is also the line that would catch a
+    // misconfigured ceiling on the first request rather than on the next
+    // release check.
+    console.warn(
+      `[data] brokered file above the buffer ceiling, streaming without a declared length dataset=${where.datasetId} version=${where.version} path=${where.bidsPath} size=${expected} ceiling=${ceiling}`,
+    );
+    return { kind: "streamed", body: countedStream(body, expected, where) };
+  }
+
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let seen = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value === undefined) continue;
+      seen += value.byteLength;
+      if (seen > expected) {
+        await reader.cancel("body exceeds the size the manifest declared").catch(() => {});
+        return { kind: "mismatch", measured: seen, atLeast: true };
+      }
+      chunks.push(value);
+    }
+  } catch (err) {
+    // A locked or disturbed stream is OUR bug -- something read the body
+    // before this did -- and relabeling it as an upstream outage would send
+    // an operator to GitHub's status page for a defect in this file. Let it
+    // reach the app's error handler with its stack instead.
+    if (err instanceof TypeError && /locked|disturbed/i.test(err.message)) throw err;
+    return { kind: "unreadable", message: err instanceof Error ? err.message : String(err) };
+  }
+  if (seen !== expected) return { kind: "mismatch", measured: seen, atLeast: false };
+
+  const bytes = new Uint8Array(seen);
+  let at = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, at);
+    at += chunk.byteLength;
+  }
+
+  const sha = await gitBlobSha(bytes);
+  if (sha !== where.blobSha) return { kind: "content-mismatch", sha };
+  return { kind: "buffered", body: bytes };
+}
+
+/**
+ * The git object name for a blob's contents: SHA-1 over `blob <len>\0<bytes>`,
+ * which is what `git hash-object` computes and what the manifest records as a
+ * git-tracked entry's `checksum`. Verified against a live manifest entry
+ * (`xx099904` `dataset_description.json`, 1414 bytes,
+ * `a57e20458be6b7845f583c1e3af58ff261b626e3`).
+ *
+ * SHA-1 is the weak hash git uses; this is an integrity check against an
+ * accidental retag, not a defense against a chosen-prefix attacker, and the
+ * manifest's own identifier is the same SHA-1 either way.
+ */
+async function gitBlobSha(bytes: Uint8Array): Promise<string> {
+  const header = new TextEncoder().encode(`blob ${bytes.byteLength}\0`);
+  const framed = new Uint8Array(header.byteLength + bytes.byteLength);
+  framed.set(header, 0);
+  framed.set(bytes, header.byteLength);
+  const digest = await crypto.subtle.digest("SHA-1", framed);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * The streamed fallback for a file too large to hold: count the bytes and
+ * error the stream if the total disagrees with the manifest.
+ *
+ * The response carries no `Content-Length` on this path, because one set here
+ * would not survive (see `sizeCheckedBody`). What it does carry is a wrong
+ * length REFUSED at the source: erroring the stream means the terminating
+ * chunk is never written, so a strict client (rclone, a browser) sees an
+ * incomplete transfer -- the same signal a short write gives the CLI
+ * (`file-download.ts`, #1402). Note what that depends on: a LENIENT client
+ * that treats connection-close as end-of-body sees a short file and a 200,
+ * with no length to cross-check. So this is weaker than the buffered branch's
+ * clean 502, which is a further reason for the ceiling to be generous rather
+ * than tight. The CLI is unaffected either way; it checks the manifest's size
+ * rather than the header.
+ */
+function countedStream(
+  body: ReadableStream<Uint8Array>,
+  expected: number,
+  where: { datasetId: string; version: string; bidsPath: string; blobSha: string },
+): ReadableStream<Uint8Array> {
+  let seen = 0;
+  const describe = () =>
+    `dataset=${where.datasetId} version=${where.version} path=${where.bidsPath} sha=${where.blobSha} manifest=${expected} delivered=${seen}`;
+  return body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        seen += chunk.byteLength;
+        // Refuse the overrun rather than passing bytes beyond the manifest's
+        // length: past `expected` the response is already not what the
+        // manifest describes, and the extra bytes are what a client would
+        // have to discard.
+        if (seen > expected) {
+          console.error(`[data] SIZE MISMATCH (overrun) ${describe()}`);
+          controller.error(new Error("Upstream content did not match the manifest"));
+          return;
+        }
+        controller.enqueue(chunk);
+      },
+      flush(controller) {
+        if (seen !== expected) {
+          console.error(`[data] SIZE MISMATCH (short) ${describe()}`);
+          controller.error(new Error("Upstream content did not match the manifest"));
+        }
+      },
+    }),
+  );
+}
+
+/**
  * Build the rclone-friendly file metadata headers for a manifest entry.
  *
  * `ETag` is the manifest checksum verbatim (`"sha256:<hex>"` for
@@ -326,7 +811,13 @@ async function loadVersionRows(env: Bindings, datasetId: string): Promise<Datase
  * Per RFC 9110 §8.6 the field describes the message body, not the
  * resource. For a HEAD 200 with no body, `Content-Length: <size>`
  * advertises what a subsequent GET would return -- standard and what
- * every HTTP client (rclone, browsers, curl) expects on HEAD. For a
+ * every HTTP client (rclone, browsers, curl) expects on HEAD. One
+ * exception since #1419: a git-tracked file ABOVE the broker's buffer
+ * ceiling is streamed and its GET carries no `Content-Length` at all,
+ * so HEAD promises a length the GET does not repeat. Accepted rather
+ * than fixed -- the ceiling is 8 MB against a 283 KB measured maximum,
+ * so no real dataset reaches it -- but see `sizeCheckedBody` before
+ * assuming the pair always agrees. For a
  * GET 302 with no body, emitting `Content-Length: <size>` is a spec
  * deviation: the message body is empty, the field would describe the
  * redirect target. Some intermediaries can mis-frame a long-`Content-
@@ -386,10 +877,15 @@ async function fileOrIndexHandler(
   // (rclone just needs the 404). Keeps `rclone sync` cheap per file.
   if (isHead) {
     if (result.kind === "file") {
-      return new Response(null, {
-        status: 200,
-        headers: fileResponseHeaders(result.file, manifest.created, true),
-      });
+      const headers = new Headers(fileResponseHeaders(result.file, manifest.created, true));
+      // A git-tracked file's GET now answers with a content type, so its HEAD
+      // has to agree: rclone's HTTP backend probes with HEAD and then GETs,
+      // and a HEAD that describes a different response than the GET is how a
+      // sync ends up with the wrong expectations.
+      if (isGitTrackedFile(result.file)) {
+        headers.set("Content-Type", contentTypeForBidsPath(result.path));
+      }
+      return new Response(null, { status: 200, headers });
     }
     if (result.kind === "directory") {
       return new Response(null, {
@@ -445,13 +941,25 @@ async function fileOrIndexHandler(
   }
 
   if (result.kind === "file") {
+    // git-tracked bytes are served from here rather than redirected to
+    // GitHub (#1403): it is the only way a dataset whose repo is private
+    // stays readable, and it is the only way we can count what we delivered.
+    if (isGitTrackedFile(result.file)) {
+      return streamGitTrackedFile({
+        env,
+        datasetId: dataset.dataset_id,
+        version: resolved.version,
+        bidsPath: result.path,
+        file: result.file,
+        createdIso: manifest.created,
+      });
+    }
     const url = await buildRedirectUrl({
       datasetId,
       version: resolved.version,
       bidsPath: result.path,
       file: result.file,
       s3Options: s3OptionsFromEnv(env),
-      githubOrg: ORG_NAME,
     });
     // Surface mtime/ETag on the 302 itself for clients that skip the
     // HEAD step (custom downloaders, conditional GET preflights).
@@ -711,7 +1219,7 @@ async function metadataJsonHandler(env: Bindings, datasetId: string): Promise<Re
   if (!gate) return notFound("Dataset not found");
 
   const row = await env.DB.prepare(
-    `SELECT dataset_id, name, description, github_repo, concept_doi,
+    `SELECT dataset_id, name, description, github_repo, concept_doi, anonymous,
             modalities, subject_count, age_min, age_max,
             file_size, total_files, tasks, enrichment_json,
             data_complete, bytes_present,
@@ -776,6 +1284,7 @@ async function metadataJsonHandler(env: Bindings, datasetId: string): Promise<Re
       name: row.name,
       description: row.description,
       github_repo: row.github_repo,
+      anonymous: row.anonymous,
       concept_doi: row.concept_doi,
       modalities: row.modalities,
       subject_count: row.subject_count,
@@ -1218,7 +1727,7 @@ export async function catalogIndexResponse(env: Bindings, request: Request): Pro
       `SELECT
          d.dataset_id,
          d.name,
-         d.concept_doi,
+         ${CONCEPT_DOI_SQL} AS concept_doi,
          d.is_exemplar,
          (SELECT version FROM dataset_versions dv
             WHERE dv.dataset_id = d.dataset_id

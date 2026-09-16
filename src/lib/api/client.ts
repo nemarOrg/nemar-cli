@@ -35,8 +35,13 @@ export const IS_DEV_BUILD = DEFAULT_API_URL.includes("workers.dev");
 /**
  * Get the API base URL from config or default.
  * Dev builds (injected URL) always use the dev backend regardless of stored config.
+ *
+ * Exported because the data plane is addressed as this origin plus `/data`
+ * (lib/http-download.ts): that mount exists in every environment, so deriving
+ * it here keeps environment selection in one place instead of introducing a
+ * second host that has to be kept in step.
  */
-function getApiUrl(): string {
+export function getApiUrl(): string {
   if (process.env.TEST_API_URL) {
     return process.env.TEST_API_URL;
   }

@@ -31,7 +31,7 @@ import { join } from "node:path";
 
 const MODULE_EXPORTS: Record<string, string[]> = {
   errors: ["ApiError", "MaintenanceError", "errorDetail"],
-  client: ["IS_DEV_BUILD", "checkHealth", "request"],
+  client: ["IS_DEV_BUILD", "checkHealth", "getApiUrl", "request"],
   auth: [
     "checkGitHubUsername",
     "checkOrcidName",
@@ -43,6 +43,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "getSandboxStatus",
     "listApiKeys",
     "login",
+    "mintDocsSession",
     "pollDeviceToken",
     "registerSSHKey",
     "requestEmailChange",
@@ -103,6 +104,8 @@ const MODULE_EXPORTS: Record<string, string[]> = {
   ],
   admin: [
     "addCi",
+    "anonymitySweep",
+    "anonymitySweepReset",
     "approveUser",
     "approveUserById",
     "availabilityReport",
@@ -192,6 +195,8 @@ const INTERNAL_WIRING = ["request"];
  * protection every other symbol has.
  */
 const POST_SPLIT_ADDITIONS = [
+  "getApiUrl", // #1401: the data plane is this origin + /data (lib/http-download.ts)
+  "mintDocsSession", // #1341, epic #1336 phase 3: POST /auth/docs/cli-session
   "NOTICE_LEVELS", // #1025, notice level vocabulary
   "approveUserById", // #1012, id-keyed approve for web/ORCID accounts
   "revokeUserById", // #1274, ADR 0040: id-keyed revoke, the approve twin's eraser
@@ -231,6 +236,8 @@ const POST_SPLIT_ADDITIONS = [
   "signalDefaultsSweepReset", // #1194, CLI wrapper for the signal-defaults sweep reset
   "uploadTierOf", // #1251, ADR 0040: upload / browse / unknown from a listed row
   "zarrFidelitySweep", // #1068, epic #1181 phase 8: POST /admin/datasets/zarr-fidelity-sweep
+  "anonymitySweep", // #1409, epic #1406: POST /admin/datasets/anonymity-sweep
+  "anonymitySweepReset", // the same route with ?reset=1
 ];
 
 /** The api.ts monolith's runtime surface, captured at #908 commit 1. */

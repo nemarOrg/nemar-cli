@@ -261,6 +261,13 @@ describe("writeDatasetCatalogFields dual-writes license_tier", () => {
   function dbWith0034(): Database {
     const db = dbWith0029();
     db.exec(sql("0034_license_tier.sql"));
+    // These tests pin the schema at 0034 on purpose -- they are about the
+    // license_tier dual-write that migration introduced. But the FUNCTION
+    // under test is the current one, and since #1407 its single UPDATE reads
+    // `anonymous` to decide whether to withhold the authors value. Added here
+    // with migration 0085's own default rather than replaying every later
+    // migration, so the fixture stays the narrow one these tests describe.
+    db.exec("ALTER TABLE datasets ADD COLUMN anonymous INTEGER NOT NULL DEFAULT 0");
     return db;
   }
 

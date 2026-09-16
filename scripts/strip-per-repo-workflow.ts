@@ -229,7 +229,11 @@ async function processRepo(
   }
 }
 
-async function runPool<T>(items: T[], worker: (it: T) => Promise<RepoResult>, concurrency: number): Promise<RepoResult[]> {
+async function runPool<T>(
+  items: T[],
+  worker: (it: T) => Promise<RepoResult>,
+  concurrency: number,
+): Promise<RepoResult[]> {
   const results: RepoResult[] = [];
   let cursor = 0;
   const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {

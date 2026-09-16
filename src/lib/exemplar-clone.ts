@@ -89,6 +89,22 @@ export interface ExemplarFleetEntry {
   xx_id: string;
   source_id: string;
   modality: string;
+  /**
+   * This entry is the fleet's standing ANONYMOUS deposit (#1407).
+   *
+   * Absent means "not anonymous" -- there is deliberately no `false`, so the
+   * flag has two states rather than three and nobody has to decide what an
+   * explicit `false` was trying to say.
+   *
+   * It is the one exemplar that must never be published. Every other entry is
+   * public with a sandbox DOI, and migration 0085's triggers refuse
+   * `anonymous = 1` once `first_published_at` is stamped -- so publishing this
+   * one, or minting it a concept DOI through the normal exemplar flow,
+   * destroys the fixture permanently rather than just changing it. That is
+   * also what makes it worth having: it is the only place the pre-publication
+   * state exists continuously instead of being built and torn down by a test.
+   */
+  anonymous?: true;
   note?: string;
 }
 
@@ -100,7 +116,7 @@ export function parseExemplarFleet(raw: unknown): ExemplarFleetEntry[] {
   if (!Array.isArray(raw)) {
     throw new Error("Exemplar fleet file must be a JSON array");
   }
-  return raw.map((entry, i) => {
+  const entries = raw.map((entry, i) => {
     if (typeof entry !== "object" || entry === null) {
       throw new Error(`Fleet entry ${i} is not an object`);
     }
@@ -119,8 +135,58 @@ export function parseExemplarFleet(raw: unknown): ExemplarFleetEntry[] {
     if (note !== undefined && typeof note !== "string") {
       throw new Error(`Fleet entry ${i} (${xx_id}): note must be a string when present`);
     }
-    return { xx_id, source_id, modality, ...(note !== undefined ? { note } : {}) };
+    const { anonymous } = entry as Record<string, unknown>;
+    if (anonymous !== undefined && anonymous !== true) {
+      throw new Error(
+        `Fleet entry ${i} (${xx_id}): anonymous must be omitted or literally true, not ${JSON.stringify(anonymous)}`,
+      );
+    }
+    return {
+      xx_id,
+      source_id,
+      modality,
+      ...(anonymous === true ? { anonymous: true as const } : {}),
+      ...(note !== undefined ? { note } : {}),
+    };
   });
+  const anonymousEntries = entries.filter((e) => e.anonymous);
+  // Exactly one, and the "at most" half is what this enforces. A second
+  // anonymous exemplar would double the cost of the state without adding a
+  // case, and "the anonymous exemplar" is how every runbook and test refers to
+  // it -- an ambiguous referent is worse than no fixture.
+  if (anonymousEntries.length > 1) {
+    throw new Error(
+      `Fleet declares ${anonymousEntries.length} anonymous exemplars (${anonymousEntries
+        .map((e) => e.xx_id)
+        .join(", ")}); exactly one is allowed`,
+    );
+  }
+  return entries;
+}
+
+/**
+ * The fleet's designated anonymous deposit, or null if none is declared.
+ *
+ * A named accessor rather than a `.find()` at each call site, so the tooling,
+ * the tests and a future runbook all mean the same row.
+ */
+export function anonymousExemplar(entries: ExemplarFleetEntry[]): ExemplarFleetEntry | null {
+  return entries.find((e) => e.anonymous) ?? null;
+}
+
+/**
+ * Is this xx id the fleet's designated anonymous deposit?
+ *
+ * The designation belongs to the xx id, not to the source, so this is the
+ * answer even when a caller overrode `--source`. Both create paths go through
+ * it: the `--all` loop and the single-id one. The single-id path is the one
+ * that actually matters here -- creating the fixture is a one-off, so
+ * `exemplar create xx099907` is the command that will be run, and an earlier
+ * version of this change wired only the loop, which would have silently
+ * produced a non-anonymous row under the name of the anonymous fixture.
+ */
+export function isDesignatedAnonymous(entries: ExemplarFleetEntry[], xxId: string): boolean {
+  return entries.find((e) => e.xx_id === xxId)?.anonymous === true;
 }
 
 /** Read and validate `scripts/exemplar-fleet.json` (or an equivalent path). */
@@ -307,6 +373,14 @@ interface ExemplarPrepareOptions {
   workDir?: string;
   name?: string;
   description?: string;
+  /**
+   * Create the D1 row with `anonymous = 1` (#1407).
+   *
+   * At creation, because that is the only moment it is unconditionally legal:
+   * the row is new, so `first_published_at` is NULL and migration 0085's
+   * triggers allow it.
+   */
+  anonymous?: true;
 }
 
 /**
@@ -390,6 +464,7 @@ export async function prepareExemplar(
       source_id: sourceId,
       name: displayName,
       description: options.description,
+      ...(options.anonymous ? { anonymous: true as const } : {}),
     });
     createSpinner.succeed(`Created ${result.dataset_id} (${result.github_repo})`);
   } catch (error) {
@@ -539,6 +614,8 @@ export async function copyExemplarData(
 
 interface ExemplarFinalizeOptions {
   publish?: boolean;
+  /** This is the fleet's anonymous deposit, so publishing it is refused. */
+  anonymous?: true;
 }
 
 /**
@@ -590,7 +667,7 @@ export async function finalizeExemplar(
     const registerSpinner = ora("Registering files in git-annex...").start();
     const regResult = await batchSetKeysPresent(datasetPath, copyResult.keys, nemarS3DevUuid);
     if (regResult.failed > 0) {
-      const msg = `${regResult.failed} of ${copyResult.keys.length} git-annex key registrations failed. Re-run finalize to retry.`;
+      const msg = `${regResult.failed} of ${copyResult.keys.length} git-annex key registrations are not in the location log (e.g. ${regResult.missing.slice(0, 3).join(", ")}). Re-run finalize to retry.`;
       registerSpinner.fail(msg);
       throw new Error(msg);
     }
@@ -660,6 +737,20 @@ export async function finalizeExemplar(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     reindexSpinner.warn(`Reindex failed (non-fatal): ${msg}`);
+  }
+
+  if (options.anonymous) {
+    // Refused here as well as server-side, because `--all --publish` would
+    // otherwise walk the whole fleet and report this entry as a failure every
+    // run. Publishing it is not a mistake to be retried: the 0085 triggers
+    // refuse `anonymous = 1` once `first_published_at` is stamped, so a
+    // publish destroys the fixture permanently rather than changing it.
+    console.log(
+      chalk.green(
+        `\nExemplar clone complete: ${sourceId} -> ${xxId} (anonymous deposit; never published).`,
+      ),
+    );
+    return;
   }
 
   if (!options.publish) {
@@ -748,12 +839,18 @@ export async function cloneExemplar(opts: {
   workDir?: string;
   name?: string;
   description?: string;
+  /** The fleet's standing anonymous deposit (#1407): created anonymous, never published. */
+  anonymous?: true;
 }): Promise<void> {
   const prep = await prepareExemplar(opts.xxId, opts.sourceId, {
     workDir: opts.workDir,
     name: opts.name,
     description: opts.description,
+    ...(opts.anonymous ? { anonymous: true as const } : {}),
   });
   const copyResult = await copyExemplarData(prep, { includeDerived: opts.includeDerived });
-  await finalizeExemplar(prep, copyResult, { publish: opts.publish });
+  await finalizeExemplar(prep, copyResult, {
+    publish: opts.publish,
+    ...(opts.anonymous ? { anonymous: true as const } : {}),
+  });
 }

@@ -24,6 +24,7 @@
  */
 
 import type { Bindings } from "../types/bindings.js";
+import { FIRST_PUBLICATION_STAMP_SQL, expectedRepoVisibility } from "./anonymity.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { ensureRepoToSpec, setRepoVisibility } from "./github.js";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "./repo-spec.js";
@@ -81,9 +82,16 @@ export async function applyDatasetVisibility(
   const db = env.DB;
 
   const dataset = await db
-    .prepare("SELECT dataset_id, github_repo FROM datasets WHERE dataset_id = ?")
+    .prepare(
+      "SELECT dataset_id, github_repo, visibility, anonymous FROM datasets WHERE dataset_id = ?",
+    )
     .bind(datasetId)
-    .first<{ dataset_id: string; github_repo: string | null }>();
+    .first<{
+      dataset_id: string;
+      github_repo: string | null;
+      visibility: string;
+      anonymous: number | null;
+    }>();
 
   if (!dataset) {
     return { ok: false, stage: "not_found", error: "Dataset not found" };
@@ -96,7 +104,20 @@ export async function applyDatasetVisibility(
     return { ok: false, stage: "invalid_repo", error: "Invalid repository format" };
   }
 
-  const isPrivate = visibility === "private";
+  // The repository does not always mirror the catalog row. An anonymous
+  // deposit (#1407) is public in the catalog and private on GitHub, so taking
+  // the requested catalog visibility as the repository's target would publish
+  // the depositor's entire git history -- author names, commit identities,
+  // their own dataset_description.json -- while the catalog kept reporting
+  // them as concealed. `expectedRepoVisibility` is the one rule both this and
+  // the drift report read.
+  const isPrivate =
+    expectedRepoVisibility({ visibility, anonymous: dataset.anonymous }) === "private";
+  // What the repository was BEFORE this call, for the revert paths below.
+  // Without anonymity that is the negation of the target, which is what this
+  // function has always assumed; for an anonymous deposit the repository is
+  // private in both states, and negating would publish it on the way back.
+  const revertPrivate = dataset.anonymous === 1 ? true : !isPrivate;
   const pat = await getDatasetsToken(env);
   const ghResult = await setRepoVisibility(repoName, isPrivate, pat);
   if (!ghResult.ok) {
@@ -113,7 +134,7 @@ export async function applyDatasetVisibility(
     const s3Msg = s3Error instanceof Error ? s3Error.message : String(s3Error);
     console.error(`WARNING: Failed to update S3 policy for ${datasetId}:`, s3Msg);
     // GitHub visibility changed but S3 policy failed - revert GitHub.
-    const revertResult = await setRepoVisibility(repoName, !isPrivate, pat);
+    const revertResult = await setRepoVisibility(repoName, revertPrivate, pat);
     return {
       ok: false,
       stage: "s3",
@@ -125,7 +146,7 @@ export async function applyDatasetVisibility(
 
   // Helper to revert GitHub + S3 visibility changes on a D1 failure.
   async function revertAfterDbFailure(errorDetails: string): Promise<VisibilityTransitionResult> {
-    const ghRevertResult = await setRepoVisibility(repoName, !isPrivate, pat);
+    const ghRevertResult = await setRepoVisibility(repoName, revertPrivate, pat);
 
     let s3Reverted = false;
     try {
@@ -149,7 +170,16 @@ export async function applyDatasetVisibility(
   let dbUpdateResult: D1Result;
   try {
     dbUpdateResult = await db
-      .prepare("UPDATE datasets SET visibility = ? WHERE dataset_id = ?")
+      .prepare(
+        // Stamping the first publication of the depositor's identity is part
+        // of the same statement that makes the row public: the triggers refuse
+        // a row that is both anonymous and stamped, and an anonymous deposit
+        // goes public without being attributed, which is what the CASE inside
+        // FIRST_PUBLICATION_STAMP_SQL expresses.
+        `UPDATE datasets SET visibility = ?${
+          visibility === "public" ? `, ${FIRST_PUBLICATION_STAMP_SQL}` : ""
+        } WHERE dataset_id = ?`,
+      )
       .bind(visibility, datasetId)
       .run();
 
@@ -177,7 +207,14 @@ export async function applyDatasetVisibility(
   try {
     const { ownerLogin, approvedWriters } = await resolveRepoCollaborators(db, datasetId);
     specEnforcement = await ensureRepoToSpec(repoName, pat, {
-      visibility,
+      // `isPrivate`, not `visibility`: the second is what the CATALOG ROW is
+      // becoming and the first is what the REPOSITORY is. They differ for an
+      // anonymous deposit, and passing the row's value here takes the
+      // published-repo branch -- locking `main` behind a pull-request ruleset
+      // on a private repository, which is how a depositor loses the ability to
+      // commit their restored attribution (#1408). The same literal was a bug
+      // in the publication orchestrator; an exhaustive scan found this one.
+      visibility: isPrivate ? "private" : "public",
       collaborators: { ownerLogin, approvedWriters },
     });
   } catch (specError) {

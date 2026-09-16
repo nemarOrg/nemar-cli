@@ -70,6 +70,52 @@ export function isKeyPresentAtDeclaredSize(key: string, existing: Map<string, nu
 }
 
 /**
+ * The keys a tree names that the bucket cannot account for (#1396).
+ *
+ * The publish gate asks this of the TREE, not of the import manifest. A manifest
+ * is what the copy phase believed it transferred, so verifying the manifest
+ * against the bucket passes whenever the manifest is the subset that worked --
+ * which is how sixteen datasets were published referencing 12,039 keys that were
+ * never transferred, with the location log advertising every one of them.
+ */
+export function keysWithoutObjects(
+  treeKeys: Iterable<string>,
+  existing: Map<string, number>,
+): string[] {
+  return [...treeKeys].filter((key) => !isKeyPresentAtDeclaredSize(key, existing));
+}
+
+/**
+ * The share of a dataset's DATA a reader can actually obtain, 0 to 1 (ADR 0064).
+ *
+ * Data only. Metadata is never annexed (ADR 0015), so `.tsv`, `.json` and `README*`
+ * arrive from GitHub whether or not one recording survived, and counting them puts
+ * every dataset near 100%: `on008017` is missing 4.7% of its tracked files and 21.6%
+ * of its data. The denominator is therefore the distinct annex keys the tree names.
+ *
+ * A dataset with no annexed keys at all is 1, not 0. It is metadata-only, which is a
+ * complete dataset of its kind, and dividing by zero to call it wholly unavailable
+ * would withdraw it.
+ */
+export function dataAvailability(state: {
+  annexed: string[];
+  missingContent: string[];
+}): number {
+  if (state.annexed.length === 0) return 1;
+  return (state.annexed.length - state.missingContent.length) / state.annexed.length;
+}
+
+/**
+ * Below this share of its data available, a dataset is withdrawn (ADR 0064).
+ *
+ * Measured AFTER recovery has reported what it cannot get. On 2026-09-15 three datasets
+ * that were not already withdrawn sat under this threshold in the morning and were whole
+ * by the afternoon, and six more came off the withdrawn list the same day, so a verdict
+ * read from a stale column would have tombstoned content that exists.
+ */
+export const MIN_DATA_AVAILABILITY = 0.9;
+
+/**
  * Max size (bytes) `curlStreamCopy` will buffer to the runner's local disk.
  * The curl fallback downloads the whole object locally so it can be verified
  * before upload (#967); this domain has recordings up to ~300GB, and GitHub
@@ -530,6 +576,61 @@ export interface ImportManifestItem {
   /** Parsed S3 source, or null if the whereis URL wasn't an S3 endpoint. */
   source: S3Ref | null;
   destUri: string;
+  /**
+   * Where this key's content comes from. **Absent means upstream**, which is the
+   * ordinary case and the only thing any manifest written before #1159 can say;
+   * nothing writes `"upstream"` explicitly, so read it through
+   * {@link isLocallyUploaded} rather than comparing to a string.
+   *
+   * Upstream means the copy phase server-side copies the key from the OpenNeuro
+   * bucket. `"local"` means prepare already uploaded the content from its clone
+   * with `git annex copy --to nemar-s3`, because the file was a plain git blob
+   * upstream and no upstream KEY exists to copy from (ADR 0060).
+   *
+   * The distinction is only about who transfers the bytes. Both kinds are data:
+   * finalize verifies both at the destination and registers both with
+   * git-annex, and both count against the empty-manifest publish guard.
+   */
+  origin?: "upstream" | "local";
+}
+
+/**
+ * True when prepare already uploaded this key's content, so the copy phase has
+ * nothing to transfer for it. Absent `origin` means upstream, which is what
+ * keeps a manifest written before #1159 readable.
+ */
+export function isLocallyUploaded(item: Pick<ImportManifestItem, "origin">): boolean {
+  return item.origin === "local";
+}
+
+/**
+ * The copy work one shard owes: this shard's slice of the manifest, minus the
+ * keys prepare already uploaded from the clone.
+ *
+ * Both numbers are about THIS shard. `localSkipped` counts only local keys that
+ * fall in this shard, so summing the shards' logs gives the manifest total once
+ * rather than once per shard.
+ *
+ * Declared here rather than inline in `copyShard` so the selection is testable
+ * without AWS: past the empty-shard early return, the copy phase lists the
+ * destination bucket, so an inline filter could only be exercised against the
+ * real one.
+ */
+export function selectShardCopyItems(
+  items: ImportManifestItem[],
+  shard: { index: number; count: number },
+): { shardItems: CopyItem[]; localSkipped: number } {
+  let localSkipped = 0;
+  const shardItems: CopyItem[] = [];
+  for (const it of items) {
+    if (!keyInShard(it.key, shard.index, shard.count)) continue;
+    if (isLocallyUploaded(it)) {
+      localSkipped++;
+      continue;
+    }
+    shardItems.push({ key: it.key, source: it.source, httpUrl: it.sourceUrl, destUri: it.destUri });
+  }
+  return { shardItems, localSkipped };
 }
 
 export interface ImportManifest {

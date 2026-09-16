@@ -73,6 +73,12 @@
                 "visibility": {
                   "type": "string"
                 },
+                "anonymous": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
                 "concept_doi": {
                   "type": [
                     "string",
@@ -334,6 +340,42 @@
                     "null"
                   ]
                 },
+                "zarr_requeue_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "anonymity_status": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "verified",
+                    "findings",
+                    "unverifiable",
+                    null
+                  ]
+                },
+                "anonymity_checked_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "anonymity_findings": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "anonymity_unchecked": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "total_recording_duration": {
                   "type": [
                     "number",
@@ -470,6 +512,12 @@
               },
               "visibility": {
                 "type": "string"
+              },
+              "anonymous": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
               },
               "concept_doi": {
                 "type": [
@@ -745,6 +793,42 @@
                 ]
               },
               "zarr_verified_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "zarr_requeue_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "anonymity_status": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "verified",
+                  "findings",
+                  "unverifiable",
+                  null
+                ]
+              },
+              "anonymity_checked_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "anonymity_findings": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "anonymity_unchecked": {
                 "type": [
                   "string",
                   "null"

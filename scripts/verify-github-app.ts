@@ -109,11 +109,7 @@ export async function signAppJwt(
   const encoded = `${base64url(new TextEncoder().encode(JSON.stringify(header)))}.${base64url(
     new TextEncoder().encode(JSON.stringify(payload)),
   )}`;
-  const sig = await crypto.subtle.sign(
-    "RSASSA-PKCS1-v1_5",
-    key,
-    new TextEncoder().encode(encoded),
-  );
+  const sig = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(encoded));
   return `${encoded}.${base64url(sig)}`;
 }
 
@@ -148,7 +144,9 @@ async function ghRequest(
 async function listInstallations(jwt: string): Promise<Installation[]> {
   const body = await ghRequest("GET", "/app/installations", jwt, "Bearer");
   if (!Array.isArray(body)) {
-    throw new Error(`GET /app/installations: expected array, got: ${JSON.stringify(body).slice(0, 200)}`);
+    throw new Error(
+      `GET /app/installations: expected array, got: ${JSON.stringify(body).slice(0, 200)}`,
+    );
   }
   return body as Installation[];
 }
@@ -170,12 +168,7 @@ async function mintInstallationToken(jwt: string, installationId: number): Promi
 }
 
 async function listInstallationRepos(token: string): Promise<InstallationRepos> {
-  const body = await ghRequest(
-    "GET",
-    "/installation/repositories?per_page=1",
-    token,
-    "token",
-  );
+  const body = await ghRequest("GET", "/installation/repositories?per_page=1", token, "token");
   const count = (body as { total_count?: unknown }).total_count;
   const repos = (body as { repositories?: unknown }).repositories;
   if (typeof count !== "number" || !Array.isArray(repos)) {
@@ -205,12 +198,12 @@ function parseArgs(argv: string[]): { appId: string; privateKeyPath: string } {
 }
 
 function printUsage(): void {
-  console.error(
-    "Usage: bun run scripts/verify-github-app.ts --app-id <N> --private-key <PATH>",
-  );
+  console.error("Usage: bun run scripts/verify-github-app.ts --app-id <N> --private-key <PATH>");
   console.error("");
   console.error("  --app-id        Numeric GitHub App ID from the App settings page.");
-  console.error("  --private-key   Path to PKCS#8 PEM file (see https://docs.nemar.org/admin/github-app-setup/).");
+  console.error(
+    "  --private-key   Path to PKCS#8 PEM file (see https://docs.nemar.org/admin/github-app-setup/).",
+  );
   console.error("");
   console.error("Override expected orgs via NEMAR_VERIFY_LOGINS=org1,org2 (case-insensitive).");
 }
@@ -223,9 +216,7 @@ async function main(): Promise<void> {
   console.log("Listing installations...");
   const installations = await listInstallations(jwt);
   if (installations.length === 0) {
-    throw new Error(
-      "App has no installations. Install on both expected orgs per the runbook.",
-    );
+    throw new Error("App has no installations. Install on both expected orgs per the runbook.");
   }
   for (const inst of installations) {
     const login = inst.account?.login ?? "(unknown)";

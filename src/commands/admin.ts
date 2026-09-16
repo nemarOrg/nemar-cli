@@ -21,7 +21,8 @@
  * - nemar admin notify              - Send broadcast email to users
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import chalk from "chalk";
 import { Command } from "commander";
@@ -35,6 +36,7 @@ import {
   isAccountKind,
 } from "../../shared/contract/index.js";
 import {
+  type AnonymitySweepBatchResponse,
   type AvailabilityReport,
   type AvailabilityReportResult,
   type AvailabilityReportSweepBatchResponse,
@@ -60,6 +62,8 @@ import {
   type WeeklySummaryResponse,
   type ZarrFidelitySweepBatchResponse,
   addCi,
+  anonymitySweep,
+  anonymitySweepReset,
   approveUser,
   approveUserById,
   availabilityReport,
@@ -161,6 +165,7 @@ import {
   confirmWithInput,
 } from "../lib/confirm.js";
 import { markReportedExit } from "../lib/debug-log.js";
+import { fetchDocsPages, getDocsUrl } from "../lib/docs-fetch.js";
 import { CLI_LIVE_DATASETS, selectRevalidateTargets } from "../lib/fleet.js";
 import {
   cloneDataset,
@@ -180,6 +185,7 @@ import {
   type WithdrawnDatasetEntry,
   loadWithdrawnDatasets,
   resolveWithdrawTargets,
+  stillWithdrawn,
 } from "../lib/withdrawn-datasets.js";
 
 /**
@@ -949,6 +955,118 @@ adminKeysCommand
 adminCommand.addCommand(adminKeysCommand);
 
 // ============================================================================
+// Documentation retrieval
+// ============================================================================
+
+/**
+ * `nemar admin docs <path...>` (epic #1336 phase 3, issue #1341).
+ *
+ * `nemarOrg/docs` is private and `docs.nemar.org` is the retrieval surface
+ * (ADR 0057, ADR 0059), so a checkout is not how anyone reads an operations
+ * runbook any more. This is how: the stored API key buys a fifteen-minute
+ * docs-scoped session, and only that session value is sent to the docs host.
+ *
+ * THERE IS DELIBERATELY NO FORM THAT PRINTS THE SESSION VALUE. Printing it
+ * would be the convenient thing and is exactly what should not exist: the
+ * credential would land in a shell history, a CI log, or an agent's transcript,
+ * which is the whole class of exposure the short TTL is hedging against and the
+ * reason the key is traded for something weaker in the first place. The command
+ * holds the value in memory for the length of one invocation and prints only
+ * documentation.
+ */
+adminCommand
+  .command("docs")
+  .description("Fetch documentation pages from docs.nemar.org as Markdown, including gated ones")
+  .argument(
+    "<path...>",
+    "Page paths, for example admin/operations/zarr-serving (a full docs.nemar.org URL also works)",
+  )
+  .option("--no-headers", "Print only the page bodies, with no path banner")
+  .addHelpText(
+    "after",
+    `
+Every page has a Markdown mirror; ${getDocsUrl()}/llms.txt indexes them.
+Pass several paths at once: they share one documentation session, which is
+both faster and easier on the rate limit than one command per page.`,
+  )
+  .action(async (paths: string[], options: { headers: boolean }) => {
+    // NOT the shared `requireAuth()` / `handleCommandError()` pair every other
+    // command in this file uses, and the difference is the point. Both write
+    // their message with `console.log`, i.e. to STDOUT, and `requireAuth`
+    // returns false without setting an exit code. For a command whose whole
+    // contract is "the page goes to stdout", that combination is the worst
+    // available: `nemar admin docs x > page.md` with no credentials exited 0
+    // and wrote the words "Error: Not authenticated" into page.md, where the
+    // caller -- a script or an agent, by design -- would then read them as
+    // documentation. Found in review of #1384. Everything below reports to
+    // stderr and sets an exit code; stdout carries pages and nothing else.
+    if (!isAuthenticated()) {
+      console.error(chalk.red("Error: Not authenticated"));
+      console.error(chalk.dim("  Run 'nemar auth login' first"));
+      process.exitCode = 1;
+      return;
+    }
+
+    const spinner = ora({
+      text: paths.length === 1 ? "Fetching documentation..." : `Fetching ${paths.length} pages...`,
+      // ora writes to stderr by default, but say so rather than rely on it:
+      // a spinner frame on stdout would land in the redirected page.
+      stream: process.stderr,
+    }).start();
+
+    let results: Awaited<ReturnType<typeof fetchDocsPages>>;
+    try {
+      results = await fetchDocsPages(paths);
+    } catch (error) {
+      spinner.stop();
+      const hints: Record<number, string> = {
+        401: "Sign in again with `nemar auth login`",
+        403: "This account cannot use the API; see the message above",
+        404: "This account does not have access to the operations documentation",
+        429: "Too many documentation sessions from this address; wait a minute",
+      };
+      const hint = error instanceof ApiError ? hints[error.statusCode] : undefined;
+      console.error(
+        chalk.red(
+          error instanceof ApiError
+            ? error.message
+            : `Failed to fetch documentation: ${errorDetail(error)}`,
+        ),
+      );
+      if (hint) console.error(chalk.dim(`  ${hint}`));
+      process.exitCode = 1;
+      return;
+    }
+    spinner.stop();
+
+    // Bodies go to stdout and everything else to stderr, so `nemar admin docs
+    // <path> > page.md` yields the page rather than the page plus banners --
+    // the shape an agent or a pipeline wants. `console.log` appends a newline,
+    // so a redirected single page is the page plus a trailing newline, not
+    // byte-identical to the mirror. That is the right trade for a text file and
+    // is stated here because the sentence above used to imply otherwise.
+    //
+    // CONSEQUENCE WORTH KNOWING FOR THE MULTI-PATH CASE: redirecting several
+    // pages concatenates them with no delimiter in the file, because the banner
+    // that separates them is on stderr. That is deliberate rather than an
+    // oversight -- putting a separator on stdout would contaminate the
+    // single-page redirect, which is the common case and the one whose output
+    // should be exactly the page. Fetch one page per invocation when the caller
+    // needs them apart; the banners still name them, in order, on stderr.
+    for (const result of results) {
+      if (!result.ok) {
+        console.error(chalk.red(`${result.path}: ${result.error}`));
+        process.exitCode = 1;
+        continue;
+      }
+      if (options.headers && results.length > 1) {
+        console.error(chalk.cyan(`\n# ${result.path}`));
+      }
+      console.log(result.body);
+    }
+  });
+
+// ============================================================================
 // S3 / IAM Management
 // ============================================================================
 
@@ -1003,6 +1121,104 @@ s3Command
     } catch (error) {
       spinner.fail("S3 lock failed");
       console.log(chalk.dim(`  ${errorDetail(error)}`));
+    }
+  });
+
+s3Command
+  .command("credential-check")
+  .description("Mint a dataset's upload credentials and ask S3 what they can actually do")
+  .argument("<dataset-id>", "Dataset ID (e.g., on007788)")
+  .addHelpText(
+    "after",
+    `
+Read-only. Mints the same STS credentials an upload would get, then lists and reads
+one object under the dataset's objects/ prefix with them, through the aws CLI.
+
+It answers the question #1380 got wrong: a 403 from a signed request does not say
+whether the identity, the session policy, or the request itself is at fault. The
+credentials NEMAR mints are temporary, and a temporary key signs nothing without
+its session token -- S3 refuses such a request with a bare 403 even on an object
+that is anonymously readable.
+
+Examples:
+  $ nemar admin s3 credential-check on007788
+  $ nemar admin s3 credential-check nm099999
+`,
+  )
+  .action(async (datasetId: string) => {
+    if (!requireAuth()) return;
+
+    const { requestUploadCredentials } = await import("../lib/api/data.js");
+    const { probeS3PrefixAccess } = await import("../lib/aws-cli.js");
+
+    const mintSpinner = ora(`Minting upload credentials for ${datasetId}...`).start();
+    let creds: Awaited<ReturnType<typeof requestUploadCredentials>>;
+    try {
+      creds = await requestUploadCredentials(datasetId);
+    } catch (error) {
+      mintSpinner.fail(`Could not mint upload credentials for ${datasetId}`);
+      console.log(chalk.dim(`  ${errorDetail(error)}`));
+      process.exit(1);
+    }
+    const temporary = creds.credentials.access_key_id.startsWith("ASIA");
+    mintSpinner.succeed(
+      `Minted ${temporary ? "temporary (STS)" : "long-lived"} credentials, expiring ${creds.credentials.expiration}`,
+    );
+    console.log(`  Scope: ${chalk.cyan(`s3://${creds.s3.bucket}/${creds.s3.prefix}/`)}`);
+    console.log(
+      chalk.dim(
+        "  The session policy names this dataset; the identity it is federated from covers the bucket.",
+      ),
+    );
+
+    const probeSpinner = ora("Asking S3 what they reach...").start();
+    const probe = await probeS3PrefixAccess({
+      credentials: creds.credentials,
+      bucket: creds.s3.bucket,
+      region: creds.s3.region,
+      prefix: creds.s3.prefix,
+    });
+
+    switch (probe.outcome) {
+      case "reachable":
+        probeSpinner.succeed(`Listed and read ${probe.object}`);
+        console.log(
+          chalk.green(`  These credentials reach s3://${probe.bucket}/${probe.prefix}/.`),
+        );
+        if (temporary) {
+          console.log(
+            chalk.dim(
+              "  A transfer must carry the session token too: git-annex caches an S3 remote's key and secret with nowhere to put it, so a copy that inherits the environment signs without one and every request comes back 403.",
+            ),
+          );
+        }
+        break;
+      case "empty-prefix":
+        probeSpinner.warn(`Listing worked; there is no object under ${probe.prefix}/ to read`);
+        console.log(
+          chalk.dim(
+            "  ListBucket is granted, so the credentials are valid. Reachability of an object is unproven because there is none.",
+          ),
+        );
+        break;
+      case "unavailable":
+        probeSpinner.warn(`Could not probe: ${probe.detail}`);
+        console.log(chalk.dim("  Install the aws CLI (nemar doctor lists it) and re-run."));
+        break;
+      case "refused":
+        probeSpinner.fail(`S3 refused: ${probe.detail}`);
+        console.log();
+        console.log("Three things can produce this, in the order worth checking:");
+        console.log(
+          "  1. the request dropped the session token (a temporary key alone is always 403)",
+        );
+        console.log(
+          `  2. the session policy does not name ${datasetId} (it is generated per dataset id)`,
+        );
+        console.log(
+          "  3. the identity the token is federated from no longer covers the bucket, so the intersection is empty",
+        );
+        process.exit(1);
     }
   });
 
@@ -2359,6 +2575,17 @@ Examples:
         console.log(
           `  ${chalk.bold(req.dataset_id)}  ${statusColor(req.status)}  by ${req.requested_by_username}  ${chalk.dim(req.requested_at)}`,
         );
+        // #1408: an anonymous release and a publication reach this list
+        // looking identical, and approving the wrong one is not reversible in
+        // either direction -- publishing names a depositor who asked to be
+        // concealed; releasing anonymously withholds a DOI someone needs.
+        if (req.anonymous === 1) {
+          console.log(
+            `    ${chalk.yellow("! anonymous release:")} ${chalk.dim(
+              "repository stays private, DOI stays reserved, depositor is not named",
+            )}`,
+          );
+        }
         if (req.current_step && req.status === "approving") {
           console.log(
             `    ${chalk.yellow(">")} ${req.current_step.replace(/_/g, " ")}${req.last_error ? chalk.red(` (${req.last_error})`) : ""}`,
@@ -3338,7 +3565,7 @@ adminCommand
     "Withdraw a broken published dataset: make it private and tombstone its EZID DOIs (concept + every version). Dry-run by default.",
   )
   .argument("[ids...]", "Dataset id(s) to withdraw (omit when using --all)")
-  .option("--all", "Target every entry in the checked-in withdrawn-datasets list")
+  .option("--all", "Target the still-withdrawn entries on the checked-in list")
   .option("--reason <reason>", "Withdrawal reason (default: the list entry's own reason)")
   .option("--execute", "Actually apply the withdrawal (default is a dry run)")
   .option("--force", "Allow a dataset id that is not on the checked-in withdrawn-datasets list")
@@ -3381,9 +3608,13 @@ adminCommand
         process.exit(1);
       }
 
+      // `--all` acts only on entries still down. A reinstated one keeps its entry
+      // as the record of a withdrawal that should not have happened (#1396), and
+      // re-targeting it would tombstone a dataset whose content we just proved is
+      // there. An explicit id still works, with the existing force guard.
       const resolved = options.all
         ? {
-            targets: entries.map((e) => ({
+            targets: stillWithdrawn(entries).map((e) => ({
               datasetId: e.dataset_id,
               reason: options.reason || e.reason,
             })),
@@ -3447,7 +3678,7 @@ adminCommand
     "Reverse a withdrawal: make a dataset public again and restore its EZID DOIs (concept + every version). Dry-run by default.",
   )
   .argument("[ids...]", "Dataset id(s) to restore (omit when using --all)")
-  .option("--all", "Target every entry in the checked-in withdrawn-datasets list")
+  .option("--all", "Target the still-withdrawn entries on the checked-in list")
   .option("--execute", "Actually apply the restore (default is a dry run)")
   .option(
     "--withdrawn-file <path>",
@@ -3481,7 +3712,9 @@ adminCommand
       if (options.all) {
         const listPath = options.withdrawnFile || defaultWithdrawnDatasetsPath();
         try {
-          targets = loadWithdrawnDatasets(listPath).map((e) => e.dataset_id);
+          // Restoring an already-restored dataset is a no-op, but listing it as a
+          // target reads as though it were still down; the list is the record.
+          targets = stillWithdrawn(loadWithdrawnDatasets(listPath)).map((e) => e.dataset_id);
         } catch (err) {
           console.error(chalk.red(`Failed to load withdrawn-datasets file: ${errorDetail(err)}`));
           process.exit(1);
@@ -3613,6 +3846,180 @@ async function dispatchOpenNeuroImportWorkflow(
 }
 
 adminCommand
+  .command("annex-normalize <datasetId>")
+  .description(
+    "Move data an existing dataset keeps in git into the annex, and put NEMAR's annex policy in force (ADR 0060)",
+  )
+  .option("--dry-run", "Clone and report what would change; touch nothing")
+  .option("--dir <path>", "Working directory for the clone (reuse it to resume without re-cloning)")
+  .option("--no-push", "Do everything except push, for a rehearsal")
+  .option(
+    "--normalize-max-gb <n>",
+    "Raise the ceiling on how much data will be uploaded from this host (default 5 GiB)",
+  )
+  .option(
+    "--via-aws-cli",
+    "Move the content with `aws s3 sync` rather than git-annex's S3 client, using whatever the aws CLI on this machine is already configured with. Faster for a large migration, and the only option on a host with no NEMAR credentials; the default path mints credentials scoped to this dataset instead.",
+  )
+  .option("-y, --yes", "Skip the confirmation prompt")
+  .addHelpText(
+    "after",
+    `
+What this does (ADR 0060, issue #1159):
+  1. clones the dataset (full clone -- data in git has to be present to upload)
+  2. annexes every file NEMAR policy calls data that the repo keeps in git, and
+     uploads the content to S3 with credentials minted for this dataset
+  3. replaces any inherited annex.largefiles attributes with NEMAR's expression
+  4. commits both changes and pushes main plus the git-annex branch
+
+It is a FORWARD fix: history is never rewritten, so published version manifests
+that address a git-resident file by its raw.githubusercontent URL keep resolving,
+and the repository does not shrink. Tags, DOIs, archives and existing S3 objects
+are untouched.
+
+Examples:
+  $ nemar admin annex-normalize on007788 --dry-run
+  $ nemar admin annex-normalize on007788 --dir /tmp/normalize-on007788
+`,
+  )
+  .action(
+    async (
+      datasetId: string,
+      options: {
+        dryRun?: boolean;
+        dir?: string;
+        push?: boolean;
+        normalizeMaxGb?: string;
+        viaAwsCli?: boolean;
+        yes?: boolean;
+        no?: boolean;
+      },
+    ) => {
+      if (!requireAuth()) return;
+
+      let maxBytes: number | undefined;
+      if (options.normalizeMaxGb !== undefined) {
+        const gb = Number(options.normalizeMaxGb);
+        if (!Number.isFinite(gb) || gb <= 0) {
+          console.error(
+            chalk.red(
+              `Invalid --normalize-max-gb "${options.normalizeMaxGb}". Expected a positive number of GiB.`,
+            ),
+          );
+          process.exit(1);
+        }
+        maxBytes = Math.floor(gb * 1024 ** 3);
+      }
+
+      const { planDatasetNormalization, normalizeDatasetRepo } = await import(
+        "../lib/normalize-dataset.js"
+      );
+
+      const planSpinner = ora(`Cloning ${datasetId} and measuring...`).start();
+      let plan: Awaited<ReturnType<typeof planDatasetNormalization>>;
+      try {
+        plan = await planDatasetNormalization(datasetId, { workDir: options.dir });
+      } catch (err) {
+        planSpinner.fail(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+      planSpinner.succeed(`Cloned ${datasetId} to ${plan.datasetPath}`);
+
+      console.log();
+      console.log(chalk.bold(`Plan for ${datasetId}`));
+      console.log(
+        `  Data files in git: ${chalk.cyan(plan.files.length.toString())} (${chalk.cyan(`${(plan.bytes / 1e6).toFixed(1)} MB`)}) -> annex + S3`,
+      );
+      for (const f of plan.files.slice(0, 5)) {
+        console.log(chalk.dim(`    - ${f.path} (${(f.size / 1e6).toFixed(2)} MB)`));
+      }
+      if (plan.files.length > 5) {
+        console.log(chalk.dim(`    ... and ${plan.files.length - 5} more`));
+      }
+      console.log(
+        `  Inherited largefiles attributes: ${
+          plan.attributeFiles.length > 0
+            ? chalk.cyan(plan.attributeFiles.join(", "))
+            : chalk.dim("none")
+        }`,
+      );
+      console.log(chalk.dim("  History is not rewritten; tags, DOIs and archives are untouched."));
+      console.log();
+
+      if (
+        plan.files.length === 0 &&
+        plan.attributeFiles.length === 0 &&
+        (plan.pendingKeys?.length ?? 0) === 0
+      ) {
+        console.log(chalk.green("Nothing to do: this dataset already matches NEMAR policy."));
+        return;
+      }
+      if (plan.files.length === 0 && (plan.pendingKeys?.length ?? 0) > 0) {
+        // A resumed clone (--dir) whose previous attempt committed and stopped. The
+        // tree looks normalized because it IS normalized -- locally. Origin still
+        // carries the recordings as plain blobs, and the keys were never proved
+        // present in S3, which is the only reason the push did not happen.
+        console.log(
+          chalk.yellow(
+            `  Resuming: ${plan.pendingKeys?.length ?? 0} key(s) are committed here and absent from origin. They will be re-verified against S3 before anything is pushed.`,
+          ),
+        );
+      }
+
+      if (options.dryRun) {
+        console.log(chalk.dim("--dry-run: stopping before any change."));
+        return;
+      }
+
+      const confirmResult = await confirm(
+        plan.files.length > 0
+          ? `Rewrite ${datasetId}'s HEAD and upload ${(plan.bytes / 1e6).toFixed(1)} MB to S3?`
+          : `Put NEMAR's annex policy in force on ${datasetId} (no data moves, no S3 traffic)?`,
+        options,
+      );
+      if (confirmResult !== "confirmed") {
+        console.log(confirmResult === "declined" ? "Declined." : "Cancelled.");
+        return;
+      }
+
+      const runSpinner = ora("Annexing and uploading...").start();
+      let result: Awaited<ReturnType<typeof normalizeDatasetRepo>>;
+      try {
+        result = await normalizeDatasetRepo(plan, {
+          push: options.push !== false,
+          maxBytes,
+          credentials: options.viaAwsCli ? "ambient" : "backend",
+        });
+      } catch (err) {
+        runSpinner.fail(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+      runSpinner.succeed(result.notes.length > 0 ? result.notes.join("; ") : "nothing changed");
+
+      if (result.committed && !result.pushed) {
+        console.log(
+          chalk.yellow(
+            `  Committed but NOT pushed (--no-push). The clone is at ${plan.datasetPath}.`,
+          ),
+        );
+      } else if (result.pushed) {
+        console.log(chalk.green(`  Pushed main and the git-annex branch for ${datasetId}`));
+      }
+
+      // Verification is not something the CLI can do on its own: it has to ask with
+      // the credentials that moved the bytes, so `normalizeDatasetRepo` owns it and
+      // refuses to push without it. Reaching here means it passed.
+      if (result.verification) {
+        console.log(
+          chalk.green(
+            `  Remote holds all ${result.verification.present.length} uploaded key(s), checked by ${result.verification.method}`,
+          ),
+        );
+      }
+    },
+  );
+
+adminCommand
   .command("import-openneuro")
   .description("Import an OpenNeuro dataset into NEMAR")
   .argument("<openneuro-ids>", "OpenNeuro dataset ID(s), comma-separated (e.g., ds007262,ds007263)")
@@ -3631,6 +4038,10 @@ adminCommand
     "--shard <i/N>",
     "Copy-phase only: process shard i of N (0-indexed), e.g. 0/8. Required with --phase copy.",
   )
+  .option(
+    "--normalize-max-gb <n>",
+    "Raise the ceiling on how much data the prepare phase will annex and upload from this host (default 5 GiB). Only needed for a dataset that keeps an unusual amount of data in git; the import aborts rather than silently spending hours uploading (ADR 0060).",
+  )
   .action(
     async (
       openneuroIds: string,
@@ -3641,6 +4052,7 @@ adminCommand
         trustUpstream?: boolean;
         phase?: string;
         shard?: string;
+        normalizeMaxGb?: string;
       },
     ) => {
       if (!requireAuth()) return;
@@ -3663,6 +4075,20 @@ adminCommand
       if ((options.dir || options.skipData) && !options.local && !options.phase) {
         console.error(chalk.red("--dir and --skip-data require --local or --phase"));
         process.exit(1);
+      }
+
+      let normalizeMaxBytes: number | undefined;
+      if (options.normalizeMaxGb !== undefined) {
+        const gb = Number(options.normalizeMaxGb);
+        if (!Number.isFinite(gb) || gb <= 0) {
+          console.error(
+            chalk.red(
+              `Invalid --normalize-max-gb "${options.normalizeMaxGb}". Expected a positive number of GiB.`,
+            ),
+          );
+          process.exit(1);
+        }
+        normalizeMaxBytes = Math.floor(gb * 1024 ** 3);
       }
 
       // Single-phase execution for the sharded CI workflow (prepare/copy/finalize).
@@ -3696,6 +4122,7 @@ adminCommand
           skipData: options.skipData,
           trustUpstream: options.trustUpstream,
           persistStaging: true,
+          normalizeMaxBytes,
         };
         try {
           if (options.phase === "prepare") {
@@ -3725,6 +4152,7 @@ adminCommand
             workDir: options.dir,
             skipData: options.skipData,
             trustUpstream: options.trustUpstream,
+            normalizeMaxBytes,
           });
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
@@ -3996,6 +4424,15 @@ importCommand
         spinner.succeed(
           `${datasetId} verified complete (${result.presentCount}/${result.expectedCount} objects present)`,
         );
+      } else if (result.expectedCount === 0) {
+        // The backend answers `complete: false` with an empty expected set when
+        // there is no published manifest to compare against, which is the right
+        // refusal but not an incompleteness: rendering it as "0/0 missing" reads
+        // as a verdict on the data when nothing was actually checked (ADR 0054).
+        spinner.warn(
+          `${datasetId} not verifiable: no published manifest to compare against ` +
+            `(${result.presentCount} object(s) in the bucket)`,
+        );
       } else {
         spinner.warn(
           `${datasetId} incomplete: ${result.missingKeys.length}/${result.expectedCount} object(s) missing${result.zeroByteKeys.length > 0 ? ` (${result.zeroByteKeys.length} zero-byte)` : ""}`,
@@ -4203,7 +4640,9 @@ Description:
             `${id} reclassified: ${
               result.complete
                 ? "already complete"
-                : `incomplete (${result.missingKeys.length}/${result.expectedCount} missing)`
+                : result.expectedCount === 0
+                  ? "not verifiable (no published manifest)"
+                  : `incomplete (${result.missingKeys.length}/${result.expectedCount} missing)`
             }`,
           );
         } catch (err) {
@@ -4456,7 +4895,9 @@ exemplarCommand
     ) => {
       if (!requireAuth()) return;
 
-      const { cloneExemplar, loadExemplarFleet } = await import("../lib/exemplar-clone.js");
+      const { cloneExemplar, loadExemplarFleet, isDesignatedAnonymous } = await import(
+        "../lib/exemplar-clone.js"
+      );
       const fleetPath = options.fleetFile || defaultExemplarFleetPath();
       const cloneOpts = { publish: options.publish, includeDerived: options.includeDerived };
 
@@ -4482,7 +4923,14 @@ exemplarCommand
             continue;
           }
           try {
-            await cloneExemplar({ xxId: entry.xx_id, sourceId: entry.source_id, ...cloneOpts });
+            await cloneExemplar({
+              xxId: entry.xx_id,
+              sourceId: entry.source_id,
+              ...cloneOpts,
+              // The fleet file decides which entry is the anonymous deposit,
+              // so `--all --publish` cannot publish it by omission.
+              ...(entry.anonymous ? { anonymous: true as const } : {}),
+            });
           } catch (err) {
             failures++;
             console.error(chalk.red(`${entry.xx_id} failed: ${errorDetail(err)}`));
@@ -4504,16 +4952,19 @@ exemplarCommand
         process.exit(1);
       }
 
-      let sourceId = options.source;
-      if (!sourceId) {
-        try {
-          const entries = loadExemplarFleet(fleetPath);
-          sourceId = entries.find((e) => e.xx_id === xxId)?.source_id;
-        } catch (err) {
-          console.error(chalk.red(`Failed to load fleet file: ${errorDetail(err)}`));
-          process.exit(1);
-        }
+      // The fleet is loaded unconditionally, not only when --source is
+      // omitted: it is where the anonymous DESIGNATION lives (#1407), and that
+      // is a property of the xx id rather than of the source. Reading it only
+      // on the --source-less path would let `exemplar create xx099907
+      // --source ...` create the fixture without its flag, silently.
+      let fleetEntries: Awaited<ReturnType<typeof loadExemplarFleet>>;
+      try {
+        fleetEntries = loadExemplarFleet(fleetPath);
+      } catch (err) {
+        console.error(chalk.red(`Failed to load fleet file: ${errorDetail(err)}`));
+        process.exit(1);
       }
+      const sourceId = options.source ?? fleetEntries.find((e) => e.xx_id === xxId)?.source_id;
       if (!sourceId) {
         console.error(
           chalk.red(
@@ -4528,7 +4979,12 @@ exemplarCommand
       }
 
       try {
-        await cloneExemplar({ xxId, sourceId, ...cloneOpts });
+        await cloneExemplar({
+          xxId,
+          sourceId,
+          ...cloneOpts,
+          ...(isDesignatedAnonymous(fleetEntries, xxId) ? { anonymous: true as const } : {}),
+        });
       } catch (error) {
         console.error(chalk.red(`\nExemplar clone failed: ${errorDetail(error)}`));
         process.exit(1);
@@ -4955,6 +5411,740 @@ fleetCommand
         `Done: revalidated=${tally.revalidated} green=${tally.green} locked=${tally.locked} still-red=${tally.stillRed} skipped=${tally.skipped} errors=${tally.errors}`,
       ),
     );
+  });
+
+fleetCommand
+  .command("annex-policy")
+  .description(
+    "Report, and optionally fix, dataset repos that NEMAR's annex policy does not actually govern (#1374, ADR 0060)",
+  )
+  .argument("[dataset-id...]", "Specific datasets to act on (omit to sweep by prefix)")
+  .option("--prefix <prefix>", "Dataset id prefix to sweep (default on: the imported fleet)", "on")
+  .option("--limit <n>", "Act on at most this many datasets, in id order")
+  .option("--apply", "Make the change (default is a read-only report)")
+  .option("--include-data", "Also move data a repo keeps in git, which uploads to S3")
+  .option("--via-aws-cli", "With --include-data, move the bytes with this machine's aws CLI")
+  .option("--no-push", "With --apply, commit locally and push nothing (a rehearsal)")
+  .option("--dir <path>", "Where clones go while they are being fixed (default: a temp dir)")
+  .option("--keep-clones", "Do not delete each clone after its dataset is done")
+  .option("--concurrency <n>", "Parallel GitHub reads during the scan (default 4)", "4")
+  .option("--json <path>", "Write the full report as JSON")
+  .option("--force", "Include the live datasets (nm000103-107)")
+  .option(YES_OPTION, YES_DESCRIPTION)
+  .option(NO_OPTION, NO_DESCRIPTION)
+  .addHelpText(
+    "after",
+    `
+Two things govern what git-annex takes, and an imported dataset has neither (#1374):
+upstream's .gitattributes outranks NEMAR's configured expression, and the expression
+was never written to the git-annex branch at all. The scan reads both from GitHub
+without cloning anything, so a sweep of the fleet costs minutes.
+
+  policy           strip the inherited attributes, configure NEMAR's expression.
+                   One commit, no data moves, no S3 traffic.
+  policy-and-data  ALSO keeps recordings in git. Skipped unless --include-data:
+                   that needs credentials and an upload, which is
+                   nemar admin annex-normalize <id> with someone watching.
+
+--apply pushes to main and to the git-annex branch for every dataset it touches,
+which starts that repo's BIDS validation. Run it in batches (--limit) rather than
+across 600 repositories at once (ADR 0020).
+
+Examples:
+  $ nemar admin fleet annex-policy                       # report the imported fleet
+  $ nemar admin fleet annex-policy --prefix nm           # report the uploaded fleet
+  $ nemar admin fleet annex-policy on001810 --apply      # fix one
+  $ nemar admin fleet annex-policy --apply --limit 10    # fix a batch
+`,
+  )
+  .action(
+    async (
+      datasetIds: string[],
+      options: {
+        prefix: string;
+        limit?: string;
+        apply?: boolean;
+        includeData?: boolean;
+        viaAwsCli?: boolean;
+        push?: boolean;
+        dir?: string;
+        keepClones?: boolean;
+        concurrency: string;
+        json?: string;
+        force?: boolean;
+      } & ConfirmOptions,
+    ) => {
+      if (!requireAuth()) return;
+
+      const {
+        POINTER_SUSPECT_MAX_BYTES,
+        applyAnnexPolicyToDataset,
+        createGitHubReader,
+        labelAnnexPolicyState,
+        selectAnnexPolicyTargets,
+        sweepAnnexPolicy,
+      } = await import("../lib/fleet-annex-policy.js");
+
+      const limit = options.limit ? Number.parseInt(options.limit, 10) : undefined;
+      if (options.limit && (!Number.isFinite(limit) || (limit ?? 0) <= 0)) {
+        console.log(chalk.red(`Error: --limit must be a positive number (got ${options.limit})`));
+        process.exit(1);
+      }
+      const concurrency = Number.parseInt(options.concurrency, 10) || 4;
+
+      let reader: Awaited<ReturnType<typeof createGitHubReader>>;
+      try {
+        reader = await createGitHubReader();
+      } catch (error) {
+        console.log(chalk.red(errorDetail(error)));
+        process.exit(1);
+      }
+
+      // Targets: named datasets, or the fleet by prefix.
+      // With --apply the limit bounds the work (below); the scan stays whole, because
+      // a bounded scan can never see past the datasets it already fixed. Without
+      // --apply it bounds the report, which is what an operator asking for a sample
+      // means by it.
+      const applyLimit = options.apply ? limit : undefined;
+      const scanLimit = options.apply ? undefined : limit;
+      let targets: string[];
+      if (datasetIds.length > 0) {
+        targets = scanLimit === undefined ? datasetIds : datasetIds.slice(0, scanLimit);
+      } else {
+        const listSpinner = ora("Fetching dataset list...").start();
+        try {
+          const all: { dataset_id: string }[] = [];
+          for (let offset = 0; ; offset += 200) {
+            const res = await listDatasets({ limit: 200, offset });
+            all.push(...res.datasets);
+            if (res.datasets.length < 200 || all.length >= res.total_count) break;
+          }
+          targets = selectAnnexPolicyTargets(all, {
+            prefix: options.prefix,
+            exclude: CLI_LIVE_DATASETS,
+            force: options.force,
+            limit: scanLimit,
+          });
+          listSpinner.succeed(
+            `${targets.length} dataset(s) with prefix ${options.prefix} (of ${all.length})`,
+          );
+        } catch (error) {
+          handleCommandError(error, listSpinner, "Failed to fetch datasets");
+          return;
+        }
+      }
+      if (targets.length === 0) {
+        console.log(chalk.dim("No datasets matched."));
+        return;
+      }
+      // The live fence has to cover BOTH target sources. `selectAnnexPolicyTargets`
+      // drops them from a prefix sweep, where naming them was not the operator's
+      // intent; naming one explicitly is, so that refuses out loud rather than
+      // silently doing nothing. There is no backend behind this command -- it
+      // pushes straight to GitHub -- so this is the only fence there is.
+      const live = targets.filter((id) => CLI_LIVE_DATASETS.has(id));
+      if (live.length > 0 && !options.force) {
+        console.log(
+          chalk.red(
+            `Refusing to touch live dataset(s): ${live.join(", ")}. These hold real data and are not to be modified during development (AGENTS.md). Pass --force if that is genuinely what you mean.`,
+          ),
+        );
+        process.exit(1);
+      }
+
+      // --- The read-only report, which --apply also starts from. -----------------
+      const scanSpinner = ora(
+        `Reading the annex policy of ${targets.length} dataset(s)...`,
+      ).start();
+      let scanned = 0;
+      let summary: Awaited<ReturnType<typeof sweepAnnexPolicy>>;
+      try {
+        summary = await sweepAnnexPolicy(targets, reader, {
+          concurrency,
+          onResult: () => {
+            scanned++;
+            scanSpinner.text = `Read ${scanned}/${targets.length}...`;
+          },
+        });
+      } catch (error) {
+        scanSpinner.fail(errorDetail(error));
+        const { FleetSweepAborted } = await import("../lib/fleet-annex-policy.js");
+        if (error instanceof FleetSweepAborted) {
+          // The sweep stopped because every remaining read would fail the same way.
+          // What it had already read is still worth the operator's hour.
+          console.log(
+            chalk.yellow(
+              `  Stopped after reading ${error.partial.scanned} of ${targets.length}. That partial inventory is below${options.json ? " and in the JSON report" : ""}.`,
+            ),
+          );
+          for (const [label, ids] of Object.entries(error.partial.byLabel)) {
+            if (ids.length > 0) console.log(`  ${label.padEnd(18)} ${ids.length}`);
+          }
+          if (options.json) {
+            writeFileSync(
+              options.json,
+              `${JSON.stringify({ summary: error.partial, aborted: error.message }, null, 2)}\n`,
+            );
+            console.log(chalk.dim(`  Partial report written to ${options.json}`));
+          }
+        }
+        process.exit(1);
+      }
+      scanSpinner.succeed(`Read ${summary.scanned} of ${targets.length}`);
+
+      const rulesToRemove = summary.states.reduce(
+        (sum, s) => sum + s.attributeFiles.reduce((n, f) => n + f.rulesRemoved, 0),
+        0,
+      );
+      const filesToRewrite = summary.states.reduce((sum, s) => sum + s.attributeFiles.length, 0);
+      const declined = summary.states.filter((s) =>
+        s.attributeFiles.some((f) => f.declined.length > 0),
+      );
+      // Data-shaped paths too small to be recordings, which the scan subtracts from
+      // `gitResidentData` as probable unlocked pointers. The heuristic is right
+      // almost always and silent when it is not: `shouldAnnex` annexes a 200-byte
+      // .edf at any size, so a genuinely tiny git-resident recording disappears from
+      // the report with no trace. Name the count.
+      const pointerSuspects = summary.states.reduce((sum, s) => sum + s.pointerSuspects.length, 0);
+
+      console.log();
+      console.log(chalk.bold("Annex policy across the fleet"));
+      for (const [label, ids] of Object.entries(summary.byLabel)) {
+        if (ids.length === 0) continue;
+        const color = label === "compliant" ? chalk.green : chalk.yellow;
+        console.log(`  ${color(label.padEnd(18))} ${ids.length}`);
+        if (label !== "compliant") {
+          const shown = ids.slice(0, 12).join(", ");
+          console.log(
+            chalk.dim(`    ${shown}${ids.length > 12 ? ` ... +${ids.length - 12}` : ""}`),
+          );
+        }
+      }
+      console.log(
+        `  ${chalk.dim("attributes to rewrite")} ${filesToRewrite} file(s), ${rulesToRemove} rule(s)`,
+      );
+      if (pointerSuspects > 0) {
+        console.log(
+          chalk.dim(
+            `  ${pointerSuspects} data-shaped path(s) under ${POINTER_SUSPECT_MAX_BYTES} bytes read as unlocked pointers, not data. A genuinely tiny recording would look the same; the clone decides.`,
+          ),
+        );
+      }
+      if (summary.truncated.length > 0) {
+        console.log(
+          chalk.dim(
+            `  GitHub truncated ${summary.truncated.length} tree(s) (${summary.truncated.slice(0, 5).join(", ")}): their data counts are a lower bound, and the clone decides.`,
+          ),
+        );
+      }
+      if (declined.length > 0) {
+        console.log(
+          chalk.yellow(
+            `  ${declined.length} dataset(s) have a quoted attribute line the strip declines: ${declined.map((s) => s.datasetId).join(", ")}`,
+          ),
+        );
+      }
+      if (summary.failed.length > 0) {
+        console.log(chalk.red(`  unreadable          ${summary.failed.length}`));
+        for (const f of summary.failed.slice(0, 5)) {
+          console.log(chalk.dim(`    ${f.datasetId}: ${f.error}`));
+        }
+      }
+      console.log();
+
+      if (options.json) {
+        writeFileSync(options.json, `${JSON.stringify({ summary }, null, 2)}\n`);
+        console.log(chalk.dim(`  Report written to ${options.json}`));
+      }
+
+      if (!options.apply) {
+        console.log(chalk.dim("Read-only: nothing was changed. Add --apply to fix a batch."));
+        return;
+      }
+
+      // --- Applying. -------------------------------------------------------------
+      // `--limit` bounds the datasets ACTED ON, not the datasets scanned. Bounding
+      // the scan meant every re-run selected the same first N ids, found them all
+      // compliant, and reported nothing to do: no number of re-runs ever reached
+      // dataset N+1, and the operator had to keep the cursor by hand.
+      const allFixable = summary.states
+        .filter((s) => {
+          const label = labelAnnexPolicyState(s);
+          if (label === "compliant") return false;
+          if (label === "policy") return true;
+          return Boolean(options.includeData);
+        })
+        .map((s) => s.datasetId);
+      const fixable = applyLimit === undefined ? allFixable : allFixable.slice(0, applyLimit);
+      if (fixable.length < allFixable.length) {
+        console.log(
+          chalk.dim(
+            `  --limit ${applyLimit}: acting on ${fixable.length} of ${allFixable.length} dataset(s) that need the fix. Re-run to take the next ${applyLimit}.`,
+          ),
+        );
+      }
+      const needsDataLeg = summary.states.filter(
+        (s) => labelAnnexPolicyState(s) !== "compliant" && !fixable.includes(s.datasetId),
+      );
+      if (needsDataLeg.length > 0) {
+        console.log(
+          chalk.dim(
+            `  ${needsDataLeg.length} dataset(s) are not in this pass because they keep data in git: ${needsDataLeg.map((s) => s.datasetId).join(", ")}. Each needs the S3 leg (nemar admin annex-normalize <id>, or --include-data here).`,
+          ),
+        );
+      }
+      if (fixable.length === 0) {
+        console.log(
+          chalk.green(
+            "Nothing to apply: every dataset read is compliant, or needs the S3 leg (--include-data).",
+          ),
+        );
+        return;
+      }
+
+      const pushing = options.push !== false;
+      const confirmResult = await confirm(
+        `${pushing ? "Push" : "Commit locally, without pushing,"} an annex-policy fix to ${fixable.length} dataset repo(s)${pushing ? ", each starting its BIDS validation" : ""}?`,
+        options,
+      );
+      if (confirmResult !== "confirmed") {
+        console.log(confirmResult === "declined" ? "Declined." : "Cancelled.");
+        return;
+      }
+
+      const workRoot = options.dir ?? mkdtempSync(join(tmpdir(), "nemar-fleet-annex-policy-"));
+      const tally = { applied: 0, compliant: 0, skipped: 0, failed: 0, unverified: 0 };
+      const outcomes: unknown[] = [];
+      let index = 0;
+      for (const datasetId of fixable) {
+        index++;
+        const prefix = chalk.dim(`[${index}/${fixable.length}]`);
+        // One dataset renamed, deleted or made private between the scan and the
+        // apply must not throw away the record of the hundreds already pushed --
+        // that record is the only list of which repositories now have a new commit
+        // and a running CI job. A fatal read still stops, because every remaining
+        // dataset would fail identically.
+        let outcome: Awaited<ReturnType<typeof applyAnnexPolicyToDataset>>;
+        try {
+          outcome = await applyAnnexPolicyToDataset(datasetId, reader, {
+            workRoot,
+            push: pushing,
+            includeData: options.includeData,
+            keepClone: options.keepClones,
+            credentials: options.viaAwsCli ? "ambient" : "backend",
+          });
+        } catch (error) {
+          const { GitHubReadError } = await import("../lib/fleet-annex-policy.js");
+          if (error instanceof GitHubReadError && error.fatal) {
+            console.log();
+            console.log(
+              chalk.red(
+                `Stopped at ${datasetId} (${error.message}). ${index - 1} dataset(s) were already acted on; their outcomes follow.`,
+              ),
+            );
+            break;
+          }
+          outcome = {
+            datasetId,
+            before: undefined as never,
+            action: "failed",
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+        outcomes.push(outcome);
+        switch (outcome.action) {
+          case "applied":
+            tally.applied++;
+            console.log(
+              `${prefix} ${chalk.green(datasetId)} ${outcome.pushed ? "pushed" : "committed locally"}${outcome.notes?.length ? chalk.dim(` (${outcome.notes.join("; ")})`) : ""}`,
+            );
+            break;
+          case "compliant":
+            tally.compliant++;
+            console.log(`${prefix} ${chalk.dim(`${datasetId} already compliant`)}`);
+            break;
+          case "skipped-has-data":
+            tally.skipped++;
+            console.log(
+              `${prefix} ${chalk.yellow(datasetId)} skipped: ${outcome.notes?.join("; ") ?? "keeps data in git"}`,
+            );
+            break;
+          case "unverified":
+            tally.unverified++;
+            console.log(
+              `${prefix} ${chalk.red(datasetId)} pushed, but GitHub still reports drift: ${
+                outcome.after?.attributeFiles.map((f) => f.path).join(", ") ||
+                "policy not configured"
+              }`,
+            );
+            break;
+          case "failed":
+            tally.failed++;
+            console.log(`${prefix} ${chalk.red(datasetId)} failed: ${outcome.error}`);
+            break;
+        }
+      }
+
+      console.log();
+      console.log(
+        `Applied ${chalk.green(String(tally.applied))}, already compliant ${tally.compliant}, skipped ${tally.skipped}, unverified ${chalk.red(String(tally.unverified))}, failed ${chalk.red(String(tally.failed))}`,
+      );
+      if (options.json) {
+        writeFileSync(options.json, `${JSON.stringify({ summary, outcomes }, null, 2)}\n`);
+        console.log(chalk.dim(`  Report written to ${options.json}`));
+      }
+      if (options.dir || options.keepClones) {
+        console.log(chalk.dim(`  Clones under ${workRoot}`));
+      }
+      if (tally.failed > 0 || tally.unverified > 0) process.exit(1);
+    },
+  );
+
+fleetCommand
+  .command("key-registration")
+  .description(
+    "Re-register annexed content NEMAR holds in S3 but never recorded in the location log (#1392)",
+  )
+  .argument("[dataset-id...]", "Specific datasets to act on (omit to sweep by prefix)")
+  .option("--prefix <prefix>", "Dataset id prefix to sweep (default on: the imported fleet)", "on")
+  .option("--limit <n>", "Act on at most this many datasets, in id order")
+  .option("--apply", "Register and push (default is a read-only report)")
+  .option("--no-push", "With --apply, register locally and push nothing (a rehearsal)")
+  .option(
+    "--include-incomplete",
+    "Also act on a dataset whose content the bucket cannot fully account for (#1396). Off by default: that is missing content, not a lost registration",
+  )
+  // One line, like its neighbours: the reasoning lives in the --help-all text,
+  // which is where every other "why would I use this" explanation in this file
+  // goes. A four-line option description is what the concise-help work removed.
+  .option("--retract-false-claims", "Withdraw presence claims the bucket cannot back")
+  .option("--dir <path>", "Where clones go while a dataset is being repaired (default: a temp dir)")
+  .option("--concurrency <n>", "Datasets in flight at once (default 4)", "4")
+  .option("--json <path>", "Write the full report as JSON")
+  .option("--force", "Include the live datasets (nm000103-107)")
+  .option("-y, --yes", "Skip confirmation and proceed")
+  .addHelpText(
+    "after",
+    `
+What this repairs (#1392):
+  \`batchSetKeysPresent\` ran fifty \`setpresentkey\` processes at once and counted
+  every exit-0 as a registration. It is fixed, but 528 of 600 imported datasets
+  were already published with NEMAR's own copy of their content unadvertised:
+  720,896 keys sitting in the bucket that no clone is told about. Those clones
+  silently fetch from OpenNeuro instead.
+
+What it will not do:
+  A dataset with any annexed key that has NO object in the bucket is reported and
+  skipped. That is missing content (#1396) and needs the bytes transferred, not a
+  registration written. \`--include-incomplete\` overrides it.
+
+The opposite repair, \`--retract-false-claims\`:
+  a key can be recorded at NEMAR's remote with NO object behind it, which is what
+  a failed copy leaves (#967): the object is there under the right name at zero
+  bytes, every name-only check counts it as content, and the log then tells every
+  clone to fetch bytes we do not hold. That is worse than an unregistered key,
+  which merely fails to appear. Run this only once recovery has reported those
+  keys unrecoverable, because while the content is still recoverable the honest
+  repair is to fetch it and the claim becomes true. Used on 230 keys across
+  on003574, on004475, on004917, on005571 and on005279, whose anatomical images
+  OpenNeuro deleted outright.
+
+  It edits the log and leaves the 0-byte objects in place. They are inert once
+  nothing claims them, since presence is tested at the declared size, and a later
+  recovery overwrites one; but the dataset still reads as damaged to a size audit
+  until they are removed.
+
+What "read-only" does and does not mean:
+  without --apply nothing is written to any repository or to S3. It is not free of
+  side effects though: establishing what the bucket holds needs credentials, and
+  minting them stamps last_activity_at on the dataset, which postpones the stale-
+  dataset cleanup cron for a private DOI-less one.
+
+How presence is established:
+  one \`list-objects-v2\` per dataset with credentials the API mints for it, not a
+  HEAD per key: s3://nemar denies anonymous ListBucket, so a missing key answers
+  403 and 403 also means private, expired, or signed without a session token.
+
+Examples:
+  $ nemar admin fleet key-registration --prefix on --limit 10
+  $ nemar admin fleet key-registration --prefix on --limit 10 --apply
+  $ nemar admin fleet key-registration on000246 --apply
+  $ nemar admin fleet key-registration on004917 --retract-false-claims --apply
+`,
+  )
+  .action(async (datasetIds: string[], options) => {
+    if (!requireAuth()) return;
+    const { bucketObjectSource, sweepKeyRegistration } = await import(
+      "../lib/fleet-key-registration.js"
+    );
+    const { CLI_LIVE_DATASETS } = await import("../lib/fleet.js");
+
+    let targets = datasetIds;
+    if (targets.length === 0) {
+      const spinner = ora("Fetching dataset list...").start();
+      try {
+        const ids: string[] = [];
+        for (let offset = 0; ; offset += 200) {
+          const page = await listDatasets({ limit: 200, offset });
+          ids.push(...page.datasets.map((d) => d.dataset_id));
+          // `?? Infinity`, not `?? ids.length`: an absent total would otherwise end
+          // the loop after the first page and silently sweep 200 datasets.
+          if (
+            page.datasets.length < 200 ||
+            ids.length >= (page.total_count ?? Number.POSITIVE_INFINITY)
+          )
+            break;
+        }
+        targets = ids.filter((id) => id.startsWith(options.prefix)).sort();
+        spinner.succeed(`${targets.length} dataset(s) with prefix ${options.prefix}`);
+      } catch (err) {
+        spinner.fail(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+    }
+    if (!options.force) {
+      targets = targets.filter((id) => !CLI_LIVE_DATASETS.has(id));
+    }
+    if (options.limit) targets = targets.slice(0, Number(options.limit));
+    if (targets.length === 0) {
+      console.log(chalk.yellow("No datasets to act on."));
+      return;
+    }
+
+    if (options.apply && options.push !== false) {
+      // A push per repository starts that repository's CI (ADR 0020).
+      const answer = await confirm(
+        `Register keys and push the git-annex branch for ${targets.length} dataset(s)? That is ${targets.length} push(es), each starting that dataset's CI.`,
+        options,
+      );
+      if (answer !== "confirmed") {
+        console.log(chalk.yellow(`${answer}; nothing was changed.`));
+        return;
+      }
+    }
+
+    const workRoot = options.dir ?? mkdtempSync(join(tmpdir(), "nemar-key-registration-"));
+    mkdirSync(workRoot, { recursive: true });
+    console.log();
+    const sweep = await sweepKeyRegistration(targets, bucketObjectSource(), {
+      workRoot,
+      apply: Boolean(options.apply),
+      push: options.push !== false,
+      includeIncomplete: Boolean(options.includeIncomplete),
+      retractFalseClaims: Boolean(options.retractFalseClaims),
+      concurrency: Number(options.concurrency) || 4,
+      onDataset: (outcome, done, total) => {
+        const label =
+          outcome.action === "failed"
+            ? chalk.red(outcome.datasetId)
+            : outcome.action === "repaired" || outcome.action === "would-repair"
+              ? chalk.green(outcome.datasetId)
+              : chalk.dim(outcome.datasetId);
+        const detail = outcome.error ?? outcome.notes[0] ?? outcome.action;
+        console.log(`${chalk.dim(`[${done}/${total}]`)} ${label} ${chalk.dim(detail)}`);
+      },
+    });
+
+    console.log();
+    for (const [action, count] of Object.entries(sweep.tally)) {
+      if (count > 0) console.log(`  ${action.padEnd(24)} ${count}`);
+    }
+    console.log(`  ${"keys registered".padEnd(24)} ${sweep.keysRegistered}`);
+    if (options.json) {
+      writeFileSync(options.json, JSON.stringify(sweep, null, 2));
+      console.log(chalk.dim(`\n  Report written to ${options.json}`));
+    }
+    if (!options.apply) {
+      console.log(chalk.dim("\nRead-only: nothing was changed. Add --apply to repair a batch."));
+    }
+    if (sweep.tally.failed > 0) process.exitCode = 1;
+  });
+
+fleetCommand
+  .command("content-recovery")
+  .description("Copy back annexed content the bucket never received, and prove each copy (#1396)")
+  .argument("[dataset-id...]", "Datasets to act on")
+  .option("--apply", "Copy (default is a read-only report)")
+  .option("--limit <n>", "Act on at most this many keys per dataset, smallest first")
+  .option("--concurrency <n>", "Copies in flight per dataset (default 8)", "8")
+  .option("--dir <path>", "Where clones go while a dataset is worked on (default: a temp dir)")
+  .option("--json <path>", "Write the full report as JSON")
+  .option("--force", "Include the live datasets (nm000103-107)")
+  .option("-y, --yes", "Skip confirmation and proceed")
+  .addHelpText(
+    "after",
+    `
+What this repairs (#1396):
+  imports that finalized with content they never transferred. The bucket has no
+  object for those keys, so the key-registration sweep refuses them: there is
+  nothing to register. This finds the bytes upstream and copies them in.
+
+Where a copy is allowed to come from:
+  a source git-annex itself pinned -- the S3 version id in <key>.log.rmet, which
+  is the archive's own record of which bytes are this key's -- or, failing that,
+  exactly one distinct upstream object whose size matches the key's. A path alone
+  is never enough: upstream rewrites paths, and an import is months old.
+
+  A key that declares zero bytes needs no source at all: there is exactly one
+  byte string of length zero, and the key's own hash says whether that is what it
+  wants. Those are written directly and reported as origin "empty". A pin is not
+  consulted, which matters: on006136's empty key carries four, and all four name
+  upstream temp objects holding 2 KB of the dataset README.
+
+How a copy is proven:
+  S3 computes the SHA-256 of what it wrote and it is compared to the key's own
+  hash before anything else happens. A copy that does not match is DELETED, not
+  left in the bucket looking like content. Above CopyObject's 5 GB limit a copy
+  is multipart and cannot be checksummed that way, so there an unpinned source is
+  refused rather than trusted.
+
+  Before any of that, the source is asked its length and refused if it does not
+  match the key's. A pin is an index, not a promise: on004624's names an object
+  32 KiB longer than its key. Below 5 GB this only saves a copy the checksum
+  would refuse anyway; above it there is no checksum behind it, so it is the
+  guard. A source that does not answer is not refused -- not finding out is not
+  evidence -- and the copy decides instead.
+
+Credentials:
+  the copy is server-side, so no dataset bytes pass through this machine, but it
+  needs to read the SOURCE bucket. The API's upload credentials cannot: they are
+  scoped to one dataset prefix in s3://nemar. This uses the ambient AWS
+  environment (AWS_PROFILE, AWS_ACCESS_KEY_ID, ...) for the copy, and API-minted
+  credentials only to list what the bucket already holds.
+
+Registering what it recovers:
+  this writes no location log. Run \`nemar admin fleet key-registration <id>
+  --apply\` afterwards, which lists the bucket again and records what is there.
+
+Examples:
+  $ nemar admin fleet content-recovery on008730
+  $ nemar admin fleet content-recovery on008730 --apply
+  $ nemar admin fleet content-recovery on008730 on008798 --apply --json report.json
+`,
+  )
+  .action(async (datasetIds: string[], options) => {
+    if (!requireAuth()) return;
+    const { bucketObjectSource } = await import("../lib/fleet-key-registration.js");
+    const { sweepContentRecovery } = await import("../lib/fleet-content-recovery.js");
+    const { CLI_LIVE_DATASETS } = await import("../lib/fleet.js");
+
+    const targets = datasetIds;
+    if (targets.length === 0) {
+      console.log(chalk.yellow("Name the datasets to act on."));
+      return;
+    }
+    const live = targets.filter((id) => CLI_LIVE_DATASETS.has(id));
+    if (live.length > 0 && !options.force) {
+      console.log(chalk.red(`Refusing to touch live dataset(s): ${live.join(", ")}`));
+      console.log(chalk.dim("  --force to override."));
+      process.exit(1);
+    }
+
+    if (options.apply) {
+      const answer = await confirm(
+        `Copy missing content into s3://nemar for ${targets.length} dataset(s)?`,
+        options,
+      );
+      if (answer !== "confirmed") {
+        console.log(chalk.yellow(`${answer}; nothing was changed.`));
+        return;
+      }
+    }
+
+    // `--limit 0` and `--limit abc` used to mean NO limit: the string "0" is
+    // truthy, Number("0") is 0, and 0 is falsy where the slice is taken. With
+    // --apply that is the difference between a bounded rehearsal and a full run.
+    let limit: number | undefined;
+    if (options.limit !== undefined) {
+      limit = Number(options.limit);
+      if (!Number.isInteger(limit) || limit < 1) {
+        console.log(chalk.red(`Error: --limit must be a positive integer (got ${options.limit})`));
+        process.exit(1);
+      }
+    }
+
+    const workRoot = options.dir ?? mkdtempSync(join(tmpdir(), "nemar-content-recovery-"));
+    mkdirSync(workRoot, { recursive: true });
+    console.log();
+    const leftInBucket: Array<{ datasetId: string; key: string }> = [];
+    const sweep = await sweepContentRecovery(targets, bucketObjectSource(), {
+      workRoot,
+      apply: Boolean(options.apply),
+      limit,
+      concurrency: Number(options.concurrency) || 8,
+      onDataset: (outcome, done, total) => {
+        const gib = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
+        const label =
+          outcome.action === "failed"
+            ? chalk.red(outcome.datasetId)
+            : outcome.action === "recovered"
+              ? chalk.green(outcome.datasetId)
+              : chalk.dim(outcome.datasetId);
+        // An object that failed verification and would not delete is the one
+        // outcome worse than not copying at all (ADR 0063), so it is collected
+        // here and printed again at the end rather than left in a JSON detail.
+        for (const key of outcome.keys) {
+          if (key.leftInBucket) leftInBucket.push({ datasetId: outcome.datasetId, key: key.key });
+        }
+        // `failed` was missing from this line entirely, so a dataset where every
+        // key failed printed "N missing, 0 recovered, 0 unrecoverable".
+        const detail = outcome.error
+          ? outcome.error
+          : !outcome.measured
+            ? "not measured"
+            : `${outcome.missing} missing (${gib(outcome.missingBytes)}), ` +
+              `${outcome.recovered} recovered (${gib(outcome.recoveredBytes)}), ` +
+              `${outcome.unrecoverable} unrecoverable (${gib(outcome.unrecoverableBytes)}), ` +
+              `${outcome.failed} failed`;
+        console.log(`${chalk.dim(`[${done}/${total}]`)} ${label} ${chalk.dim(detail)}`);
+      },
+    });
+
+    console.log();
+    for (const [action, count] of Object.entries(sweep.tally)) {
+      if (count > 0) console.log(`  ${action.padEnd(20)} ${count}`);
+    }
+    console.log(
+      `  ${"keys recovered".padEnd(20)} ${sweep.recoveredKeys} ` +
+        `(${(sweep.recoveredBytes / 1024 ** 3).toFixed(1)} GiB)`,
+    );
+    if (leftInBucket.length > 0) {
+      // Loud, and with the command to fix it. These objects carry a real key's
+      // name at its declared size, so the next `key-registration --apply` would
+      // advertise content that is not the content (ADR 0063).
+      console.log(
+        chalk.red(
+          `\n  ${leftInBucket.length} object(s) FAILED verification and could not be deleted.`,
+        ),
+      );
+      console.log(
+        chalk.red("  They will be advertised as real content by the next registration sweep."),
+      );
+      for (const { datasetId, key } of leftInBucket.slice(0, 20)) {
+        console.log(chalk.red(`    ${datasetId}  ${key}`));
+      }
+      if (leftInBucket.length > 20) {
+        console.log(chalk.red(`    ... and ${leftInBucket.length - 20} more (see --json)`));
+      }
+      console.log(
+        chalk.dim("  Remove each with: aws s3api delete-object --bucket nemar --key ..."),
+      );
+    }
+    if (options.json) {
+      writeFileSync(options.json, JSON.stringify(sweep, null, 2));
+      console.log(chalk.dim(`\n  Report written to ${options.json}`));
+    }
+    if (!options.apply) {
+      console.log(chalk.dim("\nRead-only: nothing was copied. Add --apply to recover."));
+    } else if (sweep.recoveredKeys > 0) {
+      console.log(
+        chalk.dim(
+          "\nThe location log still says nothing about these objects: run " +
+            "`nemar admin fleet key-registration <id> --apply` to record them.",
+        ),
+      );
+    }
+    if (sweep.tally.failed > 0) process.exitCode = 1;
   });
 
 adminCommand.addCommand(fleetCommand);
@@ -5916,6 +7106,104 @@ zarrFidelitySweepCommand
 adminCommand.addCommand(zarrFidelitySweepCommand);
 
 // ============================================================================
+// Anonymity verification sweep (issue #1409, epic #1406)
+// ============================================================================
+
+const anonymitySweepCommand = new Command("anonymity-sweep").description(
+  "Re-check anonymous deposits against the identity-leak inventory (#1409)",
+);
+
+anonymitySweepCommand
+  .option("--limit <n>", "Datasets per batch (server clamps to [1,25])", "10")
+  .option("--reset", "Re-arm every anonymous deposit, then exit")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(async (options: { limit?: string; reset?: boolean; json?: boolean }) => {
+    if (!requireAuth()) return;
+
+    if (options.reset) {
+      const spinner = ora("Re-arming anonymous deposits...").start();
+      try {
+        const res = await anonymitySweepReset();
+        spinner.succeed(`Re-armed ${res.reset} anonymous deposit(s).`);
+      } catch (err) {
+        spinner.fail("Reset failed");
+        console.error(chalk.red(errorDetail(err)));
+        process.exit(1);
+      }
+      return;
+    }
+
+    const limit = Number.parseInt(options.limit ?? "10", 10) || 10;
+    const spinner = ora("Checking anonymous deposits...").start();
+
+    let res: AnonymitySweepBatchResponse;
+    try {
+      res = await anonymitySweep({ limit });
+      spinner.stop();
+    } catch (err) {
+      spinner.fail("Anonymity sweep failed");
+      console.error(chalk.red(errorDetail(err)));
+      process.exit(1);
+      return;
+    }
+
+    if (options.json) {
+      console.log(JSON.stringify(res, null, 2));
+    } else {
+      console.log();
+      console.log(
+        chalk.cyan(
+          `processed=${res.processed} verified=${res.verified} findings=${res.with_findings} unverifiable=${res.unverifiable} errors=${res.errors.length} mail_failures=${res.mail_failures.length} remaining=${res.remaining ?? "unknown"}${res.budget_exhausted ? " budget_exhausted=true" : ""}`,
+        ),
+      );
+      for (const r of res.results) {
+        const color =
+          r.status === "verified"
+            ? chalk.green
+            : r.status === "findings"
+              ? chalk.red
+              : chalk.yellow;
+        console.log(
+          `  ${color(r.status.padEnd(13))} ${r.dataset_id}  (files ${r.files_scanned}/${r.files_listed})`,
+        );
+        for (const f of r.findings) {
+          const tag = f.severity === "invariant" ? chalk.red("NEMAR") : chalk.yellow("deposit");
+          console.log(`      ${tag} ${f.check}: ${f.detail}`);
+        }
+        // Printed for EVERY dataset, including a verified one. "Verified" here
+        // means "everything this sweep can check is fine", and a reader who is
+        // not told what it cannot check will hear something stronger.
+        if (r.unchecked.length > 0) {
+          console.log(`      ${chalk.dim(`not checked: ${r.unchecked.join(", ")}`)}`);
+        }
+      }
+      for (const e of res.errors) {
+        console.log(`  ${chalk.red("error")}         ${e.dataset_id}: ${e.error}`);
+      }
+      // A finding nobody was told about is a finding that did not arrive. The
+      // mail IS the depositor's copy.
+      for (const m of res.mail_failures) {
+        console.log(
+          `  ${chalk.red("not mailed")}    ${m.dataset_id} -> ${m.recipient}: ${m.error}`,
+        );
+      }
+    }
+    // Same convention as the fidelity sweep: a non-zero exit means the RUN was
+    // partial or uncertain, never that it found something. A findings verdict
+    // is the sweep working; a finding that reached nobody is not.
+    if (
+      res.errors.length > 0 ||
+      res.mail_failures.length > 0 ||
+      res.remaining === null ||
+      res.budget_exhausted
+    ) {
+      process.exit(1);
+    }
+  });
+
+adminCommand.addCommand(anonymitySweepCommand);
+
+// ============================================================================
 // Doctor: diagnostic checks + remediation (#1130)
 // ============================================================================
 
@@ -6210,6 +7498,7 @@ emailPrefsCommand
         { key: "user_approval", label: "User approval notifications" },
         { key: "publication_request", label: "Publication request notifications" },
         { key: "announcements", label: "Announcement emails" },
+        { key: "dataset_anonymity", label: "Anonymity sweep findings" },
       ];
 
       for (const cat of categories) {
@@ -6232,6 +7521,7 @@ emailPrefsCommand
   .option("--user-approval <bool>", "Enable/disable user approval notifications")
   .option("--publication-request <bool>", "Enable/disable publication request notifications")
   .option("--announcements <bool>", "Enable/disable announcement emails")
+  .option("--dataset-anonymity <bool>", "Enable/disable anonymity sweep findings")
   .option("--all <bool>", "Enable/disable all notifications")
   .option("--user <username>", "(owner only) update another user's preferences")
   .action(
@@ -6239,6 +7529,7 @@ emailPrefsCommand
       userApproval?: string;
       publicationRequest?: string;
       announcements?: string;
+      datasetAnonymity?: string;
       all?: string;
       user?: string;
     }) => {
@@ -6265,16 +7556,19 @@ emailPrefsCommand
         updates.user_approval = val;
         updates.publication_request = val;
         updates.announcements = val;
+        updates.dataset_anonymity = val;
       } else {
         const ua = parseBool(options.userApproval);
         const pr = parseBool(options.publicationRequest);
         const ann = parseBool(options.announcements);
+        const anon = parseBool(options.datasetAnonymity);
 
-        if (ua === undefined && pr === undefined && ann === undefined) {
+        if (ua === undefined && pr === undefined && ann === undefined && anon === undefined) {
           console.error(chalk.red("No preferences specified."));
           console.log("  --user-approval <bool>        User approval notifications");
           console.log("  --publication-request <bool>   Publication request notifications");
           console.log("  --announcements <bool>         Announcement emails");
+          console.log("  --dataset-anonymity <bool>     Anonymity sweep findings");
           console.log("  --all <bool>                   All notifications");
           process.exit(1);
         }
@@ -6282,6 +7576,7 @@ emailPrefsCommand
         if (ua !== undefined) updates.user_approval = ua;
         if (pr !== undefined) updates.publication_request = pr;
         if (ann !== undefined) updates.announcements = ann;
+        if (anon !== undefined) updates.dataset_anonymity = anon;
       }
 
       const spinner = ora("Updating email preferences...").start();

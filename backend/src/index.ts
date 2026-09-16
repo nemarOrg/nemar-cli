@@ -39,6 +39,7 @@ import { schemaRoutes } from "./routes/schemas";
 import { userRoutes } from "./routes/users";
 import webhooks from "./routes/webhooks";
 import { zarrDataRoutes } from "./routes/zarr-data";
+import { runAnonymitySweepCron } from "./services/anonymity-sweep";
 import { archiveRetrySweep } from "./services/archive-retry";
 import { AUTO_IMPORT_CRON, autoImportTick } from "./services/auto-import";
 import { runAvailabilityReportSweepCron } from "./services/availability-report";
@@ -480,8 +481,10 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
   // 2. Stale nm datasets: warn the owner on an escalating runway, then hand
   //    off to admins for a manual delete. The cron NEVER auto-deletes nm
   //    datasets (#662) — removing real archive data always needs a human.
-  //    Folded legacy catalog rows (#646) are excluded by the LIKE 'nm%' +
-  //    visibility='private' filters below (sentinel rows are ds*/on* + public).
+  //    Folded legacy catalog rows (#646) are excluded by the LIKE 'nm%'
+  //    filter below (sentinel rows are ds*/on*); the visibility clause no
+  //    longer does that work on its own, because #1407 widened it to
+  //    (visibility = 'private' OR anonymous = 1).
   const staleness = { warned: 0, adminNotified: 0, reset: 0 };
   // Datasets become warning candidates once within FIRST_WARNING_DAYS of the
   // 90-day deadline, i.e. inactive for at least (90 - 30) days.
@@ -505,7 +508,7 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
           WHERE (staleness_warn_stage IS NOT NULL OR staleness_admin_notified_at IS NOT NULL)
             AND NOT (
               dataset_id LIKE 'nm%' AND status = 'active' AND concept_doi IS NULL
-              AND visibility = 'private'
+              AND (visibility = 'private' OR anonymous = 1)
               AND COALESCE(last_activity_at, created_at) < datetime('now', ?)
               AND dataset_id NOT IN (
                 SELECT dataset_id FROM publication_requests WHERE status NOT IN ('published','denied')
@@ -532,7 +535,12 @@ async function scheduledCleanup(env: Bindings): Promise<void> {
            FROM datasets d
            LEFT JOIN users u ON u.id = d.owner_user_id
           WHERE d.dataset_id LIKE 'nm%' AND d.status = 'active' AND d.concept_doi IS NULL
-            AND d.visibility = 'private'
+            -- visibility = 'private' was this query's stand-in for "not yet
+            -- published". An anonymous deposit (#1407) breaks that: it
+            -- is listed publicly while its repo stays private, so it would
+            -- fall out of this set and an abandoned one would never get the
+            -- warnings every other unpublished dataset gets.
+            AND (d.visibility = 'private' OR d.anonymous = 1)
             AND COALESCE(d.last_activity_at, d.created_at) < datetime('now', ?)
             AND d.dataset_id NOT IN (
               SELECT dataset_id FROM publication_requests WHERE status NOT IN ('published','denied')
@@ -1157,6 +1165,45 @@ export default {
           .catch((err) =>
             console.error(
               "[signal-defaults-sweep] sweep failed:",
+              err instanceof Error ? (err.stack ?? err.message) : err,
+            ),
+          ),
+      );
+
+      // #1409 (epic #1406): re-check every anonymous deposit against the leak
+      // inventory. PRODUCTION-ONLY, and the reason is the rule stated at the
+      // top of this block rather than a judgment call: it mints a GitHub App
+      // token to read PRIVATE dataset repositories in the shared
+      // `nemarDatasets` org, and it emails a real depositor when it finds
+      // something. Either one on its own disqualifies it from
+      // DEV_CRON_ALLOWLIST. The sweep function itself is unguarded so the
+      // admin route still works on staging; runAnonymitySweepCron carries the
+      // fence, same split as runSignalDefaultsSweepCron above.
+      ctx.waitUntil(
+        runAnonymitySweepCron(env)
+          .then((r) => {
+            const lines = sweepLogLines(
+              "anonymity-sweep",
+              r,
+              (r) =>
+                `[anonymity-sweep] processed=${r.processed} verified=${r.verified} findings=${r.with_findings} unverifiable=${r.unverifiable} errors=${r.errors.length} remaining=${r.remaining ?? "?"}`,
+            );
+            // Findings are logged at error level even though the sweep
+            // succeeded: the run is fine and the dataset is not, and a line
+            // that reads as routine is one nobody looks at.
+            if (lines.info) console.log(lines.info);
+            for (const e of lines.errors) console.error(e);
+            for (const d of r?.results ?? []) {
+              if (d.status === "findings") {
+                console.error(
+                  `[anonymity-sweep] ${d.dataset_id}: ${d.findings.length} finding(s) -- ${d.findings.map((f) => f.check).join(", ")}`,
+                );
+              }
+            }
+          })
+          .catch((err) =>
+            console.error(
+              "[anonymity-sweep] sweep failed:",
               err instanceof Error ? (err.stack ?? err.message) : err,
             ),
           ),

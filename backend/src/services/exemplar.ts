@@ -29,17 +29,57 @@ import { isNonProductionEnv } from "./environment.js";
 export interface ExemplarGateRow {
   dataset_id: string;
   is_exemplar?: number | null;
+  /**
+   * Required, not optional: the gate must not be callable without deciding it.
+   * A caller that stops selecting the column is then a compile error rather
+   * than a silent "not anonymous".
+   */
+  anonymous: number | null;
 }
 
 /**
  * True when a normally-blocked xx dataset is an exemplar that may proceed through
  * publish / DOI / reindex. Requires a non-production env AND an xx-prefix id AND
- * is_exemplar=1. Callers keep their existing xx / is_sandbox block and skip it
- * only when this returns true (`... && !isExemplarPublishAllowed(env, row)`).
+ * is_exemplar=1 AND that it is not the fleet's anonymous deposit. Callers keep
+ * their existing xx / is_sandbox block and skip it only when this returns true
+ * (`... && !isExemplarPublishAllowed(env, row)`).
+ *
+ * **The anonymity term is not belt-and-braces; it is the whole guard for one
+ * dataset.** `xx099907` is the fleet's standing anonymous deposit, and
+ * publishing it is not a mess to clean up: the approve path stamps
+ * `first_published_at`, after which migration 0085's triggers refuse
+ * `anonymous = 1` on that row FOREVER. The fixture is destroyed rather than
+ * dirtied, which is what `scripts/exemplar-fleet.json` and AGENTS.md both warn
+ * about, and the normal publication-request refusal does not cover it: a plain
+ * (non-anonymous) publish request on an anonymous deposit is deliberately
+ * allowed, because that is exactly how a blinded deposit is published for real.
  */
 export function isExemplarPublishAllowed(
   env: Pick<Bindings, "ENVIRONMENT">,
   row: ExemplarGateRow,
+): boolean {
+  return (
+    isNonProductionEnv(env) &&
+    row.dataset_id.startsWith("xx") &&
+    row.is_exemplar === 1 &&
+    row.anonymous !== 1
+  );
+}
+
+/**
+ * True when a normally-blocked xx dataset is an exemplar that may be REINDEXED.
+ *
+ * Deliberately WITHOUT the anonymity term that `isExemplarPublishAllowed`
+ * carries, because the two ask different questions. Publishing an anonymous
+ * deposit destroys it; reindexing one is how it stays concealed. `markAnonymous`
+ * returns `repoMetadataStale`, and only a fresh enrichment commit replaces the
+ * `.nemar/metadata.json` that still names the depositor -- so blocking reindex
+ * here would leave the repository's committed metadata un-blinded, which is the
+ * opposite of what the anonymity term is for.
+ */
+export function isExemplarReindexAllowed(
+  env: Pick<Bindings, "ENVIRONMENT">,
+  row: Pick<ExemplarGateRow, "dataset_id" | "is_exemplar">,
 ): boolean {
   return isNonProductionEnv(env) && row.dataset_id.startsWith("xx") && row.is_exemplar === 1;
 }

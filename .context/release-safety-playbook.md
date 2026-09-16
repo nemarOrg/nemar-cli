@@ -16,7 +16,7 @@ This is the "child instructions" for keeping production safe as NEMAR approaches
 | Website | `ww2.nemar.org` (`nemar-website` Pages, deploys from `main`) | `test.nemar.org` (`nemar-website-test` Pages, deploys from `staging`) |
 | D1 | `nemar-db` | `nemar-db-dev` |
 | S3 | `s3://nemar` | `s3://nemar-dev` |
-| Catalog | real datasets | the 7 `xx0999NN` exemplars + private `nm099999` only (NOT a prod mirror) |
+| Catalog | real datasets | the 8 `xx0999NN` exemplars + private `nm099999` only (NOT a prod mirror) |
 | Branch | `main` (carries clean `X.Y.Z`) | `dev` (carries `X.Y.Z-devN`) |
 
 Parity is real: the CI job `integration-dev` runs the actual CLI and API tests against the live dev worker,

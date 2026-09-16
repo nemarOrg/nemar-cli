@@ -6,6 +6,7 @@
  * Uses fetch directly for Cloudflare Workers compatibility.
  */
 
+import { datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import { escapeHtml } from "../lib/escape";
 import { STALENESS_LIMIT_DAYS } from "./staleness";
 
@@ -164,6 +165,16 @@ export interface EmailPreferences {
   user_approval: boolean;
   publication_request: boolean;
   announcements: boolean;
+  /**
+   * The anonymity sweep found something on an anonymous deposit (#1409).
+   *
+   * Its own category rather than riding `publication_request`, which is the
+   * closest existing one: an admin who stops watching publication requests has
+   * said nothing about wanting to stop hearing that a concealed depositor may
+   * have been disclosed. Coupling the two would let the second be switched off
+   * by accident, and the finding is time-sensitive in a way a request is not.
+   */
+  dataset_anonymity: boolean;
 }
 
 export type EmailCategory = keyof EmailPreferences;
@@ -172,6 +183,7 @@ export const DEFAULT_EMAIL_PREFERENCES: EmailPreferences = {
   user_approval: true,
   publication_request: true,
   announcements: true,
+  dataset_anonymity: true,
 };
 
 interface ResendResponse {
@@ -196,6 +208,10 @@ export function parseEmailPreferences(raw: string | null): EmailPreferences {
       user_approval: parsed.user_approval !== false,
       publication_request: parsed.publication_request !== false,
       announcements: parsed.announcements !== false,
+      // `!== false` throughout, so a row stored before this key existed opts
+      // IN rather than out. Defaulting a new alert to off would silently give
+      // every current admin no anonymity mail at all.
+      dataset_anonymity: parsed.dataset_anonymity !== false,
     };
   } catch (err) {
     console.error("Corrupt email_preferences JSON, defaulting to all enabled:", raw, err);
@@ -1147,7 +1163,23 @@ export async function sendPublicationRequestEmail(
   replyTo?: string,
   isDev?: boolean,
   deliveryEnv?: EmailDeliveryEnv,
+  opts?: { anonymous?: boolean },
 ): Promise<void> {
+  // #1408: an anonymous release and a publication are different runs with
+  // different outcomes -- one keeps the repository private and the DOI
+  // reserved, the other makes both public and permanent. The admin approving
+  // it is the last human checkpoint, so the mail has to say which one it is.
+  const anonymous = opts?.anonymous === true;
+  const anonymousNotice = anonymous
+    ? `
+  <div style="background: #fef3c7; border-left: 4px solid #d97706; padding: 12px 16px; border-radius: 4px; margin: 16px 0;">
+    <strong>Anonymous release.</strong> Approving this publishes the data while
+    withholding the depositor: the GitHub repository stays private, the DOI stays
+    reserved (it will not resolve), and NEMAR names nobody. Attribution is
+    restored later, when the depositor requests publication again without
+    <code>--anonymous</code>.
+  </div>`
+    : "";
   const html = `
 <!DOCTYPE html>
 <html>
@@ -1156,9 +1188,10 @@ export async function sendPublicationRequestEmail(
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-  <h1 style="color: #2563eb;">Publication Request</h1>
+  <h1 style="color: #2563eb;">${anonymous ? "Anonymous Release Request" : "Publication Request"}</h1>
 
-  <p>User <strong>${escapeHtml(username)}</strong> has requested publication of dataset <strong>${escapeHtml(datasetId)}</strong>.</p>
+  <p>User <strong>${escapeHtml(username)}</strong> has requested ${anonymous ? "an anonymous release" : "publication"} of dataset <strong>${escapeHtml(datasetId)}</strong>.</p>
+${anonymousNotice}
 
   <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Action Required</h2>
   <p>Review the dataset and approve or deny the request:</p>
@@ -1185,7 +1218,7 @@ export async function sendPublicationRequestEmail(
     try {
       await sendEmail(
         adminEmail,
-        `[NEMAR] Publication request: ${datasetId} by ${username}`,
+        `[NEMAR] ${anonymous ? "Anonymous release" : "Publication"} request: ${datasetId} by ${username}`,
         html,
         resendApiKey,
         fromEmail,
@@ -1406,15 +1439,31 @@ export async function sendPublicationApprovedEmail(
   replyTo?: string,
   isDev?: boolean,
   deliveryEnv?: EmailDeliveryEnv,
+  opts?: { anonymous?: boolean },
 ): Promise<void> {
+  // #1408: an anonymous release ends here too, and almost every sentence below
+  // is wrong for it. The DOI exists but is RESERVED -- registered, not
+  // advertised, and it does not resolve -- so offering it as "your DOI" with a
+  // doi.org link is the one mistake that matters: a depositor mid-submission
+  // would paste a dead identifier into a blinded manuscript. What they cite
+  // during review is the landing page.
+  const anonymous = opts?.anonymous === true;
   const safeDoi = doi ? escapeHtml(doi) : "";
-  const doiSection = doi
-    ? `<h2 style="color: #333; font-size: 18px; margin-top: 30px;">DOI</h2>
+  const landing = escapeHtml(datasetLandingUrl(datasetId));
+  const doiSection = !doi
+    ? ""
+    : anonymous
+      ? `<h2 style="color: #333; font-size: 18px; margin-top: 30px;">Citing it during review</h2>
+       <p>Cite the dataset page. It shows the data, states that authorship is withheld, and names nobody:</p>
+       <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
+         <a href="${landing}" style="color: #2563eb;">${landing}</a>
+       </div>
+       <p style="color: #666; font-size: 14px;">A DOI (<code>${safeDoi}</code>) is reserved for this dataset but is deliberately not active: a live DOI record would carry a public author list. It is activated, with your attribution, when you publish after acceptance. Do not cite it yet, it will not resolve.</p>`
+      : `<h2 style="color: #333; font-size: 18px; margin-top: 30px;">DOI</h2>
        <p>Your dataset has been assigned the following DOI:</p>
        <div style="background-color: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
          <a href="https://doi.org/${safeDoi}" style="color: #2563eb;">${safeDoi}</a>
-       </div>`
-    : "";
+       </div>`;
 
   const html = `
 <!DOCTYPE html>
@@ -1424,14 +1473,26 @@ export async function sendPublicationApprovedEmail(
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-  <h1 style="color: #16a34a;">Dataset Published!</h1>
+  <h1 style="color: #16a34a;">${anonymous ? "Anonymous release is live" : "Dataset Published!"}</h1>
 
   <p>Hello ${escapeHtml(username)},</p>
 
-  <p>Your dataset <strong>${escapeHtml(datasetId)}</strong> has been published and is now publicly available.</p>
+  <p>${
+    anonymous
+      ? `Your dataset <strong>${escapeHtml(datasetId)}</strong> is now listed, browsable and downloadable, with your identity withheld. Its GitHub repository stays private and NEMAR names nobody.`
+      : `Your dataset <strong>${escapeHtml(datasetId)}</strong> has been published and is now publicly available.`
+  }</p>
 
   ${doiSection}
-
+${
+  anonymous
+    ? `
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">After acceptance</h2>
+  <p>Restore the real <code>Authors</code> in <code>dataset_description.json</code>, commit to <code>main</code> (your repository is still private, so you can commit directly), and request publication again <strong>without</strong> <code>--anonymous</code>. That activates the DOI with your attribution and makes the repository public.</p>
+  <p style="color: #666; font-size: 14px;">NEMAR withholds everything it derives about you. It cannot blind your own files: check the README, <code>participants.tsv</code> and any identifiers inside your recordings yourself.</p>
+`
+    : ""
+}
   <p>You can check the status of your dataset:</p>
   <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
     nemar dataset publish status ${escapeHtml(datasetId)}
@@ -1447,7 +1508,7 @@ export async function sendPublicationApprovedEmail(
 
   await sendEmail(
     to,
-    `Dataset published: ${datasetId}`,
+    anonymous ? `Anonymous release is live: ${datasetId}` : `Dataset published: ${datasetId}`,
     html,
     resendApiKey,
     fromEmail,
@@ -1914,4 +1975,152 @@ export async function sendExemplarInvariantAlertEmail(
     }
   }
   return delivered;
+}
+
+/**
+ * A finding as the mail renders it. Structurally identical to
+ * `AnonymityFinding` in `anonymity-sweep.ts`, re-declared here so `email.ts`
+ * does not import a sweep -- the dependency runs the other way.
+ */
+export interface AnonymityFindingForEmail {
+  check: string;
+  severity: "invariant" | "deposit";
+  detail: string;
+  file?: string;
+}
+
+/**
+ * The anonymity sweep found something on an anonymous deposit (#1409).
+ *
+ * Two audiences, one template, because the FACTS are the same and only the
+ * framing differs: the depositor is told what to fix in their own files, the
+ * admin is told that a guarantee NEMAR made may have stopped holding. Sending
+ * different facts to the two would be the beginning of the pair disagreeing.
+ *
+ * It never quotes the matched text. `AnonymityFinding.detail` names the file
+ * and the kind of match and stops there, because a mail is forwardable and
+ * because the depositor already knows their own name. What they need is the
+ * file, and they have it.
+ *
+ * `unchecked` is rendered on EVERY message, including one with findings.
+ * "We found two things" and "we found two things and could not look at three
+ * more" are different sentences, and only one of them is true (ADR 0005, 0054).
+ */
+export async function sendAnonymityFindingsEmail(
+  to: string[],
+  datasetId: string,
+  findings: readonly AnonymityFindingForEmail[],
+  unchecked: readonly string[],
+  opts: { audience: "depositor" | "admin" },
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<{ delivered: string[]; failed: { recipient: string; error: string }[] }> {
+  const depositor = opts.audience === "depositor";
+  const invariants = findings.filter((f) => f.severity === "invariant");
+  const deposit = findings.filter((f) => f.severity === "deposit");
+
+  const list = (items: readonly AnonymityFindingForEmail[]): string =>
+    items
+      .map((f) => `<li style="margin-bottom: 8px;">${escapeHtml(f.detail)}</li>`)
+      .join("\n      ");
+
+  const depositSection =
+    deposit.length === 0
+      ? ""
+      : `
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">In the dataset's own files</h2>
+  <p>${
+    depositor
+      ? "These are files you wrote. They are part of the dataset and are served publicly, so NEMAR cannot conceal what they say -- only you can change them."
+      : "These are the depositor's own files. NEMAR cannot blind them; the depositor has been told."
+  }</p>
+  <ul style="padding-left: 20px;">
+      ${list(deposit)}
+  </ul>`;
+
+  const invariantSection =
+    invariants.length === 0
+      ? ""
+      : `
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">In what NEMAR controls</h2>
+  <p>${
+    depositor
+      ? "These are ours, not yours. An administrator has been told at the same time as you."
+      : "These are NEMAR's own guarantees, and each one is a bug. Nothing was repaired automatically: a dataset that has already been disclosed cannot be un-disclosed by flipping a flag, and an automatic fix would destroy the evidence that the guarantee failed."
+  }</p>
+  <ul style="padding-left: 20px;">
+      ${list(invariants)}
+  </ul>`;
+
+  const uncheckedSection =
+    unchecked.length === 0
+      ? ""
+      : `
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">What this check did NOT look at</h2>
+  <p style="color: #666; font-size: 14px;">${escapeHtml(unchecked.join(", "))}</p>
+  <p style="color: #666; font-size: 14px;">Identity inside the recordings themselves -- the recording-identification field of an EDF or BDF header, <code>EEG.comments</code> in an EEGLAB file, subject fields in a FIFF header -- is never checked here. A clean result above is not a statement about those.</p>`;
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #d97706;">Anonymity check: ${escapeHtml(datasetId)}</h1>
+
+  <p>${
+    depositor
+      ? `Your anonymous deposit <strong>${escapeHtml(datasetId)}</strong> is concealing you, and a scheduled check found something that may not be.`
+      : `The scheduled anonymity check found something on <strong>${escapeHtml(datasetId)}</strong>.`
+  }</p>
+  ${depositSection}
+  ${invariantSection}
+  ${uncheckedSection}
+
+  <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Seeing it yourself</h2>
+  <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
+    nemar dataset status ${escapeHtml(datasetId)}
+  </div>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+  `;
+
+  // Returns what was delivered rather than swallowing it, the way
+  // `sendExemplarInvariantAlertEmail` above already does. For this sweep the
+  // mail is the only copy the depositor gets, so "nobody was told" has to be a
+  // fact the caller can report rather than a line in a Worker log.
+  const delivered: string[] = [];
+  const failed: { recipient: string; error: string }[] = [];
+  for (const recipient of to) {
+    try {
+      await sendEmail(
+        recipient,
+        `[NEMAR] Anonymity check found ${findings.length} item(s): ${datasetId}`,
+        html,
+        resendApiKey,
+        fromEmail,
+        replyTo,
+        isDev,
+        deliveryEnv,
+      );
+      delivered.push(recipient);
+    } catch (error) {
+      console.error(`Failed to send anonymity findings email to ${recipient}:`, error);
+      failed.push({
+        recipient,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return { delivered, failed };
 }

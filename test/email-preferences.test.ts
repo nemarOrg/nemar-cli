@@ -19,7 +19,12 @@ import { TEST_CONFIG, sleep } from "./setup";
 describe("parseEmailPreferences", () => {
   test("null input returns all enabled", () => {
     const result = parseEmailPreferences(null);
-    expect(result).toEqual({ user_approval: true, publication_request: true, announcements: true });
+    expect(result).toEqual({
+      user_approval: true,
+      publication_request: true,
+      announcements: true,
+      dataset_anonymity: true,
+    });
   });
 
   test("valid JSON with both fields", () => {
@@ -30,10 +35,16 @@ describe("parseEmailPreferences", () => {
       user_approval: false,
       publication_request: true,
       announcements: true,
+      dataset_anonymity: true,
     });
   });
 
   test("valid JSON with all disabled", () => {
+    // #1409: the stored row predates `dataset_anonymity`, so it opts IN.
+    // Every field here is `!== false`, which means a key a row has never seen
+    // defaults to enabled -- and for an anonymity alert that is the direction
+    // that matters. Defaulting a new alert to OFF would have given every
+    // current admin no anonymity mail at all, silently, on the day it shipped.
     const result = parseEmailPreferences(
       JSON.stringify({ user_approval: false, publication_request: false, announcements: false }),
     );
@@ -41,12 +52,27 @@ describe("parseEmailPreferences", () => {
       user_approval: false,
       publication_request: false,
       announcements: false,
+      dataset_anonymity: true,
     });
+  });
+
+  test("an explicit dataset_anonymity: false is honored", () => {
+    // The control for the default above: opting out is still possible, it just
+    // has to be said. Without this, a parse that ignored the key entirely
+    // would satisfy every other assertion in this file.
+    const result = parseEmailPreferences(JSON.stringify({ dataset_anonymity: false }));
+    expect(result.dataset_anonymity).toBe(false);
+    expect(result.announcements).toBe(true);
   });
 
   test("missing fields default to true", () => {
     const result = parseEmailPreferences(JSON.stringify({}));
-    expect(result).toEqual({ user_approval: true, publication_request: true, announcements: true });
+    expect(result).toEqual({
+      user_approval: true,
+      publication_request: true,
+      announcements: true,
+      dataset_anonymity: true,
+    });
   });
 
   test("partial fields: only user_approval set", () => {
@@ -55,6 +81,7 @@ describe("parseEmailPreferences", () => {
       user_approval: false,
       publication_request: true,
       announcements: true,
+      dataset_anonymity: true,
     });
   });
 
@@ -64,17 +91,28 @@ describe("parseEmailPreferences", () => {
       user_approval: true,
       publication_request: false,
       announcements: true,
+      dataset_anonymity: true,
     });
   });
 
   test("corrupt JSON returns all enabled", () => {
     const result = parseEmailPreferences("{not valid json");
-    expect(result).toEqual({ user_approval: true, publication_request: true, announcements: true });
+    expect(result).toEqual({
+      user_approval: true,
+      publication_request: true,
+      announcements: true,
+      dataset_anonymity: true,
+    });
   });
 
   test("empty string returns all enabled", () => {
     const result = parseEmailPreferences("");
-    expect(result).toEqual({ user_approval: true, publication_request: true, announcements: true });
+    expect(result).toEqual({
+      user_approval: true,
+      publication_request: true,
+      announcements: true,
+      dataset_anonymity: true,
+    });
   });
 
   test("extra fields are ignored", () => {
@@ -85,6 +123,7 @@ describe("parseEmailPreferences", () => {
       user_approval: false,
       publication_request: true,
       announcements: true,
+      dataset_anonymity: true,
     });
   });
 
@@ -92,7 +131,12 @@ describe("parseEmailPreferences", () => {
     const result = parseEmailPreferences(
       JSON.stringify({ user_approval: null, publication_request: null }),
     );
-    expect(result).toEqual({ user_approval: true, publication_request: true, announcements: true });
+    expect(result).toEqual({
+      user_approval: true,
+      publication_request: true,
+      announcements: true,
+      dataset_anonymity: true,
+    });
   });
 
   test("zero values treated as false", () => {
@@ -100,7 +144,12 @@ describe("parseEmailPreferences", () => {
       JSON.stringify({ user_approval: 0, publication_request: 0 }),
     );
     // 0 !== false is true, so these default to enabled
-    expect(result).toEqual({ user_approval: true, publication_request: true, announcements: true });
+    expect(result).toEqual({
+      user_approval: true,
+      publication_request: true,
+      announcements: true,
+      dataset_anonymity: true,
+    });
   });
 });
 

@@ -22,12 +22,13 @@
 
 import type { CallToolResult } from "@modelcontextprotocol/server";
 import { ZARR_VERIFY_STATUS_VALUES } from "../../../shared/contract/mcp.js";
+import { CONCEPT_DOI_SQL } from "../services/anonymity";
 import { ZARR_VERIFIED_AT_PATH, ZARR_VERIFY_STATUS_PATH } from "../services/sweep-stamps.js";
 
 export type ZarrVerifyStatusValue = (typeof ZARR_VERIFY_STATUS_VALUES)[number];
 
 export const PUBLIC_DATASET_ROW_SQL = `SELECT
-    d.dataset_id, d.name, d.concept_doi, d.license, d.modalities, d.tasks,
+    d.dataset_id, d.name, ${CONCEPT_DOI_SQL} AS concept_doi, d.license, d.modalities, d.tasks,
     d.subject_count, d.has_hed, d.hed_version, d.zarr_status, d.zarr_store_count,
     d.zarr_source_commit, d.zarr_converted_at, d.recording_count, d.total_recording_duration,
     d.authors, d.created_at,

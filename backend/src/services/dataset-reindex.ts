@@ -27,7 +27,7 @@ import {
 } from "./dataset-metadata-columns.js";
 import { reembedDatasetVector } from "./dataset-search.js";
 import { enrichDataset } from "./enrich-dataset.js";
-import { exemplarOrFragment, isExemplarPublishAllowed } from "./exemplar.js";
+import { exemplarOrFragment, isExemplarReindexAllowed } from "./exemplar.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { getBidsTreeStats, getBlobContent, getTreeAtRef } from "./github.js";
 import { verifyDatasetVersionS3 } from "./import-integrity.js";
@@ -96,8 +96,11 @@ export async function refreshDatasetMetadata(
   if (!dataset.github_repo) {
     throw new DatasetReindexError(`Dataset has no GitHub repository: ${datasetId}`, 400);
   }
-  // Sandbox xx datasets are not eligible for reindex, except staging exemplars (epic #923).
-  if (datasetId.startsWith("xx") && !isExemplarPublishAllowed(env, dataset)) {
+  // Sandbox xx datasets are not eligible for reindex, except staging exemplars
+  // (epic #923). The REINDEX gate, not the publish gate: an anonymous deposit
+  // must stay reindexable, because a fresh enrichment commit is what re-blinds
+  // the `.nemar/metadata.json` that otherwise still names the depositor.
+  if (datasetId.startsWith("xx") && !isExemplarReindexAllowed(env, dataset)) {
     throw new DatasetReindexError(`Sandbox dataset ${datasetId} is not eligible for reindex`, 400);
   }
 

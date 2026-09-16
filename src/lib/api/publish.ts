@@ -39,6 +39,11 @@ export interface PublishStatusResponse {
   // Non-blocking pre-screen advisory (#756): present when the screen flagged a
   // concern. The request is NOT blocked by this.
   advisory?: { source: "prescreen"; reasons: string[]; issue_url?: string };
+  // #1408: which of the two runs is queued. This is the only place a depositor
+  // can confirm, before an admin acts, that `--anonymous` was recorded.
+  // Optional because an older backend does not send it -- absent means
+  // unknown, never "no".
+  anonymous?: boolean;
 }
 
 export interface PublishRequestsResponse {
@@ -55,6 +60,11 @@ export interface PublishRequestsResponse {
     prescreen_status?: string | null;
     prescreen_reasons?: string | null;
     prescreen_issue_url?: string | null;
+    // #1408: 1 when this request asks for an ANONYMOUS release rather than a
+    // publication. The route spreads `pr.*`, so the column was already on the
+    // wire and merely unrendered -- which left an admin approving the two
+    // outcomes from an identical line.
+    anonymous?: number | null;
   }>;
   count: number;
 }
@@ -103,13 +113,31 @@ export interface PublishApproveResponse {
 
 /**
  * Request publication of a dataset (user)
+ *
+ * `anonymous` asks for a RELEASE rather than a publication (#1408): the data
+ * goes public while the repository stays private, the DOI stays reserved with
+ * no curator, and the depositor is withheld everywhere NEMAR writes them. The
+ * body is only sent when the flag is set, so an ordinary request stays exactly
+ * the bodyless POST it has always been.
  */
 export async function requestPublication(
   datasetId: string,
-): Promise<{ message: string; dataset_id: string; status: string }> {
-  return request<{ message: string; dataset_id: string; status: string }>(
+  options: { anonymous?: boolean } = {},
+): Promise<{ message: string; dataset_id: string; status: string; anonymous?: boolean }> {
+  // `anonymous` is echoed by the server (#1408). The caller must print from
+  // the ECHO rather than from `options.anonymous`: what matters to a depositor
+  // is what was recorded, not what was typed, and the two diverge exactly in
+  // the cases worth catching -- a dropped body, a proxy that rewrites it, an
+  // older backend that does not know the flag.
+  return request<{ message: string; dataset_id: string; status: string; anonymous?: boolean }>(
     `/datasets/${datasetId}/publish/request`,
-    { method: "POST" },
+    options.anonymous
+      ? {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ anonymous: true }),
+        }
+      : { method: "POST" },
     true,
   );
 }

@@ -14,7 +14,9 @@
  *   monolith surface (MONOLITH_EXPORTS below, captured at #908 commit 1 and
  *   updated by the declared removals in commits 2-3: the formatBytes
  *   pass-through re-export and the deprecated createDataladDataset/
- *   isDataladDataset aliases).
+ *   isDataladDataset aliases), plus the declared addition of
+ *   batchSetKeysAbsent in #1396, the counterpart that withdraws a presence
+ *   claim the bucket cannot back.
  *
  * INTERNAL_WIRING lists symbols exported ONLY so sibling git-annex/* modules
  * can import them (declared in #908): not part of the CLI-facing surface.
@@ -95,20 +97,24 @@ const MODULE_EXPORTS: Record<string, string[]> = {
   ],
   transfer: [
     "MAX_UNAVAILABLE_SAMPLE",
+    "batchSetKeysAbsent",
     "batchSetKeysPresent",
     "classifyGetOutcome",
     "collectFileManifest",
+    "copyPathsToAnnexRemote",
     "copyToAnnexRemote",
     "countPendingDownload",
     "dropFiles",
     "dropUnusedAnnexObjects",
     "extractCopyError",
     "extractWhereisKeyUrl",
+    "getAnnexKeysForPaths",
     "getAnnexWhereisAll",
     "getDatasetData",
     "getKeyHashDir",
     "getKeyHashDirs",
     "getRemoteUuid",
+    "listAnnexedKeys",
     "setKeyPresent",
   ],
   "repo-state": [
@@ -166,6 +172,12 @@ const INTERNAL_WIRING = [
   "buildLargefilesExpression",
   "isNeverAnnexedMetadata",
   "shouldAnnex",
+  // Also post-split (#1159): the path-scoped copy and the path->key map exist for
+  // import-normalize.ts, which moves files upstream left in git into the annex.
+  // Consumed there, never by the CLI.
+  "copyPathsToAnnexRemote",
+  "getAnnexKeysForPaths",
+  "listAnnexedKeys",
 ];
 
 /**
@@ -179,6 +191,7 @@ const MONOLITH_EXPORTS = [
   "acceptGitHubInvitation",
   "annexRemoteExists",
   "awsCredentialEnv",
+  "batchSetKeysAbsent",
   "batchSetKeysPresent",
   "checkAWSCredentials",
   "checkDownloadPrerequisites",

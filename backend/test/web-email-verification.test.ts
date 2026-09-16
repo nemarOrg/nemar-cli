@@ -567,7 +567,8 @@ describe("when the write after the code is consumed fails", () => {
     await plantCode(NEW_EMAIL, id, "654321");
     blockUserWrites();
     expect(
-      (await post("/auth/email/change/verify", cookie, { email: NEW_EMAIL, code: "654321" })).status,
+      (await post("/auth/email/change/verify", cookie, { email: NEW_EMAIL, code: "654321" }))
+        .status,
     ).toBe(500);
 
     db.run("DROP TRIGGER refuse_user_updates");

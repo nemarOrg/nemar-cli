@@ -201,18 +201,14 @@ export function buildContentDisposition(filename: string): string {
  * filename="<bidsBasename>"` so S3 returns the BIDS-shaped filename on
  * download instead of the content-addressed object name. See #513.
  *
- * git-backed files (`key: "git:<blob-sha>"`, used for small in-tree files
- * like dataset_description.json) -> raw.githubusercontent.com URL pinned
- * to the version tag. raw.githubusercontent.com responds with the BIDS
- * basename naturally because the URL path ends with it.
- *
- * Implicit invariant for the git: branch: the dataset's GitHub repo must
- * be public AND the version tag must exist on it. Both are guaranteed by
- * the publication workflow today (publish-approve flips the repo to
- * public before writing the D1 version row, which only happens after a
- * successful tag push). If that invariant ever breaks, the 302 target
- * itself returns 404 to the user with no Worker-side signal. Tracked as
- * a publisher canary in #503.
+ * git-backed files (`key: "git:<blob-sha>"`) do NOT come through here. They
+ * used to 302 to raw.githubusercontent.com pinned to the version tag, which
+ * required the repo to be public and the tag to exist -- and when either
+ * failed, the 302 target 404'd at GitHub with no Worker-side signal. The
+ * Worker now fetches and streams those bytes itself
+ * (`services/github/git-file-broker.ts`), so the data plane answers for them
+ * the way it answers for everything else (#1403, epic #1406). Calling this
+ * with a git: key throws rather than silently rebuilding the old redirect.
  */
 export async function buildRedirectUrl(args: {
   datasetId: string;
@@ -220,13 +216,13 @@ export async function buildRedirectUrl(args: {
   bidsPath: string;
   file: ManifestFile;
   s3Options: PresignedUrlOptions;
-  githubOrg: string;
   expiresIn?: number;
 }): Promise<string> {
-  const { datasetId, version, bidsPath, file, s3Options, githubOrg, expiresIn } = args;
+  const { datasetId, version, bidsPath, file, s3Options, expiresIn } = args;
   if (file.key.startsWith("git:")) {
-    const encoded = bidsPath.split("/").map(encodeURIComponent).join("/");
-    return `https://raw.githubusercontent.com/${githubOrg}/${datasetId}/${version}/${encoded}`;
+    throw new Error(
+      `git-tracked files are streamed by the Worker, not redirected: ${datasetId} ${bidsPath}`,
+    );
   }
   if (!ANNEX_KEY_RE.test(file.key)) {
     throw new Error(`Unrecognized manifest key format: ${file.key}`);
@@ -241,6 +237,44 @@ export async function buildRedirectUrl(args: {
     expiresIn ?? 3600,
     buildContentDisposition(basename),
   );
+}
+
+/**
+ * Content type for a git-tracked file the Worker serves itself.
+ *
+ * This is a security boundary, not a convenience. Until #1403 these bytes
+ * were 302'd to raw.githubusercontent.com, which answers `text/plain` for
+ * everything precisely so a repository cannot host active content on
+ * GitHub's origin. Now that data.nemar.org returns the bytes, the same rule
+ * has to hold here: a dataset is user-supplied content, and a `.html` or
+ * `.svg` served as its natural type would execute on our origin, next to the
+ * directory listings this same host renders.
+ *
+ * So the map is an ALLOWLIST of inert types, and anything unlisted is
+ * `application/octet-stream`. `nosniff` is sent alongside it by the caller,
+ * because a correct Content-Type is only half the defense if a browser is
+ * willing to guess a different one.
+ */
+const INERT_CONTENT_TYPES: Readonly<Record<string, string>> = {
+  json: "application/json; charset=utf-8",
+  tsv: "text/tab-separated-values; charset=utf-8",
+  csv: "text/csv; charset=utf-8",
+  txt: "text/plain; charset=utf-8",
+  md: "text/plain; charset=utf-8",
+  bval: "text/plain; charset=utf-8",
+  bvec: "text/plain; charset=utf-8",
+};
+
+export function contentTypeForBidsPath(bidsPath: string): string {
+  const basename = bidsPath.split("/").filter(Boolean).pop() ?? "";
+  // A dotfile (.bidsignore, .gitattributes) and an extensionless file
+  // (README, CHANGES, LICENSE) are both plain text; neither has an extension
+  // in the sense this lookup means, so answer before splitting.
+  if (!basename.includes(".") || basename.startsWith(".")) {
+    return "text/plain; charset=utf-8";
+  }
+  const ext = basename.split(".").pop()?.toLowerCase() ?? "";
+  return INERT_CONTENT_TYPES[ext] ?? "application/octet-stream";
 }
 
 // Canonical public data origin for bytes_url (#615). bytes_url is a STABLE,
@@ -264,19 +298,21 @@ const DATA_NEMAR_ORIGIN = "https://data.nemar.org";
  * Unlike `url` (for annex files a presigned S3 GET that expires in ~1h),
  * `bytes_url` is durable — a consumer can persist it and re-fetch later from
  * anywhere:
- *  - annex-backed files -> the canonical per-file data-plane route
- *    `https://data.nemar.org/<id>/<version>/<bids_relpath>`, which 302s to
- *    bytes that are re-presigned on each request (no expiry).
- *  - git-backed files -> the raw.githubusercontent.com URL pinned to the tag,
- *    identical to `url` (already stable).
+ * EVERY entry now resolves to the canonical per-file data-plane route,
+ * `https://data.nemar.org/<id>/<version>/<bids_relpath>`: annex-backed files
+ * 302 from there to bytes re-presigned on each request, and git-tracked files
+ * are streamed by the Worker itself. Before #1403 the git ones named
+ * raw.githubusercontent.com directly, which put a third-party host in the
+ * citation path of every published dataset, made delivery uncountable, and
+ * broke outright when the repo was not public. A URL saved from the old
+ * manifest still resolves (the raw host still serves a public repo), so this
+ * widens the durability promise rather than breaking it.
  */
 export function buildBytesUrl(args: {
-  githubOrg: string;
   datasetId: string;
   version: string;
   bidsPath: string;
-  key: string;
-  /** Data-plane origin for annex-backed files (epic #923). Defaults to the prod
+  /** Data-plane origin (epic #923). Defaults to the prod
    *  data host, so prod output stays byte-identical and in lockstep with the
    *  build-time raw S3 manifest. On staging, passing resolveDataBaseOrigin(env) =
    *  data-test.nemar.org makes dev-bucket-only datasets embed reachable links, but
@@ -286,11 +322,8 @@ export function buildBytesUrl(args: {
    *  Parameterizing emit_manifest.py is a Phase 5 follow-up. */
   origin?: string;
 }): string {
-  const { githubOrg, datasetId, version, bidsPath, key, origin = DATA_NEMAR_ORIGIN } = args;
+  const { datasetId, version, bidsPath, origin = DATA_NEMAR_ORIGIN } = args;
   const encoded = bidsPath.split("/").filter(Boolean).map(encodeURIComponent).join("/");
-  if (key.startsWith("git:")) {
-    return `https://raw.githubusercontent.com/${githubOrg}/${datasetId}/${version}/${encoded}`;
-  }
   return `${origin}/${datasetId}/${version}/${encoded}`;
 }
 
@@ -659,6 +692,17 @@ export interface NeuroschemaDataset {
   bids_version: string | null;
   license: string | null;
   authors: Person[];
+  /**
+   * #1408: the depositor is concealed until publication (a double-blind
+   * deposit), so `authors` is deliberately empty and `external_links` withholds
+   * the repository and the DOI.
+   *
+   * Stated as its own field rather than left to be inferred from the empty
+   * arrays, because "withheld" and "missing" look identical otherwise, and a
+   * reader who cannot tell them apart concludes the record is incomplete. Any
+   * consumer of data.nemar.org can render the difference.
+   */
+  anonymous: boolean;
   keywords: StructuredKeyword[];
   related_identifiers: RelatedIdentifierEntry[];
   contributors: ContributorEntry[];
@@ -693,6 +737,8 @@ export interface DatasetRowForMetadata {
   description: string | null;
   github_repo: string | null;
   concept_doi: string | null;
+  /** #1408: 1 while the deposit conceals its depositor. Gates `github_url`. */
+  anonymous: number | null;
   modalities: string | null;
   subject_count: number | null;
   age_min: number | null;
@@ -1021,6 +1067,7 @@ export function buildDatasetMetadata(input: {
     bids_version: null,
     license,
     authors: buildPersonList(parsedEnrichment),
+    anonymous: row.anonymous === 1,
     keywords,
     related_identifiers: related,
     contributors,
@@ -1081,12 +1128,24 @@ export function buildDatasetMetadata(input: {
       publish_date: latestVersionRow?.created_at ?? null,
     },
     external_links: {
-      dataset_doi: row.concept_doi,
-      github_url: row.github_repo
-        ? row.github_repo.startsWith("http")
-          ? row.github_repo
-          : `https://github.com/${githubOrg}/${row.dataset_id}`
-        : null,
+      // #1408: an anonymous release's identifier is RESERVED -- registered but
+      // not advertised, and it does not resolve. Publishing it here as the
+      // dataset's DOI would put a dead identifier into signposting, JSON-LD
+      // and every citation widget that reads this document. The landing page
+      // is what resolves during review; the DOI becomes real at publication.
+      dataset_doi: row.anonymous === 1 ? null : row.concept_doi,
+      // #1408: an anonymous deposit's repository is PRIVATE, so naming it here
+      // would hand every reader a URL that 404s while still disclosing that a
+      // repository exists under a predictable name. Withheld at the source
+      // rather than hidden by each consumer -- the website fabricates this URL
+      // in two places when it is absent, so a null here is what those sites
+      // need in order to have something to react to.
+      github_url:
+        row.anonymous === 1 || !row.github_repo
+          ? null
+          : row.github_repo.startsWith("http")
+            ? row.github_repo
+            : `https://github.com/${githubOrg}/${row.dataset_id}`,
     },
     extensions: {
       nemar: {

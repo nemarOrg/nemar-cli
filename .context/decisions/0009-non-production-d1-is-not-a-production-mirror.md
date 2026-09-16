@@ -10,7 +10,7 @@ The staging stack (epic #923) shares two things with production that cannot be e
 
 ## Decision
 
-`nemar-db-dev` holds **curated fixtures only** — the seven `xx0999NN` exemplars plus the private E2E dataset `nm099999`. Production `nm`/`ds` rows must not be re-seeded into it. Staging presents a completely separate catalog.
+`nemar-db-dev` holds **curated fixtures only** — the eight `xx0999NN` exemplars plus the private E2E dataset `nm099999`. Production `nm`/`ds` rows must not be re-seeded into it. Staging presents a completely separate catalog.
 
 New daily cron jobs are **production-only by default**. Adding one to the non-production set requires confirming it cannot email a real user, dispatch GitHub work against `nemarDatasets`, or mutate a real DOI or production-bucket object.
 
