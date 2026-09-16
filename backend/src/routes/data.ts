@@ -13,6 +13,7 @@
 
 import { Hono } from "hono";
 import { recordAccess } from "../services/access-metrics";
+import { CONCEPT_DOI_SQL } from "../services/anonymity";
 import {
   type CatalogIndexBuildResult,
   type CatalogIndexRow,
@@ -1726,7 +1727,7 @@ export async function catalogIndexResponse(env: Bindings, request: Request): Pro
       `SELECT
          d.dataset_id,
          d.name,
-         d.concept_doi,
+         ${CONCEPT_DOI_SQL} AS concept_doi,
          d.is_exemplar,
          (SELECT version FROM dataset_versions dv
             WHERE dv.dataset_id = d.dataset_id

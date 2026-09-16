@@ -21,7 +21,11 @@
 
 import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { Hono } from "hono";
+import { dataRoutes } from "../src/routes/data";
+import { datasetRoutes } from "../src/routes/datasets";
 import { hydrateDatasetsByIds } from "../src/services/dataset-search";
+import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 
 const REAL_DOI = "10.82901/nemar.nm000103";
@@ -76,6 +80,117 @@ describe("search does not hand out a reserved identifier", () => {
     seed(db, "nm000872", 1);
     const rows = await hydrateDatasetsByIds(realD1(db), ["nm000872"]);
     expect(JSON.stringify(rows)).not.toContain("Lovelace");
+    db.close();
+  });
+});
+
+/**
+ * The two surfaces the release review of v0.10.4 found still open, both of
+ * them the same shape: a query that selects a whole row, and a withholding
+ * rule applied to the FIELDS rather than to the row.
+ */
+describe("the raw columns a whole-row select carries", () => {
+  function env(db: Database): Bindings {
+    return { DB: realD1(db), ENVIRONMENT: "test" } as Bindings;
+  }
+
+  function app(routes: typeof dataRoutes | typeof datasetRoutes): Hono<{ Bindings: Bindings; Variables: Variables }> {
+    const hono = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+    hono.route("/", routes);
+    return hono;
+  }
+
+  /** What the anonymity sweep writes, and the only place it writes it. */
+  function stampAVerdict(db: Database, datasetId: string): void {
+    db.query(
+      `UPDATE datasets SET sweep_stamps = json_set(
+         COALESCE(sweep_stamps, '{}'),
+         '$.anonymity_checked_at', datetime('now'),
+         '$.anonymity_status', 'findings',
+         '$.anonymity_findings', json(?)
+       ) WHERE dataset_id = ?`,
+    ).run(
+      JSON.stringify([
+        {
+          check: "self_identifier",
+          severity: "deposit",
+          file: "README",
+          detail: "README contains your own name, username, GitHub handle or email address.",
+        },
+      ]),
+      datasetId,
+    );
+  }
+
+  test("a public read of an anonymous deposit carries no anonymity verdict at all", async () => {
+    const db = freshDb();
+    seed(db, "nm000873", 1);
+    stampAVerdict(db, "nm000873");
+
+    const res = await app(datasetRoutes).request("/nm000873", {}, env(db));
+    expect(res.status).toBe(200);
+    const raw = await res.text();
+
+    // The four flat fields were already nulled for this viewer. The column
+    // they are READ OUT OF was not, so the verdict shipped anyway -- telling
+    // a public reader that the concealment is leaking, and which file to
+    // fetch to break it. Asserted on the serialized body, because the leak
+    // was one level down inside a JSON string and a key-level check missed
+    // it; asserted on the VERDICT rather than on the field names, because the
+    // four aliases are meant to be present-and-null for this viewer.
+    expect(raw).not.toContain("sweep_stamps");
+    expect(raw).not.toContain("self_identifier");
+    expect(raw).not.toContain("README contains your own name");
+
+    const shaped = JSON.parse(raw).dataset;
+    expect(shaped.dataset_id).toBe("nm000873");
+    expect(shaped.anonymity_status).toBeNull();
+    expect(shaped.anonymity_findings).toBeNull();
+    db.close();
+  });
+
+  test("an ordinary dataset's read is unchanged by that withholding", async () => {
+    // The control: `sweep_stamps` is withheld from everyone, not just from an
+    // anonymous row, so this proves the route still works rather than that
+    // the row vanished.
+    const db = freshDb();
+    seed(db, "nm000874", 0);
+    stampAVerdict(db, "nm000874");
+
+    const res = await app(datasetRoutes).request("/nm000874", {}, env(db));
+    const body = JSON.parse(await res.text());
+
+    expect(res.status).toBe(200);
+    expect(body.dataset.dataset_id).toBe("nm000874");
+    expect(body.dataset.doi ?? body.dataset.concept_doi).toBe(REAL_DOI);
+    db.close();
+  });
+
+  test("the data plane's root catalog does not advertise a reserved DOI", async () => {
+    const db = freshDb();
+    seed(db, "nm000875", 1);
+    seed(db, "nm000876", 0);
+    db.run("UPDATE datasets SET is_exemplar = 0");
+    // Both carry a version DOI: the column is NOT NULL, and the point under
+    // test is the CONCEPT doi on `datasets`, which is what the index renders.
+    db.query(
+      `INSERT INTO dataset_versions (dataset_id, version, doi, provider, created_at)
+       VALUES ('nm000875', '1.0.0', ?, 'ezid', datetime('now')),
+              ('nm000876', '1.0.0', ?, 'ezid', datetime('now'))`,
+    ).run(`${REAL_DOI}.v1`, `${REAL_DOI}.v1`);
+
+    const res = await app(dataRoutes).request("/?format=json", {}, env(db));
+    const body = await res.text();
+
+    expect(res.status).toBe(200);
+    const listed = JSON.parse(body).datasets as Array<{ id: string; doi: string | null }>;
+    // Listed, because a blinded deposit is public on purpose...
+    expect(listed.find((r) => r.id === "nm000875")).toBeDefined();
+    // ...but its concept DOI is `reserved` at EZID and does not resolve, so
+    // rendering it as a citation hands a reader a ready-made dead link.
+    expect(listed.find((r) => r.id === "nm000875")?.doi).toBeFalsy();
+    // The control, without which dropping the column entirely would pass.
+    expect(listed.find((r) => r.id === "nm000876")?.doi).toBe(REAL_DOI);
     db.close();
   });
 });
