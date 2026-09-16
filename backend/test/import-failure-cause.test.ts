@@ -8,6 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  IMPORT_DATA_UNAVAILABLE_MARKER_FOR_CLASSIFY,
   IMPORT_FAILURE_CAUSE_LABELS,
   IMPORT_UPSTREAM_MARKER_FOR_CLASSIFY,
   classifyImportFailure,
@@ -95,6 +96,28 @@ describe("the marker literal is duplicated, so pin the copies together", () => {
   // import both without creating the production coupling the duplication avoids.
   test("both copies of the upstream marker are the same string", () => {
     expect(IMPORT_UPSTREAM_MARKER_FOR_CLASSIFY).toBe(OPENNEURO_UPSTREAM_MARKER);
+  });
+
+  test("both copies of the data-availability marker are the same string", () => {
+    // Same silent-drift risk as the upstream marker above. The literal is
+    // duplicated rather than imported to keep this module pure, so the copies
+    // are pinned here. A drift sends a publish-gate failure back to `unknown`
+    // with no label, which is exactly the gap this marker closed (#1396).
+    expect(IMPORT_DATA_UNAVAILABLE_MARKER_FOR_CLASSIFY).toBe("[nemar-data-unavailable]");
+  });
+
+  test("a publish-gate shortfall classifies as data_unavailable, not unknown", () => {
+    // The gate refuses when the bucket cannot back the tree's keys, and its
+    // message used to match no rule at all: an issue was filed with no label and
+    // no severity. It must NOT classify as upstream_inaccessible either -- at
+    // this point nothing has established that the content is gone at source, and
+    // filing that unmeasured is what ADR 0064 exists to correct.
+    const gateMessage =
+      "[nemar-data-unavailable] 78.4% of data keys available. 37 of 171 annexed key(s) in the tree have no object in s3://nemar/on008017/objects/";
+    const classified = classifyImportFailure({ stage: "finalize", lastError: gateMessage });
+    expect(classified.cause).toBe("data_unavailable");
+    expect(classified.label).toBe("data-unavailable");
+    expect(classified.summary).toContain("content-recovery");
   });
 
   test("the classifier recognises a message built from the recovery module's copy", () => {

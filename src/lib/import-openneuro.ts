@@ -395,6 +395,24 @@ export function findAnnexedRootMetadata(datasetPath: string): string[] {
 export const OPENNEURO_UPSTREAM_MARKER = "[openneuro-upstream-inaccessible]";
 
 /**
+ * Marker for "NEMAR's bucket cannot back this dataset's data keys" (#1396).
+ *
+ * Deliberately NOT the upstream marker. At this point we know one thing: the
+ * tree names keys the bucket has no object for. We do NOT know whether the
+ * content is gone at source or whether our copy phase simply did not finish,
+ * and filing the first without measuring it is the mistake ADR 0064 exists to
+ * correct -- nine datasets were filed `upstream_403` that way and six of them
+ * were fetchable the whole time.
+ *
+ * So this marker claims only the shortfall, and carries the availability figure
+ * so the tracking issue can be triaged by severity rather than by guess: one key
+ * of 65,063 and 935 of 935 are the same sentence without it. `admin fleet
+ * content-recovery <id>` is the command that turns it into a verdict about
+ * upstream.
+ */
+export const DATA_AVAILABILITY_MARKER = "[nemar-data-unavailable]";
+
+/**
  * Public CURRENT-version URL for a root file in an OpenNeuro dataset's S3 mirror.
  * git-annex records a VERSIONED url that anonymous reads can't fetch; the current
  * object by path is what OpenNeuro serves publicly. Exported for tests.
@@ -1592,6 +1610,7 @@ export async function finalizeImport(
           : "";
       treeGateSpinner.fail(
         [
+          `${DATA_AVAILABILITY_MARKER} ${(available * 100).toFixed(1)}% of data keys available.`,
           `${unbacked.length} of ${treeKeys.size} annexed key(s) in the tree have no object in s3://${S3_BUCKET}/${nemarId}/objects/`,
           `(e.g. ${unbacked.slice(0, 3).join(", ")}).`,
           `That is ${(available * 100).toFixed(1)}% of its data available${belowThreshold}.`,

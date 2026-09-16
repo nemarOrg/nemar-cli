@@ -131,6 +131,16 @@ earlier releases are described only by their generated notes.
   after recovery has reported what it cannot get: three datasets recovered on 2026-09-15 were
   below it that morning and whole by the afternoon.
 
+- **A publish-gate shortfall now files a labeled tracking issue (#1396).** The gate
+  refuses when the bucket cannot back the keys a dataset's tree names, but its message
+  matched no rule in the failure classifier, so the issue on `nemarDatasets/.github` was
+  filed with no label and no severity. The gate emits `[nemar-data-unavailable]` with the
+  availability figure and the classifier maps it to `data-unavailable`. It deliberately
+  does NOT reuse the upstream marker: at that point nothing has established the content
+  is gone at source, and recording that unmeasured is what put nine datasets on the
+  withdrawn list wrongly. Both copies of the literal are pinned against each other by a
+  test, like the upstream marker.
+
 - **`nemar admin fleet key-registration --retract-false-claims` withdraws a claim the
   bucket cannot back (#1396, #967).** The sweep could already see this state -- a key
   recorded at NEMAR's remote with no object behind it, which is what a failed copy leaves --

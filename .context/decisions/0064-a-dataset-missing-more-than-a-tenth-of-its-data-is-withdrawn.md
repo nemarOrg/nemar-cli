@@ -81,6 +81,16 @@ branch, where git-annex writes a `100644` pointer file whose content is the
 symlink count calls it 0 annexed files of 5,349. `git annex find` answers correctly for
 both shapes, which is why it is the definition here.
 
+**A shortfall files its own tracking issue.** The import publish gate refuses when the
+bucket cannot back the keys a dataset's tree names, and it now emits a distinct marker,
+`[nemar-data-unavailable]`, carrying the availability figure. The `nemarDatasets/.github`
+classifier turns that into a `data-unavailable` label instead of the unlabeled
+`needs-triage` a gate failure used to produce, so the issue is triaged by severity: one
+key of 65,063 and 935 of 935 are the same sentence without the ratio. The marker claims
+ONLY the shortfall, never that the content is gone at source -- that is the unmeasured
+`upstream_403` filing this ADR exists to correct, and `nemar admin fleet content-recovery
+<id>` is what turns it into a verdict.
+
 At or above the threshold, ADR 0005 is unchanged: the dataset is listed, serves what it
 has, omits what it does not, and advertises nothing it cannot deliver. Below it, and after
 the notice period, the dataset is not listed at all, which is what this ADR adds.
