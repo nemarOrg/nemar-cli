@@ -467,17 +467,6 @@ async function streamGitTrackedFile(args: {
     });
   }
 
-  // Counted when the bytes are handed to the runtime, not when the client
-  // finishes reading them, so an aborted download still counts as a full
-  // delivery. Closer than the redirect it replaces (which could only ever
-  // record intent), and worth stating rather than overclaiming.
-  recordAccess(env, {
-    datasetId,
-    source: "file",
-    detail: `git-${outcome.source}`,
-    bytes: file.size,
-  });
-
   const outgoing = await sizeCheckedBody(outcome.body, file.size, bufferCeiling(env), {
     datasetId,
     version,
@@ -501,6 +490,18 @@ async function streamGitTrackedFile(args: {
       { status: 502, headers: { "Cache-Control": "no-store", "Content-Type": "application/json" } },
     );
   }
+  // Counted once the response is known to be a delivery: after the length
+  // check, so a refused body is not recorded as bytes served, and before the
+  // client finishes reading, so an aborted download still counts as a full
+  // delivery. Closer than the redirect it replaces (which could only ever
+  // record intent), and worth stating rather than overclaiming.
+  recordAccess(env, {
+    datasetId,
+    source: "file",
+    detail: `git-${outcome.source}`,
+    bytes: file.size,
+  });
+
   const headers = new Headers(fileResponseHeaders(file, createdIso, false));
   headers.set("Content-Type", contentTypeForBidsPath(bidsPath));
   // NOT immutable, and not a year. The content at this URL is immutable --
