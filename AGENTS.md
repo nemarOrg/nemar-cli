@@ -105,7 +105,16 @@ never rendered as zero),
 `.gitattributes` outranks the configured policy, and stripping it without installing
 ours annexes everything),
 0062 (a missing git-annex degrades to an HTTP snapshot, and a snapshot is deliberately
-not a repository).
+not a repository),
+0065 (anonymity is available before first publication and NEVER after; the blind lives in
+`writeDatasetCatalogFields`, the one writer of `datasets.authors`, and decides from the
+row -- never re-add a blind at a call site),
+0066 (the data plane brokers git-tracked files and the manifest is the capability list:
+the repository comes from the dataset row and never the request, the gate runs before the
+token is used, and the cache is keyed by request URL and NEVER by blob SHA),
+0067 (anonymity is verified on a schedule and reported, never repaired: it writes only
+`sweep_stamps`, files no GitHub issue because `nemarDatasets` is public-facing, and a
+check that could not run is `unchecked` rather than clean).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
