@@ -1,16 +1,16 @@
-# ADR 0065: Anonymity is verified on a schedule, and reported, never repaired
+# ADR 0067: Anonymity is verified on a schedule, and reported, never repaired
 
 **Status:** accepted
 **Date:** 2026-09-16
 **Owner:** Seyed Yahya Shirazi
 
 Epic #1406, issue #1409.
-Follows ADR 0063 (anonymity is pre-publication only) and ADR 0064 (the data-plane broker
+Follows ADR 0065 (anonymity is pre-publication only) and ADR 0066 (the data-plane broker
 this depends on).
 
 ## Context
 
-ADR 0063 made anonymity a state the database enforces and put the blind inside every
+ADR 0065 made anonymity a state the database enforces and put the blind inside every
 writer NEMAR controls.
 Phases 1-3 delivered that.
 What none of it delivered is a reason to keep believing it tomorrow.
@@ -187,7 +187,7 @@ while this one is per-dataset and its blast radius is the one dataset that was a
   shared org, and it emails a real depositor. Either disqualifies it.
   The sweep function itself is unguarded so the admin route works on staging.
 - It costs two GitHub `core` calls per dataset for the repository tree, plus one raw fetch
-  per scanned file. The raw host spends no `core` budget (ADR 0064), and the candidate pool
+  per scanned file. The raw host spends no `core` budget (ADR 0066), and the candidate pool
   is small by construction: anonymous deposits are rare and short-lived.
 - The file scan is bounded (40 files, 512 KB each, priority-ordered so root BIDS metadata
   is always read) and reports `deposit_files_beyond_budget` when it did not see everything.
@@ -224,7 +224,7 @@ while this one is per-dataset and its blast radius is the one dataset that was a
 
 ## Receipts
 
-- Epic #1406, issue #1409; ADR 0063 (the state this verifies), ADR 0064 (the broker it reads through)
+- Epic #1406, issue #1409; ADR 0065 (the state this verifies), ADR 0066 (the broker it reads through)
 - ADR 0005 (partial data still serves; reporting is never more certain than it is),
   ADR 0034 (the column budget), ADR 0035 (sweep stamps live in one JSON column),
   ADR 0054 (a report arrives whether or not anything is wrong, and unknown is never zero),

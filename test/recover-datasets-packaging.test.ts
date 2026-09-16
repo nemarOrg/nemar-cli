@@ -239,7 +239,12 @@ describe("npm package includes scripts/withdrawn-datasets.json (PR #1223 review)
 });
 
 describe("nemar admin withdraw resolves its default file from source (PR #1223 review)", () => {
-  test("`bun run src/index.ts admin withdraw --all --json` loads the real 11-entry list", async () => {
+  // The list holds 11 entries and `--all` targets the 5 still down: an entry for a
+  // dataset that was recovered and reinstated stays as the record of a withdrawal
+  // that should not have happened (#1396), and re-targeting it would tombstone
+  // content we proved is there. The assertion is on the TARGETS, which is the
+  // number that matters, plus one id from each half.
+  test("`bun run src/index.ts admin withdraw --all --json` loads the real list and targets only what is still down", async () => {
     const configDir = mkdtempSync(join(tmpdir(), "nemar-withdraw-src-"));
     seedAuthenticatedConfig(configDir);
     const stub = startWithdrawStub();
@@ -251,11 +256,13 @@ describe("nemar admin withdraw resolves its default file from source (PR #1223 r
       expect(result.exitCode).toBe(0);
       const parsed = JSON.parse(result.stdout);
       expect(Array.isArray(parsed)).toBe(true);
-      expect(parsed.length).toBe(11);
+      expect(parsed.length).toBe(5);
       // Every target reached the network step -- proof the file loaded,
       // not just that the command exited 0.
-      expect(stub.withdrawRequests.length).toBe(11);
-      expect(stub.withdrawRequests).toContain("on004148");
+      expect(stub.withdrawRequests.length).toBe(5);
+      expect(stub.withdrawRequests).toContain("on008014");
+      // The guard: a reinstated dataset must never be a withdraw target.
+      expect(stub.withdrawRequests).not.toContain("on004148");
     } finally {
       stub.stop();
       rmSync(configDir, { recursive: true, force: true });
@@ -288,8 +295,8 @@ describe("nemar admin withdraw resolves its default file from a published-layout
       expect(result.exitCode).toBe(0);
       const parsed = JSON.parse(result.stdout);
       expect(Array.isArray(parsed)).toBe(true);
-      expect(parsed.length).toBe(11);
-      expect(stub.withdrawRequests.length).toBe(11);
+      expect(parsed.length).toBe(5);
+      expect(stub.withdrawRequests.length).toBe(5);
     } finally {
       stub.stop();
       rmSync(configDir, { recursive: true, force: true });

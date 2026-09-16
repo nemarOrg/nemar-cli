@@ -1,4 +1,4 @@
-# ADR 0064: The data plane brokers git-tracked files, and the manifest is the capability list
+# ADR 0066: The data plane brokers git-tracked files, and the manifest is the capability list
 
 **Status:** accepted
 **Date:** 2026-09-14
@@ -18,7 +18,7 @@ whose metadata resolves through a third party's content host has a dependency no
 recorded, no single place to rate-limit or measure, and URLs that change when that host does.
 
 This ADR records the phase that closed it (#1403, PR #1410). It was written after the fact,
-in the phase that depends on it, because ADR 0063 needed something true to cite.
+in the phase that depends on it, because ADR 0065 needed something true to cite.
 
 Three measurements shaped it, each taken rather than assumed:
 

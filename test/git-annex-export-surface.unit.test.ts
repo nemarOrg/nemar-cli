@@ -14,7 +14,9 @@
  *   monolith surface (MONOLITH_EXPORTS below, captured at #908 commit 1 and
  *   updated by the declared removals in commits 2-3: the formatBytes
  *   pass-through re-export and the deprecated createDataladDataset/
- *   isDataladDataset aliases).
+ *   isDataladDataset aliases), plus the declared addition of
+ *   batchSetKeysAbsent in #1396, the counterpart that withdraws a presence
+ *   claim the bucket cannot back.
  *
  * INTERNAL_WIRING lists symbols exported ONLY so sibling git-annex/* modules
  * can import them (declared in #908): not part of the CLI-facing surface.
@@ -95,6 +97,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
   ],
   transfer: [
     "MAX_UNAVAILABLE_SAMPLE",
+    "batchSetKeysAbsent",
     "batchSetKeysPresent",
     "classifyGetOutcome",
     "collectFileManifest",
@@ -188,6 +191,7 @@ const MONOLITH_EXPORTS = [
   "acceptGitHubInvitation",
   "annexRemoteExists",
   "awsCredentialEnv",
+  "batchSetKeysAbsent",
   "batchSetKeysPresent",
   "checkAWSCredentials",
   "checkDownloadPrerequisites",

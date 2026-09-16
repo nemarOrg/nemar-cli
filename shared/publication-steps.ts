@@ -44,7 +44,7 @@ export type PublicationStep = (typeof PUBLICATION_STEPS)[number];
  *                    marked "permanent and irreversible" in the list above for
  *                    good reason -- DataCite records are snapshotted, so this
  *                    is the one step that could not be undone at acceptance.
- *                    The identifier stays `reserved`, which is what ADR 0063's
+ *                    The identifier stays `reserved`, which is what ADR 0065's
  *                    A6 requires and what makes the deposit citable by its
  *                    landing page rather than by a public record.
  *   version_doi      Mints and publishes a per-version DOI, same exposure.

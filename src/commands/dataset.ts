@@ -5182,7 +5182,7 @@ Examples:
  * `unchecked` is printed on EVERY verdict, including `verified`. A reader of
  * "verified" is entitled to know what that word does not cover -- signal
  * headers always, sub-directory sidecars whenever there are any -- and a
- * verdict that hid its own scope would be the overstatement ADR 0065 forbids.
+ * verdict that hid its own scope would be the overstatement ADR 0067 forbids.
  */
 function renderAnonymityVerdict(info: {
   anonymity_status?: string | null;

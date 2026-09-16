@@ -66,6 +66,10 @@ describe("isKeyPresentAtDeclaredSize", () => {
 });
 
 describe("compareManifestToListing", () => {
+  // `expectedCount: 0` alongside `complete: false` is the wire signal for "there
+  // was nothing to check", and `nemar admin import verify` branches on exactly
+  // that to say "not verifiable" rather than "0/0 objects missing", which reads
+  // as a verdict on the data (ADR 0054). Keep the pair intact.
   test("expected null (no published manifest) -> conservatively not complete", () => {
     const result = compareManifestToListing(null, new Map([["a", 1]]));
     expect(result).toEqual({

@@ -52,7 +52,7 @@
  * git-tracked path and carries its git blob SHA, so no tree walk is needed.
  * Bytes come from `fetchGitTrackedFile` on the authenticated raw host, which
  * serves a private repository and spends none of the shared 5,000/hr GitHub
- * `core` budget (ADR 0064). That function's `absent` is honest only because a
+ * `core` budget (ADR 0066). That function's `absent` is honest only because a
  * token is held -- anonymous raw answers 404 for a private repo and for a
  * missing file alike, which is exactly the distinction this sweep must not get
  * wrong.

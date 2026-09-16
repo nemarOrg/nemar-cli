@@ -919,22 +919,71 @@ export interface KeyRegistrationResult {
   missing: string[];
 }
 
-/** Keys the location log records as present at `remoteUuid`, among those the tree names. */
-async function keysRecordedAt(datasetPath: string, remoteUuid: string): Promise<Set<string>> {
+/**
+ * Keys the location log records as present at `remoteUuid`, among those the
+ * tree names, or `null` when the question could not be answered at all.
+ *
+ * The null matters more than it looks. This used to return an EMPTY SET on
+ * failure, justified by "every key then falls through to the per-key whereis".
+ * That is true only when asserting: the shared filter is
+ * `recorded.has(key) !== present`, so for a RETRACTION an empty set means no key
+ * is unconfirmed, nothing is probed, and every claim is reported withdrawn
+ * without one being checked. `git annex find --in <uuid>` exits 1 with an
+ * uncaught exception whenever the uuid is not resolvable as a remote in that
+ * clone, which is an ordinary condition in a fresh fleet clone, so this was
+ * reachable rather than theoretical.
+ */
+async function keysRecordedAt(
+  datasetPath: string,
+  remoteUuid: string,
+): Promise<Set<string> | null> {
   const { stdout, stderr, exitCode } = await runCommand(
     ["git", "annex", "find", "--include", "*", "--in", remoteUuid, "--format=${key}\n"],
     { cwd: datasetPath },
   );
   if (exitCode !== 0) {
-    // An empty set is not wrong here -- every key then falls through to the
-    // per-key `whereis`, which reaches the right answer -- but silently, and one
-    // process per key over a 59,939-key dataset looks like a hang. Say so.
     console.warn(
       `git annex find --in ${remoteUuid} failed (${stderr.trim() || `exit ${exitCode}`}); falling back to one whereis per key, which is slow on a large dataset.`,
     );
-    return new Set();
+    return null;
   }
   return new Set(stdout.split("\n").filter(Boolean));
+}
+
+/**
+ * Whether the location log records `key` at `remoteUuid`, asked per key.
+ *
+ * Reads `--json` rather than the exit code, because the exit code answers a
+ * different question: `whereis` exits 1 for a key with ZERO copies, which is
+ * precisely the state a fully retracted key is in, so an `exitCode !== 0` test
+ * reports every correct final retraction as a failure. Measured on git-annex
+ * 10.20260901: 0 copies gives exit 1 with `{"success":false,"whereis":[]}`.
+ *
+ * Returns null when the answer could not be read, which callers must treat as
+ * unconfirmed rather than as either verdict.
+ */
+async function keyRecordedAt(
+  datasetPath: string,
+  key: string,
+  remoteUuid: string,
+): Promise<boolean | null> {
+  const { stdout } = await runCommand(["git", "annex", "whereis", "--key", key, "--json"], {
+    cwd: datasetPath,
+  });
+  const line = stdout.split("\n").find((candidate) => candidate.trim().startsWith("{"));
+  if (!line) return null;
+  try {
+    const parsed = JSON.parse(line) as {
+      whereis?: Array<{ uuid?: string }>;
+      untrusted?: Array<{ uuid?: string }>;
+    };
+    // `untrusted` holds copies too; a claim there is still a claim.
+    return [...(parsed.whereis ?? []), ...(parsed.untrusted ?? [])].some(
+      (location) => location.uuid === remoteUuid,
+    );
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -964,12 +1013,45 @@ export async function batchSetKeysPresent(
   keys: string[],
   remoteUuid: string,
 ): Promise<KeyRegistrationResult> {
+  return batchSetKeyPresence(datasetPath, keys, remoteUuid, true);
+}
+
+/**
+ * Withdraw a presence claim, and prove from the log that it is gone.
+ *
+ * The counterpart, and it exists because a claim can outlive the content. A
+ * failed copy leaves a zero-byte object under the right key name, every check
+ * that asks only whether the key exists counts it as content (#967), and this
+ * registration then tells every clone to fetch bytes NEMAR does not hold. When
+ * the content cannot be recovered -- upstream deleted it, or never exported it
+ * -- the claim cannot be made true, so the only honest repair is to retract it:
+ * 230 keys across five datasets whose anatomical images OpenNeuro removed.
+ *
+ * Retracting is not the same shape as asserting, so the read-back is inverted:
+ * success is the key NO LONGER being recorded at the remote. Reusing the
+ * assert-side check would report every retraction as a failure.
+ */
+export async function batchSetKeysAbsent(
+  datasetPath: string,
+  keys: string[],
+  remoteUuid: string,
+): Promise<KeyRegistrationResult> {
+  return batchSetKeyPresence(datasetPath, keys, remoteUuid, false);
+}
+
+async function batchSetKeyPresence(
+  datasetPath: string,
+  keys: string[],
+  remoteUuid: string,
+  present: boolean,
+): Promise<KeyRegistrationResult> {
   if (keys.length === 0) return { success: 0, failed: 0, missing: [] };
 
+  const flag = present ? "1" : "0";
   const CHUNK = 5000;
   for (let i = 0; i < keys.length; i += CHUNK) {
     const chunk = keys.slice(i, i + CHUNK);
-    const stdin = `${chunk.map((key) => `${key} ${remoteUuid} 1`).join("\n")}\n`;
+    const stdin = `${chunk.map((key) => `${key} ${remoteUuid} ${flag}`).join("\n")}\n`;
     // A non-zero exit is not the failure signal this function reports -- the log is --
     // but it is worth surfacing, because it usually means the batch never ran at all.
     const { exitCode, stderr } = await runCommand(["git", "annex", "setpresentkey", "--batch"], {
@@ -984,13 +1066,19 @@ export async function batchSetKeysPresent(
   }
 
   const recorded = await keysRecordedAt(datasetPath, remoteUuid);
-  const unseen = keys.filter((key) => !recorded.has(key));
+  // `find --in <uuid>` only sees keys the working tree names, so its silence is
+  // not evidence either way: a key it did not report is asked about directly.
+  // And when it could not answer AT ALL, every key is unconfirmed -- in both
+  // directions. Scoring "the oracle failed" as "the claim is gone" is how a
+  // retraction that never ran reports total success.
+  const unconfirmed =
+    recorded === null ? keys : keys.filter((key) => recorded.has(key) !== present);
   const missing: string[] = [];
-  for (const key of unseen) {
-    const { stdout, exitCode } = await runCommand(["git", "annex", "whereis", "--key", key], {
-      cwd: datasetPath,
-    });
-    if (exitCode !== 0 || !stdout.includes(remoteUuid)) missing.push(key);
+  for (const key of unconfirmed) {
+    const stillRecorded = await keyRecordedAt(datasetPath, key, remoteUuid);
+    // null is unreadable, which is not proof of either state, so it counts as
+    // not done. The caller stops and the operator re-runs.
+    if (stillRecorded === null || stillRecorded !== present) missing.push(key);
   }
 
   return {

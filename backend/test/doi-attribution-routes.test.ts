@@ -344,7 +344,7 @@ describe("the mint of an anonymous deposit names nobody (#1408)", () => {
   test("the identifier stays RESERVED, which is what keeps it unharvested", async () => {
     // `reserved` means registered but not advertised: it does not resolve and
     // DataCite does not harvest it. That is the whole reason a blinded deposit
-    // may hold an identifier at all (ADR 0063).
+    // may hold an identifier at all (ADR 0065).
     seedOwner("Jane", "Doe");
     seedDataset(DATASET_ID, { anonymous: 1 });
     await post(`/admin/datasets/${DATASET_ID}/doi/concept`, {

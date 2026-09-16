@@ -1,57 +1,89 @@
 [
   {
     "dataset_id": "on004148",
-    "reason": "upstream_403",
-    "note": "OpenNeuro source returns 403 for every client, including OpenNeuro's own CLI/datalad; blocked until upstream restores access."
+    "reason": "recovered",
+    "withdrawn": false,
+    "data_available": 1.0,
+    "note": "Recovered in full (1 key) and restored 2026-09-15. The upstream_403 reason was never measured for this dataset: its content was readable the whole time, and the one key that looked unrecoverable was a double-encoded copy source on a path with a space, not an upstream refusal."
   },
   {
     "dataset_id": "on007816",
-    "reason": "upstream_403",
-    "note": "OpenNeuro source returns 403 for every client, including OpenNeuro's own CLI/datalad; blocked until upstream restores access."
+    "reason": "recovered",
+    "withdrawn": false,
+    "data_available": 1.0,
+    "note": "Recovered in full (424 keys, 85 GiB) 2026-09-15. Never published, so restore does not apply; it needs a publish, not a reinstatement."
   },
   {
     "dataset_id": "on007987",
-    "reason": "upstream_403",
-    "note": "OpenNeuro source returns 403 for every client, including OpenNeuro's own CLI/datalad; blocked until upstream restores access."
+    "reason": "recovered",
+    "withdrawn": false,
+    "data_available": 1.0,
+    "note": "Recovered in full (516 keys, 38.2 GiB) and restored 2026-09-15."
   },
   {
     "dataset_id": "on008014",
     "reason": "upstream_403",
-    "note": "OpenNeuro source returns 403 for every client, including OpenNeuro's own CLI/datalad; blocked until upstream restores access."
+    "withdrawn": true,
+    "data_keys_missing": 1095,
+    "data_keys_total": 1107,
+    "data_available": 0.0108,
+    "note": "Objects listed anonymously at their correct sizes; anonymous GetObject returns 403 for every one. 1,095 of 1,107 data keys, 98.9% of its data."
   },
   {
     "dataset_id": "on008017",
     "reason": "upstream_403",
-    "note": "OpenNeuro source returns 403 for every client, including OpenNeuro's own CLI/datalad; blocked until upstream restores access."
+    "withdrawn": true,
+    "data_keys_missing": 37,
+    "data_keys_total": 171,
+    "data_available": 0.7836,
+    "note": "Objects listed anonymously; anonymous GetObject returns 403. 37 of 171 data keys, 21.6% of its data."
   },
   {
     "dataset_id": "on008065",
-    "reason": "upstream_403",
-    "note": "OpenNeuro source returns 403 for every client, including OpenNeuro's own CLI/datalad; blocked until upstream restores access."
+    "reason": "recovered",
+    "withdrawn": false,
+    "data_available": 1.0,
+    "note": "Recovered in full (5,173 keys, 94.3 GiB) and restored 2026-09-15."
   },
   {
     "dataset_id": "on008092",
     "reason": "upstream_403",
-    "note": "OpenNeuro source returns 403 for every client, including OpenNeuro's own CLI/datalad; blocked until upstream restores access."
+    "withdrawn": true,
+    "data_keys_missing": 155,
+    "data_keys_total": 155,
+    "data_available": 0.0,
+    "note": "Every data key refused: 155 of 155, 100% of its data."
   },
   {
     "dataset_id": "on008099",
     "reason": "upstream_403",
-    "note": "OpenNeuro source returns 403 for every client, including OpenNeuro's own CLI/datalad; blocked until upstream restores access."
+    "withdrawn": true,
+    "data_keys_missing": 30,
+    "data_keys_total": 30,
+    "data_available": 0.0,
+    "note": "Every data key refused: 30 of 30, 100% of its data."
   },
   {
     "dataset_id": "on008115",
     "reason": "upstream_403",
-    "note": "OpenNeuro source returns 403 for every client, including OpenNeuro's own CLI/datalad; blocked until upstream restores access."
+    "withdrawn": true,
+    "data_keys_missing": 180,
+    "data_keys_total": 180,
+    "data_available": 0.0,
+    "note": "Every data key refused: 180 of 180, 100% of its data."
   },
   {
     "dataset_id": "on005279",
-    "reason": "no_source",
-    "note": "No recoverable source was found for this dataset during the epic #967 forensic sweep."
+    "reason": "recovered",
+    "withdrawn": false,
+    "data_available": 0.976,
+    "note": "Recovered to 97.6% of its data (30 keys) and restored 2026-09-15; the 30 anatomical images OpenNeuro deleted are gone, and their false presence claims were retracted as part of the 230 keys across five datasets."
   },
   {
     "dataset_id": "on005516",
-    "reason": "no_source",
-    "note": "No recoverable source was found for this dataset during the epic #967 forensic sweep."
+    "reason": "recovered",
+    "withdrawn": false,
+    "data_available": 1.0,
+    "note": "Recovered (1 key) and restored 2026-09-15."
   }
 ]

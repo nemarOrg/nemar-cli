@@ -1,4 +1,4 @@
-# ADR 0063: Anonymity is available before first publication and never after, and it is withheld by the writer
+# ADR 0065: Anonymity is available before first publication and never after, and it is withheld by the writer
 
 **Status:** accepted
 **Date:** 2026-09-15
@@ -11,7 +11,7 @@ depositor today must choose between depositing and submitting. NEMAR can serve b
 readable, the depositor concealed, until the paper is accepted.
 
 The analysis is `.context/draft-anonymous-deposit-analysis.md` (requirements R1-R5, a
-twelve-item leak inventory, predicates A1-A10). The data-plane phase (#1403, ADR 0064) made
+twelve-item leak inventory, predicates A1-A10). The data-plane phase (#1403, ADR 0066) made
 the readable half possible -- the data plane serves a dataset's git-tracked metadata itself,
 so a repository can stay private without the dataset becoming unreadable. This ADR is the
 concealed half.
@@ -147,7 +147,7 @@ Harder, and worth stating plainly:
   names you".
 - **Cached responses outlive a state change.** Nothing purges the edge, per-URL purge caps at 30
   URLs and prefix purge is Enterprise-only, so anything already fetched stays fetchable for its
-  TTL. This is why ADR 0064's brokered files are `max-age=300` rather than `immutable`, and it
+  TTL. This is why ADR 0066's brokered files are `max-age=300` rather than `immutable`, and it
   bounds how quickly a deposit can become anonymous after it has been read.
 - **Anonymity applied late is anonymity applied to a record that is already out.** Enrichment
   runs on upload, so by the time a depositor asks to be concealed the real names are usually in
@@ -250,7 +250,7 @@ minted the permanent identifier with no authors.
 
 ## Receipts
 
-- Epic #1406, issue #1407; ADR 0064 (the data-plane half this depends on, #1403)
+- Epic #1406, issue #1407; ADR 0066 (the data-plane half this depends on, #1403)
 - ADR 0034 (the column budget this spends from), ADR 0035 (why not `sweep_stamps`),
   ADR 0017 (row-level visibility, and why it cannot express this),
   ADR 0026 (the placeholder-author gate that orders de-anonymization),

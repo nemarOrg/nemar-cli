@@ -631,7 +631,7 @@ describe("the row invariants, as a pure rule", () => {
 
 describe("a finding never carries the text it matched", () => {
   // The rule stated in the module header, on `AnonymityFinding.detail`, on
-  // `ANONYMITY_FINDINGS_PATH` and in ADR 0065 -- and, until this test, enforced
+  // `ANONYMITY_FINDINGS_PATH` and in ADR 0067 -- and, until this test, enforced
   // nowhere. Appending the matched text to a `detail` pasted the concealed
   // depositor's name into `sweep_stamps`, the `audit_log` row and forwardable
   // mail at once, and left every test green. This epic exists to keep one

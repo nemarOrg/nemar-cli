@@ -8,7 +8,7 @@
  * paths that make a dataset public. A dataset published with `nemar admin
  * make-public` kept the column NULL, and could then be made anonymous
  * afterwards -- DOI minted, landing page indexed, git history cloned, and D1
- * reporting a never-published anonymous deposit. That is the state ADR 0063
+ * reporting a never-published anonymous deposit. That is the state ADR 0065
  * calls theater, reached through the door the ADR was written to close.
  *
  * Two kinds of test here, because neither is sufficient alone. The
@@ -372,7 +372,7 @@ describe("anonymity is requested at publication, not refused there", () => {
   test("the placeholder-author gate is exempted for a release and enforced for a publication", () => {
     // This is the interlock, and it is one gate doing two jobs. A blinded
     // deposit legitimately has placeholder Authors; a real publication must
-    // not. ADR 0063's first draft claimed this came for free from ADR 0026,
+    // not. ADR 0065's first draft claimed this came for free from ADR 0026,
     // which was false twice over -- the regex is anchored and the gate reads
     // the repository file, never `datasets.authors`.
     expect(PUBLICATION).toContain("anonymousRelease: anonymousRequested,");
