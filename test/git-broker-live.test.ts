@@ -49,19 +49,42 @@ async function latestManifest(): Promise<{ version: string; entries: ManifestEnt
   return { version: listing.latest, entries };
 }
 
-/** Has the deployed data plane got the broker yet? */
-async function brokerIsDeployed(): Promise<boolean> {
+/**
+ * Has the deployed data plane got the broker yet?
+ *
+ * Tri-state on purpose. "Not deployed yet" and "I could not tell" used to be
+ * the same `false`, which was defensible while the broker genuinely was not
+ * deployed and is not any more: post-merge the broker is permanent, so every
+ * skip from here on is an infrastructure error wearing the "not deployed yet"
+ * costume. That matters because this file is the ONLY test that can see the
+ * #1419 class at all -- the in-process suite is structurally blind to it --
+ * so a silent skip is the one way a regression gets back out.
+ */
+async function brokerIsDeployed(): Promise<boolean | "unknown"> {
   if (LIVE_TARGET_BLOCKED) return false;
   try {
     const { entries } = await latestManifest();
     const git = entries.find((e) => e.checksum_algorithm === "git");
     return git !== undefined && !git.bytes_url.includes("raw.githubusercontent.com");
-  } catch {
-    return false;
+  } catch (err) {
+    console.error(
+      `[live] could not determine whether the broker is deployed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return "unknown";
   }
 }
 
-const DEPLOYED = await brokerIsDeployed();
+const PROBE = await brokerIsDeployed();
+const DEPLOYED = PROBE === true;
+
+// An unreadable probe fails rather than skipping. It is one assertion, and it
+// is the difference between "the oracle ran and found nothing wrong" and "the
+// oracle did not run".
+describe.skipIf(LIVE_TARGET_BLOCKED)("the git-file broker's live probe", () => {
+  test("the deployment probe could reach the data plane", () => {
+    expect(PROBE).not.toBe("unknown");
+  });
+});
 
 describe.skipIf(!DEPLOYED)("git-file broker against a private repo (live)", () => {
   test("every git-tracked entry is served from the data host", async () => {
@@ -89,7 +112,10 @@ describe.skipIf(!DEPLOYED)("git-file broker against a private repo (live)", () =
     expect(served.headers.get("X-Content-Type-Options")).toBe("nosniff");
     const body = await served.text();
     expect(JSON.parse(body).Name).toBeTruthy();
-    expect(Number(served.headers.get("Content-Length"))).toBe(entry.size);
+    // Compared as a string: `Number(null)` is 0, which would pass vacuously
+    // against a zero-byte entry, and this assertion is the whole oracle for
+    // #1419.
+    expect(served.headers.get("Content-Length")).toBe(String(entry.size));
 
     // The control that makes the test mean something: the same file, straight
     // from the public content host, is not readable. So the bytes above came

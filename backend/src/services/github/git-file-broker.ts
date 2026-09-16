@@ -47,11 +47,16 @@ export type GitFileFetch =
       /**
        * Never null: `okOrUnavailable` is the only constructor of this
        * variant, and a body-less 2xx leaves as `unavailable`. Stated in the
-       * type because the caller counts these bytes against the manifest and
+       * type because the caller measures these bytes against the manifest and
        * a nullable stream would push that invariant to a runtime check.
        */
       body: ReadableStream<Uint8Array>;
-      /** Upstream's byte count, when it declared one. */
+      /**
+       * Upstream's byte count, when it declared one -- which under the
+       * Workers runtime is never, on a real raw fetch. See the
+       * `Accept-Encoding` comment below and ADR 0066's 2026-09-16 amendment;
+       * this field's permanent nullness in production WAS #1419.
+       */
       contentLength: number | null;
       source: GitFileSource;
     }
@@ -171,14 +176,21 @@ export async function fetchGitTrackedFile(req: GitFileRequest): Promise<GitFileF
 
   const headers: Record<string, string> = {
     "User-Agent": "NEMAR-API",
-    // Identity, deliberately. The raw host gzips text by default, and then
-    // `Content-Length` describes the COMPRESSED body: 717 against a manifest
-    // that records 1353 for the same `dataset_description.json` (measured).
-    // The caller verifies the length it gets against the manifest, so an
-    // encoded length would either fail every text file or, if the runtime
-    // strips the header while decoding, quietly disable that check. Asking
-    // for identity makes the number mean what the manifest means. The edge
-    // can still compress on the way out to the client.
+    // Identity, requested but NOT honored, and the comment is kept to say so.
+    // The raw host gzips text by default, and then `Content-Length` describes
+    // the COMPRESSED body: 717 against a manifest that records 1353 for the
+    // same `dataset_description.json` (measured). Asking for identity WOULD
+    // make the number mean what the manifest means -- except the Workers
+    // runtime owns `Accept-Encoding`, so this header never reaches GitHub:
+    // the raw host gzips anyway and workerd strips `Content-Length` when it
+    // decodes. `contentLength` is therefore null on every real raw fetch, and
+    // the caller's upstream-header check never fired in production at all
+    // (ADR 0066, amendment 2026-09-16, #1419). An earlier version of this
+    // comment named that outcome as the thing identity was avoiding, which
+    // left a reader believing the length check was armed. It was not.
+    // Left in place because it costs nothing and would be correct on a
+    // runtime that honored it; the length guarantee lives in
+    // `sizeCheckedBody` in routes/data.ts, not here.
     "Accept-Encoding": "identity",
   };
   if (token) headers.Authorization = `Bearer ${token}`;

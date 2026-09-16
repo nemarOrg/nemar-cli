@@ -16,6 +16,22 @@
  * manifest (through `S3_ENDPOINT_URL`, the same origin-override idiom the
  * zarr suites use) and MUST reach GitHub; the private one must not. Only the
  * pair proves the ordering.
+ *
+ * WHAT THIS SUITE CANNOT SEE, stated here because it is what a reader needs
+ * before trusting a green run. It drives the route in-process, where no HTTP
+ * serialization happens at all, so `headers.set("Content-Length", ...)`
+ * always sticks. That makes it structurally blind to what caused #1419:
+ * workerd DROPS a hand-set `Content-Length` when the body is a stream. A
+ * green run here is not evidence about the deployed data plane; the oracle
+ * for that is `test/git-broker-live.test.ts`, which is what caught #1419 and
+ * what will confirm the fix once it reaches the staging worker. That file
+ * SKIPS until then, so its silence on a feature branch is not evidence
+ * either.
+ *
+ * What this suite can do about that class is pin the INTENT: the header is
+ * asserted present on the buffered branch and asserted null on the streamed
+ * one. Without the second assertion, restoring the unconditional set that
+ * #1420 shipped passes every test here -- measured, not supposed.
  */
 
 import type { Database } from "bun:sqlite";
@@ -27,7 +43,14 @@ import { fetchGitTrackedFile } from "../src/services/github/git-file-broker";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 
-const BLOB_SHA = "1f401a7ca0456812df0499c38c51eeb08fc11d1e";
+/**
+ * The real `git hash-object` of FILE_BODY, not an arbitrary 40 hex digits.
+ * Since #1419 the route verifies that the bytes it brokered ARE the blob the
+ * manifest named, so a fixture whose SHA does not match its body would 502
+ * every happy path. Recompute with:
+ *   printf '%s' '<FILE_BODY>' | git hash-object --stdin
+ */
+const BLOB_SHA = "8cb31ee475b57f9caf41c02a1e4de7862cde420c";
 const FILE_BODY = '{"Name":"A dataset","BIDSVersion":"1.11.0"}';
 
 interface Seen {
@@ -202,6 +225,19 @@ describe("the route: the gate, then the bytes", () => {
   const manifestKey = `/nm000862/version/${VERSION}.json`;
   const publicRawPath = `/nemarDatasets/nm000862/${VERSION}/${PATH}`;
 
+  /** The empty file: its git object name is the SHA-1 of `blob 0\0`. */
+  function emptyManifestBody(): string {
+    const emptySha = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
+    return JSON.stringify({
+      dataset_id: "nm000862",
+      version: "1.0.0",
+      doi: null,
+      concept_doi: null,
+      created: "2026-01-01T00:00:00Z",
+      files: { [PATH]: { key: `git:${emptySha}`, size: 0, checksum: `git:${emptySha}` } },
+    });
+  }
+
   function manifestBody(size = FILE_BODY.length): string {
     return JSON.stringify({
       dataset_id: "nm000862",
@@ -335,13 +371,35 @@ describe("the route: the gate, then the bytes", () => {
     );
   }
 
-  // NOTE ON WHAT THIS HALF CAN AND CANNOT PROVE. These run the route
-  // in-process under Bun, where `headers.set("Content-Length", ...)` always
-  // sticks. They therefore pin the branch and the refusals, but they cannot
-  // see the thing that caused #1419: workerd drops a hand-set
-  // `Content-Length` when the body is a stream. The oracle for that is
-  // `test/git-broker-live.test.ts` against the deployed data plane, which is
-  // what caught it and what confirms the fix.
+  /** A stand-in whose body fails partway, which is what a dropped upstream
+   *  connection looks like to the route: bytes, then an error. */
+  function diesMidBody(prefix: string): Response {
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        async start(controller) {
+          controller.enqueue(new TextEncoder().encode(prefix));
+          await Bun.sleep(1);
+          controller.error(new Error("upstream died"));
+        },
+      }),
+    );
+  }
+
+  // The control for `streamed()`. Everything below that targets the
+  // measurement depends on the stand-in really sending a chunked body with no
+  // length; if Bun ever buffers it anyway, three tests would silently reroute
+  // through the upstream-header fast path and keep passing while proving
+  // something else. This fails in milliseconds when that happens.
+  test("the stand-in really sends a chunked body with no declared length", async () => {
+    reset({ [publicRawPath]: () => streamed(FILE_BODY) });
+
+    const direct = await fetch(`${base}${publicRawPath}`);
+
+    expect(direct.headers.get("Content-Length")).toBeNull();
+    expect(direct.headers.get("Transfer-Encoding")).toBe("chunked");
+    await direct.text();
+  });
+
   test("a length upstream never declared is still declared to the client", async () => {
     const db = freshDb();
     seed(db, "nm000862", "public");
@@ -353,11 +411,11 @@ describe("the route: the gate, then the bytes", () => {
     const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
 
     expect(res.status).toBe(200);
-    // The regression this pins: no upstream header used to mean no
-    // `Content-Length` on the way out either, on every real fetch, because
-    // workerd owns `Accept-Encoding` and strips the header when it decodes.
-    // Setting one by hand does not survive a streamed body, so the fix is to
-    // answer a body whose length the runtime already knows.
+    // What this pins is the BUFFERED branch declaring a length it measured,
+    // with upstream declaring none. It does not pin #1419 itself: under Bun
+    // the pre-fix code declared the header too (mutation-tested), which is
+    // why the streamed-branch assertion below exists and why the live test is
+    // the oracle.
     expect(res.headers.get("Content-Length")).toBe(String(FILE_BODY.length));
     expect(await res.text()).toBe(FILE_BODY);
   });
@@ -392,29 +450,105 @@ describe("the route: the gate, then the bytes", () => {
     expect(res.status).toBe(502);
   });
 
-  test("above the buffer ceiling it streams, and a short body still fails the transfer", async () => {
+  test("the right number of bytes is not enough: a same-size edit is refused", async () => {
+    const db = freshDb();
+    seed(db, "nm000862", "public");
+    const sameLength = FILE_BODY.replace("1.11.0", "1.10.0");
+    expect(sameLength.length).toBe(FILE_BODY.length);
+    expect(sameLength).not.toBe(FILE_BODY);
+    reset({
+      [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+      [publicRawPath]: () => streamed(sameLength),
+    });
+
+    const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+
+    // The scenario the length check was written for and could not see. The
+    // raw fetch is by REF, so a moved tag serves the new blob at the same
+    // path; when the edit does not change the size, every length comparison
+    // passes and the response would carry an ETag naming the OLD blob.
+    expect(res.status).toBe(502);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  test("a body that dies mid-read is refused, and says so distinctly", async () => {
     const db = freshDb();
     seed(db, "nm000862", "public");
     reset({
-      [manifestKey]: () => new Response(manifestBody(FILE_BODY.length + 10), { status: 200 }),
-      [publicRawPath]: () => streamed(FILE_BODY),
+      [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+      [publicRawPath]: () => diesMidBody("partial"),
     });
 
-    // A ceiling of 0 sends every file down the streamed branch, which is
-    // otherwise only reachable with a multi-megabyte fixture.
-    const res = await app().request(
-      `/nm000862/${VERSION}/${PATH}`,
-      {},
-      { ...env(db), BROKER_BUFFER_MAX_BYTES: "0" },
-    );
+    const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
 
-    // Streamed: the status is committed before the length is known, so the
-    // only honest refusal left is a transfer the client cannot complete.
-    expect(res.status).toBe(200);
-    expect(res.text()).rejects.toThrow(/did not match the manifest/);
+    expect(res.status).toBe(502);
+    // Never cacheable: a transient upstream drop pinned at the edge would
+    // turn one dropped connection into five minutes of failure per URL.
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    // Its own sentence, not the "refused us" one, and a hint about when to
+    // come back -- this is the most transient failure in the function.
+    expect(await res.json()).toMatchObject({
+      error: "Upstream content host dropped the transfer",
+    });
+    expect(res.headers.get("Retry-After")).toBe("5");
   });
 
-  test("above the buffer ceiling a correct body still streams through whole", async () => {
+  test("a zero-length file is served, with a zero length", async () => {
+    const db = freshDb();
+    seed(db, "nm000862", "public");
+    reset({
+      [manifestKey]: () => new Response(emptyManifestBody(), { status: 200 }),
+      [publicRawPath]: () => new Response("", { status: 200 }),
+    });
+
+    const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Length")).toBe("0");
+    expect(await res.text()).toBe("");
+  });
+
+  test("a body larger than the manifest is not read past what was promised", async () => {
+    const db = freshDb();
+    seed(db, "nm000862", "public");
+    // The failure this guards: both size gates test the MANIFEST's number, so
+    // nothing bounds what upstream sends. Draining first and comparing after
+    // would read a retagged recording into a 128 MB isolate in full -- a kill
+    // that cannot even be caught and logged, taking every unrelated in-flight
+    // request with it.
+    const CHUNK = 64 * 1024;
+    const TOTAL = 256;
+    let pushed = 0;
+    reset({
+      [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+      [publicRawPath]: () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            async pull(controller) {
+              if (pushed >= TOTAL) {
+                controller.close();
+                return;
+              }
+              pushed++;
+              controller.enqueue(new Uint8Array(CHUNK));
+              await Bun.sleep(0);
+            },
+          }),
+        ),
+    });
+
+    const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+
+    expect(res.status).toBe(502);
+    // The assertion that makes this a test rather than a duplicate of the
+    // short/long ones: it is 502 either way, so only the byte count shows
+    // whether the read was bounded. The manifest promised 43 bytes; a
+    // bounded read stops within a chunk or two of that.
+    expect(pushed).toBeLessThan(TOTAL);
+    expect(pushed * CHUNK).toBeLessThan(4 * CHUNK);
+  });
+
+  test("above the buffer ceiling it streams, with NO declared length", async () => {
     const db = freshDb();
     seed(db, "nm000862", "public");
     reset({
@@ -425,11 +559,137 @@ describe("the route: the gate, then the bytes", () => {
     const res = await app().request(
       `/nm000862/${VERSION}/${PATH}`,
       {},
-      { ...env(db), BROKER_BUFFER_MAX_BYTES: "0" },
+      { ...env(db), BROKER_BUFFER_MAX_BYTES: String(FILE_BODY.length - 1) },
     );
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe(FILE_BODY);
+    // THE assertion of this PR. Without it, restoring the unconditional
+    // `headers.set("Content-Length", ...)` that #1420 shipped -- the change
+    // that deployed and did not work -- passes the entire suite.
+    expect(res.headers.get("Content-Length")).toBeNull();
+  });
+
+  test("a file exactly at the ceiling is buffered, not streamed", async () => {
+    const db = freshDb();
+    seed(db, "nm000862", "public");
+    reset({
+      [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+      [publicRawPath]: () => streamed(FILE_BODY),
+    });
+
+    const res = await app().request(
+      `/nm000862/${VERSION}/${PATH}`,
+      {},
+      { ...env(db), BROKER_BUFFER_MAX_BYTES: String(FILE_BODY.length) },
+    );
+
+    // "At or below" is the documented boundary, so the ceiling itself
+    // buffers. Pins `>` against a drift to `>=`.
+    expect(res.headers.get("Content-Length")).toBe(String(FILE_BODY.length));
+  });
+
+  test("a ceiling that is not a byte count falls back to the default", async () => {
+    const db = freshDb();
+    seed(db, "nm000862", "public");
+    reset({
+      [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+      [publicRawPath]: () => streamed(FILE_BODY),
+    });
+
+    // "8MB" is the obvious spelling and the one this binding's doc comment
+    // writes in prose. `Number.parseInt` would read it as EIGHT BYTES, put
+    // every file in the catalog on the streamed branch, and reproduce #1419's
+    // production symptom through a config typo, silently.
+    const res = await app().request(
+      `/nm000862/${VERSION}/${PATH}`,
+      {},
+      { ...env(db), BROKER_BUFFER_MAX_BYTES: "8MB" },
+    );
+
+    expect(res.headers.get("Content-Length")).toBe(String(FILE_BODY.length));
+  });
+
+  test("above the ceiling, a short body still fails the transfer", async () => {
+    const db = freshDb();
+    seed(db, "nm000862", "public");
+    reset({
+      [manifestKey]: () => new Response(manifestBody(FILE_BODY.length + 10), { status: 200 }),
+      [publicRawPath]: () => streamed(FILE_BODY),
+    });
+
+    const res = await app().request(
+      `/nm000862/${VERSION}/${PATH}`,
+      {},
+      { ...env(db), BROKER_BUFFER_MAX_BYTES: "0" },
+    );
+
+    // Streamed: the status is committed before the length is known, so the
+    // only honest refusal left is a transfer the client cannot complete. A
+    // ceiling of 0 reaches this branch without a multi-megabyte fixture; what
+    // it does NOT reproduce is the real shape, an 8-32 MB body arriving in
+    // many chunks under backpressure.
+    expect(res.status).toBe(200);
+    expect(res.text()).rejects.toThrow(/did not match the manifest/);
+  });
+
+  test("above the ceiling, an upstream-declared mismatch is still a clean 502", async () => {
+    const db = freshDb();
+    seed(db, "nm000862", "public");
+    reset({
+      [manifestKey]: () => new Response(manifestBody(999), { status: 200 }),
+      [publicRawPath]: () =>
+        new Response(FILE_BODY, {
+          status: 200,
+          headers: { "Content-Length": String(FILE_BODY.length) },
+        }),
+    });
+
+    const res = await app().request(
+      `/nm000862/${VERSION}/${PATH}`,
+      {},
+      { ...env(db), BROKER_BUFFER_MAX_BYTES: "0" },
+    );
+
+    // The only place the upstream-header fast path is still observable: on
+    // the buffered branch it produces the same 502 as the measurement, so
+    // deleting it changes nothing there. Here it is the difference between a
+    // clean refusal and a 200 that aborts mid-transfer.
+    expect(res.status).toBe(502);
+  });
+
+  test("a refused body is not recorded as bytes delivered, and a served one is", async () => {
+    const db = freshDb();
+    seed(db, "nm000862", "public");
+    const points: Array<{ blobs: string[]; doubles: number[] }> = [];
+    const collecting = {
+      ...env(db),
+      ANALYTICS: {
+        writeDataPoint: (p: { blobs: string[]; doubles: number[] }) => {
+          points.push(p);
+        },
+      },
+    } as unknown as Bindings;
+
+    // Refused: the manifest promises more than upstream sends.
+    reset({
+      [manifestKey]: () => new Response(manifestBody(FILE_BODY.length + 10), { status: 200 }),
+      [publicRawPath]: () => streamed(FILE_BODY),
+    });
+    const refused = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, collecting);
+    expect(refused.status).toBe(502);
+    expect(points).toEqual([]);
+
+    // Served: the same collector, so the negative half above cannot pass by
+    // `recordAccess` having been deleted outright.
+    reset({
+      [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+      [publicRawPath]: () => streamed(FILE_BODY),
+    });
+    const served = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, collecting);
+    expect(served.status).toBe(200);
+    expect(points).toHaveLength(1);
+    expect(points[0].doubles[0]).toBe(FILE_BODY.length);
   });
 
   test("an upstream throttle is a 5xx with Retry-After, never a 404", async () => {
