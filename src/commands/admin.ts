@@ -5985,12 +5985,25 @@ Where a copy is allowed to come from:
   exactly one distinct upstream object whose size matches the key's. A path alone
   is never enough: upstream rewrites paths, and an import is months old.
 
+  A key that declares zero bytes needs no source at all: there is exactly one
+  byte string of length zero, and the key's own hash says whether that is what it
+  wants. Those are written directly and reported as origin "empty". A pin is not
+  consulted, which matters: on006136's empty key carries four, and all four name
+  upstream temp objects holding 2 KB of the dataset README.
+
 How a copy is proven:
   S3 computes the SHA-256 of what it wrote and it is compared to the key's own
   hash before anything else happens. A copy that does not match is DELETED, not
   left in the bucket looking like content. Above CopyObject's 5 GB limit a copy
   is multipart and cannot be checksummed that way, so there an unpinned source is
   refused rather than trusted.
+
+  Before any of that, the source is asked its length and refused if it does not
+  match the key's. A pin is an index, not a promise: on004624's names an object
+  32 KiB longer than its key. Below 5 GB this only saves a copy the checksum
+  would refuse anyway; above it there is no checksum behind it, so it is the
+  guard. A source that does not answer is not refused -- not finding out is not
+  evidence -- and the copy decides instead.
 
 Credentials:
   the copy is server-side, so no dataset bytes pass through this machine, but it
