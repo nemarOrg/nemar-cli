@@ -72,6 +72,7 @@ import {
   uploadManifest,
   waitForPublicPropagation,
 } from "./s3";
+import { ZARR_REQUEUE_AT_PATH } from "./sweep-stamps";
 import {
   OWNER_NAME_MISSING_MESSAGE,
   OWNER_NAME_MISSING_REASON,
@@ -863,6 +864,43 @@ async function stepRepoPublic(c: ApproveStepContext): Promise<RespondOutcome | u
         if (restored.warnings?.length) {
           console.warn(
             `[publish] ${datasetId} de-anonymization enrichment warnings: ${restored.warnings.join("; ")}`,
+          );
+        }
+
+        // Ask for the Zarr stores to be rebuilt (#1409).
+        //
+        // The converter bakes the catalog row's attribution into `index.json`'s
+        // `citation` and into every store's `nemar` root attribute, and an
+        // anonymous deposit is `visibility = 'public'`, so it has been
+        // converting all along -- with the blinded label and no DOI.
+        // Re-conversion is triggered by a `latest_version` change or a GLOBAL
+        // `ZARR_ENGINE_VERSION` bump, and de-anonymizing causes neither: the tag
+        // comes from the depositor's own `Version` field, `createTag` treats an
+        // existing ref as success, and the `dataset_versions` row is written by
+        // callbacks the anonymous release never reaches. Without this stamp a
+        // published, attributed dataset keeps serving "Anonymous (withheld until
+        // publication)" from zarr.nemar.org indefinitely.
+        //
+        // Written AFTER the restoration succeeds, because a rebuild is worth
+        // asking for only once the attribution it would carry exists.
+        //
+        // Best-effort and deliberately NOT fatal: the dataset is correctly
+        // published either way, and what is stale is a derived serving copy
+        // (ADR 0005). The anonymity sweep reports a stale index if this is ever
+        // missed.
+        try {
+          await db
+            .prepare(
+              `UPDATE datasets
+                 SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '${ZARR_REQUEUE_AT_PATH}', datetime('now'))
+               WHERE dataset_id = ?`,
+            )
+            .bind(datasetId)
+            .run();
+        } catch (err) {
+          console.error(
+            `[publish] ${datasetId}: could not request a Zarr rebuild after de-anonymizing; its stores keep the blinded citation until the next conversion:`,
+            err instanceof Error ? err.message : err,
           );
         }
       }

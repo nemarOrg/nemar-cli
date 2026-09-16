@@ -486,6 +486,24 @@ describe("an anonymous release is a publication minus the steps that expose iden
     expect(ORCHESTRATOR).not.toContain("if (!c.anonymousRelease && isAnonymous(c.dataset)) {");
   });
 
+  test("de-anonymizing asks for the Zarr stores to be rebuilt", () => {
+    // The stores carry the catalog row's attribution, an anonymous deposit is
+    // public so it has been converting all along with the blinded label, and
+    // publishing for real changes neither the dataset version nor the global
+    // engine stamp -- the only two triggers the conversion queue had. Without
+    // this stamp the published, attributed dataset keeps serving
+    // "Anonymous (withheld until publication)" from zarr.nemar.org forever.
+    //
+    // Placed INSIDE the restoration block on purpose: a rebuild is worth asking
+    // for only once the attribution it would carry actually exists.
+    const restoreAt = ORCHESTRATOR.indexOf("if (restoreAttribution) {");
+    const requeueAt = ORCHESTRATOR.indexOf("${ZARR_REQUEUE_AT_PATH}");
+    const specAt = ORCHESTRATOR.indexOf("publishSpec = await ensureRepoToSpec(");
+    expect(restoreAt).toBeGreaterThan(-1);
+    expect(requeueAt).toBeGreaterThan(restoreAt);
+    expect(requeueAt).toBeLessThan(specAt);
+  });
+
   test("a blinded author list is an interlock on the mint, not only a step order", () => {
     // The ordering above is enforced by where the steps sit. This is the same
     // rule as a state check, so a retry, a resume or a future reordering

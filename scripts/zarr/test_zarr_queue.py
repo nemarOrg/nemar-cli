@@ -47,6 +47,7 @@ from zarr_queue import (  # type: ignore[import-not-found]  # noqa: E402
     index_failure_keys,
     index_store_keys,
     main,
+    fetch_requeue_requests,
     mark_done,
     mark_fail,
     may_carry_dir_formats,
@@ -79,6 +80,110 @@ class QueueTest(unittest.TestCase):
         res = reconcile(self.conn, [("nm000001", "1.0.0"), ("on000002", "1.0.0")], 3600)
         self.assertEqual(res["enqueued"], 2)
         self.assertEqual(self.status("nm000001"), "pending")
+
+    def test_requeue_request_reconverts_a_done_row(self):
+        """The archive asks for one dataset to be rebuilt, and it is.
+
+        nemarOrg/nemar-cli#1409. A de-anonymized deposit's stores carry the
+        blinded author label, and publishing it for real changes neither its
+        version nor the engine stamp -- the only two triggers this queue had --
+        so without this the store keeps serving "Anonymous (withheld until
+        publication)" forever.
+        """
+        reconcile(self.conn, [("nm000001", "1.0.0")], 3600)
+        mark_done(self.conn, "nm000001", "1.0.0")
+        self.assertEqual(self.status("nm000001"), "done")
+
+        res = reconcile(
+            self.conn,
+            [("nm000001", "1.0.0")],
+            3600,
+            requeue_requests={"nm000001": "2026-09-16 01:00:00"},
+        )
+        self.assertEqual(self.status("nm000001"), "pending")
+        self.assertEqual(res["requeue_requested"], 1)
+
+    def test_the_same_request_is_honored_once(self):
+        """The control, and the property that makes this safe to run hourly.
+
+        The stamp is recorded when the request is honored, so a request that
+        stays on the catalog row -- which it does, because nothing clears it --
+        re-queues the dataset once rather than on every tick forever.
+        """
+        reconcile(self.conn, [("nm000001", "1.0.0")], 3600)
+        mark_done(self.conn, "nm000001", "1.0.0")
+        request = {"nm000001": "2026-09-16 01:00:00"}
+
+        reconcile(self.conn, [("nm000001", "1.0.0")], 3600, requeue_requests=request)
+        mark_done(self.conn, "nm000001", "1.0.0")
+
+        res = reconcile(self.conn, [("nm000001", "1.0.0")], 3600, requeue_requests=request)
+        self.assertEqual(self.status("nm000001"), "done")
+        self.assertEqual(res["requeue_requested"], 0)
+
+    def test_a_later_request_is_honored_again(self):
+        """A second de-anonymization, or any later rebuild, is a new stamp."""
+        reconcile(self.conn, [("nm000001", "1.0.0")], 3600)
+        mark_done(self.conn, "nm000001", "1.0.0")
+        reconcile(
+            self.conn,
+            [("nm000001", "1.0.0")],
+            3600,
+            requeue_requests={"nm000001": "2026-09-16 01:00:00"},
+        )
+        mark_done(self.conn, "nm000001", "1.0.0")
+
+        res = reconcile(
+            self.conn,
+            [("nm000001", "1.0.0")],
+            3600,
+            requeue_requests={"nm000001": "2026-09-17 09:30:00"},
+        )
+        self.assertEqual(self.status("nm000001"), "pending")
+        self.assertEqual(res["requeue_requested"], 1)
+
+    def test_no_request_touches_nothing(self):
+        """The common case: every dataset in the catalog, on every tick."""
+        reconcile(self.conn, [("nm000001", "1.0.0")], 3600)
+        mark_done(self.conn, "nm000001", "1.0.0")
+        res = reconcile(self.conn, [("nm000001", "1.0.0")], 3600)
+        self.assertEqual(self.status("nm000001"), "done")
+        self.assertEqual(res["requeue_requested"], 0)
+
+    def test_a_request_is_not_held_by_the_engine_ack_gate(self):
+        """One dataset asked for by name does not wait on an unrelated bump.
+
+        The ack gate exists because a global engine bump can hand the whole
+        archive back at once. This is one dataset, for a reason the archive
+        knows; holding it behind that guard would mean a de-anonymized dataset
+        kept serving a blinded citation until somebody acked something else.
+        """
+        reconcile(self.conn, [("nm000001", "1.0.0")], 3600, engine_version="3")
+        mark_done(self.conn, "nm000001", "1.0.0", engine_version="3")
+        res = reconcile(
+            self.conn,
+            [("nm000001", "1.0.0")],
+            3600,
+            engine_version="4",
+            engine_requeue_limit=0,
+            engine_requeue_ack=False,
+            requeue_requests={"nm000001": "2026-09-16 01:00:00"},
+        )
+        self.assertEqual(self.status("nm000001"), "pending")
+        self.assertEqual(res["requeue_requested"], 1)
+
+    def test_fetch_requeue_requests_reads_only_real_stamps(self):
+        """Sparse by construction: the field is absent for almost every row."""
+        rows = [
+            {"dataset_id": "nm000001", "zarr_requeue_at": "2026-09-16 01:00:00"},
+            {"dataset_id": "nm000002", "zarr_requeue_at": None},
+            {"dataset_id": "nm000003"},
+            {"dataset_id": "nm000004", "zarr_requeue_at": ""},
+            {"zarr_requeue_at": "2026-09-16 01:00:00"},
+        ]
+        self.assertEqual(
+            fetch_requeue_requests(rows), {"nm000001": "2026-09-16 01:00:00"}
+        )
 
     def test_reconcile_filters_invalid_and_test_id(self):
         reconcile(self.conn, [("nm099999", "1"), ("bad", "1"), ("nm000001", "1.0.0")], 3600)

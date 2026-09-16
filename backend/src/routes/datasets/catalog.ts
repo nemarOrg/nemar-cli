@@ -41,7 +41,11 @@ import {
 } from "../../services/dataset-filters";
 import { DEFAULT_MIN_SCORE, executeDatasetSearch } from "../../services/dataset-search";
 import { isValidDatasetId } from "../../services/datasetId";
-import { ZARR_VERIFIED_AT_PATH, ZARR_VERIFY_STATUS_PATH } from "../../services/sweep-stamps";
+import {
+  ZARR_REQUEUE_AT_PATH,
+  ZARR_VERIFIED_AT_PATH,
+  ZARR_VERIFY_STATUS_PATH,
+} from "../../services/sweep-stamps";
 import { type Bindings, hasRole } from "../../types/bindings";
 import type { DatasetsRouter } from "./shared";
 
@@ -95,6 +99,13 @@ const FACET_PROJECTION_COLUMNS = `d.subject_count,
                -- Null until the sweep reaches this dataset.
                json_extract(d.sweep_stamps, '${ZARR_VERIFY_STATUS_PATH}') AS zarr_verify_status,
                json_extract(d.sweep_stamps, '${ZARR_VERIFIED_AT_PATH}') AS zarr_verified_at,
+               -- Issue #1409 (epic #1406): when the archive last asked for
+               -- this dataset's stores to be rebuilt. Read by
+               -- scripts/zarr/zarr_queue.py off this row, because the
+               -- conversion queue lives in SQLite on Hallu and there was no
+               -- other way for the backend to say "re-convert this one".
+               -- Same derived-field pattern, same reason: no new column.
+               json_extract(d.sweep_stamps, '${ZARR_REQUEUE_AT_PATH}') AS zarr_requeue_at,
                d.total_recording_duration,
                d.recording_duration_min,
                d.recording_duration_max,

@@ -142,6 +142,14 @@ const catalogItemObjectSchema = z
     // two fields itself.
     zarr_verify_status: z.enum(["verified", "failed", "unverifiable"]).nullable().optional(),
     zarr_verified_at: z.string().nullable().optional(),
+    // #1409: when the ARCHIVE last asked for this dataset's stores to be
+    // rebuilt, which is a different question from when they were last
+    // verified. The only consumer is `scripts/zarr/zarr_queue.py`: the
+    // conversion queue's state lives in SQLite on the Hallu node, so this row
+    // is the one channel the backend has for "re-convert this one dataset".
+    // It exists because de-anonymizing a deposit changes neither the dataset
+    // version nor the global engine stamp, which were the only two triggers.
+    zarr_requeue_at: z.string().nullable().optional(),
     total_recording_duration: z.number().nullable().optional(),
     recording_duration_min: z.number().nullable().optional(),
     recording_duration_max: z.number().nullable().optional(),
