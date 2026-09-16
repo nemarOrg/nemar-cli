@@ -128,8 +128,10 @@ earlier releases are described only by their generated notes.
   ratio toward 100%. `on008017` is missing 4.7% of its tracked files and 21.6% of its data,
   and `on004917` 11.8% against 25.4%, so a threshold on tracked files clears both. A
   metadata-only dataset measures 1 rather than dividing by zero. The threshold is applied only
-  after recovery has reported what it cannot get: three datasets recovered on 2026-09-15 were
-  below it that morning and whole by the afternoon.
+  after recovery has reported what it cannot get: on 2026-09-15 three datasets that were
+  not already withdrawn were under the threshold that morning and whole by the afternoon,
+  and six more came off the withdrawn list the same day. A verdict read from a stale
+  column would have tombstoned content that exists.
 
 - **A publish-gate shortfall now files a labeled tracking issue (#1396).** The gate
   refuses when the bucket cannot back the keys a dataset's tree names, but its message

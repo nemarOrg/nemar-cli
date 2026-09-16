@@ -276,6 +276,12 @@ describe("planKeyRecovery", () => {
       object: "ds008798/a/b.dat",
       version: "v1",
     });
+    // The ETag the size match was resolved against, unquoted. It is the evidence
+    // for this arm of the union, so it belongs in the report rather than being
+    // discarded -- and the arm carries no `remoteName`, which only ever meant
+    // something for a pin and used to be filled with the sentinel "upstream".
+    expect(entry.source).toMatchObject({ etag: "aaa" });
+    expect(entry.source).not.toHaveProperty("remoteName");
   });
 
   test("treats repeated versions of identical bytes as one candidate", () => {

@@ -303,8 +303,31 @@ export function indexUpstreamVersions(stdout: string): Map<string, UpstreamObjec
 
 export type RecoveryOrigin = "pinned" | "version-match";
 
-export interface RecoverySource extends PinnedSource {
-  origin: RecoveryOrigin;
+/**
+ * Where a copy may read from, and on what authority.
+ *
+ * A union on `origin` rather than one shape with optional fields, so each arm
+ * carries exactly the evidence its authority rests on. The pinned arm is a
+ * `PinnedSource`, including the `remoteName` the record came from; the
+ * version-match arm carries the ETag it was matched on, which is the evidence
+ * for that arm and worth having in the JSON report. Previously both were
+ * `PinnedSource` and a discovered source filled `remoteName: "upstream"`, a
+ * sentinel for a field that only means something for a pin.
+ */
+export type RecoverySource = SourceCommon &
+  (
+    | ({ origin: "pinned" } & PinnedSource)
+    | {
+        origin: "version-match";
+        bucket: string;
+        object: string;
+        version: string;
+        /** The ETag the size match was resolved against; the evidence for this arm. */
+        etag: string;
+      }
+  );
+
+interface SourceCommon {
   /**
    * The size the KEY declares, not a size read from the source object.
    *
@@ -402,7 +425,7 @@ function discoverUpstreamSource(
     bucket: upstream.bucket,
     object: candidate.object,
     version: candidate.version,
-    remoteName: "upstream",
+    etag: candidate.etag,
     origin: "version-match",
     size,
   };

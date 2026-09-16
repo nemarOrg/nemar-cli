@@ -108,9 +108,10 @@ export function dataAvailability(state: {
 /**
  * Below this share of its data available, a dataset is withdrawn (ADR 0064).
  *
- * Measured AFTER recovery has reported what it cannot get: three datasets recovered
- * on 2026-09-15 were under it that morning and whole by the afternoon, so a verdict
- * from a stale column would have tombstoned content that exists.
+ * Measured AFTER recovery has reported what it cannot get. On 2026-09-15 three datasets
+ * that were not already withdrawn sat under this threshold in the morning and were whole
+ * by the afternoon, and six more came off the withdrawn list the same day, so a verdict
+ * read from a stale column would have tombstoned content that exists.
  */
 export const MIN_DATA_AVAILABILITY = 0.9;
 
