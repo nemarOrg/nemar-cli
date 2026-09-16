@@ -406,18 +406,63 @@ describe("the declared docs checkout must exist when it is declared", () => {
 // The comparison itself.
 // --------------------------------------------------------------------------
 
-describe("the comparison must actually run in CI", () => {
-  // A fourth mode review found: an env var that resolves to the empty string --
+describe("the comparison must actually run when a checkout was undertaken", () => {
+  // The mode this guards is real: an env var that resolves to the empty string --
   // a dropped YAML interpolation, or the checkout step deleted while the `env:`
-  // line stayed -- is treated as unset, falls through to a sibling search that
-  // finds nothing on a runner, and skips the whole comparison while the job goes
-  // green. Every other mode is loud; this one was silent.
-  test.skipIf(!process.env.CI)("a docs checkout was found", () => {
+  // line stayed -- falls through to a sibling search that finds nothing on a
+  // runner, and would skip the whole comparison while the job goes green.
+  //
+  // It used to be keyed on `process.env.CI`, which is set in EVERY GitHub Actions
+  // job, and that was too broad in two ways that both bit:
+  //
+  //  1. A FORK pull request. `test.yml` deliberately sets the variable to `''`
+  //     there, because the docs repo is private and the checkout cannot succeed
+  //     on a fork. The workflow comment says the guard must then "skip VISIBLY
+  //     instead of failing on a checkout that could never have worked", and ADR
+  //     0057 says losing read access must not cost someone the ability to
+  //     contribute. The CI-keyed guard failed those runs instead, so an outside
+  //     contributor fixing a typo got a red REQUIRED check.
+  //  2. Any OTHER CI job that runs this suite without wanting docs parity.
+  //     `deploy-backend.yml`'s `test-gate` is one, and it had been red on every
+  //     push to dev for days, which skips `deploy-dev` -- so the backend silently
+  //     stopped deploying.
+  //
+  // So the runtime guard now keys on what it actually depends on: a job that
+  // declared a NON-EMPTY checkout path undertook to provide one, and must. A job
+  // that declared nothing never undertook it. An empty value is the fork case and
+  // is indistinguishable at runtime from a dropped interpolation -- which is why
+  // the protection against silent disabling is the STATIC check below, on the
+  // workflow file itself, rather than an inference from the environment.
+  test.skipIf(DECLARED_PATH === null)("the declared docs checkout resolved", () => {
     expect({ skipped: NO_CHECKOUT, root: FOUND_ROOT, ref: REF }).toEqual({
       skipped: false,
       root: FOUND_ROOT,
       ref: REF,
     });
+  });
+});
+
+describe("the workflow still wires the docs checkout", () => {
+  // The guard that cannot be silently dropped, because it does not depend on the
+  // environment it is trying to check. Deleting the checkout step, or the `env:`
+  // line that names it, makes the runtime guard above skip everywhere and take
+  // the whole comparison with it. Reading the workflow file catches that in every
+  // job and on a laptop, with no checkout of anything.
+  const WORKFLOW = join(REPO_ROOT, ".github", "workflows", "test.yml");
+
+  test("test.yml checks out the docs content tree", () => {
+    const yaml = readFileSync(WORKFLOW, "utf8");
+    expect(yaml).toContain("repository: nemarOrg/docs");
+    expect(yaml).toContain("path: docs-live");
+  });
+
+  test(`test.yml still names the checkout in ${DOCS_ENV_VAR}`, () => {
+    // Both halves: the variable is declared, and its value points at the path the
+    // checkout step writes. A rename on one side only is the drift this catches.
+    const yaml = readFileSync(WORKFLOW, "utf8");
+    const line = yaml.split("\n").find((l) => l.includes(`${DOCS_ENV_VAR}:`));
+    expect(line).toBeDefined();
+    expect(line).toContain("docs-live");
   });
 });
 
