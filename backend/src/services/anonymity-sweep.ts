@@ -76,7 +76,6 @@ import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { fetchGitTrackedFile } from "./github/git-file-broker.js";
 import { GITHUB_API, ORG_NAME } from "./github/shared.js";
-import { getManifest } from "./s3.js";
 import { isPlaceholderAuthor } from "./submission-minimums.js";
 import {
   ANONYMITY_ATTEMPTED_AT_PATH,
@@ -595,8 +594,22 @@ export interface AnonymitySweepSeams {
   getIdentifierImpl?: (identifier: string) => Promise<{ status: string; dataciteXml?: string }>;
   /** Reads a published Zarr index; `null` means the dataset has none. */
   fetchZarrIndexImpl?: (datasetId: string) => Promise<string | null>;
-  /** Reads the version manifest; `null` means there is none to read. */
-  getManifestImpl?: (datasetId: string) => Promise<{ files: Record<string, unknown> } | null>;
+  /**
+   * Lists the repository's git-tracked files at `main`.
+   *
+   * The repository tree rather than the published version manifest, and the
+   * difference matters: an anonymous release skips `version_doi`, so no
+   * `dataset_versions` row and no published manifest exists for exactly the
+   * datasets this sweep is for. `main` is also the right ref on its own terms
+   * -- a concealed deposit's files keep changing there while its repository is
+   * private, because restoring attribution is a direct commit.
+   *
+   * `null` means the listing could not be obtained, which the caller reports as
+   * unchecked rather than as "no files".
+   */
+  listGitFilesImpl?: (
+    repo: string,
+  ) => Promise<{ path: string; sha: string; size?: number }[] | null>;
 }
 
 /**
@@ -736,27 +749,26 @@ async function scanDataset(
   // --- the depositor's own files ------------------------------------------
   let filesScanned = 0;
   let filesListed = 0;
-  const manifest = seams.getManifestImpl
-    ? await seams.getManifestImpl(row.dataset_id).catch(() => null)
-    : null;
-  if (!manifest || !repo || !token) {
+  const listing =
+    repo && token && seams.listGitFilesImpl
+      ? await seams.listGitFilesImpl(repo).catch(() => null)
+      : null;
+  if (!listing || !repo || !token) {
     unchecked.push("deposit_files");
   } else {
-    const gitTracked = Object.entries(manifest.files)
-      .filter(([, file]) => {
-        const key = (file as { key?: unknown }).key;
-        return typeof key === "string" && key.startsWith("git:");
-      })
-      .map(([path]) => path);
-    filesListed = gitTracked.length;
-    const selected = selectDepositFiles(gitTracked, ANONYMITY_MAX_DEPOSIT_FILES);
+    const bySha = new Map(listing.map((f) => [f.path, f]));
+    filesListed = listing.length;
+    const selected = selectDepositFiles(
+      listing.map((f) => f.path),
+      ANONYMITY_MAX_DEPOSIT_FILES,
+    );
     for (const path of selected) {
       if (budget.remaining <= 0) {
         unchecked.push("deposit_files_budget");
         break;
       }
-      const entry = manifest.files[path] as { key?: string; size?: number } | undefined;
-      const blobSha = entry?.key?.replace(/^git:/, "") ?? "";
+      const entry = bySha.get(path);
+      const blobSha = entry?.sha ?? "";
       if ((entry?.size ?? 0) > ANONYMITY_MAX_FILE_BYTES) {
         unchecked.push(`deposit_file_too_large:${path}`);
         continue;
@@ -845,7 +857,7 @@ export async function runAnonymitySweep(
     ...seams,
     getIdentifierImpl: seams.getIdentifierImpl ?? (await defaultIdentifierReader(env)),
     fetchZarrIndexImpl: seams.fetchZarrIndexImpl ?? defaultZarrIndexReader(env),
-    getManifestImpl: seams.getManifestImpl ?? defaultManifestReader(env),
+    listGitFilesImpl: seams.listGitFilesImpl ?? defaultGitFileLister(token),
   };
 
   let verified = 0;
@@ -1011,35 +1023,32 @@ function defaultZarrIndexReader(env: Bindings): AnonymitySweepSeams["fetchZarrIn
   };
 }
 
-/** The real manifest reader: one S3 GET, signed-falls-back for a private dataset. */
-function defaultManifestReader(env: Bindings): AnonymitySweepSeams["getManifestImpl"] {
-  return async (datasetId: string) => {
-    const latest = await env.DB.prepare(
-      "SELECT version FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC LIMIT 1",
-    )
-      .bind(datasetId)
-      .first<{ version: string }>();
-    if (!latest?.version) return null;
-    const raw = await getManifest(
-      {
-        bucket: env.S3_BUCKET,
-        region: env.AWS_REGION,
-        accessKeyId: env.AWS_ACCESS_KEY_ID,
-        secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
-      },
-      datasetId,
-      latest.version,
-    );
-    if (!raw) return null;
-    // `getManifest` returns the raw document. A manifest that does not parse is
-    // not a manifest, and the caller reports the file checks as unchecked --
-    // never as clean.
-    try {
-      const parsed = JSON.parse(raw) as { files?: Record<string, unknown> };
-      return parsed.files ? { files: parsed.files } : null;
-    } catch {
-      return null;
-    }
+/**
+ * The real file listing: the repository tree at `main`.
+ *
+ * Two GitHub `core` calls per dataset, which the candidate pool makes
+ * affordable (anonymous deposits are rare and short-lived) and which the
+ * published-manifest alternative cannot replace: an anonymous release skips
+ * `version_doi`, so the `dataset_versions` row and the manifest that hangs off
+ * it do not exist for these datasets at all.
+ *
+ * Imported from `github/contents.js` rather than the `services/github` barrel
+ * ON PURPOSE. `backend/test/manifest-small-root-files.test.ts` installs a
+ * process-wide `mock.module` on the barrel that makes `getTreeAtRef` return an
+ * empty array, and `test/` and `backend/test/` share one process -- so a sweep
+ * reading through the barrel would see no files in a full run and report a
+ * clean deposit it never looked at.
+ *
+ * A truncated tree (GitHub's cap, ~100k entries) is not distinguished here.
+ * Every file this scan prioritises is at the repository root, and a recursive
+ * tree lists the root first, so truncation cannot hide one.
+ */
+function defaultGitFileLister(token: string | null): AnonymitySweepSeams["listGitFilesImpl"] {
+  return async (repo: string) => {
+    if (!token) return null;
+    const { getTreeAtRef } = await import("./github/contents.js");
+    const tree = await getTreeAtRef(repo, "main", token);
+    return tree.map((entry) => ({ path: entry.path, sha: entry.sha, size: entry.size }));
   };
 }
 

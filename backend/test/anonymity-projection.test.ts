@@ -75,6 +75,8 @@ const USES_THE_RULE = /OWNER_USERNAME_SQL|OWNER_GITHUB_SQL/;
  */
 const DELIBERATE_INTERNAL_READS: Readonly<Record<string, string>> = {
   "routes/admin/doi.ts": "admin-only DOI minting; the curator must be the real person (ADR 0041)",
+  "services/anonymity-sweep.ts":
+    "the sweep searches the depositor's own files for the depositor, so it has to know exactly who that is (#1409); nothing it reads reaches a caller -- the findings name a file and a check, never a name",
   "routes/admin/exemplar.ts": "admin-only exemplar tooling, never an anonymous surface",
   "routes/admin/user-duplicates.ts":
     "admin-only identity reconciliation; the subject IS the user, and its dataset reference is a count",

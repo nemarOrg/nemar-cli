@@ -340,6 +340,12 @@
                     "null"
                   ]
                 },
+                "zarr_requeue_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "total_recording_duration": {
                   "type": [
                     "number",
@@ -757,6 +763,12 @@
                 ]
               },
               "zarr_verified_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "zarr_requeue_at": {
                 "type": [
                   "string",
                   "null"
