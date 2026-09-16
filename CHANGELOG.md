@@ -13,9 +13,70 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
-## Unreleased
+## 0.10.4 - 2026-09-16
 
 ### Added
+
+- **A dataset can be deposited for double-blind review: readable, and not attributed until
+  you say so (epic #1406).** `nemar dataset publish request <id> --anonymous` releases the
+  data exactly as any public dataset is released -- listed, browsable, downloadable, at the
+  ordinary dataset URL a reviewer can be pointed at -- while nothing NEMAR publishes names
+  the depositor. The repository stays private, `datasets.authors` carries a blinded label
+  rather than real names, `.nemar/metadata.json` is committed with authors, contributors,
+  funding, geo-locations and related identifiers stripped, the DOI stays `reserved` with no
+  DataCurator and is never harvested, and the catalog projects no owner. When the paper is
+  accepted, restore the real `Authors` in `dataset_description.json` and request publication
+  again WITHOUT the flag; that is what ends anonymity and publishes the record for real.
+  Blind your own files first: NEMAR cannot scrub what the depositor wrote, and the sweep
+  below reports what is left rather than editing it.
+
+  Two limits are deliberate and worth knowing before you plan around them. Anonymity is
+  available only BEFORE a dataset has ever been published, and the database enforces it:
+  migration 0085 adds `first_published_at` and `anonymous` to `datasets` with triggers that
+  refuse any row which is both, so the guarantee survives a route that forgets to check.
+  Retracting an attribution that is already public is theater -- DataCite is harvested, the
+  landing page is indexed, the git history is in every clone -- so publication is a one-way
+  door rather than a toggle. And anonymity is toward the public, never toward the archive:
+  admin and service reads resolve identity on purpose. See ADR 0065.
+
+  Identity is withheld by the WRITER, not filtered by the reader, which is why the blind
+  holds at surfaces a read-time filter would have missed: `datasets.authors` reaches the
+  full-text index through a trigger, so a projection filter would have hidden names from the
+  API while leaving them searchable. Two leaks that survived the first draft are closed at
+  their own sites because neither is reachable from a `SELECT` list -- `GET /datasets/:id`
+  served the raw `owner_user_id` beside the nulled username (a stable handle linking one
+  depositor's several anonymous deposits), and `?owner=<username>` filtered on the real
+  username, confirming authorship without ever projecting it.
+
+- **`nemar admin anonymity-sweep` re-checks every anonymous deposit daily, and reports two
+  different kinds of finding without letting one stand in for the other (#1409).**
+  `severity: "invariant"` is a NEMAR bug -- repository public, real names in `authors`,
+  `first_published_at` stamped, an EZID record that is not `reserved`, an owner projected, a
+  Zarr index carrying attribution. `severity: "deposit"` is what the depositor left in their
+  own files, addressed to them. The file checks are deterministic on purpose: they do not
+  ask whether a string is a person's name, they ask whether a file contains THE DEPOSITOR --
+  the real name, username, GitHub handle, email and ORCID iD already in the `users` row
+  NEMAR is concealing -- plus any ORCID iD and any email address. No classifier, no
+  false-positive budget, and a finding a depositor can reproduce without arguing with it.
+  It reports and never repairs, because a disclosure cannot be undone by flipping a flag and
+  an automatic fix would destroy the evidence that the guarantee had failed; it writes only
+  `sweep_stamps`, and it files no GitHub issue precisely because `nemarDatasets` is
+  public-facing. A check that could not run is `unchecked`, never clean. See ADR 0067.
+
+- **The data plane serves a dataset's git-tracked files itself, instead of redirecting to
+  GitHub (#1403).** `data.nemar.org/<id>/<version>/<path>` used to 302 metadata files to
+  `raw.githubusercontent.com`; it now returns the bytes. That is what makes an anonymous
+  deposit readable at all -- its repository is private, so every raw URL 404s for a reviewer
+  -- and it removes a third-party host from the critical path for every other dataset too.
+  The capability rules are the interesting part: the manifest is the capability list, the
+  repository comes from the dataset row and never from the request, the visibility gate runs
+  BEFORE the installation token is spent, the cache is keyed by request URL and never by
+  blob SHA (two datasets sharing an identical file share its SHA, so a SHA-keyed hit would
+  serve a private dataset's bytes to whoever asked second), and a refusal is 404 rather than
+  403 because "exists but forbidden" is itself the disclosure. Responses are `max-age=300`
+  and deliberately not `immutable`: the bytes are immutable, the authorization is not, and
+  nothing purges the edge. A 32 MB per-file ceiling guards against an annex-policy slip; the
+  largest git-tracked file measured across the catalog is 283 KB. See ADR 0066.
 
 - **`nemar dataset download` no longer needs git-annex.** A missing git-annex used to be a hard
   exit, which is a poor answer to "I just want the files" when the data plane already serves
@@ -102,6 +163,38 @@ earlier releases are described only by their generated notes.
 
 ### Fixed
 
+- **A brokered git-tracked file now carries a `Content-Length`, and its length is checked
+  against the manifest for real (#1419).** The broker asks GitHub's raw host for
+  `Accept-Encoding: identity` so that upstream's declared length means what the manifest
+  means. The Workers runtime owns that header: it never reaches GitHub, raw gzips anyway,
+  and workerd strips `Content-Length` when it decodes. So the deployed data plane served
+  every git-tracked file with no length at all, and the documented check that a moved tag
+  cannot serve the wrong bytes had never once run in production -- the guard was inert while
+  looking present, which is the failure mode worth naming.
+
+  A first attempt set the header by hand and still did not work, which is worth recording
+  because it is the same lesson twice: workerd sends a streamed body chunked and drops the
+  header, so a length that reaches a client has to belong to a body whose length the runtime
+  already knows. A brokered file at or below 8 MB is therefore read, checked and answered as
+  bytes, which also makes a mismatch a clean 502 before anything is sent rather than a
+  transfer aborted mid-flight. The read is bounded by the manifest's size and cancels
+  upstream the moment it is exceeded, because both size gates test the number the MANIFEST
+  claims and nothing bounds what GitHub actually sends: draining first would let a retagged
+  recording fill a 128 MB isolate. Above the ceiling it degrades to a stream with a counter
+  that errors on a short or overrun body: no declared length there, but still no
+  wrong-length file that finishes looking healthy. For scale, the per-file ceiling is 32 MB
+  and the largest git-tracked file measured across the catalog is 283 KB, so the buffered
+  branch is what every real dataset takes.
+
+- **A brokered file is now checked for being the right bytes, not just the right number of
+  them (#1419).** The broker fetches by git REF, not by blob SHA, so a moved tag serves
+  whatever is at that path now. A same-size edit -- a BIDS version string bumped, one
+  participant ID swapped for another -- passed every length check and was served as a 200
+  whose `ETag` named the OLD blob, cacheable for five minutes. Having the complete bytes in
+  hand makes the real check affordable: the buffered branch hashes them as a git blob and
+  compares to the object name the manifest already records, so `ETag` now means what it
+  says. ADR 0066 carries both corrections.
+
 - **The withdrawn-datasets list now records a measured reason per dataset, and six entries
   were wrong (#1396).** It carried one filed reason each, 9 `upstream_403` and 2
   `no_source`, none of it measured per dataset. Trying every key against both routes
@@ -165,6 +258,18 @@ earlier releases are described only by their generated notes.
   true, so the repair is to retract it. The read-back is inverted rather than reused:
   success is the key no longer being recorded at the remote, and the assert-side check
   would have reported every retraction as a failure.
+
+- **Content recovery refuses a wrong-sized source, and can recover a zero-length key
+  (#1396).** Finishing `on004624` and `on006136` turned up `.log.rmet` pins that are simply
+  wrong about content: a key declaring 0 bytes pinned to 2,075 bytes of the dataset README
+  across four separate pins, and a key declaring 6,488,064 bytes pinned to an object one
+  32 KiB block longer. ADR 0063's SHA-256 comparison caught both and both copies were
+  deleted, so nothing wrong reached the bucket -- but the probe had issued its HEAD and read
+  only the exit code, so a readable wrong-sized object counted as recoverable content and
+  every apply spent a whole copy to be told no. The source's length is now compared to the
+  key's declared size before the copy, on the dry-run path as well as the apply path. In
+  both datasets the only tree path referencing the key is an OpenNeuro upload temp file
+  committed into the dataset, so this is upstream debris rather than scientific data.
 
 - **A multipart copy runs its parts concurrently (#1396).** Parts are independent
   server-side copies but were issued one at a time, so one oversized key copied at about
@@ -362,6 +467,28 @@ earlier releases are described only by their generated notes.
   Read-only by default, `--apply` in batches (ADR 0020: a push per repository starts
   that repository's BIDS validation), and every applied dataset is verified by reading
   GitHub back.
+
+### Migrations
+
+`0085_anonymous_deposit` adds `datasets.first_published_at` and `datasets.anonymous`, two
+`BEFORE INSERT` / `BEFORE UPDATE` triggers that abort any row which is simultaneously
+anonymous and published, a partial index on `anonymous = 1`, and one backfill that stamps
+`first_published_at` for every dataset with evidence of publication (a version row, a
+concept DOI, a `publish_date`, or `visibility = 'public'`), earliest evidence first.
+`0086_publication_request_anonymous` adds `publication_requests.anonymous` and re-opens the
+requests an earlier build had parked with `block_reason = 'anonymous_deposit'`. Both
+additive. `0083_docs_sessions` carries a comment-only correction (the docs gate is not
+ORCID-backed); the file is already applied everywhere and `wrangler d1 migrations apply`
+tracks by name, so nothing replays.
+
+### Deploy coupling
+
+**`nemarOrg/website#334` depends on this release and must ship after it.** The website's
+README panel now fetches `data.nemar.org/<id>/<version>/README.md` instead of
+`raw.githubusercontent.com`, and it drops `raw.githubusercontent.com` from `connect-src` in
+the same change. Before this release the data plane answers that URL with a 302 to the raw
+host, and a CSP applies to a redirect target, so shipping the website first would break the
+README panel on every dataset page in production.
 
 ## 0.10.3 - 2026-09-10
 
