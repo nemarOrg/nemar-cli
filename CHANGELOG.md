@@ -175,14 +175,25 @@ earlier releases are described only by their generated notes.
   A first attempt set the header by hand and still did not work, which is worth recording
   because it is the same lesson twice: workerd sends a streamed body chunked and drops the
   header, so a length that reaches a client has to belong to a body whose length the runtime
-  already knows. A brokered file at or below 8 MB is therefore read, checked against the
-  manifest's size and answered as bytes, which also makes a mismatch a clean 502 before
-  anything is sent rather than a transfer aborted mid-flight. Above that ceiling it degrades
-  to a stream with a counter that errors on a short or overrun body: no declared length
-  there, but still no wrong-length file that finishes looking healthy. For scale, the
-  per-file ceiling is 32 MB and the largest git-tracked file measured across the catalog is
-  283 KB, so the buffered branch is what every real dataset takes. ADR 0066 carries the
-  correction, including why this is a deliberate exception to ADR 0030.
+  already knows. A brokered file at or below 8 MB is therefore read, checked and answered as
+  bytes, which also makes a mismatch a clean 502 before anything is sent rather than a
+  transfer aborted mid-flight. The read is bounded by the manifest's size and cancels
+  upstream the moment it is exceeded, because both size gates test the number the MANIFEST
+  claims and nothing bounds what GitHub actually sends: draining first would let a retagged
+  recording fill a 128 MB isolate. Above the ceiling it degrades to a stream with a counter
+  that errors on a short or overrun body: no declared length there, but still no
+  wrong-length file that finishes looking healthy. For scale, the per-file ceiling is 32 MB
+  and the largest git-tracked file measured across the catalog is 283 KB, so the buffered
+  branch is what every real dataset takes.
+
+- **A brokered file is now checked for being the right bytes, not just the right number of
+  them (#1419).** The broker fetches by git REF, not by blob SHA, so a moved tag serves
+  whatever is at that path now. A same-size edit -- a BIDS version string bumped, one
+  participant ID swapped for another -- passed every length check and was served as a 200
+  whose `ETag` named the OLD blob, cacheable for five minutes. Having the complete bytes in
+  hand makes the real check affordable: the buffered branch hashes them as a git blob and
+  compares to the object name the manifest already records, so `ETag` now means what it
+  says. ADR 0066 carries both corrections.
 
 - **The withdrawn-datasets list now records a measured reason per dataset, and six entries
   were wrong (#1396).** It carried one filed reason each, 9 `upstream_403` and 2
