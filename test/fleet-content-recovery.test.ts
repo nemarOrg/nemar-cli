@@ -336,7 +336,76 @@ exit 0`);
     expect(outcome.action).toBe("failed");
     expect(outcome.keys[0].action).toBe("failed");
     expect(outcome.keys[0].detail).toContain("deleted");
-    expect(shimLog().some((line) => line.startsWith("s3api delete-object"))).toBe(true);
+    // The refusing check is named, and `verification` is NOT set: that field now
+    // means "and this is how it was proven", so a failed key must not carry one.
+    expect(outcome.keys[0].detail).toContain("refused by checksum");
+    expect(outcome.keys[0].verification).toBeUndefined();
+    expect(outcome.keys[0].leftInBucket).toBeFalsy();
+    // WHICH object was deleted, not merely that a delete happened: deleting the
+    // wrong key would pass a prefix-only assertion while leaving the bad object.
+    const deletes = shimLog().filter((line) => line.startsWith("s3api delete-object"));
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0]).toContain("--bucket nemar");
+    expect(deletes[0]).toContain(`--key on000001/objects/${outcome.keys[0].key}`);
+  }, 180_000);
+
+  test("reports an object it could not delete as still in the bucket", async () => {
+    // ADR 0063 calls this the one outcome worse than not copying at all: a
+    // right-size, wrong-content object under a real key's name, which the next
+    // registration sweep advertises because it checks name and size, never
+    // content. It has to reach the operator as a field, not buried in a string.
+    await setUpPinnedDataset("the real content of this recording");
+    installAwsShim(`
+case "$2" in
+  copy-object) echo '{"CopyObjectResult":{"ChecksumSHA256":"${sha256Base64("something else")}"}}'; exit 0 ;;
+  head-object) echo '{"ContentLength":34,"ChecksumSHA256":"${sha256Base64("something else")}"}'; exit 0 ;;
+  delete-object)
+    echo "aws: [ERROR]: An error occurred (AccessDenied) when calling the DeleteObject operation" >&2
+    exit 254 ;;
+  list-object-versions) echo '[]'; exit 0 ;;
+esac
+exit 0`);
+
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
+      workRoot,
+      apply: true,
+      originUrl: origin,
+    });
+
+    expect(outcome.keys[0].action).toBe("failed");
+    expect(outcome.keys[0].leftInBucket).toBe(true);
+    expect(outcome.keys[0].detail).toContain("LEFT IN THE BUCKET");
+    // And the reason the delete failed, which used to be discarded entirely.
+    expect(outcome.keys[0].detail).toContain("AccessDenied");
+  }, 180_000);
+
+  test("will not treat a COMPOSITE checksum as a whole-object CRC64", async () => {
+    // A composite checksum is a hash of PART hashes: two objects built from
+    // different part sizes have different composite values for identical bytes,
+    // so it cannot prove a copy matches its source. Only FULL_OBJECT can, which
+    // is why the multipart upload asks for that type explicitly.
+    const composite = "content whose checksum type is composite";
+    await setUpPinnedDataset(composite);
+    installAwsShim(`
+case "$2" in
+  copy-object) echo '{"CopyObjectResult":{"ETag":"abc-2"}}'; exit 0 ;;
+  head-object)
+    echo '{"ContentLength":${composite.length},"ChecksumCRC64NVME":"AAAAAAAAAAA=","ChecksumType":"COMPOSITE"}'
+    exit 0 ;;
+  list-object-versions) echo '[]'; exit 0 ;;
+esac
+exit 0`);
+
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
+      workRoot,
+      apply: true,
+      originUrl: origin,
+    });
+
+    // The pin plus a matching size is what is left, and that is what it must say.
+    expect(outcome.keys[0].action).toBe("recovered");
+    expect(outcome.keys[0].verification).toBe("size-and-pin");
+    expect(outcome.keys[0].verification).not.toBe("crc64-of-source");
   }, 180_000);
 
   test("without --apply it copies nothing and still says what it would do", async () => {

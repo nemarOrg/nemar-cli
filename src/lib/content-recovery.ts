@@ -202,8 +202,20 @@ export function parseRmet(contents: string, remotes: Map<string, RemoteRecord>):
     const value = decodeRmetValue(match[4]);
     const split = value.indexOf("#");
     if (split <= 0) continue;
+    // An unparseable stamp becomes 0, which sorts before every real line. That
+    // is deliberate, and measured against the alternative of dropping the line:
+    // the ONLY case where the two differ is a lone bad-stamp `+` set, where
+    // dropping loses the pin. Losing a pin makes readable content look
+    // unrecoverable, which is the failure ADR 0064 was written about -- a pin
+    // bug of that shape hid 3,186 pins and 11.5 GB -- whereas keeping a pin
+    // parsed from an odd line costs at most one wasted copy attempt, because the
+    // copy is verified against the key's own hash before anything is registered.
+    // In every multi-line case the two behave identically (a retraction sorted
+    // to 0 has nothing earlier to undo). git-annex always writes a numeric
+    // stamp, so this is a corruption guard, not a routine path.
+    const stamp = Number.parseFloat(match[1]) || 0;
     entries.push({
-      stamp: Number.parseFloat(match[1]) || 0,
+      stamp,
       retracted: match[3] === "-",
       value,
       pin: {
@@ -637,7 +649,7 @@ export async function copyObjectServerSide(opts: {
   if (opts.source.size > COPY_OBJECT_LIMIT) {
     return { ...(await multipartCopy(opts)), multipart: true };
   }
-  const { stdout, stderr, exitCode } = await aws(
+  const { stdout, stderr, exitCode, timedOut } = await aws(
     [
       "s3api",
       "copy-object",
@@ -665,7 +677,13 @@ export async function copyObjectServerSide(opts: {
     opts.env,
   );
   if (exitCode !== 0) {
-    throw new Error(`copy-object failed: ${stderr.trim() || `exit ${exitCode}`}`);
+    // `timedOut` named explicitly: a copy killed at the 30-minute limit is a
+    // transfer fault to retry, and stderr is usually empty for it, so without
+    // this it reported as a bare `exit 1` that SOURCE_UNREADABLE does not match
+    // and the key ended up `failed` with no reason a reader can act on.
+    throw new Error(
+      `copy-object failed: ${timedOut ? "timed out" : stderr.trim() || `exit ${exitCode}`}`,
+    );
   }
   const body = JSON.parse(stdout || "{}") as {
     CopyObjectResult?: { ChecksumSHA256?: string; ETag?: string };

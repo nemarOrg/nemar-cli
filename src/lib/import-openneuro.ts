@@ -1598,8 +1598,9 @@ export async function finalizeImport(
     const unbacked = keysWithoutObjects(treeKeys, existing);
     if (unbacked.length > 0) {
       // The ratio, not just the count, because the tracking issue filed from
-      // this failure is triaged by severity: "1 of 65,063 missing" and "935 of
-      // 936 missing" are the same sentence without it. Computed by the one
+      // this failure is triaged by severity: one key missing of 65,063 and 935
+      // of 935 are the same sentence without it. Both denominators here are
+      // DISTINCT KEYS, which is what `treeKeys` holds. Computed by the one
       // function that owns ADR 0064's rule, never inline here, so the zero-key
       // case and the threshold cannot drift between the two. Data only, which
       // is what `treeKeys` already is: metadata is never annexed (ADR 0015).

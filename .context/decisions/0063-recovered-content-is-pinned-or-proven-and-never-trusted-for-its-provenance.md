@@ -32,7 +32,7 @@ Measuring the sixteen also showed that the sources differ in how well they ident
 
 - Recovery is provable after the fact: every recovered key was checked against its own hash, and the report says by which method.
 - The copy is server-side, so the operator's connection is not in the path of hundreds of gigabytes. The cost is that it needs credentials that can read the source bucket, which the API's upload credentials cannot (`generateUploadPolicy` scopes them to one dataset prefix in `nemar`), so this one command reads the ambient AWS environment and says so in its help.
-- Copying with the default tagging directive fails on OpenNeuro's newer objects: they carry `access=public` tags and their bucket policy grants only `s3:GetObject`, so reading the tags is denied and the whole copy returns a bare `AccessDenied` for an object we can read. The copy therefore always sends `--tagging-directive REPLACE`.
+- Copying with the default tagging directive fails on OpenNeuro's newer objects: they carry `access=public` tags and their bucket policy grants only `s3:GetObject`, so reading the tags is denied and the whole copy returns a bare `AccessDenied` for an object we can read. The single-part copy therefore sends `--tagging-directive REPLACE`. The multipart path does not, and does not need to: `create-multipart-upload` starts a new object with no tags to carry over, and `upload-part-copy` copies bytes rather than metadata.
 - Content that nothing can prove stays missing, and is reported that way. For the 245 keys OpenNeuro also lacks, the honest state of the dataset is incomplete, and saying so is more useful than a repair that invents bytes.
 
 ## Alternatives considered

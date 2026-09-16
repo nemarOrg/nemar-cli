@@ -147,7 +147,8 @@ describe("parseRmet", () => {
   });
 
   test("decodes a base64 value, which is how a path with a space is carried", () => {
-    // Verbatim from ds008003, whose objects live under
+    // The ds008003 shape, with the id changed to this file's fixture dataset:
+    // its objects live under
     // `derivatives/reCleaned Cluster analysis/`. Requiring a literal `#` found
     // no pin here at all, and the >5 GB path needs one, so 11.5 GB read as
     // unrecoverable when both objects were sitting there readable.
@@ -188,6 +189,20 @@ describe("parseRmet", () => {
         remoteName: "s3-PUBLIC",
       },
     ]);
+  });
+
+  test("keeps a pin whose timestamp will not parse, rather than losing it", () => {
+    // Pinned as a decision, not an accident. A stamp that does not parse sorts to
+    // 0, so a lone bad-stamp SET still yields a pin. Dropping the line instead
+    // would lose it, and losing a pin is what makes readable content look
+    // unrecoverable -- the failure ADR 0064 exists about. A pin read from an odd
+    // line costs at most a wasted copy, since the copy is verified against the
+    // key's hash before anything is registered.
+    const pins = parseRmet(
+      "NOTASTAMPs 9e1479f6-49e0-413b-8222-a7f8000f55a6:V +v1#ds008798/x.nii",
+      REMOTES,
+    );
+    expect(pins.map((pin) => pin.version)).toEqual(["v1"]);
   });
 
   test("leaves a value alone when the bang is not really base64", () => {
