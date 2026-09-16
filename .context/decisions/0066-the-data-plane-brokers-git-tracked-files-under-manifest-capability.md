@@ -60,6 +60,17 @@ against a manifest's 1353) and with no in-request retry, because `githubFetchWit
 40-hex SHA check and a per-isolate budget, so a pathological dataset cannot drain the
 installation's publishing quota.
 
+**Correction, 2026-09-16 (#1419): the length is COUNTED, not read off a header.** The
+`Accept-Encoding: identity` request header above does not reach GitHub. The Workers runtime
+owns that header, so the raw host gzips anyway and workerd strips `Content-Length` when it
+decodes -- which meant the deployed broker emitted no `Content-Length` at all, and the
+manifest-vs-upstream size check never ran once in production. The length rule is unchanged;
+its enforcement moved. The response now DECLARES the manifest's size and pipes the body
+through a counting `TransformStream` that errors the stream if the delivered bytes disagree,
+so a truncated file cannot arrive looking complete and a client is never left without a
+length. The header check remains as a fast path for the case where upstream's declaration
+does survive. Counting rather than buffering keeps the memory flat under the 32 MB ceiling.
+
 **Brokered responses are `max-age=300`, not `immutable`.** The bytes are immutable; the
 AUTHORIZATION is not. Nothing purges the edge, per-URL purge caps at 30 URLs and prefix purge
 is Enterprise-only, so a long TTL would keep serving a file after the dataset that authorized
@@ -96,7 +107,7 @@ Harder, and worth stating plainly:
 
 ## Receipts
 
-- Epic #1406, issue #1403, PR #1410
+- Epic #1406, issue #1403, PR #1410; length-counting correction #1419
 - ADR 0017 (the visibility gate this runs before the token), ADR 0005 (availability is
   reported; transport failures stay fatal), ADR 0015 (git is metadata, annex is data)
 - Rules: `backend/src/services/github/git-file-broker.ts`, `backend/src/routes/data.ts`,

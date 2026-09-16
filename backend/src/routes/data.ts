@@ -451,6 +451,11 @@ async function streamGitTrackedFile(args: {
   // these are not the bytes the manifest describes. Refusing is the same rule
   // the CLI applies to a short write (#1402): a wrong-length file that looks
   // healthy is worse than an error.
+  //
+  // This is the FAST path, not the guarantee: it fires only when upstream
+  // declared a length, and workerd strips that header on a real raw fetch
+  // (see `countedBody`). It buys a clean 502 before any byte is sent when the
+  // header survives; the counter below is what holds when it does not.
   if (outcome.contentLength !== null && outcome.contentLength !== file.size) {
     console.error(
       `[data] SIZE MISMATCH dataset=${datasetId} version=${version} path=${bidsPath} manifest=${file.size} upstream=${outcome.contentLength}`,
@@ -474,13 +479,19 @@ async function streamGitTrackedFile(args: {
 
   const headers = new Headers(fileResponseHeaders(file, createdIso, false));
   headers.set("Content-Type", contentTypeForBidsPath(bidsPath));
-  // Only claim a length upstream actually confirmed. The manifest's size is
-  // what we verified against, but if upstream sent no Content-Length the body
-  // length is unknown here, and stamping the manifest's number on an unknown
-  // body is how a truncated file arrives looking complete.
-  if (outcome.contentLength !== null) {
-    headers.set("Content-Length", String(outcome.contentLength));
-  }
+  // The manifest's size is declared, and the body is COUNTED against it on
+  // the way out (`countedBody`). Both halves are needed, because in the
+  // Workers runtime `outcome.contentLength` is null on every real raw fetch:
+  // the runtime owns `Accept-Encoding`, so the broker's `identity` request
+  // header never reaches GitHub, the raw host gzips, and workerd strips
+  // `Content-Length` when it decodes. Measured against the deployed data
+  // plane on 2026-09-16: no `Content-Length` on the response at all, which
+  // also meant the upstream-declared check above never once ran in
+  // production. Declaring the manifest's number without counting would be the
+  // failure the old comment here named (a truncated file arriving complete);
+  // counting without declaring leaves every client without a length. So:
+  // declare it, then make the body prove it.
+  headers.set("Content-Length", String(file.size));
   // NOT immutable, and not a year. The content at this URL is immutable --
   // it is version-pinned and content-addressed -- but the AUTHORIZATION is
   // not: `applyVisibilityTransition` can take a dataset private, and it
@@ -501,7 +512,59 @@ async function streamGitTrackedFile(args: {
   // from deciding otherwise, and the sandbox CSP makes it inert even then.
   headers.set("X-Content-Type-Options", "nosniff");
   headers.set("Content-Security-Policy", "default-src 'none'; sandbox");
-  return new Response(outcome.body, { status: 200, headers });
+  return new Response(countedBody(outcome.body, file.size, { datasetId, version, bidsPath }), {
+    status: 200,
+    headers,
+  });
+}
+
+/**
+ * Pass a body through, counting it, and error the stream if the byte count
+ * disagrees with the length the response declared.
+ *
+ * This is the enforcement half of `Content-Length: file.size`. The headers go
+ * out before the last byte arrives, so a mismatch cannot be turned into a
+ * clean 502 at that point -- but it CAN be turned into a transfer the client
+ * is unable to complete, which is the same signal a short write gives
+ * (`file-download.ts`, #1402) and the opposite of a wrong-length file that
+ * looks healthy.
+ *
+ * Counting rather than buffering keeps the memory flat: the ceiling is 32 MB
+ * per file, a Worker holds 128 MB for all concurrent requests, and the
+ * measured maximum across the catalog is 283 KB. Buffering to get a clean
+ * status code would trade a bounded cost for an unbounded one.
+ */
+function countedBody(
+  body: ReadableStream<Uint8Array>,
+  expected: number,
+  where: { datasetId: string; version: string; bidsPath: string },
+): ReadableStream<Uint8Array> {
+  let seen = 0;
+  const describe = () =>
+    `dataset=${where.datasetId} version=${where.version} path=${where.bidsPath} manifest=${expected} delivered=${seen}`;
+  return body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        seen += chunk.byteLength;
+        // Refuse the overrun rather than passing bytes beyond the declared
+        // length: past `expected` the response is already not what the
+        // manifest describes, and the extra bytes are what a client would
+        // have to discard.
+        if (seen > expected) {
+          console.error(`[data] SIZE MISMATCH (overrun) ${describe()}`);
+          controller.error(new Error("Upstream content did not match the manifest"));
+          return;
+        }
+        controller.enqueue(chunk);
+      },
+      flush(controller) {
+        if (seen !== expected) {
+          console.error(`[data] SIZE MISMATCH (short) ${describe()}`);
+          controller.error(new Error("Upstream content did not match the manifest"));
+        }
+      },
+    }),
+  );
 }
 
 /**
