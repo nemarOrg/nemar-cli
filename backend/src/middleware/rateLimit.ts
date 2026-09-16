@@ -62,10 +62,19 @@ const TOKEN_MAX_REQUESTS_AUTHED = 1000;
 
 // Public read data-plane bucket (`data.nemar.org/*`, which the host fork in
 // index.ts rewrites to `/data/*`; also reachable as `/nemar/data/*`). These
-// endpoints are read-only, anonymous, CDN-cacheable, and never stream bytes
-// through the Worker — the per-file route 302-redirects to a presigned S3 URL
-// or raw.githubusercontent.com, so the actual download egress is on S3/GitHub,
-// not here. A parallel client (e.g. `nemar-py --jobs 16` on its HTTPS backend,
+// endpoints are read-only, anonymous and CDN-cacheable. Annexed bytes still
+// leave as a 302 to a presigned S3 URL, so the bulk egress is on S3 — but
+// since #1403 the Worker DOES carry git-tracked files itself rather than
+// redirecting them to raw.githubusercontent.com, because a private repo
+// cannot be read anonymously and a redirect can never be counted. Those are
+// kilobyte-scale metadata files, about 0.1 percent of a dataset's bytes, so
+// the cap below is still sized for request volume rather than egress. Note
+// what is NOT true: nothing here writes an edge copy (a Worker response on a
+// Custom Domain is not stored automatically — zarr-data.ts reaches
+// caches.default explicitly for that reason), so every one of those requests
+// still costs an upstream fetch. If that egress ever matters, this bucket
+// needs splitting rather than widening. A parallel client (e.g. `nemar-py
+// --jobs 16` on its HTTPS backend,
 // or `rclone`) legitimately bursts hundreds of per-file 302s for one dataset
 // and was tripping the 500/60s anonymous IP floor (#615 follow-up; Bruno's
 // `data.nemar.org` 429 reports). Give the data plane its own much larger

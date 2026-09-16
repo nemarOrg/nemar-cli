@@ -92,6 +92,29 @@ beforeAll(() => {
       if (url.pathname.endsWith("/contents/dataset_description.json")) {
         return Response.json({ content: btoa(BIDS), encoding: "base64" });
       }
+      // The enrichment route commits `.nemar/metadata.json`. The tree walk
+      // above reports no `.bidsignore`, so `.nemar/` is added and the commit
+      // takes BATCHED mode: resolve the branch ref, read its commit, create a
+      // tree, create a commit, move the ref. Then a PUT for the single-file
+      // fallback, which the batched path does not reach but which costs one
+      // line to support.
+      if (url.pathname.endsWith("/branches/main")) {
+        return Response.json({
+          commit: { sha: "commitsha", commit: { tree: { sha: "treesha" } } },
+        });
+      }
+      if (req.method === "POST" && url.pathname.endsWith("/git/trees")) {
+        return Response.json({ sha: "newtreesha" });
+      }
+      if (req.method === "POST" && url.pathname.endsWith("/git/commits")) {
+        return Response.json({ sha: "newcommitsha" });
+      }
+      if (req.method === "PATCH" && url.pathname.includes("/git/refs/heads/main")) {
+        return Response.json({ object: { sha: "newcommitsha" } });
+      }
+      if (req.method === "PUT" && url.pathname.includes("/contents/")) {
+        return Response.json({ content: { sha: "newsha" }, commit: { sha: "commitsha" } });
+      }
       return new Response("not found", { status: 404 });
     },
   });
@@ -188,12 +211,13 @@ function seedDataset(
     isExemplar?: number;
     isSandbox?: number;
     source?: string | null;
+    anonymous?: number;
   } = {},
 ) {
   db.query(
     `INSERT INTO datasets (dataset_id, name, owner_user_id, github_repo, is_sandbox, visibility,
-                           status, concept_doi, is_exemplar, source, ezid_status)
-     VALUES (?, 'Attribution Fixture Dataset', ?, ?, ?, 'public', 'active', ?, ?, ?, 'reserved')`,
+                           status, concept_doi, is_exemplar, source, ezid_status, anonymous)
+     VALUES (?, 'Attribution Fixture Dataset', ?, ?, ?, 'public', 'active', ?, ?, ?, 'reserved', ?)`,
   ).run(
     id,
     ownerId,
@@ -202,6 +226,7 @@ function seedDataset(
     opts.conceptDoi ?? null,
     opts.isExemplar ?? 0,
     opts.source ?? null,
+    opts.anonymous ?? 0,
   );
 }
 
@@ -282,6 +307,165 @@ describe("POST /admin/datasets/:id/doi/concept (the mint)", () => {
     expect(xml).not.toContain("DataCurator");
     expect(xml).not.toContain(OWNER_USERNAME);
     expect(xml).toContain("HostingInstitution");
+  });
+});
+
+describe("the mint of an anonymous deposit names nobody (#1408)", () => {
+  // The single irreversible write in this feature. A DataCite record is
+  // harvested and snapshotted, so a creator or DataCurator that reaches EZID
+  // here cannot be recalled by de-anonymizing later. `createConceptDoi` takes
+  // one boolean to decide it (`doi.ts`: `const curator =
+  // options.anonymousDeposit ? null : ...`), and until now nothing asserted
+  // what that boolean does to the bytes.
+
+  test("no curator, no name, no ORCID, no username reaches EZID", async () => {
+    seedOwner("Jane", "Doe");
+    seedDataset(DATASET_ID, { anonymous: 1 });
+
+    const res = await post(`/admin/datasets/${DATASET_ID}/doi/concept`, {
+      sandbox: true,
+      skip_enrichment_check: true,
+    });
+    expect(res.status).toBe(200);
+
+    const xml = lastDataciteXml();
+    expect(xml).not.toContain("DataCurator");
+    expect(xml).not.toContain("Doe, Jane");
+    expect(xml).not.toContain("Jane");
+    expect(xml).not.toContain("Doe");
+    expect(xml).not.toContain(ORCID);
+    expect(xml).not.toContain(OWNER_USERNAME);
+    // ADR 0041's "not at all" branch: the record still has a hosting
+    // institution, so it is a valid DataCite document, just an unattributed
+    // one.
+    expect(xml).toContain("HostingInstitution");
+  });
+
+  test("the identifier stays RESERVED, which is what keeps it unharvested", async () => {
+    // `reserved` means registered but not advertised: it does not resolve and
+    // DataCite does not harvest it. That is the whole reason a blinded deposit
+    // may hold an identifier at all (ADR 0065).
+    seedOwner("Jane", "Doe");
+    seedDataset(DATASET_ID, { anonymous: 1 });
+    await post(`/admin/datasets/${DATASET_ID}/doi/concept`, {
+      sandbox: true,
+      skip_enrichment_check: true,
+    });
+    expect(ezidWrites.at(-1)?.body).toContain("_status: reserved");
+  });
+
+  test("the SAME owner on a non-anonymous dataset is cited in full", async () => {
+    // The control, and the only thing that makes the assertions above mean
+    // something: the difference is one column, not a missing fixture.
+    seedOwner("Jane", "Doe");
+    seedDataset(DATASET_ID, { anonymous: 0 });
+
+    const res = await post(`/admin/datasets/${DATASET_ID}/doi/concept`, {
+      sandbox: true,
+      skip_enrichment_check: true,
+    });
+    expect(res.status).toBe(200);
+    const xml = lastDataciteXml();
+    expect(xml).toContain('<contributor contributorType="DataCurator">');
+    expect(xml).toContain("Doe, Jane");
+    expect(xml).toContain(ORCID);
+  });
+});
+
+describe("the update route refuses to publish or rebuild a concealed record", () => {
+  test("status: public is refused, and NOTHING is sent to EZID", async () => {
+    // The zero-writes assertion is the point: a guard that ran after the write
+    // would satisfy a status-code-only test while the record was already
+    // public and harvested.
+    seedOwner("Jane", "Doe");
+    seedDataset(DATASET_ID, { conceptDoi: "10.82901/NEMAR.NM000282", anonymous: 1 });
+
+    const res = await post(`/admin/datasets/${DATASET_ID}/doi/update`, { status: "public" });
+    expect(res.status).toBe(409);
+    expect(ezidWrites.length).toBe(0);
+  });
+
+  test("refresh_metadata is refused, and NOTHING is sent to EZID", async () => {
+    // A refresh rebuilds the whole document from `resolveOwnerIdentity` -- the
+    // real person -- so it is the other way the name reaches a permanent
+    // record.
+    seedOwner("Jane", "Doe");
+    seedDataset(DATASET_ID, { conceptDoi: "10.82901/NEMAR.NM000282", anonymous: 1 });
+
+    const res = await post(`/admin/datasets/${DATASET_ID}/doi/update`, { refresh_metadata: true });
+    expect(res.status).toBe(409);
+    expect(ezidWrites.length).toBe(0);
+  });
+
+  test("the same two calls on a non-anonymous dataset are not refused", async () => {
+    // The control. Without it a route that 409'd every update would pass.
+    seedOwner("Jane", "Doe");
+    seedDataset(DATASET_ID, { conceptDoi: "10.82901/NEMAR.NM000282", anonymous: 0 });
+
+    const res = await post(`/admin/datasets/${DATASET_ID}/doi/update`, { status: "public" });
+    expect(res.status).not.toBe(409);
+    expect(ezidWrites.length).toBeGreaterThan(0);
+  });
+});
+
+describe("the admin enrichment route blinds what it CACHES, not only what it commits", () => {
+  // `admin/doi.ts` is the second writer of `.nemar/metadata.json`: it accepts
+  // a document from an admin and commits it to the same publicly-served path
+  // the pipeline writes. Both halves matter and they are separate writes --
+  // the committed file, and `datasets.enrichment_json`, which `GET
+  // /datasets/:id` serves raw. A blind applied to one and not the other leaves
+  // the depositor named on whichever surface was missed, which is why the
+  // route builds ONE value and uses it twice. Asserted here on the D1 half,
+  // which is the one a test can read back.
+  const NAMED = {
+    version: "2.0",
+    title: "A dataset with a long enough descriptive name",
+    authors: { "Doe, Jane": { orcid: ORCID } },
+    funding_references: [{ funder_name: "A Named Foundation", award_number: "GRANT-1" }],
+    geo_locations: [{ place: "La Jolla, California" }],
+    contributors: [{ name: "Doe, Jane", contributor_type: "DataCurator" }],
+  };
+
+  function cached(): string | null {
+    return (
+      db
+        .query<{ enrichment_json: string | null }, [string]>(
+          "SELECT enrichment_json FROM datasets WHERE dataset_id = ?",
+        )
+        .get(DATASET_ID)?.enrichment_json ?? null
+    );
+  }
+
+  test("an anonymous deposit caches no author, funder or place", async () => {
+    seedOwner("Jane", "Doe");
+    seedDataset(DATASET_ID, { anonymous: 1 });
+
+    const res = await post(`/admin/datasets/${DATASET_ID}/enrichment`, NAMED);
+    expect(res.status).toBe(200);
+
+    // Asserted on the stored BYTES rather than a parsed shape: a name that
+    // survived under an unexpected key would still be served.
+    const stored = cached();
+    expect(stored).not.toBeNull();
+    expect(stored).not.toContain("Doe, Jane");
+    expect(stored).not.toContain(ORCID);
+    expect(stored).not.toContain("A Named Foundation");
+    expect(stored).not.toContain("La Jolla");
+  });
+
+  test("the same document on a non-anonymous dataset is cached in full", async () => {
+    // The control. Without it a route that stored an empty document for
+    // everything would satisfy the assertions above.
+    seedOwner("Jane", "Doe");
+    seedDataset(DATASET_ID, { anonymous: 0 });
+
+    const res = await post(`/admin/datasets/${DATASET_ID}/enrichment`, NAMED);
+    expect(res.status).toBe(200);
+    const stored = cached();
+    expect(stored).toContain("Doe, Jane");
+    expect(stored).toContain(ORCID);
+    expect(stored).toContain("A Named Foundation");
+    expect(stored).toContain("La Jolla");
   });
 });
 

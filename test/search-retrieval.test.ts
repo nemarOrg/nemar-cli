@@ -80,6 +80,10 @@ CREATE TABLE datasets (
   is_exemplar INTEGER NOT NULL DEFAULT 0,
   subject_count INTEGER,
   concept_doi TEXT,
+  -- Migration 0085. The search projections withhold a concealed deposit's
+  -- reserved identifier through CONCEPT_DOI_SQL, so this hand-built schema
+  -- needs the column the real one has; NOT NULL DEFAULT 0 matches production.
+  anonymous INTEGER NOT NULL DEFAULT 0,
   -- lookupDatasetById orders managed rows (owner != -1, the legacy-catalog
   -- sentinel) ahead of a shadow row on a tie; every seeded row here is a
   -- normal managed row.

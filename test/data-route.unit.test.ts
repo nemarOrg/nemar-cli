@@ -23,6 +23,7 @@ import {
   buildLandingPayload,
   buildPersonList,
   buildRedirectUrl,
+  contentTypeForBidsPath,
   deriveSessions,
   diffRemovedSince,
   findLastSeenVersion,
@@ -237,32 +238,20 @@ describe("buildRedirectUrl", () => {
     secretAccessKey: "secret",
   };
 
-  test("git: keys produce a raw.githubusercontent URL pinned to the version tag", async () => {
-    const url = await buildRedirectUrl({
-      datasetId: "nm099999",
-      version: "v1.0.0",
-      bidsPath: "dataset_description.json",
-      file: { key: "git:abc123", size: 480, checksum: "git:abc123" },
-      s3Options,
-      githubOrg: "nemarDatasets",
-    });
-    expect(url).toBe(
-      "https://raw.githubusercontent.com/nemarDatasets/nm099999/v1.0.0/dataset_description.json",
-    );
-  });
-
-  test("git: keys URL-encode each path segment but keep the slashes", async () => {
-    const url = await buildRedirectUrl({
-      datasetId: "nm099999",
-      version: "v1.0.0",
-      bidsPath: "sub-01/eeg/sub-01_task-rest events.tsv",
-      file: { key: "git:zzz", size: 1, checksum: "git:zzz" },
-      s3Options,
-      githubOrg: "nemarDatasets",
-    });
-    expect(url).toBe(
-      "https://raw.githubusercontent.com/nemarDatasets/nm099999/v1.0.0/sub-01/eeg/sub-01_task-rest%20events.tsv",
-    );
+  test("git: keys are refused -- the Worker streams them, it does not redirect", async () => {
+    // #1403: a git-tracked file used to 302 to raw.githubusercontent.com.
+    // Rebuilding that URL here would silently reintroduce the redirect for a
+    // caller who forgot the broker, so the function refuses rather than
+    // quietly producing a URL that cannot serve a private repo.
+    await expect(
+      buildRedirectUrl({
+        datasetId: "nm099999",
+        version: "v1.0.0",
+        bidsPath: "dataset_description.json",
+        file: { key: "git:abc123", size: 480, checksum: "git:abc123" },
+        s3Options,
+      }),
+    ).rejects.toThrow(/streamed by the Worker/);
   });
 
   test("SHA256E annex keys produce a presigned S3 GET URL against objects/<key>", async () => {
@@ -276,7 +265,6 @@ describe("buildRedirectUrl", () => {
         checksum: "sha256:deadbeef",
       },
       s3Options,
-      githubOrg: "nemarDatasets",
     });
     expect(url).toContain("https://nemar.s3.us-east-2.amazonaws.com/nm099999/objects/");
     expect(url).toContain("SHA256E-s12345--deadbeef.edf");
@@ -295,7 +283,6 @@ describe("buildRedirectUrl", () => {
         checksum: "sha256:c70cae6e4a043e2124d7e5ee94422d02",
       },
       s3Options,
-      githubOrg: "nemarDatasets",
     });
     expect(url).toContain("response-content-disposition=");
     // Decode the URL the way an HTTP client would. aws4fetch round-trips through
@@ -321,7 +308,6 @@ describe("buildRedirectUrl", () => {
         checksum: "sha256:deadbeef",
       },
       s3Options,
-      githubOrg: "nemarDatasets",
     });
     const decoded = decodeURIComponent(url.replace(/\+/g, " "));
     expect(decoded).toContain('filename="sub-01_task-rest_eeg.edf"');
@@ -339,7 +325,6 @@ describe("buildRedirectUrl", () => {
       bidsPath: "sub-01/eeg/sub-01_task-rest_eeg.edf/",
       file: { key: "SHA256E-s10--abc.edf", size: 10, checksum: "sha256:abc" },
       s3Options,
-      githubOrg: "nemarDatasets",
     });
     const decoded = decodeURIComponent(url.replace(/\+/g, " "));
     expect(decoded).toContain('filename="sub-01_task-rest_eeg.edf"');
@@ -357,7 +342,6 @@ describe("buildRedirectUrl", () => {
       bidsPath: "CHANGES",
       file: { key: "SHA256E-s512--root.txt", size: 512, checksum: "sha256:root" },
       s3Options,
-      githubOrg: "nemarDatasets",
     });
     const decoded = decodeURIComponent(url.replace(/\+/g, " "));
     expect(decoded).toContain('filename="CHANGES"');
@@ -378,7 +362,6 @@ describe("buildRedirectUrl", () => {
         checksum: "sha256:deadbeef",
       },
       s3Options,
-      githubOrg: "nemarDatasets",
     });
     const dispoIdx = url.indexOf("response-content-disposition=");
     const sigIdx = url.indexOf("X-Amz-Signature=");
@@ -394,7 +377,6 @@ describe("buildRedirectUrl", () => {
       bidsPath: "sub-01/eeg/x.edf",
       file: { key: "MD5E-s100--cafe.edf", size: 100, checksum: "md5:cafe" },
       s3Options,
-      githubOrg: "nemarDatasets",
     });
     expect(url).toContain("/nm099999/objects/MD5E-s100--cafe.edf");
     expect(url).toContain("X-Amz-Signature=");
@@ -407,7 +389,6 @@ describe("buildRedirectUrl", () => {
       bidsPath: "x.bin",
       file: { key: "SHA1E-s50--feed.bin", size: 50, checksum: "sha1:feed" },
       s3Options,
-      githubOrg: "nemarDatasets",
     });
     expect(url).toContain("/nm099999/objects/SHA1E-s50--feed.bin");
   });
@@ -428,7 +409,6 @@ describe("buildRedirectUrl", () => {
 
 describe("buildBytesUrl", () => {
   const common = {
-    githubOrg: "nemarDatasets",
     datasetId: "nm099999",
     version: "v1.0.0",
   };
@@ -437,30 +417,29 @@ describe("buildBytesUrl", () => {
     const url = buildBytesUrl({
       ...common,
       bidsPath: "sub-01/eeg/sub-01_task-rest_eeg.edf",
-      key: "SHA256E-s124573612--abc123.edf",
     });
     expect(url).toBe("https://data.nemar.org/nm099999/v1.0.0/sub-01/eeg/sub-01_task-rest_eeg.edf");
   });
 
-  test("git keys -> raw.githubusercontent URL pinned to the tag (== url)", () => {
+  test("git-tracked files get the SAME data-plane URL, not a GitHub one (#1403)", () => {
+    // This is the whole point of the change: one host in the contract. A
+    // reader cannot tell from the URL whether the bytes come from S3 or from
+    // a repo, which is what lets the repo be private.
     const url = buildBytesUrl({
       ...common,
       bidsPath: "dataset_description.json",
-      key: "git:abc123",
     });
-    expect(url).toBe(
-      "https://raw.githubusercontent.com/nemarDatasets/nm099999/v1.0.0/dataset_description.json",
-    );
+    expect(url).toBe("https://data.nemar.org/nm099999/v1.0.0/dataset_description.json");
+    expect(url).not.toContain("githubusercontent");
   });
 
   test("path segments are URL-encoded but slashes preserved", () => {
     const url = buildBytesUrl({
       ...common,
       bidsPath: "sub-01/eeg/sub-01_task-rest events.tsv",
-      key: "git:zzz",
     });
     expect(url).toBe(
-      "https://raw.githubusercontent.com/nemarDatasets/nm099999/v1.0.0/sub-01/eeg/sub-01_task-rest%20events.tsv",
+      "https://data.nemar.org/nm099999/v1.0.0/sub-01/eeg/sub-01_task-rest%20events.tsv",
     );
   });
 
@@ -472,9 +451,44 @@ describe("buildBytesUrl", () => {
     const url = buildBytesUrl({
       ...common,
       bidsPath: "sub-01/eeg/x.set",
-      key: "MD5E-s100--def.set",
     });
     expect(url).toBe("https://data.nemar.org/nm099999/v1.0.0/sub-01/eeg/x.set");
+  });
+});
+
+describe("contentTypeForBidsPath", () => {
+  // Now that data.nemar.org returns these bytes itself instead of 302ing to
+  // raw.githubusercontent.com, a dataset's own files are served from our
+  // origin. GitHub answers text/plain for everything precisely so a repo
+  // cannot host active content on its origin; the allowlist here is the same
+  // defense.
+  test("the inert types a BIDS tree actually contains keep useful types", () => {
+    expect(contentTypeForBidsPath("dataset_description.json")).toBe(
+      "application/json; charset=utf-8",
+    );
+    expect(contentTypeForBidsPath("sub-01/eeg/sub-01_events.tsv")).toBe(
+      "text/tab-separated-values; charset=utf-8",
+    );
+    expect(contentTypeForBidsPath("notes.md")).toBe("text/plain; charset=utf-8");
+  });
+
+  test("extensionless and dotfiles are plain text", () => {
+    expect(contentTypeForBidsPath("README")).toBe("text/plain; charset=utf-8");
+    expect(contentTypeForBidsPath("CHANGES")).toBe("text/plain; charset=utf-8");
+    expect(contentTypeForBidsPath(".bidsignore")).toBe("text/plain; charset=utf-8");
+  });
+
+  test("active content types are never echoed back", () => {
+    // The whole point: a dataset containing an .html or .svg must not get a
+    // type that a browser will execute on data.nemar.org.
+    for (const path of ["evil.html", "evil.htm", "evil.svg", "evil.xml", "evil.js"]) {
+      expect(contentTypeForBidsPath(path)).toBe("application/octet-stream");
+    }
+  });
+
+  test("an unknown extension falls through to octet-stream, not a guess", () => {
+    expect(contentTypeForBidsPath("sub-01/eeg/sub-01_eeg.edf")).toBe("application/octet-stream");
+    expect(contentTypeForBidsPath("x.JSON")).toBe("application/json; charset=utf-8");
   });
 });
 

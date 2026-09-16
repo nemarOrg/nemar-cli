@@ -33,7 +33,7 @@ import { Hono } from "hono";
 import type { ZarrRoutesLike } from "../mcp/index-reader.js";
 import { buildMcpServer } from "../mcp/server.js";
 import { rateLimiter } from "../middleware/rateLimit.js";
-import { GITHUB_RAW_ORIGIN } from "../services/zarr-fidelity-sweep.js";
+import { GITHUB_RAW_ORIGIN } from "../services/github/shared.js";
 import type { Bindings } from "../types/bindings.js";
 import { type CacheLike, allowedOrigin, corsHeaders, zarrDataRoutes } from "./zarr-data.js";
 

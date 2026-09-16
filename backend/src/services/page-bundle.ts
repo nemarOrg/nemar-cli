@@ -27,6 +27,7 @@
  * Epic #618 / phase 3 (#621). Companion: nemarOrg/website#63/#64/#65.
  */
 import type { Bindings } from "../types/bindings";
+import { withheldWhileAnonymous } from "./anonymity";
 import {
   type DatasetVersionRow,
   type LandingPayload,
@@ -81,15 +82,36 @@ export interface PageBundle {
  */
 async function loadCatalogRow(env: Bindings, datasetId: string): Promise<CatalogRow | null> {
   // #646: license/authors come from the `datasets` source of truth.
-  return env.DB.prepare(
+  //
+  // #1408: `concept_doi` and `github_repo` are WITHHELD for an anonymous
+  // deposit, on exactly the rule `buildDatasetMetadata` applies to
+  // `external_links` -- and it has to be stated twice because this row ships
+  // in the SAME response as that document. Without it one `GET /page-bundle`
+  // answered `external_links.github_url: null` and
+  // `catalog_row.github_repo: "nemarDatasets/<id>"` side by side, and served
+  // the reserved DOI that the other half withholds because it does not
+  // resolve. `authors` needs no treatment here: it is blinded by its writer
+  // (`markAnonymous`), so the stored value is already the label.
+  const row = await env.DB.prepare(
     `SELECT d.dataset_id, d.name, d.description, d.concept_doi, d.github_repo,
-            d.modalities, d.tasks, d.license, d.authors
+            d.modalities, d.tasks, d.license, d.authors, d.anonymous
        FROM datasets d
        WHERE d.dataset_id = ?
        LIMIT 1`,
   )
     .bind(datasetId)
-    .first<CatalogRow>();
+    .first<CatalogRow & { anonymous: number | null }>();
+  if (!row) return null;
+  // `withheldWhileAnonymous` is THE rule (services/anonymity.ts). This used to
+  // re-implement it inline, and the hand-written copy nulled two identifiers
+  // where the rule nulls three -- which is how a rule written four times ends
+  // up missing from the fifth surface.
+  const withheld = withheldWhileAnonymous(
+    row as unknown as Record<string, unknown>,
+    false,
+  ) as unknown as CatalogRow & { anonymous?: number | null };
+  const { anonymous: _anonymous, ...catalogRow } = withheld;
+  return catalogRow;
 }
 
 function s3OptionsFromEnv(env: Bindings): PresignedUrlOptions {
@@ -143,7 +165,7 @@ async function loadEnrichedMetadata(
   versionRows: DatasetVersionRow[],
 ): Promise<EnrichedMetadataResult> {
   const row = await env.DB.prepare(
-    `SELECT dataset_id, name, description, github_repo, concept_doi,
+    `SELECT dataset_id, name, description, github_repo, concept_doi, anonymous,
             modalities, subject_count, age_min, age_max,
             file_size, total_files, tasks, enrichment_json,
             data_complete, bytes_present,
@@ -162,6 +184,7 @@ async function loadEnrichedMetadata(
       description: string | null;
       github_repo: string | null;
       concept_doi: string | null;
+      anonymous: number | null;
       modalities: string | null;
       subject_count: number | null;
       age_min: number | null;
@@ -229,6 +252,7 @@ async function loadEnrichedMetadata(
       name: row.name ?? row.dataset_id,
       description: row.description,
       github_repo: row.github_repo,
+      anonymous: row.anonymous,
       concept_doi: row.concept_doi,
       modalities: row.modalities,
       subject_count: row.subject_count,

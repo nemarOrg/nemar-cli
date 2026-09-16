@@ -181,15 +181,20 @@ export async function generateManifest(
     };
   }
 
-  // Publisher canary (#503): the data.nemar.org Worker resolves git:-keyed
-  // entries by 302-redirecting to raw.githubusercontent.com pinned to this
-  // version tag. That target depends on (a) the repo being publicly readable
-  // and (b) the tag actually existing on GitHub with the manifested blobs.
-  // Today both hold by construction, but recovery scripts and retag flows
-  // could violate either invariant silently. Verify a small canary sample
-  // here so the failure shows up at publish time, not as a 404 on a user
-  // download. Throws on any non-200 — caller surfaces the message to the
-  // operator instead of writing a broken manifest.
+  // Publisher canary (#503): verify a small sample of git:-keyed entries is
+  // actually readable at this tag, so a retag or a recovery script that
+  // silently dropped blobs shows up at publish time rather than as a 404 on
+  // someone's download. Throws on any non-200 — the caller surfaces the
+  // message to the operator instead of writing a broken manifest.
+  //
+  // It no longer defends a redirect. Since #1403 the data plane streams
+  // git-tracked bytes itself, so "the repo must be publicly readable" stopped
+  // being a precondition for serving; what remains worth checking is that the
+  // blobs exist at the tag at all. The canary still reads the PUBLIC raw host
+  // anonymously, which is why a private repo must keep passing
+  // `skipGitBackedVerification` — for that case the check cannot distinguish
+  // an absent blob from an unreadable repo, and a check that cannot fail
+  // meaningfully is worse than no check.
   if (!options?.skipGitBackedVerification) {
     await verifyGitBackedFiles({ repo, tag, files });
   }

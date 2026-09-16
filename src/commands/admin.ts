@@ -36,6 +36,7 @@ import {
   isAccountKind,
 } from "../../shared/contract/index.js";
 import {
+  type AnonymitySweepBatchResponse,
   type AvailabilityReport,
   type AvailabilityReportResult,
   type AvailabilityReportSweepBatchResponse,
@@ -61,6 +62,8 @@ import {
   type WeeklySummaryResponse,
   type ZarrFidelitySweepBatchResponse,
   addCi,
+  anonymitySweep,
+  anonymitySweepReset,
   approveUser,
   approveUserById,
   availabilityReport,
@@ -2572,6 +2575,17 @@ Examples:
         console.log(
           `  ${chalk.bold(req.dataset_id)}  ${statusColor(req.status)}  by ${req.requested_by_username}  ${chalk.dim(req.requested_at)}`,
         );
+        // #1408: an anonymous release and a publication reach this list
+        // looking identical, and approving the wrong one is not reversible in
+        // either direction -- publishing names a depositor who asked to be
+        // concealed; releasing anonymously withholds a DOI someone needs.
+        if (req.anonymous === 1) {
+          console.log(
+            `    ${chalk.yellow("! anonymous release:")} ${chalk.dim(
+              "repository stays private, DOI stays reserved, depositor is not named",
+            )}`,
+          );
+        }
         if (req.current_step && req.status === "approving") {
           console.log(
             `    ${chalk.yellow(">")} ${req.current_step.replace(/_/g, " ")}${req.last_error ? chalk.red(` (${req.last_error})`) : ""}`,
@@ -4881,7 +4895,9 @@ exemplarCommand
     ) => {
       if (!requireAuth()) return;
 
-      const { cloneExemplar, loadExemplarFleet } = await import("../lib/exemplar-clone.js");
+      const { cloneExemplar, loadExemplarFleet, isDesignatedAnonymous } = await import(
+        "../lib/exemplar-clone.js"
+      );
       const fleetPath = options.fleetFile || defaultExemplarFleetPath();
       const cloneOpts = { publish: options.publish, includeDerived: options.includeDerived };
 
@@ -4907,7 +4923,14 @@ exemplarCommand
             continue;
           }
           try {
-            await cloneExemplar({ xxId: entry.xx_id, sourceId: entry.source_id, ...cloneOpts });
+            await cloneExemplar({
+              xxId: entry.xx_id,
+              sourceId: entry.source_id,
+              ...cloneOpts,
+              // The fleet file decides which entry is the anonymous deposit,
+              // so `--all --publish` cannot publish it by omission.
+              ...(entry.anonymous ? { anonymous: true as const } : {}),
+            });
           } catch (err) {
             failures++;
             console.error(chalk.red(`${entry.xx_id} failed: ${errorDetail(err)}`));
@@ -4929,16 +4952,19 @@ exemplarCommand
         process.exit(1);
       }
 
-      let sourceId = options.source;
-      if (!sourceId) {
-        try {
-          const entries = loadExemplarFleet(fleetPath);
-          sourceId = entries.find((e) => e.xx_id === xxId)?.source_id;
-        } catch (err) {
-          console.error(chalk.red(`Failed to load fleet file: ${errorDetail(err)}`));
-          process.exit(1);
-        }
+      // The fleet is loaded unconditionally, not only when --source is
+      // omitted: it is where the anonymous DESIGNATION lives (#1407), and that
+      // is a property of the xx id rather than of the source. Reading it only
+      // on the --source-less path would let `exemplar create xx099907
+      // --source ...` create the fixture without its flag, silently.
+      let fleetEntries: Awaited<ReturnType<typeof loadExemplarFleet>>;
+      try {
+        fleetEntries = loadExemplarFleet(fleetPath);
+      } catch (err) {
+        console.error(chalk.red(`Failed to load fleet file: ${errorDetail(err)}`));
+        process.exit(1);
       }
+      const sourceId = options.source ?? fleetEntries.find((e) => e.xx_id === xxId)?.source_id;
       if (!sourceId) {
         console.error(
           chalk.red(
@@ -4953,7 +4979,12 @@ exemplarCommand
       }
 
       try {
-        await cloneExemplar({ xxId, sourceId, ...cloneOpts });
+        await cloneExemplar({
+          xxId,
+          sourceId,
+          ...cloneOpts,
+          ...(isDesignatedAnonymous(fleetEntries, xxId) ? { anonymous: true as const } : {}),
+        });
       } catch (error) {
         console.error(chalk.red(`\nExemplar clone failed: ${errorDetail(error)}`));
         process.exit(1);
@@ -7075,6 +7106,104 @@ zarrFidelitySweepCommand
 adminCommand.addCommand(zarrFidelitySweepCommand);
 
 // ============================================================================
+// Anonymity verification sweep (issue #1409, epic #1406)
+// ============================================================================
+
+const anonymitySweepCommand = new Command("anonymity-sweep").description(
+  "Re-check anonymous deposits against the identity-leak inventory (#1409)",
+);
+
+anonymitySweepCommand
+  .option("--limit <n>", "Datasets per batch (server clamps to [1,25])", "10")
+  .option("--reset", "Re-arm every anonymous deposit, then exit")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(async (options: { limit?: string; reset?: boolean; json?: boolean }) => {
+    if (!requireAuth()) return;
+
+    if (options.reset) {
+      const spinner = ora("Re-arming anonymous deposits...").start();
+      try {
+        const res = await anonymitySweepReset();
+        spinner.succeed(`Re-armed ${res.reset} anonymous deposit(s).`);
+      } catch (err) {
+        spinner.fail("Reset failed");
+        console.error(chalk.red(errorDetail(err)));
+        process.exit(1);
+      }
+      return;
+    }
+
+    const limit = Number.parseInt(options.limit ?? "10", 10) || 10;
+    const spinner = ora("Checking anonymous deposits...").start();
+
+    let res: AnonymitySweepBatchResponse;
+    try {
+      res = await anonymitySweep({ limit });
+      spinner.stop();
+    } catch (err) {
+      spinner.fail("Anonymity sweep failed");
+      console.error(chalk.red(errorDetail(err)));
+      process.exit(1);
+      return;
+    }
+
+    if (options.json) {
+      console.log(JSON.stringify(res, null, 2));
+    } else {
+      console.log();
+      console.log(
+        chalk.cyan(
+          `processed=${res.processed} verified=${res.verified} findings=${res.with_findings} unverifiable=${res.unverifiable} errors=${res.errors.length} mail_failures=${res.mail_failures.length} remaining=${res.remaining ?? "unknown"}${res.budget_exhausted ? " budget_exhausted=true" : ""}`,
+        ),
+      );
+      for (const r of res.results) {
+        const color =
+          r.status === "verified"
+            ? chalk.green
+            : r.status === "findings"
+              ? chalk.red
+              : chalk.yellow;
+        console.log(
+          `  ${color(r.status.padEnd(13))} ${r.dataset_id}  (files ${r.files_scanned}/${r.files_listed})`,
+        );
+        for (const f of r.findings) {
+          const tag = f.severity === "invariant" ? chalk.red("NEMAR") : chalk.yellow("deposit");
+          console.log(`      ${tag} ${f.check}: ${f.detail}`);
+        }
+        // Printed for EVERY dataset, including a verified one. "Verified" here
+        // means "everything this sweep can check is fine", and a reader who is
+        // not told what it cannot check will hear something stronger.
+        if (r.unchecked.length > 0) {
+          console.log(`      ${chalk.dim(`not checked: ${r.unchecked.join(", ")}`)}`);
+        }
+      }
+      for (const e of res.errors) {
+        console.log(`  ${chalk.red("error")}         ${e.dataset_id}: ${e.error}`);
+      }
+      // A finding nobody was told about is a finding that did not arrive. The
+      // mail IS the depositor's copy.
+      for (const m of res.mail_failures) {
+        console.log(
+          `  ${chalk.red("not mailed")}    ${m.dataset_id} -> ${m.recipient}: ${m.error}`,
+        );
+      }
+    }
+    // Same convention as the fidelity sweep: a non-zero exit means the RUN was
+    // partial or uncertain, never that it found something. A findings verdict
+    // is the sweep working; a finding that reached nobody is not.
+    if (
+      res.errors.length > 0 ||
+      res.mail_failures.length > 0 ||
+      res.remaining === null ||
+      res.budget_exhausted
+    ) {
+      process.exit(1);
+    }
+  });
+
+adminCommand.addCommand(anonymitySweepCommand);
+
+// ============================================================================
 // Doctor: diagnostic checks + remediation (#1130)
 // ============================================================================
 
@@ -7369,6 +7498,7 @@ emailPrefsCommand
         { key: "user_approval", label: "User approval notifications" },
         { key: "publication_request", label: "Publication request notifications" },
         { key: "announcements", label: "Announcement emails" },
+        { key: "dataset_anonymity", label: "Anonymity sweep findings" },
       ];
 
       for (const cat of categories) {
@@ -7391,6 +7521,7 @@ emailPrefsCommand
   .option("--user-approval <bool>", "Enable/disable user approval notifications")
   .option("--publication-request <bool>", "Enable/disable publication request notifications")
   .option("--announcements <bool>", "Enable/disable announcement emails")
+  .option("--dataset-anonymity <bool>", "Enable/disable anonymity sweep findings")
   .option("--all <bool>", "Enable/disable all notifications")
   .option("--user <username>", "(owner only) update another user's preferences")
   .action(
@@ -7398,6 +7529,7 @@ emailPrefsCommand
       userApproval?: string;
       publicationRequest?: string;
       announcements?: string;
+      datasetAnonymity?: string;
       all?: string;
       user?: string;
     }) => {
@@ -7424,16 +7556,19 @@ emailPrefsCommand
         updates.user_approval = val;
         updates.publication_request = val;
         updates.announcements = val;
+        updates.dataset_anonymity = val;
       } else {
         const ua = parseBool(options.userApproval);
         const pr = parseBool(options.publicationRequest);
         const ann = parseBool(options.announcements);
+        const anon = parseBool(options.datasetAnonymity);
 
-        if (ua === undefined && pr === undefined && ann === undefined) {
+        if (ua === undefined && pr === undefined && ann === undefined && anon === undefined) {
           console.error(chalk.red("No preferences specified."));
           console.log("  --user-approval <bool>        User approval notifications");
           console.log("  --publication-request <bool>   Publication request notifications");
           console.log("  --announcements <bool>         Announcement emails");
+          console.log("  --dataset-anonymity <bool>     Anonymity sweep findings");
           console.log("  --all <bool>                   All notifications");
           process.exit(1);
         }
@@ -7441,6 +7576,7 @@ emailPrefsCommand
         if (ua !== undefined) updates.user_approval = ua;
         if (pr !== undefined) updates.publication_request = pr;
         if (ann !== undefined) updates.announcements = ann;
+        if (anon !== undefined) updates.dataset_anonymity = anon;
       }
 
       const spinner = ora("Updating email preferences...").start();

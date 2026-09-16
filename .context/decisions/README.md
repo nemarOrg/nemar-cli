@@ -102,7 +102,10 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0061](0061-a-registration-is-read-back-and-an-incomplete-dataset-is-not-partly-repaired.md) - A registration is read back from the location log, and a dataset the bucket cannot account for is never partly repaired
 - [ADR 0062](0062-a-missing-git-annex-degrades-to-a-snapshot.md) - A missing git-annex degrades to an HTTP snapshot, and a snapshot is not a repository
 - [ADR 0063](0063-recovered-content-is-pinned-or-proven-and-never-trusted-for-its-provenance.md) - Recovered content is pinned or proven, and an unproven copy is deleted rather than kept
-- [ADR 0064](0064-a-dataset-missing-more-than-a-tenth-of-its-data-is-withdrawn.md) - NEMAR lists a dataset only when at least 90% of its DATA files are available, and metadata never counts toward that (partially supersedes 0005)
+- [ADR 0064](0064-a-dataset-missing-more-than-a-tenth-of-its-data-is-withdrawn.md) - NEMAR lists a dataset only when at least 90% of its DATA KEYS are available, and metadata never counts toward that (partially supersedes 0005)
+- [ADR 0065](0065-anonymity-is-available-before-first-publication-and-never-after.md) - Anonymity is available before first publication and never after, and it is withheld by the writer
+- [ADR 0066](0066-the-data-plane-brokers-git-tracked-files-under-manifest-capability.md) - The data plane brokers git-tracked files, and the manifest is the capability list
+- [ADR 0067](0067-anonymity-is-verified-on-a-schedule-and-reported-never-repaired.md) - Anonymity is verified on a schedule, and reported, never repaired
 
 ## Backfill note (2026-07-31)
 

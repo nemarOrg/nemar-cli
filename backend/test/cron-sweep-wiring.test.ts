@@ -86,6 +86,11 @@ const SWEEP_WIRING: Record<string, "prod-only" | "all-envs" | "cron-wrapped" | "
   runSignalDefaultsSweep: "cron-wrapped",
   runSignalDefaultsSweepCron: "prod-only",
   runZarrFidelitySweep: "all-envs",
+  // #1409: mints a GitHub App token against the shared nemarDatasets org
+  // to read PRIVATE dataset repositories, and emails a real depositor when
+  // it finds something. Either disqualifies it from the dev tick.
+  runAnonymitySweep: "cron-wrapped",
+  runAnonymitySweepCron: "prod-only",
   runImportIssueSweep: "cron-wrapped",
   runImportIssueSweepCron: "prod-only",
   runImportCoverageSweep: "cron-wrapped",

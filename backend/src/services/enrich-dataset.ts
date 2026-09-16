@@ -18,6 +18,7 @@
 import { formatFileSize } from "../../../shared/bytes.js";
 import { type NemarMetadataV2, datasetLandingUrl } from "../../../shared/datacite-constants.js";
 import type { Bindings } from "../types/bindings.js";
+import { ANONYMOUS_DEPOSIT_REASON, blindEnrichmentMetadata, isAnonymous } from "./anonymity.js";
 import { countSessionDirs } from "./bids-tree.js";
 import {
   bidsToDataCite,
@@ -149,7 +150,7 @@ export interface EnrichmentSuccessBody {
  *  parallel pair of string fields, so status and reason cannot disagree. */
 export interface DoiSyncOutcome {
   status: "skipped";
-  reason: typeof OWNER_NAME_MISSING_REASON;
+  reason: typeof OWNER_NAME_MISSING_REASON | typeof ANONYMOUS_DEPOSIT_REASON;
   message: string;
 }
 
@@ -317,6 +318,7 @@ export async function enrichDataset(
     // tell a researcher deposit from an OpenNeuro import.
     source: string | null;
     is_exemplar: number | null;
+    anonymous: number | null;
     owner_username: string | null;
     owner_orcid: string | null;
     owner_given_name: string | null;
@@ -325,7 +327,7 @@ export async function enrichDataset(
   try {
     dataset = await env.DB.prepare(
       `SELECT d.dataset_id, d.name, d.github_repo, d.enrichment_json,
-              d.concept_doi, d.is_sandbox, d.source, d.is_exemplar,
+              d.concept_doi, d.is_sandbox, d.source, d.is_exemplar, d.anonymous,
               u.username AS owner_username, u.orcid AS owner_orcid,
               u.given_name AS owner_given_name, u.family_name AS owner_family_name
        FROM datasets d
@@ -342,6 +344,7 @@ export async function enrichDataset(
         is_sandbox: number | null;
         source: string | null;
         is_exemplar: number | null;
+        anonymous: number | null;
         owner_username: string | null;
         owner_orcid: string | null;
         owner_given_name: string | null;
@@ -932,7 +935,15 @@ export async function enrichDataset(
 
     // Pipeline LLM work is complete. Commit results; individual failures are
     // non-fatal since the expensive LLM calls already succeeded.
-    const metadataContent = JSON.stringify(finalMetadata, null, 2);
+    // An anonymous deposit's committed metadata carries no attribution. This
+    // is the last point before the document is both committed to the repo and
+    // cached in D1, and it is a WRITER-side blind on purpose: the file is
+    // backend-authored and publicly served, so filtering it at read time
+    // would leave the names in the repo and in the manifest.
+    const documentToCommit = isAnonymous(dataset)
+      ? blindEnrichmentMetadata(finalMetadata)
+      : finalMetadata;
+    const metadataContent = JSON.stringify(documentToCommit, null, 2);
     let commitError: string | undefined;
     let bidsignoreError: string | undefined;
     let cacheError: string | undefined;
@@ -1037,6 +1048,11 @@ export async function enrichDataset(
         (typeof finalMetadata.title === "string" && finalMetadata.title) || null;
       const enrichedDescription =
         (typeof finalMetadata.description === "string" && finalMetadata.description) || null;
+      // Anonymity is NOT applied here. `writeDatasetCatalogFields` is the one
+      // writer of `datasets.authors` and withholds the value in its own
+      // UPDATE, deciding from the row rather than from an argument -- so this
+      // call site passes the real authors and cannot get the rule wrong, and
+      // neither can the next caller.
       const enrichedAuthors = authorsFromEnrichment(finalMetadata);
       const bidsVersion =
         typeof bidsDescription.BIDSVersion === "string" ? bidsDescription.BIDSVersion : null;
@@ -1081,7 +1097,24 @@ export async function enrichDataset(
     let doiSyncError: string | undefined;
     let doiSyncOutcome: DoiSyncOutcome | undefined;
     const doiUploader = resolveOwnerIdentity(dataset);
-    if (dataset.concept_doi && refreshWouldStripAttribution(dataset, doiUploader)) {
+    if (dataset.concept_doi && isAnonymous(dataset)) {
+      // DO NOT SYNC (#1407). This block rebuilds the DataCite document from
+      // live DB state and pushes it to EZID, and it reads `finalMetadata` and
+      // `resolveOwnerIdentity` -- the UNBLINDED document and the real
+      // depositor -- so running it would undo, in the same function call, the
+      // blind applied a hundred lines above: the curator, the authors, the
+      // funders and the geo-locations would all land in the record.
+      //
+      // Skipping rather than pushing a blinded document is the conservative
+      // half: an anonymous deposit's identifier is `reserved` and therefore
+      // not harvested, so there is nothing to keep current, and a blinded
+      // push would still be a write whose correctness depends on this blind
+      // never being bypassed. The record is rebuilt at publication, when the
+      // attribution is real.
+      const message = `DOI metadata sync skipped for ${datasetId}: the dataset is an anonymous deposit, so the rebuilt record would name the concealed depositor. The record is refreshed when the deposit is de-anonymized and published.`;
+      console.log(`[llm-enrich] ANONYMITY SKIP ${message}`);
+      doiSyncOutcome = { status: "skipped", reason: ANONYMOUS_DEPOSIT_REASON, message };
+    } else if (dataset.concept_doi && refreshWouldStripAttribution(dataset, doiUploader)) {
       // DO NOT SYNC (#1255). This path runs automatically from the
       // README/dataset_description webhook and from `nemar admin reindex
       // --bulk`, and it rebuilds the DataCite document from live DB state.

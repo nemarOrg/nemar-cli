@@ -99,29 +99,29 @@ describe("buildReindexFilterQuery exemplar carve-out", () => {
 
 describe("buildBytesUrl origin parameterization", () => {
   const common = {
-    githubOrg: "nemarDatasets",
     datasetId: "nm000132",
     version: "v1.0.0",
     bidsPath: "sub-01/eeg/sub-01_task-rest_eeg.edf",
   };
 
   test("defaults to the prod data host (byte-identical)", () => {
-    expect(buildBytesUrl({ ...common, key: "SHA256E-s1--abc" })).toBe(
+    expect(buildBytesUrl({ ...common })).toBe(
       "https://data.nemar.org/nm000132/v1.0.0/sub-01/eeg/sub-01_task-rest_eeg.edf",
     );
   });
 
   test("staging origin override", () => {
-    expect(
-      buildBytesUrl({ ...common, key: "SHA256E-s1--abc", origin: "https://data-test.nemar.org" }),
-    ).toBe("https://data-test.nemar.org/nm000132/v1.0.0/sub-01/eeg/sub-01_task-rest_eeg.edf");
+    expect(buildBytesUrl({ ...common, origin: "https://data-test.nemar.org" })).toBe(
+      "https://data-test.nemar.org/nm000132/v1.0.0/sub-01/eeg/sub-01_task-rest_eeg.edf",
+    );
   });
 
-  test("git-backed files ignore origin (raw.githubusercontent)", () => {
-    expect(
-      buildBytesUrl({ ...common, key: "git:blobsha", origin: "https://data-test.nemar.org" }),
-    ).toBe(
-      "https://raw.githubusercontent.com/nemarDatasets/nm000132/v1.0.0/sub-01/eeg/sub-01_task-rest_eeg.edf",
+  test("git-backed files follow the same origin as annexed ones (#1403)", () => {
+    // They used to return a raw.githubusercontent.com URL regardless of
+    // origin, which meant the staging manifest pointed at production's repo
+    // content and a private repo had no readable metadata at all.
+    expect(buildBytesUrl({ ...common, origin: "https://data-test.nemar.org" })).toBe(
+      "https://data-test.nemar.org/nm000132/v1.0.0/sub-01/eeg/sub-01_task-rest_eeg.edf",
     );
   });
 });

@@ -7,6 +7,7 @@
  * Vectors carry zero facts; every display field is hydrated from `datasets`.
  */
 
+import { CONCEPT_DOI_SQL } from "./anonymity";
 import { buildExcludedUnknownBreakdownSql, isAnyFacetActive } from "./dataset-facets";
 import {
   type DatasetFilterOptions,
@@ -313,7 +314,7 @@ export async function hydrateDatasetsByIds(
   const results = await db
     .prepare(
       `SELECT d.dataset_id AS id, d.name, d.modalities, d.subject_count AS participants,
-              d.concept_doi AS doi, d.tasks, d.authors, d.has_hed
+              ${CONCEPT_DOI_SQL} AS doi, d.tasks, d.authors, d.has_hed
        FROM datasets d
        WHERE ${DATASET_ID_IN_JSON_LIST}
          AND d.status = 'active' AND d.visibility = 'public'
@@ -355,7 +356,7 @@ export async function lookupDatasetById(
   const row = await db
     .prepare(
       `SELECT d.dataset_id AS id, d.name, d.modalities, d.subject_count AS participants,
-              d.concept_doi AS doi, d.tasks, d.authors, d.has_hed
+              ${CONCEPT_DOI_SQL} AS doi, d.tasks, d.authors, d.has_hed
        FROM datasets d
        WHERE (d.dataset_id = ? OR d.source_id = ?) AND d.status = 'active'
          AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1) AND d.visibility = 'public'${filterClauses}
@@ -487,7 +488,7 @@ export async function ftsSearch(
   const results = await db
     .prepare(
       `SELECT d.dataset_id AS id, d.name, d.modalities, d.subject_count AS participants,
-              d.concept_doi AS doi, d.tasks, d.authors, d.has_hed,
+              ${CONCEPT_DOI_SQL} AS doi, d.tasks, d.authors, d.has_hed,
               snippet(datasets_fts, 5, '<mark>', '</mark>', '…', 12) AS snippet
        FROM datasets_fts
        JOIN datasets d ON d.id = datasets_fts.rowid

@@ -19,6 +19,12 @@ import { RangeParseError } from "../../../../shared/range.js";
 import { SYSTEM_USER_ID } from "../../lib/constants";
 import { parseLicenseTierFilter } from "../../lib/license";
 import { optionalAuthMiddleware } from "../../middleware/auth";
+import {
+  OWNER_GITHUB_SQL,
+  OWNER_USERNAME_SQL,
+  isAnonymous,
+  withheldWhileAnonymous,
+} from "../../services/anonymity";
 import { zarrCacheBaseUrl } from "../../services/cloudflare";
 import { getFacetVocabulary } from "../../services/dataset-facet-vocabulary";
 import {
@@ -35,7 +41,15 @@ import {
 } from "../../services/dataset-filters";
 import { DEFAULT_MIN_SCORE, executeDatasetSearch } from "../../services/dataset-search";
 import { isValidDatasetId } from "../../services/datasetId";
-import { ZARR_VERIFIED_AT_PATH, ZARR_VERIFY_STATUS_PATH } from "../../services/sweep-stamps";
+import {
+  ANONYMITY_CHECKED_AT_PATH,
+  ANONYMITY_FINDINGS_PATH,
+  ANONYMITY_STATUS_PATH,
+  ANONYMITY_UNCHECKED_PATH,
+  ZARR_REQUEUE_AT_PATH,
+  ZARR_VERIFIED_AT_PATH,
+  ZARR_VERIFY_STATUS_PATH,
+} from "../../services/sweep-stamps";
 import { type Bindings, hasRole } from "../../types/bindings";
 import type { DatasetsRouter } from "./shared";
 
@@ -89,6 +103,13 @@ const FACET_PROJECTION_COLUMNS = `d.subject_count,
                -- Null until the sweep reaches this dataset.
                json_extract(d.sweep_stamps, '${ZARR_VERIFY_STATUS_PATH}') AS zarr_verify_status,
                json_extract(d.sweep_stamps, '${ZARR_VERIFIED_AT_PATH}') AS zarr_verified_at,
+               -- Issue #1409 (epic #1406): when the archive last asked for
+               -- this dataset's stores to be rebuilt. Read by
+               -- scripts/zarr/zarr_queue.py off this row, because the
+               -- conversion queue lives in SQLite on Hallu and there was no
+               -- other way for the backend to say "re-convert this one".
+               -- Same derived-field pattern, same reason: no new column.
+               json_extract(d.sweep_stamps, '${ZARR_REQUEUE_AT_PATH}') AS zarr_requeue_at,
                d.total_recording_duration,
                d.recording_duration_min,
                d.recording_duration_max,
@@ -309,8 +330,17 @@ export function parseZarrDataFailures(
  * `file_size` being selected so the degraded fallback query (which projects
  * neither field, nor zarr_status) passes through unchanged.
  */
-function toListRow<T extends Record<string, unknown>>(row: T, zarrBaseUrl: string | null): T {
-  const shaped = withCanonicalLatestVersion(row);
+function toListRow<T extends Record<string, unknown>>(
+  row: T,
+  zarrBaseUrl: string | null,
+  // #1408: false for a public reader, so an anonymous deposit's private
+  // repository and its reserved, non-resolving DOI are withheld here the same
+  // way `data-router.ts` withholds them from `external_links`. True for the
+  // owner's own listing and for an admin, whose tooling reads `github_repo`
+  // to clone and commit -- including the commit that ends the anonymity.
+  viewerMayKnowIdentifiers = false,
+): T {
+  const shaped = withheldWhileAnonymous(withCanonicalLatestVersion(row), viewerMayKnowIdentifiers);
   if (!("file_size" in shaped)) return shaped;
   return {
     ...shaped,
@@ -624,6 +654,12 @@ async function executeAndReturn(
   // the existing Promise.allSettled so a failure here can never turn a good
   // response into a 500; it just omits both fields.
   excludedUnknownQuery?: { query: string; params: (string | number)[]; keysInOrder: FacetKey[] },
+  // #1408: does THIS caller get to see an anonymous deposit's private
+  // repository and its reserved DOI? True for the `?mine` listing and for an
+  // admin; false for the public catalog, which is what every unauthenticated
+  // reader gets. Threaded in rather than derived here because this helper is
+  // shared by both branches and has no view of the request's identity.
+  viewerMayKnowIdentifiers = false,
 ) {
   const { limit, offset } = pagination;
   // #1062: computed once per request, reused for every row's derived
@@ -737,7 +773,7 @@ async function executeAndReturn(
     }
 
     const responseBody = {
-      datasets: result.results.map((row) => toListRow(row, zarrBaseUrl)),
+      datasets: result.results.map((row) => toListRow(row, zarrBaseUrl, viewerMayKnowIdentifiers)),
       count: result.results.length,
       total_count: totalCount,
       limit,
@@ -788,9 +824,9 @@ async function executeAndReturn(
       try {
         const fallback = await db
           .prepare(
-            `SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
+            `SELECT d.dataset_id, d.name, d.description, d.status, d.visibility, d.anonymous,
                     d.github_repo, d.concept_doi, d.created_at, d.updated_at,
-                    u.username AS owner_username,
+                    ${OWNER_USERNAME_SQL},
                     -- API contract: every list entry exposes latest_version
                     -- (null when no minted DOI version yet) so callers
                     -- (e.g. scripts/hallu-sync.sh) can rely on its presence
@@ -810,7 +846,9 @@ async function executeAndReturn(
           .bind(limit, offset)
           .all();
         return c.json({
-          datasets: (fallback.results || []).map((row) => toListRow(row, zarrBaseUrl)),
+          datasets: (fallback.results || []).map((row) =>
+            toListRow(row, zarrBaseUrl, viewerMayKnowIdentifiers),
+          ),
           count: fallback.results?.length || 0,
           total_count: fallback.results?.length || 0,
           limit,
@@ -941,9 +979,9 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
         WHERE d.status = ? AND d.owner_user_id = ?
       `;
       const minePrefix = `
-        SELECT d.dataset_id, d.name, d.description, d.status, d.visibility,
+        SELECT d.dataset_id, d.name, d.description, d.status, d.visibility, d.anonymous,
                d.github_repo, d.concept_doi, d.created_at, d.updated_at,
-               u.username AS owner_username,
+               ${OWNER_USERNAME_SQL},
                d.source, d.source_id,
                COALESCE(d.modalities, '') AS modalities,
                COALESCE(d.subject_count, 0) AS participants,
@@ -1021,7 +1059,17 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       // --mine path is always authed and per-user; the no-store default
       // set at the top of the handler is the right header here. See #639
       // + the union-path Vary block below for the anonymous-shareable case.
-      return executeAndReturn(c, db, c.env, query, params, { limit, offset }, excludedUnknownQuery);
+      return executeAndReturn(
+        c,
+        db,
+        c.env,
+        query,
+        params,
+        { limit, offset },
+        excludedUnknownQuery,
+        // The `?mine` listing is scoped to the caller's own rows.
+        true,
+      );
     }
 
     // Single-table read from the `datasets` source of truth (#646). Folded legacy
@@ -1054,9 +1102,9 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     const buildPublicPrefix = (): { sql: string; params: (string | number)[] } => {
       const { from, params: prefixParams } = buildPublicBase();
       const sql = `
-      SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility,
+      SELECT d.dataset_id, d.dataset_id AS id, d.name, d.description, d.status, d.visibility, d.anonymous,
              d.github_repo, d.concept_doi, d.concept_doi AS doi, d.created_at, d.updated_at,
-             u.username AS owner_username,
+             ${OWNER_USERNAME_SQL},
              d.source, d.source_id,
              COALESCE(d.modalities, '') AS modalities,
              COALESCE(d.subject_count, 0) AS participants,
@@ -1145,7 +1193,18 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       c.header("Cache-Control", "public, max-age=30, s-maxage=300, stale-while-revalidate=600");
       c.header("Vary", "Authorization");
     }
-    return executeAndReturn(c, db, c.env, query, params, { limit, offset }, excludedUnknownQuery);
+    return executeAndReturn(
+      c,
+      db,
+      c.env,
+      query,
+      params,
+      { limit, offset },
+      excludedUnknownQuery,
+      // The public catalog. Only an admin sees a concealed deposit's
+      // repository and reserved DOI here.
+      hasRole(user?.role, "admin"),
+    );
   });
 
   /**
@@ -1281,7 +1340,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     try {
       const match = await db
         .prepare(
-          `SELECT d.dataset_id, d.name, d.github_repo, u.username as owner_username
+          `SELECT d.dataset_id, d.name, d.github_repo, ${OWNER_USERNAME_SQL}
            FROM datasets d
            JOIN users u ON d.owner_user_id = u.id
            WHERE d.source_id = ? AND d.status = 'active' AND d.visibility = 'public'
@@ -1292,7 +1351,8 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
           dataset_id: string;
           name: string;
           github_repo: string | null;
-          owner_username: string;
+          // Null for an anonymous deposit -- OWNER_USERNAME_SQL withholds it.
+          owner_username: string | null;
         }>();
 
       if (!match) {
@@ -1371,15 +1431,27 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
         -- surface a json_extract expression.
         json_extract(d.sweep_stamps, '${ZARR_VERIFY_STATUS_PATH}') AS zarr_verify_status,
         json_extract(d.sweep_stamps, '${ZARR_VERIFIED_AT_PATH}') AS zarr_verified_at,
-        u.username as owner_username,
-        u.github_username as owner_github
+        -- #1409: the anonymity verdict, so the depositor can read back what the
+        -- sweep found without waiting for mail they may have deleted. Withheld
+        -- from everyone but the owner and an admin below, because "this deposit
+        -- has findings" is itself information about the concealed person.
+        json_extract(d.sweep_stamps, '${ANONYMITY_STATUS_PATH}') AS anonymity_status,
+        json_extract(d.sweep_stamps, '${ANONYMITY_CHECKED_AT_PATH}') AS anonymity_checked_at,
+        json_extract(d.sweep_stamps, '${ANONYMITY_FINDINGS_PATH}') AS anonymity_findings,
+        json_extract(d.sweep_stamps, '${ANONYMITY_UNCHECKED_PATH}') AS anonymity_unchecked,
+        ${OWNER_USERNAME_SQL},
+        ${OWNER_GITHUB_SQL}
       FROM datasets d
       JOIN users u ON d.owner_user_id = u.id
       WHERE d.dataset_id = ?
     `,
       )
       .bind(datasetId)
-      .first();
+      // `d.*` carries every column, but the row type has to SAY it carries
+      // `anonymous`: `isAnonymous` requires the field so that a projection
+      // which stops selecting it is a compile error rather than a silent "not
+      // anonymous" (#1408).
+      .first<Record<string, unknown> & { anonymous: number | null }>();
 
     if (!dataset) {
       return c.json({ error: "Dataset not found" }, 404);
@@ -1436,10 +1508,21 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     const {
       attestation: attestationRaw,
       zarr_data_failures: zarrDataFailuresRaw,
+      owner_user_id: ownerUserIdRaw,
       ...rest
     } = withCanonicalLatestVersion(dataset as Record<string, unknown>);
     const detail = {
       ...rest,
+      // #1407: `SELECT d.*` carries the raw owner FK, which OWNER_USERNAME_SQL
+      // cannot reach. Left in place it would de-anonymize a deposit in one
+      // request -- fetch the anonymous dataset's owner_user_id, then find any
+      // other public dataset with the same value and read its disclosed
+      // owner_username -- and it is a stable pseudonymous handle linking a
+      // depositor's several anonymous deposits to each other even when there
+      // is no second dataset to join against. It is not in the contract
+      // (shared/contract/dataset.ts), so it is withheld rather than nulled for
+      // anonymous rows only: nothing declares a use for it.
+      owner_user_id: isAnonymous(dataset) ? null : ownerUserIdRaw,
       // #1207 review: `SELECT d.*` serves the raw numeric primary key here,
       // but the contract (shared/contract/dataset.ts) declares `id: string`
       // -- the list route's `id` is `d.dataset_id AS id`, already a string
@@ -1473,6 +1556,25 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       }
     });
 
-    return c.json({ dataset: detail });
+    // #1408: the same withholding the list rows and the data plane apply --
+    // a concealed deposit's repository is private and its DOI is reserved, so
+    // neither is offered to a reader who is not its owner or an admin. Applied
+    // LAST, over the assembled payload, because `SELECT d.*` puts both columns
+    // into `rest` without either being named anywhere above.
+    const viewerMayKnowIdentifiers = Boolean(
+      user && (hasRole(user.role, "admin") || user.id === dataset.owner_user_id),
+    );
+    // The verdict rides the same gate as the identifiers: a reader who may not
+    // know WHO deposited this must not be told that the concealment is leaking.
+    const shaped: Record<string, unknown> = {
+      ...withheldWhileAnonymous(detail, viewerMayKnowIdentifiers),
+    };
+    if (!viewerMayKnowIdentifiers) {
+      shaped.anonymity_status = null;
+      shaped.anonymity_checked_at = null;
+      shaped.anonymity_findings = null;
+      shaped.anonymity_unchecked = null;
+    }
+    return c.json({ dataset: shaped });
   });
 }

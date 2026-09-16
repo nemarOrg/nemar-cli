@@ -12,6 +12,7 @@
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import { auditLogStatement } from "../../db/audit-log";
+import { isAnonymous } from "../../services/anonymity";
 import type { DataCiteEnrichment } from "../../services/datacite";
 import {
   buildOrcidEnrichment,
@@ -40,6 +41,17 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
       .regex(SOURCE_ID_RE, "source_id must be an nm/on dataset id (e.g. nm000132)"),
     name: z.string().min(1).max(200).optional(),
     description: z.string().optional(),
+    /**
+     * Create this exemplar as the fleet's standing ANONYMOUS deposit (#1407).
+     *
+     * Set at INSERT rather than flipped afterwards, because this is the only
+     * moment it is unconditionally legal: the row is brand new, so
+     * `first_published_at` is NULL and migration 0085's triggers allow it. An
+     * exemplar that has been through the normal publish-and-mint flow can
+     * never be made anonymous again, which is why the fleet declares this one
+     * up front instead of borrowing an existing entry.
+     */
+    anonymous: z.literal(true).optional(),
   });
 
   /**
@@ -62,7 +74,7 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
       );
     }
 
-    const { dataset_id, source_id, name, description } = c.req.valid("json");
+    const { dataset_id, source_id, name, description, anonymous } = c.req.valid("json");
     const db = c.env.DB;
     const adminUser = c.get("user");
     const displayName = name || `[TEST COPY] ${source_id}`;
@@ -96,8 +108,8 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
     try {
       await db
         .prepare(
-          `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, is_exemplar, visibility, source, source_id, last_activity_at)
-           VALUES (?, ?, ?, ?, ?, 1, 1, 'private', 'nemar-exemplar', ?, datetime('now'))`,
+          `INSERT INTO datasets (dataset_id, name, description, owner_user_id, github_repo, is_sandbox, is_exemplar, visibility, anonymous, source, source_id, last_activity_at)
+           VALUES (?, ?, ?, ?, ?, 1, 1, 'private', ?, 'nemar-exemplar', ?, datetime('now'))`,
         )
         .bind(
           dataset_id,
@@ -105,6 +117,7 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
           description || null,
           adminUser.id,
           githubRepo.full_name,
+          anonymous ? 1 : 0,
           source_id,
         )
         .run();
@@ -190,6 +203,7 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
     const dataset = await db
       .prepare(
         `SELECT d.dataset_id, d.name, d.description, d.github_repo, d.concept_doi, d.is_exemplar,
+                d.anonymous,
                 u.username as owner_username, u.orcid as owner_orcid,
                 u.given_name as owner_given_name, u.family_name as owner_family_name
          FROM datasets d JOIN users u ON d.owner_user_id = u.id WHERE d.dataset_id = ?`,
@@ -202,6 +216,7 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
         github_repo: string | null;
         concept_doi: string | null;
         is_exemplar: number | null;
+        anonymous: number | null;
         owner_username: string;
         owner_orcid: string | null;
         owner_given_name: string | null;
@@ -248,6 +263,14 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
           // Exemplars are exempt: their owner row is an admin/service account
           // and they mint on the EZID sandbox shoulder (requiresUploaderName).
           uploaderRequired: requiresUploaderName(dataset),
+          // #1409: the fleet's standing anonymous exemplar (xx099907) is
+          // re-minted by the same maintenance command as every other one, and
+          // this is the shortest path from a concealed deposit to a permanent
+          // DataCite record naming its depositor. `resolveOwnerIdentity` above
+          // reads the real name, ORCID and username straight off the joined
+          // `users` row; without this flag they would be minted as the curator
+          // and the identifier advertised as public.
+          anonymousDeposit: isAnonymous(dataset),
           sandbox: true,
         },
         {
