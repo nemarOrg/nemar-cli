@@ -28,6 +28,33 @@ Measuring the sixteen also showed that the sources differ in how well they ident
 
 **Recovery writes no location log.** It puts objects in the bucket; `nemar admin fleet key-registration` then lists the bucket again and records what is there, so exactly one piece of code writes a presence claim and it is the one that reads the log back (ADR 0061).
 
+**Amended 2026-09-16 (#1396): a pin can name content that is not the key's, so the source's length is now checked before the copy, and a zero-length key is recovered without a source at all.**
+This decision called a pin "the archive's own record of which bytes are this key's" and let that license evidence weaker than a hash.
+Finishing the last two datasets measured two pins that are simply wrong about content:
+
+- `on006136`'s key `SHA256E-s0--e3b0c44...` carries four pins, naming four different OpenNeuro upload temp objects.
+  All four hold the same 2,075 bytes of the dataset's README, for a key that declares zero.
+- `on004624`'s key `SHA256E-s6488064--7e9f3d66...` is pinned to an object of 6,520,832 bytes, one 32 KiB block longer than the key declares.
+
+Both were caught, by the SHA-256 comparison this ADR already requires, and both copies were deleted.
+Nothing wrong reached the bucket.
+Two things change anyway.
+
+**The source's length is compared to the key's declared size before the copy, on both the dry-run and the apply path.**
+The probe already issued that HEAD and read only its exit code, so a readable wrong-sized object counted as recoverable content and every apply spent a copy to be told no.
+Below 5 GB this only saves the wasted copy.
+Above it, it is the actual guard: the multipart path cuts its ranges from the KEY's declared size and has no checksum afterwards, so a pinned source of another length was previously copied range by range against a length it does not have.
+
+**A key that declares zero bytes and carries the empty file's hash is written directly, with no source consulted.**
+There is exactly one byte string of length zero and the key names its hash, so this is the only recovery here that rests on no upstream evidence whatsoever, and it is the strongest proof on any of these paths rather than the weakest.
+A `-s0` key whose hash is NOT the empty file's is refused: no content satisfies it, and writing the empty object would be inventing bytes.
+Recorded as `origin: empty`, `verification: empty`, and read back from the bucket like every other path.
+
+**The residual, stated plainly:** `size-and-pin` remains a passing verdict, for a pinned source above 5 GB whose object carries no full-object CRC64.
+It now has a known failure mode rather than a theoretical one.
+It is bounded: a bad pin has to name an object of exactly the key's length to reach it, and neither measured case does.
+Tightening it further would refuse oversized pinned content that nothing suggests is wrong, so it stands, named here so the next person does not have to rediscover that a pin is an index, not a promise.
+
 ## Consequences
 
 - Recovery is provable after the fact: every recovered key was checked against its own hash, and the report says by which method.

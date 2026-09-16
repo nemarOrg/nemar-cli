@@ -555,14 +555,17 @@ exit 0`);
   test("keeps a refused copy a failure when the source is readable without us", async () => {
     // Same 403, opposite meaning: the object serves fine unsigned, so what was
     // refused is OUR request, and that is worth retrying with other credentials.
-    await setUpPinnedDataset("content upstream serves");
+    // The unsigned HEAD answers the key's own length, because a source of any
+    // other length is refused earlier and on different grounds.
+    const served = "content upstream serves";
+    await setUpPinnedDataset(served);
     installAwsShim(`
 case "$2" in
   copy-object)
     echo "aws: [ERROR]: An error occurred (AccessDenied) when calling the CopyObject operation: Access Denied" >&2
     exit 254 ;;
   head-object)
-    case "$*" in *--no-sign-request*) echo '{"ContentLength":10}'; exit 0 ;; esac
+    case "$*" in *--no-sign-request*) echo '{"ContentLength":${served.length}}'; exit 0 ;; esac
     exit 254 ;;
   list-object-versions) echo '[]'; exit 0 ;;
 esac
@@ -741,5 +744,182 @@ exit 0`);
     expect(sweep.recoveredBytes).toBe(content.length);
     // Every action is a key of the tally, so a new member cannot tally as NaN.
     expect(Object.values(sweep.tally).every((count) => Number.isInteger(count))).toBe(true);
+  }, 180_000);
+});
+
+describe("a key whose content is the empty file", () => {
+  /**
+   * Set up the on006136 shape: an empty annexed file whose `.log.rmet` pins an
+   * upstream object holding something else entirely.
+   */
+  async function setUpEmptyKeyDataset(): Promise<string> {
+    const key = await addAnnexedFile("tmpw6dd7czq", "");
+    await writeAnnexBranchFile(
+      origin,
+      "remote.log",
+      [
+        "9e1479f6-49e0-413b-8222-a7f8000f55a6 bucket=openneuro.org name=s3-PUBLIC type=S3 versioning=yes",
+        "ca4da2fe-2a4c-49b1-abd6-00fc9ec1ff30 bucket=nemar fileprefix=on000001/objects/ name=nemar-s3 type=S3",
+        "",
+      ].join("\n"),
+    );
+    await writeAnnexBranchFile(
+      origin,
+      `${await hashDir(origin, key)}${key}.log.rmet`,
+      "1769724514s 9e1479f6-49e0-413b-8222-a7f8000f55a6:V +tMvX#ds000001/tmpw6dd7czq\n",
+    );
+    return key;
+  }
+
+  test("writes zero bytes and never reads the upstream object", async () => {
+    // Measured on on006136: the pinned object holds 2,075 bytes of the dataset
+    // README, so copying it is refused by checksum and the key reads as
+    // unrecoverable. There is exactly one byte string of length zero and the key
+    // names its hash, so the content was never in doubt. Recovering it must not
+    // depend on upstream at all -- which is what the copy-object assertion pins.
+    const key = await setUpEmptyKeyDataset();
+    installAwsShim(`
+case "$2" in
+  put-object) echo '{"ETag":"\\"d41d8cd98f00b204e9800998ecf8427e\\""}'; exit 0 ;;
+  head-object) echo '{"ContentLength":0}'; exit 0 ;;
+  list-object-versions) echo '[["ds000001/tmpw6dd7czq","tMvX",2075,"\\"d933\\""]]'; exit 0 ;;
+esac
+exit 0`);
+
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
+      workRoot,
+      apply: true,
+      originUrl: origin,
+    });
+
+    expect(outcome.keys).toEqual([
+      { key, size: 0, action: "recovered", origin: "empty", verification: "empty" },
+    ]);
+    const puts = shimLog().filter((line) => line.startsWith("s3api put-object"));
+    expect(puts).toHaveLength(1);
+    expect(puts[0]).toContain(`--key on000001/objects/${key}`);
+    expect(puts[0]).toContain("--content-length 0");
+    expect(shimLog().filter((line) => line.startsWith("s3api copy-object"))).toEqual([]);
+  }, 180_000);
+
+  test("deletes what it wrote when the bucket reads it back as non-empty", async () => {
+    // The same rule as every other path (ADR 0063): an object under a real key's
+    // name that is not the key's content is worse than no object, because the
+    // next registration sweep checks name and size and advertises it.
+    const key = await setUpEmptyKeyDataset();
+    installAwsShim(`
+case "$2" in
+  put-object) echo '{}'; exit 0 ;;
+  head-object) echo '{"ContentLength":2075}'; exit 0 ;;
+  list-object-versions) echo '[]'; exit 0 ;;
+esac
+exit 0`);
+
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
+      workRoot,
+      apply: true,
+      originUrl: origin,
+    });
+
+    expect(outcome.keys[0]).toMatchObject({ action: "failed", origin: "empty" });
+    expect(outcome.keys[0].detail).toContain("read back 2075 bytes");
+    expect(outcome.keys[0].verification).toBeUndefined();
+    expect(outcome.keys[0].leftInBucket).toBeFalsy();
+    const deletes = shimLog().filter((line) => line.startsWith("s3api delete-object"));
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0]).toContain(`--key on000001/objects/${key}`);
+  }, 180_000);
+
+  test("reports it as recoverable in a dry run without touching the bucket", async () => {
+    const key = await setUpEmptyKeyDataset();
+    installAwsShim(`
+case "$2" in
+  list-object-versions) echo '[]'; exit 0 ;;
+esac
+exit 0`);
+
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
+      workRoot,
+      apply: false,
+      originUrl: origin,
+    });
+
+    expect(outcome.keys).toEqual([{ key, size: 0, action: "would-recover", origin: "empty" }]);
+    expect(shimLog().filter((line) => line.startsWith("s3api put-object"))).toEqual([]);
+  }, 180_000);
+});
+
+describe("a source whose length contradicts the key", () => {
+  test("is not reported as recoverable by a dry run", async () => {
+    // on004624, measured: its pin names an object of 6,520,832 bytes for a key
+    // declaring 6,488,064. The probe used to read only the exit code, so a
+    // readable wrong-sized object counted as recoverable content and every apply
+    // spent a copy to be told no by the checksum.
+    const key = await setUpPinnedDataset("the key's real content");
+    installAwsShim(`
+case "$2" in
+  head-object) echo '{"ContentLength":999999}'; exit 0 ;;
+  list-object-versions) echo '[]'; exit 0 ;;
+esac
+exit 0`);
+
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
+      workRoot,
+      apply: false,
+      originUrl: origin,
+    });
+
+    expect(outcome.keys[0]).toMatchObject({ key, action: "unrecoverable", origin: "pinned" });
+    expect(outcome.keys[0].detail).toBe(
+      `the source object is 999999 bytes and the key declares ${annexKeyDeclaredSize(key)}`,
+    );
+  }, 180_000);
+
+  test("is never copied, so the wrong bytes never reach the bucket", async () => {
+    // Below 5 GB the checksum would catch this anyway. Above it the copy is
+    // multipart, its ranges are cut from the KEY's declared size, and there is
+    // no checksum afterwards -- so refusing before the copy is the actual guard.
+    await setUpPinnedDataset("the key's real content");
+    installAwsShim(`
+case "$2" in
+  head-object) echo '{"ContentLength":999999}'; exit 0 ;;
+  list-object-versions) echo '[]'; exit 0 ;;
+esac
+exit 0`);
+
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
+      workRoot,
+      apply: true,
+      originUrl: origin,
+    });
+
+    expect(outcome.keys[0].action).toBe("failed");
+    expect(outcome.keys[0].detail).toContain("the source object is 999999 bytes");
+    expect(shimLog().filter((line) => line.startsWith("s3api copy-object"))).toEqual([]);
+  }, 180_000);
+
+  test("still tries a source whose length the answer did not carry", async () => {
+    // Not finding out is not evidence. A HEAD that answers without a
+    // ContentLength must leave the copy to decide, not refuse it on a null.
+    const content = "the key's real content";
+    await setUpPinnedDataset(content);
+    installAwsShim(`
+case "$2" in
+  copy-object) echo '{"CopyObjectResult":{"ChecksumSHA256":"${sha256Base64(content)}"}}'; exit 0 ;;
+  head-object)
+    case "$*" in *--no-sign-request*) echo '{}'; exit 0 ;; esac
+    echo '{"ContentLength":${content.length},"ChecksumSHA256":"${sha256Base64(content)}"}'
+    exit 0 ;;
+  list-object-versions) echo '[]'; exit 0 ;;
+esac
+exit 0`);
+
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
+      workRoot,
+      apply: true,
+      originUrl: origin,
+    });
+
+    expect(outcome.keys[0]).toMatchObject({ action: "recovered", verification: "checksum" });
   }, 180_000);
 });

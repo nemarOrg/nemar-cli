@@ -343,13 +343,28 @@ interface SourceCommon {
 /**
  * Where one key's content can be copied from, or why it cannot be.
  *
- * A source XOR a reason, spelled with explicit `undefined` counterparts so
- * `entry.source` can still be read directly and `entry.reason` narrows to a
- * `string` once it is absent. `recoverKey` used to need an `?? "no source"`
- * fallback for a state the producer never creates.
+ * A source XOR a reason XOR nothing to read at all, spelled with explicit
+ * `undefined` counterparts so `entry.source` can still be read directly and
+ * `entry.reason` narrows to a `string` once the other two are ruled out.
+ * `recoverKey` used to need an `?? "no source"` fallback for a state the
+ * producer never creates.
  */
 export type RecoveryPlanEntry = { key: string; size: number } & (
   | {
+      /**
+       * The key is the empty file, so there is no source and no copy.
+       *
+       * Its own arm rather than a `RecoverySource` with blank fields: every
+       * other arm exists to say WHERE bytes come from, and this one is the case
+       * where that question has no answer because it has no content to fetch.
+       */
+      empty: true;
+      source?: undefined;
+      alternatives?: undefined;
+      reason?: undefined;
+    }
+  | {
+      empty?: undefined;
       source: RecoverySource;
       /**
        * Other sources to try if the first is refused.
@@ -365,12 +380,48 @@ export type RecoveryPlanEntry = { key: string; size: number } & (
       reason?: undefined;
     }
   | {
+      empty?: undefined;
       source?: undefined;
       alternatives?: undefined;
       /** Why there is no source; the evidence that it is not a bug here. */
       reason: string;
     }
 );
+
+/**
+ * The content hash of the empty file, by backend.
+ *
+ * A key declaring `-s0` can only ever be satisfied by zero bytes, and this says
+ * whether zero bytes is what the key actually asks for. A `-s0` key whose hash
+ * is something else is self-contradictory: no byte string satisfies it, and
+ * writing the empty object would be inventing content rather than recovering it.
+ */
+const EMPTY_CONTENT_HASH: Record<string, string> = {
+  SHA256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  SHA256E: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  MD5: "d41d8cd98f00b204e9800998ecf8427e",
+  MD5E: "d41d8cd98f00b204e9800998ecf8427e",
+};
+
+/**
+ * Whether this key is the empty file, and so needs no source at all.
+ *
+ * There is exactly one byte string of length zero, so a key that declares `-s0`
+ * and carries the empty file's hash is content we already have: writing it is a
+ * proof, not a guess, and it is the only recovery on this path that rests on no
+ * upstream evidence whatsoever.
+ *
+ * This matters because the recorded sources for such a key are routinely wrong.
+ * on006136's empty key carries four pins, all naming OpenNeuro upload temp
+ * objects, and all four hold 2,075 bytes of the dataset's README. Copying from
+ * the pin was refused by checksum, correctly; the key was recoverable the whole
+ * time without reading upstream at all.
+ */
+export function isEmptyContentKey(facts: AnnexKeyFacts): boolean {
+  if (facts.size !== 0) return false;
+  const expected = EMPTY_CONTENT_HASH[facts.backend];
+  return expected !== undefined && facts.hashHex === expected;
+}
 
 /**
  * Decide where one key's content can be copied from. Pure, and the whole rule.
@@ -387,6 +438,15 @@ export function planKeyRecovery(opts: {
   const facts = parseAnnexKey(opts.key);
   if (!facts) return { key: opts.key, size: 0, reason: "not a parseable annex key" };
   const base = { key: opts.key, size: facts.size };
+  // Before any source is considered, and deliberately so: the empty file needs
+  // none, and the pins a `-s0` key carries have proven to name other content.
+  if (isEmptyContentKey(facts)) return { ...base, empty: true };
+  if (facts.size === 0) {
+    return {
+      ...base,
+      reason: "declares zero bytes but not the empty file's hash; no content can satisfy it",
+    };
+  }
   const pin = opts.pins[opts.pins.length - 1];
 
   const discovered = opts.upstream ? discoverUpstreamSource(facts.size, opts) : null;
@@ -969,7 +1029,18 @@ export async function headObject(opts: {
 export async function isUpstreamObjectReadable(
   source: { bucket: string; object: string; version?: string },
   env?: Record<string, string>,
-): Promise<{ readable: boolean; refusedByUpstream: boolean; detail: string | null }> {
+): Promise<{
+  readable: boolean;
+  refusedByUpstream: boolean;
+  /**
+   * The source object's length, or null when the answer did not carry one.
+   *
+   * Null is "we did not find out", never "zero": the caller compares this to the
+   * key's declared size and must not read a missing answer as a contradiction.
+   */
+  size: number | null;
+  detail: string | null;
+}> {
   const args = [
     "s3api",
     "head-object",
@@ -980,14 +1051,44 @@ export async function isUpstreamObjectReadable(
     source.object,
   ];
   if (source.version) args.push("--version-id", source.version);
-  const { stderr, exitCode, timedOut } = await aws(args, env);
-  if (exitCode === 0) return { readable: true, refusedByUpstream: false, detail: null };
+  const { stdout, stderr, exitCode, timedOut } = await aws(args, env);
+  if (exitCode === 0) {
+    const body = JSON.parse(stdout || "{}") as { ContentLength?: number };
+    const size = typeof body.ContentLength === "number" ? body.ContentLength : null;
+    return { readable: true, refusedByUpstream: false, size, detail: null };
+  }
   const detail = timedOut ? "timed out" : stderr.trim() || `exit ${exitCode}`;
   return {
     readable: false,
     refusedByUpstream: UPSTREAM_REFUSAL.test(stderr),
+    size: null,
     detail,
   };
+}
+
+/**
+ * Why this source cannot be this key's content, from one HEAD of it.
+ *
+ * A key declares its content's length, so a source object of another length is
+ * not that content, whatever recorded it. This is decisive for a pin as much as
+ * for a discovered object: on004624's pin names an object of 6,520,832 bytes for
+ * a key declaring 6,488,064, and reporting that key as recoverable overstated
+ * the fleet's recoverable content by every such pin.
+ *
+ * It also closes a real hazard above 5 GB, where the copy is multipart and
+ * `multipartRanges` cuts its parts from the KEY's declared size: a pinned source
+ * shorter than the key would be copied range by range against a length it does
+ * not have.
+ *
+ * Null when nothing contradicts the key, INCLUDING when the answer carried no
+ * length at all. Not finding out is not evidence.
+ */
+export function sourceSizeRefusal(
+  declaredSize: number,
+  probe: { size: number | null },
+): string | null {
+  if (probe.size === null || probe.size === declaredSize) return null;
+  return `the source object is ${probe.size} bytes and the key declares ${declaredSize}`;
 }
 
 /**
@@ -1034,6 +1135,29 @@ export async function upstreamObjectCrc64(
 }
 
 /**
+ * Write a zero-byte object, for a key whose content is the empty file.
+ *
+ * A `PutObject` with no body rather than a copy: there is nothing upstream to
+ * copy from, and nothing that would make a copy more trustworthy than writing
+ * the zero bytes the key asks for directly.
+ */
+export async function putEmptyObject(opts: {
+  bucket: string;
+  key: string;
+  env?: Record<string, string>;
+}): Promise<{ written: boolean; detail: string | null }> {
+  const { stderr, exitCode, timedOut } = await aws(
+    ["s3api", "put-object", "--bucket", opts.bucket, "--key", opts.key, "--content-length", "0"],
+    opts.env,
+  );
+  if (exitCode === 0) return { written: true, detail: null };
+  return {
+    written: false,
+    detail: timedOut ? "timed out" : stderr.trim() || `exit ${exitCode}`,
+  };
+}
+
+/**
  * Delete one object, and say why if it would not go.
  *
  * The reason matters more here than almost anywhere else in this module: this is
@@ -1063,9 +1187,13 @@ export interface KeyRecoveryOutcome {
   key: string;
   size: number;
   action: RecoveryAction;
-  origin?: RecoveryOrigin;
+  /**
+   * Where the content came from. `"empty"` is not a {@link RecoveryOrigin}
+   * because it is not a place to read from; it is the absence of one.
+   */
+  origin?: RecoveryOrigin | "empty";
   /** How a recovered copy was PROVEN. Only ever set on `recovered`. */
-  verification?: VerificationMethod;
+  verification?: VerificationMethod | "empty";
   detail?: string;
   /**
    * An object that failed verification and could not be deleted.
@@ -1093,6 +1221,54 @@ export async function recoverKey(opts: {
   env?: Record<string, string>;
 }): Promise<KeyRecoveryOutcome> {
   const { entry } = opts;
+  if (entry.empty) {
+    if (!opts.apply) {
+      return { key: entry.key, size: 0, action: "would-recover", origin: "empty" };
+    }
+    const written = await putEmptyObject({
+      bucket: opts.destBucket,
+      key: opts.destKey,
+      env: opts.env,
+    });
+    if (!written.written) {
+      return {
+        key: entry.key,
+        size: 0,
+        action: "failed",
+        origin: "empty",
+        detail: written.detail ?? "the bucket refused the write",
+      };
+    }
+    // Read back, for the same reason every other path does: the question a later
+    // registration sweep asks is what the BUCKET holds, not what a write claimed.
+    const head = await headObject({ bucket: opts.destBucket, key: opts.destKey, env: opts.env });
+    if (head.object?.size !== 0) {
+      const detail =
+        head.object === null
+          ? `written, but the bucket then answered ${head.failed ?? "nothing"}`
+          : `written, but the bucket read back ${head.object.size} bytes`;
+      const removed = await deleteObject({
+        bucket: opts.destBucket,
+        key: opts.destKey,
+        env: opts.env,
+      });
+      return {
+        key: entry.key,
+        size: 0,
+        action: "failed",
+        origin: "empty",
+        detail,
+        leftInBucket: !removed.deleted,
+      };
+    }
+    return {
+      key: entry.key,
+      size: 0,
+      action: "recovered",
+      origin: "empty",
+      verification: "empty",
+    };
+  }
   if (!entry.source) {
     return { key: entry.key, size: entry.size, action: "unrecoverable", detail: entry.reason };
   }
@@ -1121,16 +1297,32 @@ export async function recoverKey(opts: {
     // a plan built from the records alone reports 30 recoverable keys and an
     // apply recovers none. One unsigned HEAD per candidate is what the copy
     // would have found out anyway.
+    const probeRefusals: string[] = [];
     for (const candidate of [entry.source, ...(entry.alternatives ?? [])]) {
       if (oversized(candidate)) continue;
-      if ((await isUpstreamObjectReadable(candidate, opts.env)).readable) {
-        return {
-          key: entry.key,
-          size: entry.size,
-          action: "would-recover",
-          origin: candidate.origin,
-        };
+      const probe = await isUpstreamObjectReadable(candidate, opts.env);
+      if (!probe.readable) continue;
+      // The same HEAD already answered this, so the length costs nothing extra.
+      const wrongSize = sourceSizeRefusal(entry.size, probe);
+      if (wrongSize) {
+        probeRefusals.push(wrongSize);
+        continue;
       }
+      return {
+        key: entry.key,
+        size: entry.size,
+        action: "would-recover",
+        origin: candidate.origin,
+      };
+    }
+    if (probeRefusals.length > 0) {
+      return {
+        key: entry.key,
+        size: entry.size,
+        action: "unrecoverable",
+        origin,
+        detail: probeRefusals.join("; "),
+      };
     }
     return {
       key: entry.key,
@@ -1151,6 +1343,18 @@ export async function recoverKey(opts: {
   );
   const refusals: string[] = [];
   for (const source of candidates) {
+    // Ask the source's length before copying it. Below 5 GB this only saves a
+    // copy the checksum would refuse anyway; above it, it is the guard, because
+    // the multipart path cuts its ranges from the key's declared size and has no
+    // checksum to catch a source of another length afterwards.
+    const probe = await isUpstreamObjectReadable(source, opts.env);
+    if (probe.readable) {
+      const wrongSize = sourceSizeRefusal(entry.size, probe);
+      if (wrongSize) {
+        refusals.push(wrongSize);
+        continue;
+      }
+    }
     let copied: CopyResult;
     try {
       copied = await copyObjectServerSide({
