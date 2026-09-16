@@ -154,7 +154,7 @@ The 10-step pipeline lives in `src/lib/e2e-test.ts` and sources
 ### Dev D1 shares production users and the GitHub org
 
 `nemar-db-dev` no longer mirrors production's dataset catalog — it was purged to the curated
-fixtures only (the seven `xx0999NN` exemplars plus the private E2E dataset `nm099999`)
+fixtures only (the eight `xx0999NN` exemplars plus the private E2E dataset `nm099999`)
 and must stay that way. **Do not re-seed production `nm`/`ds` rows into dev D1.**
 
 But the `users` table was **not** purged: it still holds roughly 609 real email addresses,
@@ -229,9 +229,15 @@ All inside the 0-99999 cap, so `xx900001` is invalid.
 | Dev ephemeral | `xx090001`-`xx099899` | throwaway dev/e2e | dev cron |
 | Dev exemplar fleet | `xx099900`-`xx099999` | curated persistent copies | **never** (`is_exemplar=1`) |
 
-**The exemplar fleet is permanent, not ephemeral.** Seven curated `xx0999NN` copies of real public
+**The exemplar fleet is permanent, not ephemeral.** Eight curated `xx0999NN` copies of real public
 datasets (`scripts/exemplar-fleet.json`) cover eeg / ieeg / emg / meg / multi-modal / HED,
 published with **sandbox** EZID DOIs (`10.5072/FK2`, never the production `10.82901` shoulder).
+
+**`xx099907` is the exception and must NEVER be published.** It is the fleet's standing
+anonymous deposit (ADR 0065), the fixture every anonymity surface is exercised against.
+Publishing it does not dirty it, it destroys it: the approve path stamps
+`first_published_at`, after which migration 0085's triggers refuse `anonymous = 1` on that
+row forever. `isExemplarPublishAllowed` refuses it server-side; do not route around that.
 Their `active`/`public` state lives in D1 and is the source of truth for the staging catalog;
 it does not depend on the registrar.
 The only thing that lapses is EZID's sandbox shoulder, which purges DOIs after about two weeks,

@@ -455,6 +455,7 @@ export function registerDoiRoutes(admin: AdminRouter): void {
           owner_username: string;
           is_sandbox: number | null;
           is_exemplar: number | null;
+          anonymous: number | null;
         }>();
 
       if (!dataset) {

@@ -10,6 +10,7 @@
  */
 
 import { timingSafeEqual } from "../../lib/constant-time.js";
+import { isAnonymous } from "../../services/anonymity";
 import {
   type EzidVersionDoiDataset,
   dispatchCentralManifestJob,
@@ -106,10 +107,40 @@ export function registerVersionDoiRoutes(webhooks: WebhookRouter): void {
         concept_doi: string | null;
         zenodo_concept_id: string | null;
         ezid_status: string | null;
+        anonymous: number | null;
       }>();
 
     if (!dataset) {
       return c.json({ error: "Dataset not found" }, 404);
+    }
+
+    // A version DOI is minted AND made public (`createEzidVersionDoi` calls
+    // `makePublic` unconditionally), which for a concealed deposit publishes a
+    // resolving DataCite record -- irreversible, and exactly what ADR 0067's
+    // invariant A6 forbids.
+    //
+    // The webhook dispatcher already decides this before fetching a token and
+    // fails closed. This is the SAME rule at the endpoint that actually mints,
+    // because anything reaching here without passing that gate -- a re-run of
+    // the central `run-version-doi` workflow, a `workflow_dispatch`, any holder
+    // of NEMAR_WEBHOOK_TOKEN -- would otherwise mint anyway. Migration 0085's
+    // own header says it: "a rule that lives only in a service is one a future
+    // route can forget."
+    //
+    // 200 so the workflow does not fail: refusing is the correct outcome here,
+    // not an error to retry.
+    if (isAnonymous(dataset)) {
+      console.warn(
+        `[version-doi] ${dataset_id}: refusing to mint a version DOI for an anonymous deposit`,
+      );
+      return c.json(
+        {
+          error:
+            "Dataset is an anonymous deposit: a version DOI resolves, and publishing one would disclose it. Publish the dataset for real first.",
+          skipped: true,
+        },
+        200,
+      );
     }
 
     // Check if concept DOI exists

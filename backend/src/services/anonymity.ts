@@ -215,6 +215,24 @@ export const OWNER_GITHUB_SQL =
   "CASE WHEN d.anonymous = 1 THEN NULL ELSE u.github_username END AS owner_github";
 
 /**
+ * The concept DOI, withheld for a concealed deposit, as a SQL projection.
+ *
+ * The same rule `withheldWhileAnonymous` applies in TypeScript, for the
+ * projections that never build a row object to hand it -- the search tiers and
+ * the MCP catalog row, which SELECT straight into a response shape.
+ *
+ * It exists because the rule had been written by hand three times
+ * (`withheldWhileAnonymous`, `page-bundle.ts`, `data-router.ts`) and,
+ * predictably, was missing from the fourth and fifth surfaces. A reserved
+ * identifier does not resolve and must not be cited; handing one to a search
+ * result or an MCP `citation` string gives a reader a ready-made dead DOI,
+ * which is the harm ADR 0065 names.
+ *
+ * `d` must be the `datasets` alias, as with the owner projections above.
+ */
+export const CONCEPT_DOI_SQL = "CASE WHEN d.anonymous = 1 THEN NULL ELSE d.concept_doi END";
+
+/**
  * What a dataset's GitHub repository SHOULD be, which is not always what its
  * catalog row says.
  *

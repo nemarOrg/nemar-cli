@@ -35,6 +35,7 @@ import {
   flagToBoolean,
   searchDatasetsOutputSchema,
 } from "../../../../shared/contract/mcp.js";
+import { CONCEPT_DOI_SQL } from "../../services/anonymity";
 import { splitCsv } from "../../services/data-router.js";
 import {
   type DatasetFilterOptions,
@@ -212,7 +213,7 @@ export async function searchDatasetsTool(
   } else {
     const { from, params } = buildPublicCatalogBase("active", undefined, undefined);
     const filterClauses = buildDatasetFilterClauses(params, filters);
-    const selectSql = `SELECT d.dataset_id, d.name, d.concept_doi, d.license, d.modalities, d.tasks, d.subject_count, d.has_hed, d.zarr_status, d.zarr_store_count ${from}${filterClauses} ORDER BY d.created_at DESC LIMIT ?`;
+    const selectSql = `SELECT d.dataset_id, d.name, ${CONCEPT_DOI_SQL} AS concept_doi, d.license, d.modalities, d.tasks, d.subject_count, d.has_hed, d.zarr_status, d.zarr_store_count ${from}${filterClauses} ORDER BY d.created_at DESC LIMIT ?`;
     const countSql = `SELECT COUNT(*) AS total ${from}${filterClauses}`;
     const [rowsResult, countResult] = await env.DB.batch<CatalogListRow | { total: number }>([
       env.DB.prepare(selectSql).bind(...params, args.limit),

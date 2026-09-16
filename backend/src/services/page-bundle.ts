@@ -27,6 +27,7 @@
  * Epic #618 / phase 3 (#621). Companion: nemarOrg/website#63/#64/#65.
  */
 import type { Bindings } from "../types/bindings";
+import { withheldWhileAnonymous } from "./anonymity";
 import {
   type DatasetVersionRow,
   type LandingPayload,
@@ -101,10 +102,15 @@ async function loadCatalogRow(env: Bindings, datasetId: string): Promise<Catalog
     .bind(datasetId)
     .first<CatalogRow & { anonymous: number | null }>();
   if (!row) return null;
-  const { anonymous, ...catalogRow } = row;
-  if (anonymous === 1) {
-    return { ...catalogRow, concept_doi: null, github_repo: null };
-  }
+  // `withheldWhileAnonymous` is THE rule (services/anonymity.ts). This used to
+  // re-implement it inline, and the hand-written copy nulled two identifiers
+  // where the rule nulls three -- which is how a rule written four times ends
+  // up missing from the fifth surface.
+  const withheld = withheldWhileAnonymous(
+    row as unknown as Record<string, unknown>,
+    false,
+  ) as unknown as CatalogRow & { anonymous?: number | null };
+  const { anonymous: _anonymous, ...catalogRow } = withheld;
   return catalogRow;
 }
 

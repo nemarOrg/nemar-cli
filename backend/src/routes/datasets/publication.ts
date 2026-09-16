@@ -988,10 +988,16 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     }
 
     // Step 1: Update GitHub repository visibility.
-    // An anonymous deposit (#1407) is public in the catalog and private on
-    // GitHub, so this route publishes the data without publishing the
-    // repository; `expectedRepoVisibility` is the one rule that says which.
-    // De-anonymizing first is what makes the repository public.
+    //
+    // This route REFUSES an anonymous deposit outright, 35 lines up (#1408:
+    // ending anonymity has to restore attribution from the depositor's own
+    // dataset_description.json, which only the publication-request flow does).
+    // So `dataset.anonymous` is always 0 here and this always resolves to
+    // public. The call is kept rather than replaced with a literal precisely
+    // BECAUSE it is currently moot: `expectedRepoVisibility` is the one rule
+    // for this field, and if that refusal is ever relaxed, the route stays
+    // correct instead of silently publishing a concealed depositor's
+    // repository. A literal `false` here would be the bug phase 3 found twice.
     const pat = await getDatasetsToken(c.env);
     const repoShouldBePrivate =
       expectedRepoVisibility({ visibility: "public", anonymous: dataset.anonymous }) === "private";

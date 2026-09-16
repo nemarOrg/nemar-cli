@@ -2070,7 +2070,7 @@ export async function stampZarrRequeue(
       // The warning below is then the only record, which is why it is returned
       // to the caller rather than logged.
     }
-    return `${datasetId} was de-anonymized but its Zarr rebuild could not be requested: ${message}. Its viewer keeps the blinded citation until this is re-run; nothing else re-checks it.`;
+    return `${datasetId} was de-anonymized but its Zarr rebuild could not be requested: ${message}. Approve the request again to retry the stamp -- a run whose steps are all complete still re-requests it. Its viewer keeps the blinded citation until then, and nothing else re-checks a de-anonymized row.`;
   }
 }
 
@@ -2136,10 +2136,18 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   const stepsToRun = allSteps.filter((s) => !stepsCompleted.includes(s));
 
   if (stepsToRun.length === 0) {
+    // Re-request the Zarr rebuild on this path too, so the warning
+    // `stampZarrRequeue` returns is actionable. Its one other caller is at the
+    // END of the step loop, and a run that reaches here never gets there -- so
+    // an admin told "its viewer keeps the blinded citation until this is
+    // re-run" had no way to re-run it, and no other code path re-checks a
+    // de-anonymized row (the sweep selects `anonymous = 1`).
+    const retryWarning = await stampZarrRequeue(db, datasetId, anonymousRelease);
     return c.json({
       message: "All steps already completed",
       dataset_id: datasetId,
       status: "published",
+      ...(retryWarning ? { warnings: [retryWarning] } : {}),
     });
   }
 

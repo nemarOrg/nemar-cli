@@ -223,6 +223,24 @@ const VISIBILITY_MUTATOR = /await\s+(setRepoVisibility|ensureRepoToSpec)\s*\(/g;
 const LITERAL_VISIBILITY = /^\s*(true|false|"public"|"private"|'public'|'private')\s*$/;
 
 /**
+ * A literal that means PRIVATE.
+ *
+ * The scan is deliberately asymmetric, because the two directions are not
+ * comparable. Publishing a repository is what discloses a concealed depositor
+ * -- the git history carries commit author names and emails and the pre-blind
+ * `.nemar/metadata.json` -- and a clone cannot be taken back. Making one
+ * private discloses nothing; every literal-private call in this codebase is a
+ * REVERT after a failed write, and a revert must not be made conditional on
+ * the rule it is recovering from.
+ *
+ * So a literal private is allowed anywhere, and a literal `false` / `"public"`
+ * is an offense everywhere. This replaces a `file:line`-keyed allowlist, which
+ * pinned two revert calls by line number in an 1,100-line file and broke the
+ * moment an unrelated comment above them grew by six lines.
+ */
+const LITERAL_PRIVATE = /^\s*(true|"private"|'private')\s*$/;
+
+/**
  * The text of the ARGUMENT that decides visibility at one call site:
  * `setRepoVisibility(repo, <decision>, pat)`, or the `visibility:` property of
  * `ensureRepoToSpec(repo, pat, { ... })`.
@@ -236,17 +254,6 @@ function visibilityDecision(text: string, at: number): string {
   const visibility = /\bvisibility:\s*([^\n,]*)/.exec(call);
   return visibility ? visibility[1] : "";
 }
-
-/**
- * Call sites that pass a literal on purpose, with the reason. Both are REVERTS
- * to private after a failed write, and going private is always safe: it can
- * un-publish a repository that should not have been published, never the
- * reverse. A literal `false` or `"public"` never belongs here.
- */
-const DELIBERATE_LITERAL_VISIBILITY: Readonly<Record<string, string>> = {
-  "routes/datasets/publication.ts:1027": "reverting the repo to private after the D1 write failed",
-  "routes/datasets/publication.ts:1070": "the same revert one branch later",
-};
 
 describe("the repository does not follow the catalog row", () => {
   test("an anonymous deposit stays private on GitHub while its row is public", () => {
@@ -280,8 +287,11 @@ describe("the repository does not follow the catalog row", () => {
       for (const match of text.matchAll(VISIBILITY_MUTATOR)) {
         const line = text.slice(0, match.index).split("\n").length;
         const site = `${rel}:${line}`;
-        if (DELIBERATE_LITERAL_VISIBILITY[site]) continue;
-        if (!LITERAL_VISIBILITY.test(visibilityDecision(text, match.index ?? 0))) continue;
+        const decision = visibilityDecision(text, match.index ?? 0);
+        if (!LITERAL_VISIBILITY.test(decision)) continue;
+        // A literal PRIVATE is the safe direction and is always allowed; see
+        // LITERAL_PRIVATE. Only a literal public is an offense.
+        if (LITERAL_PRIVATE.test(decision)) continue;
         offenders.push(site);
       }
     }
@@ -731,5 +741,30 @@ describe("every DOI mint asks whether the deposit is anonymous", () => {
     }
     expect(sites).toBeGreaterThanOrEqual(2);
     expect(MINT_CALL.test("dispatchCreateConceptDoi")).toBe(true);
+  });
+});
+
+describe("a version DOI is refused for a concealed deposit", () => {
+  // `createEzidVersionDoi` calls `makePublic` unconditionally, so a version
+  // mint publishes a RESOLVING DataCite record -- irreversible, and what
+  // ADR 0067's invariant A6 forbids. The webhook dispatcher decided this
+  // correctly and fails closed, but the endpoint that actually mints never
+  // read the column, so anything reaching it without passing that gate (a
+  // workflow re-run, a workflow_dispatch, any holder of the webhook token)
+  // minted anyway. Migration 0085's own header: "a rule that lives only in a
+  // service is one a future route can forget."
+  const CALLBACK = readFileSync(join(SRC, "routes", "callbacks", "version-doi.ts"), "utf8");
+
+  test("the callback reads the column and refuses", () => {
+    expect(CALLBACK).toMatch(/anonymous: number \| null;/);
+    expect(CALLBACK).toMatch(/if \(isAnonymous\(dataset\)\)/);
+  });
+
+  test("the refusal comes before the mint", () => {
+    const refusalAt = CALLBACK.indexOf("if (isAnonymous(dataset))");
+    const mintAt = CALLBACK.indexOf("await createEzidVersionDoi(");
+    expect(refusalAt).toBeGreaterThan(-1);
+    expect(mintAt).toBeGreaterThan(-1);
+    expect(refusalAt).toBeLessThan(mintAt);
   });
 });
