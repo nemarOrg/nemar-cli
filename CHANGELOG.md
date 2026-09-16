@@ -170,11 +170,19 @@ earlier releases are described only by their generated notes.
   and workerd strips `Content-Length` when it decodes. So the deployed data plane served
   every git-tracked file with no length at all, and the documented check that a moved tag
   cannot serve the wrong bytes had never once run in production -- the guard was inert while
-  looking present, which is the failure mode worth naming. The response now declares the
-  manifest's size and counts the body against it on the way out, erroring the stream on a
-  short or overrun body so a wrong-length file fails the transfer instead of arriving
-  looking complete. Counted rather than buffered: the per-file ceiling is 32 MB and a Worker
-  holds 128 MB across concurrent requests. ADR 0066 carries the correction.
+  looking present, which is the failure mode worth naming.
+
+  A first attempt set the header by hand and still did not work, which is worth recording
+  because it is the same lesson twice: workerd sends a streamed body chunked and drops the
+  header, so a length that reaches a client has to belong to a body whose length the runtime
+  already knows. A brokered file at or below 8 MB is therefore read, checked against the
+  manifest's size and answered as bytes, which also makes a mismatch a clean 502 before
+  anything is sent rather than a transfer aborted mid-flight. Above that ceiling it degrades
+  to a stream with a counter that errors on a short or overrun body: no declared length
+  there, but still no wrong-length file that finishes looking healthy. For scale, the
+  per-file ceiling is 32 MB and the largest git-tracked file measured across the catalog is
+  283 KB, so the buffered branch is what every real dataset takes. ADR 0066 carries the
+  correction, including why this is a deliberate exception to ADR 0030.
 
 - **The withdrawn-datasets list now records a measured reason per dataset, and six entries
   were wrong (#1396).** It carried one filed reason each, 9 `upstream_403` and 2
