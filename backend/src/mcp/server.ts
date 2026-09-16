@@ -161,10 +161,19 @@ export function buildMcpServer(deps: BuildMcpServerDeps): McpServer {
     {
       title: "Search datasets",
       description:
-        "Search or browse the public NEMAR dataset catalog by keyword, modality, task, HED " +
-        "presence, or Zarr conversion status. A count of 0 is not an error -- an unrecognized " +
-        "modality/task value simply matches nothing; call describe_dataset on a hit to see the " +
-        "catalog's actual vocabulary for that dataset.",
+        "Search or browse the public NEMAR dataset catalog. A free-text `query` runs semantic " +
+        "search; every other parameter narrows the result set and they compose. Beyond keyword, " +
+        "modality, task, HED presence and Zarr status, you can filter by author, license tier, " +
+        "DOI presence, fidelity-verified Zarr, data completeness, recency, and the declared " +
+        "facets: subject and channel counts, session and recording counts, size, files, " +
+        "citations, duration, recording length, age, sampling rate, powerline frequency, " +
+        "reference, placement, electrode system, source, and BIDS or HED version. Range facets " +
+        "take `10..20`, `64..`, or `..128`. Pass ONLY the parameter names this schema declares: " +
+        "an undeclared name is accepted and silently ignored, which returns unfiltered results " +
+        "that look filtered. Several facet columns are only partly populated, so a filter can " +
+        "exclude rows whose value is simply unknown; pass include_unknown: true to admit those. " +
+        "A count of 0 is not an error -- an unrecognized modality/task value simply matches " +
+        "nothing; call describe_dataset on a hit to see the catalog's actual vocabulary.",
       inputSchema: searchDatasetsInputSchema4,
       outputSchema: searchDatasetsOutputSchema4,
     },
