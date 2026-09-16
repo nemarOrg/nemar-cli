@@ -9,10 +9,12 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import type { AnnexKeyFacts } from "../src/lib/content-recovery";
 import {
   COPY_OBJECT_LIMIT,
   copySourceArgument,
   indexUpstreamVersions,
+  isEmptyContentKey,
   isRetryableAwsError,
   multipartRanges,
   parseAnnexKey,
@@ -30,6 +32,8 @@ const SHA_B64 = Buffer.from(
   "hex",
 ).toString("base64");
 const MD5_KEY = "MD5E-s10203248--31e00c4f48dc4e333db21b13e967f094.set";
+/** The empty file: one byte string of length zero, and its fixed SHA-256. */
+const EMPTY_KEY = "SHA256E-s0--e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 const REMOTES = parseRemoteLog(
   [
@@ -343,6 +347,61 @@ describe("planKeyRecovery", () => {
     const entry = planKeyRecovery({ key: SHA_KEY, paths: ["a/b.dat"], pins: [] });
     expect(entry.source).toBeUndefined();
     expect(entry.reason).toBe("no upstream remote to recover from");
+  });
+
+  test("plans the empty file with no source, ignoring pins that name other content", () => {
+    // on006136, measured: its empty key carries four pins, and all four name
+    // OpenNeuro upload temp objects holding 2,075 bytes of the dataset README.
+    // Preferring the pin sent 2 KB of README at a key that declares zero bytes,
+    // which the checksum then refused -- while the content was known all along.
+    const entry = planKeyRecovery({
+      key: EMPTY_KEY,
+      paths: ["tmpw6dd7czq"],
+      pins: parseRmet(
+        "1769724514s 9e1479f6-49e0-413b-8222-a7f8000f55a6:V +tMvX#ds008798/tmpw6dd7czq",
+        REMOTES,
+      ),
+      upstream: {
+        bucket: "openneuro.org",
+        prefix: "ds008798/",
+        index: upstreamIndex([["ds008798/tmpw6dd7czq", "tMvX", 2075, '"d933"']]),
+      },
+    });
+    expect(entry).toEqual({ key: EMPTY_KEY, size: 0, empty: true });
+  });
+
+  test("refuses a zero-byte key whose hash is not the empty file's", () => {
+    // Nothing satisfies such a key, so writing the empty object would be
+    // inventing content. The `-s0` shortcut has to check the hash, not the size.
+    const entry = planKeyRecovery({
+      key: `SHA256E-s0--${"a".repeat(64)}`,
+      paths: ["a.dat"],
+      pins: [],
+    });
+    expect(entry.empty).toBeUndefined();
+    expect(entry.reason).toContain("not the empty file's hash");
+  });
+});
+
+describe("isEmptyContentKey", () => {
+  test("recognizes the empty file across the hashing backends", () => {
+    expect(isEmptyContentKey(parseAnnexKey(EMPTY_KEY) as AnnexKeyFacts)).toBe(true);
+    expect(
+      isEmptyContentKey(
+        parseAnnexKey("MD5E-s0--d41d8cd98f00b204e9800998ecf8427e.tsv") as AnnexKeyFacts,
+      ),
+    ).toBe(true);
+  });
+
+  test("is false for a sized key, however it hashes", () => {
+    expect(isEmptyContentKey(parseAnnexKey(SHA_KEY) as AnnexKeyFacts)).toBe(false);
+  });
+
+  test("is false for a backend whose hash this cannot read", () => {
+    // A URL key carries no content hash, so there is nothing to check the claim
+    // against; an unverifiable `-s0` is refused rather than assumed empty.
+    const facts = { backend: "URL", size: 0, hashHex: null };
+    expect(isEmptyContentKey(facts)).toBe(false);
   });
 });
 
@@ -685,5 +744,24 @@ describe("the 5 GB boundary that decides how a copy is proven", () => {
     const ranges = multipartRanges(3 * 1024 ** 3, 1024 ** 3);
     expect(ranges).toHaveLength(3);
     expect(ranges.every((r) => r.end >= r.offset)).toBe(true);
+  });
+});
+
+describe("planKeyRecovery on a zero-byte key whose hash cannot be read", () => {
+  test("falls through to its sources rather than refusing on an unmade comparison", () => {
+    // `HASH_WIDTH` knows SHA256/SHA256E/MD5/MD5E. A SHA1E or URL key leaves
+    // `hashHex` null, so there is nothing to compare the empty file's hash to.
+    // Refusing there would both assert a check that never ran and narrow
+    // behavior: such a key used to reach a pin and be recovered.
+    const entry = planKeyRecovery({
+      key: "SHA1E-s0--da39a3ee5e6b4b0d3255bfef95601890afd80709.dat",
+      paths: ["a.dat"],
+      pins: parseRmet(
+        "1789149471s 9e1479f6-49e0-413b-8222-a7f8000f55a6:V +v1#ds008798/a.dat",
+        REMOTES,
+      ),
+    });
+    expect(entry.reason).toBeUndefined();
+    expect(entry.source).toMatchObject({ origin: "pinned", version: "v1" });
   });
 });
