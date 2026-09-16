@@ -288,12 +288,13 @@ describe("the request route, end to end", () => {
       firstPublishedAt?: string | null;
       githubRepo?: string | null;
       conceptDoi?: string | null;
+      isExemplar?: number;
     },
   ): void {
     db.query(
       `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, is_sandbox,
-                             github_repo, anonymous, concept_doi, first_published_at)
-       VALUES (?, ?, ?, 'active', ?, 0, ?, ?, ?, ?)`,
+                             github_repo, anonymous, concept_doi, first_published_at, is_exemplar)
+       VALUES (?, ?, ?, 'active', ?, 0, ?, ?, ?, ?, ?)`,
     ).run(
       id,
       `A sufficiently descriptive title for ${id}`,
@@ -303,6 +304,7 @@ describe("the request route, end to end", () => {
       fields.anonymous,
       fields.conceptDoi ?? null,
       fields.firstPublishedAt ?? null,
+      fields.isExemplar ?? 0,
     );
   }
 
@@ -498,6 +500,111 @@ describe("the request route, end to end", () => {
     seedDataset(db, ownerId, "nm000877", { visibility: "public", anonymous: 0 });
     const res = await publishRequest(db, "nm000877", OWNER_KEY);
     expect(res.status).toBe(409);
+    db.close();
+  });
+
+  // ==========================================================================
+  // The fleet's standing anonymous deposit (#1423)
+  //
+  // `xx099907` is created anonymous and PRIVATE by
+  // `POST /admin/datasets/exemplar`, and the anonymous release is the only
+  // path that gives it the shape it is documented to have: `repo_public`
+  // makes the catalog row public while the GitHub repository stays private,
+  // and `create_tag` produces the version row and manifest the data plane
+  // serves from. Two separate guards refused that request, each for a reason
+  // that is true of a depositor's deposit and false of this one.
+  // ==========================================================================
+
+  test("the anonymous exemplar may request its anonymous release", async () => {
+    const db = freshDb();
+    const { ownerId } = await seedPeople(db);
+    seedDataset(db, ownerId, "xx099907", {
+      visibility: "private",
+      anonymous: 1,
+      isExemplar: 1,
+    });
+
+    const res = await publishRequest(db, "xx099907", OWNER_KEY, '{"anonymous":true}');
+
+    // Queued for an admin, not refused. The two refusals this pins are
+    // "Cannot publish sandbox datasets" (the xx block, whose exemplar
+    // exemption used to drop out for an anonymous row) and
+    // "already_released_anonymously" (which read `anonymous = 1` as proof a
+    // release had happened, while this row sat private and unserved).
+    // What "accepted" looks like here. The row has no GitHub repo, so the
+    // request lands in `blocked` on the content check that reads
+    // dataset_description.json -- and that is the proof: both guards under
+    // test return BEFORE the request is created, with 400 and 409
+    // respectively, so reaching a `blocked` publication request at all means
+    // neither fired. The body carries the flag, so it was accepted AS an
+    // anonymous release rather than coerced into a publication.
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as {
+      status?: string;
+      anonymous?: boolean;
+      error?: string;
+      block_reason?: string;
+    };
+    expect(body.error).toBeUndefined();
+    expect(body.status).toBe("blocked");
+    expect(body.block_reason).toBe("min_requirements_failed");
+    expect(body.anonymous).toBe(true);
+    db.close();
+  });
+
+  test("but a PLAIN publish of it is still refused, which is what the guard is for", async () => {
+    // The destructive direction: approving this would stamp
+    // `first_published_at`, after which migration 0085's triggers refuse
+    // `anonymous = 1` on the row forever. The fixture is destroyed rather
+    // than dirtied, so the exemption must not extend to it.
+    const db = freshDb();
+    const { ownerId } = await seedPeople(db);
+    seedDataset(db, ownerId, "xx099907", {
+      visibility: "private",
+      anonymous: 1,
+      isExemplar: 1,
+    });
+
+    const res = await publishRequest(db, "xx099907", OWNER_KEY);
+
+    expect(res.status).toBe(400);
+    expect((await res.json()) as { error: string }).toMatchObject({
+      error: "Cannot publish sandbox datasets",
+    });
+    db.close();
+  });
+
+  test("a non-exemplar xx dataset gets no such exemption", async () => {
+    // The control. Without it, an exemption that ignored `is_exemplar`
+    // entirely would pass the first test.
+    const db = freshDb();
+    const { ownerId } = await seedPeople(db);
+    seedDataset(db, ownerId, "xx090001", {
+      visibility: "private",
+      anonymous: 1,
+      isExemplar: 0,
+    });
+
+    const res = await publishRequest(db, "xx090001", OWNER_KEY, '{"anonymous":true}');
+
+    expect(res.status).toBe(400);
+    db.close();
+  });
+
+  test("an anonymous deposit that IS public is still told it was released", async () => {
+    // The other control, and the behavior the narrowing must not break: for a
+    // depositor, `anonymous` and `public` arrive together at the release, so
+    // asking again really is a no-op and saying so beats queueing an admin.
+    const db = freshDb();
+    const { ownerId } = await seedPeople(db);
+    seedDataset(db, ownerId, "nm000878", { visibility: "public", anonymous: 1 });
+
+    const res = await publishRequest(db, "nm000878", OWNER_KEY, '{"anonymous":true}');
+
+    expect(res.status).toBe(409);
+    expect((await res.json()) as { error: string }).toMatchObject({
+      error: "already_released_anonymously",
+    });
     db.close();
   });
 });

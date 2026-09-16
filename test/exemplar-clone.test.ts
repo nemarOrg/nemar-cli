@@ -18,6 +18,10 @@ import {
   rewriteObjectKeyPrefix,
   scrubDatasetDescription,
 } from "../src/lib/exemplar-clone";
+// The publication gate's own predicate, imported rather than restated: the
+// clone writes a placeholder and the gate decides whether it counts, so a test
+// that spelled the rule twice could pass while the two disagreed.
+import { isPlaceholderAuthor } from "../backend/src/services/submission-minimums";
 import type { CopyItem } from "../src/lib/s3-server-copy";
 
 describe("scrubDatasetDescription", () => {
@@ -52,6 +56,40 @@ describe("scrubDatasetDescription", () => {
     });
     expect(scrubbed.Authors).toEqual(["A", "B"]);
     expect(scrubbed.License).toBe("CC0");
+  });
+
+  test("leaves Authors alone by default, which is the depositor's business", () => {
+    // NEMAR does not scrub a depositor's own files. An ordinary exemplar is a
+    // copy of a published dataset and keeps its real author list.
+    const scrubbed = scrubDatasetDescription({ Name: "X", Authors: ["Ada Lovelace"] });
+    expect(scrubbed.Authors).toEqual(["Ada Lovelace"]);
+  });
+
+  test("blinds Authors for the anonymous exemplar, because no depositor will", () => {
+    // #1423: the publication request refuses an anonymous release whose
+    // Authors still names anybody, and a fixture has nobody to act on that
+    // instruction. Without this the fleet's anonymous deposit inherits the
+    // SOURCE dataset's real names and can never complete the release that
+    // gives it a public row, a version and a manifest.
+    const scrubbed = scrubDatasetDescription(
+      { Name: "X", Authors: ["Ada Lovelace", "Charles Babbage"] },
+      { anonymous: true },
+    );
+    expect(scrubbed.Authors).toEqual(["Anonymous"]);
+    expect(scrubbed.Name).toBe("[TEST COPY] X");
+  });
+
+  test("the placeholder it writes is one the publication gate accepts", () => {
+    // The two must not be able to disagree about what counts as blinded, so
+    // this asserts against the gate's own predicate rather than restating it.
+    const scrubbed = scrubDatasetDescription({ Name: "X", Authors: ["Real Person"] }, {
+      anonymous: true,
+    });
+    for (const entry of scrubbed.Authors as string[]) {
+      expect(isPlaceholderAuthor(entry)).toBe(true);
+    }
+    // The control: the names it replaced would NOT have passed.
+    expect(isPlaceholderAuthor("Real Person")).toBe(false);
   });
 });
 

@@ -18,6 +18,73 @@ import type { Bindings } from "../src/types/bindings";
 const EXEMPLAR_ID = "xx099900"; // dev exemplar band, valid id shape (num 99900 <= 99999)
 const envOf = (v: unknown) => ({ ENVIRONMENT: v }) as Pick<Bindings, "ENVIRONMENT">;
 
+/**
+ * The anonymity term, and the intent that narrows it (#1423).
+ *
+ * The term exists so the fleet's standing anonymous deposit cannot be
+ * published for real: the approve path would stamp `first_published_at`, and
+ * migration 0085's triggers then refuse `anonymous = 1` on that row forever,
+ * destroying the fixture rather than dirtying it.
+ *
+ * It was refusing an ANONYMOUS RELEASE too, which cannot do any of that --
+ * `FIRST_PUBLICATION_STAMP_SQL` leaves an anonymous row unstamped on purpose.
+ * Since the anonymous release is the only path that runs `repo_public` and
+ * `create_tag`, refusing it meant the fixture could never have a public row, a
+ * version or a manifest, so every public-facing anonymity surface was
+ * unreachable by the fixture built to exercise them.
+ */
+describe("isExemplarPublishAllowed: the anonymous deposit", () => {
+  const anonRow = { dataset_id: EXEMPLAR_ID, is_exemplar: 1, anonymous: 1 };
+  const plainRow = { dataset_id: EXEMPLAR_ID, is_exemplar: 1, anonymous: 0 };
+
+  test("an anonymous RELEASE of the anonymous exemplar is allowed", () => {
+    expect(isExemplarPublishAllowed(envOf("test"), anonRow, { anonymousRelease: true })).toBe(true);
+  });
+
+  test("a plain publish of it is still refused, which is the whole point", () => {
+    expect(isExemplarPublishAllowed(envOf("test"), anonRow, { anonymousRelease: false })).toBe(
+      false,
+    );
+    expect(isExemplarPublishAllowed(envOf("test"), anonRow, {})).toBe(false);
+  });
+
+  test("omitting the intent refuses, so a new caller fails closed", () => {
+    // The parameter defaults to `{}`. A caller that has not thought about the
+    // question gets the safe answer rather than the permissive one.
+    expect(isExemplarPublishAllowed(envOf("test"), anonRow)).toBe(false);
+  });
+
+  test("an ordinary exemplar is unaffected by the intent either way", () => {
+    expect(isExemplarPublishAllowed(envOf("test"), plainRow)).toBe(true);
+    expect(isExemplarPublishAllowed(envOf("test"), plainRow, { anonymousRelease: true })).toBe(true);
+    expect(isExemplarPublishAllowed(envOf("test"), plainRow, { anonymousRelease: false })).toBe(
+      true,
+    );
+  });
+
+  test("the production fence is not weakened by the intent", () => {
+    // The env term is the one that keeps `is_exemplar = 1` out of production
+    // entirely; an intent flag must never buy past it.
+    expect(isExemplarPublishAllowed(envOf("production"), anonRow, { anonymousRelease: true })).toBe(
+      false,
+    );
+    expect(isExemplarPublishAllowed(envOf(undefined), anonRow, { anonymousRelease: true })).toBe(
+      false,
+    );
+  });
+
+  test("a non-exemplar xx row is still refused however it asks", () => {
+    // The exemption is for the staging fleet, not for the xx band.
+    expect(
+      isExemplarPublishAllowed(
+        envOf("test"),
+        { dataset_id: EXEMPLAR_ID, is_exemplar: 0, anonymous: 1 },
+        { anonymousRelease: true },
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("isExemplarPublishAllowed", () => {
   test("non-production + xx + is_exemplar=1 -> allowed", () => {
     for (const e of ["development", "staging", "test"]) {
