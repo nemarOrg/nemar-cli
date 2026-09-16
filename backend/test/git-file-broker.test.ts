@@ -335,6 +335,13 @@ describe("the route: the gate, then the bytes", () => {
     );
   }
 
+  // NOTE ON WHAT THIS HALF CAN AND CANNOT PROVE. These run the route
+  // in-process under Bun, where `headers.set("Content-Length", ...)` always
+  // sticks. They therefore pin the branch and the refusals, but they cannot
+  // see the thing that caused #1419: workerd drops a hand-set
+  // `Content-Length` when the body is a stream. The oracle for that is
+  // `test/git-broker-live.test.ts` against the deployed data plane, which is
+  // what caught it and what confirms the fix.
   test("a length upstream never declared is still declared to the client", async () => {
     const db = freshDb();
     seed(db, "nm000862", "public");
@@ -346,18 +353,21 @@ describe("the route: the gate, then the bytes", () => {
     const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
 
     expect(res.status).toBe(200);
-    // The regression this pins: before the counter, no upstream header meant
-    // no `Content-Length` on the way out either, on every real fetch.
+    // The regression this pins: no upstream header used to mean no
+    // `Content-Length` on the way out either, on every real fetch, because
+    // workerd owns `Accept-Encoding` and strips the header when it decodes.
+    // Setting one by hand does not survive a streamed body, so the fix is to
+    // answer a body whose length the runtime already knows.
     expect(res.headers.get("Content-Length")).toBe(String(FILE_BODY.length));
     expect(await res.text()).toBe(FILE_BODY);
   });
 
-  test("a body shorter than the manifest fails the transfer, it does not arrive complete", async () => {
+  test("a body shorter than the manifest is refused, not served", async () => {
     const db = freshDb();
     seed(db, "nm000862", "public");
     reset({
-      // Upstream declares nothing, so the header check above cannot fire and
-      // only the counter stands between a truncated file and a 200 that looks
+      // Upstream declares nothing, so the header check cannot fire and only
+      // the measurement stands between a truncated file and a 200 that looks
       // healthy.
       [manifestKey]: () => new Response(manifestBody(FILE_BODY.length + 10), { status: 200 }),
       [publicRawPath]: () => streamed(FILE_BODY),
@@ -365,12 +375,11 @@ describe("the route: the gate, then the bytes", () => {
 
     const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
 
-    expect(res.status).toBe(200);
-    expect(res.headers.get("Content-Length")).toBe(String(FILE_BODY.length + 10));
-    expect(res.text()).rejects.toThrow(/did not match the manifest/);
+    expect(res.status).toBe(502);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
   });
 
-  test("a body longer than the manifest fails the transfer, and the overrun is never enqueued", async () => {
+  test("a body longer than the manifest is refused, not served", async () => {
     const db = freshDb();
     seed(db, "nm000862", "public");
     reset({
@@ -380,8 +389,47 @@ describe("the route: the gate, then the bytes", () => {
 
     const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
 
+    expect(res.status).toBe(502);
+  });
+
+  test("above the buffer ceiling it streams, and a short body still fails the transfer", async () => {
+    const db = freshDb();
+    seed(db, "nm000862", "public");
+    reset({
+      [manifestKey]: () => new Response(manifestBody(FILE_BODY.length + 10), { status: 200 }),
+      [publicRawPath]: () => streamed(FILE_BODY),
+    });
+
+    // A ceiling of 0 sends every file down the streamed branch, which is
+    // otherwise only reachable with a multi-megabyte fixture.
+    const res = await app().request(
+      `/nm000862/${VERSION}/${PATH}`,
+      {},
+      { ...env(db), BROKER_BUFFER_MAX_BYTES: "0" },
+    );
+
+    // Streamed: the status is committed before the length is known, so the
+    // only honest refusal left is a transfer the client cannot complete.
     expect(res.status).toBe(200);
     expect(res.text()).rejects.toThrow(/did not match the manifest/);
+  });
+
+  test("above the buffer ceiling a correct body still streams through whole", async () => {
+    const db = freshDb();
+    seed(db, "nm000862", "public");
+    reset({
+      [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+      [publicRawPath]: () => streamed(FILE_BODY),
+    });
+
+    const res = await app().request(
+      `/nm000862/${VERSION}/${PATH}`,
+      {},
+      { ...env(db), BROKER_BUFFER_MAX_BYTES: "0" },
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(FILE_BODY);
   });
 
   test("an upstream throttle is a 5xx with Retry-After, never a 404", async () => {
