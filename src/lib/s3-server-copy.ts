@@ -70,6 +70,52 @@ export function isKeyPresentAtDeclaredSize(key: string, existing: Map<string, nu
 }
 
 /**
+ * The keys a tree names that the bucket cannot account for (#1396).
+ *
+ * The publish gate asks this of the TREE, not of the import manifest. A manifest
+ * is what the copy phase believed it transferred, so verifying the manifest
+ * against the bucket passes whenever the manifest is the subset that worked --
+ * which is how sixteen datasets were published referencing 12,039 keys that were
+ * never transferred, with the location log advertising every one of them.
+ */
+export function keysWithoutObjects(
+  treeKeys: Iterable<string>,
+  existing: Map<string, number>,
+): string[] {
+  return [...treeKeys].filter((key) => !isKeyPresentAtDeclaredSize(key, existing));
+}
+
+/**
+ * The share of a dataset's DATA a reader can actually obtain, 0 to 1 (ADR 0064).
+ *
+ * Data only. Metadata is never annexed (ADR 0015), so `.tsv`, `.json` and `README*`
+ * arrive from GitHub whether or not one recording survived, and counting them puts
+ * every dataset near 100%: `on008017` is missing 4.7% of its tracked files and 21.6%
+ * of its data. The denominator is therefore the distinct annex keys the tree names.
+ *
+ * A dataset with no annexed keys at all is 1, not 0. It is metadata-only, which is a
+ * complete dataset of its kind, and dividing by zero to call it wholly unavailable
+ * would withdraw it.
+ */
+export function dataAvailability(state: {
+  annexed: string[];
+  missingContent: string[];
+}): number {
+  if (state.annexed.length === 0) return 1;
+  return (state.annexed.length - state.missingContent.length) / state.annexed.length;
+}
+
+/**
+ * Below this share of its data available, a dataset is withdrawn (ADR 0064).
+ *
+ * Measured AFTER recovery has reported what it cannot get. On 2026-09-15 three datasets
+ * that were not already withdrawn sat under this threshold in the morning and were whole
+ * by the afternoon, and six more came off the withdrawn list the same day, so a verdict
+ * read from a stale column would have tombstoned content that exists.
+ */
+export const MIN_DATA_AVAILABILITY = 0.9;
+
+/**
  * Max size (bytes) `curlStreamCopy` will buffer to the runner's local disk.
  * The curl fallback downloads the whole object locally so it can be verified
  * before upload (#967); this domain has recordings up to ~300GB, and GitHub

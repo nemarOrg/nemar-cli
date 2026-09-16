@@ -182,6 +182,7 @@ import {
   type WithdrawnDatasetEntry,
   loadWithdrawnDatasets,
   resolveWithdrawTargets,
+  stillWithdrawn,
 } from "../lib/withdrawn-datasets.js";
 
 /**
@@ -3550,7 +3551,7 @@ adminCommand
     "Withdraw a broken published dataset: make it private and tombstone its EZID DOIs (concept + every version). Dry-run by default.",
   )
   .argument("[ids...]", "Dataset id(s) to withdraw (omit when using --all)")
-  .option("--all", "Target every entry in the checked-in withdrawn-datasets list")
+  .option("--all", "Target the still-withdrawn entries on the checked-in list")
   .option("--reason <reason>", "Withdrawal reason (default: the list entry's own reason)")
   .option("--execute", "Actually apply the withdrawal (default is a dry run)")
   .option("--force", "Allow a dataset id that is not on the checked-in withdrawn-datasets list")
@@ -3593,9 +3594,13 @@ adminCommand
         process.exit(1);
       }
 
+      // `--all` acts only on entries still down. A reinstated one keeps its entry
+      // as the record of a withdrawal that should not have happened (#1396), and
+      // re-targeting it would tombstone a dataset whose content we just proved is
+      // there. An explicit id still works, with the existing force guard.
       const resolved = options.all
         ? {
-            targets: entries.map((e) => ({
+            targets: stillWithdrawn(entries).map((e) => ({
               datasetId: e.dataset_id,
               reason: options.reason || e.reason,
             })),
@@ -3659,7 +3664,7 @@ adminCommand
     "Reverse a withdrawal: make a dataset public again and restore its EZID DOIs (concept + every version). Dry-run by default.",
   )
   .argument("[ids...]", "Dataset id(s) to restore (omit when using --all)")
-  .option("--all", "Target every entry in the checked-in withdrawn-datasets list")
+  .option("--all", "Target the still-withdrawn entries on the checked-in list")
   .option("--execute", "Actually apply the restore (default is a dry run)")
   .option(
     "--withdrawn-file <path>",
@@ -3693,7 +3698,9 @@ adminCommand
       if (options.all) {
         const listPath = options.withdrawnFile || defaultWithdrawnDatasetsPath();
         try {
-          targets = loadWithdrawnDatasets(listPath).map((e) => e.dataset_id);
+          // Restoring an already-restored dataset is a no-op, but listing it as a
+          // target reads as though it were still down; the list is the record.
+          targets = stillWithdrawn(loadWithdrawnDatasets(listPath)).map((e) => e.dataset_id);
         } catch (err) {
           console.error(chalk.red(`Failed to load withdrawn-datasets file: ${errorDetail(err)}`));
           process.exit(1);
@@ -4403,6 +4410,15 @@ importCommand
         spinner.succeed(
           `${datasetId} verified complete (${result.presentCount}/${result.expectedCount} objects present)`,
         );
+      } else if (result.expectedCount === 0) {
+        // The backend answers `complete: false` with an empty expected set when
+        // there is no published manifest to compare against, which is the right
+        // refusal but not an incompleteness: rendering it as "0/0 missing" reads
+        // as a verdict on the data when nothing was actually checked (ADR 0054).
+        spinner.warn(
+          `${datasetId} not verifiable: no published manifest to compare against ` +
+            `(${result.presentCount} object(s) in the bucket)`,
+        );
       } else {
         spinner.warn(
           `${datasetId} incomplete: ${result.missingKeys.length}/${result.expectedCount} object(s) missing${result.zeroByteKeys.length > 0 ? ` (${result.zeroByteKeys.length} zero-byte)` : ""}`,
@@ -4610,7 +4626,9 @@ Description:
             `${id} reclassified: ${
               result.complete
                 ? "already complete"
-                : `incomplete (${result.missingKeys.length}/${result.expectedCount} missing)`
+                : result.expectedCount === 0
+                  ? "not verifiable (no published manifest)"
+                  : `incomplete (${result.missingKeys.length}/${result.expectedCount} missing)`
             }`,
           );
         } catch (err) {
@@ -5765,6 +5783,10 @@ fleetCommand
     "--include-incomplete",
     "Also act on a dataset whose content the bucket cannot fully account for (#1396). Off by default: that is missing content, not a lost registration",
   )
+  // One line, like its neighbours: the reasoning lives in the --help-all text,
+  // which is where every other "why would I use this" explanation in this file
+  // goes. A four-line option description is what the concise-help work removed.
+  .option("--retract-false-claims", "Withdraw presence claims the bucket cannot back")
   .option("--dir <path>", "Where clones go while a dataset is being repaired (default: a temp dir)")
   .option("--concurrency <n>", "Datasets in flight at once (default 4)", "4")
   .option("--json <path>", "Write the full report as JSON")
@@ -5785,6 +5807,22 @@ What it will not do:
   skipped. That is missing content (#1396) and needs the bytes transferred, not a
   registration written. \`--include-incomplete\` overrides it.
 
+The opposite repair, \`--retract-false-claims\`:
+  a key can be recorded at NEMAR's remote with NO object behind it, which is what
+  a failed copy leaves (#967): the object is there under the right name at zero
+  bytes, every name-only check counts it as content, and the log then tells every
+  clone to fetch bytes we do not hold. That is worse than an unregistered key,
+  which merely fails to appear. Run this only once recovery has reported those
+  keys unrecoverable, because while the content is still recoverable the honest
+  repair is to fetch it and the claim becomes true. Used on 230 keys across
+  on003574, on004475, on004917, on005571 and on005279, whose anatomical images
+  OpenNeuro deleted outright.
+
+  It edits the log and leaves the 0-byte objects in place. They are inert once
+  nothing claims them, since presence is tested at the declared size, and a later
+  recovery overwrites one; but the dataset still reads as damaged to a size audit
+  until they are removed.
+
 What "read-only" does and does not mean:
   without --apply nothing is written to any repository or to S3. It is not free of
   side effects though: establishing what the bucket holds needs credentials, and
@@ -5800,6 +5838,7 @@ Examples:
   $ nemar admin fleet key-registration --prefix on --limit 10
   $ nemar admin fleet key-registration --prefix on --limit 10 --apply
   $ nemar admin fleet key-registration on000246 --apply
+  $ nemar admin fleet key-registration on004917 --retract-false-claims --apply
 `,
   )
   .action(async (datasetIds: string[], options) => {
@@ -5861,6 +5900,7 @@ Examples:
       apply: Boolean(options.apply),
       push: options.push !== false,
       includeIncomplete: Boolean(options.includeIncomplete),
+      retractFalseClaims: Boolean(options.retractFalseClaims),
       concurrency: Number(options.concurrency) || 4,
       onDataset: (outcome, done, total) => {
         const label =
@@ -5885,6 +5925,180 @@ Examples:
     }
     if (!options.apply) {
       console.log(chalk.dim("\nRead-only: nothing was changed. Add --apply to repair a batch."));
+    }
+    if (sweep.tally.failed > 0) process.exitCode = 1;
+  });
+
+fleetCommand
+  .command("content-recovery")
+  .description("Copy back annexed content the bucket never received, and prove each copy (#1396)")
+  .argument("[dataset-id...]", "Datasets to act on")
+  .option("--apply", "Copy (default is a read-only report)")
+  .option("--limit <n>", "Act on at most this many keys per dataset, smallest first")
+  .option("--concurrency <n>", "Copies in flight per dataset (default 8)", "8")
+  .option("--dir <path>", "Where clones go while a dataset is worked on (default: a temp dir)")
+  .option("--json <path>", "Write the full report as JSON")
+  .option("--force", "Include the live datasets (nm000103-107)")
+  .option("-y, --yes", "Skip confirmation and proceed")
+  .addHelpText(
+    "after",
+    `
+What this repairs (#1396):
+  imports that finalized with content they never transferred. The bucket has no
+  object for those keys, so the key-registration sweep refuses them: there is
+  nothing to register. This finds the bytes upstream and copies them in.
+
+Where a copy is allowed to come from:
+  a source git-annex itself pinned -- the S3 version id in <key>.log.rmet, which
+  is the archive's own record of which bytes are this key's -- or, failing that,
+  exactly one distinct upstream object whose size matches the key's. A path alone
+  is never enough: upstream rewrites paths, and an import is months old.
+
+How a copy is proven:
+  S3 computes the SHA-256 of what it wrote and it is compared to the key's own
+  hash before anything else happens. A copy that does not match is DELETED, not
+  left in the bucket looking like content. Above CopyObject's 5 GB limit a copy
+  is multipart and cannot be checksummed that way, so there an unpinned source is
+  refused rather than trusted.
+
+Credentials:
+  the copy is server-side, so no dataset bytes pass through this machine, but it
+  needs to read the SOURCE bucket. The API's upload credentials cannot: they are
+  scoped to one dataset prefix in s3://nemar. This uses the ambient AWS
+  environment (AWS_PROFILE, AWS_ACCESS_KEY_ID, ...) for the copy, and API-minted
+  credentials only to list what the bucket already holds.
+
+Registering what it recovers:
+  this writes no location log. Run \`nemar admin fleet key-registration <id>
+  --apply\` afterwards, which lists the bucket again and records what is there.
+
+Examples:
+  $ nemar admin fleet content-recovery on008730
+  $ nemar admin fleet content-recovery on008730 --apply
+  $ nemar admin fleet content-recovery on008730 on008798 --apply --json report.json
+`,
+  )
+  .action(async (datasetIds: string[], options) => {
+    if (!requireAuth()) return;
+    const { bucketObjectSource } = await import("../lib/fleet-key-registration.js");
+    const { sweepContentRecovery } = await import("../lib/fleet-content-recovery.js");
+    const { CLI_LIVE_DATASETS } = await import("../lib/fleet.js");
+
+    const targets = datasetIds;
+    if (targets.length === 0) {
+      console.log(chalk.yellow("Name the datasets to act on."));
+      return;
+    }
+    const live = targets.filter((id) => CLI_LIVE_DATASETS.has(id));
+    if (live.length > 0 && !options.force) {
+      console.log(chalk.red(`Refusing to touch live dataset(s): ${live.join(", ")}`));
+      console.log(chalk.dim("  --force to override."));
+      process.exit(1);
+    }
+
+    if (options.apply) {
+      const answer = await confirm(
+        `Copy missing content into s3://nemar for ${targets.length} dataset(s)?`,
+        options,
+      );
+      if (answer !== "confirmed") {
+        console.log(chalk.yellow(`${answer}; nothing was changed.`));
+        return;
+      }
+    }
+
+    // `--limit 0` and `--limit abc` used to mean NO limit: the string "0" is
+    // truthy, Number("0") is 0, and 0 is falsy where the slice is taken. With
+    // --apply that is the difference between a bounded rehearsal and a full run.
+    let limit: number | undefined;
+    if (options.limit !== undefined) {
+      limit = Number(options.limit);
+      if (!Number.isInteger(limit) || limit < 1) {
+        console.log(chalk.red(`Error: --limit must be a positive integer (got ${options.limit})`));
+        process.exit(1);
+      }
+    }
+
+    const workRoot = options.dir ?? mkdtempSync(join(tmpdir(), "nemar-content-recovery-"));
+    mkdirSync(workRoot, { recursive: true });
+    console.log();
+    const leftInBucket: Array<{ datasetId: string; key: string }> = [];
+    const sweep = await sweepContentRecovery(targets, bucketObjectSource(), {
+      workRoot,
+      apply: Boolean(options.apply),
+      limit,
+      concurrency: Number(options.concurrency) || 8,
+      onDataset: (outcome, done, total) => {
+        const gib = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
+        const label =
+          outcome.action === "failed"
+            ? chalk.red(outcome.datasetId)
+            : outcome.action === "recovered"
+              ? chalk.green(outcome.datasetId)
+              : chalk.dim(outcome.datasetId);
+        // An object that failed verification and would not delete is the one
+        // outcome worse than not copying at all (ADR 0063), so it is collected
+        // here and printed again at the end rather than left in a JSON detail.
+        for (const key of outcome.keys) {
+          if (key.leftInBucket) leftInBucket.push({ datasetId: outcome.datasetId, key: key.key });
+        }
+        // `failed` was missing from this line entirely, so a dataset where every
+        // key failed printed "N missing, 0 recovered, 0 unrecoverable".
+        const detail = outcome.error
+          ? outcome.error
+          : !outcome.measured
+            ? "not measured"
+            : `${outcome.missing} missing (${gib(outcome.missingBytes)}), ` +
+              `${outcome.recovered} recovered (${gib(outcome.recoveredBytes)}), ` +
+              `${outcome.unrecoverable} unrecoverable (${gib(outcome.unrecoverableBytes)}), ` +
+              `${outcome.failed} failed`;
+        console.log(`${chalk.dim(`[${done}/${total}]`)} ${label} ${chalk.dim(detail)}`);
+      },
+    });
+
+    console.log();
+    for (const [action, count] of Object.entries(sweep.tally)) {
+      if (count > 0) console.log(`  ${action.padEnd(20)} ${count}`);
+    }
+    console.log(
+      `  ${"keys recovered".padEnd(20)} ${sweep.recoveredKeys} ` +
+        `(${(sweep.recoveredBytes / 1024 ** 3).toFixed(1)} GiB)`,
+    );
+    if (leftInBucket.length > 0) {
+      // Loud, and with the command to fix it. These objects carry a real key's
+      // name at its declared size, so the next `key-registration --apply` would
+      // advertise content that is not the content (ADR 0063).
+      console.log(
+        chalk.red(
+          `\n  ${leftInBucket.length} object(s) FAILED verification and could not be deleted.`,
+        ),
+      );
+      console.log(
+        chalk.red("  They will be advertised as real content by the next registration sweep."),
+      );
+      for (const { datasetId, key } of leftInBucket.slice(0, 20)) {
+        console.log(chalk.red(`    ${datasetId}  ${key}`));
+      }
+      if (leftInBucket.length > 20) {
+        console.log(chalk.red(`    ... and ${leftInBucket.length - 20} more (see --json)`));
+      }
+      console.log(
+        chalk.dim("  Remove each with: aws s3api delete-object --bucket nemar --key ..."),
+      );
+    }
+    if (options.json) {
+      writeFileSync(options.json, JSON.stringify(sweep, null, 2));
+      console.log(chalk.dim(`\n  Report written to ${options.json}`));
+    }
+    if (!options.apply) {
+      console.log(chalk.dim("\nRead-only: nothing was copied. Add --apply to recover."));
+    } else if (sweep.recoveredKeys > 0) {
+      console.log(
+        chalk.dim(
+          "\nThe location log still says nothing about these objects: run " +
+            "`nemar admin fleet key-registration <id> --apply` to record them.",
+        ),
+      );
     }
     if (sweep.tally.failed > 0) process.exitCode = 1;
   });

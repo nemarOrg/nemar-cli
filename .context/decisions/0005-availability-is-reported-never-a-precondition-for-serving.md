@@ -4,6 +4,24 @@
 **Date:** 2026-07-29
 **Owner:** Seyed Yahya Shirazi
 
+Partially superseded by [ADR 0064](0064-a-dataset-missing-more-than-a-tenth-of-its-data-is-withdrawn.md),
+which sets a ceiling this ADR deliberately did not have: a dataset whose distinct annexed
+data keys are less than 90% available is withdrawn from the catalog until the content can
+be served. Everything below still governs a dataset that IS listed, which is most of them:
+it delivers through every contract point, omits what is missing, and never fakes it. What
+no longer holds is the unqualified "never a precondition" in the title.
+
+**The ~90%-absent build floor below is NOT superseded and still governs archive builds.**
+It answers a different question -- whether a build that read essentially nothing is a
+failed read path -- and 0064 adds a separate, stricter rule about whether a dataset is
+listed at all. A dataset can now be withdrawn while remaining well above the build floor.
+0064 also records why the withdrawal denominator must be distinct annexed data keys and
+not `total_files`.
+
+One figure below has been overtaken: `on006159` is measured at 46.25% of its data keys
+missing (222 of 480), not the ~70% absent stated in the consequences, which was an
+upstream-file estimate from before the key-level sweep.
+
 ## Context
 
 Some NEMAR datasets are imported from upstream archives that no longer hold every file they declare, and some carry 0-byte objects left by the #967 empty-PUT bug. Delivery treated any gap as fatal: `nemar dataset get` discarded everything git-annex had already fetched and exited non-zero, and the archive workflow built the zip, uploaded it, then deleted it and never fired its callback. A dataset missing one stray upstream temp file out of 65,063 therefore served no archive at all.

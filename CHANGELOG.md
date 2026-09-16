@@ -42,6 +42,21 @@ earlier releases are described only by their generated notes.
   `dataset_description.json` is the same length across a patch bump, so resuming across versions
   would skip it and leave a tree that misreports its own version.
 
+- **`nemar admin fleet content-recovery` copies back annexed content the bucket never
+  received, and proves every copy (#1396).** Sixteen datasets finalized an import with
+  12,039 keys, about 620 GB, for which `s3://nemar` holds no object, so the registration
+  sweep could only report them: there was nothing to register. Recovery copies the bytes
+  server-side from OpenNeuro's bucket, which means hundreds of gigabytes never pass through
+  the operator's machine. A copy is only allowed from a source git-annex itself pinned (the
+  S3 version id in `<key>.log.rmet`) or from exactly one distinct upstream object carrying
+  the key's size, deduplicated by ETag; a path alone is never a source, because upstream
+  rewrites paths and these imports are months old. S3 is asked to compute the SHA-256 of
+  what it wrote and it is compared to the key's own hash before anything is registered, and
+  an object that does not match is deleted rather than left in the bucket looking like
+  content. Recovery writes no location log: `nemar admin fleet key-registration` does that
+  afterwards, so one piece of code writes presence claims and it is the one that reads the
+  log back. See ADR 0063.
+
 - **`nemar admin docs <path...>` reads documentation pages, including the gated ones, without
   a browser.** `nemarOrg/docs` is private at source and `docs.nemar.org` is the retrieval
   surface, so a checkout is no longer how anyone opens an operations runbook. The command
@@ -86,6 +101,126 @@ earlier releases are described only by their generated notes.
   command absent from that file is folded rather than dropped.
 
 ### Fixed
+
+- **The withdrawn-datasets list now records a measured reason per dataset, and six entries
+  were wrong (#1396).** It carried one filed reason each, 9 `upstream_403` and 2
+  `no_source`, none of it measured per dataset. Trying every key against both routes
+  OpenNeuro publishes found that six of the eleven were fetchable by the advertised route
+  the whole time they sat private with tombstoned DOIs: `on004148`, `on007816`, `on007987`,
+  `on008065`, `on005516` and `on005279`, now `reason: recovered`. Five were reinstated;
+  `on007816` had never been published, so it needs a publish rather than a restore. The five
+  still-withdrawn entries carry `data_keys_missing` / `data_keys_total` / `data_available` so
+  the claim is checkable, and the reinstated ones carry `data_available` alone. A
+  `withdrawn: false` flag keeps `withdraw --all` from taking a reinstated one down again, and
+  the explicit-id path refuses one too without `--force`. The parser rejects the
+  contradictions the shape allowed: `recovered` while still withdrawn, key counts given
+  singly, missing above total, and a `data_available` that disagrees with them. A test
+  asserts the two halves agree: everything still down is under the 90% threshold, and
+  everything reinstated is at or above it.
+
+- **NEMAR lists a dataset only when at least 90% of its DISTINCT ANNEXED DATA KEYS are
+  available (ADR 0064, partially superseding ADR 0005).** `dataAvailability` and
+  `MIN_DATA_AVAILABILITY` put the rule in one place, next to the presence predicate its
+  numerator is defined in terms of, and the import publish gate calls it rather than
+  recomputing the ratio. Enforcement of the withdrawal itself is still the operator running
+  `nemar admin withdraw`; what ships here is the measurement, the gate, and the list. The denominator is data, never `total_files`: metadata is never annexed
+  (ADR 0015), so it arrives from GitHub whether or not one recording survived and pulls every
+  ratio toward 100%. `on008017` is missing 4.7% of its tracked files and 21.6% of its data,
+  and `on004917` 11.8% against 25.4%, so a threshold on tracked files clears both. A
+  metadata-only dataset measures 1 rather than dividing by zero. The threshold is applied only
+  after recovery has reported what it cannot get: on 2026-09-15 three datasets that were
+  not already withdrawn were under the threshold that morning and whole by the afternoon,
+  and six more came off the withdrawn list the same day. A verdict read from a stale
+  column would have tombstoned content that exists.
+
+- **A publish-gate shortfall now files a labeled tracking issue (#1396).** The gate
+  refuses when the bucket cannot back the keys a dataset's tree names, but its message
+  matched no rule in the failure classifier, so the issue on `nemarDatasets/.github` was
+  filed with no label and no severity. The gate emits `[nemar-data-unavailable]` with the
+  availability figure and the classifier maps it to `data-unavailable`. It deliberately
+  does NOT reuse the upstream marker: at that point nothing has established the content
+  is gone at source, and recording that unmeasured is what put nine datasets on the
+  withdrawn list wrongly. Both copies of the literal are pinned against each other by a
+  test, like the upstream marker.
+
+- **`nemar admin fleet key-registration --retract-false-claims` withdraws a claim the
+  bucket cannot back (#1396, #967).** The sweep could already see this state -- a key
+  recorded at NEMAR's remote with no object behind it, which is what a failed copy leaves --
+  but only ever reported the missing content and skipped the dataset, so the false claim
+  outlived every run and clones kept being told to fetch bytes we do not hold. The scan now
+  names it (`falselyClaimed`), the skip note says how many of the missing keys are advertised
+  anyway, and the flag retracts them and pushes. Off by default and deliberately: while the
+  content is still recoverable the honest repair is to fetch it, which makes the claim true.
+  Used on the 230 keys across `on003574`, `on004475`, `on004917`, `on005571` and
+  `on005279` whose anatomical images OpenNeuro removed, verified afterwards by re-reading
+  each dataset's location log from a fresh clone of origin. It edits the log and leaves the
+  zero-byte objects, which are inert once nothing claims them but still read as damage to a
+  size audit.
+
+- **A presence claim NEMAR cannot honor can now be withdrawn (#1396).** `batchSetKeysAbsent`
+  is the counterpart to the registration path: a failed copy leaves a zero-byte object
+  under the right key name, every check that asks only whether the key exists counts it as
+  content (#967), and the registration then tells every clone to fetch bytes we do not
+  hold. Where recovery proves the content unrecoverable upstream the claim cannot be made
+  true, so the repair is to retract it. The read-back is inverted rather than reused:
+  success is the key no longer being recorded at the remote, and the assert-side check
+  would have reported every retraction as a failure.
+
+- **A multipart copy runs its parts concurrently (#1396).** Parts are independent
+  server-side copies but were issued one at a time, so one oversized key copied at about
+  6 MiB/s, hours for a single key, while eight ordinary keys in flight sustain 30 MiB/s. Eight parts now
+  run at once and the completed list is still assembled in part order. The byte-range
+  arithmetic moved into an exported `multipartRanges`, because that is where this can
+  corrupt silently: S3 stitches whatever ranges it is handed, so a gap or an overlap yields
+  an object of plausible length holding the wrong bytes, and the multipart path has no
+  SHA-256 to catch it.
+
+- **A multipart copy is now proven against its source, not just measured (#1396).** Above
+  CopyObject's 5 GB limit the copy carries no SHA-256 to compare with the key, because S3
+  refuses `--checksum-type FULL_OBJECT` for sha256, so such a copy passed on its size and
+  its pin alone. It offers that whole-object checksum for CRC64 instead, and the copy now
+  ASKS for one (`--checksum-algorithm CRC64NVME --checksum-type FULL_OBJECT`) rather than
+  hoping S3 attaches it; OpenNeuro's large objects already carry one, so the two can be
+  compared directly: an
+  equal full-object CRC64 means the copy is the pinned version's bytes rather than any
+  object of the right length. Recorded as `crc64-of-source`. It stays a fidelity check
+  rather than an identity one, so an unpinned oversized source is still refused. Costs one
+  extra HEAD, and only where there was nothing stronger to check.
+
+- **`nemar admin import verify` no longer reports "0/0 object(s) missing" (#1396).** The
+  backend answers `complete: false` with an empty expected set when there is no published
+  manifest to compare against, which is the right refusal, but the CLI rendered it as an
+  incompleteness with a count of zero over a total of zero. `on008003` reported that with
+  759 objects sitting in its prefix. It now says the dataset is not verifiable and why, so
+  an absent expectation stops reading as a verdict on the data (ADR 0054). Same fix in
+  `admin import recover`'s per-target line.
+
+- **Content recovery reads the pins of any path containing a space (#1396).** git-annex
+  base64-encodes a metadata value it cannot write literally and marks it with `!`, which is
+  what happens to every `.log.rmet` value whose object path holds a space. The parser
+  required a literal `#` in the raw token, found none inside the base64, and reported those
+  keys as having no recorded source at all: 1,808 pins in `on004148` and 1,378 in `on008003`
+  were invisible. It mattered most above CopyObject's 5 GB limit, where an unpinned source
+  is refused because a multipart copy cannot carry a SHA-256 -- `on008003`'s two 5.8 GB
+  objects read as unrecoverable while both were sitting upstream, readable, at the version
+  their own pin named.
+
+- **Content recovery no longer treats a retracted S3 version as a place to copy from (#1396).**
+  A `<key>.log.rmet` line marks its value `+` for set and `-` for unset, and the parser read
+  the marker as escaping, so a retracted version reached the AWS CLI with a literal leading
+  minus. Every one of `ds006110`'s five retractions came back as a bare `InvalidRequest`,
+  which read as an upstream defect rather than our own misparse; honoring the retraction
+  turns those five into two recoveries and three honest verdicts. The log is now replayed in
+  timestamp order, so a retraction written out of position still wins over the entry it
+  cancels.
+
+- **An import can no longer finalize with content it never transferred (#1396).** The publish
+  gate verified the import MANIFEST against the bucket, and a manifest is what the copy phase
+  believed it transferred, so a partial manifest verified cleanly while the tree still
+  referenced keys nothing had moved. Sixteen datasets published that way, and the location log
+  then told every clone NEMAR had those keys. Finalize now asks the question of the tree: every
+  annexed key must have an object at its declared size, or it refuses to register and says how
+  many are outstanding.
 
 - **Registering annexed keys no longer reports writes it never made** (#1392).
   `batchSetKeysPresent` ran fifty `git annex setpresentkey` processes at once and counted
