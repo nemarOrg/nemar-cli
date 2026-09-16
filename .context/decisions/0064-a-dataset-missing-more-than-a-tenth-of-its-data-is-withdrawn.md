@@ -160,12 +160,18 @@ data nobody can supply, which is what withdrawal is for.
 - **A withdrawal is not a verdict on the submitter.** These gaps are upstream export
   defects, so the dataset page must say the content is unavailable at source and point
   there, not imply the deposit was bad.
-- `on004212` at 28.2% loses its raw recordings to a derivatives gap: 7,495 of the
-  missing files are `derivatives/meg_paper/.../permutations/`, and the raw data is
-  intact. Withdrawing it denies a reader working recordings over missing permutation
-  files. This is the sharpest cost of a flat ratio and is accepted rather than solved:
-  a raw-versus-derivatives weighting is a second rule to argue about, and the simple
-  one is auditable today. Revisit if the fleet grows more datasets of this shape.
+- `on004212` at **39.0% of its data keys missing** (7,495 of 19,220) loses nothing a
+  reader needs: every one of those keys is under
+  `derivatives/meg_paper/.../permutations/`, and the raw recordings are intact.
+  Withdrawing it denies a reader working recordings over missing permutation files.
+  This is the sharpest cost of a flat ratio and is accepted rather than solved: a
+  raw-versus-derivatives weighting is a second rule to argue about, and the simple one
+  is auditable today. Revisit if the fleet grows more datasets of this shape.
+  **This bullet first said 28.2%, and that number was this ADR's own mistake.** 28.2%
+  is 7,503 of 26,620 TREE ENTRIES; the rule above is distinct annex keys, which is
+  7,495 of 19,220. An entry count runs above a key count, so the entry basis reports a
+  smaller shortfall and the dataset looks less damaged than it is. Corrected from a
+  re-measurement on 2026-09-16 (`nemar admin fleet key-registration on004212`).
 - Withdrawal must be measured from a rescan, never from a stale column. `data_complete`
   is a sweep artifact and a recovery can make a dataset whole minutes later; the three
   datasets recovered this session (`on003645`, `on003104`, `on005127`) would each have

@@ -539,6 +539,28 @@ describe("dataAvailability (ADR 0064)", () => {
     expect(dataAvailability({ annexed, missingContent: annexed })).toBe(0);
   });
 
+  test("on004212: the key basis and the entry basis disagree, and the key basis wins", () => {
+    // The regression this exists for is in ADR 0064 itself. Its consequence
+    // bullet recorded on004212 at 28.2% missing, which is 7,503 of 26,620 TREE
+    // ENTRIES. The rule the same ADR states is distinct annex keys, and that is
+    // 7,495 of 19,220 = 39.0%. An entry count runs above a key count, so the
+    // entry basis always reports the SMALLER shortfall and makes a dataset look
+    // less damaged than it is -- the exact error the ADR was written to forbid.
+    //
+    // Re-measured 2026-09-16 with `nemar admin fleet key-registration on004212`.
+    const keys = Array.from({ length: 19220 }, (_, i) => `on004212-key-${i}`);
+    const availability = dataAvailability({ annexed: keys, missingContent: keys.slice(0, 7495) });
+
+    expect(availability).toBeCloseTo(0.61, 3);
+    expect(1 - availability).toBeCloseTo(0.39, 3);
+    expect(availability).toBeLessThan(MIN_DATA_AVAILABILITY);
+
+    // The entry basis would have put it here, and it is NOT what the rule says.
+    const entryBasis = (26620 - 7503) / 26620;
+    expect(entryBasis).toBeCloseTo(0.718, 3);
+    expect(entryBasis).toBeGreaterThan(availability);
+  });
+
   test("reproduces the measured ratios that set the threshold", () => {
     // The five public datasets ADR 0064 puts on NOTICE, from the 2026-09-15
     // sweep. Not withdrawn: the ADR opens a notice period to 15 October 2026
