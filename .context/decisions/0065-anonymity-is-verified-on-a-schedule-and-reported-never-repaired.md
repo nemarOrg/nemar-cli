@@ -84,6 +84,35 @@ lives in annexed binaries a Worker will not pull gigabytes to read.
 and the CLI prints that line even for a verified one.
 "Verified" means everything this sweep can check is fine, and no surface may imply more.
 
+**A declared scope limit is not a gap, and the two must not be spelled the same way.**
+`ANONYMITY_DECLARED_SCOPE_LIMITS` holds the things this sweep never looks at:
+`signal_headers`, and `deposit_subdirectory_files`
+(thousands of acquisition sidecars per dataset, holding parameters rather than prose).
+They appear in `unchecked` so a reader of `verified` is told what it does not cover,
+and they do NOT withhold the verdict.
+Everything else in `unchecked` is a gap that opened on this run, and any one of them
+makes the verdict `unverifiable`.
+Conflating the two made `verified` unreachable for every real dataset:
+the first implementation compared the whole repository tree against the in-scope set,
+so any dataset with a `sub-01/` directory reported a budget overrun it never had.
+A verdict nothing can reach is a verdict nobody reads, which is ADR 0054's failure
+with the sign flipped.
+
+**Every check needs an `unchecked` channel, not only a findings array.**
+A `dataset_description.json` with a trailing comma, an `Authors` field holding objects
+rather than strings, an `enrichment_json` blob truncated mid-write, an empty tree
+listing, a git-annex pointer whose body is a key rather than the content, a 403 from S3:
+each is a question that could not be answered, and each used to return "nothing found",
+which is how a clean bill of health gets issued for a document nobody could read.
+403 in particular is not 404 (`s3-403-is-not-absence`): the bucket denies anonymous
+ListBucket, so it covers missing, private, and policy-in-flight alike.
+
+**A check that could not run must never be reported as a disclosure, either.**
+The owner-projection check read `.first()` returning `null` as a leak,
+because `undefined !== null` is true,
+and would have mailed the depositor and every admin an urgent false alarm
+for a query that did not return a row.
+
 **The cadence is the candidate predicate.**
 Unlike the fidelity sweep, which re-arms on a changed `zarr_source_commit`,
 there is nothing to compare against here:
@@ -111,9 +140,22 @@ So the fix is to make the flip re-convert rather than to withhold the viewer.
 The conversion queue's state is SQLite on the Hallu node, not D1,
 so the backend had no way at all to say "re-convert this one dataset" --
 only the global engine stamp, which is the wrong tool for one dataset.
-The orchestrator writes the stamp when it de-anonymizes,
+The orchestrator writes the stamp at the END of a successful publication run,
 the catalog row exposes it as a derived field (ADR 0034/0035: no new column),
-and `zarr_queue.reconcile` re-queues a `done` row whose stored stamp differs.
+and `zarr_queue.reconcile` re-queues the row when its stored stamp is behind.
+
+**The stamp goes after the DOI is minted, not at the restoration.**
+`doi_create` runs after `repo_public`, so a rebuild that raced a stamp written inside the
+restoration block would bake the restored attribution with NO DOI, and spend the request
+doing it.
+
+**A failed stamp is reported, because nothing else re-checks it.**
+The sweep selects `anonymous = 1`; by the time this write happens the row is `anonymous = 0`,
+so a dataset that misses its stamp has already left the only pool that would have caught it.
+It is non-fatal (the dataset IS published, and what is stale is a derived serving copy,
+ADR 0005) but it returns a warning to the approving admin and writes an `audit_log` row.
+An earlier version swallowed it behind a comment claiming the sweep would catch it,
+which was false.
 
 It is deliberately NOT behind the engine-bump ack gate.
 That gate exists because a global bump can hand the whole archive back at once and a person
@@ -121,7 +163,16 @@ should confirm it; this is one dataset, asked for by name, for a reason the arch
 and the converter does not.
 `requeue_stamp` is recorded when the request is honored rather than on completion, so a
 request that stays on the catalog row, and nothing clears it, re-queues once rather than on
-every hourly tick forever; the ordinary retry machinery owns a failed conversion.
+every hourly tick forever.
+
+A request is evaluated for EVERY job status, not only `done`.
+"Terminal for this version" (#774) is a statement about the DATA failing to convert;
+a rebuild request is about the dataset's METADATA having changed, which the failed attempt
+never saw, so it buys one retry on a `failed` row as well.
+Two counters are reported, because one cannot say what is needed:
+`requeue_requested` counts requests HONORED this run,
+`requeue_outstanding` counts rows still carrying a request their stamp is behind.
+Reporting only the first renders "asked for and never got" as zero.
 
 `_requeue_is_stale` reads a NULL stamp with a request in hand as STALE,
 which is the opposite of `_engine_is_stale` and not an inconsistency:
@@ -142,6 +193,20 @@ while this one is per-dataset and its blast radius is the one dataset that was a
   is always read) and reports `deposit_files_beyond_budget` when it did not see everything.
 - A future advisory pass is additive: it would add findings at a new severity, and nothing
   above has to change to accommodate it.
+- The verdict is READ BACK, not only mailed. `GET /datasets/:id` serves
+  `anonymity_status`, `anonymity_checked_at`, `anonymity_findings` and `anonymity_unchecked`
+  to the owner and to an admin, and `nemar dataset status` renders them. Everyone else is
+  served null on those fields, behind the same gate that withholds the identifiers: "this
+  deposit has findings" is itself a fact about the person being concealed. Without this the
+  mail's own instruction, "run `nemar dataset status`", pointed at a command that showed
+  nothing.
+- A notification that reached nobody is a result of the run, not a detail of it.
+  `sendAnonymityFindingsEmail` returns what it delivered, `AnonymitySweepResult` carries
+  `mail_failures`, and the CLI exits non-zero on a non-empty list. For a finding, the mail
+  IS the depositor's copy.
+- An unchanged set of findings is recorded every run and mailed only when it changes.
+  A deposit finding stays true until the depositor edits their own file, so daily mail
+  would train both audiences to ignore the one that is new.
 
 ## Alternatives considered
 
@@ -168,4 +233,11 @@ while this one is per-dataset and its blast radius is the one dataset that was a
 - Guards: `backend/test/anonymity-sweep.test.ts` (every check with its control, and the
   three "never swept" shapes), `scripts/zarr/test_zarr_queue.py` (the re-queue, honored
   once, and not held by the ack gate),
-  `backend/test/anonymity-publication-paths.test.ts` (the stamp's placement in the flip)
+  `backend/test/anonymity-publication-paths.test.ts` (the stamp's placement in the flip),
+  `backend/test/zarr-requeue-flip.test.ts` (the stamp WRITTEN and the catalog projection
+  that carries it, both behaviorally: a source-order check stayed green when the write was
+  disabled, nulled, or pointed at the wrong row)
+- The rule that a finding never carries the text it matched is enforced in
+  `backend/test/anonymity-sweep.test.ts`: appending the matched file body to a `detail`
+  pasted the concealed depositor's name into `sweep_stamps`, the `audit_log` row and
+  forwardable mail at once, and left every other test green.
