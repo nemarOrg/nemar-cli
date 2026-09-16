@@ -186,6 +186,15 @@ earlier releases are described only by their generated notes.
   and the largest git-tracked file measured across the catalog is 283 KB, so the buffered
   branch is what every real dataset takes.
 
+  One bound worth knowing before relying on it: `Content-Length` describes the ENCODED body,
+  and Cloudflare compresses this response for any client that accepts compression. Measured
+  on one worker within one second: a default `fetch` negotiated zstd and got no
+  `Content-Length` at all, while `Accept-Encoding: identity` got 1414, the manifest's number.
+  What changed is that the origin now emits an accurate length instead of none, and an
+  honest absence instead of a wrong number when the edge re-encodes. The manifest stays the
+  authority on a file's decoded size for every client, which is what `nemar dataset download`
+  has always checked against.
+
 - **A brokered file is now checked for being the right bytes, not just the right number of
   them (#1419).** The broker fetches by git REF, not by blob SHA, so a moved tag serves
   whatever is at that path now. A same-size edit -- a BIDS version string bumped, one

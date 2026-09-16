@@ -104,7 +104,28 @@ describe.skipIf(!DEPLOYED)("git-file broker against a private repo (live)", () =
     );
     if (!entry) throw new Error("exemplar has no dataset_description.json in its manifest");
 
-    const served = await fetch(entry.bytes_url);
+    // Two deliberate departures from a naive `fetch(entry.bytes_url)`, both
+    // of which this test failed on against a worker that was already correct.
+    //
+    // CACHE-BUSTED, because these assertions are about the HEADERS this
+    // origin produces and brokered responses are `public, max-age=300` (ADR
+    // 0066): for five minutes after any deploy that changes a header, the
+    // plain URL serves the PREVIOUS build's response. The edge is doing what
+    // it was told and it self-heals, but CI's `--retry` operates in seconds
+    // rather than minutes. A distinct query is a distinct cache key.
+    //
+    // IDENTITY ENCODING, because `Content-Length` describes the ENCODED body
+    // (RFC 9110). Cloudflare compresses this response for any client that
+    // accepts compression -- which is every browser, and Bun's own fetch,
+    // which negotiated zstd here -- and a compressed response carries either
+    // a compressed length or, as measured, none at all. So "the length equals
+    // the manifest's size" is a claim about the DECODED body, and asking for
+    // identity is how a test states which one it means. Measured 2026-09-16
+    // on one worker in one second: default `Content-Length: null`
+    // (`Content-Encoding: zstd`), identity `Content-Length: 1414`.
+    const served = await fetch(`${entry.bytes_url}?cache-bust=${Date.now()}`, {
+      headers: { "Accept-Encoding": "identity" },
+    });
     expect(served.status).toBe(200);
     // Inert type, and the two headers that keep user content from executing
     // on our origin now that we serve it ourselves.
@@ -116,6 +137,17 @@ describe.skipIf(!DEPLOYED)("git-file broker against a private repo (live)", () =
     // against a zero-byte entry, and this assertion is the whole oracle for
     // #1419.
     expect(served.headers.get("Content-Length")).toBe(String(entry.size));
+
+    // The URL a consumer actually persists, fetched the way a browser would:
+    // no cache-bust, no encoding preference. It must serve the same bytes.
+    // Deliberately NOT asserted on headers -- the cache TTL makes those
+    // unstable right after a deploy, and a compressed response legitimately
+    // carries no length for the decoded body. The manifest stays the
+    // authority on size for every client; this is why the CLI verifies
+    // against `file.size` rather than against a header.
+    const asPublished = await fetch(entry.bytes_url);
+    expect(asPublished.status).toBe(200);
+    expect(new TextEncoder().encode(await asPublished.text()).byteLength).toBe(entry.size);
 
     // The control that makes the test mean something: the same file, straight
     // from the public content host, is not readable. So the bytes above came

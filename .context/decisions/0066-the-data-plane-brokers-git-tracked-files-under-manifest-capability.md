@@ -95,8 +95,19 @@ is an isolate kill rather than a catchable error. Above the ceiling it degrades 
 with a counter that errors on a short or overrun body: no declared length and no identity
 there, but still no wrong-length file that finishes looking healthy.
 
-Two consequences worth stating rather than discovering. The streamed branch commits `200` and
-`public, max-age=300` before the length is known, so a body that later fails the counter has
+**What a client actually receives, which is narrower than "the response carries a length".**
+`Content-Length` describes the ENCODED body (RFC 9110), and Cloudflare compresses this
+response for any client that accepts compression -- every browser, and most HTTP libraries.
+Measured on one worker within one second on 2026-09-16: a default `fetch` negotiated zstd and
+got NO `Content-Length`; the same URL with `Accept-Encoding: identity` got `1414`, the
+manifest's number. So what this amendment delivers is an accurate length for the bytes the
+origin emits, and an honest absence rather than a wrong number when the edge re-encodes. The
+MANIFEST remains the authority on a file's decoded size for every client, which is why the
+CLI verifies against `file.size` and not against a header (`file-download.ts`), and why
+`test/git-broker-live.test.ts` asks for identity when it asserts the two are equal.
+
+Two further consequences worth stating rather than discovering. The streamed branch commits
+`200` and `public, max-age=300` before the length is known, so a body that later fails the counter has
 already been announced as cacheable; RFC 9111 forbids storing an incomplete response and the
 edge honors that, but it is someone else's correctness rather than ours, which is a further
 reason for the ceiling to be generous. And TTFB on a brokered file is now the full upstream
