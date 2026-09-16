@@ -486,7 +486,7 @@ describe("an anonymous release is a publication minus the steps that expose iden
     expect(ORCHESTRATOR).not.toContain("if (!c.anonymousRelease && isAnonymous(c.dataset)) {");
   });
 
-  test("de-anonymizing asks for the Zarr stores to be rebuilt", () => {
+  test("de-anonymizing asks for the Zarr stores to be rebuilt, AFTER the DOI exists", () => {
     // The stores carry the catalog row's attribution, an anonymous deposit is
     // public so it has been converting all along with the blinded label, and
     // publishing for real changes neither the dataset version nor the global
@@ -494,14 +494,17 @@ describe("an anonymous release is a publication minus the steps that expose iden
     // this stamp the published, attributed dataset keeps serving
     // "Anonymous (withheld until publication)" from zarr.nemar.org forever.
     //
-    // Placed INSIDE the restoration block on purpose: a rebuild is worth asking
-    // for only once the attribution it would carry actually exists.
+    // The stamp is written at the END of the run, not inside the restoration
+    // block: `doi_create` runs after `repo_public`, so a rebuild that raced an
+    // earlier stamp would bake the restored attribution with NO DOI and spend
+    // the one request doing it. This is a source-order check only; the write
+    // itself is exercised behaviorally in `zarr-requeue-flip.test.ts`.
     const restoreAt = ORCHESTRATOR.indexOf("if (restoreAttribution) {");
-    const requeueAt = ORCHESTRATOR.indexOf("${ZARR_REQUEUE_AT_PATH}");
-    const specAt = ORCHESTRATOR.indexOf("publishSpec = await ensureRepoToSpec(");
+    const doiAt = ORCHESTRATOR.indexOf('stepsToRun.includes("doi_create")');
+    const requeueAt = ORCHESTRATOR.indexOf("const zarrRequeueWarning = await stampZarrRequeue(");
     expect(restoreAt).toBeGreaterThan(-1);
-    expect(requeueAt).toBeGreaterThan(restoreAt);
-    expect(requeueAt).toBeLessThan(specAt);
+    expect(doiAt).toBeGreaterThan(restoreAt);
+    expect(requeueAt).toBeGreaterThan(doiAt);
   });
 
   test("a blinded author list is an interlock on the mint, not only a step order", () => {

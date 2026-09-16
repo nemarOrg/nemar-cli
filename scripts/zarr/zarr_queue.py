@@ -399,7 +399,7 @@ def _requeue_is_stale(stamp: str | None, requested: str | None) -> bool:
     **A requested value with no stamp IS stale**, which is the opposite of
     `_engine_is_stale`'s rule, and the difference is not an inconsistency. The
     engine stamp is archive-wide: reading NULL as stale there would hand the
-    whole catalogue back for reconversion on one tick, which is why
+    whole catalog back for reconversion on one tick, which is why
     `migrate_schema` seeds it. This one is per-dataset and is written only when
     a specific dataset needs a rebuild; a NULL stamp there means "this row
     predates the mechanism and has never honored a request", and the request in
@@ -505,10 +505,15 @@ def reconcile(
     pending_outstanding = 0
     pending_requeued = 0
     pending_exhausted = 0
-    # Per-dataset rebuilds the archive asked for this run (#1409). Reported on
-    # every reconcile, like `engine_stale`, so a request that never lands is
-    # visible in the cron log rather than only in a store nobody re-reads.
+    # Per-dataset rebuilds the archive asked for (#1409). TWO counters, because
+    # one cannot say what the comment promises: `requested` counts requests this
+    # run HONORED, `outstanding` counts rows carrying a request whose stamp is
+    # still behind it, whatever their status. A request that never lands
+    # increments only the second, so `outstanding` staying high across runs is
+    # the "asked for and never got" signal; reporting only the first would
+    # render exactly that case as zero.
     requeue_requested = 0
+    requeue_outstanding = 0
     # (dataset_id, version to convert) for rows the STAMP alone would requeue.
     # Held until the walk finishes so the guard below can judge the whole bump
     # rather than the first N rows of it.
@@ -538,6 +543,18 @@ def reconcile(
             enq += 1
             continue
         status = row["status"]
+        # Evaluated for EVERY status, not just `done`. A request that lands on a
+        # `failed` row used to be invisible: the branch below was reached only
+        # from `done`, so the request was never read, never honored and never
+        # counted, and a de-anonymized dataset whose last conversion failed kept
+        # serving the blinded citation with nothing left to ask again.
+        requested = (requeue_requests or {}).get(dataset_id)
+        requeue_asked = _requeue_is_stale(row["requeue_stamp"], requested)
+        if requeue_asked:
+            # Counted before anything decides whether to act on it, so the cron
+            # line distinguishes "asked for and delivered" from "asked for and
+            # still owed" (ADR 0054: unknown is never rendered as zero).
+            requeue_outstanding += 1
         if status == "done":
             # Re-convert when a version newer than the one we converted appears,
             # OR when the engine that converted it is no longer the current one
@@ -547,9 +564,6 @@ def reconcile(
             stale_engine = _engine_is_stale(row["engine_version"], engine_version)
             if stale_engine:
                 engine_stale += 1
-            # An explicit per-dataset rebuild request from the archive (#1409).
-            requested = (requeue_requests or {}).get(dataset_id)
-            requeue_asked = _requeue_is_stale(row["requeue_stamp"], requested)
             # Recordings this dataset still owes (#1197). A `done` row can be
             # serving what converted while five recordings sit in the index's
             # `pending` list, which nothing used to revisit: the run returned 0,
@@ -570,12 +584,19 @@ def reconcile(
                 if rounds >= PENDING_MAX_ROUNDS:
                     pending_exhausted += 1
             if version_changed:
+                # A version bump reconverts from the current catalog row, which
+                # is exactly what an outstanding request wanted, so the request
+                # is satisfied by this conversion. Recording the stamp here
+                # stops it buying a SECOND conversion once the row goes `done`.
                 conn.execute(
                     "UPDATE jobs SET latest_version=?, status='pending', attempts=0,"
-                    " next_retry_at=0, updated_at=? WHERE dataset_id=?",
-                    (latest, now, dataset_id),
+                    " next_retry_at=0, requeue_stamp=COALESCE(?, requeue_stamp),"
+                    " updated_at=? WHERE dataset_id=?",
+                    (latest, requested if requeue_asked else None, now, dataset_id),
                 )
                 enq += 1
+                if requeue_asked:
+                    requeue_requested += 1
             elif requeue_asked:
                 # Ahead of the engine branch, and NOT subject to its ack gate.
                 # That gate exists because a global engine bump can hand the
@@ -626,15 +647,38 @@ def reconcile(
                     (latest, now, dataset_id),
                 )
                 enq += 1
+            elif requeue_asked:
+                # A named request IS a new reason to retry a terminal failure.
+                # "Terminal for this version" is about the DATA not converting;
+                # this request is about the dataset's metadata having changed
+                # (de-anonymization rewrites the citation), which the previous
+                # attempt never saw. Bounded the same way as any other honored
+                # request: the stamp is recorded here, so it buys one retry.
+                conn.execute(
+                    "UPDATE jobs SET latest_version=?, status='pending', attempts=0,"
+                    " next_retry_at=0, last_error=NULL, requeue_stamp=?,"
+                    " updated_at=? WHERE dataset_id=?",
+                    (latest or row["latest_version"], requested, now, dataset_id),
+                )
+                enq += 1
+                requeue_requested += 1
         elif status == "unlisted":
             # Back in the catalog, so it is convertible again. Reset attempts:
             # whatever failed before was about a dataset in a different state.
             conn.execute(
                 "UPDATE jobs SET latest_version=?, status='pending', attempts=0,"
-                " next_retry_at=0, last_error=NULL, updated_at=? WHERE dataset_id=?",
-                (latest or row["latest_version"], now, dataset_id),
+                " next_retry_at=0, last_error=NULL,"
+                " requeue_stamp=COALESCE(?, requeue_stamp), updated_at=? WHERE dataset_id=?",
+                (
+                    latest or row["latest_version"],
+                    requested if requeue_asked else None,
+                    now,
+                    dataset_id,
+                ),
             )
             enq += 1
+            if requeue_asked:
+                requeue_requested += 1
         else:
             # pending / inprogress -- refresh the target version only. Do NOT
             # touch updated_at: it is the inprogress heartbeat the stale-recovery
@@ -702,6 +746,7 @@ def reconcile(
         "rejected_sample": rejected_sample,
         "engine_stale": engine_stale,
         "requeue_requested": requeue_requested,
+        "requeue_outstanding": requeue_outstanding,
         "engine_requeued": engine_requeued,
         "engine_pending": len(stamp_only) if engine_requeue_blocked else 0,
         "engine_requeue_blocked": engine_requeue_blocked,
@@ -995,10 +1040,18 @@ def fetch_public_datasets(api_base: str) -> tuple[list[tuple[str, str]], bool]:
     and the public filter so the backfill sweep below cannot drift from it.
     """
     rows, complete = fetch_public_catalog_rows(api_base)
-    return (
-        [(str(d.get("dataset_id", "")), str(d.get("latest_version") or "")) for d in rows],
-        complete,
-    )
+    return catalog_rows_to_pairs(rows), complete
+
+
+def catalog_rows_to_pairs(rows: list[dict]) -> list[tuple[str, str]]:
+    """Catalog rows as the (dataset_id, latest_version) pairs `reconcile` takes.
+
+    Its own function because `main` needs the pairs AND the raw rows (for
+    `fetch_requeue_requests`), so it cannot go through `fetch_public_datasets`
+    without fetching twice. Hand-copying the comprehension instead is the drift
+    `fetch_public_datasets`'s docstring already warns about.
+    """
+    return [(str(d.get("dataset_id", "")), str(d.get("latest_version") or "")) for d in rows]
 
 
 def fetch_requeue_requests(rows: list[dict]) -> dict[str, str]:
@@ -1018,10 +1071,21 @@ def fetch_requeue_requests(rows: list[dict]) -> dict[str, str]:
     out: dict[str, str] = {}
     for row in rows:
         stamp = row.get("zarr_requeue_at")
-        if isinstance(stamp, str) and stamp:
-            dataset_id = str(row.get("dataset_id", ""))
-            if dataset_id:
+        dataset_id = str(row.get("dataset_id", ""))
+        if isinstance(stamp, str):
+            # An empty string is absence, the same as a missing key: the field
+            # is derived from a JSON path that simply is not set.
+            if stamp and dataset_id:
                 out[dataset_id] = stamp
+        elif stamp is not None:
+            # Present but unusable is not the same as absent. If the field ever
+            # changes shape, every request would otherwise evaporate in silence
+            # and the cron log would report requeue_outstanding=0 forever.
+            print(
+                f"[zarr-queue] {dataset_id or '<no id>'}: zarr_requeue_at is present but not a"
+                f" usable string ({type(stamp).__name__}); the rebuild request was ignored",
+                flush=True,
+            )
     return out
 
 
@@ -1713,9 +1777,7 @@ def main() -> int:
         # and the sparse per-dataset rebuild requests (#1409). Paging the
         # catalog twice would be a second chance to see a different catalog.
         catalog_rows, complete = fetch_public_catalog_rows(args.api_base)
-        datasets = [
-            (str(d.get("dataset_id", "")), str(d.get("latest_version") or "")) for d in catalog_rows
-        ]
+        datasets = catalog_rows_to_pairs(catalog_rows)
         res = reconcile(
             conn,
             datasets,
@@ -1744,6 +1806,7 @@ def main() -> int:
             # rebuild the archive asked for and never got is invisible unless
             # the log says how many it asked for.
             f"requeue_requested={res['requeue_requested']} "
+            f"requeue_outstanding={res['requeue_outstanding']} "
             # Coverage (#1197), on every run for the same reason engine_stale is:
             # a steady zero is what makes the run that says otherwise legible.
             f"pending_outstanding={res['pending_outstanding']} "

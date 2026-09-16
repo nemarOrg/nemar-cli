@@ -36,6 +36,7 @@ from zarr_queue import (  # type: ignore[import-not-found]  # noqa: E402
     PENDING_MAX_ROUNDS,
     ZARR_ENGINE_VERSION,
     _get_json_retrying,
+    _requeue_is_stale,
     backoff_seconds,
     build_parser,
     claim_next,
@@ -43,11 +44,11 @@ from zarr_queue import (  # type: ignore[import-not-found]  # noqa: E402
     connect,
     dir_format_recordings,
     fetch_manifest_paths,
+    fetch_requeue_requests,
     fetch_zarr_index,
     index_failure_keys,
     index_store_keys,
     main,
-    fetch_requeue_requests,
     mark_done,
     mark_fail,
     may_carry_dir_formats,
@@ -102,6 +103,101 @@ class QueueTest(unittest.TestCase):
         )
         self.assertEqual(self.status("nm000001"), "pending")
         self.assertEqual(res["requeue_requested"], 1)
+
+    def test_no_request_means_never_stale(self):
+        """The short-circuit that keeps this from re-queueing the archive.
+
+        `_requeue_is_stale` is deliberately the OPPOSITE polarity to
+        `_engine_is_stale`: a NULL stamp IS stale, because it means the row has
+        never honored the request in hand. That rule is only safe because of
+        `if not requested: return False` -- without it, every dataset that has
+        ever been re-queued would re-queue on every tick the moment the catalog
+        stopped carrying the stamp, which is exactly the unattended mass
+        requeue the engine ack gate exists to prevent.
+        """
+        # A stamp present, no request: not stale.
+        self.assertFalse(_requeue_is_stale("2026-09-16 01:00:00", None))
+        # No stamp, no request: not stale either.
+        self.assertFalse(_requeue_is_stale(None, None))
+        # No stamp WITH a request: stale, which is the inverted rule.
+        self.assertTrue(_requeue_is_stale(None, "2026-09-16 01:00:00"))
+        # Stamp behind the request: stale.
+        self.assertTrue(_requeue_is_stale("2026-09-15 00:00:00", "2026-09-16 01:00:00"))
+        # Stamp equal to the request: honored already.
+        self.assertFalse(_requeue_is_stale("2026-09-16 01:00:00", "2026-09-16 01:00:00"))
+
+    def test_a_request_reaches_a_failed_row(self):
+        """A named request is a new reason to retry a terminal failure.
+
+        "Terminal for this version" (#774) is about the DATA not converting.
+        This request is about the dataset's METADATA having changed -- the
+        citation the converter bakes in -- which the failed attempt never saw.
+        The request used to be evaluated only inside the `done` branch, so a
+        de-anonymized dataset whose last conversion failed kept serving the
+        blinded citation with nothing left to ask again.
+        """
+        reconcile(self.conn, [("nm000001", "1.0.0")], 3600)
+        mark_fail(self.conn, "nm000001", "boom", 1, 1800)
+        self.assertEqual(self.status("nm000001"), "failed")
+
+        res = reconcile(
+            self.conn,
+            [("nm000001", "1.0.0")],
+            3600,
+            requeue_requests={"nm000001": "2026-09-16 01:00:00"},
+        )
+        self.assertEqual(self.status("nm000001"), "pending")
+        self.assertEqual(res["requeue_requested"], 1)
+
+    def test_a_failed_rows_request_is_also_honored_once(self):
+        """The control for the test above: it buys one retry, not a loop."""
+        reconcile(self.conn, [("nm000001", "1.0.0")], 3600)
+        mark_fail(self.conn, "nm000001", "boom", 1, 1800)
+        request = {"nm000001": "2026-09-16 01:00:00"}
+        reconcile(self.conn, [("nm000001", "1.0.0")], 3600, requeue_requests=request)
+        mark_fail(self.conn, "nm000001", "boom again", 1, 1800)
+        res = reconcile(self.conn, [("nm000001", "1.0.0")], 3600, requeue_requests=request)
+        self.assertEqual(res["requeue_requested"], 0)
+        self.assertEqual(self.status("nm000001"), "failed")
+
+    def test_an_outstanding_request_is_counted_even_when_not_honored(self):
+        """The counter that makes a lost request visible.
+
+        `requeue_requested` counts requests HONORED. On its own it renders "a
+        rebuild the archive asked for and never got" as zero, which is the
+        thing ADR 0054 forbids. `requeue_outstanding` counts rows still carrying
+        a request whose stamp is behind it, whatever their status.
+        """
+        reconcile(self.conn, [("nm000001", "1.0.0")], 3600)
+        # An inprogress row: the request is outstanding and cannot be honored
+        # this tick.
+        self.conn.execute("UPDATE jobs SET status='inprogress' WHERE dataset_id=?", ("nm000001",))
+        res = reconcile(
+            self.conn,
+            [("nm000001", "1.0.0")],
+            3600,
+            requeue_requests={"nm000001": "2026-09-16 01:00:00"},
+        )
+        self.assertEqual(res["requeue_requested"], 0)
+        self.assertEqual(res["requeue_outstanding"], 1)
+
+    def test_a_version_bump_satisfies_an_outstanding_request(self):
+        """A reconversion the request wanted must not buy a second one.
+
+        `version_changed` wins over the requeue branch, and it reconverts from
+        the current catalog row -- which is what the request asked for. Without
+        recording the stamp there, the request would re-queue the dataset AGAIN
+        once the row went `done`.
+        """
+        reconcile(self.conn, [("nm000001", "1.0.0")], 3600)
+        mark_done(self.conn, "nm000001", "1.0.0")
+        request = {"nm000001": "2026-09-16 01:00:00"}
+        res = reconcile(self.conn, [("nm000001", "2.0.0")], 3600, requeue_requests=request)
+        self.assertEqual(res["requeue_requested"], 1)
+        mark_done(self.conn, "nm000001", "2.0.0")
+        again = reconcile(self.conn, [("nm000001", "2.0.0")], 3600, requeue_requests=request)
+        self.assertEqual(again["requeue_requested"], 0)
+        self.assertEqual(self.status("nm000001"), "done")
 
     def test_the_same_request_is_honored_once(self):
         """The control, and the property that makes this safe to run hourly.
