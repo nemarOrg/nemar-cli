@@ -12,6 +12,7 @@
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import { auditLogStatement } from "../../db/audit-log";
+import { isAnonymous } from "../../services/anonymity";
 import type { DataCiteEnrichment } from "../../services/datacite";
 import {
   buildOrcidEnrichment,
@@ -202,6 +203,7 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
     const dataset = await db
       .prepare(
         `SELECT d.dataset_id, d.name, d.description, d.github_repo, d.concept_doi, d.is_exemplar,
+                d.anonymous,
                 u.username as owner_username, u.orcid as owner_orcid,
                 u.given_name as owner_given_name, u.family_name as owner_family_name
          FROM datasets d JOIN users u ON d.owner_user_id = u.id WHERE d.dataset_id = ?`,
@@ -214,6 +216,7 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
         github_repo: string | null;
         concept_doi: string | null;
         is_exemplar: number | null;
+        anonymous: number | null;
         owner_username: string;
         owner_orcid: string | null;
         owner_given_name: string | null;
@@ -260,6 +263,14 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
           // Exemplars are exempt: their owner row is an admin/service account
           // and they mint on the EZID sandbox shoulder (requiresUploaderName).
           uploaderRequired: requiresUploaderName(dataset),
+          // #1409: the fleet's standing anonymous exemplar (xx099907) is
+          // re-minted by the same maintenance command as every other one, and
+          // this is the shortest path from a concealed deposit to a permanent
+          // DataCite record naming its depositor. `resolveOwnerIdentity` above
+          // reads the real name, ORCID and username straight off the joined
+          // `users` row; without this flag they would be minted as the curator
+          // and the identifier advertised as public.
+          anonymousDeposit: isAnonymous(dataset),
           sandbox: true,
         },
         {

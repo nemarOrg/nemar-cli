@@ -687,3 +687,49 @@ describe("enrichment does not un-blind what it just blinded", () => {
     expect(cacheAt).toBeGreaterThan(serializeAt);
   });
 });
+
+describe("every DOI mint asks whether the deposit is anonymous", () => {
+  // A mint is the shortest path from a concealed deposit to a PERMANENT
+  // DataCite record naming its depositor, and `resolveOwnerIdentity` reads the
+  // real name, ORCID and username straight off the joined `users` row. The
+  // exemplar re-mint route (`nemar admin exemplar remint-dois`) did not pass
+  // `anonymousDeposit`, and it is the documented maintenance command for the
+  // fleet that contains the standing anonymous exemplar -- so running it would
+  // have de-anonymized exactly the dataset the fleet keeps concealed.
+  const MINT_CALL = /createConceptDoi|dispatchCreateConceptDoi/;
+
+  test("no call site mints without deciding the anonymity question", () => {
+    const offenders: string[] = [];
+    for (const file of sourceFiles(SRC)) {
+      const rel = file
+        .slice(SRC.length + 1)
+        .split(sep)
+        .join("/");
+      const text = readFileSync(file, "utf8");
+      // Only call sites, not the declaration or the import.
+      for (const match of text.matchAll(
+        /await\s+(dispatchCreateConceptDoi|createConceptDoi)\s*\(/g,
+      )) {
+        const after = text.slice(match.index, (match.index ?? 0) + 2500);
+        if (after.includes("anonymousDeposit")) continue;
+        offenders.push(`${rel}:${text.slice(0, match.index).split("\n").length}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  test("the scan would notice: it finds the mint call sites it scans", () => {
+    // Without this a regex matching nothing would pass forever. Two today:
+    // the concept-DOI route and the exemplar re-mint.
+    let sites = 0;
+    for (const file of sourceFiles(SRC)) {
+      sites += [
+        ...readFileSync(file, "utf8").matchAll(
+          /await\s+(dispatchCreateConceptDoi|createConceptDoi)\s*\(/g,
+        ),
+      ].length;
+    }
+    expect(sites).toBeGreaterThanOrEqual(2);
+    expect(MINT_CALL.test("dispatchCreateConceptDoi")).toBe(true);
+  });
+});
