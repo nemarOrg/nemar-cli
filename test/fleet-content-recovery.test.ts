@@ -830,6 +830,32 @@ exit 0`);
     expect(deletes[0]).toContain(`--key on000001/objects/${key}`);
   }, 180_000);
 
+  test("refuses an empty write the bucket read back without any length", async () => {
+    // Zero is the PASSING value on this path, so a `?? 0` default on a missing
+    // ContentLength turns "the bucket told us nothing" into "proven empty".
+    // It is the one place in this module where that default fails open.
+    await setUpEmptyKeyDataset();
+    installAwsShim(`
+case "$2" in
+  put-object) echo '{}'; exit 0 ;;
+  head-object) echo '{"AcceptRanges":"bytes"}'; exit 0 ;;
+  list-object-versions) echo '[]'; exit 0 ;;
+esac
+exit 0`);
+
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
+      workRoot,
+      apply: true,
+      originUrl: origin,
+    });
+
+    expect(outcome.measured).toBe(true);
+    expect(outcome.keys[0]).toMatchObject({ action: "failed", origin: "empty" });
+    expect(outcome.keys[0].detail).toContain("without a length");
+    expect(outcome.keys[0].verification).toBeUndefined();
+    expect(shimLog().filter((line) => line.startsWith("s3api delete-object"))).toHaveLength(1);
+  }, 180_000);
+
   test("reports it as recoverable in a dry run without touching the bucket", async () => {
     const key = await setUpEmptyKeyDataset();
     installAwsShim(`
@@ -893,9 +919,81 @@ exit 0`);
       originUrl: origin,
     });
 
-    expect(outcome.keys[0].action).toBe("failed");
+    // `unrecoverable`, not `failed`, and the same verdict the dry run gives.
+    // A source of the wrong length is a permanent answer, so filing it as a
+    // transfer fault would paint the dataset red and exit 1 for an operator to
+    // retry something that cannot change.
+    expect(outcome.keys[0].action).toBe("unrecoverable");
     expect(outcome.keys[0].detail).toContain("the source object is 999999 bytes");
     expect(shimLog().filter((line) => line.startsWith("s3api copy-object"))).toEqual([]);
+  }, 180_000);
+
+  test("asks with the credentials the copy will use, not anonymously", async () => {
+    // Five of the sixteen datasets list their objects publicly and 403 an
+    // anonymous read. An unsigned probe there establishes nothing about the
+    // object the signed copy is about to read, so the guard would be skipped for
+    // exactly the sources that most need it -- and above 5 GB there is no
+    // checksum afterwards to catch it.
+    await setUpPinnedDataset("the key's real content");
+    installAwsShim(`
+case "$2" in
+  head-object)
+    case "$*" in
+      *--no-sign-request*)
+        echo "aws: [ERROR]: An error occurred (403) when calling the HeadObject operation: Forbidden" >&2
+        exit 254 ;;
+    esac
+    echo '{"ContentLength":999999}'; exit 0 ;;
+  list-object-versions) echo '[]'; exit 0 ;;
+esac
+exit 0`);
+
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
+      workRoot,
+      apply: true,
+      originUrl: origin,
+    });
+
+    expect(outcome.keys[0].action).toBe("unrecoverable");
+    expect(outcome.keys[0].detail).toContain("the source object is 999999 bytes");
+    expect(shimLog().filter((line) => line.startsWith("s3api copy-object"))).toEqual([]);
+  }, 180_000);
+
+  test("does not read a text-mode answer as a missing length, or throw on it", async () => {
+    // The AWS CLI honors `output = text` from ~/.aws/config and
+    // AWS_DEFAULT_OUTPUT, and this command runs on the operator's ambient AWS
+    // environment. Parsing that as JSON threw from outside the only try in
+    // `recoverKey`, which discarded EVERY key outcome for the dataset -- on an
+    // apply run, including keys whose objects had already been copied in.
+    const content = "the key's real content";
+    await setUpPinnedDataset(content);
+    installAwsShim(`
+case "$2" in
+  copy-object) echo '{"CopyObjectResult":{"ChecksumSHA256":"${sha256Base64(content)}"}}'; exit 0 ;;
+  head-object)
+    case "$*" in
+      *"--output json"*) ;;
+      *) printf 'bytes\\t999999\\ttext/plain\\n'; exit 0 ;;
+    esac
+    echo '{"ContentLength":${content.length},"ChecksumSHA256":"${sha256Base64(content)}"}'
+    exit 0 ;;
+  list-object-versions) echo '[]'; exit 0 ;;
+esac
+exit 0`);
+
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
+      workRoot,
+      apply: true,
+      originUrl: origin,
+    });
+
+    // Measured, not merely "did not throw": every HEAD asks for JSON, so the
+    // text branch of the shim is never reached and the copy verifies normally.
+    expect(outcome.measured).toBe(true);
+    expect(outcome.keys[0]).toMatchObject({ action: "recovered", verification: "checksum" });
+    const heads = shimLog().filter((line) => line.startsWith("s3api head-object"));
+    expect(heads.length).toBeGreaterThan(0);
+    expect(heads.every((line) => line.includes("--output json"))).toBe(true);
   }, 180_000);
 
   test("still tries a source whose length the answer did not carry", async () => {
@@ -921,5 +1019,73 @@ exit 0`);
     });
 
     expect(outcome.keys[0]).toMatchObject({ action: "recovered", verification: "checksum" });
+  }, 180_000);
+
+  test("survives a CLI that answers text even when asked for json", async () => {
+    // The `--output json` flag is the fix; this is the layer under it. A parse
+    // error here escapes the only try in `recoverKey`, and the catch above it
+    // replaces the whole dataset result with `unmeasured` -- discarding the
+    // outcomes of keys whose objects were already copied into the bucket. The
+    // dataset must still be measured, whatever the CLI prints.
+    const content = "the key's real content";
+    await setUpPinnedDataset(content);
+    installAwsShim(`
+case "$2" in
+  copy-object) echo '{"CopyObjectResult":{"ChecksumSHA256":"${sha256Base64(content)}"}}'; exit 0 ;;
+  head-object)
+    case "$*" in
+      *"--bucket openneuro.org"*) printf 'bytes\\t999999\\ttext/plain\\n'; exit 0 ;;
+    esac
+    echo '{"ContentLength":${content.length},"ChecksumSHA256":"${sha256Base64(content)}"}'
+    exit 0 ;;
+  list-object-versions) echo '[]'; exit 0 ;;
+esac
+exit 0`);
+
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
+      workRoot,
+      apply: true,
+      originUrl: origin,
+    });
+
+    // Measured, not thrown away: an unreadable length is "we did not find out",
+    // so the copy proceeds and the checksum decides, exactly as before the guard.
+    expect(outcome.measured).toBe(true);
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.keys[0]).toMatchObject({ action: "recovered", verification: "checksum" });
+  }, 180_000);
+
+  test("treats an unreadable read-back as a failed question, not a lost dataset", async () => {
+    // The same hazard on the destination HEAD, which is what verification reads
+    // when the copy itself returned no checksum. An unreadable answer must
+    // refuse the copy and delete it, the way any unmeasured read-back does; it
+    // must not throw, because the catch above discards the whole dataset.
+    const content = "the key's real content";
+    await setUpPinnedDataset(content);
+    installAwsShim(`
+case "$2" in
+  copy-object) echo '{"CopyObjectResult":{}}'; exit 0 ;;
+  head-object)
+    case "$*" in
+      *"--bucket nemar"*) printf 'bytes\\t22\\tapplication/octet-stream\\n'; exit 0 ;;
+    esac
+    echo '{"ContentLength":${content.length}}'; exit 0 ;;
+  list-object-versions) echo '[]'; exit 0 ;;
+esac
+exit 0`);
+
+    const outcome = await recoverDatasetContent("on000001", async () => new Map(), {
+      workRoot,
+      apply: true,
+      originUrl: origin,
+    });
+
+    expect(outcome.measured).toBe(true);
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.keys[0].action).toBe("failed");
+    expect(outcome.keys[0].verification).toBeUndefined();
+    // And the unproven object is gone, which is the point of refusing at all.
+    expect(outcome.keys[0].leftInBucket).toBeFalsy();
+    expect(shimLog().filter((line) => line.startsWith("s3api delete-object"))).toHaveLength(1);
   }, 180_000);
 });

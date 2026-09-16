@@ -441,7 +441,12 @@ export function planKeyRecovery(opts: {
   // Before any source is considered, and deliberately so: the empty file needs
   // none, and the pins a `-s0` key carries have proven to name other content.
   if (isEmptyContentKey(facts)) return { ...base, empty: true };
-  if (facts.size === 0) {
+  // Only when the hash was actually READ and differs. A backend whose hash width
+  // this module does not know (SHA1E, SHA512E, URL) leaves `hashHex` null, and
+  // refusing those here would both assert a comparison that never happened and
+  // narrow behavior: before the empty path existed they fell through to a pin or
+  // a discovered object and could be recovered. Not finding out is not evidence.
+  if (facts.size === 0 && facts.hashHex !== null && EMPTY_CONTENT_HASH[facts.backend]) {
     return {
       ...base,
       reason: "declares zero bytes but not the empty file's hash; no content can satisfy it",
@@ -943,7 +948,14 @@ async function multipartCopy(opts: {
 /** An object's facts, or why the bucket could not be asked for them. */
 export interface HeadObjectAnswer {
   object: {
-    size: number;
+    /**
+     * The object's length, or null when the answer carried none.
+     *
+     * Not `?? 0`. Zero is a real length and, for a key that declares zero, the
+     * PASSING one, so defaulting a missing answer to it turned "the bucket told
+     * us nothing" into "proven empty" on the one path where that reads as success.
+     */
+    size: number | null;
     etag: string | null;
     checksumSha256: string | null;
     crc64: string | null;
@@ -987,16 +999,26 @@ export async function headObject(opts: {
       ? { object: null, failed: null }
       : { object: null, failed: why };
   }
-  const body = JSON.parse(stdout || "{}") as {
+  // A parse failure is a failed QUESTION, not an absent object and not a throw.
+  // `--output json` above is what stops it, but this call sits outside the only
+  // try in `recoverKey`, so an escaping error would be caught one level up in
+  // `recoverDatasetContent` and discard every key outcome for the dataset --
+  // including, on an apply run, keys whose objects were already copied in.
+  let body: {
     ContentLength?: number;
     ETag?: string;
     ChecksumSHA256?: string;
     ChecksumCRC64NVME?: string;
     ChecksumType?: string;
   };
+  try {
+    body = JSON.parse(stdout || "{}");
+  } catch {
+    return { object: null, failed: "the bucket's answer could not be read as JSON" };
+  }
   return {
     object: {
-      size: body.ContentLength ?? 0,
+      size: typeof body.ContentLength === "number" ? body.ContentLength : null,
       // Unquoted here, at the boundary, so the type's value is always unquoted
       // and no downstream comparison has to strip again to be correct.
       etag: body.ETag?.replace(/"/g, "") ?? null,
@@ -1029,6 +1051,16 @@ export async function headObject(opts: {
 export async function isUpstreamObjectReadable(
   source: { bucket: string; object: string; version?: string },
   env?: Record<string, string>,
+  /**
+   * Sign the request, for a caller that needs the answer the COPY will get.
+   *
+   * Default false: the dry run asks unsigned, which needs no credentials and is
+   * what tells it whether upstream refuses the object. The apply path asks
+   * signed, because five of the sixteen datasets list their objects publicly and
+   * 403 an anonymous read, and an unsigned refusal there establishes nothing
+   * about the object the signed copy is about to read.
+   */
+  signed = false,
 ): Promise<{
   readable: boolean;
   refusedByUpstream: boolean;
@@ -1041,21 +1073,22 @@ export async function isUpstreamObjectReadable(
   size: number | null;
   detail: string | null;
 }> {
-  const args = [
-    "s3api",
-    "head-object",
-    "--no-sign-request",
-    "--bucket",
-    source.bucket,
-    "--key",
-    source.object,
-  ];
+  const args = ["s3api", "head-object", "--bucket", source.bucket, "--key", source.object];
+  if (!signed) args.push("--no-sign-request");
   if (source.version) args.push("--version-id", source.version);
+  // Every call site that reads a body asks for JSON explicitly. The operator's
+  // ambient AWS environment is what signs these (the command says so in its
+  // help), and `output = text` in ~/.aws/config or AWS_DEFAULT_OUTPUT makes the
+  // CLI answer tab-separated fields that JSON.parse throws on.
+  args.push("--output", "json");
   const { stdout, stderr, exitCode, timedOut } = await aws(args, env);
   if (exitCode === 0) {
-    const body = JSON.parse(stdout || "{}") as { ContentLength?: number };
-    const size = typeof body.ContentLength === "number" ? body.ContentLength : null;
-    return { readable: true, refusedByUpstream: false, size, detail: null };
+    return {
+      readable: true,
+      refusedByUpstream: false,
+      size: parseContentLength(stdout),
+      detail: null,
+    };
   }
   const detail = timedOut ? "timed out" : stderr.trim() || `exit ${exitCode}`;
   return {
@@ -1064,6 +1097,22 @@ export async function isUpstreamObjectReadable(
     size: null,
     detail,
   };
+}
+
+/**
+ * The `ContentLength` of a HEAD answer, or null if it did not carry a usable one.
+ *
+ * Never throws. An unreadable answer is "we did not find out", which the caller
+ * already handles; letting a parse error escape would abort the whole dataset,
+ * discarding the outcomes of keys whose objects were already copied in.
+ */
+function parseContentLength(stdout: string): number | null {
+  try {
+    const body = JSON.parse(stdout || "{}") as { ContentLength?: number };
+    return typeof body.ContentLength === "number" ? body.ContentLength : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1242,11 +1291,18 @@ export async function recoverKey(opts: {
     // Read back, for the same reason every other path does: the question a later
     // registration sweep asks is what the BUCKET holds, not what a write claimed.
     const head = await headObject({ bucket: opts.destBucket, key: opts.destKey, env: opts.env });
-    if (head.object?.size !== 0) {
+    // A positive zero, so "the bucket carried no length" cannot pass as "empty".
+    // Zero is the passing value on this path alone, which is why `size` is
+    // tri-state: `?? 0` here would have read silence as proof.
+    if (head.object === null || head.object.size !== 0) {
       const detail =
         head.object === null
-          ? `written, but the bucket then answered ${head.failed ?? "nothing"}`
-          : `written, but the bucket read back ${head.object.size} bytes`;
+          ? head.failed
+            ? `written, but the bucket then answered ${head.failed}`
+            : "written, but the bucket then reported no such object"
+          : head.object.size === null
+            ? "written, but the bucket answered without a length, so nothing was checked"
+            : `written, but the bucket read back ${head.object.size} bytes`;
       const removed = await deleteObject({
         bucket: opts.destBucket,
         key: opts.destKey,
@@ -1342,16 +1398,27 @@ export async function recoverKey(opts: {
     (candidate) => !oversized(candidate),
   );
   const refusals: string[] = [];
+  // Size contradictions kept apart from transfer faults. A source of the wrong
+  // length is a permanent answer -- a re-run gets it again forever -- so a key
+  // refused only for that is `unrecoverable`, the way the dry run reports it, and
+  // not `failed`, which paints the dataset red and exits 1 for an operator to
+  // retry something that cannot change.
+  const sizeRefusals: string[] = [];
   for (const source of candidates) {
     // Ask the source's length before copying it. Below 5 GB this only saves a
     // copy the checksum would refuse anyway; above it, it is the guard, because
     // the multipart path cuts its ranges from the key's declared size and has no
     // checksum to catch a source of another length afterwards.
-    const probe = await isUpstreamObjectReadable(source, opts.env);
+    //
+    // SIGNED, unlike the dry run's probe: five of the sixteen datasets list
+    // their objects publicly and 403 an anonymous read, and an unsigned refusal
+    // there would skip the check for exactly the sources the copy can still read.
+    const probe = await isUpstreamObjectReadable(source, opts.env, true);
     if (probe.readable) {
       const wrongSize = sourceSizeRefusal(entry.size, probe);
       if (wrongSize) {
         refusals.push(wrongSize);
+        sizeRefusals.push(wrongSize);
         continue;
       }
     }
@@ -1432,6 +1499,19 @@ export async function recoverKey(opts: {
       ].join("; "),
       origin: source.origin,
       leftInBucket: !removed.deleted,
+    };
+  }
+
+  // Every candidate contradicted the key's own length. That is settled, and it
+  // needs no question put to upstream: the objects answered, and what they said
+  // rules them out permanently. Reported the way the dry run reports it.
+  if (sizeRefusals.length === candidates.length) {
+    return {
+      key: entry.key,
+      size: entry.size,
+      action: "unrecoverable",
+      origin,
+      detail: sizeRefusals.join("; "),
     };
   }
 

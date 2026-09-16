@@ -41,18 +41,28 @@ Nothing wrong reached the bucket.
 Two things change anyway.
 
 **The source's length is compared to the key's declared size before the copy, on both the dry-run and the apply path.**
-The probe already issued that HEAD and read only its exit code, so a readable wrong-sized object counted as recoverable content and every apply spent a copy to be told no.
+The dry run already issued that HEAD and read only its exit code, so a readable wrong-sized object counted as recoverable content and every apply spent a copy to be told no.
+The apply path had no pre-copy probe at all; it now makes one HEAD per candidate, which is a real added cost at fleet scale and is what buys the guard.
 Below 5 GB this only saves the wasted copy.
 Above it, it is the actual guard: the multipart path cuts its ranges from the KEY's declared size and has no checksum afterwards, so a pinned source of another length was previously copied range by range against a length it does not have.
 
+**The apply path asks SIGNED, and that distinction is the whole value of the check.**
+The dry run asks unsigned, which needs no credentials and is also how it learns whether upstream refuses an object at all.
+Five of the sixteen datasets, though, list their objects publicly and 403 an anonymous read.
+An unsigned probe there establishes nothing about the object the signed copy is about to read, so an unsigned-only guard would be skipped for precisely the sources that most need it, and above 5 GB there is no checksum behind it.
+One consequence to keep in view: for those five, the DRY RUN still cannot check the length, so its verdict there remains the optimistic one and only the apply path is authoritative.
+
 **A key that declares zero bytes and carries the empty file's hash is written directly, with no source consulted.**
 There is exactly one byte string of length zero and the key names its hash, so this is the only recovery here that rests on no upstream evidence whatsoever, and it is the strongest proof on any of these paths rather than the weakest.
-A `-s0` key whose hash is NOT the empty file's is refused: no content satisfies it, and writing the empty object would be inventing bytes.
+A `-s0` key whose hash is read and is NOT the empty file's is refused: no content satisfies it, and writing the empty object would be inventing bytes.
+Read is the operative word.
+The backends whose hash width this code knows are SHA256, SHA256E, MD5 and MD5E; a SHA1E, SHA512E or URL key leaves no hash to compare, so it falls through to its ordinary sources rather than being refused on a comparison that never happened.
 Recorded as `origin: empty`, `verification: empty`, and read back from the bucket like every other path.
 
 **The residual, stated plainly:** `size-and-pin` remains a passing verdict, for a pinned source above 5 GB whose object carries no full-object CRC64.
 It now has a known failure mode rather than a theoretical one.
-It is bounded: a bad pin has to name an object of exactly the key's length to reach it, and neither measured case does.
+It is bounded, though only by the pre-copy check above: a bad pin has to name an object of exactly the key's length, or an object whose length the signed HEAD could not establish at all, to reach it.
+Neither measured case does.
 Tightening it further would refuse oversized pinned content that nothing suggests is wrong, so it stands, named here so the next person does not have to rediscover that a pin is an index, not a promise.
 
 ## Consequences

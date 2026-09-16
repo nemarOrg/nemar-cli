@@ -746,3 +746,22 @@ describe("the 5 GB boundary that decides how a copy is proven", () => {
     expect(ranges.every((r) => r.end >= r.offset)).toBe(true);
   });
 });
+
+describe("planKeyRecovery on a zero-byte key whose hash cannot be read", () => {
+  test("falls through to its sources rather than refusing on an unmade comparison", () => {
+    // `HASH_WIDTH` knows SHA256/SHA256E/MD5/MD5E. A SHA1E or URL key leaves
+    // `hashHex` null, so there is nothing to compare the empty file's hash to.
+    // Refusing there would both assert a check that never ran and narrow
+    // behavior: such a key used to reach a pin and be recovered.
+    const entry = planKeyRecovery({
+      key: "SHA1E-s0--da39a3ee5e6b4b0d3255bfef95601890afd80709.dat",
+      paths: ["a.dat"],
+      pins: parseRmet(
+        "1789149471s 9e1479f6-49e0-413b-8222-a7f8000f55a6:V +v1#ds008798/a.dat",
+        REMOTES,
+      ),
+    });
+    expect(entry.reason).toBeUndefined();
+    expect(entry.source).toMatchObject({ origin: "pinned", version: "v1" });
+  });
+});
