@@ -1523,6 +1523,21 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       // (shared/contract/dataset.ts), so it is withheld rather than nulled for
       // anonymous rows only: nothing declares a use for it.
       owner_user_id: isAnonymous(dataset) ? null : ownerUserIdRaw,
+      // #1419 release review: the same `SELECT d.*` trap, one column over.
+      // The anonymity sweep writes its verdict ONLY into `sweep_stamps`
+      // (`ANONYMITY_SWEEP_STAMP_SQL`), and the four flat `anonymity_*` fields
+      // below are aliases read back out of it. Nulling the aliases for a
+      // viewer who may not know the identifiers -- which the block at the end
+      // of this function does, deliberately -- left the raw column beside
+      // them carrying the same values, so a public reader of an anonymous
+      // deposit could learn that the concealment is leaking AND which file to
+      // fetch to break it (`check` + `file`, in prose addressed to the
+      // depositor). This release is also what makes that file publicly
+      // fetchable. Withheld rather than nulled, for everyone: the column is
+      // not in the contract (`shared/contract/dataset.ts`, zero hits in
+      // `shared/openapi.json`), the flat fields are the declared surface, and
+      // an operator who needs the stamps reads them through the admin routes.
+      sweep_stamps: undefined,
       // #1207 review: `SELECT d.*` serves the raw numeric primary key here,
       // but the contract (shared/contract/dataset.ts) declares `id: string`
       // -- the list route's `id` is `d.dataset_id AS id`, already a string
