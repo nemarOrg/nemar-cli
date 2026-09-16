@@ -24,7 +24,6 @@ describe("parseEmailPreferences", () => {
       publication_request: true,
       announcements: true,
       dataset_anonymity: true,
-      dataset_anonymity: true,
     });
   });
 
@@ -73,7 +72,6 @@ describe("parseEmailPreferences", () => {
       publication_request: true,
       announcements: true,
       dataset_anonymity: true,
-      dataset_anonymity: true,
     });
   });
 
@@ -104,7 +102,6 @@ describe("parseEmailPreferences", () => {
       publication_request: true,
       announcements: true,
       dataset_anonymity: true,
-      dataset_anonymity: true,
     });
   });
 
@@ -114,7 +111,6 @@ describe("parseEmailPreferences", () => {
       user_approval: true,
       publication_request: true,
       announcements: true,
-      dataset_anonymity: true,
       dataset_anonymity: true,
     });
   });
@@ -140,7 +136,6 @@ describe("parseEmailPreferences", () => {
       publication_request: true,
       announcements: true,
       dataset_anonymity: true,
-      dataset_anonymity: true,
     });
   });
 
@@ -153,7 +148,6 @@ describe("parseEmailPreferences", () => {
       user_approval: true,
       publication_request: true,
       announcements: true,
-      dataset_anonymity: true,
       dataset_anonymity: true,
     });
   });

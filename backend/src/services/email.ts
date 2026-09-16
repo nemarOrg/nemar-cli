@@ -2017,7 +2017,7 @@ export async function sendAnonymityFindingsEmail(
   replyTo?: string,
   isDev?: boolean,
   deliveryEnv?: EmailDeliveryEnv,
-): Promise<void> {
+): Promise<{ delivered: string[]; failed: { recipient: string; error: string }[] }> {
   const depositor = opts.audience === "depositor";
   const invariants = findings.filter((f) => f.severity === "invariant");
   const deposit = findings.filter((f) => f.severity === "deposit");
@@ -2095,6 +2095,12 @@ export async function sendAnonymityFindingsEmail(
 </html>
   `;
 
+  // Returns what was delivered rather than swallowing it, the way
+  // `sendExemplarInvariantAlertEmail` above already does. For this sweep the
+  // mail is the only copy the depositor gets, so "nobody was told" has to be a
+  // fact the caller can report rather than a line in a Worker log.
+  const delivered: string[] = [];
+  const failed: { recipient: string; error: string }[] = [];
   for (const recipient of to) {
     try {
       await sendEmail(
@@ -2107,8 +2113,14 @@ export async function sendAnonymityFindingsEmail(
         isDev,
         deliveryEnv,
       );
+      delivered.push(recipient);
     } catch (error) {
       console.error(`Failed to send anonymity findings email to ${recipient}:`, error);
+      failed.push({
+        recipient,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
+  return { delivered, failed };
 }

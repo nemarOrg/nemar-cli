@@ -346,6 +346,36 @@
                     "null"
                   ]
                 },
+                "anonymity_status": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "verified",
+                    "findings",
+                    "unverifiable",
+                    null
+                  ]
+                },
+                "anonymity_checked_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "anonymity_findings": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "anonymity_unchecked": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "total_recording_duration": {
                   "type": [
                     "number",
@@ -769,6 +799,36 @@
                 ]
               },
               "zarr_requeue_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "anonymity_status": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "verified",
+                  "findings",
+                  "unverifiable",
+                  null
+                ]
+              },
+              "anonymity_checked_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "anonymity_findings": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "anonymity_unchecked": {
                 "type": [
                   "string",
                   "null"

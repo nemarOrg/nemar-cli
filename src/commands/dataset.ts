@@ -1806,6 +1806,7 @@ Examples:
             " then 'nemar dataset publish request' without --anonymous.",
         ),
       );
+      renderAnonymityVerdict(datasetInfo);
     }
     console.log(`  Created:     ${new Date(datasetInfo.created_at).toLocaleDateString()}`);
 
@@ -5170,3 +5171,59 @@ Examples:
       process.exit(1);
     }
   });
+
+/**
+ * The last anonymity verdict, as `nemar dataset status` shows it (#1409).
+ *
+ * The sweep's notification mail tells both audiences to run this command, so
+ * this is what makes that instruction true. Served only to the owner and to an
+ * admin; everyone else gets nulls from the API and sees nothing here.
+ *
+ * `unchecked` is printed on EVERY verdict, including `verified`. A reader of
+ * "verified" is entitled to know what that word does not cover -- signal
+ * headers always, sub-directory sidecars whenever there are any -- and a
+ * verdict that hid its own scope would be the overstatement ADR 0065 forbids.
+ */
+function renderAnonymityVerdict(info: {
+  anonymity_status?: string | null;
+  anonymity_checked_at?: string | null;
+  anonymity_findings?: string | null;
+  anonymity_unchecked?: string | null;
+}): void {
+  if (!info.anonymity_status) return;
+  const parseList = (raw: string | null | undefined): unknown[] => {
+    if (!raw) return [];
+    try {
+      const value: unknown = JSON.parse(raw);
+      return Array.isArray(value) ? value : [];
+    } catch {
+      return [];
+    }
+  };
+  const findings = parseList(info.anonymity_findings);
+  const unchecked = parseList(info.anonymity_unchecked).filter(
+    (u): u is string => typeof u === "string",
+  );
+  const checked = info.anonymity_checked_at
+    ? chalk.dim(` (checked ${new Date(info.anonymity_checked_at).toLocaleDateString()})`)
+    : "";
+
+  if (info.anonymity_status === "findings") {
+    console.log(`  Blind check: ${chalk.red(`${findings.length} finding(s)`)}${checked}`);
+    for (const finding of findings) {
+      if (typeof finding !== "object" || finding === null) continue;
+      const f = finding as { check?: unknown; file?: unknown; detail?: unknown };
+      const where = typeof f.file === "string" ? ` ${chalk.dim(f.file)}` : "";
+      console.log(`               - ${String(f.check ?? "unknown")}${where}`);
+      if (typeof f.detail === "string") console.log(chalk.dim(`                 ${f.detail}`));
+    }
+  } else if (info.anonymity_status === "unverifiable") {
+    console.log(`  Blind check: ${chalk.yellow("could not be completed")}${checked}`);
+  } else {
+    console.log(`  Blind check: ${chalk.green("no findings")}${checked}`);
+  }
+
+  if (unchecked.length > 0) {
+    console.log(chalk.dim(`               Not checked: ${unchecked.join(", ")}`));
+  }
+}

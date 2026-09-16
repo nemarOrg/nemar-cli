@@ -647,6 +647,13 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
 
     try {
       const result = await runAnonymitySweep(c.env, { limit });
+      // A batch in which every dataset errored is not a successful run. The CLI
+      // already exits non-zero on it, but a dashboard, a curl or a future
+      // scheduled caller reads the status code, and 200 tells all of them the
+      // sweep is healthy while it is checking nothing.
+      if (result.errors.length > 0 && result.results.length === 0) {
+        return c.json(result, 503);
+      }
       return c.json(result);
     } catch (err) {
       console.error("[anonymity-sweep] candidate query failed:", err);

@@ -6926,7 +6926,7 @@ anonymitySweepCommand
       console.log();
       console.log(
         chalk.cyan(
-          `processed=${res.processed} verified=${res.verified} findings=${res.with_findings} unverifiable=${res.unverifiable} errors=${res.errors.length} remaining=${res.remaining ?? "unknown"}${res.budget_exhausted ? " budget_exhausted=true" : ""}`,
+          `processed=${res.processed} verified=${res.verified} findings=${res.with_findings} unverifiable=${res.unverifiable} errors=${res.errors.length} mail_failures=${res.mail_failures.length} remaining=${res.remaining ?? "unknown"}${res.budget_exhausted ? " budget_exhausted=true" : ""}`,
         ),
       );
       for (const r of res.results) {
@@ -6953,11 +6953,23 @@ anonymitySweepCommand
       for (const e of res.errors) {
         console.log(`  ${chalk.red("error")}         ${e.dataset_id}: ${e.error}`);
       }
+      // A finding nobody was told about is a finding that did not arrive. The
+      // mail IS the depositor's copy.
+      for (const m of res.mail_failures) {
+        console.log(
+          `  ${chalk.red("not mailed")}    ${m.dataset_id} -> ${m.recipient}: ${m.error}`,
+        );
+      }
     }
     // Same convention as the fidelity sweep: a non-zero exit means the RUN was
     // partial or uncertain, never that it found something. A findings verdict
-    // is the sweep working.
-    if (res.errors.length > 0 || res.remaining === null || res.budget_exhausted) {
+    // is the sweep working; a finding that reached nobody is not.
+    if (
+      res.errors.length > 0 ||
+      res.mail_failures.length > 0 ||
+      res.remaining === null ||
+      res.budget_exhausted
+    ) {
       process.exit(1);
     }
   });

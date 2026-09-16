@@ -2028,6 +2028,8 @@ export interface AnonymitySweepBatchResponse {
   /** Candidates still owing a pass; null if the count query failed. */
   remaining: number | null;
   budget_exhausted: boolean;
+  /** Findings that reached nobody. The mail is the depositor's only copy. */
+  mail_failures: { dataset_id: string; recipient: string; error: string }[];
 }
 
 /** Run one bounded anonymity sweep batch (server default 10, max 25). */
