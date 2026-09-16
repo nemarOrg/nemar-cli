@@ -30,6 +30,7 @@ import {
   describeSandboxGap,
   describeUncheckedSandboxGap,
 } from "../../shared/contract/profile-gaps.js";
+import { datasetLandingUrl } from "../../shared/datacite-constants.js";
 import { LICENSE_TIERS } from "../../shared/license-tiers.js";
 import { RangeParseError } from "../../shared/range.js";
 import { addCi } from "../lib/api/admin.js";
@@ -1792,13 +1793,30 @@ Examples:
         `  Withdrawn:   ${chalk.red(new Date(datasetInfo.withdrawn_at).toLocaleDateString())}${reason}`,
       );
     }
+    // #1408: a separate axis from `status`, printed for the same reason
+    // `Withdrawn:` is -- a reader who sees `public` and no authors would
+    // otherwise conclude the record is incomplete rather than deliberately
+    // blinded. The second line says what ends it, because that is the thing a
+    // depositor actually needs to know next.
+    if (datasetInfo.anonymous === 1) {
+      console.log(`  Anonymous:   ${chalk.yellow("identity withheld until publication")}`);
+      console.log(
+        chalk.dim(
+          "               Restore the real Authors in dataset_description.json," +
+            " then 'nemar dataset publish request' without --anonymous.",
+        ),
+      );
+    }
     console.log(`  Created:     ${new Date(datasetInfo.created_at).toLocaleDateString()}`);
 
     if (datasetInfo.description) {
       console.log(`  Description: ${datasetInfo.description}`);
     }
 
-    if (datasetInfo.github_repo) {
+    // An anonymous deposit's repository is private, so printing its URL offers
+    // a link that 404s and discloses that a repo exists under a predictable
+    // name. The Anonymous line above already explains the absence.
+    if (datasetInfo.github_repo && datasetInfo.anonymous !== 1) {
       console.log(`  GitHub:      https://github.com/${datasetInfo.github_repo}`);
     }
 
@@ -1807,11 +1825,23 @@ Examples:
       // dataset. Printing it as a bare link invites the reader to follow it and
       // conclude the dataset is fine.
       const doiUrl = `https://doi.org/${datasetInfo.concept_doi}`;
-      console.log(
-        datasetInfo.withdrawn_at
-          ? `  DOI:         ${chalk.dim(doiUrl)} ${chalk.red("(tombstoned)")}`
-          : `  DOI:         ${doiUrl}`,
-      );
+      if (datasetInfo.anonymous === 1) {
+        // An anonymous release's identifier is RESERVED: pre-registered, not
+        // advertised, and it does not resolve. Printing it as a bare link is
+        // the same trap the withdrawn case below avoids, and worse here -- a
+        // depositor mid-submission would cite it and their reviewers would get
+        // a dead link, in the one situation this feature exists to serve. The
+        // citable thing is the landing page, which resolves and says why the
+        // dataset has no authors.
+        console.log(`  DOI:         ${chalk.dim(doiUrl)} ${chalk.yellow("(reserved)")}`);
+        console.log(`  Cite:        ${datasetLandingUrl(datasetInfo.dataset_id)}`);
+      } else {
+        console.log(
+          datasetInfo.withdrawn_at
+            ? `  DOI:         ${chalk.dim(doiUrl)} ${chalk.red("(tombstoned)")}`
+            : `  DOI:         ${doiUrl}`,
+        );
+      }
     }
 
     // #970: surface-but-visible -- only shout when data is verified incomplete;
@@ -3876,18 +3906,61 @@ Description:
 Status Flow:
   requested → approving → published (or denied)
 
+Anonymous deposit (--anonymous):
+  For submission to a double-blind venue. The data is released exactly as any
+  public dataset is -- listed, browsable and downloadable -- while your identity
+  is withheld: the repository stays private, the DOI stays reserved, and nothing
+  NEMAR publishes names you. Reviewers follow the ordinary dataset URL.
+
+  Blind your own dataset_description.json first (Authors: ["Anonymous"]); NEMAR
+  cannot scrub the files you wrote. When the paper is accepted, restore the real
+  Authors and request publication again WITHOUT the flag: that is what ends
+  anonymity and publishes the record for real.
+
+  Only available before a dataset has ever been published. Retracting an
+  attribution that is already public is not something NEMAR can deliver.
+
 Examples:
   $ nemar dataset publish request nm000104
+  $ nemar dataset publish request nm000104 --anonymous   # blind, for review
   $ nemar dataset publish status nm000104     # Check request status`,
   )
-  .action(async (datasetId) => {
+  .option("--anonymous", "Release the data with your identity withheld until publication")
+  .action(async (datasetId, options: { anonymous?: boolean }) => {
     requireAuth();
 
-    const spinner = ora(`Requesting publication for ${datasetId}...`).start();
+    const spinner = ora(
+      options.anonymous
+        ? `Requesting anonymous release for ${datasetId}...`
+        : `Requesting publication for ${datasetId}...`,
+    ).start();
 
     try {
-      const result = await requestPublication(datasetId);
+      const result = await requestPublication(datasetId, { anonymous: options.anonymous });
       spinner.succeed(result.message);
+      // Printed from the server's ECHO, not from the flag that was typed. A
+      // request whose body never arrived would otherwise succeed with a
+      // message indistinguishable from a correct one, and the depositor would
+      // find out when their name appeared on the published record.
+      if (options.anonymous && result.anonymous !== true) {
+        console.log(
+          chalk.yellow(
+            "\n  WARNING: you asked for an anonymous release, but the server did not confirm it.",
+          ),
+        );
+        console.log(
+          chalk.yellow(
+            `  Run 'nemar dataset publish status ${datasetId}' and check the Anonymous line before an admin approves it.`,
+          ),
+        );
+      } else if (result.anonymous === true) {
+        console.log(
+          chalk.dim(
+            "\n  Your identity will be withheld: the repository stays private, the DOI stays\n" +
+              "  reserved, and NEMAR names nobody until you publish without --anonymous.",
+          ),
+        );
+      }
       console.log(
         chalk.dim(
           "\n  Admins have been notified. Use 'nemar dataset publish status' to check progress.",
@@ -3982,6 +4055,20 @@ Examples:
       const statusColor = statusColors[result.status] || chalk.dim;
 
       console.log(`  Status: ${statusColor(result.status)}`);
+
+      // #1408: which of the two runs was recorded. Printed on both values,
+      // because a depositor who typed --anonymous needs to see the word before
+      // an admin approves, and one who did not needs to see that a stale flag
+      // from an earlier request is not about to conceal them.
+      if (result.anonymous === true) {
+        console.log(
+          `  Anonymous: ${chalk.yellow("yes")} ${chalk.dim("(identity withheld; repository stays private, DOI stays reserved)")}`,
+        );
+      } else if (result.anonymous === false) {
+        console.log(
+          `  Anonymous: ${chalk.dim("no")} ${chalk.dim("(published under your name, with a resolving DOI)")}`,
+        );
+      }
 
       if (result.requested_at) {
         console.log(`  Requested: ${chalk.dim(result.requested_at)}`);

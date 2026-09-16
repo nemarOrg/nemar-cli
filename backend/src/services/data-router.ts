@@ -692,6 +692,17 @@ export interface NeuroschemaDataset {
   bids_version: string | null;
   license: string | null;
   authors: Person[];
+  /**
+   * #1408: the depositor is concealed until publication (a double-blind
+   * deposit), so `authors` is deliberately empty and `external_links` withholds
+   * the repository and the DOI.
+   *
+   * Stated as its own field rather than left to be inferred from the empty
+   * arrays, because "withheld" and "missing" look identical otherwise, and a
+   * reader who cannot tell them apart concludes the record is incomplete. Any
+   * consumer of data.nemar.org can render the difference.
+   */
+  anonymous: boolean;
   keywords: StructuredKeyword[];
   related_identifiers: RelatedIdentifierEntry[];
   contributors: ContributorEntry[];
@@ -726,6 +737,8 @@ export interface DatasetRowForMetadata {
   description: string | null;
   github_repo: string | null;
   concept_doi: string | null;
+  /** #1408: 1 while the deposit conceals its depositor. Gates `github_url`. */
+  anonymous: number | null;
   modalities: string | null;
   subject_count: number | null;
   age_min: number | null;
@@ -1054,6 +1067,7 @@ export function buildDatasetMetadata(input: {
     bids_version: null,
     license,
     authors: buildPersonList(parsedEnrichment),
+    anonymous: row.anonymous === 1,
     keywords,
     related_identifiers: related,
     contributors,
@@ -1114,12 +1128,24 @@ export function buildDatasetMetadata(input: {
       publish_date: latestVersionRow?.created_at ?? null,
     },
     external_links: {
-      dataset_doi: row.concept_doi,
-      github_url: row.github_repo
-        ? row.github_repo.startsWith("http")
-          ? row.github_repo
-          : `https://github.com/${githubOrg}/${row.dataset_id}`
-        : null,
+      // #1408: an anonymous release's identifier is RESERVED -- registered but
+      // not advertised, and it does not resolve. Publishing it here as the
+      // dataset's DOI would put a dead identifier into signposting, JSON-LD
+      // and every citation widget that reads this document. The landing page
+      // is what resolves during review; the DOI becomes real at publication.
+      dataset_doi: row.anonymous === 1 ? null : row.concept_doi,
+      // #1408: an anonymous deposit's repository is PRIVATE, so naming it here
+      // would hand every reader a URL that 404s while still disclosing that a
+      // repository exists under a predictable name. Withheld at the source
+      // rather than hidden by each consumer -- the website fabricates this URL
+      // in two places when it is absent, so a null here is what those sites
+      // need in order to have something to react to.
+      github_url:
+        row.anonymous === 1 || !row.github_repo
+          ? null
+          : row.github_repo.startsWith("http")
+            ? row.github_repo
+            : `https://github.com/${githubOrg}/${row.dataset_id}`,
     },
     extensions: {
       nemar: {

@@ -73,6 +73,12 @@
                 "visibility": {
                   "type": "string"
                 },
+                "anonymous": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
                 "concept_doi": {
                   "type": [
                     "string",
@@ -470,6 +476,12 @@
               },
               "visibility": {
                 "type": "string"
+              },
+              "anonymous": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
               },
               "concept_doi": {
                 "type": [

@@ -174,6 +174,62 @@ fixture had to be declared rather than borrowed. Publishing it destroys it perma
 fleet file marks it, the clone tool skips it under `--all --publish`, and the
 publication-request route refuses it.
 
+**A blinded deposit is submitted blinded, and that is an EXCEPTION to the submission
+standards rather than a silent special case.** NEMAR asks the depositor to anonymize their own
+`dataset_description.json` before requesting an anonymous release, exactly as a double-blind
+venue asks for a blinded manuscript, and restores attribution at acceptance. The alternative --
+accepting real names and having NEMAR conceal them -- was considered and rejected as
+unachievable: that file is git-tracked, part of the dataset, and served publicly from the data
+plane, so NEMAR cannot conceal what it says.
+
+So ADR 0026's `Authors` rule INVERTS for an anonymous release rather than relaxing. A
+publication requires at least one real name; a release requires none, and both require a
+non-empty field. The two are exact complements over the same input, which is what makes
+"blind to release, restore to publish" an enforced ordering rather than advice. Every other
+minimum -- a descriptive Name, an ethics statement -- applies unchanged.
+
+The enforcement stops at what is structured. `Authors` is checked because it is a field;
+README, `participants.tsv` and identifiers inside signal headers are the depositor's to scrub
+and are REPORTED by the blind check, never enforced at the gate. The exception set is listed
+for depositors on `docs.nemar.org` (#1412), because a requirement that is waived in one
+direction and reversed in another is not something anyone should have to infer from a refusal
+message.
+
+**What a blinded submission cites is the landing page, never the DOI.** The identifier is
+minted at release but stays `reserved` -- registered, not advertised, and it does NOT resolve.
+So it cannot do a citation's job during review, while `nemar.org/dataset/<id>` resolves and
+states why the dataset has no authors, which is strictly more informative to a reviewer. Both
+surfaces follow from that: `nemar dataset status` marks the DOI `(reserved)` and prints a
+`Cite:` line, and the data plane serves `external_links.dataset_doi: null` while anonymous so a
+dead identifier never reaches signposting, JSON-LD or a citation widget. Reserving early is
+still worth it -- the same identifier becomes the real one at publication -- but reserving is
+not publishing, and no surface may blur the two.
+
+**"No surface" is literal, and it took a review to make it true.** The reserved identifier and
+the private repository were each withheld by one surface and served raw by three others, twice
+in the SAME HTTP response: the page bundle carried `external_links.github_url: null` beside
+`catalog_row.github_repo`, and the catalog's list and detail projections served both columns
+out of `SELECT d.*`. The rule now holds wherever a reader who is neither the owner nor an
+admin can see the row. It is conditional on the VIEWER, unlike every other rule here, and that
+is deliberate: anonymity is toward the public, never toward the depositor (R5), and
+`nemar dataset clone`, `commit` and `push` read `github_repo` from these routes to perform the
+very commit that ends the anonymity. Two publication steps are deferred for the same reason --
+`update_metadata` writes `DatasetDOI` into `dataset_description.json` and `update_readme` adds
+a DOI badge to the README, both git-tracked and served publicly by the data plane, so an
+anonymous release runs neither and the publication that ends anonymity runs both. Deferred, not
+dropped: `doi_create` still reserves the identifier, so the one activated at publication is the
+same one. The version-DOI webhook is gated on the same state, because a pushed `v*` tag mints
+AND publishes in one pass, and nothing stopped a depositor from pushing one after their
+release.
+
+**And the ordering is an invariant, not a step order.** A DataCite record whose creator is the
+blinded label is harvested within hours and inverts ADR 0041 on the one identifier nothing can
+retract, so `doi_create` and `publish_doi` both read `datasets.authors` and refuse to run while
+it still carries `ANONYMOUS_AUTHORS_LABEL`. Relying on where the restoring enrichment sits in
+the step list was not enough: the condition that ran it read a row value that its own preceding
+`UPDATE` had already cleared, so a RETRY of a failed run skipped the restoration silently and
+minted the permanent identifier with no authors.
+
 ## Alternatives considered
 
 - **Filter identity at read time.** The obvious design, and it leaves the real names in
@@ -204,4 +260,7 @@ publication-request route refuses it.
   control), `backend/test/anonymity-projection.test.ts` (one owner rule),
   `backend/test/anonymity-writers.test.ts` (the blinding, driven through `enrichDataset`
   itself rather than through a hand-written fixture),
-  `backend/test/anonymity-publication-paths.test.ts` (every path to public carries the stamp)
+  `backend/test/anonymity-publication-paths.test.ts` (every path to public carries the stamp,
+  and the step set, the mint interlock and the repo-spec visibility),
+  `backend/test/anonymous-release.test.ts` (the request route and the catalog, driven through
+  the real app on a real database, each with a control)

@@ -2571,6 +2571,17 @@ Examples:
         console.log(
           `  ${chalk.bold(req.dataset_id)}  ${statusColor(req.status)}  by ${req.requested_by_username}  ${chalk.dim(req.requested_at)}`,
         );
+        // #1408: an anonymous release and a publication reach this list
+        // looking identical, and approving the wrong one is not reversible in
+        // either direction -- publishing names a depositor who asked to be
+        // concealed; releasing anonymously withholds a DOI someone needs.
+        if (req.anonymous === 1) {
+          console.log(
+            `    ${chalk.yellow("! anonymous release:")} ${chalk.dim(
+              "repository stays private, DOI stays reserved, depositor is not named",
+            )}`,
+          );
+        }
         if (req.current_step && req.status === "approving") {
           console.log(
             `    ${chalk.yellow(">")} ${req.current_step.replace(/_/g, " ")}${req.last_error ? chalk.red(` (${req.last_error})`) : ""}`,

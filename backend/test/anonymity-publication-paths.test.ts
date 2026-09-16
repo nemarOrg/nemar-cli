@@ -24,6 +24,11 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 import {
+  ANONYMOUS_RELEASE_SKIPPED_STEPS,
+  ANONYMOUS_RELEASE_STEPS,
+} from "../../shared/publication-steps";
+import {
+  ANONYMOUS_AUTHORS_LABEL,
   END_ANONYMITY_AT_PUBLICATION_SQL,
   FIRST_PUBLICATION_STAMP_SQL,
   expectedRepoVisibility,
@@ -198,6 +203,51 @@ describe("END_ANONYMITY_AT_PUBLICATION_SQL ends concealment in one statement", (
   });
 });
 
+/**
+ * An awaited CALL that can change what the world can read of a dataset's
+ * repository. `await` excludes both the declarations and the prose: the word
+ * appears in several comments, and a comment decides nothing.
+ */
+const VISIBILITY_MUTATOR = /await\s+(setRepoVisibility|ensureRepoToSpec)\s*\(/g;
+
+/**
+ * A visibility decision written as a LITERAL rather than computed.
+ *
+ * That is the whole bug class, and stating it this way is what makes the scan
+ * able to fail. An earlier draft asked whether the enclosing region MENTIONED
+ * `expectedRepoVisibility`, and a call whose own argument had been reverted to
+ * `false` still passed, because a different call twenty lines away mentioned
+ * it. A scan is only worth running if the thing it reads is the thing that
+ * decides.
+ */
+const LITERAL_VISIBILITY = /^\s*(true|false|"public"|"private"|'public'|'private')\s*$/;
+
+/**
+ * The text of the ARGUMENT that decides visibility at one call site:
+ * `setRepoVisibility(repo, <decision>, pat)`, or the `visibility:` property of
+ * `ensureRepoToSpec(repo, pat, { ... })`.
+ */
+function visibilityDecision(text: string, at: number): string {
+  const call = text.slice(at, at + 1200).replace(/^await\s+/, "");
+  if (call.startsWith("setRepoVisibility")) {
+    const args = /^setRepoVisibility\s*\(([^)]*)\)/.exec(call);
+    return args ? (args[1].split(",")[1] ?? "") : "";
+  }
+  const visibility = /\bvisibility:\s*([^\n,]*)/.exec(call);
+  return visibility ? visibility[1] : "";
+}
+
+/**
+ * Call sites that pass a literal on purpose, with the reason. Both are REVERTS
+ * to private after a failed write, and going private is always safe: it can
+ * un-publish a repository that should not have been published, never the
+ * reverse. A literal `false` or `"public"` never belongs here.
+ */
+const DELIBERATE_LITERAL_VISIBILITY: Readonly<Record<string, string>> = {
+  "routes/datasets/publication.ts:1027": "reverting the repo to private after the D1 write failed",
+  "routes/datasets/publication.ts:1070": "the same revert one branch later",
+};
+
 describe("the repository does not follow the catalog row", () => {
   test("an anonymous deposit stays private on GitHub while its row is public", () => {
     expect(expectedRepoVisibility({ visibility: "public", anonymous: 1 })).toBe("private");
@@ -208,46 +258,351 @@ describe("the repository does not follow the catalog row", () => {
   });
 
   test("every mutator of repository visibility goes through the rule", () => {
-    // `setRepoVisibility` is what actually publishes a git history. A call
-    // site that computes its argument from `visibility` alone would publish
-    // an anonymous deposit's repository while the catalog kept reporting the
-    // depositor as concealed -- with a 200 and no log line.
-    const mutators = [
-      join(SRC, "services", "visibility.ts"),
-      join(SRC, "routes", "datasets", "publication.ts"),
-    ];
-    for (const file of mutators) {
-      expect(readFileSync(file, "utf8")).toContain("expectedRepoVisibility");
+    // `setRepoVisibility` is what actually publishes a git history: the commit
+    // author names and emails, and the pre-blind `.nemar/metadata.json` still
+    // in it. A call site that computes its argument from `visibility` alone
+    // publishes an anonymous deposit's repository while the catalog keeps
+    // reporting the depositor as concealed -- with a 200 and no log line, and
+    // nothing to revert, because a clone is a clone.
+    //
+    // EXHAUSTIVE, in the shape of the two scans above, and it had to become so
+    // to be worth anything: it was a hardcoded list of two files, and the call
+    // that runs during an approved anonymous release
+    // (`publication-orchestrator.ts`) was not one of them. Reverting that one
+    // argument to a literal left the whole suite green.
+    const offenders: string[] = [];
+    for (const file of sourceFiles(SRC)) {
+      const rel = file
+        .slice(SRC.length + 1)
+        .split(sep)
+        .join("/");
+      const text = readFileSync(file, "utf8");
+      for (const match of text.matchAll(VISIBILITY_MUTATOR)) {
+        const line = text.slice(0, match.index).split("\n").length;
+        const site = `${rel}:${line}`;
+        if (DELIBERATE_LITERAL_VISIBILITY[site]) continue;
+        if (!LITERAL_VISIBILITY.test(visibilityDecision(text, match.index ?? 0))) continue;
+        offenders.push(site);
+      }
     }
+    expect(offenders).toEqual([]);
+  });
+
+  test("the scan would notice: it finds the call sites it is scanning for", () => {
+    // Twelve today across four files. Without this a regex that matched
+    // nothing would pass the test above forever, which is exactly how the
+    // hardcoded list it replaced managed to miss the orchestrator.
+    let sites = 0;
+    for (const file of sourceFiles(SRC)) {
+      sites += [...readFileSync(file, "utf8").matchAll(VISIBILITY_MUTATOR)].length;
+    }
+    expect(sites).toBeGreaterThanOrEqual(10);
   });
 });
 
-describe("a still-blind deposit cannot be published", () => {
+describe("anonymity is requested at publication, not refused there", () => {
   const PUBLICATION = readFileSync(join(SRC, "routes", "datasets", "publication.ts"), "utf8");
+  const MINIMUMS = readFileSync(join(SRC, "services", "submission-minimums.ts"), "utf8");
 
-  test("the request route blocks on anonymity", () => {
-    expect(PUBLICATION).toContain("if (isAnonymous(dataset)) {");
-    expect(PUBLICATION).toContain("blockReason = ANONYMOUS_DEPOSIT_REASON;");
+  test("the request route reads an --anonymous intent off the body", () => {
+    // Phase 2 blocked every publication request from an anonymous dataset.
+    // That was too blunt in BOTH directions: a depositor could never reach the
+    // anonymous state, and a blinded deposit could never be published for real,
+    // because the normal request is exactly how de-anonymization happens.
+    expect(PUBLICATION).toContain("let anonymousRequested = false;");
+    expect(PUBLICATION).not.toContain("blockReason = ANONYMOUS_DEPOSIT_REASON;");
   });
 
-  test("the block is decided before the expensive checks, so it always wins", () => {
-    // The CI and submission-minimums checks also set `blocked`, and they run
-    // GitHub calls to do it. Anonymity is a column read and is definitive, so
-    // it goes first -- and a later check must not overwrite its reason with a
-    // vaguer one.
-    const anonymityAt = PUBLICATION.indexOf("blockReason = ANONYMOUS_DEPOSIT_REASON;");
-    const ciAt = PUBLICATION.indexOf('blockReason = "bids_validation_pending";');
-    const minimumsAt = PUBLICATION.indexOf('blockReason = "min_requirements_failed";');
-    expect(anonymityAt).toBeGreaterThan(-1);
-    expect(anonymityAt).toBeLessThan(ciAt);
-    expect(anonymityAt).toBeLessThan(minimumsAt);
+  test("the guard that refuses a published dataset reads a column the query asks for", () => {
+    // `hasEverBeenPublished` reads `first_published_at`. The field used to be
+    // OPTIONAL on the shared type, so this SELECT could omit the column, the
+    // predicate answered `false`, and TypeScript raised nothing -- the guard
+    // was dead. Both halves are pinned: the column is selected, and the type
+    // requires it so the next omission is a compile error.
+    expect(PUBLICATION).toMatch(/SELECT d\.id[^`]*d\.first_published_at/);
+    expect(PUBLICATION).toContain("first_published_at: string | null;");
   });
 
-  test("the reason carries a message telling the depositor both halves of the fix", () => {
-    // Restoring the names and clearing the flag are separate acts, and a
-    // message naming only one leaves the other to be guessed.
-    expect(PUBLICATION).toContain("[ANONYMOUS_DEPOSIT_REASON]:");
-    expect(PUBLICATION).toMatch(/Restore the real Authors in dataset_description\.json/);
+  test("an `anonymous` key that is not a boolean is refused, never coerced", () => {
+    // `{"anonymous": "true"}` from a form serializer parses cleanly and is not
+    // `=== true`. Reading that as a normal publication would conceal nothing
+    // while telling the depositor their request succeeded -- and there is no
+    // un-publishing a name.
+    expect(PUBLICATION).toContain('error: "invalid_anonymous",');
+  });
+
+  test("the answer says which of the two was recorded", () => {
+    // A lost flag otherwise produces output byte-identical to a correct
+    // request, on every surface, until the dataset is published.
+    expect(PUBLICATION).toContain("anonymous: anonymousRequested,");
+    expect(PUBLICATION).toContain("anonymous: request.anonymous === 1,");
+    expect(PUBLICATION).toContain("{ anonymous: anonymousRequested }");
+  });
+
+  test("the blind check cannot be skipped by a GitHub hiccup or an upstream review", () => {
+    // For a publication this gate is a quality check and failing open costs a
+    // weak title. For an anonymous release it IS the blind check: the rule
+    // that `dataset_description.json` does not still name the depositor. A
+    // transient GitHub error, or an OpenNeuro/exemplar exemption, would have
+    // granted a blind nobody verified.
+    expect(PUBLICATION).toContain("const anonymousNeedsBlindCheck = anonymousRequested;");
+    expect(PUBLICATION).toContain("if (anonymousNeedsBlindCheck) {");
+    expect(PUBLICATION).toMatch(
+      /anonymousNeedsBlindCheck \|\| \(dataset\.source !== "openneuro" && !dataset\.is_exemplar\)/,
+    );
+  });
+
+  test("the intent is persisted, because approval runs a different publication", () => {
+    // At request time the dataset is not anonymous yet -- asking is what makes
+    // it so, later. So the approval step cannot re-derive this from the row.
+    expect(PUBLICATION).toMatch(/INSERT INTO publication_requests[^`"]*anonymous\)/);
+    expect(PUBLICATION).toContain("anonymousRequested ? 1 : 0");
+  });
+
+  test("a re-request without the flag cannot inherit a stale anonymous intent", () => {
+    // The unblock path rewrites the row. If it left `anonymous` alone, a
+    // depositor re-requesting a NORMAL publication would silently get an
+    // anonymous release instead -- the one mistake this flow must not make
+    // quietly.
+    const unblock = PUBLICATION.indexOf("SET status = 'requested', block_reason = NULL");
+    expect(unblock).toBeGreaterThan(-1);
+    expect(PUBLICATION.slice(unblock, unblock + 400)).toContain("anonymous = ?");
+  });
+
+  test("the placeholder-author gate is exempted for a release and enforced for a publication", () => {
+    // This is the interlock, and it is one gate doing two jobs. A blinded
+    // deposit legitimately has placeholder Authors; a real publication must
+    // not. ADR 0063's first draft claimed this came for free from ADR 0026,
+    // which was false twice over -- the regex is anchored and the gate reads
+    // the repository file, never `datasets.authors`.
+    expect(PUBLICATION).toContain("anonymousRelease: anonymousRequested,");
+    expect(MINIMUMS).toContain("anonymousRelease?: boolean;");
+    // The rule INVERTS, it does not relax: a release refuses real names and a
+    // publication requires them. Permitting was the first draft and it let a
+    // depositor be named by their own file on a public dataset page.
+    expect(MINIMUMS).toContain("} else if (realAuthors.length > 0) {");
+    expect(MINIMUMS).toContain("} else if (realAuthors.length === 0) {");
+  });
+
+  test("asking for anonymity on a published dataset is refused, not blocked", () => {
+    // A block invites a re-request; this can never succeed, because the
+    // triggers refuse it and no amount of retrying changes that.
+    expect(PUBLICATION).toContain("if (anonymousRequested && hasEverBeenPublished(dataset)) {");
+    expect(PUBLICATION).toContain('error: "already_published",');
+  });
+});
+
+describe("an anonymous release is a publication minus the steps that expose identity", () => {
+  const ORCHESTRATOR = readFileSync(join(SRC, "services", "publication-orchestrator.ts"), "utf8");
+
+  test("the skipped set is exactly the identity-exposing steps", () => {
+    // Driven through the real exported constant rather than a copy: a step
+    // added to the skip list without a reason, or removed from it, changes
+    // what an anonymous release does in the world.
+    expect([...ANONYMOUS_RELEASE_SKIPPED_STEPS].sort()).toEqual([
+      "publish_doi",
+      "update_metadata",
+      "update_readme",
+      "upload_to_zenodo",
+      "version_doi",
+    ]);
+  });
+
+  test("the DOI is not written into the files the data plane serves", () => {
+    // `update_metadata` writes DatasetDOI into dataset_description.json and
+    // `update_readme` adds a DOI badge to README.md. Both files are
+    // git-tracked and served publicly (#1403), and the identifier is RESERVED
+    // -- it does not resolve. Running them would have put a dead DOI on the
+    // dataset page of the one deposit whose premise is that no identifier of
+    // it resolves yet, and a depositor mid-submission would have cited it.
+    expect(ANONYMOUS_RELEASE_STEPS).not.toContain("update_metadata");
+    expect(ANONYMOUS_RELEASE_STEPS).not.toContain("update_readme");
+    // Deferred, not dropped: doi_create still reserves the identifier, so the
+    // publication that ends anonymity activates the SAME one.
+    expect(ANONYMOUS_RELEASE_STEPS).toContain("doi_create");
+  });
+
+  test("repo_public still runs, because it is what releases the data", () => {
+    // The step's name is now narrower than what it does: it flips the catalog
+    // row public while `expectedRepoVisibility` keeps the repository private.
+    expect(ANONYMOUS_RELEASE_STEPS).toContain("repo_public");
+    expect(ANONYMOUS_RELEASE_STEPS).toContain("s3_public_read");
+    // The gates are not skipped either: an anonymous release is validated and
+    // reviewed exactly like a publication.
+    expect(ANONYMOUS_RELEASE_STEPS).toContain("ci_check");
+  });
+
+  test("the run picks its step set from the request, not from the dataset row", () => {
+    expect(ORCHESTRATOR).toContain("const anonymousRelease = request.anonymous === 1;");
+    expect(ORCHESTRATOR).toContain("? ANONYMOUS_RELEASE_STEPS");
+  });
+
+  test("the release blinds before the data plane can serve the repository's file", () => {
+    // `.nemar/metadata.json` is backend-written and publicly served from the
+    // manifest, and enrichment has already run by this point, so the committed
+    // copy still names the depositor until a fresh pass rewrites it.
+    const markAt = ORCHESTRATOR.indexOf("const marked = await markAnonymous(c.env, datasetId);");
+    const reenrichAt = ORCHESTRATOR.indexOf(
+      "const reenriched = await runEnrichmentForDataset(c.env, datasetId);",
+    );
+    expect(markAt).toBeGreaterThan(-1);
+    expect(reenrichAt).toBeGreaterThan(markAt);
+    // UNCONDITIONAL. It used to be gated on `marked.repoMetadataStale`, which
+    // is read from `enrichment_json IS NOT NULL` -- a CACHE of the committed
+    // document, not the document. An admin revert nulls that column and leaves
+    // the repository's file in place, so the two disagree and the gate said
+    // "nothing to do" while the committed metadata still named the depositor.
+    expect(ORCHESTRATOR).not.toContain("if (marked.repoMetadataStale) {");
+    // A failure to blind stops the release rather than publishing under the
+    // depositor's name.
+    expect(ORCHESTRATOR).toContain("the release was stopped rather than published under");
+  });
+
+  test("publishing a formerly blinded deposit restores attribution before the mint", () => {
+    // doi_create prefers `.nemar/metadata.json` over the BIDS description, so
+    // minting before the restoring pass would cite an enrichment with no
+    // authors on a permanent, harvested identifier.
+    const restoreAt = ORCHESTRATOR.indexOf("if (restoreAttribution) {");
+    const mintAt = ORCHESTRATOR.indexOf("anonymousDeposit: c.anonymousRelease,");
+    expect(restoreAt).toBeGreaterThan(-1);
+    expect(mintAt).toBeGreaterThan(restoreAt);
+  });
+
+  test("the restoration condition survives its own UPDATE, and the retry", () => {
+    // It used to read `isAnonymous(c.dataset)` at the point of use -- AFTER
+    // the UPDATE three lines above had already set `anonymous = 0`, and with
+    // `c.dataset` re-SELECTed on every invocation. So a retry after a failed
+    // enrichment saw a non-anonymous row, skipped the restoration silently,
+    // and minted a permanent DataCite record whose creator was the blinded
+    // label. The intent is captured before the write and read from the request
+    // history, which no step can rewrite.
+    const captureAt = ORCHESTRATOR.indexOf("const restoreAttribution =");
+    const updateAt = ORCHESTRATOR.indexOf("END_ANONYMITY_AT_PUBLICATION_SQL}");
+    expect(captureAt).toBeGreaterThan(-1);
+    expect(updateAt).toBeGreaterThan(captureAt);
+    expect(ORCHESTRATOR).toContain(
+      "SELECT 1 AS found FROM publication_requests WHERE dataset_id = ? AND anonymous = 1 LIMIT 1",
+    );
+    expect(ORCHESTRATOR).not.toContain("if (!c.anonymousRelease && isAnonymous(c.dataset)) {");
+  });
+
+  test("a blinded author list is an interlock on the mint, not only a step order", () => {
+    // The ordering above is enforced by where the steps sit. This is the same
+    // rule as a state check, so a retry, a resume or a future reordering
+    // cannot slip a permanent identifier past it: a DataCite record naming
+    // ANONYMOUS_AUTHORS_LABEL as its creator is harvested within hours and
+    // inverts ADR 0041 on the one identifier nothing can retract.
+    expect(ORCHESTRATOR).toContain("async function blockedByUnrestoredAttribution(");
+    expect(ORCHESTRATOR).toContain(
+      'const blocked = await blockedByUnrestoredAttribution(c, "doi_create");',
+    );
+    expect(ORCHESTRATOR).toContain(
+      'const blocked = await blockedByUnrestoredAttribution(c, "publish_doi");',
+    );
+  });
+
+  test("every path to public carries the stamp its own run needs", () => {
+    // FIRST_PUBLICATION_STAMP_SQL records a publication only when the row is
+    // not anonymous; END_ANONYMITY clears the flag and stamps unconditionally.
+    // Pasting the second into an anonymous release -- which the end-of-run
+    // repair and the operator recovery string both did -- names the depositor
+    // as published and destroys the concealment the run just delivered.
+    const branched =
+      "c.anonymousRelease ? FIRST_PUBLICATION_STAMP_SQL : END_ANONYMITY_AT_PUBLICATION_SQL";
+    // The visibility flip, the end-of-run consistency repair, and the
+    // `action_required` statement an operator is told to paste.
+    expect(ORCHESTRATOR.split(branched).length - 1).toBe(3);
+  });
+
+  test("the repo spec is enforced against the visibility the repo actually has", () => {
+    // A hardcoded `visibility: "public"` took the published-repo branch for an
+    // anonymous release and locked `main` behind a pull-request ruleset on a
+    // repository that is still PRIVATE -- breaking the documented way out of
+    // anonymity, where the depositor commits restored Authors straight to main
+    // precisely because ADR 0001 has not bitten yet. It applied silently: a
+    // successful ruleset is never logged.
+    expect(ORCHESTRATOR).toContain('visibility: repoShouldBePrivate ? "private" : "public",');
+  });
+
+  test("the mint reads THIS RUN's intent, never the dataset row", () => {
+    // On a normal publication of a formerly blinded deposit the row was
+    // anonymous moments earlier. Reading it would mint the real, permanent DOI
+    // with no curator -- inverting ADR 0041 on the one identifier that is
+    // actually harvested.
+    expect(ORCHESTRATOR).toContain("anonymousDeposit: c.anonymousRelease,");
+    expect(ORCHESTRATOR).not.toContain("anonymousDeposit: isAnonymous(dataset)");
+  });
+});
+
+describe("the two statements the de-anonymization ordering rests on", () => {
+  // `stepRepoPublic` cannot be driven in-suite (approving a publication makes
+  // real GitHub, S3 and EZID calls), but the two queries it decides from are
+  // just SQL, and SQL can be run. Both were asserted only as source text,
+  // which pins where they are written and nothing about what they return.
+
+  const PRIOR_ANONYMOUS_SQL =
+    "SELECT 1 AS found FROM publication_requests WHERE dataset_id = ? AND anonymous = 1 LIMIT 1";
+
+  function seedRequest(db: Database, datasetId: string, anonymous: number, status: string): void {
+    db.prepare(
+      `INSERT INTO publication_requests (dataset_id, requested_by, status, anonymous)
+       VALUES (?, 7, ?, ?)`,
+    ).run(datasetId, status, anonymous);
+  }
+
+  test("the history query finds a PAST anonymous request, whatever became of it", () => {
+    // Deliberately unfiltered by status and unordered. A denied, superseded or
+    // long-published anonymous request still means this dataset's attribution
+    // was withheld at some point, so a later normal publication must restore
+    // it. Adding `AND status = 'requested'` here is the "optimization" that
+    // would reintroduce the permanent-DOI-cites-the-blinded-label bug, and
+    // this test is what it would break.
+    const db = freshDb();
+    seed(db, "nm000950");
+    seedRequest(db, "nm000950", 1, "denied");
+    seedRequest(db, "nm000950", 0, "requested");
+    expect(db.prepare(PRIOR_ANONYMOUS_SQL).get("nm000950")).toEqual({ found: 1 });
+    db.close();
+  });
+
+  test("a dataset that was never anonymous returns nothing", () => {
+    // The control. Without it, a query that matched every row would satisfy
+    // the assertion above -- and every ordinary publication would pay for an
+    // enrichment pass it does not need.
+    const db = freshDb();
+    seed(db, "nm000951");
+    seedRequest(db, "nm000951", 0, "requested");
+    expect(db.prepare(PRIOR_ANONYMOUS_SQL).get("nm000951")).toBeNull();
+    db.close();
+  });
+
+  test("the mint interlock reads the label the writer actually stores", () => {
+    // `blockedByUnrestoredAttribution` compares `datasets.authors` against
+    // `ANONYMOUS_AUTHORS_LABEL`. Both sides import the same constant, so the
+    // comparison cannot drift -- but the STORED value can, and the column is
+    // written by `writeDatasetCatalogFields`, not by the interlock. Run the
+    // interlock's own query against a row in the state `markAnonymous` leaves.
+    const db = freshDb();
+    seed(db, "nm000952", 1);
+    db.prepare("UPDATE datasets SET authors = ? WHERE dataset_id = ?").run(
+      ANONYMOUS_AUTHORS_LABEL,
+      "nm000952",
+    );
+    const blinded = db
+      .prepare("SELECT authors FROM datasets WHERE dataset_id = ?")
+      .get("nm000952") as { authors: string | null };
+    expect(blinded.authors).toBe(ANONYMOUS_AUTHORS_LABEL);
+
+    // And after restoration the interlock lets the mint through.
+    db.prepare("UPDATE datasets SET authors = ? WHERE dataset_id = ?").run(
+      "Lovelace, Ada",
+      "nm000952",
+    );
+    const restored = db
+      .prepare("SELECT authors FROM datasets WHERE dataset_id = ?")
+      .get("nm000952") as { authors: string | null };
+    expect(restored.authors).not.toBe(ANONYMOUS_AUTHORS_LABEL);
+    db.close();
   });
 });
 

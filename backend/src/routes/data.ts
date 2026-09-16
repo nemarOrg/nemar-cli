@@ -918,7 +918,7 @@ async function metadataJsonHandler(env: Bindings, datasetId: string): Promise<Re
   if (!gate) return notFound("Dataset not found");
 
   const row = await env.DB.prepare(
-    `SELECT dataset_id, name, description, github_repo, concept_doi,
+    `SELECT dataset_id, name, description, github_repo, concept_doi, anonymous,
             modalities, subject_count, age_min, age_max,
             file_size, total_files, tasks, enrichment_json,
             data_complete, bytes_present,
@@ -983,6 +983,7 @@ async function metadataJsonHandler(env: Bindings, datasetId: string): Promise<Re
       name: row.name,
       description: row.description,
       github_repo: row.github_repo,
+      anonymous: row.anonymous,
       concept_doi: row.concept_doi,
       modalities: row.modalities,
       subject_count: row.subject_count,

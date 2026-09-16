@@ -27,7 +27,6 @@ import { describe, expect, test } from "bun:test";
 import {
   ANONYMOUS_AUTHORS_LABEL,
   blindEnrichmentMetadata,
-  clearAnonymous,
   isAnonymous,
   markAnonymous,
 } from "../src/services/anonymity";
@@ -216,25 +215,6 @@ describe("markAnonymous scrubs what an earlier enrichment already published", ()
     const db = freshDb();
     const result = await markAnonymous({ DB: realD1(db) } as Bindings, "nm000999");
     expect(result.changed).toBe(false);
-  });
-
-  test("clearAnonymous reports whether it changed anything", async () => {
-    const db = freshDb();
-    seed(db, "nm000926", { anonymous: 1 });
-
-    expect(await clearAnonymous({ DB: realD1(db) } as Bindings, "nm000926")).toEqual({
-      changed: true,
-    });
-    expect(
-      isAnonymous(
-        db.query("SELECT anonymous FROM datasets WHERE dataset_id = 'nm000926'").get() as {
-          anonymous: number;
-        },
-      ),
-    ).toBe(false);
-    expect(await clearAnonymous({ DB: realD1(db) } as Bindings, "nm000999")).toEqual({
-      changed: false,
-    });
   });
 });
 
