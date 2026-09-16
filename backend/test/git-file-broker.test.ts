@@ -309,6 +309,81 @@ describe("the route: the gate, then the bytes", () => {
     expect(res.headers.get("Cache-Control")).toBe("no-store");
   });
 
+  /**
+   * A body the stand-in sends WITHOUT declaring a length, which is what the
+   * broker actually meets in production: workerd owns `Accept-Encoding`, the
+   * raw host gzips, and the runtime strips `Content-Length` when it decodes.
+   * A `Response` built from a stream is chunked, so the client sees no length
+   * -- the same shape, reproduced with a real server rather than asserted.
+   */
+  function streamed(text: string): Response {
+    const bytes = new TextEncoder().encode(text);
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        async start(controller) {
+          // Two chunks with a turn of the event loop between them. A stream
+          // that closes synchronously is small enough for Bun to buffer and
+          // declare a length for, which would make these tests pass through
+          // the header check they are here to bypass; yielding forces the
+          // chunked response the runtime actually hands the broker.
+          controller.enqueue(bytes.subarray(0, 1));
+          await Bun.sleep(1);
+          controller.enqueue(bytes.subarray(1));
+          controller.close();
+        },
+      }),
+    );
+  }
+
+  test("a length upstream never declared is still declared to the client", async () => {
+    const db = freshDb();
+    seed(db, "nm000862", "public");
+    reset({
+      [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+      [publicRawPath]: () => streamed(FILE_BODY),
+    });
+
+    const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+
+    expect(res.status).toBe(200);
+    // The regression this pins: before the counter, no upstream header meant
+    // no `Content-Length` on the way out either, on every real fetch.
+    expect(res.headers.get("Content-Length")).toBe(String(FILE_BODY.length));
+    expect(await res.text()).toBe(FILE_BODY);
+  });
+
+  test("a body shorter than the manifest fails the transfer, it does not arrive complete", async () => {
+    const db = freshDb();
+    seed(db, "nm000862", "public");
+    reset({
+      // Upstream declares nothing, so the header check above cannot fire and
+      // only the counter stands between a truncated file and a 200 that looks
+      // healthy.
+      [manifestKey]: () => new Response(manifestBody(FILE_BODY.length + 10), { status: 200 }),
+      [publicRawPath]: () => streamed(FILE_BODY),
+    });
+
+    const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Length")).toBe(String(FILE_BODY.length + 10));
+    expect(res.text()).rejects.toThrow(/did not match the manifest/);
+  });
+
+  test("a body longer than the manifest fails the transfer, and the overrun is never enqueued", async () => {
+    const db = freshDb();
+    seed(db, "nm000862", "public");
+    reset({
+      [manifestKey]: () => new Response(manifestBody(4), { status: 200 }),
+      [publicRawPath]: () => streamed(FILE_BODY),
+    });
+
+    const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+
+    expect(res.status).toBe(200);
+    expect(res.text()).rejects.toThrow(/did not match the manifest/);
+  });
+
   test("an upstream throttle is a 5xx with Retry-After, never a 404", async () => {
     const db = freshDb();
     seed(db, "nm000862", "public");

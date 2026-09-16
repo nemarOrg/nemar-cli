@@ -44,7 +44,13 @@ export type GitFileSource = "raw" | "blob";
 export type GitFileFetch =
   | {
       kind: "ok";
-      body: ReadableStream<Uint8Array> | null;
+      /**
+       * Never null: `okOrUnavailable` is the only constructor of this
+       * variant, and a body-less 2xx leaves as `unavailable`. Stated in the
+       * type because the caller counts these bytes against the manifest and
+       * a nullable stream would push that invariant to a runtime check.
+       */
+      body: ReadableStream<Uint8Array>;
       /** Upstream's byte count, when it declared one. */
       contentLength: number | null;
       source: GitFileSource;
