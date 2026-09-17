@@ -15,6 +15,7 @@ import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { EXEMPLAR_ID_RE } from "../src/routes/admin/exemplar";
 import {
+  ABSENT_DATASET_ID,
   DEV_EPHEMERAL_BAND_END,
   DEV_OWNED_FIXTURE_IDS,
   DEV_SANDBOX_RANGE_RE,
@@ -402,5 +403,32 @@ describe("the declared ownership set cannot drift (#1440)", () => {
       expect(isDevOwnedDatasetId(id)).toBe(DEV_OWNED_FIXTURE_IDS.has(id));
       expect(isDevOwnedDatasetId(id)).toBe(false);
     }
+  });
+});
+
+describe("the id a test may rely on being absent (#1434)", () => {
+  test("is reserved, so the allocator can never return it", () => {
+    // The property that makes it usable at all. Four live tests had picked
+    // `nm099998` for this on the strength of "unlikely to be allocated", and
+    // epic #1430 then allocated it as a standing fixture.
+    expect(isReservedFixtureId(ABSENT_DATASET_ID)).toBe(true);
+    expect(isValidDatasetId(ABSENT_DATASET_ID)).toBe(true);
+  });
+
+  test("is not dev-owned, so no explicit-id create can claim it either", () => {
+    // `explicitDatasetIdGate` requires reserved AND declared dev-owned, so this
+    // is the second half of "cannot become real". A future fixture that wants
+    // this id has to add it here, which fails this test and sends them to the
+    // four live tests that depend on its absence.
+    expect(isDevOwnedDatasetId(ABSENT_DATASET_ID)).toBe(false);
+    expect(DEV_OWNED_FIXTURE_IDS.has(ABSENT_DATASET_ID)).toBe(false);
+  });
+
+  test("is the FLOOR of the band, furthest from the next fixture assignment", () => {
+    // Fixtures are assigned downward from nm099999 (ADR 0068), so the floor is
+    // the last id a fixture would reach. Moving it to, say, nm099997 would put
+    // the sentinel directly in the path of the next one.
+    expect(ABSENT_DATASET_ID).toBe(formatDatasetId("nm", RESERVED_FIXTURE_FLOOR));
+    expect(isReservedFixtureId(formatDatasetId("nm", RESERVED_FIXTURE_FLOOR - 1))).toBe(false);
   });
 });

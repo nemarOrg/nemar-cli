@@ -110,6 +110,20 @@ Adding it would let a non-production worker cascade-delete a GitHub repository p
 The cost is that adding a standing fixture now means adding it in two places, the reserved band and the ownership set.
 That is a real cost and it is the right one: the alternative is a rule that cannot express the thing it is being asked to express, which is how this was missed the first time.
 
+## Amendment 2026-09-17 (#1434): the band's floor is the id a test may rely on being absent
+
+Building `nm099998` turned four passing live tests red at once.
+Each of them used `nm099998` as its "dataset does not exist" id, commented "valid format within the cap, but unlikely to be allocated".
+Unlikely is a guess, and this ADR is what made the guess wrong: a reserved id is exactly where a standing fixture goes, so it is the worst place to look for an id that will stay absent.
+
+`ABSENT_DATASET_ID` is `nm099900`, the FLOOR of the reserved band, and it is exported so a test imports the declaration rather than re-guessing.
+Both halves of "floor of the reserved band" carry weight.
+Reserved means `generateDatasetId` can never return it, so no upload will claim it.
+The floor specifically, because fixtures are assigned downward from `nm099999`, which makes it the last id in the band a fixture would reach; naming it here is what stops one from reaching it, since `explicitDatasetIdGate` also requires membership in `DEV_OWNED_FIXTURE_IDS` and this id must never join.
+
+A future fixture that wants `nm099900` has to delete the constant, which fails its guard tests and leads whoever does it to the four tests that depend on the absence.
+That is the intended cost: the previous arrangement had no cost at all, and no warning either.
+
 ## Consequences
 
 A fixture's id becomes predictable without a registry: the next standing fixture is `nm099997`, and anyone can work that out from this document.

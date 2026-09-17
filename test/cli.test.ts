@@ -32,6 +32,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawn } from "bun";
+import { ABSENT_DATASET_ID } from "../backend/src/services/datasetId";
 import { LIVE_TARGET_BLOCKED, TEST_CONFIG, sleep } from "./setup";
 
 /**
@@ -668,12 +669,14 @@ describe("CLI Dataset Download", () => {
   test.skipIf(LIVE_TARGET_BLOCKED)(
     "nemar dataset download with non-existent dataset shows error",
     async () => {
-      // `nm099998`, not `nm999999`: the latter is outside the 0-99999 id cap, so the
-      // backend answers 400 "Invalid dataset ID format" -- and this case passed only
-      // because the CLI called EVERY lookup failure "Dataset not found". Now that a
-      // 400 is reported as a 400, the id has to be genuinely ABSENT rather than
-      // malformed, which is what the sibling status/view cases already use.
-      const { stdout, stderr, exitCode } = await runCli(["dataset", "download", "nm099998"]);
+      // `ABSENT_DATASET_ID`, not `nm999999`: the latter is outside the 0-99999 id
+      // cap, so the backend answers 400 "Invalid dataset ID format" -- and this
+      // case passed only because the CLI called EVERY lookup failure "Dataset not
+      // found". Now that a 400 is reported as a 400, the id has to be genuinely
+      // ABSENT rather than malformed. It was spelled `nm099998` until epic #1430
+      // made that a standing fixture; the constant is an id the allocator can
+      // never return and no fixture may claim.
+      const { stdout, stderr, exitCode } = await runCli(["dataset", "download", ABSENT_DATASET_ID]);
 
       // Should fail with dataset not found (after prereq check)
       const output = stdout + stderr;
@@ -699,8 +702,9 @@ describe("CLI Dataset Status", () => {
   test.skipIf(LIVE_TARGET_BLOCKED)(
     "nemar dataset status with non-existent dataset shows error",
     async () => {
-      // Valid format within MAX_NUMBER=99999 cap, but unlikely to be allocated.
-      const { stdout, exitCode } = await runCli(["dataset", "status", "nm099998"]);
+      // See the download case above: an id that CANNOT be allocated, not one
+      // that was unlikely to be.
+      const { stdout, exitCode } = await runCli(["dataset", "status", ABSENT_DATASET_ID]);
 
       expect(stdout).toContain("not found");
     },
@@ -754,7 +758,7 @@ describe("CLI Dataset Status", () => {
   test.skipIf(LIVE_TARGET_BLOCKED)(
     "nemar dataset view with non-existent dataset behaves like status",
     async () => {
-      const { stdout, exitCode } = await runCli(["dataset", "view", "nm099998"]);
+      const { stdout, exitCode } = await runCli(["dataset", "view", ABSENT_DATASET_ID]);
 
       expect(stdout).toContain("not found");
     },

@@ -6,6 +6,7 @@
  */
 
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { ABSENT_DATASET_ID } from "../backend/src/services/datasetId";
 import rootPkg from "../package.json";
 import { LIVE_TARGET_BLOCKED, TEST_CONFIG, sleep, testRequest } from "./setup";
 
@@ -611,8 +612,12 @@ describeLive("Datasets API", () => {
 
   describe("GET /datasets/:id", () => {
     test("non-existent dataset returns 404", async () => {
-      // Valid format within MAX_NUMBER=99999 cap, but unlikely to be allocated.
-      const { status } = await testRequest("/datasets/nm099998");
+      // `ABSENT_DATASET_ID`, not a hand-picked id. This read "valid format
+      // within the MAX_NUMBER=99999 cap, but unlikely to be allocated" and
+      // named nm099998, which epic #1430 then designated as the standing
+      // anonymous deposit; building it turned this test red. The constant is
+      // the floor of the reserved band, which the allocator can never return.
+      const { status } = await testRequest(`/datasets/${ABSENT_DATASET_ID}`);
 
       expect(status).toBe(404);
     });

@@ -15,12 +15,13 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { ABSENT_DATASET_ID } from "../backend/src/services/datasetId";
 import { datasetLookupFailure } from "../src/commands/dataset";
 import { ApiError } from "../src/lib/api/errors";
 
 describe("only a real 404 is absence", () => {
   test("404 is the one status that may say not found", () => {
-    expect(datasetLookupFailure(new ApiError(404, "Dataset nm099998 not found"))).toBe(
+    expect(datasetLookupFailure(new ApiError(404, `Dataset ${ABSENT_DATASET_ID} not found`))).toBe(
       "Dataset not found",
     );
   });

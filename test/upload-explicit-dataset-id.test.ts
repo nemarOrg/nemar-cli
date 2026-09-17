@@ -122,8 +122,7 @@ describe("nemar dataset upload --dataset-id", () => {
   });
 
   test("the option's attribute name is what transfer.ts reads", () => {
-    const option = createUploadCommand()
-      .options.find((o) => o.long === "--dataset-id");
+    const option = createUploadCommand().options.find((o) => o.long === "--dataset-id");
     expect(option).toBeDefined();
     // Renaming the flag renames the attribute, and `createOrResumeDataset`
     // reads `options.datasetId`. This is the coupling the wire tests above

@@ -32,7 +32,9 @@ describe("stepsForRelease", () => {
     const ordinary = stepsForRelease(false);
 
     expect(ordinary).toEqual(PUBLICATION_STEPS);
-    expect(anonymous.length).toBe(PUBLICATION_STEPS.length - ANONYMOUS_RELEASE_SKIPPED_STEPS.length);
+    expect(anonymous.length).toBe(
+      PUBLICATION_STEPS.length - ANONYMOUS_RELEASE_SKIPPED_STEPS.length,
+    );
     for (const skipped of ANONYMOUS_RELEASE_SKIPPED_STEPS) {
       expect(anonymous).not.toContain(skipped);
     }
