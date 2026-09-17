@@ -24,6 +24,7 @@
  */
 
 import type { AccountKind } from "../../../shared/contract/user.js";
+import { isReservedFixtureId } from "./datasetId.js";
 
 /**
  * `error` is the stable machine-readable half and must not change — the CLI
@@ -47,7 +48,7 @@ export const SANDBOX_TRAINING_ERROR = {
 } as const;
 
 /**
- * A `test`-kind account on production may own only `xx` sandbox datasets, so
+ * A `test`-kind account may own only `xx` sandbox datasets, so
  * a real DOI never attaches to a persona (epic #1272 phase 4, #1284; ADR
  * 0048). `error` matches the stable-machine-readable convention the two
  * bodies above already follow.
@@ -55,7 +56,7 @@ export const SANDBOX_TRAINING_ERROR = {
 export const TEST_ACCOUNT_SANDBOX_ONLY_ERROR = {
   error: "test_account_sandbox_only",
   message:
-    "Test accounts can only create sandbox (xx) datasets on production. Use a person account for real data.",
+    "Test accounts can only create sandbox (xx) datasets. Use a person account for real data.",
 } as const;
 
 export type UploadGateBody =
@@ -95,7 +96,14 @@ export function uploadChannelForAuthMethod(
  *
  * The kind check needs no separate `isProduction` input: the route only ever
  * calls this function from inside its own `if (!sandbox)` branch, and
- * `sandbox` is unconditionally forced `true` off production (the route
+ * NOTE (#1432): "unconditionally" below is no longer true. A NAMED reserved id
+ * derives `sandbox` from its own prefix, so an `nm0999xx` create off production
+ * reaches this function. The ordering argument that follows therefore no longer
+ * proves the environment is production, and `TEST_ACCOUNT_SANDBOX_ONLY_ERROR` is
+ * now reachable off production. The `=== "test"` predicate itself is unchanged
+ * and still right: a test persona may own only `xx`, in any environment.
+ *
+ * `sandbox` is forced `true` off production for every ALLOCATED id (the route
  * decides that from its own `isProduction` literal before this function ever
  * runs) -- so REACHING this function already proves the environment is
  * production, and a `test`-kind account off production is never refused here
@@ -127,5 +135,65 @@ export function realDatasetCreateGate(
  */
 export function realDatasetServiceGate(user: { service_access: number }): UploadGateBody | null {
   if (!user.service_access) return SERVICE_ACCESS_ERROR;
+  return null;
+}
+
+export const EXPLICIT_ID_PRODUCTION_ERROR = {
+  error: "Explicit dataset ids are not available in production",
+  message:
+    "A dataset id is allocated, never chosen. Naming one is a non-production fixture affordance (ADR 0068).",
+} as const;
+
+export const EXPLICIT_ID_ADMIN_ERROR = {
+  error: "Admin role required to name a dataset id",
+  message: "Standing fixtures are created by an administrator, not by a depositor.",
+} as const;
+
+export const EXPLICIT_ID_NOT_RESERVED_ERROR = {
+  error: "Dataset id is not in the reserved fixture band",
+  message:
+    "Only ids the allocator can never mint may be named: nm099900-nm099999 and xx099900-xx099999 (ADR 0068).",
+} as const;
+
+/**
+ * Gate for naming a dataset id instead of being allocated one.
+ *
+ * This exists because ADR 0068 makes `generateDatasetId` structurally unable to
+ * return a reserved id, so the standing fixtures that live in that band cannot
+ * be created by the route that creates everything else. The alternative was a
+ * hand-written D1 INSERT, which is the shortcut that produced a fixture nobody
+ * could publish: it skips every gate the fixture exists to exercise.
+ *
+ * **It narrows a documented invariant, and does so without weakening it.** The
+ * create route forces `sandbox = true` in every non-production environment,
+ * commented "prevents dev from minting real nm-prefix dataset IDs". A reserved
+ * id is, by construction, one the allocator can never hand to anybody, so dev
+ * naming `nm099998` does not mint a real id and cannot collide with one. The
+ * invariant's PURPOSE is preserved exactly; only its blunt form is narrowed.
+ * That distinction is the whole reason phase 1 had to land first -- before the
+ * reservation existed there was no checkable sense of "not a real id".
+ *
+ * Every other create-time gate still applies. In particular this does NOT
+ * exempt the caller from `realDatasetCreateGate`: a fixture that skipped the
+ * account gates would stop exercising them, which is the opposite of why it
+ * exists. An operator who cannot pass them is not the right operator.
+ *
+ * All three terms are required, not any: non-production alone would let a dev
+ * caller name `nm000104` and reach a LIVE repository, because `nemarDatasets`
+ * is shared between environments.
+ */
+export type ExplicitIdGateBody =
+  | typeof EXPLICIT_ID_PRODUCTION_ERROR
+  | typeof EXPLICIT_ID_ADMIN_ERROR
+  | typeof EXPLICIT_ID_NOT_RESERVED_ERROR;
+
+export function explicitDatasetIdGate(input: {
+  isProduction: boolean;
+  isAdmin: boolean;
+  datasetId: string;
+}): ExplicitIdGateBody | null {
+  if (input.isProduction) return EXPLICIT_ID_PRODUCTION_ERROR;
+  if (!input.isAdmin) return EXPLICIT_ID_ADMIN_ERROR;
+  if (!isReservedFixtureId(input.datasetId)) return EXPLICIT_ID_NOT_RESERVED_ERROR;
   return null;
 }

@@ -257,6 +257,44 @@ export type FacetKey = (typeof FACETS)[number]["key"];
 
 const FACETS_BY_KEY = new Map(FACETS.map((f) => [f.key, f]));
 
+/**
+ * How a facet's accepted values should be described to a human or a model.
+ *
+ * ONE definition, because there are now three consumers: the CLI's `--help`,
+ * the MCP wire contract, and the MCP zod 4 mirror the model actually reads.
+ * It lives here rather than in `src/lib/facet-options.ts` because `shared/` is
+ * the zero-dependency module both the CLI and `backend/` already import; the
+ * CLI copy pulled in Commander and could not be reached from the worker.
+ *
+ * Getting this wrong is not cosmetic. A `bytes` or `duration` facet whose
+ * description omits the unit grammar leads a caller to type a bare number,
+ * which parses as bytes or SECONDS: the difference between `100h` and
+ * `360000`, which is the regression #1169 fixed once already. A `text` facet
+ * described as exact match understates a substring predicate, and a `version`
+ * facet described as exact understates exact-or-prefix. Each of those makes a
+ * filter that was faithfully applied look like it was applied to something
+ * else, which is the failure this whole surface exists to avoid.
+ */
+export function describeFacet(facet: FacetDefinition): string {
+  const unit = facet.unit ? ` (${facet.unit})` : "";
+  switch (facet.valueKind) {
+    case "enum":
+      return `${facet.label} -- comma-separated, one or more of: ${(facet.enumValues ?? []).join(", ")}`;
+    case "number":
+      return `${facet.label}${unit} -- range (e.g. 10..50, 10.., ..50, or 10)`;
+    // Byte and duration facets accept unit suffixes (shared/range.ts), and the
+    // bare form means the base unit -- bytes and seconds.
+    case "bytes":
+      return `${facet.label}${unit} -- range with optional units (e.g. 10gb..2tb, 500mb.., ..1gb; bare = bytes)`;
+    case "duration":
+      return `${facet.label}${unit} -- range with optional units (e.g. 30m..2h, 100h.., ..90s; bare = seconds)`;
+    case "text":
+      return `${facet.label} -- substring match`;
+    case "version":
+      return `${facet.label} -- exact or prefix match`;
+  }
+}
+
 export function getFacetDefinition(key: string): FacetDefinition | undefined {
   return FACETS_BY_KEY.get(key);
 }
