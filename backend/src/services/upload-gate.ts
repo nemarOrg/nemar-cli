@@ -189,9 +189,11 @@ export const EXPLICIT_ID_NOT_RESERVED_ERROR = {
  * account gates would stop exercising them, which is the opposite of why it
  * exists. An operator who cannot pass them is not the right operator.
  *
- * All three terms are required, not any: non-production alone would let a dev
+ * All FOUR terms are required, not any: non-production alone would let a dev
  * caller name `nm000104` and reach a LIVE repository, because `nemarDatasets`
- * is shared between environments.
+ * is shared between environments. The count was three until #1440 added the
+ * dev-owned term; a stale "three" here is how a reader concludes the last
+ * check is redundant.
  */
 export type ExplicitIdGateBody =
   | typeof EXPLICIT_ID_PRODUCTION_ERROR
