@@ -512,26 +512,101 @@ const facetInputShape: Record<string, z.ZodOptional<z.ZodString>> = Object.fromE
   FACETS.map((facet) => [facet.queryParam, z.string().optional()]),
 );
 
+/**
+ * The catalog filters ADR 0032 deliberately keeps OUT of the facet table:
+ * irregular semantics (FTS routing, LIKE-joined lists, derived predicates)
+ * with no declared table to generate from, so they are written out here.
+ *
+ * Declared as a named shape rather than inline in the object below so that
+ * {@link SEARCH_DATASETS_NARROWING_FILTERS} can be `Object.keys` of the real
+ * schema instead of a second copy of these names.
+ *
+ * That derived list is what the cap counts against; it is NOT yet what the
+ * rest of the surface reads. Three places still spell these names by hand and
+ * each needs its own edit when one is added: the sentence in the tool
+ * description (`server.ts`, which interpolates only the facet labels), the
+ * zod4 mirror (`backend/src/mcp/schemas.ts`, which carries `.describe()` text
+ * the contract does not), and `mcp-search-datasets.unit.test.ts`'s hand-written
+ * list. The last of those fails on a mismatch, which is the reminder to do the
+ * other two.
+ *
+ * (`query`, `limit` and `include_unknown` are deliberately NOT here: the first
+ * two are not filters at all, and `include_unknown` WIDENS every active facet
+ * rather than narrowing, so counting it against a narrowing cap would be
+ * wrong.)
+ */
+const narrowingFilterShape = {
+  modality: z.string().optional(),
+  task: z.string().optional(),
+  has_hed: z.boolean().optional(),
+  has_zarr: z.boolean().optional(),
+  /** Author name, matched the same way the CLI's `--author` matches. */
+  author: z.string().optional(),
+  /** Only datasets carrying a DOI, i.e. the citable ones. */
+  has_doi: z.boolean().optional(),
+  /** A strict narrowing of `has_zarr`: the copy also PASSED the standing
+   *  fidelity sweep. A fresh conversion is `has_zarr` without this. */
+  has_zarr_verified: z.boolean().optional(),
+  /** Only datasets verified data-complete. */
+  data_complete: z.boolean().optional(),
+  /** Published within this many days. */
+  recent: z.number().int().positive().optional(),
+  /** License tiers, comma-separated, from the declared vocabulary. */
+  license: z.string().optional(),
+} as const;
+
+/** The bespoke narrowing filters, derived from the shape that declares them. */
+export const SEARCH_DATASETS_NARROWING_FILTERS: readonly string[] =
+  Object.keys(narrowingFilterShape);
+
+/**
+ * Every parameter of `search_datasets` that NARROWS the result set: the
+ * bespoke filters above plus every declared facet, in that order.
+ *
+ * The one list behind the per-call cap, the generated sentence in the tool
+ * description, and the test that checks the count -- none of them re-spells
+ * these names.
+ */
+export const SEARCH_DATASETS_FILTER_PARAMS: readonly string[] = [
+  ...SEARCH_DATASETS_NARROWING_FILTERS,
+  ...FACETS.map((facet) => facet.queryParam),
+];
+
+/**
+ * The most narrowing filters one `search_datasets` call may combine.
+ *
+ * NOT the D1 bound-parameter ceiling, which is already enforced centrally and
+ * independently: `assertBoundParamBudget` throws inside
+ * `buildDatasetFilterClauses` above `MAX_BOUND_PARAMS` (100), added after
+ * #1193 shipped a faceted search that 500'd only on D1. That guard stays the
+ * backstop and this cap does not replace it. All thirty filters at their
+ * widest put 52 bound parameters on every statement either branch of the tool
+ * builds -- around half the ceiling -- and a call setting all thirty was run
+ * against the real staging database on both branches without error.
+ * `filter-count-matches-clauses.unit.test.ts` pins that measurement, so a
+ * facet that moves it shows up in a diff rather than only when the ceiling is
+ * reached.
+ *
+ * What the cap adds is WHERE the refusal happens. Reaching the backstop
+ * surfaces as a thrown exception mid-query, which tells a caller nothing it
+ * can act on; refusing at the door names the filters it counted and what to
+ * drop. Twenty is the declared facet count, so every facet can still be
+ * combined in one call; a test pins the cap at no less than `FACETS.length`,
+ * so growing the vocabulary forces this number to be revisited rather than
+ * quietly making that sentence false.
+ *
+ * Deliberately NOT applied to `GET /datasets` or the CLI. A person combining
+ * every flag they have is doing something reasonable, and they already get a
+ * legible failure from `assertBoundParamBudget` if they ever reach it. This is
+ * an affordance for a caller that cannot read a stack trace and has to decide
+ * what to try next, which is the MCP surface and only it.
+ */
+export const SEARCH_DATASETS_MAX_FILTERS = 20;
+
 export const searchDatasetsInputSchema = z
   .object({
     query: z.string().optional(),
-    modality: z.string().optional(),
-    task: z.string().optional(),
-    has_hed: z.boolean().optional(),
-    has_zarr: z.boolean().optional(),
-    /** Author name, matched the same way the CLI's `--author` matches. */
-    author: z.string().optional(),
-    /** Only datasets carrying a DOI, i.e. the citable ones. */
-    has_doi: z.boolean().optional(),
-    /** A strict narrowing of `has_zarr`: the copy also PASSED the standing
-     *  fidelity sweep. A fresh conversion is `has_zarr` without this. */
-    has_zarr_verified: z.boolean().optional(),
-    /** Only datasets verified data-complete. */
-    data_complete: z.boolean().optional(),
-    /** Published within this many days. */
-    recent: z.number().int().positive().optional(),
-    /** License tiers, comma-separated, from the declared vocabulary. */
-    license: z.string().optional(),
+    ...narrowingFilterShape,
     /** Widen every ACTIVE facet to also admit rows whose column is NULL.
      *  Several facet columns are only partly populated, so a filter's recall
      *  is low by construction rather than by bug (ADR 0032); this is how a
