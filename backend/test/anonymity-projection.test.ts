@@ -190,6 +190,8 @@ const DELIBERATE_VERSION_DOI_READS: Readonly<Record<string, string>> = {
   "services/central-manifest.ts":
     "collects prior version DOIs to preserve the concept record's HasVersion relations",
   "services/publication-orchestrator.ts": "the publish flow itself, which is where anonymity ends",
+  "services/anonymity-sweep.ts":
+    "the sweep that VERIFIES each version identifier is still `reserved` at EZID (ADR 0067); it reports to admins and stamps `sweep_stamps`, and a rule that withheld the DOI from it would blind the check to the thing it exists to check",
   "services/withdraw.ts":
     "admin withdrawal and restore, which must tombstone every version DOI including a reserved one",
   // The manifest-generation family. Each reads the version DOI to EMBED it in
