@@ -428,7 +428,12 @@ describe("the id a test may rely on being absent (#1434)", () => {
     // Fixtures are assigned downward from nm099999 (ADR 0068), so the floor is
     // the last id a fixture would reach. Moving it to, say, nm099997 would put
     // the sentinel directly in the path of the next one.
-    expect(ABSENT_DATASET_ID).toBe(formatDatasetId("nm", RESERVED_FIXTURE_FLOOR));
+    //
+    // The literal, not `formatDatasetId("nm", RESERVED_FIXTURE_FLOOR)`: that is
+    // the constant's own definition, so asserting it says only that `=` works.
+    // Four live tests hard-code this id in their expectations, and pinning the
+    // string is what makes a change to the floor fail HERE rather than there.
+    expect(ABSENT_DATASET_ID).toBe("nm099900");
     expect(isReservedFixtureId(formatDatasetId("nm", RESERVED_FIXTURE_FLOOR - 1))).toBe(false);
   });
 });
