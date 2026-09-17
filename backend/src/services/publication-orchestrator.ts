@@ -62,7 +62,7 @@ import {
 } from "./github";
 import { getDatasetsToken } from "./github-auth";
 import { generateManifest } from "./manifest";
-import { errorMessage, readRepoMetadata } from "./repo-metadata";
+import { BIDS_METADATA_UNAVAILABLE, errorMessage, readRepoMetadata } from "./repo-metadata";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "./repo-spec";
 import { withRetry } from "./retry";
 import {
@@ -2031,6 +2031,30 @@ export interface ApproveRunArgs {
  * JSON body + status the route should emit.
  */
 /**
+ * Was this dataset EVER released under the blind?
+ *
+ * The durable answer, and the only one available at the end of a run.
+ * `datasets.anonymous` and `first_published_at` are both rewritten by
+ * `repo_public` in this same invocation (migration 0085's triggers force the two
+ * into one statement), so by the time the tail jobs below run, the row itself no
+ * longer says the deposit was ever concealed. `publication_requests` keeps every
+ * request, so the request that asked for the blind is still there.
+ *
+ * Shared by both de-anonymization tail jobs deliberately: they have to agree
+ * about which datasets have a tail at all.
+ */
+async function hadAnonymousRequest(db: D1Database, datasetId: string): Promise<boolean> {
+  const priorAnonymous = await db
+    .prepare(
+      "SELECT 1 AS found FROM publication_requests WHERE dataset_id = ? AND anonymous = 1 LIMIT 1",
+    )
+    .bind(datasetId)
+    .first<{ found: number }>()
+    .catch(() => null);
+  return priorAnonymous?.found === 1;
+}
+
+/**
  * Request one dataset's Zarr stores be rebuilt after de-anonymization.
  *
  * Returns a warning string when the request could not be recorded, rather than
@@ -2052,14 +2076,7 @@ export async function stampZarrRequeue(
   // An anonymous RELEASE is the blinded state arriving, not leaving: its stores
   // should carry the blinded label, so it asks for nothing.
   if (anonymousRelease) return undefined;
-  const priorAnonymous = await db
-    .prepare(
-      "SELECT 1 AS found FROM publication_requests WHERE dataset_id = ? AND anonymous = 1 LIMIT 1",
-    )
-    .bind(datasetId)
-    .first<{ found: number }>()
-    .catch(() => null);
-  if (priorAnonymous?.found !== 1) return undefined;
+  if (!(await hadAnonymousRequest(db, datasetId))) return undefined;
 
   try {
     await db
@@ -2091,6 +2108,199 @@ export async function stampZarrRequeue(
     }
     return `${datasetId} was de-anonymized but its Zarr rebuild could not be requested: ${message}. Approve the request again to retry the stamp -- a run whose steps are all complete still re-requests it. Its viewer keeps the blinded citation until then, and nothing else re-checks a de-anonymized row.`;
   }
+}
+
+/**
+ * Version identifiers this completes in one run, beyond which it reports rather
+ * than keeps going. A concealed deposit accumulates one per anonymous release,
+ * so a handful is the realistic ceiling; the cap is here so a corrupt or
+ * unexpectedly long history cannot turn the tail of a publication into an
+ * unbounded series of EZID writes.
+ */
+export const MAX_CONCEALED_ERA_VERSION_DOIS = 10;
+
+/**
+ * Publish the version identifiers a concealed release left `reserved`.
+ *
+ * `version_doi` mints the version the depositor is publishing NOW. An anonymous
+ * release minted one too, reserved (#1447), and review is exactly the process
+ * that produces a revision -- so the ordinary case is that the depositor
+ * publishes `1.0.1` after having released `1.0.0` under the blind. Nothing then
+ * revisits `1.0.0`: `version_doi` never names it, and `doi-reconcile.ts` only
+ * ever looks at `latest_version_doi`. Its identifier stays reserved forever
+ * while its `dataset_versions` row stops being withheld the moment
+ * `anonymous` clears, so the landing page renders a live `https://doi.org/...`
+ * anchor for an identifier that does not resolve, on a published dataset.
+ *
+ * Every row here is concealed-era by construction: anonymity is only available
+ * before first publication (ADR 0065), so a dataset reaching its first real
+ * publication has no other kind of version row.
+ *
+ * `createEzidVersionDoi` per version rather than a bespoke flip: the
+ * reserved-to-public transition, the rebuilt DataCite document that keeps the
+ * blinded creator out of the permanent record, the refusal to advance a
+ * tombstoned identifier, and the concept record's `HasVersion` refresh are all
+ * already there and already tested. An identifier that is already public costs
+ * one call and changes nothing (`return_public`), so this is idempotent, and a
+ * row whose identifier EZID no longer holds is minted back rather than skipped.
+ *
+ * Non-fatal, and reported the way {@link stampZarrRequeue} is: the dataset IS
+ * published and correctly attributed, and what is wrong is a secondary
+ * identifier. Raising here would fail a run that had already succeeded.
+ */
+export async function completeConcealedEraVersionDois(
+  env: Bindings,
+  db: D1Database,
+  datasetId: string,
+  anonymousRelease: boolean,
+): Promise<string | undefined> {
+  // The blind arriving, not leaving: these identifiers are meant to be reserved.
+  if (anonymousRelease) return undefined;
+  if (!(await hadAnonymousRequest(db, datasetId))) return undefined;
+
+  // Accumulates every problem the run hits, so one report carries all of them.
+  // Each `return` below goes through the shared writer with this list, never a
+  // fresh one: a run that both truncated and then failed has to say both.
+  const warnings: string[] = [];
+
+  let dataset: { name: string; github_repo: string | null; concept_doi: string | null } | null;
+  let rows: { version: string; doi: string }[];
+  try {
+    dataset = await db
+      .prepare("SELECT name, github_repo, concept_doi FROM datasets WHERE dataset_id = ?")
+      .bind(datasetId)
+      .first<{ name: string; github_repo: string | null; concept_doi: string | null }>();
+    const res = await db
+      .prepare(
+        "SELECT version, doi FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at ASC LIMIT ?",
+      )
+      .bind(datasetId, MAX_CONCEALED_ERA_VERSION_DOIS + 1)
+      .all<{ version: string; doi: string }>();
+    rows = res.results ?? [];
+  } catch (err) {
+    warnings.push(`could not read the recorded versions: ${errorMessage(err)}`);
+    return concealedEraVersionWarning(db, datasetId, warnings);
+  }
+  if (rows.length === 0) return undefined;
+
+  if (rows.length > MAX_CONCEALED_ERA_VERSION_DOIS) {
+    rows = rows.slice(0, MAX_CONCEALED_ERA_VERSION_DOIS);
+    warnings.push(
+      `more than ${MAX_CONCEALED_ERA_VERSION_DOIS} recorded versions; only the oldest ${MAX_CONCEALED_ERA_VERSION_DOIS} were attempted`,
+    );
+  }
+
+  if (!dataset?.concept_doi) {
+    // Without the concept identifier there is no `IsVersionOf` to write, so the
+    // record cannot be rebuilt correctly. Reported rather than guessed at.
+    warnings.push(
+      `${rows.length} recorded version(s) may still be reserved, but the dataset has no concept DOI to relate them to`,
+    );
+    return concealedEraVersionWarning(db, datasetId, warnings);
+  }
+  const conceptIdentifier = conceptEzidIdentifier(dataset.concept_doi);
+  // Same rule as the version_doi step: the shoulder in the identifier decides
+  // which EZID account holds it, never ENVIRONMENT.
+  const sandbox = conceptIdentifier.includes(TEST_SHOULDER.replace(/^doi:/, "").split("/")[0]);
+  const repoName = dataset.github_repo?.split("/")[1];
+  if (!repoName) {
+    warnings.push(
+      `${rows.length} recorded version(s) may still be reserved, but the dataset has no GitHub repository to rebuild their metadata from`,
+    );
+    return concealedEraVersionWarning(db, datasetId, warnings);
+  }
+
+  let repoMeta: Awaited<ReturnType<typeof readRepoMetadata>>;
+  try {
+    const pat = await getDatasetsToken(env);
+    // `main`, not the version's own tag: the authors are what has to be right,
+    // and the restored ones are on main. A tag read would reproduce the
+    // description as it stood during review, which is where the blinded label
+    // came from in the first place.
+    repoMeta = await readRepoMetadata(repoName, pat, undefined, dataset.name, "main", {
+      useContentsApi: true,
+    });
+  } catch (err) {
+    warnings.push(
+      `could not read the repository metadata to rebuild ${rows.length} version record(s): ${errorMessage(err)}`,
+    );
+    return concealedEraVersionWarning(db, datasetId, warnings);
+  }
+
+  // `readRepoMetadata` reports a failed read instead of raising, and its
+  // fallback description is `{ Name }` alone -- which DataCite renders with a
+  // `(:unav)` creator. Publishing an identifier with that record is worse than
+  // leaving it reserved: reserved is recoverable by approving again, whereas a
+  // public version DOI attributed to nobody is exactly the outcome ADR 0065
+  // exists to prevent, and it would look deliberate on a dataset that was
+  // anonymous by choice. So an unreadable repository stops the run.
+  const unreadable = repoMeta.warnings.filter((w) => w.startsWith(BIDS_METADATA_UNAVAILABLE));
+  if (unreadable.length > 0) {
+    warnings.push(
+      `${rows.length} recorded version(s) may still be reserved; their attribution could not be rebuilt: ${unreadable.join("; ")}`,
+    );
+    return concealedEraVersionWarning(db, datasetId, warnings);
+  }
+  for (const w of repoMeta.warnings) {
+    console.warn(`[publish:concealed-era-version-doi] ${datasetId}: ${w}`);
+  }
+
+  const allDois = rows.map((r) => r.doi);
+  const ensured: string[] = [];
+  for (const row of rows) {
+    try {
+      const result = await createEzidVersionDoi(env, {
+        datasetId,
+        conceptIdentifier,
+        version: row.version,
+        bidsDescription: repoMeta.bidsDescription,
+        githubRepo: dataset.github_repo || `nemarDatasets/${repoName}`,
+        sandbox,
+        existingVersionDois: allDois,
+        enrichment: repoMeta.enrichment,
+        // Deliberately no `reserveOnly`: this function exists to END the
+        // reservation the anonymous release made.
+      });
+      ensured.push(result.doi);
+      for (const w of result.warnings ?? []) {
+        warnings.push(`${row.version}: ${w}`);
+      }
+    } catch (err) {
+      warnings.push(`${row.version} (${row.doi}) is still reserved: ${errorMessage(err)}`);
+    }
+  }
+  console.log(
+    `[publish] ${datasetId}: concealed-era version identifiers ensured public: ${ensured.join(", ") || "none"}`,
+  );
+  if (warnings.length === 0) return undefined;
+  return concealedEraVersionWarning(db, datasetId, warnings);
+}
+
+/**
+ * One place that both records and phrases a failed completion, so the audit row
+ * and the admin's copy cannot say different things. Every early return above
+ * goes through it.
+ */
+async function concealedEraVersionWarning(
+  db: D1Database,
+  datasetId: string,
+  problems: string[],
+): Promise<string> {
+  const joined = problems.join("; ");
+  console.error(`[publish] ${datasetId}: concealed-era version DOIs not completed: ${joined}`);
+  try {
+    await auditLogStatement(db, {
+      userId: null,
+      action: "concealed_era_version_doi_incomplete",
+      resourceType: "dataset",
+      resourceId: datasetId,
+      details: JSON.stringify({ problems }),
+    }).run();
+  } catch {
+    // The returned warning is then the only record, which is why it is returned
+    // to the caller rather than logged.
+  }
+  return `${datasetId} was de-anonymized but a version identifier minted during the blind may still be RESERVED: ${joined}. A reserved DOI does not resolve, and the dataset page now links it. Approve the request again to retry -- a run whose steps are all complete still retries this.`;
 }
 
 export async function runPublicationApproval(args: ApproveRunArgs): Promise<RespondOutcome> {
@@ -2162,11 +2372,20 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     // re-run" had no way to re-run it, and no other code path re-checks a
     // de-anonymized row (the sweep selects `anonymous = 1`).
     const retryWarning = await stampZarrRequeue(db, datasetId, anonymousRelease);
+    // And the other tail job, for the same reason: its warning tells the admin
+    // to approve again, so approving again has to be what retries it.
+    const retryVersionWarning = await completeConcealedEraVersionDois(
+      env,
+      db,
+      datasetId,
+      anonymousRelease,
+    );
+    const retryWarnings = [retryWarning, retryVersionWarning].filter(Boolean);
     return c.json({
       message: "All steps already completed",
       dataset_id: datasetId,
       status: "published",
-      ...(retryWarning ? { warnings: [retryWarning] } : {}),
+      ...(retryWarnings.length > 0 ? { warnings: retryWarnings } : {}),
     });
   }
 
@@ -2338,6 +2557,17 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // "Anonymous (withheld until publication)" from zarr.nemar.org indefinitely.
   const zarrRequeueWarning = await stampZarrRequeue(db, datasetId, anonymousRelease);
 
+  // Finish the reservations the blind left behind, now that `version_doi` has
+  // dealt with the version being published and the concept record is public.
+  // After that step, not before: it is the one that refreshes the concept
+  // record's `HasVersion` list, and it reads `dataset_versions` to build it.
+  const concealedEraDoiWarning = await completeConcealedEraVersionDois(
+    env,
+    db,
+    datasetId,
+    anonymousRelease,
+  );
+
   // Mark as published
   await db
     .prepare(
@@ -2376,7 +2606,12 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   const auditWarning = auditLogFailed
     ? `Audit log write failed: ${auditLogError}. Publication succeeded but was not logged for compliance.`
     : undefined;
-  const responseWarnings = [auditWarning, c.notifyUserWarning, zarrRequeueWarning].filter(Boolean);
+  const responseWarnings = [
+    auditWarning,
+    c.notifyUserWarning,
+    zarrRequeueWarning,
+    concealedEraDoiWarning,
+  ].filter(Boolean);
 
   return c.json({
     message: "Dataset published successfully",

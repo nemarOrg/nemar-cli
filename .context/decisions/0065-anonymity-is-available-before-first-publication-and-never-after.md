@@ -295,6 +295,45 @@ publishing.
 What changed is the discovery that the platform was ALSO not publishing the data, which the
 release is supposed to do.
 
+**A reservation made during the blind is a debt, and real publication settles ALL of them, not
+just the version it is publishing now.**
+This is the other half of #1447, and the half that only shows up on the second publication.
+`version_doi` mints and publishes the version it was handed; nothing in the run ever revisits an
+older `dataset_versions` row.
+Peer review is the process that produces a revision, so the ordinary shape at acceptance is
+`1.0.1` public beside a `1.0.0` that is still `reserved` -- and the moment `anonymous` clears,
+that older row stops being withheld by `VERSION_DOI_SQL` and the landing page renders it as a
+live `https://doi.org/...` anchor to an identifier that does not resolve.
+The withholding rule above was doing its job; what it was hiding did not stop being dead when
+it stopped being hidden.
+So publication now runs `completeConcealedEraVersionDois` as a tail job, once per
+`dataset_versions` row, through `createEzidVersionDoi` rather than a bespoke status flip:
+the reserved-to-public transition, the rebuilt DataCite document, the tombstone refusal and the
+concept record's `HasVersion` refresh are all paths that already exist and are already tested,
+and an identifier that is already public costs one call and changes nothing, which is what makes
+the whole thing safe to run twice.
+Every pre-existing row qualifies without a per-row marker, because `first_published_at` was NULL
+for the dataset's entire life until this run: the durable "was concealed" signal is
+`publication_requests.anonymous = 1`, since `anonymous` and `first_published_at` are rewritten in
+the same statement and neither can be read afterwards.
+
+Three properties of that tail job are decisions rather than implementation.
+It **refuses rather than publishes** when the repository cannot be read: `readRepoMetadata` does
+not throw, it degrades to `{ Name }`, and DataCite then renders a `(:unav)` creator -- acceptable
+for a mint whose alternative is no DOI, and the exact inversion of ADR 0041 on a dataset that was
+anonymous by choice, where it would read as deliberate.
+Reserved is recoverable by approving again; a public version DOI attributed to nobody is not.
+"Declares no authors" and "could not be read" are told apart by
+`BIDS_METADATA_UNAVAILABLE`, exported for this caller, and the second is the only one that stops
+the run.
+It is **bounded** at `MAX_CONCEALED_ERA_VERSION_DOIS` (10) registrar round trips, and it says so
+in the warning rather than silently doing part of the work.
+And it is **non-fatal**, following `stampZarrRequeue`: it returns a warning, writes an
+`audit_log` row, and is called from both the finalize block and the all-steps-complete early
+return, so "approve again to retry" is true rather than advice.
+Publication must not fail because a registrar was down, but an identifier the dataset page now
+links has to be reported when it is still dead.
+
 **"No surface" is literal, and it took a review to make it true.** The reserved identifier and
 the private repository were each withheld by one surface and served raw by three others, twice
 in the SAME HTTP response: the page bundle carried `external_links.github_url: null` beside
@@ -353,4 +392,7 @@ minted the permanent identifier with no authors.
   `backend/test/anonymity-publication-paths.test.ts` (every path to public carries the stamp,
   and the step set, the mint interlock and the repo-spec visibility),
   `backend/test/anonymous-release.test.ts` (the request route and the catalog, driven through
-  the real app on a real database, each with a control)
+  the real app on a real database, each with a control),
+  `backend/test/concealed-era-version-dois.test.ts` (settling the reservations the blind left
+  behind, against local EZID and GitHub stand-ins that record what went on the wire, with the
+  reads-nothing refusal and its declares-no-authors control)

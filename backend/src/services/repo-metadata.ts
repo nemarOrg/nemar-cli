@@ -71,6 +71,21 @@ export interface RepoMetadataResult {
 }
 
 /**
+ * Prefix of the one warning that means "nothing was read", as opposed to "what
+ * was read is thin".
+ *
+ * `readRepoMetadata` never throws: a failed read degrades to the `{ Name }`
+ * fallback and a warning, which DataCite then renders with a `(:unav)` creator.
+ * That is a fine outcome for a mint whose alternative is no DOI at all, and the
+ * wrong one for a caller deciding whether to make an identifier PUBLIC -- for
+ * that, "this dataset declares no authors" and "we could not read what it
+ * declares" have to be told apart, and the returned description alone cannot do
+ * it. Exported for the callers that must refuse rather than publish a placeholder
+ * (`completeConcealedEraVersionDois`).
+ */
+export const BIDS_METADATA_UNAVAILABLE = "BIDS metadata unavailable";
+
+/**
  * Read both dataset_description.json and nemar_metadata.json from a GitHub repo.
  * Combines them into BIDS description and DataCite enrichment.
  * Returns warnings for any non-fatal errors encountered.
@@ -147,7 +162,7 @@ export async function readRepoMetadata(
     }
   } catch (error) {
     warnings.push(
-      `BIDS metadata unavailable: ${errorMessage(error)}. DOI minted with minimal metadata.`,
+      `${BIDS_METADATA_UNAVAILABLE}: ${errorMessage(error)}. DOI minted with minimal metadata.`,
     );
   }
 

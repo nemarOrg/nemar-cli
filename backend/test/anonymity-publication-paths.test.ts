@@ -533,6 +533,41 @@ describe("an anonymous release is a publication minus the steps that expose iden
     expect(requeueAt).toBeGreaterThan(doiAt);
   });
 
+  test("the reservations the blind left behind are finished at BOTH ends of the run", () => {
+    // An anonymous release mints its version identifier and leaves it reserved,
+    // and review is exactly the process that produces a revision -- so at real
+    // publication the ordinary shape is a public `1.0.1` beside a still-reserved
+    // `1.0.0` whose `dataset_versions` row has stopped being withheld. Nothing
+    // else revisits it: the `version_doi` step only ever names the version being
+    // published now, and the DOI reconcile sweep reads `latest_version_doi`
+    // alone. The dataset page then renders a live `https://doi.org/...` anchor
+    // for an identifier that does not resolve.
+    //
+    // AFTER the Zarr requeue, which is after `doi_create` and `version_doi` for
+    // the reasons above: `version_doi` is the step that rebuilds the concept
+    // record's HasVersion list out of `dataset_versions`.
+    //
+    // And on the all-steps-complete path as well, which is the second call. The
+    // warning this returns tells the admin to approve again, so approving again
+    // has to be the thing that retries it -- a run with nothing left to do
+    // returns before the finalize block ever executes.
+    //
+    // Source-order and call-site check only; the writes are exercised
+    // behaviorally in `concealed-era-version-dois.test.ts`.
+    const zarrAt = ORCHESTRATOR.indexOf("const zarrRequeueWarning = await stampZarrRequeue(");
+    const completeAt = ORCHESTRATOR.indexOf(
+      "const concealedEraDoiWarning = await completeConcealedEraVersionDois(",
+    );
+    expect(zarrAt).toBeGreaterThan(-1);
+    expect(completeAt).toBeGreaterThan(zarrAt);
+    expect(ORCHESTRATOR.split("await completeConcealedEraVersionDois(").length - 1).toBe(2);
+    // The other call site, and its warning reaching the body rather than a log.
+    expect(ORCHESTRATOR).toContain(
+      "const retryWarnings = [retryWarning, retryVersionWarning].filter(Boolean);",
+    );
+    expect(ORCHESTRATOR).toContain("    concealedEraDoiWarning,\n  ].filter(Boolean);");
+  });
+
   test("a blinded author list is an interlock on the mint, not only a step order", () => {
     // The ordering above is enforced by where the steps sit. This is the same
     // rule as a state check, so a retry, a resume or a future reordering
