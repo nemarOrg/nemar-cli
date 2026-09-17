@@ -267,11 +267,16 @@ export async function mintEzidVersionDoi(
   );
 
   // Not written for a concealed deposit (#1447). The column means "the version
-  // DOI that is PUBLISHED", and is read as exactly that by `archive-retry.ts`
-  // (`latest_version_doi IS NOT NULL` selects datasets with a released version)
-  // and by `import-integrity.ts` (`versionFromDoi` derives the version from
-  // it). Putting a non-resolving identifier there would change what both mean.
-  // The identifier is deterministic, so the real publication re-derives it.
+  // DOI that is PUBLISHED", and putting a non-resolving identifier there would
+  // change what it means for every reader. The identifier is deterministic, so
+  // the real publication re-derives it.
+  //
+  // Two sweeps used the column as a stand-in for "this dataset has a version at
+  // all" and so could not see a concealed release; both now resolve the version
+  // through `resolveCurrentVersion`, which falls back to `dataset_versions` --
+  // the row the manifest job below inserts. `doi-reconcile.ts` deliberately does
+  // NOT follow: for that one, not seeing these rows is the protection, and its
+  // refusal is on the row so a later widening cannot route around it.
   if (!reserveOnly) {
     await env.DB.prepare(
       "UPDATE datasets SET latest_version_doi = ?, updated_at = datetime('now') WHERE id = ?",

@@ -265,14 +265,31 @@ Measured on the dev worker while building `nm099998`, against a normally publish
 the same worker.
 The step now runs and mints the version identifier `reserved`, exactly as `doi_create` already
 leaves the concept identifier, so the data is reachable and no identifier resolves.
-Two surfaces had to follow: `extensions.nemar.versions[].doi` on the public `metadata.json`,
-which sat three lines below the `dataset_doi` that WAS withheld and had no rule of its own
-because the array was necessarily empty for a concealed deposit until now; and
-`latest_version_doi`, which `SELECT d.*` carries into the detail response.
-That column is left NULL rather than filled, because `archive-retry.ts` reads
-`latest_version_doi IS NOT NULL` as "has a released version" and `import-integrity.ts` derives
-the version from it; it means the version DOI that is PUBLISHED, and a concealed deposit has
-none.
+Four surfaces had to follow, and the first count of them was two, which is the reason this
+paragraph now names them.
+THREE public readers each held their own copy of
+`SELECT version, doi, created_at FROM dataset_versions` and none of them withheld it:
+`extensions.nemar.versions[].doi` on `metadata.json`, which sat three lines below the
+`dataset_doi` that WAS withheld and had no rule of its own because the array was necessarily
+empty for a concealed deposit until now;
+the landing page, which renders each row's DOI as a live `https://doi.org/...` anchor and so
+handed a reviewer a one-click dead identifier;
+and the page bundle, which carries the rows twice in one response.
+The rule and the statement are now each declared once, as `VERSION_DOI_SQL` and
+`PUBLIC_DATASET_VERSIONS_SQL`, with a source scanner refusing a fourth hand-spelled copy.
+The fourth surface is `latest_version_doi`, which `SELECT d.*` carries into the detail response.
+That column is left NULL rather than filled: it means the version DOI that is PUBLISHED, and a
+concealed deposit has none.
+Leaving it NULL has a cost, and the cost is paid rather than avoided.
+Two daily sweeps used the column as a stand-in for "this dataset has a version at all" and so
+could not see a released concealed deposit: `archive-retry.ts` would never re-dispatch its
+failed archive, and `import-integrity.ts` could not resolve a version to read a manifest for,
+so no caller of `verifyDatasetVersionS3` could reach a `data_complete` verdict for one.
+Both now resolve the version through `resolveCurrentVersion`, which falls back to
+`dataset_versions`.
+`doi-reconcile.ts` deliberately does NOT follow: for that sweep, not seeing these rows is the
+protection, and its refusal is `isAnonymous(row)` in the loop precisely so a later widening of
+its candidate query cannot route around it.
 The reasoning that makes this safe is the one already stated above: reserving is not
 publishing.
 What changed is the discovery that the platform was ALSO not publishing the data, which the

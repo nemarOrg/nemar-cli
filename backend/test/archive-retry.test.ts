@@ -15,6 +15,7 @@ import {
   ARCHIVE_RETRY_SWEEP_QUERY,
   MAX_ARCHIVE_RETRIES,
   decideArchiveRetry,
+  resolveCurrentVersion,
   versionFromDoi,
 } from "../src/services/archive-retry";
 
@@ -96,6 +97,38 @@ describe("versionFromDoi", () => {
   });
 });
 
+describe("resolveCurrentVersion", () => {
+  test("prefers the published version DOI", () => {
+    expect(
+      resolveCurrentVersion({
+        latest_version_doi: "10.82901/nemar.nm000111.v1.0.1",
+        recorded_version: "0.9.0",
+      }),
+    ).toBe("1.0.1");
+  });
+
+  test("falls back to the recorded version when no DOI is published", () => {
+    // The shape an anonymous release leaves behind (#1447): a dataset_versions
+    // row from the manifest callback, and latest_version_doi still NULL.
+    expect(resolveCurrentVersion({ latest_version_doi: null, recorded_version: "1.0.0" })).toBe(
+      "1.0.0",
+    );
+    // A concept DOI in the column has no .vX.Y.Z suffix, so it resolves nothing
+    // and the recorded version is still the right answer.
+    expect(
+      resolveCurrentVersion({
+        latest_version_doi: "10.82901/nemar.nm000111",
+        recorded_version: "1.0.0",
+      }),
+    ).toBe("1.0.0");
+  });
+
+  test("returns null when neither source has a version", () => {
+    expect(resolveCurrentVersion({ latest_version_doi: null, recorded_version: null })).toBeNull();
+    expect(resolveCurrentVersion({})).toBeNull();
+  });
+});
+
 const MIGRATIONS_DIR = join(import.meta.dir, "../src/db/migrations");
 
 function freshDb(): Database {
@@ -142,6 +175,20 @@ function insertDataset(
   );
 }
 
+/** A manifest-callback row: what a released version leaves in D1 (#1447). */
+function seedVersion(
+  db: Database,
+  datasetId: string,
+  version: string,
+  doi: string,
+  createdAt?: string,
+): void {
+  db.prepare(
+    `INSERT INTO dataset_versions (dataset_id, version, doi, provider, created_at)
+     VALUES (?, ?, ?, 'ezid', COALESCE(?, datetime('now')))`,
+  ).run(datasetId, version, doi, createdAt ?? null);
+}
+
 describe("migration 0040: archive_retry_count", () => {
   let db: Database;
   beforeEach(() => {
@@ -175,10 +222,19 @@ describe("ARCHIVE_RETRY_SWEEP_QUERY", () => {
     db = freshDb();
   });
 
+  interface SweptRow {
+    dataset_id: string;
+    latest_version_doi: string | null;
+    recorded_version: string | null;
+    archive_retry_count: number;
+  }
+
+  function sweepRows(): SweptRow[] {
+    return db.prepare(ARCHIVE_RETRY_SWEEP_QUERY).all(MAX_ARCHIVE_RETRIES) as SweptRow[];
+  }
+
   function sweepIds(): string[] {
-    return (
-      db.prepare(ARCHIVE_RETRY_SWEEP_QUERY).all(MAX_ARCHIVE_RETRIES) as { dataset_id: string }[]
-    ).map((r) => r.dataset_id);
+    return sweepRows().map((r) => r.dataset_id);
   }
 
   test("selects a failed, versioned, under-cap, stale-checked dataset", () => {
@@ -231,5 +287,74 @@ describe("ARCHIVE_RETRY_SWEEP_QUERY", () => {
       archive_checked_at: "2999-01-01 00:00:00", // checked in the (far) future -> not stale
     });
     expect(sweepIds()).toEqual([]);
+  });
+
+  test("selects a released ANONYMOUS deposit: no version DOI, but a version row", () => {
+    // The exact shape #1447 leaves: the release cut a tag and generated an
+    // archive, the manifest callback inserted the version, and
+    // latest_version_doi stays NULL because the identifier is reserved. Keying
+    // off the column alone made this dataset's failed archive unreachable.
+    insertDataset(db, {
+      dataset_id: "nm099998",
+      archive_status: "failed",
+      latest_version_doi: null,
+      archive_retry_count: 0,
+      archive_checked_at: null,
+    });
+    seedVersion(db, "nm099998", "1.0.0", "10.5072/fk2nemar.nm099998.v1.0.0");
+    expect(sweepRows()).toEqual([
+      {
+        dataset_id: "nm099998",
+        latest_version_doi: null,
+        recorded_version: "1.0.0",
+        archive_retry_count: 0,
+      },
+    ]);
+  });
+
+  test("a failed dataset with neither source is still excluded", () => {
+    // The budget guard: LIMIT 20 is the whole run, so a row that could never be
+    // dispatched must not take a slot. This is the control for the widening --
+    // it is only the version ROW that admits nm000021, not the widening itself.
+    insertDataset(db, {
+      dataset_id: "nm000020",
+      archive_status: "failed",
+      latest_version_doi: null,
+      archive_checked_at: null,
+    });
+    insertDataset(db, {
+      dataset_id: "nm000021",
+      archive_status: "failed",
+      latest_version_doi: null,
+      archive_checked_at: null,
+    });
+    seedVersion(db, "nm000021", "2.1.0", "10.82901/nemar.nm000021.v2.1.0");
+    expect(sweepIds()).toEqual(["nm000021"]);
+  });
+
+  test("the recorded version is the newest row, and the published DOI still wins", () => {
+    insertDataset(db, {
+      dataset_id: "nm000030",
+      archive_status: "failed",
+      latest_version_doi: null,
+      archive_checked_at: null,
+    });
+    // Out of semver order on purpose: ORDER BY created_at DESC, not by string.
+    seedVersion(db, "nm000030", "1.10.0", "10.82901/nemar.nm000030.v1.10.0", "2026-01-02 00:00:00");
+    seedVersion(db, "nm000030", "1.9.0", "10.82901/nemar.nm000030.v1.9.0", "2026-01-01 00:00:00");
+
+    insertDataset(db, {
+      dataset_id: "nm000031",
+      archive_status: "failed",
+      latest_version_doi: "10.82901/nemar.nm000031.v3.0.0",
+      archive_checked_at: null,
+    });
+    seedVersion(db, "nm000031", "2.0.0", "10.82901/nemar.nm000031.v2.0.0");
+
+    const byId = new Map(sweepRows().map((r) => [r.dataset_id, r]));
+    expect(byId.get("nm000030")?.recorded_version).toBe("1.10.0");
+    // Both sources present: resolveCurrentVersion prefers the published one, so
+    // the retry rebuilds v3.0.0 and not the stale version row.
+    expect(resolveCurrentVersion(byId.get("nm000031") as SweptRow)).toBe("3.0.0");
   });
 });
