@@ -139,26 +139,31 @@ export function realDatasetServiceGate(user: { service_access: number }): Upload
 }
 
 export const EXPLICIT_ID_PRODUCTION_ERROR = {
-  error: "Explicit dataset ids are not available in production",
+  error: "explicit_id_not_available_in_production",
   message:
     "A dataset id is allocated, never chosen. Naming one is a non-production fixture affordance (ADR 0068).",
 } as const;
 
 export const EXPLICIT_ID_ADMIN_ERROR = {
-  error: "Admin role required to name a dataset id",
-  message: "Standing fixtures are created by an administrator, not by a depositor.",
+  error: "explicit_id_requires_admin",
+  message:
+    "Naming a dataset id requires the admin role. Standing fixtures are created by an administrator, not by a depositor.",
 } as const;
 
 export const EXPLICIT_ID_NOT_DEV_OWNED_ERROR = {
-  error: "Dataset id is reserved but not declared dev-owned",
+  error: "explicit_id_not_dev_owned",
   message:
-    "Add it to DEV_OWNED_FIXTURE_IDS first (ADR 0068, #1440). Until a fixture is declared, production treats its pushes as its own and the dev worker refuses them.",
+    "That id is reserved but not declared dev-owned. Add it to DEV_OWNED_FIXTURE_IDS first (ADR 0068, #1440): until a fixture is declared, production treats its pushes as its own and the dev worker refuses them.",
 } as const;
 
 export const EXPLICIT_ID_NOT_RESERVED_ERROR = {
-  error: "Dataset id is not in the reserved fixture band",
+  error: "explicit_id_not_reserved",
   message:
-    "Only ids the allocator can never mint may be named: nm099900-nm099999 and xx099900-xx099999 (ADR 0068).",
+    // I-12: names the SECOND requirement too. The earlier message advertised
+    // the whole reserved band, so an operator picked nm099997 -- the next
+    // standing fixture ADR 0068 designates -- and hit a refusal this sentence
+    // had not predicted.
+    "Only ids the allocator can never mint may be named: nm099900-nm099999 and xx099900-xx099999 (ADR 0068). A reserved nm id must also be declared in DEV_OWNED_FIXTURE_IDS before it can be created.",
 } as const;
 
 /**
