@@ -330,9 +330,9 @@ The requests have no such bound.
 `PRIOR_ANONYMOUS_REQUEST_SQL` asks whether this dataset was EVER under the blind, and it is
 deliberately unfiltered by `status`, because no status in this state machine separates a run that
 happened from one that did not: the deny route accepts a request that is already `approving`, so a
-release that reserved an identifier and then failed can be denied afterwards, and `blocked` is
-written both before a run and by the orchestrator mid-run, with `publication-sweep` moving a blocked
-row back to `requested`.
+release that reserved an identifier and then failed can be denied afterwards,
+and `blocked` is written both before a run and by the orchestrator mid-run,
+with `publication-sweep` moving a blocked row back to `requested`.
 Both callers of that statement fail in one direction only.
 A false positive costs an idempotent pass, an attribution restore that rewrites what is already
 there or an EZID call that answers `return_public`; a false negative publishes a permanent record
