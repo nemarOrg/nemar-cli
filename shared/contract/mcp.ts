@@ -594,6 +594,12 @@ export const SEARCH_DATASETS_FILTER_PARAMS: readonly string[] = [
  * combined in one call; a test pins the cap at no less than `FACETS.length`,
  * so growing the vocabulary forces this number to be revisited rather than
  * quietly making that sentence false.
+ *
+ * Deliberately NOT applied to `GET /datasets` or the CLI. A person combining
+ * every flag they have is doing something reasonable, and they already get a
+ * legible failure from `assertBoundParamBudget` if they ever reach it. This is
+ * an affordance for a caller that cannot read a stack trace and has to decide
+ * what to try next, which is the MCP surface and only it.
  */
 export const SEARCH_DATASETS_MAX_FILTERS = 20;
 
