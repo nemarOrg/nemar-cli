@@ -170,6 +170,29 @@ export const NEVER_DEV_OWNED_IDS: ReadonlySet<string> = Object.freeze(
 ) as ReadonlySet<string>;
 
 /**
+ * The id a test may rely on being ABSENT, forever.
+ *
+ * Four live tests picked `nm099998` for this, each commented "valid format
+ * within the cap, but unlikely to be allocated". Unlikely is a guess, and this
+ * epic then designated that exact id as the standing anonymous deposit, so
+ * building the fixture turned four passing tests red at once. A test that needs
+ * a 404 needs an id that CANNOT become real, not one that probably will not.
+ *
+ * `nm099900` is the FLOOR of the reserved band, and both halves of that matter.
+ * Reserved means `generateDatasetId` can never return it (ADR 0068), so no
+ * upload will ever claim it. The floor specifically, because fixtures are
+ * assigned DOWNWARD from `nm099999`, so it is the last id in the band a fixture
+ * would ever reach -- and naming it here is what stops one from reaching it,
+ * since `explicitDatasetIdGate` also requires membership in
+ * `DEV_OWNED_FIXTURE_IDS`, which this must never join.
+ *
+ * Exported so the tests import the declaration rather than re-guessing. A
+ * future fixture that wants this id has to delete this constant and find the
+ * four tests, which is the point.
+ */
+export const ABSENT_DATASET_ID = formatDatasetId("nm", RESERVED_FIXTURE_FLOOR);
+
+/**
  * True when the non-production worker OWNS this dataset: it may delete it, its
  * webhook deliveries belong to dev, and production must not act on them.
  *

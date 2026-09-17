@@ -9,9 +9,13 @@
 --     it so, later, when an admin approves. Reading `datasets.anonymous` at
 --     approval would therefore always say "no".
 --   * The two publications are different runs. An anonymous release skips the
---     steps that expose identity (publish_doi, upload_to_zenodo, version_doi)
---     and keeps the repository private; a normal one does neither. The
---     orchestrator picks the step set from this column.
+--     steps that expose identity and keeps the repository private; a normal one
+--     does neither. The orchestrator picks the step set from this column, which
+--     `shared/publication-steps.ts` declares -- and this comment does not
+--     restate, because the first version of it did and went stale within the
+--     epic: it named `version_doi` as skipped, and #1447 put that step back
+--     (the anonymous release mints its version identifier RESERVED, because
+--     that step is what dispatches the central manifest).
 --   * A request is a durable record of what a person asked for. After the
 --     deposit is de-anonymized and published, `datasets.anonymous` is 0, and
 --     without this column the history would read as though the anonymous

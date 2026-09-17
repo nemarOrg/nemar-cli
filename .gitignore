@@ -83,3 +83,14 @@ docs-live/
 # accident twice now (dropped once in 745059e), so ignore it rather than rely
 # on remembering to unstage it.
 deno.lock
+
+# A dataset downloaded into the checkout root. `nemar dataset download <id>`
+# defaults its output to `./<dataset-id>`, and three live CLI tests run it from
+# wherever the suite was started, so a full run in a worktree leaves a complete
+# git-annex clone beside the source. One got committed as a gitlink before this
+# line existed; git-annex marks its objects read-only, so cleaning it up needs a
+# chmod first, which is exactly the kind of thing to not rely on remembering.
+/nm0*/
+/xx0*/
+/on0*/
+/ds0*/

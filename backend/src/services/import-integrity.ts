@@ -18,7 +18,7 @@
  */
 
 import type { Bindings } from "../types/bindings.js";
-import { versionFromDoi } from "./archive-retry.js";
+import { resolveCurrentVersion } from "./archive-retry.js";
 import { type PresignedUrlOptions, getManifest, listObjectSizes } from "./s3.js";
 
 /**
@@ -277,10 +277,23 @@ export async function verifyDatasetVersionS3(
 
   let resolvedVersion = version ?? null;
   if (!resolvedVersion) {
-    const row = await env.DB.prepare("SELECT latest_version_doi FROM datasets WHERE dataset_id = ?")
+    // Both columns, one rule (`resolveCurrentVersion`). Reading only
+    // `latest_version_doi` resolved nothing for a released ANONYMOUS deposit,
+    // which leaves that column NULL on purpose (#1447), so every caller that
+    // omits `version` -- the import-retry engine, the availability report, the
+    // issue sweep, the admin verify route -- fell to the `expected: null` path
+    // and could never reach a `data_complete` verdict for one. The version
+    // artifact it goes on to read exists for those deposits: the manifest job
+    // that wrote it is the same step that inserted the `dataset_versions` row.
+    const row = await env.DB.prepare(
+      `SELECT latest_version_doi,
+              (SELECT version FROM dataset_versions dv WHERE dv.dataset_id = datasets.dataset_id
+               ORDER BY created_at DESC LIMIT 1) AS recorded_version
+         FROM datasets WHERE dataset_id = ?`,
+    )
       .bind(datasetId)
-      .first<{ latest_version_doi: string | null }>();
-    resolvedVersion = versionFromDoi(row?.latest_version_doi ?? null);
+      .first<{ latest_version_doi: string | null; recorded_version: string | null }>();
+    resolvedVersion = row ? resolveCurrentVersion(row) : null;
   }
 
   let expected: Record<string, ExpectedManifestFile> | null = null;

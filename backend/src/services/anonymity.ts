@@ -156,19 +156,30 @@ export const ANONYMOUS_AUTHORS_LABEL = "Anonymous (withheld until publication)";
 export const ANONYMOUS_DEPOSIT_REASON = "anonymous_deposit";
 
 /**
- * The two identifiers a concealed deposit must not advertise to the public.
+ * The identifiers a concealed deposit must not advertise to the public.
  *
- * Neither NAMES the depositor, which is why they are handled here rather than
- * by a writer: `github_repo` points at a repository that is private (so the
- * URL 404s while still disclosing that a repo exists under a predictable
- * name), and `concept_doi` is registered `reserved` at EZID, so it does not
- * resolve and must not be cited. `data-router.ts` already withholds both from
- * `external_links`; this is the same rule for the catalog projections, which
- * serve the raw columns.
+ * None of them NAMES the depositor, which is why they are handled here rather
+ * than by a writer: `github_repo` points at a repository that is private (so
+ * the URL 404s while still disclosing that a repo exists under a predictable
+ * name), and `concept_doi` and `latest_version_doi` are registered `reserved`
+ * at EZID, so they do not resolve and must not be cited. `data-router.ts`
+ * already withholds the first two from `external_links`; this is the same rule
+ * for the catalog projections, which serve the raw columns.
+ *
+ * `latest_version_doi` joined the list with #1447. Before that, an anonymous
+ * release skipped `version_doi` entirely, so the column was always NULL on a
+ * concealed row and the gap was invisible; the release now mints the version
+ * identifier RESERVED (it is also the only thing that dispatches the manifest
+ * job), so the column is populated and non-resolving, which is exactly the
+ * shape this rule exists for. The detail route reaches it through `SELECT d.*`
+ * without naming it anywhere, which is why the rule is applied over the
+ * assembled payload rather than written into each projection.
  *
  * Conditional on the VIEWER, unlike every other rule in this module, and that
- * is deliberate: anonymity is toward the public, never toward NEMAR or toward
- * the depositor themselves (requirement R5). `nemar dataset clone`, `commit`,
+ * is deliberate: anonymity is toward the public, never toward NEMAR
+ * (requirement R5) and never toward the depositor, which R5 does not say and
+ * which follows instead from what the depositor has to do next.
+ * `nemar dataset clone`, `commit`,
  * `push` and `ci` all read `github_repo` from these routes, and the depositor
  * needs exactly those commands to restore their attribution and end the
  * anonymity. Withholding from the owner would break the documented way out.
@@ -183,6 +194,7 @@ export function withheldWhileAnonymous<T extends Record<string, unknown>>(
     ...("github_repo" in row ? { github_repo: null } : {}),
     ...("concept_doi" in row ? { concept_doi: null } : {}),
     ...("doi" in row ? { doi: null } : {}),
+    ...("latest_version_doi" in row ? { latest_version_doi: null } : {}),
   };
 }
 
@@ -231,6 +243,44 @@ export const OWNER_GITHUB_SQL =
  * `d` must be the `datasets` alias, as with the owner projections above.
  */
 export const CONCEPT_DOI_SQL = "CASE WHEN d.anonymous = 1 THEN NULL ELSE d.concept_doi END";
+
+/**
+ * A version DOI, withheld for a concealed deposit, as a SQL projection.
+ *
+ * The version-row twin of `CONCEPT_DOI_SQL`, and it exists for the reason that
+ * one exists: the rule was already written in TypeScript for the assembled
+ * catalog row (`withheldWhileAnonymous`, on `latest_version_doi`) and then not
+ * written for the three queries that read `dataset_versions` straight into a
+ * public response -- the landing page (`routes/data.ts`), `metadata.json`
+ * (same file), and the page bundle (`services/page-bundle.ts`). The landing
+ * page renders each row's DOI as a live `https://doi.org/...` anchor, so the
+ * miss handed a reader a one-click dead DOI for a deposit that had paid for
+ * concealment.
+ *
+ * It was unreachable before #1447. An anonymous release skipped `version_doi`
+ * wholesale, so a concealed deposit had NO version rows and every one of these
+ * queries returned an empty array. Minting the identifier reserved -- which
+ * the release now does, because that step is also the only thing that
+ * dispatches the manifest job -- populated the array and made the gap real.
+ *
+ * `dv` is the required alias for `dataset_versions` and `d` for `datasets`, so
+ * a site using this fragment must join the two. That join is on
+ * `dataset_versions`'s foreign key and every one of these callers has already
+ * loaded and gated the dataset row before it runs, so it neither costs nor
+ * hides anything.
+ *
+ * Unlike the concept projection this is NOT paired with a viewer check. All
+ * three sites are the public data plane, which serves one document to
+ * everyone; the depositor reads their own version DOI from
+ * `GET /datasets/:id/versions` (registered in `routes/datasets/manifests.ts`,
+ * whose file name is not its path), which requires authentication and then
+ * owner, collaborator or admin, and is deliberately left alone. R5 is about the
+ * ARCHIVE keeping the depositor's identity, so it is not the citation for this;
+ * the reason is narrower and specific to the blind: the depositor is not the
+ * audience it is kept from, and the commands that END the anonymity read these
+ * routes.
+ */
+export const VERSION_DOI_SQL = "CASE WHEN d.anonymous = 1 THEN NULL ELSE dv.doi END AS doi";
 
 /**
  * What a dataset's GitHub repository SHOULD be, which is not always what its
@@ -402,3 +452,36 @@ export async function markAnonymous(
  */
 export const END_ANONYMITY_AT_PUBLICATION_SQL =
   "anonymous = 0, first_published_at = COALESCE(first_published_at, datetime('now'))";
+
+/**
+ * Was this dataset EVER under the blind? Binds `dataset_id`.
+ *
+ * The durable answer, asked of the request history rather than of
+ * `datasets.anonymous`: the flag is cleared by
+ * {@link END_ANONYMITY_AT_PUBLICATION_SQL} inside the very step that needs the
+ * answer, so a retry re-reads a row that no longer remembers.
+ *
+ * **Deliberately unfiltered by status, and it cannot be narrowed.** The
+ * tempting predicate is "only a request the orchestrator actually ran", since
+ * `requested` and `denied` sound like requests that did nothing. Neither is a
+ * reliable signal in this state machine:
+ *
+ * - the deny route accepts `approving`, so a release that got as far as
+ *   `markAnonymous` -- or as far as reserving a version identifier -- and then
+ *   failed can be denied afterwards and end up `denied`;
+ * - `blocked` is written both at request time, before anything ran, and by the
+ *   orchestrator itself, and `publication-sweep` moves a `blocked` row back to
+ *   `requested`.
+ *
+ * So no status distinguishes "ran" from "did not", and the two callers both fail
+ * in one direction only. A false positive costs an idempotent pass: an
+ * attribution restore that rewrites what is already there, or an EZID call that
+ * returns `return_public` and changes nothing. A false negative publishes a
+ * permanent record citing the blinded label, or leaves a version DOI reserved
+ * behind a link the landing page renders as live. Both callers therefore ask
+ * this question, and something cheaper and provable -- `created_at` against
+ * `first_published_at`, which migration 0085's triggers make load-bearing --
+ * bounds the work instead.
+ */
+export const PRIOR_ANONYMOUS_REQUEST_SQL =
+  "SELECT 1 AS found FROM publication_requests WHERE dataset_id = ? AND anonymous = 1 LIMIT 1";

@@ -121,6 +121,25 @@ describe("POST /admin/datasets/exemplar", () => {
     expect(res.status).toBe(400);
   });
 
+  test("400 on anonymous: true, refused by name and before anything is created (#1434)", async () => {
+    // The field is still DECLARED, so the schema accepts it and the refusal has
+    // to come from the route. Asserting the error code rather than the status
+    // is what separates this from the `anonymous: false` case above, which is
+    // rejected by zod: both are 400, and only one of them proves the retirement
+    // check ran.
+    const res = await post(
+      "/admin/datasets/exemplar",
+      { dataset_id: EXEMPLAR, source_id: "nm000132", anonymous: true },
+      "development",
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "exemplar_anonymous_retired" });
+    // Refused before the GitHub call and before the INSERT, so there is nothing
+    // to roll back. A row here would mean the check moved below the create.
+    const row = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM datasets").get();
+    expect(row?.n).toBe(0);
+  });
+
   test("400 on a malformed source_id", async () => {
     const res = await post(
       "/admin/datasets/exemplar",

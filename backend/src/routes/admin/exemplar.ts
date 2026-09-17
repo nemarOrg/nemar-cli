@@ -42,26 +42,30 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
     name: z.string().min(1).max(200).optional(),
     description: z.string().optional(),
     /**
-     * DEPRECATED (#1433, ADR 0068); retired by #1434. Do not use it.
+     * RETIRED (#1434, ADR 0068). Still declared, and REFUSED when present.
      *
      * It created the fleet's standing ANONYMOUS deposit (#1407), which lived at
      * xx099907 until this field's premise was withdrawn: `xx` publishes only
      * through the exemplar exception, so an anonymous exemplar can take no
-     * publish path at all. A row created with this flag today is permanently
-     * unpublishable, and its refusal reads "Cannot publish sandbox datasets",
+     * publish path at all. A row created with this flag was permanently
+     * unpublishable, and its refusal read "Cannot publish sandbox datasets",
      * which names the band rather than the anonymity term that actually fired.
-     * `scripts/exemplar-fleet.json` declares no anonymous entry and its loader
-     * now refuses the key outright. The standing anonymous deposit is a reserved
-     * `nm` id built through the normal upload path.
+     * The standing anonymous deposit is now `nm099998`, a reserved `nm` id
+     * built through the normal upload path.
      *
-     * Original rationale, kept because the constraint it describes is still real:
+     * Declared rather than deleted BECAUSE the answer must not be silent. Zod
+     * strips an unknown key, so removing the field outright would take
+     * `anonymous: true` from a caller who means it, create a NAMED exemplar,
+     * and report success. That is the same failure `invalid_anonymous` refuses
+     * on the publication route: someone who asked to be concealed must never be
+     * told yes and published under their own name. `scripts/exemplar-fleet.json`
+     * and its loader refuse the key the same way (#1433).
      *
-     * Set at INSERT rather than flipped afterwards, because this is the only
-     * moment it is unconditionally legal: the row is brand new, so
-     * `first_published_at` is NULL and migration 0085's triggers allow it. An
-     * exemplar that has been through the normal publish-and-mint flow can
-     * never be made anonymous again, which is why the fleet declares this one
-     * up front instead of borrowing an existing entry.
+     * The constraint the original rationale described is still real, and is why
+     * this cannot be softened into "create it, then flip it": `anonymous = 1` is
+     * only unconditionally legal at INSERT, while `first_published_at` is NULL
+     * and migration 0085's triggers allow it. An exemplar that has been through
+     * the normal publish-and-mint flow can never be made anonymous again.
      */
     anonymous: z.literal(true).optional(),
   });
@@ -87,6 +91,21 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
     }
 
     const { dataset_id, source_id, name, description, anonymous } = c.req.valid("json");
+
+    // Refused before anything is created (#1434): no GitHub repository, no row,
+    // nothing to roll back. See the field's declaration for why it is refused
+    // rather than deleted.
+    if (anonymous) {
+      return c.json(
+        {
+          error: "exemplar_anonymous_retired",
+          message:
+            "An exemplar can no longer be created anonymous. The `xx` band publishes only through the exemplar exception, so an anonymous exemplar could take no publish path at all and was permanently stuck. The standing anonymous deposit is nm099998, built through the normal upload path (ADR 0068).",
+        },
+        400,
+      );
+    }
+
     const db = c.env.DB;
     const adminUser = c.get("user");
     const displayName = name || `[TEST COPY] ${source_id}`;
@@ -129,7 +148,10 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
           description || null,
           adminUser.id,
           githubRepo.full_name,
-          anonymous ? 1 : 0,
+          // Always 0: the only path that set it is refused above. Written as a
+          // literal rather than dropped from the statement so the column stays
+          // visible at the one place it could ever have been set.
+          0,
           source_id,
         )
         .run();

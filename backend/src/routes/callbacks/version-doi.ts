@@ -19,7 +19,7 @@ import {
 } from "../../services/central-manifest.js";
 import { refreshMetadataAfterVersionDoi } from "../../services/dataset-reindex.js";
 import { createEzidVersionDoi } from "../../services/doi.js";
-import { TEST_SHOULDER, conceptEzidIdentifier } from "../../services/ezid.js";
+import { conceptEzidIdentifier, isSandboxIdentifier } from "../../services/ezid.js";
 import { getDatasetsToken } from "../../services/github-auth.js";
 import { downloadReleaseArchive } from "../../services/github.js";
 import { generateManifest } from "../../services/manifest.js";
@@ -114,10 +114,14 @@ export function registerVersionDoiRoutes(webhooks: WebhookRouter): void {
       return c.json({ error: "Dataset not found" }, 404);
     }
 
-    // A version DOI is minted AND made public (`createEzidVersionDoi` calls
-    // `makePublic` unconditionally), which for a concealed deposit publishes a
-    // resolving DataCite record -- irreversible, and exactly what ADR 0067's
-    // invariant A6 forbids.
+    // A version DOI minted through THIS endpoint is made public, which for a
+    // concealed deposit publishes a resolving DataCite record -- irreversible,
+    // and exactly what ADR 0065's invariant A6 forbids. (`createEzidVersionDoi`
+    // gained a `reserveOnly` mode in #1447, used by the publication
+    // orchestrator's anonymous release so the manifest job still gets
+    // dispatched. This endpoint deliberately does NOT use it: a tag push is
+    // not a release decision, and the orchestrator is the one place entitled
+    // to mint for a concealed deposit.)
     //
     // The webhook dispatcher already decides this before fetching a token and
     // fails closed. This is the SAME rule at the endpoint that actually mints,
@@ -159,8 +163,7 @@ export function registerVersionDoiRoutes(webhooks: WebhookRouter): void {
     // handler below is unreachable and kept only until the follow-up removes
     // the retired zenodo paths. Auto-detect sandbox from the EZID test
     // shoulder prefix.
-    const sandboxPrefix = TEST_SHOULDER.replace(/^doi:/, "").split("/")[0];
-    const sandbox = conceptEzidIdentifier(dataset.concept_doi).includes(sandboxPrefix);
+    const sandbox = isSandboxIdentifier(conceptEzidIdentifier(dataset.concept_doi));
 
     return handleEzidVersionDoi(c, dataset, version, release_url, sandbox);
   });
@@ -380,6 +383,8 @@ async function handleEzidVersionDoi(
     description: string | null;
     github_repo: string | null;
     concept_doi: string | null;
+    /** See the async handler below: required so the field cannot be dropped. */
+    anonymous: number | null;
   },
   version: string,
   releaseUrl: string,
@@ -407,6 +412,12 @@ async function handleEzidVersionDoiAsync(
     description: string | null;
     github_repo: string | null;
     concept_doi: string | null;
+    // Carried, not dropped (#1447): `EzidVersionDoiDataset` requires it, and
+    // the mint reads it to decide published-vs-reserved. The caller has
+    // already refused an anonymous deposit outright, so the value reaching
+    // here is always 0 or NULL -- but a type that omitted the field would let
+    // a future caller that skipped the refusal publish one silently.
+    anonymous: number | null;
   },
   version: string,
   sandbox: boolean,

@@ -685,7 +685,7 @@ describe("the catalog withholds what it cannot make resolve", () => {
   });
 
   test("the owner keeps both, because they need them to end the anonymity", async () => {
-    // Anonymity is toward the public, never toward the depositor (R5).
+    // Anonymity is toward the public, and the depositor is not the public.
     // `nemar dataset clone`, `commit` and `push` all read `github_repo` from
     // this route, and those are the commands that restore attribution.
     const db = freshDb();

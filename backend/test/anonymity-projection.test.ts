@@ -33,7 +33,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
-import { OWNER_GITHUB_SQL, OWNER_USERNAME_SQL } from "../src/services/anonymity";
+import { OWNER_GITHUB_SQL, OWNER_USERNAME_SQL, VERSION_DOI_SQL } from "../src/services/anonymity";
 
 const SRC = join(import.meta.dir, "..", "src");
 
@@ -55,6 +55,18 @@ const READS_OWNER = /\b(?:u|users)\.(?:username|github_username)\b/;
 /** Is this a dataset query at all? */
 const DATASET_SCOPED = /\bdatasets\b|\bdataset_collaborators\b/i;
 const USES_THE_RULE = /OWNER_USERNAME_SQL|OWNER_GITHUB_SQL/;
+
+/**
+ * Reads a version DOI off `dataset_versions`.
+ *
+ * A bare `doi`, which is the only spelling that reaches the column: `\b`
+ * treats `_` as a word character, so `concept_doi`, `latest_version_doi` and
+ * `dataset_doi` do not match, and the many `SELECT version FROM
+ * dataset_versions` subqueries in `catalog.ts` do not either.
+ */
+const READS_VERSION_DOI = /\bdoi\b/;
+const VERSION_SCOPED = /\bdataset_versions\b/i;
+const USES_THE_VERSION_RULE = /VERSION_DOI_SQL|PUBLIC_DATASET_VERSIONS_SQL/;
 
 /**
  * Sites that resolve the real owner ON PURPOSE, each with the reason.
@@ -154,6 +166,100 @@ describe("owner identity is projected through one rule", () => {
     const uses = catalog.match(/\$\{OWNER_USERNAME_SQL\}/g) ?? [];
     expect(uses.length).toBeGreaterThanOrEqual(5);
     expect(catalog).toContain("${OWNER_GITHUB_SQL}");
+  });
+});
+
+/**
+ * Reads a version DOI on purpose, each with the reason.
+ *
+ * Same shape and same argument as `DELIBERATE_INTERNAL_READS` above: NEMAR has
+ * to keep knowing a concealed deposit's version identifier -- it minted it, it
+ * has to be able to tombstone it, complete it, or hand it back to the
+ * depositor. What must not happen is an ANONYMOUS-FACING projection carrying
+ * one, because a `reserved` identifier does not resolve.
+ */
+const DELIBERATE_VERSION_DOI_READS: Readonly<Record<string, string>> = {
+  "routes/datasets/manifests.ts":
+    "the `GET /:id/versions` handler: authenticated, then owner-or-collaborator-or-admin, and the depositor is entitled to their own version DOI",
+  "routes/callbacks/version-doi.ts":
+    "the callback that MINTS the identifier, reading back what it wrote; nothing it returns is a public projection",
+  "routes/admin/doi.ts":
+    "admin-only DOI tooling: builds the concept record's HasVersion relations and refreshes each version record at EZID",
+  "routes/admin/datasets-lifecycle.ts":
+    "admin-only backfill and manifest dispatch, both of which write the DOI INTO a manifest rather than into a response",
+  "services/central-manifest.ts":
+    "collects prior version DOIs to preserve the concept record's HasVersion relations",
+  "services/publication-orchestrator.ts": "the publish flow itself, which is where anonymity ends",
+  "services/anonymity-sweep.ts":
+    "the sweep that VERIFIES each version identifier is still `reserved` at EZID (ADR 0067); it reports to admins and stamps `sweep_stamps`, and a rule that withheld the DOI from it would blind the check to the thing it exists to check",
+  "services/withdraw.ts":
+    "admin withdrawal and restore, which must tombstone every version DOI including a reserved one",
+  // The manifest-generation family. Each reads the version DOI to EMBED it in
+  // the S3 manifest object, and the public route that serves that object
+  // (`GET /<id>/<v>/manifest.json`) returns only the per-file entries array --
+  // `VersionManifest.doi` and `.concept_doi` are not in its response shape.
+  // `ANONYMITY_DECLARED_SCOPE_LIMITS` records what is left of this: the S3
+  // object itself, which is not a NEMAR response.
+  "services/manifest-coverage.ts": "coverage report; the DOI goes into the manifest it regenerates",
+  "services/doctor/checks/missing-manifest.ts": "doctor check, same manifest payload",
+  "services/manifest-sweep.ts": "the cron form of the same check",
+};
+
+describe("a version DOI is projected through one rule", () => {
+  test("no public query reads a version doi by hand", () => {
+    const offenders: string[] = [];
+    for (const file of sourceFiles(SRC)) {
+      const rel = file
+        .slice(SRC.length + 1)
+        .split(sep)
+        .join("/");
+      // The constants themselves contain the column name, by construction.
+      if (rel === "services/anonymity.ts" || rel === "services/data-router.ts") continue;
+      if (DELIBERATE_VERSION_DOI_READS[rel]) continue;
+      const text = readFileSync(file, "utf8");
+      for (const match of text.matchAll(SQL_STATEMENT)) {
+        const statement = match[0];
+        if (!VERSION_SCOPED.test(statement)) continue;
+        if (!READS_VERSION_DOI.test(statement)) continue;
+        if (USES_THE_VERSION_RULE.test(statement)) continue;
+        offenders.push(`${rel}:${text.slice(0, match.index).split("\n").length}`);
+      }
+    }
+
+    expect(offenders).toEqual([]);
+  });
+
+  test("the scan matches the statements it claims to match", () => {
+    for (const [rel, reason] of Object.entries(DELIBERATE_VERSION_DOI_READS)) {
+      const text = readFileSync(join(SRC, ...rel.split("/")), "utf8");
+      const hits = [...text.matchAll(SQL_STATEMENT)].filter(
+        (m) =>
+          VERSION_SCOPED.test(m[0]) &&
+          READS_VERSION_DOI.test(m[0]) &&
+          !USES_THE_VERSION_RULE.test(m[0]),
+      );
+      expect(
+        hits.length,
+        `${rel} is allowlisted (${reason}) but has no matching statement`,
+      ).toBeGreaterThan(0);
+    }
+  });
+
+  test("the rule withholds only when the dataset is anonymous", () => {
+    // Pinned, like the owner projections: this string decides what three
+    // public surfaces disclose, and `dv` / `d` are the aliases every caller
+    // must supply.
+    expect(VERSION_DOI_SQL).toBe("CASE WHEN d.anonymous = 1 THEN NULL ELSE dv.doi END AS doi");
+  });
+
+  test("all three public readers share the one statement", () => {
+    // The landing page and metadata.json (routes/data.ts) and the page bundle.
+    // Each had its own copy of `SELECT version, doi, created_at FROM
+    // dataset_versions`, and the withholding was in none of them.
+    const data = readFileSync(join(SRC, "routes", "data.ts"), "utf8");
+    const bundle = readFileSync(join(SRC, "services", "page-bundle.ts"), "utf8");
+    expect((data.match(/PUBLIC_DATASET_VERSIONS_SQL/g) ?? []).length).toBeGreaterThanOrEqual(3);
+    expect(bundle).toContain("PUBLIC_DATASET_VERSIONS_SQL");
   });
 });
 
