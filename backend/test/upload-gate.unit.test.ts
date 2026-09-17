@@ -254,7 +254,10 @@ describe("explicitDatasetIdGate (ADR 0068, #1432)", () => {
       "xx000001",
       "xx090001",
       "xx099899",
-      "on008062",
+      // on099999 rather than on008062: the latter fails BOTH the prefix rule
+      // and the floor rule, so it cannot isolate the prefix term. This one is
+      // in the band numerically and refused only because `on` never allocates.
+      "on099999",
     ]) {
       expect(explicitDatasetIdGate({ ...ok, datasetId })).toEqual(EXPLICIT_ID_NOT_RESERVED_ERROR);
     }
