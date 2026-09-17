@@ -8,7 +8,7 @@
 
 import { SYSTEM_USER_ID } from "../lib/constants.js";
 import type { Bindings } from "../types/bindings.js";
-import { isDevRangeDatasetId, isValidDatasetId } from "./datasetId.js";
+import { isDevOwnedDatasetId, isValidDatasetId } from "./datasetId.js";
 import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { deleteRepository } from "./github.js";
@@ -80,11 +80,16 @@ export async function deleteDatasetCascade(
   // scheduledCleanup already fences its automated path by ID band; this is the
   // same fence at the single choke point every manual caller shares
   // (admin delete-dataset, admin bulk-delete, draft delete, import rollback).
-  // Non-production may only cascade ids it could have created itself, i.e. the
-  // dev sandbox partition (xx09NNNN, SANDBOX_ID_FLOOR=90001).
-  if (isNonProductionEnv(env) && !isDevRangeDatasetId(datasetId)) {
+  // Non-production may only cascade ids it OWNS: the dev sandbox partition
+  // (xx09NNNN, SANDBOX_ID_FLOOR=90001) plus the reserved fixtures declared
+  // dev-owned in datasetId.ts (#1440). The second term exists because a
+  // standing fixture at a reserved `nm` id is dev's to delete and rebuild, and
+  // without it the documented recovery for a failed fixture build -- delete,
+  // then recreate -- was refused on the only worker that could run it.
+  // nm099999 is NOT dev-owned and stays refused here: production has it too.
+  if (isNonProductionEnv(env) && !isDevOwnedDatasetId(datasetId)) {
     throw new ProdRepoFenceError(
-      `Refusing to delete "${datasetId}" from a non-production worker: cascade deletion removes the GitHub repository nemarDatasets/${datasetId}, which is shared with production. Non-production may only delete dev-range ids (xx090000-xx099999).`,
+      `Refusing to delete "${datasetId}" from a non-production worker: cascade deletion removes the GitHub repository nemarDatasets/${datasetId}, which is shared with production. Non-production may only delete ids it owns (xx090000-xx099999, plus its declared reserved fixtures).`,
     );
   }
 

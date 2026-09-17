@@ -8,7 +8,7 @@
  * intentional changes are import paths and the register-function wrapper.
  */
 
-import { isDevRangeDatasetId, isValidDatasetId } from "../../services/datasetId.js";
+import { isDevOwnedDatasetId, isValidDatasetId } from "../../services/datasetId.js";
 import { isNonProductionEnv } from "../../services/environment.js";
 import { getDatasetsToken } from "../../services/github-auth.js";
 import { triggerEnrichmentRun, triggerVersionDoiRun } from "../../services/github.js";
@@ -427,7 +427,14 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
     // !isNonProductionEnv (not ENVIRONMENT === "production") so the gate FAILS
     // CLOSED: an unset/typo'd ENVIRONMENT must still short-circuit rather than
     // let the prod worker dispatch against a dev-range repo it has no row for.
-    if (!isNonProductionEnv(c.env) && isDevRangeDatasetId(payload.repository?.name ?? "")) {
+    // isDevOwnedDatasetId, not isDevRangeDatasetId (#1440): the reserved `nm`
+    // fixtures are dev's too. Without this, a push to nemarDatasets/nm099998
+    // reaches the prod worker (org-level delivery) and is treated as prod's
+    // own, so prod dispatches enrichment / zarr / version-DOI runs for a
+    // repository it has no D1 row for -- and the version-DOI path picks its
+    // sandbox-vs-production EZID credentials from the DOI string rather than
+    // from ENVIRONMENT, which is the worst of those to get wrong.
+    if (!isNonProductionEnv(c.env) && isDevOwnedDatasetId(payload.repository?.name ?? "")) {
       if (c.env.DEV_WEBHOOK_MIRROR_URL) {
         // Forward the raw, still-HMAC-signed delivery to the dev worker (epic
         // #923) so it dispatches for staging exemplars. Outbound-only and
@@ -463,11 +470,18 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
         );
         return c.json({ ok: true, dispatched: false, reason: "dev_range_repo", forwarded: true });
       }
+      // The reason string keeps its name for stability (tests and logs pin it),
+      // though since #1440 it covers dev-OWNED repos rather than only dev-range
+      // ones: a reserved fixture like nm099998 short-circuits here too.
       return c.json({ ok: true, dispatched: false, reason: "dev_range_repo" });
     }
 
-    // The reciprocal fence: a NON-production worker may only act on dev-range
-    // repos. The forward above re-posts a still-valid HMAC delivery, and both
+    // The reciprocal fence: a NON-production worker may only act on repos it
+    // OWNS -- the dev sandbox range plus the reserved fixtures declared
+    // dev-owned in datasetId.ts (#1440). Before that second term the dev worker
+    // refused its OWN standing fixture, so the one dataset built to exercise
+    // the anonymity surfaces could never have enrichment run against it.
+    // The forward above re-posts a still-valid HMAC delivery, and both
     // workers share GITHUB_WEBHOOK_SECRET by design, so signature verification
     // alone cannot tell the dev worker "this one is not yours". Without this,
     // the only thing stopping the dev worker from dispatching real central
@@ -475,7 +489,7 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
     // sandbox-vs-production EZID credentials are chosen from the DOI string
     // rather than ENVIRONMENT) is GitHub's delivery configuration pointing at
     // prod — an operational control, not a code one.
-    if (isNonProductionEnv(c.env) && !isDevRangeDatasetId(payload.repository?.name ?? "")) {
+    if (isNonProductionEnv(c.env) && !isDevOwnedDatasetId(payload.repository?.name ?? "")) {
       return c.json({ ok: true, dispatched: false, reason: "prod_range_repo_on_dev_worker" });
     }
 
