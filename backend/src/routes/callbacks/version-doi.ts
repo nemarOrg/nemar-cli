@@ -116,7 +116,7 @@ export function registerVersionDoiRoutes(webhooks: WebhookRouter): void {
 
     // A version DOI minted through THIS endpoint is made public, which for a
     // concealed deposit publishes a resolving DataCite record -- irreversible,
-    // and exactly what ADR 0067's invariant A6 forbids. (`createEzidVersionDoi`
+    // and exactly what ADR 0065's invariant A6 forbids. (`createEzidVersionDoi`
     // gained a `reserveOnly` mode in #1447, used by the publication
     // orchestrator's anonymous release so the manifest job still gets
     // dispatched. This endpoint deliberately does NOT use it: a tag push is

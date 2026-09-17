@@ -535,14 +535,19 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
     const dispatched: Record<string, unknown> = {};
     const errors: Record<string, string> = {};
 
-    // #1408: a version DOI is minted AND published in one pass
-    // (`services/doi.ts` calls `makePublic` unconditionally), so dispatching
-    // it for an anonymous deposit would put a resolving, harvested DataCite
-    // record into the world for the one dataset whose whole premise is that no
-    // identifier of it resolves yet. The publication orchestrator drops
-    // `version_doi` from an anonymous release's step set, but nothing stops the
-    // depositor from pushing a `v*` tag afterward -- `nemar dataset release`
-    // does exactly that -- and this handler would have obliged.
+    // #1408: the `run-version-doi` workflow this dispatches calls
+    // `POST /callbacks/version-doi`, which mints AND publishes -- it
+    // deliberately does not use the `reserveOnly` mode #1447 added, because a
+    // tag push is not a release decision. So dispatching for an anonymous
+    // deposit would put a resolving, harvested DataCite record into the world
+    // for the one dataset whose whole premise is that no identifier of it
+    // resolves yet.
+    //
+    // An anonymous release DOES mint its own version identifier, reserved, via
+    // the publication orchestrator (#1447: that step is what dispatches the
+    // central manifest). That is the one entitled minter. Nothing stops the
+    // depositor from pushing a `v*` tag as well -- `nemar dataset release` does
+    // exactly that -- and this handler would have obliged.
     //
     // Decided here, BEFORE the GitHub token is fetched, for two reasons: a
     // refusal needs no token, and a token outage must not be able to change

@@ -6,10 +6,13 @@
  * `PUBLICATION_STEPS` unconditionally. An admin approving an ANONYMOUS RELEASE
  * was therefore shown a sixteen-step plan including "Make repo public" and
  * "Publish DOI (irreversible)", neither of which happens, and then watched the
- * progress stop at 12 of 16 on a release that had finished. Measured on the
- * dev worker while building nm099998: the banner listed all sixteen and the
- * orchestrator ran twelve, skipping the four in
- * `ANONYMOUS_RELEASE_SKIPPED_STEPS`.
+ * progress stop short on a release that had finished. Measured on the dev
+ * worker while building nm099998: the banner listed all sixteen and the
+ * orchestrator ran ELEVEN, because the skip list then held five steps --
+ * `version_doi` was on it, which is the other half of #1447. With that step
+ * restored the set is the twelve `ANONYMOUS_RELEASE_STEPS` names, and the
+ * assertions below are written against the list rather than against either
+ * number, so removing a step from the skip list cannot make them stale.
  *
  * The live progress renderer was always right, because the backend hands it
  * the real step set. These two built their own.

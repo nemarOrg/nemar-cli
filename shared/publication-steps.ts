@@ -105,8 +105,10 @@ export const ANONYMOUS_RELEASE_STEPS: readonly PublicationStep[] = PUBLICATION_S
  * `nemar dataset publish status` both rendered `PUBLICATION_STEPS`
  * unconditionally, so an admin approving an anonymous release was shown a
  * 16-step plan including "Publish DOI (irreversible)" and "Make repo public",
- * and then watched it stop at 11 of 16 forever. Neither is what happens: the
- * repository stays private and no identifier is published. The live progress
+ * and then watched it stop at 11 of 16 forever -- 11 because the skip list held
+ * five steps when that was measured; it holds four now that `version_doi` is
+ * back. Neither line is what happens: the repository stays private and no
+ * identifier is published. The live progress
  * renderer had it right, because the backend tells it the real step set.
  */
 export function stepsForRelease(anonymous: boolean): readonly PublicationStep[] {

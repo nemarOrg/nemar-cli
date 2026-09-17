@@ -718,12 +718,15 @@ export interface AnonymitySweepSeams {
   /**
    * Lists the repository's git-tracked files at `main`.
    *
-   * The repository tree rather than the published version manifest, and the
-   * difference matters: an anonymous release skips `version_doi`, so no
-   * `dataset_versions` row and no published manifest exists for exactly the
-   * datasets this sweep is for. `main` is also the right ref on its own terms
-   * -- a concealed deposit's files keep changing there while its repository is
-   * private, because restoring attribution is a direct commit.
+   * The repository tree rather than the published version manifest, for two
+   * reasons that outlive #1447. Most concealed deposits have no manifest to
+   * read: a released one does now (the anonymous release reserves its version
+   * identifier precisely so the manifest job is dispatched), but a deposit
+   * spends the review it exists for UNRELEASED, with no `dataset_versions` row
+   * at all. And a manifest that does exist describes the tree as of the
+   * release, while `main` keeps moving -- a concealed deposit's files change
+   * there while its repository is private, because restoring attribution is a
+   * direct commit. The sweep has to see the current tree, not the released one.
    *
    * `null` means the listing could not be obtained, which the caller reports as
    * unchecked rather than as "no files".
@@ -1256,9 +1259,11 @@ function defaultZarrIndexReader(env: Bindings): AnonymitySweepSeams["fetchZarrIn
  *
  * Two GitHub `core` calls per dataset, which the candidate pool makes
  * affordable (anonymous deposits are rare and short-lived) and which the
- * published-manifest alternative cannot replace: an anonymous release skips
- * `version_doi`, so the `dataset_versions` row and the manifest that hangs off
- * it do not exist for these datasets at all.
+ * published-manifest alternative cannot replace. Since #1447 a RELEASED
+ * anonymous deposit does have a `dataset_versions` row and a manifest, but an
+ * unreleased one -- which is what a deposit under review is -- has neither, and
+ * a manifest is a snapshot of the release while this sweep has to answer for
+ * the tree as it stands today.
  *
  * Imported from `github/contents.js` rather than the `services/github` barrel
  * ON PURPOSE. `backend/test/manifest-small-root-files.test.ts` installs a

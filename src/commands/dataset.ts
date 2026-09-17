@@ -4138,9 +4138,11 @@ Examples:
         // still running -- exactly the visibility gap #284 calls out.
         //
         // And showing MORE than it runs is the mirror of that bug (#1447): an
-        // anonymous release skips four steps, so rendering all sixteen left
-        // this display stuck at 12 of 16 forever on a release that had
-        // finished. `anonymous` is already on the response, printed two lines
+        // anonymous release skips several steps, so rendering all sixteen left
+        // this display permanently short of its own total on a release that had
+        // finished. Stated without a count on purpose -- the count changed
+        // inside this very PR, from 11 to 12, when `version_doi` came off the
+        // skip list. `anonymous` is already on the response, printed two lines
         // above, so the right list was in hand and unused.
         const steps = stepsForRelease(result.anonymous === true);
         const completed = result.steps_completed || [];
