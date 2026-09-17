@@ -29,30 +29,33 @@ import type { SearchResult } from "../src/services/dataset-search";
 describe("search_datasets declares the whole filter surface", () => {
   const declared = new Set(Object.keys(searchDatasetsInputSchema.shape));
 
+  /** The bespoke filters ADR 0032 deliberately keeps OUT of the facet table,
+   *  minus `search` (spelled `query` on this surface). Hand-listed on purpose:
+   *  they have irregular semantics and no declared table to derive from, so
+   *  this list is the reminder to wire a new one through. It can only catch a
+   *  REMOVAL, never an omission; the stronger check is an equivalence test
+   *  against the HTTP route's own mapping, tracked separately. */
+  const BESPOKE_FILTERS = [
+    "modality",
+    "task",
+    "author",
+    "has_doi",
+    "has_hed",
+    "has_zarr",
+    "has_zarr_verified",
+    "data_complete",
+    "recent",
+    "license",
+    "include_unknown",
+  ];
+
   test("every declared facet is an accepted parameter", () => {
     const missing = FACETS.map((f) => f.queryParam).filter((q) => !declared.has(q));
     expect(missing).toEqual([]);
   });
 
   test("every bespoke catalog filter is an accepted parameter", () => {
-    // The nine ADR 0032 deliberately keeps OUT of the facet table, minus
-    // `search` (spelled `query` on this surface). These are hand-listed on
-    // purpose: they have irregular semantics and no declared table to derive
-    // from, so this list is the reminder to wire a new one through.
-    const bespoke = [
-      "modality",
-      "task",
-      "author",
-      "has_doi",
-      "has_hed",
-      "has_zarr",
-      "has_zarr_verified",
-      "data_complete",
-      "recent",
-      "license",
-      "include_unknown",
-    ];
-    const missing = bespoke.filter((name) => !declared.has(name));
+    const missing = BESPOKE_FILTERS.filter((name) => !declared.has(name));
     expect(missing).toEqual([]);
   });
 
@@ -68,9 +71,20 @@ describe("search_datasets declares the whole filter surface", () => {
     expect(mirrorKeys).toEqual(contractKeys);
   });
 
-  test("a range facet value survives the schema", () => {
-    const parsed = searchDatasetsInputSchema.parse({ channels: "64..128" });
-    expect((parsed as Record<string, unknown>).channels).toBe("64..128");
+  test("no facet name collides with a bespoke parameter, and the count is exact", () => {
+    // Both shapes spread the generated facets AFTER the bespoke declarations
+    // and before `limit`, so a facet whose queryParam matched a bespoke name
+    // would silently redefine it as a plain string, and one named `limit`
+    // would be dropped. Neither is visible to the two tests above: the key
+    // sets stay equal and both names are still present.
+    const facetParams = FACETS.map((f) => f.queryParam);
+    const collisions = facetParams.filter((q) => BESPOKE_FILTERS.includes(q) || q === "query" || q === "limit");
+    expect(collisions).toEqual([]);
+
+    // `query` and `limit` are the two that are neither a facet nor a filter.
+    expect(Object.keys(searchDatasetsInputSchema.shape).length).toBe(
+      BESPOKE_FILTERS.length + 2 + FACETS.length,
+    );
   });
 });
 
