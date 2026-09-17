@@ -8,7 +8,11 @@
  * intentional changes are import paths and the register-function wrapper.
  */
 
-import { isDevOwnedDatasetId, isValidDatasetId } from "../../services/datasetId.js";
+import {
+  isDevOwnedDatasetId,
+  isDevRangeDatasetId,
+  isValidDatasetId,
+} from "../../services/datasetId.js";
 import { isNonProductionEnv } from "../../services/environment.js";
 import { getDatasetsToken } from "../../services/github-auth.js";
 import { triggerEnrichmentRun, triggerVersionDoiRun } from "../../services/github.js";
@@ -429,12 +433,25 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
     // let the prod worker dispatch against a dev-range repo it has no row for.
     // isDevOwnedDatasetId, not isDevRangeDatasetId (#1440): the reserved `nm`
     // fixtures are dev's too. Without this, a push to nemarDatasets/nm099998
-    // reaches the prod worker (org-level delivery) and is treated as prod's
-    // own, so prod dispatches enrichment / zarr / version-DOI runs for a
-    // repository it has no D1 row for -- and the version-DOI path picks its
-    // sandbox-vs-production EZID credentials from the DOI string rather than
-    // from ENVIRONMENT, which is the worst of those to get wrong.
+    // is delivered here and treated as prod's own, so prod dispatches an
+    // ENRICHMENT run for a repository it has no D1 row for.
+    //
+    // Enrichment alone: zarr is not dispatched from here at all
+    // (`shouldDispatchZarr` is defined and never called, #1109), and the
+    // version-DOI path already refuses this case because its anonymity check
+    // treats an absent `datasets` row as anonymous (#1408).
     if (!isNonProductionEnv(c.env) && isDevOwnedDatasetId(payload.repository?.name ?? "")) {
+      // Audible when the DECLARED set is what matched, rather than the id shape.
+      // The shape case is routine and stays quiet; the declared case is the one
+      // where a bad entry would make production silently stop dispatching for a
+      // real dataset, with nothing in Worker Logs to see (ADR 0053: silence is
+      // only evidence of a problem when there was work to do).
+      const repoName = payload.repository?.name ?? "";
+      if (!isDevRangeDatasetId(repoName)) {
+        console.warn(
+          `[github-webhook] short-circuited ${repoName} on production: declared dev-owned (DEV_OWNED_FIXTURE_IDS, #1440), delivery=${deliveryId}`,
+        );
+      }
       if (c.env.DEV_WEBHOOK_MIRROR_URL) {
         // Forward the raw, still-HMAC-signed delivery to the dev worker (epic
         // #923) so it dispatches for staging exemplars. Outbound-only and
