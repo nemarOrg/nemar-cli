@@ -191,6 +191,21 @@ Harder, and worth stating plainly:
   "readable on GitHub" must say so rather than reading `visibility`, and the three fixed here
   are evidence the proxy was load-bearing in places nobody had listed.
 
+**Amendment 2026-09-16 (ADR 0068, epic #1430): the fixture's PLACEMENT below is superseded.**
+The reasoning in this section is unchanged and still the reason a standing fixture exists.
+What was wrong is the id.
+`xx` publishes only through the exemplar exception (non-production, `is_exemplar = 1`, sandbox
+DOIs), and that gate additionally refused any anonymous exemplar, so the one fixture whose
+defining event is an anonymous RELEASE was placed in the one band where taking it meant widening
+an exception -- which is what #1428 then did.
+ADR 0068 records the rule that makes the placement decidable: standing fixtures take reserved ids
+at the top of a prefix.
+The deposit moves to `nm099998` in #1434, #1433 withdraws the #1428 gate exception, and this
+section is rewritten then.
+Until then `xx099907` remains the fixture of record, but note it is `visibility: private` and was
+never successfully released, so "public row, private repo" below describes the intended shape and
+not the current one.
+
 **The staging fleet carries one standing anonymous deposit.** `xx099907` is created anonymous
 and never published, because the state is otherwise only ever exercised against rows a test
 builds and tears down in the same process. It could not be an existing exemplar: all seven are
