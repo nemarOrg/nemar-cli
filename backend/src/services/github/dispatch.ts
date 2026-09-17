@@ -104,7 +104,10 @@ export const CENTRAL_MANIFEST_BUCKET = "nemar";
  *
  * `options.s3Bucket` must be {@link CENTRAL_MANIFEST_BUCKET} or absent; anything
  * else throws before the dispatch. A non-prod worker therefore cannot reach this
- * path at all, and must build the manifest inline instead (#1451).
+ * path at all, and must build the manifest inline instead (#1451) -- which on the
+ * dev worker means `POST /admin/datasets/:id/manifest/:version`, the route the
+ * error message names, since `/admin/manifest/dispatch` has no inline branch of
+ * its own to fall back to.
  */
 export async function triggerManifestGeneration(
   datasetId: string,
@@ -120,7 +123,7 @@ export async function triggerManifestGeneration(
   // half-written manifest: the workflow ignores s3_bucket and writes to prod.
   if (options?.s3Bucket !== undefined && options.s3Bucket !== CENTRAL_MANIFEST_BUCKET) {
     throw new Error(
-      `Refusing to dispatch central manifest generation for bucket "${options.s3Bucket}": generate-manifest.yml hardcodes s3://${CENTRAL_MANIFEST_BUCKET} and ignores s3_bucket (#1451), so this run would write ${datasetId}@${version} into the production bucket. Generate the manifest inline instead.`,
+      `Refusing to dispatch central manifest generation for bucket "${options.s3Bucket}": generate-manifest.yml hardcodes s3://${CENTRAL_MANIFEST_BUCKET} and ignores s3_bucket (#1451), so this run would write ${datasetId}@${version} into the production bucket. Build it inline instead, with POST /admin/datasets/${datasetId}/manifest/${version}.`,
     );
   }
 

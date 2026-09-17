@@ -314,6 +314,16 @@ async function verifyGitBackedFiles(args: {
       // so the first HEAD can race the propagation. A single short retry
       // catches that without inflating the Worker subrequest budget; a real
       // missing-blob failure stays failed across both attempts.
+      //
+      // The retry exists so a 404 can become a 200, and NOT so a 404 can be
+      // forgotten. `present` returns immediately, an `absent` seen on either
+      // attempt is kept even if the other attempt was inconclusive, and
+      // `unchecked` is the verdict only when no attempt decided anything. Taking
+      // the last attempt instead would let a 503 on the retry erase an
+      // authenticated 404 from the first, and an erased absence writes a manifest
+      // promising a blob the data plane cannot serve, which is the incident this
+      // canary exists to prevent.
+      let absent: GitBackedFileCheckResult | null = null;
       let last: GitBackedFileCheckResult = {
         path,
         url,
@@ -330,6 +340,7 @@ async function verifyGitBackedFiles(args: {
           });
           last = { path, url, status: res.status, ok: res.ok, verdict: verdictFor(res.status) };
           if (res.ok) return last;
+          if (last.verdict === "absent") absent ??= last;
         } catch (err) {
           console.warn(
             `[manifest] canary HEAD threw dataset=${repo} tag=${tag} path=${path} attempt=${attempt + 1}:`,
@@ -342,7 +353,7 @@ async function verifyGitBackedFiles(args: {
           await new Promise((r) => setTimeout(r, 2000));
         }
       }
-      return last;
+      return absent ?? last;
     }),
   );
 

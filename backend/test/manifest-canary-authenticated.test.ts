@@ -48,8 +48,21 @@ interface Seen {
 let server: Server;
 let base: string;
 let seen: Seen[] = [];
-/** What the current test wants the raw half of the stand-in to answer. */
-let rawStatus = 200;
+/**
+ * What the current test wants the raw half of the stand-in to answer, per
+ * attempt at the same path. A one-element array answers every attempt the same
+ * way; a longer one lets the retry disagree with the first probe, which is the
+ * only way to see whether a verdict survives the attempt after it.
+ */
+let rawStatuses: number[] = [200];
+/** HEAD attempts per raw path, so the sequence above can be indexed. */
+let rawAttempts = new Map<string, number>();
+
+function nextRawStatus(path: string): number {
+  const n = rawAttempts.get(path) ?? 0;
+  rawAttempts.set(path, n + 1);
+  return rawStatuses[Math.min(n, rawStatuses.length - 1)];
+}
 
 beforeAll(() => {
   server = Bun.serve({
@@ -83,7 +96,7 @@ beforeAll(() => {
         });
       }
       if (url.pathname === ddRawPath || url.pathname === changesRawPath) {
-        return new Response(null, { status: rawStatus });
+        return new Response(null, { status: nextRawStatus(url.pathname) });
       }
       return new Response("no route", { status: 404 });
     },
@@ -97,9 +110,21 @@ afterAll(() => {
   server.stop(true);
 });
 
-function build(): Promise<Awaited<ReturnType<typeof generateManifest>>> {
+/** Drive the entry point, with the raw host answering `statuses` in order. */
+function build(...statuses: number[]): Promise<Awaited<ReturnType<typeof generateManifest>>> {
   seen = [];
+  rawAttempts = new Map();
+  rawStatuses = statuses.length > 0 ? statuses : [200];
   return generateManifest(REPO, "1.0.0", TOKEN, REPO, null, null, { rawBase: base });
+}
+
+async function buildError(...statuses: number[]): Promise<unknown> {
+  try {
+    await build(...statuses);
+  } catch (err) {
+    return err;
+  }
+  return undefined;
 }
 
 describe("the manifest canary on a private repository", () => {
@@ -110,9 +135,7 @@ describe("the manifest canary on a private repository", () => {
   });
 
   test("passes, and sends the installation token on every probe", async () => {
-    rawStatus = 200;
-
-    const manifest = await build();
+    const manifest = await build(200);
 
     expect(Object.keys(manifest.files).sort()).toEqual(["CHANGES", "dataset_description.json"]);
     const probes = seen.filter((s) => s.method === "HEAD");
@@ -125,14 +148,7 @@ describe("the manifest canary on a private repository", () => {
   test("still refuses a manifest when an authenticated probe 404s", async () => {
     // The check the canary exists for: the tag resolves and the token is
     // accepted, so a 404 on the path means the blob is not there.
-    rawStatus = 404;
-
-    let thrown: unknown;
-    try {
-      await build();
-    } catch (err) {
-      thrown = err;
-    }
+    const thrown = await buildError(404);
 
     expect(thrown).toBeInstanceOf(GitBackedFileMissingError);
     const error = thrown as GitBackedFileMissingError;
@@ -145,10 +161,43 @@ describe("the manifest canary on a private repository", () => {
     // A refused credential, a secondary rate limit or a 5xx is not evidence
     // that a blob is gone, and refusing the manifest on one blocks a release
     // for a reason that has nothing to do with the data.
-    rawStatus = 503;
-
-    const manifest = await build();
+    const manifest = await build(503);
 
     expect(Object.keys(manifest.files)).toContain("dataset_description.json");
+  });
+
+  test("keeps a 404 from the first probe when the retry only 503s", async () => {
+    // Attempt-order independence, and the reason it matters: the retry is there
+    // so a 404 can become a 200 while the tag propagates, not so a 404 can be
+    // forgotten. Taking the last attempt would report this path as undecided and
+    // write a manifest promising a blob the raw host already said is not there.
+    const thrown = await buildError(404, 503);
+
+    expect(thrown).toBeInstanceOf(GitBackedFileMissingError);
+    const error = thrown as GitBackedFileMissingError;
+    expect(error.checks.map((c) => c.verdict).sort()).toEqual(["absent", "absent"]);
+    expect(error.checks.map((c) => c.status)).toEqual([404, 404]);
+  });
+
+  test("refuses when only the retry gets a 404", async () => {
+    // The mirror image, which the last-attempt-wins version also got right; both
+    // orders are asserted so a future rewrite cannot pass by handling one.
+    const thrown = await buildError(503, 404);
+
+    expect(thrown).toBeInstanceOf(GitBackedFileMissingError);
+    expect((thrown as GitBackedFileMissingError).checks.map((c) => c.verdict).sort()).toEqual([
+      "absent",
+      "absent",
+    ]);
+  });
+
+  test("accepts a 404 that the retry turns into a 200", async () => {
+    // What the retry is actually for: raw.githubusercontent.com serving a tag
+    // pushed seconds earlier. The strongest-verdict rule must not turn this
+    // into a permanent refusal.
+    const manifest = await build(404, 200);
+
+    expect(Object.keys(manifest.files).sort()).toEqual(["CHANGES", "dataset_description.json"]);
+    expect(seen.filter((s) => s.method === "HEAD")).toHaveLength(4);
   });
 });
