@@ -11,7 +11,7 @@ import { z } from "zod";
 import type { AccountKind } from "../../../../shared/contract/user.js";
 import { authMiddleware } from "../../middleware/auth";
 import { cliVersionGuard } from "../../middleware/cliVersion";
-import { generateDatasetId, isValidDatasetId } from "../../services/datasetId";
+import { generateDatasetId, isSandboxDatasetId, isValidDatasetId } from "../../services/datasetId";
 import {
   type GitHubRepo,
   addCollaborator,
@@ -30,6 +30,7 @@ import {
   getFederationToken,
 } from "../../services/sts";
 import {
+  explicitDatasetIdGate,
   realDatasetCreateGate,
   realDatasetServiceGate,
   uploadChannelForAuthMethod,
@@ -134,6 +135,12 @@ const createDatasetSchema = z.object({
   files: z.array(fileSchema).optional(),
   sandbox: z.boolean().optional(), // If true, creates sandbox dataset (xx000XXX)
   attestation: attestationSchema.optional(),
+  // Name the id instead of being allocated one. Non-production, admin, and the
+  // reserved fixture band only -- see explicitDatasetIdGate. Exists because
+  // ADR 0068 makes generateDatasetId structurally unable to return a reserved
+  // id, so the standing fixtures that live there have no other way in through
+  // the route that creates everything else.
+  dataset_id: z.string().optional(),
 });
 
 /**
@@ -237,6 +244,7 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         files,
         sandbox: requestedSandbox,
         attestation,
+        dataset_id: requestedDatasetId,
       } = c.req.valid("json");
       const user = c.get("user");
       const db = c.env.DB;
@@ -250,9 +258,35 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         );
       }
       const isProduction = environment === "production";
-      const sandbox = isProduction ? !!requestedSandbox : true;
 
-      if (!isProduction && !requestedSandbox) {
+      // A named id is gated before anything reads it (ADR 0068, #1432).
+      if (requestedDatasetId !== undefined) {
+        const gate = explicitDatasetIdGate({
+          isProduction,
+          isAdmin: hasRole(user.role, "admin"),
+          datasetId: requestedDatasetId,
+        });
+        if (gate) {
+          console.warn(
+            `[datasets] explicit id refused: id=${requestedDatasetId} user=${user.username} reason=${gate.error}`,
+          );
+          return c.json(gate, 403);
+        }
+      }
+
+      // Non-production forces sandbox, EXCEPT for a named reserved id, whose
+      // prefix decides. The forcing exists to stop dev minting real nm ids; a
+      // reserved id is one the allocator can never mint for anybody, so naming
+      // one does not do that. Derived from the id rather than from the
+      // request's `sandbox` flag, so the two can never disagree.
+      const sandbox =
+        requestedDatasetId !== undefined
+          ? isSandboxDatasetId(requestedDatasetId)
+          : isProduction
+            ? !!requestedSandbox
+            : true;
+
+      if (!isProduction && requestedDatasetId === undefined && !requestedSandbox) {
         console.warn(
           `[datasets] Non-production env: forcing sandbox=true for user ${user.username} (requested: ${requestedSandbox})`,
         );
@@ -319,9 +353,16 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
       // same name, return it instead of creating a new one. This prevents phantom
       // datasets when the CLI loses .nemar/config.json and retries.
       // "Incomplete" = private, no DOI, no version records, has a GitHub repo.
-      const existingIncomplete = await db
-        .prepare(
-          `SELECT d.dataset_id, d.github_repo
+      // Skipped for a named id: dedup matches on (owner, name, sandbox) and
+      // would return a DIFFERENT dataset than the one named, which is the one
+      // answer an operator naming an id can never want. The named id's own
+      // uniqueness check below is the right conflict signal.
+      const existingIncomplete =
+        requestedDatasetId !== undefined
+          ? null
+          : await db
+              .prepare(
+                `SELECT d.dataset_id, d.github_repo
            FROM datasets d
            WHERE d.owner_user_id = ?
              AND d.name = ?
@@ -334,9 +375,9 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
              )
            ORDER BY d.created_at DESC
            LIMIT 1`,
-        )
-        .bind(user.id, name, sandbox ? 1 : 0)
-        .first<{ dataset_id: string; github_repo: string }>();
+              )
+              .bind(user.id, name, sandbox ? 1 : 0)
+              .first<{ dataset_id: string; github_repo: string }>();
 
       if (existingIncomplete) {
         console.log(
@@ -470,7 +511,13 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
       let datasetId: string;
       const MAX_ID_RETRIES = 3;
       for (let attempt = 0; ; attempt++) {
-        datasetId = await generateDatasetId(db, !!sandbox, { sandboxIdFloor, sandboxIdCeiling });
+        // A named id is not allocated and must not be retried: the retry loop
+        // exists to walk past a concurrent claim, and walking past a NAMED id
+        // would silently create a different dataset than the operator asked
+        // for. A collision is a conflict, reported as one.
+        datasetId =
+          requestedDatasetId ??
+          (await generateDatasetId(db, !!sandbox, { sandboxIdFloor, sandboxIdCeiling }));
         try {
           // Claim the ID early with a minimal INSERT to close the TOCTOU gap.
           // license/license_tier are intentionally omitted: no license is known
@@ -506,6 +553,19 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
           break; // ID claimed successfully
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
+          if (requestedDatasetId !== undefined && msg.includes("UNIQUE constraint failed")) {
+            return c.json(
+              {
+                error: "Dataset id already exists",
+                dataset_id: requestedDatasetId,
+                // Matches the documented exemplar recovery in AGENTS.md:
+                // creation is not retry-safe after a partial failure, so the
+                // recovery is delete-then-recreate rather than re-running it.
+                note: "Naming an id never overwrites. Remove the existing dataset first (`nemar admin delete-dataset <id>`), then recreate.",
+              },
+              409,
+            );
+          }
           if (attempt < MAX_ID_RETRIES - 1 && msg.includes("UNIQUE constraint failed")) {
             continue; // Retry with a new ID
           }
