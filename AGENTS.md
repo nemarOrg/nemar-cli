@@ -114,7 +114,10 @@ the repository comes from the dataset row and never the request, the gate runs b
 token is used, and the cache is keyed by request URL and NEVER by blob SHA),
 0067 (anonymity is verified on a schedule and reported, never repaired: it writes only
 `sweep_stamps`, files no GitHub issue because `nemarDatasets` is public-facing, and a
-check that could not run is `unchecked` rather than clean).
+check that could not run is `unchecked` rather than clean),
+0068 (the top 100 ids of a band are reserved for standing test fixtures and the allocator
+never returns one: real datasets grow upward, fixtures are assigned downward from
+`nm099999`, and the reservation is not environment-fenced because the GitHub org is shared).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
@@ -225,9 +228,21 @@ All inside the 0-99999 cap, so `xx900001` is invalid.
 
 | Band | Range | Purpose | Cleanup |
 |---|---|---|---|
+| Real datasets | `nm000108`-`nm099899` | allocated upward by `generateDatasetId` | never |
+| **`nm` fixtures (reserved)** | `nm099900`-`nm099999` | standing test fixtures, assigned by name | **never** |
 | Prod sandbox | `xx000001`-`xx089999` | real user sandbox training | 14-day cron (prod) |
 | Dev ephemeral | `xx090001`-`xx099899` | throwaway dev/e2e | dev cron |
-| Dev exemplar fleet | `xx099900`-`xx099999` | curated persistent copies | **never** (`is_exemplar=1`) |
+| Dev exemplar fleet (reserved) | `xx099900`-`xx099999` | curated persistent copies | **never** (`is_exemplar=1`) |
+
+**The top 100 ids of a band are RESERVED and the allocator never returns one** (ADR 0068).
+Real datasets grow upward from the prefix's start; standing test fixtures are assigned
+downward from `nm099999`, so a fixture's id is predictable without a registry. In use
+today: `nm099999` (e2e, its own reset endpoint) and the `xx099900+` exemplar fleet.
+Reserved means not *allocatable*, not invalid, so `isValidDatasetId` still accepts these
+and every route must still serve them. The reservation is **not** environment-fenced:
+`nemarDatasets` is shared between prod and dev, so a prod-minted fixture id would collide
+with a dev fixture's repository. `on` ids are mirrored from OpenNeuro and never allocated
+here, so they have no reserved band.
 
 **The exemplar fleet is permanent, not ephemeral.** Eight curated `xx0999NN` copies of real public
 datasets (`scripts/exemplar-fleet.json`) cover eeg / ieeg / emg / meg / multi-modal / HED,
