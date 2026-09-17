@@ -551,6 +551,10 @@ export function createUploadCommand(): Command {
       "--upstream-source <ref>",
       "Attestation (redistribution only): upstream release URL or accession",
     )
+    .option(
+      "--dataset-id <id>",
+      "Name the dataset id instead of being allocated one (admin, non-production, reserved fixture band only)",
+    )
     .addHelpText(
       "after",
       ({ command }) => `
@@ -578,7 +582,8 @@ Examples:
   $ ${invokedAs(command)} ./my-eeg-dataset
   $ ${invokedAs(command)} ./ds -n "My EEG Study" -d "64-channel EEG data"
   $ ${invokedAs(command)} ./ds --dry-run        # Preview without uploading
-  $ ${invokedAs(command)} ./ds -j 16            # More parallel streams`,
+  $ ${invokedAs(command)} ./ds -j 16            # More parallel streams
+  $ ${invokedAs(command)} ./ds --dataset-id nm099998   # Standing fixture (admin, staging)`,
     )
     .action(async (datasetPath, options) => {
       // Get config for GitHub username
