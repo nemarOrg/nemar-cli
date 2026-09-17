@@ -263,10 +263,13 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
           // Exemplars are exempt: their owner row is an admin/service account
           // and they mint on the EZID sandbox shoulder (requiresUploaderName).
           uploaderRequired: requiresUploaderName(dataset),
-          // #1409: the fleet's standing anonymous exemplar (xx099907) is
-          // re-minted by the same maintenance command as every other one, and
-          // this is the shortest path from a concealed deposit to a permanent
-          // DataCite record naming its depositor. `resolveOwnerIdentity` above
+          // #1409: an anonymous row re-minted by the same maintenance command
+          // as every other one is the shortest path from a concealed deposit
+          // to a permanent DataCite record naming its depositor. The flag is
+          // read from the ROW, so it holds whether or not the fleet declares
+          // an anonymous entry -- and since #1433 it declares none, which is
+          // why this is written as a general rule about anonymous rows rather
+          // than about one named fixture. `resolveOwnerIdentity` above
           // reads the real name, ORCID and username straight off the joined
           // `users` row; without this flag they would be minted as the curator
           // and the identifier advertised as public.

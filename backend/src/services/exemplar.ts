@@ -25,27 +25,6 @@
 import type { Bindings } from "../types/bindings.js";
 import { isNonProductionEnv } from "./environment.js";
 
-/**
- * What the caller is asking to do, for the one case where the gate's answer
- * depends on it.
- *
- * Defaulted to `{}` rather than required: every existing caller is asking the
- * destructive question (mint a DOI, publish a DOI, publish for real), and the
- * safe default for a gate is to refuse. Only the publication-request route,
- * which knows whether the depositor asked for `--anonymous`, passes it.
- */
-export interface ExemplarPublishIntent {
-  /**
-   * The caller is an ANONYMOUS release: row public, repository private,
-   * attribution withheld, `first_published_at` left NULL. Never set this from
-   * anything but the request's own flag -- inferring it from the row's current
-   * `anonymous` value would make every plain publish of an anonymous deposit
-   * look like an anonymous release, which is the exact confusion this
-   * parameter exists to prevent.
-   */
-  anonymousRelease?: boolean;
-}
-
 /** Minimal row shape the publish gate needs. */
 export interface ExemplarGateRow {
   dataset_id: string;
@@ -61,49 +40,41 @@ export interface ExemplarGateRow {
 /**
  * True when a normally-blocked xx dataset is an exemplar that may proceed through
  * publish / DOI / reindex. Requires a non-production env AND an xx-prefix id AND
- * is_exemplar=1 AND that this is not an attribution-ending publish of the
- * fleet's anonymous deposit. Callers keep their existing xx / is_sandbox block
- * and skip it only when this returns true
+ * is_exemplar=1 AND that the row is not anonymous. Callers keep their existing
+ * xx / is_sandbox block and skip it only when this returns true
  * (`... && !isExemplarPublishAllowed(env, row)`).
  *
- * **The anonymity term is not belt-and-braces; it is the whole guard for one
- * dataset.** `xx099907` is the fleet's standing anonymous deposit, and
- * publishing it is not a mess to clean up: the approve path stamps
- * `first_published_at`, after which migration 0085's triggers refuse
- * `anonymous = 1` on that row FOREVER. The fixture is destroyed rather than
- * dirtied, which is what `scripts/exemplar-fleet.json` and AGENTS.md both warn
- * about, and the normal publication-request refusal does not cover it: a plain
- * (non-anonymous) publish request on an anonymous deposit is deliberately
- * allowed, because that is exactly how a blinded deposit is published for real.
+ * **The anonymity term is a live guard, not dead weight.** It is tempting to
+ * read it as unreachable now that `scripts/exemplar-fleet.json` declares no
+ * anonymous entry (#1433). That does not follow: the fleet file is not the only
+ * producer of such a row. `POST /admin/datasets/exemplar` still accepts
+ * `anonymous: true` and writes it alongside `is_exemplar = 1` on an `xx0999NN`
+ * id, so any admin can create exactly the row this term refuses. #1434 retires
+ * that field; until then the term is load-bearing.
  *
- * **`anonymousRelease` narrows that term to the direction it meant (#1423).**
- * The reasoning above is about an attribution-ending publish. An ANONYMOUS
- * release cannot do any of it: the orchestrator picks
- * `FIRST_PUBLICATION_STAMP_SQL` for that path, and that rule is
- * `CASE WHEN anonymous = 1 THEN first_published_at ELSE COALESCE(...) END` --
- * it deliberately does not stamp an anonymous row, so the triggers keep
- * permitting `anonymous = 1` and the fixture survives intact.
+ * What it prevents: publishing an anonymous row does not dirty it but destroys
+ * it, because the approve path stamps `first_published_at`, after which
+ * migration 0085's triggers refuse `anonymous = 1` on that row forever.
  *
- * Refusing it anyway had a cost that was not noticed until someone tried to
- * BUILD the fixture: an anonymous release is the only path that runs
- * `repo_public` (catalog row public, GitHub repo private) and `create_tag`
- * (version row + manifest), so without it `xx099907` can only ever be a
- * private row that the data plane will not serve. Every public-facing
- * anonymity surface -- the git-file broker, the catalog owner projection, the
- * search blind -- was therefore unreachable by the one fixture that exists to
- * exercise them, while AGENTS.md described it as "public row, private repo".
- * The gate was refusing the safe direction and allowing the destructive one.
+ * **What this function no longer does, and why (#1433).** It briefly took an
+ * `ExemplarPublishIntent` so that an explicit `anonymousRelease` could pass the
+ * anonymity term (#1423). That existed for one reason: the standing anonymous
+ * deposit had been placed in the `xx` band, where publication is itself an
+ * exception, so the one path the fixture needed was the one path the gate
+ * refused. The right repair was not to widen the gate but to move the fixture
+ * to a reserved `nm` id (ADR 0068, epic #1430), where an anonymous release is
+ * an ordinary publication and no exception is involved. The parameter is gone
+ * with the fixture it served.
  */
 export function isExemplarPublishAllowed(
   env: Pick<Bindings, "ENVIRONMENT">,
   row: ExemplarGateRow,
-  intent: ExemplarPublishIntent = {},
 ): boolean {
   return (
     isNonProductionEnv(env) &&
     row.dataset_id.startsWith("xx") &&
     row.is_exemplar === 1 &&
-    (row.anonymous !== 1 || intent.anonymousRelease === true)
+    row.anonymous !== 1
   );
 }
 

@@ -37,51 +37,46 @@ describe("isExemplarPublishAllowed: the anonymous deposit", () => {
   const anonRow = { dataset_id: EXEMPLAR_ID, is_exemplar: 1, anonymous: 1 };
   const plainRow = { dataset_id: EXEMPLAR_ID, is_exemplar: 1, anonymous: 0 };
 
-  test("an anonymous RELEASE of the anonymous exemplar is allowed", () => {
-    expect(isExemplarPublishAllowed(envOf("test"), anonRow, { anonymousRelease: true })).toBe(true);
-  });
-
-  test("a plain publish of it is still refused, which is the whole point", () => {
-    expect(isExemplarPublishAllowed(envOf("test"), anonRow, { anonymousRelease: false })).toBe(
-      false,
-    );
-    expect(isExemplarPublishAllowed(envOf("test"), anonRow, {})).toBe(false);
-  });
-
-  test("omitting the intent refuses, so a new caller fails closed", () => {
-    // The parameter defaults to `{}`. A caller that has not thought about the
-    // question gets the safe answer rather than the permissive one.
+  test("an anonymous exemplar is refused every direction, with no way to ask", () => {
+    // Withdrawn in #1433. The gate briefly took an `anonymousRelease` intent so
+    // the fleet's anonymous deposit could take the one publish path it needed
+    // (#1423). That fixture was in the wrong band: `xx` publishes only through
+    // the exemplar exception, so widening the exception was the only way to let
+    // it live there. It now lives at a reserved `nm` id where an anonymous
+    // release is an ordinary publication, and the parameter went with it.
     expect(isExemplarPublishAllowed(envOf("test"), anonRow)).toBe(false);
   });
 
-  test("an ordinary exemplar is unaffected by the intent either way", () => {
+  test("the term is a LIVE guard: the admin route can still create such a row", () => {
+    // Not unreachable, though the fleet no longer declares an anonymous entry.
+    // POST /admin/datasets/exemplar still accepts `anonymous: true` and writes
+    // it with is_exemplar = 1 on an xx0999NN id (routes/admin/exemplar.ts), so
+    // an admin can create exactly this row today. #1434 retires that field.
+    // Publishing such a row destroys it rather than dirtying it: the approve
+    // path stamps first_published_at, after which migration 0085's triggers
+    // refuse anonymous = 1 on it forever.
+    expect(isExemplarPublishAllowed(envOf("test"), anonRow)).toBe(false);
     expect(isExemplarPublishAllowed(envOf("test"), plainRow)).toBe(true);
-    expect(isExemplarPublishAllowed(envOf("test"), plainRow, { anonymousRelease: true })).toBe(
-      true,
-    );
-    expect(isExemplarPublishAllowed(envOf("test"), plainRow, { anonymousRelease: false })).toBe(
-      true,
-    );
   });
 
-  test("the production fence is not weakened by the intent", () => {
+  test("an ordinary exemplar is allowed off production", () => {
+    expect(isExemplarPublishAllowed(envOf("test"), plainRow)).toBe(true);
+  });
+
+  test("the production fence holds, and fails closed on an unknown env", () => {
     // The env term is the one that keeps `is_exemplar = 1` out of production
-    // entirely; an intent flag must never buy past it.
-    expect(isExemplarPublishAllowed(envOf("production"), anonRow, { anonymousRelease: true })).toBe(
-      false,
-    );
-    expect(isExemplarPublishAllowed(envOf(undefined), anonRow, { anonymousRelease: true })).toBe(
-      false,
-    );
+    // entirely. It uses isNonProductionEnv, so an unset value refuses.
+    expect(isExemplarPublishAllowed(envOf("production"), plainRow)).toBe(false);
+    expect(isExemplarPublishAllowed(envOf(undefined), plainRow)).toBe(false);
+    expect(isExemplarPublishAllowed(envOf("production"), anonRow)).toBe(false);
   });
 
-  test("a non-exemplar xx row is still refused however it asks", () => {
+  test("a non-exemplar xx row is still refused", () => {
     // The exemption is for the staging fleet, not for the xx band.
     expect(
       isExemplarPublishAllowed(
         envOf("test"),
         { dataset_id: EXEMPLAR_ID, is_exemplar: 0, anonymous: 1 },
-        { anonymousRelease: true },
       ),
     ).toBe(false);
   });
