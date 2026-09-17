@@ -114,7 +114,10 @@ the repository comes from the dataset row and never the request, the gate runs b
 token is used, and the cache is keyed by request URL and NEVER by blob SHA),
 0067 (anonymity is verified on a schedule and reported, never repaired: it writes only
 `sweep_stamps`, files no GitHub issue because `nemarDatasets` is public-facing, and a
-check that could not run is `unchecked` rather than clean).
+check that could not run is `unchecked` rather than clean),
+0068 (the top 100 ids of a band are reserved for standing test fixtures and the allocator
+never returns one: real datasets grow upward, fixtures are assigned downward from
+`nm099999`, and the reservation is not environment-fenced because the GitHub org is shared).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
@@ -225,13 +228,38 @@ All inside the 0-99999 cap, so `xx900001` is invalid.
 
 | Band | Range | Purpose | Cleanup |
 |---|---|---|---|
+| Pre-allocator `nm` | `nm000001`-`nm000107` | predate `START_NUMBER`; `nm000103`-`nm000107` are LIVE | never |
+| Real datasets | `nm000108`-`nm099899` | allocated upward by `generateDatasetId` | never |
+| **`nm` fixtures (reserved)** | `nm099900`-`nm099999` | standing test fixtures, assigned by name | **never** |
 | Prod sandbox | `xx000001`-`xx089999` | real user sandbox training | 14-day cron (prod) |
 | Dev ephemeral | `xx090001`-`xx099899` | throwaway dev/e2e | dev cron |
-| Dev exemplar fleet | `xx099900`-`xx099999` | curated persistent copies | **never** (`is_exemplar=1`) |
+| Dev exemplar fleet (reserved) | `xx099900`-`xx099999` | curated persistent copies | **never** (`is_exemplar=1`) |
+
+**The top 100 ids of each allocating PREFIX are RESERVED and the allocator never returns
+one** (ADR 0068): `nm099900`-`nm099999` and `xx099900`-`xx099999`. This is a property of
+the prefix, not of each band in the table above, so the top of the prod sandbox band
+(`xx089900`+) and of the dev ephemeral band (`xx099800`+) are allocated normally.
+Real datasets grow upward from the prefix's start; standing test fixtures are assigned
+downward from `nm099999`, so a fixture's id is predictable without a registry. In use
+today: `nm099999` (end-to-end, its own reset endpoint) and the `xx099900+` exemplar fleet.
+Reserved means not *allocatable*, not invalid, so `isValidDatasetId` still accepts these
+and every route must still serve them. The reservation is **not** environment-fenced:
+`nemarDatasets` is shared between prod and dev, so a prod-minted fixture id would collide
+with a dev fixture's repository. `on` ids are mirrored from OpenNeuro and never allocated
+here, so they have no reserved band.
 
 **The exemplar fleet is permanent, not ephemeral.** Eight curated `xx0999NN` copies of real public
 datasets (`scripts/exemplar-fleet.json`) cover eeg / ieeg / emg / meg / multi-modal / HED,
 published with **sandbox** EZID DOIs (`10.5072/FK2`, never the production `10.82901` shoulder).
+
+> **Superseded, and being moved (ADR 0068, epic #1430).** Placing the standing anonymous
+> deposit in the `xx` band was the mistake ADR 0068 was written to prevent: `xx` publishes
+> only through the exemplar exception, and an anonymous deposit's whole purpose is to take
+> a real release. It moves to the reserved id `nm099998` in #1434, which also retires
+> `xx099907` and rewrites the two paragraphs below. Until then `xx099907` is still the
+> fixture of record and everything below still applies, EXCEPT that it is currently
+> `visibility: private` and was never successfully released, so the "public row" wording
+> below describes an intended shape rather than a real one.
 
 **`xx099907` is the exception and must NEVER be published.** It is the fleet's standing
 anonymous deposit (ADR 0065), the fixture every anonymity surface is exercised against.

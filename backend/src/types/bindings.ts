@@ -105,8 +105,11 @@ export interface Bindings {
    *  Prevents repo-name collisions in the shared nemarDatasets org between
    *  prod- and dev/test-created sandbox datasets. Prod sets CEILING="89999"
    *  (allocates xx000001-xx089999); dev/test sets FLOOR="90001" (allocates
-   *  xx090001-xx099999). Both optional and clamped to [start, 99999], so an
-   *  absent or bad value only widens/narrows within the valid id range. */
+   *  xx090001-xx099899). Both optional and clamped to [start, RESERVED_FIXTURE_FLOOR-1]
+   *  = [start, 99899] for xx, so an absent or bad value only widens/narrows
+   *  within the valid id range. The ceiling is 99899 rather than 99999 because
+   *  the top 100 ids are the reserved fixture band (ADR 0068); see
+   *  RESERVED_FIXTURE_FLOOR in services/datasetId.ts. */
   SANDBOX_ID_FLOOR?: string;
   SANDBOX_ID_CEILING?: string;
 
