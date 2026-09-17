@@ -9,10 +9,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   type ExemplarFleetEntry,
-  anonymousExemplar,
   findMissingCopiedKeys,
   isAnnexContentKey,
-  isDesignatedAnonymous,
   parseExemplarFleet,
   planSubPrefixCopy,
   rewriteObjectKeyPrefix,

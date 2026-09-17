@@ -440,6 +440,33 @@ describe("the request route, end to end", () => {
     db.close();
   });
 
+  test("an anonymous PRIVATE row has not been released, and is not told it has", async () => {
+    // The guard for the `visibility === "public"` term on
+    // `already_released_anonymously`, which #1433 deliberately KEPT while
+    // withdrawing everything else #1428 added.
+    //
+    // It had no test. The only case that exercised the private side was the
+    // xx099907 test withdrawn in this PR, and that row now returns 400 at the
+    // xx block before reaching this branch at all -- so deleting the term left
+    // 108 tests green. This is that missing guard, on a real `nm` row so it
+    // cannot be lost again to a change in the xx band.
+    //
+    // Why the term is right: `anonymous = 1` is not evidence a release
+    // HAPPENED. A row can be created anonymous and private (migration 0085
+    // permits it at INSERT, the only moment it is unconditionally legal), and
+    // the release is the only thing that makes it public. Telling such a row
+    // its release already occurred leaves it private and unserved with nothing
+    // to do about it.
+    const db = freshDb();
+    const { ownerId } = await seedPeople(db);
+    seedDataset(db, ownerId, "nm000877", { visibility: "private", anonymous: 1 });
+    const res = await publishRequest(db, "nm000877", OWNER_KEY, '{"anonymous":true}');
+    expect(res.status).not.toBe(409);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).not.toBe("already_released_anonymously");
+    db.close();
+  });
+
   test("re-requesting rewrites the recorded intent in both directions", async () => {
     // A blocked row is re-used rather than replaced, and an admin CAN approve
     // a blocked request (`runPublicationApproval` selects `status IN
@@ -504,15 +531,19 @@ describe("the request route, end to end", () => {
   });
 
   // ==========================================================================
-  // The fleet's standing anonymous deposit (#1423)
+  // The xx band and anonymity (#1433, ADR 0068)
   //
-  // `xx099907` is created anonymous and PRIVATE by
-  // `POST /admin/datasets/exemplar`, and the anonymous release is the only
-  // path that gives it the shape it is documented to have: `repo_public`
-  // makes the catalog row public while the GitHub repository stays private,
-  // and `create_tag` produces the version row and manifest the data plane
-  // serves from. Two separate guards refused that request, each for a reason
-  // that is true of a depositor's deposit and false of this one.
+  // These tests once argued the opposite. `xx099907` was the fleet's standing
+  // anonymous deposit, and #1423 made two guards let it through so it could
+  // take the anonymous release that would have given it a public row, a
+  // private repository and a manifest.
+  //
+  // The placement was the mistake. `xx` publishes only through the exemplar
+  // exception, so the one path that fixture needed was the one path its band
+  // refuses, and the only way to keep it there was to widen a gate. The
+  // standing anonymous deposit now lives at a reserved `nm` id where the same
+  // release is an ordinary publication, and the xx band goes back to refusing
+  // every direction.
   // ==========================================================================
 
   test("an anonymous xx exemplar is refused BOTH directions now", async () => {
@@ -555,9 +586,13 @@ describe("the request route, end to end", () => {
 
     const res = await publishRequest(db, "xx099900", OWNER_KEY);
 
-    // Past the xx block: it gets as far as the content checks, which is the
-    // same "allowed past the gate" signal the sibling tests use.
-    expect(res.status).not.toBe(400);
+    // Asserted positively. `not.toBe(400)` was satisfied by 403, 409, 422 and
+    // 500 alike, so a regression that broke the exemplar exemption in any other
+    // way would have left it green. Measured: the route answers 200 and queues
+    // the request, which is what "the ordinary exemplar exemption still works"
+    // actually means.
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ status: "requested", anonymous: false });
     db.close();
   });
 

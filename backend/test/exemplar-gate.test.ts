@@ -47,14 +47,15 @@ describe("isExemplarPublishAllowed: the anonymous deposit", () => {
     expect(isExemplarPublishAllowed(envOf("test"), anonRow)).toBe(false);
   });
 
-  test("the term guards nothing today, and is kept for the direction it fails in", () => {
-    // `scripts/exemplar-fleet.json` declares no anonymous entry and the loader
-    // now REFUSES one, so no row should reach this function with anonymous = 1.
-    // The term stays because of the two ways to be wrong, refusing a publish
-    // that should have been allowed is the recoverable one: publishing an
-    // anonymous row stamps first_published_at, after which migration 0085's
-    // triggers refuse anonymous = 1 on it forever.
-    expect(isExemplarPublishAllowed(envOf("test"), { ...anonRow, anonymous: 1 })).toBe(false);
+  test("the term is a LIVE guard: the admin route can still create such a row", () => {
+    // Not unreachable, though the fleet no longer declares an anonymous entry.
+    // POST /admin/datasets/exemplar still accepts `anonymous: true` and writes
+    // it with is_exemplar = 1 on an xx0999NN id (routes/admin/exemplar.ts), so
+    // an admin can create exactly this row today. #1434 retires that field.
+    // Publishing such a row destroys it rather than dirtying it: the approve
+    // path stamps first_published_at, after which migration 0085's triggers
+    // refuse anonymous = 1 on it forever.
+    expect(isExemplarPublishAllowed(envOf("test"), anonRow)).toBe(false);
     expect(isExemplarPublishAllowed(envOf("test"), plainRow)).toBe(true);
   });
 
@@ -70,13 +71,12 @@ describe("isExemplarPublishAllowed: the anonymous deposit", () => {
     expect(isExemplarPublishAllowed(envOf("production"), anonRow)).toBe(false);
   });
 
-  test("a non-exemplar xx row is still refused however it asks", () => {
+  test("a non-exemplar xx row is still refused", () => {
     // The exemption is for the staging fleet, not for the xx band.
     expect(
       isExemplarPublishAllowed(
         envOf("test"),
         { dataset_id: EXEMPLAR_ID, is_exemplar: 0, anonymous: 1 },
-        { anonymousRelease: true },
       ),
     ).toBe(false);
   });
