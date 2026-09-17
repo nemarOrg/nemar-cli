@@ -30,6 +30,8 @@
  */
 
 import {
+  SEARCH_DATASETS_FILTER_PARAMS,
+  SEARCH_DATASETS_MAX_FILTERS,
   type SearchDatasetsHit,
   type SearchDatasetsInput,
   flagToBoolean,
@@ -186,10 +188,85 @@ function unavailableOutcome(): ToolOutcome {
   };
 }
 
+/**
+ * Whether a supplied value will actually narrow the query, which is not the
+ * same question as whether the caller supplied the key.
+ *
+ * Every consumer downstream is truthiness-guarded, and this has to match them
+ * or the cap refuses calls over filters that were never going to be applied:
+ * `buildDatasetFilterClauses` writes its boolean clauses under `if
+ * (opts.hasDoi)` / `if (opts.hasHed)` / ... so `has_doi: false` builds NOTHING
+ * (it does not mean "datasets without a DOI"); `recent` is guarded `opts.recent
+ * && opts.recent > 0`; `parseFacetFilters` skips a facet whose raw value is
+ * `""` after trimming; and `parseLicenseTierFilter("")` yields no tiers.
+ *
+ * `hasActiveFilters` (dataset-search.ts) is the same predicate over the mapped
+ * `DatasetFilterOptions`, and states the same rules; this one answers over the
+ * wire names, which is what the caller has to be told to drop.
+ * `filter-count-matches-clauses.unit.test.ts` holds the equivalence against
+ * the real builders rather than against either comment.
+ */
+function narrows(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === "string") return value.trim() !== "";
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value > 0;
+  return true;
+}
+
+/**
+ * The declared filters this call actually narrows by, in declaration order.
+ * Reads {@link SEARCH_DATASETS_FILTER_PARAMS}, so a facet added to
+ * `shared/facets.ts` is counted the day it is declared.
+ */
+export function activeFilterParams(args: SearchDatasetsInput): string[] {
+  const supplied = args as Record<string, unknown>;
+  return SEARCH_DATASETS_FILTER_PARAMS.filter((name) => narrows(supplied[name]));
+}
+
+/**
+ * The wire argument names mapped onto `DatasetFilterOptions`' own field names
+ * -- the one place the two spellings meet (`has_zarr_verified` ->
+ * `hasZarrVerified`, `license` -> a parsed tier list).
+ *
+ * Exported so the cap's notion of an active filter can be checked against the
+ * clauses these options actually build, instead of against a comment claiming
+ * they match.
+ */
+export function buildFilterOptions(
+  args: SearchDatasetsInput,
+  facets: DatasetFilterOptions["facets"],
+): DatasetFilterOptions {
+  return {
+    modality: args.modality,
+    task: args.task,
+    hasHed: args.has_hed,
+    hasZarr: args.has_zarr,
+    author: args.author,
+    hasDoi: args.has_doi,
+    hasZarrVerified: args.has_zarr_verified,
+    dataComplete: args.data_complete,
+    recent: args.recent,
+    licenseTiers: parseLicenseTierFilter(args.license),
+    facets,
+    includeUnknown: args.include_unknown,
+  };
+}
+
 export async function searchDatasetsTool(
   env: Pick<Bindings, "DB" | "AI" | "VECTORIZE">,
   args: SearchDatasetsInput,
 ): Promise<ToolOutcome> {
+  // Checked before any parsing, so an over-wide call costs nothing and the
+  // answer names what to drop. `assertBoundParamBudget` remains the backstop;
+  // see SEARCH_DATASETS_MAX_FILTERS for why this cap is not that ceiling.
+  const active = activeFilterParams(args);
+  if (active.length > SEARCH_DATASETS_MAX_FILTERS) {
+    return badFilterOutcome(
+      `Too many filters in one call: ${active.length}, and at most ${SEARCH_DATASETS_MAX_FILTERS} can be combined. Drop the least selective ones and filter the results yourself, or run narrower calls and intersect them. Supplied: ${active.join(", ")}.`,
+    );
+  }
+
   // Every filter `buildDatasetFilterClauses` understands, not a hand-picked
   // four. The bespoke fields below and the declared facet table are the two
   // halves ADR 0032 deliberately keeps separate; both ride in the same options
@@ -215,20 +292,7 @@ export async function searchDatasetsTool(
     );
   }
 
-  const filters: DatasetFilterOptions = {
-    modality: args.modality,
-    task: args.task,
-    hasHed: args.has_hed,
-    hasZarr: args.has_zarr,
-    author: args.author,
-    hasDoi: args.has_doi,
-    hasZarrVerified: args.has_zarr_verified,
-    dataComplete: args.data_complete,
-    recent: args.recent,
-    licenseTiers: parseLicenseTierFilter(args.license),
-    facets,
-    includeUnknown: args.include_unknown,
-  };
+  const filters = buildFilterOptions(args, facets);
 
   let hits: SearchDatasetsHit[];
   let count: number;
