@@ -6,7 +6,8 @@
  * without requiring a git clone (used by web frontend).
  */
 
-import { ORG_NAME, type TreeEntry, getBlobContent, getTreeAtRef } from "./github";
+import { type TreeEntry, getBlobContent, getTreeAtRef } from "./github";
+import { GITHUB_RAW_ORIGIN, rawContentUrl } from "./github/shared.js";
 
 export interface ManifestFile {
   key: string;
@@ -92,6 +93,12 @@ export interface GenerateManifestOptions {
    * Production callers (webhooks, admin publish flow) never set this.
    */
   skipGitBackedVerification?: boolean;
+  /**
+   * Raw content host for the canary. Defaults to {@link GITHUB_RAW_ORIGIN};
+   * tests point it at a local server, the same override
+   * `GitFileRequest.rawBase` carries for the broker. Production never sets it.
+   */
+  rawBase?: string;
 }
 
 /**
@@ -190,13 +197,15 @@ export async function generateManifest(
   // It no longer defends a redirect. Since #1403 the data plane streams
   // git-tracked bytes itself, so "the repo must be publicly readable" stopped
   // being a precondition for serving; what remains worth checking is that the
-  // blobs exist at the tag at all. The canary still reads the PUBLIC raw host
-  // anonymously, which is why a private repo must keep passing
-  // `skipGitBackedVerification` — for that case the check cannot distinguish
-  // an absent blob from an unreadable repo, and a check that cannot fail
-  // meaningfully is worse than no check.
+  // blobs exist at the tag at all. It reads the raw host WITH the installation
+  // token for that reason (#1450): a private repo is a supported shape now that
+  // an anonymous deposit is a public row over a private repository (ADR 0065),
+  // and the credential is what makes the probe mean what the broker will do.
+  // The earlier anonymous read told every private repo its blobs were gone, and
+  // the carve-out it documented -- pass `skipGitBackedVerification` for a
+  // private repo -- was never taken by any caller.
   if (!options?.skipGitBackedVerification) {
-    await verifyGitBackedFiles({ repo, tag, files });
+    await verifyGitBackedFiles({ repo, tag, files, pat, rawBase: options?.rawBase });
   }
 
   return {
@@ -223,11 +232,22 @@ export class GitBackedFileMissingError extends Error {
   }
 }
 
+/**
+ * What one canary probe established.
+ *
+ * `absent` is the only verdict that refuses a manifest. The probe carries an
+ * installation token, so a 404 means the path is not at that ref; a 401, a
+ * throttle or a 5xx says nothing about the blob and must not be reported as
+ * one missing (the broker's "a throttle is not an absence", one layer up).
+ */
+export type GitBackedFileVerdict = "present" | "absent" | "unchecked";
+
 export interface GitBackedFileCheckResult {
   path: string;
   url: string;
   status: number;
   ok: boolean;
+  verdict: GitBackedFileVerdict;
 }
 
 /**
@@ -267,62 +287,104 @@ export function selectGitBackedCanaries(
   return canaries;
 }
 
+/** A status the raw host answered with that decides nothing about the blob. */
+function verdictFor(status: number): GitBackedFileVerdict {
+  if (status >= 200 && status < 300) return "present";
+  return status === 404 ? "absent" : "unchecked";
+}
+
 async function verifyGitBackedFiles(args: {
   repo: string;
   tag: string;
   files: Record<string, ManifestFile>;
+  /** Installation token. Sent on every probe; a private repo needs it. */
+  pat: string;
+  rawBase?: string;
 }): Promise<void> {
-  const { repo, tag, files } = args;
+  const { repo, tag, files, pat, rawBase = GITHUB_RAW_ORIGIN } = args;
   const canaries = selectGitBackedCanaries(files);
   if (canaries.length === 0) return;
 
   const checks = await Promise.all(
     canaries.map(async (path): Promise<GitBackedFileCheckResult> => {
-      const url = `https://raw.githubusercontent.com/${ORG_NAME}/${repo}/${tag}/${path
-        .split("/")
-        .map(encodeURIComponent)
-        .join("/")}`;
+      const url = rawContentUrl(rawBase, repo, tag, path);
       // One retry with a 2-second backoff to absorb raw.githubusercontent.com
       // CDN propagation lag after a fresh tag push. The publish workflow that
       // calls generateManifest typically runs seconds after `git push --tags`,
       // so the first HEAD can race the propagation. A single short retry
       // catches that without inflating the Worker subrequest budget; a real
       // missing-blob failure stays failed across both attempts.
-      let last: GitBackedFileCheckResult = { path, url, status: 0, ok: false };
+      //
+      // The retry exists so a 404 can become a 200, and NOT so a 404 can be
+      // forgotten. `present` returns immediately, an `absent` seen on either
+      // attempt is kept even if the other attempt was inconclusive, and
+      // `unchecked` is the verdict only when no attempt decided anything. Taking
+      // the last attempt instead would let a 503 on the retry erase an
+      // authenticated 404 from the first, and an erased absence writes a manifest
+      // promising a blob the data plane cannot serve, which is the incident this
+      // canary exists to prevent.
+      let absent: GitBackedFileCheckResult | null = null;
+      let last: GitBackedFileCheckResult = {
+        path,
+        url,
+        status: 0,
+        ok: false,
+        verdict: "unchecked",
+      };
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
-          const res = await fetch(url, { method: "HEAD", redirect: "follow" });
-          last = { path, url, status: res.status, ok: res.ok };
+          const res = await fetch(url, {
+            method: "HEAD",
+            redirect: "follow",
+            headers: { "User-Agent": "NEMAR-API", Authorization: `Bearer ${pat}` },
+          });
+          last = { path, url, status: res.status, ok: res.ok, verdict: verdictFor(res.status) };
           if (res.ok) return last;
+          if (last.verdict === "absent") absent ??= last;
         } catch (err) {
           console.warn(
             `[manifest] canary HEAD threw dataset=${repo} tag=${tag} path=${path} attempt=${attempt + 1}:`,
             err instanceof Error ? err.message : String(err),
           );
-          last = { path, url, status: 0, ok: false };
+          // A transport error is not an answer about the blob either.
+          last = { path, url, status: 0, ok: false, verdict: "unchecked" };
         }
         if (attempt === 0) {
           await new Promise((r) => setTimeout(r, 2000));
         }
       }
-      return last;
+      return absent ?? last;
     }),
   );
 
-  const failures = checks.filter((c) => !c.ok);
-  if (failures.length === 0) {
-    console.log(
-      `[manifest] git-backed canary OK dataset=${repo} tag=${tag} checked=${canaries.length}`,
-    );
+  const missing = checks.filter((c) => c.verdict === "absent");
+  const unchecked = checks.filter((c) => c.verdict === "unchecked");
+
+  if (missing.length === 0) {
+    // Said out loud rather than folded into the OK line: a run where the host
+    // refused every probe writes a manifest nothing verified, and an operator
+    // reading "canary OK" would believe otherwise (ADR 0053).
+    if (unchecked.length > 0) {
+      console.warn(
+        `[manifest] git-backed canary UNCHECKED dataset=${repo} tag=${tag} ` +
+          `checked=${canaries.length} undecided=${unchecked
+            .map((u) => `${u.path} (HTTP ${u.status})`)
+            .join(", ")}`,
+      );
+    } else {
+      console.log(
+        `[manifest] git-backed canary OK dataset=${repo} tag=${tag} checked=${canaries.length}`,
+      );
+    }
     return;
   }
 
-  const summary = failures.map((f) => `${f.path} (HTTP ${f.status})`).join(", ");
+  const summary = missing.map((f) => `${f.path} (HTTP ${f.status})`).join(", ");
   console.error(
     `[manifest] git-backed canary FAILED dataset=${repo} tag=${tag} failures=${summary}`,
   );
   throw new GitBackedFileMissingError(
-    `Manifest canary failed: ${failures.length}/${checks.length} git:-keyed files do not resolve on raw.githubusercontent.com at tag ${tag}. Failing paths: ${summary}. The version tag may not exist on GitHub yet, the repo may be private, or the blob may have been removed by a retag. Refusing to write a manifest that would 404 on data.nemar.org.`,
+    `Manifest canary failed: ${missing.length}/${checks.length} git:-keyed files do not resolve on raw.githubusercontent.com at tag ${tag}. Failing paths: ${summary}. The probe was authenticated, so a private repository is not the cause: the version tag may not exist on GitHub yet, or the blob may have been removed by a retag. Refusing to write a manifest that would 404 on data.nemar.org.`,
     checks,
   );
 }
