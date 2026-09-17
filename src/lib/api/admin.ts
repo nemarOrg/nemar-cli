@@ -704,7 +704,14 @@ export async function createExemplar(opts: {
   source_id: string;
   name?: string;
   description?: string;
-  /** Create as the fleet's standing anonymous deposit (#1407). */
+  /**
+   * Mirrors the route's still-live `anonymous` field (`POST
+   * /admin/datasets/exemplar`). It has had no caller since #1433 removed the
+   * fleet's anonymous designation, and is kept only so this client stays a
+   * faithful description of the endpoint. #1434 retires both together; do not
+   * use it to build a fixture, which is what ADR 0068 moved to a reserved
+   * `nm` id.
+   */
   anonymous?: true;
 }): Promise<CreateExemplarResponse> {
   return request<CreateExemplarResponse>(
