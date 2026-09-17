@@ -48,7 +48,7 @@ export const SANDBOX_TRAINING_ERROR = {
 } as const;
 
 /**
- * A `test`-kind account on production may own only `xx` sandbox datasets, so
+ * A `test`-kind account may own only `xx` sandbox datasets, so
  * a real DOI never attaches to a persona (epic #1272 phase 4, #1284; ADR
  * 0048). `error` matches the stable-machine-readable convention the two
  * bodies above already follow.
@@ -56,7 +56,7 @@ export const SANDBOX_TRAINING_ERROR = {
 export const TEST_ACCOUNT_SANDBOX_ONLY_ERROR = {
   error: "test_account_sandbox_only",
   message:
-    "Test accounts can only create sandbox (xx) datasets on production. Use a person account for real data.",
+    "Test accounts can only create sandbox (xx) datasets. Use a person account for real data.",
 } as const;
 
 export type UploadGateBody =
@@ -96,7 +96,14 @@ export function uploadChannelForAuthMethod(
  *
  * The kind check needs no separate `isProduction` input: the route only ever
  * calls this function from inside its own `if (!sandbox)` branch, and
- * `sandbox` is unconditionally forced `true` off production (the route
+ * NOTE (#1432): "unconditionally" below is no longer true. A NAMED reserved id
+ * derives `sandbox` from its own prefix, so an `nm0999xx` create off production
+ * reaches this function. The ordering argument that follows therefore no longer
+ * proves the environment is production, and `TEST_ACCOUNT_SANDBOX_ONLY_ERROR` is
+ * now reachable off production. The `=== "test"` predicate itself is unchanged
+ * and still right: a test persona may own only `xx`, in any environment.
+ *
+ * `sandbox` is forced `true` off production for every ALLOCATED id (the route
  * decides that from its own `isProduction` literal before this function ever
  * runs) -- so REACHING this function already proves the environment is
  * production, and a `test`-kind account off production is never refused here

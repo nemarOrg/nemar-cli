@@ -12,6 +12,7 @@ import type { AccountKind } from "../../../../shared/contract/user.js";
 import { authMiddleware } from "../../middleware/auth";
 import { cliVersionGuard } from "../../middleware/cliVersion";
 import { generateDatasetId, isSandboxDatasetId, isValidDatasetId } from "../../services/datasetId";
+import { isNonProductionEnv } from "../../services/environment";
 import {
   type GitHubRepo,
   addCollaborator,
@@ -257,7 +258,15 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
           "[datasets] ENVIRONMENT not configured; defaulting to non-production (sandbox-only)",
         );
       }
-      const isProduction = environment === "production";
+      // `!isNonProductionEnv`, NOT `ENVIRONMENT === "production"`, so the fence
+      // FAILS CLOSED. Before the named-id path existed, `isProduction === false`
+      // meant MORE restriction (force sandbox), so a literal comparison was
+      // fail-safe. The named-id gate inverts that valence: `false` is now
+      // permission to name a reserved id. An unset, misspelled or
+      // env-block-omitted ENVIRONMENT must refuse, not permit, on a worker that
+      // may be bound to prod's D1, prod's bucket and the shared GitHub org.
+      // Matches webhooks/github.ts, services/deletion.ts and services/exemplar.ts.
+      const isProduction = !isNonProductionEnv(c.env);
 
       // A named id is gated before anything reads it (ADR 0068, #1432).
       if (requestedDatasetId !== undefined) {
@@ -558,10 +567,19 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
               {
                 error: "Dataset id already exists",
                 dataset_id: requestedDatasetId,
-                // Matches the documented exemplar recovery in AGENTS.md:
-                // creation is not retry-safe after a partial failure, so the
-                // recovery is delete-then-recreate rather than re-running it.
-                note: "Naming an id never overwrites. Remove the existing dataset first (`nemar admin delete-dataset <id>`), then recreate.",
+                // Deliberately NOT "run delete-dataset". Two reasons, both
+                // learned the hard way in review:
+                //
+                // 1. The reserved band is where the STANDING fixtures live, and
+                //    their whole value is that they persist. xx099907 has been
+                //    pre-publication for weeks by design and nm099999 has a
+                //    reset endpoint rather than a delete/recreate cycle.
+                //    Blanket delete advice aimed at this band is aimed at them.
+                // 2. For a reserved `nm` id the command does not even work off
+                //    production: deleteDatasetCascade refuses any id outside
+                //    xx09NNNN on a non-production worker, because a cascade
+                //    removes the GitHub repository and the org is shared.
+                note: "Naming an id never overwrites an existing dataset. The reserved band holds standing fixtures that are meant to persist, so check what is there before removing anything; note that a non-production worker can only cascade-delete dev-range ids (xx090000-xx099999).",
               },
               409,
             );
