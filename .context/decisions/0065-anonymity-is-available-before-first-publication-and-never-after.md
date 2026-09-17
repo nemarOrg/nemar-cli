@@ -253,6 +253,31 @@ dead identifier never reaches signposting, JSON-LD or a citation widget. Reservi
 still worth it -- the same identifier becomes the real one at publication -- but reserving is
 not publishing, and no surface may blur the two.
 
+**Amended by #1447: the VERSION DOI is reserved the same way, and the release stopped skipping
+the step that mints it.**
+An anonymous release originally skipped `version_doi` outright, which reads as correct from the
+step's name and was not.
+That one step also dispatches the central manifest job, whose callback inserts the
+`dataset_versions` row, so skipping it left every anonymous release with no manifest and no
+version: the data plane answered 404 "Version not published" for a dataset the release had just
+made public, and the catalog listing omitted it.
+Measured on the dev worker while building `nm099998`, against a normally published control on
+the same worker.
+The step now runs and mints the version identifier `reserved`, exactly as `doi_create` already
+leaves the concept identifier, so the data is reachable and no identifier resolves.
+Two surfaces had to follow: `extensions.nemar.versions[].doi` on the public `metadata.json`,
+which sat three lines below the `dataset_doi` that WAS withheld and had no rule of its own
+because the array was necessarily empty for a concealed deposit until now; and
+`latest_version_doi`, which `SELECT d.*` carries into the detail response.
+That column is left NULL rather than filled, because `archive-retry.ts` reads
+`latest_version_doi IS NOT NULL` as "has a released version" and `import-integrity.ts` derives
+the version from it; it means the version DOI that is PUBLISHED, and a concealed deposit has
+none.
+The reasoning that makes this safe is the one already stated above: reserving is not
+publishing.
+What changed is the discovery that the platform was ALSO not publishing the data, which the
+release is supposed to do.
+
 **"No surface" is literal, and it took a review to make it true.** The reserved identifier and
 the private repository were each withheld by one surface and served raw by three others, twice
 in the SAME HTTP response: the page bundle carried `external_links.github_url: null` beside
