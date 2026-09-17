@@ -84,7 +84,11 @@ The measured consequences, all in code that predates this ADR:
 
 - `services/deletion.ts` refused to cascade-delete `nm099998` from the dev worker, so the documented recovery for a failed fixture build, delete then recreate, did not work on the only worker that could run it.
 - `routes/webhooks/github.ts` made the DEV worker refuse pushes to its own fixture, answering `prod_range_repo_on_dev_worker`, so enrichment could never run against the one dataset built to exercise the anonymity surfaces.
-- The same file made the PRODUCTION worker treat those pushes as its own and dispatch enrichment, zarr and version-DOI runs for a repository it has no D1 row for.
+- The same file made the PRODUCTION worker treat those pushes as its own and dispatch an ENRICHMENT run for a repository it has no D1 row for.
+  Stated narrowly on purpose, because a first draft of this amendment said "enrichment, zarr and version-DOI" and two thirds of that was wrong: `shouldDispatchZarr` is defined but never called (retired with the Actions dispatch path in #1109), and the version-DOI path already refused this case, because its anonymity check reads `SELECT anonymous FROM datasets` on the calling worker and treats an ABSENT row as anonymous (#1408).
+  Enrichment alone is enough to justify the change, and an ADR that overstates its evidence is worse than one that understates it.
+- A fourth fence, found only after the first three were fixed: `services/publication-sweep.ts` scoped its non-production candidate set with `AND pr.dataset_id LIKE 'xx09%'`, the same question asked a fourth way.
+  An anonymous release IS a publication request, so the standing anonymous deposit is the dataset most likely to land in the `blocked` state that sweep exists to clear, and moving it to a reserved `nm` id dropped it out of the sweep's reach.
 
 **Environment ownership is therefore declared, in `DEV_OWNED_FIXTURE_IDS`, and not inferred from the id.**
 `isDevOwnedDatasetId` is `isDevRangeDatasetId(id) || DEV_OWNED_FIXTURE_IDS.has(id)`, and the three fences use it.
