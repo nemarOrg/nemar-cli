@@ -32,6 +32,7 @@ import {
 } from "../../shared/contract/profile-gaps.js";
 import { datasetLandingUrl } from "../../shared/datacite-constants.js";
 import { LICENSE_TIERS } from "../../shared/license-tiers.js";
+import { stepsForRelease } from "../../shared/publication-steps.js";
 import { RangeParseError } from "../../shared/range.js";
 import { addCi } from "../lib/api/admin.js";
 import { getCurrentUser } from "../lib/api/auth.js";
@@ -60,7 +61,6 @@ import {
 } from "../lib/api/datasets.js";
 import { ApiError, errorDetail } from "../lib/api/errors.js";
 import {
-  PUBLICATION_STEPS,
   getPublishStatus,
   requestPublication,
   resendPublishNotification,
@@ -4130,14 +4130,19 @@ Examples:
       }
 
       if (result.status === "approving") {
-        // Source of truth is `PUBLICATION_STEPS` in shared/publication-steps.ts
-        // (re-exported by src/lib/api/publish.ts), shared with the backend
-        // orchestrator. Showing fewer steps here than
-        // the backend actually runs (the legacy list missed
-        // enrichment_check, version_doi, sync_nemar) made the status
-        // display claim "all steps complete" while the backend was still
-        // running — exactly the visibility gap #284 calls out.
-        const steps = PUBLICATION_STEPS;
+        // Source of truth is `shared/publication-steps.ts` (re-exported by
+        // src/lib/api/publish.ts), shared with the backend orchestrator.
+        // Showing fewer steps here than the backend actually runs (the legacy
+        // list missed enrichment_check, version_doi, sync_nemar) made the
+        // status display claim "all steps complete" while the backend was
+        // still running -- exactly the visibility gap #284 calls out.
+        //
+        // And showing MORE than it runs is the mirror of that bug (#1447): an
+        // anonymous release skips four steps, so rendering all sixteen left
+        // this display stuck at 12 of 16 forever on a release that had
+        // finished. `anonymous` is already on the response, printed two lines
+        // above, so the right list was in hand and unused.
+        const steps = stepsForRelease(result.anonymous === true);
         const completed = result.steps_completed || [];
         const total = steps.length;
         console.log("\n  Steps:");
