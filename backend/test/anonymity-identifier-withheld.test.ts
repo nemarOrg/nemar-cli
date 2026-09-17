@@ -94,7 +94,9 @@ describe("the raw columns a whole-row select carries", () => {
     return { DB: realD1(db), ENVIRONMENT: "test" } as Bindings;
   }
 
-  function app(routes: typeof dataRoutes | typeof datasetRoutes): Hono<{ Bindings: Bindings; Variables: Variables }> {
+  function app(
+    routes: typeof dataRoutes | typeof datasetRoutes,
+  ): Hono<{ Bindings: Bindings; Variables: Variables }> {
     const hono = new Hono<{ Bindings: Bindings; Variables: Variables }>();
     hono.route("/", routes);
     return hono;

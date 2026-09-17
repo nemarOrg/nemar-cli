@@ -56,7 +56,9 @@ describe("isExemplarPublishAllowed: the anonymous deposit", () => {
 
   test("an ordinary exemplar is unaffected by the intent either way", () => {
     expect(isExemplarPublishAllowed(envOf("test"), plainRow)).toBe(true);
-    expect(isExemplarPublishAllowed(envOf("test"), plainRow, { anonymousRelease: true })).toBe(true);
+    expect(isExemplarPublishAllowed(envOf("test"), plainRow, { anonymousRelease: true })).toBe(
+      true,
+    );
     expect(isExemplarPublishAllowed(envOf("test"), plainRow, { anonymousRelease: false })).toBe(
       true,
     );

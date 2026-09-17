@@ -21,6 +21,7 @@
  */
 
 import { z } from "zod";
+import { FACETS } from "../facets";
 import {
   DATASET_ID_RE,
   SOURCE_COMMIT_RE,
@@ -488,6 +489,29 @@ export const SEARCH_DATASETS_MAX_LIMIT = 100;
  *  caller reads `subject_count` off each hit). `has_zarr` filters on the
  *  catalog's converted flag, never `zarr_verify_status` -- see
  *  `zarrVerifyStatusSchema`'s doc. */
+/**
+ * Every declared facet, as an optional string parameter keyed by its wire
+ * `queryParam`.
+ *
+ * DERIVED, never hand-listed. ADR 0032 makes `shared/facets.ts` the single
+ * source of truth for which columns are filterable, and this schema is the one
+ * consumer that used to opt out of that: its parameters were written by hand,
+ * which is how the NEMAR assistant's prompt ended up instructing the model to
+ * call `modality_filter`, a name no schema ever declared. The server accepts
+ * unknown arguments and drops them, so that returned unfiltered results wearing
+ * the appearance of filtered ones. Generating the parameters from `FACETS`
+ * removes that class of bug rather than the one instance, and a new facet
+ * reaches MCP callers the day it is declared.
+ *
+ * Values are strings because that is what `parseFacetFilters` consumes: a range
+ * facet takes `10..20`, `64..`, or `..128`; an enum or version facet takes its
+ * declared token. The parser validates and throws on anything else, and the
+ * tool turns that into an error naming the offending value.
+ */
+const facetInputShape: Record<string, z.ZodOptional<z.ZodString>> = Object.fromEntries(
+  FACETS.map((facet) => [facet.queryParam, z.string().optional()]),
+);
+
 export const searchDatasetsInputSchema = z
   .object({
     query: z.string().optional(),
@@ -495,6 +519,25 @@ export const searchDatasetsInputSchema = z
     task: z.string().optional(),
     has_hed: z.boolean().optional(),
     has_zarr: z.boolean().optional(),
+    /** Author name, matched the same way the CLI's `--author` matches. */
+    author: z.string().optional(),
+    /** Only datasets carrying a DOI, i.e. the citable ones. */
+    has_doi: z.boolean().optional(),
+    /** A strict narrowing of `has_zarr`: the copy also PASSED the standing
+     *  fidelity sweep. A fresh conversion is `has_zarr` without this. */
+    has_zarr_verified: z.boolean().optional(),
+    /** Only datasets verified data-complete. */
+    data_complete: z.boolean().optional(),
+    /** Published within this many days. */
+    recent: z.number().int().positive().optional(),
+    /** License tiers, comma-separated, from the declared vocabulary. */
+    license: z.string().optional(),
+    /** Widen every ACTIVE facet to also admit rows whose column is NULL.
+     *  Several facet columns are only partly populated, so a filter's recall
+     *  is low by construction rather than by bug (ADR 0032); this is how a
+     *  caller sees what a filter is excluding. */
+    include_unknown: z.boolean().optional(),
+    ...facetInputShape,
     limit: z
       .number()
       .int()
