@@ -74,10 +74,11 @@ describe("isExemplarPublishAllowed: the anonymous deposit", () => {
   test("a non-exemplar xx row is still refused", () => {
     // The exemption is for the staging fleet, not for the xx band.
     expect(
-      isExemplarPublishAllowed(
-        envOf("test"),
-        { dataset_id: EXEMPLAR_ID, is_exemplar: 0, anonymous: 1 },
-      ),
+      isExemplarPublishAllowed(envOf("test"), {
+        dataset_id: EXEMPLAR_ID,
+        is_exemplar: 0,
+        anonymous: 1,
+      }),
     ).toBe(false);
   });
 });

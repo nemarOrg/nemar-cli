@@ -61,7 +61,9 @@ On the `xx` side the reserved band is the exemplar fleet, which already occupied
 
 **Reserved means not allocatable, not invalid.**
 `isValidDatasetId` still accepts a reserved id and every route must still serve one.
-The reservation binds exactly one thing: what `generateDatasetId` may hand out.
+The reservation binds two things.
+`generateDatasetId` may never hand out a reserved id, and `POST /datasets` may name ONLY a reserved id that is also declared dev-owned (`explicitDatasetIdGate`, #1432 and #1440).
+The second is what lets a fixture exist at all, since the first makes the allocator structurally unable to produce one.
 
 **The reservation is environment-independent.**
 It is not fenced to non-production, because the GitHub org is shared and a repository name collision does not care which database allocated it.
@@ -91,7 +93,8 @@ The measured consequences, all in code that predates this ADR:
   An anonymous release IS a publication request, so the standing anonymous deposit is the dataset most likely to land in the `blocked` state that sweep exists to clear, and moving it to a reserved `nm` id dropped it out of the sweep's reach.
 
 **Environment ownership is therefore declared, in `DEV_OWNED_FIXTURE_IDS`, and not inferred from the id.**
-`isDevOwnedDatasetId` is `isDevRangeDatasetId(id) || DEV_OWNED_FIXTURE_IDS.has(id)`, and the three fences use it.
+`isDevOwnedDatasetId` is `isDevRangeDatasetId(id) || DEV_OWNED_FIXTURE_IDS.has(id)`, and FOUR production call sites use it: the two webhook fences, the cascade-deletion fence, and the create-time gate.
+The blocked-BIDS sweep is the fourth fence proper, and it asks the same question in SQL through `blockedSweepScope`.
 `isDevRangeDatasetId` keeps its own meaning and its other callers; conflating the two questions is what caused this, and it is not fixed by redefining the first one.
 
 **A declared list is right here, and this ADR rejects exactly that shape for the allocator.**
@@ -152,11 +155,26 @@ deriving one from the other is what makes the cleanup cron's boundary and the al
 
 ## Receipts
 
-- `backend/src/services/datasetId.ts` -- `RESERVED_FIXTURE_FLOOR`, `isReservedFixtureId`, `resolveRange`
-- `backend/test/dataset-id-partition.test.ts` -- the band is refused against a FULL allocatable band, seeded directly, since that is the only state in which it can be crossed
+Kept current across the epic's four phases rather than left at phase 1's scope; this list is
+the index someone uses to find the enforcement.
+
+**The allocator and the id map**
+- `backend/src/services/datasetId.ts` -- `RESERVED_FIXTURE_FLOOR`, `isReservedFixtureId`, `formatDatasetId`, `resolveRange`, `DEV_OWNED_FIXTURE_IDS`, `NEVER_DEV_OWNED_IDS`, `isDevOwnedDatasetId`
+- `backend/test/dataset-id-partition.test.ts` -- the band is refused against a FULL allocatable band, seeded directly, since that is the only state in which it can be crossed; plus the ownership-drift invariants
 - `backend/src/routes/admin/exemplar.ts` -- `EXEMPLAR_ID_RE`, which declares the same band separately and is cross-checked against `isReservedFixtureId` by a drift test
-- #1430 (epic), #1431 (this phase)
-- #1423 and #1428 -- the gate exception this rule makes unnecessary; #1433 withdraws it, and until then it remains live
-- ADR 0065 -- amended in this phase to record that the fixture's placement, not its reasoning, is what was wrong
-- ADR 0065 -- anonymity is available before first publication and never after; the fixture this rule was written for
-- Epic #923 -- the `xx` partition this generalizes
+
+**Creating a fixture at a reserved id (#1432)**
+- `backend/src/services/upload-gate.ts` -- `explicitDatasetIdGate`: non-production AND admin AND reserved AND declared dev-owned
+- `backend/src/routes/datasets/upload.ts` -- the `dataset_id` field, the two separate environment predicates, the named-id claim and its 409
+- `backend/test/dataset-create-explicit-id.test.ts`, `backend/test/upload-gate.unit.test.ts`
+
+**Environment ownership (#1440)**
+- `backend/src/services/deletion.ts` -- the cascade fence
+- `backend/src/routes/webhooks/github.ts` -- the production short-circuit and the reciprocal dev fence
+- `backend/src/services/publication-sweep.ts` -- `blockedSweepScope`, the fourth fence, found only after the first three were fixed
+- `backend/test/webhook-github-dev-range.test.ts`, `backend/test/cron-dev-safety.test.ts`
+
+**Issues**
+- #1430 (epic); #1431, #1432, #1433, #1440 (phases 1-4); #1434 (builds `nm099998`, retires `xx099907`, and retires the `anonymous` field on `POST /admin/datasets/exemplar`)
+- #1423 and #1428 -- the gate exception this rule made unnecessary. WITHDRAWN by #1433; ADR 0065's #1423 amendment is superseded accordingly.
+- ADR 0065 -- the fixture's reason for existing, whose placement this ADR corrects

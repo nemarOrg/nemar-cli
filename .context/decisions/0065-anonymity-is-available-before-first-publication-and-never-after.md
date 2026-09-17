@@ -132,31 +132,34 @@ because the triggers refuse the intermediate state, and at that step rather than
 the run because every later step can fail and return, which would otherwise leave a dataset
 public in the world and anonymous in D1 forever.
 
-**Amendment 2026-09-16 (#1423): `anonymous = 1` is not evidence that a release happened, and
-the exemplar gate now asks which direction the caller means.** Building the fleet's standing
-anonymous deposit found two guards that read a row's anonymity as a history rather than as a
-state. Both are true of a depositor's deposit, where `anonymous` and `public` arrive together
+**Amendment 2026-09-16 (#1423), SUPERSEDED 2026-09-17 by #1433 (epic #1430).**
+What #1423 got right survives and is stated below; what it built was withdrawn a day later, so
+the original text is replaced rather than left standing with a pointer. It described an
+exemplar gate that took the request's intent and a clone tool that blinded `Authors`; neither
+exists.
+
+**What was right, and is still the decision.** `anonymous = 1` is not evidence that a release
+HAPPENED. It is true of a depositor's deposit, where `anonymous` and `public` arrive together
 at the release, and false of a row CREATED anonymous -- which `POST /admin/datasets/exemplar`
 does, and which the decision above deliberately permits ("set at INSERT rather than flipped
-afterwards, because this is the only moment it is unconditionally legal").
+afterwards, because this is the only moment it is unconditionally legal"). So the request
+route's `already_released_anonymously` requires `visibility = 'public'` as well, because the
+release is what makes a row public. That term is in the code today and has its own test.
 
-- `isExemplarPublishAllowed` refused every publication request for an anonymous exemplar. Its
-  reasoning -- the approve path stamps `first_published_at` and the triggers then refuse
-  `anonymous = 1` forever -- is about an attribution-ending publish. An anonymous release
-  cannot do it: the orchestrator picks `FIRST_PUBLICATION_STAMP_SQL`, which leaves an
-  anonymous row unstamped on purpose. It now takes the request's own intent, so the
-  destructive direction stays refused and the safe one goes through.
-- The request route answered `already_released_anonymously` to any anonymous row. It now also
-  requires `visibility = 'public'`, because the release is what makes a row public.
+**What was wrong.** #1423 widened `isExemplarPublishAllowed` with an `ExemplarPublishIntent`
+so the fleet's anonymous deposit could take the one publish path it needed, and taught the
+clone tool to blind `Authors` so that deposit could pass the release's own check. Both existed
+to keep a fixture in the `xx` band. The band was the mistake: `xx` publishes only through the
+exemplar exception, while an anonymous deposit's defining event is an anonymous RELEASE, so
+the one path the fixture needed was the one path its band refuses.
 
-The cost of the first was not a fixture inconvenience: the anonymous release is the only path
-that runs `repo_public` and `create_tag`, so the fixture could only ever be a private row that
-the data plane refuses to serve, and every public-facing anonymity surface it exists to
-exercise was unreachable from it while AGENTS.md described it as "public row, private repo".
+ADR 0068 records the rule that makes the placement decidable. #1433 removed the intent
+parameter, the `Authors` blind and the fleet's anonymous entry, and the fleet loader now
+REFUSES an `anonymous` key outright. The standing anonymous deposit moves to the reserved id
+`nm099998` in #1434, built through the normal upload path from a tree an operator blinds by
+hand, which is what a real anonymous depositor does.
 
-`scrubDatasetDescription` also blinds the copied `Authors` for that one entry. NEMAR does not
-scrub a depositor's files -- it refuses an anonymous release whose Authors names anybody and
-tells them to fix it -- and a fixture has no depositor to act on that.
+
 
 ## Consequences
 
@@ -191,29 +194,33 @@ Harder, and worth stating plainly:
   "readable on GitHub" must say so rather than reading `visibility`, and the three fixed here
   are evidence the proxy was load-bearing in places nobody had listed.
 
-**Amendment 2026-09-16 (ADR 0068, epic #1430): the fixture's PLACEMENT below is superseded.**
-The reasoning in this section is unchanged and still the reason a standing fixture exists.
-What was wrong is the id.
-`xx` publishes only through the exemplar exception (non-production, `is_exemplar = 1`, sandbox
-DOIs), and that gate additionally refused any anonymous exemplar, so the one fixture whose
-defining event is an anonymous RELEASE was placed in the one band where taking it meant widening
-an exception -- which is what #1428 then did.
-ADR 0068 records the rule that makes the placement decidable: standing fixtures take reserved ids
-at the top of a prefix.
-The deposit moves to `nm099998` in #1434, #1433 withdraws the #1428 gate exception, and this
-section is rewritten then.
-Until then `xx099907` remains the fixture of record, but note it is `visibility: private` and was
-never successfully released, so "public row, private repo" below describes the intended shape and
-not the current one.
+**The platform carries one standing anonymous deposit** (amended 2026-09-17, ADR 0068,
+epic #1430; this replaces the `xx099907` text that stood here).
+The reason for having one is unchanged and is the decision: the anonymous state is otherwise
+only ever exercised against rows a test builds and tears down in the same process, so nothing
+is ever tested against a dataset that has been pre-publication for weeks.
 
-**The staging fleet carries one standing anonymous deposit.** `xx099907` is created anonymous
-and never published, because the state is otherwise only ever exercised against rows a test
-builds and tears down in the same process. It could not be an existing exemplar: all seven are
-public with sandbox DOIs, so the 0085 backfill stamps `first_published_at` on every one and the
-triggers then refuse `anonymous = 1` -- which is the invariant working, and the reason the
-fixture had to be declared rather than borrowed. Publishing it destroys it permanently, so the
-fleet file marks it, the clone tool skips it under `--all --publish`, and the
-publication-request route refuses it.
+What changed is where it lives. It was declared at `xx099907`, inside the exemplar fleet, and
+that placement was the mistake ADR 0068 was written to prevent. `xx` publishes only through
+the exemplar exception (non-production, `is_exemplar = 1`, sandbox DOIs), while an anonymous
+deposit's defining event is an anonymous RELEASE, so the one path the fixture needed was the
+one path its band refuses. Keeping it there meant widening a publish gate, which #1428 did and
+#1433 undid.
+
+It also could not have been an EXISTING exemplar, which is worth keeping: all of them are
+public with sandbox DOIs, so the 0085 backfill stamps `first_published_at` on every one and
+the triggers then refuse `anonymous = 1`. That is the invariant working, and it is why the
+fixture has to be declared rather than borrowed.
+
+The deposit is now `nm099998`, a reserved id (ADR 0068), built through the normal upload path
+from a tree an operator blinds by hand -- which is what the submission standard below asks a
+real anonymous depositor to do, so the fixture exercises the instruction rather than bypassing
+it. #1434 builds it and retires `xx099907`.
+
+**Current state, 2026-09-17:** `nm099998` does NOT exist yet. `xx099907` DOES: a dev D1 row
+(`visibility: private`, `anonymous = 1`, never successfully released) and a private
+`nemarDatasets` repository, no longer declared by `scripts/exemplar-fleet.json`. Anything
+describing either as a working fixture is describing a shape that is not real.
 
 **A blinded deposit is submitted blinded, and that is an EXCEPTION to the submission
 standards rather than a silent special case.** NEMAR asks the depositor to anonymize their own

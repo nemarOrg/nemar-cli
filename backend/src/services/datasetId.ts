@@ -66,10 +66,11 @@ export function formatDatasetId(prefix: string, n: number): string {
  * longer declared by the fleet and is retired in #1434. nm099998 is DESIGNATED
  * for the standing anonymous deposit and not yet built, also #1434.
  *
- * Nothing in production calls this yet: the reservation is enforced entirely by
- * `resolveRange`, and this predicate is the inverse rule, for the explicit-id
- * fixture path #1432 adds. Until then its only guard duty is the drift test
- * against `EXEMPLAR_ID_RE`, which declares the same band separately.
+ * The reservation itself is enforced by `resolveRange`; this predicate is the
+ * inverse rule, and it IS a production gate: `explicitDatasetIdGate`
+ * (services/upload-gate.ts) calls it on every named-id create, so changing it
+ * moves what `POST /datasets` will accept. It is also cross-checked against
+ * `EXEMPLAR_ID_RE`, which declares the same band separately, by a drift test.
  */
 export function isReservedFixtureId(id: string): boolean {
   if (!isValidDatasetId(id)) return false;
@@ -153,6 +154,16 @@ export const DEV_OWNED_FIXTURE_IDS: ReadonlySet<string> = Object.freeze(
  * prevents the unrecoverable variant, row plus S3 plus repo with no recreate,
  * so keeping `nm099999` out of the set remains right; it just protects less
  * than "dev can never touch it".
+ *
+ * Membership decides THREE things, not only deletion: webhook ownership and the
+ * blocked-BIDS sweep's scope read it too. So excluding `nm099999` also means
+ * the dev worker answers `prod_range_repo_on_dev_worker` for pushes to its
+ * repository while production claims them, even though dev D1 holds a row for
+ * it. That is pre-existing (`isDevRangeDatasetId("nm099999")` was false too)
+ * and harmless in practice, because `src/lib/e2e-test.ts` does not depend on
+ * enrichment running. It is recorded because it is the same symptom the
+ * declared set exists to cure, and someone comparing the two will otherwise
+ * read it as an oversight.
  */
 export const NEVER_DEV_OWNED_IDS: ReadonlySet<string> = Object.freeze(
   new Set(["nm099999"]),

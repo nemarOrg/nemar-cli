@@ -7,6 +7,10 @@
  */
 
 import { describe, expect, test } from "bun:test";
+// The publication gate's own predicate, imported rather than restated: the
+// clone writes a placeholder and the gate decides whether it counts, so a test
+// that spelled the rule twice could pass while the two disagreed.
+import { isPlaceholderAuthor } from "../backend/src/services/submission-minimums";
 import {
   type ExemplarFleetEntry,
   findMissingCopiedKeys,
@@ -16,10 +20,6 @@ import {
   rewriteObjectKeyPrefix,
   scrubDatasetDescription,
 } from "../src/lib/exemplar-clone";
-// The publication gate's own predicate, imported rather than restated: the
-// clone writes a placeholder and the gate decides whether it counts, so a test
-// that spelled the rule twice could pass while the two disagreed.
-import { isPlaceholderAuthor } from "../backend/src/services/submission-minimums";
 import type { CopyItem } from "../src/lib/s3-server-copy";
 
 describe("scrubDatasetDescription", () => {

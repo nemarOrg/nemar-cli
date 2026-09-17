@@ -244,8 +244,12 @@ downward from `nm099999`, so a fixture's id is predictable without a registry. I
 today: `nm099999` (end-to-end, its own reset endpoint) and the `xx099900+` exemplar fleet.
 Reserved means not *allocatable*, not invalid, so `isValidDatasetId` still accepts these
 and every route must still serve them. A fixture is created by NAMING its id on
-`POST /datasets` (`dataset_id`), which is fenced to non-production AND an admin AND the
-reserved band, all three (`explicitDatasetIdGate`). It narrows the route's
+`POST /datasets` (`dataset_id`), fenced by `explicitDatasetIdGate` on FOUR terms, all of
+them required: non-production, an admin, the reserved band, AND the id being declared
+dev-owned in `DEV_OWNED_FIXTURE_IDS`. The fourth is the one a new fixture hits: ADR 0068
+names `nm099997` as the next standing fixture, and creating it is refused until it is
+declared, because an undeclared fixture is invisible to the dev worker and claimed by the
+production one. It narrows the route's
 "non-production forces sandbox" rule without weakening it: that rule exists to stop dev
 minting a REAL `nm` id, and a reserved id is one the allocator can never mint for anybody.
 Naming an id exempts nothing else, so the account gates still apply and an operator who
@@ -271,9 +275,14 @@ published with **sandbox** EZID DOIs (`10.5072/FK2`, never the production `10.82
 >
 > `xx099907` itself still EXISTS in dev D1 (`visibility: private`, `anonymous = 1`,
 > never successfully released) and as a private `nemarDatasets` repository. #1434 retires
-> it and builds the standing anonymous deposit at the reserved id `nm099998`, uploaded
-> through the normal path from a tree an operator blinds by hand, exactly as a real
-> anonymous depositor does.
+> it and builds the standing anonymous deposit at the reserved id `nm099998`, from a tree
+> an operator blinds by hand, exactly as a real anonymous depositor does.
+>
+> One seam #1434 owns: `POST /datasets` accepts `dataset_id`, but the CLI's own
+> `createDataset` client does not send it yet, so `nemar dataset upload` cannot name an id.
+> The fixture's create is therefore an out-of-band API call until #1434 adds the field, and
+> "through the normal upload path" means the normal ROUTE and its gates, which is what
+> matters -- not that the CLI can drive it today.
 >
 > One field outlives the fixture: `POST /admin/datasets/exemplar` still accepts
 > `anonymous: true`, so an admin can still create an anonymous exemplar row. Do not.

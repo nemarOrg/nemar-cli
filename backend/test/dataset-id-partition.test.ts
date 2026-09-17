@@ -18,15 +18,15 @@ import {
   DEV_EPHEMERAL_BAND_END,
   DEV_OWNED_FIXTURE_IDS,
   DEV_SANDBOX_RANGE_RE,
-  generateDatasetId,
-  isDevEphemeralSandboxId,
-  isDevRangeDatasetId,
-  formatDatasetId,
-  isDevOwnedDatasetId,
-  isReservedFixtureId,
-  isValidDatasetId,
   NEVER_DEV_OWNED_IDS,
   RESERVED_FIXTURE_FLOOR,
+  formatDatasetId,
+  generateDatasetId,
+  isDevEphemeralSandboxId,
+  isDevOwnedDatasetId,
+  isDevRangeDatasetId,
+  isReservedFixtureId,
+  isValidDatasetId,
 } from "../src/services/datasetId";
 import { freshDb, realD1 } from "./helpers/d1";
 
@@ -232,9 +232,9 @@ describe("generateDatasetId reserved fixture band (ADR 0068)", () => {
     // ceiling is passed, which is the shape that used to run to xx099999.
     const raw = freshDb();
     seedRange(raw, "xx", 99898, 99899);
-    await expect(
-      generateDatasetId(realD1(raw), true, { sandboxIdFloor: 99898 }),
-    ).rejects.toThrow(/xx099900-xx099999 is the reserved fixture band/);
+    await expect(generateDatasetId(realD1(raw), true, { sandboxIdFloor: 99898 })).rejects.toThrow(
+      /xx099900-xx099999 is the reserved fixture band/,
+    );
   });
 
   test("dev xx still allocates the last id below the fleet", async () => {
