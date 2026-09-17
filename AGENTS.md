@@ -243,7 +243,13 @@ Real datasets grow upward from the prefix's start; standing test fixtures are as
 downward from `nm099999`, so a fixture's id is predictable without a registry. In use
 today: `nm099999` (end-to-end, its own reset endpoint) and the `xx099900+` exemplar fleet.
 Reserved means not *allocatable*, not invalid, so `isValidDatasetId` still accepts these
-and every route must still serve them. The reservation is **not** environment-fenced:
+and every route must still serve them. A fixture is created by NAMING its id on
+`POST /datasets` (`dataset_id`), which is fenced to non-production AND an admin AND the
+reserved band, all three (`explicitDatasetIdGate`). It narrows the route's
+"non-production forces sandbox" rule without weakening it: that rule exists to stop dev
+minting a REAL `nm` id, and a reserved id is one the allocator can never mint for anybody.
+Naming an id exempts nothing else, so the account gates still apply and an operator who
+cannot pass them is not the right operator. The reservation is **not** environment-fenced:
 `nemarDatasets` is shared between prod and dev, so a prod-minted fixture id would collide
 with a dev fixture's repository. `on` ids are mirrored from OpenNeuro and never allocated
 here, so they have no reserved band.
