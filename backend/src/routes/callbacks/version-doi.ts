@@ -19,7 +19,7 @@ import {
 } from "../../services/central-manifest.js";
 import { refreshMetadataAfterVersionDoi } from "../../services/dataset-reindex.js";
 import { createEzidVersionDoi } from "../../services/doi.js";
-import { TEST_SHOULDER, conceptEzidIdentifier } from "../../services/ezid.js";
+import { conceptEzidIdentifier, isSandboxIdentifier } from "../../services/ezid.js";
 import { getDatasetsToken } from "../../services/github-auth.js";
 import { downloadReleaseArchive } from "../../services/github.js";
 import { generateManifest } from "../../services/manifest.js";
@@ -163,8 +163,7 @@ export function registerVersionDoiRoutes(webhooks: WebhookRouter): void {
     // handler below is unreachable and kept only until the follow-up removes
     // the retired zenodo paths. Auto-detect sandbox from the EZID test
     // shoulder prefix.
-    const sandboxPrefix = TEST_SHOULDER.replace(/^doi:/, "").split("/")[0];
-    const sandbox = conceptEzidIdentifier(dataset.concept_doi).includes(sandboxPrefix);
+    const sandbox = isSandboxIdentifier(conceptEzidIdentifier(dataset.concept_doi));
 
     return handleEzidVersionDoi(c, dataset, version, release_url, sandbox);
   });
