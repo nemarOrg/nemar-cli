@@ -18,6 +18,7 @@
 import { type CallToolResult, McpServer } from "@modelcontextprotocol/server";
 import pkg from "../../../package.json" with { type: "json" };
 import type { McpToolName } from "../../../shared/contract/mcp.js";
+import { FACETS } from "../../../shared/facets.js";
 import type { CacheLike } from "../routes/zarr-data.js";
 import { GITHUB_RAW_ORIGIN } from "../services/github/shared.js";
 import { recordMcpToolCall } from "../services/mcp-metrics.js";
@@ -80,6 +81,10 @@ const INSTRUCTIONS = [
   "coordinates, zero bytes touched); pass taste: true for a small, capped, inline-decoded window",
   "of physical values instead.",
 ].join(" ");
+
+/** Facet labels for the search tool description, interpolated so a newly
+ *  declared facet reaches the description without anyone remembering to edit it. */
+const FACET_LABELS = FACETS.map((f) => f.label).join(", ");
 
 /**
  * Times `fn`, writes exactly one metrics point per call, and unwraps `fn`'s
@@ -160,20 +165,7 @@ export function buildMcpServer(deps: BuildMcpServerDeps): McpServer {
     "search_datasets",
     {
       title: "Search datasets",
-      description:
-        "Search or browse the public NEMAR dataset catalog. A free-text `query` runs semantic " +
-        "search; every other parameter narrows the result set and they compose. Beyond keyword, " +
-        "modality, task, HED presence and Zarr status, you can filter by author, license tier, " +
-        "DOI presence, fidelity-verified Zarr, data completeness, recency, and the declared " +
-        "facets: subject and channel counts, session and recording counts, size, files, " +
-        "citations, duration, recording length, age, sampling rate, powerline frequency, " +
-        "reference, placement, electrode system, source, and BIDS or HED version. Range facets " +
-        "take `10..20`, `64..`, or `..128`. Pass ONLY the parameter names this schema declares: " +
-        "an undeclared name is accepted and silently ignored, which returns unfiltered results " +
-        "that look filtered. Several facet columns are only partly populated, so a filter can " +
-        "exclude rows whose value is simply unknown; pass include_unknown: true to admit those. " +
-        "A count of 0 is not an error -- an unrecognized modality/task value simply matches " +
-        "nothing; call describe_dataset on a hit to see the catalog's actual vocabulary.",
+      description: `Search or browse the public NEMAR dataset catalog. A free-text query runs the exact-id, full-text and semantic tiers in that order; every other parameter narrows the result set, and they compose. Beyond modality, task, HED presence and Zarr status you can filter by author, license tier, DOI presence, fidelity-verified Zarr, data completeness and recency, plus these declared facets: ${FACET_LABELS}. Each parameter's own description gives the value syntax it accepts. Pass ONLY the names this schema declares: an undeclared name is accepted and silently ignored, which returns unfiltered results that look filtered. Several facet columns are only partly populated, so a filter can exclude rows whose value is simply unknown; pass include_unknown: true to admit those. A count of 0 is not an error -- an unrecognized modality/task value simply matches nothing; call describe_dataset on a hit to see the catalog's actual vocabulary.`,
       inputSchema: searchDatasetsInputSchema4,
       outputSchema: searchDatasetsOutputSchema4,
     },

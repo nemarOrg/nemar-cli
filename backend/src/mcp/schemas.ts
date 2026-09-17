@@ -44,7 +44,7 @@ import {
   ZARR_VERIFY_STATUS_VALUES,
 } from "../../../shared/contract/mcp.js";
 import { DATASET_ID_RE, SOURCE_COMMIT_RE } from "../../../shared/contract/zarr-index.js";
-import { FACETS } from "../../../shared/facets.js";
+import { FACETS, describeFacet } from "../../../shared/facets.js";
 
 const DATASET_ID_DESCRIPTION =
   "NEMAR dataset id: two lowercase letters (nm/on/xx) followed by six digits, e.g. nm000329.";
@@ -72,16 +72,7 @@ const DATASET_ID_DESCRIPTION =
  * the filter itself (ADR 0032).
  */
 const facetInputShape4 = Object.fromEntries(
-  FACETS.map((facet) => {
-    const range =
-      facet.valueKind === "number" || facet.valueKind === "bytes" || facet.valueKind === "duration";
-    const detail = range
-      ? `Range: \`10..20\`, \`64..\` (at least), or \`..128\` (at most)${facet.unit ? `, in ${facet.unit}` : ""}.`
-      : facet.enumValues
-        ? `One of: ${facet.enumValues.join(", ")}.`
-        : "Exact match on the declared value.";
-    return [facet.queryParam, z4.string().optional().describe(`${facet.label}. ${detail}`)];
-  }),
+  FACETS.map((facet) => [facet.queryParam, z4.string().optional().describe(describeFacet(facet))]),
 );
 
 export const searchDatasetsInputSchema4 = z4

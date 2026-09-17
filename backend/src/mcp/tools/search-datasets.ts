@@ -35,10 +35,11 @@ import {
   flagToBoolean,
   searchDatasetsOutputSchema,
 } from "../../../../shared/contract/mcp.js";
+import { RangeParseError } from "../../../../shared/range.js";
 import { parseLicenseTierFilter } from "../../lib/license.js";
 import { CONCEPT_DOI_SQL } from "../../services/anonymity";
 import { splitCsv } from "../../services/data-router.js";
-import { parseFacetFilters } from "../../services/dataset-facets.js";
+import { FacetEnumParseError, parseFacetFilters } from "../../services/dataset-facets.js";
 import {
   type DatasetFilterOptions,
   buildDatasetFilterClauses,
@@ -200,7 +201,15 @@ export async function searchDatasetsTool(
       return typeof raw === "string" ? raw : undefined;
     });
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
+    // Narrowed to the two declared parse errors, matching the HTTP route
+    // (routes/datasets/catalog.ts). A broad catch would launder an internal
+    // fault into "that filter value was not accepted", and the model would
+    // retry differently shaped values forever against a fault that has nothing
+    // to do with its input. Anything else rethrows into withToolMetrics, which
+    // records outcome "exception" and logs it. ADR 0051: a specific error is
+    // never overwritten by a generic one.
+    if (!(err instanceof RangeParseError || err instanceof FacetEnumParseError)) throw err;
+    const detail = err.message;
     return badFilterOutcome(
       `That filter value was not accepted: ${detail}. Ranges take \`10..20\`, \`64..\`, or \`..128\`; enum and version facets take a declared token.`,
     );
