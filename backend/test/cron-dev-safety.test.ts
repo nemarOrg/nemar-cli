@@ -41,6 +41,7 @@ import {
   isDevOwnedDatasetId,
 } from "../src/services/datasetId";
 import { deleteDatasetCascade } from "../src/services/deletion";
+import { blockedSweepScope } from "../src/services/publication-sweep";
 import { reconcileReservedVersionDois } from "../src/services/doi-reconcile";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -322,36 +323,58 @@ describe("blocked publication sweep scopes by dataset range, not by skipping", (
     }
   }
 
-  /** The candidate query as built for each environment (see publication-sweep.ts). */
-  function candidateQuery(devRangeOnly: boolean): string {
-    return `SELECT pr.dataset_id
+  /**
+   * The candidate query, built from the REAL scope decision imported from
+   * publication-sweep.ts. The previous version of this helper retyped
+   * `LIKE 'xx09%'`, so it kept passing while the production clause changed
+   * under it -- the exact thing `.rules/testing.md` forbids.
+   */
+  function candidateQuery(nonProduction: boolean): { sql: string; binds: string[] } {
+    const { clause, ids } = blockedSweepScope(nonProduction);
+    return {
+      sql: `SELECT pr.dataset_id
               FROM publication_requests pr
               JOIN datasets d ON d.dataset_id = pr.dataset_id
              WHERE pr.status = 'blocked'
                AND pr.block_reason IN ('bids_validation_pending')
-               ${devRangeOnly ? "AND pr.dataset_id LIKE 'xx09%'" : ""}
-             ORDER BY pr.updated_at ASC`;
+               ${clause}
+             ORDER BY pr.updated_at ASC`,
+      binds: ids,
+    };
   }
 
-  test("non-production sees only dev-range requests", async () => {
+  test("non-production sees dev-range requests AND its declared fixtures", async () => {
+    // nm099998 is the case this exists for. An anonymous release IS a
+    // publication request, so the standing anonymous deposit is the single most
+    // likely dataset on staging to land in 'blocked' while BIDS validation runs
+    // -- and it was inside `LIKE 'xx09%'` at xx099907 and dropped out of it at
+    // nm099998. Without the ownership term it would stay stuck forever, which
+    // is the state this sweep exists to clear.
     const db = freshDb();
-    seedBlocked(db, ["xx099900", "xx090001", "nm000155", "on003805"]);
+    seedBlocked(db, ["xx099900", "xx090001", "nm099998", "nm000155", "on003805", "nm099999"]);
 
+    const { sql, binds } = candidateQuery(true);
     const rows = await realD1(db)
-      .prepare(candidateQuery(true))
-      .bind()
+      .prepare(sql)
+      .bind(...binds)
       .all<{ dataset_id: string }>();
 
-    expect(rows.results.map((r) => r.dataset_id).sort()).toEqual(["xx090001", "xx099900"]);
+    // nm099999 is absent deliberately: reserved, but production's, not dev's.
+    expect(rows.results.map((r) => r.dataset_id).sort()).toEqual([
+      "nm099998",
+      "xx090001",
+      "xx099900",
+    ]);
   });
 
   test("production still sees every blocked request", async () => {
     const db = freshDb();
     seedBlocked(db, ["xx099900", "nm000155", "on003805"]);
 
+    const { sql, binds } = candidateQuery(false);
     const rows = await realD1(db)
-      .prepare(candidateQuery(false))
-      .bind()
+      .prepare(sql)
+      .bind(...binds)
       .all<{ dataset_id: string }>();
 
     expect(rows.results.map((r) => r.dataset_id).sort()).toEqual([

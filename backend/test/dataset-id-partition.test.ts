@@ -16,13 +16,16 @@ import { describe, expect, test } from "bun:test";
 import { EXEMPLAR_ID_RE } from "../src/routes/admin/exemplar";
 import {
   DEV_EPHEMERAL_BAND_END,
+  DEV_OWNED_FIXTURE_IDS,
   DEV_SANDBOX_RANGE_RE,
   generateDatasetId,
   isDevEphemeralSandboxId,
   isDevRangeDatasetId,
   formatDatasetId,
+  isDevOwnedDatasetId,
   isReservedFixtureId,
   isValidDatasetId,
+  NEVER_DEV_OWNED_IDS,
   RESERVED_FIXTURE_FLOOR,
 } from "../src/services/datasetId";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -351,5 +354,53 @@ describe("reserved band: the gaps the first round of tests left", () => {
     );
     expect(err?.message).toMatch(/1 to 89999/);
     expect(err?.message).not.toMatch(/reserved fixture band/);
+  });
+});
+
+describe("the declared ownership set cannot drift (#1440)", () => {
+  // Every other guarantee in this design is a rule that holds for ids nobody
+  // named. The ownership set is the one piece that is a LIST, so it is the one
+  // piece where a member nobody thought to name can be wrong. These are the
+  // properties that hold for any future edit, not for the members it has today.
+
+  test("every member is a reserved fixture id", () => {
+    // The failure this prevents: a typo that lands an ALLOCATABLE production id
+    // in the set. "nm000998" for "nm099998" is one keystroke, and it would make
+    // the production worker silently stop dispatching enrichment for a real
+    // dataset AND let a non-production worker cascade-delete its shared
+    // nemarDatasets repository -- the exact blast radius the deletion fence
+    // exists to prevent.
+    for (const id of DEV_OWNED_FIXTURE_IDS) {
+      expect(isValidDatasetId(id)).toBe(true);
+      expect(isReservedFixtureId(id)).toBe(true);
+    }
+  });
+
+  test("no member is on the never-dev-owned list", () => {
+    for (const id of NEVER_DEV_OWNED_IDS) {
+      expect(DEV_OWNED_FIXTURE_IDS.has(id)).toBe(false);
+      expect(isDevOwnedDatasetId(id)).toBe(false);
+    }
+  });
+
+  test("the two lists are disjoint and the never-list is itself reserved", () => {
+    // If nm099999 stopped being a reserved id, the never-list would be guarding
+    // something the allocator could hand to a depositor, which is a different
+    // bug wearing the same name.
+    for (const id of NEVER_DEV_OWNED_IDS) {
+      expect(isReservedFixtureId(id)).toBe(true);
+    }
+  });
+
+  test("dev-owned is a strict superset of dev-range, by exactly the declared set", () => {
+    // Pins the shape of the predicate rather than its current membership: no id
+    // is dev-owned unless it is dev-range or declared.
+    for (const id of ["xx090001", "xx099899", "xx099900", "xx099999"]) {
+      expect(isDevOwnedDatasetId(id)).toBe(true);
+    }
+    for (const id of ["nm000104", "nm000108", "nm099899", "nm099999", "on008062", "xx000001"]) {
+      expect(isDevOwnedDatasetId(id)).toBe(DEV_OWNED_FIXTURE_IDS.has(id));
+      expect(isDevOwnedDatasetId(id)).toBe(false);
+    }
   });
 });

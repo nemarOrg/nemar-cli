@@ -174,8 +174,11 @@ describe("POST /webhooks/github dev-range forwarder (epic #923, phase 5)", () =>
 describe("dev OWNS its reserved fixtures (#1440)", () => {
   // The fences key on `isDevOwnedDatasetId`, not `isDevRangeDatasetId`. Before
   // that, the reserved `nm` fixture was refused by the dev worker and claimed
-  // by the production one at the same time: a push to nemarDatasets/nm099998
-  // reaches BOTH workers (org-level delivery), and neither recognized it.
+  // by the production one at the same time. GitHub delivers to prod, which
+  // forwards dev-owned deliveries to DEV_WEBHOOK_MIRROR_URL (the dev worker
+  // never mirrors: the var is absent from [env.dev.vars]), so before this
+  // change neither worker acted on nm099998 -- prod claimed it and dev refused
+  // it. It is a forward, not a second delivery.
 
   test("production short-circuits a reserved nm fixture, as it does a dev-range repo", async () => {
     // Without this the prod worker dispatches enrichment / zarr / version-DOI
