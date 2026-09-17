@@ -65,31 +65,29 @@ describe("scrubDatasetDescription", () => {
     expect(scrubbed.Authors).toEqual(["Ada Lovelace"]);
   });
 
-  test("blinds Authors for the anonymous exemplar, because no depositor will", () => {
-    // #1423: the publication request refuses an anonymous release whose
-    // Authors still names anybody, and a fixture has nobody to act on that
-    // instruction. Without this the fleet's anonymous deposit inherits the
-    // SOURCE dataset's real names and can never complete the release that
-    // gives it a public row, a version and a manifest.
-    const scrubbed = scrubDatasetDescription(
-      { Name: "X", Authors: ["Ada Lovelace", "Charles Babbage"] },
-      { anonymous: true },
-    );
-    expect(scrubbed.Authors).toEqual(["Anonymous"]);
-    expect(scrubbed.Name).toBe("[TEST COPY] X");
-  });
-
-  test("the placeholder it writes is one the publication gate accepts", () => {
-    // The two must not be able to disagree about what counts as blinded, so
-    // this asserts against the gate's own predicate rather than restating it.
-    const scrubbed = scrubDatasetDescription({ Name: "X", Authors: ["Real Person"] }, {
-      anonymous: true,
+  test("does NOT blind Authors, and the gate would refuse what it leaves", () => {
+    // Withdrawn in #1433. The blind was added (#1423) because the fleet's
+    // anonymous deposit had no depositor to follow the instruction that a
+    // depositor gets: blind `dataset_description.json` yourself. The real fix
+    // was to stop keeping that fixture in the exemplar fleet at all, so the
+    // clone tool goes back to scrubbing only what is unsafe to copy.
+    const scrubbed = scrubDatasetDescription({
+      Name: "X",
+      Authors: ["Ada Lovelace", "Charles Babbage"],
     });
+    expect(scrubbed.Authors).toEqual(["Ada Lovelace", "Charles Babbage"]);
+    expect(scrubbed.Name).toBe("[TEST COPY] X");
+    expect(scrubbed.DatasetDOI).toBeUndefined();
+
+    // And the consequence is stated rather than assumed: what the clone leaves
+    // behind would NOT satisfy the anonymous-release gate. That is correct now
+    // -- an exemplar has no anonymous release to take -- and it is the fact
+    // that makes re-adding a blind here the wrong instinct: the standing
+    // anonymous deposit is uploaded from a tree an operator blinded by hand,
+    // which is exactly what a real anonymous depositor does.
     for (const entry of scrubbed.Authors as string[]) {
-      expect(isPlaceholderAuthor(entry)).toBe(true);
+      expect(isPlaceholderAuthor(entry)).toBe(false);
     }
-    // The control: the names it replaced would NOT have passed.
-    expect(isPlaceholderAuthor("Real Person")).toBe(false);
   });
 });
 
@@ -202,63 +200,47 @@ describe("parseExemplarFleet", () => {
     expect(placeholders).toEqual([]);
   });
 
-  test("anonymous must be literally true, never false", async () => {
-    // Two states, not three. An explicit `false` reads as a deliberate
-    // statement about a row and would invite someone to interpret it as
-    // "was anonymous, is not any more" -- which is a fact the fleet file has
-    // no business carrying.
-    expect(() =>
-      parseExemplarFleet([
-        { xx_id: "xx099900", source_id: "on000001", modality: "eeg", anonymous: false },
-      ]),
-    ).toThrow(/anonymous must be omitted or literally true/);
-    const ok = parseExemplarFleet([
-      { xx_id: "xx099900", source_id: "on000001", modality: "eeg", anonymous: true },
-    ]);
-    expect(ok[0].anonymous).toBe(true);
+  test("an anonymous entry is REFUSED, in either spelling", () => {
+    // Withdrawn in #1433, and refused rather than ignored. The fleet declared a
+    // standing anonymous deposit at xx099907 until this epic; the placement was
+    // the mistake, because `xx` publishes only through the exemplar exception
+    // while an anonymous deposit's defining event is an anonymous RELEASE. A
+    // silent ignore would let someone re-add the key and get a fixture that
+    // looks right and cannot do its job -- which is exactly what happened the
+    // first time.
+    for (const anonymous of [true, false]) {
+      expect(() =>
+        parseExemplarFleet([
+          { xx_id: "xx099900", source_id: "on000001", modality: "eeg", anonymous },
+        ]),
+      ).toThrow(/no longer declares an anonymous deposit/);
+    }
   });
 
-  test("at most one anonymous exemplar is declared", () => {
-    // "The anonymous exemplar" is how the runbooks, the tests and the fleet
-    // tooling all refer to it. A second one makes that phrase ambiguous, and
-    // an ambiguous referent is worse than no fixture at all.
-    expect(() =>
+  test("the refusal names where the anonymous deposit went", () => {
+    // A refusal that does not say what to do instead gets worked around.
+    let message = "";
+    try {
       parseExemplarFleet([
         { xx_id: "xx099900", source_id: "on000001", modality: "eeg", anonymous: true },
-        { xx_id: "xx099901", source_id: "on000002", modality: "eeg", anonymous: true },
-      ]),
-    ).toThrow(/declares 2 anonymous exemplars/);
+      ]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toMatch(/reserved nm id/);
+    expect(message).toMatch(/ADR 0068/);
   });
 
-  test("the checked-in fleet designates a standing anonymous deposit", async () => {
-    // The point of designating one: anonymity is otherwise only ever exercised
-    // against rows a test just created and tore down. This is the one place
-    // the pre-publication state exists continuously on staging.
+  test("the checked-in fleet declares no anonymous deposit", async () => {
+    // The file itself, not a constructed entry: this is what would fail if
+    // xx099907 were restored to it.
     const raw = await Bun.file(`${import.meta.dir}/../scripts/exemplar-fleet.json`).json();
     const entries: ExemplarFleetEntry[] = parseExemplarFleet(raw);
-    const designated = anonymousExemplar(entries);
-    expect(designated).not.toBeNull();
-    expect(designated?.xx_id).toBe("xx099907");
-    // It has to say why it must never be published, because the failure mode
-    // is silent and permanent: the 0085 triggers refuse anonymous = 1 once
-    // first_published_at is stamped, so one `--publish` ends the fixture.
-    expect(designated?.note).toMatch(/never published/i);
-  });
-
-  test("the designation is keyed by xx id, so --source cannot bypass it", async () => {
-    // Creating this fixture is a one-off, so `exemplar create xx099907` is the
-    // command that will actually be run. An earlier version of this change
-    // wired only the `--all` loop, which would have produced a non-anonymous
-    // row under the name of the anonymous fixture -- silently, and only
-    // discoverable once a test that depends on it started passing for the
-    // wrong reason.
-    const entries = parseExemplarFleet([
-      { xx_id: "xx099900", source_id: "on000001", modality: "eeg" },
-      { xx_id: "xx099907", source_id: "on000002", modality: "eeg", anonymous: true },
-    ]);
-    expect(isDesignatedAnonymous(entries, "xx099907")).toBe(true);
-    expect(isDesignatedAnonymous(entries, "xx099900")).toBe(false);
-    expect(isDesignatedAnonymous(entries, "xx099999")).toBe(false);
+    expect(entries.length).toBeGreaterThan(0);
+    for (const entry of entries) {
+      expect(entry).not.toHaveProperty("anonymous");
+      expect(entry.xx_id).not.toBe("xx099907");
+    }
   });
 
   test("every fleet source is a distinct real dataset id", async () => {

@@ -515,62 +515,49 @@ describe("the request route, end to end", () => {
   // that is true of a depositor's deposit and false of this one.
   // ==========================================================================
 
-  test("the anonymous exemplar may request its anonymous release", async () => {
-    const db = freshDb();
-    const { ownerId } = await seedPeople(db);
-    seedDataset(db, ownerId, "xx099907", {
-      visibility: "private",
-      anonymous: 1,
-      isExemplar: 1,
-    });
+  test("an anonymous xx exemplar is refused BOTH directions now", async () => {
+    // Withdrawn in #1433. #1423 let this row take an anonymous release, because
+    // the fleet's standing anonymous deposit lived at xx099907 and that release
+    // is what would have given it a public row, a private repository and a
+    // manifest. The deposit has moved to a reserved `nm` id (ADR 0068), where
+    // the same release is an ordinary publication and needs no exemption, so
+    // the xx band goes back to refusing every direction.
+    for (const body of ['{"anonymous":true}', undefined]) {
+      const db = freshDb();
+      const { ownerId } = await seedPeople(db);
+      seedDataset(db, ownerId, "xx099907", {
+        visibility: "private",
+        anonymous: 1,
+        isExemplar: 1,
+      });
 
-    const res = await publishRequest(db, "xx099907", OWNER_KEY, '{"anonymous":true}');
+      const res = await publishRequest(db, "xx099907", OWNER_KEY, body);
 
-    // Queued for an admin, not refused. The two refusals this pins are
-    // "Cannot publish sandbox datasets" (the xx block, whose exemplar
-    // exemption used to drop out for an anonymous row) and
-    // "already_released_anonymously" (which read `anonymous = 1` as proof a
-    // release had happened, while this row sat private and unserved).
-    // What "accepted" looks like here. The row has no GitHub repo, so the
-    // request lands in `blocked` on the content check that reads
-    // dataset_description.json -- and that is the proof: both guards under
-    // test return BEFORE the request is created, with 400 and 409
-    // respectively, so reaching a `blocked` publication request at all means
-    // neither fired. The body carries the flag, so it was accepted AS an
-    // anonymous release rather than coerced into a publication.
-    expect(res.status).toBe(422);
-    const body = (await res.json()) as {
-      status?: string;
-      anonymous?: boolean;
-      error?: string;
-      block_reason?: string;
-    };
-    expect(body.error).toBeUndefined();
-    expect(body.status).toBe("blocked");
-    expect(body.block_reason).toBe("min_requirements_failed");
-    expect(body.anonymous).toBe(true);
-    db.close();
+      expect(res.status).toBe(400);
+      expect((await res.json()) as { error: string }).toMatchObject({
+        error: "Cannot publish sandbox datasets",
+      });
+      db.close();
+    }
   });
 
-  test("but a PLAIN publish of it is still refused, which is what the guard is for", async () => {
-    // The destructive direction: approving this would stamp
-    // `first_published_at`, after which migration 0085's triggers refuse
-    // `anonymous = 1` on the row forever. The fixture is destroyed rather
-    // than dirtied, so the exemption must not extend to it.
+  test("a non-anonymous exemplar still publishes, so the band is not simply closed", async () => {
+    // The control. Withdrawing the anonymity exemption must not take the
+    // ordinary exemplar exemption with it: seven fleet entries depend on it to
+    // get their sandbox DOIs.
     const db = freshDb();
     const { ownerId } = await seedPeople(db);
-    seedDataset(db, ownerId, "xx099907", {
+    seedDataset(db, ownerId, "xx099900", {
       visibility: "private",
-      anonymous: 1,
+      anonymous: 0,
       isExemplar: 1,
     });
 
-    const res = await publishRequest(db, "xx099907", OWNER_KEY);
+    const res = await publishRequest(db, "xx099900", OWNER_KEY);
 
-    expect(res.status).toBe(400);
-    expect((await res.json()) as { error: string }).toMatchObject({
-      error: "Cannot publish sandbox datasets",
-    });
+    // Past the xx block: it gets as far as the content checks, which is the
+    // same "allowed past the gate" signal the sibling tests use.
+    expect(res.status).not.toBe(400);
     db.close();
   });
 

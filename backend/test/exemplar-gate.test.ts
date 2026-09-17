@@ -37,40 +37,37 @@ describe("isExemplarPublishAllowed: the anonymous deposit", () => {
   const anonRow = { dataset_id: EXEMPLAR_ID, is_exemplar: 1, anonymous: 1 };
   const plainRow = { dataset_id: EXEMPLAR_ID, is_exemplar: 1, anonymous: 0 };
 
-  test("an anonymous RELEASE of the anonymous exemplar is allowed", () => {
-    expect(isExemplarPublishAllowed(envOf("test"), anonRow, { anonymousRelease: true })).toBe(true);
-  });
-
-  test("a plain publish of it is still refused, which is the whole point", () => {
-    expect(isExemplarPublishAllowed(envOf("test"), anonRow, { anonymousRelease: false })).toBe(
-      false,
-    );
-    expect(isExemplarPublishAllowed(envOf("test"), anonRow, {})).toBe(false);
-  });
-
-  test("omitting the intent refuses, so a new caller fails closed", () => {
-    // The parameter defaults to `{}`. A caller that has not thought about the
-    // question gets the safe answer rather than the permissive one.
+  test("an anonymous exemplar is refused every direction, with no way to ask", () => {
+    // Withdrawn in #1433. The gate briefly took an `anonymousRelease` intent so
+    // the fleet's anonymous deposit could take the one publish path it needed
+    // (#1423). That fixture was in the wrong band: `xx` publishes only through
+    // the exemplar exception, so widening the exception was the only way to let
+    // it live there. It now lives at a reserved `nm` id where an anonymous
+    // release is an ordinary publication, and the parameter went with it.
     expect(isExemplarPublishAllowed(envOf("test"), anonRow)).toBe(false);
   });
 
-  test("an ordinary exemplar is unaffected by the intent either way", () => {
+  test("the term guards nothing today, and is kept for the direction it fails in", () => {
+    // `scripts/exemplar-fleet.json` declares no anonymous entry and the loader
+    // now REFUSES one, so no row should reach this function with anonymous = 1.
+    // The term stays because of the two ways to be wrong, refusing a publish
+    // that should have been allowed is the recoverable one: publishing an
+    // anonymous row stamps first_published_at, after which migration 0085's
+    // triggers refuse anonymous = 1 on it forever.
+    expect(isExemplarPublishAllowed(envOf("test"), { ...anonRow, anonymous: 1 })).toBe(false);
     expect(isExemplarPublishAllowed(envOf("test"), plainRow)).toBe(true);
-    expect(isExemplarPublishAllowed(envOf("test"), plainRow, { anonymousRelease: true })).toBe(true);
-    expect(isExemplarPublishAllowed(envOf("test"), plainRow, { anonymousRelease: false })).toBe(
-      true,
-    );
   });
 
-  test("the production fence is not weakened by the intent", () => {
+  test("an ordinary exemplar is allowed off production", () => {
+    expect(isExemplarPublishAllowed(envOf("test"), plainRow)).toBe(true);
+  });
+
+  test("the production fence holds, and fails closed on an unknown env", () => {
     // The env term is the one that keeps `is_exemplar = 1` out of production
-    // entirely; an intent flag must never buy past it.
-    expect(isExemplarPublishAllowed(envOf("production"), anonRow, { anonymousRelease: true })).toBe(
-      false,
-    );
-    expect(isExemplarPublishAllowed(envOf(undefined), anonRow, { anonymousRelease: true })).toBe(
-      false,
-    );
+    // entirely. It uses isNonProductionEnv, so an unset value refuses.
+    expect(isExemplarPublishAllowed(envOf("production"), plainRow)).toBe(false);
+    expect(isExemplarPublishAllowed(envOf(undefined), plainRow)).toBe(false);
+    expect(isExemplarPublishAllowed(envOf("production"), anonRow)).toBe(false);
   });
 
   test("a non-exemplar xx row is still refused however it asks", () => {
