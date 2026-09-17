@@ -44,15 +44,17 @@ export interface ExemplarGateRow {
  * xx / is_sandbox block and skip it only when this returns true
  * (`... && !isExemplarPublishAllowed(env, row)`).
  *
- * **The anonymity term guards nothing today, and is kept anyway.** It was added
- * for `xx099907`, the fleet's standing anonymous deposit, because publishing
- * that row would not dirty the fixture but destroy it: the approve path stamps
- * `first_published_at`, after which migration 0085's triggers refuse
- * `anonymous = 1` on that row forever. `scripts/exemplar-fleet.json` no longer
- * declares any anonymous entry (#1433), so no row can reach this function with
- * `anonymous = 1` -- but of the two ways to be wrong, refusing a publish that
- * should have been allowed is the cheap one, and an exemplar fleet that grows
- * an anonymous entry again should meet a refusal rather than a surprise.
+ * **The anonymity term is a live guard, not dead weight.** It is tempting to
+ * read it as unreachable now that `scripts/exemplar-fleet.json` declares no
+ * anonymous entry (#1433). That does not follow: the fleet file is not the only
+ * producer of such a row. `POST /admin/datasets/exemplar` still accepts
+ * `anonymous: true` and writes it alongside `is_exemplar = 1` on an `xx0999NN`
+ * id, so any admin can create exactly the row this term refuses. #1434 retires
+ * that field; until then the term is load-bearing.
+ *
+ * What it prevents: publishing an anonymous row does not dirty it but destroys
+ * it, because the approve path stamps `first_published_at`, after which
+ * migration 0085's triggers refuse `anonymous = 1` on that row forever.
  *
  * **What this function no longer does, and why (#1433).** It briefly took an
  * `ExemplarPublishIntent` so that an explicit `anonymousRelease` could pass the
