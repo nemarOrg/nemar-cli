@@ -86,7 +86,11 @@ export function isReservedFixtureId(id: string): boolean {
 // cap on purpose so isValidDatasetId and every prod webhook/data/zarr gate keep
 // their exact semantics (xx900001 would fail validation everywhere).
 //
-// DEV_SANDBOX_RANGE_RE identifies a dev/test-range repo by id shape alone
+// DEV_SANDBOX_RANGE_RE identifies a dev/test-range repo by id shape alone.
+// NOTE (#1440): the webhook receiver and the deletion fence now ask
+// isDevOwnedDatasetId instead, because ownership is not a function of id shape
+// once a reserved `nm` fixture exists. This regex keeps its own meaning -- "is
+// this a dev SANDBOX id" -- and its other callers.
 // (env-independent): xx09NNNN == xx090000-xx099999, which covers the whole dev
 // band (floor 90001) and the exemplar sub-band (xx099900+). The prod webhook
 // receiver uses it to refuse dispatching enrichment/zarr/DOI runs against
@@ -130,7 +134,29 @@ export const DEV_EPHEMERAL_BAND_END = formatDatasetId("xx", RESERVED_FIXTURE_FLO
 // `POST /admin/datasets/nm099999/reset` rather than a delete-and-recreate
 // cycle. Adding it here would let a non-production worker cascade-delete a
 // GitHub repository production also uses.
-const DEV_OWNED_FIXTURE_IDS = new Set(["nm099998"]);
+export const DEV_OWNED_FIXTURE_IDS: ReadonlySet<string> = Object.freeze(
+  new Set(["nm099998"]),
+) as ReadonlySet<string>;
+
+/**
+ * Ids the non-production worker must NEVER own, however the set is edited.
+ *
+ * `nm099999` is reserved AND a fixture AND still production's: it exists in
+ * both catalogs and is maintained through `POST /admin/datasets/nm099999/reset`
+ * rather than a delete-and-recreate cycle. It is named here rather than left to
+ * a reviewer's memory, because the cost of it drifting into the set is a
+ * non-production worker cascade-deleting a repository production also uses.
+ *
+ * Note the reset endpoint itself is not environment-fenced and already deletes
+ * and recreates that repository from whichever worker serves the request, which
+ * is how `nemar admin e2e-test` works against staging. The cascade fence still
+ * prevents the unrecoverable variant, row plus S3 plus repo with no recreate,
+ * so keeping `nm099999` out of the set remains right; it just protects less
+ * than "dev can never touch it".
+ */
+export const NEVER_DEV_OWNED_IDS: ReadonlySet<string> = Object.freeze(
+  new Set(["nm099999"]),
+) as ReadonlySet<string>;
 
 /**
  * True when the non-production worker OWNS this dataset: it may delete it, its
