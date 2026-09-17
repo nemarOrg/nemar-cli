@@ -8,7 +8,8 @@
  * "Publish DOI (irreversible)", neither of which happens, and then watched the
  * progress stop at 12 of 16 on a release that had finished. Measured on the
  * dev worker while building nm099998: the banner listed all sixteen and the
- * orchestrator ran six.
+ * orchestrator ran twelve, skipping the four in
+ * `ANONYMOUS_RELEASE_SKIPPED_STEPS`.
  *
  * The live progress renderer was always right, because the backend hands it
  * the real step set. These two built their own.
@@ -61,11 +62,25 @@ describe("PUBLICATION_STEP_LABELS", () => {
     }
   });
 
-  test("no label promises that the repository goes public", () => {
+  test("repo_public says which thing goes public", () => {
     // `repo_public` keeps the GitHub repository PRIVATE for an anonymous
     // release -- it is the catalog row that flips. The old banner's "Make repo
     // public" was the single most misleading line on the approval screen.
-    expect(PUBLICATION_STEP_LABELS.repo_public.toLowerCase()).not.toContain("repo public");
+    //
+    // Asserted positively. The first version of this was
+    // `.not.toContain("repo public")`, which pins one wrong spelling rather
+    // than the promise: "Publish the repo" and "Make repository public" both
+    // pass it while saying exactly the thing that was wrong.
+    expect(PUBLICATION_STEP_LABELS.repo_public).toBe("Make catalog row public");
+  });
+
+  test("no label claims the git repository is published", () => {
+    // The general form of the above, across every label: an anonymous release
+    // runs 12 of the 16 steps and the repository stays private through all of
+    // them, so no step may describe itself as publishing a repo.
+    for (const step of PUBLICATION_STEPS) {
+      expect(PUBLICATION_STEP_LABELS[step].toLowerCase()).not.toMatch(/repo(sitory)?\b/);
+    }
   });
 });
 

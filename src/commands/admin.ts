@@ -2770,17 +2770,20 @@ After Approval:
       // describes the wrong operation is worse than no banner, because it is
       // the screen the decision is made from.
       let anonymousRelease = false;
-      let planKnown = true;
+      let planUnknownReason: string | null = null;
       try {
         anonymousRelease = (await getPublishStatus(datasetId)).anonymous === true;
-      } catch {
+      } catch (err) {
         // Unreadable state is not a reason to refuse an approval the admin can
-        // still make, but it IS a reason to stop asserting what will happen.
-        planKnown = false;
+        // still make, but it IS a reason to stop asserting what will happen --
+        // and to say WHY. A bare `catch {}` here printed "could not read the
+        // request's state" for an expired key, a 404 and a network failure
+        // alike, which is three different next actions rendered as one.
+        planUnknownReason = err instanceof Error ? err.message : String(err);
       }
 
       const steps = stepsForRelease(anonymousRelease);
-      if (planKnown) {
+      if (planUnknownReason === null) {
         console.log(
           anonymousRelease
             ? `This is an ANONYMOUS RELEASE and will run ${steps.length} of the ${PUBLICATION_STEPS.length} orchestrator steps:`
@@ -2789,7 +2792,7 @@ After Approval:
       } else {
         console.log(
           chalk.yellow(
-            `Could not read the request's state, so this lists all ${steps.length} steps; an anonymous release runs fewer.`,
+            `Could not read the request's state (${planUnknownReason}), so this lists all ${steps.length} steps; an anonymous release runs fewer.`,
           ),
         );
       }
