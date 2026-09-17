@@ -254,50 +254,36 @@ cannot pass them is not the right operator. The reservation is **not** environme
 with a dev fixture's repository. `on` ids are mirrored from OpenNeuro and never allocated
 here, so they have no reserved band.
 
-**The exemplar fleet is permanent, not ephemeral.** Eight curated `xx0999NN` copies of real public
+**The exemplar fleet is permanent, not ephemeral.** Seven curated `xx0999NN` copies of real public
 datasets (`scripts/exemplar-fleet.json`) cover eeg / ieeg / emg / meg / multi-modal / HED,
 published with **sandbox** EZID DOIs (`10.5072/FK2`, never the production `10.82901` shoulder).
 
-> **Superseded, and being moved (ADR 0068, epic #1430).** Placing the standing anonymous
-> deposit in the `xx` band was the mistake ADR 0068 was written to prevent: `xx` publishes
-> only through the exemplar exception, and an anonymous deposit's whole purpose is to take
-> a real release. It moves to the reserved id `nm099998` in #1434, which also retires
-> `xx099907` and rewrites the two paragraphs below. Until then `xx099907` is still the
-> fixture of record and everything below still applies, EXCEPT that it is currently
-> `visibility: private` and was never successfully released, so the "public row" wording
-> below describes an intended shape rather than a real one.
+> **The fleet no longer has an anonymous deposit (#1433, ADR 0068).** It had one at
+> `xx099907`, and that placement was the mistake ADR 0068 exists to prevent: `xx` publishes
+> only through the exemplar exception, while an anonymous deposit's defining event is an
+> anonymous RELEASE, so the one path the fixture needed was the one path its band refuses.
+> Keeping it there meant widening a publish gate, which is what #1428 did and #1433 undid.
+>
+> What is true NOW: `scripts/exemplar-fleet.json` declares seven entries and the loader
+> **refuses** an `anonymous` key outright. `isExemplarPublishAllowed` refuses an anonymous
+> exemplar in every direction; there is no longer a way to ask. The clone tool does not
+> blind `Authors`.
+>
+> `xx099907` itself still EXISTS in dev D1 (`visibility: private`, `anonymous = 1`,
+> never successfully released) and as a private `nemarDatasets` repository. #1434 retires
+> it and builds the standing anonymous deposit at the reserved id `nm099998`, uploaded
+> through the normal path from a tree an operator blinds by hand, exactly as a real
+> anonymous depositor does.
+>
+> One field outlives the fixture: `POST /admin/datasets/exemplar` still accepts
+> `anonymous: true`, so an admin can still create an anonymous exemplar row. Do not.
+> It cannot be published in any direction and its refusal reads "Cannot publish sandbox
+> datasets", which names the band rather than the term that fired. #1434 retires the field.
 
-**`xx099907` is the exception and must NEVER be published.** It is the fleet's standing
-anonymous deposit (ADR 0065), the fixture every anonymity surface is exercised against.
-Publishing it does not dirty it, it destroys it: the approve path stamps
-`first_published_at`, after which migration 0085's triggers refuse `anonymous = 1` on that
-row forever. `isExemplarPublishAllowed` refuses a PLAIN publish of it server-side; do not route around that.
-An **anonymous release** of it is allowed and is how the fixture is built (#1423): that path
-leaves `first_published_at` NULL by design, and it is the only one that runs `repo_public`
-(catalog row public, repository private) and `create_tag` (version + manifest).
 Their `active`/`public` state lives in D1 and is the source of truth for the staging catalog;
 it does not depend on the registrar.
 The only thing that lapses is EZID's sandbox shoulder, which purges DOIs after about two weeks,
 so re-mint with `nemar admin exemplar remint-dois` only when a resolvable test DOI actually matters.
-
-**`xx099907` is the standing ANONYMOUS deposit (#1407) and is the one exemplar that must never
-be published.** Public row, private repo, `anonymous = 1`, no DOI. Every other exemplar is
-public with a sandbox DOI, and migration 0085's triggers refuse `anonymous = 1` once
-`first_published_at` is stamped, so publishing this one or minting it a concept DOI destroys
-the fixture permanently rather than changing it. `nemar admin exemplar create --all --publish`
-skips it by reading the `anonymous` flag in `scripts/exemplar-fleet.json`, and the
-publication-request route refuses a plain publish of it server-side; do not force either. It
-exists so anonymity is exercised against a dataset that has been in the pre-publication state
-for weeks, rather than only against rows a test creates and tears down.
-
-**Building it takes two steps, and `create` alone is not enough.**
-`nemar admin exemplar create xx099907` leaves an anonymous row that is `visibility = 'private'`
-(the exemplar INSERT writes `private`), which the data plane will not serve -- so the broker,
-the catalog owner projection and the search blind are all unexercised. The second step is the
-anonymous release, requested the same way a depositor requests one:
-`nemar dataset publish request xx099907 --anonymous`, then approve it. The clone blinds the
-copied `Authors` to `["Anonymous"]` for this entry, because the release refuses a blind the
-gate cannot verify and a fixture has no depositor to act on that instruction.
 
 Two caveats with the clone tool: it reads `AWS_ACCESS_KEY_ID`/`SECRET` from the **ambient
 environment** (unlike `e2e-test.ts`, which fetches per-user S3 credentials from the backend),
