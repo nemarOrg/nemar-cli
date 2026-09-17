@@ -114,7 +114,10 @@ the repository comes from the dataset row and never the request, the gate runs b
 token is used, and the cache is keyed by request URL and NEVER by blob SHA),
 0067 (anonymity is verified on a schedule and reported, never repaired: it writes only
 `sweep_stamps`, files no GitHub issue because `nemarDatasets` is public-facing, and a
-check that could not run is `unchecked` rather than clean).
+check that could not run is `unchecked` rather than clean),
+0068 (the top 100 ids of a band are reserved for standing test fixtures and the allocator
+never returns one: real datasets grow upward, fixtures are assigned downward from
+`nm099999`, and the reservation is not environment-fenced because the GitHub org is shared).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
@@ -225,45 +228,71 @@ All inside the 0-99999 cap, so `xx900001` is invalid.
 
 | Band | Range | Purpose | Cleanup |
 |---|---|---|---|
+| Pre-allocator `nm` | `nm000001`-`nm000107` | predate `START_NUMBER`; `nm000103`-`nm000107` are LIVE | never |
+| Real datasets | `nm000108`-`nm099899` | allocated upward by `generateDatasetId` | never |
+| **`nm` fixtures (reserved)** | `nm099900`-`nm099999` | standing test fixtures, assigned by name | **never** |
 | Prod sandbox | `xx000001`-`xx089999` | real user sandbox training | 14-day cron (prod) |
 | Dev ephemeral | `xx090001`-`xx099899` | throwaway dev/e2e | dev cron |
-| Dev exemplar fleet | `xx099900`-`xx099999` | curated persistent copies | **never** (`is_exemplar=1`) |
+| Dev exemplar fleet (reserved) | `xx099900`-`xx099999` | curated persistent copies | **never** (`is_exemplar=1`) |
 
-**The exemplar fleet is permanent, not ephemeral.** Eight curated `xx0999NN` copies of real public
+**The top 100 ids of each allocating PREFIX are RESERVED and the allocator never returns
+one** (ADR 0068): `nm099900`-`nm099999` and `xx099900`-`xx099999`. This is a property of
+the prefix, not of each band in the table above, so the top of the prod sandbox band
+(`xx089900`+) and of the dev ephemeral band (`xx099800`+) are allocated normally.
+Real datasets grow upward from the prefix's start; standing test fixtures are assigned
+downward from `nm099999`, so a fixture's id is predictable without a registry. In use
+today: `nm099999` (end-to-end, its own reset endpoint) and the `xx099900+` exemplar fleet.
+Reserved means not *allocatable*, not invalid, so `isValidDatasetId` still accepts these
+and every route must still serve them. A fixture is created by NAMING its id on
+`POST /datasets` (`dataset_id`), fenced by `explicitDatasetIdGate` on FOUR terms, all of
+them required: non-production, an admin, the reserved band, AND the id being declared
+dev-owned in `DEV_OWNED_FIXTURE_IDS`. The fourth is the one a new fixture hits: ADR 0068
+names `nm099997` as the next standing fixture, and creating it is refused until it is
+declared, because an undeclared fixture is invisible to the dev worker and claimed by the
+production one. It narrows the route's
+"non-production forces sandbox" rule without weakening it: that rule exists to stop dev
+minting a REAL `nm` id, and a reserved id is one the allocator can never mint for anybody.
+Naming an id exempts nothing else, so the account gates still apply and an operator who
+cannot pass them is not the right operator. The reservation is **not** environment-fenced:
+`nemarDatasets` is shared between prod and dev, so a prod-minted fixture id would collide
+with a dev fixture's repository. `on` ids are mirrored from OpenNeuro and never allocated
+here, so they have no reserved band.
+
+**The exemplar fleet is permanent, not ephemeral.** Seven curated `xx0999NN` copies of real public
 datasets (`scripts/exemplar-fleet.json`) cover eeg / ieeg / emg / meg / multi-modal / HED,
 published with **sandbox** EZID DOIs (`10.5072/FK2`, never the production `10.82901` shoulder).
 
-**`xx099907` is the exception and must NEVER be published.** It is the fleet's standing
-anonymous deposit (ADR 0065), the fixture every anonymity surface is exercised against.
-Publishing it does not dirty it, it destroys it: the approve path stamps
-`first_published_at`, after which migration 0085's triggers refuse `anonymous = 1` on that
-row forever. `isExemplarPublishAllowed` refuses a PLAIN publish of it server-side; do not route around that.
-An **anonymous release** of it is allowed and is how the fixture is built (#1423): that path
-leaves `first_published_at` NULL by design, and it is the only one that runs `repo_public`
-(catalog row public, repository private) and `create_tag` (version + manifest).
+> **The fleet no longer has an anonymous deposit (#1433, ADR 0068).** It had one at
+> `xx099907`, and that placement was the mistake ADR 0068 exists to prevent: `xx` publishes
+> only through the exemplar exception, while an anonymous deposit's defining event is an
+> anonymous RELEASE, so the one path the fixture needed was the one path its band refuses.
+> Keeping it there meant widening a publish gate, which is what #1428 did and #1433 undid.
+>
+> What is true NOW: `scripts/exemplar-fleet.json` declares seven entries and the loader
+> **refuses** an `anonymous` key outright. `isExemplarPublishAllowed` refuses an anonymous
+> exemplar in every direction; there is no longer a way to ask. The clone tool does not
+> blind `Authors`.
+>
+> `xx099907` itself still EXISTS in dev D1 (`visibility: private`, `anonymous = 1`,
+> never successfully released) and as a private `nemarDatasets` repository. #1434 retires
+> it and builds the standing anonymous deposit at the reserved id `nm099998`, from a tree
+> an operator blinds by hand, exactly as a real anonymous depositor does.
+>
+> One seam #1434 owns: `POST /datasets` accepts `dataset_id`, but the CLI's own
+> `createDataset` client does not send it yet, so `nemar dataset upload` cannot name an id.
+> The fixture's create is therefore an out-of-band API call until #1434 adds the field, and
+> "through the normal upload path" means the normal ROUTE and its gates, which is what
+> matters -- not that the CLI can drive it today.
+>
+> One field outlives the fixture: `POST /admin/datasets/exemplar` still accepts
+> `anonymous: true`, so an admin can still create an anonymous exemplar row. Do not.
+> It cannot be published in any direction and its refusal reads "Cannot publish sandbox
+> datasets", which names the band rather than the term that fired. #1434 retires the field.
+
 Their `active`/`public` state lives in D1 and is the source of truth for the staging catalog;
 it does not depend on the registrar.
 The only thing that lapses is EZID's sandbox shoulder, which purges DOIs after about two weeks,
 so re-mint with `nemar admin exemplar remint-dois` only when a resolvable test DOI actually matters.
-
-**`xx099907` is the standing ANONYMOUS deposit (#1407) and is the one exemplar that must never
-be published.** Public row, private repo, `anonymous = 1`, no DOI. Every other exemplar is
-public with a sandbox DOI, and migration 0085's triggers refuse `anonymous = 1` once
-`first_published_at` is stamped, so publishing this one or minting it a concept DOI destroys
-the fixture permanently rather than changing it. `nemar admin exemplar create --all --publish`
-skips it by reading the `anonymous` flag in `scripts/exemplar-fleet.json`, and the
-publication-request route refuses a plain publish of it server-side; do not force either. It
-exists so anonymity is exercised against a dataset that has been in the pre-publication state
-for weeks, rather than only against rows a test creates and tears down.
-
-**Building it takes two steps, and `create` alone is not enough.**
-`nemar admin exemplar create xx099907` leaves an anonymous row that is `visibility = 'private'`
-(the exemplar INSERT writes `private`), which the data plane will not serve -- so the broker,
-the catalog owner projection and the search blind are all unexercised. The second step is the
-anonymous release, requested the same way a depositor requests one:
-`nemar dataset publish request xx099907 --anonymous`, then approve it. The clone blinds the
-copied `Authors` to `["Anonymous"]` for this entry, because the release refuses a blind the
-gate cannot verify and a fixture has no depositor to act on that instruction.
 
 Two caveats with the clone tool: it reads `AWS_ACCESS_KEY_ID`/`SECRET` from the **ambient
 environment** (unlike `e2e-test.ts`, which fetches per-user S3 credentials from the backend),

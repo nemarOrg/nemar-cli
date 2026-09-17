@@ -201,17 +201,9 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     }
 
     // Block sandbox/xx, except staging exemplars (epic #923).
-    //
-    // The intent is passed because the exemplar exception turns on it for one
-    // dataset (#1423): the fleet's anonymous deposit may take an ANONYMOUS
-    // release -- which is what gives it a public row, a private repository and
-    // a manifest -- but not a plain publish, which would end its anonymity and
-    // destroy the fixture. Taken from the request's own flag, never from the
-    // row's current `anonymous` value, so that "publish this blinded deposit
-    // for real" stays refused for the exemplar and allowed for everyone else.
     if (
       (dataset.is_sandbox || dataset.dataset_id.startsWith("xx")) &&
-      !isExemplarPublishAllowed(c.env, dataset, { anonymousRelease: anonymousRequested })
+      !isExemplarPublishAllowed(c.env, dataset)
     ) {
       return c.json({ error: "Cannot publish sandbox datasets" }, 400);
     }
@@ -229,18 +221,19 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
       // plainly rather than queued, so the depositor is not left waiting on an
       // admin for a no-op.
       //
-      // The `visibility === "public"` term matters (#1423): `anonymous = 1`
-      // is not by itself evidence that a release HAPPENED. For a depositor it
-      // is, because the release is what sets it -- but a row can also be
-      // CREATED anonymous, which is what `POST /admin/datasets/exemplar` does
-      // and what migration 0085 deliberately permits ("set at INSERT rather
-      // than flipped afterwards, because this is the only moment it is
+      // The `visibility === "public"` term matters (#1423): `anonymous = 1` is
+      // not by itself evidence that a release HAPPENED. For a depositor it is,
+      // because the release is what sets it -- but a row can also be CREATED
+      // anonymous, which migration 0085 deliberately permits ("set at INSERT
+      // rather than flipped afterwards, because this is the only moment it is
       // unconditionally legal"). Such a row is anonymous and PRIVATE: nothing
       // has been released, and the release is the only thing that makes it
-      // public. Without this term the fleet's anonymous deposit was told its
-      // release had already happened while its row sat private and the data
-      // plane refused to serve it. Adding it changes nothing for a real
-      // deposit, whose `anonymous` and `public` arrive together.
+      // public. Without this term such a row is told its release already
+      // happened while it sits private and the data plane refuses to serve it.
+      // This term outlived the fixture that exposed it (#1433): it is a
+      // correctness fix about what `anonymous` means, not an accommodation,
+      // and it changes nothing for a real deposit, whose `anonymous` and
+      // `public` arrive together.
       return c.json(
         {
           error: "already_released_anonymously",

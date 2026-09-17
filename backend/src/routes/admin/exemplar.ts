@@ -42,7 +42,19 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
     name: z.string().min(1).max(200).optional(),
     description: z.string().optional(),
     /**
-     * Create this exemplar as the fleet's standing ANONYMOUS deposit (#1407).
+     * DEPRECATED (#1433, ADR 0068); retired by #1434. Do not use it.
+     *
+     * It created the fleet's standing ANONYMOUS deposit (#1407), which lived at
+     * xx099907 until this field's premise was withdrawn: `xx` publishes only
+     * through the exemplar exception, so an anonymous exemplar can take no
+     * publish path at all. A row created with this flag today is permanently
+     * unpublishable, and its refusal reads "Cannot publish sandbox datasets",
+     * which names the band rather than the anonymity term that actually fired.
+     * `scripts/exemplar-fleet.json` declares no anonymous entry and its loader
+     * now refuses the key outright. The standing anonymous deposit is a reserved
+     * `nm` id built through the normal upload path.
+     *
+     * Original rationale, kept because the constraint it describes is still real:
      *
      * Set at INSERT rather than flipped afterwards, because this is the only
      * moment it is unconditionally legal: the row is brand new, so
@@ -263,10 +275,13 @@ export function registerExemplarRoutes(admin: AdminRouter): void {
           // Exemplars are exempt: their owner row is an admin/service account
           // and they mint on the EZID sandbox shoulder (requiresUploaderName).
           uploaderRequired: requiresUploaderName(dataset),
-          // #1409: the fleet's standing anonymous exemplar (xx099907) is
-          // re-minted by the same maintenance command as every other one, and
-          // this is the shortest path from a concealed deposit to a permanent
-          // DataCite record naming its depositor. `resolveOwnerIdentity` above
+          // #1409: an anonymous row re-minted by the same maintenance command
+          // as every other one is the shortest path from a concealed deposit
+          // to a permanent DataCite record naming its depositor. The flag is
+          // read from the ROW, so it holds whether or not the fleet declares
+          // an anonymous entry -- and since #1433 it declares none, which is
+          // why this is written as a general rule about anonymous rows rather
+          // than about one named fixture. `resolveOwnerIdentity` above
           // reads the real name, ORCID and username straight off the joined
           // `users` row; without this flag they would be minted as the curator
           // and the identifier advertised as public.

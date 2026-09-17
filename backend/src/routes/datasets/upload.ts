@@ -11,7 +11,8 @@ import { z } from "zod";
 import type { AccountKind } from "../../../../shared/contract/user.js";
 import { authMiddleware } from "../../middleware/auth";
 import { cliVersionGuard } from "../../middleware/cliVersion";
-import { generateDatasetId, isValidDatasetId } from "../../services/datasetId";
+import { generateDatasetId, isSandboxDatasetId, isValidDatasetId } from "../../services/datasetId";
+import { isNonProductionEnv } from "../../services/environment";
 import {
   type GitHubRepo,
   addCollaborator,
@@ -30,6 +31,7 @@ import {
   getFederationToken,
 } from "../../services/sts";
 import {
+  explicitDatasetIdGate,
   realDatasetCreateGate,
   realDatasetServiceGate,
   uploadChannelForAuthMethod,
@@ -134,6 +136,12 @@ const createDatasetSchema = z.object({
   files: z.array(fileSchema).optional(),
   sandbox: z.boolean().optional(), // If true, creates sandbox dataset (xx000XXX)
   attestation: attestationSchema.optional(),
+  // Name the id instead of being allocated one. Non-production, admin, and the
+  // reserved fixture band only -- see explicitDatasetIdGate. Exists because
+  // ADR 0068 makes generateDatasetId structurally unable to return a reserved
+  // id, so the standing fixtures that live there have no other way in through
+  // the route that creates everything else.
+  dataset_id: z.string().optional(),
 });
 
 /**
@@ -237,6 +245,7 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         files,
         sandbox: requestedSandbox,
         attestation,
+        dataset_id: requestedDatasetId,
       } = c.req.valid("json");
       const user = c.get("user");
       const db = c.env.DB;
@@ -249,10 +258,54 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
           "[datasets] ENVIRONMENT not configured; defaulting to non-production (sandbox-only)",
         );
       }
-      const isProduction = environment === "production";
-      const sandbox = isProduction ? !!requestedSandbox : true;
+      // TWO predicates, deliberately, because this route runs two rules whose
+      // SAFE directions are opposite. One variable cannot serve both, and an
+      // earlier version of this epic tried: it replaced the literal comparison
+      // with `!isNonProductionEnv` for the named-id gate's benefit and thereby
+      // INVERTED the allocation rule underneath it. Measured on the composed
+      // branch before this was caught: `ENVIRONMENT` unset and no `dataset_id`
+      // allocated `nm000108`, a real id, where it had always allocated
+      // `xx000001`. That is the exact collision class ADR 0068 exists to
+      // prevent, introduced by a change made to prevent a different one.
+      //
+      // Allocation: an UNRECOGNIZED environment must force sandbox, so the
+      // literal comparison is right here. Unknown means "not production" in the
+      // restrictive direction.
+      const forceSandbox = c.env.ENVIRONMENT !== "production";
+      // Naming a reserved id: an UNRECOGNIZED environment must refuse, so the
+      // allowlist is right here. Unknown means "treat as production" in the
+      // permissive direction. Matches webhooks/github.ts, services/deletion.ts
+      // and services/exemplar.ts.
+      const isProduction = !isNonProductionEnv(c.env);
 
-      if (!isProduction && !requestedSandbox) {
+      // A named id is gated before anything reads it (ADR 0068, #1432).
+      if (requestedDatasetId !== undefined) {
+        const gate = explicitDatasetIdGate({
+          isProduction,
+          isAdmin: hasRole(user.role, "admin"),
+          datasetId: requestedDatasetId,
+        });
+        if (gate) {
+          console.warn(
+            `[datasets] explicit id refused: id=${requestedDatasetId} user=${user.username} reason=${gate.error}`,
+          );
+          return c.json(gate, 403);
+        }
+      }
+
+      // Non-production forces sandbox, EXCEPT for a named reserved id, whose
+      // prefix decides. The forcing exists to stop dev minting real nm ids; a
+      // reserved id is one the allocator can never mint for anybody, so naming
+      // one does not do that. Derived from the id rather than from the
+      // request's `sandbox` flag, so the two can never disagree.
+      const sandbox =
+        requestedDatasetId !== undefined
+          ? isSandboxDatasetId(requestedDatasetId)
+          : forceSandbox
+            ? true
+            : !!requestedSandbox;
+
+      if (forceSandbox && requestedDatasetId === undefined && !requestedSandbox) {
         console.warn(
           `[datasets] Non-production env: forcing sandbox=true for user ${user.username} (requested: ${requestedSandbox})`,
         );
@@ -292,6 +345,10 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
       }
 
       // Validate sandbox file size limit (larger outside production, see const)
+      // `isProduction` (the allowlist) is right here too: an unrecognized
+      // environment gets production's SMALLER cap, which is the restrictive
+      // direction. This is a deliberate tightening over the literal comparison,
+      // which gave an unknown environment the larger non-production cap.
       const sandboxMaxTotalSize = isProduction
         ? SANDBOX_MAX_TOTAL_SIZE
         : SANDBOX_MAX_TOTAL_SIZE_NONPROD;
@@ -319,9 +376,16 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
       // same name, return it instead of creating a new one. This prevents phantom
       // datasets when the CLI loses .nemar/config.json and retries.
       // "Incomplete" = private, no DOI, no version records, has a GitHub repo.
-      const existingIncomplete = await db
-        .prepare(
-          `SELECT d.dataset_id, d.github_repo
+      // Skipped for a named id: dedup matches on (owner, name, sandbox) and
+      // would return a DIFFERENT dataset than the one named, which is the one
+      // answer an operator naming an id can never want. The named id's own
+      // uniqueness check below is the right conflict signal.
+      const existingIncomplete =
+        requestedDatasetId !== undefined
+          ? null
+          : await db
+              .prepare(
+                `SELECT d.dataset_id, d.github_repo
            FROM datasets d
            WHERE d.owner_user_id = ?
              AND d.name = ?
@@ -334,9 +398,9 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
              )
            ORDER BY d.created_at DESC
            LIMIT 1`,
-        )
-        .bind(user.id, name, sandbox ? 1 : 0)
-        .first<{ dataset_id: string; github_repo: string }>();
+              )
+              .bind(user.id, name, sandbox ? 1 : 0)
+              .first<{ dataset_id: string; github_repo: string }>();
 
       if (existingIncomplete) {
         console.log(
@@ -470,7 +534,13 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
       let datasetId: string;
       const MAX_ID_RETRIES = 3;
       for (let attempt = 0; ; attempt++) {
-        datasetId = await generateDatasetId(db, !!sandbox, { sandboxIdFloor, sandboxIdCeiling });
+        // A named id is not allocated and must not be retried: the retry loop
+        // exists to walk past a concurrent claim, and walking past a NAMED id
+        // would silently create a different dataset than the operator asked
+        // for. A collision is a conflict, reported as one.
+        datasetId =
+          requestedDatasetId ??
+          (await generateDatasetId(db, !!sandbox, { sandboxIdFloor, sandboxIdCeiling }));
         try {
           // Claim the ID early with a minimal INSERT to close the TOCTOU gap.
           // license/license_tier are intentionally omitted: no license is known
@@ -506,6 +576,32 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
           break; // ID claimed successfully
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
+          if (requestedDatasetId !== undefined && msg.includes("UNIQUE constraint failed")) {
+            return c.json(
+              {
+                error: "Dataset id already exists",
+                dataset_id: requestedDatasetId,
+                // Deliberately NOT "run delete-dataset". Two reasons, both
+                // learned the hard way in review:
+                //
+                // 1. The reserved band is where the STANDING fixtures live, and
+                //    their whole value is that they persist. xx099907 has been
+                //    pre-publication for weeks by design and nm099999 has a
+                //    reset endpoint rather than a delete/recreate cycle.
+                //    Blanket delete advice aimed at this band is aimed at them.
+                // 2. It used to be worse: for a reserved `nm` id the command
+                //    did not work off production at all. #1440 fixed that by
+                //    fencing the cascade on OWNERSHIP, and making
+                //    delete-then-recreate work on the only worker that can
+                //    rebuild a fixture was one of its four motivating defects.
+                //    So the note no longer warns the operator off it -- it just
+                //    stops short of recommending deletion in a band whose
+                //    contents are supposed to persist.
+                note: "Naming an id never overwrites an existing dataset. The reserved band holds standing fixtures that are meant to persist, so check what is there before removing anything. A non-production worker may cascade-delete only the ids it owns: the dev range (xx090000-xx099999) and its declared reserved fixtures.",
+              },
+              409,
+            );
+          }
           if (attempt < MAX_ID_RETRIES - 1 && msg.includes("UNIQUE constraint failed")) {
             continue; // Retry with a new ID
           }

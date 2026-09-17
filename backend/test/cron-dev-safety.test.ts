@@ -38,9 +38,11 @@ import {
   DEV_EPHEMERAL_BAND_END,
   DEV_EPHEMERAL_BAND_START,
   isDevEphemeralSandboxId,
+  isDevOwnedDatasetId,
 } from "../src/services/datasetId";
 import { deleteDatasetCascade } from "../src/services/deletion";
 import { reconcileReservedVersionDois } from "../src/services/doi-reconcile";
+import { blockedCandidateQuery } from "../src/services/publication-sweep";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 
@@ -238,13 +240,44 @@ describe("deleteDatasetCascade prod-repo fence", () => {
   const env = (environment: string) =>
     ({ ENVIRONMENT: environment, DB: {}, S3_BUCKET: "nemar-dev" }) as unknown as Bindings;
 
-  for (const id of ["nm000103", "nm000155", "on003805", "xx000042", "xx089999"]) {
+  // nm099999 is in this list deliberately: it is a RESERVED fixture id, but it
+  // exists in production's catalog too and is maintained through its own reset
+  // endpoint, so dev must not cascade-delete the repository production uses.
+  // "reserved" does not imply "dev-owned" (#1440).
+  for (const id of ["nm000103", "nm000155", "on003805", "xx000042", "xx089999", "nm099999"]) {
     test(`refuses ${id} on a non-production worker`, async () => {
       await expect(deleteDatasetCascade({} as D1Database, env("development"), id)).rejects.toThrow(
         /non-production worker/,
       );
     });
   }
+
+  test("allows the dev-owned reserved fixture off-prod (#1440)", async () => {
+    // The failure this fixes: the fence keyed on the id SHAPE (xx09NNNN), so a
+    // reserved `nm` fixture was refused on the only worker that could rebuild
+    // it -- which made the documented recovery for a failed fixture build,
+    // delete then recreate, impossible on dev. It must NOT throw the fence
+    // error; failing later on the stub D1 is the "let through" signal.
+    const explodes = {
+      prepare() {
+        throw new Error("reached-d1");
+      },
+    } as unknown as D1Database;
+    await expect(
+      deleteDatasetCascade(explodes, env("development"), "nm099998"),
+    ).rejects.not.toThrow(/non-production worker/);
+  });
+
+  test("production is unaffected: the fence is non-production only", async () => {
+    const explodes = {
+      prepare() {
+        throw new Error("reached-d1");
+      },
+    } as unknown as D1Database;
+    await expect(deleteDatasetCascade(explodes, env("production"), "nm000103")).rejects.not.toThrow(
+      /non-production worker/,
+    );
+  });
 
   test("refuses before touching GitHub, S3 or D1", async () => {
     // The throw must precede every side effect; a D1 that explodes on use
@@ -290,36 +323,45 @@ describe("blocked publication sweep scopes by dataset range, not by skipping", (
     }
   }
 
-  /** The candidate query as built for each environment (see publication-sweep.ts). */
-  function candidateQuery(devRangeOnly: boolean): string {
-    return `SELECT pr.dataset_id
-              FROM publication_requests pr
-              JOIN datasets d ON d.dataset_id = pr.dataset_id
-             WHERE pr.status = 'blocked'
-               AND pr.block_reason IN ('bids_validation_pending')
-               ${devRangeOnly ? "AND pr.dataset_id LIKE 'xx09%'" : ""}
-             ORDER BY pr.updated_at ASC`;
-  }
+  // The candidate query is imported WHOLE (sql + binds) from publication-sweep.ts.
+  // Importing only the scope clause was not enough: this file then rebuilt the
+  // surrounding SELECT by hand, so its placeholder layout was not production's,
+  // and transposing the declared ids with the limit in the real `.bind()` left
+  // the suite green. `.rules/testing.md` forbids hand-copied SQL for exactly
+  // this reason, and a half-imported query has the same defect as a copied one.
 
-  test("non-production sees only dev-range requests", async () => {
+  test("non-production sees dev-range requests AND its declared fixtures", async () => {
+    // nm099998 is the case this exists for. An anonymous release IS a
+    // publication request, so the standing anonymous deposit is the single most
+    // likely dataset on staging to land in 'blocked' while BIDS validation runs
+    // -- and it was inside `LIKE 'xx09%'` at xx099907 and dropped out of it at
+    // nm099998. Without the ownership term it would stay stuck forever, which
+    // is the state this sweep exists to clear.
     const db = freshDb();
-    seedBlocked(db, ["xx099900", "xx090001", "nm000155", "on003805"]);
+    seedBlocked(db, ["xx099900", "xx090001", "nm099998", "nm000155", "on003805", "nm099999"]);
 
+    const { sql, binds } = blockedCandidateQuery(true, 100);
     const rows = await realD1(db)
-      .prepare(candidateQuery(true))
-      .bind()
+      .prepare(sql)
+      .bind(...binds)
       .all<{ dataset_id: string }>();
 
-    expect(rows.results.map((r) => r.dataset_id).sort()).toEqual(["xx090001", "xx099900"]);
+    // nm099999 is absent deliberately: reserved, but production's, not dev's.
+    expect(rows.results.map((r) => r.dataset_id).sort()).toEqual([
+      "nm099998",
+      "xx090001",
+      "xx099900",
+    ]);
   });
 
   test("production still sees every blocked request", async () => {
     const db = freshDb();
     seedBlocked(db, ["xx099900", "nm000155", "on003805"]);
 
+    const { sql, binds } = blockedCandidateQuery(false, 100);
     const rows = await realD1(db)
-      .prepare(candidateQuery(false))
-      .bind()
+      .prepare(sql)
+      .bind(...binds)
       .all<{ dataset_id: string }>();
 
     expect(rows.results.map((r) => r.dataset_id).sort()).toEqual([
@@ -327,5 +369,37 @@ describe("blocked publication sweep scopes by dataset range, not by skipping", (
       "on003805",
       "xx099900",
     ]);
+  });
+});
+
+describe("the dev cleanup cron never selects a reserved fixture (#1440)", () => {
+  // Dev OWNING nm099998 must not make the cleanup cron a way to lose it. The
+  // cron bounds itself by a SQL string range over the dev EPHEMERAL band, which
+  // is a different question from ownership: dev owns the fixture and may delete
+  // it deliberately, but nothing automated may.
+  test("the ephemeral band excludes the reserved fixtures, by construction", () => {
+    const db = freshDb();
+    seedAged(db, ["xx090001", "xx099899", "xx099900", "nm099998", "nm099999"]);
+    const picked = (
+      db
+        .query(NON_PROD_SANDBOX_QUERY)
+        .all(DEV_EPHEMERAL_BAND_START, DEV_EPHEMERAL_BAND_END, 100) as { dataset_id: string }[]
+    ).map((r) => r.dataset_id);
+    expect(picked).toEqual(["xx090001", "xx099899"]);
+    expect(picked).not.toContain("nm099998");
+    db.close();
+  });
+
+  test("isDevOwnedDatasetId and isDevEphemeralSandboxId answer different questions", () => {
+    // Conflating them is the bug #1440 fixed; this pins that they are not the
+    // same predicate wearing two names.
+    expect(isDevOwnedDatasetId("nm099998")).toBe(true);
+    expect(isDevEphemeralSandboxId("nm099998")).toBe(false);
+    expect(isDevOwnedDatasetId("xx090001")).toBe(true);
+    expect(isDevEphemeralSandboxId("xx090001")).toBe(true);
+    expect(isDevOwnedDatasetId("xx099900")).toBe(true); // exemplar fleet: dev's
+    expect(isDevEphemeralSandboxId("xx099900")).toBe(false); // but never auto-deleted
+    expect(isDevOwnedDatasetId("nm099999")).toBe(false); // production has it too
+    expect(isDevOwnedDatasetId("nm000104")).toBe(false);
   });
 });
