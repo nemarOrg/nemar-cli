@@ -82,6 +82,35 @@ export function blockedSweepScope(nonProduction: boolean): { clause: string; ids
 }
 
 /**
+ * The blocked-BIDS candidate query and its binds, in one place.
+ *
+ * Exported WHOLE rather than just the scope clause, because the clause alone
+ * was not enough: the test imported it and then rebuilt the surrounding SELECT
+ * by hand, so its placeholder layout was not production's and transposing
+ * `declaredIds` with `limit` in the real `.bind()` left the suite green. The
+ * bind order is a property of the SQL, so the two travel together or neither
+ * is tested.
+ */
+export function blockedCandidateQuery(
+  nonProduction: boolean,
+  limit: number,
+): { sql: string; binds: (string | number)[] } {
+  const { clause, ids } = blockedSweepScope(nonProduction);
+  const placeholders = BIDS_VALIDATION_BLOCK_REASONS.map(() => "?").join(", ");
+  return {
+    sql: `SELECT pr.id, pr.dataset_id, pr.block_reason, d.github_repo
+           FROM publication_requests pr
+           JOIN datasets d ON d.dataset_id = pr.dataset_id
+          WHERE pr.status = 'blocked'
+            AND pr.block_reason IN (${placeholders})
+            ${clause}
+          ORDER BY pr.updated_at ASC
+          LIMIT ?`,
+    binds: [...BIDS_VALIDATION_BLOCK_REASONS, ...ids, limit],
+  };
+}
+
+/**
  * Re-evaluate every publication request blocked on BIDS validation and
  * transition the ones whose CI has since resolved. Returns a tally for the cron
  * log. Never throws — per-row failures are counted and skipped so one bad repo
@@ -120,9 +149,8 @@ export async function sweepBlockedBidsValidationRequests(
   // The declared ids are BOUND, not interpolated, and come from the same
   // exported declaration the predicates use, so this clause cannot disagree
   // with `isDevOwnedDatasetId`.
-  const { clause: scopeClause, ids: declaredIds } = blockedSweepScope(isNonProductionEnv(env));
+  const candidate = blockedCandidateQuery(isNonProductionEnv(env), limit);
 
-  const placeholders = BIDS_VALIDATION_BLOCK_REASONS.map(() => "?").join(", ");
   // Guard the initial query so a D1 outage / schema drift surfaces as errors>0
   // in the cron tally rather than an all-zero result indistinguishable from
   // "nothing to do". This keeps the "never throws" contract honest.
@@ -136,20 +164,8 @@ export async function sweepBlockedBidsValidationRequests(
   };
   try {
     rows = await db
-      .prepare(
-        `SELECT pr.id, pr.dataset_id, pr.block_reason, d.github_repo
-           FROM publication_requests pr
-           JOIN datasets d ON d.dataset_id = pr.dataset_id
-          WHERE pr.status = 'blocked'
-            AND pr.block_reason IN (${placeholders})
-            ${scopeClause}
-          ORDER BY pr.updated_at ASC
-          LIMIT ?`,
-      )
-      // Bind order follows the placeholders in the SQL above: the block
-      // reasons, then the declared dev-owned ids (empty in production, where
-      // scopeClause is likewise empty), then the limit.
-      .bind(...BIDS_VALIDATION_BLOCK_REASONS, ...declaredIds, limit)
+      .prepare(candidate.sql)
+      .bind(...candidate.binds)
       .all<{ id: number; dataset_id: string; block_reason: string; github_repo: string | null }>();
   } catch (err) {
     result.errors++;

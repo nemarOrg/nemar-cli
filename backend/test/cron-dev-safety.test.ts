@@ -41,8 +41,8 @@ import {
   isDevOwnedDatasetId,
 } from "../src/services/datasetId";
 import { deleteDatasetCascade } from "../src/services/deletion";
-import { blockedSweepScope } from "../src/services/publication-sweep";
 import { reconcileReservedVersionDois } from "../src/services/doi-reconcile";
+import { blockedCandidateQuery } from "../src/services/publication-sweep";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
 
@@ -274,9 +274,9 @@ describe("deleteDatasetCascade prod-repo fence", () => {
         throw new Error("reached-d1");
       },
     } as unknown as D1Database;
-    await expect(
-      deleteDatasetCascade(explodes, env("production"), "nm000103"),
-    ).rejects.not.toThrow(/non-production worker/);
+    await expect(deleteDatasetCascade(explodes, env("production"), "nm000103")).rejects.not.toThrow(
+      /non-production worker/,
+    );
   });
 
   test("refuses before touching GitHub, S3 or D1", async () => {
@@ -323,25 +323,12 @@ describe("blocked publication sweep scopes by dataset range, not by skipping", (
     }
   }
 
-  /**
-   * The candidate query, built from the REAL scope decision imported from
-   * publication-sweep.ts. The previous version of this helper retyped
-   * `LIKE 'xx09%'`, so it kept passing while the production clause changed
-   * under it -- the exact thing `.rules/testing.md` forbids.
-   */
-  function candidateQuery(nonProduction: boolean): { sql: string; binds: string[] } {
-    const { clause, ids } = blockedSweepScope(nonProduction);
-    return {
-      sql: `SELECT pr.dataset_id
-              FROM publication_requests pr
-              JOIN datasets d ON d.dataset_id = pr.dataset_id
-             WHERE pr.status = 'blocked'
-               AND pr.block_reason IN ('bids_validation_pending')
-               ${clause}
-             ORDER BY pr.updated_at ASC`,
-      binds: ids,
-    };
-  }
+  // The candidate query is imported WHOLE (sql + binds) from publication-sweep.ts.
+  // Importing only the scope clause was not enough: this file then rebuilt the
+  // surrounding SELECT by hand, so its placeholder layout was not production's,
+  // and transposing the declared ids with the limit in the real `.bind()` left
+  // the suite green. `.rules/testing.md` forbids hand-copied SQL for exactly
+  // this reason, and a half-imported query has the same defect as a copied one.
 
   test("non-production sees dev-range requests AND its declared fixtures", async () => {
     // nm099998 is the case this exists for. An anonymous release IS a
@@ -353,7 +340,7 @@ describe("blocked publication sweep scopes by dataset range, not by skipping", (
     const db = freshDb();
     seedBlocked(db, ["xx099900", "xx090001", "nm099998", "nm000155", "on003805", "nm099999"]);
 
-    const { sql, binds } = candidateQuery(true);
+    const { sql, binds } = blockedCandidateQuery(true, 100);
     const rows = await realD1(db)
       .prepare(sql)
       .bind(...binds)
@@ -371,7 +358,7 @@ describe("blocked publication sweep scopes by dataset range, not by skipping", (
     const db = freshDb();
     seedBlocked(db, ["xx099900", "nm000155", "on003805"]);
 
-    const { sql, binds } = candidateQuery(false);
+    const { sql, binds } = blockedCandidateQuery(false, 100);
     const rows = await realD1(db)
       .prepare(sql)
       .bind(...binds)
