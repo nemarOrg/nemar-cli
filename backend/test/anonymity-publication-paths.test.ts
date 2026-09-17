@@ -414,8 +414,24 @@ describe("an anonymous release is a publication minus the steps that expose iden
       "update_metadata",
       "update_readme",
       "upload_to_zenodo",
-      "version_doi",
     ]);
+  });
+
+  test("version_doi RUNS, because it is also the only manifest trigger (#1447)", () => {
+    // It was skipped until #1447, which reads correctly from the step's name
+    // and is wrong: `publishEzidVersionDoiViaCentral` mints the identifier AND
+    // dispatches the central manifest job whose callback inserts the
+    // `dataset_versions` row. Skipping it left a released anonymous deposit
+    // with no manifest and no version -- measured on the dev worker, the data
+    // plane answered 404 "Version not published" for a dataset the release had
+    // just made public, and the catalog listing omitted it entirely.
+    expect(ANONYMOUS_RELEASE_STEPS).toContain("version_doi");
+    // What makes that safe is that the mint stops at `reserved`. If this term
+    // is ever dropped, the step publishes a resolving version DOI for a
+    // concealed deposit, which is irreversible.
+    const CENTRAL = readFileSync(join(SRC, "services", "central-manifest.ts"), "utf8");
+    expect(CENTRAL).toContain("const reserveOnly = isAnonymous(dataset);");
+    expect(CENTRAL).toContain("reserveOnly,");
   });
 
   test("the DOI is not written into the files the data plane serves", () => {

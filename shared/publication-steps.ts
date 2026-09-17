@@ -47,7 +47,6 @@ export type PublicationStep = (typeof PUBLICATION_STEPS)[number];
  *                    The identifier stays `reserved`, which is what ADR 0065's
  *                    A6 requires and what makes the deposit citable by its
  *                    landing page rather than by a public record.
- *   version_doi      Mints and publishes a per-version DOI, same exposure.
  *   upload_to_zenodo Zenodo's `creators` field is mandatory, so there is no
  *                    unattributed form; `createZenodoConceptDoi` refuses an
  *                    anonymous deposit outright rather than deposit a name.
@@ -59,6 +58,20 @@ export type PublicationStep = (typeof PUBLICATION_STEPS)[number];
  *   update_readme    Same identifier, worse placement: a DOI badge on the
  *                    README the dataset page renders, linking to a doi.org URL
  *                    that 404s.
+ *
+ * `version_doi` is NOT in this list, and the reason is worth stating because
+ * it was until #1447. It mints a per-version DOI, which for a concealed
+ * deposit must not resolve, so dropping the whole step looked correct. But the
+ * same step is the ONLY thing that dispatches the central manifest job, whose
+ * callback inserts the `dataset_versions` row; skipping it left every
+ * anonymous release with no manifest and no version, the data plane answering
+ * "Version not published" for a dataset the release had just made public, and
+ * the dataset missing from the catalog listing. The step now runs and mints
+ * the identifier RESERVED (`createEzidVersionDoi`'s `reserveOnly`), which is
+ * the same state `doi_create` leaves the concept DOI in: registered, not
+ * advertised, not harvested, and completed by the publication that ends the
+ * anonymity. `latest_version_doi` stays NULL, because that column means the
+ * version DOI that is published.
  *
  * Those last two are DEFERRED, not dropped. `doi_create` still runs, so the
  * identifier is reserved for the dataset from the start and the same one is
@@ -76,10 +89,52 @@ export const ANONYMOUS_RELEASE_SKIPPED_STEPS: readonly PublicationStep[] = [
   "update_readme",
   "upload_to_zenodo",
   "publish_doi",
-  "version_doi",
 ] as const;
 
 /** The steps an anonymous release runs, in the same order as a publication. */
 export const ANONYMOUS_RELEASE_STEPS: readonly PublicationStep[] = PUBLICATION_STEPS.filter(
   (s) => !ANONYMOUS_RELEASE_SKIPPED_STEPS.includes(s),
 );
+
+/**
+ * The steps an approval will actually run, given whether the pending request
+ * asked for an anonymous release.
+ *
+ * One rule, so the CLI cannot describe a different publication from the one the
+ * backend performs. Before #1447 the approve confirmation and
+ * `nemar dataset publish status` both rendered `PUBLICATION_STEPS`
+ * unconditionally, so an admin approving an anonymous release was shown a
+ * 16-step plan including "Publish DOI (irreversible)" and "Make repo public",
+ * and then watched it stop at 11 of 16 forever. Neither is what happens: the
+ * repository stays private and no identifier is published. The live progress
+ * renderer had it right, because the backend tells it the real step set.
+ */
+export function stepsForRelease(anonymous: boolean): readonly PublicationStep[] {
+  return anonymous ? ANONYMOUS_RELEASE_STEPS : PUBLICATION_STEPS;
+}
+
+/**
+ * Human labels for the step list, as a total map so adding a step to
+ * `PUBLICATION_STEPS` without labeling it is a compile error. The alternative,
+ * a positional literal, is what the approve banner used: a hand-numbered
+ * two-column block that had to be re-typed whenever the step list changed and
+ * silently described the wrong publication when it was not.
+ */
+export const PUBLICATION_STEP_LABELS: Record<PublicationStep, string> = {
+  ci_check: "Check CI",
+  enrichment_check: "Enrichment check",
+  s3_public_read: "S3 public read",
+  repo_public: "Make catalog row public",
+  tag_protect: "Tag protection",
+  doi_create: "Create DOI",
+  update_metadata: "Update metadata",
+  update_readme: "Update README",
+  create_tag: "Create version tag",
+  create_release: "Create GitHub release",
+  upload_to_zenodo: "Upload to Zenodo (no-op)",
+  publish_doi: "Publish DOI (irreversible)",
+  version_doi: "Version DOI + manifest",
+  s3_lock: "S3 Object Lock",
+  sync_nemar: "Sync NEMAR (no-op)",
+  notify_user: "Notify user",
+};

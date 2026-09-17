@@ -10,6 +10,7 @@
  */
 
 import type { Bindings } from "../types/bindings.js";
+import { isAnonymous } from "./anonymity.js";
 import { createEzidVersionDoi } from "./doi.js";
 import { conceptEzidIdentifier } from "./ezid.js";
 import { getDatasetsToken } from "./github-auth.js";
@@ -195,6 +196,14 @@ export interface EzidVersionDoiDataset {
   name: string;
   github_repo: string | null;
   concept_doi: string | null;
+  /**
+   * Required, not optional (#1447): the mint below decides from it whether the
+   * version identifier is published or left reserved, and a caller that stops
+   * selecting the column must be a compile error rather than a silent
+   * "not anonymous" that publishes a concealed deposit's DOI. Same reasoning
+   * as the detail route's row type and `expectedRepoVisibility`.
+   */
+  anonymous: number | null;
 }
 
 /**
@@ -232,6 +241,8 @@ export async function mintEzidVersionDoi(
     .all<{ doi: string }>();
   const existingVersionDois = versionRows.results.map((r) => r.doi);
 
+  const reserveOnly = isAnonymous(dataset);
+
   const result = await createEzidVersionDoi(
     {
       EZID_USERNAME: env.EZID_USERNAME,
@@ -251,14 +262,23 @@ export async function mintEzidVersionDoi(
       sandbox,
       existingVersionDois,
       enrichment: repoMeta.enrichment,
+      reserveOnly,
     },
   );
 
-  await env.DB.prepare(
-    "UPDATE datasets SET latest_version_doi = ?, updated_at = datetime('now') WHERE id = ?",
-  )
-    .bind(result.doi, dataset.id)
-    .run();
+  // Not written for a concealed deposit (#1447). The column means "the version
+  // DOI that is PUBLISHED", and is read as exactly that by `archive-retry.ts`
+  // (`latest_version_doi IS NOT NULL` selects datasets with a released version)
+  // and by `import-integrity.ts` (`versionFromDoi` derives the version from
+  // it). Putting a non-resolving identifier there would change what both mean.
+  // The identifier is deterministic, so the real publication re-derives it.
+  if (!reserveOnly) {
+    await env.DB.prepare(
+      "UPDATE datasets SET latest_version_doi = ?, updated_at = datetime('now') WHERE id = ?",
+    )
+      .bind(result.doi, dataset.id)
+      .run();
+  }
 
   return { doi: result.doi, warnings: result.warnings };
 }

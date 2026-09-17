@@ -363,6 +363,30 @@ export async function createEzidVersionDoi(
     enrichment?: DataCiteEnrichment;
     /** Previously published version DOIs to preserve in concept HasVersion relations */
     existingVersionDois?: string[];
+    /**
+     * Mint the identifier and STOP, leaving it `reserved` (#1447).
+     *
+     * For an anonymous release. The version identifier has to exist, because
+     * the orchestrator step that mints it is also the only thing that
+     * dispatches the central manifest job, and without that job there is no
+     * `dataset_versions` row, no manifest, and the data plane answers
+     * "Version not published" for a dataset the release just made public. But
+     * it must not RESOLVE: a public version DOI is harvested by DataCite, and
+     * ADR 0065 A6 keeps a concealed deposit citable by its landing page only.
+     *
+     * The concept DOI's `HasVersion` update is skipped with it. That record is
+     * itself `reserved` for a concealed deposit, so adding a relation to a
+     * second reserved identifier would change nothing a reader can see, and
+     * leaving the concept record untouched matches what `doi_sync` already
+     * does for these rows.
+     *
+     * Reserved is the same state `doi_create` leaves the concept DOI in, and
+     * the same state a crashed publish leaves behind (#900), so the resume
+     * path below already knows how to finish one: the real publication, once
+     * attribution is restored, runs this function again without the flag and
+     * completes the transition.
+     */
+    reserveOnly?: boolean;
   },
 ): Promise<DoiResult> {
   const auth = resolveEzidAuth(env, opts.sandbox);
@@ -412,6 +436,17 @@ export async function createEzidVersionDoi(
     }
     identifier = await getIdentifier(auth, fullIdentifier);
     const action = classifyExistingVersionDoi(identifier.status);
+    if (action === "complete_reserved" && opts.reserveOnly) {
+      // A reserved identifier is the DESIRED end state here, not an
+      // interrupted publish, so the #900 resume must not fire. Returning it
+      // keeps a re-run of an anonymous release idempotent.
+      return {
+        doi,
+        provider: "ezid",
+        providerRecordId: identifier.identifier,
+        status: identifier.status,
+      };
+    }
     if (action === "return_public") {
       return {
         doi,
@@ -428,6 +463,18 @@ export async function createEzidVersionDoi(
       );
     }
     // action === "complete_reserved": fall through to makePublic below.
+  }
+
+  // An anonymous release stops here: the identifier exists, reserved, and the
+  // caller goes on to dispatch the manifest job. Nothing below this line is
+  // reached until the deposit is published for real.
+  if (opts.reserveOnly) {
+    return {
+      doi,
+      provider: "ezid",
+      providerRecordId: fullIdentifier,
+      status: "reserved",
+    };
   }
 
   // Make the version DOI public (also runs for the resume-a-reserved path above).

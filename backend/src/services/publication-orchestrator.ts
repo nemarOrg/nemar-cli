@@ -1599,6 +1599,13 @@ async function stepVersionDoi(c: ApproveStepContext): Promise<RespondOutcome | u
               name: string;
               github_repo: string | null;
               concept_doi: string | null;
+              // #1447: this step now RUNS for an anonymous release, because it
+              // is also the only thing that dispatches the central manifest
+              // job. The mint reads this field to leave the identifier
+              // reserved instead of publishing it, so the row type has to say
+              // it carries the column -- a `SELECT` that stopped returning it
+              // must be a compile error, not a silent publish.
+              anonymous: number | null;
             }>();
 
         if (!freshDataset) {
@@ -1688,6 +1695,9 @@ async function stepVersionDoi(c: ApproveStepContext): Promise<RespondOutcome | u
                 sandbox: isSandboxDoi,
                 existingVersionDois,
                 enrichment: repoMeta.enrichment,
+                // Same rule as the central path above (#1447): mint, do not
+                // publish, for a concealed deposit.
+                reserveOnly: isAnonymous(freshDataset),
               },
             );
 
@@ -1698,16 +1708,25 @@ async function stepVersionDoi(c: ApproveStepContext): Promise<RespondOutcome | u
               }
             }
 
-            // DOI is now public and permanent. DB and manifest failures below are
-            // non-fatal but must be surfaced for operator awareness.
+            // DOI is now public and permanent, unless this was an anonymous
+            // release, where it is reserved and the row records the identifier
+            // that the real publication will complete. DB and manifest
+            // failures below are non-fatal but must be surfaced for operator
+            // awareness.
             let dbError: string | undefined;
             try {
-              await db
-                .prepare(
-                  "UPDATE datasets SET latest_version_doi = ?, updated_at = datetime('now') WHERE id = ?",
-                )
-                .bind(result.doi, freshDataset.id)
-                .run();
+              // Not for a concealed deposit: `latest_version_doi` means "the
+              // version DOI that is PUBLISHED", and this one is reserved. The
+              // central path in `central-manifest.ts` carries the same rule
+              // and the reasoning.
+              if (!isAnonymous(freshDataset)) {
+                await db
+                  .prepare(
+                    "UPDATE datasets SET latest_version_doi = ?, updated_at = datetime('now') WHERE id = ?",
+                  )
+                  .bind(result.doi, freshDataset.id)
+                  .run();
+              }
 
               await db
                 .prepare(
