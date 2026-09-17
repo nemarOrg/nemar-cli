@@ -16,6 +16,7 @@ import type { Database } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { ANONYMOUS_AUTHORS_LABEL } from "../src/services/anonymity";
 import {
+  ANONYMITY_MAX_VERSION_IDENTIFIERS,
   ANONYMITY_SWEEP_CANDIDATE_SQL,
   ANONYMITY_SWEEP_RESET_SQL,
   type AnonymitySweepSeams,
@@ -23,6 +24,7 @@ import {
   inScopeDepositFiles,
   namedEntriesIn,
   ownerIdentityOf,
+  parseVersionDois,
   runAnonymitySweep,
   scanDepositFile,
   selectDepositFiles,
@@ -1098,5 +1100,202 @@ describe("the Zarr index, which is served publicly", () => {
     const res = await runAnonymitySweep(env(db), { seams });
     expect(res.results[0].findings.map((f) => f.check)).toContain("zarr_index_names_depositor");
     db.close();
+  });
+});
+
+/**
+ * The version identifiers, which a concealed deposit only started having in
+ * #1447: the anonymous release now runs `version_doi` and mints one RESERVED,
+ * because that step is what dispatches the central manifest. Before that there
+ * was exactly one identifier per dataset and the concept check covered it.
+ *
+ * The reason this needs a sweep of its own rather than trust: the daily
+ * `doi-reconcile` cron completes stuck-`reserved` version DOIs, and the only
+ * thing keeping it off these rows is a skip it performs on itself. A guarantee
+ * held by another sweep's good behavior is one this sweep exists to re-check.
+ */
+describe("the version identifiers", () => {
+  const VERSION_DOI = "10.5072/fk2nm000992.v1.0.0";
+
+  function seedVersion(db: Database, datasetId: string, version: string, doi: string): void {
+    db.query(
+      "INSERT INTO dataset_versions (dataset_id, version, doi, provider) VALUES (?, ?, ?, 'ezid')",
+    ).run(datasetId, version, doi);
+  }
+
+  /** Answers per DOI, so a test can make the concept clean and a version not. */
+  function byDoi(
+    answers: Record<string, { status: string; dataciteXml?: string }>,
+  ): AnonymitySweepSeams["getIdentifierImpl"] {
+    return async (doi: string) => {
+      const answer = answers[doi];
+      if (!answer) throw new Error(`no such identifier: ${doi}`);
+      return answer;
+    };
+  }
+
+  test("a version DOI that resolves is a finding, and a reserved one is not", async () => {
+    const db = freshDb();
+    seed(db, "nm000992", { conceptDoi: "10.5072/fk2nm000992" });
+    seedVersion(db, "nm000992", "1.0.0", VERSION_DOI);
+    const seams = { ...cleanSeams() };
+    seams.getIdentifierImpl = byDoi({
+      "10.5072/fk2nm000992": { status: "reserved", dataciteXml: "<resource/>" },
+      [VERSION_DOI]: { status: "public", dataciteXml: "<resource/>" },
+    });
+    const res = await runAnonymitySweep(env(db), { seams });
+    // The concept identifier is clean, so this can only come from the version:
+    // a check that read `concept_doi` twice would report nothing here.
+    expect(res.results[0].findings.map((f) => f.check)).toEqual(["version_doi_not_reserved"]);
+    expect(res.results[0].findings[0].detail).toContain("1.0.0");
+
+    const db2 = freshDb();
+    seed(db2, "nm000993", { conceptDoi: "10.5072/fk2nm000993" });
+    seedVersion(db2, "nm000993", "1.0.0", "10.5072/fk2nm000993.v1.0.0");
+    const ok = { ...cleanSeams() };
+    ok.getIdentifierImpl = byDoi({
+      "10.5072/fk2nm000993": { status: "reserved", dataciteXml: "<resource/>" },
+      "10.5072/fk2nm000993.v1.0.0": { status: "reserved", dataciteXml: "<resource/>" },
+    });
+    const clean = await runAnonymitySweep(env(db2), { seams: ok });
+    expect(clean.results[0].findings).toEqual([]);
+    db.close();
+    db2.close();
+  });
+
+  test("a version DataCite document that names the depositor", async () => {
+    // The failure mode #1447's own fix had to prevent from the other side: the
+    // version record is written while the deposit is concealed, so it should
+    // carry the blinded label. A real name in it means something rebuilt the
+    // record from an un-blinded description.
+    const db = freshDb();
+    seed(db, "nm000994", { conceptDoi: "10.5072/fk2nm000994" });
+    seedVersion(db, "nm000994", "1.0.0", "10.5072/fk2nm000994.v1.0.0");
+    const seams = { ...cleanSeams() };
+    seams.getIdentifierImpl = byDoi({
+      "10.5072/fk2nm000994": { status: "reserved", dataciteXml: "<resource/>" },
+      "10.5072/fk2nm000994.v1.0.0": {
+        status: "reserved",
+        dataciteXml: "<creator><creatorName>Lovelace, Ada</creatorName></creator>",
+      },
+    });
+    const res = await runAnonymitySweep(env(db), { seams });
+    expect(res.results[0].findings.map((f) => f.check)).toEqual(["version_doi_names_depositor"]);
+    db.close();
+  });
+
+  test("the version DOI is read from dataset_versions, not latest_version_doi", async () => {
+    // An anonymous release leaves `latest_version_doi` NULL on purpose (it means
+    // "the version DOI that is PUBLISHED"), so a check keyed off that column
+    // would look at nothing for exactly these datasets. This row has the version
+    // in `dataset_versions` and nothing in the column, which is the real shape.
+    const db = freshDb();
+    seed(db, "nm000995", { conceptDoi: "10.5072/fk2nm000995" });
+    seedVersion(db, "nm000995", "1.0.0", "10.5072/fk2nm000995.v1.0.0");
+    expect(
+      db
+        .query<{ latest_version_doi: string | null }, [string]>(
+          "SELECT latest_version_doi FROM datasets WHERE dataset_id = ?",
+        )
+        .get("nm000995")?.latest_version_doi,
+    ).toBeNull();
+
+    const asked: string[] = [];
+    const seams = { ...cleanSeams() };
+    seams.getIdentifierImpl = async (doi: string) => {
+      asked.push(doi);
+      return { status: "reserved", dataciteXml: "<resource/>" };
+    };
+    await runAnonymitySweep(env(db), { seams });
+    expect(asked).toEqual(["10.5072/fk2nm000995", "10.5072/fk2nm000995.v1.0.0"]);
+    db.close();
+  });
+
+  test("a version record that cannot be read is a gap, counted once", async () => {
+    const db = freshDb();
+    seed(db, "nm000996", { conceptDoi: "10.5072/fk2nm000996" });
+    seedVersion(db, "nm000996", "1.0.0", "10.5072/fk2nm000996.v1.0.0");
+    seedVersion(db, "nm000996", "1.1.0", "10.5072/fk2nm000996.v1.1.0");
+    const seams = { ...cleanSeams() };
+    seams.getIdentifierImpl = byDoi({
+      "10.5072/fk2nm000996": { status: "reserved", dataciteXml: "<resource/>" },
+      // Neither version answers, so both throw.
+    });
+    const res = await runAnonymitySweep(env(db), { seams });
+    expect(res.results[0].status).toBe("unverifiable");
+    // One entry, not two: a reader needs to know a version record went unread,
+    // not how many did.
+    expect(res.results[0].unchecked.filter((u) => u === "version_doi_reserved")).toEqual([
+      "version_doi_reserved",
+    ]);
+    db.close();
+  });
+
+  test("past the cap the truncation is reported, not silent", async () => {
+    const db = freshDb();
+    seed(db, "nm000997", { conceptDoi: "10.5072/fk2nm000997" });
+    const answers: Record<string, { status: string; dataciteXml?: string }> = {
+      "10.5072/fk2nm000997": { status: "reserved", dataciteXml: "<resource/>" },
+    };
+    for (let i = 0; i <= ANONYMITY_MAX_VERSION_IDENTIFIERS; i++) {
+      const doi = `10.5072/fk2nm000997.v1.${i}.0`;
+      seedVersion(db, "nm000997", `1.${i}.0`, doi);
+      answers[doi] = { status: "reserved", dataciteXml: "<resource/>" };
+    }
+    const asked: string[] = [];
+    const seams = { ...cleanSeams() };
+    const reader = byDoi(answers);
+    seams.getIdentifierImpl = async (doi: string, isSandbox: boolean) => {
+      asked.push(doi);
+      return await (reader as NonNullable<typeof reader>)(doi, isSandbox);
+    };
+    const res = await runAnonymitySweep(env(db), { seams });
+    // The cap is on version identifiers, so the concept read is on top of it.
+    expect(asked.length).toBe(ANONYMITY_MAX_VERSION_IDENTIFIERS + 1);
+    expect(res.results[0].unchecked).toContain("version_dois_beyond_budget");
+    // And a reported truncation is a GAP: everything read came back reserved,
+    // and the verdict is still not `verified`.
+    expect(res.results[0].status).toBe("unverifiable");
+    db.close();
+  });
+
+  test("the S3 version artifacts are declared unchecked once a version exists", async () => {
+    // A released concealed deposit HAS `<id>/version/v<version>.json` and its
+    // siblings, written by the central workflow and derived from files this
+    // sweep does read. Declared rather than measured, so it appears in
+    // `unchecked` and does NOT withhold `verified`.
+    const db = freshDb();
+    seed(db, "nm000998", { conceptDoi: "10.5072/fk2nm000998" });
+    seedVersion(db, "nm000998", "1.0.0", "10.5072/fk2nm000998.v1.0.0");
+    const seams = { ...cleanSeams() };
+    seams.getIdentifierImpl = byDoi({
+      "10.5072/fk2nm000998": { status: "reserved", dataciteXml: "<resource/>" },
+      "10.5072/fk2nm000998.v1.0.0": { status: "reserved", dataciteXml: "<resource/>" },
+    });
+    const res = await runAnonymitySweep(env(db), { seams });
+    expect(res.results[0].unchecked).toEqual(["signal_headers", "version_artifacts"]);
+    expect(res.results[0].status).toBe("verified");
+
+    // And absent for a deposit with no version: there are no such objects, and
+    // declaring a limit on something that does not exist is noise.
+    const db2 = freshDb();
+    seed(db2, "nm000999");
+    const none = await runAnonymitySweep(env(db2), { seams: cleanSeams() });
+    expect(none.results[0].unchecked).toEqual(["signal_headers"]);
+    db.close();
+    db2.close();
+  });
+
+  test("parseVersionDois drops a line that cannot be an identifier", () => {
+    expect(parseVersionDois("1.0.0 10.5072/fk2x.v1.0.0\n2.0.0 10.5072/fk2x.v2.0.0")).toEqual([
+      { version: "1.0.0", doi: "10.5072/fk2x.v1.0.0" },
+      { version: "2.0.0", doi: "10.5072/fk2x.v2.0.0" },
+    ]);
+    expect(parseVersionDois(null)).toEqual([]);
+    // No space, so no DOI: dropping it is right, because handing it to EZID
+    // would produce a `version_doi_reserved` gap that reads as "a record went
+    // unread" when there was never a record.
+    expect(parseVersionDois("garbage")).toEqual([]);
+    expect(parseVersionDois("1.0.0 ")).toEqual([]);
   });
 });

@@ -37,10 +37,22 @@ The repository is private,
 `datasets.authors` holds the blinded label,
 `enrichment_json` carries none of the blinded keys,
 `first_published_at` is NULL,
-the EZID record is `reserved` and its DataCite document names nobody,
+EVERY EZID record is `reserved` and its DataCite document names nobody,
 the catalog's owner projection returns nothing,
 and the published Zarr index carries no real attribution.
 A failure here is a NEMAR bug, reported as `severity: "invariant"`.
+
+"Every" rather than "the": a concealed deposit has more than one identifier.
+The concept DOI was the only one when this ADR was written, because an anonymous release
+skipped `version_doi` entirely.
+#1447 put that step back, reserving a per-version identifier because the same step is what
+dispatches the central manifest, so the sweep reads every `dataset_versions` row's DOI as
+well (`version_doi_not_reserved`, `version_doi_names_depositor`), bounded by
+`ANONYMITY_MAX_VERSION_IDENTIFIERS` with the truncation reported.
+That surface is the sharpest argument for this ADR's whole premise: what could advance one
+of those identifiers out of `reserved` is NEMAR's own `doi-reconcile` cron, whose only
+reason not to is a skip it performs on itself.
+A guarantee held by another sweep's good behavior is precisely what this one re-checks.
 
 **What the depositor left in their own files.**
 Reported as `severity: "deposit"` and addressed to them, because NEMAR cannot fix it.
@@ -86,8 +98,18 @@ and the CLI prints that line even for a verified one.
 
 **A declared scope limit is not a gap, and the two must not be spelled the same way.**
 `ANONYMITY_DECLARED_SCOPE_LIMITS` holds the things this sweep never looks at:
-`signal_headers`, and `deposit_subdirectory_files`
-(thousands of acquisition sidecars per dataset, holding parameters rather than prose).
+`signal_headers`,
+`deposit_subdirectory_files`
+(thousands of acquisition sidecars per dataset, holding parameters rather than prose),
+and `version_artifacts`
+(the `<id>/version/v<version>.json` object and its `-summary` / `-records` siblings that the
+central workflow writes to S3, which a released concealed deposit has had since #1447).
+The last is a declared limit rather than a gap because those objects are DERIVED, by a
+workflow, from the git-tracked files this sweep does read,
+so a leak reaching them is one it reports at its source with a path the depositor can act on.
+What that reasoning does not cover is a field the emitter adds on its own,
+and the honest way to say so is to keep the limit in `unchecked` on every run rather than
+to argue it away.
 They appear in `unchecked` so a reader of `verified` is told what it does not cover,
 and they do NOT withhold the verdict.
 Everything else in `unchecked` is a gap that opened on this run, and any one of them

@@ -124,15 +124,14 @@ export type AnonymitySeverity = "invariant" | "deposit";
 /**
  * Scope limits this sweep DECLARES rather than measures.
  *
- * Both are permanent statements about what was never in scope, not reports of
+ * Each is a permanent statement about what was never in scope, not a report of
  * something that went wrong on this run, so they appear in `unchecked` on a
  * clean dataset and do not withhold `verified`. Everything else in `unchecked`
  * is a gap that opened on this run, and any one of them makes the verdict
  * `unverifiable`.
  *
  * Keeping them in `unchecked` rather than dropping them is the point: a reader
- * of a `verified` verdict is told, every time, the two things it does not
- * cover.
+ * of a `verified` verdict is told, every time, the things it does not cover.
  */
 export const ANONYMITY_DECLARED_SCOPE_LIMITS: readonly string[] = [
   // Identity inside the recordings themselves: EDF/BDF recording-identification
@@ -144,7 +143,33 @@ export const ANONYMITY_DECLARED_SCOPE_LIMITS: readonly string[] = [
   // statement from "the 40-file budget ran out" -- that one is
   // `deposit_files_beyond_budget`, and it IS a gap.
   "deposit_subdirectory_files",
+  // The version artifacts the central manifest workflow writes to S3 --
+  // `<id>/version/v<version>.json` and its `-summary` / `-records` siblings
+  // (`versionArtifactKey` in `services/s3.ts`). Declared in #1447, when an
+  // anonymous release started producing them: the release runs `version_doi`,
+  // which dispatches the manifest job, so a concealed deposit now HAS these
+  // objects, and `s3_public_read` has already run by then.
+  //
+  // Out of scope rather than a gap because they are DERIVED, by a workflow, from
+  // the git-tracked files this sweep does read: the same
+  // `dataset_description.json` fields, re-serialized. A leak that reaches them
+  // is a leak this sweep reports at its source, with a path the depositor can
+  // act on -- which the S3 key is not. What that reasoning does NOT cover is a
+  // field the emitter adds on its own, and the honest way to say so is to keep
+  // the limit in `unchecked` on every run rather than to argue it away here.
+  "version_artifacts",
 ];
+
+/**
+ * Version identifiers one dataset's scan will read, at most.
+ *
+ * A concealed deposit has one or two: `version_doi` mints one per release, and
+ * a deposit under review is rarely released twice. The cap exists so the number
+ * of EZID calls per dataset stays bounded by something other than an
+ * assumption, and anything past it is REPORTED (`version_dois_beyond_budget`),
+ * which makes it a gap rather than a silent truncation.
+ */
+export const ANONYMITY_MAX_VERSION_IDENTIFIERS = 5;
 
 export interface AnonymityFinding {
   /** Stable id, so a reader can branch on it without parsing prose. */
@@ -226,6 +251,12 @@ interface OwnerIdentity {
  */
 export const ANONYMITY_SWEEP_CANDIDATE_SQL = `SELECT d.dataset_id, d.github_repo, d.authors,
           d.enrichment_json, d.first_published_at, d.concept_doi, d.is_sandbox,
+          (SELECT group_concat(vd.pair, char(10)) FROM (
+             SELECT v.version || ' ' || v.doi AS pair
+               FROM dataset_versions v
+              WHERE v.dataset_id = d.dataset_id
+              ORDER BY v.version
+           ) vd) AS version_dois,
           u.username AS owner_username, u.github_username AS owner_github,
           u.given_name AS owner_given_name, u.family_name AS owner_family_name,
           u.email AS owner_email, u.orcid AS owner_orcid,
@@ -317,6 +348,14 @@ interface AnonymityCandidate {
   first_published_at: string | null;
   concept_doi: string | null;
   is_sandbox: number | null;
+  /**
+   * `"<version> <doi>"` per line, oldest version first, or null for none.
+   *
+   * Flattened into the candidate query rather than fetched per dataset: the
+   * sweep is one query plus a bounded number of network calls per row, and a
+   * second D1 round trip per row would make the row count set the query count.
+   */
+  version_dois: string | null;
   owner_username: string | null;
   owner_github: string | null;
   owner_given_name: string | null;
@@ -325,6 +364,29 @@ interface AnonymityCandidate {
   owner_orcid: string | null;
   /** Last run's findings, so an unchanged set is not re-mailed every day. */
   previous_findings: string | null;
+}
+
+/**
+ * `version_dois` as the candidate query flattened it, back into pairs.
+ *
+ * Exported for its own test. A malformed line is DROPPED rather than guessed at:
+ * every line is written by the query above from two NOT NULL columns, so a line
+ * without a space is not a version this sweep failed to parse, it is something
+ * that cannot be an identifier -- and passing it to EZID would produce a
+ * `version_doi_reserved` gap that reads as "a record went unread" when nothing
+ * was ever there to read.
+ */
+export function parseVersionDois(raw: string | null): { version: string; doi: string }[] {
+  if (!raw) return [];
+  const pairs: { version: string; doi: string }[] = [];
+  for (const line of raw.split("\n")) {
+    const idx = line.indexOf(" ");
+    if (idx <= 0) continue;
+    const version = line.slice(0, idx);
+    const doi = line.slice(idx + 1).trim();
+    if (doi) pairs.push({ version, doi });
+  }
+  return pairs;
 }
 
 /**
@@ -696,10 +758,13 @@ export interface AnonymitySweepSeams {
    * URL rather than a `fetch`, so there is no impl seam to pass.
    */
   rawBase?: string;
-  /** Reads the EZID record. Substituted rather than pointed at a base URL,
-   *  because `ezid.ts` resolves its host from a module-level global. */
+  /**
+   * Reads the EZID record for one DOI: the concept DOI, and since #1447 each of
+   * `dataset_versions`' version DOIs as well. Substituted rather than pointed at
+   * a base URL, because `ezid.ts` resolves its host from a module-level global.
+   */
   getIdentifierImpl?: (
-    identifier: string,
+    doi: string,
     isSandbox: boolean,
   ) => Promise<{ status: string; dataciteXml?: string }>;
   /**
@@ -830,7 +895,7 @@ async function scanDataset(
     }
   }
 
-  // --- the identifier ------------------------------------------------------
+  // --- the identifiers -----------------------------------------------------
   if (!row.concept_doi) {
     // No identifier is not a gap: a deposit may simply have none yet.
   } else if (!seams.getIdentifierImpl) {
@@ -855,6 +920,68 @@ async function scanDataset(
       }
     } catch {
       unchecked.push("doi_reserved");
+    }
+  }
+
+  // The concept DOI is not the only identifier a concealed deposit has. Since
+  // #1447 an anonymous release runs `version_doi` and mints a per-version
+  // identifier RESERVED, because that step is what dispatches the central
+  // manifest. So there is a second KIND of record that can be flipped to public
+  // with the dataset row untouched -- and one of the things that could flip it
+  // is NEMAR's own `doi-reconcile` cron, which completes stuck-`reserved`
+  // version DOIs and had to be taught to skip these rows. A guarantee whose
+  // only protection is another sweep's skip list is exactly what this sweep is
+  // for.
+  //
+  // Read from `dataset_versions` rather than `datasets.latest_version_doi`: that
+  // column means "the version DOI that is PUBLISHED" and an anonymous release
+  // deliberately leaves it NULL, so keying off it would look at nothing for
+  // precisely these datasets.
+  const versionIdentifiers = parseVersionDois(row.version_dois);
+  if (versionIdentifiers.length > 0) {
+    // A published version means the central workflow wrote this dataset's S3
+    // version artifacts, so the declared limit becomes relevant and is stated.
+    // Pushed here rather than unconditionally, the way
+    // `deposit_subdirectory_files` is: a deposit with no version has no such
+    // objects, and declaring a limit on something that does not exist is noise
+    // in the one field a reader is meant to take seriously.
+    unchecked.push("version_artifacts");
+  }
+  if (versionIdentifiers.length === 0) {
+    // Nothing to check. Not a gap: an unreleased deposit has no version.
+  } else if (!seams.getIdentifierImpl) {
+    unchecked.push("version_doi_reserved");
+  } else {
+    if (versionIdentifiers.length > ANONYMITY_MAX_VERSION_IDENTIFIERS) {
+      unchecked.push("version_dois_beyond_budget");
+    }
+    for (const { version, doi } of versionIdentifiers.slice(0, ANONYMITY_MAX_VERSION_IDENTIFIERS)) {
+      try {
+        const record = await seams.getIdentifierImpl(doi, row.is_sandbox === 1);
+        if (record.status !== "reserved") {
+          findings.push({
+            check: "version_doi_not_reserved",
+            severity: "invariant",
+            // The version, not the DOI: the version is short and the DOI
+            // contains it, so the string a reader needs is the one that fits in
+            // a sentence. Neither names anybody.
+            detail: `The version ${version} DOI record is "${record.status}", not "reserved". An anonymous release mints its version identifier reserved on purpose; a resolving one has been harvested by DataCite and cannot be recalled.`,
+          });
+        }
+        if (record.dataciteXml && textNamesOwner(record.dataciteXml, owner)) {
+          findings.push({
+            check: "version_doi_names_depositor",
+            severity: "invariant",
+            detail: `The DataCite document registered for the version ${version} DOI names the depositor. It was built while the deposit was concealed, so it should carry the blinded label and nothing else.`,
+          });
+        }
+      } catch {
+        // Per identifier, so one unreachable record does not report the others
+        // as unchecked -- and one `unchecked` entry either way, because the
+        // reader of a verdict needs to know a version record went unread, not
+        // how many.
+        if (!unchecked.includes("version_doi_reserved")) unchecked.push("version_doi_reserved");
+      }
     }
   }
 
@@ -1208,7 +1335,14 @@ async function defaultIdentifierReader(
 ): Promise<AnonymitySweepSeams["getIdentifierImpl"]> {
   const { getIdentifier, conceptEzidIdentifier } = await import("./ezid.js");
   const { resolveEzidAuth } = await import("./doi.js");
-  return async (conceptDoi: string, isSandbox: boolean) => {
+  // `doi` and not `conceptDoi`: since #1447 the same reader is handed version
+  // DOIs out of `dataset_versions` as well. `conceptEzidIdentifier` is the right
+  // transform for both -- it uppercases and prefixes `doi:`, which is exactly
+  // the spelling `buildVersionIdentifier` used to CREATE the version
+  // identifier, so the string here is the one EZID stored. `ensureDoiScheme`
+  // would not do: it does not uppercase, and `dataset_versions.doi` is stored
+  // lowercased by `extractDoi`.
+  return async (doi: string, isSandbox: boolean) => {
     // Sandbox and production shoulders have different credentials, and the row
     // says which one this DOI was minted on. Hardcoding production made every
     // exemplar-fleet dataset permanently `unverifiable` on staging -- where the
@@ -1224,7 +1358,7 @@ async function defaultIdentifierReader(
       },
       isSandbox,
     );
-    const record = await getIdentifier(auth, conceptEzidIdentifier(conceptDoi));
+    const record = await getIdentifier(auth, conceptEzidIdentifier(doi));
     return { status: record.status, dataciteXml: record.dataciteXml };
   };
 }
