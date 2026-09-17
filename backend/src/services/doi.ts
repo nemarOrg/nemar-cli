@@ -484,11 +484,17 @@ export async function createEzidVersionDoi(
   // An anonymous release stops here: the identifier exists, reserved, and the
   // caller goes on to dispatch the manifest job. Nothing below this line is
   // reached until the deposit is published for real.
+  //
+  // `identifier.identifier` and not `fullIdentifier`, matching the other exits:
+  // the field records what the registrar HOLDS, not what we asked it for. The
+  // two are the same string today because EZID echoes the identifier back, and
+  // the two spellings appearing side by side in one function is how a reader
+  // starts wondering whether they are.
   if (opts.reserveOnly) {
     return {
       doi,
       provider: "ezid",
-      providerRecordId: fullIdentifier,
+      providerRecordId: identifier.identifier,
       status: "reserved",
     };
   }
@@ -550,7 +556,7 @@ export async function createEzidVersionDoi(
   return {
     doi,
     provider: "ezid",
-    providerRecordId: fullIdentifier,
+    providerRecordId: identifier.identifier,
     status: "public",
     ...(warnings.length > 0 && { warnings }),
   };
