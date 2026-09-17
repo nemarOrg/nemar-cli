@@ -13,12 +13,14 @@
 
 import type { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { EXEMPLAR_ID_RE } from "../src/routes/admin/exemplar";
 import {
   DEV_EPHEMERAL_BAND_END,
   DEV_SANDBOX_RANGE_RE,
   generateDatasetId,
   isDevEphemeralSandboxId,
   isDevRangeDatasetId,
+  formatDatasetId,
   isReservedFixtureId,
   isValidDatasetId,
   RESERVED_FIXTURE_FLOOR,
@@ -154,7 +156,7 @@ describe("isReservedFixtureId", () => {
   test("the boundary is exact for both reserving prefixes", () => {
     expect(isReservedFixtureId("nm099899")).toBe(false);
     expect(isReservedFixtureId("nm099900")).toBe(true);
-    expect(isReservedFixtureId("nm099998")).toBe(true); // the anonymous deposit
+    expect(isReservedFixtureId("nm099998")).toBe(true); // designated, built by #1434
     expect(isReservedFixtureId("nm099999")).toBe(true); // the e2e dataset
     expect(isReservedFixtureId("xx099899")).toBe(false);
     expect(isReservedFixtureId("xx099900")).toBe(true); // the exemplar fleet
@@ -192,9 +194,10 @@ describe("isReservedFixtureId", () => {
 
 describe("generateDatasetId reserved fixture band (ADR 0068)", () => {
   test("nm exhausts at 99899 rather than minting a fixture id", async () => {
-    // The whole allocatable nm band is taken and the reserved band is EMPTY,
-    // which is the shape production is in today: 203 nm rows and no nm099900+
-    // except nm099999. Before the reservation this call returned nm099900.
+    // The band is only crossed once everything below it is gone, so the test
+    // seeds that state directly rather than approximating it: production holds
+    // 197 rows in [108, 99899] and is nowhere near exhaustion. Before the
+    // reservation this call returned nm099900.
     const raw = freshDb();
     seedRange(raw, "nm", 108, 99899);
     await expect(generateDatasetId(realD1(raw), false)).rejects.toThrow(/108 to 99899/);
@@ -203,9 +206,11 @@ describe("generateDatasetId reserved fixture band (ADR 0068)", () => {
   test("the exhaustion error names the reservation, not just the ceiling", async () => {
     const raw = freshDb();
     seedRange(raw, "nm", 108, 99899);
-    // A caller told "all IDs from 108 to 99899 are allocated" with no further
-    // explanation would reasonably conclude the cap is a bug, since MAX_NUMBER
-    // is 99999. The clause is what stops someone from "fixing" it.
+    // An operator reading the log, or a dev/staging caller, told "all IDs from
+    // 108 to 99899 are allocated" with no further explanation would reasonably
+    // conclude the cap is a bug, since MAX_NUMBER is 99999. The clause is what
+    // stops someone from "fixing" it. In production the message reaches the log
+    // only: index.ts replaces err.message outside non-production.
     await expect(generateDatasetId(realD1(raw), false)).rejects.toThrow(
       /nm099900-nm099999 is the reserved fixture band/,
     );
@@ -217,11 +222,11 @@ describe("generateDatasetId reserved fixture band (ADR 0068)", () => {
     expect(await generateDatasetId(realD1(raw), false)).toBe("nm099899");
   });
 
-  test("dev xx (floor 90001, NO ceiling) stops below the exemplar fleet", async () => {
-    // The live dev configuration: SANDBOX_ID_FLOOR=90001 and no
-    // SANDBOX_ID_CEILING, so the window was [90001, 99999] and ran straight
-    // through the fleet. Seeding the last two allocatable ids makes the old
-    // behavior return xx099900, which is a real exemplar.
+  test("xx with no ceiling stops below the exemplar fleet", async () => {
+    // A narrow floor stands in for the live dev config (floor 90001, no
+    // ceiling) so the boundary is reached without seeding 10k rows; the test
+    // above does exercise the real floor. What matters in both is that no
+    // ceiling is passed, which is the shape that used to run to xx099999.
     const raw = freshDb();
     seedRange(raw, "xx", 99898, 99899);
     await expect(
@@ -246,20 +251,105 @@ describe("generateDatasetId reserved fixture band (ADR 0068)", () => {
   });
 
   test("an existing fixture row does not drag allocation into the band", async () => {
-    // What EXCLUDED_IDS was there for: nm099999 contributes candidate 100000,
-    // and its neighbors contribute candidates inside the band. None may win.
+    // nm099999 contributes candidate 100000 and nm099998 contributes 99999.
+    // Seeding only those two and asserting nm000108 would prove nothing: the
+    // start of the window is free, so it wins whatever the cap is. Everything
+    // below the band is taken here, leaving exactly nm099899 and the band, so
+    // the reservation is the only thing that can decide the answer.
     const raw = freshDb();
+    seedRange(raw, "nm", 108, 99898);
     seedIds(raw, ["nm099998", "nm099999"]);
     const id = await generateDatasetId(realD1(raw), false);
-    expect(id).toBe("nm000108");
+    expect(id).toBe("nm099899");
     expect(isReservedFixtureId(id)).toBe(false);
   });
 
-  test("the fleet's own ids do not open the band to the allocator", async () => {
+  test("the LIVE dev config refuses rather than reaching into the fleet", async () => {
+    // SANDBOX_ID_FLOOR=90001 with NO ceiling, exactly as backend/wrangler-sccn.toml
+    // sets it, against a full dev band. Three fleet ids are present and 99902-99999
+    // are free, so before the reservation this call returned xx099902 -- a repo
+    // name in the reserved band, in the GitHub org production shares.
     const raw = freshDb();
+    seedRange(raw, "xx", 90001, 99899);
     seedIds(raw, ["xx099900", "xx099901", "xx099907"]);
-    const id = await generateDatasetId(realD1(raw), true, { sandboxIdFloor: 90001 });
-    expect(id).toBe("xx090001");
-    expect(isReservedFixtureId(id)).toBe(false);
+    await expect(generateDatasetId(realD1(raw), true, { sandboxIdFloor: 90001 })).rejects.toThrow(
+      /xx099900-xx099999 is the reserved fixture band/,
+    );
+  });
+});
+
+describe("reserved band: the gaps the first round of tests left", () => {
+  test("a non-integer bound cannot mint a malformed id", async () => {
+    // Bounds are rounded INWARD. Before that, a fractional floor reached
+    // formatDatasetId, where (90001.5).toString() is already 7 characters and
+    // padStart(6) does nothing, so the allocator returned "xx90001.5": not a
+    // dataset id, invisible to every band predicate, and therefore unreachable
+    // by both the prod webhook's staging guard and the dev cleanup cron.
+    // Production is safe today only because upload.ts parses with
+    // Number.parseInt, which truncates; that is one edit from Number().
+    const db = realD1(freshDb());
+    const id = await generateDatasetId(db, true, { sandboxIdFloor: 90001.5 });
+    expect(isValidDatasetId(id)).toBe(true); // the load-bearing assertion
+    expect(id).toBe("xx090002"); // narrowed up, never 90001.5
+    expect(isDevEphemeralSandboxId(id)).toBe(true); // the cron can still reach it
+  });
+
+  test("a non-integer ceiling narrows down rather than up", async () => {
+    const raw = freshDb();
+    seedRange(raw, "xx", 90001, 90002);
+    // floor(90002.9) = 90002, so the window is [90001, 90002] and exhausted.
+    // Anchored on the word after the number: an unfloored ceiling still throws
+    // here (90003 > 90002.9 is skipped either way), and only the rendered
+    // message distinguishes the two, so /90001 to 90002/ alone would match
+    // "90001 to 90002.9" as a substring and pin nothing.
+    await expect(
+      generateDatasetId(realD1(raw), true, { sandboxIdFloor: 90001, sandboxIdCeiling: 90002.9 }),
+    ).rejects.toThrow(/from 90001 to 90002 are allocated/);
+  });
+
+  test("a floor inside the reserved band refuses rather than allocating", async () => {
+    // resolveRange clamps the ceiling against the cap but deliberately does not
+    // clamp the start, so the window inverts and nothing is allocatable. The
+    // inverted message reads like a bug; the obvious "tidy-up" (raise max to
+    // start) would mint xx099950, which is a fixture id. This pins the refusal
+    // so that tidy-up fails loudly.
+    await expect(
+      generateDatasetId(realD1(freshDb()), true, { sandboxIdFloor: 99950 }),
+    ).rejects.toThrow(/Failed to generate dataset ID/);
+  });
+
+  test("the exemplar route's band IS the allocator's reserved band", () => {
+    // EXEMPLAR_ID_RE declares the same boundary independently, as a regex, and
+    // three more copies exist in the CLI. The dangerous direction is raising
+    // RESERVED_FIXTURE_FLOOR: the allocator would then mint xx099900 while the
+    // exemplar route still accepts it as a fixture id, which is a repo-name
+    // collision in the org production shares, i.e. exactly what ADR 0068 exists
+    // to prevent. Cross-check rather than restate.
+    for (let n = RESERVED_FIXTURE_FLOOR - 2; n <= 99999; n++) {
+      const id = formatDatasetId("xx", n);
+      expect(EXEMPLAR_ID_RE.test(id)).toBe(isReservedFixtureId(id));
+    }
+  });
+
+  test("the fallback ceiling is the reserved cap, not MAX_NUMBER", async () => {
+    // Four pre-existing tests in this file resolve the fallback ceiling and all
+    // assert on the START of the window, so none of them can see it move. This
+    // one reads the ceiling back out of the exhaustion message instead.
+    const raw = freshDb();
+    seedRange(raw, "xx", 1, 99899);
+    await expect(generateDatasetId(realD1(raw), true)).rejects.toThrow(/1 to 99899/);
+  });
+
+  test("the reserved clause is omitted when a lower ceiling is the real limit", async () => {
+    // Prod xx caps at SANDBOX_ID_CEILING=89999. Blaming the reserved band there
+    // would send an operator to the wrong constant.
+    const raw = freshDb();
+    seedRange(raw, "xx", 1, 89999);
+    const err = await generateDatasetId(realD1(raw), true, { sandboxIdCeiling: 89999 }).then(
+      () => null,
+      (e: Error) => e,
+    );
+    expect(err?.message).toMatch(/1 to 89999/);
+    expect(err?.message).not.toMatch(/reserved fixture band/);
   });
 });
