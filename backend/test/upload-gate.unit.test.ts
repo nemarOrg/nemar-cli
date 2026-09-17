@@ -17,6 +17,10 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  EXPLICIT_ID_ADMIN_ERROR,
+  EXPLICIT_ID_NOT_RESERVED_ERROR,
+  EXPLICIT_ID_PRODUCTION_ERROR,
+  explicitDatasetIdGate,
   SANDBOX_TRAINING_ERROR,
   SERVICE_ACCESS_ERROR,
   TEST_ACCOUNT_SANDBOX_ONLY_ERROR,
@@ -218,5 +222,66 @@ describe("realDatasetServiceGate", () => {
     // create time (on whichever channel created the dataset), so re-asking
     // here would block a collaborator who never created anything.
     expect(realDatasetServiceGate({ service_access: 1 })).toBeNull();
+  });
+});
+
+describe("explicitDatasetIdGate (ADR 0068, #1432)", () => {
+  const ok = { isProduction: false, isAdmin: true, datasetId: "nm099998" };
+
+  test("allows only the three terms together", () => {
+    expect(explicitDatasetIdGate(ok)).toBeNull();
+  });
+
+  test("production refuses regardless of the other two", () => {
+    expect(explicitDatasetIdGate({ ...ok, isProduction: true })).toEqual(
+      EXPLICIT_ID_PRODUCTION_ERROR,
+    );
+  });
+
+  test("a non-admin refuses regardless of the id", () => {
+    expect(explicitDatasetIdGate({ ...ok, isAdmin: false })).toEqual(EXPLICIT_ID_ADMIN_ERROR);
+  });
+
+  test("every allocatable id is refused, including live and boundary ones", () => {
+    // nm000104 is a LIVE production dataset and the reason non-production is
+    // not a sufficient fence on its own: nemarDatasets is shared, so naming it
+    // from dev would reach a real repository. nm099899/xx099899 are the ids
+    // immediately below the band.
+    for (const datasetId of [
+      "nm000104",
+      "nm000108",
+      "nm099899",
+      "xx000001",
+      "xx090001",
+      "xx099899",
+      // on099999 rather than on008062: the latter fails BOTH the prefix rule
+      // and the floor rule, so it cannot isolate the prefix term. This one is
+      // in the band numerically and refused only because `on` never allocates.
+      "on099999",
+    ]) {
+      expect(explicitDatasetIdGate({ ...ok, datasetId })).toEqual(EXPLICIT_ID_NOT_RESERVED_ERROR);
+    }
+  });
+
+  test("every reserved id is allowed", () => {
+    for (const datasetId of ["nm099900", "nm099998", "nm099999", "xx099900", "xx099907", "xx099999"]) {
+      expect(explicitDatasetIdGate({ ...ok, datasetId })).toBeNull();
+    }
+  });
+
+  test("a malformed id is refused, never treated as a name", () => {
+    for (const datasetId of ["", "nm99998", "nm100000", "zz099998", "nm099998 ", "NM099998"]) {
+      expect(explicitDatasetIdGate({ ...ok, datasetId })).toEqual(EXPLICIT_ID_NOT_RESERVED_ERROR);
+    }
+  });
+
+  test("the outermost fence answers first", () => {
+    // Ordering is observable and worth pinning: a production caller who is also
+    // a non-admin naming a live id must be told about production, which is the
+    // term that can never be satisfied, rather than being sent to ask for an
+    // admin role that would not help.
+    expect(
+      explicitDatasetIdGate({ isProduction: true, isAdmin: false, datasetId: "nm000104" }),
+    ).toEqual(EXPLICIT_ID_PRODUCTION_ERROR);
   });
 });
