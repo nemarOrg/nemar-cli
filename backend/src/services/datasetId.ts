@@ -46,9 +46,10 @@ const RESERVES_FIXTURE_BAND = new Set(["nm", "xx"]);
 /**
  * Build a dataset id from a prefix and a number.
  *
- * Ids are fixed-width zero-padded, and every band boundary in this file is
- * compared as a STRING (`id >= DEV_EPHEMERAL_BAND_START`), so an unpadded id is
- * not merely ugly: "xx99900" sorts above "xx099999" and silently inverts those
+ * Ids are fixed-width zero-padded. The dev band boundaries in this file are
+ * compared as STRINGS (`id >= DEV_EPHEMERAL_BAND_START`); the reserved-band
+ * check compares numbers. An unpadded id is therefore not merely ugly:
+ * "xx99900" sorts above "xx099999" and silently inverts the string
  * comparisons. Nothing here interpolates a number into an id directly.
  */
 export function formatDatasetId(prefix: string, n: number): string {
@@ -59,10 +60,15 @@ export function formatDatasetId(prefix: string, n: number): string {
  * True when an id falls in its prefix's reserved fixture band.
  *
  * Reserved means NOT ALLOCATABLE, not invalid: `isValidDatasetId` still accepts
- * these ids and every route must still serve them. In use today: nm099999 (E2E,
- * with its own reset endpoint) and xx099900-xx099907 (the exemplar fleet).
- * nm099998 is DESIGNATED for the standing anonymous deposit and not yet built
- * (#1434).
+ * these ids and every route must still serve them. In use today: nm099999 (the
+ * end-to-end dataset, with its own reset endpoint) and xx099900-xx099907 (the
+ * exemplar fleet). nm099998 is DESIGNATED for the standing anonymous deposit
+ * and not yet built (#1434).
+ *
+ * Nothing in production calls this yet: the reservation is enforced entirely by
+ * `resolveRange`, and this predicate is the inverse rule, for the explicit-id
+ * fixture path #1432 adds. Until then its only guard duty is the drift test
+ * against `EXEMPLAR_ID_RE`, which declares the same band separately.
  */
 export function isReservedFixtureId(id: string): boolean {
   if (!isValidDatasetId(id)) return false;
@@ -73,8 +79,9 @@ export function isReservedFixtureId(id: string): boolean {
 // Dev/test staging (epic #923) partitions the sandbox (xx) space so the shared
 // nemarDatasets GitHub org never has repo-name collisions between prod-created
 // and dev/test-created sandbox datasets: prod allocates xx000001-xx089999
-// (SANDBOX_ID_CEILING="89999"), dev/test allocates xx090001-xx099999
-// (SANDBOX_ID_FLOOR="90001"). The partition lives INSIDE the 6-digit/<=99999
+// (SANDBOX_ID_CEILING="89999"), dev/test allocates xx090001-xx099899
+// (SANDBOX_ID_FLOOR="90001", with the top 100 reserved by ADR 0068; it was
+// xx090001-xx099999 before that). The partition lives INSIDE the 6-digit/<=99999
 // cap on purpose so isValidDatasetId and every prod webhook/data/zarr gate keep
 // their exact semantics (xx900001 would fail validation everywhere).
 //
@@ -137,8 +144,19 @@ function resolveRange(
   const cap = RESERVES_FIXTURE_BAND.has(prefix) ? RESERVED_FIXTURE_FLOOR - 1 : MAX_NUMBER;
   const s = opts?.start;
   const m = opts?.max;
-  const start = typeof s === "number" && Number.isFinite(s) ? Math.max(natural, s) : natural;
-  const max = typeof m === "number" && Number.isFinite(m) ? Math.min(cap, m) : cap;
+  // Rounded INWARD (ceil the floor, floor the ceiling) so a non-integer bound
+  // narrows like every other bad bound. Without this a fractional floor is
+  // carried through the candidate loop into formatDatasetId, where
+  // (90001.5).toString() is already 7 characters and padStart(6) is a no-op:
+  // the allocator returns "xx90001.5", which is not a dataset id at all.
+  // isValidDatasetId, isDevRangeDatasetId and isDevEphemeralSandboxId all
+  // answer false for it, so the prod webhook's staging guard never fires and
+  // the dev cleanup cron can never delete it. Escaping the id space is worse
+  // than entering the reserved band, and the upload route is one
+  // Number.parseInt -> Number edit away from reaching it.
+  const start =
+    typeof s === "number" && Number.isFinite(s) ? Math.max(natural, Math.ceil(s)) : natural;
+  const max = typeof m === "number" && Number.isFinite(m) ? Math.min(cap, Math.floor(m)) : cap;
   return { start, max };
 }
 
@@ -198,19 +216,19 @@ async function findLowestUnusedNumber(
  * Queries existing datasets to find gaps from deletions, reusing freed IDs
  * before allocating new ones.
  *
+ * Never returns an id in the reserved fixture band (ADR 0068). Dev is the case
+ * that needed this: it sets SANDBOX_ID_FLOOR=90001 and NO ceiling, so before
+ * the reservation its window was [90001, 99999] and ran straight through the
+ * exemplar fleet at xx099900+ that DEV_EPHEMERAL_BAND_END already declared
+ * off-limits to the cleanup cron. The fleet was protected only by its ids
+ * happening to be taken already.
+ *
  * @param db - D1 database instance
  * @param sandbox - If true, generates xx000XXX sandbox ID instead of nm000XXX
  * @param opts - Optional sandbox range partition (epic #923). `sandboxIdFloor`
  *   raises the lowest allocatable xx number (dev/test set 90001); `sandboxIdCeiling`
  *   lowers the highest (prod sets 89999). Ignored for the nm prefix. Both clamp to
  *   the natural [start, cap] bounds, so a bad value only narrows the range.
- *
- * Never returns an id in the reserved fixture band (ADR 0068). Dev is the case
- * that needed this: it sets SANDBOX_ID_FLOOR=90001 and NO ceiling, so before the
- * reservation its window was [90001, 99999] and ran straight through the
- * exemplar fleet at xx099900+ that DEV_EPHEMERAL_BAND_END already declared
- * off-limits to the cleanup cron. The fleet was protected only by its ids
- * happening to be taken already.
  */
 export async function generateDatasetId(
   db: D1Database,
@@ -223,9 +241,13 @@ export async function generateDatasetId(
 
   if (n === null) {
     const { start: lo, max: hi } = resolveRange(prefix, range);
-    const reserved = RESERVES_FIXTURE_BAND.has(prefix)
-      ? `; ${formatDatasetId(prefix, RESERVED_FIXTURE_FLOOR)}-${formatDatasetId(prefix, MAX_NUMBER)} is the reserved fixture band and is never allocated (ADR 0068)`
-      : "";
+    // Only when the reservation is what the caller actually hit. For prod xx the
+    // binding constraint is SANDBOX_ID_CEILING=89999, and blaming the reserved
+    // band there would send an operator to the wrong place.
+    const reserved =
+      RESERVES_FIXTURE_BAND.has(prefix) && hi === RESERVED_FIXTURE_FLOOR - 1
+        ? `; ${formatDatasetId(prefix, RESERVED_FIXTURE_FLOOR)}-${formatDatasetId(prefix, MAX_NUMBER)} is the reserved fixture band and is never allocated (ADR 0068)`
+        : "";
     throw new Error(
       `Failed to generate dataset ID for prefix '${prefix}': all IDs from ${lo} to ${hi} are allocated${reserved}`,
     );
