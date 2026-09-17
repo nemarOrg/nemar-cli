@@ -625,7 +625,14 @@ export interface DatasetFunding {
 
 export interface VersionEntry {
   version: string;
-  doi: string;
+  /**
+   * Null for a concealed deposit (#1447): the identifier is registered
+   * `reserved` and does not resolve, so it is withheld here exactly as
+   * `external_links.dataset_doi` is. A consumer that renders a citation from
+   * this array has to handle the null, which is the point: the version exists
+   * and is downloadable, and the DOI does not become real until publication.
+   */
+  doi: string | null;
   created_at: string;
   manifest_url: string;
 }
@@ -1153,7 +1160,15 @@ export function buildDatasetMetadata(input: {
           const tag = toVersionTag(v.version);
           return {
             version: tag,
-            doi: v.doi,
+            // #1447: the SAME rule as `dataset_doi` twenty lines above, for
+            // the same reason. An anonymous release's version identifier is
+            // registered `reserved` and does not resolve, so publishing it
+            // here would put a dead DOI into every citation widget that reads
+            // this document. It was not written when `dataset_doi` was,
+            // because the version array was necessarily EMPTY for a concealed
+            // deposit until #1447 made the release mint one; nothing could
+            // reach this line, so nothing revealed it was missing.
+            doi: row.anonymous === 1 ? null : v.doi,
             created_at: v.created_at,
             manifest_url: `/${row.dataset_id}/${tag}/manifest.json`,
           };

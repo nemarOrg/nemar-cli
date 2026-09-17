@@ -156,15 +156,24 @@ export const ANONYMOUS_AUTHORS_LABEL = "Anonymous (withheld until publication)";
 export const ANONYMOUS_DEPOSIT_REASON = "anonymous_deposit";
 
 /**
- * The two identifiers a concealed deposit must not advertise to the public.
+ * The identifiers a concealed deposit must not advertise to the public.
  *
- * Neither NAMES the depositor, which is why they are handled here rather than
- * by a writer: `github_repo` points at a repository that is private (so the
- * URL 404s while still disclosing that a repo exists under a predictable
- * name), and `concept_doi` is registered `reserved` at EZID, so it does not
- * resolve and must not be cited. `data-router.ts` already withholds both from
- * `external_links`; this is the same rule for the catalog projections, which
- * serve the raw columns.
+ * None of them NAMES the depositor, which is why they are handled here rather
+ * than by a writer: `github_repo` points at a repository that is private (so
+ * the URL 404s while still disclosing that a repo exists under a predictable
+ * name), and `concept_doi` and `latest_version_doi` are registered `reserved`
+ * at EZID, so they do not resolve and must not be cited. `data-router.ts`
+ * already withholds the first two from `external_links`; this is the same rule
+ * for the catalog projections, which serve the raw columns.
+ *
+ * `latest_version_doi` joined the list with #1447. Before that, an anonymous
+ * release skipped `version_doi` entirely, so the column was always NULL on a
+ * concealed row and the gap was invisible; the release now mints the version
+ * identifier RESERVED (it is also the only thing that dispatches the manifest
+ * job), so the column is populated and non-resolving, which is exactly the
+ * shape this rule exists for. The detail route reaches it through `SELECT d.*`
+ * without naming it anywhere, which is why the rule is applied over the
+ * assembled payload rather than written into each projection.
  *
  * Conditional on the VIEWER, unlike every other rule in this module, and that
  * is deliberate: anonymity is toward the public, never toward NEMAR or toward
@@ -183,6 +192,7 @@ export function withheldWhileAnonymous<T extends Record<string, unknown>>(
     ...("github_repo" in row ? { github_repo: null } : {}),
     ...("concept_doi" in row ? { concept_doi: null } : {}),
     ...("doi" in row ? { doi: null } : {}),
+    ...("latest_version_doi" in row ? { latest_version_doi: null } : {}),
   };
 }
 

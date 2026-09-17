@@ -195,4 +195,64 @@ describe("the raw columns a whole-row select carries", () => {
     expect(listed.find((r) => r.id === "nm000876")?.doi).toBe(REAL_DOI);
     db.close();
   });
+
+  test("metadata.json does not advertise a reserved VERSION doi (#1447)", async () => {
+    // The version array was necessarily empty for a concealed deposit until
+    // #1447 let the release mint a reserved version identifier, so this line
+    // was unreachable and the withholding next to `dataset_doi` was never
+    // extended to it. Now it is reachable.
+    const db = freshDb();
+    seed(db, "nm000877", 1);
+    seed(db, "nm000878", 0);
+    db.query(
+      `INSERT INTO dataset_versions (dataset_id, version, doi, provider, created_at)
+       VALUES ('nm000877', '1.0.0', ?, 'ezid', datetime('now')),
+              ('nm000878', '1.0.0', ?, 'ezid', datetime('now'))`,
+    ).run(`${REAL_DOI}.v1.0.0`, `${REAL_DOI}.v1.0.0`);
+
+    const blinded = await app(dataRoutes).request("/nm000877/metadata.json", {}, env(db));
+    const named = await app(dataRoutes).request("/nm000878/metadata.json", {}, env(db));
+    expect(blinded.status).toBe(200);
+    expect(named.status).toBe(200);
+
+    const blindedVersions = (await blinded.json()).extensions.nemar.versions as Array<{
+      version: string;
+      doi: string | null;
+    }>;
+    const namedVersions = (await named.json()).extensions.nemar.versions as Array<{
+      version: string;
+      doi: string | null;
+    }>;
+
+    // The version is still ANNOUNCED -- the data is public and downloadable,
+    // which is the whole point of an anonymous release...
+    expect(blindedVersions.map((v) => v.version)).toEqual(["v1.0.0"]);
+    // ...and its identifier is not, because it is reserved at EZID.
+    expect(blindedVersions[0].doi).toBeNull();
+    // The control, without which nulling the field unconditionally would pass.
+    expect(namedVersions[0].doi).toBe(`${REAL_DOI}.v1.0.0`);
+    db.close();
+  });
+
+  test("the detail route withholds latest_version_doi from a concealed deposit (#1447)", async () => {
+    const db = freshDb();
+    seed(db, "nm000879", 1);
+    seed(db, "nm000880", 0);
+    db.query("UPDATE datasets SET latest_version_doi = ? WHERE dataset_id IN (?, ?)").run(
+      `${REAL_DOI}.v1.0.0`,
+      "nm000879",
+      "nm000880",
+    );
+
+    const blinded = await app(datasetRoutes).request("/nm000879", {}, env(db));
+    const named = await app(datasetRoutes).request("/nm000880", {}, env(db));
+    expect(blinded.status).toBe(200);
+    expect(named.status).toBe(200);
+
+    // `SELECT d.*` carries the column without naming it anywhere, which is why
+    // the rule is applied over the assembled payload.
+    expect((await blinded.json()).dataset.latest_version_doi).toBeNull();
+    expect((await named.json()).dataset.latest_version_doi).toBe(`${REAL_DOI}.v1.0.0`);
+    db.close();
+  });
 });
