@@ -317,7 +317,39 @@ for the dataset's entire life until this run: the durable "was concealed" signal
 `publication_requests.anonymous = 1`, since `anonymous` and `first_published_at` are rewritten in
 the same statement and neither can be read afterwards.
 
-Three properties of that tail job are decisions rather than implementation.
+**Which rows, and which requests, are two separate questions, and only one of them has a clean
+answer.**
+The rows are bounded by `created_at <= first_published_at`, and that bound is load-bearing rather
+than tidy: anonymity is impossible after that stamp, which the triggers below enforce, so a version
+recorded later cannot have been minted under a blind.
+Taking every row instead looks identical on the first real publication, when the stamp is minutes
+old and there is nothing else, and is wrong on every publication after it, where an ordinary
+revision would be re-attempted forever and, past the cap, reported as an identifier that "may still
+be reserved" when the only rows skipped were ordinary public ones.
+The requests have no such bound.
+`PRIOR_ANONYMOUS_REQUEST_SQL` asks whether this dataset was EVER under the blind, and it is
+deliberately unfiltered by `status`, because no status in this state machine separates a run that
+happened from one that did not: the deny route accepts a request that is already `approving`, so a
+release that reserved an identifier and then failed can be denied afterwards, and `blocked` is
+written both before a run and by the orchestrator mid-run, with `publication-sweep` moving a blocked
+row back to `requested`.
+Both callers of that statement fail in one direction only.
+A false positive costs an idempotent pass, an attribution restore that rewrites what is already
+there or an EZID call that answers `return_public`; a false negative publishes a permanent record
+citing the blinded label, or leaves a version DOI reserved behind a link the page renders as live.
+So the statement over-answers on purpose, and the `created_at` bound does the narrowing.
+
+**The window between clearing the flag and settling the debt is real, and accepted.**
+`repo_public` clears `anonymous` and the tail job runs at the end of the same invocation, so
+between the two a public reader can see a live-looking anchor to a still-reserved identifier, and
+can keep seeing it if a later step fails.
+Both alternative orderings are worse, for reasons already recorded here: settling before the
+restoring commit would make a blinded record permanent, and settling before `version_doi` would
+rebuild the concept record's `HasVersion` list without the version being published now.
+What makes the window survivable is that it is reported rather than silent, and that approving
+again closes it.
+
+Four properties of that tail job are decisions rather than implementation.
 It **refuses rather than publishes** when the repository cannot be read: `readRepoMetadata` does
 not throw, it degrades to `{ Name }`, and DataCite then renders a `(:unav)` creator -- acceptable
 for a mint whose alternative is no DOI, and the exact inversion of ADR 0041 on a dataset that was
@@ -326,6 +358,12 @@ Reserved is recoverable by approving again; a public version DOI attributed to n
 "Declares no authors" and "could not be read" are told apart by
 `BIDS_METADATA_UNAVAILABLE`, exported for this caller, and the second is the only one that stops
 the run.
+It reads the **rebuilt repository record, not the step order**, for whether attribution has
+actually been restored, and leaves every reservation alone while the blinded label is still there.
+That is the interlock `doi_create` and `publish_doi` carry at `refuseWhileBlinded`, which cannot
+serve here: it reads `datasets.authors`, and `repo_public` has already rewritten that column by the
+time the tail job runs.
+The repository can answer, because the restoring commit is what puts the real names on `main`.
 It is **bounded** at `MAX_CONCEALED_ERA_VERSION_DOIS` (10) registrar round trips, and it says so
 in the warning rather than silently doing part of the work.
 And it is **non-fatal**, following `stampZarrRequeue`: it returns a warning, writes an
@@ -395,4 +433,5 @@ minted the permanent identifier with no authors.
   the real app on a real database, each with a control),
   `backend/test/concealed-era-version-dois.test.ts` (settling the reservations the blind left
   behind, against local EZID and GitHub stand-ins that record what went on the wire, with the
-  reads-nothing refusal and its declares-no-authors control)
+  reads-nothing refusal and its declares-no-authors control, the still-blinded refusal, and the
+  concealed-era boundary in both directions)

@@ -24,6 +24,7 @@ import {
   ANONYMOUS_AUTHORS_LABEL,
   END_ANONYMITY_AT_PUBLICATION_SQL,
   FIRST_PUBLICATION_STAMP_SQL,
+  PRIOR_ANONYMOUS_REQUEST_SQL,
   expectedRepoVisibility,
   isAnonymous,
   markAnonymous,
@@ -45,7 +46,7 @@ import {
 import { resolveEmailConfig, sendPublicationApprovedEmail } from "./email";
 import { resolveDatasetLandingBase } from "./environment";
 import { isExemplarPublishAllowed } from "./exemplar";
-import { TEST_SHOULDER, conceptEzidIdentifier, makePublic as ezidMakePublic } from "./ezid";
+import { conceptEzidIdentifier, makePublic as ezidMakePublic, isSandboxIdentifier } from "./ezid";
 import {
   checkWorkflowExists,
   createOrUpdateFile,
@@ -631,12 +632,7 @@ async function stepRepoPublic(c: ApproveStepContext): Promise<RespondOutcome | u
       // `c.anonymousRelease` comes from, one row older.
       const priorAnonymous = c.anonymousRelease
         ? null
-        : await db
-            .prepare(
-              "SELECT 1 AS found FROM publication_requests WHERE dataset_id = ? AND anonymous = 1 LIMIT 1",
-            )
-            .bind(datasetId)
-            .first<{ found: number }>();
+        : await db.prepare(PRIOR_ANONYMOUS_REQUEST_SQL).bind(datasetId).first<{ found: number }>();
       const restoreAttribution =
         !c.anonymousRelease && (isAnonymous(c.dataset) || priorAnonymous?.found === 1);
 
@@ -1623,10 +1619,7 @@ async function stepVersionDoi(c: ApproveStepContext): Promise<RespondOutcome | u
           await updateProgress("version_doi");
         } else {
           // Auto-detect sandbox from EZID test shoulder prefix (both paths).
-          const sandboxPrefix = TEST_SHOULDER.replace(/^doi:/, "").split("/")[0];
-          const isSandboxDoi = conceptEzidIdentifier(freshDataset.concept_doi).includes(
-            sandboxPrefix,
-          );
+          const isSandboxDoi = isSandboxIdentifier(conceptEzidIdentifier(freshDataset.concept_doi));
 
           if (isCentralManifestWorkflowEnabled(c.env)) {
             // Central flow (#751): cheap O(1) mint + dispatch. No inline
@@ -2040,14 +2033,22 @@ export interface ApproveRunArgs {
  * longer says the deposit was ever concealed. `publication_requests` keeps every
  * request, so the request that asked for the blind is still there.
  *
- * Shared by both de-anonymization tail jobs deliberately: they have to agree
- * about which datasets have a tail at all.
+ * Shared by both de-anonymization tail jobs and by `repo_public`'s restoration
+ * decision, through the one statement in `services/anonymity.ts`, deliberately:
+ * all three have to agree about which datasets have a concealed era at all.
+ * {@link PRIOR_ANONYMOUS_REQUEST_SQL} says why no `status` predicate can narrow
+ * it -- `denied` can follow `approving`, and `blocked` means either -- and why
+ * over-answering here is the cheap direction. What bounds the work is the
+ * `created_at` filter in {@link completeConcealedEraVersionDois}, not this.
+ *
+ * Reads nothing on failure: a D1 error here is reported by the caller that
+ * matters. Swallowing it would be wrong at `repo_public`, where a false negative
+ * skips a restoration, which is why that site asks the question directly and
+ * lets the step fail.
  */
 async function hadAnonymousRequest(db: D1Database, datasetId: string): Promise<boolean> {
   const priorAnonymous = await db
-    .prepare(
-      "SELECT 1 AS found FROM publication_requests WHERE dataset_id = ? AND anonymous = 1 LIMIT 1",
-    )
+    .prepare(PRIOR_ANONYMOUS_REQUEST_SQL)
     .bind(datasetId)
     .first<{ found: number }>()
     .catch(() => null);
@@ -2132,9 +2133,16 @@ export const MAX_CONCEALED_ERA_VERSION_DOIS = 10;
  * `anonymous` clears, so the landing page renders a live `https://doi.org/...`
  * anchor for an identifier that does not resolve, on a published dataset.
  *
- * Every row here is concealed-era by construction: anonymity is only available
- * before first publication (ADR 0065), so a dataset reaching its first real
- * publication has no other kind of version row.
+ * Concealed-era means created no later than `first_published_at`, and the query
+ * says so rather than taking every row the dataset has. Anonymity is only
+ * available before first publication (ADR 0065) and migration 0085's triggers
+ * enforce it, so a version recorded after that stamp cannot have been minted
+ * under a blind. Reading every row instead looks equivalent on the first real
+ * publication, when the stamp is minutes old and there is nothing else, and is
+ * wrong on the ones after it: a formerly-anonymous dataset that goes on to
+ * accumulate ordinary revisions would re-attempt them forever and, past the cap,
+ * report that identifiers "may still be reserved" when the only rows not
+ * attempted were ordinary public ones.
  *
  * `createEzidVersionDoi` per version rather than a bespoke flip: the
  * reserved-to-public transition, the rebuilt DataCite document that keeps the
@@ -2170,9 +2178,21 @@ export async function completeConcealedEraVersionDois(
       .prepare("SELECT name, github_repo, concept_doi FROM datasets WHERE dataset_id = ?")
       .bind(datasetId)
       .first<{ name: string; github_repo: string | null; concept_doi: string | null }>();
+    // `repo_public` stamped `first_published_at` earlier in THIS run, so the
+    // comparison is against this publication for a dataset publishing for the
+    // first time and against the earlier one for every publication after it.
+    // A NULL stamp cannot happen here (this runs after that step) and is treated
+    // as "everything qualifies" rather than "nothing does", so a missing stamp
+    // reports too much instead of silently leaving an identifier dead.
     const res = await db
       .prepare(
-        "SELECT version, doi FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at ASC LIMIT ?",
+        `SELECT v.version, v.doi
+           FROM dataset_versions v
+           JOIN datasets d ON d.dataset_id = v.dataset_id
+          WHERE v.dataset_id = ?
+            AND (d.first_published_at IS NULL OR v.created_at <= d.first_published_at)
+          ORDER BY v.created_at ASC
+          LIMIT ?`,
       )
       .bind(datasetId, MAX_CONCEALED_ERA_VERSION_DOIS + 1)
       .all<{ version: string; doi: string }>();
@@ -2186,7 +2206,7 @@ export async function completeConcealedEraVersionDois(
   if (rows.length > MAX_CONCEALED_ERA_VERSION_DOIS) {
     rows = rows.slice(0, MAX_CONCEALED_ERA_VERSION_DOIS);
     warnings.push(
-      `more than ${MAX_CONCEALED_ERA_VERSION_DOIS} recorded versions; only the oldest ${MAX_CONCEALED_ERA_VERSION_DOIS} were attempted`,
+      `more than ${MAX_CONCEALED_ERA_VERSION_DOIS} versions recorded before first publication; only the oldest ${MAX_CONCEALED_ERA_VERSION_DOIS} were attempted`,
     );
   }
 
@@ -2199,9 +2219,7 @@ export async function completeConcealedEraVersionDois(
     return concealedEraVersionWarning(db, datasetId, warnings);
   }
   const conceptIdentifier = conceptEzidIdentifier(dataset.concept_doi);
-  // Same rule as the version_doi step: the shoulder in the identifier decides
-  // which EZID account holds it, never ENVIRONMENT.
-  const sandbox = conceptIdentifier.includes(TEST_SHOULDER.replace(/^doi:/, "").split("/")[0]);
+  const sandbox = isSandboxIdentifier(conceptIdentifier);
   const repoName = dataset.github_repo?.split("/")[1];
   if (!repoName) {
     warnings.push(
@@ -2238,6 +2256,25 @@ export async function completeConcealedEraVersionDois(
   if (unreadable.length > 0) {
     warnings.push(
       `${rows.length} recorded version(s) may still be reserved; their attribution could not be rebuilt: ${unreadable.join("; ")}`,
+    );
+    return concealedEraVersionWarning(db, datasetId, warnings);
+  }
+  // Read the rebuilt record, not the step order, for whether attribution has
+  // actually been restored. What this function does is make identifiers PUBLIC,
+  // and a DataCite record whose creator is the blinded label is harvested within
+  // hours and inverts ADR 0041 on the one thing nothing can retract -- the same
+  // reason `doi_create` and `publish_doi` carry the interlock at
+  // `refuseWhileBlinded`. That interlock reads `datasets.authors`, which
+  // `repo_public` has already rewritten by the time this runs, so it cannot
+  // answer here; the repository can, because the restoring commit is what put
+  // the real names on `main`. If they are not there, the reservation is left
+  // alone: still reserved is recoverable, still blinded and public is not.
+  const stillBlinded = (
+    Array.isArray(repoMeta.bidsDescription.Authors) ? repoMeta.bidsDescription.Authors : []
+  ).some((a) => typeof a === "string" && a.trim() === ANONYMOUS_AUTHORS_LABEL);
+  if (stillBlinded) {
+    warnings.push(
+      `${rows.length} recorded version(s) may still be reserved; the repository still carries the anonymous-deposit author label, so making them public would publish a blinded record`,
     );
     return concealedEraVersionWarning(db, datasetId, warnings);
   }

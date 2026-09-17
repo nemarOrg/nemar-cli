@@ -807,9 +807,10 @@ export interface DatasetVersionRow {
  * the `VERSION_DOI_SQL` withholding on all three: it was missing from all
  * three when each spelled its own `SELECT version, doi, created_at`.
  *
- * NOT for an owner- or admin-gated caller. `GET /datasets/:id/manifests` runs
- * its own query on purpose, because the depositor is entitled to the version
- * DOI this one hides from the public.
+ * NOT for an owner- or admin-gated caller. `GET /datasets/:id/versions` (in
+ * `routes/datasets/manifests.ts`, which registers `/versions` despite its name)
+ * runs its own query on purpose, because the depositor is entitled to the
+ * version DOI this one hides from the public.
  */
 export const PUBLIC_DATASET_VERSIONS_SQL = `SELECT dv.version, ${VERSION_DOI_SQL}, dv.created_at
      FROM dataset_versions dv

@@ -180,7 +180,7 @@ describe("owner identity is projected through one rule", () => {
  */
 const DELIBERATE_VERSION_DOI_READS: Readonly<Record<string, string>> = {
   "routes/datasets/manifests.ts":
-    "owner-or-collaborator-or-admin only; the depositor is entitled to their own version DOI (requirement R5)",
+    "the `GET /:id/versions` handler: authenticated, then owner-or-collaborator-or-admin, and the depositor is entitled to their own version DOI",
   "routes/callbacks/version-doi.ts":
     "the callback that MINTS the identifier, reading back what it wrote; nothing it returns is a public projection",
   "routes/admin/doi.ts":

@@ -232,12 +232,17 @@ function seedDataset(fields?: { conceptDoi?: string | null; githubRepo?: string 
   );
 }
 
-/** The durable record that this deposit was once released under the blind. */
-function seedRequest(anonymous: number): void {
+/**
+ * The durable record that this deposit was once released under the blind.
+ *
+ * `status` matters: only a request the orchestrator actually ran (`approving` or
+ * `published`) can have reserved anything.
+ */
+function seedRequest(anonymous: number, status = "published"): void {
   db.prepare(
     `INSERT INTO publication_requests (dataset_id, status, requested_by, anonymous)
-     VALUES (?, 'published', 1, ?)`,
-  ).run(DATASET_ID, anonymous);
+     VALUES (?, ?, 1, ?)`,
+  ).run(DATASET_ID, status, anonymous);
 }
 
 function seedVersion(version: string, createdAt: string): void {
@@ -386,6 +391,78 @@ describe("who this runs for", () => {
     expect(githubSeen).toEqual([]);
   });
 
+  test("a DENIED anonymous request still counts, because denial can follow a partial run", async () => {
+    // The narrowing that looks obviously right and is wrong: only `approving`
+    // and `published` sound like requests the orchestrator ran. The deny route
+    // accepts a request that is already `approving`, so a release that got as
+    // far as reserving this identifier and then failed can be denied afterwards
+    // and end up `denied` with the reservation still standing. Filtering it out
+    // leaves that identifier reserved forever behind a link the landing page
+    // renders as live. Over-answering costs one idempotent EZID call.
+    seedDataset();
+    seedRequest(1, "denied");
+    seedVersion("1.0.0", "2026-01-01 00:00:00");
+    seedIdentifier(versionIdentifier("1.0.0"), "reserved", BLINDED_XML);
+
+    expect(await run()).toBeUndefined();
+    expect(statusOf("1.0.0")).toBe("public");
+  });
+
+  test("a request still sitting unapproved counts too, for the same reason", async () => {
+    // `blocked` is written both before a run and by the orchestrator mid-run,
+    // and `publication-sweep` moves a `blocked` row back to `requested`, so
+    // `requested` is not evidence that nothing happened either.
+    seedDataset();
+    seedRequest(1, "requested");
+    seedVersion("1.0.0", "2026-01-01 00:00:00");
+    seedIdentifier(versionIdentifier("1.0.0"), "reserved", BLINDED_XML);
+
+    expect(await run()).toBeUndefined();
+    expect(statusOf("1.0.0")).toBe("public");
+  });
+
+  test("a version recorded AFTER first publication is not concealed-era", async () => {
+    // Anonymity is impossible after `first_published_at` (ADR 0065, enforced by
+    // migration 0085's triggers), so an ordinary later revision cannot have been
+    // minted under a blind. Attempting it would be harmless-but-wasteful today
+    // and is what makes the cap below misreport.
+    seedDataset();
+    seedRequest(1);
+    seedVersion("1.0.0", "2026-01-01 00:00:00");
+    seedVersion("2.0.0", "2027-01-01 00:00:00");
+    seedIdentifier(versionIdentifier("1.0.0"), "reserved", BLINDED_XML);
+    seedIdentifier(versionIdentifier("2.0.0"), "public", "<resource/>");
+
+    const warning = await run();
+
+    expect(warning).toBeUndefined();
+    expect(statusOf("1.0.0")).toBe("public");
+    // Never addressed at all, not merely left unchanged.
+    expect(methodsFor("2.0.0")).toEqual([]);
+  });
+
+  test("an ordinary publication long after the blind reports nothing, even past the cap", async () => {
+    // The shape that made the first draft cry wolf forever: one concealed-era
+    // version, then more ordinary revisions than the cap. Counting every row
+    // truncated at 10 and appended "may still be RESERVED" on every publication
+    // for the rest of the dataset's life.
+    seedDataset();
+    seedRequest(1);
+    seedVersion("1.0.0", "2026-01-01 00:00:00");
+    seedIdentifier(versionIdentifier("1.0.0"), "reserved", BLINDED_XML);
+    for (let i = 1; i <= MAX_CONCEALED_ERA_VERSION_DOIS + 1; i++) {
+      seedVersion(`2.0.${i}`, `2027-01-${String(i).padStart(2, "0")} 00:00:00`);
+      seedIdentifier(versionIdentifier(`2.0.${i}`), "public", "<resource/>");
+    }
+
+    const warning = await run();
+
+    expect(warning).toBeUndefined();
+    expect(auditRows()).toEqual([]);
+    expect(statusOf("1.0.0")).toBe("public");
+    expect(methodsFor(`2.0.${MAX_CONCEALED_ERA_VERSION_DOIS + 1}`)).toEqual([]);
+  });
+
   test("a formerly-anonymous dataset with no recorded versions is a no-op", async () => {
     seedDataset();
     seedRequest(1);
@@ -454,6 +531,28 @@ describe("what it refuses to guess", () => {
     expect(auditRows().map((r) => r.action)).toEqual(["concealed_era_version_doi_incomplete"]);
   });
 
+  test("a repository still carrying the blinded label leaves the reservation alone", async () => {
+    // The interlock the mint steps have, applied to the one thing this function
+    // does. `refuseWhileBlinded` reads `datasets.authors`, which `repo_public`
+    // rewrote earlier in the same run, so it cannot answer here; the repository
+    // can, because the restoring commit is what puts the real names on `main`.
+    // A DataCite record naming "Anonymous (withheld until publication)" is
+    // harvested within hours and cannot be recalled.
+    seedDataset();
+    seedRequest(1);
+    seedVersion("1.0.0", "2026-01-01 00:00:00");
+    seedIdentifier(versionIdentifier("1.0.0"), "reserved", BLINDED_XML);
+    repoState.description = { ...DESCRIPTION, Authors: [BLINDED_LABEL] };
+
+    const warning = await run();
+
+    expect(warning).toMatch(/still carries the anonymous-deposit author label/);
+    expect(statusOf("1.0.0")).toBe("reserved");
+    expect(dataciteOf("1.0.0")).toBe(BLINDED_XML);
+    expect(ezidSeen).toEqual([]);
+    expect(auditRows().map((r) => r.action)).toEqual(["concealed_era_version_doi_incomplete"]);
+  });
+
   test("a repository that declares no authors is still completed", async () => {
     // The control for the guard above: "declares nothing" is not "could not be
     // read". A dataset whose description has no Authors gets the same `(:unav)`
@@ -507,7 +606,7 @@ describe("it keeps going, and it stays bounded", () => {
     const warning = await run();
 
     expect(warning).toMatch(
-      new RegExp(`more than ${MAX_CONCEALED_ERA_VERSION_DOIS} recorded versions`),
+      new RegExp(`more than ${MAX_CONCEALED_ERA_VERSION_DOIS} versions recorded before first`),
     );
     for (let i = 0; i < MAX_CONCEALED_ERA_VERSION_DOIS; i++) {
       expect(statusOf(`1.0.${i}`)).toBe("public");
@@ -530,7 +629,7 @@ describe("it keeps going, and it stays bounded", () => {
     const warning = await run();
 
     expect(warning).toMatch(
-      new RegExp(`more than ${MAX_CONCEALED_ERA_VERSION_DOIS} recorded versions`),
+      new RegExp(`more than ${MAX_CONCEALED_ERA_VERSION_DOIS} versions recorded before first`),
     );
     expect(warning).toMatch(/no concept DOI/);
     expect(JSON.parse(auditRows()[0].details).problems).toHaveLength(2);

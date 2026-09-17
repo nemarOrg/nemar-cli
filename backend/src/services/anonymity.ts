@@ -176,8 +176,10 @@ export const ANONYMOUS_DEPOSIT_REASON = "anonymous_deposit";
  * assembled payload rather than written into each projection.
  *
  * Conditional on the VIEWER, unlike every other rule in this module, and that
- * is deliberate: anonymity is toward the public, never toward NEMAR or toward
- * the depositor themselves (requirement R5). `nemar dataset clone`, `commit`,
+ * is deliberate: anonymity is toward the public, never toward NEMAR
+ * (requirement R5) and never toward the depositor, which R5 does not say and
+ * which follows instead from what the depositor has to do next.
+ * `nemar dataset clone`, `commit`,
  * `push` and `ci` all read `github_repo` from these routes, and the depositor
  * needs exactly those commands to restore their attribution and end the
  * anonymity. Withholding from the owner would break the documented way out.
@@ -270,9 +272,13 @@ export const CONCEPT_DOI_SQL = "CASE WHEN d.anonymous = 1 THEN NULL ELSE d.conce
  * Unlike the concept projection this is NOT paired with a viewer check. All
  * three sites are the public data plane, which serves one document to
  * everyone; the depositor reads their own version DOI from
- * `GET /datasets/:id/manifests`, which is owner-gated and deliberately left
- * alone (requirement R5 -- anonymity is toward the public, never toward the
- * depositor).
+ * `GET /datasets/:id/versions` (registered in `routes/datasets/manifests.ts`,
+ * whose file name is not its path), which requires authentication and then
+ * owner, collaborator or admin, and is deliberately left alone. R5 is about the
+ * ARCHIVE keeping the depositor's identity, so it is not the citation for this;
+ * the reason is narrower and specific to the blind: the depositor is not the
+ * audience it is kept from, and the commands that END the anonymity read these
+ * routes.
  */
 export const VERSION_DOI_SQL = "CASE WHEN d.anonymous = 1 THEN NULL ELSE dv.doi END AS doi";
 
@@ -446,3 +452,36 @@ export async function markAnonymous(
  */
 export const END_ANONYMITY_AT_PUBLICATION_SQL =
   "anonymous = 0, first_published_at = COALESCE(first_published_at, datetime('now'))";
+
+/**
+ * Was this dataset EVER under the blind? Binds `dataset_id`.
+ *
+ * The durable answer, asked of the request history rather than of
+ * `datasets.anonymous`: the flag is cleared by
+ * {@link END_ANONYMITY_AT_PUBLICATION_SQL} inside the very step that needs the
+ * answer, so a retry re-reads a row that no longer remembers.
+ *
+ * **Deliberately unfiltered by status, and it cannot be narrowed.** The
+ * tempting predicate is "only a request the orchestrator actually ran", since
+ * `requested` and `denied` sound like requests that did nothing. Neither is a
+ * reliable signal in this state machine:
+ *
+ * - the deny route accepts `approving`, so a release that got as far as
+ *   `markAnonymous` -- or as far as reserving a version identifier -- and then
+ *   failed can be denied afterwards and end up `denied`;
+ * - `blocked` is written both at request time, before anything ran, and by the
+ *   orchestrator itself, and `publication-sweep` moves a `blocked` row back to
+ *   `requested`.
+ *
+ * So no status distinguishes "ran" from "did not", and the two callers both fail
+ * in one direction only. A false positive costs an idempotent pass: an
+ * attribution restore that rewrites what is already there, or an EZID call that
+ * returns `return_public` and changes nothing. A false negative publishes a
+ * permanent record citing the blinded label, or leaves a version DOI reserved
+ * behind a link the landing page renders as live. Both callers therefore ask
+ * this question, and something cheaper and provable -- `created_at` against
+ * `first_published_at`, which migration 0085's triggers make load-bearing --
+ * bounds the work instead.
+ */
+export const PRIOR_ANONYMOUS_REQUEST_SQL =
+  "SELECT 1 AS found FROM publication_requests WHERE dataset_id = ? AND anonymous = 1 LIMIT 1";

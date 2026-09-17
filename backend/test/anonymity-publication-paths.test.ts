@@ -31,6 +31,7 @@ import {
   ANONYMOUS_AUTHORS_LABEL,
   END_ANONYMITY_AT_PUBLICATION_SQL,
   FIRST_PUBLICATION_STAMP_SQL,
+  PRIOR_ANONYMOUS_REQUEST_SQL,
   expectedRepoVisibility,
 } from "../src/services/anonymity";
 import { freshDb } from "./helpers/d1";
@@ -506,9 +507,11 @@ describe("an anonymous release is a publication minus the steps that expose iden
     const updateAt = ORCHESTRATOR.indexOf("END_ANONYMITY_AT_PUBLICATION_SQL}");
     expect(captureAt).toBeGreaterThan(-1);
     expect(updateAt).toBeGreaterThan(captureAt);
-    expect(ORCHESTRATOR).toContain(
-      "SELECT 1 AS found FROM publication_requests WHERE dataset_id = ? AND anonymous = 1 LIMIT 1",
-    );
+    // Through the shared constant rather than its text: both this site and the
+    // finalize tail jobs ask the same question, and a copy here could be
+    // narrowed on its own.
+    expect((ORCHESTRATOR.match(/prepare\(PRIOR_ANONYMOUS_REQUEST_SQL\)/g) ?? []).length).toBe(2);
+    expect(ORCHESTRATOR).not.toContain("FROM publication_requests WHERE dataset_id = ? AND anon");
     expect(ORCHESTRATOR).not.toContain("if (!c.anonymousRelease && isAnonymous(c.dataset)) {");
   });
 
@@ -543,23 +546,27 @@ describe("an anonymous release is a publication minus the steps that expose iden
     // alone. The dataset page then renders a live `https://doi.org/...` anchor
     // for an identifier that does not resolve.
     //
-    // AFTER the Zarr requeue, which is after `doi_create` and `version_doi` for
-    // the reasons above: `version_doi` is the step that rebuilds the concept
-    // record's HasVersion list out of `dataset_versions`.
+    // BOTH ends means both call sites: the finalize block, and the
+    // all-steps-complete early return. The warning this returns tells the admin
+    // to approve again, so approving again has to be the thing that retries it --
+    // and a run with nothing left to do returns before finalize ever executes.
     //
-    // And on the all-steps-complete path as well, which is the second call. The
-    // warning this returns tells the admin to approve again, so approving again
-    // has to be the thing that retries it -- a run with nothing left to do
-    // returns before the finalize block ever executes.
+    // Deliberately NOT an assertion about its position relative to
+    // `stampZarrRequeue`. Both are awaited tail jobs after the last step, both
+    // only read `dataset_versions` and the repository, and neither writes
+    // anything the other reads, so swapping them changes no behavior -- an
+    // ordering test there passes on the mutation it claims to catch. What the
+    // order does depend on is `doi_create` and `version_doi` having run, and
+    // that is what being inside the finalize block gives it.
     //
-    // Source-order and call-site check only; the writes are exercised
-    // behaviorally in `concealed-era-version-dois.test.ts`.
-    const zarrAt = ORCHESTRATOR.indexOf("const zarrRequeueWarning = await stampZarrRequeue(");
-    const completeAt = ORCHESTRATOR.indexOf(
+    // Call-site check only; the writes are exercised behaviorally in
+    // `concealed-era-version-dois.test.ts`.
+    const finalizeAt = ORCHESTRATOR.indexOf(
       "const concealedEraDoiWarning = await completeConcealedEraVersionDois(",
     );
-    expect(zarrAt).toBeGreaterThan(-1);
-    expect(completeAt).toBeGreaterThan(zarrAt);
+    const lastStepAt = ORCHESTRATOR.indexOf('stepsToRun.includes("version_doi")');
+    expect(lastStepAt).toBeGreaterThan(-1);
+    expect(finalizeAt).toBeGreaterThan(lastStepAt);
     expect(ORCHESTRATOR.split("await completeConcealedEraVersionDois(").length - 1).toBe(2);
     // The other call site, and its warning reaching the body rather than a log.
     expect(ORCHESTRATOR).toContain(
@@ -622,9 +629,6 @@ describe("the two statements the de-anonymization ordering rests on", () => {
   // just SQL, and SQL can be run. Both were asserted only as source text,
   // which pins where they are written and nothing about what they return.
 
-  const PRIOR_ANONYMOUS_SQL =
-    "SELECT 1 AS found FROM publication_requests WHERE dataset_id = ? AND anonymous = 1 LIMIT 1";
-
   function seedRequest(db: Database, datasetId: string, anonymous: number, status: string): void {
     db.prepare(
       `INSERT INTO publication_requests (dataset_id, requested_by, status, anonymous)
@@ -633,17 +637,19 @@ describe("the two statements the de-anonymization ordering rests on", () => {
   }
 
   test("the history query finds a PAST anonymous request, whatever became of it", () => {
-    // Deliberately unfiltered by status and unordered. A denied, superseded or
-    // long-published anonymous request still means this dataset's attribution
-    // was withheld at some point, so a later normal publication must restore
-    // it. Adding `AND status = 'requested'` here is the "optimization" that
-    // would reintroduce the permanent-DOI-cites-the-blinded-label bug, and
-    // this test is what it would break.
+    // Deliberately unfiltered by status and unordered, and this is the test that
+    // breaks when someone narrows it. `requested` and `denied` look like
+    // requests that never ran, and neither is: the deny route accepts a request
+    // that is already `approving`, so a release that reached `markAnonymous` and
+    // then failed can be denied afterwards, and `blocked` is written both before
+    // a run and mid-run, with `publication-sweep` moving it back to `requested`.
+    // Narrowing reintroduces the permanent-DOI-cites-the-blinded-label bug for
+    // the sake of skipping an idempotent pass.
     const db = freshDb();
     seed(db, "nm000950");
     seedRequest(db, "nm000950", 1, "denied");
     seedRequest(db, "nm000950", 0, "requested");
-    expect(db.prepare(PRIOR_ANONYMOUS_SQL).get("nm000950")).toEqual({ found: 1 });
+    expect(db.prepare(PRIOR_ANONYMOUS_REQUEST_SQL).get("nm000950")).toEqual({ found: 1 });
     db.close();
   });
 
@@ -654,7 +660,7 @@ describe("the two statements the de-anonymization ordering rests on", () => {
     const db = freshDb();
     seed(db, "nm000951");
     seedRequest(db, "nm000951", 0, "requested");
-    expect(db.prepare(PRIOR_ANONYMOUS_SQL).get("nm000951")).toBeNull();
+    expect(db.prepare(PRIOR_ANONYMOUS_REQUEST_SQL).get("nm000951")).toBeNull();
     db.close();
   });
 
