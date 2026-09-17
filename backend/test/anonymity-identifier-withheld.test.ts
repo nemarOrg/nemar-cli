@@ -234,6 +234,83 @@ describe("the raw columns a whole-row select carries", () => {
     db.close();
   });
 
+  test("the landing page does not link a reserved VERSION doi (#1447)", async () => {
+    // The surface the PR review found still open after the metadata.json fix
+    // above: the SAME version rows, read by the SAME loader, reach
+    // `buildLandingPayload`, which had no anonymity term at all -- and the
+    // HTML form renders each one as a live `https://doi.org/...` anchor. One
+    // click, one dead identifier, from a page a reviewer is meant to be sent.
+    const db = freshDb();
+    seed(db, "nm000881", 1);
+    seed(db, "nm000882", 0);
+    db.query(
+      `INSERT INTO dataset_versions (dataset_id, version, doi, provider, created_at)
+       VALUES ('nm000881', '1.0.0', ?, 'ezid', datetime('now')),
+              ('nm000882', '1.0.0', ?, 'ezid', datetime('now'))`,
+    ).run(`${REAL_DOI}.v1.0.0`, `${REAL_DOI}.v1.0.0`);
+
+    const blindedJson = await app(dataRoutes).request("/nm000881/?format=json", {}, env(db));
+    const namedJson = await app(dataRoutes).request("/nm000882/?format=json", {}, env(db));
+    expect(blindedJson.status).toBe(200);
+    expect(namedJson.status).toBe(200);
+    const blindedVersions = (await blindedJson.json()).versions as Array<{ doi: string | null }>;
+    expect(blindedVersions.length).toBe(1);
+    expect(blindedVersions[0].doi).toBeNull();
+    expect(((await namedJson.json()).versions as Array<{ doi: string | null }>)[0].doi).toBe(
+      `${REAL_DOI}.v1.0.0`,
+    );
+
+    // And the HTML, because that is the form with the anchor in it. Asserted
+    // on the rendered text rather than on the payload field, so a future
+    // renderer that reaches around the payload for the DOI still fails.
+    // `Accept: text/html` is load-bearing: with no Accept header the route
+    // negotiates to JSON, and a JSON body passes the two `not.toContain`
+    // assertions below without the renderer ever running.
+    const html = (id: string) =>
+      app(dataRoutes)
+        .request(`/${id}/`, { headers: { Accept: "text/html" } }, env(db))
+        .then((r) => r.text());
+    const blindedHtml = await html("nm000881");
+    const namedHtml = await html("nm000882");
+    expect(namedHtml).toContain("<table");
+    expect(blindedHtml).not.toContain("doi.org");
+    expect(blindedHtml).not.toContain(REAL_DOI);
+    // Still a version table: the version is announced, only its identifier is not.
+    expect(blindedHtml).toContain("v1.0.0");
+    // The control, without which a renderer that dropped the DOI column
+    // entirely would pass.
+    expect(namedHtml).toContain(`https://doi.org/${REAL_DOI}.v1.0.0`);
+    db.close();
+  });
+
+  test("the page bundle does not carry a reserved VERSION doi (#1447)", async () => {
+    // The third reader of those rows, and the one with teeth: its response is
+    // cached at the edge for `s-maxage=300, stale-while-revalidate=86400`, so
+    // a leak here outlives the deposit's de-anonymization by a day.
+    const db = freshDb();
+    seed(db, "nm000883", 1);
+    seed(db, "nm000884", 0);
+    db.query(
+      `INSERT INTO dataset_versions (dataset_id, version, doi, provider, created_at)
+       VALUES ('nm000883', '1.0.0', ?, 'ezid', datetime('now')),
+              ('nm000884', '1.0.0', ?, 'ezid', datetime('now'))`,
+    ).run(`${REAL_DOI}.v1.0.0`, `${REAL_DOI}.v1.0.0`);
+
+    const blinded = await app(dataRoutes).request("/nm000883/page-bundle.json", {}, env(db));
+    const named = await app(dataRoutes).request("/nm000884/page-bundle.json", {}, env(db));
+    expect(blinded.status).toBe(200);
+    expect(named.status).toBe(200);
+
+    // On the serialized body: the bundle carries the version rows twice, once
+    // under `landing` and once under `metadata.extensions`, and a key-level
+    // check on one of them misses the other.
+    const blindedRaw = await blinded.text();
+    expect(blindedRaw).not.toContain(REAL_DOI);
+    expect(blindedRaw).toContain("v1.0.0");
+    expect(await named.text()).toContain(`${REAL_DOI}.v1.0.0`);
+    db.close();
+  });
+
   test("the detail route withholds latest_version_doi from a concealed deposit (#1447)", async () => {
     const db = freshDb();
     seed(db, "nm000879", 1);

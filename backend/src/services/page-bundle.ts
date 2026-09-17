@@ -32,6 +32,7 @@ import {
   type DatasetVersionRow,
   type LandingPayload,
   type NeuroschemaDataset,
+  PUBLIC_DATASET_VERSIONS_SQL,
   buildDatasetMetadata,
   buildLandingPayload,
 } from "./data-router";
@@ -137,9 +138,7 @@ async function loadVersionRowsForBundle(
   env: Bindings,
   datasetId: string,
 ): Promise<DatasetVersionRow[]> {
-  const result = await env.DB.prepare(
-    "SELECT version, doi, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC",
-  )
+  const result = await env.DB.prepare(PUBLIC_DATASET_VERSIONS_SQL)
     .bind(datasetId)
     .all<DatasetVersionRow>();
   return result.results ?? [];

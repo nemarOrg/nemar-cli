@@ -25,6 +25,7 @@ import type {
   StructuredKeyword,
 } from "../../../shared/datacite-constants.js";
 import { escapeHtml } from "../lib/escape";
+import { VERSION_DOI_SQL } from "./anonymity";
 import { isValidDatasetId } from "./datasetId";
 import type { ManifestFile, VersionManifest } from "./manifest";
 import {
@@ -784,12 +785,37 @@ export interface DatasetRowForMetadata {
 
 /**
  * dataset_versions row shape (subset).
+ *
+ * `doi` is nullable because `PUBLIC_DATASET_VERSIONS_SQL` withholds it for a
+ * concealed deposit; a row always HAS one in the table (`doi TEXT NOT NULL`).
  */
 export interface DatasetVersionRow {
   version: string;
-  doi: string;
+  doi: string | null;
   created_at: string;
 }
+
+/**
+ * Every version row of a dataset, newest-first, as the public data plane may
+ * see them.
+ *
+ * One statement rather than three copies of it. The landing page,
+ * `metadata.json` and the page bundle all read exactly this, and the only
+ * thing that distinguishes them is what they do when D1 throws (the two in
+ * `routes/data.ts` degrade to an empty array, `page-bundle.ts` deliberately
+ * propagates -- see its own comment for why). Sharing the text is what keeps
+ * the `VERSION_DOI_SQL` withholding on all three: it was missing from all
+ * three when each spelled its own `SELECT version, doi, created_at`.
+ *
+ * NOT for an owner- or admin-gated caller. `GET /datasets/:id/manifests` runs
+ * its own query on purpose, because the depositor is entitled to the version
+ * DOI this one hides from the public.
+ */
+export const PUBLIC_DATASET_VERSIONS_SQL = `SELECT dv.version, ${VERSION_DOI_SQL}, dv.created_at
+     FROM dataset_versions dv
+     JOIN datasets d ON d.dataset_id = dv.dataset_id
+    WHERE dv.dataset_id = ?
+ ORDER BY dv.created_at DESC`;
 
 // Exported (#1062, epic #1181 phase 2) so zarr-catalog.ts's document builder
 // reuses this exact comma-split rather than re-implementing it -- the two
@@ -1160,15 +1186,15 @@ export function buildDatasetMetadata(input: {
           const tag = toVersionTag(v.version);
           return {
             version: tag,
-            // #1447: the SAME rule as `dataset_doi` twenty lines above, for
-            // the same reason. An anonymous release's version identifier is
-            // registered `reserved` and does not resolve, so publishing it
-            // here would put a dead DOI into every citation widget that reads
-            // this document. It was not written when `dataset_doi` was,
-            // because the version array was necessarily EMPTY for a concealed
-            // deposit until #1447 made the release mint one; nothing could
-            // reach this line, so nothing revealed it was missing.
-            doi: row.anonymous === 1 ? null : v.doi,
+            // Null for a concealed deposit, and NOT by a check here: the rows
+            // arrive from `PUBLIC_DATASET_VERSIONS_SQL`, which withholds the
+            // identifier in the query. This line read
+            // `row.anonymous === 1 ? null : v.doi` when #1447 first made the
+            // array non-empty for a concealed deposit, which left the landing
+            // page -- fed by the same rows, through `buildLandingPayload` --
+            // still serving it. Withholding in the one shared statement covers
+            // every consumer of those rows instead of the one that was noticed.
+            doi: v.doi,
             created_at: v.created_at,
             manifest_url: `/${row.dataset_id}/${tag}/manifest.json`,
           };

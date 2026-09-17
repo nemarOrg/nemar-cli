@@ -243,6 +243,40 @@ export const OWNER_GITHUB_SQL =
 export const CONCEPT_DOI_SQL = "CASE WHEN d.anonymous = 1 THEN NULL ELSE d.concept_doi END";
 
 /**
+ * A version DOI, withheld for a concealed deposit, as a SQL projection.
+ *
+ * The version-row twin of `CONCEPT_DOI_SQL`, and it exists for the reason that
+ * one exists: the rule was already written in TypeScript for the assembled
+ * catalog row (`withheldWhileAnonymous`, on `latest_version_doi`) and then not
+ * written for the three queries that read `dataset_versions` straight into a
+ * public response -- the landing page (`routes/data.ts`), `metadata.json`
+ * (same file), and the page bundle (`services/page-bundle.ts`). The landing
+ * page renders each row's DOI as a live `https://doi.org/...` anchor, so the
+ * miss handed a reader a one-click dead DOI for a deposit that had paid for
+ * concealment.
+ *
+ * It was unreachable before #1447. An anonymous release skipped `version_doi`
+ * wholesale, so a concealed deposit had NO version rows and every one of these
+ * queries returned an empty array. Minting the identifier reserved -- which
+ * the release now does, because that step is also the only thing that
+ * dispatches the manifest job -- populated the array and made the gap real.
+ *
+ * `dv` is the required alias for `dataset_versions` and `d` for `datasets`, so
+ * a site using this fragment must join the two. That join is on
+ * `dataset_versions`'s foreign key and every one of these callers has already
+ * loaded and gated the dataset row before it runs, so it neither costs nor
+ * hides anything.
+ *
+ * Unlike the concept projection this is NOT paired with a viewer check. All
+ * three sites are the public data plane, which serves one document to
+ * everyone; the depositor reads their own version DOI from
+ * `GET /datasets/:id/manifests`, which is owner-gated and deliberately left
+ * alone (requirement R5 -- anonymity is toward the public, never toward the
+ * depositor).
+ */
+export const VERSION_DOI_SQL = "CASE WHEN d.anonymous = 1 THEN NULL ELSE dv.doi END AS doi";
+
+/**
  * What a dataset's GitHub repository SHOULD be, which is not always what its
  * catalog row says.
  *

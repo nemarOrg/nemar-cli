@@ -136,9 +136,7 @@ describe("POST /admin/datasets/exemplar", () => {
     expect(await res.json()).toMatchObject({ error: "exemplar_anonymous_retired" });
     // Refused before the GitHub call and before the INSERT, so there is nothing
     // to roll back. A row here would mean the check moved below the create.
-    const row = db
-      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM datasets")
-      .get();
+    const row = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM datasets").get();
     expect(row?.n).toBe(0);
   });
 

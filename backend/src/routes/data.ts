@@ -19,6 +19,7 @@ import {
   type CatalogIndexRow,
   type DatasetRowForMetadata,
   type DatasetVersionRow,
+  PUBLIC_DATASET_VERSIONS_SQL,
   type PublicManifestEntry,
   type VersionPickerEntry,
   buildBytesUrl,
@@ -307,9 +308,7 @@ async function manifestJsonHandler(
  */
 async function loadVersionRows(env: Bindings, datasetId: string): Promise<DatasetVersionRow[]> {
   try {
-    const result = await env.DB.prepare(
-      "SELECT version, doi, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC",
-    )
+    const result = await env.DB.prepare(PUBLIC_DATASET_VERSIONS_SQL)
       .bind(datasetId)
       .all<DatasetVersionRow>();
     return result.results ?? [];
@@ -1244,9 +1243,7 @@ async function metadataJsonHandler(env: Bindings, datasetId: string): Promise<Re
     return notFound("Dataset not found");
   }
 
-  const versionsResult = await env.DB.prepare(
-    "SELECT version, doi, created_at FROM dataset_versions WHERE dataset_id = ? ORDER BY created_at DESC",
-  )
+  const versionsResult = await env.DB.prepare(PUBLIC_DATASET_VERSIONS_SQL)
     .bind(datasetId)
     .all<DatasetVersionRow>();
   const versions = versionsResult.results ?? [];
