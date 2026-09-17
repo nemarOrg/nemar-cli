@@ -519,13 +519,21 @@ const facetInputShape: Record<string, z.ZodOptional<z.ZodString>> = Object.fromE
  *
  * Declared as a named shape rather than inline in the object below so that
  * {@link SEARCH_DATASETS_NARROWING_FILTERS} can be `Object.keys` of the real
- * schema instead of a second copy of these names. The cap in
- * `search-datasets.ts`, the prose in the tool description and the shape test
- * all read that derived list, so adding a filter here reaches every one of
- * them without a matching hand edit. (`query`, `limit` and `include_unknown`
- * are deliberately NOT here: the first two are not filters at all, and
- * `include_unknown` WIDENS every active facet rather than narrowing, so
- * counting it against a narrowing cap would be wrong.)
+ * schema instead of a second copy of these names.
+ *
+ * That derived list is what the cap counts against; it is NOT yet what the
+ * rest of the surface reads. Three places still spell these names by hand and
+ * each needs its own edit when one is added: the sentence in the tool
+ * description (`server.ts`, which interpolates only the facet labels), the
+ * zod4 mirror (`backend/src/mcp/schemas.ts`, which carries `.describe()` text
+ * the contract does not), and `mcp-search-datasets.unit.test.ts`'s hand-written
+ * list. The last of those fails on a mismatch, which is the reminder to do the
+ * other two.
+ *
+ * (`query`, `limit` and `include_unknown` are deliberately NOT here: the first
+ * two are not filters at all, and `include_unknown` WIDENS every active facet
+ * rather than narrowing, so counting it against a narrowing cap would be
+ * wrong.)
  */
 const narrowingFilterShape = {
   modality: z.string().optional(),
@@ -571,16 +579,21 @@ export const SEARCH_DATASETS_FILTER_PARAMS: readonly string[] = [
  * independently: `assertBoundParamBudget` throws inside
  * `buildDatasetFilterClauses` above `MAX_BOUND_PARAMS` (100), added after
  * #1193 shipped a faceted search that 500'd only on D1. That guard stays the
- * backstop and this cap does not replace it. Measured today, all thirty
- * filters at their widest bind 50 parameters on the browse branch and 53 on
- * the `query` branch -- half the ceiling -- and a maximal call was run against
- * the real staging database on both branches without error.
+ * backstop and this cap does not replace it. All thirty filters at their
+ * widest put 52 bound parameters on every statement either branch of the tool
+ * builds -- around half the ceiling -- and a call setting all thirty was run
+ * against the real staging database on both branches without error.
+ * `filter-count-matches-clauses.unit.test.ts` pins that measurement, so a
+ * facet that moves it shows up in a diff rather than only when the ceiling is
+ * reached.
  *
  * What the cap adds is WHERE the refusal happens. Reaching the backstop
  * surfaces as a thrown exception mid-query, which tells a caller nothing it
  * can act on; refusing at the door names the filters it counted and what to
  * drop. Twenty is the declared facet count, so every facet can still be
- * combined in one call, and the number to revisit when the vocabulary grows.
+ * combined in one call; a test pins the cap at no less than `FACETS.length`,
+ * so growing the vocabulary forces this number to be revisited rather than
+ * quietly making that sentence false.
  */
 export const SEARCH_DATASETS_MAX_FILTERS = 20;
 

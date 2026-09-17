@@ -1,21 +1,31 @@
 /**
  * The per-call filter cap counts the same filters the query builders act on.
  *
- * `activeFilterParams` decides what "a filter is set" means from the supplied
- * value alone; `buildDatasetFilterClauses` and `parseFacetFilters` decide it
- * again, independently, from truthiness guards scattered across two modules
- * (`if (opts.hasDoi)`, `opts.recent && opts.recent > 0`, the parser's
- * `raw.trim() === ""` skip, `parseLicenseTierFilter`'s empty result). If the
- * two ever disagree, the cap refuses a call over a filter the SQL was never
- * going to carry, or counts one it does. Nothing in the type system connects
- * them, so this test does -- against the real builders, in both directions.
+ * `activeFilterNames` decides what "a filter is set" means from the built
+ * `DatasetFilterOptions`; `buildDatasetFilterClauses` and `parseFacetFilters`
+ * decide it again, independently, from truthiness guards scattered across two
+ * modules. If the two disagree, the cap refuses a call over a filter the SQL
+ * was never going to carry, or counts one it does. Nothing in the type system
+ * connects them, so this file does.
  *
- * Real modules throughout, no D1: `buildDatasetFilterClauses` returns a SQL
- * string and pushes bound parameters into an array, both of which are the
- * observable fact being asserted.
+ * An earlier revision counted the RAW WIRE ARGUMENT instead, and was wrong for
+ * ten of the thirty filters -- `license: "CC0-1.0"` (a non-empty string that
+ * parses to no tiers), an enum facet given `","`, a version facet given `"v"`,
+ * and whitespace in `modality`/`task`/`author` (which the builder's bare
+ * truthiness accepts and binds). The tests below missed all ten, because they
+ * supplied exactly one valid and one empty value per filter, and every
+ * divergence lives at a third class of value: supplied, non-empty, and inert.
+ * `INERT_VALUES` is that third class, and it is the table to extend first when
+ * this file is touched.
+ *
+ * Real modules throughout, and a real database: `freshDb()`/`realD1()`
+ * (helpers/d1.ts) apply every migration to in-memory SQLite and execute the
+ * production SQL, so the cap tests run the tool end to end rather than
+ * asserting on a boolean.
  */
 
-import { describe, expect, test } from "bun:test";
+import type { Database } from "bun:sqlite";
+import { beforeEach, describe, expect, test } from "bun:test";
 import {
   SEARCH_DATASETS_FILTER_PARAMS,
   SEARCH_DATASETS_MAX_FILTERS,
@@ -24,27 +34,59 @@ import {
 } from "../../shared/contract/mcp";
 import { FACETS } from "../../shared/facets";
 import {
-  activeFilterParams,
+  activeFilterNames,
   buildFilterOptions,
   searchDatasetsTool,
 } from "../src/mcp/tools/search-datasets";
 import { parseFacetFilters } from "../src/services/dataset-facets";
-import { MAX_BOUND_PARAMS, buildDatasetFilterClauses } from "../src/services/dataset-filters";
+import {
+  MAX_BOUND_PARAMS,
+  buildDatasetFilterClauses,
+  buildPublicCatalogBase,
+} from "../src/services/dataset-filters";
+import type { Bindings } from "../src/types/bindings";
+import { freshDb, realD1 } from "./helpers/d1";
 
-/** A value that must make each bespoke filter narrow. Hand-written on purpose:
- *  it is the independent witness, and `covers every declared narrowing filter`
- *  below fails until a newly declared filter is given one. */
-const BESPOKE_SET_VALUES: Record<string, unknown> = {
-  modality: "eeg",
-  task: "rest",
-  author: "smith",
-  has_hed: true,
-  has_zarr: true,
-  has_doi: true,
-  has_zarr_verified: true,
-  data_complete: true,
-  recent: 30,
-  license: "public",
+/** A value that must make each bespoke filter narrow, with the SQL its clause
+ *  must contain. The fragments are the independent witness against a
+ *  transposition in `buildFilterOptions`' wire-name-to-field mapping, which is
+ *  otherwise invisible: swapping two boolean filters there leaves every count
+ *  and every parameter total unchanged. */
+const BESPOKE: Record<string, { set: unknown; sql: string }> = {
+  modality: { set: "eeg", sql: "d.modalities" },
+  task: { set: "rest", sql: "d.tasks" },
+  author: { set: "smith", sql: "d.authors" },
+  has_hed: { set: true, sql: "d.has_hed = 1" },
+  has_zarr: { set: true, sql: "d.zarr_status = 'ready'" },
+  has_doi: { set: true, sql: "d.concept_doi" },
+  has_zarr_verified: { set: true, sql: "sweep_stamps" },
+  data_complete: { set: true, sql: "d.data_complete = 1" },
+  recent: { set: 30, sql: "d.publish_date" },
+  license: { set: "public", sql: "d.license_tier" },
+};
+
+/**
+ * Supplied, non-empty, and inert: values a caller can really send that reach a
+ * parser and come back with nothing to filter on. The class the old wire-level
+ * count got wrong, and the reason the cap now runs after parsing.
+ */
+const INERT_VALUES: Record<string, unknown> = {
+  // `parseLicenseTierFilter` keeps only declared tiers and drops the rest, and
+  // the zod4 mirror's own description tells a model exactly that -- so an SPDX
+  // identifier here is a caller doing what the schema invited.
+  license: "CC0-1.0",
+  // Whitespace: `narrows` used to trim and see "unset" while the builder's
+  // `if (opts.modality)` sees a truthy string and binds `%  %`.
+  modality: "  ",
+  task: "\t",
+  author: " ",
+  // An enum facet whose tokens all reduce to empty yields no values, so the
+  // key never enters the parsed bag.
+  powerline: ",",
+  source: " , ",
+  // A version facet strips a leading `v`, leaving an empty prefix.
+  bids_version: "v",
+  hed_version: "V",
 };
 
 /** The widest legal value for a facet, by declared kind. */
@@ -67,235 +109,265 @@ function facetSetValue(facet: (typeof FACETS)[number]): string {
 
 function setValueFor(name: string): unknown {
   const facet = FACETS.find((f) => f.queryParam === name);
-  return facet ? facetSetValue(facet) : BESPOKE_SET_VALUES[name];
+  return facet ? facetSetValue(facet) : BESPOKE[name]?.set;
 }
 
-/** Clauses plus bound parameters for one argument object, via the real path
- *  the tool itself takes (parse facets, map to options, build SQL). */
-function build(
-  args: Record<string, unknown>,
-  search?: string,
-): { clauses: string; params: (string | number)[] } {
-  const typed = args as SearchDatasetsInput;
+/** Options and clauses for one argument object, via the real path the tool
+ *  takes: parse the facets, map to options, build the SQL. */
+function build(args: Record<string, unknown>): {
+  clauses: string;
+  params: (string | number)[];
+  names: string[];
+} {
   const facets = parseFacetFilters((key) => {
     const raw = args[key];
     return typeof raw === "string" ? raw : undefined;
   });
+  const options = buildFilterOptions(args as SearchDatasetsInput, facets);
   const params: (string | number)[] = [];
-  // `search` is set by `executeDatasetSearch` from the tool's `query`, not by
-  // `buildFilterOptions`, so the `query` branch is reproduced by setting it on
-  // the options here rather than by passing another argument name.
-  const options = { ...buildFilterOptions(typed, facets), ...(search ? { search } : {}) };
   const clauses = buildDatasetFilterClauses(params, options);
-  return { clauses, params };
+  return { clauses, params, names: activeFilterNames(options) };
 }
 
 describe("the filter cap counts what the query builders act on", () => {
   test("covers every declared narrowing filter", () => {
-    // Guards the two tables below from going stale: a bespoke filter added to
-    // the contract without a value here would otherwise be skipped silently,
-    // and every assertion would still pass.
-    const missing = SEARCH_DATASETS_NARROWING_FILTERS.filter(
-      (name) => !(name in BESPOKE_SET_VALUES),
-    );
-    expect(missing).toEqual([]);
-    const unknown = Object.keys(BESPOKE_SET_VALUES).filter(
-      (name) => !SEARCH_DATASETS_NARROWING_FILTERS.includes(name),
-    );
-    expect(unknown).toEqual([]);
+    // Guards the tables above from going stale: a bespoke filter added to the
+    // contract without an entry here would otherwise be skipped silently, and
+    // every assertion in this file would still pass. It also closes the empty
+    // -list hole for the loops below -- they cannot silently iterate zero
+    // times while these identities hold.
+    expect(SEARCH_DATASETS_NARROWING_FILTERS.filter((n) => !(n in BESPOKE))).toEqual([]);
+    expect(
+      Object.keys(BESPOKE).filter((n) => !SEARCH_DATASETS_NARROWING_FILTERS.includes(n)),
+    ).toEqual([]);
     expect(SEARCH_DATASETS_FILTER_PARAMS.length).toBe(
       SEARCH_DATASETS_NARROWING_FILTERS.length + FACETS.length,
     );
+    expect(
+      Object.keys(INERT_VALUES).filter((n) => !SEARCH_DATASETS_FILTER_PARAMS.includes(n)),
+    ).toEqual([]);
   });
 
-  test("a set value both counts and builds a clause, for every filter", () => {
+  test("every facet can still be combined in one call", () => {
+    // The doc comment on SEARCH_DATASETS_MAX_FILTERS says twenty is the facet
+    // count, so no caller has to choose between declared facets. Without this,
+    // the sentence goes silently false the day a 21st facet lands -- and the
+    // constant itself is pinned by nothing else, since every fixture below
+    // sizes itself FROM it.
+    expect(SEARCH_DATASETS_MAX_FILTERS).toBeGreaterThanOrEqual(FACETS.length);
+  });
+
+  test("a set value both counts and builds its own clause, for every filter", () => {
     for (const name of SEARCH_DATASETS_FILTER_PARAMS) {
-      const args = { [name]: setValueFor(name) };
-      expect({ name, counted: activeFilterParams(args as SearchDatasetsInput) }).toEqual({
-        name,
-        counted: [name],
-      });
-      const { clauses } = build(args);
-      expect({ name, narrowed: clauses.trim().length > 0 }).toEqual({ name, narrowed: true });
+      const { names, clauses } = build({ [name]: setValueFor(name) });
+      expect({ name, counted: names }).toEqual({ name, counted: [name] });
+      // Not just "some clause": the one this filter is supposed to build.
+      const fragment = BESPOKE[name]?.sql;
+      if (fragment) {
+        expect({ name, has: clauses.includes(fragment) }).toEqual({ name, has: true });
+      } else {
+        expect({ name, narrowed: clauses.trim().length > 0 }).toEqual({ name, narrowed: true });
+      }
     }
   });
 
   test("a value that builds no clause is not counted either", () => {
-    // The falsy forms a caller can actually send: `""` for any string filter
-    // (the facet parser's own "not set"), and `false` for a boolean one --
-    // `has_doi: false` does NOT mean "datasets without a DOI", it means no
-    // clause at all, which is the asymmetry this cap must not misread.
+    // `""` for any string filter, `false` for a boolean one -- `has_doi: false`
+    // does NOT mean "datasets without a DOI", it means no clause at all.
     for (const name of SEARCH_DATASETS_FILTER_PARAMS) {
       const set = setValueFor(name);
       const empty = typeof set === "boolean" ? false : typeof set === "number" ? 0 : "";
-      const args = { [name]: empty };
-      expect({ name, counted: activeFilterParams(args as SearchDatasetsInput) }).toEqual({
-        name,
-        counted: [],
-      });
-      const { clauses } = build(args);
+      const { names, clauses } = build({ [name]: empty });
+      expect({ name, counted: names }).toEqual({ name, counted: [] });
       expect({ name, narrowed: clauses.trim().length > 0 }).toEqual({ name, narrowed: false });
     }
   });
 
-  test("an explicitly null filter is unset", () => {
-    // Unreachable through the tool -- zod rejects `null` for every declared
-    // filter before `searchDatasetsTool` sees the arguments -- so it is
-    // asserted here, directly on the exported helper, rather than left as a
-    // defensive branch no test can reach. A caller assembling arguments by
-    // hand (the CLI's own `--flag` plumbing clears this way) gets the same
-    // answer as one that omitted the key.
-    const args = { subjects: null, has_doi: null, author: null, modality: "eeg" };
-    expect(activeFilterParams(args as unknown as SearchDatasetsInput)).toEqual(["modality"]);
+  test("a supplied but inert value agrees, whichever way the parser resolves it", () => {
+    // The table that fails against a wire-level count. Each of these is
+    // non-empty on the wire, so the question is only ever settled after
+    // parsing -- and the count and the SQL have to settle it the same way.
+    for (const [name, value] of Object.entries(INERT_VALUES)) {
+      const { names, clauses, params } = build({ [name]: value });
+      const narrowed = clauses.trim().length > 0;
+      expect({ name, counted: names.includes(name), narrowed }).toEqual({
+        name,
+        counted: narrowed,
+        narrowed,
+      });
+      // And whichever way it went, the parameters match the clauses: an inert
+      // value must not bind one, a live one must.
+      expect({ name, bound: params.length > 0 }).toEqual({ name, bound: narrowed });
+    }
   });
 
   test("include_unknown, query and limit are not filters", () => {
     // `include_unknown` WIDENS every active facet; `query` and `limit` are not
     // filters at all. None may consume the caller's twenty.
-    const args = { include_unknown: true, query: "eeg", limit: 5 };
-    expect(activeFilterParams(args as SearchDatasetsInput)).toEqual([]);
+    expect(build({ include_unknown: true, query: "eeg", limit: 5 }).names).toEqual([]);
     for (const name of ["include_unknown", "query", "limit"]) {
       expect(SEARCH_DATASETS_FILTER_PARAMS.includes(name)).toBe(false);
     }
   });
 
   test("every filter at once stays inside D1's bound-parameter ceiling", () => {
-    // `assertBoundParamBudget` (dataset-filters.ts, #1193/#1195) throws above
-    // MAX_BOUND_PARAMS from inside `buildDatasetFilterClauses`, so building
-    // the worst case a caller can construct -- all thirty filters at their
-    // widest, then the same again with the `query` branch's FTS clause -- IS
-    // the assertion: an overflow fails this test by throwing. The explicit
-    // bounds below pin the measured numbers so a facet that moves them is
-    // visible in the diff rather than only when the ceiling is reached.
+    // Counted on the STATEMENT, not on the filter clauses alone: the catalog
+    // base contributes its own parameters ahead of them and the page contributes
+    // a LIMIT after, and the ceiling applies to the whole statement. Both
+    // branches of the tool build the same filter clauses over the same base, so
+    // one measurement covers them.
+    //
+    // `assertBoundParamBudget` (#1193/#1195) throws from inside
+    // `buildDatasetFilterClauses` above MAX_BOUND_PARAMS, so building the worst
+    // case a caller can construct IS the assertion -- an overflow fails this
+    // test by throwing. The exact pin makes a facet that moves it visible in a
+    // diff rather than only when the ceiling is reached.
     const everything: Record<string, unknown> = {};
     for (const name of SEARCH_DATASETS_FILTER_PARAMS) everything[name] = setValueFor(name);
-    const browse = build(everything);
-    expect(browse.params.length).toBeLessThanOrEqual(MAX_BOUND_PARAMS);
-    expect(browse.params.length).toBe(50);
 
-    const withQuery = build(everything, "eeg");
-    expect(withQuery.params.length).toBeGreaterThan(browse.params.length);
-    expect(withQuery.params.length).toBeLessThanOrEqual(MAX_BOUND_PARAMS);
-    expect(withQuery.params.length).toBe(53);
-  });
-
-  test("the cap holds the worst case to roughly half of what it allows", () => {
-    // The cap's own claim: twenty filters, chosen to bind as many parameters
-    // as possible, stay far enough under MAX_BOUND_PARAMS that the backstop is
-    // unreachable through the tool. Chosen by measured cost, not by name, so
-    // this keeps meaning the same thing as the vocabulary changes.
-    const byCost = [...SEARCH_DATASETS_FILTER_PARAMS]
-      .map((name) => ({ name, cost: build({ [name]: setValueFor(name) }).params.length }))
-      .sort((a, b) => b.cost - a.cost)
-      .slice(0, SEARCH_DATASETS_MAX_FILTERS);
-    const worst: Record<string, unknown> = {};
-    for (const { name } of byCost) worst[name] = setValueFor(name);
-    const built = build(worst, "eeg");
-    expect(activeFilterParams(worst as SearchDatasetsInput).length).toBe(
-      SEARCH_DATASETS_MAX_FILTERS,
+    const { params } = buildPublicCatalogBase("active", undefined, undefined);
+    const facets = parseFacetFilters((key) => {
+      const raw = everything[key];
+      return typeof raw === "string" ? raw : undefined;
+    });
+    buildDatasetFilterClauses(
+      params,
+      buildFilterOptions(everything as SearchDatasetsInput, facets),
     );
-    expect(built.params.length).toBeLessThan(MAX_BOUND_PARAMS / 2 + 10);
+    params.push(25); // the page's LIMIT
+    expect(params.length).toBeLessThanOrEqual(MAX_BOUND_PARAMS);
+    expect(params.length).toBe(52);
   });
 });
 
-/**
- * A binding that records being used and then fails.
- *
- * Not a stand-in for D1: nothing here answers a query, and no assertion below
- * depends on a result. The only fact it reports is WHETHER the tool reached
- * the database, which is the whole difference between a call the cap refused
- * and one it let through. A real D1 would answer both alike.
- */
-function tripwireEnv(): { env: Parameters<typeof searchDatasetsTool>[0]; reached: () => boolean } {
-  let touched = false;
-  const trip = () => {
-    touched = true;
-    throw new Error("tripwire: the database was reached");
+/** A public, active row with everything else left NULL -- the "not yet
+ *  populated" state `include_unknown` exists to admit. */
+function insertDataset(db: Database, datasetId: string, cols: Record<string, unknown> = {}): void {
+  const merged: Record<string, unknown> = {
+    owner_user_id: -1,
+    name: datasetId,
+    visibility: "public",
+    status: "active",
+    is_sandbox: 0,
+    ...cols,
   };
-  return {
-    env: {
-      DB: { prepare: trip, batch: trip } as unknown as D1Database,
-      AI: {} as never,
-      VECTORIZE: {} as never,
-    },
-    reached: () => touched,
-  };
-}
-
-/** `SEARCH_DATASETS_MAX_FILTERS` names, cheapest first, so the rejection is
- *  driven by the COUNT and not by any one filter's parameter cost. */
-function nFilters(n: number): Record<string, unknown> {
-  const args: Record<string, unknown> = {};
-  for (const name of SEARCH_DATASETS_FILTER_PARAMS.slice(0, n)) args[name] = setValueFor(name);
-  return args;
+  const keys = Object.keys(merged);
+  db.query(
+    `INSERT INTO datasets (dataset_id, ${keys.join(", ")}) VALUES (?, ${keys.map(() => "?").join(", ")})`,
+  ).run(datasetId, ...(keys.map((k) => merged[k]) as never[]));
 }
 
 describe("search_datasets refuses more filters than it can combine", () => {
-  test("one over the cap is refused, and the answer names what to drop", async () => {
-    const args = nFilters(SEARCH_DATASETS_MAX_FILTERS + 1);
-    expect(activeFilterParams(args as SearchDatasetsInput).length).toBe(
-      SEARCH_DATASETS_MAX_FILTERS + 1,
-    );
-    const { env, reached } = tripwireEnv();
-    const outcome = await searchDatasetsTool(env, args as SearchDatasetsInput);
-    expect(outcome.result.isError).toBe(true);
-    const text = (outcome.result.content as { text: string }[])[0].text;
-    expect(text).toContain(`${SEARCH_DATASETS_MAX_FILTERS + 1}`);
-    expect(text).toContain(`at most ${SEARCH_DATASETS_MAX_FILTERS}`);
-    // Every counted filter is named, so a caller can choose which to drop
-    // rather than guessing at a number.
-    for (const name of Object.keys(args)) expect(text).toContain(name);
-    // Refused at the door: no parsing, no query, nothing billed.
-    expect(reached()).toBe(false);
+  let db: Database;
+  let env: Pick<Bindings, "DB" | "AI" | "VECTORIZE">;
+
+  beforeEach(() => {
+    db = freshDb();
+    insertDataset(db, "nm000001", { subject_count: 12 });
+    insertDataset(db, "nm000002", { subject_count: 400 });
+    env = { DB: realD1(db), AI: {} as never, VECTORIZE: {} as never };
   });
 
-  test("exactly the cap is allowed through to the query", async () => {
-    // The paired half. Without it, a cap that refused EVERY call would pass
-    // the test above. The tripwire throwing is the proof it got past the gate.
-    const args = nFilters(SEARCH_DATASETS_MAX_FILTERS);
-    expect(activeFilterParams(args as SearchDatasetsInput).length).toBe(
-      SEARCH_DATASETS_MAX_FILTERS,
+  /** The declared facets, all at their widest -- exactly `MAX_FILTERS` of
+   *  them, and none overlapping the bespoke names a test may add on top. */
+  function everyFacet(): Record<string, unknown> {
+    const args: Record<string, unknown> = { include_unknown: true, limit: 10 };
+    for (const facet of FACETS) args[facet.queryParam] = facetSetValue(facet);
+    return args;
+  }
+
+  function payload(outcome: Awaited<ReturnType<typeof searchDatasetsTool>>): string {
+    return (outcome.result.content as { text: string }[])[0].text;
+  }
+
+  test("exactly the cap runs, and the query it runs is really filtered", async () => {
+    const args = everyFacet();
+    expect(
+      activeFilterNames(buildFilterOptions(args as SearchDatasetsInput, undefined)).length,
+    ).toBe(0);
+    const outcome = await searchDatasetsTool(env, args as SearchDatasetsInput);
+    expect(outcome.result.isError).toBeUndefined();
+    const wide = JSON.parse(payload(outcome)) as {
+      count: number;
+      results: { dataset_id: string }[];
+    };
+    expect(wide.results.map((r) => r.dataset_id).sort()).toEqual(["nm000001", "nm000002"]);
+
+    // Same twenty filters, one of them narrowed: the row with 400 subjects
+    // must drop out. Proves the clauses reached D1 and bound their values,
+    // which a count alone cannot.
+    const narrowed = await searchDatasetsTool(env, {
+      ...args,
+      subjects: "0..100",
+    } as SearchDatasetsInput);
+    expect(narrowed.result.isError).toBeUndefined();
+    const hits = JSON.parse(payload(narrowed)) as {
+      count: number;
+      results: { dataset_id: string }[];
+    };
+    expect(hits.results.map((r) => r.dataset_id)).toEqual(["nm000001"]);
+    expect(hits.count).toBe(1);
+  });
+
+  test("one over the cap is refused, and the answer names exactly what to drop", async () => {
+    // Composed from every bespoke filter plus enough facets to go one over, so
+    // the list carries both `has_zarr` and `has_zarr_verified`. That pair is
+    // the reason the check below parses the list instead of matching
+    // substrings: one is a prefix of the other.
+    const args: Record<string, unknown> = { include_unknown: true, limit: 10 };
+    for (const [name, { set }] of Object.entries(BESPOKE)) args[name] = set;
+    for (const facet of FACETS.slice(
+      0,
+      SEARCH_DATASETS_MAX_FILTERS + 1 - Object.keys(BESPOKE).length,
+    )) {
+      args[facet.queryParam] = facetSetValue(facet);
+    }
+    const expected = activeFilterNames(
+      buildFilterOptions(
+        args as SearchDatasetsInput,
+        parseFacetFilters((k) => args[k] as string | undefined),
+      ),
     );
-    const { env, reached } = tripwireEnv();
-    await expect(searchDatasetsTool(env, args as SearchDatasetsInput)).rejects.toThrow("tripwire");
-    expect(reached()).toBe(true);
+    expect(expected.length).toBe(SEARCH_DATASETS_MAX_FILTERS + 1);
+
+    const outcome = await searchDatasetsTool(env, args as SearchDatasetsInput);
+    expect(outcome.result.isError).toBe(true);
+    const text = payload(outcome);
+    expect(text).toContain(`Too many filters in one call: ${SEARCH_DATASETS_MAX_FILTERS + 1}`);
+    expect(text).toContain(`at most ${SEARCH_DATASETS_MAX_FILTERS}`);
+    // Parsed, not substring-matched: `has_zarr` is a prefix of
+    // `has_zarr_verified`, so a per-name `toContain` cannot tell a complete
+    // list from one missing an entry.
+    const listed = text.split("Supplied: ")[1]?.replace(/\.$/, "").split(", ");
+    expect(listed).toEqual(expected);
+  });
+
+  test("a malformed facet value is reported before the cap", async () => {
+    // ADR 0051: the specific complaint wins. A caller who sent both an
+    // over-wide call and a bad range gets the range back, which is the one
+    // they cannot work out from the parameter list.
+    const outcome = await searchDatasetsTool(env, {
+      ...everyFacet(),
+      modality: "eeg",
+      subjects: "not-a-range",
+    } as SearchDatasetsInput);
+    expect(outcome.result.isError).toBe(true);
+    expect(payload(outcome)).toContain("not accepted");
+    expect(payload(outcome)).not.toContain("Too many filters");
   });
 
   test("unset and widening parameters do not consume the cap", async () => {
-    // The cap counts filters that narrow, so a call at the cap stays legal
-    // when a caller adds `query`, `limit`, `include_unknown`, a cleared filter
-    // and an explicit `false` on top of it.
-    // Built from the declared facets rather than `nFilters`, so the cleared
-    // bespoke names below are additions and not overwrites of counted ones.
-    const base: Record<string, unknown> = {};
-    for (const name of SEARCH_DATASETS_FILTER_PARAMS.slice(-SEARCH_DATASETS_MAX_FILTERS)) {
-      base[name] = setValueFor(name);
-    }
-    const args = {
-      ...base,
-      query: "eeg",
-      limit: 5,
-      include_unknown: true,
+    // A call at the cap stays legal when a caller adds `query`, `limit`,
+    // `include_unknown`, a cleared filter, an inert one and an explicit
+    // `false` on top of it.
+    const outcome = await searchDatasetsTool(env, {
+      ...everyFacet(),
       has_doi: false,
       author: "",
       task: undefined,
-    };
-    expect(activeFilterParams(args as SearchDatasetsInput).length).toBe(
-      SEARCH_DATASETS_MAX_FILTERS,
-    );
-    // The `query` branch runs several tiers and degrades on a failing one
-    // rather than propagating, so this asserts on the tripwire being reached
-    // and on the outcome NOT being the cap's refusal -- never on which tier
-    // happened to throw first.
-    const { env, reached } = tripwireEnv();
-    let text = "";
-    try {
-      const outcome = await searchDatasetsTool(env, args as SearchDatasetsInput);
-      text = (outcome.result.content as { text: string }[])[0]?.text ?? "";
-    } catch {
-      // A tier that propagates instead of degrading is equally good evidence.
-    }
-    expect(reached()).toBe(true);
-    expect(text).not.toContain("Too many filters");
+      license: "CC0-1.0",
+    } as SearchDatasetsInput);
+    expect(outcome.result.isError).toBeUndefined();
+    expect(payload(outcome)).not.toContain("Too many filters");
   });
 });

@@ -30,13 +30,13 @@
  */
 
 import {
-  SEARCH_DATASETS_FILTER_PARAMS,
   SEARCH_DATASETS_MAX_FILTERS,
   type SearchDatasetsHit,
   type SearchDatasetsInput,
   flagToBoolean,
   searchDatasetsOutputSchema,
 } from "../../../../shared/contract/mcp.js";
+import { FACETS } from "../../../../shared/facets.js";
 import { RangeParseError } from "../../../../shared/range.js";
 import { parseLicenseTierFilter } from "../../lib/license.js";
 import { CONCEPT_DOI_SQL } from "../../services/anonymity";
@@ -188,40 +188,71 @@ function unavailableOutcome(): ToolOutcome {
   };
 }
 
+/** The wire argument names mapped onto `DatasetFilterOptions`' own field
+ *  names. Both directions of the mapping read this: {@link buildFilterOptions}
+ *  writes the options, {@link activeFilterNames} names them back for the
+ *  refusal message. A transposition here would be invisible to either, so
+ *  `filter-count-matches-clauses.unit.test.ts` pins each wire name to the SQL
+ *  its own clause contains. */
+const BESPOKE_OPTION_FIELD = {
+  modality: "modality",
+  task: "task",
+  has_hed: "hasHed",
+  has_zarr: "hasZarr",
+  author: "author",
+  has_doi: "hasDoi",
+  has_zarr_verified: "hasZarrVerified",
+  data_complete: "dataComplete",
+  recent: "recent",
+  license: "licenseTiers",
+} as const satisfies Record<string, keyof DatasetFilterOptions>;
+
 /**
- * Whether a supplied value will actually narrow the query, which is not the
- * same question as whether the caller supplied the key.
+ * Whether a built option will actually produce a clause.
  *
- * Every consumer downstream is truthiness-guarded, and this has to match them
- * or the cap refuses calls over filters that were never going to be applied:
- * `buildDatasetFilterClauses` writes its boolean clauses under `if
- * (opts.hasDoi)` / `if (opts.hasHed)` / ... so `has_doi: false` builds NOTHING
- * (it does not mean "datasets without a DOI"); `recent` is guarded `opts.recent
- * && opts.recent > 0`; `parseFacetFilters` skips a facet whose raw value is
- * `""` after trimming; and `parseLicenseTierFilter("")` yields no tiers.
+ * Deliberately reads the MAPPED option and not the wire argument. The two are
+ * not interchangeable, and an earlier revision of this file counted the wire
+ * argument and was wrong for ten of the thirty filters: `license: "CC0-1.0"`
+ * is a non-empty string that `parseLicenseTierFilter` reduces to no tiers, a
+ * version facet given `"v"` parses to an empty prefix, an enum facet given
+ * `","` parses to no values, and `modality: "  "` is whitespace that the
+ * builder's raw truthiness test accepts and binds as `%  %`. Every one of
+ * those disagreements disappears once the question is asked after parsing.
  *
- * `hasActiveFilters` (dataset-search.ts) is the same predicate over the mapped
- * `DatasetFilterOptions`, and states the same rules; this one answers over the
- * wire names, which is what the caller has to be told to drop.
- * `filter-count-matches-clauses.unit.test.ts` holds the equivalence against
- * the real builders rather than against either comment.
+ * The rules themselves are the builders': `buildDatasetFilterClauses` guards
+ * each bespoke clause on bare truthiness (`if (opts.modality)`, `if
+ * (opts.hasDoi)` -- so `has_doi: false` builds NOTHING, and does not mean
+ * "datasets without a DOI"), `recent` on `> 0`, and `licenseTiers` on a
+ * non-empty array. `hasActiveFilters` (dataset-search.ts) applies the same
+ * rules, but answers a different question: one boolean for the whole options
+ * bag, including `search`, where this one has to say WHICH filters, by the
+ * names the caller used.
  */
-function narrows(value: unknown): boolean {
-  if (value === undefined || value === null) return false;
-  if (typeof value === "string") return value.trim() !== "";
-  if (typeof value === "boolean") return value;
+function optionNarrows(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length > 0;
   if (typeof value === "number") return value > 0;
-  return true;
+  return Boolean(value);
 }
 
 /**
- * The declared filters this call actually narrows by, in declaration order.
- * Reads {@link SEARCH_DATASETS_FILTER_PARAMS}, so a facet added to
- * `shared/facets.ts` is counted the day it is declared.
+ * The filters these options will actually narrow by, under the wire names the
+ * caller used, in the same order `SEARCH_DATASETS_FILTER_PARAMS` declares them
+ * (bespoke first, then facets).
+ *
+ * The facet half reads the PARSED bag, so a facet the parser dropped is not
+ * counted, and a facet added to `shared/facets.ts` is counted the day it is
+ * declared.
  */
-export function activeFilterParams(args: SearchDatasetsInput): string[] {
-  const supplied = args as Record<string, unknown>;
-  return SEARCH_DATASETS_FILTER_PARAMS.filter((name) => narrows(supplied[name]));
+export function activeFilterNames(filters: DatasetFilterOptions): string[] {
+  const names: string[] = [];
+  for (const [wire, field] of Object.entries(BESPOKE_OPTION_FIELD)) {
+    if (optionNarrows(filters[field])) names.push(wire);
+  }
+  const facets = filters.facets ?? {};
+  for (const facet of FACETS) {
+    if (facets[facet.key as keyof typeof facets] !== undefined) names.push(facet.queryParam);
+  }
+  return names;
 }
 
 /**
@@ -257,16 +288,6 @@ export async function searchDatasetsTool(
   env: Pick<Bindings, "DB" | "AI" | "VECTORIZE">,
   args: SearchDatasetsInput,
 ): Promise<ToolOutcome> {
-  // Checked before any parsing, so an over-wide call costs nothing and the
-  // answer names what to drop. `assertBoundParamBudget` remains the backstop;
-  // see SEARCH_DATASETS_MAX_FILTERS for why this cap is not that ceiling.
-  const active = activeFilterParams(args);
-  if (active.length > SEARCH_DATASETS_MAX_FILTERS) {
-    return badFilterOutcome(
-      `Too many filters in one call: ${active.length}, and at most ${SEARCH_DATASETS_MAX_FILTERS} can be combined. Drop the least selective ones and filter the results yourself, or run narrower calls and intersect them. Supplied: ${active.join(", ")}.`,
-    );
-  }
-
   // Every filter `buildDatasetFilterClauses` understands, not a hand-picked
   // four. The bespoke fields below and the declared facet table are the two
   // halves ADR 0032 deliberately keeps separate; both ride in the same options
@@ -293,6 +314,20 @@ export async function searchDatasetsTool(
   }
 
   const filters = buildFilterOptions(args, facets);
+
+  // The cap, checked on the BUILT options rather than the raw arguments, so
+  // that what it counts and what the SQL carries cannot disagree. It sits
+  // after the facet parse for the same reason: a malformed facet value is the
+  // more specific complaint and is reported first (ADR 0051), and parsing
+  // thirty in-memory strings costs nothing next to the D1 round trip this
+  // guards. `assertBoundParamBudget` remains the backstop; see
+  // SEARCH_DATASETS_MAX_FILTERS for why this cap is not that ceiling.
+  const active = activeFilterNames(filters);
+  if (active.length > SEARCH_DATASETS_MAX_FILTERS) {
+    return badFilterOutcome(
+      `Too many filters in one call: ${active.length}, and at most ${SEARCH_DATASETS_MAX_FILTERS} can be combined. Drop the least selective ones and filter the results yourself, or run narrower calls and intersect them. Supplied: ${active.join(", ")}.`,
+    );
+  }
 
   let hits: SearchDatasetsHit[];
   let count: number;
