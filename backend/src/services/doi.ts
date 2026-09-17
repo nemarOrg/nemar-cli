@@ -22,7 +22,6 @@ import {
   createIdentifier,
   extractDoi,
   getIdentifier,
-  makePublic,
   updateIdentifier,
 } from "./ezid";
 import type { UploaderIdentity } from "./uploader-identity";
@@ -329,9 +328,10 @@ async function createZenodoConceptDoi(
 
 /**
  * Create a version DOI via EZID.
- * Mints a new DOI with IsVersionOf relation to the concept DOI,
- * immediately makes it public, and updates the concept DOI to
- * include HasVersion back-references to all versions.
+ * Mints a new DOI with IsVersionOf relation to the concept DOI, makes it
+ * public, and updates the concept DOI to include HasVersion back-references to
+ * all versions. Under `opts.reserveOnly` (an anonymous release, #1447) it stops
+ * after the mint and does none of the rest: see that option's own docs.
  */
 /** What to do when createIdentifier reports an EZID version DOI already exists. */
 export type ExistingVersionDoiAction = "return_public" | "complete_reserved" | "error";
@@ -339,11 +339,19 @@ export type ExistingVersionDoiAction = "return_public" | "complete_reserved" | "
 /**
  * Decide how to handle an already-existing version identifier (epic #896 #900).
  * - `public`     -> the prior mint fully completed; return it (idempotent).
- * - `reserved`   -> a prior mint crashed before makePublic; finish the transition.
+ * - `reserved`   -> the transition to public is unfinished; finish it.
  * - anything else (`unavailable` = a deliberately tombstoned DOI, or an unknown
- *   status) -> ERROR. Never silently makePublic a non-reserved identifier: that
+ *   status) -> ERROR. Never silently publish a non-reserved identifier: that
  *   would resurrect a tombstoned DOI back to resolving.
  * Pure + exported so the three-way branch is unit-testable without EZID.
+ *
+ * This says what the STATUS means, not what the caller should do with it, and
+ * the two stopped being the same thing in #1447. `reserved` no longer implies a
+ * crash: an anonymous release reserves on purpose, so `createEzidVersionDoi`
+ * under `reserveOnly` treats `complete_reserved` as "already correct, return
+ * it" and `return_public` as an error, inverting both branches. The sweep in
+ * `doi-reconcile.ts` reads it the original way and excludes concealed deposits
+ * before it asks. A new caller has to decide which of those it is.
  */
 export function classifyExistingVersionDoi(status: EzidStatus): ExistingVersionDoiAction {
   if (status === "public") return "return_public";
@@ -428,7 +436,7 @@ export async function createEzidVersionDoi(
     // exist. Fetch it and inspect status:
     //  - already `public`  -> the prior attempt fully completed; return early.
     //  - still `reserved`  -> the prior attempt created the identifier but
-    //    CRASHED before makePublic (#900). Returning early here left a
+    //    CRASHED before publishing it (#900). Returning early here left a
     //    permanent, non-resolving `reserved` DOI recorded as the dataset's
     //    latest version. Fall through to finish the transition instead.
     if (!(error instanceof Error && error.message.includes("already exists"))) {
@@ -436,16 +444,24 @@ export async function createEzidVersionDoi(
     }
     identifier = await getIdentifier(auth, fullIdentifier);
     const action = classifyExistingVersionDoi(identifier.status);
-    if (action === "complete_reserved" && opts.reserveOnly) {
-      // A reserved identifier is the DESIRED end state here, not an
-      // interrupted publish, so the #900 resume must not fire. Returning it
-      // keeps a re-run of an anonymous release idempotent.
-      return {
-        doi,
-        provider: "ezid",
-        providerRecordId: identifier.identifier,
-        status: identifier.status,
-      };
+    // An anonymous release accepts exactly ONE pre-existing state: reserved,
+    // which is the state it is trying to reach, so finding it there is a
+    // re-run. That case falls through to the `if (opts.reserveOnly)` return
+    // below -- the same line the fresh mint returns from -- rather than being
+    // answered twice.
+    //
+    // Every other status is refused, INCLUDING `public`. For a normal
+    // republish `return_public` is the right answer, since the prior mint
+    // finished the job; under `reserveOnly` it means this version's identifier
+    // is already resolving, so DataCite has harvested a record for a deposit
+    // that ADR 0065 A6 keeps citable by its landing page alone. Returning it
+    // would report the step as successful and record the leak as the intended
+    // state, which is how nobody looks again. Refuse, and let the failed step
+    // put it in front of an admin.
+    if (opts.reserveOnly && action !== "complete_reserved") {
+      throw new Error(
+        `Version DOI ${doi} already exists with status "${identifier.status}"; an anonymous release requires a reserved identifier and will not adopt this one`,
+      );
     }
     if (action === "return_public") {
       return {
@@ -457,12 +473,12 @@ export async function createEzidVersionDoi(
     }
     if (action === "error") {
       // `unavailable` (deliberately tombstoned) or an unknown status: refuse to
-      // silently makePublic it back to resolving.
+      // silently publish it back to resolving.
       throw new Error(
-        `Version DOI ${doi} already exists with unexpected status "${identifier.status}"; refusing to makePublic`,
+        `Version DOI ${doi} already exists with unexpected status "${identifier.status}"; refusing to publish it`,
       );
     }
-    // action === "complete_reserved": fall through to makePublic below.
+    // action === "complete_reserved": fall through to the status flip below.
   }
 
   // An anonymous release stops here: the identifier exists, reserved, and the
@@ -477,8 +493,29 @@ export async function createEzidVersionDoi(
     };
   }
 
-  // Make the version DOI public (also runs for the resume-a-reserved path above).
-  await makePublic(auth, identifier.identifier, target);
+  // Make the version DOI public (also runs for the resume-a-reserved path
+  // above), sending the metadata WITH the status flip rather than the status
+  // alone.
+  //
+  // `makePublic` sends `_status` and `_target` and nothing else, so an
+  // identifier that already existed keeps whatever `datacite` record it was
+  // RESERVED with. For the #900 crash-resume that is merely stale. For a
+  // de-anonymized deposit it is wrong in exactly the way this feature exists
+  // to prevent: the record was reserved during the anonymous release, when
+  // `bidsToDataCite` had nothing but the blinded label to work from, so its
+  // creator is "Anonymous (withheld until publication)". Publishing it
+  // unchanged would hand DataCite that string as the version's PERMANENT
+  // attribution -- an anonymity that outlives the anonymity, and the one
+  // failure mode ADR 0065 calls irreversible.
+  //
+  // `dataciteXml` here was built from `opts.bidsDescription` at the top of this
+  // function, i.e. from the description the CURRENT call read, which on the
+  // real publication is the one carrying the restored authors.
+  await updateIdentifier(auth, identifier.identifier, {
+    status: "public",
+    target,
+    dataciteXml,
+  });
 
   // Update the concept DOI's XML to include HasVersion relation.
   // Non-fatal: the version DOI is already public at this point, so we log but
