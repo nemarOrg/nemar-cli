@@ -35,8 +35,11 @@ import {
   flagToBoolean,
   searchDatasetsOutputSchema,
 } from "../../../../shared/contract/mcp.js";
+import { RangeParseError } from "../../../../shared/range.js";
+import { parseLicenseTierFilter } from "../../lib/license.js";
 import { CONCEPT_DOI_SQL } from "../../services/anonymity";
 import { splitCsv } from "../../services/data-router.js";
+import { FacetEnumParseError, parseFacetFilters } from "../../services/dataset-facets.js";
 import {
   type DatasetFilterOptions,
   buildDatasetFilterClauses,
@@ -149,6 +152,24 @@ export function mergeHitsWithCatalog(
   return { hits, unresolvedIds };
 }
 
+/** A rejected filter value, reported so the caller can correct it.
+ *
+ *  Errors teach here (epic #1065): naming the parameter and what it received
+ *  lets an agent re-plan, where a bare validation failure just ends the turn.
+ *  This is also the guard against the failure that made this change necessary:
+ *  the input schema is `.passthrough()`, so an argument the server does not
+ *  declare is accepted and silently dropped, and unfiltered results then look
+ *  filtered. A facet value that parses wrong is at least visible; see the
+ *  `unknown argument` note below for the ones that cannot be. */
+function badFilterOutcome(message: string): ToolOutcome {
+  return {
+    result: {
+      isError: true,
+      content: [{ type: "text", text: message }],
+    },
+  };
+}
+
 function unavailableOutcome(): ToolOutcome {
   return {
     result: {
@@ -169,11 +190,44 @@ export async function searchDatasetsTool(
   env: Pick<Bindings, "DB" | "AI" | "VECTORIZE">,
   args: SearchDatasetsInput,
 ): Promise<ToolOutcome> {
+  // Every filter `buildDatasetFilterClauses` understands, not a hand-picked
+  // four. The bespoke fields below and the declared facet table are the two
+  // halves ADR 0032 deliberately keeps separate; both ride in the same options
+  // bag, and both the query and no-query paths consume it.
+  let facets: DatasetFilterOptions["facets"];
+  try {
+    facets = parseFacetFilters((key) => {
+      const raw = (args as Record<string, unknown>)[key];
+      return typeof raw === "string" ? raw : undefined;
+    });
+  } catch (err) {
+    // Narrowed to the two declared parse errors, matching the HTTP route
+    // (routes/datasets/catalog.ts). A broad catch would launder an internal
+    // fault into "that filter value was not accepted", and the model would
+    // retry differently shaped values forever against a fault that has nothing
+    // to do with its input. Anything else rethrows into withToolMetrics, which
+    // records outcome "exception" and logs it. ADR 0051: a specific error is
+    // never overwritten by a generic one.
+    if (!(err instanceof RangeParseError || err instanceof FacetEnumParseError)) throw err;
+    const detail = err.message;
+    return badFilterOutcome(
+      `That filter value was not accepted: ${detail}. Ranges take \`10..20\`, \`64..\`, or \`..128\`; enum and version facets take a declared token.`,
+    );
+  }
+
   const filters: DatasetFilterOptions = {
     modality: args.modality,
     task: args.task,
     hasHed: args.has_hed,
     hasZarr: args.has_zarr,
+    author: args.author,
+    hasDoi: args.has_doi,
+    hasZarrVerified: args.has_zarr_verified,
+    dataComplete: args.data_complete,
+    recent: args.recent,
+    licenseTiers: parseLicenseTierFilter(args.license),
+    facets,
+    includeUnknown: args.include_unknown,
   };
 
   let hits: SearchDatasetsHit[];
