@@ -16,6 +16,7 @@
  */
 
 import type { Bindings } from "../types/bindings.js";
+import { DEV_OWNED_FIXTURE_IDS } from "./datasetId.js";
 import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { getWorkflowRuns } from "./github.js";
@@ -65,6 +66,22 @@ function errMsg(err: unknown): string {
 }
 
 /**
+ * The non-production scope for the blocked-BIDS candidate query, as a clause
+ * plus the values to bind for it.
+ *
+ * Exported so the test imports the REAL clause instead of retyping it.
+ * `.rules/testing.md` names hand-copied SQL outright, and the version of this
+ * test that predated #1440 retyped `LIKE 'xx09%'` and therefore could not see
+ * the clause change under it.
+ */
+export function blockedSweepScope(nonProduction: boolean): { clause: string; ids: string[] } {
+  if (!nonProduction) return { clause: "", ids: [] };
+  const ids = [...DEV_OWNED_FIXTURE_IDS];
+  const inList = ids.length > 0 ? ` OR pr.dataset_id IN (${ids.map(() => "?").join(", ")})` : "";
+  return { clause: `AND (pr.dataset_id LIKE 'xx09%'${inList})`, ids };
+}
+
+/**
  * Re-evaluate every publication request blocked on BIDS validation and
  * transition the ones whose CI has since resolved. Returns a tally for the cron
  * log. Never throws — per-row failures are counted and skipped so one bad repo
@@ -89,12 +106,21 @@ export async function sweepBlockedBidsValidationRequests(
   // nemarDatasets installation token, and rewrite their status.
   //
   // Narrowed rather than disabled: staging genuinely needs this sweep, because
-  // an exemplar published while its BIDS validation is still running lands in
-  // exactly this 'blocked' state and would otherwise stay stuck forever. So
-  // outside production the candidate set is scoped to the dev range (xx09NNNN),
-  // which is the same fence the sandbox cleanup uses.
-  const devRangeOnly = isNonProductionEnv(env);
-  const scopeClause = devRangeOnly ? "AND pr.dataset_id LIKE 'xx09%'" : "";
+  // a dataset published while its BIDS validation is still running lands in
+  // exactly this 'blocked' state and would otherwise stay stuck forever.
+  //
+  // Scoped to what the dev worker OWNS, not to the dev id RANGE (#1440). The
+  // range form (`LIKE 'xx09%'`) silently excluded the standing anonymous
+  // deposit once it moved to a reserved `nm` id -- and an anonymous release IS
+  // a publication request, so that fixture is the single most likely dataset on
+  // staging to land in this state. It was inside the range at xx099907 and
+  // dropped out of it at nm099998, which is the same regression this epic fixed
+  // in three other fences.
+  //
+  // The declared ids are BOUND, not interpolated, and come from the same
+  // exported declaration the predicates use, so this clause cannot disagree
+  // with `isDevOwnedDatasetId`.
+  const { clause: scopeClause, ids: declaredIds } = blockedSweepScope(isNonProductionEnv(env));
 
   const placeholders = BIDS_VALIDATION_BLOCK_REASONS.map(() => "?").join(", ");
   // Guard the initial query so a D1 outage / schema drift surfaces as errors>0
@@ -120,7 +146,10 @@ export async function sweepBlockedBidsValidationRequests(
           ORDER BY pr.updated_at ASC
           LIMIT ?`,
       )
-      .bind(...BIDS_VALIDATION_BLOCK_REASONS, limit)
+      // Bind order follows the placeholders in the SQL above: the block
+      // reasons, then the declared dev-owned ids (empty in production, where
+      // scopeClause is likewise empty), then the limit.
+      .bind(...BIDS_VALIDATION_BLOCK_REASONS, ...declaredIds, limit)
       .all<{ id: number; dataset_id: string; block_reason: string; github_repo: string | null }>();
   } catch (err) {
     result.errors++;

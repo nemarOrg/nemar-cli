@@ -72,6 +72,41 @@ OpenNeuro ids are mirrored from upstream and never allocated here, so a reservat
 The rule is enforced in `resolveRange`, which is the single source of truth for both the allocator loop and the exhaustion error,
 so a caller that runs out of ids is told the ceiling it actually hit rather than being told 99999 while the allocator stopped at 99899.
 
+## Amendment 2026-09-17 (#1440): environment ownership is declared, not inferred
+
+Moving the standing anonymous deposit to a reserved `nm` id had a consequence this ADR did not foresee, found in review of #1437 rather than in the plan.
+
+Three fences decide "does this environment own this dataset?" from the id SHAPE, via `isDevRangeDatasetId` (`/^xx09\d{4}$/`).
+That predicate was quietly answering two different questions at once: "is this a dev SANDBOX dataset" and "does the dev worker own this".
+They were the same set until a reserved `nm` fixture existed, which is the second and not the first.
+
+The measured consequences, all in code that predates this ADR:
+
+- `services/deletion.ts` refused to cascade-delete `nm099998` from the dev worker, so the documented recovery for a failed fixture build, delete then recreate, did not work on the only worker that could run it.
+- `routes/webhooks/github.ts` made the DEV worker refuse pushes to its own fixture, answering `prod_range_repo_on_dev_worker`, so enrichment could never run against the one dataset built to exercise the anonymity surfaces.
+- The same file made the PRODUCTION worker treat those pushes as its own and dispatch an ENRICHMENT run for a repository it has no D1 row for.
+  Stated narrowly on purpose, because a first draft of this amendment said "enrichment, zarr and version-DOI" and two thirds of that was wrong: `shouldDispatchZarr` is defined but never called (retired with the Actions dispatch path in #1109), and the version-DOI path already refused this case, because its anonymity check reads `SELECT anonymous FROM datasets` on the calling worker and treats an ABSENT row as anonymous (#1408).
+  Enrichment alone is enough to justify the change, and an ADR that overstates its evidence is worse than one that understates it.
+- A fourth fence, found only after the first three were fixed: `services/publication-sweep.ts` scoped its non-production candidate set with `AND pr.dataset_id LIKE 'xx09%'`, the same question asked a fourth way.
+  An anonymous release IS a publication request, so the standing anonymous deposit is the dataset most likely to land in the `blocked` state that sweep exists to clear, and moving it to a reserved `nm` id dropped it out of the sweep's reach.
+
+**Environment ownership is therefore declared, in `DEV_OWNED_FIXTURE_IDS`, and not inferred from the id.**
+`isDevOwnedDatasetId` is `isDevRangeDatasetId(id) || DEV_OWNED_FIXTURE_IDS.has(id)`, and the three fences use it.
+`isDevRangeDatasetId` keeps its own meaning and its other callers; conflating the two questions is what caused this, and it is not fixed by redefining the first one.
+
+**A declared list is right here, and this ADR rejects exactly that shape for the allocator.**
+The difference is what the two are being asked.
+The allocator needs a rule, because "which id does the next fixture get" has to be answerable without consulting a list, and a list records no rule.
+Ownership is a FACT about a particular fixture, not something derivable from its id, so there is no rule to record.
+Position does not encode it either, which is what rules out partitioning the reserved band by owner: `nm099999` and `nm099998` are adjacent and differ.
+
+**`nm099999` is deliberately not in the set.**
+It exists in both the production and dev catalogs, and it is maintained through `POST /admin/datasets/nm099999/reset` rather than a delete-and-recreate cycle.
+Adding it would let a non-production worker cascade-delete a GitHub repository production also uses.
+
+The cost is that adding a standing fixture now means adding it in two places, the reserved band and the ownership set.
+That is a real cost and it is the right one: the alternative is a rule that cannot express the thing it is being asked to express, which is how this was missed the first time.
+
 ## Consequences
 
 A fixture's id becomes predictable without a registry: the next standing fixture is `nm099997`, and anyone can work that out from this document.

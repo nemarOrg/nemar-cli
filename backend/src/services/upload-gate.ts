@@ -24,7 +24,7 @@
  */
 
 import type { AccountKind } from "../../../shared/contract/user.js";
-import { isReservedFixtureId } from "./datasetId.js";
+import { isDevOwnedDatasetId, isReservedFixtureId } from "./datasetId.js";
 
 /**
  * `error` is the stable machine-readable half and must not change — the CLI
@@ -149,6 +149,12 @@ export const EXPLICIT_ID_ADMIN_ERROR = {
   message: "Standing fixtures are created by an administrator, not by a depositor.",
 } as const;
 
+export const EXPLICIT_ID_NOT_DEV_OWNED_ERROR = {
+  error: "Dataset id is reserved but not declared dev-owned",
+  message:
+    "Add it to DEV_OWNED_FIXTURE_IDS first (ADR 0068, #1440). Until a fixture is declared, production treats its pushes as its own and the dev worker refuses them.",
+} as const;
+
 export const EXPLICIT_ID_NOT_RESERVED_ERROR = {
   error: "Dataset id is not in the reserved fixture band",
   message:
@@ -185,7 +191,8 @@ export const EXPLICIT_ID_NOT_RESERVED_ERROR = {
 export type ExplicitIdGateBody =
   | typeof EXPLICIT_ID_PRODUCTION_ERROR
   | typeof EXPLICIT_ID_ADMIN_ERROR
-  | typeof EXPLICIT_ID_NOT_RESERVED_ERROR;
+  | typeof EXPLICIT_ID_NOT_RESERVED_ERROR
+  | typeof EXPLICIT_ID_NOT_DEV_OWNED_ERROR;
 
 export function explicitDatasetIdGate(input: {
   isProduction: boolean;
@@ -195,5 +202,18 @@ export function explicitDatasetIdGate(input: {
   if (input.isProduction) return EXPLICIT_ID_PRODUCTION_ERROR;
   if (!input.isAdmin) return EXPLICIT_ID_ADMIN_ERROR;
   if (!isReservedFixtureId(input.datasetId)) return EXPLICIT_ID_NOT_RESERVED_ERROR;
+  // Reserved is not sufficient: the fixture must also be DECLARED as dev-owned
+  // (#1440). Creation previously admitted any reserved id while ownership was
+  // declared for one, so the next fixture -- ADR 0068 names nm099997 -- would
+  // have been born in exactly the state this epic just fixed: production
+  // dispatching enrichment for a repo it has no row for, the dev worker
+  // refusing its own dataset, and delete-dataset refused on the only worker
+  // that could rebuild it. Nothing warned, and the symptom surfaced days later
+  // as "enrichment never ran". Failing closed HERE is the one moment someone is
+  // already thinking about the fixture.
+  //
+  // Reserved `xx` ids are dev-range and so already dev-owned; nm099999 is
+  // created by its own reset endpoint, not this route.
+  if (!isDevOwnedDatasetId(input.datasetId)) return EXPLICIT_ID_NOT_DEV_OWNED_ERROR;
   return null;
 }

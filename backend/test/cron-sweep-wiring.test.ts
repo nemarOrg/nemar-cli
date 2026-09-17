@@ -97,6 +97,10 @@ const SWEEP_WIRING: Record<string, "prod-only" | "all-envs" | "cron-wrapped" | "
   runImportCoverageSweepCron: "prod-only",
   runWeeklyImportSummaryCron: "prod-only",
   sweepBlockedBidsValidationRequests: "all-envs",
+  // #1440: the non-production scope clause for sweepBlockedBidsValidationRequests,
+  // exported so the test imports the REAL clause rather than retyping it. Pure,
+  // driven only by the sweep above, and never a cron entry point of its own.
+  blockedSweepScope: "helper",
   importIssueSweepLogLines: "helper",
   importCoverageSweepSummary: "helper",
   availabilityReportSweepWhere: "helper",

@@ -18,6 +18,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   EXPLICIT_ID_ADMIN_ERROR,
+  EXPLICIT_ID_NOT_DEV_OWNED_ERROR,
   EXPLICIT_ID_NOT_RESERVED_ERROR,
   EXPLICIT_ID_PRODUCTION_ERROR,
   explicitDatasetIdGate,
@@ -263,10 +264,37 @@ describe("explicitDatasetIdGate (ADR 0068, #1432)", () => {
     }
   });
 
-  test("every reserved id is allowed", () => {
-    for (const datasetId of ["nm099900", "nm099998", "nm099999", "xx099900", "xx099907", "xx099999"]) {
+  test("a reserved id is allowed only once it is DECLARED dev-owned", () => {
+    // Reserved is necessary and not sufficient (#1440). Creation used to admit
+    // any reserved id while ownership was declared for one, so the next fixture
+    // would be born undeclared: production dispatching enrichment for a repo it
+    // has no row for, the dev worker refusing its own dataset, and
+    // delete-dataset refused on the only worker that could rebuild it.
+    expect(explicitDatasetIdGate({ ...ok, datasetId: "nm099998" })).toBeNull();
+
+    // Reserved `xx` ids are dev-range, so they are dev-owned without being
+    // named in the set.
+    for (const datasetId of ["xx099900", "xx099907", "xx099999"]) {
       expect(explicitDatasetIdGate({ ...ok, datasetId })).toBeNull();
     }
+  });
+
+  test("an UNDECLARED reserved nm id is refused, and says what to do", () => {
+    // ADR 0068 names nm099997 as the next standing fixture, so this is the
+    // documented next step rather than a hypothetical.
+    for (const datasetId of ["nm099900", "nm099997"]) {
+      expect(explicitDatasetIdGate({ ...ok, datasetId })).toEqual(EXPLICIT_ID_NOT_DEV_OWNED_ERROR);
+    }
+    expect(EXPLICIT_ID_NOT_DEV_OWNED_ERROR.message).toMatch(/DEV_OWNED_FIXTURE_IDS/);
+  });
+
+  test("nm099999 is refused here: it has its own reset endpoint, not this route", () => {
+    // Reserved, a fixture, and production's. It is created and rebuilt through
+    // POST /admin/datasets/nm099999/reset, so naming it here would be a second
+    // way to make a dataset production also uses.
+    expect(explicitDatasetIdGate({ ...ok, datasetId: "nm099999" })).toEqual(
+      EXPLICIT_ID_NOT_DEV_OWNED_ERROR,
+    );
   });
 
   test("a malformed id is refused, never treated as a name", () => {

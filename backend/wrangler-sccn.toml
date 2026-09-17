@@ -157,9 +157,10 @@ WEB_SESSION_COOKIE_DOMAIN = "app.nemar.org"
 # on005385/on005752 (#751); kept here (not just on the live Worker) so a
 # dev->main backend deploy can't silently revert it. Redeploy to change.
 MANIFEST_VIA_CENTRAL_WORKFLOW = "true"
-# Dev-range webhook mirror (epic #923). On prod only: a GitHub push to a dev-range
-# (xx09NNNN) repo is re-posted verbatim to the dev worker so it dispatches for
-# staging exemplars. Outbound-only + fire-and-forget; a dev outage cannot affect
+# Dev-owned webhook mirror (epic #923, widened by #1440). On prod only: a GitHub
+# push to a repo the dev worker OWNS (xx09NNNN, plus the reserved fixtures
+# declared in datasetId.ts) is re-posted verbatim to the dev worker so it
+# dispatches for staging datasets. Outbound-only + fire-and-forget; a dev outage cannot affect
 # prod. Absent from [env.dev.vars] so the dev worker never mirrors.
 DEV_WEBHOOK_MIRROR_URL = "https://api-test.nemar.org/webhooks/github"
 # Zarr serving copy (epic #684). Base URL of the Cloudflare-cached zarr host the

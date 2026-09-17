@@ -86,7 +86,11 @@ export function isReservedFixtureId(id: string): boolean {
 // cap on purpose so isValidDatasetId and every prod webhook/data/zarr gate keep
 // their exact semantics (xx900001 would fail validation everywhere).
 //
-// DEV_SANDBOX_RANGE_RE identifies a dev/test-range repo by id shape alone
+// DEV_SANDBOX_RANGE_RE identifies a dev/test-range repo by id shape alone.
+// NOTE (#1440): the webhook receiver and the deletion fence now ask
+// isDevOwnedDatasetId instead, because ownership is not a function of id shape
+// once a reserved `nm` fixture exists. This regex keeps its own meaning -- "is
+// this a dev SANDBOX id" -- and its other callers.
 // (env-independent): xx09NNNN == xx090000-xx099999, which covers the whole dev
 // band (floor 90001) and the exemplar sub-band (xx099900+). The prod webhook
 // receiver uses it to refuse dispatching enrichment/zarr/DOI runs against
@@ -109,6 +113,63 @@ export const DEV_EPHEMERAL_BAND_START = "xx090001";
 // cleanup cron honored this boundary while the allocator ran straight through
 // it (ADR 0068).
 export const DEV_EPHEMERAL_BAND_END = formatDatasetId("xx", RESERVED_FIXTURE_FLOOR);
+
+// Reserved ids the NON-PRODUCTION worker owns outright (#1440).
+//
+// `isDevRangeDatasetId` (xx09NNNN) was quietly answering two different
+// questions: "is this a dev SANDBOX dataset" and "does the dev worker own
+// this". They were the same set until the standing anonymous deposit moved to
+// a reserved `nm` id (ADR 0068), which is the second and not the first.
+//
+// A declared list rather than a rule, deliberately, and ADR 0068 rejected
+// exactly that shape for the ALLOCATOR. The allocator needed a rule, because
+// "which id does the next fixture get" has to be answerable without consulting
+// a list. This is a different question: which environment owns a given standing
+// fixture is a FACT about that fixture, not something derivable from its id.
+// Ownership is not a function of position either, which rules out splitting the
+// reserved band by owner: nm099999 and nm099998 are adjacent and differ.
+//
+// **nm099999 is deliberately absent.** It exists in BOTH production and dev D1
+// (production holds it among its 203 nm rows), and it is maintained through
+// `POST /admin/datasets/nm099999/reset` rather than a delete-and-recreate
+// cycle. Adding it here would let a non-production worker cascade-delete a
+// GitHub repository production also uses.
+export const DEV_OWNED_FIXTURE_IDS: ReadonlySet<string> = Object.freeze(
+  new Set(["nm099998"]),
+) as ReadonlySet<string>;
+
+/**
+ * Ids the non-production worker must NEVER own, however the set is edited.
+ *
+ * `nm099999` is reserved AND a fixture AND still production's: it exists in
+ * both catalogs and is maintained through `POST /admin/datasets/nm099999/reset`
+ * rather than a delete-and-recreate cycle. It is named here rather than left to
+ * a reviewer's memory, because the cost of it drifting into the set is a
+ * non-production worker cascade-deleting a repository production also uses.
+ *
+ * Note the reset endpoint itself is not environment-fenced and already deletes
+ * and recreates that repository from whichever worker serves the request, which
+ * is how `nemar admin e2e-test` works against staging. The cascade fence still
+ * prevents the unrecoverable variant, row plus S3 plus repo with no recreate,
+ * so keeping `nm099999` out of the set remains right; it just protects less
+ * than "dev can never touch it".
+ */
+export const NEVER_DEV_OWNED_IDS: ReadonlySet<string> = Object.freeze(
+  new Set(["nm099999"]),
+) as ReadonlySet<string>;
+
+/**
+ * True when the non-production worker OWNS this dataset: it may delete it, its
+ * webhook deliveries belong to dev, and production must not act on them.
+ *
+ * Distinct from `isDevRangeDatasetId`, which answers "is this a dev sandbox
+ * id". Every dev sandbox id is dev-owned, but not every dev-owned id is a
+ * sandbox id. Keep the two separate: conflating them is what made a reserved
+ * `nm` fixture invisible to dev and visible to production at the same time.
+ */
+export function isDevOwnedDatasetId(id: string): boolean {
+  return isDevRangeDatasetId(id) || DEV_OWNED_FIXTURE_IDS.has(id);
+}
 
 /**
  * True when a dataset id is in the dev EPHEMERAL sandbox band, i.e. the only
