@@ -219,16 +219,22 @@ function env(): Bindings {
   } as unknown as Bindings;
 }
 
-function seedDataset(fields?: { conceptDoi?: string | null; githubRepo?: string | null }): void {
+function seedDataset(fields?: {
+  conceptDoi?: string | null;
+  githubRepo?: string | null;
+  /** The row as `repo_public` leaves it: de-anonymized and stamped. */
+  firstPublishedAt?: string;
+}): void {
   db.prepare(
     `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, is_sandbox,
                            github_repo, anonymous, concept_doi, first_published_at)
-     VALUES (?, ?, 1, 'active', 'public', 0, ?, 0, ?, datetime('now'))`,
+     VALUES (?, ?, 1, 'active', 'public', 0, ?, 0, ?, COALESCE(?, datetime('now')))`,
   ).run(
     DATASET_ID,
     DESCRIPTION.Name,
     fields?.githubRepo === undefined ? REPO : fields.githubRepo,
     fields?.conceptDoi === undefined ? CONCEPT_DOI : fields.conceptDoi,
+    fields?.firstPublishedAt ?? null,
   );
 }
 
@@ -439,6 +445,22 @@ describe("who this runs for", () => {
     expect(statusOf("1.0.0")).toBe("public");
     // Never addressed at all, not merely left unchanged.
     expect(methodsFor("2.0.0")).toEqual([]);
+  });
+
+  test("a version recorded in the same second as the stamp IS concealed-era", async () => {
+    // The boundary is inclusive, and this is the case that makes it matter. Both
+    // columns are `datetime('now')` at second precision, and `repo_public`
+    // stamps the dataset a few steps before `version_doi` inserts the row -- so
+    // on a fast run, or an e2e one, the concealed release and the publication
+    // that settles it land on the same timestamp. A strict `<` would exclude
+    // exactly the row this function exists for and report nothing wrong.
+    seedDataset({ firstPublishedAt: "2026-06-01 12:00:00" });
+    seedRequest(1);
+    seedVersion("1.0.0", "2026-06-01 12:00:00");
+    seedIdentifier(versionIdentifier("1.0.0"), "reserved", BLINDED_XML);
+
+    expect(await run()).toBeUndefined();
+    expect(statusOf("1.0.0")).toBe("public");
   });
 
   test("an ordinary publication long after the blind reports nothing, even past the cap", async () => {
