@@ -355,6 +355,44 @@ describe("POST /datasets: the environment fence fails CLOSED", () => {
     });
   }
 
+  test("an unrecognized ENVIRONMENT still FORCES SANDBOX for an allocated id", async () => {
+    // The other half of the fence, and the half that had no test. The named-id
+    // gate and the allocation rule have OPPOSITE safe directions: unknown must
+    // REFUSE a named id and must FORCE SANDBOX for an allocated one. An earlier
+    // version of this epic drove both from one variable, which fixed the first
+    // and inverted the second -- measured: `ENVIRONMENT` unset allocated
+    // nm000108, a real id, where it had always allocated xx000001.
+    for (const environment of NOT_RECOGNIZED) {
+      db = freshDb();
+      app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+      app.route("/datasets", datasetRoutes);
+      await seedUser(ENTITLED);
+      await create(envWith(environment), { name: "ordinary" });
+      const row = db
+        .query<{ dataset_id: string; is_sandbox: number }, []>(
+          "SELECT dataset_id, is_sandbox FROM datasets",
+        )
+        .get();
+      expect(row?.dataset_id.startsWith("xx")).toBe(true);
+      expect(row?.is_sandbox).toBe(1);
+    }
+  });
+
+  test("production itself allocates a real id, so the rule is not simply always-sandbox", async () => {
+    // The control. `ENVIRONMENT: "production"` is the ONE value that may
+    // allocate an nm id, and it must still do so or the fence has broken
+    // production instead of protecting it.
+    await seedUser(ENTITLED);
+    await create(prodEnv(), { name: "real-one", sandbox: false });
+    const row = db
+      .query<{ dataset_id: string; is_sandbox: number }, []>(
+        "SELECT dataset_id, is_sandbox FROM datasets",
+      )
+      .get();
+    expect(row?.dataset_id.startsWith("nm")).toBe(true);
+    expect(row?.is_sandbox).toBe(0);
+  });
+
   test("the recognized non-production values still allow it", async () => {
     // The inverse, so the fence cannot be "fixed" by refusing everything.
     for (const environment of ["development", "staging", "test"]) {

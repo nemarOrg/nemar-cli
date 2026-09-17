@@ -258,14 +258,24 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
           "[datasets] ENVIRONMENT not configured; defaulting to non-production (sandbox-only)",
         );
       }
-      // `!isNonProductionEnv`, NOT `ENVIRONMENT === "production"`, so the fence
-      // FAILS CLOSED. Before the named-id path existed, `isProduction === false`
-      // meant MORE restriction (force sandbox), so a literal comparison was
-      // fail-safe. The named-id gate inverts that valence: `false` is now
-      // permission to name a reserved id. An unset, misspelled or
-      // env-block-omitted ENVIRONMENT must refuse, not permit, on a worker that
-      // may be bound to prod's D1, prod's bucket and the shared GitHub org.
-      // Matches webhooks/github.ts, services/deletion.ts and services/exemplar.ts.
+      // TWO predicates, deliberately, because this route runs two rules whose
+      // SAFE directions are opposite. One variable cannot serve both, and an
+      // earlier version of this epic tried: it replaced the literal comparison
+      // with `!isNonProductionEnv` for the named-id gate's benefit and thereby
+      // INVERTED the allocation rule underneath it. Measured on the composed
+      // branch before this was caught: `ENVIRONMENT` unset and no `dataset_id`
+      // allocated `nm000108`, a real id, where it had always allocated
+      // `xx000001`. That is the exact collision class ADR 0068 exists to
+      // prevent, introduced by a change made to prevent a different one.
+      //
+      // Allocation: an UNRECOGNIZED environment must force sandbox, so the
+      // literal comparison is right here. Unknown means "not production" in the
+      // restrictive direction.
+      const forceSandbox = c.env.ENVIRONMENT !== "production";
+      // Naming a reserved id: an UNRECOGNIZED environment must refuse, so the
+      // allowlist is right here. Unknown means "treat as production" in the
+      // permissive direction. Matches webhooks/github.ts, services/deletion.ts
+      // and services/exemplar.ts.
       const isProduction = !isNonProductionEnv(c.env);
 
       // A named id is gated before anything reads it (ADR 0068, #1432).
@@ -291,11 +301,11 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
       const sandbox =
         requestedDatasetId !== undefined
           ? isSandboxDatasetId(requestedDatasetId)
-          : isProduction
-            ? !!requestedSandbox
-            : true;
+          : forceSandbox
+            ? true
+            : !!requestedSandbox;
 
-      if (!isProduction && requestedDatasetId === undefined && !requestedSandbox) {
+      if (forceSandbox && requestedDatasetId === undefined && !requestedSandbox) {
         console.warn(
           `[datasets] Non-production env: forcing sandbox=true for user ${user.username} (requested: ${requestedSandbox})`,
         );
@@ -335,6 +345,10 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
       }
 
       // Validate sandbox file size limit (larger outside production, see const)
+      // `isProduction` (the allowlist) is right here too: an unrecognized
+      // environment gets production's SMALLER cap, which is the restrictive
+      // direction. This is a deliberate tightening over the literal comparison,
+      // which gave an unknown environment the larger non-production cap.
       const sandboxMaxTotalSize = isProduction
         ? SANDBOX_MAX_TOTAL_SIZE
         : SANDBOX_MAX_TOTAL_SIZE_NONPROD;
@@ -575,11 +589,15 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
                 //    pre-publication for weeks by design and nm099999 has a
                 //    reset endpoint rather than a delete/recreate cycle.
                 //    Blanket delete advice aimed at this band is aimed at them.
-                // 2. For a reserved `nm` id the command does not even work off
-                //    production: deleteDatasetCascade refuses any id outside
-                //    xx09NNNN on a non-production worker, because a cascade
-                //    removes the GitHub repository and the org is shared.
-                note: "Naming an id never overwrites an existing dataset. The reserved band holds standing fixtures that are meant to persist, so check what is there before removing anything; note that a non-production worker can only cascade-delete dev-range ids (xx090000-xx099999).",
+                // 2. It used to be worse: for a reserved `nm` id the command
+                //    did not work off production at all. #1440 fixed that by
+                //    fencing the cascade on OWNERSHIP, and making
+                //    delete-then-recreate work on the only worker that can
+                //    rebuild a fixture was one of its four motivating defects.
+                //    So the note no longer warns the operator off it -- it just
+                //    stops short of recommending deletion in a band whose
+                //    contents are supposed to persist.
+                note: "Naming an id never overwrites an existing dataset. The reserved band holds standing fixtures that are meant to persist, so check what is there before removing anything. A non-production worker may cascade-delete only the ids it owns: the dev range (xx090000-xx099999) and its declared reserved fixtures.",
               },
               409,
             );
