@@ -61,10 +61,10 @@ export function formatDatasetId(prefix: string, n: number): string {
  *
  * Reserved means NOT ALLOCATABLE, not invalid: `isValidDatasetId` still accepts
  * these ids and every route must still serve them. In use today: nm099999 (the
- * end-to-end dataset, with its own reset endpoint) and xx099900-xx099906 (the
- * exemplar fleet). xx099907 still exists in dev D1 and on GitHub but is no
- * longer declared by the fleet and is retired in #1434. nm099998 is DESIGNATED
- * for the standing anonymous deposit and not yet built, also #1434.
+ * end-to-end dataset, with its own reset endpoint), nm099998 (the standing
+ * anonymous deposit, built in #1434) and xx099900-xx099906 (the exemplar
+ * fleet). xx099907 held the anonymous deposit before #1434 and is retired: no
+ * dev D1 row and no GitHub repository, both verified 404 on 2026-09-17.
  *
  * The reservation itself is enforced by `resolveRange`; this predicate is the
  * inverse rule, and it IS a production gate: `explicitDatasetIdGate`

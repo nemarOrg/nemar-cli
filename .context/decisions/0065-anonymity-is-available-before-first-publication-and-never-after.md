@@ -215,12 +215,46 @@ fixture has to be declared rather than borrowed.
 The deposit is now `nm099998`, a reserved id (ADR 0068), built through the normal upload path
 from a tree an operator blinds by hand -- which is what the submission standard below asks a
 real anonymous depositor to do, so the fixture exercises the instruction rather than bypassing
-it. #1434 builds it and retires `xx099907`.
+it. #1434 built it and retired `xx099907`.
 
-**Current state, 2026-09-17:** `nm099998` does NOT exist yet. `xx099907` DOES: a dev D1 row
-(`visibility: private`, `anonymous = 1`, never successfully released) and a private
-`nemarDatasets` repository, no longer declared by `scripts/exemplar-fleet.json`. Anything
-describing either as a working fixture is describing a shape that is not real.
+**Current state, 2026-09-17, measured on the dev worker rather than asserted:** `nm099998` exists
+and is the fixture. A public catalog row over a PRIVATE `nemarDatasets` repository,
+`anonymous = 1`, `first_published_at` NULL, `authors` reading
+`Anonymous (withheld until publication)`, and `owner_username`, `owner_github`, `github_repo`,
+`concept_doi` and `latest_version_doi` all NULL on the detail response.
+`v1.0.0` is released: `GET /datasets/nm099998/manifest` answers `{"versions":["v1.0.0"]}` over a
+131-file manifest, and the data plane serves `dataset_description.json` out of the private
+repository at 200 with 508 bytes declared and 508 delivered, which is ADR 0066's broker doing the
+one thing a private-repo deposit needs from it.
+Four public surfaces (the detail response, `metadata.json`, the page bundle and the enrichment
+file) carry none of the depositor's identity tokens.
+`xx099907` no longer exists in either place: no dev D1 row and no GitHub repository, both 404.
+
+**One gap is left open on purpose, and it is a gap in the FIXTURE, not in the blind.** The
+fixture is `is_sandbox = 1, is_exemplar = 0`, and the catalog population requires
+`d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1`
+(`services/dataset-filters.ts`, `routes/datasets/catalog.ts`, which each spell it out), so
+`nm099998` satisfies no disjunct: it is absent from list and search on dev and cannot exercise
+those two paths end to end.
+A real anonymous deposit on production is not a sandbox row and WILL be in that population, so
+the blind there is load-bearing: list rows go through `toListRow`, hence
+`withheldWhileAnonymous`, and owner identity is withheld in the projection itself by
+`OWNER_USERNAME_SQL` and `OWNER_GITHUB_SQL`, because a join cannot be blinded by a writer.
+`backend/test/anonymity-projection.test.ts` fails if a call site spells the raw join out instead.
+So the rule is covered and only the live exercise of it is missing.
+Closing that means changing either the fixture's flags or the population filter, and neither is
+free.
+`is_exemplar = 1` is the tempting one-character fix and the hazard is NOT where it looks:
+the exemplar publish and reindex gates both require `dataset_id.startsWith("xx")` alongside
+`is_exemplar === 1` (`services/exemplar.ts`) and the remint route tests `EXEMPLAR_ID_RE`, so
+`xx`-only tooling would correctly ignore an `nm` id rather than misbehave on it.
+`requiresUploaderName` (`services/uploader-identity.ts`) is the one that reads `is_exemplar`
+with NO id check, and it is wired into publication, the admin DOI route and enrichment, so the
+flag would silently exempt the fixture from "a DOI mint needs a real uploader name", treating a
+concealed real depositor like a service-owned copy of a public dataset. That is the opposite of
+what this fixture is for.
+Widening the filter is the other option and it changes what every anonymous reader sees, which
+is a bigger decision than a test fixture should force.
 
 **A blinded deposit is submitted blinded, and that is an EXCEPTION to the submission
 standards rather than a silent special case.** NEMAR asks the depositor to anonymize their own
