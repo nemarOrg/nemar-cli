@@ -241,7 +241,13 @@ the prefix, not of each band in the table above, so the top of the prod sandbox 
 (`xx089900`+) and of the dev ephemeral band (`xx099800`+) are allocated normally.
 Real datasets grow upward from the prefix's start; standing test fixtures are assigned
 downward from `nm099999`, so a fixture's id is predictable without a registry. In use
-today: `nm099999` (end-to-end, its own reset endpoint) and the `xx099900+` exemplar fleet.
+today: `nm099999` (end-to-end, its own reset endpoint), `nm099998` (the standing anonymous
+deposit, dev-owned) and the `xx099900+` exemplar fleet; `nm099997` is next.
+The FLOOR of the `nm` band is spoken for in the opposite direction: `nm099900` is
+`ABSENT_DATASET_ID`, the id live tests rely on never resolving. It must never be declared
+dev-owned and a downward assignment must never reach it. Four live tests used `nm099998`
+for that purpose, each commented "unlikely to be allocated", and building the fixture on
+that id turned all four red at once.
 Reserved means not *allocatable*, not invalid, so `isValidDatasetId` still accepts these
 and every route must still serve them. A fixture is created by NAMING its id on
 `POST /datasets` (`dataset_id`), fenced by `explicitDatasetIdGate` on FOUR terms, all of
@@ -273,21 +279,17 @@ published with **sandbox** EZID DOIs (`10.5072/FK2`, never the production `10.82
 > exemplar in every direction; there is no longer a way to ask. The clone tool does not
 > blind `Authors`.
 >
-> `xx099907` itself still EXISTS in dev D1 (`visibility: private`, `anonymous = 1`,
-> never successfully released) and as a private `nemarDatasets` repository. #1434 retires
-> it and builds the standing anonymous deposit at the reserved id `nm099998`, from a tree
-> an operator blinds by hand, exactly as a real anonymous depositor does.
+> `xx099907` is RETIRED (#1434). No dev D1 row, no `nemarDatasets` repository; both
+> verified 404 on 2026-09-17. The standing anonymous deposit is now `nm099998`, described
+> in full below.
 >
-> One seam #1434 owns: `POST /datasets` accepts `dataset_id`, but the CLI's own
-> `createDataset` client does not send it yet, so `nemar dataset upload` cannot name an id.
-> The fixture's create is therefore an out-of-band API call until #1434 adds the field, and
-> "through the normal upload path" means the normal ROUTE and its gates, which is what
-> matters -- not that the CLI can drive it today.
->
-> One field outlives the fixture: `POST /admin/datasets/exemplar` still accepts
-> `anonymous: true`, so an admin can still create an anonymous exemplar row. Do not.
-> It cannot be published in any direction and its refusal reads "Cannot publish sandbox
-> datasets", which names the band rather than the term that fired. #1434 retires the field.
+> Two seams the previous text promised are closed, recorded because someone reading the
+> old paragraphs would still expect them: `POST /datasets` takes `dataset_id` and the CLI
+> sends it (`nemar dataset upload --dataset-id`), so a fixture's create is no longer an
+> out-of-band API call; and `POST /admin/datasets/exemplar` REFUSES `anonymous: true`
+> with `exemplar_anonymous_retired`. That field is still declared, deliberately: zod
+> strips an unknown key, so deleting it outright would take `anonymous: true` from a
+> caller who means it, create a NAMED exemplar, and report success.
 
 Their `active`/`public` state lives in D1 and is the source of truth for the staging catalog;
 it does not depend on the registrar.
@@ -299,6 +301,32 @@ environment** (unlike `e2e-test.ts`, which fetches per-user S3 credentials from 
 and session credentials are short-lived, so export them immediately before each run.
 Creation is also **not retry-safe** after a partial failure (issue #955):
 recover with `nemar admin delete-dataset <id>` then recreate, rather than re-running `create`.
+
+### `nm099998` is the standing anonymous deposit, and a NAMED publication destroys it
+
+It is the fixture every anonymity surface is exercised against (ADR 0065, #1407): a PUBLIC
+catalog row over a PRIVATE `nemarDatasets` repository, `anonymous = 1`,
+`first_published_at` NULL, with a version DOI minted and left **reserved** rather than
+published. It exists so anonymity is tested against a dataset that has been in the
+concealed state for weeks, not only against rows a test creates and tears down.
+
+**Never publish it non-anonymously.** An ANONYMOUS release is fine and is the point; it has
+had one. What is unrecoverable is a normal publication, and the mechanism is worth knowing
+exactly, because the two halves live in different files:
+`FIRST_PUBLICATION_STAMP_SQL` (`services/anonymity.ts`) stamps `first_published_at` only
+`WHEN anonymous = 0`, so an anonymous release leaves the column NULL, while a named one
+stamps it -- and migration 0085's `datasets_anonymous_unpublished_ai`/`_au` triggers then
+ABORT any statement that would set `anonymous = 1` on a stamped row, forever. So publishing
+it under a name does not dirty the fixture, it destroys it, and no repair exists short of
+rebuilding the dataset at a new id. An earlier version of this file said the approve path
+stamps the column outright; that is false for an anonymous release, and the difference is
+the whole safety margin.
+
+The dev worker OWNS it (`DEV_OWNED_FIXTURE_IDS`, ADR 0068), so `nemar admin delete-dataset
+nm099998` works from staging and a failed rebuild is recoverable. Production has no row for
+it, so until the next `dev -> main` release the production worker still claims pushes to its
+repository and dispatches runs that fail. Expect those; they are not a sign the fixture is
+broken.
 
 ---
 

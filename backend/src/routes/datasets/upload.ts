@@ -585,10 +585,11 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
                 // learned the hard way in review:
                 //
                 // 1. The reserved band is where the STANDING fixtures live, and
-                //    their whole value is that they persist. xx099907 has been
-                //    pre-publication for weeks by design and nm099999 has a
-                //    reset endpoint rather than a delete/recreate cycle.
-                //    Blanket delete advice aimed at this band is aimed at them.
+                //    their whole value is that they persist. nm099998 is the
+                //    anonymous deposit and its value comes from having been
+                //    concealed for weeks, and nm099999 has a reset endpoint
+                //    rather than a delete/recreate cycle. Blanket delete advice
+                //    aimed at this band is aimed at them.
                 // 2. It used to be worse: for a reserved `nm` id the command
                 //    did not work off production at all. #1440 fixed that by
                 //    fencing the cascade on OWNERSHIP, and making

@@ -56,7 +56,8 @@ Note that this is a property of the prefix, not of each band inside it:
 the top of the prod sandbox band (`xx089900`-`xx089999`) and the top of the dev ephemeral band (`xx099800`-`xx099899`) are allocated normally.
 Real datasets allocate UPWARD from the prefix's start, as they always have; fixtures are assigned DOWNWARD from `MAX_NUMBER` by name.
 
-On the `nm` side `nm099999` (end-to-end, with its own reset endpoint) is in use today, and `nm099998` is designated for the standing anonymous deposit, which #1434 builds.
+On the `nm` side `nm099999` (end-to-end, with its own reset endpoint) and `nm099998` (the standing anonymous deposit, built and released by #1434) are in use today; `nm099997` is next.
+The band's FLOOR, `nm099900`, is spoken for in the opposite direction and is never assigned to a fixture: it is `ABSENT_DATASET_ID` (see the amendment below).
 On the `xx` side the reserved band is the exemplar fleet, which already occupied it.
 
 **Reserved means not allocatable, not invalid.**
