@@ -307,8 +307,12 @@ recover with `nemar admin delete-dataset <id>` then recreate, rather than re-run
 It is the fixture every anonymity surface is exercised against (ADR 0065, #1407): a PUBLIC
 catalog row over a PRIVATE `nemarDatasets` repository, `anonymous = 1`,
 `first_published_at` NULL, with a version DOI minted and left **reserved** rather than
-published. It exists so anonymity is tested against a dataset that has been in the
-concealed state for weeks, not only against rows a test creates and tears down.
+published. It exists so anonymity is tested against a dataset that STAYS concealed across
+releases, deploys and enrichment runs, not only against rows a test creates and tears down in
+one process. That value ACCRUES, so it is worth saying where the fixture is today: it was built
+on 2026-09-17 and has no tenure yet. Deleting and rebuilding it costs whatever it has
+accumulated, which is the reason the reserved band's error text does not offer
+`delete-dataset` as routine advice.
 
 **Never publish it non-anonymously.** An ANONYMOUS release is fine and is the point; it has
 had one. What is unrecoverable is a normal publication, and the mechanism is worth knowing

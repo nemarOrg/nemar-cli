@@ -232,9 +232,10 @@ file) carry none of the depositor's identity tokens.
 
 **One gap is left open on purpose, and it is a gap in the FIXTURE, not in the blind.** The
 fixture is `is_sandbox = 1, is_exemplar = 0`, and the catalog population requires
-`is_sandbox = 0 OR is_exemplar = 1` (`services/dataset-filters.ts`,
-`routes/datasets/catalog.ts`), so `nm099998` is absent from list and search on dev and cannot
-exercise those two paths end to end.
+`d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1`
+(`services/dataset-filters.ts`, `routes/datasets/catalog.ts`, which each spell it out), so
+`nm099998` satisfies no disjunct: it is absent from list and search on dev and cannot exercise
+those two paths end to end.
 A real anonymous deposit on production is not a sandbox row and WILL be in that population, so
 the blind there is load-bearing: list rows go through `toListRow`, hence
 `withheldWhileAnonymous`, and owner identity is withheld in the projection itself by
@@ -242,8 +243,18 @@ the blind there is load-bearing: list rows go through `toListRow`, hence
 `backend/test/anonymity-projection.test.ts` fails if a call site spells the raw join out instead.
 So the rule is covered and only the live exercise of it is missing.
 Closing that means changing either the fixture's flags or the population filter, and neither is
-free: `is_exemplar = 1` would hand an `nm` id to exemplar tooling that declares an `xx`-only band,
-and widening the filter changes what every anonymous reader sees.
+free.
+`is_exemplar = 1` is the tempting one-character fix and the hazard is NOT where it looks:
+the exemplar publish and reindex gates both require `dataset_id.startsWith("xx")` alongside
+`is_exemplar === 1` (`services/exemplar.ts`) and the remint route tests `EXEMPLAR_ID_RE`, so
+`xx`-only tooling would correctly ignore an `nm` id rather than misbehave on it.
+`requiresUploaderName` (`services/uploader-identity.ts`) is the one that reads `is_exemplar`
+with NO id check, and it is wired into publication, the admin DOI route and enrichment, so the
+flag would silently exempt the fixture from "a DOI mint needs a real uploader name", treating a
+concealed real depositor like a service-owned copy of a public dataset. That is the opposite of
+what this fixture is for.
+Widening the filter is the other option and it changes what every anonymous reader sees, which
+is a bigger decision than a test fixture should force.
 
 **A blinded deposit is submitted blinded, and that is an EXCEPTION to the submission
 standards rather than a silent special case.** NEMAR asks the depositor to anonymize their own
