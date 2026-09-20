@@ -85,6 +85,31 @@ labeled 128 Hz. It also drops `sympy`, whose only caller was the defect.
 New work this decision creates: **`eegprep-lean` does not exist yet.** Its contract is the first
 deliverable, per ADR 0069.
 
+#### ICLabel is backbone capability, not a separate product
+
+Phases 4, 5 and 6 are not "doing the browser". They are the capability that makes it possible to
+run ICLabel in a browser at all, built once and used by whatever surface asks for it.
+
+Two consequences that are easy to get wrong, and that the tier tables do not show:
+
+- **It costs nothing in the Python download budget.** `onnxruntime` has no WebAssembly build, so
+  the browser path goes through ONNX Runtime Web, which is JavaScript. Inference leaves Python
+  entirely. No package tier grows.
+- **It does cost a model artifact**, and that is where the real megabytes are. The network is about
+  2.9 M parameters, roughly 11.6 MB at float32, consistent with the 10.8 MB `netICL.mat` in the
+  wheel today. Phase 6 quantizes it to int8 and **ships int8 everywhere, native and browser, as one
+  artifact with one set of numbers to validate** (decided on #324). That is a saving of roughly
+  8 MB, which is worth putting beside the matplotlib trim rejected in ADR 0069 at 2.47 MB: this is
+  the scale at which shrinking something pays for the work it costs.
+
+The seam it creates is not size, it is synchrony. `iclabel()` and `pop_iclabel()` are synchronous
+and reachable from the GUI menus and from `eegprep-console`, while ONNX Runtime Web returns a
+promise that has to be awaited. Phase 5 has to decide what the async entry point is called, and
+whether the synchronous `pop_iclabel` raises a clear error under Emscripten rather than silently
+blocking. **That is a declared divergence in exactly ADR 0069's sense**, and it belongs in the
+`eegprep-lean` contract when that is written: the same call behaves differently on the two paths,
+and the contract says so rather than letting a user discover it.
+
 ### nemarOrg/nemar-cli
 
 **#1457** is open: `read_window`'s Python recipe emits
@@ -106,7 +131,8 @@ osa Phase 0 items 2,3,4,5,6 ─┬─> osa Phase 1 (tool-result contract, resume
 
 ADR 0069 ─> eegprep-lean contract ─> eegprep-lean package ─> nemar-cli#1457 (recipe targets it)
 
-eegprep epic #324 phases 2,3,5,6 ─> ICLabel in the browser
+eegprep epic #324 phase 4 ─> phase 5 (ORT Web, async) ─┬─> ICLabel runs in a browser
+                          └─> phase 6 (int8)         ─┘
                                      (independent of the OSA track)
 
 osa#370 ──> nemar-cli dev to main promotion
@@ -127,8 +153,11 @@ something real to run. They meet at the recipe in nemar-cli#1457.
    is the failure mode it exists to prevent.
 3. **Whether `pillow` and `fonttools` are droppable from the plot tier** (2.09 MB). Plausible for a
    PNG-only path, and must be proven the `eeglabio` way, by running the plotting with them absent.
-4. **Where the ICLabel work meets the lean runtime.** The eegprep epic is building browser ICLabel
-   on its own track; ADR 0069 has not been applied to it.
+4. **Whether the `[ica]` tier is right for a browser.** ADR 0069 lists it as adding `python-picard`,
+   but the browser ICA path the epic is actually building is `runica` routed through
+   `scipy.linalg.blas` (#376), and scipy is already present at the preprocess tier. The tier may be
+   unnecessary in the browser, or may need to name a different package. Resolve when `eegprep-lean`
+   is built, and correct the ADR table rather than leaving both readings alive.
 
 ## Working rules that have already earned themselves
 
