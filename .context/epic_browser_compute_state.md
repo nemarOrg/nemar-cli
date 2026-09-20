@@ -4,7 +4,14 @@
 > Decisions live in [`decisions/`](decisions/README.md); where this document and an ADR disagree,
 > the ADR wins. This document holds the state, the order of work, and the questions still open.
 
-**Last verified:** 2026-09-20, by querying each repository rather than from memory.
+**Last verified:** 2026-09-20.
+
+**How to verify a row, and how the first version of this file got it wrong.** Issue state is not
+work state. This document's first version reported four eegprep phases as open because their
+issues were open, when every phase pull request had already merged into the epic branch and the
+issues stay open until the epic lands on `develop`. It then said it had been "verified by querying
+each repository", which made a stale reading look rigorous. So every row below names what it was
+checked against: **issue state**, **PR state**, or **a file on a branch**. Prefer the last.
 
 ## What the epic is
 
@@ -42,6 +49,11 @@ them from memory, which has already nearly happened twice.
 
 ### OpenScience-Collective/osa
 
+Three files carry almost all of this, and a newcomer cannot find them from the issues alone:
+`src/api/routers/community.py` (the session store and both chat paths),
+`workers/osa-worker/index.js` (the edge: routing, Turnstile, rate limits) and
+`frontend/osa-chat-widget.js` (the widget). Every Phase 0 item below touches at least one.
+
 Phase 0 of `.context/browser-execution-tool-design.md` lists six prerequisites that the design
 assumed and that do not hold against deployed code. None of Phase 1 works end to end until they
 are settled.
@@ -66,14 +78,26 @@ Merged: **#421**, which answered whether a figure can ride on a tool result.
 Epic **#324**, "eegprep in the browser (Pyodide) with a small ONNX ICLabel", on branch
 `epic/324-pyodide-browser`.
 
-| Phase | Issue | State |
-|---|---|---|
-| 1. oct2py, psutil, pyedflib out of the base install | #374 | closed, in the epic branch |
-| 2. Pyodide harness, CI, ICA benchmark gate | #375 | open |
-| 3. runica matmuls through scipy BLAS under Emscripten | #376 | open |
-| 4. Export ICLabel to ONNX, native onnxruntime | #377 | closed |
-| 5. Browser ICLabel via ONNX Runtime Web | #378 | open |
-| 6. Quantize ICLabel to int8 with a parity repo | #379 | open |
+**All six phases are built and merged into the epic branch.** Their issues are open only because
+the epic workflow closes them when the epic reaches `develop`, which is the trap described above.
+
+| Phase | Issue | PR into the epic branch | Verified by |
+|---|---|---|---|
+| 1. oct2py, psutil, pyedflib out of the base install | #374 | #380 merged | PR state |
+| 2. Pyodide harness, CI, ICA benchmark gate | #375 | #382 merged | PR state |
+| 3. runica float64 products through dgemm | #376 | #385 merged | PR state |
+| 4. Export ICLabel to ONNX, native onnxruntime | #377 | #381 merged | PR state |
+| 5. Async ICLabel browser execution | #378 | #384 merged | PR state |
+| 6. Quantize ICLabel with a frozen parity gate | #379 | #383 merged | PR state |
+
+Phase 6 has shipped rather than being planned: `src/eegprep/plugins/ICLabel/iclabel.onnx` on the
+epic branch is **2,932,897 bytes**, int8, and `netICL.mat` (10,815,192 bytes) is excluded from the
+wheel rather than deleted from the tree. The roughly 8 MB saving this document previously described
+as future work is already realized. Verified by reading the branch.
+
+Phase 5's async entry point is decided and implemented, not open: `iclabel_async` and
+`pop_iclabel_async`, with the synchronous names raising under Emscripten. Verified by reading
+`src/eegprep/plugins/ICLabel/iclabel.py` on the branch.
 
 **PR #386** (epic to develop) is open and **deliberately held**: do not merge it until something
 actually needs it. **PR #387** patches review findings into the epic branch.
@@ -85,6 +109,21 @@ labeled 128 Hz. It also drops `sympy`, whose only caller was the defect.
 New work this decision creates: **`eegprep-lean` does not exist yet.** Its contract is the first
 deliverable, per ADR 0069.
 
+#### Browser ICA does not finish, and that is a product constraint
+
+Phase 2's benchmark, recorded on #324 and in `docs/source/pyodide_benchmark.md`: for 64 channels
+by 60 seconds at 250 Hz, **runica took 680 seconds under Pyodide** against 467 native, and
+**picard took 109 seconds** against 10 native, with neither converging within 512 iterations. The
+recorded verdicts were `picard_browser_default_retained=false` and `phase3_recommended=false`,
+which is why Phase 3 was narrowed to float64 dgemm only.
+
+The design note's default execution budget is `exec_seconds: 120`. So **ICA cannot complete inside
+a browser execution as currently budgeted.** Either the tool gets a per-call budget and the
+assistant's prompt says plainly that ICA takes minutes, or ICA is out of the first browser lane and
+the prompt says that instead. Neither is written anywhere the prompt will read it, and this is the
+single most product-relevant number in the epic. It also strengthens the case for serving
+precomputed weights rather than computing them in the browser.
+
 #### ICLabel is backbone capability, not a separate product
 
 Phases 4, 5 and 6 are not "doing the browser". They are the capability that makes it possible to
@@ -92,9 +131,14 @@ run ICLabel in a browser at all, built once and used by whatever surface asks fo
 
 Two consequences that are easy to get wrong, and that the tier tables do not show:
 
-- **It costs nothing in the Python download budget.** `onnxruntime` has no WebAssembly build, so
-  the browser path goes through ONNX Runtime Web, which is JavaScript. Inference leaves Python
-  entirely. No package tier grows.
+- **It costs nothing in the *Python* download budget, which is not the same as being free.**
+  `onnxruntime` has no WebAssembly build, so the browser path goes through ONNX Runtime Web, which
+  is JavaScript, and no package tier grows. But ORT Web brings its own runtime:
+  `ort-wasm-simd-threaded.wasm` is about **11.2 MB** (the WebGPU build is 21.7 MB), on top of the
+  2.9 MB model. That is more than the entire read-and-plot tier, it appears in no table in this
+  document or in the design note, and the design note does not mention `onnxruntime-web` at all.
+  An earlier version of this section said ICLabel "costs nothing in the Python download budget"
+  without that second sentence, which was true and thoroughly misleading.
 - **It does cost a model artifact**, and that is where the real megabytes are. The network is about
   2.9 M parameters, roughly 11.6 MB at float32, consistent with the 10.8 MB `netICL.mat` in the
   wheel today. Phase 6 quantizes it to int8 and **ships int8 everywhere, native and browser, as one
@@ -165,8 +209,16 @@ eegprep epic #324 phase 4 ─> phase 5 (ORT Web, async) ─┬─> ICLabel runs 
 osa#370 ──> nemar-cli dev to main promotion
 ```
 
-The two tracks, OSA's transport and eegprep's runtime, are independent until the widget needs
-something real to run. They meet at the recipe in nemar-cli#1457.
+The two tracks meet **twice**, not once, and this document previously showed only the first.
+
+1. **At the recipe** in nemar-cli#1457, which is the obvious one.
+2. **At a JavaScript global.** The browser ICLabel path does `from js import eegprep_iclabel_web`
+   and expects a host-registered object with a promise-returning `run(...)`. That host is OSA's
+   widget: it has to load ONNX Runtime Web, register the global, and get the model bytes to it
+   before Python imports anything, while the model lives inside a Python wheel. Who delivers those
+   bytes is an open seam on #378 itself. So "a JavaScript runtime dependency" belongs on the list
+   of things a community brings, which the design note currently limits to a lockfile, allowlists,
+   prompt guidance and an optional Python helper.
 
 ## What is coming, and what it constrains now
 
@@ -215,12 +267,11 @@ rather than an exception carved into that one.
    is the failure mode it exists to prevent.
 3. **Whether `pillow` and `fonttools` are droppable from the plot tier** (2.09 MB). Plausible for a
    PNG-only path, and must be proven the `eeglabio` way, by running the plotting with them absent.
-4. **Whether the `[ica]` tier is right for a browser.** ADR 0069 lists it as adding `python-picard`,
-   but the browser ICA path the epic is actually building is `runica` routed through
-   `scipy.linalg.blas` (#376), and scipy is already present at the preprocess tier. Now that ICA
-   and ICLabel are separated and the NEMAR path serves precomputed weights, the tier may be
-   unnecessary on that path entirely. Resolve when `eegprep-lean` is built, and correct the ADR
-   table rather than leaving both readings alive.
+4. ~~Whether the `[ica]` tier is right for a browser.~~ **Answered: it is not.** ADR 0069's
+   `[ica]` tier adds `python-picard` and its 5.6 MB of scikit-learn for a path Phase 2's benchmark
+   gate explicitly rejected as the browser default. The browser ICA that exists is `runica` through
+   `scipy.linalg.blas`, and scipy is already in `[preprocess]`. The ADR's tier table needs
+   correcting now rather than when `eegprep-lean` is built.
 5. **How precomputed ICA weights are versioned against the dataset they came from.** A
    decomposition is only valid for the data it was computed on, and NEMAR datasets are versioned
    and revisable. Getting this wrong means someone classifies components that do not belong to the
