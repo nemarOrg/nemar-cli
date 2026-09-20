@@ -61,6 +61,31 @@ and it costs 9.8 MB. It is deliberately not in the base: a session that only rea
 and matplotlib arrives when a plot is actually asked for.
 Extras are additive here, which is exactly right, because every tier genuinely adds to the one beneath it.
 
+### The plot tier is not trimmed, and what would change that
+
+matplotlib is mostly fonts. Of its 6.55 MB wheel, 4.07 MB is bundled typefaces
+(DejaVu Sans, Serif and Mono, STIX, Computer Modern) and another 0.50 MB is example data and
+GUI toolbar icons; the working library, Python source plus compiled extensions plus backends,
+is about 2 MB. A wheel installs atomically, so none of that can be left behind at install time,
+but it can be left out of a rebuilt wheel, and Pyodide builds custom wheels routinely.
+
+Costed out, the trim is not worth it. Dropping the example data, the toolbar icons, STIX, Computer Modern
+and the AFM metrics changes no behavior we could find, since `mathtext.fontset` defaults to `dejavusans`,
+eegprep never overrides it and nothing here emits PostScript, and it saves 2.47 MB.
+Going further, to DejaVu Sans alone, starts breaking things: `spectopo` labels axes with
+`$\mu$V$^2$`, which needs the oblique face.
+
+So roughly 2.5 MB, in exchange for a rebuilt wheel to maintain against every matplotlib release
+and a font-fallback divergence to declare in the contract. **Not worth it. Do not redo this investigation.**
+
+What would change the answer is scale, not cleverness: a saving of around 8 MB,
+or anything approaching half the tier. The only route there is dropping `pillow` and `fonttools`
+as well, which are 2.09 MB together and are plausible for a PNG-only figure path,
+but that is the `eeglabio` shape exactly and would have to be proven by running the plotting
+with them absent rather than by reading the import sites.
+If someone establishes that and the font trim together, the total approaches the threshold
+and this is worth reopening.
+
 ## Consequences
 
 The scientific package stops being asked to be two things at once, and its dependency list stops being a budget.
