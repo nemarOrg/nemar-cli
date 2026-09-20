@@ -102,6 +102,28 @@ Two consequences that are easy to get wrong, and that the tier tables do not sho
   8 MB, which is worth putting beside the matplotlib trim rejected in ADR 0069 at 2.47 MB: this is
   the scale at which shrinking something pays for the work it costs.
 
+  **4-bit is under investigation**, against an owner target near 3-4 MB. Note that the arithmetic
+  does not obviously agree with the target, since int8 should land near 2.9 MB and int4 near
+  1.5 MB, so part of that work is establishing the real numbers and explaining the gap. Viability
+  turns on whether ONNX Runtime Web can execute 4-bit today, not on whether ONNX can represent it,
+  and on per-class parity rather than aggregate accuracy: a quantization that holds overall
+  accuracy while degrading one clinically meaningful class has failed.
+
+**ICA and ICLabel are two capabilities, not two stages of one.** ICA decomposes a recording into
+components and is the expensive half; ICLabel classifies components that already exist and is the
+cheap half. Keeping them apart is a NEMAR product decision, not a packaging convenience: the
+intention is to **serve precomputed ICA weights alongside a dataset**, so that a person in a browser
+loads a decomposition rather than computing one, and then chooses whether to run ICLabel over it.
+
+That changes what the browser has to be able to do. On the NEMAR path it needs to read data, read
+weights, classify, and plot. Computing ICA in the browser becomes the case for someone working on
+their own recording rather than the common path, which lowers the stakes on #376 (`runica` through
+`scipy.linalg.blas` under Emscripten) for NEMAR specifically without making it unnecessary in
+general.
+
+It also creates work that is in no tracker yet: **the data plane has to serve ICA weights.** See the
+nemar-cli section below.
+
 The seam it creates is not size, it is synchrony. `iclabel()` and `pop_iclabel()` are synchronous
 and reachable from the GUI menus and from `eegprep-console`, while ONNX Runtime Web returns a
 promise that has to be awaited. Phase 5 has to decide what the async entry point is called, and
@@ -111,6 +133,13 @@ blocking. **That is a declared divergence in exactly ADR 0069's sense**, and it 
 and the contract says so rather than letting a user discover it.
 
 ### nemarOrg/nemar-cli
+
+**Precomputed ICA weights are a new data-plane capability with no issue yet.** The intention is to
+serve a decomposition alongside a dataset so a browser session loads weights instead of computing
+them. That implies decisions this map cannot make for it: where the weights live relative to the
+Zarr store, how they are versioned against the dataset version they were computed from, what
+happens when a dataset is revised and the weights are stale, and whether they are part of the
+manifest capability list that ADR 0066 makes the data plane check. File it before building it.
 
 **#1457** is open: `read_window`'s Python recipe emits
 `zarr.open("s3://...", storage_options={"anon": True})`, which cannot run in a browser, which is
@@ -155,9 +184,14 @@ something real to run. They meet at the recipe in nemar-cli#1457.
    PNG-only path, and must be proven the `eeglabio` way, by running the plotting with them absent.
 4. **Whether the `[ica]` tier is right for a browser.** ADR 0069 lists it as adding `python-picard`,
    but the browser ICA path the epic is actually building is `runica` routed through
-   `scipy.linalg.blas` (#376), and scipy is already present at the preprocess tier. The tier may be
-   unnecessary in the browser, or may need to name a different package. Resolve when `eegprep-lean`
-   is built, and correct the ADR table rather than leaving both readings alive.
+   `scipy.linalg.blas` (#376), and scipy is already present at the preprocess tier. Now that ICA
+   and ICLabel are separated and the NEMAR path serves precomputed weights, the tier may be
+   unnecessary on that path entirely. Resolve when `eegprep-lean` is built, and correct the ADR
+   table rather than leaving both readings alive.
+5. **How precomputed ICA weights are versioned against the dataset they came from.** A
+   decomposition is only valid for the data it was computed on, and NEMAR datasets are versioned
+   and revisable. Getting this wrong means someone classifies components that do not belong to the
+   recording they are looking at, silently.
 
 ## Working rules that have already earned themselves
 
