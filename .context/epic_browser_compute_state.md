@@ -136,10 +136,8 @@ and the contract says so rather than letting a user discover it.
 
 **Precomputed ICA weights are a new data-plane capability with no issue yet.** The intention is to
 serve a decomposition alongside a dataset so a browser session loads weights instead of computing
-them. That implies decisions this map cannot make for it: where the weights live relative to the
-Zarr store, how they are versioned against the dataset version they were computed from, what
-happens when a dataset is revised and the weights are stale, and whether they are part of the
-manifest capability list that ADR 0066 makes the data plane check. File it before building it.
+them. See "What is coming" below: this is not near-term work, but it is near enough that the
+current design should not foreclose it.
 
 **#1457** is open: `read_window`'s Python recipe emits
 `zarr.open("s3://...", storage_options={"anon": True})`, which cannot run in a browser, which is
@@ -169,6 +167,41 @@ osa#370 ──> nemar-cli dev to main promotion
 
 The two tracks, OSA's transport and eegprep's runtime, are independent until the widget needs
 something real to run. They meet at the recipe in nemar-cli#1457.
+
+## What is coming, and what it constrains now
+
+Not available today, and not this epic's work, but close enough that designing against its absence
+would be a mistake.
+
+When NEMAR connects to a supercomputer and runs **first-party pipelines**, their outputs become
+products in their own right. Precomputed **ICA weights** are one. **Processed or derived data** is
+another. These are intended to be a significant part of what NEMAR offers, not a side effect of
+this epic, and people would consume them without ever running the pipeline themselves.
+
+**The precedent for this already exists here, and it is not the obvious one.** The Zarr serving
+copy is already a first-party derived artifact: produced by a conversion engine this repository
+owns (ADR 0029), stamped with which engine produced it (ADR 0033), versioned, and served on its
+own path rather than out of the dataset's git tree. That is the shape a pipeline product needs,
+and it already works.
+
+What would be the wrong precedent is ADR 0066's git brokering. That decision is explicit that the
+Worker brokers **git-tracked files** and that **the manifest is the capability list**, built from
+the dataset's own version document. A supercomputer pipeline output is not git-tracked and has no
+manifest entry, so it cannot be served that way without either committing large derived binaries
+into every dataset repository or weakening the rule that closes the confused-deputy hole. Neither
+is acceptable. Derived products need their own capability list, holding ADR 0066's five rules,
+rather than an exception carved into that one.
+
+**What this constrains in the work happening now:**
+
+- The `eegprep-lean` contract should describe reading **a derived artifact**, not specifically ICA
+  weights. The first one is weights; the second will not be.
+- The recipe surface in nemar-cli#1457 should be able to name a derived product as an input, for
+  the same reason.
+- Provenance is not optional for these. A decomposition or a preprocessing run is only meaningful
+  against the exact dataset version it was computed from, and the engine stamp on Zarr conversions
+  is the existing answer to that question in this codebase. Reuse it rather than inventing a second
+  provenance story.
 
 ## Open questions, not yet decided
 
