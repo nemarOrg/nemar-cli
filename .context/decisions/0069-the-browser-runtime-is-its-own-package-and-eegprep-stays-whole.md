@@ -26,9 +26,40 @@ is a package whose existing users get less than they had.
 
 eegprep stays whole.
 Its default install keeps every dependency it has today, so `pip install eegprep` is unchanged and no existing user is disturbed.
-The browser runtime becomes a separate package, built to a download budget rather than trimmed down to one,
-and this project owns the seam between the two: a declared contract, with any divergence in behavior
+The browser runtime becomes a separate distribution, `eegprep-lean`, built to a download budget rather than trimmed down to one.
+It is published from the eegprep repository, not a new one: same source tree, same tests, same maintainers.
+eegprep depends on it and re-exports it, so `pip install eegprep` is a superset of what it installs today
+and the science code is not forked into two copies that drift.
+
+This project owns the seam between the two: a declared contract, with any divergence in behavior
 written down in that contract rather than discovered by a user who hit it.
+
+### Why not `eegprep[lean]`
+
+Because an extra cannot subtract.
+`pip install eegprep[lean]` resolves eegprep's own requirements first and then adds whatever `lean` declares,
+so an extra by that name would install the whole 62.6 MB and then some, which is the opposite of what it says.
+micropip resolves the same way, so the browser gets no relief either.
+A genuinely small install needs a distribution whose *base* is small, and that is either a lean eegprep,
+which changes what every existing user gets from an unchanged command, or a second name.
+This is the second name.
+
+### The tiers are extras, which is what extras are for
+
+The lean distribution is layered by what a session actually does, each tier adding to the one below it,
+measured against the Pyodide 0.29.5 distribution:
+
+| install | packages | download | what it buys |
+|---|---|---|---|
+| `eegprep-lean` | 12 | 4.2 MB | read a window of data |
+| `eegprep-lean[plot]` | 22 | 14.0 MB | and draw it, adding matplotlib |
+| `eegprep-lean[preprocess]` | 23 | 30.4 MB | and filter and resample it, adding scipy |
+| `eegprep-lean[ica]` | 27 | 36.3 MB | and decompose it, adding python-picard |
+
+Plotting is the tier that matters most for pacing, because it is the first thing a person asks for after looking at data
+and it costs 9.8 MB. It is deliberately not in the base: a session that only reads pays 4.2 MB,
+and matplotlib arrives when a plot is actually asked for.
+Extras are additive here, which is exactly right, because every tier genuinely adds to the one beneath it.
 
 ## Consequences
 
@@ -51,6 +82,8 @@ There is also a second artifact to release, version and support.
 - **Move mne, pybids, h5py and neo to eegprep extras.** The original plan, from the measurements in sccn/eegprep#395. It shrinks the default install, which changes what existing users get from an unchanged command, and every move needs proof that nothing reaches the package through another library. Rejected: the risk lands on the scientific package's users to buy a smaller browser download.
 - **Make eegprep lean and publish a large bundle beside it.** Same shrinking of the default install, with the breakage concentrated in one release rather than spread over several. Rejected for the same reason.
 - **One repository, two published distributions.** Keeps the science unforked, but the release pipeline carries the split and CI has to prove both. Held in reserve: this is where to go if the seam turns out to be thinner than expected.
+- **An `eegprep[lean]` extra.** The name everyone reaches for first, and it cannot work: extras add to a distribution's requirements and never replace them, so the base install arrives before the extra does. Worth stating in full here because it is the proposal that will come back.
+- **A separate repository.** Cleanest boundary, and rejected as too clean: the lean runtime and the full package share science code, and a repository boundary is where shared code goes to be copied. One repository, two distributions, keeps them honest.
 - **Lazy imports alone.** Does not reduce the download at all, because micropip installs the declared closure whether or not the module is imported. Rejected on measurement.
 
 ## Receipts
