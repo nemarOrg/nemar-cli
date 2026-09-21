@@ -13,6 +13,112 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## 0.10.5 - 2026-09-21
+
+### Added
+
+- **The catalog's whole filter surface is available over the Model Context Protocol
+  (MCP) (#1429).** `search_datasets` advertised six filters and accepted thirty-three;
+  an assistant could only reach the six it was told about, and a name it invented for
+  the rest was accepted and silently ignored, so an unfiltered answer came back looking
+  filtered. The parameters are now generated from `shared/facets.ts`, the one place the
+  facets are declared, so the tool description and the server cannot disagree. Range
+  syntax (`10..20`, `64..`, `..128`) and `include_unknown` are documented per parameter,
+  because several facet columns are only partly populated and low recall there is a
+  property of the data rather than a bug (ADR 0032). A call is capped at twenty filters
+  (#1442).
+
+  The underlying trap is narrowed, not closed: the schema still accepts an argument it
+  does not declare and drops it. What changed is that the declared set is now exhaustive
+  and generated, so there is far less reason to invent one, and the tool description
+  says plainly that an undeclared name is ignored.
+
+- **The top hundred ids of every allocating prefix are reserved for standing test
+  fixtures (ADR 0068).** `RESERVED_FIXTURE_FLOOR = 99900`, so `nm099900`-`nm099999` and
+  `xx099900`-`xx099999` are never returned by the allocator. Real datasets still
+  allocate upward from the start of the prefix; fixtures are assigned downward from the
+  top, by name. Reserved means **not allocatable, not invalid**: `isValidDatasetId` still
+  accepts a reserved id and every route still serves one.
+
+- **A non-production fixture can be created at its reserved id** (#1437, #1445), behind a
+  gate with four separate conditions: not production, an admin caller, an id inside the
+  reserved band, and a name on the declared dev-owned list. Each refusal carries its own
+  machine-readable `error` code rather than one generic failure, so a caller can tell
+  which condition it missed.
+
+- **The read recipe has a browser lane** (#1469, ADR 0070). `read_window`'s `how_to`
+  block gained `python_browser`, which names `eegprep-lean` and calls its asynchronous
+  interface against the recipe's `array_path`. The lane that was labeled ready-to-run
+  Python could not run in a browser, which is where compute runs by default (ADR 0049):
+  the synchronous Zarr entry point starts an input/output thread, which Pyodide's main
+  thread cannot, and the resulting error names threads rather than Zarr. All three lanes
+  now say where they run.
+
+### Changed
+
+- **The standing anonymous fixture moved from `xx099907` to `nm099998`, and the way it is
+  protected changed with it.** `xx099907` was an exemplar-band row guarded by a
+  per-fixture code gate that made it structurally unpublishable: `isExemplarPublishAllowed`
+  refused it server-side, so approving it by mistake was not possible. `nm099998` is a
+  reserved `nm` id created through the ordinary anonymous-deposit path, which is the point,
+  because the fixture now exercises the mechanism real depositors use rather than an
+  exception carved around it.
+
+  The consequence is worth stating plainly for whoever operates this: **there is no longer
+  a per-fixture code gate.** An admin approving `nm099998`'s publication request as an
+  ordinary, non-anonymous release will de-anonymize it and destroy the fixture
+  permanently, exactly as that action would for a real depositor's anonymous dataset.
+  Creating it is still heavily gated, by four separate conditions including
+  not-production and admin; publishing it is guarded by the same care any anonymous
+  deposit gets, and no more. `xx099907` itself is fully retired: no row, no repository,
+  and the fleet loader now refuses an `anonymous` key outright.
+
+- **The OSC surfaces can read Zarr chunks cross-origin** (#1466). `*.osc.earth` joins the
+  NEMAR web properties on the Zarr host's allow-list. This does not change who can read
+  the data, which is anonymous: cross-origin resource sharing is a browser instruction
+  about which page may see a response, and a request without it still succeeds for any
+  non-browser client. What it changes is whether in-browser code on those surfaces can
+  use what it fetched.
+
+### Fixed
+
+- **The manifest canary probed a private repository anonymously** (#1452), so every blob
+  it checked read as gone. It now authenticates with the installation token and reports
+  a tri-state verdict: `present`, `absent`, or `unchecked`. `unchecked` is logged as
+  itself rather than folded into the healthy line, and an authenticated `absent` seen on
+  a first attempt survives a later `unchecked`, so a transient failure on retry cannot
+  erase a real absence (ADR 0067).
+
+- **The anonymous exemplar could not take its anonymous release** (#1428), and the
+  version identifiers minted during a blind stayed reserved with nothing to complete
+  them afterward.
+
+- **Upload's two environment questions are no longer one predicate** (#1445). Allocation
+  asks whether this is literally production, and the named-id gate asks whether this is
+  not a known non-production environment; they fail in deliberately opposite directions,
+  so an unset environment variable cannot cause a real `nm` id to be allocated where a
+  sandbox `xx` id was meant.
+
+- **A sweep's SQL and its bind parameters are exported together** (#1445), rather than
+  the query being hand-retyped in a test where a transposed parameter could stay green.
+
+### Migrations
+
+None. `0086_publication_request_anonymous.sql` appears in the diff, but only its comment
+changed: it had named `version_doi` among the steps an anonymous release skips, which
+#1447 stopped being true. No schema statement was touched, and the migration has already
+run.
+
+### Deploy coupling
+
+**The Open Science Assistant's NEMAR prompt must ship with this release**
+(OpenScience-Collective/osa#425). That prompt told the model `search_datasets`'s filters
+are *exactly* the six it listed, that there is no participant-count filter, and to pass
+only those six names. All three statements become false the moment this release reaches
+production, and the third is the one that does damage: it instructs the model not to use
+filters that now work, so a question about channel counts or participant numbers takes a
+worse route or is declined, and nothing looks broken.
+
 ## 0.10.4 - 2026-09-16
 
 ### Added
