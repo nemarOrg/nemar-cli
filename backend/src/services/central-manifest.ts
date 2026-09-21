@@ -10,6 +10,7 @@
  */
 
 import type { Bindings } from "../types/bindings.js";
+import { isAnonymous } from "./anonymity.js";
 import { createEzidVersionDoi } from "./doi.js";
 import { conceptEzidIdentifier } from "./ezid.js";
 import { getDatasetsToken } from "./github-auth.js";
@@ -195,6 +196,14 @@ export interface EzidVersionDoiDataset {
   name: string;
   github_repo: string | null;
   concept_doi: string | null;
+  /**
+   * Required, not optional (#1447): the mint below decides from it whether the
+   * version identifier is published or left reserved, and a caller that stops
+   * selecting the column must be a compile error rather than a silent
+   * "not anonymous" that publishes a concealed deposit's DOI. Same reasoning
+   * as the detail route's row type and `expectedRepoVisibility`.
+   */
+  anonymous: number | null;
 }
 
 /**
@@ -232,6 +241,8 @@ export async function mintEzidVersionDoi(
     .all<{ doi: string }>();
   const existingVersionDois = versionRows.results.map((r) => r.doi);
 
+  const reserveOnly = isAnonymous(dataset);
+
   const result = await createEzidVersionDoi(
     {
       EZID_USERNAME: env.EZID_USERNAME,
@@ -251,14 +262,28 @@ export async function mintEzidVersionDoi(
       sandbox,
       existingVersionDois,
       enrichment: repoMeta.enrichment,
+      reserveOnly,
     },
   );
 
-  await env.DB.prepare(
-    "UPDATE datasets SET latest_version_doi = ?, updated_at = datetime('now') WHERE id = ?",
-  )
-    .bind(result.doi, dataset.id)
-    .run();
+  // Not written for a concealed deposit (#1447). The column means "the version
+  // DOI that is PUBLISHED", and putting a non-resolving identifier there would
+  // change what it means for every reader. The identifier is deterministic, so
+  // the real publication re-derives it.
+  //
+  // Two sweeps used the column as a stand-in for "this dataset has a version at
+  // all" and so could not see a concealed release; both now resolve the version
+  // through `resolveCurrentVersion`, which falls back to `dataset_versions` --
+  // the row the manifest job below inserts. `doi-reconcile.ts` deliberately does
+  // NOT follow: for that one, not seeing these rows is the protection, and its
+  // refusal is on the row so a later widening cannot route around it.
+  if (!reserveOnly) {
+    await env.DB.prepare(
+      "UPDATE datasets SET latest_version_doi = ?, updated_at = datetime('now') WHERE id = ?",
+    )
+      .bind(result.doi, dataset.id)
+      .run();
+  }
 
   return { doi: result.doi, warnings: result.warnings };
 }

@@ -8,7 +8,11 @@
  * intentional changes are import paths and the register-function wrapper.
  */
 
-import { isDevRangeDatasetId, isValidDatasetId } from "../../services/datasetId.js";
+import {
+  isDevOwnedDatasetId,
+  isDevRangeDatasetId,
+  isValidDatasetId,
+} from "../../services/datasetId.js";
 import { isNonProductionEnv } from "../../services/environment.js";
 import { getDatasetsToken } from "../../services/github-auth.js";
 import { triggerEnrichmentRun, triggerVersionDoiRun } from "../../services/github.js";
@@ -427,7 +431,27 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
     // !isNonProductionEnv (not ENVIRONMENT === "production") so the gate FAILS
     // CLOSED: an unset/typo'd ENVIRONMENT must still short-circuit rather than
     // let the prod worker dispatch against a dev-range repo it has no row for.
-    if (!isNonProductionEnv(c.env) && isDevRangeDatasetId(payload.repository?.name ?? "")) {
+    // isDevOwnedDatasetId, not isDevRangeDatasetId (#1440): the reserved `nm`
+    // fixtures are dev's too. Without this, a push to nemarDatasets/nm099998
+    // is delivered here and treated as prod's own, so prod dispatches an
+    // ENRICHMENT run for a repository it has no D1 row for.
+    //
+    // Enrichment alone: zarr is not dispatched from here at all
+    // (`shouldDispatchZarr` is defined and never called, #1109), and the
+    // version-DOI path already refuses this case because its anonymity check
+    // treats an absent `datasets` row as anonymous (#1408).
+    if (!isNonProductionEnv(c.env) && isDevOwnedDatasetId(payload.repository?.name ?? "")) {
+      // Audible when the DECLARED set is what matched, rather than the id shape.
+      // The shape case is routine and stays quiet; the declared case is the one
+      // where a bad entry would make production silently stop dispatching for a
+      // real dataset, with nothing in Worker Logs to see (ADR 0053: silence is
+      // only evidence of a problem when there was work to do).
+      const repoName = payload.repository?.name ?? "";
+      if (!isDevRangeDatasetId(repoName)) {
+        console.warn(
+          `[github-webhook] short-circuited ${repoName} on production: declared dev-owned (DEV_OWNED_FIXTURE_IDS, #1440), delivery=${deliveryId}`,
+        );
+      }
       if (c.env.DEV_WEBHOOK_MIRROR_URL) {
         // Forward the raw, still-HMAC-signed delivery to the dev worker (epic
         // #923) so it dispatches for staging exemplars. Outbound-only and
@@ -463,11 +487,18 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
         );
         return c.json({ ok: true, dispatched: false, reason: "dev_range_repo", forwarded: true });
       }
+      // The reason string keeps its name for stability (tests and logs pin it),
+      // though since #1440 it covers dev-OWNED repos rather than only dev-range
+      // ones: a reserved fixture like nm099998 short-circuits here too.
       return c.json({ ok: true, dispatched: false, reason: "dev_range_repo" });
     }
 
-    // The reciprocal fence: a NON-production worker may only act on dev-range
-    // repos. The forward above re-posts a still-valid HMAC delivery, and both
+    // The reciprocal fence: a NON-production worker may only act on repos it
+    // OWNS -- the dev sandbox range plus the reserved fixtures declared
+    // dev-owned in datasetId.ts (#1440). Before that second term the dev worker
+    // refused its OWN standing fixture, so the one dataset built to exercise
+    // the anonymity surfaces could never have enrichment run against it.
+    // The forward above re-posts a still-valid HMAC delivery, and both
     // workers share GITHUB_WEBHOOK_SECRET by design, so signature verification
     // alone cannot tell the dev worker "this one is not yours". Without this,
     // the only thing stopping the dev worker from dispatching real central
@@ -475,7 +506,7 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
     // sandbox-vs-production EZID credentials are chosen from the DOI string
     // rather than ENVIRONMENT) is GitHub's delivery configuration pointing at
     // prod — an operational control, not a code one.
-    if (isNonProductionEnv(c.env) && !isDevRangeDatasetId(payload.repository?.name ?? "")) {
+    if (isNonProductionEnv(c.env) && !isDevOwnedDatasetId(payload.repository?.name ?? "")) {
       return c.json({ ok: true, dispatched: false, reason: "prod_range_repo_on_dev_worker" });
     }
 
@@ -504,14 +535,19 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
     const dispatched: Record<string, unknown> = {};
     const errors: Record<string, string> = {};
 
-    // #1408: a version DOI is minted AND published in one pass
-    // (`services/doi.ts` calls `makePublic` unconditionally), so dispatching
-    // it for an anonymous deposit would put a resolving, harvested DataCite
-    // record into the world for the one dataset whose whole premise is that no
-    // identifier of it resolves yet. The publication orchestrator drops
-    // `version_doi` from an anonymous release's step set, but nothing stops the
-    // depositor from pushing a `v*` tag afterward -- `nemar dataset release`
-    // does exactly that -- and this handler would have obliged.
+    // #1408: the `run-version-doi` workflow this dispatches calls
+    // `POST /callbacks/version-doi`, which mints AND publishes -- it
+    // deliberately does not use the `reserveOnly` mode #1447 added, because a
+    // tag push is not a release decision. So dispatching for an anonymous
+    // deposit would put a resolving, harvested DataCite record into the world
+    // for the one dataset whose whole premise is that no identifier of it
+    // resolves yet.
+    //
+    // An anonymous release DOES mint its own version identifier, reserved, via
+    // the publication orchestrator (#1447: that step is what dispatches the
+    // central manifest). That is the one entitled minter. Nothing stops the
+    // depositor from pushing a `v*` tag as well -- `nemar dataset release` does
+    // exactly that -- and this handler would have obliged.
     //
     // Decided here, BEFORE the GitHub token is fetched, for two reasons: a
     // refusal needs no token, and a token outage must not be able to change

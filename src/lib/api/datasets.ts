@@ -492,6 +492,19 @@ export interface CreateDatasetRequest {
   description?: string;
   files?: FileInfo[];
   sandbox?: boolean; // If true, creates sandbox dataset with xx000xxx ID
+  /**
+   * Name the id instead of being allocated one (ADR 0068, #1432).
+   *
+   * Refused unless the request is non-production, the caller is an admin, the
+   * id is in the reserved fixture band, and that id is declared dev-owned --
+   * see `explicitDatasetIdGate`. It exists because `generateDatasetId` is
+   * structurally unable to return a reserved id, so the standing fixtures that
+   * live there have no other way in through the route that creates everything
+   * else.
+   *
+   * Omitted by every ordinary upload: a dataset id is allocated, never chosen.
+   */
+  dataset_id?: string;
   // Deposit attestation (#1077): recorded on the dataset row (migration 0067).
   // Optional at the wire level for older CLIs; collected for every new upload.
   attestation?: {

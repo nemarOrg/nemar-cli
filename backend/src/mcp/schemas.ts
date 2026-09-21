@@ -44,6 +44,7 @@ import {
   ZARR_VERIFY_STATUS_VALUES,
 } from "../../../shared/contract/mcp.js";
 import { DATASET_ID_RE, SOURCE_COMMIT_RE } from "../../../shared/contract/zarr-index.js";
+import { FACETS, describeFacet } from "../../../shared/facets.js";
 
 const DATASET_ID_DESCRIPTION =
   "NEMAR dataset id: two lowercase letters (nm/on/xx) followed by six digits, e.g. nm000329.";
@@ -55,6 +56,24 @@ const DATASET_ID_DESCRIPTION =
 // the zod 3 wire contract above, not redefined here -- a mirror must never
 // own a number the contract already owns (the parity test would still catch
 // a silent drift, but there is no reason to give it something to catch).
+
+/**
+ * The declared facets, as described string parameters keyed by wire name.
+ *
+ * Generated from `shared/facets.ts`, exactly like the zod 3 contract's
+ * `facetInputShape`, because THIS is the schema the model reads: `registerTool`
+ * advertises it, so a facet missing here is a filter the assistant does not know
+ * exists. Hand-maintaining the list is what let the NEMAR prompt drift onto
+ * `modality_filter`, a parameter nothing declared, which `.passthrough()` then
+ * accepted and dropped.
+ *
+ * The description is built from the facet's own `label`, `unit` and
+ * `enumValues`, so the wording a caller sees comes from the same declaration as
+ * the filter itself (ADR 0032).
+ */
+const facetInputShape4 = Object.fromEntries(
+  FACETS.map((facet) => [facet.queryParam, z4.string().optional().describe(describeFacet(facet))]),
+);
 
 export const searchDatasetsInputSchema4 = z4
   .object({
@@ -81,6 +100,47 @@ export const searchDatasetsInputSchema4 = z4
         "Filter to datasets with a converted Zarr serving copy (has_zarr means converted, " +
           "never fidelity-verified -- see describe_dataset's zarr_verify_status for that).",
       ),
+    author: z4
+      .string()
+      .optional()
+      .describe("Filter to datasets one of whose authors matches this name."),
+    has_doi: z4
+      .boolean()
+      .optional()
+      .describe("Filter to datasets that carry a DOI, i.e. the citable ones."),
+    has_zarr_verified: z4
+      .boolean()
+      .optional()
+      .describe(
+        "Filter to datasets whose Zarr copy PASSED the standing fidelity sweep. A strict " +
+          "narrowing of has_zarr: a fresh conversion is has_zarr until the sweep reaches it.",
+      ),
+    data_complete: z4
+      .boolean()
+      .optional()
+      .describe("Filter to datasets verified to hold all of their declared content."),
+    recent: z4
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe("Filter to datasets published within this many days."),
+    license: z4
+      .string()
+      .optional()
+      .describe(
+        "Comma-separated license tiers: public, attribution, sharealike, noncommercial, " +
+          "noderiv, unknown. Unrecognized tokens are dropped.",
+      ),
+    include_unknown: z4
+      .boolean()
+      .optional()
+      .describe(
+        "Widen every ACTIVE facet filter to also admit datasets whose value is unknown. " +
+          "Several facet columns are only partly populated, so a filter's recall can be low " +
+          "because the data is missing rather than because it did not match.",
+      ),
+    ...facetInputShape4,
     limit: z4
       .number()
       .int()
@@ -541,10 +601,28 @@ const rangeSchema4 = z4
   .passthrough()
   .refine((v) => v.end >= v.start, { message: "end must be >= start", path: ["end"] });
 
-const readRecipeHowToSchema4 = z4
+export const readRecipeHowToSchema4 = z4
   .object({
-    python_zarr: z4.string().describe("Ready-to-run Python: zarr + anonymous S3, slice, done."),
-    zarrita: z4.string().describe("The TypeScript/JS equivalent using zarrita, browser-safe."),
+    python_zarr: z4
+      .string()
+      .describe(
+        "Python for desktop and HPC: zarr + anonymous S3. NOT usable in a browser -- " +
+          "zarr.open is synchronous and starts an IO thread, which Pyodide cannot. " +
+          "Use python_browser there.",
+      ),
+    zarrita: z4
+      .string()
+      .describe(
+        "The TypeScript/JavaScript lane, zarrita. Runs in a browser and in Node. " +
+          "For Python in a browser use python_browser, not this.",
+      ),
+    python_browser: z4
+      .string()
+      .describe(
+        "Python in a browser (Pyodide), via eegprep-lean's async store over HTTPS range " +
+          "requests. Async throughout. Carries no install line: eegprep-lean is not on " +
+          "PyPI and the executing runtime pins and installs it.",
+      ),
   })
   .passthrough();
 

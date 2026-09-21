@@ -17,7 +17,8 @@
 
 import { type CallToolResult, McpServer } from "@modelcontextprotocol/server";
 import pkg from "../../../package.json" with { type: "json" };
-import type { McpToolName } from "../../../shared/contract/mcp.js";
+import { type McpToolName, SEARCH_DATASETS_MAX_FILTERS } from "../../../shared/contract/mcp.js";
+import { FACETS } from "../../../shared/facets.js";
 import type { CacheLike } from "../routes/zarr-data.js";
 import { GITHUB_RAW_ORIGIN } from "../services/github/shared.js";
 import { recordMcpToolCall } from "../services/mcp-metrics.js";
@@ -80,6 +81,10 @@ const INSTRUCTIONS = [
   "coordinates, zero bytes touched); pass taste: true for a small, capped, inline-decoded window",
   "of physical values instead.",
 ].join(" ");
+
+/** Facet labels for the search tool description, interpolated so a newly
+ *  declared facet reaches the description without anyone remembering to edit it. */
+const FACET_LABELS = FACETS.map((f) => f.label).join(", ");
 
 /**
  * Times `fn`, writes exactly one metrics point per call, and unwraps `fn`'s
@@ -160,11 +165,7 @@ export function buildMcpServer(deps: BuildMcpServerDeps): McpServer {
     "search_datasets",
     {
       title: "Search datasets",
-      description:
-        "Search or browse the public NEMAR dataset catalog by keyword, modality, task, HED " +
-        "presence, or Zarr conversion status. A count of 0 is not an error -- an unrecognized " +
-        "modality/task value simply matches nothing; call describe_dataset on a hit to see the " +
-        "catalog's actual vocabulary for that dataset.",
+      description: `Search or browse the public NEMAR dataset catalog. A free-text query runs the exact-id, full-text and semantic tiers in that order; every other parameter narrows the result set, and they compose. Beyond modality, task, HED presence and Zarr status you can filter by author, license tier, DOI presence, fidelity-verified Zarr, data completeness and recency, plus these declared facets: ${FACET_LABELS}. Each parameter's own description gives the value syntax it accepts. Pass ONLY the names this schema declares: an undeclared name is accepted and silently ignored, which returns unfiltered results that look filtered. At most ${SEARCH_DATASETS_MAX_FILTERS} narrowing filters may be combined in one call; a call setting more is refused rather than truncated. Several facet columns are only partly populated, so a filter can exclude rows whose value is simply unknown; pass include_unknown: true to admit those. A count of 0 is not an error -- an unrecognized modality/task value simply matches nothing; call describe_dataset on a hit to see the catalog's actual vocabulary.`,
       inputSchema: searchDatasetsInputSchema4,
       outputSchema: searchDatasetsOutputSchema4,
     },
@@ -274,8 +275,9 @@ export function buildMcpServer(deps: BuildMcpServerDeps): McpServer {
       title: "Read window",
       description:
         "Read a window of one recording's actual signal. By default (taste: false) returns a " +
-        "read recipe -- zarr/zarrita/S3 coordinates and how-to snippets -- with zero signal bytes " +
-        "touched. Pass taste: true (and channels, required) for a small, capped, inline-decoded " +
+        "read recipe -- coordinates plus a how-to snippet per lane, and the lanes are not " +
+        "interchangeable: python_zarr for desktop and HPC, python_browser for Python in a " +
+        "browser, zarrita for TypeScript -- with zero signal bytes touched. Pass taste: true (and channels, required) for a small, capped, inline-decoded " +
         "window of physical values instead: at most 60 s, 64 channels, and 65,536 channel-samples " +
         "(channels x samples) -- ask for fewer channels or a shorter window, or omit taste, past " +
         "that. Needs a v3-format-converted dataset; a dataset still on index format v1 answers a " +

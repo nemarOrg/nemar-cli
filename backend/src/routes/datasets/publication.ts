@@ -216,10 +216,24 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     if (dataset.visibility === "public" && !isAnonymous(dataset)) {
       return c.json({ error: "Dataset is already published" }, 409);
     }
-    if (isAnonymous(dataset) && anonymousRequested) {
+    if (isAnonymous(dataset) && dataset.visibility === "public" && anonymousRequested) {
       // Already released anonymously; asking again changes nothing. Said
       // plainly rather than queued, so the depositor is not left waiting on an
       // admin for a no-op.
+      //
+      // The `visibility === "public"` term matters (#1423): `anonymous = 1` is
+      // not by itself evidence that a release HAPPENED. For a depositor it is,
+      // because the release is what sets it -- but a row can also be CREATED
+      // anonymous, which migration 0085 deliberately permits ("set at INSERT
+      // rather than flipped afterwards, because this is the only moment it is
+      // unconditionally legal"). Such a row is anonymous and PRIVATE: nothing
+      // has been released, and the release is the only thing that makes it
+      // public. Without this term such a row is told its release already
+      // happened while it sits private and the data plane refuses to serve it.
+      // This term outlived the fixture that exposed it (#1433): it is a
+      // correctness fix about what `anonymous` means, not an accommodation,
+      // and it changes nothing for a real deposit, whose `anonymous` and
+      // `public` arrive together.
       return c.json(
         {
           error: "already_released_anonymously",

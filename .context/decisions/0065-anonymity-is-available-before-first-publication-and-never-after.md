@@ -132,6 +132,35 @@ because the triggers refuse the intermediate state, and at that step rather than
 the run because every later step can fail and return, which would otherwise leave a dataset
 public in the world and anonymous in D1 forever.
 
+**Amendment 2026-09-16 (#1423), SUPERSEDED 2026-09-17 by #1433 (epic #1430).**
+What #1423 got right survives and is stated below; what it built was withdrawn a day later, so
+the original text is replaced rather than left standing with a pointer. It described an
+exemplar gate that took the request's intent and a clone tool that blinded `Authors`; neither
+exists.
+
+**What was right, and is still the decision.** `anonymous = 1` is not evidence that a release
+HAPPENED. It is true of a depositor's deposit, where `anonymous` and `public` arrive together
+at the release, and false of a row CREATED anonymous -- which `POST /admin/datasets/exemplar`
+does, and which the decision above deliberately permits ("set at INSERT rather than flipped
+afterwards, because this is the only moment it is unconditionally legal"). So the request
+route's `already_released_anonymously` requires `visibility = 'public'` as well, because the
+release is what makes a row public. That term is in the code today and has its own test.
+
+**What was wrong.** #1423 widened `isExemplarPublishAllowed` with an `ExemplarPublishIntent`
+so the fleet's anonymous deposit could take the one publish path it needed, and taught the
+clone tool to blind `Authors` so that deposit could pass the release's own check. Both existed
+to keep a fixture in the `xx` band. The band was the mistake: `xx` publishes only through the
+exemplar exception, while an anonymous deposit's defining event is an anonymous RELEASE, so
+the one path the fixture needed was the one path its band refuses.
+
+ADR 0068 records the rule that makes the placement decidable. #1433 removed the intent
+parameter, the `Authors` blind and the fleet's anonymous entry, and the fleet loader now
+REFUSES an `anonymous` key outright. The standing anonymous deposit moves to the reserved id
+`nm099998` in #1434, built through the normal upload path from a tree an operator blinds by
+hand, which is what a real anonymous depositor does.
+
+
+
 ## Consequences
 
 Easier: a depositor can submit to a blind venue without choosing between depositing and
@@ -165,14 +194,67 @@ Harder, and worth stating plainly:
   "readable on GitHub" must say so rather than reading `visibility`, and the three fixed here
   are evidence the proxy was load-bearing in places nobody had listed.
 
-**The staging fleet carries one standing anonymous deposit.** `xx099907` is created anonymous
-and never published, because the state is otherwise only ever exercised against rows a test
-builds and tears down in the same process. It could not be an existing exemplar: all seven are
-public with sandbox DOIs, so the 0085 backfill stamps `first_published_at` on every one and the
-triggers then refuse `anonymous = 1` -- which is the invariant working, and the reason the
-fixture had to be declared rather than borrowed. Publishing it destroys it permanently, so the
-fleet file marks it, the clone tool skips it under `--all --publish`, and the
-publication-request route refuses it.
+**The platform carries one standing anonymous deposit** (amended 2026-09-17, ADR 0068,
+epic #1430; this replaces the `xx099907` text that stood here).
+The reason for having one is unchanged and is the decision: the anonymous state is otherwise
+only ever exercised against rows a test builds and tears down in the same process, so nothing
+is ever tested against a dataset that has been pre-publication for weeks.
+
+What changed is where it lives. It was declared at `xx099907`, inside the exemplar fleet, and
+that placement was the mistake ADR 0068 was written to prevent. `xx` publishes only through
+the exemplar exception (non-production, `is_exemplar = 1`, sandbox DOIs), while an anonymous
+deposit's defining event is an anonymous RELEASE, so the one path the fixture needed was the
+one path its band refuses. Keeping it there meant widening a publish gate, which #1428 did and
+#1433 undid.
+
+It also could not have been an EXISTING exemplar, which is worth keeping: all of them are
+public with sandbox DOIs, so the 0085 backfill stamps `first_published_at` on every one and
+the triggers then refuse `anonymous = 1`. That is the invariant working, and it is why the
+fixture has to be declared rather than borrowed.
+
+The deposit is now `nm099998`, a reserved id (ADR 0068), built through the normal upload path
+from a tree an operator blinds by hand -- which is what the submission standard below asks a
+real anonymous depositor to do, so the fixture exercises the instruction rather than bypassing
+it. #1434 built it and retired `xx099907`.
+
+**Current state, 2026-09-17, measured on the dev worker rather than asserted:** `nm099998` exists
+and is the fixture. A public catalog row over a PRIVATE `nemarDatasets` repository,
+`anonymous = 1`, `first_published_at` NULL, `authors` reading
+`Anonymous (withheld until publication)`, and `owner_username`, `owner_github`, `github_repo`,
+`concept_doi` and `latest_version_doi` all NULL on the detail response.
+`v1.0.0` is released: `GET /datasets/nm099998/manifest` answers `{"versions":["v1.0.0"]}` over a
+131-file manifest, and the data plane serves `dataset_description.json` out of the private
+repository at 200 with 508 bytes declared and 508 delivered, which is ADR 0066's broker doing the
+one thing a private-repo deposit needs from it.
+Four public surfaces (the detail response, `metadata.json`, the page bundle and the enrichment
+file) carry none of the depositor's identity tokens.
+`xx099907` no longer exists in either place: no dev D1 row and no GitHub repository, both 404.
+
+**One gap is left open on purpose, and it is a gap in the FIXTURE, not in the blind.** The
+fixture is `is_sandbox = 1, is_exemplar = 0`, and the catalog population requires
+`d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1`
+(`services/dataset-filters.ts`, `routes/datasets/catalog.ts`, which each spell it out), so
+`nm099998` satisfies no disjunct: it is absent from list and search on dev and cannot exercise
+those two paths end to end.
+A real anonymous deposit on production is not a sandbox row and WILL be in that population, so
+the blind there is load-bearing: list rows go through `toListRow`, hence
+`withheldWhileAnonymous`, and owner identity is withheld in the projection itself by
+`OWNER_USERNAME_SQL` and `OWNER_GITHUB_SQL`, because a join cannot be blinded by a writer.
+`backend/test/anonymity-projection.test.ts` fails if a call site spells the raw join out instead.
+So the rule is covered and only the live exercise of it is missing.
+Closing that means changing either the fixture's flags or the population filter, and neither is
+free.
+`is_exemplar = 1` is the tempting one-character fix and the hazard is NOT where it looks:
+the exemplar publish and reindex gates both require `dataset_id.startsWith("xx")` alongside
+`is_exemplar === 1` (`services/exemplar.ts`) and the remint route tests `EXEMPLAR_ID_RE`, so
+`xx`-only tooling would correctly ignore an `nm` id rather than misbehave on it.
+`requiresUploaderName` (`services/uploader-identity.ts`) is the one that reads `is_exemplar`
+with NO id check, and it is wired into publication, the admin DOI route and enrichment, so the
+flag would silently exempt the fixture from "a DOI mint needs a real uploader name", treating a
+concealed real depositor like a service-owned copy of a public dataset. That is the opposite of
+what this fixture is for.
+Widening the filter is the other option and it changes what every anonymous reader sees, which
+is a bigger decision than a test fixture should force.
 
 **A blinded deposit is submitted blinded, and that is an EXCEPTION to the submission
 standards rather than a silent special case.** NEMAR asks the depositor to anonymize their own
@@ -204,6 +286,125 @@ surfaces follow from that: `nemar dataset status` marks the DOI `(reserved)` and
 dead identifier never reaches signposting, JSON-LD or a citation widget. Reserving early is
 still worth it -- the same identifier becomes the real one at publication -- but reserving is
 not publishing, and no surface may blur the two.
+
+**Amended by #1447: the VERSION DOI is reserved the same way, and the release stopped skipping
+the step that mints it.**
+An anonymous release originally skipped `version_doi` outright, which reads as correct from the
+step's name and was not.
+That one step also dispatches the central manifest job, whose callback inserts the
+`dataset_versions` row, so skipping it left every anonymous release with no manifest and no
+version: the data plane answered 404 "Version not published" for a dataset the release had just
+made public, and the catalog listing omitted it.
+Measured on the dev worker while building `nm099998`, against a normally published control on
+the same worker.
+The step now runs and mints the version identifier `reserved`, exactly as `doi_create` already
+leaves the concept identifier, so the data is reachable and no identifier resolves.
+Four surfaces had to follow, and the first count of them was two, which is the reason this
+paragraph now names them.
+THREE public readers each held their own copy of
+`SELECT version, doi, created_at FROM dataset_versions` and none of them withheld it:
+`extensions.nemar.versions[].doi` on `metadata.json`, which sat three lines below the
+`dataset_doi` that WAS withheld and had no rule of its own because the array was necessarily
+empty for a concealed deposit until now;
+the landing page, which renders each row's DOI as a live `https://doi.org/...` anchor and so
+handed a reviewer a one-click dead identifier;
+and the page bundle, which carries the rows twice in one response.
+The rule and the statement are now each declared once, as `VERSION_DOI_SQL` and
+`PUBLIC_DATASET_VERSIONS_SQL`, with a source scanner refusing a fourth hand-spelled copy.
+The fourth surface is `latest_version_doi`, which `SELECT d.*` carries into the detail response.
+That column is left NULL rather than filled: it means the version DOI that is PUBLISHED, and a
+concealed deposit has none.
+Leaving it NULL has a cost, and the cost is paid rather than avoided.
+Two daily sweeps used the column as a stand-in for "this dataset has a version at all" and so
+could not see a released concealed deposit: `archive-retry.ts` would never re-dispatch its
+failed archive, and `import-integrity.ts` could not resolve a version to read a manifest for,
+so no caller of `verifyDatasetVersionS3` could reach a `data_complete` verdict for one.
+Both now resolve the version through `resolveCurrentVersion`, which falls back to
+`dataset_versions`.
+`doi-reconcile.ts` deliberately does NOT follow: for that sweep, not seeing these rows is the
+protection, and its refusal is `isAnonymous(row)` in the loop precisely so a later widening of
+its candidate query cannot route around it.
+The reasoning that makes this safe is the one already stated above: reserving is not
+publishing.
+What changed is the discovery that the platform was ALSO not publishing the data, which the
+release is supposed to do.
+
+**A reservation made during the blind is a debt, and real publication settles ALL of them, not
+just the version it is publishing now.**
+This is the other half of #1447, and the half that only shows up on the second publication.
+`version_doi` mints and publishes the version it was handed; nothing in the run ever revisits an
+older `dataset_versions` row.
+Peer review is the process that produces a revision, so the ordinary shape at acceptance is
+`1.0.1` public beside a `1.0.0` that is still `reserved` -- and the moment `anonymous` clears,
+that older row stops being withheld by `VERSION_DOI_SQL` and the landing page renders it as a
+live `https://doi.org/...` anchor to an identifier that does not resolve.
+The withholding rule above was doing its job; what it was hiding did not stop being dead when
+it stopped being hidden.
+So publication now runs `completeConcealedEraVersionDois` as a tail job, once per
+`dataset_versions` row, through `createEzidVersionDoi` rather than a bespoke status flip:
+the reserved-to-public transition, the rebuilt DataCite document, the tombstone refusal and the
+concept record's `HasVersion` refresh are all paths that already exist and are already tested,
+and an identifier that is already public costs one call and changes nothing, which is what makes
+the whole thing safe to run twice.
+Every pre-existing row qualifies without a per-row marker, because `first_published_at` was NULL
+for the dataset's entire life until this run: the durable "was concealed" signal is
+`publication_requests.anonymous = 1`, since `anonymous` and `first_published_at` are rewritten in
+the same statement and neither can be read afterwards.
+
+**Which rows, and which requests, are two separate questions, and only one of them has a clean
+answer.**
+The rows are bounded by `created_at <= first_published_at`, and that bound is load-bearing rather
+than tidy: anonymity is impossible after that stamp, which the triggers below enforce, so a version
+recorded later cannot have been minted under a blind.
+Taking every row instead looks identical on the first real publication, when the stamp is minutes
+old and there is nothing else, and is wrong on every publication after it, where an ordinary
+revision would be re-attempted forever and, past the cap, reported as an identifier that "may still
+be reserved" when the only rows skipped were ordinary public ones.
+The requests have no such bound.
+`PRIOR_ANONYMOUS_REQUEST_SQL` asks whether this dataset was EVER under the blind, and it is
+deliberately unfiltered by `status`, because no status in this state machine separates a run that
+happened from one that did not: the deny route accepts a request that is already `approving`, so a
+release that reserved an identifier and then failed can be denied afterwards,
+and `blocked` is written both before a run and by the orchestrator mid-run,
+with `publication-sweep` moving a blocked row back to `requested`.
+Both callers of that statement fail in one direction only.
+A false positive costs an idempotent pass, an attribution restore that rewrites what is already
+there or an EZID call that answers `return_public`; a false negative publishes a permanent record
+citing the blinded label, or leaves a version DOI reserved behind a link the page renders as live.
+So the statement over-answers on purpose, and the `created_at` bound does the narrowing.
+
+**The window between clearing the flag and settling the debt is real, and accepted.**
+`repo_public` clears `anonymous` and the tail job runs at the end of the same invocation, so
+between the two a public reader can see a live-looking anchor to a still-reserved identifier, and
+can keep seeing it if a later step fails.
+Both alternative orderings are worse, for reasons already recorded here: settling before the
+restoring commit would make a blinded record permanent, and settling before `version_doi` would
+rebuild the concept record's `HasVersion` list without the version being published now.
+What makes the window survivable is that it is reported rather than silent, and that approving
+again closes it.
+
+Four properties of that tail job are decisions rather than implementation.
+It **refuses rather than publishes** when the repository cannot be read: `readRepoMetadata` does
+not throw, it degrades to `{ Name }`, and DataCite then renders a `(:unav)` creator -- acceptable
+for a mint whose alternative is no DOI, and the exact inversion of ADR 0041 on a dataset that was
+anonymous by choice, where it would read as deliberate.
+Reserved is recoverable by approving again; a public version DOI attributed to nobody is not.
+"Declares no authors" and "could not be read" are told apart by
+`BIDS_METADATA_UNAVAILABLE`, exported for this caller, and the second is the only one that stops
+the run.
+It reads the **rebuilt repository record, not the step order**, for whether attribution has
+actually been restored, and leaves every reservation alone while the blinded label is still there.
+That is the interlock `doi_create` and `publish_doi` carry at `refuseWhileBlinded`, which cannot
+serve here: it reads `datasets.authors`, and `repo_public` has already rewritten that column by the
+time the tail job runs.
+The repository can answer, because the restoring commit is what puts the real names on `main`.
+It is **bounded** at `MAX_CONCEALED_ERA_VERSION_DOIS` (10) registrar round trips, and it says so
+in the warning rather than silently doing part of the work.
+And it is **non-fatal**, following `stampZarrRequeue`: it returns a warning, writes an
+`audit_log` row, and is called from both the finalize block and the all-steps-complete early
+return, so "approve again to retry" is true rather than advice.
+Publication must not fail because a registrar was down, but an identifier the dataset page now
+links has to be reported when it is still dead.
 
 **"No surface" is literal, and it took a review to make it true.** The reserved identifier and
 the private repository were each withheld by one surface and served raw by three others, twice
@@ -263,4 +464,8 @@ minted the permanent identifier with no authors.
   `backend/test/anonymity-publication-paths.test.ts` (every path to public carries the stamp,
   and the step set, the mint interlock and the repo-spec visibility),
   `backend/test/anonymous-release.test.ts` (the request route and the catalog, driven through
-  the real app on a real database, each with a control)
+  the real app on a real database, each with a control),
+  `backend/test/concealed-era-version-dois.test.ts` (settling the reservations the blind left
+  behind, against local EZID and GitHub stand-ins that record what went on the wire, with the
+  reads-nothing refusal and its declares-no-authors control, the still-blinded refusal, and the
+  concealed-era boundary in both directions)

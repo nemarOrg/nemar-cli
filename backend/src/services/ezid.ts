@@ -516,3 +516,20 @@ export function conceptEzidIdentifier(conceptDoi: string): string {
 export function isTestShoulder(shoulder: string): boolean {
   return shoulder === TEST_SHOULDER || shoulder.startsWith("doi:10.5072/");
 }
+
+/**
+ * Does this EZID identifier live on the sandbox shoulder?
+ *
+ * Unlike {@link isTestShoulder}, which takes a shoulder, this takes a whole
+ * identifier (`doi:10.5072/FK2NM099998.V1.0.0`) and answers which EZID account
+ * holds it. The shoulder in the identifier decides that, never `ENVIRONMENT`: a
+ * sandbox DOI minted on the dev worker has to keep resolving to the sandbox
+ * account whatever touches it later.
+ *
+ * Declared once because three call sites derived it by hand from `TEST_SHOULDER`
+ * and had to agree: the `version_doi` publish step, the version-DOI callback, and
+ * the concealed-era completion.
+ */
+export function isSandboxIdentifier(identifier: string): boolean {
+  return identifier.includes(TEST_SHOULDER.replace(/^doi:/, "").split("/")[0]);
+}

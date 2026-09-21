@@ -542,10 +542,25 @@ describe("the route: the gate, then the bytes", () => {
     expect(res.status).toBe(502);
     // The assertion that makes this a test rather than a duplicate of the
     // short/long ones: it is 502 either way, so only the byte count shows
-    // whether the read was bounded. The manifest promised 43 bytes; a
-    // bounded read stops within a chunk or two of that.
-    expect(pushed).toBeLessThan(TOTAL);
-    expect(pushed * CHUNK).toBeLessThan(4 * CHUNK);
+    // whether the read was bounded.
+    //
+    // The bound is deliberately loose, and the tight one was wrong. `pushed`
+    // counts chunks the SERVER produced, and the client performs exactly one
+    // read: 64 KB already exceeds the 43 bytes the manifest promised, so
+    // sizeCheckedBody cancels on the first chunk. But this stand-in is a real
+    // Bun.serve over a real socket, so between the client's cancel and the
+    // server noticing it, the server can write several chunks into socket
+    // buffers. That count is a property of the kernel and of machine load, not
+    // of this code: `< 4 * CHUNK` passed deterministically at 1 chunk unloaded
+    // and failed in CI at exactly 4 under load.
+    //
+    // What is worth pinning is the memory claim -- a 16 MB body is not drained
+    // into a 128 MB isolate, which is a kill that cannot be caught and logged
+    // -- so the bound is an eighth of the body, far above any socket buffer
+    // and far below draining. Cancellation itself cannot be asserted from
+    // here: the server-side stream's cancel() is a different object and a real
+    // HTTP server does not reliably forward the client's abort to it.
+    expect(pushed).toBeLessThan(TOTAL / 8);
   });
 
   test("above the buffer ceiling it streams, with NO declared length", async () => {

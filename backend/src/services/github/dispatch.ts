@@ -74,6 +74,18 @@ export async function triggerArchiveGeneration(
 export const CENTRAL_WORKFLOW_REPO = "nemarDatasets/.github";
 
 /**
+ * The bucket `generate-manifest.yml` actually writes to.
+ *
+ * It is a hardcoded `S3_BUCKET: nemar` in the workflow, which never reads
+ * `client_payload.s3_bucket` (#1451). So a caller passing a non-prod bucket is
+ * not redirected, it is ignored: the dispatch would write a non-prod dataset's
+ * manifest into the production bucket. `triggerManifestGeneration` refuses that
+ * rather than trusting a parameter the other end drops on the floor. When the
+ * workflow starts honoring `s3_bucket` this constant, and the guard, go away.
+ */
+export const CENTRAL_MANIFEST_BUCKET = "nemar";
+
+/**
  * Trigger central manifest generation via repository_dispatch on
  * `nemarDatasets/.github` (NOT the individual dataset repo). The workflow
  * checks out the dataset repo's version tag, walks the tree, builds the
@@ -89,6 +101,13 @@ export const CENTRAL_WORKFLOW_REPO = "nemarDatasets/.github";
  * the dataset repo is private, raw.githubusercontent.com cannot serve
  * an unauthenticated HEAD, so Stream A's Python workflow disables its
  * git-backed canary verification when this flag is set.
+ *
+ * `options.s3Bucket` must be {@link CENTRAL_MANIFEST_BUCKET} or absent; anything
+ * else throws before the dispatch. A non-prod worker therefore cannot reach this
+ * path at all, and must build the manifest inline instead (#1451) -- which on the
+ * dev worker means `POST /admin/datasets/:id/manifest/:version`, the route the
+ * error message names, since `/admin/manifest/dispatch` has no inline branch of
+ * its own to fall back to.
  */
 export async function triggerManifestGeneration(
   datasetId: string,
@@ -100,6 +119,14 @@ export async function triggerManifestGeneration(
   pat: string,
   options?: { skipCanary?: boolean; skipCallback?: boolean; s3Bucket?: string },
 ): Promise<void> {
+  // Before the network call, so a refused bucket costs no dispatch and no
+  // half-written manifest: the workflow ignores s3_bucket and writes to prod.
+  if (options?.s3Bucket !== undefined && options.s3Bucket !== CENTRAL_MANIFEST_BUCKET) {
+    throw new Error(
+      `Refusing to dispatch central manifest generation for bucket "${options.s3Bucket}": generate-manifest.yml hardcodes s3://${CENTRAL_MANIFEST_BUCKET} and ignores s3_bucket (#1451), so this run would write ${datasetId}@${version} into the production bucket. Build it inline instead, with POST /admin/datasets/${datasetId}/manifest/${version}.`,
+    );
+  }
+
   const response = await fetch(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
     method: "POST",
     headers: {
@@ -117,8 +144,11 @@ export async function triggerManifestGeneration(
         concept_doi: conceptDoi,
         callback_token: callbackToken,
         callback_url: callbackUrl,
-        // Env-awareness (epic #923): the central workflow writes to this bucket
-        // instead of a hardcoded s3://nemar. Omitted (prod default) when unset.
+        // Epic #923 sent this so the central workflow could follow the caller's
+        // bucket. generate-manifest.yml never read it (#1451), so today it is
+        // documentation of intent rather than a control, and the guard above is
+        // what keeps a non-prod bucket from silently meaning "prod". Kept on the
+        // payload so the workflow can start honoring it without a Worker deploy.
         // callback_url is already caller-built from API_BASE_URL, so no separate
         // callback_base_url is needed here.
         s3_bucket: options?.s3Bucket,

@@ -183,6 +183,74 @@ describe("buildReadRecipe", () => {
     expect(recipe.how_to.zarrita).toContain("zarr.open.v3(store");
   });
 
+  // #1457. The lane labeled ready-to-run Python was the one lane that could not run
+  // where compute runs by default (ADR 0049). These pin the parts of the browser lane
+  // whose absence is a silent failure rather than a wrong string.
+  describe("the browser-Python lane", () => {
+    const store = on008083Index.stores[0];
+    const browser = () =>
+      buildReadRecipe({ index: on008083Index, store, groupName: "eeg_250hz" }).how_to
+        .python_browser;
+
+    test("reads the https array path, never s3", () => {
+      // s3:// needs s3fs and aiohttp, and a browser needs neither: the store maps
+      // byte requests onto HTTP Range against contract_base.
+      expect(browser()).toContain(on008083Index.contract_base);
+      expect(browser()).not.toContain("s3://");
+      expect(browser()).not.toContain(on008083Index.s3_uri);
+    });
+
+    test("is asynchronous throughout", () => {
+      // The whole reason this lane exists. A synchronous call starts an IO thread and
+      // Pyodide's main thread cannot, and the error names threads rather than zarr.
+      expect(browser()).toContain("await open_array(");
+      expect(browser()).toContain("await arr.getitem(");
+      expect(browser()).not.toContain("zarr.open(");
+    });
+
+    test("slices the sample axis, with the exact selection zarr's async API takes", () => {
+      // One exact line rather than a prefix match, because every way this can be wrong
+      // is silent. Swapping the tuple slices the channel axis with sample indices and
+      // returns real numbers off the wrong axis; reversing slice() arguments yields an
+      // empty window rather than an error; and dropping the outer tuple passes two
+      // positional arguments to a method whose selection is a single argument.
+      expect(browser()).toContain(
+        "window = await arr.getitem((slice(None), slice(start_sample, end_sample)))",
+      );
+    });
+
+    test("the name it imports is the name it calls", () => {
+      // Checking the import and the call site separately lets them drift apart, and the
+      // snippet then raises NameError the first time a model runs it.
+      const imported = /from eegprep_lean import (\w+)/.exec(browser())?.[1];
+      expect(imported, "the snippet imports nothing from eegprep_lean").toBeTruthy();
+      expect(browser()).toContain(`await ${imported}(`);
+    });
+
+    test("names eegprep-lean rather than inlining a store", () => {
+      // The alternative is a third hand-written copy of a reader bound to the index
+      // contract, which is the drift this recipe exists to avoid.
+      expect(browser()).toContain("from eegprep_lean import");
+    });
+
+    test("carries no install line", () => {
+      // eegprep-lean is not on the Python Package Index, so micropip.install would
+      // fail outright; the executing runtime pins and installs it.
+      expect(browser()).not.toContain("micropip.install");
+      expect(browser()).not.toContain("pip install");
+    });
+
+    test("the desktop lane warns against a browser, rather than merely mentioning one", () => {
+      // It used to be described as "ready-to-run Python" with nothing saying where.
+      // Asserting the word "browser" appears is not enough: a comment reading "also
+      // works fine in a browser" would satisfy that while actively misleading a model
+      // into the threading failure this lane exists to avoid.
+      const recipe = buildReadRecipe({ index: on008083Index, store, groupName: "eeg_250hz" });
+      expect(recipe.how_to.python_zarr).toContain("desktop and HPC only");
+      expect(recipe.how_to.python_zarr).toContain("a browser cannot");
+    });
+  });
+
   test("throws for a group name the store does not have", () => {
     const store = on008083Index.stores[0];
     expect(() =>

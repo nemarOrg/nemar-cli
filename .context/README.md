@@ -47,6 +47,8 @@ Trust these for how things work today.
 | [dataset_workflow.md](dataset_workflow.md) | Dataset lifecycle: IDs, upload, download, versioning. | public |
 | [pr_architecture.md](pr_architecture.md) | PR + staging mechanics. **The branch-protection payload it described is superseded**; see ADR 0001. | public |
 | [phase5-cross-repo-owner-deploys.md](phase5-cross-repo-owner-deploys.md) | Known cross-repo gaps needing owner action. | public |
+| [epic_browser_compute_state.md](epic_browser_compute_state.md) | The live map of the in-browser compute epic across osa, eegprep, nemar-cli and website: what is decided, what blocks what, what is still open. | public |
+| [eegprep_lean_contract.md](eegprep_lean_contract.md) | What `eegprep-lean` will guarantee and where it deliberately differs from eegprep. The deliverable ADR 0069 names; drafted before the package exists. | public |
 | [ideas.md](ideas.md) | Exploratory design notes. Frequently rewritten; promote settled items to an ADR. | public |
 | [research.md](research.md) | Prior art from the `nemar-tools` scripts. Describes the **pre-NEMAR** Zenodo flow; DOIs are EZID now (ADR 0007). | public |
 
@@ -94,6 +96,7 @@ A table rather than a list, so each carries a destination like every other docum
 | [prototyping_plan.md](prototyping_plan.md) | public |
 | [architecture_review.md](architecture_review.md) | public |
 | [epic_central_manifest_state.md](epic_central_manifest_state.md) | public |
+| [epic_browser_compute_state.md](epic_browser_compute_state.md) | public |
 | [sprint_review_publication_workflow.md](sprint_review_publication_workflow.md) | public |
 | [deleted-datasets-incident.md](deleted-datasets-incident.md) | public |
 | [blast-radius-catalog-fold.md](blast-radius-catalog-fold.md) | public |

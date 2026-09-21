@@ -40,19 +40,33 @@ export interface ExemplarGateRow {
 /**
  * True when a normally-blocked xx dataset is an exemplar that may proceed through
  * publish / DOI / reindex. Requires a non-production env AND an xx-prefix id AND
- * is_exemplar=1 AND that it is not the fleet's anonymous deposit. Callers keep
- * their existing xx / is_sandbox block and skip it only when this returns true
+ * is_exemplar=1 AND that the row is not anonymous. Callers keep their existing
+ * xx / is_sandbox block and skip it only when this returns true
  * (`... && !isExemplarPublishAllowed(env, row)`).
  *
- * **The anonymity term is not belt-and-braces; it is the whole guard for one
- * dataset.** `xx099907` is the fleet's standing anonymous deposit, and
- * publishing it is not a mess to clean up: the approve path stamps
- * `first_published_at`, after which migration 0085's triggers refuse
- * `anonymous = 1` on that row FOREVER. The fixture is destroyed rather than
- * dirtied, which is what `scripts/exemplar-fleet.json` and AGENTS.md both warn
- * about, and the normal publication-request refusal does not cover it: a plain
- * (non-anonymous) publish request on an anonymous deposit is deliberately
- * allowed, because that is exactly how a blinded deposit is published for real.
+ * **The anonymity term is defense in depth, not dead weight.** Both known
+ * producers of such a row are now closed: `scripts/exemplar-fleet.json` declares
+ * no anonymous entry and the loader refuses the key outright (#1433), and
+ * `POST /admin/datasets/exemplar` refuses `anonymous: true` before anything is
+ * created, writing the column as a literal 0 (#1434). Neither closure is a
+ * reason to drop this term, because what it refuses is a row that reached the
+ * table by some other route: a manual insert, a restored backup predating
+ * #1434, or a later writer that forgets. It costs one boolean; being wrong
+ * costs what the next paragraph describes.
+ *
+ * What it prevents: publishing an anonymous row does not dirty it but destroys
+ * it, because the approve path stamps `first_published_at`, after which
+ * migration 0085's triggers refuse `anonymous = 1` on that row forever.
+ *
+ * **What this function no longer does, and why (#1433).** It briefly took an
+ * `ExemplarPublishIntent` so that an explicit `anonymousRelease` could pass the
+ * anonymity term (#1423). That existed for one reason: the standing anonymous
+ * deposit had been placed in the `xx` band, where publication is itself an
+ * exception, so the one path the fixture needed was the one path the gate
+ * refused. The right repair was not to widen the gate but to move the fixture
+ * to a reserved `nm` id (ADR 0068, epic #1430), where an anonymous release is
+ * an ordinary publication and no exception is involved. The parameter is gone
+ * with the fixture it served.
  */
 export function isExemplarPublishAllowed(
   env: Pick<Bindings, "ENVIRONMENT">,

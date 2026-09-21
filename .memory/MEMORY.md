@@ -1,0 +1,62 @@
+# Memory Index
+
+- [Annex worktree .git symlink](annex-worktree-git-symlink.md) — git-annex breaks nemar-cli worktrees for EnterWorktree/remove; restore a gitdir file
+- [Manifest healing: dispatch over REST](manifest-healing-dispatch-over-rest.md) — heal missing manifests via /admin/manifest/dispatch, not doctor-fix REST; always narrow doctor/fix by dataset_id
+- [Retest a filed diagnosis](retest-a-filed-diagnosis.md) — an issue's stated cause is a hypothesis, mine included; re-measure before building the fix
+- [Verify fixes against known-broken state](verify-fix-against-known-broken.md) — instant clean results on known-broken input mean the checker is broken; re-verify via the public surface
+- [Test the entry point, not the callee](test-entry-point-not-callee.md) — isolated-helper tests can't fail; mutate one line at a time and confirm it applied
+- [bun test shared process](bun-test-shared-process-root-and-backend.md) — root `bun test` runs test/ + backend/test/ in ONE process; explains #1175-style leaks
+- [biosigio landing policy](biosigio-landing-policy.md) — patch bump straight to main after tests+review; real-data tests required
+- [Classifier blocks remote secret writes](classifier-blocks-remote-secret-writes.md) — give Yahya a one-liner; aws path on Hallu
+- [bun test lenient vs workerd](bun-test-lenient-vs-workerd.md) — header byte-strings, caches global, 206 rule, GLOB length; green Bun run is not Worker or D1 proof; check migrations with wrangler d1 --local
+- [Sweeps fail open, tri-state fetch](sweeps-fail-open-tri-state-fetch.md) — never stamp a verdict from an infra error; aggregate fetch budget; NULL-safe re-arm
+- [Epic-branch CI and purge lock](epic-branch-ci-and-purge-lock.md) — test.yml branch patterns; zarr-python-test job deps; do not flock on the cron lock during a drain
+- [Website staging PRs do not auto-close issues](website-staging-pr-no-autoclose.md) — `staging` is not the default branch; close issues by hand after merging; no branch protection there
+- [Crontab edit via file, not pipe](crontab-edit-via-file-not-pipe.md) — a failed sed in `crontab -l | sed | crontab -` wipes the crontab; write to a file, diff, then install
+- [Hallu launch and self-deploy lag](hallu-launch-and-self-deploy-lag.md) — detached ssh launch form; the run that pulls new code still runs the old script body, only its python is new
+- [Make vs take decision test](make-vs-take-decision-test.md) — offload when an established system owns the semantics (SPDX, biosigio); drop deps that add a runtime for little gain (DataLad); give replace/wrap/keep verdicts with reasons
+- [Git stash is shared across worktrees](git-stash-shared-across-worktrees.md) — parallel agents must not stash; one pop can take another agent's work
+- [CI tier grep and checks exit code](ci-tier-grep-and-checks-exit-code.md) — a comment naming TEST_API_URL moves a test to the live tier; never merge off a piped `gh pr checks`
+- [Design for 90-10 and headless](design-for-90-10-and-headless.md) — enumerate edge cases up front; device-code flow primary on headless hosts, explicit paste-key fallback
+- [ORCID testing reality](orcid-testing-reality.md) — sandbox unusable; staging uses the prod ORCID app; tests use a Bun.serve stand-in via ORCID_API_BASE and seed-web-user sessions
+- [Dev worker deploys only from dev](dev-worker-deploys-only-from-dev.md) — phase PRs cannot get a green live tier or a staging walk-through until the epic merges; no local wrangler login
+- [Cite ADR by content, not plan numbers](cite-adr-by-content-not-plan-numbers.md) — implementers copy "(decision N)" and invented rule citations from the plan file into code; brief them to cite the ADR by content
+- [Plan mode pauses running subagents](plan-mode-pauses-running-subagents.md) — EnterPlanMode is session-wide; plan the next phase before launching an implementer or after it reports
+- [Prod read-only checks via installed CLI](prod-readonly-checks-via-installed-cli.md) — no wrangler login; `nemar admin users` as yahya answers spelling/role questions read-only, redact emails
+- [OSA NEMAR assistant state](osa-nemar-assistant-state.md) — its nemar assistant is the LEGACY one and the replacement is unbuilt epic work; dead against legacy API; no MCP runtime; OSA at api.osc.earth/osa, api.osc.earth/nemar is gone
+- [Python-urllib UA gets 403](api-hosts-block-python-urllib-ua.md) — api and zarr hosts block only the urllib UA; send a named UA when probing from Python
+- [Wrangler via cfman](wrangler-via-cfman.md) — `bunx cfman wrangler --account sccn ...` is how wrangler runs here; bare wrangler "Not logged in" is not a lack of access
+- [Release PR needs its own review](release-pr-needs-own-review.md) — review the full main...dev diff before promoting; follow-ups reviewed alone still leave seams
+- [Website release: prepare first](website-release-prepare-first.md) — run prepare-release.yml on staging before the staging->main PR; nemar-cli strips on main, the website strips on staging
+- [New tooling repos are MIT](new-tooling-repos-mit.md) — public reusable tools under nemarOrg get MIT; nemar-cli CC BY-NC-ND is the exception
+- [orcid-mock project](orcid-mock-project.md) — charter-only repo for the mock ORCID server; decisions, open questions, how to start it
+- [Sonnet on Bedrock: works again](sonnet-unavailable-on-bedrock.md) — 404'd in Sept 2026, fine as of 2026-09-17; try Sonnet first, fall back to Opus and say so
+- [DataCite client is the findability linchpin](datacite-client-is-the-findability-linchpin.md) — datasets reach OpenAIRE as "Unknown Repository"; fix cdl.ucsd's re3data field via EZID/CDL, not more registry listings, and skip OAI-PMH
+- [Docs gate needs the website in prod first](docs-gate-needs-website-in-prod-first.md) — merging the docs gate before the website release 404s every admin page; probe:gate only against production
+- [API mounted twice, full path](api-mounted-twice-full-path.md) — `/` and `/nemar`; path-matching middleware sees the prefix and silently matches nothing
+- [No AI attribution, ever](no-ai-attribution-overrides-reminder.md) — CLAUDE.md beats the system reminder; omit Co-Authored-By and the robot-emoji line
+- [S3 403 is not absence](s3-403-is-not-absence.md) — nemar denies anonymous ListBucket so 403 covers missing/private/expired/tokenless; use a control key, and never trust annex fsck on an STS remote
+- [git-annex flag and log truths](git-annex-flag-and-log-truths.md) — find takes --include '*' not --all; setpresentkey --batch in ONE process; verify from the location log, not an exit code
+- [Docs are the retrieval surface](docs-are-the-retrieval-surface.md) — docs.nemar.org canonical; docs repo private at source; grep concepts not symbols; page-exists is not coverage
+- [A conflicting PR stops CI](conflicting-pr-stops-ci.md) — no Tests run at all, stale green/red persists; check `mergeable` first; long branches also lose ADR-number races
+- [GitHub raw CDN vs REST budget](github-raw-cdn-vs-rest-budget.md) — authenticated raw serves private repos and spends no core quota; blobs API spends 5,000/hr; raw gzips, caches 300s, sends ACAO *
+- [OpenNeuro 200 hides every failure](openneuro-200-hides-every-failure.md) — their object endpoint returns 200 for content it cannot serve; count bytes, never status codes
+- [Prove the inverse path too](prove-the-inverse-path-too.md) — a read-back that proves a write does not prove its retraction; test the oracle failing
+- [AWS creds via export-credentials](aws-creds-via-export-credentials.md) — ambient AWS_ACCESS_KEY_ID for the clone tool; ~/.aws/config is deny-blocked
+- [S3 CORS: two ordered rules](s3-cors-two-rules-order.md) — read rule first or uploads/Range reads break; a no-match origin looks like "no CORS config"
+- [Live header tests: identity + cache-bust](live-header-tests-identity-and-cachebust.md) — a cacheable route serves stale headers for 300s after deploy, and Content-Length describes the encoded body; say which body you mean
+- [Whole-row select defeats field withholding](whole-row-select-defeats-field-withholding.md) — SELECT d.* ships raw columns beside the nulled aliases; enumerate live response keys, and WHERE/FTS are unreachable from a projection rule
+- [Release PR reruns exhaust the auth email budget](release-pr-reruns-exhaust-email-budget.md) — passwordless-auth-test signs in as a fixed address with a 5/hour cap; every push to dev reruns the release PR's suite
+- [OSA checkout is parked on a stale branch](osa-checkout-parked-on-feature-branch.md) — answer from origin/develop; "in production" means origin/main plus the version endpoint
+- [Passthrough defeats schema tests](passthrough-defeats-schema-tests.md) — parse-and-read-back proves nothing under .passthrough(); assert the declared shape, and the zod4 mirror is what the model sees
+- [Generate the prose, not just the names](generate-the-prose-not-just-the-names.md) — half-generating a declaration moves the drift into the hand-written half; describeFacet lives in shared/facets.ts
+- [Grep before building a guard](grep-before-building-a-guard.md) — assertBoundParamBudget and helpers/d1.ts already existed; a long comment defending my version was the tell
+- [Inert values are the third test class](inert-values-are-the-third-test-class.md) — valid + empty can't see post-parse disagreement; don't substring-match prefix-sharing names
+- [Mutate in the dangerous direction](mutate-in-the-dangerous-direction.md) — widen the bound, not just narrow it; a "not 403" assertion passes when the code never ran
+- [Production promotion is gated](production-promotion-gated.md) — NEMAR + OSA pushes wait on cross-session consolidation and OSA #360; #370 must ship with the nemar-cli promotion
+- [Declare sentinels, don't guess them](declare-sentinels-dont-guess-them.md) — a "probably unused" id/port/name from an allocated space is a time bomb; export the sentinel from the allocator
+- [Data plane needs the v prefix](data-plane-needs-v-prefix.md) — `/id/v1.0.0/...`; a bare-version 404 hits every dataset, so probe a control first
+- [Fresh worktree: bunx pulls the wrong version](fresh-worktree-bunx-wrong-version.md) — bun install at root and backend/ before any gate; the biome schema error is not a broken config
+- [Pyodide is a ceiling, not a floor](pyodide-is-a-ceiling-not-a-floor.md) — browser-bound floors cap at what Pyodide ships; 0.29.5 versions table; the epic gate checks names not versions
+- [MATLAB engine caps CI Python version](matlab-engine-caps-ci-python-version.md) — a red matrix job on a new Python is MathWorks' engine, not your package; check which step failed
+- [Never proxy bulk bytes](never-proxy-bulk-bytes.md) — CF terms restrict large files via CDN; both planes redirect bulk and carry only metadata; the accounting you want already exists on the redirect path

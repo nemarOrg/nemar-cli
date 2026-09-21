@@ -18,6 +18,71 @@ import type { Bindings } from "../src/types/bindings";
 const EXEMPLAR_ID = "xx099900"; // dev exemplar band, valid id shape (num 99900 <= 99999)
 const envOf = (v: unknown) => ({ ENVIRONMENT: v }) as Pick<Bindings, "ENVIRONMENT">;
 
+/**
+ * The anonymity term, and the intent that narrows it (#1423).
+ *
+ * The term exists so the fleet's standing anonymous deposit cannot be
+ * published for real: the approve path would stamp `first_published_at`, and
+ * migration 0085's triggers then refuse `anonymous = 1` on that row forever,
+ * destroying the fixture rather than dirtying it.
+ *
+ * It was refusing an ANONYMOUS RELEASE too, which cannot do any of that --
+ * `FIRST_PUBLICATION_STAMP_SQL` leaves an anonymous row unstamped on purpose.
+ * Since the anonymous release is the only path that runs `repo_public` and
+ * `create_tag`, refusing it meant the fixture could never have a public row, a
+ * version or a manifest, so every public-facing anonymity surface was
+ * unreachable by the fixture built to exercise them.
+ */
+describe("isExemplarPublishAllowed: the anonymous deposit", () => {
+  const anonRow = { dataset_id: EXEMPLAR_ID, is_exemplar: 1, anonymous: 1 };
+  const plainRow = { dataset_id: EXEMPLAR_ID, is_exemplar: 1, anonymous: 0 };
+
+  test("an anonymous exemplar is refused every direction, with no way to ask", () => {
+    // Withdrawn in #1433. The gate briefly took an `anonymousRelease` intent so
+    // the fleet's anonymous deposit could take the one publish path it needed
+    // (#1423). That fixture was in the wrong band: `xx` publishes only through
+    // the exemplar exception, so widening the exception was the only way to let
+    // it live there. It now lives at a reserved `nm` id where an anonymous
+    // release is an ordinary publication, and the parameter went with it.
+    expect(isExemplarPublishAllowed(envOf("test"), anonRow)).toBe(false);
+  });
+
+  test("the term is a LIVE guard: the admin route can still create such a row", () => {
+    // Not unreachable, though the fleet no longer declares an anonymous entry.
+    // POST /admin/datasets/exemplar still accepts `anonymous: true` and writes
+    // it with is_exemplar = 1 on an xx0999NN id (routes/admin/exemplar.ts), so
+    // an admin can create exactly this row today. #1434 retires that field.
+    // Publishing such a row destroys it rather than dirtying it: the approve
+    // path stamps first_published_at, after which migration 0085's triggers
+    // refuse anonymous = 1 on it forever.
+    expect(isExemplarPublishAllowed(envOf("test"), anonRow)).toBe(false);
+    expect(isExemplarPublishAllowed(envOf("test"), plainRow)).toBe(true);
+  });
+
+  test("an ordinary exemplar is allowed off production", () => {
+    expect(isExemplarPublishAllowed(envOf("test"), plainRow)).toBe(true);
+  });
+
+  test("the production fence holds, and fails closed on an unknown env", () => {
+    // The env term is the one that keeps `is_exemplar = 1` out of production
+    // entirely. It uses isNonProductionEnv, so an unset value refuses.
+    expect(isExemplarPublishAllowed(envOf("production"), plainRow)).toBe(false);
+    expect(isExemplarPublishAllowed(envOf(undefined), plainRow)).toBe(false);
+    expect(isExemplarPublishAllowed(envOf("production"), anonRow)).toBe(false);
+  });
+
+  test("a non-exemplar xx row is still refused", () => {
+    // The exemption is for the staging fleet, not for the xx band.
+    expect(
+      isExemplarPublishAllowed(envOf("test"), {
+        dataset_id: EXEMPLAR_ID,
+        is_exemplar: 0,
+        anonymous: 1,
+      }),
+    ).toBe(false);
+  });
+});
+
 describe("isExemplarPublishAllowed", () => {
   test("non-production + xx + is_exemplar=1 -> allowed", () => {
     for (const e of ["development", "staging", "test"]) {

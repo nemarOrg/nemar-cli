@@ -13,10 +13,29 @@
  * reserved. The rotation guarantees every row is visited within
  * ceil(total/batch) days regardless of churn — a stuck DOI is exactly the row
  * that stops being updated, so a recency window would starve it.
+ *
+ * **A `reserved` version DOI is no longer always a crash.** Since #1447 an
+ * anonymous release (ADR 0065) mints its version identifier reserved ON
+ * PURPOSE: that step is the only thing that dispatches the manifest job, and a
+ * concealed deposit must stay citable by its landing page alone. Completing one
+ * here would be the worst outcome this sweep could produce -- it publishes the
+ * identifier, DataCite harvests it, and the record it harvests still names
+ * "Anonymous" as the creator, so a cron job both breaks the concealment and
+ * fixes the wrong attribution in place, permanently, with nobody having asked.
+ *
+ * So concealed deposits are excluded, and the exclusion is `isAnonymous(row)` in
+ * the loop rather than a predicate in the candidate query. Two reasons. It runs
+ * on the row, so it holds no matter how the candidate query is later widened --
+ * and it will be: the sibling sweeps all key off `datasets.latest_version_doi`,
+ * which an anonymous release deliberately leaves NULL, so today's rows reach
+ * here only by an accident of a column written in another file. And a skip that
+ * a WHERE clause performs is invisible; this one logs, so an operator can see
+ * that the sweep met a concealed deposit and left it alone.
  */
 
 import { datasetVersionLandingUrl } from "../../../shared/datacite-constants.js";
 import type { Bindings } from "../types/bindings.js";
+import { isAnonymous } from "./anonymity.js";
 import { classifyExistingVersionDoi, resolveEzidAuth } from "./doi.js";
 import { isNonProductionEnv, resolveDatasetLandingBase } from "./environment.js";
 import { getIdentifier, makePublic } from "./ezid.js";
@@ -31,6 +50,8 @@ const SANDBOX_SHOULDER_PREFIX = "10.5072";
 interface DoiRow {
   dataset_id: string;
   latest_version_doi: string;
+  /** Required, not optional: an absent column must not read as "not anonymous". */
+  anonymous: number | null;
 }
 
 /** Extract the semver from a version DOI (`…NEMAR.NM000104.V1.0.0` -> `1.0.0`). */
@@ -77,6 +98,8 @@ export async function reconcileReservedVersionDois(
     return;
   }
 
+  // Deliberately NOT filtered on `anonymous` here: the refusal lives in the
+  // loop below, on the row, where widening this query cannot route around it.
   const WHERE = "latest_version_doi IS NOT NULL AND latest_version_doi != ''";
   let rows: DoiRow[];
   try {
@@ -95,7 +118,7 @@ export async function reconcileReservedVersionDois(
     if (total === 0) return;
     const offset = rotationOffset(total, nowMs);
     const res = await env.DB.prepare(
-      `SELECT dataset_id, latest_version_doi FROM datasets
+      `SELECT dataset_id, latest_version_doi, anonymous FROM datasets
        WHERE ${WHERE}
        ORDER BY dataset_id LIMIT ? OFFSET ?`,
     )
@@ -113,7 +136,14 @@ export async function reconcileReservedVersionDois(
 
   let checked = 0;
   let reconciled = 0;
-  for (const { dataset_id, latest_version_doi: doi } of rows) {
+  for (const row of rows) {
+    const { dataset_id, latest_version_doi: doi } = row;
+    // The enforcement, before EZID is touched at all. A concealed deposit's
+    // reserved identifier is the DESIRED state, and `makePublic` is one-way.
+    if (isAnonymous(row)) {
+      console.log(`[doi-reconcile] skipped ${dataset_id}: anonymous deposit (reserved on purpose)`);
+      continue;
+    }
     if (!isEzidNemarDoi(doi)) continue;
     const version = versionFromVersionDoi(doi);
     if (!version) continue;
@@ -132,6 +162,14 @@ export async function reconcileReservedVersionDois(
       // identifier is ever completed to public; `unavailable` (a deliberate
       // tombstone -- see services/withdraw.ts) and `public` are both left
       // alone (epic #967 phase 4 review fix, GROUP 3c).
+      //
+      // `makePublic` and not `updateIdentifier(..., { dataciteXml })`, which is
+      // what `createEzidVersionDoi` now does on the same branch: there the
+      // caller has just read the dataset description and may be publishing a
+      // formerly-anonymous deposit, so the record's metadata can be wrong.
+      // Here the reserved record was written by the crashed run itself, from
+      // the same description, moments earlier -- and this sweep has no
+      // description to rebuild it from. Flipping the status is the whole job.
       if (classifyExistingVersionDoi(id.status) === "complete_reserved") {
         await makePublic(
           auth,

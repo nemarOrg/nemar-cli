@@ -90,7 +90,7 @@ export function ensureGitignoreHasNemar(absolutePath: string): void {
 /** Step 6: Create a new dataset in the backend, or resume an existing one. */
 export async function createOrResumeDataset(
   absolutePath: string,
-  options: { description?: string },
+  options: { description?: string; datasetId?: string },
   datasetName: string,
   dataFiles: UploadFileEntry[],
   existingConfig: LocalDatasetConfig | null,
@@ -142,6 +142,11 @@ export async function createOrResumeDataset(
         description: options.description,
         files: dataFiles.map((f) => ({ path: f.path, size: f.size, type: f.type })),
         attestation,
+        // Undefined unless `--dataset-id` was given, and `JSON.stringify` drops
+        // an undefined value, so an ordinary upload's body is unchanged by this
+        // option existing. Never defaulted: a dataset id is allocated, and the
+        // one reserved-band exception is something an operator asks for by name.
+        dataset_id: options.datasetId,
       });
 
       datasetInfo = {

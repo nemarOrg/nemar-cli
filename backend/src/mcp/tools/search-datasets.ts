@@ -30,13 +30,18 @@
  */
 
 import {
+  SEARCH_DATASETS_MAX_FILTERS,
   type SearchDatasetsHit,
   type SearchDatasetsInput,
   flagToBoolean,
   searchDatasetsOutputSchema,
 } from "../../../../shared/contract/mcp.js";
+import { FACETS } from "../../../../shared/facets.js";
+import { RangeParseError } from "../../../../shared/range.js";
+import { parseLicenseTierFilter } from "../../lib/license.js";
 import { CONCEPT_DOI_SQL } from "../../services/anonymity";
 import { splitCsv } from "../../services/data-router.js";
+import { FacetEnumParseError, parseFacetFilters } from "../../services/dataset-facets.js";
 import {
   type DatasetFilterOptions,
   buildDatasetFilterClauses,
@@ -149,6 +154,24 @@ export function mergeHitsWithCatalog(
   return { hits, unresolvedIds };
 }
 
+/** A rejected filter value, reported so the caller can correct it.
+ *
+ *  Errors teach here (epic #1065): naming the parameter and what it received
+ *  lets an agent re-plan, where a bare validation failure just ends the turn.
+ *  This is also the guard against the failure that made this change necessary:
+ *  the input schema is `.passthrough()`, so an argument the server does not
+ *  declare is accepted and silently dropped, and unfiltered results then look
+ *  filtered. A facet value that parses wrong is at least visible; see the
+ *  `unknown argument` note below for the ones that cannot be. */
+function badFilterOutcome(message: string): ToolOutcome {
+  return {
+    result: {
+      isError: true,
+      content: [{ type: "text", text: message }],
+    },
+  };
+}
+
 function unavailableOutcome(): ToolOutcome {
   return {
     result: {
@@ -165,16 +188,146 @@ function unavailableOutcome(): ToolOutcome {
   };
 }
 
-export async function searchDatasetsTool(
-  env: Pick<Bindings, "DB" | "AI" | "VECTORIZE">,
+/** The wire argument names mapped onto `DatasetFilterOptions`' own field
+ *  names. Both directions of the mapping read this: {@link buildFilterOptions}
+ *  writes the options, {@link activeFilterNames} names them back for the
+ *  refusal message. A transposition here would be invisible to either, so
+ *  `filter-count-matches-clauses.unit.test.ts` pins each wire name to the SQL
+ *  its own clause contains. */
+const BESPOKE_OPTION_FIELD = {
+  modality: "modality",
+  task: "task",
+  has_hed: "hasHed",
+  has_zarr: "hasZarr",
+  author: "author",
+  has_doi: "hasDoi",
+  has_zarr_verified: "hasZarrVerified",
+  data_complete: "dataComplete",
+  recent: "recent",
+  license: "licenseTiers",
+} as const satisfies Record<string, keyof DatasetFilterOptions>;
+
+/**
+ * Whether a built option will actually produce a clause.
+ *
+ * Deliberately reads the MAPPED option and not the wire argument. The two are
+ * not interchangeable, and an earlier revision of this file counted the wire
+ * argument and was wrong for ten of the thirty filters: `license: "CC0-1.0"`
+ * is a non-empty string that `parseLicenseTierFilter` reduces to no tiers, a
+ * version facet given `"v"` parses to an empty prefix, an enum facet given
+ * `","` parses to no values, and `modality: "  "` is whitespace that the
+ * builder's raw truthiness test accepts and binds as `%  %`. Every one of
+ * those disagreements disappears once the question is asked after parsing.
+ *
+ * The rules themselves are the builders': `buildDatasetFilterClauses` guards
+ * each bespoke clause on bare truthiness (`if (opts.modality)`, `if
+ * (opts.hasDoi)` -- so `has_doi: false` builds NOTHING, and does not mean
+ * "datasets without a DOI"), `recent` on `> 0`, and `licenseTiers` on a
+ * non-empty array. `hasActiveFilters` (dataset-search.ts) applies the same
+ * rules, but answers a different question: one boolean for the whole options
+ * bag, including `search`, where this one has to say WHICH filters, by the
+ * names the caller used.
+ */
+function optionNarrows(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "number") return value > 0;
+  return Boolean(value);
+}
+
+/**
+ * The filters these options will actually narrow by, under the wire names the
+ * caller used, in the same order `SEARCH_DATASETS_FILTER_PARAMS` declares them
+ * (bespoke first, then facets).
+ *
+ * The facet half reads the PARSED bag, so a facet the parser dropped is not
+ * counted, and a facet added to `shared/facets.ts` is counted the day it is
+ * declared.
+ */
+export function activeFilterNames(filters: DatasetFilterOptions): string[] {
+  const names: string[] = [];
+  for (const [wire, field] of Object.entries(BESPOKE_OPTION_FIELD)) {
+    if (optionNarrows(filters[field])) names.push(wire);
+  }
+  const facets = filters.facets ?? {};
+  for (const facet of FACETS) {
+    if (facets[facet.key as keyof typeof facets] !== undefined) names.push(facet.queryParam);
+  }
+  return names;
+}
+
+/**
+ * The wire argument names mapped onto `DatasetFilterOptions`' own field names
+ * -- the one place the two spellings meet (`has_zarr_verified` ->
+ * `hasZarrVerified`, `license` -> a parsed tier list).
+ *
+ * Exported so the cap's notion of an active filter can be checked against the
+ * clauses these options actually build, instead of against a comment claiming
+ * they match.
+ */
+export function buildFilterOptions(
   args: SearchDatasetsInput,
-): Promise<ToolOutcome> {
-  const filters: DatasetFilterOptions = {
+  facets: DatasetFilterOptions["facets"],
+): DatasetFilterOptions {
+  return {
     modality: args.modality,
     task: args.task,
     hasHed: args.has_hed,
     hasZarr: args.has_zarr,
+    author: args.author,
+    hasDoi: args.has_doi,
+    hasZarrVerified: args.has_zarr_verified,
+    dataComplete: args.data_complete,
+    recent: args.recent,
+    licenseTiers: parseLicenseTierFilter(args.license),
+    facets,
+    includeUnknown: args.include_unknown,
   };
+}
+
+export async function searchDatasetsTool(
+  env: Pick<Bindings, "DB" | "AI" | "VECTORIZE">,
+  args: SearchDatasetsInput,
+): Promise<ToolOutcome> {
+  // Every filter `buildDatasetFilterClauses` understands, not a hand-picked
+  // four. The bespoke fields below and the declared facet table are the two
+  // halves ADR 0032 deliberately keeps separate; both ride in the same options
+  // bag, and both the query and no-query paths consume it.
+  let facets: DatasetFilterOptions["facets"];
+  try {
+    facets = parseFacetFilters((key) => {
+      const raw = (args as Record<string, unknown>)[key];
+      return typeof raw === "string" ? raw : undefined;
+    });
+  } catch (err) {
+    // Narrowed to the two declared parse errors, matching the HTTP route
+    // (routes/datasets/catalog.ts). A broad catch would launder an internal
+    // fault into "that filter value was not accepted", and the model would
+    // retry differently shaped values forever against a fault that has nothing
+    // to do with its input. Anything else rethrows into withToolMetrics, which
+    // records outcome "exception" and logs it. ADR 0051: a specific error is
+    // never overwritten by a generic one.
+    if (!(err instanceof RangeParseError || err instanceof FacetEnumParseError)) throw err;
+    const detail = err.message;
+    return badFilterOutcome(
+      `That filter value was not accepted: ${detail}. Ranges take \`10..20\`, \`64..\`, or \`..128\`; enum and version facets take a declared token.`,
+    );
+  }
+
+  const filters = buildFilterOptions(args, facets);
+
+  // The cap, checked on the BUILT options rather than the raw arguments, so
+  // that what it counts and what the SQL carries cannot disagree. It sits
+  // after the facet parse for the same reason: a malformed facet value is the
+  // more specific complaint and is reported first (ADR 0051), and parsing
+  // thirty in-memory strings costs nothing next to the D1 round trip this
+  // guards. `assertBoundParamBudget` remains the backstop; see
+  // SEARCH_DATASETS_MAX_FILTERS for why this cap is not that ceiling.
+  const active = activeFilterNames(filters);
+  if (active.length > SEARCH_DATASETS_MAX_FILTERS) {
+    return badFilterOutcome(
+      `Too many filters in one call: ${active.length}, and at most ${SEARCH_DATASETS_MAX_FILTERS} can be combined. Drop the least selective ones and filter the results yourself, or run narrower calls and intersect them. Supplied: ${active.join(", ")}.`,
+    );
+  }
 
   let hits: SearchDatasetsHit[];
   let count: number;

@@ -36,6 +36,11 @@ import {
   isAccountKind,
 } from "../../shared/contract/index.js";
 import {
+  PUBLICATION_STEPS,
+  PUBLICATION_STEP_LABELS,
+  stepsForRelease,
+} from "../../shared/publication-steps.js";
+import {
   type AnonymitySweepBatchResponse,
   type AvailabilityReport,
   type AvailabilityReportResult,
@@ -152,6 +157,7 @@ import {
   type StepResult,
   approvePublication,
   denyPublication,
+  getPublishStatus,
   listPublishRequests,
 } from "../lib/api/publish.js";
 import { getConfig, isAuthenticated } from "../lib/config.js";
@@ -2684,8 +2690,13 @@ publishCommand
     "after",
     `
 Description:
-  Approve a publication request and run the automated 16-step orchestrator
+  Approve a publication request and run the automated orchestrator
   to make the dataset publicly accessible with a permanent DOI.
+
+  An ANONYMOUS RELEASE runs a smaller step set: the GitHub repository stays
+  private, no identifier is published, and the depositor is not named. The
+  confirmation banner reads the pending request and lists what will actually
+  run, so approve one and read the banner rather than this list.
 
   WARNING: This action is PERMANENT. Published datasets cannot be unpublished.
   Once a DOI is assigned, it is permanent and cannot be deleted.
@@ -2694,7 +2705,9 @@ Orchestrator Steps (execution order; shared/publication-steps.ts):
    1. CI Check          - Verify BIDS validation passes, deploy workflows if missing
    2. Enrichment Check  - Verify metadata pipeline has run (warn-only, non-blocking)
    3. S3 Public Read    - Grant public read access to S3 data
-   4. Make Public       - Change GitHub repository visibility to public
+   4. Repo Public       - Publish the catalog row; for an ordinary publication
+                          this also makes the GitHub repository public, and for
+                          an anonymous release the repository stays private
    5. Tag Protection    - Enable tag protection rules
    6. Create DOI        - Create concept DOI via EZID (or Zenodo if configured)
    7. Update Metadata   - Update dataset metadata from BIDS description
@@ -2703,13 +2716,20 @@ Orchestrator Steps (execution order; shared/publication-steps.ts):
   10. Create Release    - Create GitHub release from tag
   11. Upload to Zenodo  - Legacy Zenodo upload (disabled; kept for step history)
   12. Publish DOI       - Make DOI public and findable (permanent, irreversible)
-  13. Version DOI       - Mint the version DOI for this release
+  13. Version DOI       - Mint the version DOI and dispatch the manifest job,
+                          which is what records the version. Runs for an
+                          anonymous release too, minting RESERVED (#1447)
   14. S3 Lock           - Enable S3 Object Lock (prevents data deletion)
   15. Sync NEMAR        - Legacy nemar.org sync (no-op, retired)
   16. Notify User       - Send publication confirmation email
 
   (Archive zip generation is not an orchestrator step; the version-DOI
   workflow dispatches it separately.)
+
+  Steps 7, 8, 11 and 12 are skipped for an anonymous release: each one either
+  publishes an identifier or writes one into a file the data plane serves
+  publicly. See ANONYMOUS_RELEASE_SKIPPED_STEPS in shared/publication-steps.ts,
+  which states the reason for each.
 
 Resume Capability:
   If a step fails, the orchestrator saves progress. Use --resume to retry
@@ -2741,19 +2761,68 @@ After Approval:
         ? `Resume publication of ${datasetId}`
         : `Approve and publish ${datasetId}`;
       console.log(chalk.cyan(`\n${action}\n`));
-      console.log("This will run the following 16-step orchestrator:");
-      console.log("   1. Check CI              9. Create version tag");
-      console.log("   2. Enrichment check     10. Create GitHub release");
-      console.log("   3. S3 public read       11. Upload to Zenodo (no-op)");
-      console.log("   4. Make repo public     12. Publish DOI (irreversible)");
-      console.log("   5. Tag protection       13. Mint version DOI");
-      console.log(
-        options.sandbox
-          ? "   6. Create DOI (SANDBOX) 14. S3 Object Lock"
-          : "   6. Create DOI           14. S3 Object Lock",
-      );
-      console.log("   7. Update metadata      15. Sync NEMAR (no-op)");
-      console.log("   8. Update README        16. Notify user");
+
+      // Ask the server what this request IS before describing what approving
+      // it will do (#1447). An anonymous release runs a strictly smaller step
+      // set, and the banner used to be a hand-numbered literal of all sixteen:
+      // an admin approving one was told the repository would be made public
+      // and the DOI published irreversibly, and neither happens. A banner that
+      // describes the wrong operation is worse than no banner, because it is
+      // the screen the decision is made from.
+      let anonymousRelease = false;
+      let planUnknownReason: string | null = null;
+      try {
+        anonymousRelease = (await getPublishStatus(datasetId)).anonymous === true;
+      } catch (err) {
+        // Unreadable state is not a reason to refuse an approval the admin can
+        // still make, but it IS a reason to stop asserting what will happen --
+        // and to say WHY. A bare `catch {}` here printed "could not read the
+        // request's state" for an expired key, a 404 and a network failure
+        // alike, which is three different next actions rendered as one.
+        planUnknownReason = err instanceof Error ? err.message : String(err);
+      }
+
+      const steps = stepsForRelease(anonymousRelease);
+      if (planUnknownReason === null) {
+        console.log(
+          anonymousRelease
+            ? `This is an ANONYMOUS RELEASE and will run ${steps.length} of the ${PUBLICATION_STEPS.length} orchestrator steps:`
+            : `This will run the following ${steps.length}-step orchestrator:`,
+        );
+      } else {
+        console.log(
+          chalk.yellow(
+            `Could not read the request's state (${planUnknownReason}), so this lists all ${steps.length} steps; an anonymous release runs fewer.`,
+          ),
+        );
+      }
+      // Two columns, generated from the step list rather than typed out, so
+      // adding a step cannot leave the banner describing the old publication.
+      const half = Math.ceil(steps.length / 2);
+      for (let i = 0; i < half; i++) {
+        const left = steps[i];
+        const right = steps[i + half];
+        const label = (step: (typeof steps)[number], n: number): string => {
+          const text =
+            step === "doi_create" && options.sandbox
+              ? `${PUBLICATION_STEP_LABELS[step]} (SANDBOX)`
+              : PUBLICATION_STEP_LABELS[step];
+          return `${String(n).padStart(2, " ")}. ${text}`;
+        };
+        const leftCell = label(left, i + 1).padEnd(34, " ");
+        console.log(`   ${leftCell}${right ? label(right, i + half + 1) : ""}`.trimEnd());
+      }
+      if (anonymousRelease) {
+        console.log();
+        console.log(
+          chalk.yellow("  The GitHub repository stays PRIVATE and no identifier is published:"),
+        );
+        console.log(
+          chalk.yellow(
+            "  the concept and version DOIs stay reserved until the deposit is published for real.",
+          ),
+        );
+      }
       console.log();
 
       // Sandbox warning
@@ -4895,9 +4964,7 @@ exemplarCommand
     ) => {
       if (!requireAuth()) return;
 
-      const { cloneExemplar, loadExemplarFleet, isDesignatedAnonymous } = await import(
-        "../lib/exemplar-clone.js"
-      );
+      const { cloneExemplar, loadExemplarFleet } = await import("../lib/exemplar-clone.js");
       const fleetPath = options.fleetFile || defaultExemplarFleetPath();
       const cloneOpts = { publish: options.publish, includeDerived: options.includeDerived };
 
@@ -4927,9 +4994,6 @@ exemplarCommand
               xxId: entry.xx_id,
               sourceId: entry.source_id,
               ...cloneOpts,
-              // The fleet file decides which entry is the anonymous deposit,
-              // so `--all --publish` cannot publish it by omission.
-              ...(entry.anonymous ? { anonymous: true as const } : {}),
             });
           } catch (err) {
             failures++;
@@ -4952,11 +5016,11 @@ exemplarCommand
         process.exit(1);
       }
 
-      // The fleet is loaded unconditionally, not only when --source is
-      // omitted: it is where the anonymous DESIGNATION lives (#1407), and that
-      // is a property of the xx id rather than of the source. Reading it only
-      // on the --source-less path would let `exemplar create xx099907
-      // --source ...` create the fixture without its flag, silently.
+      // Loaded unconditionally rather than only when --source is omitted. It
+      // used to carry the anonymous designation as well as the source, and
+      // that designation is gone (#1433, ADR 0068); loading it either way is
+      // kept because a fleet file that fails to parse should be reported the
+      // same way whichever flags were passed.
       let fleetEntries: Awaited<ReturnType<typeof loadExemplarFleet>>;
       try {
         fleetEntries = loadExemplarFleet(fleetPath);
@@ -4983,7 +5047,6 @@ exemplarCommand
           xxId,
           sourceId,
           ...cloneOpts,
-          ...(isDesignatedAnonymous(fleetEntries, xxId) ? { anonymous: true as const } : {}),
         });
       } catch (error) {
         console.error(chalk.red(`\nExemplar clone failed: ${errorDetail(error)}`));

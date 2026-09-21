@@ -76,26 +76,63 @@ export function versionFromDoi(latestVersionDoi: string | null | undefined): str
 }
 
 /**
+ * The two places a dataset's current version is recorded, resolved in one rule.
+ *
+ * `datasets.latest_version_doi` is the older of the two and was the only one
+ * this file read. It means "the version DOI that is PUBLISHED", so an anonymous
+ * release (#1447, ADR 0065) deliberately leaves it NULL: that release DOES cut a
+ * tag, generate an archive, and get a `dataset_versions` row from the manifest
+ * callback, but its identifier stays reserved. Reading only the column therefore
+ * made every released concealed deposit invisible to this sweep -- its archive
+ * could fail and nothing would ever re-dispatch, and the depositor cannot see
+ * the admin surfaces that would have shown it.
+ *
+ * `dataset_versions.version` is the fallback, and it is the same value the tag
+ * carries, so it is what the archive workflow needs to check out.
+ *
+ * Widening the version SOURCE is safe here in a way it would not be in
+ * `doi-reconcile.ts`: this dispatches an archive build inside the private
+ * repository, which discloses nothing, whereas that sweep would publish a
+ * reserved identifier. That is why the refusal there is on the row and not in
+ * its candidate query.
+ */
+export function resolveCurrentVersion(row: {
+  latest_version_doi?: string | null;
+  recorded_version?: string | null;
+}): string | null {
+  return versionFromDoi(row.latest_version_doi) ?? row.recorded_version ?? null;
+}
+
+/**
  * Candidate query for the daily sweep. Exported so the test asserts the exact
  * WHERE logic against a real SQLite db. Binds `MAX_ARCHIVE_RETRIES`.
  *
- * Picks still-failed datasets that have a published version, are under the cap,
- * and whose last attempt is stale (>6h) or unknown -- the 6h guard avoids
- * re-dispatching an archive the webhook just retried.
+ * Picks still-failed datasets that have a version to build (see
+ * {@link resolveCurrentVersion} for why that is two columns rather than one),
+ * are under the cap, and whose last attempt is stale (>6h) or unknown -- the 6h
+ * guard avoids re-dispatching an archive the webhook just retried.
+ *
+ * The version predicate stays in the WHERE clause rather than moving to the
+ * loop's `!version` skip: `LIMIT 20` is the run's whole budget, and a row that
+ * can never be dispatched must not consume one of the twenty slots.
  */
-export const ARCHIVE_RETRY_SWEEP_QUERY = `SELECT dataset_id, latest_version_doi, archive_retry_count
-   FROM datasets
-  WHERE archive_status = 'failed'
-    AND latest_version_doi IS NOT NULL
-    AND archive_retry_count < ?
-    AND (json_extract(sweep_stamps, '$.archive_checked_at') IS NULL
-         OR json_extract(sweep_stamps, '$.archive_checked_at') < datetime('now', '-6 hours'))
-  ORDER BY json_extract(sweep_stamps, '$.archive_checked_at') ASC
+export const ARCHIVE_RETRY_SWEEP_QUERY = `SELECT d.dataset_id, d.latest_version_doi, d.archive_retry_count,
+         (SELECT version FROM dataset_versions dv WHERE dv.dataset_id = d.dataset_id
+          ORDER BY created_at DESC LIMIT 1) AS recorded_version
+   FROM datasets d
+  WHERE d.archive_status = 'failed'
+    AND (d.latest_version_doi IS NOT NULL
+         OR EXISTS (SELECT 1 FROM dataset_versions dv WHERE dv.dataset_id = d.dataset_id))
+    AND d.archive_retry_count < ?
+    AND (json_extract(d.sweep_stamps, '$.archive_checked_at') IS NULL
+         OR json_extract(d.sweep_stamps, '$.archive_checked_at') < datetime('now', '-6 hours'))
+  ORDER BY json_extract(d.sweep_stamps, '$.archive_checked_at') ASC
   LIMIT 20`;
 
 interface SweepRow {
   dataset_id: string;
-  latest_version_doi: string;
+  latest_version_doi: string | null;
+  recorded_version: string | null;
   archive_retry_count: number;
 }
 
@@ -149,7 +186,7 @@ export async function archiveRetrySweep(env: Bindings): Promise<void> {
   let dispatched = 0;
   let skipped = 0;
   for (const row of candidates) {
-    const version = versionFromDoi(row.latest_version_doi);
+    const version = resolveCurrentVersion(row);
     if (!version) {
       skipped++;
       continue;

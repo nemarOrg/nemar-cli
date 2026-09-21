@@ -106,6 +106,9 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0065](0065-anonymity-is-available-before-first-publication-and-never-after.md) - Anonymity is available before first publication and never after, and it is withheld by the writer
 - [ADR 0066](0066-the-data-plane-brokers-git-tracked-files-under-manifest-capability.md) - The data plane brokers git-tracked files, and the manifest is the capability list
 - [ADR 0067](0067-anonymity-is-verified-on-a-schedule-and-reported-never-repaired.md) - Anonymity is verified on a schedule, and reported, never repaired
+- [ADR 0068](0068-test-fixtures-are-assigned-from-the-top-of-the-id-band-downward.md) - Test fixtures are assigned from the top of the id band downward, and real datasets allocate upward
+- [ADR 0069](0069-the-browser-runtime-is-its-own-package-and-eegprep-stays-whole.md) - The browser runtime is its own package, and eegprep stays whole
+- [ADR 0070](0070-the-browser-recipe-names-eegprep-lean-and-carries-no-install-line.md) - The browser recipe names eegprep-lean and carries no install line
 
 ## Backfill note (2026-07-31)
 

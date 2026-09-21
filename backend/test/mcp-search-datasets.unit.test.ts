@@ -8,8 +8,106 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import {
+  SEARCH_DATASETS_NARROWING_FILTERS,
+  searchDatasetsInputSchema,
+} from "../../shared/contract/mcp";
+import { FACETS } from "../../shared/facets";
+import { searchDatasetsInputSchema4 } from "../src/mcp/schemas";
 import { mergeHitsWithCatalog } from "../src/mcp/tools/search-datasets";
 import type { SearchResult } from "../src/services/dataset-search";
+
+/**
+ * The MCP search surface must declare every filter the catalog can apply.
+ *
+ * This is the test that would have caught the drift that motivated widening
+ * the tool: its input schema was hand-written and had gone stale against the
+ * catalog, so the NEMAR assistant's prompt taught the model `modality_filter`,
+ * a name nothing declared. Because the schema is `.passthrough()`, the server
+ * accepted it and dropped it, and an unfiltered result set was presented as
+ * filtered. ADR 0032 already enforces this in both directions between
+ * `shared/facets.ts` and `dataset-facets.ts`; this extends the same discipline
+ * to the third consumer.
+ */
+describe("search_datasets declares the whole filter surface", () => {
+  const declared = new Set(Object.keys(searchDatasetsInputSchema.shape));
+
+  /** The bespoke filters ADR 0032 deliberately keeps OUT of the facet table,
+   *  minus `search` (spelled `query` on this surface). Hand-listed on purpose:
+   *  they have irregular semantics and no declared table to derive from, so
+   *  this list is the reminder to wire a new one through. It can only catch a
+   *  REMOVAL, never an omission; the stronger check is an equivalence test
+   *  against the HTTP route's own mapping, tracked separately. */
+  const BESPOKE_FILTERS = [
+    "modality",
+    "task",
+    "author",
+    "has_doi",
+    "has_hed",
+    "has_zarr",
+    "has_zarr_verified",
+    "data_complete",
+    "recent",
+    "license",
+    "include_unknown",
+  ];
+
+  test("every declared facet is an accepted parameter", () => {
+    const missing = FACETS.map((f) => f.queryParam).filter((q) => !declared.has(q));
+    expect(missing).toEqual([]);
+  });
+
+  test("every bespoke catalog filter is an accepted parameter", () => {
+    const missing = BESPOKE_FILTERS.filter((name) => !declared.has(name));
+    expect(missing).toEqual([]);
+  });
+
+  test("the narrowing filters the cap counts are this list minus include_unknown", () => {
+    // `SEARCH_DATASETS_NARROWING_FILTERS` is `Object.keys` of the shape that
+    // declares them, so it cannot omit one -- but it can quietly GAIN one, and
+    // a filter that reaches the schema without reaching this hand-written list
+    // is the drift this file exists to catch. `include_unknown` is the single
+    // deliberate difference: it widens every active facet instead of narrowing,
+    // so it is declared outside that shape and does not consume a caller's cap.
+    // Compared as sorted sets: declaration order differs between the two and
+    // carries no meaning (every clause is AND-ed), so ordering it would make
+    // this fail on a harmless reshuffle.
+    expect([...SEARCH_DATASETS_NARROWING_FILTERS].sort()).toEqual(
+      BESPOKE_FILTERS.filter((name) => name !== "include_unknown").sort(),
+    );
+    expect(SEARCH_DATASETS_NARROWING_FILTERS.includes("include_unknown")).toBe(false);
+  });
+
+  test("the zod4 wire mirror declares the same keys as the contract", () => {
+    // The mirror is what `registerTool` advertises, so it is what the model
+    // reads. Both schemas are `.passthrough()`, so the existing parity tests --
+    // which feed sample objects to both -- cannot see a key missing from one
+    // side: it is simply passed through. Only comparing the declared shapes
+    // catches it, and this is the check that would have caught the widened
+    // contract failing to reach the wire.
+    const contractKeys = Object.keys(searchDatasetsInputSchema.shape).sort();
+    const mirrorKeys = Object.keys(searchDatasetsInputSchema4.shape).sort();
+    expect(mirrorKeys).toEqual(contractKeys);
+  });
+
+  test("no facet name collides with a bespoke parameter, and the count is exact", () => {
+    // Both shapes spread the generated facets AFTER the bespoke declarations
+    // and before `limit`, so a facet whose queryParam matched a bespoke name
+    // would silently redefine it as a plain string, and one named `limit`
+    // would be dropped. Neither is visible to the two tests above: the key
+    // sets stay equal and both names are still present.
+    const facetParams = FACETS.map((f) => f.queryParam);
+    const collisions = facetParams.filter(
+      (q) => BESPOKE_FILTERS.includes(q) || q === "query" || q === "limit",
+    );
+    expect(collisions).toEqual([]);
+
+    // `query` and `limit` are the two that are neither a facet nor a filter.
+    expect(Object.keys(searchDatasetsInputSchema.shape).length).toBe(
+      BESPOKE_FILTERS.length + 2 + FACETS.length,
+    );
+  });
+});
 
 function searchResult(overrides: Partial<SearchResult> & { id: string }): SearchResult {
   return {

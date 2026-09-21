@@ -265,6 +265,18 @@ describe("migration 0073: collapse sweep stamps", () => {
     // A stale stamp is selected by the sweeps' `< datetime('now', ?)`
     // shape; a future one is not. Run through json_extract on the real
     // column, exactly like the rewritten predicates.
+    //
+    // nm000100 is re-stamped to now first, because the seeded value is a FIXED
+    // date (`stampValue`, 2026-08-10 and later) and this assertion names every
+    // stale row in the table. Once real time moved more than 30 days past that
+    // date the seeded row became stale on its own and the test failed with no
+    // code change -- which is exactly what happened, on 2026-09-17. Anchoring
+    // the row the assertion depends on to `datetime('now')` removes the clock
+    // from the test without weakening it: the two rows below still pin both
+    // directions of the comparison.
+    db.query(
+      "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.data_checked_at', datetime('now')) WHERE dataset_id = 'nm000100'",
+    ).run();
     db.query(
       "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.data_checked_at', '2020-01-01 00:00:00') WHERE dataset_id = 'nm000101'",
     ).run();
