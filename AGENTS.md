@@ -427,6 +427,13 @@ Gated, and worth knowing exist:
 [`code_review.md`](.rules/code_review.md), [`documentation.md`](.rules/documentation.md),
 [`ci_cd.md`](.rules/ci_cd.md).
 
+`.memory/` holds what working on this repository has taught: one observation per file, the flag
+that actually works, the status code that lies, the fix that looked right and was not. It is
+tracked in git so it survives a change of agent, model or machine, and so a person can correct it.
+Read [`.memory/README.md`](.memory/README.md) for the boundary against the two below, which is the
+part that matters: an ADR is a ruling, a `.context/` document is an argument, a memory is an
+observation and binds nobody.
+
 `.context/` holds decisions, planning and research. Start from
 [`.context/README.md`](.context/README.md), which marks what is current and what is historical.
 The entries worth knowing by name: [`decisions/`](.context/decisions/README.md) (binding),
