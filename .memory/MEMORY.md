@@ -57,3 +57,5 @@
 - [Declare sentinels, don't guess them](declare-sentinels-dont-guess-them.md) — a "probably unused" id/port/name from an allocated space is a time bomb; export the sentinel from the allocator
 - [Data plane needs the v prefix](data-plane-needs-v-prefix.md) — `/id/v1.0.0/...`; a bare-version 404 hits every dataset, so probe a control first
 - [Fresh worktree: bunx pulls the wrong version](fresh-worktree-bunx-wrong-version.md) — bun install at root and backend/ before any gate; the biome schema error is not a broken config
+- [Pyodide is a ceiling, not a floor](pyodide-is-a-ceiling-not-a-floor.md) — browser-bound floors cap at what Pyodide ships; 0.29.5 versions table; the epic gate checks names not versions
+- [MATLAB engine caps CI Python version](matlab-engine-caps-ci-python-version.md) — a red matrix job on a new Python is MathWorks' engine, not your package; check which step failed
