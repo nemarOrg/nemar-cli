@@ -115,12 +115,12 @@ There is also a second artifact to release, version and support.
 
 - **Move mne, pybids, h5py and neo to eegprep extras.** The original plan, from the measurements in sccn/eegprep#395. It shrinks the default install, which changes what existing users get from an unchanged command, and every move needs proof that nothing reaches the package through another library. Rejected: the risk lands on the scientific package's users to buy a smaller browser download.
 - **Make eegprep lean and publish a large bundle beside it.** Same shrinking of the default install, with the breakage concentrated in one release rather than spread over several. Rejected for the same reason.
-- **A second repository for the lean runtime.** Cleanest boundary, and rejected as too clean: the lean runtime and the full package share science code, and a repository boundary is where shared code goes to be copied.
-
-*(Correction, 2026-09-20: this list previously carried "One repository, two published distributions" as an alternative "held in reserve". That is not an alternative, it is this ADR's decision, stated twice. Removed so that nobody cites the decision as a path that was rejected.)*
 - **An `eegprep[lean]` extra.** The name everyone reaches for first, and it cannot work: extras add to a distribution's requirements and never replace them, so the base install arrives before the extra does. Worth stating in full here because it is the proposal that will come back.
 - **A separate repository.** Cleanest boundary, and rejected as too clean: the lean runtime and the full package share science code, and a repository boundary is where shared code goes to be copied. One repository, two distributions, keeps them honest.
+- **Put the browser reader in `nemar-cli`, next to the index contract it tracks.** The reader conforms to NEMAR's Zarr index contract, so on paper it belongs beside it, and that would avoid coupling across a repository boundary. Not available: `nemar-cli` is a TypeScript and Bun package with no Python in it, deliberately, and this reader would be the first. It stays in `eegprep-lean`, and the coupling is managed the way the index contract says to manage it, by branching on `format_version` and hardcoding only what the schema declares `const`. Recorded because it is the second proposal that will come back.
 - **Lazy imports alone.** Does not reduce the download at all, because micropip installs the declared closure whether or not the module is imported. Rejected on measurement.
+
+*(Corrections, 2026-09-20: this list previously carried "One repository, two published distributions" as an alternative "held in reserve". That is not an alternative, it is this ADR's decision, stated twice, so it was removed rather than left where someone could cite the decision as a rejected path. It also listed the separate-repository alternative twice, under two names; the duplicate is now gone.)*
 
 ## Receipts
 
