@@ -68,6 +68,19 @@ Compounding it: that benchmark also found ICA does not finish inside the design 
 Plotting is the tier that matters most for pacing, because it is the first thing a person asks for after looking at data
 and it costs 9.8 MB. It is deliberately not in the base: a session that only reads pays 4.2 MB,
 and matplotlib arrives when a plot is actually asked for.
+
+*(Correction, 2026-09-21: the `eegprep-lean` row above is wrong about which install name it names.
+As built, the base declares no dependencies at all and zarr is an extra.
+Not a trim for its own sake: zarr installs under Pyodide only as
+`micropip.install("zarr==3.4.0", deps=False)`, because its `numcodecs>=0.14` pin is metadata and
+numcodecs publishes no emscripten wheel at any version.
+A base that declared zarr would make `micropip.install("eegprep-lean")` fail outright in the
+browser this distribution exists for, which is the opposite of what a base tier is for.
+So the tier measured here at 12 packages and 4.2 MB is `[zarr]`,
+and the base beneath it is the package alone, which reads a dataset's index without installing
+anything and is the tier a session pays for when it only wants to know what a dataset contains.
+The measurements are unchanged; what was wrong was the install name they sit under.
+Built in sccn/eegprep#406, and the divergence recorded in #409.)*
 Extras are additive here, which is exactly right, because every tier genuinely adds to the one beneath it.
 
 ### The plot tier is not trimmed, and what would change that

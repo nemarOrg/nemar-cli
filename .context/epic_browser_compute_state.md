@@ -133,9 +133,27 @@ versions, so a floor above what Pyodide ships passes it; diagnosis corrected in 
 **#401** (`importlib.abc.Traversable` is removed in Python 3.14, which matters here because the
 browser interpreter tracks upstream CPython).
 
-New work this decision creates: **`eegprep-lean` does not exist yet.** Its contract is the first
-deliverable, per ADR 0069, and is now drafted at
-[`eegprep_lean_contract.md`](eegprep_lean_contract.md).
+New work this decision creates: **`eegprep-lean` exists and reads the live archive.** Its contract
+was the first deliverable per ADR 0069, drafted at
+[`eegprep_lean_contract.md`](eegprep_lean_contract.md), and the package now follows it:
+
+- sccn/eegprep#406, the index reader. Base tier, standard library only.
+- sccn/eegprep#408, the window reader. Reads real signal through an asynchronous Zarr store over
+  range requests, and only the chunks a window spans.
+- sccn/eegprep#409, the plot tier, plus the channel labels, units and acquisition rate.
+
+Two corrections came out of building it, and both are recorded rather than quietly fixed.
+zarr is an **extra**, not a base dependency as ADR 0069's table has it, because a declared zarr
+makes `micropip.install("eegprep-lean")` fail outright under Pyodide;
+the ADR carries a correction note.
+And the channel **units and labels are readable**, on the channel group rather than on the
+level-0 array, which is where the package first looked and concluded they were unknowable.
+The same document carries `original_rate`, so a reader can tell that `nm000103` was acquired at
+500 Hz and is served at 250.
+
+Still open on it: sccn/eegprep#410, `read_window` has no offline coverage, so a mutation that
+carried the channel's unit onto stored integer counts survived every offline tier and was caught
+only by the live test.
 
 #### Browser ICA does not finish, and that is a product constraint
 
@@ -229,7 +247,7 @@ osa Phase 0 items 2,3,4,5,6 ─┬─> osa Phase 1 (tool-result contract, resume
                              └─> osa Phase 2 (widget, execution, approval UI)
 
 ADR 0069 ─> eegprep-lean contract ─> eegprep-lean package ─> nemar-cli#1457 (recipe targets it)
-            (drafted)
+            (drafted)            (reads and plots; #410 open)
 
 eegprep epic #324 phase 4 ─> phase 5 (ORT Web, async) ─┬─> ICLabel runs in a browser
                           └─> phase 6 (int8)         ─┘
