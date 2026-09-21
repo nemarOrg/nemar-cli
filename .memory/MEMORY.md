@@ -59,3 +59,4 @@
 - [Fresh worktree: bunx pulls the wrong version](fresh-worktree-bunx-wrong-version.md) — bun install at root and backend/ before any gate; the biome schema error is not a broken config
 - [Pyodide is a ceiling, not a floor](pyodide-is-a-ceiling-not-a-floor.md) — browser-bound floors cap at what Pyodide ships; 0.29.5 versions table; the epic gate checks names not versions
 - [MATLAB engine caps CI Python version](matlab-engine-caps-ci-python-version.md) — a red matrix job on a new Python is MathWorks' engine, not your package; check which step failed
+- [Never proxy bulk bytes](never-proxy-bulk-bytes.md) — CF terms restrict large files via CDN; both planes redirect bulk and carry only metadata; the accounting you want already exists on the redirect path
