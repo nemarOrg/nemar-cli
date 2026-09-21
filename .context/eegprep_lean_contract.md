@@ -31,8 +31,8 @@ Settled, and not to be reopened without superseding the decision that settled it
 
 Open, and named here so they are not settled by accident:
 
-1. The exact package list of the base tier. ADR 0069 measured 12 packages and 4.2 MB; the
-   membership has not been written down.
+1. The exact package list of the `[zarr]` tier. ADR 0069 measured 12 packages and 4.2 MB; the
+   membership has not been written down. (The base tier below it is settled: no dependencies.)
 2. Whether `pillow` and `fonttools` are droppable from the plot tier (2.09 MB together).
    Must be proven by running the plotting with them absent, not by reading import sites.
 3. What the `[ica]` tier becomes. See "ICA is not a browser capability" below.
@@ -142,13 +142,26 @@ From ADR 0069, measured against the Pyodide 0.29.5 distribution, each tier addin
 
 | install | packages | download | what it buys |
 |---|---|---|---|
-| `eegprep-lean` | 12 | 4.2 MB | read a window of data |
-| `eegprep-lean[plot]` | 22 | 14.0 MB | and draw it, adding matplotlib |
-| `eegprep-lean[preprocess]` | 23 | 30.4 MB | and filter and resample it, adding scipy |
+| `eegprep-lean` | 1 | the package alone | read the index: what a dataset holds, at what rate, and where |
+| `eegprep-lean[zarr]` | 12 | 4.2 MB | and read a window of signal |
+| `eegprep-lean[zarr,plot]` | 22 | 14.0 MB | and draw it, adding matplotlib |
+| `eegprep-lean[zarr,preprocess]` | 23 | 30.4 MB | and filter and resample it, adding scipy |
+
+**zarr is an extra rather than a base dependency, which differs from ADR 0069's table**,
+and the ADR carries the correction.
+zarr installs under Pyodide only as `micropip.install("zarr==3.4.0", deps=False)`:
+its `numcodecs>=0.14` pin is metadata, and numcodecs publishes no emscripten wheel at any version,
+so a normal resolve fails on a dependency these stores never use at runtime.
+A base that declared zarr would therefore make `micropip.install("eegprep-lean")` fail outright.
+The measurements are ADR 0069's and are unchanged; the install names they sit under are corrected.
 
 Plotting is deliberately not in the base.
 It is the first thing a person asks for after looking at data, and it costs 9.8 MB,
 so a session that only reads pays 4.2 MB and matplotlib arrives when a plot is actually asked for.
+The plot tier also stands on its own:
+`window.py` imports zarr inside `read_window` rather than at module scope,
+and continuous integration runs each extra separately so a stray module-scope import cannot
+pass unnoticed and then fail in a browser.
 
 ### ICA is not a browser capability
 
