@@ -275,8 +275,9 @@ export function buildMcpServer(deps: BuildMcpServerDeps): McpServer {
       title: "Read window",
       description:
         "Read a window of one recording's actual signal. By default (taste: false) returns a " +
-        "read recipe -- zarr/zarrita/S3 coordinates and how-to snippets -- with zero signal bytes " +
-        "touched. Pass taste: true (and channels, required) for a small, capped, inline-decoded " +
+        "read recipe -- coordinates plus a how-to snippet per lane, and the lanes are not " +
+        "interchangeable: python_zarr for desktop and HPC, python_browser for Python in a " +
+        "browser, zarrita for TypeScript -- with zero signal bytes touched. Pass taste: true (and channels, required) for a small, capped, inline-decoded " +
         "window of physical values instead: at most 60 s, 64 channels, and 65,536 channel-samples " +
         "(channels x samples) -- ask for fewer channels or a shorter window, or omit taste, past " +
         "that. Needs a v3-format-converted dataset; a dataset still on index format v1 answers a " +

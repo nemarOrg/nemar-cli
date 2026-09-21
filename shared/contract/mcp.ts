@@ -304,12 +304,31 @@ const rangeSchema = z
 
 export const readRecipeHowToSchema = z
   .object({
-    /** Python, `zarr` + anonymous S3 -- the desktop/HPC lane (E2 in the draft
-     *  ecosystem plan; eegprep/MNE consume the array this produces). */
+    /** Python, `zarr` + anonymous S3. **Desktop and high-performance computing
+     *  only, never a browser** (E2 in the draft ecosystem plan; eegprep/MNE
+     *  consume the array this produces). `zarr.open` is the synchronous API,
+     *  which starts an IO thread, and Pyodide's main thread cannot start one:
+     *  the failure is `RuntimeError: can't start new thread`, naming neither
+     *  zarr nor the browser (OpenScience-Collective/osa#375). Use
+     *  `python_browser` there. */
     python_zarr: z.string(),
-    /** TypeScript/JavaScript, `zarrita` -- the browser lane and this
-     *  server's own spike decode path. */
+    /** TypeScript and JavaScript, `zarrita`. Runs in a browser and in Node,
+     *  and is this server's own spike decode path. This is the JavaScript
+     *  lane rather than *the* browser lane: compute in a browser is Python
+     *  (ADR 0049), and `python_browser` is that lane. */
     zarrita: z.string(),
+    /** Python in a browser, through `eegprep-lean`'s asynchronous store
+     *  (sccn/eegprep, ADR 0069). Asynchronous throughout, because that is the
+     *  only thing that works on an event loop that is already running, and it
+     *  reads the HTTPS `array_path` with range requests rather than `s3://`,
+     *  so it needs neither s3fs nor aiohttp.
+     *
+     *  Deliberately carries no install line. `eegprep-lean` is not on the
+     *  Python Package Index, and the runtime that executes this is where the
+     *  version is pinned and installed (the OSA browser execution lockfile);
+     *  a snippet that installed it would either fail or silently disagree
+     *  with the runtime about which version is running. */
+    python_browser: z.string(),
   })
   .passthrough();
 export type ReadRecipeHowTo = z.infer<typeof readRecipeHowToSchema>;
@@ -389,7 +408,17 @@ function buildHowTo(opts: {
       "",
       `arr = zarr.open("${s3Path}", mode="r", storage_options={"anon": True})`,
       "window = arr[:, start_sample:end_sample]",
+      "# desktop and HPC only: zarr.open starts an IO thread, which a browser cannot",
       "# physical = digital * scale + offset -- see the recipe's scale_offset field",
+    ].join("\n"),
+    python_browser: [
+      "from eegprep_lean import open_array  # from the runtime's lockfile, not micropip",
+      "",
+      `arr = await open_array("${httpPath}")`,
+      "window = await arr.getitem((slice(None), slice(start_sample, end_sample)))",
+      "# async throughout: the loop is already running, so there is no synchronous form",
+      "# physical = digital * scale + offset -- see the recipe's scale_offset field",
+      "# read_window(index, store, ...) does the same read in physical units, with labels",
     ].join("\n"),
     zarrita: [
       'import * as zarr from "zarrita";',
