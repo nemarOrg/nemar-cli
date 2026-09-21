@@ -4,7 +4,7 @@
 > Decisions live in [`decisions/`](decisions/README.md); where this document and an ADR disagree,
 > the ADR wins. This document holds the state, the order of work, and the questions still open.
 
-**Last verified:** 2026-09-20.
+**Last verified:** 2026-09-21.
 
 **How to verify a row, and how the first version of this file got it wrong.** Issue state is not
 work state. This document's first version reported four eegprep phases as open because their
@@ -100,11 +100,38 @@ Phase 5's async entry point is decided and implemented, not open: `iclabel_async
 `src/eegprep/plugins/ICLabel/iclabel.py` on the branch.
 
 **PR #386** (epic to develop) is open and **deliberately held**: do not merge it until something
-actually needs it. **PR #387** patches review findings into the epic branch.
+actually needs it. The case for holding it is weaker than it was, because the epic branch is no
+longer behind.
 
-**PR #397** is open and green on all five test jobs: it fixes #396, a defect where `pop_resample`
-computed a wrong ratio for non-integer sampling rates, 24 of 86 realistic pairs, worst case 117.04 Hz
-labeled 128 Hz. It also drops `sympy`, whose only caller was the defect.
+**PR #387** merged into the epic branch on 2026-09-20, closing the Phase 5/6 review blockers.
+
+**PR #397** merged: it fixes #396, a defect where `pop_resample` computed a wrong ratio for
+non-integer sampling rates, 24 of 86 realistic pairs, worst case 117.04 Hz labeled 128 Hz. It also
+drops `sympy`, whose only caller was the defect.
+
+**PR #399** merged: Python floor to 3.12, CI matrix to 3.12 and 3.13, and every dependency floor
+bounded by what Pyodide 0.29.5 ships. 3.13 is the version Pyodide actually runs and eegprep had
+never been tested on it; it passes. The 3.13 CI job initially failed on MathWorks' engine, which
+covers only 3.9 through 3.12, not on eegprep.
+
+**PR #402** merged, correcting #399: only **compiled** floors are a ceiling in the browser. The
+test is whether the package publishes a pure-Python wheel, not whether Pyodide bundles it. numpy,
+scipy, h5py and matplotlib publish none and are genuinely capped; threadpoolctl is bundled but pure
+Python and is not. An earlier claim here and in #400 that `threadpoolctl>=3.6.0` was a live broken
+install was wrong.
+
+**PR #403** open: merges develop into the epic branch, which was 45 commits behind. Seven
+conflicts, resolved keeping the extras split against develop's attempt to return `oct2py` to the
+base install. It exposed a real integration bug neither branch could find alone:
+`MemmapData.__array_function__` returned `NotImplemented` for everything except `copyto` and `put`,
+and because defining that method opts a type into numpy's dispatch protocol, `NotImplemented`
+raises rather than falling back, so every other numpy call failed on a mapped array. Develop's #351
+test covers that path and the epic branch never had the test.
+
+Open issues from this work: **#400** (the Pyodide gate matches package names and never compares
+versions, so a floor above what Pyodide ships passes it; diagnosis corrected in a comment) and
+**#401** (`importlib.abc.Traversable` is removed in Python 3.14, which matters here because the
+browser interpreter tracks upstream CPython).
 
 New work this decision creates: **`eegprep-lean` does not exist yet.** Its contract is the first
 deliverable, per ADR 0069, and is now drafted at
