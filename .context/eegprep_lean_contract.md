@@ -60,13 +60,19 @@ rather than as a snippet in a string.
 
 `eegprep-lean` targets Pyodide. Pyodide 0.29.5 bundles CPython 3.13.2 on `emscripten_4_0_9`,
 and a browser cannot be told to run a different one.
-So `requires-python` and every dependency floor are a **ceiling** here, not a floor:
-a floor above the version Pyodide bundles cannot be satisfied, because micropip has no
-WebAssembly build to fall back to.
+So `requires-python`, and the floor of every **compiled** dependency, are a **ceiling** here rather
+than a floor: PyPI carries no WebAssembly build, so Pyodide's bundled one is the only one a browser
+can have and a floor above it cannot be satisfied.
+
+The test is whether the package publishes a pure-Python wheel, not whether Pyodide bundles it.
+A `py3-none-any` wheel means micropip fetches any version straight from PyPI and the bundled build
+goes unused, so that floor costs a download and nothing more. Of the packages that matter here,
+numpy, scipy, h5py and matplotlib publish none and are genuinely capped; threadpoolctl is bundled
+but pure Python and is not.
 
 This inverts the usual reading and it is invisible from the code, which is why
-eegprep's `tests/test_browser_dependency_floors.py` (sccn/eegprep#399) enforces it, and why
-`eegprep-lean` inherits the same test.
+eegprep's `tests/test_browser_dependency_floors.py` (sccn/eegprep#399, corrected in #402) enforces
+it for the compiled set, and why `eegprep-lean` inherits the same test.
 
 ### Numerical agreement with eegprep
 
