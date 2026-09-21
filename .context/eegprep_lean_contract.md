@@ -140,12 +140,17 @@ and they belong in `eegprep-lean`'s own lockfile rather than in a snippet.
 
 From ADR 0069, measured against the Pyodide 0.29.5 distribution, each tier adding to the one below it:
 
+The rows are cumulative, each adding to the one above it,
+which is why the last one names `plot` as well:
+30.4 MB was measured with matplotlib present, and `[zarr,preprocess]` alone has not been measured.
+Packages are counted as micropip installs them under Pyodide, transitive dependencies included.
+
 | install | packages | download | what it buys |
 |---|---|---|---|
-| `eegprep-lean` | 1 | the package alone | read the index: what a dataset holds, at what rate, and where |
+| `eegprep-lean` | 1 | the package alone | read the index and the channel list: what a dataset holds, at what rate, in what units |
 | `eegprep-lean[zarr]` | 12 | 4.2 MB | and read a window of signal |
 | `eegprep-lean[zarr,plot]` | 22 | 14.0 MB | and draw it, adding matplotlib |
-| `eegprep-lean[zarr,preprocess]` | 23 | 30.4 MB | and filter and resample it, adding scipy |
+| `eegprep-lean[zarr,plot,preprocess]` | 23 | 30.4 MB | and filter and resample it, adding scipy |
 
 **zarr is an extra rather than a base dependency, which differs from ADR 0069's table**,
 and the ADR carries the correction.
@@ -162,6 +167,28 @@ The plot tier also stands on its own:
 `window.py` imports zarr inside `read_window` rather than at module scope,
 and continuous integration runs each extra separately so a stray module-scope import cannot
 pass unnoticed and then fail in a browser.
+
+### What the base tier can answer
+
+More than the tier table suggests, and worth stating because it was got wrong once.
+The unit each channel is measured in, and the channel's own label,
+are attributes of the channel group rather than of the level-0 array:
+the array carries `scale`, `offset` and `physical_formula` but not the unit those produce,
+so a reader that inspects only the array concludes that units are unknowable.
+They are not.
+`nm000103` names its channels `E1` through `E129` and declares them in `uV`.
+Reading that document needs no zarr and no numpy, so it sits in the base tier.
+
+The same document carries `original_rate`, and it does not always equal `rate`.
+The store resamples level 0 to `min(native rate, modality cap)`,
+and the cap for electroencephalography and magnetoencephalography is 250 Hz,
+so `nm000103` was acquired at 500 Hz and is served at 250.
+A client that reports only `rate` lets a caller believe they hold the recording as acquired.
+
+One rule the store contract states and this package follows:
+read the unit from the channel, never from the modality.
+Magnetoencephalography is a Tesla-based unit rather than a voltage,
+so a window whose channels disagree on a unit reports none rather than picking one.
 
 ### ICA is not a browser capability
 
