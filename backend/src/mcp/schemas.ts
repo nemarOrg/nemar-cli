@@ -601,10 +601,28 @@ const rangeSchema4 = z4
   .passthrough()
   .refine((v) => v.end >= v.start, { message: "end must be >= start", path: ["end"] });
 
-const readRecipeHowToSchema4 = z4
+export const readRecipeHowToSchema4 = z4
   .object({
-    python_zarr: z4.string().describe("Ready-to-run Python: zarr + anonymous S3, slice, done."),
-    zarrita: z4.string().describe("The TypeScript/JS equivalent using zarrita, browser-safe."),
+    python_zarr: z4
+      .string()
+      .describe(
+        "Python for desktop and HPC: zarr + anonymous S3. NOT usable in a browser -- " +
+          "zarr.open is synchronous and starts an IO thread, which Pyodide cannot. " +
+          "Use python_browser there.",
+      ),
+    zarrita: z4
+      .string()
+      .describe(
+        "The TypeScript/JavaScript lane, zarrita. Runs in a browser and in Node. " +
+          "For Python in a browser use python_browser, not this.",
+      ),
+    python_browser: z4
+      .string()
+      .describe(
+        "Python in a browser (Pyodide), via eegprep-lean's async store over HTTPS range " +
+          "requests. Async throughout. Carries no install line: eegprep-lean is not on " +
+          "PyPI and the executing runtime pins and installs it.",
+      ),
   })
   .passthrough();
 

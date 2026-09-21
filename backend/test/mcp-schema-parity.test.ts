@@ -29,6 +29,7 @@ import {
   listRecordingsInputSchema,
   listRecordingsOutputSchema,
   provenanceEnvelopeSchema,
+  readRecipeHowToSchema,
   readWindowInputSchema,
   readWindowOutputSchema,
   renderOverviewInputSchema,
@@ -46,6 +47,7 @@ import {
   listRecordingsInputSchema4,
   listRecordingsOutputSchema4,
   provenanceEnvelopeSchema4,
+  readRecipeHowToSchema4,
   readWindowInputSchema4,
   readWindowOutputSchema4,
   renderOverviewInputSchema4,
@@ -696,4 +698,38 @@ describe("readWindowOutputSchema parity", () => {
   for (const [label, input] of cases) {
     test(label, () => assertParity(readWindowOutputSchema, readWindowOutputSchema4, input, label));
   }
+});
+
+/**
+ * `how_to` is `.passthrough()` on both copies, which is what makes adding a lane
+ * backward compatible -- and also what makes a lane added to one copy and not the other
+ * invisible to every accept/reject case above. A snippet the contract computes but the
+ * mirror never advertises is a lane the model is not told about, which is the same as
+ * not having it (#1457).
+ */
+describe("read recipe how_to lanes", () => {
+  const declaredKeys = (shape: Record<string, unknown>) => Object.keys(shape).sort();
+
+  test("both copies declare the same lanes", () => {
+    expect(declaredKeys(readRecipeHowToSchema4.shape)).toEqual(
+      declaredKeys(readRecipeHowToSchema.shape as Record<string, unknown>),
+    );
+  });
+
+  test("the lanes are the three this contract promises", () => {
+    // Written out rather than derived from either copy, so agreeing with itself is not
+    // enough: a lane dropped from both would otherwise pass the test above.
+    expect(declaredKeys(readRecipeHowToSchema4.shape)).toEqual([
+      "python_browser",
+      "python_zarr",
+      "zarrita",
+    ]);
+  });
+
+  test("every lane the mirror declares carries a description the model reads", () => {
+    for (const [name, field] of Object.entries(readRecipeHowToSchema4.shape)) {
+      const description = (field as { description?: string }).description;
+      expect(description, `${name} has no .describe()`).toBeTruthy();
+    }
+  });
 });

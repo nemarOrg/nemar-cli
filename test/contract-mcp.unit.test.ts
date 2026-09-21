@@ -183,6 +183,51 @@ describe("buildReadRecipe", () => {
     expect(recipe.how_to.zarrita).toContain("zarr.open.v3(store");
   });
 
+  // #1457. The lane labeled ready-to-run Python was the one lane that could not run
+  // where compute runs by default (ADR 0049). These pin the parts of the browser lane
+  // whose absence is a silent failure rather than a wrong string.
+  describe("the browser-Python lane", () => {
+    const store = on008083Index.stores[0];
+    const browser = () =>
+      buildReadRecipe({ index: on008083Index, store, groupName: "eeg_250hz" }).how_to
+        .python_browser;
+
+    test("reads the https array path, never s3", () => {
+      // s3:// needs s3fs and aiohttp, and a browser needs neither: the store maps
+      // byte requests onto HTTP Range against contract_base.
+      expect(browser()).toContain(on008083Index.contract_base);
+      expect(browser()).not.toContain("s3://");
+      expect(browser()).not.toContain(on008083Index.s3_uri);
+    });
+
+    test("is asynchronous throughout", () => {
+      // The whole reason this lane exists. A synchronous call starts an IO thread and
+      // Pyodide's main thread cannot, and the error names threads rather than zarr.
+      expect(browser()).toContain("await open_array(");
+      expect(browser()).toContain("await arr.getitem(");
+      expect(browser()).not.toContain("zarr.open(");
+    });
+
+    test("names eegprep-lean rather than inlining a store", () => {
+      // The alternative is a third hand-written copy of a reader bound to the index
+      // contract, which is the drift this recipe exists to avoid.
+      expect(browser()).toContain("from eegprep_lean import");
+    });
+
+    test("carries no install line", () => {
+      // eegprep-lean is not on the Python Package Index, so micropip.install would
+      // fail outright; the executing runtime pins and installs it.
+      expect(browser()).not.toContain("micropip.install");
+      expect(browser()).not.toContain("pip install");
+    });
+
+    test("the desktop lane says it is not for a browser", () => {
+      // It used to be described as "ready-to-run Python" with nothing saying where.
+      const recipe = buildReadRecipe({ index: on008083Index, store, groupName: "eeg_250hz" });
+      expect(recipe.how_to.python_zarr.toLowerCase()).toContain("browser");
+    });
+  });
+
   test("throws for a group name the store does not have", () => {
     const store = on008083Index.stores[0];
     expect(() =>
