@@ -229,9 +229,30 @@ serve a decomposition alongside a dataset so a browser session loads weights ins
 them. See "What is coming" below: this is not near-term work, but it is near enough that the
 current design should not foreclose it.
 
-**#1457** is open: `read_window`'s Python recipe emits
-`zarr.open("s3://...", storage_options={"anon": True})`, which cannot run in a browser, which is
-the lane the recipe exists for. It is downstream of `eegprep-lean` and cannot be finished first.
+**#1457 is closed by #1469.** `read_window`'s recipe gained a `python_browser` lane that names
+`eegprep-lean` and calls its asynchronous API against the recipe's `array_path`,
+so it reads HTTPS range requests rather than `s3://` and needs neither s3fs nor aiohttp.
+The other two lanes now say where they run:
+`zarrita` was described as browser-safe, which is true and was being read as making it *the*
+browser lane, when it is the JavaScript one.
+
+The lane deliberately **carries no install line**, and ADR 0070 records why.
+`eegprep-lean` is not on the Python Package Index, and publishing a second distribution name is
+the eegprep project owner's call,
+so the executing runtime pins and installs it and serves the wheel from its own origin.
+That last part is forced rather than chosen:
+`micropip.install(url)` is a browser `fetch`, so the host must send `access-control-allow-origin`,
+and **GitHub release assets send none**,
+because a release download redirects to `release-assets.githubusercontent.com` with a signed URL
+and no CORS header.
+The Python Package Index, `raw.githubusercontent.com` and jsDelivr all send `*`; measured
+2026-09-21.
+OpenScience-Collective/osa#424 tracks the runtime side: vendor the wheel, pin it, and decide the
+refresh procedure, because that pin is the only thing keeping the runtime and the reader in step.
+
+**The browser lane cannot reach the live host until `dev` reaches production.** #1466 added the
+OSC surfaces to the zarr host's allow-list and is merged to `dev`, so `app.osc.earth` still
+receives no `access-control-allow-origin` from `zarr.nemar.org` today.
 
 `dev` is 32 commits ahead of `main`. The promotion is gated on osa#370 shipping with it.
 
@@ -246,8 +267,11 @@ in-browser BIDS validation, which is the same "compute in the browser" shape.
 osa Phase 0 items 2,3,4,5,6 ─┬─> osa Phase 1 (tool-result contract, resume route)
                              └─> osa Phase 2 (widget, execution, approval UI)
 
-ADR 0069 ─> eegprep-lean contract ─> eegprep-lean package ─> nemar-cli#1457 (recipe targets it)
-            (drafted)            (reads and plots; #410 open)
+ADR 0069 ─> eegprep-lean contract ─> eegprep-lean package ─> nemar-cli#1457 (recipe names it)
+            (current)            (reads, plots, wheel)     (closed by #1469; ADR 0070)
+                                                             │
+                                                             └─> osa#424 (runtime vendors the wheel)
+                                                             └─> nemar-cli dev -> main (CORS for osc.earth)
 
 eegprep epic #324 phase 4 ─> phase 5 (ORT Web, async) ─┬─> ICLabel runs in a browser
                           └─> phase 6 (int8)         ─┘
