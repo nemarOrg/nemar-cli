@@ -732,4 +732,20 @@ describe("read recipe how_to lanes", () => {
       expect(description, `${name} has no .describe()`).toBeTruthy();
     }
   });
+
+  test("each description says where that lane runs", () => {
+    // Truthiness is not enough. These descriptions are the whole model-facing half of
+    // this change, and one reverting to the old text -- "Ready-to-run Python: zarr +
+    // anonymous S3, slice, done." -- would still be a non-empty string on the right key
+    // while telling the model the browser lane is synchronous zarr over S3.
+    const described = (name: string) =>
+      (readRecipeHowToSchema4.shape[name] as { description?: string }).description ?? "";
+
+    expect(described("python_zarr")).toContain("NOT usable in a browser");
+    expect(described("zarrita")).toContain("TypeScript/JavaScript");
+    expect(described("python_browser")).toContain("browser");
+    expect(described("python_browser")).toContain("eegprep-lean");
+    expect(described("python_browser")).toContain("Async");
+    expect(described("python_browser")).not.toBe(described("python_zarr"));
+  });
 });

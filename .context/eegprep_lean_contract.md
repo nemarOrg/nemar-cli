@@ -1,6 +1,12 @@
 # The `eegprep-lean` contract
 
-**Status:** draft. `eegprep-lean` does not exist yet.
+**Status:** current. `eegprep-lean` exists and reads the live archive:
+the index reader (sccn/eegprep#406), the window reader (#408),
+the plot tier together with the channel labels and units (#409),
+and a wheel built and verified in continuous integration (#411).
+It is **not** published to the Python Package Index,
+and [ADR 0070](decisions/0070-the-browser-recipe-names-eegprep-lean-and-carries-no-install-line.md)
+records how it reaches a browser instead.
 **Lives here because** ADR 0069 says this project owns the seam, and because eegprep gitignores
 its own `.context/`. The normative parts move into eegprep's `docs/source/` when the package ships.
 **Owner:** Seyed Yahya Shirazi
