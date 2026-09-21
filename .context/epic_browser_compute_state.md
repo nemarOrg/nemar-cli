@@ -107,7 +107,8 @@ computed a wrong ratio for non-integer sampling rates, 24 of 86 realistic pairs,
 labeled 128 Hz. It also drops `sympy`, whose only caller was the defect.
 
 New work this decision creates: **`eegprep-lean` does not exist yet.** Its contract is the first
-deliverable, per ADR 0069.
+deliverable, per ADR 0069, and is now drafted at
+[`eegprep_lean_contract.md`](eegprep_lean_contract.md).
 
 #### Browser ICA does not finish, and that is a product constraint
 
@@ -201,6 +202,7 @@ osa Phase 0 items 2,3,4,5,6 ─┬─> osa Phase 1 (tool-result contract, resume
                              └─> osa Phase 2 (widget, execution, approval UI)
 
 ADR 0069 ─> eegprep-lean contract ─> eegprep-lean package ─> nemar-cli#1457 (recipe targets it)
+            (drafted)
 
 eegprep epic #324 phase 4 ─> phase 5 (ORT Web, async) ─┬─> ICLabel runs in a browser
                           └─> phase 6 (int8)         ─┘
@@ -262,9 +264,13 @@ rather than an exception carved into that one.
    holding a few spectrograms at 430,440 base64 characters, is a different budget from the current
    text-only one. It is also a token question, since every retained figure is re-sent on every
    later turn.
-2. **What does `eegprep-lean` guarantee, and where does it deliberately differ from eegprep?**
-   ADR 0069 names the contract as the deliverable rather than a side effect. Undeclared divergence
-   is the failure mode it exists to prevent.
+2. ~~**What does `eegprep-lean` guarantee, and where does it deliberately differ from eegprep?**~~
+   **Drafted:** [`eegprep_lean_contract.md`](eegprep_lean_contract.md). It settles reader
+   ownership (`eegprep-lean` owns the browser reader, because `nemar-cli` is TypeScript and Bun
+   with no Python in it and a reader would be the first), records the async-only constraint as a
+   structural divergence, and states that ICA is refused in the browser rather than attempted.
+   Three things stay open inside it: the base tier's exact package list, whether `pillow` and
+   `fonttools` are droppable, and what the `[ica]` tier becomes.
 3. **Whether `pillow` and `fonttools` are droppable from the plot tier** (2.09 MB). Plausible for a
    PNG-only path, and must be proven the `eeglabio` way, by running the plotting with them absent.
 4. ~~Whether the `[ica]` tier is right for a browser.~~ **Answered: it is not.** ADR 0069's
