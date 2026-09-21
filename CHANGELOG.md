@@ -85,9 +85,12 @@ earlier releases are described only by their generated notes.
 - **The manifest canary probed a private repository anonymously** (#1452), so every blob
   it checked read as gone. It now authenticates with the installation token and reports
   a tri-state verdict: `present`, `absent`, or `unchecked`. `unchecked` is logged as
-  itself rather than folded into the healthy line, and an authenticated `absent` seen on
-  a first attempt survives a later `unchecked`, so a transient failure on retry cannot
-  erase a real absence (ADR 0067).
+  itself rather than folded into the healthy line, because a run that could not check
+  anything still writes a manifest and an operator reading `canary OK` would believe it
+  was verified (ADR 0053). An authenticated `absent` seen on a first attempt survives a
+  later `unchecked`, so a transient failure on retry cannot erase a real absence. The
+  private repository it could not read is an anonymous deposit, which is a public row
+  over a private repository by design (ADR 0065).
 
 - **The anonymous exemplar could not take its anonymous release** (#1428), and the
   version identifiers minted during a blind stayed reserved with nothing to complete

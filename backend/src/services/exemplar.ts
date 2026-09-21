@@ -44,13 +44,15 @@ export interface ExemplarGateRow {
  * xx / is_sandbox block and skip it only when this returns true
  * (`... && !isExemplarPublishAllowed(env, row)`).
  *
- * **The anonymity term is a live guard, not dead weight.** It is tempting to
- * read it as unreachable now that `scripts/exemplar-fleet.json` declares no
- * anonymous entry (#1433). That does not follow: the fleet file is not the only
- * producer of such a row. `POST /admin/datasets/exemplar` still accepts
- * `anonymous: true` and writes it alongside `is_exemplar = 1` on an `xx0999NN`
- * id, so any admin can create exactly the row this term refuses. #1434 retires
- * that field; until then the term is load-bearing.
+ * **The anonymity term is defense in depth, not dead weight.** Both known
+ * producers of such a row are now closed: `scripts/exemplar-fleet.json` declares
+ * no anonymous entry and the loader refuses the key outright (#1433), and
+ * `POST /admin/datasets/exemplar` refuses `anonymous: true` before anything is
+ * created, writing the column as a literal 0 (#1434). Neither closure is a
+ * reason to drop this term, because what it refuses is a row that reached the
+ * table by some other route: a manual insert, a restored backup predating
+ * #1434, or a later writer that forgets. It costs one boolean; being wrong
+ * costs what the next paragraph describes.
  *
  * What it prevents: publishing an anonymous row does not dirty it but destroys
  * it, because the approve path stamps `first_published_at`, after which
