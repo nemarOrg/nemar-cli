@@ -54,7 +54,16 @@ measured against the Pyodide 0.29.5 distribution:
 | `eegprep-lean` | 12 | 4.2 MB | read a window of data |
 | `eegprep-lean[plot]` | 22 | 14.0 MB | and draw it, adding matplotlib |
 | `eegprep-lean[preprocess]` | 23 | 30.4 MB | and filter and resample it, adding scipy |
-| `eegprep-lean[ica]` | 27 | 36.3 MB | and decompose it, adding python-picard |
+| `eegprep-lean[ica]` | 27 | 36.3 MB | see the correction below |
+
+*(Correction, 2026-09-20: the `[ica]` row was written as "adding python-picard", which is wrong for
+a browser. Phase 2's benchmark gate rejected picard as the browser default, and the browser ICA
+that exists routes `runica` through `scipy.linalg.blas`, with scipy already present in
+`[preprocess]`. So this tier adds nothing a browser uses, and it should either be dropped or
+renamed for the native case when `eegprep-lean` is actually built. The measured footprint of a
+picard install is unchanged and correct; what was wrong was calling it the browser's ICA path.
+Compounding it: that benchmark also found ICA does not finish inside the design note's
+`exec_seconds: 120` budget at all, so no tier makes browser ICA work today.)*
 
 Plotting is the tier that matters most for pacing, because it is the first thing a person asks for after looking at data
 and it costs 9.8 MB. It is deliberately not in the base: a session that only reads pays 4.2 MB,
@@ -106,7 +115,9 @@ There is also a second artifact to release, version and support.
 
 - **Move mne, pybids, h5py and neo to eegprep extras.** The original plan, from the measurements in sccn/eegprep#395. It shrinks the default install, which changes what existing users get from an unchanged command, and every move needs proof that nothing reaches the package through another library. Rejected: the risk lands on the scientific package's users to buy a smaller browser download.
 - **Make eegprep lean and publish a large bundle beside it.** Same shrinking of the default install, with the breakage concentrated in one release rather than spread over several. Rejected for the same reason.
-- **One repository, two published distributions.** Keeps the science unforked, but the release pipeline carries the split and CI has to prove both. Held in reserve: this is where to go if the seam turns out to be thinner than expected.
+- **A second repository for the lean runtime.** Cleanest boundary, and rejected as too clean: the lean runtime and the full package share science code, and a repository boundary is where shared code goes to be copied.
+
+*(Correction, 2026-09-20: this list previously carried "One repository, two published distributions" as an alternative "held in reserve". That is not an alternative, it is this ADR's decision, stated twice. Removed so that nobody cites the decision as a path that was rejected.)*
 - **An `eegprep[lean]` extra.** The name everyone reaches for first, and it cannot work: extras add to a distribution's requirements and never replace them, so the base install arrives before the extra does. Worth stating in full here because it is the proposal that will come back.
 - **A separate repository.** Cleanest boundary, and rejected as too clean: the lean runtime and the full package share science code, and a repository boundary is where shared code goes to be copied. One repository, two distributions, keeps them honest.
 - **Lazy imports alone.** Does not reduce the download at all, because micropip installs the declared closure whether or not the module is imported. Rejected on measurement.
