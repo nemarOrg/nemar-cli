@@ -51,7 +51,7 @@ import { Hono } from "hono";
 import { rateLimiter } from "../middleware/rateLimit.js";
 import { recordAccess, zarrObjectType } from "../services/access-metrics";
 import { ZARR_DATASET_DOCUMENTS } from "../services/cloudflare.js";
-import { isNemarWebOrigin } from "../services/cors-origins";
+import { isNemarWebOrigin, isOscOrigin } from "../services/cors-origins";
 import { normalizeBidsPath } from "../services/data-router";
 import { isValidDatasetId } from "../services/datasetId";
 import { ZarrCatalogForbiddenError, fetchZarrCatalogObject } from "../services/zarr-catalog";
@@ -59,17 +59,24 @@ import type { Bindings } from "../types/bindings.js";
 
 /** Origins allowed to read zarr chunks cross-origin in a browser: the NEMAR
  *  web properties, including the website's Pages preview URLs (#1346), plus
- *  localhost for dev. Anything else gets no Access-Control-Allow-Origin and is
- *  blocked by the browser -- which is what makes zarr.nemar.org the
- *  authoritative browser gateway.
+ *  localhost for dev, plus the OSC surfaces (#1465).
  *
- *  Deliberately still tighter than the api fork's `cors()`, which also allows
- *  `*.osc.earth`; `isNemarWebOrigin` is only the part the two must agree on. */
+ *  OSA was added because it hosts the browser compute widget, which reads these
+ *  chunks directly so the data never leaves the browser (ADR 0049). Without it
+ *  that lane cannot work at all, and it fails as an opaque CORS error naming
+ *  nothing. The list is granted by request and by name; anything not on it gets
+ *  no Access-Control-Allow-Origin and is blocked by the browser.
+ *
+ *  Be clear about what this is worth. An Origin header is set by the browser and
+ *  forged trivially by anything that is not one, and the same bytes are readable
+ *  from the public bucket, so this is not an access control. It decides which
+ *  PAGES can read, not which CLIENTS. #1465 carries the assessment of what, if
+ *  anything, should actually control access here. */
 export function allowedOrigin(origin: string | null): string | null {
   if (!origin) return null;
   try {
     const { hostname } = new URL(origin);
-    if (isNemarWebOrigin(hostname)) return origin;
+    if (isNemarWebOrigin(hostname) || isOscOrigin(hostname)) return origin;
   } catch {
     return null;
   }

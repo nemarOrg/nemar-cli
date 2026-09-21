@@ -3,11 +3,11 @@
  * (#1346).
  *
  * The api fork (`cors()` in index.ts) and the zarr fork (`allowedOrigin` in
- * routes/zarr-data.ts) deliberately differ in scope — the api fork also allows
- * `*.osc.earth` and sets `credentials: true`, the zarr fork stays as tight as it
- * can while still exposing the Range headers zarrita reads. What they must NOT
- * differ on is which of our own web surfaces count, because a surface allowed by
- * one and blocked by the other is a page that half works.
+ * routes/zarr-data.ts) still differ — the api fork sets `credentials: true` and
+ * the zarr fork exposes the Range headers zarrita reads — but as of #1465 they
+ * agree on WHICH origins are admitted. What they must NOT differ on is which
+ * surfaces count, because a surface allowed by one and blocked by the other is a
+ * page that half works, and the browser compute lane spans both.
  *
  * Kept pure (no Hono context, no env) so the tables are unit-testable without
  * instantiating the worker, the same way `host-routing.ts` is.
@@ -66,4 +66,24 @@ export function isNemarWebOrigin(hostname: string): boolean {
   if (hostname === "localhost" || hostname === "127.0.0.1") return true;
   if (hostname === "nemar.org" || hostname.endsWith(".nemar.org")) return true;
   return isWebsitePagesHost(hostname);
+}
+
+/**
+ * True for an OpenScience Collective surface.
+ *
+ * OSA hosts the browser compute widget, which reads Zarr chunks directly so the
+ * data never leaves the browser (Architecture Decision Record 0049). That makes
+ * it a first-party consumer of `zarr.nemar.org`, not a third party, even though
+ * it is a different domain.
+ *
+ * This list is granted by request and by name. It is not a general opening: a
+ * site that is not here gets no `Access-Control-Allow-Origin` and a browser
+ * blocks it. Adding one is a deliberate act, and #1465 records why this one was
+ * added and what an Origin allow-list does and does not actually control.
+ *
+ * Expects the hostname alone, already lowercased by `URL` parsing at the call
+ * sites — not a full origin.
+ */
+export function isOscOrigin(hostname: string): boolean {
+  return hostname === "osc.earth" || hostname.endsWith(".osc.earth");
 }

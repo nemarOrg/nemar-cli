@@ -37,6 +37,29 @@ describe("allowedOrigin", () => {
     }
   });
 
+  // OSA hosts the browser compute widget, which reads these chunks directly
+  // (#1465). Without this the lane cannot work, and it fails as an opaque CORS
+  // error rather than anything naming the cause.
+  test("allows the OSC surfaces (#1465)", () => {
+    for (const o of ["https://osc.earth", "https://www.osc.earth", "https://api.osc.earth"]) {
+      expect(allowedOrigin(o)).toBe(o);
+    }
+  });
+
+  // The suffix has to be a real label boundary, the same property already
+  // pinned for .nemar.org and .pages.dev. Anyone can register a domain that
+  // merely ends in the same characters.
+  test("blocks lookalikes of the OSC surfaces", () => {
+    for (const o of [
+      "https://osc.earth.evil.com",
+      "https://notosc.earth",
+      "https://evil-osc.earth",
+      "https://osc.earth.evil.example/osc.earth",
+    ]) {
+      expect(allowedOrigin(o)).toBeNull();
+    }
+  });
+
   test("blocks third-party origins (OpenNeuro etc.)", () => {
     for (const o of [
       "https://openneuro.org",
