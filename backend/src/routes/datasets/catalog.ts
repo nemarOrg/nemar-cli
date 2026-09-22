@@ -35,6 +35,7 @@ import {
 } from "../../services/dataset-facets";
 import {
   type DatasetFilterOptions,
+  PUBLISHED_AT_SQL,
   buildDatasetFilterClauses,
   buildPublicCatalogBase,
   escapeLikePattern,
@@ -501,16 +502,6 @@ export function parseFilterQuery(
  */
 export const ANONYMOUS_ERROR_DETAILS =
   "An internal error occurred while processing this request. Please try again; if it persists, contact support.";
-
-/**
- * When a dataset reached the public catalog (#1477): its first publication,
- * else its row creation. `created_at` alone is when a draft row was made, so a
- * dataset drafted in July and published in September sorted behind every
- * import in between. `first_published_at` (migration 0085) is stamped for
- * imports and native publications alike; the fallback covers rows that never
- * published (a `?mine=true` draft) or predate the column's backfill.
- */
-const PUBLISHED_AT_SQL = "COALESCE(d.first_published_at, d.created_at)";
 
 function buildSortClause(sort: string): string {
   switch (sort) {
