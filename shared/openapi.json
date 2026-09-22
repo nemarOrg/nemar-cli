@@ -97,6 +97,12 @@
                 "updated_at": {
                   "type": "string"
                 },
+                "first_published_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "owner_username": {
                   "type": [
                     "string",
@@ -536,6 +542,12 @@
               },
               "updated_at": {
                 "type": "string"
+              },
+              "first_published_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "owner_username": {
                 "type": [

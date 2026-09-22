@@ -17,8 +17,9 @@
  *    matches").
  *  - Without `query`: the same public-catalog base (`buildPublicCatalogBase`)
  *    and filter clauses (`buildDatasetFilterClauses`) the list route uses, a
- *    compact SELECT of exactly the hit columns, `ORDER BY d.created_at DESC`
- *    (the list route's own default), and a `COUNT(*)` over the same
+ *    compact SELECT of exactly the hit columns, ordered newest-published
+ *    first by the shared `PUBLISHED_AT_SQL` (the list route's own default,
+ *    #1477), and a `COUNT(*)` over the same
  *    predicate -- both in one `db.batch`. This branch selects license/zarr
  *    facts directly, so there is no follow-up query and no unresolved-hit
  *    case here.
@@ -44,6 +45,7 @@ import { splitCsv } from "../../services/data-router.js";
 import { FacetEnumParseError, parseFacetFilters } from "../../services/dataset-facets.js";
 import {
   type DatasetFilterOptions,
+  PUBLISHED_AT_SQL,
   buildDatasetFilterClauses,
   buildPublicCatalogBase,
 } from "../../services/dataset-filters.js";
@@ -366,7 +368,7 @@ export async function searchDatasetsTool(
   } else {
     const { from, params } = buildPublicCatalogBase("active", undefined, undefined);
     const filterClauses = buildDatasetFilterClauses(params, filters);
-    const selectSql = `SELECT d.dataset_id, d.name, ${CONCEPT_DOI_SQL} AS concept_doi, d.license, d.modalities, d.tasks, d.subject_count, d.has_hed, d.zarr_status, d.zarr_store_count ${from}${filterClauses} ORDER BY d.created_at DESC LIMIT ?`;
+    const selectSql = `SELECT d.dataset_id, d.name, ${CONCEPT_DOI_SQL} AS concept_doi, d.license, d.modalities, d.tasks, d.subject_count, d.has_hed, d.zarr_status, d.zarr_store_count ${from}${filterClauses} ORDER BY ${PUBLISHED_AT_SQL} DESC LIMIT ?`;
     const countSql = `SELECT COUNT(*) AS total ${from}${filterClauses}`;
     const [rowsResult, countResult] = await env.DB.batch<CatalogListRow | { total: number }>([
       env.DB.prepare(selectSql).bind(...params, args.limit),

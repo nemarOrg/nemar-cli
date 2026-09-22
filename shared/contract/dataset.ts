@@ -71,6 +71,11 @@ const catalogItemObjectSchema = z
     doi: z.string().nullable().optional(),
     created_at: z.string(),
     updated_at: z.string().optional(),
+    // #1477: when the dataset first went public (migration 0085). `sort=newest`,
+    // `sort=oldest` and `recent=` read this, falling back to a legacy row's
+    // publish_date and then created_at when null (never published, e.g. a
+    // `?mine=true` draft). Absent on older backends.
+    first_published_at: z.string().nullable().optional(),
     owner_username: z.string().nullable().optional(),
     source: z.string().nullable().optional(),
     modalities: z.string().optional(),
