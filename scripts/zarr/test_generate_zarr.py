@@ -7631,3 +7631,88 @@ class TestConvertOneEndToEnd(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMainRoutesSingleRecordingsThroughThePool(unittest.TestCase):
+    """#1483: a single-recording run with --jobs > 1 converts in a pool worker,
+    the only path with the serial memory retry; --jobs 1 stays in-process.
+
+    Observed without substituting anything: the in-process path initializes the
+    worker context (`_CTX`) in THIS process, and a pool worker initializes its
+    own, leaving this process's untouched. A real EDF is converted either way.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        self.s3 = os.path.join(self.dir, "s3")
+        os.makedirs(os.path.join(self.repo, "sub-01", "eeg"))
+        os.makedirs(self.s3)
+
+        def git(*args):
+            subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True)
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.org")
+        git("config", "user.name", "t")
+        build_real_edf(os.path.join(self.repo, "sub-01", "eeg"), "sub-01_task-rest_eeg", seconds=10)
+        git("add", "-A")
+        git("commit", "-q", "-m", "init")
+
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write(STUB_AWS)
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        saved = (os.environ.get("PATH"), os.environ.get("ZARR_TEST_S3_ROOT"))
+        os.environ["PATH"] = bindir + os.pathsep + (saved[0] or "")
+        os.environ["ZARR_TEST_S3_ROOT"] = self.s3
+        self.addCleanup(self._restore_env, saved)
+        saved_ctx = dict(generate_zarr._CTX)
+        self.addCleanup(lambda: (generate_zarr._CTX.clear(), generate_zarr._CTX.update(saved_ctx)))
+        generate_zarr._CTX.clear()
+
+    @staticmethod
+    def _restore_env(saved):
+        for key, value in zip(("PATH", "ZARR_TEST_S3_ROOT"), saved, strict=True):
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def run_main(self, jobs: int) -> str:
+        argv = [
+            "generate_zarr.py", "--dataset-id", "on008083", "--repo-dir", self.repo,
+            "--bucket", "nemar-test", "--callback-out", os.path.join(self.dir, "cb.json"),
+            "--local", "--clean", "--jobs", str(jobs),
+            # Closed port: the catalog read fails fast instead of reaching the
+            # real API; provenance is best-effort and not under test here.
+            "--api-base", "http://127.0.0.1:9",
+        ]
+        saved, sys.argv = sys.argv, argv
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = generate_zarr.main()
+        finally:
+            sys.argv = saved
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertIn("converted sub-01/eeg/sub-01_task-rest_eeg.edf", out.getvalue())
+        return out.getvalue()
+
+    def test_one_recording_with_several_jobs_converts_in_a_worker(self):
+        self.run_main(jobs=2)
+        self.assertEqual(generate_zarr._CTX, {}, "converted in-process, not in the pool")
+
+    def test_jobs_one_still_converts_in_process(self):
+        self.run_main(jobs=1)
+        self.assertEqual(generate_zarr._CTX.get("dataset_id"), "on008083")
