@@ -17,6 +17,7 @@ import contextlib
 import errno
 import hashlib
 import io
+import itertools
 import json
 import os
 import shutil
@@ -79,6 +80,10 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     INMEM_MEM_FACTOR,
     usable_ram_bytes,
     memory_failure_result,
+    live_admission_ceiling,
+    mem_available_bytes,
+    anon_rss_bytes,
+    _tracked_call,
     memory_snapshot,
     log_memory_failure,
     count_infra_failures,
@@ -3127,6 +3132,30 @@ def _crashing_worker(primary, peak_bytes=None):
         os._exit(1)
     time.sleep(0.45)
     return {"ok": True, "primary": primary, "entry": {"zarr": primary + ".zarr"}}
+
+
+def _timed_worker(primary, peak_bytes=None):
+    """Fault-free worker that takes long enough for admission to matter, and
+    says when it ran. Module-level so it pickles."""
+    started = time.monotonic()
+    time.sleep(0.8)
+    return {
+        "ok": True,
+        "primary": primary,
+        "entry": {"zarr": primary + ".zarr"},
+        "span": (started, time.monotonic()),
+    }
+
+
+def _track_listing_worker(track_dir, reserve=None):
+    """Reports what `_tracked_call` left in its track directory while this ran."""
+    files = sorted(os.listdir(track_dir))
+    with open(os.path.join(track_dir, files[0])) as fh:
+        return {"files": files, "record": json.load(fh)}
+
+
+def _track_failing_worker(track_dir, reserve=None):
+    raise RuntimeError("the conversion failed")
 
 
 def _budget_worker(primary, peak_bytes=None):
@@ -8121,3 +8150,180 @@ class TestMainRetryPendingRound(unittest.TestCase):
         self.assertEqual(rc, 0, log)
         self.assertNotIn("--retry-pending", log)
         self.assertIn(f"converted {self.A}", log)
+
+
+class TestLiveAdmissionCeiling(unittest.TestCase):
+    """#1483: the admission ceiling follows the node's memory during the run,
+    charging in-flight recordings only for what they have not yet taken.
+
+    The /proc files are real-shaped fixtures written to a temporary directory,
+    in the kernel's own `Key:   <n> kB` format, and read by the same functions
+    that read the live ones."""
+
+    GIB = 1024**3
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = self._tmp.name
+        self.meminfo = os.path.join(self.root, "meminfo")
+        self.proc = os.path.join(self.root, "proc")
+        self.track = os.path.join(self.root, "track")
+        os.makedirs(self.proc)
+        os.makedirs(self.track)
+        self.addCleanup(os.environ.pop, "ZARR_MEM_HEADROOM_FRAC", None)
+        os.environ.pop("ZARR_MEM_HEADROOM_FRAC", None)
+        self.available(10 * self.GIB)
+
+    def available(self, n):
+        with open(self.meminfo, "w") as fh:
+            fh.write(f"MemTotal:       {64 * self.GIB // 1024} kB\n")
+            fh.write(f"MemFree:        {n // 2048} kB\n")
+            fh.write(f"MemAvailable:   {n // 1024} kB\n")
+
+    def worker(self, pid, *, reserve, start, now):
+        """A tracked recording in flight: its track file and its /proc status."""
+        with open(os.path.join(self.track, f"{pid}.json"), "w") as fh:
+            json.dump({"reserve": reserve, "rss_anon_start": start}, fh)
+        if now is not None:
+            os.makedirs(os.path.join(self.proc, str(pid)))
+            with open(os.path.join(self.proc, str(pid), "status"), "w") as fh:
+                fh.write(f"Name:\tpython3\nVmRSS:\t{now // 1024} kB\n"
+                         f"RssAnon:\t{now // 1024} kB\nRssFile:\t 2048 kB\n")
+
+    def ceiling(self, running_peak, *, static=3 * GIB, hard=None):
+        return live_admission_ceiling(
+            static, hard, running_peak, self.track,
+            meminfo_path=self.meminfo, proc_root=self.proc,
+        )
+
+    def test_idle_it_is_the_headroom_of_what_is_available_now(self):
+        self.assertEqual(self.ceiling(0), 8 * self.GIB)
+        self.available(20 * self.GIB)  # a tenant finished: the ceiling rises
+        self.assertEqual(self.ceiling(0), 16 * self.GIB)
+        self.available(5 * self.GIB)  # a tenant grew: it falls
+        self.assertEqual(self.ceiling(0), 4 * self.GIB)
+
+    def test_it_never_exceeds_the_hardware_ceiling(self):
+        self.assertEqual(self.ceiling(0, hard=6 * self.GIB), 6 * self.GIB)
+
+    def test_off_linux_the_static_ceiling_applies(self):
+        os.remove(self.meminfo)
+        self.assertEqual(self.ceiling(0), 3 * self.GIB)
+
+    def test_what_a_recording_has_taken_is_not_charged_twice(self):
+        # 1.5 GiB of its 4 GiB reserve is already out of MemAvailable; the other
+        # 2.5 GiB is still owed.
+        self.worker(101, reserve=4 * self.GIB, start=self.GIB, now=int(2.5 * self.GIB))
+        self.assertEqual(self.ceiling(4 * self.GIB), int(9.5 * self.GIB))
+
+    def test_credit_is_capped_at_the_reserve(self):
+        # Retained heap from an earlier recording must not buy extra room.
+        self.worker(101, reserve=4 * self.GIB, start=0, now=7 * self.GIB)
+        self.assertEqual(self.ceiling(4 * self.GIB), 12 * self.GIB)
+
+    def test_an_untracked_or_unreadable_recording_is_charged_in_full(self):
+        self.worker(101, reserve=4 * self.GIB, start=0, now=None)  # process gone
+        self.assertEqual(self.ceiling(4 * self.GIB), 8 * self.GIB)
+        with open(os.path.join(self.track, "102.json"), "w") as fh:
+            fh.write("{not json")
+        self.assertEqual(self.ceiling(4 * self.GIB), 8 * self.GIB)
+
+    def test_credit_never_exceeds_what_is_in_flight(self):
+        # A track file can outlive its recording by an instant.
+        self.worker(101, reserve=4 * self.GIB, start=0, now=3 * self.GIB)
+        self.assertEqual(self.ceiling(self.GIB), 9 * self.GIB)
+        self.assertEqual(self.ceiling(0), 8 * self.GIB)
+
+    def test_the_live_readers_work_where_proc_exists(self):
+        if not sys.platform.startswith("linux"):
+            self.assertIsNone(mem_available_bytes())
+            return
+        self.assertGreater(mem_available_bytes(), 0)
+        self.assertGreater(anon_rss_bytes(os.getpid()), 1024**2)
+        self.assertIsNone(anon_rss_bytes(2**22 + 12345))
+
+
+class TestTrackedCall(unittest.TestCase):
+    """`_tracked_call` leaves a record for the parent while the recording runs,
+    and removes it however the recording ends."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.track = self._tmp.name
+
+    def test_the_record_exists_while_the_worker_runs(self):
+        out = _tracked_call(_track_listing_worker, self.track, 123, self.track)
+        self.assertEqual(out["files"], [f"{os.getpid()}.json"])
+        self.assertEqual(out["record"]["reserve"], 123)
+        if sys.platform.startswith("linux"):
+            self.assertIsInstance(out["record"]["rss_anon_start"], int)
+        else:  # nothing to measure; the parent then charges the full reserve
+            self.assertIsNone(out["record"]["rss_anon_start"])
+        self.assertEqual(os.listdir(self.track), [])
+
+    def test_the_record_is_removed_when_the_worker_raises(self):
+        with self.assertRaises(RuntimeError):
+            _tracked_call(_track_failing_worker, self.track, 1, self.track)
+        self.assertEqual(os.listdir(self.track), [])
+
+
+class TestAdmissionFollowsTheCeiling(unittest.TestCase):
+    """A drain re-reads its ceiling while recordings run, not only when one
+    finishes (#1483). The ceiling here is a file the test rewrites mid-run, in
+    place of /proc: the node's memory is the environment, not the logic."""
+
+    RESERVE = 100
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.limit = os.path.join(self._tmp.name, "limit")
+        self.set_limit(150)  # room for one recording at a time
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.05
+
+    def set_limit(self, n):
+        # Replaced atomically: the drain reads this from another thread, and a
+        # truncate-then-write would let it read an empty file.
+        tmp = self.limit + ".tmp"
+        with open(tmp, "w") as fh:
+            fh.write(str(n))
+        os.replace(tmp, self.limit)
+
+    def ceiling(self, _running_peak, _track_dir):
+        with open(self.limit) as fh:
+            return int(fh.read())
+
+    def run_drain(self, raise_after=None):
+        import threading
+
+        primaries = [f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest_eeg.set" for i in range(1, 4)]
+        results = []
+        if raise_after is not None:
+            timer = threading.Timer(raise_after, self.set_limit, args=(10**6,))
+            timer.start()
+            self.addCleanup(timer.cancel)
+        _drain_with_admission(
+            primaries, {p: self.RESERVE for p in primaries}, 3, 10**12, {},
+            lambda r, i: results.append(r), worker=_timed_worker, ceiling=self.ceiling,
+        )
+        self.assertEqual(len(results), 3)
+        return sorted(r["span"] for r in results)
+
+    def test_a_tight_ceiling_runs_recordings_one_at_a_time(self):
+        spans = self.run_drain()
+        for earlier, later in itertools.pairwise(spans):
+            self.assertGreaterEqual(later[0], earlier[1] - 0.01)
+
+    def test_memory_freed_mid_run_is_used_before_anything_finishes(self):
+        spans = self.run_drain(raise_after=0.2)
+        # The first recording is still running (0.8 s) when the ceiling rises
+        # at 0.2 s; the others start then, not when it finishes.
+        first_end = spans[0][1]
+        self.assertLess(spans[1][0], first_end)
+        self.assertLess(spans[2][0], first_end)
