@@ -942,3 +942,90 @@ def test_backfill_sweep_gets_accept_exemplars_only_under_test(ack_run) -> None:
     assert "--accept-exemplars" not in calls[1].split()
     assert "--api-base https://api.nemar.org" in calls[1]
 
+
+
+# -- convert_dataset: which runs ask the driver for a pending-only retry (#1483) --
+
+
+def _function_source(name: str) -> str:
+    """The text of one shell function in hallu-zarr.sh, from `name() {` to the
+    `}` that closes it at column 0."""
+    lines = SCRIPT.read_text().splitlines()
+    start = lines.index(f"{name}() {{")
+    end = next(i for i in range(start + 1, len(lines)) if lines[i] == "}")
+    return "\n".join(lines[start : end + 1])
+
+
+def _driver_argv(tmp_path: Path, *call_args: str) -> list[str]:
+    """Run the REAL `convert_dataset` under the script's own `set -uo pipefail`
+    and return the argv it gave the driver.
+
+    Everything around it is a stand-in: the driver is a real executable that
+    records its arguments and writes the callback the function then reads, and
+    `nemar`/`log`/`err`/`safe_rm` are shell functions. The function body itself,
+    including the empty-array expansion that has to survive `set -u`, is the
+    script's, extracted verbatim.
+    """
+    record = tmp_path / "argv.txt"
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    python = venv / "bin" / "python"
+    python.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$@" > {shlex.quote(str(record))}\n'
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--callback-out" ]; then echo "{}" > "$2"; fi\n'
+        "  shift\n"
+        "done\n"
+    )
+    python.chmod(0o755)
+    work = tmp_path / "work"
+    work.mkdir()
+    harness = "\n".join(
+        [
+            "set -uo pipefail",
+            f"WORK_DIR={shlex.quote(str(work))}",
+            f"LOG_FILE={shlex.quote(str(tmp_path / 'log.txt'))}",
+            f"VENV_DIR={shlex.quote(str(venv))}",
+            "DRIVER=generate_zarr.py S3_BUCKET=nemar AWS_REGION=us-east-2",
+            "CONTRACT_BASE=https://data.example CALLBACK_URL= NEMAR_WEBHOOK_TOKEN=",
+            "API_BASE=https://api.example JOBS=2",
+            "log() { :; }; err() { :; }",
+            'safe_rm() { rm -rf "$1"; }',
+            'nemar() { mkdir -p "${@: -1}"; }',
+            _function_source("convert_dataset"),
+            "convert_dataset " + " ".join(shlex.quote(a) for a in call_args),
+        ]
+    )
+    proc = subprocess.run(
+        ["bash", "-c", harness], capture_output=True, text=True, timeout=30, check=False
+    )
+    assert proc.returncode == 0, proc.stderr
+    return record.read_text().splitlines()
+
+
+def test_the_queue_drain_asks_for_a_pending_only_retry(tmp_path):
+    argv = _driver_argv(tmp_path, "on008083", "v1.0.0", "retry-pending")
+    assert "--retry-pending" in argv
+    # Still a --clean run: the driver decides, and falls back to the full
+    # rebuild whenever the published index is not current.
+    assert "--clean" in argv
+
+
+def test_a_one_off_run_is_always_a_full_rebuild(tmp_path):
+    # No third argument, under `set -u`: the empty array must expand to nothing
+    # rather than abort the function.
+    argv = _driver_argv(tmp_path, "on008083", "v1.0.0")
+    assert "--retry-pending" not in argv
+    assert "--clean" in argv
+
+
+def test_only_the_drain_loop_passes_the_retry_scope():
+    calls = [
+        line.strip()
+        for line in SCRIPT.read_text().splitlines()
+        if "convert_dataset " in line and not line.lstrip().startswith("#")
+    ]
+    assert 'if convert_dataset "$id" "$version" retry-pending; then' in calls
+    assert 'convert_dataset "$ONLY_DATASET" "$v"' in calls
+    assert len(calls) == 2, calls
