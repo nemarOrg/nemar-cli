@@ -4,7 +4,7 @@
 > Decisions live in [`decisions/`](decisions/README.md); where this document and an ADR disagree,
 > the ADR wins. This document holds the state, the order of work, and the questions still open.
 
-**Last verified:** 2026-09-21.
+**Last verified:** 2026-09-23 for the OSA and nemar-cli sections, 2026-09-21 for the rest.
 
 **How to verify a row, and how the first version of this file got it wrong.** Issue state is not
 work state. This document's first version reported four eegprep phases as open because their
@@ -43,35 +43,47 @@ them from memory, which has already nearly happened twice.
 | mne, pybids, h5py and neo stay in eegprep. An import-site audit cannot prove a dependency is removable: `eeglabio` has no import site and is still required, because mne imports it to write an EEGLAB file. | sccn/eegprep#395, closed with the reasoning |
 | Images ride on a tool result. All four block spellings normalize to one Anthropic image block, and both offered models read a figure returned that way. `image/svg+xml` passes every local layer and fails as a 400 at the endpoint. | OpenScience-Collective/osa#421, merged |
 | The transport is two-run continuation: no LangGraph `interrupt()`, no checkpointer. The browser executes between run 1 and run 2 with no request open. | `osa/.context/browser-execution-tool-design.md` |
-| No second notebook platform. The marimo and JupyterLite comparison was run on 2026-09-16 and neither is adopted; the notebook surface is an editable re-run panel in the widget against the same warm worker. | osa#423 carries the recovered verdict, still to be written into the design note |
+| No second notebook platform in this release. marimo is rejected: its WebAssembly sandbox refuses numcodecs blosc's `multiprocessing.Lock`, so the NEMAR read fails there. JupyterLite pinned to Pyodide 0.29.5 works and is deferred to osa#453. This release's surface is the editable re-run panel in the widget, against the same warm worker. | OSA's ADR 0010 (`docs/adr/0010-the-notebook-surface.md`), measured 2026-09-23; closed osa#423 |
 
 ## Current state, per repository
 
 ### OpenScience-Collective/osa
 
-Three files carry almost all of this, and a newcomer cannot find them from the issues alone:
+Epic **#429**, "Browser execution, run model-written Python in the user's browser",
+on branch `feature/issue-429-epic-browser-execution`.
+
+**All four phases are built and merged into the epic branch.**
+The epic has not reached `develop`, so none of it is in an OSA release yet;
+the release follows the epic, and nemar.org re-pins the widget after that release,
+because the widget's integrity hash changed several times during the epic.
+
+| Phase | Issue | PRs into the epic branch | Verified by |
+|---|---|---|---|
+| 1. The server: client-executed tools and the two-run continuation; carried #422 | #430, closed | #435 | PR state |
+| 2. The widget: a Pyodide runtime and `execute_code`, behind a per-call permission gate | #431, closed | #448 | PR state |
+| 3. Environments: the lockfile overlay, `eegprep-lean` 0.1.0.dev2 vendored, NEMAR's prompt for the full tool surface; carried #370 and #424 | #432, closed | #449, #450, #451, #452 | PR state |
+| 4. A workspace in the browser, the notebook decision, and the editable re-run panel; carried #423 | #433, closed | #454, #455, #456, #457 | PR state |
+
+What a newcomer needs to know is where the pieces live.
+The server and the edge are still the three files that carried Phase 0:
 `src/api/routers/community.py` (the session store and both chat paths),
-`workers/osa-worker/index.js` (the edge: routing, Turnstile, rate limits) and
-`frontend/osa-chat-widget.js` (the widget). Every Phase 0 item below touches at least one.
+`workers/osa-worker/index.js` (the edge) and `frontend/osa-chat-widget.js` (the widget).
+The browser side is `frontend/osa-runtime.js` (the worker's lifecycle),
+`frontend/osa-controller.js` (answering a tool request, and the reader's own re-runs),
+`frontend/osa-worker-core.js` (Python itself, sealed to the community's `fetch_allow`)
+and `frontend/osa-workspace.js` (what a run leaves behind, in IndexedDB).
+`docs/community-browser-runtime.md` is the guide for a community adopting the runtime,
+and `frontend/browser-harness/chrome.js` runs all of it in headless Chrome in CI.
 
-Phase 0 of `.context/browser-execution-tool-design.md` lists six prerequisites that the design
-assumed and that do not hold against deployed code. None of Phase 1 works end to end until they
-are settled.
+The design note's six Phase 0 prerequisites are settled on the epic branch.
+The edge routes `/chat/resume` without Turnstile and on its own hourly budget (`workers/osa-worker/index.js`),
+two-run needs no checkpointer, and #422 gave the session store the tool round trip.
+Verified by reading the branch.
 
-| Item | State |
-|---|---|
-| 1. The 120-second abort is not a constraint under two-run | settled in the note. **Do not raise it.** |
-| 2. The resume endpoint 404s at the edge (worker routes by a two-segment matcher) | open, needs a worker route and a deploy to both environments |
-| 3. Turnstile makes the resume POST unauthenticatable as designed | open, latent until Turnstile is switched on, fatal that day |
-| 4. Rate limits are consumed per resume: one turn with N executions is 1 + N requests | open, needs an exemption or a restated budget |
-| 5. No checkpointer, and the graph is compiled per request | open, request-path refactor |
-| 6. Conversation state would have two owners | **#422, in progress, this is the current work** |
+Other open work: **#453** (a hosted JupyterLite, with four prerequisites ADR 0010 lists),
+**#406** (a shared `cache_control` marker budget helper) and **#434** (a test that fails only on a color terminal).
 
-Other open work: **#423** (write the marimo verdict into the design note), **#406** (shared
-`cache_control` marker budget helper, needed before Phase 2 cache work), **#370** (rewrite the
-NEMAR assistant config for the full MCP tool surface, which gates the nemar-cli promotion).
-
-Merged: **#421**, which answered whether a figure can ride on a tool result.
+Merged before the epic: **#421**, which answered whether a figure can ride on a tool result.
 
 ### sccn/eegprep
 
@@ -250,11 +262,21 @@ The Python Package Index, `raw.githubusercontent.com` and jsDelivr all send `*`;
 OpenScience-Collective/osa#424 tracks the runtime side: vendor the wheel, pin it, and decide the
 refresh procedure, because that pin is the only thing keeping the runtime and the reader in step.
 
-**The browser lane cannot reach the live host until `dev` reaches production.** #1466 added the
-OSC surfaces to the zarr host's allow-list and is merged to `dev`, so `app.osc.earth` still
-receives no `access-control-allow-origin` from `zarr.nemar.org` today.
+**The browser lane reaches the live host.** #1466 added the OSC surfaces to the zarr host's
+allow-list and shipped in v0.10.5: `osc.earth` and every `*.osc.earth` origin get their own
+origin back in `access-control-allow-origin` from `zarr.nemar.org`, and an unknown origin gets
+none (measured 2026-09-23). So a notebook surface hosted under `osc.earth` needs no change here.
 
-`dev` is 32 commits ahead of `main`. The promotion is gated on osa#370 shipping with it.
+**`dev` is 20 commits ahead of `main`, and three of them are this epic's.** #1482 (the
+`eegprep-lean` contract for Pyodide 0.29.5), #1487 (ADR 0071: the `python_browser` recipe leads
+with `read_window`) and #1492 (the contract names 0.1.0.dev2 and `index_url`). Until they are
+promoted, production `mcp.nemar.org` hands a model #1469's recipe, which reads raw counts with
+`open_array` (measured 2026-09-23). That recipe and OSA's own `read_window` snippet both ran on
+the vendored 0.1.0.dev2 in OSA's `widget_e2e.py --nemar` on 2026-09-22, so an OSA release before
+the promotion still reads. #1487's recipe needs `index_url`, which 0.1.0.dev2 is the first to
+accept, and OSA's live contract test runs whatever `mcp.nemar.org` serves, so it checks that
+recipe on the vendored wheel the day it is promoted. osa#370, which gated the promotion, is done
+and ships with the OSA epic's release.
 
 ### nemarOrg/website
 
@@ -264,20 +286,19 @@ in-browser BIDS validation, which is the same "compute in the browser" shape.
 ## What blocks what
 
 ```
-osa Phase 0 items 2,3,4,5,6 ─┬─> osa Phase 1 (tool-result contract, resume route)
-                             └─> osa Phase 2 (widget, execution, approval UI)
+osa epic #429, phases 1-4 merged ─> epic to develop ─> OSA release ─> nemar.org re-pins the widget
 
 ADR 0069 ─> eegprep-lean contract ─> eegprep-lean package ─> nemar-cli#1457 (recipe names it)
             (current)            (reads, plots, wheel)     (closed by #1469; ADR 0070)
                                                              │
-                                                             └─> osa#424 (runtime vendors the wheel)
-                                                             └─> nemar-cli dev -> main (CORS for osc.earth)
+                                                             └─> osa#424 (done: 0.1.0.dev2 vendored, osa#450)
+                                                             └─> CORS for osc.earth (done: v0.10.5)
 
 eegprep epic #324 phase 4 ─> phase 5 (ORT Web, async) ─┬─> ICLabel runs in a browser
                           └─> phase 6 (int8)         ─┘
                                      (independent of the OSA track)
 
-osa#370 ──> nemar-cli dev to main promotion
+nemar-cli dev to main ─> ADR 0071's read_window recipe reaches models (independent of the OSA release)
 ```
 
 The two tracks meet **twice**, not once, and this document previously showed only the first.
@@ -328,11 +349,11 @@ rather than an exception carved into that one.
 
 ## Open questions, not yet decided
 
-1. **Does a figure persist in session history, or only for the continuation?** Raised in osa#422
-   and explicitly out of its scope. It is a memory question: 1000 sessions per community, each
-   holding a few spectrograms at 430,440 base64 characters, is a different budget from the current
-   text-only one. It is also a token question, since every retained figure is re-sent on every
-   later turn.
+1. ~~**Does a figure persist in session history, or only for the continuation?**~~
+   **Answered: only for the continuation.** A figure rides on the live tool result, and
+   `scrub_stored_images` (OSA's `src/api/tool_results.py`) replaces every image block with a text
+   placeholder before a session's history is stored, so no retained figure is re-sent on a later
+   turn. The reader keeps every figure anyway, in the browser workspace OSA's phase 4 added.
 2. ~~**What does `eegprep-lean` guarantee, and where does it deliberately differ from eegprep?**~~
    **Drafted:** [`eegprep_lean_contract.md`](eegprep_lean_contract.md). It settles reader
    ownership (`eegprep-lean` owns the browser reader, because `nemar-cli` is TypeScript and Bun
