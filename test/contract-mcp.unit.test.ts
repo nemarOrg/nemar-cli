@@ -203,9 +203,82 @@ describe("buildReadRecipe", () => {
     test("is asynchronous throughout", () => {
       // The whole reason this lane exists. A synchronous call starts an IO thread and
       // Pyodide's main thread cannot, and the error names threads rather than zarr.
-      expect(browser()).toContain("await open_array(");
+      expect(browser()).toContain("await eegprep_lean.read_index(");
+      expect(browser()).toContain("await eegprep_lean.read_window(");
+      expect(browser()).toContain("await eegprep_lean.open_array(");
       expect(browser()).toContain("await arr.getitem(");
       expect(browser()).not.toContain("zarr.open(");
+    });
+
+    test("leads with the read in physical units, before the raw one", () => {
+      // The stored counts plot like EEG while being wrong, and nothing raises, so the
+      // read a model meets first is read_window: physical units, with channel labels.
+      const text = browser();
+      expect(text.indexOf("eegprep_lean.read_window(")).toBeGreaterThan(-1);
+      expect(text.indexOf("eegprep_lean.read_window(")).toBeLessThan(
+        text.indexOf("eegprep_lean.open_array("),
+      );
+      expect(text).toContain("n_samples=end_sample - start_sample");
+    });
+
+    test("names the index, the store and the group exactly", () => {
+      // index.store matches a store's path only, and store.group refuses to guess
+      // between groups, so each must be the value itself rather than a placeholder.
+      expect(browser()).toContain(
+        `read_index("${on008083Index.dataset_id}", index_url="${on008083Index.contract_base}index.json")`,
+      );
+      expect(browser()).toContain(`index.store("${store.path}")`);
+      expect(browser()).toContain('group=store.group("eeg_250hz")');
+    });
+
+    test("calls read_window with exactly the arguments it takes", () => {
+      // One exact block, as for the raw read below: swapping index and store, or
+      // renaming a keyword, is silent until a model runs it.
+      expect(browser()).toContain(
+        [
+          "window = await eegprep_lean.read_window(",
+          '    index, store, group=store.group("eeg_250hz"),',
+          "    start_sample=start_sample, n_samples=end_sample - start_sample,",
+          ")",
+        ].join("\n"),
+      );
+    });
+
+    test("a quote or backslash in an index value cannot end a string early", () => {
+      // path and group names are free-form strings in the index schema, and this text is
+      // code a client runs, so each value is written as a quoted literal. Reading the
+      // literal back must give the value itself, in every lane.
+      const path = 'sub-01/eeg/a"b\\c.set';
+      const group = 'eeg"x';
+      const zarr = 'sub-01/eeg/a"b.zarr';
+      const odd = {
+        ...store,
+        path,
+        zarr,
+        groups: [{ ...(store.groups?.[0] ?? {}), name: group }],
+      } as typeof store;
+      const howTo = buildReadRecipe({ index: on008083Index, store: odd, groupName: group }).how_to;
+      const literalAfter = (text: string, call: string) => {
+        const start = text.indexOf(call) + call.length;
+        const match = /^"(?:[^"\\]|\\.)*"/.exec(text.slice(start));
+        expect(match, `no quoted literal after ${call}`).toBeTruthy();
+        return JSON.parse(match?.[0] ?? '""');
+      };
+      expect(literalAfter(howTo.python_browser, "index.store(")).toBe(path);
+      expect(literalAfter(howTo.python_browser, "store.group(")).toBe(group);
+      expect(literalAfter(howTo.python_browser, "open_array(")).toContain(zarr);
+      expect(literalAfter(howTo.python_zarr, "zarr.open(")).toContain(zarr);
+      expect(literalAfter(howTo.zarrita, "new zarr.FetchStore(")).toContain(zarr);
+    });
+
+    test("reads the environment that served it", () => {
+      // A dev or staging server's recipe must not send a reader to production's index,
+      // which is what read_index's default URL would do.
+      const staging = { ...on008083Index, contract_base: "https://zarr.staging.example/on008083/zarr/" };
+      const text = buildReadRecipe({ index: staging, store, groupName: "eeg_250hz" }).how_to
+        .python_browser;
+      expect(text).toContain('index_url="https://zarr.staging.example/on008083/zarr/index.json"');
+      expect(text).not.toContain(on008083Index.contract_base);
     });
 
     test("slices the sample axis, with the exact selection zarr's async API takes", () => {
@@ -215,22 +288,31 @@ describe("buildReadRecipe", () => {
       // empty window rather than an error; and dropping the outer tuple passes two
       // positional arguments to a method whose selection is a single argument.
       expect(browser()).toContain(
-        "window = await arr.getitem((slice(None), slice(start_sample, end_sample)))",
+        "digital = await arr.getitem((slice(None), slice(start_sample, end_sample)))",
       );
     });
 
-    test("the name it imports is the name it calls", () => {
-      // Checking the import and the call site separately lets them drift apart, and the
-      // snippet then raises NameError the first time a model runs it.
-      const imported = /from eegprep_lean import (\w+)/.exec(browser())?.[1];
-      expect(imported, "the snippet imports nothing from eegprep_lean").toBeTruthy();
-      expect(browser()).toContain(`await ${imported}(`);
+    test("calls eegprep-lean only through the module it imports", () => {
+      // A bare open_array( with the module imported as a whole raises NameError the
+      // first time a model runs it, so every call names the module.
+      const text = browser();
+      expect(text).toContain("import eegprep_lean");
+      for (const name of ["read_index", "read_window", "open_array"]) {
+        const bare = new RegExp(`(?<![.\\w])${name}\\(`);
+        expect(bare.test(text), `${name} is called without eegprep_lean.`).toBe(false);
+      }
     });
 
-    test("names eegprep-lean rather than inlining a store", () => {
-      // The alternative is a third hand-written copy of a reader bound to the index
-      // contract, which is the drift this recipe exists to avoid.
-      expect(browser()).toContain("from eegprep_lean import");
+    test("a view level reads the raw array, and says why", () => {
+      // read_window reads level 0 only, so a recipe for a downsampled view must not
+      // lead with it. No tool asks for a view level today (read_window's two call
+      // sites pass level "0"); buildReadRecipe accepts one, so its text is pinned here.
+      const text = buildReadRecipe({ index: on008083Index, store, groupName: "eeg_250hz", level: 1 })
+        .how_to.python_browser;
+      expect(text).toContain("await eegprep_lean.open_array(");
+      expect(text).not.toContain("read_window(");
+      expect(text).not.toContain("read_index(");
+      expect(text).toContain("level 0 only");
     });
 
     test("carries no install line", () => {
