@@ -619,9 +619,11 @@ export const readRecipeHowToSchema4 = z4
     python_browser: z4
       .string()
       .describe(
-        "Python in a browser (Pyodide), via eegprep-lean's async store over HTTPS range " +
-          "requests. Async throughout. Carries no install line: eegprep-lean is not on " +
-          "PyPI and the executing runtime pins and installs it.",
+        "Python in a browser (Pyodide), via eegprep-lean over HTTPS range requests. " +
+          "Async throughout. At level 0 it leads with read_window, which returns physical " +
+          "units with channel labels; the open_array read that follows it returns stored " +
+          "digital counts. Carries no install line: eegprep-lean is not on PyPI and the " +
+          "executing runtime pins and installs it.",
       ),
   })
   .passthrough();

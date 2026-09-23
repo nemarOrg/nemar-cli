@@ -317,11 +317,15 @@ export const readRecipeHowToSchema = z
      *  lane rather than *the* browser lane: compute in a browser is Python
      *  (ADR 0049), and `python_browser` is that lane. */
     zarrita: z.string(),
-    /** Python in a browser, through `eegprep-lean`'s asynchronous store
+    /** Python in a browser, through `eegprep-lean`'s asynchronous API
      *  (sccn/eegprep, ADR 0069). Asynchronous throughout, because that is the
      *  only thing that works on an event loop that is already running, and it
-     *  reads the HTTPS `array_path` with range requests rather than `s3://`,
-     *  so it needs neither s3fs nor aiohttp.
+     *  reads over HTTPS with range requests rather than `s3://`, so it needs
+     *  neither s3fs nor aiohttp. At level 0 it leads with `read_window`, which
+     *  returns physical units with channel labels, naming the index by this
+     *  recipe's `contract_base`; the raw `open_array` read of `array_path`
+     *  follows it, and is the only read at a view level (ADR 0070's amendment
+     *  of 2026-09-22).
      *
      *  Deliberately carries no install line. `eegprep-lean` is not on the
      *  Python Package Index, and the runtime that executes this is where the
@@ -399,9 +403,47 @@ function buildHowTo(opts: {
   s3Uri: string;
   contractBase: string;
   relativePath: string;
+  datasetId: string;
+  storePath: string;
+  groupName: string;
+  isLevel0: boolean;
 }): ReadRecipeHowTo {
   const s3Path = `${opts.s3Uri}${opts.relativePath}`;
   const httpPath = `${opts.contractBase}${opts.relativePath}`;
+  const rawRead = [
+    `arr = await eegprep_lean.open_array("${httpPath}")`,
+    "digital = await arr.getitem((slice(None), slice(start_sample, end_sample)))",
+    "# physical = digital * scale + offset -- see the recipe's scale_offset field",
+  ];
+  // Level 0 leads with read_window, which returns physical units with channel labels:
+  // the stored counts plot like EEG while being wrong, and nothing raises. The index is
+  // named by this recipe's own contract_base, so a dev or staging server's recipe reads
+  // that environment. A view level is a downsampled copy that read_window does not read,
+  // so there the raw read is the read.
+  const pythonBrowser = opts.isLevel0
+    ? [
+        "import eegprep_lean  # from the runtime's lockfile, not micropip",
+        "",
+        "# index_url needs eegprep-lean 0.1.0.dev2 or later",
+        `index = await eegprep_lean.read_index("${opts.datasetId}", index_url="${opts.contractBase}index.json")`,
+        `store = index.store("${opts.storePath}")`,
+        "window = await eegprep_lean.read_window(",
+        `    index, store, group=store.group("${opts.groupName}"),`,
+        "    start_sample=start_sample, n_samples=end_sample - start_sample,",
+        ")",
+        "# window.data is in physical units (window.unit), one row per channel in window.labels",
+        "# async throughout: the loop is already running, so there is no synchronous form",
+        "",
+        "# the stored digital counts instead, when those are what you need:",
+        ...rawRead,
+      ]
+    : [
+        "import eegprep_lean  # from the runtime's lockfile, not micropip",
+        "",
+        "# a view level: a downsampled copy, which read_window (level 0 only) does not read",
+        ...rawRead,
+        "# async throughout: the loop is already running, so there is no synchronous form",
+      ];
   return {
     python_zarr: [
       "import zarr",
@@ -411,15 +453,7 @@ function buildHowTo(opts: {
       "# desktop and HPC only: zarr.open starts an IO thread, which a browser cannot",
       "# physical = digital * scale + offset -- see the recipe's scale_offset field",
     ].join("\n"),
-    python_browser: [
-      "from eegprep_lean import open_array  # from the runtime's lockfile, not micropip",
-      "",
-      `arr = await open_array("${httpPath}")`,
-      "window = await arr.getitem((slice(None), slice(start_sample, end_sample)))",
-      "# async throughout: the loop is already running, so there is no synchronous form",
-      "# physical = digital * scale + offset -- see the recipe's scale_offset field",
-      "# read_window(index, store, ...) does the same read in physical units, with labels",
-    ].join("\n"),
+    python_browser: pythonBrowser.join("\n"),
     zarrita: [
       'import * as zarr from "zarrita";',
       "",
@@ -447,9 +481,9 @@ function buildHowTo(opts: {
 export function buildReadRecipe(input: {
   index: Pick<
     ZarrIndex,
-    "contract_base" | "data_base" | "s3_uri" | "s3_region" | "s3_anonymous" | "layout"
+    "dataset_id" | "contract_base" | "data_base" | "s3_uri" | "s3_region" | "s3_anonymous" | "layout"
   >;
-  store: Pick<ZarrStore, "zarr" | "groups">;
+  store: Pick<ZarrStore, "path" | "zarr" | "groups">;
   groupName: string;
   level?: "0" | number;
   sampleSlice?: { start: number; end: number };
@@ -489,6 +523,10 @@ export function buildReadRecipe(input: {
       s3Uri: index.s3_uri,
       contractBase: index.contract_base,
       relativePath,
+      datasetId: index.dataset_id,
+      storePath: store.path,
+      groupName,
+      isLevel0,
     }),
   });
 }
