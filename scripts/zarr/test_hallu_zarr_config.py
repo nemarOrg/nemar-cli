@@ -270,6 +270,9 @@ def test_print_config_without_test_uses_prod_defaults(dirs: tuple[Path, Path]) -
     # JOBS falls back to `nproc`, which varies by runner; just confirm it
     # resolved to a positive integer rather than being empty/non-numeric.
     assert cfg["JOBS"].isdigit() and int(cfg["JOBS"]) > 0
+    # Worker anonymous-memory bounds (on004789's RLIMIT_DATA trips, biosigio#129).
+    assert cfg["ZARR_ASYNC__CONCURRENCY"] == "3"
+    assert cfg["MALLOC_ARENA_MAX"] == "2"
     assert cfg["ONLY_DATASET"] == ""
     assert cfg["LIMIT"] == "0"
     assert cfg["REQUEUE"] == ""
@@ -476,6 +479,45 @@ def test_explicit_zarr_jobs_wins_over_test_default(dirs: tuple[Path, Path]) -> N
     assert proc.returncode == 0, proc.stderr
     cfg = parse_config(proc.stdout)
     assert cfg["JOBS"] == "2"
+
+
+def test_explicit_worker_memory_bounds_win(dirs: tuple[Path, Path]) -> None:
+    zarr_base, home = dirs
+    proc = run_script(
+        ["--print-config"],
+        zarr_base,
+        home,
+        extra_env={"ZARR_ASYNC__CONCURRENCY": "8", "MALLOC_ARENA_MAX": "4"},
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    cfg = parse_config(proc.stdout)
+    assert cfg["ZARR_ASYNC__CONCURRENCY"] == "8"
+    assert cfg["MALLOC_ARENA_MAX"] == "4"
+
+
+@pytest.mark.parametrize("mode", [[], ["--test"]])
+def test_worker_memory_bounds_reach_child_processes(
+    dirs: tuple[Path, Path], mode: list[str]
+) -> None:
+    """The bounds only work if the Python driver and its pool workers SEE them,
+    so check the exported environment of a child shell, the same way
+    test_test_mode_env_vars_are_exported does, in both prod and --test mode."""
+    zarr_base, home = dirs
+    env = base_env(zarr_base, home)
+    wrapper = (
+        f'trap "env" EXIT; source {shlex.quote(str(SCRIPT))} '
+        f"{' '.join(mode)} --print-config >/dev/null 2>/dev/null"
+    )
+    proc = subprocess.run(
+        ["bash", "-c", wrapper], env=env, capture_output=True, text=True,
+        timeout=30, check=False,
+    )
+    dumped = dict(
+        line.partition("=")[::2] for line in proc.stdout.splitlines() if "=" in line
+    )
+    assert dumped.get("ZARR_ASYNC__CONCURRENCY") == "3"
+    assert dumped.get("MALLOC_ARENA_MAX") == "2"
 
 
 def test_test_mode_env_vars_are_exported(dirs: tuple[Path, Path]) -> None:
