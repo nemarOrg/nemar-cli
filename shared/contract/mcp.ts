@@ -324,8 +324,7 @@ export const readRecipeHowToSchema = z
      *  neither s3fs nor aiohttp. At level 0 it leads with `read_window`, which
      *  returns physical units with channel labels, naming the index by this
      *  recipe's `contract_base`; the raw `open_array` read of `array_path`
-     *  follows it, and is the only read at a view level (ADR 0070's amendment
-     *  of 2026-09-22).
+     *  follows it, and is the only read at a view level (ADR 0071).
      *
      *  Deliberately carries no install line. `eegprep-lean` is not on the
      *  Python Package Index, and the runtime that executes this is where the
@@ -408,10 +407,15 @@ function buildHowTo(opts: {
   groupName: string;
   isLevel0: boolean;
 }): ReadRecipeHowTo {
-  const s3Path = `${opts.s3Uri}${opts.relativePath}`;
-  const httpPath = `${opts.contractBase}${opts.relativePath}`;
+  // Every value below comes from an index document and is written into code a client
+  // may run, so each is a quoted literal from JSON.stringify: its escapes are valid in
+  // Python and in JavaScript, and a quote or backslash in a recording's path cannot end
+  // the string early.
+  const q = (value: string) => JSON.stringify(value);
+  const s3Path = q(`${opts.s3Uri}${opts.relativePath}`);
+  const httpPath = q(`${opts.contractBase}${opts.relativePath}`);
   const rawRead = [
-    `arr = await eegprep_lean.open_array("${httpPath}")`,
+    `arr = await eegprep_lean.open_array(${httpPath})`,
     "digital = await arr.getitem((slice(None), slice(start_sample, end_sample)))",
     "# physical = digital * scale + offset -- see the recipe's scale_offset field",
   ];
@@ -425,10 +429,10 @@ function buildHowTo(opts: {
         "import eegprep_lean  # from the runtime's lockfile, not micropip",
         "",
         "# index_url needs eegprep-lean 0.1.0.dev2 or later",
-        `index = await eegprep_lean.read_index("${opts.datasetId}", index_url="${opts.contractBase}index.json")`,
-        `store = index.store("${opts.storePath}")`,
+        `index = await eegprep_lean.read_index(${q(opts.datasetId)}, index_url=${q(`${opts.contractBase}index.json`)})`,
+        `store = index.store(${q(opts.storePath)})`,
         "window = await eegprep_lean.read_window(",
-        `    index, store, group=store.group("${opts.groupName}"),`,
+        `    index, store, group=store.group(${q(opts.groupName)}),`,
         "    start_sample=start_sample, n_samples=end_sample - start_sample,",
         ")",
         "# window.data is in physical units (window.unit), one row per channel in window.labels",
@@ -448,7 +452,7 @@ function buildHowTo(opts: {
     python_zarr: [
       "import zarr",
       "",
-      `arr = zarr.open("${s3Path}", mode="r", storage_options={"anon": True})`,
+      `arr = zarr.open(${s3Path}, mode="r", storage_options={"anon": True})`,
       "window = arr[:, start_sample:end_sample]",
       "# desktop and HPC only: zarr.open starts an IO thread, which a browser cannot",
       "# physical = digital * scale + offset -- see the recipe's scale_offset field",
@@ -457,7 +461,7 @@ function buildHowTo(opts: {
     zarrita: [
       'import * as zarr from "zarrita";',
       "",
-      `const store = new zarr.FetchStore("${httpPath}");`,
+      `const store = new zarr.FetchStore(${httpPath});`,
       'const arr = await zarr.open.v3(store, { kind: "array" });',
       "const window = await zarr.get(arr, [null, zarr.slice(startSample, endSample)]);",
       "// physical = digital * scale + offset -- see the recipe's scale_offset field",

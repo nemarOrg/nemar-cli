@@ -231,6 +231,46 @@ describe("buildReadRecipe", () => {
       expect(browser()).toContain('group=store.group("eeg_250hz")');
     });
 
+    test("calls read_window with exactly the arguments it takes", () => {
+      // One exact block, as for the raw read below: swapping index and store, or
+      // renaming a keyword, is silent until a model runs it.
+      expect(browser()).toContain(
+        [
+          "window = await eegprep_lean.read_window(",
+          '    index, store, group=store.group("eeg_250hz"),',
+          "    start_sample=start_sample, n_samples=end_sample - start_sample,",
+          ")",
+        ].join("\n"),
+      );
+    });
+
+    test("a quote or backslash in an index value cannot end a string early", () => {
+      // path and group names are free-form strings in the index schema, and this text is
+      // code a client runs, so each value is written as a quoted literal. Reading the
+      // literal back must give the value itself, in every lane.
+      const path = 'sub-01/eeg/a"b\\c.set';
+      const group = 'eeg"x';
+      const zarr = 'sub-01/eeg/a"b.zarr';
+      const odd = {
+        ...store,
+        path,
+        zarr,
+        groups: [{ ...(store.groups?.[0] ?? {}), name: group }],
+      } as typeof store;
+      const howTo = buildReadRecipe({ index: on008083Index, store: odd, groupName: group }).how_to;
+      const literalAfter = (text: string, call: string) => {
+        const start = text.indexOf(call) + call.length;
+        const match = /^"(?:[^"\\]|\\.)*"/.exec(text.slice(start));
+        expect(match, `no quoted literal after ${call}`).toBeTruthy();
+        return JSON.parse(match?.[0] ?? '""');
+      };
+      expect(literalAfter(howTo.python_browser, "index.store(")).toBe(path);
+      expect(literalAfter(howTo.python_browser, "store.group(")).toBe(group);
+      expect(literalAfter(howTo.python_browser, "open_array(")).toContain(zarr);
+      expect(literalAfter(howTo.python_zarr, "zarr.open(")).toContain(zarr);
+      expect(literalAfter(howTo.zarrita, "new zarr.FetchStore(")).toContain(zarr);
+    });
+
     test("reads the environment that served it", () => {
       // A dev or staging server's recipe must not send a reader to production's index,
       // which is what read_index's default URL would do.
@@ -265,7 +305,8 @@ describe("buildReadRecipe", () => {
 
     test("a view level reads the raw array, and says why", () => {
       // read_window reads level 0 only, so a recipe for a downsampled view must not
-      // lead with it.
+      // lead with it. No tool asks for a view level today (read_window's two call
+      // sites pass level "0"); buildReadRecipe accepts one, so its text is pinned here.
       const text = buildReadRecipe({ index: on008083Index, store, groupName: "eeg_250hz", level: 1 })
         .how_to.python_browser;
       expect(text).toContain("await eegprep_lean.open_array(");
