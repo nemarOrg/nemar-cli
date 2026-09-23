@@ -5864,12 +5864,16 @@ def _drain_with_admission(
 
         def admit() -> None:
             nonlocal running_peak
-            while queue:
-                if len(in_flight) >= cap:
-                    break  # no slot, so no need to read /proc
+            # Read once per round, not per recording admitted: what this round
+            # submits has not started, so it earns no credit and the ceiling
+            # cannot move because of it. No slot, no read.
+            limit: int | None = None
+            while queue and len(in_flight) < cap:
+                if limit is None:
+                    limit = ceiling(running_peak, track_dir)
                 idx = _next_admission(
                     [run_peaks[p] for p in queue], len(in_flight), running_peak,
-                    cap, ceiling(running_peak, track_dir),
+                    cap, limit,
                 )
                 if idx is None:
                     break

@@ -8288,8 +8288,12 @@ class TestAdmissionFollowsTheCeiling(unittest.TestCase):
         generate_zarr.ADMISSION_RECHECK_SECONDS = 0.05
 
     def set_limit(self, n):
-        with open(self.limit, "w") as fh:
+        # Replaced atomically: the drain reads this from another thread, and a
+        # truncate-then-write would let it read an empty file.
+        tmp = self.limit + ".tmp"
+        with open(tmp, "w") as fh:
             fh.write(str(n))
+        os.replace(tmp, self.limit)
 
     def ceiling(self, _running_peak, _track_dir):
         with open(self.limit) as fh:
