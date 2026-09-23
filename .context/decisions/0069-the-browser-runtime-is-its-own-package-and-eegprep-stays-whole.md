@@ -4,6 +4,17 @@
 **Date:** 2026-09-20
 **Owner:** Seyed Yahya Shirazi
 
+**Amendment 2026-09-22:** The correction of 2026-09-21 below gives two reasons zarr is an extra.
+The first, that zarr installs under Pyodide only with `deps=False`, held on Pyodide 0.28.3,
+whose distribution carries numcodecs 0.13.1 (below zarr's `>=0.14`) and no google-crc32c.
+It does not hold on 0.29.5, which carries numcodecs 0.15.1 and google-crc32c 1.8.0:
+`micropip.install("zarr==3.4.0")` with its dependencies was measured to succeed.
+("No emscripten wheel at any version" is true of numcodecs on PyPI;
+Pyodide builds its own, and that build is what satisfies the pin.)
+The second reason stands, and with it the verdict:
+the base is the tier a session pays for when it only reads a dataset's index, and that is the package alone.
+See `.context/eegprep_lean_contract.md`, "Installation in the browser".
+
 ## Context
 
 In-browser compute needs a Python runtime that Pyodide can download in seconds.
