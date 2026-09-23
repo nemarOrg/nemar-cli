@@ -78,6 +78,8 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     INMEM_MEM_FACTOR,
     usable_ram_bytes,
     memory_failure_result,
+    memory_snapshot,
+    log_memory_failure,
     count_infra_failures,
     RecordingMemoryExceeded,
     MaxShieldUncalibrated,
@@ -3113,7 +3115,11 @@ class TestMemoryErrorBeforePeakResetIsTyped(unittest.TestCase):
 
     def test_memory_error_before_reset_returns_typed_failure(self):
         gz = self._inject(MemoryError("cannot allocate"))
-        res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
+        # #1483: the stack is logged, not just the first line kept in the result.
+        self.assertIn("exceeded its memory budget", out.getvalue())
+        self.assertIn("Traceback", out.getvalue())
         self.assertFalse(res["ok"])
         # The whole point: coded, so the queue can mark it terminal instead of
         # burning five attempts on a recording that will never fit.
@@ -3128,9 +3134,11 @@ class TestMemoryErrorBeforePeakResetIsTyped(unittest.TestCase):
         # stack cannot be mapped at the RLIMIT_DATA limit (on004696, 2026-09-03).
         # Uncoded it broke the pool; typed it is the same verdict as MemoryError.
         gz = self._inject(RuntimeError("can't start new thread"))
-        res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
         self.assertFalse(res["ok"])
         self.assertEqual(res["code"], gz.RecordingMemoryExceeded.code)
+        self.assertIn("can't start new thread", out.getvalue())
 
     def test_enomem_at_the_limit_is_typed_as_memory(self):
         gz = self._inject(OSError(errno.ENOMEM, "Cannot allocate memory"))
@@ -3145,9 +3153,11 @@ class TestMemoryErrorBeforePeakResetIsTyped(unittest.TestCase):
         # The generic handler never touched rss_trusted, so it was already fine;
         # assert it stays that way rather than being swept into the typed branch.
         gz = self._inject(RuntimeError("something else"))
-        res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
         self.assertFalse(res["ok"])
         self.assertIsNone(res["code"])
+        self.assertNotIn("exceeded its memory budget", out.getvalue())
 
 
 class TestMaxShieldWiringInConvertOne(unittest.TestCase):
@@ -3521,6 +3531,58 @@ class TestPoolBreakRecovery(unittest.TestCase):
         self.assertEqual(len(results), 5)
         self.assertTrue(all(r["ok"] for r in results))
         self.assertEqual(breaks, 0)
+
+
+class TestMemoryFailureForensics(unittest.TestCase):
+    """#1483: a memory failure logs where it was raised and how close the worker
+    was to its limit; on004789's could only be attributed by reading source."""
+
+    def test_snapshot_reads_the_process_where_proc_exists(self):
+        snap = memory_snapshot()
+        if sys.platform.startswith("linux"):
+            for key in ("VmData", "VmRSS", "VmHWM"):
+                self.assertGreater(snap[key], 1024**2)
+            self.assertGreaterEqual(snap["VmHWM"], snap["VmRSS"])
+        else:
+            self.assertNotIn("VmData", snap)
+
+    def test_snapshot_reports_a_finite_data_limit(self):
+        import resource
+
+        saved = resource.getrlimit(resource.RLIMIT_DATA)
+        limit = (data_segment_bytes() or 0) + 64 * 1024**3
+        if saved[1] != resource.RLIM_INFINITY:
+            limit = min(limit, saved[1])
+        try:
+            resource.setrlimit(resource.RLIMIT_DATA, (limit, saved[1]))
+        except (OSError, ValueError):
+            self.skipTest("RLIMIT_DATA cannot be set here")
+        self.addCleanup(resource.setrlimit, resource.RLIMIT_DATA, saved)
+        self.assertEqual(memory_snapshot()["RLIMIT_DATA"], limit)
+
+    def test_the_log_names_the_recording_and_the_raising_frame(self):
+        def allocate_shard_buffer():
+            raise MemoryError("Unable to allocate 60.4 MiB")
+
+        try:
+            allocate_shard_buffer()
+        except MemoryError as exc:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                log_memory_failure("sub-01/ieeg/sub-01_ieeg.edf", exc)
+        text = out.getvalue()
+        self.assertTrue(text.startswith("::warning::'sub-01/ieeg/sub-01_ieeg.edf' exceeded"))
+        self.assertIn("allocate_shard_buffer", text)
+        self.assertIn("MemoryError: Unable to allocate 60.4 MiB", text)
+
+    def test_logging_never_raises(self):
+        # A failure inside the log must not turn a typed memory failure into an
+        # uncoded one that retries forever.
+        class Unprintable:
+            def __repr__(self):
+                raise MemoryError("no room to format this")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            log_memory_failure(Unprintable(), MemoryError("x"))
 
 
 class TestStoreMetadataDiagnostics(unittest.TestCase):

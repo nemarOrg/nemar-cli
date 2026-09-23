@@ -448,6 +448,57 @@ def data_segment_bytes() -> int | None:
     except (OSError, ValueError, IndexError):
         return None
     return None
+
+def memory_snapshot() -> dict[str, int]:
+    """VmData, VmRSS and VmHWM from /proc/self/status, plus the soft RLIMIT_DATA,
+    at this instant. Whatever cannot be read (macOS, a locked-down /proc) is
+    omitted rather than guessed. For the log line a memory failure prints: the
+    budget is enforced on VmData while calibration measures RSS, and only both,
+    side by side with the limit, say which one a failure actually hit (#1483)."""
+    snap: dict[str, int] = {}
+    try:
+        with open("/proc/self/status", encoding="utf-8") as fh:
+            for line in fh:
+                key = line.split(":", 1)[0]
+                if key in ("VmData", "VmRSS", "VmHWM"):
+                    snap[key] = int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        import resource
+
+        soft = resource.getrlimit(resource.RLIMIT_DATA)[0]
+        if soft != resource.RLIM_INFINITY:
+            snap["RLIMIT_DATA"] = soft
+    except (ImportError, OSError, ValueError):
+        pass
+    return snap
+
+
+def log_memory_failure(primary: str, exc: BaseException) -> None:
+    """Print a memory failure's traceback and a ``memory_snapshot``.
+
+    ``memory_failure_result`` keeps only the first line of the error, and the
+    failure happens inside a pool worker, so without this the stack and the
+    process's footprint are gone for good. on004789's 60.4 MiB allocation
+    failures (#1483) could only be attributed to zarr shard buffers by reading
+    source code, because nothing recorded where they were raised or how close
+    the worker was to its limit. Best-effort: logging must never turn a typed
+    memory failure into an uncoded one, so any error here, including a second
+    MemoryError, is swallowed. Interrupts still propagate."""
+    try:
+        import traceback
+
+        snap = memory_snapshot()
+        mem = ", ".join(f"{k}={v / 1024**3:.2f} GiB" for k, v in snap.items()) or "unavailable"
+        stack = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        print(
+            f"::warning::{primary!r} exceeded its memory budget ({mem}); traceback "
+            f"follows:\n{stack}",
+            flush=True,
+        )
+    except Exception:  # noqa: BLE001, S110 - see docstring
+        pass
 # One-shot latch: a box where setrlimit is refused (a seccomp profile, an odd
 # container runtime) would otherwise run with NO containment and say nothing,
 # leaving everyone believing #1110 shipped when it silently did not.
@@ -5351,6 +5402,7 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         # Measure here as well: a recording that hit the backstop is the strongest
         # evidence its format is under-projected, and excluding it made the
         # calibration summary look cleanest exactly where it was most wrong.
+        log_memory_failure(primary, exc)
         return memory_failure_result(
             primary, exc, peak_rss_bytes() if rss_trusted else None
         )
@@ -5358,6 +5410,7 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         # The backstop does not always surface as MemoryError: see
         # `is_memory_exhaustion`. Same verdict, same code, same measurement.
         if is_memory_exhaustion(exc):
+            log_memory_failure(primary, exc)
             return memory_failure_result(
                 primary, exc, peak_rss_bytes() if rss_trusted else None
             )
