@@ -106,7 +106,8 @@ The reader conforms to NEMAR's published index contract
   Format v3 is current; older indexes coexist until a dataset reconverts, so a reader that assumes
   v3 is wrong rather than merely unlucky.
 - `contract_base` is the only URL it hardcodes.
-- `read_index(dataset_id, index_url=...)` fetches the given index document in place of that hardcoded one
+- `read_index(dataset_id, index_url=...)` fetches the index document at `index_url`
+  instead of the reader's default, `https://zarr.nemar.org/<dataset_id>/zarr/index.json`
   (sccn/eegprep#416, from 0.1.0.dev2).
   `contract_base` is still read from the fetched document, never derived from the argument,
   and a document that names a different `dataset_id` is refused.
