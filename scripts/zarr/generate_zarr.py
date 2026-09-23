@@ -1141,6 +1141,120 @@ def hardware_ceiling_bytes(meminfo_path: str = "/proc/meminfo") -> int:
                CEILING_FLOOR_BYTES)
 
 
+def mem_available_bytes(meminfo_path: str = "/proc/meminfo") -> int | None:
+    """One `MemAvailable` sample, or None where it cannot be read (off Linux, or
+    a kernel older than 3.14). Unlike `usable_ram_bytes` this is not smoothed:
+    `live_admission_ceiling` reads it at every admission decision, so a single
+    unlucky instant costs one decision, not a whole run."""
+    try:
+        with open(meminfo_path) as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def anon_rss_bytes(pid: int, proc_root: str = "/proc") -> int | None:
+    """`RssAnon` of process `pid`: the memory it has actually taken from the node
+    that only swap could give back. None when the process is gone or the field
+    is not published (off Linux, or a kernel older than 4.5)."""
+    try:
+        with open(os.path.join(proc_root, str(pid), "status"), encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("RssAnon:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _tracked_call(worker, primary: str, reserve: int, track_dir: str) -> dict:
+    """Run ``worker(primary, reserve)`` in a pool worker, recording while it runs
+    what `live_admission_ceiling` needs: this process's pid, the reserve it was
+    admitted with, and its `RssAnon` at the start. What the recording has taken
+    since is then `RssAnon` now minus that, readable from the parent without
+    asking the worker anything. Module-level so it pickles. #1483"""
+    path = os.path.join(track_dir, f"{os.getpid()}.json")
+    start = anon_rss_bytes(os.getpid())
+    try:
+        with open(path, "w") as fh:
+            json.dump({"reserve": int(reserve), "rss_anon_start": start}, fh)
+    except OSError:
+        pass  # untracked: the parent then counts the whole reserve as outstanding
+    try:
+        return worker(primary, reserve)
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(path)
+
+
+def live_admission_ceiling(
+    static_ceiling: int,
+    hard_ceiling: int | None,
+    running_peak: int,
+    track_dir: str | None,
+    *,
+    meminfo_path: str = "/proc/meminfo",
+    proc_root: str = "/proc",
+) -> int:
+    """The RAM ceiling admission packs in-flight reserves under, NOW (#1483).
+
+    The ceiling used to be sampled once, at the start of a run that can last
+    hours, on a node other tenants share: when they grew, admission kept packing
+    against memory that was no longer there, and when they shrank it kept a busy
+    hour's limit for the rest of the run. This reads `MemAvailable` again and
+    asks how much of it is already spoken for by recordings in flight.
+
+    `MemAvailable` has already been reduced by what those recordings have taken,
+    so charging their whole reserves against it again would count that twice.
+    What is still owed is each reserve minus what its recording has actually
+    taken (`_tracked_call` records the starting point). A recording not yet
+    tracked, or whose usage cannot be read, is charged its whole reserve. So:
+
+        ceiling = MemAvailable * headroom + sum(min(reserve, taken))
+
+    admits a new recording when ``running_peak + its reserve <= ceiling``, never
+    above ``hard_ceiling``. Where `MemAvailable` cannot be read (off Linux), the
+    static ceiling applies unchanged. Taken memory is `RssAnon`, not RSS: the
+    streaming path's scratch memmaps are file-backed page cache, which
+    `MemAvailable` already counts as reclaimable.
+    """
+    avail = mem_available_bytes(meminfo_path)
+    if avail is None:
+        return static_ceiling
+    frac = float(os.environ.get("ZARR_MEM_HEADROOM_FRAC", "0.8"))
+    taken = 0
+    if running_peak > 0 and track_dir:
+        try:
+            names = os.listdir(track_dir)
+        except OSError:
+            names = []
+        for name in names:
+            pid_text, _, ext = name.partition(".")
+            if ext != "json" or not pid_text.isdigit():
+                continue
+            try:
+                with open(os.path.join(track_dir, name)) as fh:
+                    rec = json.load(fh)
+                reserve = int(rec["reserve"])
+                start = rec.get("rss_anon_start")
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            now = anon_rss_bytes(int(pid_text), proc_root)
+            if now is None or not isinstance(start, int):
+                continue
+            taken += min(reserve, max(0, now - start))
+        # Never credit more than is in flight: a file the worker has not yet
+        # removed can outlive its recording by an instant.
+        taken = min(taken, running_peak)
+    ceiling = int(avail * frac) + taken
+    if hard_ceiling:
+        ceiling = min(ceiling, hard_ceiling)
+    return max(0, ceiling)
+
+
 def per_recording_ceiling_bytes() -> int:
     """Largest projected peak a SINGLE recording may use: the whole usable node.
     Admission control in ``main`` keeps the SUM of concurrently-converting
@@ -5621,6 +5735,13 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
                 shutil.rmtree(d, ignore_errors=True)
 
 
+# How often a drain re-evaluates admission while nothing finishes (#1483). A
+# drain used to sleep until a recording completed, so memory freed by another
+# tenant went unused until then, and a large recording could hold the queue for
+# an hour. `wait` now returns at least this often and admission is re-read.
+ADMISSION_RECHECK_SECONDS = float(os.environ.get("ZARR_ADMISSION_RECHECK_SECONDS", "15"))
+
+
 # How many memory-budget failures one run retries serially at its end (#1483).
 # Each retry runs ALONE, so a dataset where most recordings trip the budget
 # would otherwise turn a parallel run into a serial one; past this many, the
@@ -5648,7 +5769,8 @@ def _next_admission(
 
 
 def _drain_with_admission(
-    convert, peaks, cpu_cap, ram_ceiling, ctx, record, worker=None, memory_retry=None
+    convert, peaks, cpu_cap, ram_ceiling, ctx, record, worker=None, memory_retry=None,
+    ceiling=None,
 ) -> tuple[int, int]:
     """Run ``convert_one`` over ``convert`` in a pool of up to ``cpu_cap`` workers,
     dispatching a recording only while the SUM of in-flight projected peaks stays
@@ -5686,8 +5808,18 @@ def _drain_with_admission(
        they failed. Before this, such a failure waited 1h-7d for a retry round
        that rebuilt the whole dataset under the same budget and mostly failed the
        same way.
+
+    Admission is re-evaluated against ``ceiling(running_peak, track_dir)``, by
+    default `live_admission_ceiling` over this node's /proc with ``ram_ceiling``
+    as its off-Linux fallback, whenever a recording finishes and at least every
+    ``ADMISSION_RECHECK_SECONDS`` otherwise (#1483).
     """
     worker = worker or convert_one
+    if ceiling is None:
+        hard = ctx.get("hard_ceiling")
+
+        def ceiling(running_peak: int, track_dir: str | None) -> int:
+            return live_admission_ceiling(ram_ceiling, hard, running_peak, track_dir)
     done = 0
     pool_breaks = 0
     held: list[dict] = []  # memory failures awaiting the serial retry
@@ -5733,9 +5865,11 @@ def _drain_with_admission(
         def admit() -> None:
             nonlocal running_peak
             while queue:
+                if len(in_flight) >= cap:
+                    break  # no slot, so no need to read /proc
                 idx = _next_admission(
                     [run_peaks[p] for p in queue], len(in_flight), running_peak,
-                    cap, ram_ceiling,
+                    cap, ceiling(running_peak, track_dir),
                 )
                 if idx is None:
                     break
@@ -5744,18 +5878,23 @@ def _drain_with_admission(
                 # neither the queue nor in_flight -- silently dropped, which is
                 # the very failure this recovery exists to prevent.
                 p = queue[idx]
-                fut = ex.submit(worker, p, run_peaks[p])
+                fut = ex.submit(_tracked_call, worker, p, run_peaks[p], track_dir)
                 queue.pop(idx)
                 in_flight[fut] = (p, run_peaks[p])
                 running_peak += run_peaks[p]
 
+        track_dir = tempfile.mkdtemp(prefix="zarr-admission-")
         try:
             with ProcessPoolExecutor(
                 max_workers=cap, initializer=_init_worker, initargs=(run_ctx,)
             ) as ex:
                 admit()
                 while in_flight:
-                    finished, _ = wait(list(in_flight), return_when=FIRST_COMPLETED)
+                    finished, _ = wait(
+                        list(in_flight),
+                        timeout=ADMISSION_RECHECK_SECONDS,
+                        return_when=FIRST_COMPLETED,
+                    )
                     for fut in finished:
                         p, peak = in_flight.pop(fut)
                         running_peak -= peak
@@ -5775,6 +5914,8 @@ def _drain_with_admission(
                     admit()
         except BrokenProcessPool:
             broke = True
+        finally:
+            shutil.rmtree(track_dir, ignore_errors=True)
         if broke or broken:
             pool_breaks += 1
         return broken + [p for p, _peak in in_flight.values()]
@@ -6238,8 +6379,8 @@ def main() -> int:
 
     print(
         f"[zarr] admission: up to {cpu_cap} worker(s), RAM ceiling "
-        f"~{ram_ceiling // 1024**3} GiB; a recording projected above it alone is "
-        f"skipped (#909)",
+        f"~{ram_ceiling // 1024**3} GiB now and re-read from MemAvailable as the run "
+        f"goes (#1483); a recording projected above it alone is skipped (#909)",
         flush=True,
     )
     # Per-dataset provenance for the stores' `nemar` root attribute (#1064).
