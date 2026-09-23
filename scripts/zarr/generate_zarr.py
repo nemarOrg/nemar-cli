@@ -938,7 +938,8 @@ def count_infra_failures(failures: list, failure_entries: list) -> int:
 
 class ChannelCountMismatch(Exception):
     """The converted store carries fewer channels than the recording's BIDS
-    `_channels.tsv` declares, so publishing it would serve a silently
+    `_channels.tsv` declares AND fewer than the file's own header declares (or
+    the header could not be read), so publishing it would serve a silently
     unfaithful copy (the failure mode behind nemarDatasets/on002718#1, where
     biosigio#110 truncated 74-channel EEGLAB files to one channel). Typed so
     the gate is a DETERMINISTIC data failure surfaced in the index and the
@@ -1129,11 +1130,14 @@ _FALLBACK_REASONS = {
         "This recording is too large to convert to an interactive viewer copy "
         "within the conversion node's memory limits."
     ),
-    # NEMAR-side fidelity gate: the converted copy disagreed with the BIDS
-    # channels.tsv ground truth, so it was withheld rather than served.
+    # NEMAR-side fidelity gate: the converted copy came up short of the
+    # recording's channels.tsv and of the file's own header (or the header was
+    # unreadable), so it was withheld rather than served. A sidecar that merely
+    # over-declares is not this failure; see channel_gate_verdict.
     "channel_count_mismatch": (
         "The converted viewer copy carried fewer channels than this recording's "
-        "channels.tsv declares, so it was withheld pending a converter fix."
+        "channels.tsv declares (and than the data file itself, where its header "
+        "could be read), so it was withheld pending a converter fix."
     ),
     # NEMAR-side (not a biosigIO code): ADR 0028. Surfaces MEGIN's own position,
     # which is why the file cannot simply be shown, rather than a bare read error.
@@ -2327,6 +2331,84 @@ def expected_channel_count_for(
         return None
     rows = [line for line in text.splitlines()[1:] if line.strip()]
     return len(rows) or None
+
+
+# EDF+/BDF+ carry their annotations as a pseudo-signal with this label; it is
+# never a data channel, and no exporter serves it as one.
+EDF_ANNOTATION_LABELS = frozenset({"EDF Annotations", "BDF Annotations"})
+
+
+def file_declared_channel_count(primary_local: str) -> int | None:
+    """Data-channel count the recording file's OWN header declares, read with no
+    importer in between, or None when the format has no cheap header to read.
+
+    This is the second ground truth the fidelity gate needs. channels.tsv alone
+    cannot tell "the importer dropped channels" (biosigio#110, the failure the
+    gate exists for) from "the sidecar lists channels this file never had": on
+    2026-09-22, every channel_count_mismatch sampled across ten datasets
+    (on004789, on006914, on004551, on004703, on005280, on006107, on007095,
+    on007118-on007120) was the second kind, with the store holding exactly the
+    file's channels. The header is independent of biosigIO by construction, so
+    a real truncation still shows up as a store short of THIS number.
+
+    EDF/BDF: `ns` at bytes 252-256, then ns 16-byte labels; the annotation
+    pseudo-signal is not a channel. BrainVision: `NumberOfChannels` in the
+    `.vhdr`'s `[Common Infos]` section. Anything unreadable returns None, which
+    leaves the gate on channels.tsv alone -- exactly its behavior before this
+    existed.
+    """
+    ext = lower_ext(primary_local)
+    try:
+        if ext in (".edf", ".bdf"):
+            with open(primary_local, "rb") as fh:
+                head = fh.read(256)
+                if len(head) < 256:
+                    return None
+                ns = int(head[252:256].decode("ascii").strip())
+                if ns <= 0:
+                    return None
+                raw = fh.read(16 * ns)
+            if len(raw) < 16 * ns:
+                return None
+            labels = [raw[i * 16:(i + 1) * 16].decode("latin-1").strip() for i in range(ns)]
+            return sum(1 for label in labels if label not in EDF_ANNOTATION_LABELS)
+        if ext == ".vhdr":
+            with open(primary_local, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+            # Scoped to [Common Infos], the section MNE reads it from, so a
+            # comment elsewhere in the header can never supply the count.
+            section = re.search(r"^\[Common Infos\][^\n]*\n(.*?)(?=^\[|\Z)", text, re.M | re.S)
+            m = section and re.search(
+                r"^\s*NumberOfChannels\s*=\s*(\d+)", section.group(1), re.MULTILINE
+            )
+            return int(m.group(1)) if m else None
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+ChannelGateVerdict = Literal["pass", "sidecar_overcount", "truncated"]
+
+
+def channel_gate_verdict(
+    in_store: int, channels_tsv: int | None, in_file: int | None
+) -> ChannelGateVerdict:
+    """The fidelity gate's decision, kept pure so every branch is testable.
+
+    - ``pass``: no applicable channels.tsv, or the store holds at least what it
+      declares.
+    - ``sidecar_overcount``: the store falls short of channels.tsv but holds
+      every channel the file's own header declares, so the SIDECAR over-declares
+      and the store is faithful. Published, with the disagreement recorded.
+    - ``truncated``: the store falls short of channels.tsv and either falls
+      short of the file too, or the file's count is unknown. Withheld
+      (``ChannelCountMismatch``), as before: better no store than a wrong one.
+    """
+    if not channels_tsv or in_store >= channels_tsv:
+        return "pass"
+    if in_file is not None and in_store >= in_file:
+        return "sidecar_overcount"
+    return "truncated"
 
 
 def affected_primaries(
@@ -5244,12 +5326,34 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         expected = expected_channel_count_for(
             c["repo"], primary, c["head_files"], c["head"]
         )
+        channel_count_note = None
         if expected:
             total = store_total_channels(meta)
-            if total < expected:
+            in_file = (
+                file_declared_channel_count(primary_local) if total < expected else None
+            )
+            verdict = channel_gate_verdict(total, expected, in_file)
+            if verdict == "sidecar_overcount":
+                # The store holds every channel the file itself declares; the
+                # sidecar lists channels the file never had. Serve the faithful
+                # copy and disclose the disagreement on the index entry.
+                channel_count_note = {
+                    "channels_tsv": expected, "in_file": in_file, "in_store": total,
+                }
+                print(
+                    f"::warning::{primary}: channels.tsv declares {expected} channel(s) "
+                    f"but the file itself holds {in_file}; serving the {total}-channel "
+                    "store, which matches the file",
+                    flush=True,
+                )
+            elif verdict == "truncated":
+                file_part = (
+                    f" and the file itself declares {in_file}" if in_file is not None else ""
+                )
                 raise ChannelCountMismatch(
                     f"store has {total} channel(s) but {primary}'s channels.tsv "
-                    f"declares {expected}; refusing to publish an unfaithful copy"
+                    f"declares {expected}{file_part}; refusing to publish an "
+                    "unfaithful copy"
                 )
         # Latest-only: --delete drops stale chunk objects a smaller new store no
         # longer needs. Long origin TTL; the callback purges zarr.json/index.json.
@@ -5309,6 +5413,8 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             }
         if channels_read_failed:
             entry["channels_tsv_read_error"] = True
+        if channel_count_note:
+            entry["channels_tsv_count_mismatch"] = channel_count_note
         # For a split FIF, record all member source paths so the browser can map any
         # split file (e.g. a click on split-02) to this single head store.
         members = split_members_for(primary, c["head_files"])
