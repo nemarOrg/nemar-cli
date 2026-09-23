@@ -156,7 +156,10 @@ Measured 2026-09-22 with Pyodide 0.29.5's Node loader:
 
 This section used to say that zarr installs only with `deps=False` and that a pure-Python CRC-32C
 stands in for `google_crc32c`.
-That was true on Pyodide 0.28.3 (OpenScience-Collective/osa#375), whose distribution carries numcodecs 0.13.1, below zarr's `numcodecs>=0.14` pin, and no google-crc32c at all. It is not true on 0.29.5.
+That was true on Pyodide 0.28.3 (OpenScience-Collective/osa#375),
+whose distribution carries numcodecs 0.13.1, below zarr's `numcodecs>=0.14` pin,
+and no google-crc32c at all.
+It is not true on 0.29.5.
 
 OSA does not use micropip for this at all.
 zarr and `eegprep-lean` are entries in a per-community Pyodide lock overlay,
@@ -183,9 +186,10 @@ Packages are counted as micropip installs them under Pyodide, transitive depende
 
 **zarr is an extra rather than a base dependency, which differs from ADR 0069's table**,
 and the ADR carries the correction.
-The reason first given, that zarr installs under Pyodide only with `deps=False`,
-held on Pyodide 0.28.3 and not on 0.29.5 (see "Installation in the browser", and ADR 0069's amendment of 2026-09-22).
-The split stands for the reason the base tier exists:
+The first reason given, that zarr installs under Pyodide only with `deps=False`,
+held on Pyodide 0.28.3 and not on 0.29.5
+(see "Installation in the browser", and ADR 0069's amendment of 2026-09-22).
+The split stands on the second, the reason the base tier exists:
 a session that only reads a dataset's index pays for the package alone, not for zarr's 4.2 MB.
 The measurements are ADR 0069's and are unchanged; the install names they sit under are corrected.
 
