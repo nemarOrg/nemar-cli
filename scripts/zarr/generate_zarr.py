@@ -2851,6 +2851,70 @@ def _failure_entry(
     }
 
 
+def index_provenance(dataset_row: dict | None) -> dict:
+    """The index's top-level dataset provenance (#1064), from the catalog row.
+    One function because ``pending_retry_worklist`` compares a published index
+    against the current row on exactly these fields: two copies of the mapping
+    would let the comparison drift from what is published."""
+    row = dataset_row or {}
+    return {
+        "doi": row.get("concept_doi") or row.get("doi") or None,
+        "license": row.get("license") or None,
+        "citation": dataset_citation(dataset_row),
+        "hed_version": row.get("hed_version") or None,
+    }
+
+
+def pending_retry_worklist(
+    index: dict | None,
+    head: str,
+    discovered: list[str],
+    dataset_row: dict | None,
+    row_fetch_failed: bool,
+    biosigio_version: str | None,
+    engine_version: str = ZARR_ENGINE_VERSION,
+) -> tuple[list[str] | None, str]:
+    """What a pending-driven retry round has to convert (#1483). Pure.
+
+    Returns ``(recordings, reason)``. ``recordings`` is the published index's
+    ``pending`` paths still discovered at HEAD, when everything else the index
+    serves is still exactly what a full rebuild would produce: same commit, same
+    engine, same biosigIO, and the same dataset provenance (which every store
+    embeds). Otherwise it is None, ``reason`` says why, and the run is a full
+    rebuild as before.
+
+    A retry round used to rebuild the whole dataset to convert the handful of
+    recordings still pending, so on a large dataset each round spent hours
+    reconverting stores that were already published at this commit, and could
+    fail new recordings for memory while doing it.
+    """
+    if not isinstance(index, dict):
+        return None, "no published index"
+    if index.get("source_commit") != head:
+        return None, "the index was built from a different commit"
+    if index.get("engine_version") != engine_version:
+        return None, "the index was built by a different engine"
+    if index.get("biosigio_version") != biosigio_version:
+        return None, "the index was built with a different biosigIO"
+    if row_fetch_failed:
+        return None, "the catalog could not be read to compare provenance"
+    current = index_provenance(dataset_row)
+    if any(index.get(k) != v for k, v in current.items()):
+        return None, "the dataset's provenance changed since the index was built"
+    at_head = set(discovered)
+    pending = index.get("pending")
+    paths = sorted(
+        {
+            e["path"]
+            for e in (pending if isinstance(pending, list) else [])
+            if isinstance(e, dict) and isinstance(e.get("path"), str) and e["path"] in at_head
+        }
+    )
+    if not paths:
+        return None, "the index lists nothing pending"
+    return paths, f"{len(paths)} pending recording(s)"
+
+
 def merge_index(
     prior: dict | None,
     dataset_id: str,
@@ -3082,10 +3146,7 @@ def merge_index(
         # dataset, which is the difference between "read the index" and "read the
         # index and then the catalog" for every recipe. Nullable throughout: the
         # catalog genuinely may not have a DOI yet.
-        "doi": (dataset_row or {}).get("concept_doi") or (dataset_row or {}).get("doi") or None,
-        "license": (dataset_row or {}).get("license") or None,
-        "citation": dataset_citation(dataset_row),
-        "hed_version": (dataset_row or {}).get("hed_version") or None,
+        **index_provenance(dataset_row),
         # How to turn this index's numbers into reads, without probing.
         "layout": dict(INDEX_LAYOUT),
         "discovered_count": (
@@ -5813,6 +5874,14 @@ def main() -> int:
         "Implies --full.",
     )
     ap.add_argument(
+        "--retry-pending",
+        action="store_true",
+        help="a pending-driven retry round (#1483): when the published index was "
+        "built from this HEAD by this engine and biosigIO, with the same dataset "
+        "provenance, convert only the recordings it lists as pending and merge "
+        "them into it. Otherwise ignored, and --clean applies as given.",
+    )
+    ap.add_argument(
         "--wipe",
         action="store_true",
         help="erase s3://<bucket>/<id>/zarr/ before rebuilding. Recovery only (a "
@@ -5872,8 +5941,30 @@ def main() -> int:
     # `--if-none-match "*"` write derived from "the merge had no prior" would 412
     # on every clean run.
     live_index, live_index_etag = read_index_with_etag(bucket, dataset_id)
+    head_files = git_ls_files(repo, head)
+    # Coverage denominator: every raw recording at HEAD, whether or not this run
+    # touches it. Publishing it is what lets a consumer check completeness without
+    # cloning the repo (#1197).
+    discovered = discover_primaries(head_files)
+    # A retry round converts only what is still pending when nothing else would
+    # change (#1483); see `pending_retry_worklist`. The catalog row it compares
+    # against is fetched here and reused for the stores below, so it is still
+    # read once per run.
+    biosigio_version = installed_biosigio_version()
+    early_row: tuple[dict | None, bool] | None = None
+    retry_paths: list[str] | None = None
+    if args.retry_pending and not args.wipe:
+        early_row = fetch_dataset_row(args.api_base, dataset_id)
+        retry_paths, why = pending_retry_worklist(
+            live_index, head, discovered, early_row[0], early_row[1], biosigio_version
+        )
+        verdict = f"converting only {why}" if retry_paths else f"{why}; full rebuild"
+        print(f"[zarr] --retry-pending: {verdict}", flush=True)
+    # From here on `clean` is what this run does, which a retry round turns off:
+    # it merges into the published index instead of rewriting it.
+    clean = args.clean and retry_paths is None
     prior_for_orphans: dict | None = None
-    if args.clean:
+    if clean:
         prior, prior_commit, full = None, None, True
         prior_for_orphans = live_index
     else:
@@ -5884,20 +5975,19 @@ def main() -> int:
     # on the same terms: carried on the incremental path, rebuilt from this run
     # under --clean (which reconverts every recording anyway).
     prior_manifest = (
-        None if args.clean else s3_read_json(bucket, f"{dataset_id}/zarr/manifest.json")
+        None if clean else s3_read_json(bucket, f"{dataset_id}/zarr/manifest.json")
     )
 
-    head_files = git_ls_files(repo, head)
     if full:
         diff: list[tuple[str, str]] = []
     else:
         assert prior_commit  # full is False only when prior_commit is a real ancestor SHA
         diff = git_diff_name_status(repo, prior_commit, head)
     convert, remove = compute_worklist(head_files, diff, full)
-    # Coverage denominator: every raw recording at HEAD, whether or not this run
-    # touches it. Publishing it is what lets a consumer check completeness without
-    # cloning the repo (#1197).
-    discovered = discover_primaries(head_files)
+    if retry_paths is not None:
+        # The index was built from HEAD, so the diff is empty and the worklist
+        # with it; what is left to do is exactly what the index lists as pending.
+        convert, remove = retry_paths, []
     # `pending` attempt counts are a property of the RECORDING's history, not of
     # this run, so they are carried even under --clean -- which otherwise rebuilds
     # the index from nothing. Without this a recording would reset to attempt 1
@@ -5945,7 +6035,7 @@ def main() -> int:
     #
     # `--wipe` keeps the old behaviour for recovery (a corrupt prefix, an index
     # that no longer describes what is on S3).
-    if args.clean:
+    if clean:
         # `compute_clean_orphans` also protects already-published stores under
         # an excluded tree (derivatives/sourcedata/code) from this removal: a
         # raw-only `convert` no longer contains them, but that must not be
@@ -6154,9 +6244,12 @@ def main() -> int:
     )
     # Per-dataset provenance for the stores' `nemar` root attribute (#1064).
     # Skipped when there is nothing to convert, so a no-op run makes no request.
-    dataset_row, provenance_fetch_failed = (
-        fetch_dataset_row(args.api_base, dataset_id) if convert else (None, False)
-    )
+    if early_row is not None:
+        dataset_row, provenance_fetch_failed = early_row
+    else:
+        dataset_row, provenance_fetch_failed = (
+            fetch_dataset_row(args.api_base, dataset_id) if convert else (None, False)
+        )
     with tempfile.TemporaryDirectory() as tmp:
         ctx = {
             "repo": repo, "bucket": bucket, "dataset_id": dataset_id, "head": head,
@@ -6299,7 +6392,14 @@ def main() -> int:
     # "failed") so the driver can classify data-vs-infra and the backend records
     # WHAT failed even on a total failure (#774 — previously no callback was
     # written here, so total failures were invisible).
-    if convert and not converted_entries and not remove:
+    #
+    # Not for a retry round (#1483). Its worklist is only the recordings already
+    # pending, so "none converted" is the ordinary outcome of a round that did
+    # not help, not a failed dataset: the index still serves everything else, and
+    # it has to be rewritten so the pending attempt counts advance, or those
+    # recordings could never reach `retry_exhausted` and the queue row would go
+    # `failed` instead of backing off.
+    if convert and not converted_entries and not remove and retry_paths is None:
         print(f"::error::all {len(convert)} conversion(s) failed; index left untouched", flush=True)
         write_failed_callback()
         return 1
@@ -6316,7 +6416,8 @@ def main() -> int:
     # which is how on008083 came to publish an EMPTY source_commit while D1 held
     # the real SHA (#1197). There is no longer anything to fall back FOR: those
     # recordings are now listed in `pending`, and the queue re-queues a `done`
-    # dataset that has any (zarr_queue.reconcile), which re-runs it with --clean.
+    # dataset that has any (zarr_queue.reconcile), which re-runs it: only the
+    # pending recordings when the index is otherwise current (#1483), else --clean.
     # So publish the commit the stores were actually built from.
     # The trailing `and prior_commit` in the condition is not redundant with
     # `is_commit_sha`: that call narrows the value at runtime but not for a
@@ -6328,7 +6429,6 @@ def main() -> int:
     index_commit = (
         prior_commit if (infra_failures and is_commit_sha(prior_commit) and prior_commit) else head
     )
-    biosigio_version = installed_biosigio_version()
 
     def build_index(merge_prior: dict | None, merge_pending: list | None) -> dict:
         """Merge this run's results onto a prior document and check the coverage
@@ -6467,7 +6567,7 @@ def main() -> int:
         # `--clean` hands the merge no prior (the document is rebuilt from this
         # run), exactly as the first attempt did; the pending attempt history
         # still comes from the published document, newer one included.
-        remerged = build_index(None if args.clean else newer, (newer or {}).get("pending"))
+        remerged = build_index(None if clean else newer, (newer or {}).get("pending"))
         if events_file:
             remerged["events_parquet"] = f"{remerged['data_base']}{EVENTS_PARQUET_NAME}"
             remerged["events_row_count"] = events_file["row_count"]

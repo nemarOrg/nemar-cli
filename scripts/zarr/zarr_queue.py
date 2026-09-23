@@ -1694,8 +1694,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="failed",
         help="`done` reaches datasets that converted PARTIALLY: a run where "
         "anything succeeded is marked done, so recordings that failed for a "
-        "retryable reason are stranded there. Scope it with --dataset -- "
-        "requeuing `done` re-converts the whole dataset.",
+        "retryable reason are stranded there. Scope it with --dataset. The "
+        "drain then converts only the recordings the index lists as pending "
+        "when that index is otherwise current (#1483), and the whole dataset "
+        "otherwise; for a guaranteed full rebuild, run "
+        "`hallu-zarr.sh --dataset <id>` instead.",
     )
     p.add_argument("--dataset", default=None, help="just this dataset")
     p.add_argument(
