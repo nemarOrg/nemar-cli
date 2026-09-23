@@ -209,6 +209,17 @@ unset _work_dir_overridden _state_dir_overridden
 # per-recording budget (small EEG packs many-wide; large MEG self-limits). Override
 # with ZARR_JOBS.
 JOBS="${ZARR_JOBS:-$(nproc 2>/dev/null || echo 8)}"
+# Anonymous-memory bounds for every conversion worker. Each worker converts under
+# an RLIMIT_DATA budget (generate_zarr.py apply_worker_mem_limit), which counts
+# anonymous memory (VmData), not page cache, and two library defaults grow that
+# independently of the recording: zarr keeps up to `async.concurrency` (10) shard
+# encodes in flight, and glibc gives each thread its own malloc arena (up to 8 x
+# cores). on004789's recording_memory_exceeded failures (2026-09-22) were budget
+# trips of this kind; biosigio#129 removes the biggest source, and these bounds
+# keep the rest near the worker's own arrays. Exported so the Python driver and
+# its pool workers inherit them; a value already in the environment wins.
+export ZARR_ASYNC__CONCURRENCY="${ZARR_ASYNC__CONCURRENCY:-3}"
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 # The driver source. Repatriated from nemarDatasets/.github to nemarOrg/nemar-cli
 # in #1109 (ADR 0029): this engine runs here on the cron, never in Actions, so it
 # belongs with the CLI where it can be developed and tested. Deployment is now a
@@ -505,6 +516,8 @@ WORK_DIR=$WORK_DIR
 STATE_DIR=$STATE_DIR
 SWEEP_SCRATCH=${SWEEP_SCRATCH:-0}
 JOBS=$JOBS
+ZARR_ASYNC__CONCURRENCY=$ZARR_ASYNC__CONCURRENCY
+MALLOC_ARENA_MAX=$MALLOC_ARENA_MAX
 DRIVER_REPO=$DRIVER_REPO
 DRIVER_REF=$DRIVER_REF
 VENV_DIR=$VENV_DIR
