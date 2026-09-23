@@ -101,6 +101,8 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     MEFD_EXT,
     electrode_positions_for,
     expected_channel_count_for,
+    file_declared_channel_count,
+    channel_gate_verdict,
     store_total_channels,
     store_metadata,
     embed_attr,
@@ -2829,6 +2831,107 @@ class TestChannelCountMismatch(unittest.TestCase):
         # index records), not an untyped infra failure that retries forever.
         self.assertEqual(ChannelCountMismatch.code, "channel_count_mismatch")
         self.assertIn("channels.tsv", reason_for_code("channel_count_mismatch"))
+
+
+def write_edf_header(path: str, labels: list[str]) -> None:
+    """Write an EDF/BDF header with exactly these signal labels and no data
+    records: the 256-byte fixed part (field widths per the EDF spec), then 256
+    bytes per signal, labels first. Real bytes in the layout the format defines,
+    which is all `file_declared_channel_count` reads."""
+    ns = len(labels)
+    fixed = (
+        "0".ljust(8) + "X".ljust(80) + "X".ljust(80) + "01.01.26" + "00.00.00"
+        + str(256 * (ns + 1)).ljust(8) + "EDF+C".ljust(44) + "0".ljust(8)
+        + "1".ljust(8) + str(ns).ljust(4)
+    )
+    assert len(fixed) == 256
+    per_signal = "".join(label.ljust(16) for label in labels) + " " * (ns * 240)
+    with open(path, "wb") as fh:
+        fh.write((fixed + per_signal).encode("ascii"))
+
+
+class TestFileDeclaredChannelCount(unittest.TestCase):
+    """The gate's second ground truth: the file's own header, read with no
+    importer in between (#1477 follow-up; every sampled channel_count_mismatch
+    on 2026-09-22 was a sidecar listing channels its file never had)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def path(self, name):
+        return os.path.join(self.dir, name)
+
+    def test_edf_counts_signals_less_the_annotation_track(self):
+        p = self.path("r_ieeg.edf")
+        write_edf_header(p, ["LPHD1-LPHD2", "LPHD2-LPHD3", "LIWS3-LIWS4", "EDF Annotations"])
+        self.assertEqual(file_declared_channel_count(p), 3)
+
+    def test_bdf_drops_its_own_annotation_label(self):
+        p = self.path("r_eeg.bdf")
+        write_edf_header(p, ["Fp1", "Fp2", "Status", "BDF Annotations"])
+        # Status is a real signal in the file; only the annotation track is not.
+        self.assertEqual(file_declared_channel_count(p), 3)
+
+    def test_brainvision_reads_number_of_channels(self):
+        p = self.path("r_eeg.vhdr")
+        with open(p, "w") as fh:
+            fh.write("Brain Vision Data Exchange Header File Version 1.0\n"
+                     "[Common Infos]\nDataFile=r_eeg.eeg\nNumberOfChannels=63\n")
+        self.assertEqual(file_declared_channel_count(p), 63)
+
+    def test_a_truncated_header_is_unknown_not_zero(self):
+        p = self.path("short_ieeg.edf")
+        with open(p, "wb") as fh:
+            fh.write(b"0" * 100)
+        self.assertIsNone(file_declared_channel_count(p))
+
+    def test_labels_cut_short_are_unknown(self):
+        p = self.path("cut_ieeg.edf")
+        write_edf_header(p, ["A", "B", "C"])
+        with open(p, "r+b") as fh:
+            fh.truncate(256 + 20)  # ns=3 declared, fewer than 48 label bytes
+        self.assertIsNone(file_declared_channel_count(p))
+
+    def test_formats_without_a_cheap_header_and_missing_files_are_unknown(self):
+        p = self.path("r_eeg.set")
+        with open(p, "wb") as fh:
+            fh.write(b"MATLAB 5.0")
+        self.assertIsNone(file_declared_channel_count(p))
+        self.assertIsNone(file_declared_channel_count(self.path("absent_eeg.edf")))
+
+    def test_a_real_edf_plus_from_pyedflib(self):
+        # EDF+ writers append the annotation pseudo-signal; it must not count.
+        try:
+            import pyedflib  # noqa: F401
+        except ImportError:
+            self.skipTest("pyedflib not installed")
+        p = build_real_edf(self.dir, "real_eeg", n_channels=4, seconds=2)
+        self.assertEqual(file_declared_channel_count(p), 4)
+
+
+class TestChannelGateVerdict(unittest.TestCase):
+    def test_no_applicable_sidecar_passes(self):
+        self.assertEqual(channel_gate_verdict(10, None, None), "pass")
+
+    def test_a_store_that_meets_the_sidecar_passes(self):
+        self.assertEqual(channel_gate_verdict(128, 128, None), "pass")
+        self.assertEqual(channel_gate_verdict(130, 128, 120), "pass")
+
+    def test_a_sidecar_that_over_declares_is_not_a_truncation(self):
+        # on004789 sub-R1350D: 120 in the file, 120 in the store, 128 declared.
+        self.assertEqual(channel_gate_verdict(120, 128, 120), "sidecar_overcount")
+
+    def test_a_store_short_of_the_file_is_still_withheld(self):
+        # biosigio#110: the importer served 1 of a file's 74 channels.
+        self.assertEqual(channel_gate_verdict(1, 74, 74), "truncated")
+        self.assertEqual(channel_gate_verdict(119, 128, 120), "truncated")
+
+    def test_an_unreadable_header_keeps_the_old_strict_gate(self):
+        self.assertEqual(channel_gate_verdict(120, 128, None), "truncated")
 
 
 class TestCleanOrphanSelection(unittest.TestCase):
@@ -7406,6 +7509,32 @@ class TestConvertOneEndToEnd(unittest.TestCase):
         )
         check_index_invariant(index)
         validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_a_sidecar_that_over_declares_still_publishes_the_faithful_store(self):
+        """channels.tsv listing channels the file never had (on004789's bipolar
+        micro-contacts, on006914's 6-of-128) must not withhold a store holding
+        every channel the file declares. The disagreement is disclosed on the
+        entry, and the entry still satisfies the closed schema."""
+        with open(os.path.join(self.eeg, "sub-01_task-rest_channels.tsv"), "w") as fh:
+            fh.writelines(
+                ["name\ttype\tunits\n"] + [f"E{i + 1}\tEEG\tV\n" for i in range(6)]
+            )
+        result = self.convert()
+        self.assertTrue(result["ok"], result.get("error"))
+        entry = result["entry"]
+        self.assertEqual(
+            entry["channels_tsv_count_mismatch"],
+            {"channels_tsv": 6, "in_file": 4, "in_store": 4},
+        )
+        index = merge_index(
+            None, "on007763", "b" * 40, [entry], [], "2026-09-02T00:00:00Z",
+            [], [], discovered=[self.primary],
+        )
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_agreeing_counts_add_no_mismatch_note(self):
+        self.assertNotIn("channels_tsv_count_mismatch", self.convert()["entry"])
 
     def test_an_unreadable_sidecar_is_recorded_not_collapsed(self):
         """A channels.tsv that APPLIES but cannot be read must not look like a
