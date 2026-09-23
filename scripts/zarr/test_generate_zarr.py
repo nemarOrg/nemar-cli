@@ -28,6 +28,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import ClassVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -120,6 +121,8 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     is_split_fif,
     materialize_local,
     merge_index,
+    index_provenance,
+    pending_retry_worklist,
     parse_annex_key,
     power_line_frequency_for,
     safe_store_prefix,
@@ -7858,3 +7861,263 @@ class TestMainRoutesSingleRecordingsThroughThePool(unittest.TestCase):
     def test_jobs_one_still_converts_in_process(self):
         self.run_main(jobs=1)
         self.assertEqual(generate_zarr._CTX.get("dataset_id"), "on008083")
+
+
+class TestPendingRetryWorklist(unittest.TestCase):
+    """#1483: a retry round converts only what is pending, and only while every
+    other store the index serves is what a full rebuild would produce."""
+
+    HEAD = "b" * 40
+    A = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+    B = "sub-02/eeg/sub-02_task-rest_eeg.edf"
+    ROW: ClassVar[dict] = {
+        "dataset_id": "on008083", "license": "CC0", "concept_doi": "10.5281/zenodo.1"
+    }
+
+    def index(self, *, head=HEAD, row=ROW, biosigio="1.2.7", pending=(B,), discovered=(A, B)):
+        """A real v3 index, built by `merge_index` exactly as a run publishes it."""
+        return merge_index(
+            None, "on008083", head,
+            [{"path": self.A, "zarr": store_rel_for(self.A)}], [],
+            "2026-09-22T00:00:00Z", [],
+            [{"path": p, "reason": "memory_budget", "last_error": "x"} for p in pending],
+            discovered=list(discovered), biosigio_version=biosigio, dataset_row=row,
+        )
+
+    def worklist(self, index, *, discovered=(A, B), row=ROW, failed=False, biosigio="1.2.7"):
+        return pending_retry_worklist(
+            index, self.HEAD, list(discovered), row, failed, biosigio
+        )
+
+    def test_a_current_index_retries_only_its_pending_recordings(self):
+        # Round trip through the published shape: the provenance comparison is
+        # against what merge_index wrote, not against a hand-built document.
+        paths, why = self.worklist(self.index())
+        self.assertEqual(paths, [self.B])
+        self.assertIn("1 pending", why)
+
+    def test_the_index_publishes_the_provenance_the_retry_compares(self):
+        index = self.index()
+        for key, value in index_provenance(self.ROW).items():
+            self.assertEqual(index[key], value, key)
+
+    def test_anything_that_changes_the_served_stores_forces_a_full_rebuild(self):
+        cases = {
+            "no index": (None, {}),
+            "different commit": (self.index(head="c" * 40), {}),
+            "different engine": ({**self.index(), "engine_version": "0"}, {}),
+            "different biosigIO": (self.index(biosigio="1.2.6"), {}),
+            "catalog unreadable": (self.index(), {"failed": True}),
+            "license changed": (self.index(), {"row": {**self.ROW, "license": "CC-BY-4.0"}}),
+            "citation changed": (
+                self.index(),
+                {"row": {**self.ROW, "authors": ["Doe, J."], "name": "A dataset"}},
+            ),
+            "nothing pending": (
+                self.index(pending=(), discovered=(self.A,)), {"discovered": (self.A,)}
+            ),
+            "pending recording gone from HEAD": (self.index(), {"discovered": (self.A,)}),
+        }
+        for label, (index, kwargs) in cases.items():
+            with self.subTest(label):
+                paths, why = self.worklist(index, **kwargs)
+                self.assertIsNone(paths)
+                self.assertTrue(why)
+
+    def test_a_recording_never_attempted_is_retried_too(self):
+        # merge_index lists a discovered recording with no store and no failure
+        # as `not_attempted` pending; the round owes it a conversion as well.
+        index = self.index(pending=())
+        self.assertEqual(index["pending"][0]["reason"], "not_attempted")
+        self.assertEqual(self.worklist(index)[0], [self.B])
+
+    def test_malformed_pending_entries_are_ignored(self):
+        index = {**self.index(), "pending": [None, {"path": 3}, {"path": self.B}]}
+        self.assertEqual(self.worklist(index)[0], [self.B])
+
+
+class TestMainRetryPendingRound(unittest.TestCase):
+    """`--retry-pending` through `main()` (#1483): real recordings converted by
+    the real exporter, the real `aws` stand-in over local files, and a local
+    catalog server, so the decision, the worklist, the merge into the published
+    index and the exit status all run for real.
+
+    Recording B is committed the way git-annex commits it, as a symlink into
+    `.git/annex/objects`. Its content is absent on the first run, so B fails and
+    is listed as pending while A converts; the tests then decide whether the
+    content is there for the retry. HEAD never moves, which is exactly the
+    situation a retry round is in.
+    """
+
+    A = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+    B = "sub-02/eeg/sub-02_task-rest_eeg.edf"
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        self.s3 = os.path.join(self.dir, "s3")
+        os.makedirs(self.s3)
+
+        def git(*args):
+            subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True)
+
+        os.makedirs(os.path.join(self.repo, "sub-01", "eeg"))
+        os.makedirs(os.path.join(self.repo, "sub-02", "eeg"))
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.org")
+        git("config", "user.name", "t")
+        with open(os.path.join(self.repo, "dataset_description.json"), "w") as fh:
+            json.dump({"Name": "retry fixture", "BIDSVersion": "1.8.0"}, fh)
+        build_real_edf(os.path.join(self.repo, "sub-01", "eeg"), "sub-01_task-rest_eeg", seconds=10)
+        # B as git-annex leaves it before `get`: a committed symlink to an object
+        # that is not there.
+        self.b_object = os.path.join(self.repo, ".git", "annex", "objects", "B.edf")
+        os.symlink(
+            os.path.relpath(self.b_object, os.path.join(self.repo, "sub-02", "eeg")),
+            os.path.join(self.repo, self.B),
+        )
+        git("add", "-A")
+        git("commit", "-q", "-m", "init")
+
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write(STUB_AWS)
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        saved = (os.environ.get("PATH"), os.environ.get("ZARR_TEST_S3_ROOT"))
+        os.environ["PATH"] = bindir + os.pathsep + (saved[0] or "")
+        os.environ["ZARR_TEST_S3_ROOT"] = self.s3
+        self.addCleanup(self._restore_env, saved)
+
+        self.row = {"dataset_id": "on008083", "license": "CC0", "concept_doi": "10.5281/zenodo.1"}
+        self.api = self._serve_catalog()
+        self.callback = os.path.join(self.dir, "cb.json")
+
+    @staticmethod
+    def _restore_env(saved):
+        for key, value in zip(("PATH", "ZARR_TEST_S3_ROOT"), saved, strict=True):
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _serve_catalog(self) -> str:
+        """A local catalog answering GET /datasets/<id> with `self.row`, read
+        per request so a test can change the dataset between runs."""
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        test = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
+                body = json.dumps(test.row).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_port}"
+
+    def materialize_b(self):
+        """`git annex get` for B: the content appears, HEAD does not move."""
+        os.makedirs(os.path.dirname(self.b_object), exist_ok=True)
+        build_real_edf(os.path.dirname(self.b_object), "B", seconds=10)
+
+    def run_main(self, *extra) -> tuple[int, str, dict]:
+        argv = [
+            "generate_zarr.py", "--dataset-id", "on008083", "--repo-dir", self.repo,
+            "--bucket", "nemar-test", "--callback-out", self.callback, "--local",
+            "--api-base", self.api, "--jobs", "2", "--clean", *extra,
+        ]
+        saved, sys.argv = sys.argv, argv
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = generate_zarr.main()
+        finally:
+            sys.argv = saved
+        with open(self.callback) as fh:
+            return rc, out.getvalue(), json.load(fh)
+
+    def published_index(self) -> dict:
+        with open(os.path.join(self.s3, "on008083_zarr_index.json")) as fh:
+            return json.load(fh)
+
+    def first_round(self) -> dict:
+        """The run a retry round follows: A converts, B is left pending."""
+        rc, log, _ = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("no published index; full rebuild", log)
+        index = self.published_index()
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+        self.assertEqual([p["path"] for p in index["pending"]], [self.B])
+        return index
+
+    def test_a_retry_round_converts_only_the_pending_recording(self):
+        before = self.first_round()
+        self.materialize_b()
+        rc, log, body = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("converting only 1 pending recording(s)", log)
+        self.assertIn(f"converted {self.B}", log)
+        self.assertNotIn(f"converted {self.A}", log)
+        index = self.published_index()
+        self.assertEqual(sorted(s["path"] for s in index["stores"]), [self.A, self.B])
+        # A was carried from the published index, untouched, not rebuilt.
+        carried = next(s for s in index["stores"] if s["path"] == self.A)
+        self.assertEqual(carried, before["stores"][0])
+        self.assertEqual(index["pending"], [])
+        self.assertEqual(body["pending_count"], 0)
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_a_round_that_converts_nothing_still_advances_the_attempts(self):
+        # Without this a retry round where the pending recording fails again
+        # took the total-failure exit: index untouched, attempts never counted,
+        # and the queue row marked `failed` while A was still being served.
+        self.first_round()
+        rc, log, body = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        index = self.published_index()
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+        self.assertEqual([(p["path"], p["attempts"]) for p in index["pending"]], [(self.B, 2)])
+        self.assertEqual(body["pending_count"], 1)
+
+    def test_a_provenance_change_turns_the_round_into_a_full_rebuild(self):
+        # Every store embeds the dataset's DOI, license and citation, so a
+        # changed catalog row (de-anonymization, a new license) has to reach A.
+        self.first_round()
+        self.materialize_b()
+        self.row = {**self.row, "license": "CC-BY-4.0"}
+        rc, log, _ = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("provenance changed", log)
+        self.assertIn(f"converted {self.A}", log)
+        self.assertEqual(self.published_index()["license"], "CC-BY-4.0")
+
+    def test_without_the_flag_a_run_is_a_full_rebuild(self):
+        # A one-off `hallu-zarr.sh --dataset` run never passes it.
+        self.first_round()
+        self.materialize_b()
+        rc, log, _ = self.run_main()
+        self.assertEqual(rc, 0, log)
+        self.assertNotIn("--retry-pending", log)
+        self.assertIn(f"converted {self.A}", log)
