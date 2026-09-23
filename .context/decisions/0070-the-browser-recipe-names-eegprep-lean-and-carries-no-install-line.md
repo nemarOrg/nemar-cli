@@ -4,6 +4,17 @@
 **Date:** 2026-09-21
 **Owner:** Seyed Yahya Shirazi
 
+**Amendment 2026-09-22:** At level 0 the lane now leads with `read_window`,
+and the `open_array` read of the recipe's `array_path` follows it.
+The raw read returns stored digital counts, which plot like EEG while being wrong, and nothing raises,
+so the first read a model meets is the one in physical units, with channel labels.
+The lead names its index by this recipe's own `contract_base`
+(`read_index(id, index_url="<contract_base>index.json")`, eegprep-lean 0.1.0.dev2 or later,
+sccn/eegprep#416), so a dev or staging server's recipe reads that environment and not production's.
+A view level is a downsampled copy that `read_window` does not read, so there the raw read stays the read.
+The verdict stands: the lane names eegprep-lean, calls its asynchronous API against the recipe's
+contract, and carries no install line.
+
 ## Context
 
 `read_window` hands the model a `how_to` block of ready-to-run snippets.
