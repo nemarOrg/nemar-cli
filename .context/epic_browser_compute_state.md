@@ -4,7 +4,8 @@
 > Decisions live in [`decisions/`](decisions/README.md); where this document and an ADR disagree,
 > the ADR wins. This document holds the state, the order of work, and the questions still open.
 
-**Last verified:** 2026-09-23 for the OSA and nemar-cli sections, 2026-09-21 for the rest.
+**Last verified:** 2026-09-23 for the Open Science Assistant (OSA) and nemar-cli sections,
+2026-09-21 for the rest.
 
 **How to verify a row, and how the first version of this file got it wrong.** Issue state is not
 work state. This document's first version reported four eegprep phases as open because their
@@ -262,7 +263,7 @@ The Python Package Index, `raw.githubusercontent.com` and jsDelivr all send `*`;
 OpenScience-Collective/osa#424 tracks the runtime side: vendor the wheel, pin it, and decide the
 refresh procedure, because that pin is the only thing keeping the runtime and the reader in step.
 
-**The browser lane reaches the live host.** #1466 added the OSC surfaces to the zarr host's
+**The browser lane reaches the live host.** #1466 added the Open Science Collective (OSC) surfaces to the zarr host's
 allow-list and shipped in v0.10.5: `osc.earth` and every `*.osc.earth` origin get their own
 origin back in `access-control-allow-origin` from `zarr.nemar.org`, and an unknown origin gets
 none (measured 2026-09-23). So a notebook surface hosted under `osc.earth` needs no change here.
@@ -298,7 +299,8 @@ eegprep epic #324 phase 4 ─> phase 5 (ORT Web, async) ─┬─> ICLabel runs 
                           └─> phase 6 (int8)         ─┘
                                      (independent of the OSA track)
 
-nemar-cli dev to main ─> ADR 0071's read_window recipe reaches models (independent of the OSA release)
+nemar-cli dev to main ─> ADR 0071's read_window recipe reaches models (independent of the OSA release;
+                          measured and cited in the nemar-cli section above)
 ```
 
 The two tracks meet **twice**, not once, and this document previously showed only the first.
