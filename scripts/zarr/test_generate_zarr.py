@@ -2883,6 +2883,19 @@ class TestFileDeclaredChannelCount(unittest.TestCase):
                      "[Common Infos]\nDataFile=r_eeg.eeg\nNumberOfChannels=63\n")
         self.assertEqual(file_declared_channel_count(p), 63)
 
+    def test_brainvision_ignores_the_count_outside_common_infos(self):
+        p = self.path("c_eeg.vhdr")
+        with open(p, "w") as fh:
+            fh.write("Brain Vision Data Exchange Header File Version 1.0\n"
+                     "[Comment]\nNumberOfChannels=999 (amplifier maximum)\n"
+                     "[Common Infos]\nDataFile=c_eeg.eeg\nNumberOfChannels=32\n"
+                     "[Channel Infos]\nCh1=Fp1,,0.1,uV\n")
+        self.assertEqual(file_declared_channel_count(p), 32)
+        q = self.path("n_eeg.vhdr")
+        with open(q, "w") as fh:
+            fh.write("[Comment]\nNumberOfChannels=64\n")
+        self.assertIsNone(file_declared_channel_count(q))
+
     def test_a_truncated_header_is_unknown_not_zero(self):
         p = self.path("short_ieeg.edf")
         with open(p, "wb") as fh:

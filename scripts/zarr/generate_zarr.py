@@ -1136,7 +1136,8 @@ _FALLBACK_REASONS = {
     # over-declares is not this failure; see channel_gate_verdict.
     "channel_count_mismatch": (
         "The converted viewer copy carried fewer channels than this recording's "
-        "channels.tsv and data file declare, so it was withheld pending a converter fix."
+        "channels.tsv declares (and than the data file itself, where its header "
+        "could be read), so it was withheld pending a converter fix."
     ),
     # NEMAR-side (not a biosigIO code): ADR 0028. Surfaces MEGIN's own position,
     # which is why the file cannot simply be shown, rather than a bare read error.
@@ -2352,8 +2353,9 @@ def file_declared_channel_count(primary_local: str) -> int | None:
 
     EDF/BDF: `ns` at bytes 252-256, then ns 16-byte labels; the annotation
     pseudo-signal is not a channel. BrainVision: `NumberOfChannels` in the
-    `.vhdr` text. Anything unreadable returns None, which leaves the gate on
-    channels.tsv alone -- exactly its behaviour before this existed.
+    `.vhdr`'s `[Common Infos]` section. Anything unreadable returns None, which
+    leaves the gate on channels.tsv alone -- exactly its behavior before this
+    existed.
     """
     ext = lower_ext(primary_local)
     try:
@@ -2372,7 +2374,13 @@ def file_declared_channel_count(primary_local: str) -> int | None:
             return sum(1 for label in labels if label not in EDF_ANNOTATION_LABELS)
         if ext == ".vhdr":
             with open(primary_local, encoding="utf-8", errors="replace") as fh:
-                m = re.search(r"^\s*NumberOfChannels\s*=\s*(\d+)", fh.read(), re.MULTILINE)
+                text = fh.read()
+            # Scoped to [Common Infos], the section MNE reads it from, so a
+            # comment elsewhere in the header can never supply the count.
+            section = re.search(r"^\[Common Infos\][^\n]*\n(.*?)(?=^\[|\Z)", text, re.M | re.S)
+            m = section and re.search(
+                r"^\s*NumberOfChannels\s*=\s*(\d+)", section.group(1), re.MULTILINE
+            )
             return int(m.group(1)) if m else None
     except (OSError, ValueError):
         return None

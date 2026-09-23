@@ -70,11 +70,13 @@ export type ZarrUnitsReport = z.infer<typeof zarrUnitsReportSchema>;
  *  holds, while the store serves every channel the file's own header declares
  *  (faithful to the data; the sidecar over-declares). Mirrors the schema's
  *  closed `channels_tsv_count_mismatch` object. */
-export const zarrChannelsTsvCountMismatchSchema = z.object({
-  channels_tsv: z.number().int().positive(),
-  in_file: z.number().int().nonnegative(),
-  in_store: z.number().int().nonnegative(),
-});
+export const zarrChannelsTsvCountMismatchSchema = z
+  .object({
+    channels_tsv: z.number().int().positive(),
+    in_file: z.number().int().nonnegative(),
+    in_store: z.number().int().nonnegative(),
+  })
+  .passthrough();
 
 /** ADR 0028 Signal-Space Separation record, present exactly when a store's
  *  `derived` is true. The keys named here are what `generate_zarr.py`'s
