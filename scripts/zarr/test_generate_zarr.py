@@ -3010,6 +3010,33 @@ def _crashing_worker(primary, peak_bytes=None):
     return {"ok": True, "primary": primary, "entry": {"zarr": primary + ".zarr"}}
 
 
+def _budget_worker(primary, peak_bytes=None):
+    """Fault-injection worker for the in-run memory retry (#1483). Module-level so
+    it pickles. A recording whose path carries ``need-<MiB>`` needs that much
+    reserve: dispatched with less, it returns what ``convert_one`` returns for a
+    memory failure (the real ``memory_failure_result``); with enough, it
+    converts. A converted result also carries the reserve and the worker
+    context's ``mem_budget`` it ran under, and when it ran, so a test can tell
+    which pass produced it and whether two runs overlapped."""
+    started = time.monotonic()
+    marker = next((part for part in primary.split("_") if part.startswith("need-")), None)
+    need = int(marker.split("-")[1]) * 1024**2 if marker else 0
+    time.sleep(0.1)
+    reserve = peak_bytes or 0
+    if need > reserve:
+        return memory_failure_result(
+            primary, MemoryError(f"needed {need >> 20} MiB, had {reserve >> 20} MiB")
+        )
+    return {
+        "ok": True,
+        "primary": primary,
+        "entry": {"zarr": primary + ".zarr"},
+        "reserve": peak_bytes,
+        "mem_budget": generate_zarr._CTX.get("mem_budget"),
+        "span": (started, time.monotonic()),
+    }
+
+
 class TestMemoryFailureClassification(unittest.TestCase):
     """#1110: a runtime OOM must be explainable to the viewer but still retryable."""
 
@@ -3531,6 +3558,113 @@ class TestPoolBreakRecovery(unittest.TestCase):
         self.assertEqual(len(results), 5)
         self.assertTrue(all(r["ok"] for r in results))
         self.assertEqual(breaks, 0)
+
+
+class TestSerialMemoryRetry(unittest.TestCase):
+    """#1483: a recording that exceeds its memory reserve is retried ONCE, alone,
+    at the end of the run, with the budget the node offers then. Before, it waited
+    1h-7d for a retry round that rebuilt the whole dataset under the same budget
+    and mostly failed the same way."""
+
+    MIB = 1024**2
+    RESERVE = 100 * MIB
+    RETRY = 512 * MIB
+
+    @staticmethod
+    def _rec(i, need=0):
+        tag = f"_need-{need}" if need else ""
+        return f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest{tag}_eeg.set"
+
+    def _run(self, primaries, retry_peak=None, cpu_cap=3, with_retry=True):
+        retry_peak = self.RETRY if retry_peak is None else retry_peak
+        peaks = {p: self.RESERVE for p in primaries}
+        results, indices, asked = [], [], []
+
+        def memory_retry():
+            asked.append(retry_peak)
+            return {"mem_budget": retry_peak}, retry_peak
+
+        def record(r, i):
+            results.append(r)
+            indices.append(i)
+
+        _drain_with_admission(
+            list(primaries), peaks, cpu_cap, 10**12, {"mem_budget": self.RESERVE},
+            record, worker=_budget_worker,
+            memory_retry=memory_retry if with_retry else None,
+        )
+        self.assertEqual(indices, list(range(1, len(primaries) + 1)),
+                         "every recording is reported exactly once, in order")
+        self.assertEqual(sorted(r["primary"] for r in results), sorted(primaries))
+        return {r["primary"]: r for r in results}, asked
+
+    def test_a_memory_failure_converts_when_retried_alone(self):
+        small = [self._rec(i) for i in range(1, 6)]
+        big = [self._rec(i, need=300) for i in range(6, 8)]
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            results, asked = self._run(small[:2] + big[:1] + small[2:] + big[1:])
+
+        self.assertTrue(all(r["ok"] for r in results.values()))
+        self.assertEqual(len(asked), 1, "the retry budget is read once per run")
+        for p in big:
+            # Retried with the budget read AFTER the parallel pass, both as the
+            # reserve and as the worker context's ceiling.
+            self.assertEqual(results[p]["reserve"], self.RETRY)
+            self.assertEqual(results[p]["mem_budget"], self.RETRY)
+        for p in small:
+            self.assertEqual(results[p]["reserve"], self.RESERVE)
+            self.assertEqual(results[p]["mem_budget"], self.RESERVE)
+        # At the end of the run, and one at a time.
+        first_pass_end = max(results[p]["span"][1] for p in small)
+        spans = sorted(results[p]["span"] for p in big)
+        self.assertGreaterEqual(spans[0][0], first_pass_end)
+        self.assertGreaterEqual(spans[1][0], spans[0][1], "retries must not overlap")
+        self.assertIn("2 of 2 converted", out.getvalue())
+
+    def test_a_recording_that_fails_again_is_reported_once(self):
+        huge = self._rec(9, need=1024)
+        with contextlib.redirect_stdout(io.StringIO()):
+            results, _ = self._run([self._rec(1), huge, self._rec(2)])
+        r = results[huge]
+        self.assertFalse(r["ok"])
+        # Still the retryable memory code, so it goes to `pending` for the next
+        # round rather than being recorded as a property of the data.
+        self.assertEqual(r["code"], RecordingMemoryExceeded.code)
+        self.assertIn("had 512 MiB", r["error"], "the reported failure is the retry's")
+
+    def test_no_second_attempt_when_the_node_offers_no_more(self):
+        big = self._rec(1, need=300)
+        results, asked = self._run([big, self._rec(2)], retry_peak=self.RESERVE)
+        self.assertEqual(asked, [self.RESERVE])
+        self.assertFalse(results[big]["ok"])
+        self.assertIn("had 100 MiB", results[big]["error"])
+
+    def test_retries_per_run_are_capped(self):
+        # Each retry runs alone, so a dataset where most recordings trip their
+        # reserve must not turn a parallel run into a serial one.
+        self.addCleanup(setattr, generate_zarr, "MEMORY_RETRY_MAX", generate_zarr.MEMORY_RETRY_MAX)
+        generate_zarr.MEMORY_RETRY_MAX = 1
+        big = [self._rec(i, need=300) for i in range(1, 4)]
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            results, _ = self._run(big)
+        converted = [p for p in big if results[p]["ok"]]
+        self.assertEqual(len(converted), 1)
+        for p in set(big) - set(converted):
+            self.assertIn("had 100 MiB", results[p]["error"])
+        self.assertIn("2 more left for the next round", out.getvalue())
+
+    def test_without_a_retry_hook_failures_report_as_before(self):
+        big = self._rec(1, need=300)
+        results, asked = self._run([big, self._rec(2)], with_retry=False)
+        self.assertEqual(asked, [])
+        self.assertIn("had 100 MiB", results[big]["error"])
+
+    def test_a_clean_run_never_reads_a_retry_budget(self):
+        # Reading it samples /proc/meminfo three times; a run with nothing to
+        # retry has no reason to.
+        results, asked = self._run([self._rec(i) for i in range(1, 4)])
+        self.assertTrue(all(r["ok"] for r in results.values()))
+        self.assertEqual(asked, [])
 
 
 class TestMemoryFailureForensics(unittest.TestCase):

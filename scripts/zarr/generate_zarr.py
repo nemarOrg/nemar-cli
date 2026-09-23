@@ -449,6 +449,7 @@ def data_segment_bytes() -> int | None:
         return None
     return None
 
+
 def memory_snapshot() -> dict[str, int]:
     """VmData, VmRSS and VmHWM from /proc/self/status, plus the soft RLIMIT_DATA,
     at this instant. Whatever cannot be read (macOS, a locked-down /proc) is
@@ -5453,6 +5454,13 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
                 shutil.rmtree(d, ignore_errors=True)
 
 
+# How many memory-budget failures one run retries serially at its end (#1483).
+# Each retry runs ALONE, so a dataset where most recordings trip the budget
+# would otherwise turn a parallel run into a serial one; past this many, the
+# rest go to the next retry round as before.
+MEMORY_RETRY_MAX = int(os.environ.get("ZARR_MEMORY_RETRY_MAX", "64"))
+
+
 def _next_admission(
     pending_peaks: list[int], in_flight_count: int, running_peak: int,
     cpu_cap: int, ram_ceiling: int,
@@ -5473,7 +5481,7 @@ def _next_admission(
 
 
 def _drain_with_admission(
-    convert, peaks, cpu_cap, ram_ceiling, ctx, record, worker=None
+    convert, peaks, cpu_cap, ram_ceiling, ctx, record, worker=None, memory_retry=None
 ) -> tuple[int, int]:
     """Run ``convert_one`` over ``convert`` in a pool of up to ``cpu_cap`` workers,
     dispatching a recording only while the SUM of in-flight projected peaks stays
@@ -5499,21 +5507,49 @@ def _drain_with_admission(
     Retrying suspects in PARALLEL instead would be wrong: the culprit kills the
     pool again, and an innocent recording that happened to be in flight for both
     breaks gets blamed. That is not hypothetical -- the tests caught exactly it.
+
+    3. Serial memory retry (#1483), when ``memory_retry`` is given. A recording
+       that failed with a retryable memory code (``RETRYABLE_CODES``) is held
+       back instead of reported. Once the passes above are done, the node's RAM
+       is no longer shared with the parallel pass, so ``memory_retry()`` is
+       called ONCE, then, and returns ``(retry_ctx, retry_peak)``: the worker
+       context and the per-recording reserve to retry with, read at that moment.
+       Each held recording whose original reserve was below ``retry_peak`` is
+       re-run alone with it, up to ``MEMORY_RETRY_MAX``; the rest are reported as
+       they failed. Before this, such a failure waited 1h-7d for a retry round
+       that rebuilt the whole dataset under the same budget and mostly failed the
+       same way.
     """
     worker = worker or convert_one
     done = 0
     pool_breaks = 0
+    held: list[dict] = []  # memory failures awaiting the serial retry
+    retried: set = set()
+    recovered = 0
 
     def report(r: dict) -> None:
-        nonlocal done
+        nonlocal done, recovered
+        p = r.get("primary")
+        if (
+            memory_retry is not None
+            and not r.get("ok")
+            and r.get("code") in RETRYABLE_CODES
+            and p not in retried
+        ):
+            held.append(r)
+            return
+        if p in retried and r.get("ok"):
+            recovered += 1
         done += 1
         record(r, done)
 
-    def drain_once(queue: list, cap: int) -> list:
+    def drain_once(queue: list, cap: int, run_ctx=None, run_peaks=None) -> list:
         """Drain ``queue`` (mutated in place) with up to ``cap`` workers until it
         is empty or the pool breaks. Returns the recordings that were in flight
         at the moment of the break -- empty when the pass completed cleanly."""
         nonlocal pool_breaks
+        run_ctx = ctx if run_ctx is None else run_ctx
+        run_peaks = peaks if run_peaks is None else run_peaks
         in_flight: dict = {}
         running_peak = 0
         # One pass observes at most one pool death, but it can surface twice (a
@@ -5531,7 +5567,7 @@ def _drain_with_admission(
             nonlocal running_peak
             while queue:
                 idx = _next_admission(
-                    [peaks[p] for p in queue], len(in_flight), running_peak,
+                    [run_peaks[p] for p in queue], len(in_flight), running_peak,
                     cap, ram_ceiling,
                 )
                 if idx is None:
@@ -5541,14 +5577,14 @@ def _drain_with_admission(
                 # neither the queue nor in_flight -- silently dropped, which is
                 # the very failure this recovery exists to prevent.
                 p = queue[idx]
-                fut = ex.submit(worker, p, peaks[p])
+                fut = ex.submit(worker, p, run_peaks[p])
                 queue.pop(idx)
-                in_flight[fut] = (p, peaks[p])
-                running_peak += peaks[p]
+                in_flight[fut] = (p, run_peaks[p])
+                running_peak += run_peaks[p]
 
         try:
             with ProcessPoolExecutor(
-                max_workers=cap, initializer=_init_worker, initargs=(ctx,)
+                max_workers=cap, initializer=_init_worker, initargs=(run_ctx,)
             ) as ex:
                 admit()
                 while in_flight:
@@ -5594,18 +5630,52 @@ def _drain_with_admission(
             "recording(s) one at a time to find the culprit",
             flush=True,
         )
+    killed = ("killed its worker process while running alone "
+              "(out of memory, or a native crash in the reader)")
     while suspects:
         culprits = drain_once(suspects, 1)
         # cap=1, so at most one recording was in flight: it died running alone.
         for p in culprits:
-            killed = ("killed its worker process while running alone "
-                      "(out of memory, or a native crash in the reader)")
             report({
                 "ok": False,
                 "primary": p,
                 "error": killed,
                 "detail": failure_detail(killed),
             })
+
+    if held:
+        retry_ctx, retry_peak = memory_retry()
+        eligible = [r for r in held if retry_peak > peaks[r["primary"]]]
+        to_retry = eligible[:MEMORY_RETRY_MAX]
+        retry_set = {r["primary"] for r in to_retry}
+        for r in held:
+            if r["primary"] not in retry_set:
+                retried.add(r["primary"])  # final: report, never hold again
+                report(r)
+        if to_retry:
+            print(
+                f"::warning::retrying {len(to_retry)} recording(s) that exceeded their "
+                f"memory budget, one at a time with ~{retry_peak / 1024**3:.1f} GiB each"
+                + (f" ({len(eligible) - len(to_retry)} more left for the next round)"
+                   if len(eligible) > len(to_retry) else ""),
+                flush=True,
+            )
+            queue = [r["primary"] for r in to_retry]
+            retried.update(queue)
+            retry_peaks = {p: retry_peak for p in queue}
+            while queue:
+                for p in drain_once(queue, 1, run_ctx=retry_ctx, run_peaks=retry_peaks):
+                    report({
+                        "ok": False,
+                        "primary": p,
+                        "error": killed,
+                        "detail": failure_detail(killed),
+                    })
+            print(
+                f"[zarr] memory retry: {recovered} of {len(to_retry)} converted when "
+                "given the node alone",
+                flush=True,
+            )
 
     if pool_breaks:
         # ::warning:: not [zarr]: on the cron this lands in a multi-megabyte plain
@@ -5997,13 +6067,26 @@ def main() -> int:
             "projections": projections,
         }
         pool_breaks = 0
-        if cpu_cap == 1 or n <= 1:
+        # --jobs 1 converts in this process, as an operator asked for. Anything
+        # else, a single recording included, goes through the pool: it is the
+        # only path with the serial memory retry, and a single-recording run is
+        # where a large recording most often trips its reserve (#1483).
+        if cpu_cap == 1 or not convert:
             _init_worker(ctx)
             for i, p in enumerate(convert, 1):
                 record(convert_one(p, peaks[p]), i)
         else:
+            def memory_retry() -> tuple[dict, int]:
+                # Read now, after the parallel pass: the retry runs alone, so it
+                # may have the whole usable node, never past the hardware ceiling.
+                budget = per_recording_ceiling_bytes()
+                if ctx["hard_ceiling"]:
+                    budget = min(budget, ctx["hard_ceiling"])
+                return {**ctx, "mem_budget": budget}, budget
+
             pool_breaks, _max_suspects = _drain_with_admission(
-                convert, peaks, cpu_cap, ram_ceiling, ctx, record
+                convert, peaks, cpu_cap, ram_ceiling, ctx, record,
+                memory_retry=memory_retry,
             )
 
     calibration = calibration_summary(measured, projections, streamed_paths)
