@@ -78,6 +78,8 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     INMEM_MEM_FACTOR,
     usable_ram_bytes,
     memory_failure_result,
+    memory_snapshot,
+    log_memory_failure,
     count_infra_failures,
     RecordingMemoryExceeded,
     MaxShieldUncalibrated,
@@ -3124,6 +3126,33 @@ def _crashing_worker(primary, peak_bytes=None):
     return {"ok": True, "primary": primary, "entry": {"zarr": primary + ".zarr"}}
 
 
+def _budget_worker(primary, peak_bytes=None):
+    """Fault-injection worker for the in-run memory retry (#1483). Module-level so
+    it pickles. A recording whose path carries ``need-<MiB>`` needs that much
+    reserve: dispatched with less, it returns what ``convert_one`` returns for a
+    memory failure (the real ``memory_failure_result``); with enough, it
+    converts. A converted result also carries the reserve and the worker
+    context's ``mem_budget`` it ran under, and when it ran, so a test can tell
+    which pass produced it and whether two runs overlapped."""
+    started = time.monotonic()
+    marker = next((part for part in primary.split("_") if part.startswith("need-")), None)
+    need = int(marker.split("-")[1]) * 1024**2 if marker else 0
+    time.sleep(0.1)
+    reserve = peak_bytes or 0
+    if need > reserve:
+        return memory_failure_result(
+            primary, MemoryError(f"needed {need >> 20} MiB, had {reserve >> 20} MiB")
+        )
+    return {
+        "ok": True,
+        "primary": primary,
+        "entry": {"zarr": primary + ".zarr"},
+        "reserve": peak_bytes,
+        "mem_budget": generate_zarr._CTX.get("mem_budget"),
+        "span": (started, time.monotonic()),
+    }
+
+
 class TestMemoryFailureClassification(unittest.TestCase):
     """#1110: a runtime OOM must be explainable to the viewer but still retryable."""
 
@@ -3229,7 +3258,11 @@ class TestMemoryErrorBeforePeakResetIsTyped(unittest.TestCase):
 
     def test_memory_error_before_reset_returns_typed_failure(self):
         gz = self._inject(MemoryError("cannot allocate"))
-        res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
+        # #1483: the stack is logged, not just the first line kept in the result.
+        self.assertIn("exceeded its memory budget", out.getvalue())
+        self.assertIn("Traceback", out.getvalue())
         self.assertFalse(res["ok"])
         # The whole point: coded, so the queue can mark it terminal instead of
         # burning five attempts on a recording that will never fit.
@@ -3244,9 +3277,11 @@ class TestMemoryErrorBeforePeakResetIsTyped(unittest.TestCase):
         # stack cannot be mapped at the RLIMIT_DATA limit (on004696, 2026-09-03).
         # Uncoded it broke the pool; typed it is the same verdict as MemoryError.
         gz = self._inject(RuntimeError("can't start new thread"))
-        res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
         self.assertFalse(res["ok"])
         self.assertEqual(res["code"], gz.RecordingMemoryExceeded.code)
+        self.assertIn("can't start new thread", out.getvalue())
 
     def test_enomem_at_the_limit_is_typed_as_memory(self):
         gz = self._inject(OSError(errno.ENOMEM, "Cannot allocate memory"))
@@ -3261,9 +3296,11 @@ class TestMemoryErrorBeforePeakResetIsTyped(unittest.TestCase):
         # The generic handler never touched rss_trusted, so it was already fine;
         # assert it stays that way rather than being swept into the typed branch.
         gz = self._inject(RuntimeError("something else"))
-        res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
         self.assertFalse(res["ok"])
         self.assertIsNone(res["code"])
+        self.assertNotIn("exceeded its memory budget", out.getvalue())
 
 
 class TestMaxShieldWiringInConvertOne(unittest.TestCase):
@@ -3637,6 +3674,165 @@ class TestPoolBreakRecovery(unittest.TestCase):
         self.assertEqual(len(results), 5)
         self.assertTrue(all(r["ok"] for r in results))
         self.assertEqual(breaks, 0)
+
+
+class TestSerialMemoryRetry(unittest.TestCase):
+    """#1483: a recording that exceeds its memory reserve is retried ONCE, alone,
+    at the end of the run, with the budget the node offers then. Before, it waited
+    1h-7d for a retry round that rebuilt the whole dataset under the same budget
+    and mostly failed the same way."""
+
+    MIB = 1024**2
+    RESERVE = 100 * MIB
+    RETRY = 512 * MIB
+
+    @staticmethod
+    def _rec(i, need=0):
+        tag = f"_need-{need}" if need else ""
+        return f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest{tag}_eeg.set"
+
+    def _run(self, primaries, retry_peak=None, cpu_cap=3, with_retry=True):
+        retry_peak = self.RETRY if retry_peak is None else retry_peak
+        peaks = {p: self.RESERVE for p in primaries}
+        results, indices, asked = [], [], []
+
+        def memory_retry():
+            asked.append(retry_peak)
+            return {"mem_budget": retry_peak}, retry_peak
+
+        def record(r, i):
+            results.append(r)
+            indices.append(i)
+
+        _drain_with_admission(
+            list(primaries), peaks, cpu_cap, 10**12, {"mem_budget": self.RESERVE},
+            record, worker=_budget_worker,
+            memory_retry=memory_retry if with_retry else None,
+        )
+        self.assertEqual(indices, list(range(1, len(primaries) + 1)),
+                         "every recording is reported exactly once, in order")
+        self.assertEqual(sorted(r["primary"] for r in results), sorted(primaries))
+        return {r["primary"]: r for r in results}, asked
+
+    def test_a_memory_failure_converts_when_retried_alone(self):
+        small = [self._rec(i) for i in range(1, 6)]
+        big = [self._rec(i, need=300) for i in range(6, 8)]
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            results, asked = self._run(small[:2] + big[:1] + small[2:] + big[1:])
+
+        self.assertTrue(all(r["ok"] for r in results.values()))
+        self.assertEqual(len(asked), 1, "the retry budget is read once per run")
+        for p in big:
+            # Retried with the budget read AFTER the parallel pass, both as the
+            # reserve and as the worker context's ceiling.
+            self.assertEqual(results[p]["reserve"], self.RETRY)
+            self.assertEqual(results[p]["mem_budget"], self.RETRY)
+        for p in small:
+            self.assertEqual(results[p]["reserve"], self.RESERVE)
+            self.assertEqual(results[p]["mem_budget"], self.RESERVE)
+        # At the end of the run, and one at a time.
+        first_pass_end = max(results[p]["span"][1] for p in small)
+        spans = sorted(results[p]["span"] for p in big)
+        self.assertGreaterEqual(spans[0][0], first_pass_end)
+        self.assertGreaterEqual(spans[1][0], spans[0][1], "retries must not overlap")
+        self.assertIn("2 of 2 converted", out.getvalue())
+
+    def test_a_recording_that_fails_again_is_reported_once(self):
+        huge = self._rec(9, need=1024)
+        with contextlib.redirect_stdout(io.StringIO()):
+            results, _ = self._run([self._rec(1), huge, self._rec(2)])
+        r = results[huge]
+        self.assertFalse(r["ok"])
+        # Still the retryable memory code, so it goes to `pending` for the next
+        # round rather than being recorded as a property of the data.
+        self.assertEqual(r["code"], RecordingMemoryExceeded.code)
+        self.assertIn("had 512 MiB", r["error"], "the reported failure is the retry's")
+
+    def test_no_second_attempt_when_the_node_offers_no_more(self):
+        big = self._rec(1, need=300)
+        results, asked = self._run([big, self._rec(2)], retry_peak=self.RESERVE)
+        self.assertEqual(asked, [self.RESERVE])
+        self.assertFalse(results[big]["ok"])
+        self.assertIn("had 100 MiB", results[big]["error"])
+
+    def test_retries_per_run_are_capped(self):
+        # Each retry runs alone, so a dataset where most recordings trip their
+        # reserve must not turn a parallel run into a serial one.
+        self.addCleanup(setattr, generate_zarr, "MEMORY_RETRY_MAX", generate_zarr.MEMORY_RETRY_MAX)
+        generate_zarr.MEMORY_RETRY_MAX = 1
+        big = [self._rec(i, need=300) for i in range(1, 4)]
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            results, _ = self._run(big)
+        converted = [p for p in big if results[p]["ok"]]
+        self.assertEqual(len(converted), 1)
+        for p in set(big) - set(converted):
+            self.assertIn("had 100 MiB", results[p]["error"])
+        self.assertIn("2 more left for the next round", out.getvalue())
+
+    def test_without_a_retry_hook_failures_report_as_before(self):
+        big = self._rec(1, need=300)
+        results, asked = self._run([big, self._rec(2)], with_retry=False)
+        self.assertEqual(asked, [])
+        self.assertIn("had 100 MiB", results[big]["error"])
+
+    def test_a_clean_run_never_reads_a_retry_budget(self):
+        # Reading it samples /proc/meminfo three times; a run with nothing to
+        # retry has no reason to.
+        results, asked = self._run([self._rec(i) for i in range(1, 4)])
+        self.assertTrue(all(r["ok"] for r in results.values()))
+        self.assertEqual(asked, [])
+
+
+class TestMemoryFailureForensics(unittest.TestCase):
+    """#1483: a memory failure logs where it was raised and how close the worker
+    was to its limit; on004789's could only be attributed by reading source."""
+
+    def test_snapshot_reads_the_process_where_proc_exists(self):
+        snap = memory_snapshot()
+        if sys.platform.startswith("linux"):
+            for key in ("VmData", "VmRSS", "VmHWM"):
+                self.assertGreater(snap[key], 1024**2)
+            self.assertGreaterEqual(snap["VmHWM"], snap["VmRSS"])
+        else:
+            self.assertNotIn("VmData", snap)
+
+    def test_snapshot_reports_a_finite_data_limit(self):
+        import resource
+
+        saved = resource.getrlimit(resource.RLIMIT_DATA)
+        limit = (data_segment_bytes() or 0) + 64 * 1024**3
+        if saved[1] != resource.RLIM_INFINITY:
+            limit = min(limit, saved[1])
+        try:
+            resource.setrlimit(resource.RLIMIT_DATA, (limit, saved[1]))
+        except (OSError, ValueError):
+            self.skipTest("RLIMIT_DATA cannot be set here")
+        self.addCleanup(resource.setrlimit, resource.RLIMIT_DATA, saved)
+        self.assertEqual(memory_snapshot()["RLIMIT_DATA"], limit)
+
+    def test_the_log_names_the_recording_and_the_raising_frame(self):
+        def allocate_shard_buffer():
+            raise MemoryError("Unable to allocate 60.4 MiB")
+
+        try:
+            allocate_shard_buffer()
+        except MemoryError as exc:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                log_memory_failure("sub-01/ieeg/sub-01_ieeg.edf", exc)
+        text = out.getvalue()
+        self.assertTrue(text.startswith("::warning::'sub-01/ieeg/sub-01_ieeg.edf' exceeded"))
+        self.assertIn("allocate_shard_buffer", text)
+        self.assertIn("MemoryError: Unable to allocate 60.4 MiB", text)
+
+    def test_logging_never_raises(self):
+        # A failure inside the log must not turn a typed memory failure into an
+        # uncoded one that retries forever.
+        class Unprintable:
+            def __repr__(self):
+                raise MemoryError("no room to format this")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            log_memory_failure(Unprintable(), MemoryError("x"))
 
 
 class TestStoreMetadataDiagnostics(unittest.TestCase):
@@ -7577,3 +7773,88 @@ class TestConvertOneEndToEnd(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMainRoutesSingleRecordingsThroughThePool(unittest.TestCase):
+    """#1483: a single-recording run with --jobs > 1 converts in a pool worker,
+    the only path with the serial memory retry; --jobs 1 stays in-process.
+
+    Observed without substituting anything: the in-process path initializes the
+    worker context (`_CTX`) in THIS process, and a pool worker initializes its
+    own, leaving this process's untouched. A real EDF is converted either way.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        self.s3 = os.path.join(self.dir, "s3")
+        os.makedirs(os.path.join(self.repo, "sub-01", "eeg"))
+        os.makedirs(self.s3)
+
+        def git(*args):
+            subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True)
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.org")
+        git("config", "user.name", "t")
+        build_real_edf(os.path.join(self.repo, "sub-01", "eeg"), "sub-01_task-rest_eeg", seconds=10)
+        git("add", "-A")
+        git("commit", "-q", "-m", "init")
+
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write(STUB_AWS)
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        saved = (os.environ.get("PATH"), os.environ.get("ZARR_TEST_S3_ROOT"))
+        os.environ["PATH"] = bindir + os.pathsep + (saved[0] or "")
+        os.environ["ZARR_TEST_S3_ROOT"] = self.s3
+        self.addCleanup(self._restore_env, saved)
+        saved_ctx = dict(generate_zarr._CTX)
+        self.addCleanup(lambda: (generate_zarr._CTX.clear(), generate_zarr._CTX.update(saved_ctx)))
+        generate_zarr._CTX.clear()
+
+    @staticmethod
+    def _restore_env(saved):
+        for key, value in zip(("PATH", "ZARR_TEST_S3_ROOT"), saved, strict=True):
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def run_main(self, jobs: int) -> str:
+        argv = [
+            "generate_zarr.py", "--dataset-id", "on008083", "--repo-dir", self.repo,
+            "--bucket", "nemar-test", "--callback-out", os.path.join(self.dir, "cb.json"),
+            "--local", "--clean", "--jobs", str(jobs),
+            # Closed port: the catalog read fails fast instead of reaching the
+            # real API; provenance is best-effort and not under test here.
+            "--api-base", "http://127.0.0.1:9",
+        ]
+        saved, sys.argv = sys.argv, argv
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = generate_zarr.main()
+        finally:
+            sys.argv = saved
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertIn("converted sub-01/eeg/sub-01_task-rest_eeg.edf", out.getvalue())
+        return out.getvalue()
+
+    def test_one_recording_with_several_jobs_converts_in_a_worker(self):
+        self.run_main(jobs=2)
+        self.assertEqual(generate_zarr._CTX, {}, "converted in-process, not in the pool")
+
+    def test_jobs_one_still_converts_in_process(self):
+        self.run_main(jobs=1)
+        self.assertEqual(generate_zarr._CTX.get("dataset_id"), "on008083")
