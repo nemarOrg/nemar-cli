@@ -13,6 +13,51 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## 0.10.6 - 2026-09-24
+
+### Added
+
+- **`get_events` filters rows and columns (#1501).** Two optional inputs: `where`, a
+  column name to the values to keep (compared as strings, every named column must
+  match), and `columns`, the columns to return (`onset_s` and `sample_index` always
+  come back). Every answer carries `columns_summary`, each column with its distinct and
+  null counts and, when there are at most 50 short ones, its values, computed before
+  `where`, so one call with `limit: 1` shows what a filter can ask for. A column the
+  recording does not have is refused with the columns it has. For ERP CORE's N170
+  recording, faces and scrambled faces with one column is about 10 KB instead of
+  220 KB.
+
+### Fixed
+
+- **`get_events` answers recordings of a dataset whose `events.parquet` is large
+  (#1499).** A file over the whole-file bound (16 MB or 100,000 rows) used to refuse
+  every recording. It now reads only the row groups whose `store_path` statistics can
+  hold the requested recording, and refuses only when those are over the bound too.
+  nm000132 (ERP CORE, 153,722 rows) answers each of its 240 recordings.
+- **The Zarr channel-count gate trusts the recording file (#1481).** It compared the
+  converted channels with the BIDS sidecar; it now reads the EDF, BDF or BrainVision
+  header's own count.
+- **Zarr conversions fail less for memory, and retry what failed (#1484, #1485,
+  #1486, #1488, #1489).** Each worker bounds its concurrency and allocator arenas; a
+  memory failure is retried alone within the run and logged with the worker's memory
+  at that moment; a retry round reconverts only pending recordings rather than the
+  whole dataset; admission re-reads the node's available memory as it runs; and
+  biosigio 1.2.8 writes each shard once rather than once per channel (110 s to 8.8 s
+  and 5.1 GB to 1.8 GB on a 128-channel, 30-minute EDF).
+- **Staging's catalog sweeps cover the exemplar fleet (#1497),** so test.nemar.org
+  shows those datasets' Zarr tags and viewer filter as production shows the datasets
+  they copy.
+
+### Changed
+
+- **The catalog sorts by when a dataset went public (#1478):** its first publication,
+  else its publish date, else its creation, one definition read by every date-based
+  ordering and filter.
+- **`read_window`'s `python_browser` recipe leads with eegprep-lean's `read_window`
+  (#1487),** which returns physical units with channel labels. It used to lead with
+  `open_array`, whose stored digital counts plot as a figure that looks like EEG and is
+  wrong.
+
 ## 0.10.5 - 2026-09-21
 
 ### Added
