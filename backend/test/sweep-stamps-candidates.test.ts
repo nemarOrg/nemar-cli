@@ -50,7 +50,9 @@ import {
   ARCHIVE_SWEEP_READY_SQL,
   ARCHIVE_SWEEP_SKIP_SQL,
   ARCHIVE_SWEEP_STAMP_ONLY_SQL,
+  CHANNEL_MONTAGE_SWEEP_REMAINING_SQL,
   CHANNEL_MONTAGE_SWEEP_WRITE_SQL,
+  HED_SWEEP_REMAINING_SQL,
   HED_SWEEP_STAMP_ONLY_SQL,
   HED_SWEEP_WRITE_SQL,
   ZARR_SWEEP_READY_SQL,
@@ -151,6 +153,7 @@ function seedDataset(
     owner?: number;
     visibility?: "public" | "private";
     isSandbox?: 0 | 1;
+    isExemplar?: 0 | 1;
     githubRepo?: string | null;
     modalities?: string | null;
     zarrStatus?: string | null;
@@ -158,15 +161,16 @@ function seedDataset(
   } = {},
 ): void {
   db.prepare(
-    `INSERT INTO datasets (dataset_id, name, owner_user_id, visibility, is_sandbox,
+    `INSERT INTO datasets (dataset_id, name, owner_user_id, visibility, is_sandbox, is_exemplar,
                            github_repo, modalities, zarr_status, sweep_stamps)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     id,
     opts.owner ?? 1,
     opts.visibility ?? "public",
     opts.isSandbox ?? 0,
+    opts.isExemplar ?? 0,
     opts.githubRepo === undefined ? null : opts.githubRepo,
     opts.modalities ?? null,
     opts.zarrStatus ?? null,
@@ -516,6 +520,105 @@ describe("POST /admin/datasets/data-integrity-sweep candidate selection and stam
 // against a row whose sweep_stamps is NULL: the shape on which a missing
 // COALESCE makes json_set return NULL, silently dropping the stamp and
 // leaving the row a permanent re-sweep candidate.
+
+// ---------------------------------------------------------------------------
+// The exemplar fleet (#1496)
+// ---------------------------------------------------------------------------
+
+/**
+ * Exemplars are inserted `is_sandbox = 1, is_exemplar = 1`; every catalog-fact
+ * sweep must select them as it selects a real dataset, and must still skip a
+ * plain sandbox row. Before #1496 each of these excluded both, so a converted
+ * staging exemplar never got its zarr_status and read as having no Zarr copy.
+ */
+describe("the catalog-fact sweeps select exemplars, and still skip plain sandbox rows (#1496)", () => {
+  const repo = (id: string) => `nemarDatasets/${id}`;
+  const exemplar = { isSandbox: 1 as const, isExemplar: 1 as const };
+  const sandbox = { isSandbox: 1 as const };
+
+  test("archive-sweep", async () => {
+    seedDataset("nm000050");
+    seedDataset("xx099903", exemplar);
+    seedDataset("xx000051", sandbox);
+    const body = (await (await post("/admin/datasets/archive-sweep")).json()) as {
+      errors: { dataset_id: string }[];
+      remaining: number | null;
+    };
+    expect(body.errors.map((e) => e.dataset_id).sort()).toEqual(["nm000050", "xx099903"]);
+    expect(body.remaining).toBe(2); // the remaining count carries the carve-out too
+  });
+
+  test("zarr-sweep", async () => {
+    seedDataset("nm000052");
+    seedDataset("xx099903", exemplar);
+    seedDataset("xx000053", sandbox);
+    const body = (await (await post("/admin/datasets/zarr-sweep")).json()) as {
+      errors: { dataset_id: string }[];
+      remaining: number | null;
+    };
+    expect(body.errors.map((e) => e.dataset_id).sort()).toEqual(["nm000052", "xx099903"]);
+    expect(body.remaining).toBe(2);
+  });
+
+  test("channel-montage-sweep", async () => {
+    seedDataset("nm000054", { githubRepo: repo("nm000054"), modalities: "eeg" });
+    seedDataset("xx099901", { ...exemplar, githubRepo: repo("xx099901"), modalities: "eeg" });
+    seedDataset("xx000055", { ...sandbox, githubRepo: repo("xx000055"), modalities: "eeg" });
+    expect((await post("/admin/datasets/channel-montage-sweep")).status).toBe(500); // token fetch
+    expect(recordedCandidates("channel_montage_checked_at")).toEqual(["nm000054", "xx099901"]);
+    // Its remaining count runs only after a real token fetch; the exported SQL, on this db.
+    expect((db.query(CHANNEL_MONTAGE_SWEEP_REMAINING_SQL).get() as { n: number }).n).toBe(2);
+  });
+
+  test("hed-sweep", async () => {
+    seedDataset("nm000056", { githubRepo: repo("nm000056") });
+    seedDataset("xx099906", { ...exemplar, githubRepo: repo("xx099906") });
+    seedDataset("xx000057", { ...sandbox, githubRepo: repo("xx000057") });
+    expect((await post("/admin/datasets/hed-sweep")).status).toBe(500); // token fetch
+    expect(recordedCandidates("hed_checked_at")).toEqual(["nm000056", "xx099906"]);
+    expect((db.query(HED_SWEEP_REMAINING_SQL).get() as { n: number }).n).toBe(2);
+  });
+
+  test("data-integrity-sweep", async () => {
+    seedDataset("nm000058", { githubRepo: repo("nm000058") });
+    seedDataset("xx099903", { ...exemplar, githubRepo: repo("xx099903") });
+    seedDataset("xx000059", { ...sandbox, githubRepo: repo("xx000059") });
+    const first = (await (await post("/admin/datasets/data-integrity-sweep?limit=1")).json()) as {
+      processed: number;
+      remaining: number | null;
+    };
+    expect(first.processed).toBe(1); // nm000058 sorts first
+    expect(first.remaining).toBe(1); // the exemplar is still to do; the plain sandbox row never is
+    const body = (await (await post("/admin/datasets/data-integrity-sweep")).json()) as {
+      processed: number;
+    };
+    expect(body.processed).toBe(1);
+    expect(stamp("xx099903", "data_checked_at")).not.toBeNull();
+    expect(stamp("xx000059", "data_checked_at")).toBeNull();
+  });
+
+  test("vectorize/reindex-all", async () => {
+    for (const id of ["nm000060", "xx099903", "xx000061"]) {
+      seedDataset(id, id === "xx099903" ? exemplar : id === "xx000061" ? sandbox : {});
+    }
+    db.run("UPDATE datasets SET status = 'active'");
+    // The route refuses to run without both bindings; a dry run returns before
+    // either is used, so bare placeholders stand in for them here.
+    const res = await app.request(
+      "/admin/vectorize/reindex-all",
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ dry_run: true }),
+      },
+      { ...env(), AI: {}, VECTORIZE: {} } as unknown as Bindings,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { total: number; last_id: string };
+    expect(body.total).toBe(2);
+    expect(body.last_id).toBe("xx099903");
+  });
+});
 
 describe("per-candidate stamp writes persist on a fresh row and end candidacy", () => {
   const cases: [name: string, sql: string, key: string, binds: unknown[]][] = [
