@@ -52,11 +52,13 @@ earlier releases are described only by their generated notes.
 
 - **The catalog sorts by when a dataset went public (#1478):** its first publication,
   else its publish date, else its creation, one definition read by every date-based
-  ordering and filter.
+  ordering and filter. Catalog entries gain an optional `first_published_at`, null
+  until a dataset is first published and absent from older backends.
 - **`read_window`'s `python_browser` recipe leads with eegprep-lean's `read_window`
   (#1487),** which returns physical units with channel labels. It used to lead with
   `open_array`, whose stored digital counts plot as a figure that looks like EEG and is
-  wrong.
+  wrong. The recipe's `read_index(index_url=...)` needs eegprep-lean 0.1.0.dev2 or
+  later.
 
 ## 0.10.5 - 2026-09-21
 
