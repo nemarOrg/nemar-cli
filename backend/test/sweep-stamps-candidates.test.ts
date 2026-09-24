@@ -535,10 +535,15 @@ describe("the catalog-fact sweeps select exemplars, and still skip plain sandbox
   const repo = (id: string) => `nemarDatasets/${id}`;
   const exemplar = { isSandbox: 1 as const, isExemplar: 1 as const };
   const sandbox = { isSandbox: 1 as const };
+  // The fleet's own ids with their own modalities (scripts/exemplar-fleet.json):
+  // xx099903 is EMG, xx099904 EEG, xx099906 beh,eeg. An exemplar is created
+  // private and only goes public when it is published (routes/admin/exemplar.ts),
+  // so a private one is the ordinary pre-publish state, not a corner case.
 
   test("archive-sweep", async () => {
     seedDataset("nm000050");
-    seedDataset("xx099903", exemplar);
+    seedDataset("xx099903", { ...exemplar, modalities: "emg" });
+    seedDataset("xx099905", { ...exemplar, modalities: "eeg", visibility: "private" }); // not yet published
     seedDataset("xx000051", sandbox);
     const body = (await (await post("/admin/datasets/archive-sweep")).json()) as {
       errors: { dataset_id: string }[];
@@ -550,7 +555,8 @@ describe("the catalog-fact sweeps select exemplars, and still skip plain sandbox
 
   test("zarr-sweep", async () => {
     seedDataset("nm000052");
-    seedDataset("xx099903", exemplar);
+    seedDataset("xx099903", { ...exemplar, modalities: "emg" });
+    seedDataset("xx099905", { ...exemplar, modalities: "eeg", visibility: "private" }); // not yet published
     seedDataset("xx000053", sandbox);
     const body = (await (await post("/admin/datasets/zarr-sweep")).json()) as {
       errors: { dataset_id: string }[];
@@ -562,17 +568,19 @@ describe("the catalog-fact sweeps select exemplars, and still skip plain sandbox
 
   test("channel-montage-sweep", async () => {
     seedDataset("nm000054", { githubRepo: repo("nm000054"), modalities: "eeg" });
-    seedDataset("xx099901", { ...exemplar, githubRepo: repo("xx099901"), modalities: "eeg" });
+    seedDataset("xx099904", { ...exemplar, githubRepo: repo("xx099904"), modalities: "eeg" });
+    // Still an EEG-only sweep: the carve-out admits exemplars, not other modalities.
+    seedDataset("xx099903", { ...exemplar, githubRepo: repo("xx099903"), modalities: "emg" });
     seedDataset("xx000055", { ...sandbox, githubRepo: repo("xx000055"), modalities: "eeg" });
     expect((await post("/admin/datasets/channel-montage-sweep")).status).toBe(500); // token fetch
-    expect(recordedCandidates("channel_montage_checked_at")).toEqual(["nm000054", "xx099901"]);
+    expect(recordedCandidates("channel_montage_checked_at")).toEqual(["nm000054", "xx099904"]);
     // Its remaining count runs only after a real token fetch; the exported SQL, on this db.
     expect((db.query(CHANNEL_MONTAGE_SWEEP_REMAINING_SQL).get() as { n: number }).n).toBe(2);
   });
 
   test("hed-sweep", async () => {
     seedDataset("nm000056", { githubRepo: repo("nm000056") });
-    seedDataset("xx099906", { ...exemplar, githubRepo: repo("xx099906") });
+    seedDataset("xx099906", { ...exemplar, githubRepo: repo("xx099906"), modalities: "beh,eeg" });
     seedDataset("xx000057", { ...sandbox, githubRepo: repo("xx000057") });
     expect((await post("/admin/datasets/hed-sweep")).status).toBe(500); // token fetch
     expect(recordedCandidates("hed_checked_at")).toEqual(["nm000056", "xx099906"]);
@@ -581,7 +589,7 @@ describe("the catalog-fact sweeps select exemplars, and still skip plain sandbox
 
   test("data-integrity-sweep", async () => {
     seedDataset("nm000058", { githubRepo: repo("nm000058") });
-    seedDataset("xx099903", { ...exemplar, githubRepo: repo("xx099903") });
+    seedDataset("xx099903", { ...exemplar, githubRepo: repo("xx099903"), modalities: "emg" });
     seedDataset("xx000059", { ...sandbox, githubRepo: repo("xx000059") });
     const first = (await (await post("/admin/datasets/data-integrity-sweep?limit=1")).json()) as {
       processed: number;
@@ -598,9 +606,10 @@ describe("the catalog-fact sweeps select exemplars, and still skip plain sandbox
   });
 
   test("vectorize/reindex-all", async () => {
-    for (const id of ["nm000060", "xx099903", "xx000061"]) {
-      seedDataset(id, id === "xx099903" ? exemplar : id === "xx000061" ? sandbox : {});
-    }
+    seedDataset("nm000060");
+    seedDataset("xx099903", { ...exemplar, modalities: "emg" });
+    seedDataset("xx099905", { ...exemplar, modalities: "eeg", visibility: "private" }); // not yet published
+    seedDataset("xx000061", sandbox);
     db.run("UPDATE datasets SET status = 'active'");
     // The route refuses to run without both bindings; a dry run returns before
     // either is used, so bare placeholders stand in for them here.
