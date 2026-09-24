@@ -186,7 +186,7 @@ const CORPUS: Record<string, string> = {
     String.raw`{"café/😀/\uD800.txt":{"key":"kA","size":3,"checksum":"c"}}`,
   ),
   "raw multi-byte characters": manifest(
-    '{"é/漢字/😀.tsv":{"key":"k","size":4,"checksum":"c"}," line":{"key":"k","size":5,"checksum":"c"}}',
+    '{"é/漢字/😀.tsv":{"key":"k","size":4,"checksum":"c"},"\u2028line":{"key":"k","size":5,"checksum":"c"}}',
   ),
   "numbers of every form": manifest(
     '{"a":{"size":0},"b":{"size":-0},"c":{"size":1.5e3},"d":{"size":-12.25E-2},"e":{"size":1e400},"f":{"size":123456789012345678901234567890},"g":{"size":0.1},"h":{"size":1E+2}}',
@@ -248,9 +248,9 @@ const CORPUS: Record<string, string> = {
   "single-quoted string": manifest("{'a':{}}"),
   comment: manifest('{/* no */"a":{}}'),
   "mismatched brackets": manifest('{"a":{"x":[1}}'),
-  "non-breaking space as whitespace": ` ${manifest("{}")}`,
+  "non-breaking space as whitespace": `\u00a0${manifest("{}")}`,
   "form feed as whitespace": `\f${manifest("{}")}`,
-  "byte-order mark in the text": `﻿${manifest("{}")}`,
+  "byte-order mark in the text": `\ufeff${manifest("{}")}`,
 };
 
 describe("scanManifestText matches JSON.parse", () => {
@@ -449,7 +449,7 @@ describe("differential fuzz against JSON.parse", () => {
     "null",
     '"x"',
     String.raw`"aé😀\n\"\\/"`,
-    '" é漢😀"',
+    '"\u2028é漢😀"',
   ] as const;
   const KEYS = ['"a"', '"b"', '"__proto__"', '"1"', '"0"', String.raw`"kA"`] as const;
   const PATHS = ['"a/b"', '"a"', '"a/b/c"', '"__proto__"', '"42"', String.raw`"x\/y"`, '"é/ü"'];

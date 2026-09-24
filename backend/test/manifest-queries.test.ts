@@ -141,28 +141,25 @@ describe("ResolvePathQuery is resolveFile", () => {
 
   // Synthetic: no real manifest has array-index names at its root, and
   // `Object.entries` lists those FIRST. That order is invisible unless the
-  // stable sort meets a tie, and `localeCompare` ties "1" with "1​"
+  // stable sort meets a tie, and `localeCompare` ties "1" with "1\u200b"
   // (a zero-width space is ignorable to the collator). So the only document
   // that can tell the two orders apart is one like this.
   test("root array-index names keep Object.entries' order through a sort tie", () => {
-    expect("1".localeCompare("1​")).toBe(0);
-    const text = JSON.stringify({
-      version: "1",
-      files: {
-        "1​": { size: 1 },
-        b: { size: 2 },
-        "1": { size: 3 },
-        "10": { size: 4 },
-        "10/x": { size: 5 },
-      },
-    });
+    const zwsp = String.fromCharCode(0x200b);
+    expect("1".localeCompare(`1${zwsp}`)).toBe(0);
+    // Written as JSON text, not built from an object literal: a literal would
+    // already put "1" and "10" first, and the document has to list them LAST
+    // (after the tying name, and "10" after the directory "10/x") for the
+    // stream's order and Object.entries' order to differ at all.
+    const text = String.raw`{"version":"1","files":{"1\u200b":{"size":1},"b":{"size":2},"10/x":{"size":5},"1":{"size":3},"10":{"size":4}}}`;
     const parsed = JSON.parse(text) as VersionManifest;
+    expect(Object.keys(parsed.files)).toEqual(["1", "10", `1${zwsp}`, "b", "10/x"]);
     const expected = resolveFile(parsed, "");
     const got = answerText(text, new ResolvePathQuery(""));
     expect(got).toEqual(expected);
     // Pin the order itself, so this cannot pass by both sides being wrong.
     if (got.kind !== "directory") throw new Error("expected a directory");
-    expect(got.children.map((c) => c.name)).toEqual(["1", "1​", "10", "b"]);
+    expect(got.children.map((c) => c.name)).toEqual(["1", `1${zwsp}`, "10", "b"]);
     expect(got.children.find((c) => c.name === "10")).toEqual({
       kind: "file",
       name: "10",
