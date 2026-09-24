@@ -92,7 +92,7 @@
 import type { CallToolResult } from "@modelcontextprotocol/server";
 import { decompress as fzstdDecompress } from "fzstd";
 import { asyncBufferFromUrl, parquetMetadataAsync, parquetReadObjects } from "hyparquet";
-import type { Compressors } from "hyparquet";
+import type { Compressors, FileMetaData } from "hyparquet";
 import { z } from "zod";
 import {
   type EventRow,
@@ -226,21 +226,30 @@ export const MAX_STORE_FANOUT_ENTRIES = 2000;
  * bucket that is tens of GB/min of S3 egress from one IP with zero cache
  * progress.
  *
- * Refusing is the right answer rather than paging, because the rows for one
- * store are not addressable without reading the file: `parquetReadObjects` can
- * take `rowStart`/`rowEnd`, but a row's `store_path` is only known after it is
- * read. And refusing costs the caller little: `index.json` publishes
+ * A file over either bound is not read whole, but it is not refused outright
+ * either (#1498): the producer writes the file sorted by `store_path`, and every
+ * row group carries min/max statistics for it, so the row groups that can hold
+ * the requested store are known from the footer alone. Those are read, and the
+ * same two bounds are applied to them instead of the file
+ * ({@link storeRowGroupSpan}). The refusal that used to answer every recording
+ * of a large dataset now answers only a recording whose own row groups are over
+ * a bound, or a file without `store_path` statistics. nm000132 (ERP CORE) is
+ * why: its file is 2.4 MB but 153,722 rows, so the row bound refused every one
+ * of its 240 recordings, each a few hundred rows in one row group of about
+ * 66,000.
+ *
+ * A refusal still costs the caller little: `index.json` publishes
  * `events_parquet` as a PUBLIC URL, so a client that genuinely wants 5.4 M rows
  * can fetch and query the file itself. Handing over a URL instead of streaming
  * bytes is exactly the recipe-first posture ADR 0049 sets for signal data.
  *
  * Both bounds are checked from `parquetMetadataAsync`, which this path already
- * fetches before the full read, so a refusal costs one footer read.
+ * fetches before any row is read, so a refusal costs one footer read.
  */
 export const MAX_EVENTS_PARQUET_BYTES = 16 * 1024 * 1024;
 export const MAX_EVENTS_PARQUET_ROWS = 100_000;
 
-/** Thrown by {@link readWholeEventsParquet} when a bound is exceeded. The
+/** Thrown by {@link readEventsParquet} when a bound is exceeded. The
  *  caller already turns a throw from this path into a typed tool error, so this
  *  rides that seam rather than adding a second failure channel. */
 export class EventsParquetTooLargeError extends Error {}
@@ -256,14 +265,79 @@ const eventRowsProjectionSchema = z.object({
   invalidRowCount: z.number().int().nonnegative(),
 });
 
-async function readWholeEventsParquet(
+/** Byte order, as parquet compares BYTE_ARRAY statistics: JavaScript's `<`
+ *  compares UTF-16 code units, which disagrees with UTF-8 byte order for a path
+ *  holding a character above U+FFFF next to one in U+E000-U+FFFF. */
+function compareUtf8(a: string, b: string): number {
+  const x = new TextEncoder().encode(a);
+  const y = new TextEncoder().encode(b);
+  const n = Math.min(x.length, y.length);
+  for (let i = 0; i < n; i++) {
+    if (x[i] !== y[i]) return x[i] - y[i];
+  }
+  return x.length - y.length;
+}
+
+/** The contiguous run of row groups that can hold `storeZarr`'s rows, from each
+ *  row group's `store_path` min/max statistics, with what reading it costs.
+ *  `null` when any row group has no usable statistics for `store_path`: then
+ *  nothing short of reading the file says where a store's rows are. A run with
+ *  no row groups (`rows: 0`) means the statistics prove the store has none.
+ *
+ *  Only `min_value`/`max_value` count, never the deprecated `min`/`max`, which
+ *  older writers computed with a signed byte comparison. The run spans every
+ *  row group between the first and last match, so a file that is not sorted
+ *  after all is still read correctly, only less cheaply, and the bounds see
+ *  that cost. Exported for its unit tests. */
+export function storeRowGroupSpan(
+  metadata: FileMetaData,
+  storeZarr: string,
+): { rowStart: number; rowEnd: number; rows: number; compressedBytes: number } | null {
+  let first = -1;
+  let last = -1;
+  for (const [index, rowGroup] of metadata.row_groups.entries()) {
+    const chunk = rowGroup.columns.find(
+      (c) => c.meta_data?.path_in_schema.join(".") === "store_path",
+    );
+    const stats = chunk?.meta_data?.statistics;
+    const min = stats?.min_value;
+    const max = stats?.max_value;
+    if (typeof min !== "string" || typeof max !== "string") return null;
+    if (compareUtf8(min, storeZarr) <= 0 && compareUtf8(storeZarr, max) <= 0) {
+      if (first === -1) first = index;
+      last = index;
+    }
+  }
+  if (first === -1) return { rowStart: 0, rowEnd: 0, rows: 0, compressedBytes: 0 };
+  let rowStart = 0;
+  for (let i = 0; i < first; i++) rowStart += Number(metadata.row_groups[i].num_rows);
+  let rows = 0;
+  let compressedBytes = 0;
+  for (let i = first; i <= last; i++) {
+    const rowGroup = metadata.row_groups[i];
+    rows += Number(rowGroup.num_rows);
+    compressedBytes += Number(
+      rowGroup.total_compressed_size ??
+        rowGroup.columns.reduce((sum, c) => sum + (c.meta_data?.total_compressed_size ?? 0n), 0n),
+    );
+  }
+  return { rowStart, rowEnd: rowStart + rows, rows, compressedBytes };
+}
+
+/** Reads the whole file when it is within both bounds, and otherwise only the
+ *  row groups that can hold `storeZarr` (see {@link MAX_EVENTS_PARQUET_BYTES}).
+ *  `scope` says which: on `"store"`, `byStore` is complete for `storeZarr`
+ *  alone, since the other stores in those row groups may continue outside them. */
+async function readEventsParquet(
   deps: RecordingToolDeps,
   datasetId: string,
   eventsParquetUrl: string,
+  storeZarr: string,
 ): Promise<{
   byStore: Map<string, EventRow[]>;
   bytesFetched: number;
   invalidRowCountByStore: Map<string, number>;
+  scope: "file" | "store";
 }> {
   let bytesFetched = 0;
   const countingFetch: typeof fetch = async (input, init) => {
@@ -293,19 +367,35 @@ async function readWholeEventsParquet(
   // paging here.
   const rowCount = Number(metadata.num_rows ?? 0);
   const byteLength = file.byteLength;
-  if (byteLength > MAX_EVENTS_PARQUET_BYTES || rowCount > MAX_EVENTS_PARQUET_ROWS) {
-    throw new EventsParquetTooLargeError(
-      `dataset "${datasetId}"'s events.parquet is too large for this server to read inline: ${byteLength} bytes and ${rowCount} rows, over the ${MAX_EVENTS_PARQUET_BYTES}-byte / ${MAX_EVENTS_PARQUET_ROWS}-row limit. The file is public at ${eventsParquetUrl} -- read it directly (it is one row per event and channel group, with a store_path column) rather than through this tool.`,
-    );
+  const limit = `the ${MAX_EVENTS_PARQUET_BYTES}-byte / ${MAX_EVENTS_PARQUET_ROWS}-row limit`;
+  const remedy = `The file is public at ${eventsParquetUrl} -- read it directly (it is one row per event and channel group, with a store_path column) rather than through this tool.`;
+  const wholeFile = byteLength <= MAX_EVENTS_PARQUET_BYTES && rowCount <= MAX_EVENTS_PARQUET_ROWS;
+  let span: ReturnType<typeof storeRowGroupSpan> = null;
+  if (!wholeFile) {
+    const tooLarge = `dataset "${datasetId}"'s events.parquet is too large for this server to read inline: ${byteLength} bytes and ${rowCount} rows, over ${limit}`;
+    span = storeRowGroupSpan(metadata, storeZarr);
+    if (!span) {
+      throw new EventsParquetTooLargeError(
+        `${tooLarge}, and its row groups carry no store_path statistics to find one recording's rows by. ${remedy}`,
+      );
+    }
+    if (span.rows > MAX_EVENTS_PARQUET_ROWS || span.compressedBytes > MAX_EVENTS_PARQUET_BYTES) {
+      throw new EventsParquetTooLargeError(
+        `${tooLarge}, and the row groups that hold this recording are over it too: ${span.compressedBytes} bytes and ${span.rows} rows. ${remedy}`,
+      );
+    }
   }
 
   // No `columns` filter: every column (the eight named on eventRowSchema
   // plus subject/session/task/run and any x_-prefixed extra) is wanted, so
   // `.passthrough()` on the wire schema has something real to pass through.
+  // A span of no row groups (the statistics prove the store has no rows) reads
+  // nothing: an empty row range fetches no pages.
   const rawRows = await parquetReadObjects({
     file,
     metadata,
     compressors: EVENTS_PARQUET_COMPRESSORS,
+    ...(span ? { rowStart: span.rowStart, rowEnd: span.rowEnd } : {}),
   });
 
   const byStore = new Map<string, EventRow[]>();
@@ -313,6 +403,9 @@ async function readWholeEventsParquet(
   let totalInvalid = 0;
   for (const raw of rawRows) {
     const storePath = String((raw as { store_path?: unknown }).store_path ?? "");
+    // Reading by row group: another store's rows here may be only part of its
+    // rows, so they are neither validated nor kept.
+    if (span && storePath !== storeZarr) continue;
     const candidate = {
       ...raw,
       sample_index: toSafeSampleIndex(
@@ -341,7 +434,7 @@ async function readWholeEventsParquet(
       `[get_events] ${datasetId}: ${totalInvalid} parquet row(s) failed eventRowSchema validation and were omitted`,
     );
   }
-  return { byStore, bytesFetched, invalidRowCountByStore };
+  return { byStore, bytesFetched, invalidRowCountByStore, scope: span ? "store" : "file" };
 }
 
 /** Primary path: `events/<zarr>` cache entry per store, all written in one
@@ -401,13 +494,20 @@ async function loadEventsFromParquet(
     }
   }
 
-  const { byStore, bytesFetched, invalidRowCountByStore } = await readWholeEventsParquet(
+  const { byStore, bytesFetched, invalidRowCountByStore, scope } = await readEventsParquet(
     deps,
     datasetId,
     eventsParquetUrl,
+    storeZarr,
   );
-  for (const zarr of allStoreZarrs) {
-    if (!byStore.has(zarr)) byStore.set(zarr, []);
+  // A `[]` placeholder says "the parquet has no rows for this store", which only
+  // a whole-file read can say about a store it did not ask for.
+  if (scope === "file") {
+    for (const zarr of allStoreZarrs) {
+      if (!byStore.has(zarr)) byStore.set(zarr, []);
+    }
+  } else if (!byStore.has(storeZarr)) {
+    byStore.set(storeZarr, []);
   }
 
   if (sourceCommit) {

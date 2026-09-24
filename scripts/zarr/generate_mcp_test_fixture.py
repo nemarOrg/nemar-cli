@@ -99,6 +99,8 @@ from the repo root. Writes
 `backend/test/fixtures/mcp/on003392-synthetic-meg-view3-c-0-0-0.bin`,
 `backend/test/fixtures/mcp/nm000329-synthetic-multichunk-view1-c-0-0-{0,1,2}.bin`,
 `backend/test/fixtures/mcp/oversized-events.parquet`,
+`backend/test/fixtures/mcp/row-groups-events.parquet`,
+`backend/test/fixtures/mcp/no-stats-events.parquet`,
 `backend/test/fixtures/mcp/two-group-events.parquet`,
 `backend/test/fixtures/mcp/invalid-row-events.parquet`,
 and the sharded level-0 fixture set above, printing each one's byte size.
@@ -397,15 +399,34 @@ def build_sharded_level0_fixture() -> None:
 OVERSIZED_EVENTS_ROWS = 100_001
 
 
+#: The first three stores of the nm000329 index fixture, in the byte order the
+#: producer sorts `store_path` by (`sub-1/` sorts before `sub-10/`: `/` < `0`).
+FIXTURE_STORES = (
+    "sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-calibration_run-0_eeg.zarr",
+    "sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-clean_run-1_eeg.zarr",
+    "sub-10/ses-0/eeg/sub-10_ses-0_task-imagery_acq-calibration_run-0_eeg.zarr",
+)
+
+#: Row-group layout of row-groups-events.parquet (#1498): 120,000 rows, over the
+#: 100,000-row whole-file cap, in three row groups of 40,000. The middle store's
+#: 20 rows straddle the first boundary, so reading it takes two row groups.
+ROW_GROUP_SIZE = 40_000
+STRADDLE_START = 39_990
+STRADDLE_ROWS = 20
+ROW_GROUPS_TOTAL_ROWS = 120_000
+
+
 def build_oversized_events_parquet() -> None:
-    """A parquet whose ROW COUNT crosses get_events' inline-read budget."""
+    """A parquet whose ROW COUNT crosses get_events' inline-read budget, every row
+    for ONE store the index knows, so even that store's own row group is over it
+    (#1498: a file over the cap is read by row group when statistics allow)."""
     import pyarrow as pa
     import pyarrow.parquet as pq
 
     n = OVERSIZED_EVENTS_ROWS
     table = pa.table(
         {
-            "store_path": pa.array(["sub-1/ses-0/eeg/x.zarr"] * n),
+            "store_path": pa.array([FIXTURE_STORES[0]] * n),
             "group_name": pa.array(["eeg_250hz"] * n),
             "onset_s": pa.array([1.5] * n, type=pa.float64()),
             "duration_s": pa.array([0.5] * n, type=pa.float64()),
@@ -416,6 +437,67 @@ def build_oversized_events_parquet() -> None:
     out = FIXTURES_DIR / "oversized-events.parquet"
     pq.write_table(table, out, compression="zstd")
     print(f"wrote {out} ({out.stat().st_size} bytes, {n} rows)")
+
+
+def _row_groups_table():
+    """The 120,000-row table row-groups-events.parquet and no-stats-events.parquet share:
+    the first store as filler, the second store's 20 events across the first row-group
+    boundary, and the third store as filler after them, sorted by `store_path`."""
+    import pyarrow as pa
+
+    first = STRADDLE_START
+    middle = STRADDLE_ROWS
+    last = ROW_GROUPS_TOTAL_ROWS - first - middle
+    # The middle store's events are distinct, so a read that returned another
+    # store's rows, or dropped one, is visible: onset k seconds, sample k * 250.
+    onsets = [1.5] * first + [float(k) for k in range(1, middle + 1)] + [2.5] * last
+    samples = [375] * first + [k * 250 for k in range(1, middle + 1)] + [625] * last
+    return pa.table(
+        {
+            "store_path": pa.array(
+                [FIXTURE_STORES[0]] * first
+                + [FIXTURE_STORES[1]] * middle
+                + [FIXTURE_STORES[2]] * last
+            ),
+            "group_name": pa.array(["eeg_250hz"] * ROW_GROUPS_TOTAL_ROWS),
+            "onset_s": pa.array(onsets, type=pa.float64()),
+            "duration_s": pa.array([0.5] * ROW_GROUPS_TOTAL_ROWS, type=pa.float64()),
+            "sample_index": pa.array(samples, type=pa.int64()),
+            "trial_type": pa.array(
+                ["stim"] * first
+                + ["face" if k % 2 else "scrambled_face" for k in range(1, middle + 1)]
+                + ["stim"] * last
+            ),
+        }
+    )
+
+
+def build_row_groups_events_parquet() -> None:
+    """Over the whole-file row cap, but sorted by `store_path` with statistics, as the
+    producer writes it: one store's rows are found by row group (#1498)."""
+    import pyarrow.parquet as pq
+
+    out = FIXTURES_DIR / "row-groups-events.parquet"
+    pq.write_table(_row_groups_table(), out, compression="zstd", row_group_size=ROW_GROUP_SIZE)
+    meta = pq.ParquetFile(out).metadata
+    size = out.stat().st_size
+    print(f"wrote {out} ({size} bytes, {meta.num_rows} rows, {meta.num_row_groups} row groups)")
+
+
+def build_no_stats_events_parquet() -> None:
+    """The same rows with no column statistics: nothing locates one store's rows, so
+    get_events must still decline (#1498)."""
+    import pyarrow.parquet as pq
+
+    out = FIXTURES_DIR / "no-stats-events.parquet"
+    pq.write_table(
+        _row_groups_table(),
+        out,
+        compression="zstd",
+        row_group_size=ROW_GROUP_SIZE,
+        write_statistics=False,
+    )
+    print(f"wrote {out} ({out.stat().st_size} bytes, no statistics)")
 
 
 def build_two_group_events_parquet() -> None:
@@ -525,6 +607,8 @@ def main() -> None:
         )
 
     build_oversized_events_parquet()
+    build_row_groups_events_parquet()
+    build_no_stats_events_parquet()
     build_two_group_events_parquet()
     build_invalid_row_events_parquet()
     build_sharded_level0_fixture()

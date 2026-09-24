@@ -3629,6 +3629,13 @@ def write_events_parquet(
     point at which the whole dataset is in memory. Rows accumulate only until
     `EVENTS_ROW_GROUP_ROWS`, then become a row group.
 
+    The MCP's `get_events` relies on that order (#1498): for a file over its
+    whole-file budget it reads only the row groups whose `store_path` min/max
+    statistics can hold the recording asked for (`storeRowGroupSpan` in
+    `backend/src/mcp/tools/get-events.ts`). An unsorted file is still read
+    correctly there, but those row groups then span more of it and more
+    recordings are declined.
+
     A store with rows from THIS run uses them. A store this run did NOT reconvert
     keeps the rows the prior file has for it. `reconverted` is what separates the
     two, and it is not `staged`: a store that WAS reconverted and produced no
