@@ -29,9 +29,17 @@ incrementally (`services/manifest-scan.ts`) and a query (`services/manifest-quer
 keeps only its answer: one entry, one directory's immediate children, a boolean, a digest
 of totals and the BIDS index, or a count. The verdict is still `JSON.parse`'s: the whole
 body is read on every scan, and a document broken anywhere, including after the entry a
-caller wanted, is malformed. Where a query's shortcut is only exact for well-formed input
-(the digest's running totals assume ascending, repeat-free keys and integer sizes), it
-checks that on every key and falls back to the whole-parse reference when it fails.
+caller wanted, is malformed.
+
+**No query reads a manifest whole, whatever the manifest looks like.** Where the stream
+cannot prove an answer, it says so instead of materializing the document to find out.
+The `metadata.json` digest is the case: its totals are exact only while keys strictly
+ascend (so no key repeats). Once the order breaks, the totals are reported unproven, and
+the route takes them from the catalog row, as it does when no manifest can be read. The
+BIDS index and sessions are sets, so they stay exact in any order. An entry whose size
+is not a non-negative integer is counted as a file and left out of `size_bytes`. Both
+cases are logged. Manifests are rewritten in place, so "no current manifest is unsorted"
+is an observation, not an invariant, and the bound cannot depend on it.
 
 **The raw body is kept in the Workers Cache API, and a copy never answers without S3
 saying so.** The copy is stored with the S3 ETag it came with, under a dataset- and
@@ -56,7 +64,12 @@ any other lookup costs.
   from the manifest the gate trusts, is what removes it.
 - Every read costs one conditional S3 request even on a cache hit, and a miss costs one
   full read that also fills the cache. The cache changes where the bytes come from, never
-  what the route decides.
+  what the route decides. The tail of a cache write goes to `waitUntil`, so a slow or
+  wedged `cache.put` never delays an answer.
+- `metadata.json` for a manifest whose keys are out of order reports the catalog row's
+  `total_files` and `size_bytes`, which can be stale, instead of the manifest's. That
+  departs from the pre-#1502 route, which parsed the whole document and summed it
+  (concatenating a string size). This is the price of having no unbounded path.
 - Seven datasets lose `manifest.json` (every one at 45,424 files or more, where the old
   path already needed about 90 MB). Their files remain enumerable one directory at a time.
 
