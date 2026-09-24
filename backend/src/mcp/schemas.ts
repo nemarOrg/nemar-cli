@@ -603,7 +603,7 @@ export const getEventsOutputSchema4 = z4
       .array(eventColumnSummarySchema4)
       .optional()
       .describe(
-        "Every column of this recording's events but onset_s and sample_index, before where is applied.",
+        "Every column of this recording's events except onset_s, sample_index, store_path and group_name, before where is applied.",
       ),
     envelope: provenanceEnvelopeSchema4.optional(),
   })

@@ -1024,8 +1024,10 @@ export const getEventsOutputSchema = z
      *  (the fallback's clean-404 case). Null when there is none. */
     note: z.string().nullable().optional(),
     /** Additive (#1500): every column of the recording's events for the group
-     *  answered, except `onset_s` and `sample_index`, computed BEFORE `where`, so
-     *  it says what a filter can ask for. `total_count` counts after `where`. */
+     *  answered, except `onset_s` and `sample_index` (a new value on every row) and
+     *  `store_path` and `group_name` (named by the request), computed BEFORE
+     *  `where`, so it says what a filter can ask for. `total_count` counts after
+     *  `where`. */
     columns_summary: z.array(eventColumnSummarySchema).optional(),
     envelope: provenanceEnvelopeSchema.optional(),
   })

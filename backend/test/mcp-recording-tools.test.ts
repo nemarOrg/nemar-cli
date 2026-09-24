@@ -1480,8 +1480,10 @@ describe("list_recordings / get_events (epic #1065 phase 3)", () => {
     test("columns_summary describes the rows before where, and lists only short, few values", async () => {
       const output = await events(1, { where: { trial_type: ["left_hand"] }, limit: 1 });
       const byName = new Map((output.columns_summary ?? []).map((c) => [c.name, c]));
-      expect(byName.has("onset_s")).toBe(false);
-      expect(byName.has("sample_index")).toBe(false);
+      // The times differ on every row; the store and group are the ones asked for.
+      for (const name of ["onset_s", "sample_index", "store_path", "group_name"]) {
+        expect(byName.has(name)).toBe(false);
+      }
       expect(byName.get("trial_type")).toEqual({
         name: "trial_type",
         distinct_count: 2,
@@ -1500,6 +1502,31 @@ describe("list_recordings / get_events (epic #1065 phase 3)", () => {
         values: [],
       });
       expect(byName.get("duration_s")?.values).toEqual([{ value: "4.5", count: 72 }]);
+    });
+
+    test("the store and group are left out of the summary, but where and columns still take them", async () => {
+      const output = await events(1, {
+        where: { group_name: ["eeg_250hz"], store_path: [first] },
+        columns: ["store_path", "group_name"],
+        limit: 1,
+      });
+      expect(output.total_count).toBe(72);
+      expect(output.events[0]).toMatchObject({ store_path: first, group_name: "eeg_250hz" });
+    });
+
+    test("where on a group with no events keeps the group's own note, not a where note", async () => {
+      // before > 0 is what stops "none of this recording's 0 events matched where"
+      // being said about a group that never had any.
+      const { body } = await callTool(app, env(db), 1, "get_events", {
+        dataset_id: MULTI_GROUP_ID,
+        recording: first,
+        group: MULTI_GROUP_EMPTY,
+        where: { trial_type: ["left_hand"] },
+      });
+      const output = getEventsOutputSchema.parse(structuredContentOf(body)) as GetEventsOutput;
+      expect(output.total_count).toBe(0);
+      expect(output.note).toContain(MULTI_GROUP_EMPTY);
+      expect(output.note).not.toContain("matched where");
     });
 
     test("a filtered call is served from the same cached rows as an unfiltered one", async () => {

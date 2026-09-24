@@ -673,17 +673,22 @@ function eventColumnNames(rows: readonly EventRow[]): string[] {
   return [...seen];
 }
 
-/** `columns_summary` (#1500): each column but the two times, with its distinct
- *  values when there are few enough to list, so a caller can build a `where`
- *  from one small call instead of reading every row to find what to ask for.
- *  Exported for its unit tests. */
+/** Not summarized: the two times, which differ on every row, and the store and
+ *  group, which the request already named. `where` and `columns` still accept
+ *  them. */
+const UNSUMMARIZED_COLUMNS = new Set(["onset_s", "sample_index", "store_path", "group_name"]);
+
+/** `columns_summary` (#1500): each column but {@link UNSUMMARIZED_COLUMNS}, with
+ *  its distinct values when there are few enough to list, so a caller can build a
+ *  `where` from one small call instead of reading every row to find what to ask
+ *  for. Exported for its unit tests. */
 export function summarizeEventColumns(
   rows: readonly EventRow[],
   names: readonly string[],
 ): EventColumnSummary[] {
   const summary: EventColumnSummary[] = [];
   for (const name of names) {
-    if (name === "onset_s" || name === "sample_index") continue;
+    if (UNSUMMARIZED_COLUMNS.has(name)) continue;
     const counts = new Map<string, number>();
     let nullCount = 0;
     for (const row of rows) {
@@ -928,7 +933,6 @@ export async function getEventsTool(
   // answers with what it could have asked for. A recording with no rows has no
   // columns to check against; the note above already says why it is empty.
   const columnNames = eventColumnNames(rows);
-  const columnsSummary = summarizeEventColumns(rows, columnNames);
   if (rows.length > 0) {
     const named = [
       ["where", Object.keys(args.where ?? {})],
@@ -949,6 +953,9 @@ export async function getEventsTool(
       }
     }
   }
+  // After the refusal, which needs only the names, so a refused request does not
+  // pay for a pass over every value.
+  const columnsSummary = summarizeEventColumns(rows, columnNames);
   if (args.where) {
     const allowed = new Map(
       Object.entries(args.where).map(([column, values]) => [column, new Set(values.map(String))]),
@@ -957,7 +964,7 @@ export async function getEventsTool(
     rows = rows.filter((r) => matchesWhere(r, allowed));
     if (before > 0 && rows.length === 0) {
       notes.push(
-        `none of this recording's ${before} events matched where; columns_summary lists the values each column holds`,
+        `none of this recording's ${before} events matched where; columns_summary lists each column's values when it has few`,
       );
     }
   }
