@@ -143,6 +143,19 @@ async function get(path: string, init: RequestInit = {}): Promise<Response> {
   return app().request(`https://data.nemar.org${path}`, init, env());
 }
 
+/**
+ * The S3 requests made for one dataset's objects since the log was last
+ * cleared, as `GET [INM ]<status> <path>`. The stand-in is shared by the whole
+ * file, so a test counts its own dataset's reads and never the whole log: a
+ * test that timed out keeps running (Bun does not stop it) and its reads of
+ * another dataset can land in a later test's window.
+ */
+function readsOf(datasetId: string): string[] {
+  return s3.log
+    .filter((r) => r.path.startsWith(`/${datasetId}/`))
+    .map((r) => `${r.method} ${r.ifNoneMatch ? "INM " : ""}${r.status} ${r.path}`);
+}
+
 const JSON_ACCEPT = { headers: { Accept: "application/json" } };
 const HTML_ACCEPT = { headers: { Accept: "text/html" } };
 
@@ -426,7 +439,7 @@ describe("metadata.json", () => {
     expect(body.data_summary?.size_bytes).toBe(123456);
     expect(body.sessions).toEqual(digest.sessions);
     expect(body.extensions.nemar.bids_index?.subjects).toEqual(digest.subjects);
-    expect(s3.log.filter((r) => r.path === "/nm000909/version/v1.1.1.json")).toHaveLength(1);
+    expect(readsOf("nm000909")).toEqual(["GET 200 /nm000909/version/v1.1.1.json"]);
   });
 });
 
@@ -483,9 +496,7 @@ describe("the large manifest: answers, and memory that does not follow it", () =
       expect(doc.extensions.nemar.bids_index?.subjects).toEqual(digestManifest(large).subjects);
       expect(samples).toBeGreaterThan(3);
       expect(peak).toBeLessThan(16 * 1024 * 1024);
-      expect(s3.log.filter((r) => r.path === `/${DESCENDING_ID}/version/v1.0.3.json`)).toHaveLength(
-        1,
-      );
+      expect(readsOf(DESCENDING_ID)).toEqual([`GET 200 /${DESCENDING_ID}/version/v1.0.3.json`]);
     },
     LARGE_MANIFEST_TEST_TIMEOUT_MS,
   );
@@ -614,14 +625,14 @@ describe("the edge cache sits behind the visibility gate", () => {
     }
     expect((await get(`/${SMALL}/metadata.json`)).status).toBe(404);
     expect(cache.matches).toBe(matchesBefore);
-    expect(s3.log.filter((r) => r.path.startsWith(`/${SMALL}/`))).toEqual([]);
+    expect(readsOf(SMALL)).toEqual([]);
   });
 
   test("the differential: the same request for the public dataset does touch both", async () => {
     const matchesBefore = cache.matches;
     await get(`/${SMALL}/v1.1.1/participants.tsv`, { method: "HEAD" });
     expect(cache.matches).toBeGreaterThan(matchesBefore);
-    expect(s3.log.length).toBeGreaterThan(0);
+    expect(readsOf(SMALL)).toEqual([`GET 200 ${SMALL_OBJECT}`]);
   });
 });
 
@@ -699,6 +710,6 @@ describe("a broken or stalled edge cache never breaks the route", () => {
     };
     const res = await get(`/${SMALL}/v1.1.1/sub-001/`, JSON_ACCEPT);
     expect(await res.text()).toBe(expectedListing());
-    expect(s3.log.map((r) => `${r.ifNoneMatch ? "INM " : ""}${r.status}`)).toEqual(["200"]);
+    expect(readsOf(SMALL)).toEqual([`GET 200 ${SMALL_OBJECT}`]);
   });
 });
