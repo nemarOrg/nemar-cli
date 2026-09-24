@@ -581,9 +581,10 @@ describe("the edge cache sits behind the visibility gate", () => {
     s3.log.length = 0;
     const second = await get(`/${SMALL}/v1.1.1/sub-001/`, JSON_ACCEPT);
     expect(await second.text()).toBe(await first.clone().text());
-    // This manifest's reads only, as the tests above count them: the stand-in
-    // is shared by the whole file.
-    expect(s3.log.filter((r) => r.path === SMALL_OBJECT).map((r) => r.status)).toEqual([304]);
+    // Every nm000132 read, not only this manifest's: a JSON listing has no
+    // reason to touch any other object of the dataset (the prior version is
+    // read only for the HTML footer), so one conditional GET is the whole of it.
+    expect(readsOf(SMALL)).toEqual([`GET INM 304 ${SMALL_OBJECT}`]);
   });
 
   test("two manifests read at the same time each store an intact copy", async () => {
