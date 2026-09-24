@@ -607,9 +607,12 @@ describe("the edge cache sits behind the visibility gate", () => {
     for (const [i, res] of second.entries()) {
       expect(await res.text()).toBe(await first[i].text());
     }
-    const reads = s3.log.filter((r) => r.path.startsWith(`/${SMALL}/`));
-    expect(reads.length).toBeGreaterThanOrEqual(2);
-    expect(reads.every((r) => r.status === 304)).toBe(true);
+    // Exactly one conditional GET per version: each request revalidates its
+    // own copy once. Only the order between the two is up to the scheduler.
+    expect(readsOf(SMALL).sort()).toEqual([
+      `GET INM 304 /${SMALL}/version/v1.0.0.json`,
+      `GET INM 304 ${SMALL_OBJECT}`,
+    ]);
   });
 
   test("a dataset gone private is refused before the cache or S3 is touched", async () => {
