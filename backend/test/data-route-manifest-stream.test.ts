@@ -71,6 +71,7 @@ const PRIOR: VersionManifest = {
 const PRIOR_TEXT = JSON.stringify(PRIOR, null, 2);
 
 const SMALL = "nm000132";
+const SMALL_OBJECT = `/${SMALL}/version/v1.1.1.json`;
 const LARGE_ID = "nm000281";
 const LARGE_OPTS = { subjects: 374, runsPerSession: 50, datasetId: LARGE_ID };
 
@@ -539,7 +540,9 @@ describe("the edge cache sits behind the visibility gate", () => {
     s3.log.length = 0;
     const second = await get(`/${SMALL}/v1.1.1/sub-001/`, JSON_ACCEPT);
     expect(await second.text()).toBe(await first.clone().text());
-    expect(s3.log.map((r) => r.status)).toEqual([304]);
+    // This manifest's reads only, as the tests above count them: the stand-in
+    // is shared by the whole file.
+    expect(s3.log.filter((r) => r.path === SMALL_OBJECT).map((r) => r.status)).toEqual([304]);
   });
 
   test("two manifests read at the same time each store an intact copy", async () => {
@@ -581,7 +584,7 @@ describe("the edge cache sits behind the visibility gate", () => {
     }
     expect((await get(`/${SMALL}/metadata.json`)).status).toBe(404);
     expect(cache.matches).toBe(matchesBefore);
-    expect(s3.log).toEqual([]);
+    expect(s3.log.filter((r) => r.path.startsWith(`/${SMALL}/`))).toEqual([]);
   });
 
   test("the differential: the same request for the public dataset does touch both", async () => {
