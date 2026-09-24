@@ -45,8 +45,10 @@ export interface LargeManifestOptions {
  * runs), passed explicitly because Bun's 5 s default is too close. They scan
  * the manifest, some of them several times (the route's memory test makes
  * five requests). On `ubuntu-latest` (run 36058320838) they took 1.5 to
- * 3.3 s where a laptop takes 0.5 to 1.9 s, and the five-scan test ran past
- * 5 s and timed out.
+ * 3.3 s where a laptop takes 0.5 to 1.9 s, and the five-request test ran
+ * past 5 s and timed out. Given room, it took 7.7 s there (run 36064962692;
+ * 1.6 s on a laptop) and the rest up to 3.6 s, so 30 s is about four times
+ * the slowest measurement.
  *
  * A timed-out test is not stopped. Its body keeps running into the tests
  * after it, sharing their S3 stand-in, their `caches.default` and the heap
