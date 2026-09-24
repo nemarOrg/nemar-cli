@@ -1013,10 +1013,14 @@ export class SessionsCollector {
 export interface ManifestDigest {
   /** The manifest's own `version` field, as written (bare, e.g. "1.0.0"). */
   version: string;
-  /** Sum of every entry's declared `size`. */
-  bytes: number;
-  /** Number of entries. */
-  files: number;
+  /**
+   * Sum of every entry's declared `size`. Null when a streamed digest could
+   * not prove it (`DigestQuery`); `metadata.json` then reports the catalog
+   * row's figure instead, as it does when no manifest could be read.
+   */
+  bytes: number | null;
+  /** Number of entries; null under the same condition as `bytes`. */
+  files: number | null;
   sessions: string[];
   subjects: Record<string, BidsIndexSubjectNode>;
 }
@@ -1025,8 +1029,7 @@ export interface ManifestDigest {
  * The reference digest over a whole parsed manifest: exactly the expressions
  * `buildDatasetMetadata` evaluated inline before #1502, in the same order.
  * The streaming route computes the same numbers without the manifest
- * (`services/manifest-queries.ts`) and falls back to this when it cannot
- * prove its shortcut exact.
+ * (`services/manifest-queries.ts`); the tests compare the two.
  */
 export function digestManifest(manifest: VersionManifest): ManifestDigest {
   const totals = Object.values(manifest.files).reduce(
@@ -1110,8 +1113,14 @@ export function buildDatasetMetadataFromDigest(input: {
   // (S3 error, corrupt JSON) for a dataset that DOES have a manifest. Cases 2
   // and 3 mean a healthy manifested dataset can still surface a stale D1 size
   // here -- this is a deliberate perf/availability tradeoff, not a bug.
-  const sizeBytes = manifestDigest ? manifestDigest.bytes : row.file_size;
-  const totalFiles = manifestDigest ? manifestDigest.files : row.total_files;
+  // A fourth case since #1502: a streamed digest whose totals could not be
+  // proven (keys out of order, or a sum past 2^53) carries null totals, and the
+  // row answers for them while the BIDS index and sessions still come from
+  // the manifest.
+  const sizeBytes =
+    manifestDigest && manifestDigest.bytes !== null ? manifestDigest.bytes : row.file_size;
+  const totalFiles =
+    manifestDigest && manifestDigest.files !== null ? manifestDigest.files : row.total_files;
 
   const sessionsList = manifestDigest ? manifestDigest.sessions : [];
   // S3 version manifests store the version field bare (e.g. "1.0.0").

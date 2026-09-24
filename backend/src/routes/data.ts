@@ -30,7 +30,6 @@ import {
   buildRedirectUrl,
   contentTypeForBidsPath,
   diffRemovedSinceResolved,
-  digestManifest,
   findLastSeenVersionBy,
   pickResponseFormat,
   renderCatalogIndexHtml,
@@ -186,12 +185,12 @@ async function queryManifest<T>(
 }
 
 /**
- * Everything `metadata.json` needs from the latest manifest, without holding
- * it. The streaming digest is exact only when the manifest's keys arrive in
- * ascending order and its sizes are plain integers (see `DigestQuery`); when
- * it cannot prove that, the manifest is read again and materialized for the
- * reference `digestManifest`, which is the memory this route used to need,
- * so that path says so in the log.
+ * Everything `metadata.json` needs from the latest manifest, in one streaming
+ * pass that never holds the manifest (#1502). When the stream cannot prove the
+ * totals (see `DigestQuery`), they come back null and the catalog row answers
+ * for them; the BIDS index and sessions are exact either way. Both departures
+ * from a clean manifest are logged, because a manifest that triggers them is
+ * one the pipeline did not write the usual way.
  */
 async function loadManifestDigest(
   env: Bindings,
@@ -201,19 +200,18 @@ async function loadManifestDigest(
 ): Promise<ManifestDigest | null> {
   const read = await queryManifest(env, request, datasetId, version, () => new DigestQuery());
   if (!read) return null;
-  if (read.answer.kind === "digest") return read.answer.digest;
-  console.warn(
-    `[data] metadata.json: ${read.answer.reason}; materializing the whole manifest for the digest dataset=${datasetId} version=${version}`,
-  );
-  const full = await queryManifest(
-    env,
-    request,
-    datasetId,
-    version,
-    () => new EntriesQuery(Number.POSITIVE_INFINITY),
-  );
-  if (!full || full.answer.kind !== "entries") return null;
-  return digestManifest({ ...full.header, files: full.answer.files });
+  const { digest, unproven, excludedSizes } = read.answer;
+  if (unproven !== null) {
+    console.warn(
+      `[data] metadata.json: ${unproven}; total_files and size_bytes come from the catalog row dataset=${datasetId} version=${version}`,
+    );
+  }
+  if (excludedSizes > 0) {
+    console.warn(
+      `[data] metadata.json: ${excludedSizes} manifest entries have a size that is not a non-negative integer; counted in total_files, left out of size_bytes dataset=${datasetId} version=${version}`,
+    );
+  }
+  return digest;
 }
 
 /**

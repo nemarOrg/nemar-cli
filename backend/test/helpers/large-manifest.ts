@@ -29,6 +29,15 @@ export interface LargeManifestOptions {
   runsPerSession: number;
   datasetId?: string;
   version?: string;
+  /**
+   * List the entries in DESCENDING order, which no pipeline writes and which
+   * is exactly what a streaming digest cannot prove repeat-free. Generated in
+   * that order directly, never by reversing a list, so the stream still holds
+   * one chunk at a time.
+   */
+  descending?: boolean;
+  /** Write every Nth entry's size as a JSON string instead of a number. */
+  stringSizeEvery?: number;
 }
 
 const SIDES = ["left", "right"] as const;
@@ -51,8 +60,7 @@ function fakeSha(i: number, width = 40): string {
   return out.slice(0, width);
 }
 
-/** Every path, in the order the manifest lists them (ascending). */
-export function* largeManifestPaths(opts: LargeManifestOptions): Generator<string> {
+function* ascendingPaths(opts: LargeManifestOptions): Generator<string> {
   yield* ROOT_BEFORE;
   for (let s = 0; s < opts.subjects; s++) {
     const sub = `sub-${pad(s, 3)}`;
@@ -67,6 +75,29 @@ export function* largeManifestPaths(opts: LargeManifestOptions): Generator<strin
     yield `${sub}/${ses}/${sub}_${ses}_scans.tsv`;
   }
   yield* ROOT_AFTER;
+}
+
+/** The same paths, last first, produced without materializing the list. */
+function* descendingPaths(opts: LargeManifestOptions): Generator<string> {
+  yield* [...ROOT_AFTER].reverse();
+  for (let s = opts.subjects - 1; s >= 0; s--) {
+    const sub = `sub-${pad(s, 3)}`;
+    const ses = "ses-01";
+    yield `${sub}/${ses}/${sub}_${ses}_scans.tsv`;
+    for (let r = opts.runsPerSession - 1; r >= 0; r--) {
+      for (const side of [...SIDES].reverse()) {
+        for (const suffix of [...SUFFIXES].reverse()) {
+          yield `${sub}/${ses}/emg/${sub}_${ses}_task-emg2pose_run-${pad(r, 2)}_recording-${side}_${suffix}`;
+        }
+      }
+    }
+  }
+  yield* [...ROOT_BEFORE].reverse();
+}
+
+/** Every path, in the order the manifest lists them (ascending unless `descending`). */
+export function largeManifestPaths(opts: LargeManifestOptions): Generator<string> {
+  return opts.descending ? descendingPaths(opts) : ascendingPaths(opts);
 }
 
 export function largeManifestEntryCount(opts: LargeManifestOptions): number {
@@ -92,7 +123,9 @@ export function* largeManifestPieces(opts: LargeManifestOptions): Generator<stri
     const bytesUrl = annex
       ? `https://data.nemar.org/${datasetId}/v${version}/${path}`
       : `https://raw.githubusercontent.com/nemarDatasets/${datasetId}/v${version}/${path}`;
-    yield `${i === 0 ? "" : ","}\n    ${JSON.stringify(path)}: {\n      "key": "${key}",\n      "size": ${size},\n      "checksum": "${checksum}",\n      "bytes_url": "${bytesUrl}"\n    }`;
+    const sizeJson =
+      opts.stringSizeEvery && (i + 1) % opts.stringSizeEvery === 0 ? `"${size}"` : String(size);
+    yield `${i === 0 ? "" : ","}\n    ${JSON.stringify(path)}: {\n      "key": "${key}",\n      "size": ${sizeJson},\n      "checksum": "${checksum}",\n      "bytes_url": "${bytesUrl}"\n    }`;
     i++;
   }
   yield "\n  }\n}\n";

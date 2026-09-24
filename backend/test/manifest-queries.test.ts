@@ -243,51 +243,72 @@ describe("ContainsPathQuery is Object.hasOwn", () => {
 });
 
 describe("DigestQuery is digestManifest", () => {
-  test("nm000132 takes the streaming path and matches the reference exactly", () => {
+  test("nm000132 streams to exactly the reference digest", () => {
     const got = answerText(FIXTURE_TEXT, new DigestQuery());
-    // The shortcut must actually apply to a real manifest; a digest that
-    // always fell back would pass the parity check and bound nothing.
-    expect(got.kind).toBe("digest");
-    if (got.kind !== "digest") throw new Error("unreachable");
-    expect(got.digest).toEqual(digestManifest(FIXTURE));
+    // The exact path must actually apply to a real manifest; a digest that
+    // always reported unproven totals would bound memory and lose the totals.
+    expect(got).toEqual({ digest: digestManifest(FIXTURE), unproven: null, excludedSizes: 0 });
     expect(got.digest.files).toBe(1462);
   });
 
-  // Synthetic, each one a way the running totals could silently disagree
-  // with Object.values: the real manifests are sorted with integer sizes, so
-  // none of them can.
-  const FALLBACKS: Record<string, string> = {
+  // Synthetic: the real manifests are sorted with integer sizes, so none of
+  // them reach these. Each is a way a stream's totals and Object.values'
+  // could disagree, and none of them may read the manifest whole to settle it.
+  const UNPROVEN: Record<string, string> = {
     "keys out of order": '{"version":"1","files":{"b":{"size":1},"a":{"size":2}}}',
     "a repeated key (counted once, last value)":
       '{"version":"1","files":{"a":{"size":1},"b":{"size":2},"a":{"size":5}}}',
-    "a string size (+ concatenates)": '{"version":"1","files":{"a":{"size":1},"b":{"size":"2"}}}',
-    "a fractional size": '{"version":"1","files":{"a":{"size":0.1},"b":{"size":0.2}}}',
-    "a negative size": '{"version":"1","files":{"a":{"size":-1},"b":{"size":2}}}',
     "sizes past 2^53": '{"version":"1","files":{"a":{"size":9007199254740991},"b":{"size":2}}}',
-    "an entry that is not an object": '{"version":"1","files":{"a":7,"b":{"size":2}}}',
     "files as an array (indices sort as strings)":
       '{"version":"1","files":[{"size":1},{"size":2},{"size":3},{"size":4},{"size":5},{"size":6},{"size":7},{"size":8},{"size":9},{"size":10},{"size":11}]}',
   };
-  for (const [label, text] of Object.entries(FALLBACKS)) {
-    test(`falls back when it cannot prove itself exact: ${label}`, () => {
+  for (const [label, text] of Object.entries(UNPROVEN)) {
+    test(`totals it cannot prove are null, and the index is still exact: ${label}`, () => {
       const got = answerText(text, new DigestQuery());
-      expect(got.kind).toBe("needs_full_read");
-      // The fallback the route then takes: materialize, run the reference.
-      const entries = answerText(text, new EntriesQuery(Number.POSITIVE_INFINITY));
-      if (entries.kind !== "entries") throw new Error("unreachable");
+      const reference = digestManifest(JSON.parse(text) as VersionManifest);
+      expect(got.unproven).not.toBeNull();
+      expect(got.digest.bytes).toBeNull();
+      expect(got.digest.files).toBeNull();
+      expect(got.digest.sessions).toEqual(reference.sessions);
+      expect(got.digest.subjects).toEqual(reference.subjects);
+    });
+  }
+
+  // A size with no meaningful sum: Object.values would concatenate a string
+  // or produce NaN. The entry is counted and its size left out, and that is
+  // reported rather than hidden.
+  const BAD_SIZES: Record<string, string> = {
+    "a string size": '{"version":"1","files":{"a":{"size":1},"b":{"size":"2"},"c":{"size":4}}}',
+    "a fractional size": '{"version":"1","files":{"a":{"size":0.5},"b":{"size":2}}}',
+    "a negative size": '{"version":"1","files":{"a":{"size":-1},"b":{"size":2}}}',
+    "an entry that is not an object": '{"version":"1","files":{"a":7,"b":{"size":2},"c":null}}',
+  };
+  for (const [label, text] of Object.entries(BAD_SIZES)) {
+    test(`an unusable size is counted, excluded and reported: ${label}`, () => {
       const parsed = JSON.parse(text) as VersionManifest;
-      const header = { ...parsed, files: undefined };
-      expect(digestManifest({ ...header, files: entries.files } as VersionManifest)).toEqual(
-        digestManifest(parsed),
-      );
+      const values = Object.values(parsed.files) as unknown[];
+      const sizeOf = (v: unknown) =>
+        v !== null && typeof v === "object" ? (v as { size?: unknown }).size : undefined;
+      const usable = values
+        .map(sizeOf)
+        .filter((n): n is number => Number.isSafeInteger(n) && (n as number) >= 0);
+      const got = answerText(text, new DigestQuery());
+      expect(got.unproven).toBeNull();
+      expect(got.excludedSizes).toBe(values.length - usable.length);
+      expect(got.excludedSizes).toBeGreaterThan(0);
+      expect(got.digest.files).toBe(values.length);
+      expect(got.digest.bytes).toBe(usable.reduce((a, b) => a + b, 0));
     });
   }
 
   test("a second files member starts the totals over", () => {
     const text = '{"version":"1","files":{"a":{"size":1}},"files":{"b":{"size":2}}}';
     const got = answerText(text, new DigestQuery());
-    if (got.kind !== "digest") throw new Error("expected the streaming path");
-    expect(got.digest).toEqual(digestManifest(JSON.parse(text)));
+    expect(got).toEqual({
+      digest: digestManifest(JSON.parse(text)),
+      unproven: null,
+      excludedSizes: 0,
+    });
   });
 });
 
@@ -443,7 +464,7 @@ describe("a large manifest over HTTP", () => {
       );
     }
     const digest = await answerStream(await read(), new DigestQuery());
-    expect(digest).toEqual({ kind: "digest", digest: digestManifest(parsed) });
+    expect(digest).toEqual({ digest: digestManifest(parsed), unproven: null, excludedSizes: 0 });
     expect(await answerStream(await read(), new EntriesQuery(30_000))).toEqual({
       kind: "over_limit",
       limit: 30_000,
@@ -494,7 +515,38 @@ describe("a large manifest over HTTP", () => {
     const baseline = liveBytes();
     const query = sampling(new DigestQuery(), 5000);
     const answer = await answerStream(largeManifestStream(LARGE), query);
-    expect(answer.kind).toBe("digest");
+    expect(answer.unproven).toBeNull();
+    expect(Math.max(...query.samples) - baseline).toBeLessThan(8 * 1024 * 1024);
+  });
+
+  // The two ways a digest used to fall back to reading the whole manifest,
+  // forced on the large manifest. Neither may cost more than a lookup.
+  test("keys in descending order: totals unproven, index exact, memory flat", async () => {
+    const baseline = liveBytes();
+    const query = sampling(new DigestQuery(), 5000);
+    const answer = await answerStream(largeManifestStream({ ...LARGE, descending: true }), query);
+    const reference = digestManifest(parsed);
+    expect(answer.unproven).toContain("ascending");
+    expect(answer.digest.files).toBeNull();
+    expect(answer.digest.subjects).toEqual(reference.subjects);
+    expect(answer.digest.sessions).toEqual(reference.sessions);
+    expect(query.samples.length).toBeGreaterThan(25);
+    expect(Math.max(...query.samples) - baseline).toBeLessThan(8 * 1024 * 1024);
+  });
+
+  test("a string size every 1,000 entries: excluded and counted, memory flat", async () => {
+    const baseline = liveBytes();
+    const query = sampling(new DigestQuery(), 5000);
+    const answer = await answerStream(
+      largeManifestStream({ ...LARGE, stringSizeEvery: 1000 }),
+      query,
+    );
+    const sizes = Object.values(parsed.files).map((f) => f.size);
+    const kept = sizes.filter((_, i) => (i + 1) % 1000 !== 0);
+    expect(answer.unproven).toBeNull();
+    expect(answer.excludedSizes).toBe(Math.floor(LARGE_ENTRIES / 1000));
+    expect(answer.digest.files).toBe(LARGE_ENTRIES);
+    expect(answer.digest.bytes).toBe(kept.reduce((a, b) => a + b, 0));
     expect(Math.max(...query.samples) - baseline).toBeLessThan(8 * 1024 * 1024);
   });
 

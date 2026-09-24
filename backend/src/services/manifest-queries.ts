@@ -15,7 +15,9 @@
  *  - {@link ContainsPathQuery} is `Object.hasOwn(manifest.files, path)`, for
  *    the tombstone walk. Kept: one boolean.
  *  - {@link DigestQuery} is `digestManifest`, for `metadata.json`. Kept: two
- *    numbers and the BIDS index, which grows with subjects, not files.
+ *    numbers and the BIDS index, which grows with subjects, not files. Where
+ *    the stream cannot prove the totals it reports them unproven rather than
+ *    reading the manifest whole.
  *  - {@link EntriesQuery} is `manifest.files` itself, for `manifest.json`,
  *    which has to name every entry; it is bounded by a count instead, and
  *    {@link EntryCountQuery} (`Object.keys(manifest.files).length`) lets the
@@ -27,8 +29,8 @@
  * that appears twice keeps its first position with its last value. The
  * queries that emit an order ({@link ResolvePathQuery}'s children, which a
  * stable sort only reorders among ties) reproduce that. Nothing here assumes
- * the manifest is sorted; {@link DigestQuery} is the one query that USES
- * sortedness, and it checks it on every key and falls back when it fails.
+ * the manifest is sorted; {@link DigestQuery} and {@link EntryCountQuery} are
+ * the queries that USE sortedness, and they check it on every key.
  */
 
 import {
@@ -203,91 +205,110 @@ export class ContainsPathQuery implements ManifestQuery<boolean> {
   }
 }
 
-export type DigestAnswer =
-  | { kind: "digest"; digest: ManifestDigest }
+export interface DigestAnswer {
   /**
-   * The shortcut could not prove itself exact for this document, so the
-   * caller must materialize it and run the reference `digestManifest`.
+   * `bytes` and `files` are null when the stream could not prove them (see
+   * `unproven`); `sessions` and `subjects` are always exact.
    */
-  | { kind: "needs_full_read"; reason: string };
+  digest: ManifestDigest;
+  /** Why the totals are null, or null when they are exact. */
+  unproven: string | null;
+  /**
+   * Entries whose `size` is not a non-negative safe integer. They are counted
+   * in `files` and left out of `bytes`.
+   */
+  excludedSizes: number;
+}
 
 /**
- * `digestManifest(manifest)` without the manifest, for `metadata.json`.
+ * `digestManifest(manifest)` without the manifest, for `metadata.json`, in
+ * memory that grows with the BIDS index (subjects, sessions, tasks), never
+ * with the number of files. There is no fallback that reads the manifest
+ * whole: every document is answered in one streaming pass.
  *
  * The sessions and the BIDS index are sets of strings built from paths, so
- * they are right in any order and immune to a repeated key. The two totals are
- * not: `Object.values` counts a repeated key once, with its LAST value, and
- * adds sizes with `+`, which concatenates as soon as one of them is a string.
- * So the running totals are only kept while two things hold, and either
- * failing hands the question back to the reference implementation:
+ * they are exact in any order and immune to a repeated key. The totals are
+ * where a stream and `Object.values` can disagree, and each way is handled
+ * without holding the entries:
  *
- *  - every key is strictly greater than the one before it (UTF-16 code-unit
- *    order), which proves no key repeats. The manifests the pipeline writes
- *    are in this order (git tree order is byte order, and every BIDS path
- *    is ASCII); `manifest-queries.test.ts` checks it on the real nm000132
- *    manifest, and checks the fallback on one that is not.
- *  - every size is a non-negative safe integer and the running total stays a
- *    safe integer, which makes floating-point addition exact and therefore
- *    order-free, so `Object.values`' order (array indices first) cannot
- *    change the sum.
+ *  - A REPEATED KEY is one entry to `Object.values`, with its last value. A
+ *    stream can only rule repeats out while every key is strictly greater than
+ *    the one before it (UTF-16 code-unit order), which is how the pipeline
+ *    writes manifests (git tree order is byte order, and every BIDS path is
+ *    ASCII; `manifest-queries.test.ts` checks the real nm000132 manifest).
+ *    Deduplicating out-of-order keys exactly would mean keeping every key, the
+ *    memory #1502 removed, so once the order breaks the totals are reported as
+ *    unproven (null) and the route takes them from the catalog row, as it does
+ *    when a manifest cannot be read at all. Nothing is guessed.
+ *  - A SIZE THAT IS NOT A NON-NEGATIVE SAFE INTEGER has no meaningful sum:
+ *    `Object.values` would have concatenated a string or produced NaN. Such
+ *    an entry is counted as a file, left out of `bytes`, and reported in
+ *    `excludedSizes` so the route can log it.
+ *  - A TOTAL PAST 2^53 cannot be added exactly, so it is unproven as well.
+ *
+ * With integer sizes and ascending keys, floating-point addition is exact and
+ * therefore order-free, so the result equals `digestManifest`'s.
  */
 export class DigestQuery implements ManifestQuery<DigestAnswer> {
   private previous: string | null = null;
-  private failure: string | null = null;
+  private unproven: string | null = null;
   private bytes = 0;
   private files = 0;
+  private excludedSizes = 0;
   private bids = new BidsIndexBuilder();
   private sessions = new SessionsCollector();
 
   reset(): void {
     this.previous = null;
-    this.failure = null;
+    this.unproven = null;
     this.bytes = 0;
     this.files = 0;
+    this.excludedSizes = 0;
     this.bids = new BidsIndexBuilder();
     this.sessions = new SessionsCollector();
   }
 
   key(path: string): boolean {
-    if (this.failure !== null) return false;
+    this.bids.add(path);
+    this.sessions.add(path);
+    if (this.unproven !== null) return false;
     if (this.previous !== null && !(this.previous < path)) {
-      this.failure = "entry keys are not in strictly ascending order";
+      this.unproven =
+        "entry keys are not in strictly ascending order, so a repeated key cannot be ruled out";
       return false;
     }
     this.previous = path;
-    this.bids.add(path);
-    this.sessions.add(path);
+    this.files++;
     return true;
   }
 
   value(_path: string, value: unknown): void {
-    if (this.failure !== null) return;
+    if (this.unproven !== null) return;
     const size =
       value !== null && typeof value === "object" ? (value as { size?: unknown }).size : undefined;
-    if (
-      typeof size !== "number" ||
-      !Number.isSafeInteger(size) ||
-      size < 0 ||
-      this.bytes + size > Number.MAX_SAFE_INTEGER
-    ) {
-      this.failure = "an entry's size is not a non-negative safe integer";
+    if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) {
+      this.excludedSizes++;
+      return;
+    }
+    if (this.bytes + size > Number.MAX_SAFE_INTEGER) {
+      this.unproven = "the sizes add up past 2^53, which cannot be summed exactly";
       return;
     }
     this.bytes += size;
-    this.files++;
   }
 
   finish(header: ManifestHeader): DigestAnswer {
-    if (this.failure !== null) return { kind: "needs_full_read", reason: this.failure };
+    const exact = this.unproven === null;
     return {
-      kind: "digest",
       digest: {
         version: header.version,
-        bytes: this.bytes,
-        files: this.files,
+        bytes: exact ? this.bytes : null,
+        files: exact ? this.files : null,
         sessions: this.sessions.build(),
         subjects: this.bids.build(),
       },
+      unproven: this.unproven,
+      excludedSizes: exact ? this.excludedSizes : 0,
     };
   }
 }

@@ -384,24 +384,30 @@ describe("metadata.json", () => {
     });
   }
 
-  // Synthetic: every real manifest is sorted, so only this reaches the
-  // fallback that re-reads and materializes the manifest for the reference.
-  test("an unsorted manifest takes the whole-parse fallback and still matches", async () => {
+  // Synthetic: every real manifest is sorted. An unsorted one cannot be proven
+  // free of repeated keys without keeping every key, so its totals come from
+  // the catalog row (as for an unreadable manifest) and nothing reads it twice.
+  test("an unsorted manifest keeps its index and takes its totals from the catalog row", async () => {
     const unsorted: VersionManifest = {
       ...CURRENT,
       files: Object.fromEntries(Object.entries(CURRENT.files).reverse()),
     };
     seed("nm000909", "public", [["1.1.1", "2026-04-04 06:05:15"]]);
+    db.prepare("UPDATE datasets SET file_size = ?, total_files = ? WHERE dataset_id = ?").run(
+      123456,
+      789,
+      "nm000909",
+    );
     s3.put("/nm000909/version/v1.1.1.json", JSON.stringify(unsorted));
     const res = await get("/nm000909/metadata.json");
     expect(res.status).toBe(200);
     const body = (await res.json()) as MetadataShape;
     const digest = digestManifest(unsorted);
-    expect(body.data_summary?.total_files).toBe(digest.files);
-    expect(body.data_summary?.size_bytes).toBe(digest.bytes);
+    expect(body.data_summary?.total_files).toBe(789);
+    expect(body.data_summary?.size_bytes).toBe(123456);
+    expect(body.sessions).toEqual(digest.sessions);
     expect(body.extensions.nemar.bids_index?.subjects).toEqual(digest.subjects);
-    // Two reads: the streaming digest that gave up, then the whole one.
-    expect(s3.log.filter((r) => r.path === "/nm000909/version/v1.1.1.json")).toHaveLength(2);
+    expect(s3.log.filter((r) => r.path === "/nm000909/version/v1.1.1.json")).toHaveLength(1);
   });
 });
 
@@ -430,6 +436,36 @@ describe("the large manifest: answers, and memory that does not follow it", () =
       clearInterval(timer);
     }
   }
+
+  // The case #1502's first fix still read whole: keys out of order. The
+  // metadata digest used to materialize the manifest for it.
+  const DESCENDING_ID = "nm000282";
+  beforeAll(() => {
+    s3.put(
+      `/${DESCENDING_ID}/version/v1.0.3.json`,
+      largeManifestText({ ...LARGE_OPTS, datasetId: DESCENDING_ID, descending: true }),
+    );
+  });
+
+  test("metadata.json over the large manifest in descending order stays flat", async () => {
+    seed(DESCENDING_ID, "public", [["1.0.3", "2026-08-31 00:21:32"]]);
+    db.prepare("UPDATE datasets SET total_files = ? WHERE dataset_id = ?").run(42, DESCENDING_ID);
+    const { res, body, peak, samples } = await sampled(() =>
+      get(`/${DESCENDING_ID}/metadata.json`),
+    );
+    expect(res.status).toBe(200);
+    const doc = JSON.parse(body) as {
+      data_summary: { total_files: number } | null;
+      extensions: { nemar: { bids_index: { subjects: unknown } | null } };
+    };
+    expect(doc.data_summary?.total_files).toBe(42);
+    expect(doc.extensions.nemar.bids_index?.subjects).toEqual(digestManifest(large).subjects);
+    expect(samples).toBeGreaterThan(3);
+    expect(peak).toBeLessThan(16 * 1024 * 1024);
+    expect(s3.log.filter((r) => r.path === `/${DESCENDING_ID}/version/v1.0.3.json`)).toHaveLength(
+      1,
+    );
+  });
 
   const paths = [...largeManifestPaths(LARGE_OPTS)];
   // An annexed recording deep in the manifest, so a GET is a presigned
