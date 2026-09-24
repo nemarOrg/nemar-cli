@@ -542,6 +542,32 @@ describe("the edge cache sits behind the visibility gate", () => {
     expect(s3.log.map((r) => r.status)).toEqual([304]);
   });
 
+  test("two manifests read at the same time each store an intact copy", async () => {
+    // Concurrent requests in one isolate each have their own cache write; the
+    // copies must not mix. Both are then answered from the copy after a 304.
+    // A slow cache read keeps the two writes in flight at once.
+    cache = new DrainingCache({ readDelayMs: 20 });
+    (globalThis as { caches?: unknown }).caches = { default: cache };
+    const paths = [`/${SMALL}/v1.1.1/sub-001/`, `/${SMALL}/v1.0.0/sub-001/`];
+    const first = await Promise.all(paths.map((p) => get(p, JSON_ACCEPT)));
+    const decoder = new TextDecoder();
+    for (const [version, text] of [
+      ["v1.1.1", CURRENT_TEXT],
+      ["v1.0.0", PRIOR_TEXT],
+    ] as const) {
+      const copy = cache.store.get(manifestCacheKey("https://data.nemar.org", SMALL, version));
+      expect(copy && decoder.decode(copy.body)).toBe(text);
+    }
+    s3.log.length = 0;
+    const second = await Promise.all(paths.map((p) => get(p, JSON_ACCEPT)));
+    for (const [i, res] of second.entries()) {
+      expect(await res.text()).toBe(await first[i].text());
+    }
+    const reads = s3.log.filter((r) => r.path.startsWith(`/${SMALL}/`));
+    expect(reads.length).toBeGreaterThanOrEqual(2);
+    expect(reads.every((r) => r.status === 304)).toBe(true);
+  });
+
   test("a dataset gone private is refused before the cache or S3 is touched", async () => {
     await get(`/${SMALL}/v1.1.1/sub-001/`, JSON_ACCEPT);
     expect(cache.store.size).toBeGreaterThan(0);

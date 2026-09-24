@@ -59,10 +59,11 @@ export class DrainingCache implements CacheLike {
   readonly store = new Map<string, { body: Uint8Array; status: number; headers: Headers }>();
   matches = 0;
   puts = 0;
-  /** Bytes read by the last `put()`, whether or not it completed. */
+  /** Bytes read by the most recently started `put()`, whether or not it completed. */
   lastPutBytes = 0;
   /** Why the last `put()` failed, if it did. */
   lastPutError: unknown = null;
+  private startedPuts = 0;
 
   constructor(
     private readonly opts: {
@@ -82,6 +83,11 @@ export class DrainingCache implements CacheLike {
   async put(request: RequestInfo | URL, response: Response): Promise<void> {
     this.puts++;
     if (response.status === 206) throw new Error("Cache API cannot store a 206 response");
+    // Each put counts its own bytes: two puts can be in flight at once, as
+    // concurrent requests in one isolate make them, and a count shared on
+    // the instance would size one copy from the other's reads.
+    const started = ++this.startedPuts;
+    let read = 0;
     this.lastPutBytes = 0;
     this.lastPutError = null;
     const chunks: Uint8Array[] = [];
@@ -92,7 +98,8 @@ export class DrainingCache implements CacheLike {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        this.lastPutBytes += value.byteLength;
+        read += value.byteLength;
+        if (started === this.startedPuts) this.lastPutBytes = read;
         if (this.opts.keepBodies !== false) chunks.push(value);
         if (this.opts.readDelayMs && ++n % every === 0) await Bun.sleep(this.opts.readDelayMs);
       }
@@ -101,7 +108,7 @@ export class DrainingCache implements CacheLike {
       this.lastPutError = err;
       throw err;
     }
-    const body = new Uint8Array(this.lastPutBytes);
+    const body = new Uint8Array(read);
     let at = 0;
     for (const c of chunks) {
       body.set(c, at);
