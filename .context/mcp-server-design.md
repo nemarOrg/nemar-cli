@@ -377,20 +377,29 @@ dataset has no data."
 ### 5.4 `get_events`
 
 **Inputs:** `dataset_id`, `recording` (a store's `path` or `zarr`),
-`group?`, `limit` (default 1000, capped at 5000), `offset` (default 0).
+`group?`, `limit` (default 1000, capped at 5000), `offset` (default 0),
+`where?` (column name to allowed values, compared as strings, every column
+ANDed) and `columns?` (the columns to return; `onset_s` and `sample_index`
+always come back), both added by #1500.
 **Outputs:** `events[]` (`store_path`, `group_name`, `onset_s`,
 `duration_s?`, `sample_index`, `trial_type?`, `value?`, `hed?`, plus any
-`subject`/`session`/`task`/`run`/`x_`-prefixed extra passed through),
+`subject`/`session`/`task`/`run`/`x_`-prefixed extra passed through; with
+`columns`, only the two times and the columns named),
 `source` (`"events_parquet"` or `"events_tsv_fallback"`), `estimated`
-(boolean), `total_count`, `limit`, `offset`, `truncated`, `note`, and an
-optional `envelope`.
+(boolean), `total_count` and `truncated` (counted after `where`), `limit`,
+`offset`, `note`, `columns_summary` (each column but the two times, the store
+and the group, with its distinct values when there are at most 50, computed
+before `where`), and an optional `envelope`. A `where` or `columns` name the
+recording does not have is refused with the columns it does.
 **Cost class:** the WHOLE `events.parquet` file is read once per
 `(dataset_id, source_commit)` on a miss (`hyparquet`'s `asyncBufferFromUrl`
 + `parquetMetadataAsync` + `parquetReadObjects`, no `columns` filter so
 every pass-through BIDS entity column survives), grouped by `store_path`,
 and every store's rows are written to the cache in one pass -- so ONE
 dataset-wide read serves every recording's future `get_events` call, not
-just the one this request named. **Codec: hand-rolled ZSTD-only, not
+just the one this request named. Over 16 MB or 100,000 rows, only the row groups
+whose `store_path` statistics can hold the requested store are read, and only
+that store is cached (#1498). **Codec: hand-rolled ZSTD-only, not
 `hyparquet-compressors`** -- that package's `compressors` export eagerly
 WASM-compiles its `SNAPPY` entry (the `hysnappy` dependency) at module
 load, which crashes isolate startup under real workerd regardless of
