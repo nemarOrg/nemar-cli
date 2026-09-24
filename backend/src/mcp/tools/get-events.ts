@@ -95,7 +95,11 @@ import { asyncBufferFromUrl, parquetMetadataAsync, parquetReadObjects } from "hy
 import type { Compressors, FileMetaData } from "hyparquet";
 import { z } from "zod";
 import {
+  type EventColumnSummary,
   type EventRow,
+  type EventRowOutput,
+  GET_EVENTS_SUMMARY_MAX_VALUES,
+  GET_EVENTS_SUMMARY_MAX_VALUE_CHARS,
   type GetEventsInput,
   type GetEventsOutput,
   eventRowSchema,
@@ -660,6 +664,97 @@ async function loadEventsFromTsvFallback(
   return { kind: "rows", rows, note: null, bytesFetched };
 }
 
+/** The columns `rows` carry, in the order they first appear. */
+function eventColumnNames(rows: readonly EventRow[]): string[] {
+  const seen = new Set<string>();
+  for (const row of rows) {
+    for (const key of Object.keys(row)) seen.add(key);
+  }
+  return [...seen];
+}
+
+/** Not summarized: the two times, which differ on every row, and the store and
+ *  group, which the request already named. `where` and `columns` still accept
+ *  them. */
+const UNSUMMARIZED_COLUMNS = new Set(["onset_s", "sample_index", "store_path", "group_name"]);
+
+/** `columns_summary` (#1500): each column but {@link UNSUMMARIZED_COLUMNS}, with
+ *  its distinct values when there are few enough to list, so a caller can build a
+ *  `where` from one small call instead of reading every row to find what to ask
+ *  for. Exported for its unit tests. */
+export function summarizeEventColumns(
+  rows: readonly EventRow[],
+  names: readonly string[],
+): EventColumnSummary[] {
+  const summary: EventColumnSummary[] = [];
+  for (const name of names) {
+    if (UNSUMMARIZED_COLUMNS.has(name)) continue;
+    const counts = new Map<string, number>();
+    let nullCount = 0;
+    for (const row of rows) {
+      const value = (row as Record<string, unknown>)[name];
+      if (value === null || value === undefined) {
+        nullCount++;
+        continue;
+      }
+      const key = String(value);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const listable =
+      counts.size <= GET_EVENTS_SUMMARY_MAX_VALUES &&
+      [...counts.keys()].every((v) => v.length <= GET_EVENTS_SUMMARY_MAX_VALUE_CHARS);
+    summary.push({
+      name,
+      distinct_count: counts.size,
+      null_count: nullCount,
+      values: listable
+        ? [...counts]
+            .map(([value, count]) => ({ value, count }))
+            .sort(
+              (a, b) => b.count - a.count || (a.value < b.value ? -1 : a.value > b.value ? 1 : 0),
+            )
+        : null,
+    });
+  }
+  return summary;
+}
+
+/** `where` keeps a row when every named column holds, as a string, one of the
+ *  values listed for it. A null never matches: there is no value to compare. */
+function matchesWhere(row: EventRow, allowed: ReadonlyMap<string, ReadonlySet<string>>): boolean {
+  for (const [column, values] of allowed) {
+    const value = (row as Record<string, unknown>)[column];
+    if (value === null || value === undefined || !values.has(String(value))) return false;
+  }
+  return true;
+}
+
+/** A row with only the columns asked for, after the two it cannot do without. */
+function projectEventRow(row: EventRow, columns: readonly string[]): EventRowOutput {
+  const projected: EventRowOutput & Record<string, unknown> = {
+    onset_s: row.onset_s,
+    sample_index: row.sample_index,
+  };
+  for (const column of columns) {
+    if (column in projected) continue;
+    projected[column] = (row as Record<string, unknown>)[column] ?? null;
+  }
+  return projected;
+}
+
+function unknownColumnsResult(
+  datasetId: string,
+  recording: string,
+  input: "where" | "columns",
+  unknown: string[],
+  known: string[],
+): CallToolResult {
+  return toolError(
+    `get_events: ${input} names ${unknown.map((c) => `"${c}"`).join(", ")}, which recording ` +
+      `"${recording}" in dataset "${datasetId}" has no column for. Its events have: ${known.join(", ")}.`,
+  );
+}
+
 export async function getEventsTool(
   deps: RecordingToolDeps,
   args: GetEventsInput,
@@ -833,10 +928,52 @@ export async function getEventsTool(
         : `no events.tsv rows resolved for this recording${resolvedGroupName ? ` (group "${resolvedGroupName}")` : ""}`,
     );
   }
+  // `where` and `columns` (#1500). The summary and the column check describe
+  // this group's rows BEFORE the filter, so a filter that keeps nothing still
+  // answers with what it could have asked for. A recording with no rows has no
+  // columns to check against; the note above already says why it is empty.
+  const columnNames = eventColumnNames(rows);
+  if (rows.length > 0) {
+    const named = [
+      ["where", Object.keys(args.where ?? {})],
+      ["columns", args.columns ?? []],
+    ] as const;
+    for (const [input, columns] of named) {
+      const unknown = columns.filter((c) => !columnNames.includes(c));
+      if (unknown.length > 0) {
+        return {
+          result: unknownColumnsResult(
+            args.dataset_id,
+            args.recording,
+            input,
+            unknown,
+            columnNames,
+          ),
+        };
+      }
+    }
+  }
+  // After the refusal, which needs only the names, so a refused request does not
+  // pay for a pass over every value.
+  const columnsSummary = summarizeEventColumns(rows, columnNames);
+  if (args.where) {
+    const allowed = new Map(
+      Object.entries(args.where).map(([column, values]) => [column, new Set(values.map(String))]),
+    );
+    const before = rows.length;
+    rows = rows.filter((r) => matchesWhere(r, allowed));
+    if (before > 0 && rows.length === 0) {
+      notes.push(
+        `none of this recording's ${before} events matched where; columns_summary lists each column's values when it has few`,
+      );
+    }
+  }
   note = notes.length > 0 ? notes.join(" ") : null;
 
   const totalCount = rows.length;
-  const page = rows.slice(args.offset, args.offset + args.limit);
+  const pageRows = rows.slice(args.offset, args.offset + args.limit);
+  const columns = args.columns;
+  const page = columns ? pageRows.map((r) => projectEventRow(r, columns)) : pageRows;
   const truncated = args.offset + page.length < totalCount;
 
   if (!sourceCommitFinal) {
@@ -875,6 +1012,7 @@ export async function getEventsTool(
     offset: args.offset,
     truncated,
     note,
+    columns_summary: columnsSummary,
     envelope,
   } satisfies GetEventsOutput);
 

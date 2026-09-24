@@ -27,7 +27,12 @@
 import * as z4 from "zod4";
 import {
   GET_EVENTS_DEFAULT_LIMIT,
+  GET_EVENTS_MAX_COLUMNS,
   GET_EVENTS_MAX_LIMIT,
+  GET_EVENTS_MAX_WHERE_COLUMNS,
+  GET_EVENTS_MAX_WHERE_VALUES,
+  GET_EVENTS_SUMMARY_MAX_VALUES,
+  GET_EVENTS_SUMMARY_MAX_VALUE_CHARS,
   LIST_RECORDINGS_DEFAULT_LIMIT,
   LIST_RECORDINGS_MAX_LIMIT,
   NEXT_CHEAPEST_TOOL_VALUES,
@@ -496,6 +501,8 @@ export const listRecordingsOutputSchema4 = z4
 // get_events
 // ---------------------------------------------------------------------------
 
+const eventColumnNameSchema4 = z4.string().min(1).max(64);
+
 export const getEventsInputSchema4 = z4
   .object({
     dataset_id: z4.string().regex(DATASET_ID_RE).describe(DATASET_ID_DESCRIPTION),
@@ -513,6 +520,36 @@ export const getEventsInputSchema4 = z4
         `Maximum number of event rows to return (default ${GET_EVENTS_DEFAULT_LIMIT}, capped at ${GET_EVENTS_MAX_LIMIT}).`,
       ),
     offset: z4.number().int().nonnegative().default(0),
+    where: z4
+      .record(
+        eventColumnNameSchema4,
+        z4
+          .array(z4.union([z4.string(), z4.number()]))
+          .min(1)
+          .max(GET_EVENTS_MAX_WHERE_VALUES),
+      )
+      .refine(
+        (w) => {
+          const n = Object.keys(w).length;
+          return n >= 1 && n <= GET_EVENTS_MAX_WHERE_COLUMNS;
+        },
+        { message: `where names 1 to ${GET_EVENTS_MAX_WHERE_COLUMNS} columns` },
+      )
+      .optional()
+      .describe(
+        "Keep only rows whose value in each named column, compared as a string, is one of those " +
+          'listed, e.g. {"trial_type": ["stimulus"]}. total_count counts the rows kept. ' +
+          "columns_summary names the columns and their values, so a call with limit 1 shows what to ask for.",
+      ),
+    columns: z4
+      .array(eventColumnNameSchema4)
+      .min(1)
+      .max(GET_EVENTS_MAX_COLUMNS)
+      .optional()
+      .describe(
+        'Return only these columns, e.g. ["trial_type"]; onset_s and sample_index always come back. ' +
+          "Omit for every column.",
+      ),
   })
   .passthrough();
 
@@ -529,11 +566,30 @@ const eventRowSchema4 = z4
   })
   .passthrough();
 
+const eventRowOutputSchema4 = eventRowSchema4
+  .partial()
+  .required({ onset_s: true, sample_index: true });
+
+const eventColumnSummarySchema4 = z4
+  .object({
+    name: z4.string(),
+    distinct_count: z4.number().int().nonnegative(),
+    null_count: z4.number().int().nonnegative(),
+    values: z4
+      .array(z4.object({ value: z4.string(), count: z4.number().int().positive() }).passthrough())
+      .nullable()
+      .describe(
+        `Each distinct value and its row count, most common first; null over ${GET_EVENTS_SUMMARY_MAX_VALUES} ` +
+          `distinct values or for a value over ${GET_EVENTS_SUMMARY_MAX_VALUE_CHARS} characters.`,
+      ),
+  })
+  .passthrough();
+
 export const getEventsOutputSchema4 = z4
   .object({
     dataset_id: z4.string().regex(DATASET_ID_RE).describe(DATASET_ID_DESCRIPTION),
     recording: z4.string(),
-    events: z4.array(eventRowSchema4),
+    events: z4.array(eventRowOutputSchema4),
     source: z4
       .enum(["events_parquet", "events_tsv_fallback"])
       .describe("events_parquet is exact; events_tsv_fallback's sample_index is estimated."),
@@ -543,6 +599,12 @@ export const getEventsOutputSchema4 = z4
     offset: z4.number().int(),
     truncated: z4.boolean(),
     note: z4.string().nullable().optional(),
+    columns_summary: z4
+      .array(eventColumnSummarySchema4)
+      .optional()
+      .describe(
+        "Every column of this recording's events except onset_s, sample_index, store_path and group_name, before where is applied.",
+      ),
     envelope: provenanceEnvelopeSchema4.optional(),
   })
   .passthrough();

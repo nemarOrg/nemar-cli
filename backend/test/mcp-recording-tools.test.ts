@@ -25,6 +25,9 @@ import type { Hono } from "hono";
 import { parquetMetadata } from "hyparquet";
 import type { FileMetaData } from "hyparquet";
 import {
+  type EventRow,
+  GET_EVENTS_SUMMARY_MAX_VALUES,
+  GET_EVENTS_SUMMARY_MAX_VALUE_CHARS,
   type GetEventsOutput,
   type ListRecordingsOutput,
   getEventsOutputSchema,
@@ -32,7 +35,11 @@ import {
 } from "../../shared/contract/mcp.js";
 import on003392MegSssSliceRaw from "../../test/fixtures/zarr-index-on003392-meg-sss-slice.json";
 import { projectionUrl } from "../src/mcp/projection-cache.js";
-import { MAX_STORE_FANOUT_ENTRIES, storeRowGroupSpan } from "../src/mcp/tools/get-events.js";
+import {
+  MAX_STORE_FANOUT_ENTRIES,
+  storeRowGroupSpan,
+  summarizeEventColumns,
+} from "../src/mcp/tools/get-events.js";
 import { type McpRoutesDeps, createMcpRoutes } from "../src/routes/mcp.js";
 import { type CacheLike, createZarrDataRoutes } from "../src/routes/zarr-data.js";
 import type { Bindings } from "../src/types/bindings.js";
@@ -1388,6 +1395,184 @@ describe("list_recordings / get_events (epic #1065 phase 3)", () => {
           .slice(parquetReadsBefore)
           .filter((r) => r.url.endsWith("events.parquet")).length,
       ).toBe(0);
+    });
+  });
+
+  // #1500. nm000329's first store is 72 events in one group: 36 left_hand with
+  // value "1" and 36 right_hand with value "2" (the fixture parquet, read with
+  // pyarrow), so every count below is known rather than merely nonzero.
+  describe("where, columns and columns_summary (#1500)", () => {
+    const first = (nm000329IndexRaw as { stores: Array<{ zarr: string }> }).stores[0].zarr;
+
+    async function events(id: number, args: Record<string, unknown>): Promise<GetEventsOutput> {
+      const { body } = await callTool(app, env(db), id, "get_events", {
+        dataset_id: V3_ID,
+        recording: first,
+        ...args,
+      });
+      const output = structuredContentOf(body) as unknown as GetEventsOutput;
+      getEventsOutputSchema.parse(output);
+      return output;
+    }
+
+    test("where keeps the named values, and total_count and truncated count what it kept", async () => {
+      const page = await events(1, { where: { trial_type: ["left_hand"] }, limit: 10 });
+      expect(page.events.length).toBe(10);
+      expect(page.events.every((e) => e.trial_type === "left_hand")).toBe(true);
+      expect(page.total_count).toBe(36);
+      expect(page.truncated).toBe(true);
+      const last = await events(2, { where: { trial_type: ["left_hand"] }, offset: 30, limit: 10 });
+      expect(last.events.length).toBe(6);
+      expect(last.truncated).toBe(false);
+      const both = await events(3, { where: { trial_type: ["left_hand", "right_hand"] } });
+      expect(both.total_count).toBe(72);
+    });
+
+    test("where compares as strings, so a number matches the string column it names", async () => {
+      const output = await events(1, { where: { value: [1] } });
+      expect(output.total_count).toBe(36);
+      expect(output.events.every((e) => e.trial_type === "left_hand")).toBe(true);
+    });
+
+    test("where ANDs its columns: left_hand with right_hand's value keeps nothing, and says so", async () => {
+      const output = await events(1, { where: { trial_type: ["left_hand"], value: ["2"] } });
+      expect(output.events).toEqual([]);
+      expect(output.total_count).toBe(0);
+      expect(output.note).toContain("none of this recording's 72 events matched where");
+    });
+
+    test("a null never matches, not even the string null", async () => {
+      const output = await events(1, { where: { hed: ["null", "", "n/a"] } });
+      expect(output.total_count).toBe(0);
+    });
+
+    test("columns returns the two times and the columns named, and nothing else", async () => {
+      const output = await events(1, { columns: ["value", "trial_type", "onset_s"], limit: 3 });
+      expect(output.events.length).toBe(3);
+      for (const row of output.events) {
+        // Key order is the output schema's, not the request's: the tool parses its answer.
+        expect(Object.keys(row).sort()).toEqual(["onset_s", "sample_index", "trial_type", "value"]);
+      }
+      // The values are the rows' own, not placeholders.
+      const full = await events(2, { limit: 3 });
+      expect(output.events.map((e) => [e.onset_s, e.sample_index, e.value])).toEqual(
+        full.events.map((e) => [e.onset_s, e.sample_index, e.value]),
+      );
+    });
+
+    test("an unknown where or columns name is refused, naming the columns that exist", async () => {
+      for (const args of [
+        { where: { event_type: ["face"] } },
+        { columns: ["trial_type", "event_type"] },
+      ]) {
+        const { body } = await callTool(app, env(db), 1, "get_events", {
+          dataset_id: V3_ID,
+          recording: first,
+          ...args,
+        });
+        const text = errorTextOf(body);
+        expect(text).toContain('"event_type"');
+        expect(text).not.toContain('"trial_type"');
+        expect(text).toContain("trial_type, value, hed");
+      }
+    });
+
+    test("columns_summary describes the rows before where, and lists only short, few values", async () => {
+      const output = await events(1, { where: { trial_type: ["left_hand"] }, limit: 1 });
+      const byName = new Map((output.columns_summary ?? []).map((c) => [c.name, c]));
+      // The times differ on every row; the store and group are the ones asked for.
+      for (const name of ["onset_s", "sample_index", "store_path", "group_name"]) {
+        expect(byName.has(name)).toBe(false);
+      }
+      expect(byName.get("trial_type")).toEqual({
+        name: "trial_type",
+        distinct_count: 2,
+        null_count: 0,
+        values: [
+          { value: "left_hand", count: 36 },
+          { value: "right_hand", count: 36 },
+        ],
+      });
+      // 72 distinct sample strings: counted, not spelled out.
+      expect(byName.get("sample")).toMatchObject({ distinct_count: 72, values: null });
+      expect(byName.get("hed")).toEqual({
+        name: "hed",
+        distinct_count: 0,
+        null_count: 72,
+        values: [],
+      });
+      expect(byName.get("duration_s")?.values).toEqual([{ value: "4.5", count: 72 }]);
+    });
+
+    test("the store and group are left out of the summary, but where and columns still take them", async () => {
+      const output = await events(1, {
+        where: { group_name: ["eeg_250hz"], store_path: [first] },
+        columns: ["store_path", "group_name"],
+        limit: 1,
+      });
+      expect(output.total_count).toBe(72);
+      expect(output.events[0]).toMatchObject({ store_path: first, group_name: "eeg_250hz" });
+    });
+
+    test("where on a group with no events keeps the group's own note, not a where note", async () => {
+      // before > 0 is what stops "none of this recording's 0 events matched where"
+      // being said about a group that never had any.
+      const { body } = await callTool(app, env(db), 1, "get_events", {
+        dataset_id: MULTI_GROUP_ID,
+        recording: first,
+        group: MULTI_GROUP_EMPTY,
+        where: { trial_type: ["left_hand"] },
+      });
+      const output = getEventsOutputSchema.parse(structuredContentOf(body)) as GetEventsOutput;
+      expect(output.total_count).toBe(0);
+      expect(output.note).toContain(MULTI_GROUP_EMPTY);
+      expect(output.note).not.toContain("matched where");
+    });
+
+    test("a filtered call is served from the same cached rows as an unfiltered one", async () => {
+      await events(1, {});
+      const parquetReads = () =>
+        fixtureServer.requestLog.filter((r) => r.url === `${V3_ID}/zarr/events.parquet`).length;
+      const before = parquetReads();
+      const output = await events(2, { where: { trial_type: ["right_hand"] }, columns: ["value"] });
+      expect(output.total_count).toBe(36);
+      expect(parquetReads()).toBe(before);
+    });
+
+    test("the events.tsv fallback filters and projects the same way", async () => {
+      const { body } = await callTool(app, env(db), 1, "get_events", {
+        dataset_id: V1_ID,
+        recording: "sub-I003/eeg/sub-I003_task-sleep_eeg.zarr",
+        where: { trial_type: ["sleep_stage_2"] },
+        columns: ["value"],
+      });
+      const output = structuredContentOf(body) as unknown as GetEventsOutput;
+      expect(output.source).toBe("events_tsv_fallback");
+      expect(output.events).toEqual([{ onset_s: 2.5, sample_index: 500, value: "7" }]);
+    });
+
+    test("summarizeEventColumns lists up to the value and length bounds, and counts past them", () => {
+      const rows = (values: string[]) =>
+        values.map((v, i) => ({ onset_s: i, sample_index: i, x: v }) as unknown as EventRow);
+      const distinct = (n: number) => Array.from({ length: n }, (_, i) => `v${i}`);
+      const at = summarizeEventColumns(rows(distinct(GET_EVENTS_SUMMARY_MAX_VALUES)), ["x"]);
+      expect(at[0].values?.length).toBe(GET_EVENTS_SUMMARY_MAX_VALUES);
+      const over = summarizeEventColumns(rows(distinct(GET_EVENTS_SUMMARY_MAX_VALUES + 1)), ["x"]);
+      expect(over[0]).toMatchObject({
+        distinct_count: GET_EVENTS_SUMMARY_MAX_VALUES + 1,
+        values: null,
+      });
+      const long = "a".repeat(GET_EVENTS_SUMMARY_MAX_VALUE_CHARS);
+      expect(summarizeEventColumns(rows([long]), ["x"])[0].values).toEqual([
+        { value: long, count: 1 },
+      ]);
+      expect(summarizeEventColumns(rows([`${long}a`]), ["x"])[0].values).toBeNull();
+      // Most common first; a tie in value order, so the answer is the same every time.
+      expect(summarizeEventColumns(rows(["b", "a", "c", "c"]), ["x"])[0].values).toEqual([
+        { value: "c", count: 2 },
+        { value: "a", count: 1 },
+        { value: "b", count: 1 },
+      ]);
     });
   });
 });
