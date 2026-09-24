@@ -43,7 +43,11 @@ import { manifestCacheKey } from "../src/services/manifest-source";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { DrainingCache, StalledCache } from "./helpers/cache";
 import { freshDb, realD1 } from "./helpers/d1";
-import { largeManifestPaths, largeManifestText } from "./helpers/large-manifest";
+import {
+  LARGE_MANIFEST_TEST_TIMEOUT_MS,
+  largeManifestPaths,
+  largeManifestText,
+} from "./helpers/large-manifest";
 import { type S3ManifestStandin, startS3ManifestStandin } from "./helpers/s3-manifest-standin";
 
 const CURRENT_TEXT = readFileSync(
@@ -325,36 +329,44 @@ describe("manifest.json", () => {
     }
   });
 
-  test(`above ${MAX_MANIFEST_JSON_ENTRIES} entries it refuses, naming the listing`, async () => {
-    expect(Object.keys(large.files).length).toBeGreaterThan(MAX_MANIFEST_JSON_ENTRIES);
-    for (const version of ["v1.0.3", "latest"]) {
-      const res = await get(`/${LARGE_ID}/${version}/manifest.json`);
-      expect(res.status).toBe(413);
-      const body = (await res.json()) as Record<string, unknown>;
-      expect(body.dataset_id).toBe(LARGE_ID);
-      expect(body.version).toBe("v1.0.3");
-      expect(body.limit).toBe(MAX_MANIFEST_JSON_ENTRIES);
-      expect(body.listing_url).toBe(`https://data.nemar.org/${LARGE_ID}/v1.0.3/?format=json`);
-      expect(String(body.error)).toContain(String(body.listing_url));
-      // And the listing it names does work.
-      const listing = await get(`/${LARGE_ID}/v1.0.3/?format=json`);
-      expect(listing.status).toBe(200);
-    }
-  });
+  test(
+    `above ${MAX_MANIFEST_JSON_ENTRIES} entries it refuses, naming the listing`,
+    async () => {
+      expect(Object.keys(large.files).length).toBeGreaterThan(MAX_MANIFEST_JSON_ENTRIES);
+      for (const version of ["v1.0.3", "latest"]) {
+        const res = await get(`/${LARGE_ID}/${version}/manifest.json`);
+        expect(res.status).toBe(413);
+        const body = (await res.json()) as Record<string, unknown>;
+        expect(body.dataset_id).toBe(LARGE_ID);
+        expect(body.version).toBe("v1.0.3");
+        expect(body.limit).toBe(MAX_MANIFEST_JSON_ENTRIES);
+        expect(body.listing_url).toBe(`https://data.nemar.org/${LARGE_ID}/v1.0.3/?format=json`);
+        expect(String(body.error)).toContain(String(body.listing_url));
+        // And the listing it names does work.
+        const listing = await get(`/${LARGE_ID}/v1.0.3/?format=json`);
+        expect(listing.status).toBe(200);
+      }
+    },
+    LARGE_MANIFEST_TEST_TIMEOUT_MS,
+  );
 
-  test("through the /data mount, the listing URL keeps the mount", async () => {
-    const mounted = new Hono<{ Bindings: Bindings; Variables: Variables }>();
-    mounted.route("/data", dataRoutes);
-    const res = await mounted.request(
-      `https://api.nemar.org/data/${LARGE_ID}/latest/manifest.json`,
-      {},
-      env(),
-    );
-    expect(res.status).toBe(413);
-    expect(((await res.json()) as { listing_url: string }).listing_url).toBe(
-      `https://api.nemar.org/data/${LARGE_ID}/v1.0.3/?format=json`,
-    );
-  });
+  test(
+    "through the /data mount, the listing URL keeps the mount",
+    async () => {
+      const mounted = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+      mounted.route("/data", dataRoutes);
+      const res = await mounted.request(
+        `https://api.nemar.org/data/${LARGE_ID}/latest/manifest.json`,
+        {},
+        env(),
+      );
+      expect(res.status).toBe(413);
+      expect(((await res.json()) as { listing_url: string }).listing_url).toBe(
+        `https://api.nemar.org/data/${LARGE_ID}/v1.0.3/?format=json`,
+      );
+    },
+    LARGE_MANIFEST_TEST_TIMEOUT_MS,
+  );
 });
 
 describe("metadata.json", () => {
@@ -369,20 +381,26 @@ describe("metadata.json", () => {
     [SMALL, () => CURRENT],
     [LARGE_ID, () => large],
   ] as const) {
-    test(`${id}: the manifest-derived fields equal digestManifest's`, async () => {
-      const res = await get(`/${id}/metadata.json`);
-      expect(res.status).toBe(200);
-      const body = (await res.json()) as MetadataShape;
-      const digest = digestManifest(manifest());
-      expect(body.data_summary?.total_files).toBe(digest.files);
-      expect(body.data_summary?.size_bytes).toBe(digest.bytes);
-      expect(body.sessions).toEqual(digest.sessions);
-      expect(body.sessions_count).toBe(digest.sessions.length > 0 ? digest.sessions.length : null);
-      expect(body.extensions.nemar.bids_index).toEqual({
-        version: `v${manifest().version}`,
-        subjects: digest.subjects,
-      });
-    });
+    test(
+      `${id}: the manifest-derived fields equal digestManifest's`,
+      async () => {
+        const res = await get(`/${id}/metadata.json`);
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as MetadataShape;
+        const digest = digestManifest(manifest());
+        expect(body.data_summary?.total_files).toBe(digest.files);
+        expect(body.data_summary?.size_bytes).toBe(digest.bytes);
+        expect(body.sessions).toEqual(digest.sessions);
+        expect(body.sessions_count).toBe(
+          digest.sessions.length > 0 ? digest.sessions.length : null,
+        );
+        expect(body.extensions.nemar.bids_index).toEqual({
+          version: `v${manifest().version}`,
+          subjects: digest.subjects,
+        });
+      },
+      LARGE_MANIFEST_TEST_TIMEOUT_MS,
+    );
   }
 
   // Synthetic: every real manifest is sorted. An unsorted one cannot be proven
@@ -448,72 +466,84 @@ describe("the large manifest: answers, and memory that does not follow it", () =
     );
   });
 
-  test("metadata.json over the large manifest in descending order stays flat", async () => {
-    seed(DESCENDING_ID, "public", [["1.0.3", "2026-08-31 00:21:32"]]);
-    db.prepare("UPDATE datasets SET total_files = ? WHERE dataset_id = ?").run(42, DESCENDING_ID);
-    const { res, body, peak, samples } = await sampled(() =>
-      get(`/${DESCENDING_ID}/metadata.json`),
-    );
-    expect(res.status).toBe(200);
-    const doc = JSON.parse(body) as {
-      data_summary: { total_files: number } | null;
-      extensions: { nemar: { bids_index: { subjects: unknown } | null } };
-    };
-    expect(doc.data_summary?.total_files).toBe(42);
-    expect(doc.extensions.nemar.bids_index?.subjects).toEqual(digestManifest(large).subjects);
-    expect(samples).toBeGreaterThan(3);
-    expect(peak).toBeLessThan(16 * 1024 * 1024);
-    expect(s3.log.filter((r) => r.path === `/${DESCENDING_ID}/version/v1.0.3.json`)).toHaveLength(
-      1,
-    );
-  });
+  test(
+    "metadata.json over the large manifest in descending order stays flat",
+    async () => {
+      seed(DESCENDING_ID, "public", [["1.0.3", "2026-08-31 00:21:32"]]);
+      db.prepare("UPDATE datasets SET total_files = ? WHERE dataset_id = ?").run(42, DESCENDING_ID);
+      const { res, body, peak, samples } = await sampled(() =>
+        get(`/${DESCENDING_ID}/metadata.json`),
+      );
+      expect(res.status).toBe(200);
+      const doc = JSON.parse(body) as {
+        data_summary: { total_files: number } | null;
+        extensions: { nemar: { bids_index: { subjects: unknown } | null } };
+      };
+      expect(doc.data_summary?.total_files).toBe(42);
+      expect(doc.extensions.nemar.bids_index?.subjects).toEqual(digestManifest(large).subjects);
+      expect(samples).toBeGreaterThan(3);
+      expect(peak).toBeLessThan(16 * 1024 * 1024);
+      expect(s3.log.filter((r) => r.path === `/${DESCENDING_ID}/version/v1.0.3.json`)).toHaveLength(
+        1,
+      );
+    },
+    LARGE_MANIFEST_TEST_TIMEOUT_MS,
+  );
 
   const paths = [...largeManifestPaths(LARGE_OPTS)];
   // An annexed recording deep in the manifest, so a GET is a presigned
   // redirect (a git-tracked file would need a GitHub stand-in as well).
   const deep = paths.slice(123_457).find((p) => p.endsWith(".bdf")) as string;
 
-  test("a file, a directory and a miss, each against the reference", async () => {
-    const head = await get(`/${LARGE_ID}/v1.0.3/${deep}`, { method: "HEAD" });
-    expect(head.status).toBe(200);
-    expect(head.headers.get("Content-Length")).toBe(String(large.files[deep].size));
-    expect(head.headers.get("ETag")).toBe(`"${large.files[deep].checksum}"`);
+  test(
+    "a file, a directory and a miss, each against the reference",
+    async () => {
+      const head = await get(`/${LARGE_ID}/v1.0.3/${deep}`, { method: "HEAD" });
+      expect(head.status).toBe(200);
+      expect(head.headers.get("Content-Length")).toBe(String(large.files[deep].size));
+      expect(head.headers.get("ETag")).toBe(`"${large.files[deep].checksum}"`);
 
-    const dir = deep.split("/").slice(0, -1).join("/");
-    const listing = await get(`/${LARGE_ID}/v1.0.3/${dir}/?format=json`);
-    const resolved = resolveFile(large, dir);
-    if (resolved.kind !== "directory") throw new Error("expected a directory");
-    expect(await listing.text()).toBe(
-      JSON.stringify({
-        dataset_id: LARGE_ID,
-        version: "v1.0.3",
-        path: dir,
-        kind: "directory",
-        children: resolved.children,
-      }),
-    );
+      const dir = deep.split("/").slice(0, -1).join("/");
+      const listing = await get(`/${LARGE_ID}/v1.0.3/${dir}/?format=json`);
+      const resolved = resolveFile(large, dir);
+      if (resolved.kind !== "directory") throw new Error("expected a directory");
+      expect(await listing.text()).toBe(
+        JSON.stringify({
+          dataset_id: LARGE_ID,
+          version: "v1.0.3",
+          path: dir,
+          kind: "directory",
+          children: resolved.children,
+        }),
+      );
 
-    const miss = await get(`/${LARGE_ID}/v1.0.3/sub-000/nope.tsv`);
-    expect(miss.status).toBe(404);
-  });
+      const miss = await get(`/${LARGE_ID}/v1.0.3/sub-000/nope.tsv`);
+      expect(miss.status).toBe(404);
+    },
+    LARGE_MANIFEST_TEST_TIMEOUT_MS,
+  );
 
-  test("the route's peak memory is a small fraction of the manifest", async () => {
-    const bytes = new TextEncoder().encode(largeText).length;
-    expect(bytes).toBeGreaterThan(55_000_000);
-    for (const run of [
-      () => get(`/${LARGE_ID}/v1.0.3/${deep}`, { method: "HEAD" }),
-      () => get(`/${LARGE_ID}/v1.0.3/${deep}`, { redirect: "manual" }),
-      () => get(`/${LARGE_ID}/v1.0.3/sub-200/ses-01/emg/`, HTML_ACCEPT),
-      () => get(`/${LARGE_ID}/metadata.json`),
-      () => get(`/${LARGE_ID}/v1.0.3/manifest.json`),
-    ]) {
-      const { res, peak, samples } = await sampled(run);
-      expect(res.status).toBeLessThan(500);
-      expect(samples).toBeGreaterThan(3);
-      // A whole parse holds the text (63 MB) and then a graph larger still.
-      expect(peak).toBeLessThan(16 * 1024 * 1024);
-    }
-  });
+  test(
+    "the route's peak memory is a small fraction of the manifest",
+    async () => {
+      const bytes = new TextEncoder().encode(largeText).length;
+      expect(bytes).toBeGreaterThan(55_000_000);
+      for (const run of [
+        () => get(`/${LARGE_ID}/v1.0.3/${deep}`, { method: "HEAD" }),
+        () => get(`/${LARGE_ID}/v1.0.3/${deep}`, { redirect: "manual" }),
+        () => get(`/${LARGE_ID}/v1.0.3/sub-200/ses-01/emg/`, HTML_ACCEPT),
+        () => get(`/${LARGE_ID}/metadata.json`),
+        () => get(`/${LARGE_ID}/v1.0.3/manifest.json`),
+      ]) {
+        const { res, peak, samples } = await sampled(run);
+        expect(res.status).toBeLessThan(500);
+        expect(samples).toBeGreaterThan(3);
+        // A whole parse holds the text (63 MB) and then a graph larger still.
+        expect(peak).toBeLessThan(16 * 1024 * 1024);
+      }
+    },
+    LARGE_MANIFEST_TEST_TIMEOUT_MS,
+  );
 });
 
 describe("the edge cache sits behind the visibility gate", () => {

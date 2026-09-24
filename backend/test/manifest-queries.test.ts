@@ -38,6 +38,7 @@ import {
 } from "../src/services/manifest-queries";
 import { scanManifestStream, scanManifestText } from "../src/services/manifest-scan";
 import {
+  LARGE_MANIFEST_TEST_TIMEOUT_MS,
   type LargeManifestOptions,
   largeManifestEntryCount,
   largeManifestPaths,
@@ -443,129 +444,170 @@ describe("a large manifest over HTTP", () => {
     return res.body as ReadableStream<Uint8Array>;
   };
 
-  test("is the size the issue measured, and sorted", () => {
-    expect(LARGE_ENTRIES).toBe(149_979);
-    expect(Object.keys(parsed.files)).toHaveLength(LARGE_ENTRIES);
-    // Tens of megabytes: nm000281's is 42.8 MB for 102,532 entries.
-    expect(bytesLength).toBeGreaterThan(55_000_000);
-  });
+  test(
+    "is the size the issue measured, and sorted",
+    () => {
+      expect(LARGE_ENTRIES).toBe(149_979);
+      expect(Object.keys(parsed.files)).toHaveLength(LARGE_ENTRIES);
+      // Tens of megabytes: nm000281's is 42.8 MB for 102,532 entries.
+      expect(bytesLength).toBeGreaterThan(55_000_000);
+    },
+    LARGE_MANIFEST_TEST_TIMEOUT_MS,
+  );
 
-  test("every query answers what the whole parse answers", async () => {
-    const somePaths = [...largeManifestPaths(LARGE)].filter((_, i) => i % 30_011 === 5);
-    const dirs = ["", "sub-000", "sub-373/ses-01", "sub-200/ses-01/emg", "sub-999", "nope/x"];
-    for (const raw of [...dirs, ...somePaths]) {
-      expect(await answerStream(await read(), new ResolvePathQuery(raw))).toEqual(
-        resolveFile(parsed, raw) as ResolvedFile,
-      );
-    }
-    for (const path of [...somePaths, "sub-000/nope"]) {
-      expect(await answerStream(await read(), new ContainsPathQuery(path))).toBe(
-        Object.hasOwn(parsed.files, path),
-      );
-    }
-    const digest = await answerStream(await read(), new DigestQuery());
-    expect(digest).toEqual({ digest: digestManifest(parsed), unproven: null, excludedSizes: 0 });
-    expect(await answerStream(await read(), new EntriesQuery(30_000))).toEqual({
-      kind: "over_limit",
-      limit: 30_000,
-    });
-    expect(await answerStream(await read(), new EntryCountQuery())).toEqual({
-      kind: "count",
-      count: Object.keys(parsed.files).length,
-    });
-  });
+  test(
+    "every query answers what the whole parse answers",
+    async () => {
+      const somePaths = [...largeManifestPaths(LARGE)].filter((_, i) => i % 30_011 === 5);
+      const dirs = ["", "sub-000", "sub-373/ses-01", "sub-200/ses-01/emg", "sub-999", "nope/x"];
+      for (const raw of [...dirs, ...somePaths]) {
+        expect(await answerStream(await read(), new ResolvePathQuery(raw))).toEqual(
+          resolveFile(parsed, raw) as ResolvedFile,
+        );
+      }
+      for (const path of [...somePaths, "sub-000/nope"]) {
+        expect(await answerStream(await read(), new ContainsPathQuery(path))).toBe(
+          Object.hasOwn(parsed.files, path),
+        );
+      }
+      const digest = await answerStream(await read(), new DigestQuery());
+      expect(digest).toEqual({ digest: digestManifest(parsed), unproven: null, excludedSizes: 0 });
+      expect(await answerStream(await read(), new EntriesQuery(30_000))).toEqual({
+        kind: "over_limit",
+        limit: 30_000,
+      });
+      expect(await answerStream(await read(), new EntryCountQuery())).toEqual({
+        kind: "count",
+        count: Object.keys(parsed.files).length,
+      });
+    },
+    LARGE_MANIFEST_TEST_TIMEOUT_MS,
+  );
 
-  test("a lookup's peak memory stays flat while the manifest grows tenfold", async () => {
-    const small: LargeManifestOptions = { subjects: 37, runsPerSession: 50 };
-    const target = "sub-020/ses-01/emg/sub-020_ses-01_task-emg2pose_run-07_recording-left_emg.json";
+  test(
+    "a lookup's peak memory stays flat while the manifest grows tenfold",
+    async () => {
+      const small: LargeManifestOptions = { subjects: 37, runsPerSession: 50 };
+      const target =
+        "sub-020/ses-01/emg/sub-020_ses-01_task-emg2pose_run-07_recording-left_emg.json";
 
-    const measure = async (opts: LargeManifestOptions, raw: string) => {
+      const measure = async (opts: LargeManifestOptions, raw: string) => {
+        const baseline = liveBytes();
+        const query = sampling(new ResolvePathQuery(raw), 5000);
+        const answer = await answerStream(largeManifestStream(opts), query);
+        return {
+          answer,
+          peak: Math.max(...query.samples) - baseline,
+          samples: query.samples.length,
+        };
+      };
+
+      const tenth = await measure(small, target);
+      const full = await measure(LARGE, target);
+      expect(tenth.answer.kind).toBe("file");
+      expect(full.answer).toEqual(tenth.answer);
+      expect(full.samples).toBe(29);
+
+      // Generous: the scan holds one decoded chunk and the answer. A whole
+      // parse holds the document (tens of MB of text alone) at these points.
+      const BOUND = 8 * 1024 * 1024;
+      expect(full.peak).toBeLessThan(BOUND);
+      expect(tenth.peak).toBeLessThan(BOUND);
+      // And the growth is noise, not proportional: 10x the entries, well under
+      // 10% of the manifest's size in extra memory.
+      expect(full.peak - tenth.peak).toBeLessThan(bytesLength / 10);
+    },
+    LARGE_MANIFEST_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "a directory listing's memory follows the listing, not the manifest",
+    async () => {
       const baseline = liveBytes();
-      const query = sampling(new ResolvePathQuery(raw), 5000);
-      const answer = await answerStream(largeManifestStream(opts), query);
-      return { answer, peak: Math.max(...query.samples) - baseline, samples: query.samples.length };
-    };
+      const query = sampling(new ResolvePathQuery("sub-100/ses-01/emg"), 5000);
+      const answer = await answerStream(largeManifestStream(LARGE), query);
+      if (answer.kind !== "directory") throw new Error("expected a directory");
+      expect(answer.children).toHaveLength(400);
+      expect(Math.max(...query.samples) - baseline).toBeLessThan(8 * 1024 * 1024);
+    },
+    LARGE_MANIFEST_TEST_TIMEOUT_MS,
+  );
 
-    const tenth = await measure(small, target);
-    const full = await measure(LARGE, target);
-    expect(tenth.answer.kind).toBe("file");
-    expect(full.answer).toEqual(tenth.answer);
-    expect(full.samples).toBe(29);
-
-    // Generous: the scan holds one decoded chunk and the answer. A whole
-    // parse holds the document (tens of MB of text alone) at these points.
-    const BOUND = 8 * 1024 * 1024;
-    expect(full.peak).toBeLessThan(BOUND);
-    expect(tenth.peak).toBeLessThan(BOUND);
-    // And the growth is noise, not proportional: 10x the entries, well under
-    // 10% of the manifest's size in extra memory.
-    expect(full.peak - tenth.peak).toBeLessThan(bytesLength / 10);
-  });
-
-  test("a directory listing's memory follows the listing, not the manifest", async () => {
-    const baseline = liveBytes();
-    const query = sampling(new ResolvePathQuery("sub-100/ses-01/emg"), 5000);
-    const answer = await answerStream(largeManifestStream(LARGE), query);
-    if (answer.kind !== "directory") throw new Error("expected a directory");
-    expect(answer.children).toHaveLength(400);
-    expect(Math.max(...query.samples) - baseline).toBeLessThan(8 * 1024 * 1024);
-  });
-
-  test("the metadata digest's memory follows the subjects, not the files", async () => {
-    const baseline = liveBytes();
-    const query = sampling(new DigestQuery(), 5000);
-    const answer = await answerStream(largeManifestStream(LARGE), query);
-    expect(answer.unproven).toBeNull();
-    expect(Math.max(...query.samples) - baseline).toBeLessThan(8 * 1024 * 1024);
-  });
+  test(
+    "the metadata digest's memory follows the subjects, not the files",
+    async () => {
+      const baseline = liveBytes();
+      const query = sampling(new DigestQuery(), 5000);
+      const answer = await answerStream(largeManifestStream(LARGE), query);
+      expect(answer.unproven).toBeNull();
+      expect(Math.max(...query.samples) - baseline).toBeLessThan(8 * 1024 * 1024);
+    },
+    LARGE_MANIFEST_TEST_TIMEOUT_MS,
+  );
 
   // The two ways a digest used to fall back to reading the whole manifest,
   // forced on the large manifest. Neither may cost more than a lookup.
-  test("keys in descending order: totals unproven, index exact, memory flat", async () => {
-    const baseline = liveBytes();
-    const query = sampling(new DigestQuery(), 5000);
-    const answer = await answerStream(largeManifestStream({ ...LARGE, descending: true }), query);
-    const reference = digestManifest(parsed);
-    expect(answer.unproven).toContain("ascending");
-    expect(answer.digest.files).toBeNull();
-    expect(answer.digest.subjects).toEqual(reference.subjects);
-    expect(answer.digest.sessions).toEqual(reference.sessions);
-    expect(query.samples.length).toBeGreaterThan(25);
-    expect(Math.max(...query.samples) - baseline).toBeLessThan(8 * 1024 * 1024);
-  });
+  test(
+    "keys in descending order: totals unproven, index exact, memory flat",
+    async () => {
+      const baseline = liveBytes();
+      const query = sampling(new DigestQuery(), 5000);
+      const answer = await answerStream(largeManifestStream({ ...LARGE, descending: true }), query);
+      const reference = digestManifest(parsed);
+      expect(answer.unproven).toContain("ascending");
+      expect(answer.digest.files).toBeNull();
+      expect(answer.digest.subjects).toEqual(reference.subjects);
+      expect(answer.digest.sessions).toEqual(reference.sessions);
+      expect(query.samples.length).toBeGreaterThan(25);
+      expect(Math.max(...query.samples) - baseline).toBeLessThan(8 * 1024 * 1024);
+    },
+    LARGE_MANIFEST_TEST_TIMEOUT_MS,
+  );
 
-  test("a string size every 1,000 entries: excluded and counted, memory flat", async () => {
-    const baseline = liveBytes();
-    const query = sampling(new DigestQuery(), 5000);
-    const answer = await answerStream(
-      largeManifestStream({ ...LARGE, stringSizeEvery: 1000 }),
-      query,
-    );
-    const sizes = Object.values(parsed.files).map((f) => f.size);
-    const kept = sizes.filter((_, i) => (i + 1) % 1000 !== 0);
-    expect(answer.unproven).toBeNull();
-    expect(answer.excludedSizes).toBe(Math.floor(LARGE_ENTRIES / 1000));
-    expect(answer.digest.files).toBe(LARGE_ENTRIES);
-    expect(answer.digest.bytes).toBe(kept.reduce((a, b) => a + b, 0));
-    expect(Math.max(...query.samples) - baseline).toBeLessThan(8 * 1024 * 1024);
-  });
+  test(
+    "a string size every 1,000 entries: excluded and counted, memory flat",
+    async () => {
+      const baseline = liveBytes();
+      const query = sampling(new DigestQuery(), 5000);
+      const answer = await answerStream(
+        largeManifestStream({ ...LARGE, stringSizeEvery: 1000 }),
+        query,
+      );
+      const sizes = Object.values(parsed.files).map((f) => f.size);
+      const kept = sizes.filter((_, i) => (i + 1) % 1000 !== 0);
+      expect(answer.unproven).toBeNull();
+      expect(answer.excludedSizes).toBe(Math.floor(LARGE_ENTRIES / 1000));
+      expect(answer.digest.files).toBe(LARGE_ENTRIES);
+      expect(answer.digest.bytes).toBe(kept.reduce((a, b) => a + b, 0));
+      expect(Math.max(...query.samples) - baseline).toBeLessThan(8 * 1024 * 1024);
+    },
+    LARGE_MANIFEST_TEST_TIMEOUT_MS,
+  );
 
-  test("counting the entries for the manifest.json bound keeps nothing", async () => {
-    const baseline = liveBytes();
-    const query = sampling(new EntryCountQuery(), 5000);
-    const answer = await answerStream(largeManifestStream(LARGE), query);
-    expect(answer).toEqual({ kind: "count", count: LARGE_ENTRIES });
-    expect(Math.max(...query.samples) - baseline).toBeLessThan(8 * 1024 * 1024);
-  });
+  test(
+    "counting the entries for the manifest.json bound keeps nothing",
+    async () => {
+      const baseline = liveBytes();
+      const query = sampling(new EntryCountQuery(), 5000);
+      const answer = await answerStream(largeManifestStream(LARGE), query);
+      expect(answer).toEqual({ kind: "count", count: LARGE_ENTRIES });
+      expect(Math.max(...query.samples) - baseline).toBeLessThan(8 * 1024 * 1024);
+    },
+    LARGE_MANIFEST_TEST_TIMEOUT_MS,
+  );
 
-  test("an over-limit manifest.json refusal drops what it had gathered", async () => {
-    const baseline = liveBytes();
-    const query = sampling(new EntriesQuery(30_000), 5000);
-    const answer = await answerStream(largeManifestStream(LARGE), query);
-    expect(answer.kind).toBe("over_limit");
-    // Samples after the limit was crossed must be back near the baseline:
-    // the 30,000 materialized entries are released, not carried to the end.
-    const late = query.samples.slice(-10);
-    expect(Math.max(...late) - baseline).toBeLessThan(8 * 1024 * 1024);
-  });
+  test(
+    "an over-limit manifest.json refusal drops what it had gathered",
+    async () => {
+      const baseline = liveBytes();
+      const query = sampling(new EntriesQuery(30_000), 5000);
+      const answer = await answerStream(largeManifestStream(LARGE), query);
+      expect(answer.kind).toBe("over_limit");
+      // Samples after the limit was crossed must be back near the baseline:
+      // the 30,000 materialized entries are released, not carried to the end.
+      const late = query.samples.slice(-10);
+      expect(Math.max(...late) - baseline).toBeLessThan(8 * 1024 * 1024);
+    },
+    LARGE_MANIFEST_TEST_TIMEOUT_MS,
+  );
 });

@@ -34,7 +34,7 @@ import {
   resetEdgeCopyNotices,
 } from "../src/services/manifest-source";
 import { DrainingCache, InMemoryCache, StalledCache } from "./helpers/cache";
-import { largeManifestText } from "./helpers/large-manifest";
+import { LARGE_MANIFEST_TEST_TIMEOUT_MS, largeManifestText } from "./helpers/large-manifest";
 import { type S3ManifestStandin, startS3ManifestStandin } from "./helpers/s3-manifest-standin";
 
 const FIXTURE_TEXT = readFileSync(
@@ -402,23 +402,27 @@ describe("memory on a miss is bounded by the lag cap, not the manifest", () => {
     ],
     ["a cache that never reads (a put that settles at once)", () => new InMemoryCache()],
   ] as const) {
-    test(label, async () => {
-      s3.put(OBJECT, large);
-      const cache = makeCache();
-      const target = "sub-300/ses-01/emg";
-      const baseline = liveBytes();
-      const { query, samples } = sampled(target);
-      const read = await readManifest(source(cache), ID, VERSION, () => query);
-      if (read.kind !== "ok") throw new Error(read.kind);
-      expect(read.query.finish(read.header)).toEqual(resolveFile(parsed, target));
-      expect(samples.length).toBeGreaterThan(25);
-      // The cap plus a generous allowance; the manifest is ~63 MB.
-      const peak = Math.max(...samples) - baseline;
-      expect(peak).toBeLessThan(CACHE_WRITE_MAX_LAG_BYTES + 8 * 1024 * 1024);
-      if (cache instanceof DrainingCache) {
-        // It really was slower and it still got every byte.
-        expect(cache.lastPutBytes).toBe(new TextEncoder().encode(large).length);
-      }
-    });
+    test(
+      label,
+      async () => {
+        s3.put(OBJECT, large);
+        const cache = makeCache();
+        const target = "sub-300/ses-01/emg";
+        const baseline = liveBytes();
+        const { query, samples } = sampled(target);
+        const read = await readManifest(source(cache), ID, VERSION, () => query);
+        if (read.kind !== "ok") throw new Error(read.kind);
+        expect(read.query.finish(read.header)).toEqual(resolveFile(parsed, target));
+        expect(samples.length).toBeGreaterThan(25);
+        // The cap plus a generous allowance; the manifest is ~63 MB.
+        const peak = Math.max(...samples) - baseline;
+        expect(peak).toBeLessThan(CACHE_WRITE_MAX_LAG_BYTES + 8 * 1024 * 1024);
+        if (cache instanceof DrainingCache) {
+          // It really was slower and it still got every byte.
+          expect(cache.lastPutBytes).toBe(new TextEncoder().encode(large).length);
+        }
+      },
+      LARGE_MANIFEST_TEST_TIMEOUT_MS,
+    );
   }
 });

@@ -40,6 +40,20 @@ export interface LargeManifestOptions {
   stringSizeEvery?: number;
 }
 
+/**
+ * The timeout for a test that reads the 63 MB manifest (374 subjects, 50
+ * runs), passed explicitly because Bun's 5 s default is too close. They scan
+ * the manifest, some of them several times (the route's memory test makes
+ * five requests). On `ubuntu-latest` (run 36058320838) they took 1.5 to
+ * 3.3 s where a laptop takes 0.5 to 1.9 s, and the five-scan test ran past
+ * 5 s and timed out.
+ *
+ * A timed-out test is not stopped. Its body keeps running into the tests
+ * after it, sharing their S3 stand-in, their `caches.default` and the heap
+ * they sample, so one slow runner shows up as unrelated failures further on.
+ */
+export const LARGE_MANIFEST_TEST_TIMEOUT_MS = 30_000;
+
 const SIDES = ["left", "right"] as const;
 const SUFFIXES = ["channels.tsv", "emg.bdf", "emg.json", "events.tsv"] as const;
 const ROOT_BEFORE = [".bidsignore", "README.md", "dataset_description.json", "participants.tsv"];
