@@ -188,9 +188,10 @@ def test_test_mode_print_config_defaults(dirs: tuple[Path, Path]) -> None:
     assert cfg["CONTRACT_BASE"] == "https://zarr-test.nemar.org"
     # The biosigIO floor the node will install. Printed because it is the one
     # config value that decides what the CONVERSION does rather than where it
-    # goes: below the >=1.2.7 floor the streaming and in-memory paths disagree
-    # about channels.tsv units, which is what gates the engine bump.
-    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.7"
+    # goes: below 1.2.7 the streaming and in-memory paths disagree about
+    # channels.tsv units, which is what gates the engine bump, and below 1.2.8
+    # the streaming export rewrites every shard once per channel (#1483).
+    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.8"
     assert cfg["S3_BUCKET"] == "nemar-dev"
     assert cfg["AWS_PROFILE"] == "nemar-zarr-dev"
     assert cfg["STATE_DIR"] == state_dir
@@ -257,7 +258,7 @@ def test_print_config_without_test_uses_prod_defaults(dirs: tuple[Path, Path]) -
     assert cfg["TEST_API_URL"] == ""
     assert cfg["CALLBACK_URL"] == "https://api.nemar.org/webhooks/zarr-ready"
     assert cfg["CONTRACT_BASE"] == "https://zarr.nemar.org"
-    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.7"
+    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.8"
     assert cfg["S3_BUCKET"] == "nemar"
     assert cfg["AWS_PROFILE"] == "nemar-zarr"
     assert cfg["STATE_DIR"] == f"{zarr_base}/zarr-state"
@@ -270,6 +271,9 @@ def test_print_config_without_test_uses_prod_defaults(dirs: tuple[Path, Path]) -
     # JOBS falls back to `nproc`, which varies by runner; just confirm it
     # resolved to a positive integer rather than being empty/non-numeric.
     assert cfg["JOBS"].isdigit() and int(cfg["JOBS"]) > 0
+    # Worker anonymous-memory bounds (on004789's RLIMIT_DATA trips, biosigio#129).
+    assert cfg["ZARR_ASYNC__CONCURRENCY"] == "3"
+    assert cfg["MALLOC_ARENA_MAX"] == "2"
     assert cfg["ONLY_DATASET"] == ""
     assert cfg["LIMIT"] == "0"
     assert cfg["REQUEUE"] == ""
@@ -476,6 +480,45 @@ def test_explicit_zarr_jobs_wins_over_test_default(dirs: tuple[Path, Path]) -> N
     assert proc.returncode == 0, proc.stderr
     cfg = parse_config(proc.stdout)
     assert cfg["JOBS"] == "2"
+
+
+def test_explicit_worker_memory_bounds_win(dirs: tuple[Path, Path]) -> None:
+    zarr_base, home = dirs
+    proc = run_script(
+        ["--print-config"],
+        zarr_base,
+        home,
+        extra_env={"ZARR_ASYNC__CONCURRENCY": "8", "MALLOC_ARENA_MAX": "4"},
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    cfg = parse_config(proc.stdout)
+    assert cfg["ZARR_ASYNC__CONCURRENCY"] == "8"
+    assert cfg["MALLOC_ARENA_MAX"] == "4"
+
+
+@pytest.mark.parametrize("mode", [[], ["--test"]])
+def test_worker_memory_bounds_reach_child_processes(
+    dirs: tuple[Path, Path], mode: list[str]
+) -> None:
+    """The bounds only work if the Python driver and its pool workers SEE them,
+    so check the exported environment of a child shell, the same way
+    test_test_mode_env_vars_are_exported does, in both prod and --test mode."""
+    zarr_base, home = dirs
+    env = base_env(zarr_base, home)
+    wrapper = (
+        f'trap "env" EXIT; source {shlex.quote(str(SCRIPT))} '
+        f"{' '.join(mode)} --print-config >/dev/null 2>/dev/null"
+    )
+    proc = subprocess.run(
+        ["bash", "-c", wrapper], env=env, capture_output=True, text=True,
+        timeout=30, check=False,
+    )
+    dumped = dict(
+        line.partition("=")[::2] for line in proc.stdout.splitlines() if "=" in line
+    )
+    assert dumped.get("ZARR_ASYNC__CONCURRENCY") == "3"
+    assert dumped.get("MALLOC_ARENA_MAX") == "2"
 
 
 def test_test_mode_env_vars_are_exported(dirs: tuple[Path, Path]) -> None:
@@ -900,3 +943,90 @@ def test_backfill_sweep_gets_accept_exemplars_only_under_test(ack_run) -> None:
     assert "--accept-exemplars" not in calls[1].split()
     assert "--api-base https://api.nemar.org" in calls[1]
 
+
+
+# -- convert_dataset: which runs ask the driver for a pending-only retry (#1483) --
+
+
+def _function_source(name: str) -> str:
+    """The text of one shell function in hallu-zarr.sh, from `name() {` to the
+    `}` that closes it at column 0."""
+    lines = SCRIPT.read_text().splitlines()
+    start = lines.index(f"{name}() {{")
+    end = next(i for i in range(start + 1, len(lines)) if lines[i] == "}")
+    return "\n".join(lines[start : end + 1])
+
+
+def _driver_argv(tmp_path: Path, *call_args: str) -> list[str]:
+    """Run the REAL `convert_dataset` under the script's own `set -uo pipefail`
+    and return the argv it gave the driver.
+
+    Everything around it is a stand-in: the driver is a real executable that
+    records its arguments and writes the callback the function then reads, and
+    `nemar`/`log`/`err`/`safe_rm` are shell functions. The function body itself,
+    including the empty-array expansion that has to survive `set -u`, is the
+    script's, extracted verbatim.
+    """
+    record = tmp_path / "argv.txt"
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    python = venv / "bin" / "python"
+    python.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$@" > {shlex.quote(str(record))}\n'
+        'while [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--callback-out" ]; then echo "{}" > "$2"; fi\n'
+        "  shift\n"
+        "done\n"
+    )
+    python.chmod(0o755)
+    work = tmp_path / "work"
+    work.mkdir()
+    harness = "\n".join(
+        [
+            "set -uo pipefail",
+            f"WORK_DIR={shlex.quote(str(work))}",
+            f"LOG_FILE={shlex.quote(str(tmp_path / 'log.txt'))}",
+            f"VENV_DIR={shlex.quote(str(venv))}",
+            "DRIVER=generate_zarr.py S3_BUCKET=nemar AWS_REGION=us-east-2",
+            "CONTRACT_BASE=https://data.example CALLBACK_URL= NEMAR_WEBHOOK_TOKEN=",
+            "API_BASE=https://api.example JOBS=2",
+            "log() { :; }; err() { :; }",
+            'safe_rm() { rm -rf "$1"; }',
+            'nemar() { mkdir -p "${@: -1}"; }',
+            _function_source("convert_dataset"),
+            "convert_dataset " + " ".join(shlex.quote(a) for a in call_args),
+        ]
+    )
+    proc = subprocess.run(
+        ["bash", "-c", harness], capture_output=True, text=True, timeout=30, check=False
+    )
+    assert proc.returncode == 0, proc.stderr
+    return record.read_text().splitlines()
+
+
+def test_the_queue_drain_asks_for_a_pending_only_retry(tmp_path):
+    argv = _driver_argv(tmp_path, "on008083", "v1.0.0", "retry-pending")
+    assert "--retry-pending" in argv
+    # Still a --clean run: the driver decides, and falls back to the full
+    # rebuild whenever the published index is not current.
+    assert "--clean" in argv
+
+
+def test_a_one_off_run_is_always_a_full_rebuild(tmp_path):
+    # No third argument, under `set -u`: the empty array must expand to nothing
+    # rather than abort the function.
+    argv = _driver_argv(tmp_path, "on008083", "v1.0.0")
+    assert "--retry-pending" not in argv
+    assert "--clean" in argv
+
+
+def test_only_the_drain_loop_passes_the_retry_scope():
+    calls = [
+        line.strip()
+        for line in SCRIPT.read_text().splitlines()
+        if "convert_dataset " in line and not line.lstrip().startswith("#")
+    ]
+    assert 'if convert_dataset "$id" "$version" retry-pending; then' in calls
+    assert 'convert_dataset "$ONLY_DATASET" "$v"' in calls
+    assert len(calls) == 2, calls

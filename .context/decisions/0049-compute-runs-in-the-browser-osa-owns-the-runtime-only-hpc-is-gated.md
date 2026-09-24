@@ -4,6 +4,14 @@
 **Date:** 2026-09-08
 **Owner:** Seyed Yahya Shirazi
 
+**Amendment 2026-09-22:** The first-load cost under "Costs accepted" was an estimate, and it was high.
+Measured on Pyodide 0.29.5 as uncompressed bytes (a compressed transfer is smaller):
+the interpreter is 5.3 MB, and NEMAR's browser runtime as shipped (OpenScience-Collective/osa#448),
+numpy, matplotlib, zarr and eegprep-lean with their dependencies, is 23 packages and 13.6 MB,
+so a first load is 18.9 MB.
+Adding scipy, the next thing a preprocessing step needs, brings it to 35.2 MB, scipy alone being 16.3 MB.
+The verdict stands; the cost it accepted is smaller than it said.
+
 Supersedes ADR 0025.
 The parts of 0025 that still hold are restated here so this document is the single current statement;
 0025 is kept for its history.

@@ -317,11 +317,14 @@ export const readRecipeHowToSchema = z
      *  lane rather than *the* browser lane: compute in a browser is Python
      *  (ADR 0049), and `python_browser` is that lane. */
     zarrita: z.string(),
-    /** Python in a browser, through `eegprep-lean`'s asynchronous store
+    /** Python in a browser, through `eegprep-lean`'s asynchronous API
      *  (sccn/eegprep, ADR 0069). Asynchronous throughout, because that is the
      *  only thing that works on an event loop that is already running, and it
-     *  reads the HTTPS `array_path` with range requests rather than `s3://`,
-     *  so it needs neither s3fs nor aiohttp.
+     *  reads over HTTPS with range requests rather than `s3://`, so it needs
+     *  neither s3fs nor aiohttp. At level 0 it leads with `read_window`, which
+     *  returns physical units with channel labels, naming the index by this
+     *  recipe's `contract_base`; the raw `open_array` read of `array_path`
+     *  follows it, and is the only read at a view level (ADR 0071).
      *
      *  Deliberately carries no install line. `eegprep-lean` is not on the
      *  Python Package Index, and the runtime that executes this is where the
@@ -399,31 +402,66 @@ function buildHowTo(opts: {
   s3Uri: string;
   contractBase: string;
   relativePath: string;
+  datasetId: string;
+  storePath: string;
+  groupName: string;
+  isLevel0: boolean;
 }): ReadRecipeHowTo {
-  const s3Path = `${opts.s3Uri}${opts.relativePath}`;
-  const httpPath = `${opts.contractBase}${opts.relativePath}`;
+  // Every value below comes from an index document and is written into code a client
+  // may run, so each is a quoted literal from JSON.stringify: its escapes are valid in
+  // Python and in JavaScript, and a quote or backslash in a recording's path cannot end
+  // the string early.
+  const q = (value: string) => JSON.stringify(value);
+  const s3Path = q(`${opts.s3Uri}${opts.relativePath}`);
+  const httpPath = q(`${opts.contractBase}${opts.relativePath}`);
+  const rawRead = [
+    `arr = await eegprep_lean.open_array(${httpPath})`,
+    "digital = await arr.getitem((slice(None), slice(start_sample, end_sample)))",
+    "# physical = digital * scale + offset -- see the recipe's scale_offset field",
+  ];
+  // Level 0 leads with read_window, which returns physical units with channel labels:
+  // the stored counts plot like EEG while being wrong, and nothing raises. The index is
+  // named by this recipe's own contract_base, so a dev or staging server's recipe reads
+  // that environment. A view level is a downsampled copy that read_window does not read,
+  // so there the raw read is the read.
+  const pythonBrowser = opts.isLevel0
+    ? [
+        "import eegprep_lean  # from the runtime's lockfile, not micropip",
+        "",
+        "# index_url needs eegprep-lean 0.1.0.dev2 or later",
+        `index = await eegprep_lean.read_index(${q(opts.datasetId)}, index_url=${q(`${opts.contractBase}index.json`)})`,
+        `store = index.store(${q(opts.storePath)})`,
+        "window = await eegprep_lean.read_window(",
+        `    index, store, group=store.group(${q(opts.groupName)}),`,
+        "    start_sample=start_sample, n_samples=end_sample - start_sample,",
+        ")",
+        "# window.data is in physical units (window.unit), one row per channel in window.labels",
+        "# async throughout: the loop is already running, so there is no synchronous form",
+        "",
+        "# the stored digital counts instead, when those are what you need:",
+        ...rawRead,
+      ]
+    : [
+        "import eegprep_lean  # from the runtime's lockfile, not micropip",
+        "",
+        "# a view level: a downsampled copy, which read_window (level 0 only) does not read",
+        ...rawRead,
+        "# async throughout: the loop is already running, so there is no synchronous form",
+      ];
   return {
     python_zarr: [
       "import zarr",
       "",
-      `arr = zarr.open("${s3Path}", mode="r", storage_options={"anon": True})`,
+      `arr = zarr.open(${s3Path}, mode="r", storage_options={"anon": True})`,
       "window = arr[:, start_sample:end_sample]",
       "# desktop and HPC only: zarr.open starts an IO thread, which a browser cannot",
       "# physical = digital * scale + offset -- see the recipe's scale_offset field",
     ].join("\n"),
-    python_browser: [
-      "from eegprep_lean import open_array  # from the runtime's lockfile, not micropip",
-      "",
-      `arr = await open_array("${httpPath}")`,
-      "window = await arr.getitem((slice(None), slice(start_sample, end_sample)))",
-      "# async throughout: the loop is already running, so there is no synchronous form",
-      "# physical = digital * scale + offset -- see the recipe's scale_offset field",
-      "# read_window(index, store, ...) does the same read in physical units, with labels",
-    ].join("\n"),
+    python_browser: pythonBrowser.join("\n"),
     zarrita: [
       'import * as zarr from "zarrita";',
       "",
-      `const store = new zarr.FetchStore("${httpPath}");`,
+      `const store = new zarr.FetchStore(${httpPath});`,
       'const arr = await zarr.open.v3(store, { kind: "array" });',
       "const window = await zarr.get(arr, [null, zarr.slice(startSample, endSample)]);",
       "// physical = digital * scale + offset -- see the recipe's scale_offset field",
@@ -447,9 +485,15 @@ function buildHowTo(opts: {
 export function buildReadRecipe(input: {
   index: Pick<
     ZarrIndex,
-    "contract_base" | "data_base" | "s3_uri" | "s3_region" | "s3_anonymous" | "layout"
+    | "dataset_id"
+    | "contract_base"
+    | "data_base"
+    | "s3_uri"
+    | "s3_region"
+    | "s3_anonymous"
+    | "layout"
   >;
-  store: Pick<ZarrStore, "zarr" | "groups">;
+  store: Pick<ZarrStore, "path" | "zarr" | "groups">;
   groupName: string;
   level?: "0" | number;
   sampleSlice?: { start: number; end: number };
@@ -489,6 +533,10 @@ export function buildReadRecipe(input: {
       s3Uri: index.s3_uri,
       contractBase: index.contract_base,
       relativePath,
+      datasetId: index.dataset_id,
+      storePath: store.path,
+      groupName,
+      isLevel0,
     }),
   });
 }
@@ -871,6 +919,19 @@ export type ListRecordingsOutput = z.infer<typeof listRecordingsOutputSchema>;
 export const GET_EVENTS_DEFAULT_LIMIT = 1000;
 export const GET_EVENTS_MAX_LIMIT = 5000;
 
+/** Bounds on `get_events`' `where` and `columns` (#1500). */
+export const GET_EVENTS_MAX_WHERE_COLUMNS = 8;
+export const GET_EVENTS_MAX_WHERE_VALUES = 100;
+export const GET_EVENTS_MAX_COLUMNS = 32;
+/** `columns_summary` lists a column's values only when it has at most this many
+ *  distinct values, each at most `GET_EVENTS_SUMMARY_MAX_VALUE_CHARS` long: the
+ *  summary is on every answer, so a column of per-event strings (`sample`, a HED
+ *  annotation) is counted, never spelled out. */
+export const GET_EVENTS_SUMMARY_MAX_VALUES = 50;
+export const GET_EVENTS_SUMMARY_MAX_VALUE_CHARS = 100;
+
+const eventColumnNameSchema = z.string().min(1).max(64);
+
 export const getEventsInputSchema = z
   .object({
     dataset_id: z.string().regex(DATASET_ID_RE),
@@ -881,6 +942,28 @@ export const getEventsInputSchema = z
      *  same way `list_recordings` pages recordings. */
     limit: z.number().int().positive().max(GET_EVENTS_MAX_LIMIT).default(GET_EVENTS_DEFAULT_LIMIT),
     offset: z.number().int().nonnegative().default(0),
+    /** Additive (#1500): keep a row only when, for every column named, its value
+     *  compared as a string is one of those listed. A column the recording's
+     *  events do not have is refused, never answered with an empty list. */
+    where: z
+      .record(
+        eventColumnNameSchema,
+        z
+          .array(z.union([z.string(), z.number()]))
+          .min(1)
+          .max(GET_EVENTS_MAX_WHERE_VALUES),
+      )
+      .refine(
+        (w) => {
+          const n = Object.keys(w).length;
+          return n >= 1 && n <= GET_EVENTS_MAX_WHERE_COLUMNS;
+        },
+        { message: `where names 1 to ${GET_EVENTS_MAX_WHERE_COLUMNS} columns` },
+      )
+      .optional(),
+    /** Additive (#1500): return only these columns. `onset_s` and `sample_index`
+     *  always come back; an event without its time is not usable. */
+    columns: z.array(eventColumnNameSchema).min(1).max(GET_EVENTS_MAX_COLUMNS).optional(),
   })
   .passthrough();
 export type GetEventsInput = z.infer<typeof getEventsInputSchema>;
@@ -899,11 +982,35 @@ export const eventRowSchema = z
   .passthrough();
 export type EventRow = z.infer<typeof eventRowSchema>;
 
+/** A row as `get_events` answers it: every column, or with `columns` only
+ *  `onset_s`, `sample_index` and the columns named (#1500). The cache and the
+ *  parquet read still validate each row against the full `eventRowSchema`. */
+export const eventRowOutputSchema = eventRowSchema
+  .partial()
+  .required({ onset_s: true, sample_index: true });
+export type EventRowOutput = z.infer<typeof eventRowOutputSchema>;
+
+/** One column of a recording's events, as `columns_summary` describes it. */
+export const eventColumnSummarySchema = z
+  .object({
+    name: z.string(),
+    distinct_count: z.number().int().nonnegative(),
+    null_count: z.number().int().nonnegative(),
+    /** Each distinct value (as a string) and how many rows hold it, most common
+     *  first. Null when the column has more than `GET_EVENTS_SUMMARY_MAX_VALUES`
+     *  distinct values or one longer than `GET_EVENTS_SUMMARY_MAX_VALUE_CHARS`. */
+    values: z
+      .array(z.object({ value: z.string(), count: z.number().int().positive() }).passthrough())
+      .nullable(),
+  })
+  .passthrough();
+export type EventColumnSummary = z.infer<typeof eventColumnSummarySchema>;
+
 export const getEventsOutputSchema = z
   .object({
     dataset_id: z.string().regex(DATASET_ID_RE),
     recording: z.string(),
-    events: z.array(eventRowSchema),
+    events: z.array(eventRowOutputSchema),
     source: z.enum(["events_parquet", "events_tsv_fallback"]),
     estimated: z.boolean(),
     /** Additive, phase 3: pagination facts mirroring `list_recordings`'.
@@ -916,6 +1023,12 @@ export const getEventsOutputSchema = z
     /** A short caveat, e.g. "no events file found next to this recording"
      *  (the fallback's clean-404 case). Null when there is none. */
     note: z.string().nullable().optional(),
+    /** Additive (#1500): every column of the recording's events for the group
+     *  answered, except `onset_s` and `sample_index` (a new value on every row) and
+     *  `store_path` and `group_name` (named by the request), computed BEFORE
+     *  `where`, so it says what a filter can ask for. `total_count` counts after
+     *  `where`. */
+    columns_summary: z.array(eventColumnSummarySchema).optional(),
     envelope: provenanceEnvelopeSchema.optional(),
   })
   .passthrough();

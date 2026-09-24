@@ -61,7 +61,9 @@
 # Every conversion rebuilds the whole dataset (the driver's --clean) so the
 # serving copy mirrors the current dataset. --clean RECONCILES rather than
 # erases: each store is synced with --delete and only stores that no longer
-# exist in HEAD are removed, after a successful conversion (ADR 0023).
+# exist in HEAD are removed, after a successful conversion (ADR 0023). The one
+# exception is a retry round from the queue (#1483): when the published index
+# is otherwise current, only its pending recordings are converted.
 #
 # Crontab (sibling of hallu-sync, offset to :30):
 #   30 * * * * /path/to/hallu-zarr.sh >> /mnt/local/zarr-state/.nm-zarr-cron.log 2>&1
@@ -209,6 +211,17 @@ unset _work_dir_overridden _state_dir_overridden
 # per-recording budget (small EEG packs many-wide; large MEG self-limits). Override
 # with ZARR_JOBS.
 JOBS="${ZARR_JOBS:-$(nproc 2>/dev/null || echo 8)}"
+# Anonymous-memory bounds for every conversion worker. Each worker converts under
+# an RLIMIT_DATA budget (generate_zarr.py apply_worker_mem_limit), which counts
+# anonymous memory (VmData), not page cache, and two library defaults grow that
+# independently of the recording: zarr keeps up to `async.concurrency` (10) shard
+# encodes in flight, and glibc gives each thread its own malloc arena (up to 8 x
+# cores). on004789's recording_memory_exceeded failures (2026-09-22) were budget
+# trips of this kind; biosigio#129 removes the biggest source, and these bounds
+# keep the rest near the worker's own arrays. Exported so the Python driver and
+# its pool workers inherit them; a value already in the environment wins.
+export ZARR_ASYNC__CONCURRENCY="${ZARR_ASYNC__CONCURRENCY:-3}"
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 # The driver source. Repatriated from nemarDatasets/.github to nemarOrg/nemar-cli
 # in #1109 (ADR 0029): this engine runs here on the cron, never in Actions, so it
 # belongs with the CLI where it can be developed and tested. Deployment is now a
@@ -226,13 +239,15 @@ VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
 # CTF `.hc` coil naming, 1.2.6 is what index format v3 reads (constant-column view
 # chunking with the geometry declared in attrs, channels.tsv units CONVERTING
 # samples with a per-file report, resource exhaustion propagating as MemoryError),
-# and 1.2.7 gives `stream_to_zarr` the same `bids_channels` parameter as
+# 1.2.7 gives `stream_to_zarr` the same `bids_channels` parameter as
 # `Recording.from_file` -- which is what makes engine "3" safe, since below that
-# floor the streaming and in-memory paths disagree about a recording's units.
+# floor the streaming and in-memory paths disagree about a recording's units --
+# and 1.2.8 writes each streamed shard once instead of once per channel, which is
+# what kept large EDFs inside their memory budget (#1483).
 # Extras are not optional here: [mef3] carries pymef and [hdf5] carries h5py, and
 # without either the matching recordings raise ImportError at convert time even
 # though discovery finds them.
-BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.7}"
+BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.8}"
 API_BASE="${API_BASE:-https://api.nemar.org}"
 # The STABLE base published in each index as `contract_base` and in each store's
 # `nemar.contract_url` (#1059/#1064). Distinct from S3_BUCKET/AWS_REGION, which
@@ -505,6 +520,8 @@ WORK_DIR=$WORK_DIR
 STATE_DIR=$STATE_DIR
 SWEEP_SCRATCH=${SWEEP_SCRATCH:-0}
 JOBS=$JOBS
+ZARR_ASYNC__CONCURRENCY=$ZARR_ASYNC__CONCURRENCY
+MALLOC_ARENA_MAX=$MALLOC_ARENA_MAX
 DRIVER_REPO=$DRIVER_REPO
 DRIVER_REF=$DRIVER_REF
 VENV_DIR=$VENV_DIR
@@ -660,7 +677,13 @@ qpy() { VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" "$QUEUE" --db "$QUEUE_DB"
 # --- Per-dataset: download -> convert -> push -> CLEANUP -----------------------
 # Returns 0 on success. The store is on S3; the scratch copy is always deleted.
 convert_dataset() {
-  local id="$1" version="${2:-}"
+  # $3 = "retry-pending" from the queue drain only (#1483): the driver then
+  # converts just the recordings the published index lists as pending, when that
+  # index is otherwise current (same commit, engine, biosigIO, provenance), and
+  # falls back to the full --clean rebuild when it is not. A one-off --dataset
+  # run never passes it, so an operator asking for a dataset always gets a full
+  # rebuild.
+  local id="$1" version="${2:-}" scope="${3:-}"
   local dir="$WORK_DIR/$id"
   local cb="$WORK_DIR/$id.callback.json"
   # Reset BEFORE any early return so the drain loop never reads an unbound (set -u
@@ -699,6 +722,8 @@ convert_dataset() {
   fi
 
   local rc=0
+  local retry_args=()
+  [[ "$scope" == "retry-pending" ]] && retry_args=(--retry-pending)
   # --clean: full-rebuild every recording so the serving copy mirrors the current
   # dataset. It RECONCILES rather than wiping -- each store is synced with
   # --delete and only stores absent from HEAD are removed, after a successful
@@ -708,6 +733,7 @@ convert_dataset() {
   VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" "$DRIVER" \
     --dataset-id "$id" --repo-dir "$dir" \
     --bucket "$S3_BUCKET" --region "$AWS_REGION" --clean \
+    ${retry_args[@]+"${retry_args[@]}"} \
     --contract-base "$CONTRACT_BASE" --api-base "$API_BASE" \
     --jobs "$JOBS" --callback-out "$cb" >>"$LOG_FILE" 2>&1 || rc=$?
 
@@ -1015,7 +1041,7 @@ while :; do
   # stale-recovery sweep reclaims on its own -- it costs one re-conversion, it
   # does not lose data or stall the drain. Worth a loud line so the wasted work
   # is attributable, not worth abandoning a backfill mid-queue.
-  if convert_dataset "$id" "$version"; then
+  if convert_dataset "$id" "$version" retry-pending; then
     # shellcheck disable=SC1010  # `done` is the queue subcommand, not the keyword
     qpy done "$id" "$version" --pending-count "${LAST_PENDING_COUNT:-0}" \
       --not-attempted-count "${LAST_NOT_ATTEMPTED:-0}" ||

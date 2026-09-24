@@ -7,6 +7,9 @@ and a wheel built and verified in continuous integration (#411).
 It is **not** published to the Python Package Index,
 and [ADR 0070](decisions/0070-the-browser-recipe-names-eegprep-lean-and-carries-no-install-line.md)
 records how it reaches a browser instead.
+As built, OSA vendors `eegprep-lean` 0.1.0.dev2 in NEMAR's Pyodide lock overlay
+and serves the wheel from its own API, with the browser enforcing each wheel's sha256
+(OpenScience-Collective/osa#448 vendored 0.1.0.dev1; OpenScience-Collective/osa#450 re-vendored 0.1.0.dev2).
 **Lives here because** ADR 0069 says this project owns the seam, and because eegprep gitignores
 its own `.context/`. The normative parts move into eegprep's `docs/source/` when the package ships.
 **Owner:** Seyed Yahya Shirazi
@@ -38,7 +41,10 @@ Settled, and not to be reopened without superseding the decision that settled it
 Open, and named here so they are not settled by accident:
 
 1. The exact package list of the `[zarr]` tier. ADR 0069 measured 12 packages and 4.2 MB; the
-   membership has not been written down. (The base tier below it is settled: no dependencies.)
+   membership has not been written down in `eegprep-lean` itself. (The base tier below it is settled: no dependencies.)
+   OSA's NEMAR overlay records the Pyodide lock entries it resolves to on 0.29.5:
+   zarr needs donfig, google-crc32c, msgspec, numcodecs, numpy, packaging and typing-extensions
+   (`src/assistants/nemar/runtime/depends.toml` in OpenScience-Collective/osa).
 2. Whether `pillow` and `fonttools` are droppable from the plot tier (2.09 MB together).
    Must be proven by running the plotting with them absent, not by reading import sites.
 3. What the `[ica]` tier becomes. See "ICA is not a browser capability" below.
@@ -100,6 +106,14 @@ The reader conforms to NEMAR's published index contract
   Format v3 is current; older indexes coexist until a dataset reconverts, so a reader that assumes
   v3 is wrong rather than merely unlucky.
 - `contract_base` is the only URL it hardcodes.
+- `read_index(dataset_id, index_url=...)` fetches the index document at `index_url`
+  instead of the reader's default, `https://zarr.nemar.org/<dataset_id>/zarr/index.json`
+  (sccn/eegprep#416, from 0.1.0.dev2).
+  `contract_base` is still read from the fetched document, never derived from the argument,
+  and a document that names a different `dataset_id` is refused.
+  The `python_browser` recipe passes its own `contract_base` followed by `index.json`,
+  so a recipe served by a staging deployment reads that deployment's index
+  ([ADR 0071](decisions/0071-the-browser-recipe-leads-with-the-read-in-physical-units.md)).
 - `data_base` is re-read from the document on every use, never cached across runs and never
   assumed, because it may move independently of `contract_base`.
 - It uses `layout` rather than probing: `level0` is `<zarr>/<group>/0` and `view` is
@@ -126,21 +140,41 @@ So the reader is async end to end, and a synchronous convenience wrapper is **no
 one would have to start a loop, which is the thing that cannot be done.
 This is the single largest divergence from eegprep and it is structural.
 
-Transport is a read-only `zarr.abc.store.Store` over `pyodide.http.pyfetch`, mapping
+Transport is a read-only `zarr.abc.store.Store` that maps
 `RangeByteRequest`, `OffsetByteRequest` and `SuffixByteRequest` onto HTTP `Range`.
 Suffix ranges work cross-origin, which the sharding codec needs for the shard index.
 `s3fs` and `aiohttp` are not used and are not dependencies.
 
+The bytes come through a pluggable transport (sccn/eegprep#414, in 0.1.0.dev1).
+By default the reader uses `pyodide.http.pyfetch` in a browser and `urllib` elsewhere.
+`FetchTransport(fetch)` takes any async `fetch(url, headers=...)` that returns a `(status, body)` pair,
+sends only `Range`, and reads only a `2xx` as data.
+`set_default_transport` makes a transport what the readers use when no `transport=` argument is given.
+That seam exists because a sandboxed runtime may remove `pyodide` from executed code.
+OSA's runtime does, so NEMAR's prelude registers a transport over OSA's own client:
+`eegprep_lean.set_default_transport(eegprep_lean.FetchTransport(osa.fetch))`.
+The recipe's calls are unchanged either way; the transport is the host's to supply.
+
 ### Installation in the browser
 
-zarr installs as `micropip.install("zarr==3.4.0", deps=False)`.
-The `deps=False` is not an optimization: zarr's `numcodecs>=0.14` pin is metadata, and numcodecs
-publishes no emscripten wheel at any version, so a normal install fails on a dependency the code
-does not need at runtime for these stores.
-A pure-Python CRC-32C stands in for `google_crc32c`.
+On Pyodide 0.29.5, zarr 3.4.0 installs with its dependencies:
+the distribution bundles numcodecs 0.15.1 and google-crc32c 1.8.0, which satisfy zarr's pins.
+Measured 2026-09-22 with Pyodide 0.29.5's Node loader:
+`micropip.install("zarr==3.4.0")`, without `deps=False`, then importing zarr, numcodecs and google_crc32c, succeeds.
 
-These are exactly the facts that make a hand-written install line in a recipe fragile,
-and they belong in `eegprep-lean`'s own lockfile rather than in a snippet.
+This section used to say that zarr installs only with `deps=False` and that a pure-Python CRC-32C
+stands in for `google_crc32c`.
+That was true on Pyodide 0.28.3 (OpenScience-Collective/osa#375),
+whose distribution carries numcodecs 0.13.1, below zarr's `numcodecs>=0.14` pin,
+and no google-crc32c at all.
+It is not true on 0.29.5.
+
+OSA does not use micropip for this at all.
+zarr and `eegprep-lean` are entries in a per-community Pyodide lock overlay,
+which Pyodide's `loadPackage` resolves together with the distribution's own packages,
+fetching each wheel with its sha256 as `fetch` integrity (OpenScience-Collective/osa#448).
+Version facts like these are what make a hand-written install line in a recipe fragile,
+and they stay in the runtime's lock rather than in a snippet, which is ADR 0070's point.
 
 ## The tiers
 
@@ -160,10 +194,11 @@ Packages are counted as micropip installs them under Pyodide, transitive depende
 
 **zarr is an extra rather than a base dependency, which differs from ADR 0069's table**,
 and the ADR carries the correction.
-zarr installs under Pyodide only as `micropip.install("zarr==3.4.0", deps=False)`:
-its `numcodecs>=0.14` pin is metadata, and numcodecs publishes no emscripten wheel at any version,
-so a normal resolve fails on a dependency these stores never use at runtime.
-A base that declared zarr would therefore make `micropip.install("eegprep-lean")` fail outright.
+The first reason given, that zarr installs under Pyodide only with `deps=False`,
+held on Pyodide 0.28.3 and not on 0.29.5
+(see "Installation in the browser", and ADR 0069's amendment of 2026-09-22).
+The split stands on the second, the reason the base tier exists:
+a session that only reads a dataset's index pays for the package alone, not for zarr's 4.2 MB.
 The measurements are ADR 0069's and are unchanged; the install names they sit under are corrected.
 
 Plotting is deliberately not in the base.
@@ -256,5 +291,11 @@ Stated plainly so it can be checked rather than believed:
 - sccn/eegprep#400, the epic gate that checks package names and not versions.
 - #1457, the browser lane that needs this reader.
 - OpenScience-Collective/osa#375, where the async-only finding was measured.
+- sccn/eegprep#414, the pluggable transport (`FetchTransport`, `set_default_transport`).
+- OpenScience-Collective/osa#448, which vendored 0.1.0.dev1 in NEMAR's lock overlay, registers the
+  transport in NEMAR's prelude, and checks each wheel's sha256 in a real browser in CI.
+- sccn/eegprep#416, `read_index(index_url=)` and its refusal of a mismatched `dataset_id`, in 0.1.0.dev2.
+- OpenScience-Collective/osa#450, which re-vendors 0.1.0.dev2 byte for byte from the commit it records,
+  and checks weekly whether upstream has moved past it.
 - eegprep's `docs/source/pyodide_benchmark.md` and sccn/eegprep#324, for the ICA timings.
 - `https://docs.nemar.org/platform/zarr/index-contract/`, the contract the reader conforms to.

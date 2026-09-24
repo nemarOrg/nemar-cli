@@ -448,6 +448,58 @@ def data_segment_bytes() -> int | None:
     except (OSError, ValueError, IndexError):
         return None
     return None
+
+
+def memory_snapshot() -> dict[str, int]:
+    """VmData, VmRSS and VmHWM from /proc/self/status, plus the soft RLIMIT_DATA,
+    at this instant. Whatever cannot be read (macOS, a locked-down /proc) is
+    omitted rather than guessed. For the log line a memory failure prints: the
+    budget is enforced on VmData while calibration measures RSS, and only both,
+    side by side with the limit, say which one a failure actually hit (#1483)."""
+    snap: dict[str, int] = {}
+    try:
+        with open("/proc/self/status", encoding="utf-8") as fh:
+            for line in fh:
+                key = line.split(":", 1)[0]
+                if key in ("VmData", "VmRSS", "VmHWM"):
+                    snap[key] = int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        import resource
+
+        soft = resource.getrlimit(resource.RLIMIT_DATA)[0]
+        if soft != resource.RLIM_INFINITY:
+            snap["RLIMIT_DATA"] = soft
+    except (ImportError, OSError, ValueError):
+        pass
+    return snap
+
+
+def log_memory_failure(primary: str, exc: BaseException) -> None:
+    """Print a memory failure's traceback and a ``memory_snapshot``.
+
+    ``memory_failure_result`` keeps only the first line of the error, and the
+    failure happens inside a pool worker, so without this the stack and the
+    process's footprint are gone for good. on004789's 60.4 MiB allocation
+    failures (#1483) could only be attributed to zarr shard buffers by reading
+    source code, because nothing recorded where they were raised or how close
+    the worker was to its limit. Best-effort: logging must never turn a typed
+    memory failure into an uncoded one, so any error here, including a second
+    MemoryError, is swallowed. Interrupts still propagate."""
+    try:
+        import traceback
+
+        snap = memory_snapshot()
+        mem = ", ".join(f"{k}={v / 1024**3:.2f} GiB" for k, v in snap.items()) or "unavailable"
+        stack = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        print(
+            f"::warning::{primary!r} exceeded its memory budget ({mem}); traceback "
+            f"follows:\n{stack}",
+            flush=True,
+        )
+    except Exception:  # noqa: BLE001, S110 - see docstring
+        pass
 # One-shot latch: a box where setrlimit is refused (a seccomp profile, an odd
 # container runtime) would otherwise run with NO containment and say nothing,
 # leaving everyone believing #1110 shipped when it silently did not.
@@ -938,7 +990,8 @@ def count_infra_failures(failures: list, failure_entries: list) -> int:
 
 class ChannelCountMismatch(Exception):
     """The converted store carries fewer channels than the recording's BIDS
-    `_channels.tsv` declares, so publishing it would serve a silently
+    `_channels.tsv` declares AND fewer than the file's own header declares (or
+    the header could not be read), so publishing it would serve a silently
     unfaithful copy (the failure mode behind nemarDatasets/on002718#1, where
     biosigio#110 truncated 74-channel EEGLAB files to one channel). Typed so
     the gate is a DETERMINISTIC data failure surfaced in the index and the
@@ -1088,6 +1141,120 @@ def hardware_ceiling_bytes(meminfo_path: str = "/proc/meminfo") -> int:
                CEILING_FLOOR_BYTES)
 
 
+def mem_available_bytes(meminfo_path: str = "/proc/meminfo") -> int | None:
+    """One `MemAvailable` sample, or None where it cannot be read (off Linux, or
+    a kernel older than 3.14). Unlike `usable_ram_bytes` this is not smoothed:
+    `live_admission_ceiling` reads it at every admission decision, so a single
+    unlucky instant costs one decision, not a whole run."""
+    try:
+        with open(meminfo_path) as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def anon_rss_bytes(pid: int, proc_root: str = "/proc") -> int | None:
+    """`RssAnon` of process `pid`: the memory it has actually taken from the node
+    that only swap could give back. None when the process is gone or the field
+    is not published (off Linux, or a kernel older than 4.5)."""
+    try:
+        with open(os.path.join(proc_root, str(pid), "status"), encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("RssAnon:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _tracked_call(worker, primary: str, reserve: int, track_dir: str) -> dict:
+    """Run ``worker(primary, reserve)`` in a pool worker, recording while it runs
+    what `live_admission_ceiling` needs: this process's pid, the reserve it was
+    admitted with, and its `RssAnon` at the start. What the recording has taken
+    since is then `RssAnon` now minus that, readable from the parent without
+    asking the worker anything. Module-level so it pickles. #1483"""
+    path = os.path.join(track_dir, f"{os.getpid()}.json")
+    start = anon_rss_bytes(os.getpid())
+    try:
+        with open(path, "w") as fh:
+            json.dump({"reserve": int(reserve), "rss_anon_start": start}, fh)
+    except OSError:
+        pass  # untracked: the parent then counts the whole reserve as outstanding
+    try:
+        return worker(primary, reserve)
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(path)
+
+
+def live_admission_ceiling(
+    static_ceiling: int,
+    hard_ceiling: int | None,
+    running_peak: int,
+    track_dir: str | None,
+    *,
+    meminfo_path: str = "/proc/meminfo",
+    proc_root: str = "/proc",
+) -> int:
+    """The RAM ceiling admission packs in-flight reserves under, NOW (#1483).
+
+    The ceiling used to be sampled once, at the start of a run that can last
+    hours, on a node other tenants share: when they grew, admission kept packing
+    against memory that was no longer there, and when they shrank it kept a busy
+    hour's limit for the rest of the run. This reads `MemAvailable` again and
+    asks how much of it is already spoken for by recordings in flight.
+
+    `MemAvailable` has already been reduced by what those recordings have taken,
+    so charging their whole reserves against it again would count that twice.
+    What is still owed is each reserve minus what its recording has actually
+    taken (`_tracked_call` records the starting point). A recording not yet
+    tracked, or whose usage cannot be read, is charged its whole reserve. So:
+
+        ceiling = MemAvailable * headroom + sum(min(reserve, taken))
+
+    admits a new recording when ``running_peak + its reserve <= ceiling``, never
+    above ``hard_ceiling``. Where `MemAvailable` cannot be read (off Linux), the
+    static ceiling applies unchanged. Taken memory is `RssAnon`, not RSS: the
+    streaming path's scratch memmaps are file-backed page cache, which
+    `MemAvailable` already counts as reclaimable.
+    """
+    avail = mem_available_bytes(meminfo_path)
+    if avail is None:
+        return static_ceiling
+    frac = float(os.environ.get("ZARR_MEM_HEADROOM_FRAC", "0.8"))
+    taken = 0
+    if running_peak > 0 and track_dir:
+        try:
+            names = os.listdir(track_dir)
+        except OSError:
+            names = []
+        for name in names:
+            pid_text, _, ext = name.partition(".")
+            if ext != "json" or not pid_text.isdigit():
+                continue
+            try:
+                with open(os.path.join(track_dir, name)) as fh:
+                    rec = json.load(fh)
+                reserve = int(rec["reserve"])
+                start = rec.get("rss_anon_start")
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            now = anon_rss_bytes(int(pid_text), proc_root)
+            if now is None or not isinstance(start, int):
+                continue
+            taken += min(reserve, max(0, now - start))
+        # Never credit more than is in flight: a file the worker has not yet
+        # removed can outlive its recording by an instant.
+        taken = min(taken, running_peak)
+    ceiling = int(avail * frac) + taken
+    if hard_ceiling:
+        ceiling = min(ceiling, hard_ceiling)
+    return max(0, ceiling)
+
+
 def per_recording_ceiling_bytes() -> int:
     """Largest projected peak a SINGLE recording may use: the whole usable node.
     Admission control in ``main`` keeps the SUM of concurrently-converting
@@ -1129,11 +1296,14 @@ _FALLBACK_REASONS = {
         "This recording is too large to convert to an interactive viewer copy "
         "within the conversion node's memory limits."
     ),
-    # NEMAR-side fidelity gate: the converted copy disagreed with the BIDS
-    # channels.tsv ground truth, so it was withheld rather than served.
+    # NEMAR-side fidelity gate: the converted copy came up short of the
+    # recording's channels.tsv and of the file's own header (or the header was
+    # unreadable), so it was withheld rather than served. A sidecar that merely
+    # over-declares is not this failure; see channel_gate_verdict.
     "channel_count_mismatch": (
         "The converted viewer copy carried fewer channels than this recording's "
-        "channels.tsv declares, so it was withheld pending a converter fix."
+        "channels.tsv declares (and than the data file itself, where its header "
+        "could be read), so it was withheld pending a converter fix."
     ),
     # NEMAR-side (not a biosigIO code): ADR 0028. Surfaces MEGIN's own position,
     # which is why the file cannot simply be shown, rather than a bare read error.
@@ -2329,6 +2499,84 @@ def expected_channel_count_for(
     return len(rows) or None
 
 
+# EDF+/BDF+ carry their annotations as a pseudo-signal with this label; it is
+# never a data channel, and no exporter serves it as one.
+EDF_ANNOTATION_LABELS = frozenset({"EDF Annotations", "BDF Annotations"})
+
+
+def file_declared_channel_count(primary_local: str) -> int | None:
+    """Data-channel count the recording file's OWN header declares, read with no
+    importer in between, or None when the format has no cheap header to read.
+
+    This is the second ground truth the fidelity gate needs. channels.tsv alone
+    cannot tell "the importer dropped channels" (biosigio#110, the failure the
+    gate exists for) from "the sidecar lists channels this file never had": on
+    2026-09-22, every channel_count_mismatch sampled across ten datasets
+    (on004789, on006914, on004551, on004703, on005280, on006107, on007095,
+    on007118-on007120) was the second kind, with the store holding exactly the
+    file's channels. The header is independent of biosigIO by construction, so
+    a real truncation still shows up as a store short of THIS number.
+
+    EDF/BDF: `ns` at bytes 252-256, then ns 16-byte labels; the annotation
+    pseudo-signal is not a channel. BrainVision: `NumberOfChannels` in the
+    `.vhdr`'s `[Common Infos]` section. Anything unreadable returns None, which
+    leaves the gate on channels.tsv alone -- exactly its behavior before this
+    existed.
+    """
+    ext = lower_ext(primary_local)
+    try:
+        if ext in (".edf", ".bdf"):
+            with open(primary_local, "rb") as fh:
+                head = fh.read(256)
+                if len(head) < 256:
+                    return None
+                ns = int(head[252:256].decode("ascii").strip())
+                if ns <= 0:
+                    return None
+                raw = fh.read(16 * ns)
+            if len(raw) < 16 * ns:
+                return None
+            labels = [raw[i * 16:(i + 1) * 16].decode("latin-1").strip() for i in range(ns)]
+            return sum(1 for label in labels if label not in EDF_ANNOTATION_LABELS)
+        if ext == ".vhdr":
+            with open(primary_local, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+            # Scoped to [Common Infos], the section MNE reads it from, so a
+            # comment elsewhere in the header can never supply the count.
+            section = re.search(r"^\[Common Infos\][^\n]*\n(.*?)(?=^\[|\Z)", text, re.M | re.S)
+            m = section and re.search(
+                r"^\s*NumberOfChannels\s*=\s*(\d+)", section.group(1), re.MULTILINE
+            )
+            return int(m.group(1)) if m else None
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+ChannelGateVerdict = Literal["pass", "sidecar_overcount", "truncated"]
+
+
+def channel_gate_verdict(
+    in_store: int, channels_tsv: int | None, in_file: int | None
+) -> ChannelGateVerdict:
+    """The fidelity gate's decision, kept pure so every branch is testable.
+
+    - ``pass``: no applicable channels.tsv, or the store holds at least what it
+      declares.
+    - ``sidecar_overcount``: the store falls short of channels.tsv but holds
+      every channel the file's own header declares, so the SIDECAR over-declares
+      and the store is faithful. Published, with the disagreement recorded.
+    - ``truncated``: the store falls short of channels.tsv and either falls
+      short of the file too, or the file's count is unknown. Withheld
+      (``ChannelCountMismatch``), as before: better no store than a wrong one.
+    """
+    if not channels_tsv or in_store >= channels_tsv:
+        return "pass"
+    if in_file is not None and in_store >= in_file:
+        return "sidecar_overcount"
+    return "truncated"
+
+
 def affected_primaries(
     changed_path: str,
     primaries_by_dir: dict[str, list[str]],
@@ -2717,6 +2965,70 @@ def _failure_entry(
     }
 
 
+def index_provenance(dataset_row: dict | None) -> dict:
+    """The index's top-level dataset provenance (#1064), from the catalog row.
+    One function because ``pending_retry_worklist`` compares a published index
+    against the current row on exactly these fields: two copies of the mapping
+    would let the comparison drift from what is published."""
+    row = dataset_row or {}
+    return {
+        "doi": row.get("concept_doi") or row.get("doi") or None,
+        "license": row.get("license") or None,
+        "citation": dataset_citation(dataset_row),
+        "hed_version": row.get("hed_version") or None,
+    }
+
+
+def pending_retry_worklist(
+    index: dict | None,
+    head: str,
+    discovered: list[str],
+    dataset_row: dict | None,
+    row_fetch_failed: bool,
+    biosigio_version: str | None,
+    engine_version: str = ZARR_ENGINE_VERSION,
+) -> tuple[list[str] | None, str]:
+    """What a pending-driven retry round has to convert (#1483). Pure.
+
+    Returns ``(recordings, reason)``. ``recordings`` is the published index's
+    ``pending`` paths still discovered at HEAD, when everything else the index
+    serves is still exactly what a full rebuild would produce: same commit, same
+    engine, same biosigIO, and the same dataset provenance (which every store
+    embeds). Otherwise it is None, ``reason`` says why, and the run is a full
+    rebuild as before.
+
+    A retry round used to rebuild the whole dataset to convert the handful of
+    recordings still pending, so on a large dataset each round spent hours
+    reconverting stores that were already published at this commit, and could
+    fail new recordings for memory while doing it.
+    """
+    if not isinstance(index, dict):
+        return None, "no published index"
+    if index.get("source_commit") != head:
+        return None, "the index was built from a different commit"
+    if index.get("engine_version") != engine_version:
+        return None, "the index was built by a different engine"
+    if index.get("biosigio_version") != biosigio_version:
+        return None, "the index was built with a different biosigIO"
+    if row_fetch_failed:
+        return None, "the catalog could not be read to compare provenance"
+    current = index_provenance(dataset_row)
+    if any(index.get(k) != v for k, v in current.items()):
+        return None, "the dataset's provenance changed since the index was built"
+    at_head = set(discovered)
+    pending = index.get("pending")
+    paths = sorted(
+        {
+            e["path"]
+            for e in (pending if isinstance(pending, list) else [])
+            if isinstance(e, dict) and isinstance(e.get("path"), str) and e["path"] in at_head
+        }
+    )
+    if not paths:
+        return None, "the index lists nothing pending"
+    return paths, f"{len(paths)} pending recording(s)"
+
+
 def merge_index(
     prior: dict | None,
     dataset_id: str,
@@ -2948,10 +3260,7 @@ def merge_index(
         # dataset, which is the difference between "read the index" and "read the
         # index and then the catalog" for every recipe. Nullable throughout: the
         # catalog genuinely may not have a DOI yet.
-        "doi": (dataset_row or {}).get("concept_doi") or (dataset_row or {}).get("doi") or None,
-        "license": (dataset_row or {}).get("license") or None,
-        "citation": dataset_citation(dataset_row),
-        "hed_version": (dataset_row or {}).get("hed_version") or None,
+        **index_provenance(dataset_row),
         # How to turn this index's numbers into reads, without probing.
         "layout": dict(INDEX_LAYOUT),
         "discovered_count": (
@@ -3319,6 +3628,13 @@ def write_events_parquet(
     `store_path, onset_s` by construction -- no global sort, and therefore no
     point at which the whole dataset is in memory. Rows accumulate only until
     `EVENTS_ROW_GROUP_ROWS`, then become a row group.
+
+    The MCP's `get_events` relies on that order (#1498): for a file over its
+    whole-file budget it reads only the row groups whose `store_path` min/max
+    statistics can hold the recording asked for (`storeRowGroupSpan` in
+    `backend/src/mcp/tools/get-events.ts`). An unsorted file is still read
+    correctly there, but those row groups then span more of it and more
+    recordings are declined.
 
     A store with rows from THIS run uses them. A store this run did NOT reconvert
     keeps the rows the prior file has for it. `reconverted` is what separates the
@@ -5244,12 +5560,34 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         expected = expected_channel_count_for(
             c["repo"], primary, c["head_files"], c["head"]
         )
+        channel_count_note = None
         if expected:
             total = store_total_channels(meta)
-            if total < expected:
+            in_file = (
+                file_declared_channel_count(primary_local) if total < expected else None
+            )
+            verdict = channel_gate_verdict(total, expected, in_file)
+            if verdict == "sidecar_overcount":
+                # The store holds every channel the file itself declares; the
+                # sidecar lists channels the file never had. Serve the faithful
+                # copy and disclose the disagreement on the index entry.
+                channel_count_note = {
+                    "channels_tsv": expected, "in_file": in_file, "in_store": total,
+                }
+                print(
+                    f"::warning::{primary}: channels.tsv declares {expected} channel(s) "
+                    f"but the file itself holds {in_file}; serving the {total}-channel "
+                    "store, which matches the file",
+                    flush=True,
+                )
+            elif verdict == "truncated":
+                file_part = (
+                    f" and the file itself declares {in_file}" if in_file is not None else ""
+                )
                 raise ChannelCountMismatch(
                     f"store has {total} channel(s) but {primary}'s channels.tsv "
-                    f"declares {expected}; refusing to publish an unfaithful copy"
+                    f"declares {expected}{file_part}; refusing to publish an "
+                    "unfaithful copy"
                 )
         # Latest-only: --delete drops stale chunk objects a smaller new store no
         # longer needs. Long origin TTL; the callback purges zarr.json/index.json.
@@ -5309,6 +5647,8 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             }
         if channels_read_failed:
             entry["channels_tsv_read_error"] = True
+        if channel_count_note:
+            entry["channels_tsv_count_mismatch"] = channel_count_note
         # For a split FIF, record all member source paths so the browser can map any
         # split file (e.g. a click on split-02) to this single head store.
         members = split_members_for(primary, c["head_files"])
@@ -5351,6 +5691,7 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         # Measure here as well: a recording that hit the backstop is the strongest
         # evidence its format is under-projected, and excluding it made the
         # calibration summary look cleanest exactly where it was most wrong.
+        log_memory_failure(primary, exc)
         return memory_failure_result(
             primary, exc, peak_rss_bytes() if rss_trusted else None
         )
@@ -5358,6 +5699,7 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         # The backstop does not always surface as MemoryError: see
         # `is_memory_exhaustion`. Same verdict, same code, same measurement.
         if is_memory_exhaustion(exc):
+            log_memory_failure(primary, exc)
             return memory_failure_result(
                 primary, exc, peak_rss_bytes() if rss_trusted else None
             )
@@ -5400,6 +5742,20 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
                 shutil.rmtree(d, ignore_errors=True)
 
 
+# How often a drain re-evaluates admission while nothing finishes (#1483). A
+# drain used to sleep until a recording completed, so memory freed by another
+# tenant went unused until then, and a large recording could hold the queue for
+# an hour. `wait` now returns at least this often and admission is re-read.
+ADMISSION_RECHECK_SECONDS = float(os.environ.get("ZARR_ADMISSION_RECHECK_SECONDS", "15"))
+
+
+# How many memory-budget failures one run retries serially at its end (#1483).
+# Each retry runs ALONE, so a dataset where most recordings trip the budget
+# would otherwise turn a parallel run into a serial one; past this many, the
+# rest go to the next retry round as before.
+MEMORY_RETRY_MAX = int(os.environ.get("ZARR_MEMORY_RETRY_MAX", "64"))
+
+
 def _next_admission(
     pending_peaks: list[int], in_flight_count: int, running_peak: int,
     cpu_cap: int, ram_ceiling: int,
@@ -5420,7 +5776,8 @@ def _next_admission(
 
 
 def _drain_with_admission(
-    convert, peaks, cpu_cap, ram_ceiling, ctx, record, worker=None
+    convert, peaks, cpu_cap, ram_ceiling, ctx, record, worker=None, memory_retry=None,
+    ceiling=None,
 ) -> tuple[int, int]:
     """Run ``convert_one`` over ``convert`` in a pool of up to ``cpu_cap`` workers,
     dispatching a recording only while the SUM of in-flight projected peaks stays
@@ -5446,21 +5803,59 @@ def _drain_with_admission(
     Retrying suspects in PARALLEL instead would be wrong: the culprit kills the
     pool again, and an innocent recording that happened to be in flight for both
     breaks gets blamed. That is not hypothetical -- the tests caught exactly it.
+
+    3. Serial memory retry (#1483), when ``memory_retry`` is given. A recording
+       that failed with a retryable memory code (``RETRYABLE_CODES``) is held
+       back instead of reported. Once the passes above are done, the node's RAM
+       is no longer shared with the parallel pass, so ``memory_retry()`` is
+       called ONCE, then, and returns ``(retry_ctx, retry_peak)``: the worker
+       context and the per-recording reserve to retry with, read at that moment.
+       Each held recording whose original reserve was below ``retry_peak`` is
+       re-run alone with it, up to ``MEMORY_RETRY_MAX``; the rest are reported as
+       they failed. Before this, such a failure waited 1h-7d for a retry round
+       that rebuilt the whole dataset under the same budget and mostly failed the
+       same way.
+
+    Admission is re-evaluated against ``ceiling(running_peak, track_dir)``, by
+    default `live_admission_ceiling` over this node's /proc with ``ram_ceiling``
+    as its off-Linux fallback, whenever a recording finishes and at least every
+    ``ADMISSION_RECHECK_SECONDS`` otherwise (#1483).
     """
     worker = worker or convert_one
+    if ceiling is None:
+        hard = ctx.get("hard_ceiling")
+
+        def ceiling(running_peak: int, track_dir: str | None) -> int:
+            return live_admission_ceiling(ram_ceiling, hard, running_peak, track_dir)
     done = 0
     pool_breaks = 0
+    held: list[dict] = []  # memory failures awaiting the serial retry
+    retried: set = set()
+    recovered = 0
 
     def report(r: dict) -> None:
-        nonlocal done
+        nonlocal done, recovered
+        p = r.get("primary")
+        if (
+            memory_retry is not None
+            and not r.get("ok")
+            and r.get("code") in RETRYABLE_CODES
+            and p not in retried
+        ):
+            held.append(r)
+            return
+        if p in retried and r.get("ok"):
+            recovered += 1
         done += 1
         record(r, done)
 
-    def drain_once(queue: list, cap: int) -> list:
+    def drain_once(queue: list, cap: int, run_ctx=None, run_peaks=None) -> list:
         """Drain ``queue`` (mutated in place) with up to ``cap`` workers until it
         is empty or the pool breaks. Returns the recordings that were in flight
         at the moment of the break -- empty when the pass completed cleanly."""
         nonlocal pool_breaks
+        run_ctx = ctx if run_ctx is None else run_ctx
+        run_peaks = peaks if run_peaks is None else run_peaks
         in_flight: dict = {}
         running_peak = 0
         # One pass observes at most one pool death, but it can surface twice (a
@@ -5476,10 +5871,16 @@ def _drain_with_admission(
 
         def admit() -> None:
             nonlocal running_peak
-            while queue:
+            # Read once per round, not per recording admitted: what this round
+            # submits has not started, so it earns no credit and the ceiling
+            # cannot move because of it. No slot, no read.
+            limit: int | None = None
+            while queue and len(in_flight) < cap:
+                if limit is None:
+                    limit = ceiling(running_peak, track_dir)
                 idx = _next_admission(
-                    [peaks[p] for p in queue], len(in_flight), running_peak,
-                    cap, ram_ceiling,
+                    [run_peaks[p] for p in queue], len(in_flight), running_peak,
+                    cap, limit,
                 )
                 if idx is None:
                     break
@@ -5488,18 +5889,23 @@ def _drain_with_admission(
                 # neither the queue nor in_flight -- silently dropped, which is
                 # the very failure this recovery exists to prevent.
                 p = queue[idx]
-                fut = ex.submit(worker, p, peaks[p])
+                fut = ex.submit(_tracked_call, worker, p, run_peaks[p], track_dir)
                 queue.pop(idx)
-                in_flight[fut] = (p, peaks[p])
-                running_peak += peaks[p]
+                in_flight[fut] = (p, run_peaks[p])
+                running_peak += run_peaks[p]
 
+        track_dir = tempfile.mkdtemp(prefix="zarr-admission-")
         try:
             with ProcessPoolExecutor(
-                max_workers=cap, initializer=_init_worker, initargs=(ctx,)
+                max_workers=cap, initializer=_init_worker, initargs=(run_ctx,)
             ) as ex:
                 admit()
                 while in_flight:
-                    finished, _ = wait(list(in_flight), return_when=FIRST_COMPLETED)
+                    finished, _ = wait(
+                        list(in_flight),
+                        timeout=ADMISSION_RECHECK_SECONDS,
+                        return_when=FIRST_COMPLETED,
+                    )
                     for fut in finished:
                         p, peak = in_flight.pop(fut)
                         running_peak -= peak
@@ -5519,6 +5925,8 @@ def _drain_with_admission(
                     admit()
         except BrokenProcessPool:
             broke = True
+        finally:
+            shutil.rmtree(track_dir, ignore_errors=True)
         if broke or broken:
             pool_breaks += 1
         return broken + [p for p, _peak in in_flight.values()]
@@ -5541,18 +5949,52 @@ def _drain_with_admission(
             "recording(s) one at a time to find the culprit",
             flush=True,
         )
+    killed = ("killed its worker process while running alone "
+              "(out of memory, or a native crash in the reader)")
     while suspects:
         culprits = drain_once(suspects, 1)
         # cap=1, so at most one recording was in flight: it died running alone.
         for p in culprits:
-            killed = ("killed its worker process while running alone "
-                      "(out of memory, or a native crash in the reader)")
             report({
                 "ok": False,
                 "primary": p,
                 "error": killed,
                 "detail": failure_detail(killed),
             })
+
+    if held:
+        retry_ctx, retry_peak = memory_retry()
+        eligible = [r for r in held if retry_peak > peaks[r["primary"]]]
+        to_retry = eligible[:MEMORY_RETRY_MAX]
+        retry_set = {r["primary"] for r in to_retry}
+        for r in held:
+            if r["primary"] not in retry_set:
+                retried.add(r["primary"])  # final: report, never hold again
+                report(r)
+        if to_retry:
+            print(
+                f"::warning::retrying {len(to_retry)} recording(s) that exceeded their "
+                f"memory budget, one at a time with ~{retry_peak / 1024**3:.1f} GiB each"
+                + (f" ({len(eligible) - len(to_retry)} more left for the next round)"
+                   if len(eligible) > len(to_retry) else ""),
+                flush=True,
+            )
+            queue = [r["primary"] for r in to_retry]
+            retried.update(queue)
+            retry_peaks = {p: retry_peak for p in queue}
+            while queue:
+                for p in drain_once(queue, 1, run_ctx=retry_ctx, run_peaks=retry_peaks):
+                    report({
+                        "ok": False,
+                        "primary": p,
+                        "error": killed,
+                        "detail": failure_detail(killed),
+                    })
+            print(
+                f"[zarr] memory retry: {recovered} of {len(to_retry)} converted when "
+                "given the node alone",
+                flush=True,
+            )
 
     if pool_breaks:
         # ::warning:: not [zarr]: on the cron this lands in a multi-megabyte plain
@@ -5582,6 +6024,14 @@ def main() -> int:
         "reconciled exactly; stores for recordings no longer at HEAD are removed "
         "afterwards. Does NOT erase the serving prefix up front -- see --wipe. "
         "Implies --full.",
+    )
+    ap.add_argument(
+        "--retry-pending",
+        action="store_true",
+        help="a pending-driven retry round (#1483): when the published index was "
+        "built from this HEAD by this engine and biosigIO, with the same dataset "
+        "provenance, convert only the recordings it lists as pending and merge "
+        "them into it. Otherwise ignored, and --clean applies as given.",
     )
     ap.add_argument(
         "--wipe",
@@ -5643,8 +6093,30 @@ def main() -> int:
     # `--if-none-match "*"` write derived from "the merge had no prior" would 412
     # on every clean run.
     live_index, live_index_etag = read_index_with_etag(bucket, dataset_id)
+    head_files = git_ls_files(repo, head)
+    # Coverage denominator: every raw recording at HEAD, whether or not this run
+    # touches it. Publishing it is what lets a consumer check completeness without
+    # cloning the repo (#1197).
+    discovered = discover_primaries(head_files)
+    # A retry round converts only what is still pending when nothing else would
+    # change (#1483); see `pending_retry_worklist`. The catalog row it compares
+    # against is fetched here and reused for the stores below, so it is still
+    # read once per run.
+    biosigio_version = installed_biosigio_version()
+    early_row: tuple[dict | None, bool] | None = None
+    retry_paths: list[str] | None = None
+    if args.retry_pending and not args.wipe:
+        early_row = fetch_dataset_row(args.api_base, dataset_id)
+        retry_paths, why = pending_retry_worklist(
+            live_index, head, discovered, early_row[0], early_row[1], biosigio_version
+        )
+        verdict = f"converting only {why}" if retry_paths else f"{why}; full rebuild"
+        print(f"[zarr] --retry-pending: {verdict}", flush=True)
+    # From here on `clean` is what this run does, which a retry round turns off:
+    # it merges into the published index instead of rewriting it.
+    clean = args.clean and retry_paths is None
     prior_for_orphans: dict | None = None
-    if args.clean:
+    if clean:
         prior, prior_commit, full = None, None, True
         prior_for_orphans = live_index
     else:
@@ -5655,20 +6127,19 @@ def main() -> int:
     # on the same terms: carried on the incremental path, rebuilt from this run
     # under --clean (which reconverts every recording anyway).
     prior_manifest = (
-        None if args.clean else s3_read_json(bucket, f"{dataset_id}/zarr/manifest.json")
+        None if clean else s3_read_json(bucket, f"{dataset_id}/zarr/manifest.json")
     )
 
-    head_files = git_ls_files(repo, head)
     if full:
         diff: list[tuple[str, str]] = []
     else:
         assert prior_commit  # full is False only when prior_commit is a real ancestor SHA
         diff = git_diff_name_status(repo, prior_commit, head)
     convert, remove = compute_worklist(head_files, diff, full)
-    # Coverage denominator: every raw recording at HEAD, whether or not this run
-    # touches it. Publishing it is what lets a consumer check completeness without
-    # cloning the repo (#1197).
-    discovered = discover_primaries(head_files)
+    if retry_paths is not None:
+        # The index was built from HEAD, so the diff is empty and the worklist
+        # with it; what is left to do is exactly what the index lists as pending.
+        convert, remove = retry_paths, []
     # `pending` attempt counts are a property of the RECORDING's history, not of
     # this run, so they are carried even under --clean -- which otherwise rebuilds
     # the index from nothing. Without this a recording would reset to attempt 1
@@ -5716,7 +6187,7 @@ def main() -> int:
     #
     # `--wipe` keeps the old behaviour for recovery (a corrupt prefix, an index
     # that no longer describes what is on S3).
-    if args.clean:
+    if clean:
         # `compute_clean_orphans` also protects already-published stores under
         # an excluded tree (derivatives/sourcedata/code) from this removal: a
         # raw-only `convert` no longer contains them, but that must not be
@@ -5919,15 +6390,18 @@ def main() -> int:
 
     print(
         f"[zarr] admission: up to {cpu_cap} worker(s), RAM ceiling "
-        f"~{ram_ceiling // 1024**3} GiB; a recording projected above it alone is "
-        f"skipped (#909)",
+        f"~{ram_ceiling // 1024**3} GiB now and re-read from MemAvailable as the run "
+        f"goes (#1483); a recording projected above it alone is skipped (#909)",
         flush=True,
     )
     # Per-dataset provenance for the stores' `nemar` root attribute (#1064).
     # Skipped when there is nothing to convert, so a no-op run makes no request.
-    dataset_row, provenance_fetch_failed = (
-        fetch_dataset_row(args.api_base, dataset_id) if convert else (None, False)
-    )
+    if early_row is not None:
+        dataset_row, provenance_fetch_failed = early_row
+    else:
+        dataset_row, provenance_fetch_failed = (
+            fetch_dataset_row(args.api_base, dataset_id) if convert else (None, False)
+        )
     with tempfile.TemporaryDirectory() as tmp:
         ctx = {
             "repo": repo, "bucket": bucket, "dataset_id": dataset_id, "head": head,
@@ -5944,13 +6418,26 @@ def main() -> int:
             "projections": projections,
         }
         pool_breaks = 0
-        if cpu_cap == 1 or n <= 1:
+        # --jobs 1 converts in this process, as an operator asked for. Anything
+        # else, a single recording included, goes through the pool: it is the
+        # only path with the serial memory retry, and a single-recording run is
+        # where a large recording most often trips its reserve (#1483).
+        if cpu_cap == 1 or not convert:
             _init_worker(ctx)
             for i, p in enumerate(convert, 1):
                 record(convert_one(p, peaks[p]), i)
         else:
+            def memory_retry() -> tuple[dict, int]:
+                # Read now, after the parallel pass: the retry runs alone, so it
+                # may have the whole usable node, never past the hardware ceiling.
+                budget = per_recording_ceiling_bytes()
+                if ctx["hard_ceiling"]:
+                    budget = min(budget, ctx["hard_ceiling"])
+                return {**ctx, "mem_budget": budget}, budget
+
             pool_breaks, _max_suspects = _drain_with_admission(
-                convert, peaks, cpu_cap, ram_ceiling, ctx, record
+                convert, peaks, cpu_cap, ram_ceiling, ctx, record,
+                memory_retry=memory_retry,
             )
 
     calibration = calibration_summary(measured, projections, streamed_paths)
@@ -6057,7 +6544,14 @@ def main() -> int:
     # "failed") so the driver can classify data-vs-infra and the backend records
     # WHAT failed even on a total failure (#774 — previously no callback was
     # written here, so total failures were invisible).
-    if convert and not converted_entries and not remove:
+    #
+    # Not for a retry round (#1483). Its worklist is only the recordings already
+    # pending, so "none converted" is the ordinary outcome of a round that did
+    # not help, not a failed dataset: the index still serves everything else, and
+    # it has to be rewritten so the pending attempt counts advance, or those
+    # recordings could never reach `retry_exhausted` and the queue row would go
+    # `failed` instead of backing off.
+    if convert and not converted_entries and not remove and retry_paths is None:
         print(f"::error::all {len(convert)} conversion(s) failed; index left untouched", flush=True)
         write_failed_callback()
         return 1
@@ -6074,7 +6568,8 @@ def main() -> int:
     # which is how on008083 came to publish an EMPTY source_commit while D1 held
     # the real SHA (#1197). There is no longer anything to fall back FOR: those
     # recordings are now listed in `pending`, and the queue re-queues a `done`
-    # dataset that has any (zarr_queue.reconcile), which re-runs it with --clean.
+    # dataset that has any (zarr_queue.reconcile), which re-runs it: only the
+    # pending recordings when the index is otherwise current (#1483), else --clean.
     # So publish the commit the stores were actually built from.
     # The trailing `and prior_commit` in the condition is not redundant with
     # `is_commit_sha`: that call narrows the value at runtime but not for a
@@ -6086,7 +6581,6 @@ def main() -> int:
     index_commit = (
         prior_commit if (infra_failures and is_commit_sha(prior_commit) and prior_commit) else head
     )
-    biosigio_version = installed_biosigio_version()
 
     def build_index(merge_prior: dict | None, merge_pending: list | None) -> dict:
         """Merge this run's results onto a prior document and check the coverage
@@ -6225,7 +6719,7 @@ def main() -> int:
         # `--clean` hands the merge no prior (the document is rebuilt from this
         # run), exactly as the first attempt did; the pending attempt history
         # still comes from the published document, newer one included.
-        remerged = build_index(None if args.clean else newer, (newer or {}).get("pending"))
+        remerged = build_index(None if clean else newer, (newer or {}).get("pending"))
         if events_file:
             remerged["events_parquet"] = f"{remerged['data_base']}{EVENTS_PARQUET_NAME}"
             remerged["events_row_count"] = events_file["row_count"]

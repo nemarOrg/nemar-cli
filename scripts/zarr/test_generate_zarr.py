@@ -17,6 +17,7 @@ import contextlib
 import errno
 import hashlib
 import io
+import itertools
 import json
 import os
 import shutil
@@ -28,6 +29,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import ClassVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -78,6 +80,12 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     INMEM_MEM_FACTOR,
     usable_ram_bytes,
     memory_failure_result,
+    live_admission_ceiling,
+    mem_available_bytes,
+    anon_rss_bytes,
+    _tracked_call,
+    memory_snapshot,
+    log_memory_failure,
     count_infra_failures,
     RecordingMemoryExceeded,
     MaxShieldUncalibrated,
@@ -101,6 +109,8 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     MEFD_EXT,
     electrode_positions_for,
     expected_channel_count_for,
+    file_declared_channel_count,
+    channel_gate_verdict,
     store_total_channels,
     store_metadata,
     embed_attr,
@@ -116,6 +126,8 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     is_split_fif,
     materialize_local,
     merge_index,
+    index_provenance,
+    pending_retry_worklist,
     parse_annex_key,
     power_line_frequency_for,
     safe_store_prefix,
@@ -2831,6 +2843,120 @@ class TestChannelCountMismatch(unittest.TestCase):
         self.assertIn("channels.tsv", reason_for_code("channel_count_mismatch"))
 
 
+def write_edf_header(path: str, labels: list[str]) -> None:
+    """Write an EDF/BDF header with exactly these signal labels and no data
+    records: the 256-byte fixed part (field widths per the EDF spec), then 256
+    bytes per signal, labels first. Real bytes in the layout the format defines,
+    which is all `file_declared_channel_count` reads."""
+    ns = len(labels)
+    fixed = (
+        "0".ljust(8) + "X".ljust(80) + "X".ljust(80) + "01.01.26" + "00.00.00"
+        + str(256 * (ns + 1)).ljust(8) + "EDF+C".ljust(44) + "0".ljust(8)
+        + "1".ljust(8) + str(ns).ljust(4)
+    )
+    assert len(fixed) == 256
+    per_signal = "".join(label.ljust(16) for label in labels) + " " * (ns * 240)
+    with open(path, "wb") as fh:
+        fh.write((fixed + per_signal).encode("ascii"))
+
+
+class TestFileDeclaredChannelCount(unittest.TestCase):
+    """The gate's second ground truth: the file's own header, read with no
+    importer in between (#1477 follow-up; every sampled channel_count_mismatch
+    on 2026-09-22 was a sidecar listing channels its file never had)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def path(self, name):
+        return os.path.join(self.dir, name)
+
+    def test_edf_counts_signals_less_the_annotation_track(self):
+        p = self.path("r_ieeg.edf")
+        write_edf_header(p, ["LPHD1-LPHD2", "LPHD2-LPHD3", "LIWS3-LIWS4", "EDF Annotations"])
+        self.assertEqual(file_declared_channel_count(p), 3)
+
+    def test_bdf_drops_its_own_annotation_label(self):
+        p = self.path("r_eeg.bdf")
+        write_edf_header(p, ["Fp1", "Fp2", "Status", "BDF Annotations"])
+        # Status is a real signal in the file; only the annotation track is not.
+        self.assertEqual(file_declared_channel_count(p), 3)
+
+    def test_brainvision_reads_number_of_channels(self):
+        p = self.path("r_eeg.vhdr")
+        with open(p, "w") as fh:
+            fh.write("Brain Vision Data Exchange Header File Version 1.0\n"
+                     "[Common Infos]\nDataFile=r_eeg.eeg\nNumberOfChannels=63\n")
+        self.assertEqual(file_declared_channel_count(p), 63)
+
+    def test_brainvision_ignores_the_count_outside_common_infos(self):
+        p = self.path("c_eeg.vhdr")
+        with open(p, "w") as fh:
+            fh.write("Brain Vision Data Exchange Header File Version 1.0\n"
+                     "[Comment]\nNumberOfChannels=999 (amplifier maximum)\n"
+                     "[Common Infos]\nDataFile=c_eeg.eeg\nNumberOfChannels=32\n"
+                     "[Channel Infos]\nCh1=Fp1,,0.1,uV\n")
+        self.assertEqual(file_declared_channel_count(p), 32)
+        q = self.path("n_eeg.vhdr")
+        with open(q, "w") as fh:
+            fh.write("[Comment]\nNumberOfChannels=64\n")
+        self.assertIsNone(file_declared_channel_count(q))
+
+    def test_a_truncated_header_is_unknown_not_zero(self):
+        p = self.path("short_ieeg.edf")
+        with open(p, "wb") as fh:
+            fh.write(b"0" * 100)
+        self.assertIsNone(file_declared_channel_count(p))
+
+    def test_labels_cut_short_are_unknown(self):
+        p = self.path("cut_ieeg.edf")
+        write_edf_header(p, ["A", "B", "C"])
+        with open(p, "r+b") as fh:
+            fh.truncate(256 + 20)  # ns=3 declared, fewer than 48 label bytes
+        self.assertIsNone(file_declared_channel_count(p))
+
+    def test_formats_without_a_cheap_header_and_missing_files_are_unknown(self):
+        p = self.path("r_eeg.set")
+        with open(p, "wb") as fh:
+            fh.write(b"MATLAB 5.0")
+        self.assertIsNone(file_declared_channel_count(p))
+        self.assertIsNone(file_declared_channel_count(self.path("absent_eeg.edf")))
+
+    def test_a_real_edf_plus_from_pyedflib(self):
+        # EDF+ writers append the annotation pseudo-signal; it must not count.
+        try:
+            import pyedflib  # noqa: F401
+        except ImportError:
+            self.skipTest("pyedflib not installed")
+        p = build_real_edf(self.dir, "real_eeg", n_channels=4, seconds=2)
+        self.assertEqual(file_declared_channel_count(p), 4)
+
+
+class TestChannelGateVerdict(unittest.TestCase):
+    def test_no_applicable_sidecar_passes(self):
+        self.assertEqual(channel_gate_verdict(10, None, None), "pass")
+
+    def test_a_store_that_meets_the_sidecar_passes(self):
+        self.assertEqual(channel_gate_verdict(128, 128, None), "pass")
+        self.assertEqual(channel_gate_verdict(130, 128, 120), "pass")
+
+    def test_a_sidecar_that_over_declares_is_not_a_truncation(self):
+        # on004789 sub-R1350D: 120 in the file, 120 in the store, 128 declared.
+        self.assertEqual(channel_gate_verdict(120, 128, 120), "sidecar_overcount")
+
+    def test_a_store_short_of_the_file_is_still_withheld(self):
+        # biosigio#110: the importer served 1 of a file's 74 channels.
+        self.assertEqual(channel_gate_verdict(1, 74, 74), "truncated")
+        self.assertEqual(channel_gate_verdict(119, 128, 120), "truncated")
+
+    def test_an_unreadable_header_keeps_the_old_strict_gate(self):
+        self.assertEqual(channel_gate_verdict(120, 128, None), "truncated")
+
+
 class TestCleanOrphanSelection(unittest.TestCase):
     """`--clean` no longer wipes the prefix; it removes only the stores that are
     no longer produced at HEAD. `compute_clean_orphans` is the selection rule
@@ -3008,6 +3134,57 @@ def _crashing_worker(primary, peak_bytes=None):
     return {"ok": True, "primary": primary, "entry": {"zarr": primary + ".zarr"}}
 
 
+def _timed_worker(primary, peak_bytes=None):
+    """Fault-free worker that takes long enough for admission to matter, and
+    says when it ran. Module-level so it pickles."""
+    started = time.monotonic()
+    time.sleep(0.8)
+    return {
+        "ok": True,
+        "primary": primary,
+        "entry": {"zarr": primary + ".zarr"},
+        "span": (started, time.monotonic()),
+    }
+
+
+def _track_listing_worker(track_dir, reserve=None):
+    """Reports what `_tracked_call` left in its track directory while this ran."""
+    files = sorted(os.listdir(track_dir))
+    with open(os.path.join(track_dir, files[0])) as fh:
+        return {"files": files, "record": json.load(fh)}
+
+
+def _track_failing_worker(track_dir, reserve=None):
+    raise RuntimeError("the conversion failed")
+
+
+def _budget_worker(primary, peak_bytes=None):
+    """Fault-injection worker for the in-run memory retry (#1483). Module-level so
+    it pickles. A recording whose path carries ``need-<MiB>`` needs that much
+    reserve: dispatched with less, it returns what ``convert_one`` returns for a
+    memory failure (the real ``memory_failure_result``); with enough, it
+    converts. A converted result also carries the reserve and the worker
+    context's ``mem_budget`` it ran under, and when it ran, so a test can tell
+    which pass produced it and whether two runs overlapped."""
+    started = time.monotonic()
+    marker = next((part for part in primary.split("_") if part.startswith("need-")), None)
+    need = int(marker.split("-")[1]) * 1024**2 if marker else 0
+    time.sleep(0.1)
+    reserve = peak_bytes or 0
+    if need > reserve:
+        return memory_failure_result(
+            primary, MemoryError(f"needed {need >> 20} MiB, had {reserve >> 20} MiB")
+        )
+    return {
+        "ok": True,
+        "primary": primary,
+        "entry": {"zarr": primary + ".zarr"},
+        "reserve": peak_bytes,
+        "mem_budget": generate_zarr._CTX.get("mem_budget"),
+        "span": (started, time.monotonic()),
+    }
+
+
 class TestMemoryFailureClassification(unittest.TestCase):
     """#1110: a runtime OOM must be explainable to the viewer but still retryable."""
 
@@ -3113,7 +3290,11 @@ class TestMemoryErrorBeforePeakResetIsTyped(unittest.TestCase):
 
     def test_memory_error_before_reset_returns_typed_failure(self):
         gz = self._inject(MemoryError("cannot allocate"))
-        res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
+        # #1483: the stack is logged, not just the first line kept in the result.
+        self.assertIn("exceeded its memory budget", out.getvalue())
+        self.assertIn("Traceback", out.getvalue())
         self.assertFalse(res["ok"])
         # The whole point: coded, so the queue can mark it terminal instead of
         # burning five attempts on a recording that will never fit.
@@ -3128,9 +3309,11 @@ class TestMemoryErrorBeforePeakResetIsTyped(unittest.TestCase):
         # stack cannot be mapped at the RLIMIT_DATA limit (on004696, 2026-09-03).
         # Uncoded it broke the pool; typed it is the same verdict as MemoryError.
         gz = self._inject(RuntimeError("can't start new thread"))
-        res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
         self.assertFalse(res["ok"])
         self.assertEqual(res["code"], gz.RecordingMemoryExceeded.code)
+        self.assertIn("can't start new thread", out.getvalue())
 
     def test_enomem_at_the_limit_is_typed_as_memory(self):
         gz = self._inject(OSError(errno.ENOMEM, "Cannot allocate memory"))
@@ -3145,9 +3328,11 @@ class TestMemoryErrorBeforePeakResetIsTyped(unittest.TestCase):
         # The generic handler never touched rss_trusted, so it was already fine;
         # assert it stays that way rather than being swept into the typed branch.
         gz = self._inject(RuntimeError("something else"))
-        res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            res = gz.convert_one("sub-01/eeg/sub-01_task-x_eeg.set", 4 * 1024**3)
         self.assertFalse(res["ok"])
         self.assertIsNone(res["code"])
+        self.assertNotIn("exceeded its memory budget", out.getvalue())
 
 
 class TestMaxShieldWiringInConvertOne(unittest.TestCase):
@@ -3521,6 +3706,165 @@ class TestPoolBreakRecovery(unittest.TestCase):
         self.assertEqual(len(results), 5)
         self.assertTrue(all(r["ok"] for r in results))
         self.assertEqual(breaks, 0)
+
+
+class TestSerialMemoryRetry(unittest.TestCase):
+    """#1483: a recording that exceeds its memory reserve is retried ONCE, alone,
+    at the end of the run, with the budget the node offers then. Before, it waited
+    1h-7d for a retry round that rebuilt the whole dataset under the same budget
+    and mostly failed the same way."""
+
+    MIB = 1024**2
+    RESERVE = 100 * MIB
+    RETRY = 512 * MIB
+
+    @staticmethod
+    def _rec(i, need=0):
+        tag = f"_need-{need}" if need else ""
+        return f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest{tag}_eeg.set"
+
+    def _run(self, primaries, retry_peak=None, cpu_cap=3, with_retry=True):
+        retry_peak = self.RETRY if retry_peak is None else retry_peak
+        peaks = {p: self.RESERVE for p in primaries}
+        results, indices, asked = [], [], []
+
+        def memory_retry():
+            asked.append(retry_peak)
+            return {"mem_budget": retry_peak}, retry_peak
+
+        def record(r, i):
+            results.append(r)
+            indices.append(i)
+
+        _drain_with_admission(
+            list(primaries), peaks, cpu_cap, 10**12, {"mem_budget": self.RESERVE},
+            record, worker=_budget_worker,
+            memory_retry=memory_retry if with_retry else None,
+        )
+        self.assertEqual(indices, list(range(1, len(primaries) + 1)),
+                         "every recording is reported exactly once, in order")
+        self.assertEqual(sorted(r["primary"] for r in results), sorted(primaries))
+        return {r["primary"]: r for r in results}, asked
+
+    def test_a_memory_failure_converts_when_retried_alone(self):
+        small = [self._rec(i) for i in range(1, 6)]
+        big = [self._rec(i, need=300) for i in range(6, 8)]
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            results, asked = self._run(small[:2] + big[:1] + small[2:] + big[1:])
+
+        self.assertTrue(all(r["ok"] for r in results.values()))
+        self.assertEqual(len(asked), 1, "the retry budget is read once per run")
+        for p in big:
+            # Retried with the budget read AFTER the parallel pass, both as the
+            # reserve and as the worker context's ceiling.
+            self.assertEqual(results[p]["reserve"], self.RETRY)
+            self.assertEqual(results[p]["mem_budget"], self.RETRY)
+        for p in small:
+            self.assertEqual(results[p]["reserve"], self.RESERVE)
+            self.assertEqual(results[p]["mem_budget"], self.RESERVE)
+        # At the end of the run, and one at a time.
+        first_pass_end = max(results[p]["span"][1] for p in small)
+        spans = sorted(results[p]["span"] for p in big)
+        self.assertGreaterEqual(spans[0][0], first_pass_end)
+        self.assertGreaterEqual(spans[1][0], spans[0][1], "retries must not overlap")
+        self.assertIn("2 of 2 converted", out.getvalue())
+
+    def test_a_recording_that_fails_again_is_reported_once(self):
+        huge = self._rec(9, need=1024)
+        with contextlib.redirect_stdout(io.StringIO()):
+            results, _ = self._run([self._rec(1), huge, self._rec(2)])
+        r = results[huge]
+        self.assertFalse(r["ok"])
+        # Still the retryable memory code, so it goes to `pending` for the next
+        # round rather than being recorded as a property of the data.
+        self.assertEqual(r["code"], RecordingMemoryExceeded.code)
+        self.assertIn("had 512 MiB", r["error"], "the reported failure is the retry's")
+
+    def test_no_second_attempt_when_the_node_offers_no_more(self):
+        big = self._rec(1, need=300)
+        results, asked = self._run([big, self._rec(2)], retry_peak=self.RESERVE)
+        self.assertEqual(asked, [self.RESERVE])
+        self.assertFalse(results[big]["ok"])
+        self.assertIn("had 100 MiB", results[big]["error"])
+
+    def test_retries_per_run_are_capped(self):
+        # Each retry runs alone, so a dataset where most recordings trip their
+        # reserve must not turn a parallel run into a serial one.
+        self.addCleanup(setattr, generate_zarr, "MEMORY_RETRY_MAX", generate_zarr.MEMORY_RETRY_MAX)
+        generate_zarr.MEMORY_RETRY_MAX = 1
+        big = [self._rec(i, need=300) for i in range(1, 4)]
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            results, _ = self._run(big)
+        converted = [p for p in big if results[p]["ok"]]
+        self.assertEqual(len(converted), 1)
+        for p in set(big) - set(converted):
+            self.assertIn("had 100 MiB", results[p]["error"])
+        self.assertIn("2 more left for the next round", out.getvalue())
+
+    def test_without_a_retry_hook_failures_report_as_before(self):
+        big = self._rec(1, need=300)
+        results, asked = self._run([big, self._rec(2)], with_retry=False)
+        self.assertEqual(asked, [])
+        self.assertIn("had 100 MiB", results[big]["error"])
+
+    def test_a_clean_run_never_reads_a_retry_budget(self):
+        # Reading it samples /proc/meminfo three times; a run with nothing to
+        # retry has no reason to.
+        results, asked = self._run([self._rec(i) for i in range(1, 4)])
+        self.assertTrue(all(r["ok"] for r in results.values()))
+        self.assertEqual(asked, [])
+
+
+class TestMemoryFailureForensics(unittest.TestCase):
+    """#1483: a memory failure logs where it was raised and how close the worker
+    was to its limit; on004789's could only be attributed by reading source."""
+
+    def test_snapshot_reads_the_process_where_proc_exists(self):
+        snap = memory_snapshot()
+        if sys.platform.startswith("linux"):
+            for key in ("VmData", "VmRSS", "VmHWM"):
+                self.assertGreater(snap[key], 1024**2)
+            self.assertGreaterEqual(snap["VmHWM"], snap["VmRSS"])
+        else:
+            self.assertNotIn("VmData", snap)
+
+    def test_snapshot_reports_a_finite_data_limit(self):
+        import resource
+
+        saved = resource.getrlimit(resource.RLIMIT_DATA)
+        limit = (data_segment_bytes() or 0) + 64 * 1024**3
+        if saved[1] != resource.RLIM_INFINITY:
+            limit = min(limit, saved[1])
+        try:
+            resource.setrlimit(resource.RLIMIT_DATA, (limit, saved[1]))
+        except (OSError, ValueError):
+            self.skipTest("RLIMIT_DATA cannot be set here")
+        self.addCleanup(resource.setrlimit, resource.RLIMIT_DATA, saved)
+        self.assertEqual(memory_snapshot()["RLIMIT_DATA"], limit)
+
+    def test_the_log_names_the_recording_and_the_raising_frame(self):
+        def allocate_shard_buffer():
+            raise MemoryError("Unable to allocate 60.4 MiB")
+
+        try:
+            allocate_shard_buffer()
+        except MemoryError as exc:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                log_memory_failure("sub-01/ieeg/sub-01_ieeg.edf", exc)
+        text = out.getvalue()
+        self.assertTrue(text.startswith("::warning::'sub-01/ieeg/sub-01_ieeg.edf' exceeded"))
+        self.assertIn("allocate_shard_buffer", text)
+        self.assertIn("MemoryError: Unable to allocate 60.4 MiB", text)
+
+    def test_logging_never_raises(self):
+        # A failure inside the log must not turn a typed memory failure into an
+        # uncoded one that retries forever.
+        class Unprintable:
+            def __repr__(self):
+                raise MemoryError("no room to format this")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            log_memory_failure(Unprintable(), MemoryError("x"))
 
 
 class TestStoreMetadataDiagnostics(unittest.TestCase):
@@ -7407,6 +7751,32 @@ class TestConvertOneEndToEnd(unittest.TestCase):
         check_index_invariant(index)
         validate_document(index, INDEX_SCHEMA_PATH, "index")
 
+    def test_a_sidecar_that_over_declares_still_publishes_the_faithful_store(self):
+        """channels.tsv listing channels the file never had (on004789's bipolar
+        micro-contacts, on006914's 6-of-128) must not withhold a store holding
+        every channel the file declares. The disagreement is disclosed on the
+        entry, and the entry still satisfies the closed schema."""
+        with open(os.path.join(self.eeg, "sub-01_task-rest_channels.tsv"), "w") as fh:
+            fh.writelines(
+                ["name\ttype\tunits\n"] + [f"E{i + 1}\tEEG\tV\n" for i in range(6)]
+            )
+        result = self.convert()
+        self.assertTrue(result["ok"], result.get("error"))
+        entry = result["entry"]
+        self.assertEqual(
+            entry["channels_tsv_count_mismatch"],
+            {"channels_tsv": 6, "in_file": 4, "in_store": 4},
+        )
+        index = merge_index(
+            None, "on007763", "b" * 40, [entry], [], "2026-09-02T00:00:00Z",
+            [], [], discovered=[self.primary],
+        )
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_agreeing_counts_add_no_mismatch_note(self):
+        self.assertNotIn("channels_tsv_count_mismatch", self.convert()["entry"])
+
     def test_an_unreadable_sidecar_is_recorded_not_collapsed(self):
         """A channels.tsv that APPLIES but cannot be read must not look like a
         dataset that ships none: both leave `units_report` absent, and only one
@@ -7435,3 +7805,525 @@ class TestConvertOneEndToEnd(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMainRoutesSingleRecordingsThroughThePool(unittest.TestCase):
+    """#1483: a single-recording run with --jobs > 1 converts in a pool worker,
+    the only path with the serial memory retry; --jobs 1 stays in-process.
+
+    Observed without substituting anything: the in-process path initializes the
+    worker context (`_CTX`) in THIS process, and a pool worker initializes its
+    own, leaving this process's untouched. A real EDF is converted either way.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        self.s3 = os.path.join(self.dir, "s3")
+        os.makedirs(os.path.join(self.repo, "sub-01", "eeg"))
+        os.makedirs(self.s3)
+
+        def git(*args):
+            subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True)
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.org")
+        git("config", "user.name", "t")
+        build_real_edf(os.path.join(self.repo, "sub-01", "eeg"), "sub-01_task-rest_eeg", seconds=10)
+        git("add", "-A")
+        git("commit", "-q", "-m", "init")
+
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write(STUB_AWS)
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        saved = (os.environ.get("PATH"), os.environ.get("ZARR_TEST_S3_ROOT"))
+        os.environ["PATH"] = bindir + os.pathsep + (saved[0] or "")
+        os.environ["ZARR_TEST_S3_ROOT"] = self.s3
+        self.addCleanup(self._restore_env, saved)
+        saved_ctx = dict(generate_zarr._CTX)
+        self.addCleanup(lambda: (generate_zarr._CTX.clear(), generate_zarr._CTX.update(saved_ctx)))
+        generate_zarr._CTX.clear()
+
+    @staticmethod
+    def _restore_env(saved):
+        for key, value in zip(("PATH", "ZARR_TEST_S3_ROOT"), saved, strict=True):
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def run_main(self, jobs: int) -> str:
+        argv = [
+            "generate_zarr.py", "--dataset-id", "on008083", "--repo-dir", self.repo,
+            "--bucket", "nemar-test", "--callback-out", os.path.join(self.dir, "cb.json"),
+            "--local", "--clean", "--jobs", str(jobs),
+            # Closed port: the catalog read fails fast instead of reaching the
+            # real API; provenance is best-effort and not under test here.
+            "--api-base", "http://127.0.0.1:9",
+        ]
+        saved, sys.argv = sys.argv, argv
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = generate_zarr.main()
+        finally:
+            sys.argv = saved
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertIn("converted sub-01/eeg/sub-01_task-rest_eeg.edf", out.getvalue())
+        return out.getvalue()
+
+    def test_one_recording_with_several_jobs_converts_in_a_worker(self):
+        self.run_main(jobs=2)
+        self.assertEqual(generate_zarr._CTX, {}, "converted in-process, not in the pool")
+
+    def test_jobs_one_still_converts_in_process(self):
+        self.run_main(jobs=1)
+        self.assertEqual(generate_zarr._CTX.get("dataset_id"), "on008083")
+
+
+class TestPendingRetryWorklist(unittest.TestCase):
+    """#1483: a retry round converts only what is pending, and only while every
+    other store the index serves is what a full rebuild would produce."""
+
+    HEAD = "b" * 40
+    A = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+    B = "sub-02/eeg/sub-02_task-rest_eeg.edf"
+    ROW: ClassVar[dict] = {
+        "dataset_id": "on008083", "license": "CC0", "concept_doi": "10.5281/zenodo.1"
+    }
+
+    def index(self, *, head=HEAD, row=ROW, biosigio="1.2.7", pending=(B,), discovered=(A, B)):
+        """A real v3 index, built by `merge_index` exactly as a run publishes it."""
+        return merge_index(
+            None, "on008083", head,
+            [{"path": self.A, "zarr": store_rel_for(self.A)}], [],
+            "2026-09-22T00:00:00Z", [],
+            [{"path": p, "reason": "memory_budget", "last_error": "x"} for p in pending],
+            discovered=list(discovered), biosigio_version=biosigio, dataset_row=row,
+        )
+
+    def worklist(self, index, *, discovered=(A, B), row=ROW, failed=False, biosigio="1.2.7"):
+        return pending_retry_worklist(
+            index, self.HEAD, list(discovered), row, failed, biosigio
+        )
+
+    def test_a_current_index_retries_only_its_pending_recordings(self):
+        # Round trip through the published shape: the provenance comparison is
+        # against what merge_index wrote, not against a hand-built document.
+        paths, why = self.worklist(self.index())
+        self.assertEqual(paths, [self.B])
+        self.assertIn("1 pending", why)
+
+    def test_the_index_publishes_the_provenance_the_retry_compares(self):
+        index = self.index()
+        for key, value in index_provenance(self.ROW).items():
+            self.assertEqual(index[key], value, key)
+
+    def test_anything_that_changes_the_served_stores_forces_a_full_rebuild(self):
+        cases = {
+            "no index": (None, {}),
+            "different commit": (self.index(head="c" * 40), {}),
+            "different engine": ({**self.index(), "engine_version": "0"}, {}),
+            "different biosigIO": (self.index(biosigio="1.2.6"), {}),
+            "catalog unreadable": (self.index(), {"failed": True}),
+            "license changed": (self.index(), {"row": {**self.ROW, "license": "CC-BY-4.0"}}),
+            "citation changed": (
+                self.index(),
+                {"row": {**self.ROW, "authors": ["Doe, J."], "name": "A dataset"}},
+            ),
+            "nothing pending": (
+                self.index(pending=(), discovered=(self.A,)), {"discovered": (self.A,)}
+            ),
+            "pending recording gone from HEAD": (self.index(), {"discovered": (self.A,)}),
+        }
+        for label, (index, kwargs) in cases.items():
+            with self.subTest(label):
+                paths, why = self.worklist(index, **kwargs)
+                self.assertIsNone(paths)
+                self.assertTrue(why)
+
+    def test_a_recording_never_attempted_is_retried_too(self):
+        # merge_index lists a discovered recording with no store and no failure
+        # as `not_attempted` pending; the round owes it a conversion as well.
+        index = self.index(pending=())
+        self.assertEqual(index["pending"][0]["reason"], "not_attempted")
+        self.assertEqual(self.worklist(index)[0], [self.B])
+
+    def test_malformed_pending_entries_are_ignored(self):
+        index = {**self.index(), "pending": [None, {"path": 3}, {"path": self.B}]}
+        self.assertEqual(self.worklist(index)[0], [self.B])
+
+
+class TestMainRetryPendingRound(unittest.TestCase):
+    """`--retry-pending` through `main()` (#1483): real recordings converted by
+    the real exporter, the real `aws` stand-in over local files, and a local
+    catalog server, so the decision, the worklist, the merge into the published
+    index and the exit status all run for real.
+
+    Recording B is committed the way git-annex commits it, as a symlink into
+    `.git/annex/objects`. Its content is absent on the first run, so B fails and
+    is listed as pending while A converts; the tests then decide whether the
+    content is there for the retry. HEAD never moves, which is exactly the
+    situation a retry round is in.
+    """
+
+    A = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+    B = "sub-02/eeg/sub-02_task-rest_eeg.edf"
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        self.s3 = os.path.join(self.dir, "s3")
+        os.makedirs(self.s3)
+
+        def git(*args):
+            subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True)
+
+        os.makedirs(os.path.join(self.repo, "sub-01", "eeg"))
+        os.makedirs(os.path.join(self.repo, "sub-02", "eeg"))
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.org")
+        git("config", "user.name", "t")
+        with open(os.path.join(self.repo, "dataset_description.json"), "w") as fh:
+            json.dump({"Name": "retry fixture", "BIDSVersion": "1.8.0"}, fh)
+        build_real_edf(os.path.join(self.repo, "sub-01", "eeg"), "sub-01_task-rest_eeg", seconds=10)
+        # B as git-annex leaves it before `get`: a committed symlink to an object
+        # that is not there.
+        self.b_object = os.path.join(self.repo, ".git", "annex", "objects", "B.edf")
+        os.symlink(
+            os.path.relpath(self.b_object, os.path.join(self.repo, "sub-02", "eeg")),
+            os.path.join(self.repo, self.B),
+        )
+        git("add", "-A")
+        git("commit", "-q", "-m", "init")
+
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write(STUB_AWS)
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        saved = (os.environ.get("PATH"), os.environ.get("ZARR_TEST_S3_ROOT"))
+        os.environ["PATH"] = bindir + os.pathsep + (saved[0] or "")
+        os.environ["ZARR_TEST_S3_ROOT"] = self.s3
+        self.addCleanup(self._restore_env, saved)
+
+        self.row = {"dataset_id": "on008083", "license": "CC0", "concept_doi": "10.5281/zenodo.1"}
+        self.api = self._serve_catalog()
+        self.callback = os.path.join(self.dir, "cb.json")
+
+    @staticmethod
+    def _restore_env(saved):
+        for key, value in zip(("PATH", "ZARR_TEST_S3_ROOT"), saved, strict=True):
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _serve_catalog(self) -> str:
+        """A local catalog answering GET /datasets/<id> with `self.row`, read
+        per request so a test can change the dataset between runs."""
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        test = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
+                body = json.dumps(test.row).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_port}"
+
+    def materialize_b(self):
+        """`git annex get` for B: the content appears, HEAD does not move."""
+        os.makedirs(os.path.dirname(self.b_object), exist_ok=True)
+        build_real_edf(os.path.dirname(self.b_object), "B", seconds=10)
+
+    def run_main(self, *extra) -> tuple[int, str, dict]:
+        argv = [
+            "generate_zarr.py", "--dataset-id", "on008083", "--repo-dir", self.repo,
+            "--bucket", "nemar-test", "--callback-out", self.callback, "--local",
+            "--api-base", self.api, "--jobs", "2", "--clean", *extra,
+        ]
+        saved, sys.argv = sys.argv, argv
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = generate_zarr.main()
+        finally:
+            sys.argv = saved
+        with open(self.callback) as fh:
+            return rc, out.getvalue(), json.load(fh)
+
+    def published_index(self) -> dict:
+        with open(os.path.join(self.s3, "on008083_zarr_index.json")) as fh:
+            return json.load(fh)
+
+    def first_round(self) -> dict:
+        """The run a retry round follows: A converts, B is left pending."""
+        rc, log, _ = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("no published index; full rebuild", log)
+        index = self.published_index()
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+        self.assertEqual([p["path"] for p in index["pending"]], [self.B])
+        return index
+
+    def test_a_retry_round_converts_only_the_pending_recording(self):
+        before = self.first_round()
+        self.materialize_b()
+        rc, log, body = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("converting only 1 pending recording(s)", log)
+        self.assertIn(f"converted {self.B}", log)
+        self.assertNotIn(f"converted {self.A}", log)
+        index = self.published_index()
+        self.assertEqual(sorted(s["path"] for s in index["stores"]), [self.A, self.B])
+        # A was carried from the published index, untouched, not rebuilt.
+        carried = next(s for s in index["stores"] if s["path"] == self.A)
+        self.assertEqual(carried, before["stores"][0])
+        self.assertEqual(index["pending"], [])
+        self.assertEqual(body["pending_count"], 0)
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_a_round_that_converts_nothing_still_advances_the_attempts(self):
+        # Without this a retry round where the pending recording fails again
+        # took the total-failure exit: index untouched, attempts never counted,
+        # and the queue row marked `failed` while A was still being served.
+        self.first_round()
+        rc, log, body = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        index = self.published_index()
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+        self.assertEqual([(p["path"], p["attempts"]) for p in index["pending"]], [(self.B, 2)])
+        self.assertEqual(body["pending_count"], 1)
+
+    def test_a_provenance_change_turns_the_round_into_a_full_rebuild(self):
+        # Every store embeds the dataset's DOI, license and citation, so a
+        # changed catalog row (de-anonymization, a new license) has to reach A.
+        self.first_round()
+        self.materialize_b()
+        self.row = {**self.row, "license": "CC-BY-4.0"}
+        rc, log, _ = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("provenance changed", log)
+        self.assertIn(f"converted {self.A}", log)
+        self.assertEqual(self.published_index()["license"], "CC-BY-4.0")
+
+    def test_without_the_flag_a_run_is_a_full_rebuild(self):
+        # A one-off `hallu-zarr.sh --dataset` run never passes it.
+        self.first_round()
+        self.materialize_b()
+        rc, log, _ = self.run_main()
+        self.assertEqual(rc, 0, log)
+        self.assertNotIn("--retry-pending", log)
+        self.assertIn(f"converted {self.A}", log)
+
+
+class TestLiveAdmissionCeiling(unittest.TestCase):
+    """#1483: the admission ceiling follows the node's memory during the run,
+    charging in-flight recordings only for what they have not yet taken.
+
+    The /proc files are real-shaped fixtures written to a temporary directory,
+    in the kernel's own `Key:   <n> kB` format, and read by the same functions
+    that read the live ones."""
+
+    GIB = 1024**3
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = self._tmp.name
+        self.meminfo = os.path.join(self.root, "meminfo")
+        self.proc = os.path.join(self.root, "proc")
+        self.track = os.path.join(self.root, "track")
+        os.makedirs(self.proc)
+        os.makedirs(self.track)
+        self.addCleanup(os.environ.pop, "ZARR_MEM_HEADROOM_FRAC", None)
+        os.environ.pop("ZARR_MEM_HEADROOM_FRAC", None)
+        self.available(10 * self.GIB)
+
+    def available(self, n):
+        with open(self.meminfo, "w") as fh:
+            fh.write(f"MemTotal:       {64 * self.GIB // 1024} kB\n")
+            fh.write(f"MemFree:        {n // 2048} kB\n")
+            fh.write(f"MemAvailable:   {n // 1024} kB\n")
+
+    def worker(self, pid, *, reserve, start, now):
+        """A tracked recording in flight: its track file and its /proc status."""
+        with open(os.path.join(self.track, f"{pid}.json"), "w") as fh:
+            json.dump({"reserve": reserve, "rss_anon_start": start}, fh)
+        if now is not None:
+            os.makedirs(os.path.join(self.proc, str(pid)))
+            with open(os.path.join(self.proc, str(pid), "status"), "w") as fh:
+                fh.write(f"Name:\tpython3\nVmRSS:\t{now // 1024} kB\n"
+                         f"RssAnon:\t{now // 1024} kB\nRssFile:\t 2048 kB\n")
+
+    def ceiling(self, running_peak, *, static=3 * GIB, hard=None):
+        return live_admission_ceiling(
+            static, hard, running_peak, self.track,
+            meminfo_path=self.meminfo, proc_root=self.proc,
+        )
+
+    def test_idle_it_is_the_headroom_of_what_is_available_now(self):
+        self.assertEqual(self.ceiling(0), 8 * self.GIB)
+        self.available(20 * self.GIB)  # a tenant finished: the ceiling rises
+        self.assertEqual(self.ceiling(0), 16 * self.GIB)
+        self.available(5 * self.GIB)  # a tenant grew: it falls
+        self.assertEqual(self.ceiling(0), 4 * self.GIB)
+
+    def test_it_never_exceeds_the_hardware_ceiling(self):
+        self.assertEqual(self.ceiling(0, hard=6 * self.GIB), 6 * self.GIB)
+
+    def test_off_linux_the_static_ceiling_applies(self):
+        os.remove(self.meminfo)
+        self.assertEqual(self.ceiling(0), 3 * self.GIB)
+
+    def test_what_a_recording_has_taken_is_not_charged_twice(self):
+        # 1.5 GiB of its 4 GiB reserve is already out of MemAvailable; the other
+        # 2.5 GiB is still owed.
+        self.worker(101, reserve=4 * self.GIB, start=self.GIB, now=int(2.5 * self.GIB))
+        self.assertEqual(self.ceiling(4 * self.GIB), int(9.5 * self.GIB))
+
+    def test_credit_is_capped_at_the_reserve(self):
+        # Retained heap from an earlier recording must not buy extra room.
+        self.worker(101, reserve=4 * self.GIB, start=0, now=7 * self.GIB)
+        self.assertEqual(self.ceiling(4 * self.GIB), 12 * self.GIB)
+
+    def test_an_untracked_or_unreadable_recording_is_charged_in_full(self):
+        self.worker(101, reserve=4 * self.GIB, start=0, now=None)  # process gone
+        self.assertEqual(self.ceiling(4 * self.GIB), 8 * self.GIB)
+        with open(os.path.join(self.track, "102.json"), "w") as fh:
+            fh.write("{not json")
+        self.assertEqual(self.ceiling(4 * self.GIB), 8 * self.GIB)
+
+    def test_credit_never_exceeds_what_is_in_flight(self):
+        # A track file can outlive its recording by an instant.
+        self.worker(101, reserve=4 * self.GIB, start=0, now=3 * self.GIB)
+        self.assertEqual(self.ceiling(self.GIB), 9 * self.GIB)
+        self.assertEqual(self.ceiling(0), 8 * self.GIB)
+
+    def test_the_live_readers_work_where_proc_exists(self):
+        if not sys.platform.startswith("linux"):
+            self.assertIsNone(mem_available_bytes())
+            return
+        self.assertGreater(mem_available_bytes(), 0)
+        self.assertGreater(anon_rss_bytes(os.getpid()), 1024**2)
+        self.assertIsNone(anon_rss_bytes(2**22 + 12345))
+
+
+class TestTrackedCall(unittest.TestCase):
+    """`_tracked_call` leaves a record for the parent while the recording runs,
+    and removes it however the recording ends."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.track = self._tmp.name
+
+    def test_the_record_exists_while_the_worker_runs(self):
+        out = _tracked_call(_track_listing_worker, self.track, 123, self.track)
+        self.assertEqual(out["files"], [f"{os.getpid()}.json"])
+        self.assertEqual(out["record"]["reserve"], 123)
+        if sys.platform.startswith("linux"):
+            self.assertIsInstance(out["record"]["rss_anon_start"], int)
+        else:  # nothing to measure; the parent then charges the full reserve
+            self.assertIsNone(out["record"]["rss_anon_start"])
+        self.assertEqual(os.listdir(self.track), [])
+
+    def test_the_record_is_removed_when_the_worker_raises(self):
+        with self.assertRaises(RuntimeError):
+            _tracked_call(_track_failing_worker, self.track, 1, self.track)
+        self.assertEqual(os.listdir(self.track), [])
+
+
+class TestAdmissionFollowsTheCeiling(unittest.TestCase):
+    """A drain re-reads its ceiling while recordings run, not only when one
+    finishes (#1483). The ceiling here is a file the test rewrites mid-run, in
+    place of /proc: the node's memory is the environment, not the logic."""
+
+    RESERVE = 100
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.limit = os.path.join(self._tmp.name, "limit")
+        self.set_limit(150)  # room for one recording at a time
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.05
+
+    def set_limit(self, n):
+        # Replaced atomically: the drain reads this from another thread, and a
+        # truncate-then-write would let it read an empty file.
+        tmp = self.limit + ".tmp"
+        with open(tmp, "w") as fh:
+            fh.write(str(n))
+        os.replace(tmp, self.limit)
+
+    def ceiling(self, _running_peak, _track_dir):
+        with open(self.limit) as fh:
+            return int(fh.read())
+
+    def run_drain(self, raise_after=None):
+        import threading
+
+        primaries = [f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest_eeg.set" for i in range(1, 4)]
+        results = []
+        if raise_after is not None:
+            timer = threading.Timer(raise_after, self.set_limit, args=(10**6,))
+            timer.start()
+            self.addCleanup(timer.cancel)
+        _drain_with_admission(
+            primaries, {p: self.RESERVE for p in primaries}, 3, 10**12, {},
+            lambda r, i: results.append(r), worker=_timed_worker, ceiling=self.ceiling,
+        )
+        self.assertEqual(len(results), 3)
+        return sorted(r["span"] for r in results)
+
+    def test_a_tight_ceiling_runs_recordings_one_at_a_time(self):
+        spans = self.run_drain()
+        for earlier, later in itertools.pairwise(spans):
+            self.assertGreaterEqual(later[0], earlier[1] - 0.01)
+
+    def test_memory_freed_mid_run_is_used_before_anything_finishes(self):
+        spans = self.run_drain(raise_after=0.2)
+        # The first recording is still running (0.8 s) when the ceiling rises
+        # at 0.2 s; the others start then, not when it finishes.
+        first_end = spans[0][1]
+        self.assertLess(spans[1][0], first_end)
+        self.assertLess(spans[2][0], first_end)

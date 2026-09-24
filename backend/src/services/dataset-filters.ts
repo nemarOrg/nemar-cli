@@ -26,6 +26,18 @@ import { hasRole } from "../types/bindings";
 import { type FacetFilterValues, buildFacetClauses } from "./dataset-facets";
 import { ZARR_VERIFY_STATUS_PATH } from "./sweep-stamps";
 
+/**
+ * When a dataset reached the public catalog (#1477): its first publication
+ * (migration 0085, stamped for imports and native publications alike), else a
+ * legacy folded-catalog row's `publish_date`, else its row creation.
+ * `created_at` alone is when a draft row was made, so a dataset drafted in
+ * July and published in September sorted, and filtered as "recent", as if it
+ * were from July. ONE definition for every reader: the list route's
+ * newest/oldest sort and citations tiebreak, `?recent=`, and the MCP
+ * `search_datasets` browse order. Assumes the `datasets d` alias.
+ */
+export const PUBLISHED_AT_SQL = "COALESCE(d.first_published_at, d.publish_date, d.created_at)";
+
 /** Build an injection-safe FTS5 MATCH expression: tokenize to alphanumerics
  *  (dropping all FTS5 operator chars), quote each token and prefix-match it,
  *  OR them for recall. Returns null when there is nothing to match. Lives
@@ -204,13 +216,14 @@ export function buildDatasetFilterClauses(
     clauses += " AND d.data_complete = 1";
   }
   if (opts.recent && opts.recent > 0) {
-    // #646: folded catalog rows carry publish_date (from nemar.org); managed
-    // rows leave it NULL so this falls through to created_at. Preserves the old
-    // UNION's per-branch recency (catalog = publish_date, managed = created_at).
-    // Guarded to > 0 (#1145 review S4): a negative value would build
+    // "Recently published" (the CLI's own --recent help), so it reads the same
+    // date the newest sort orders by (#1477). Before that it was
+    // COALESCE(publish_date, created_at), and managed rows leave publish_date
+    // NULL (#646), so a draft made weeks before publication never counted as
+    // recent. Guarded to > 0 (#1145 review S4): a negative value would build
     // `datetime('now', '--5 days')`, a malformed SQLite modifier that
     // silently matches nothing rather than erroring loudly.
-    clauses += " AND COALESCE(d.publish_date, d.created_at) > datetime('now', ?)";
+    clauses += ` AND ${PUBLISHED_AT_SQL} > datetime('now', ?)`;
     params.push(`-${opts.recent} days`);
   }
 

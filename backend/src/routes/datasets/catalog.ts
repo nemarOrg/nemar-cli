@@ -35,6 +35,7 @@ import {
 } from "../../services/dataset-facets";
 import {
   type DatasetFilterOptions,
+  PUBLISHED_AT_SQL,
   buildDatasetFilterClauses,
   buildPublicCatalogBase,
   escapeLikePattern,
@@ -505,7 +506,7 @@ export const ANONYMOUS_ERROR_DETAILS =
 function buildSortClause(sort: string): string {
   switch (sort) {
     case "oldest":
-      return " ORDER BY d.created_at ASC";
+      return ` ORDER BY ${PUBLISHED_AT_SQL} ASC`;
     case "name":
       return " ORDER BY d.name ASC";
     case "participants":
@@ -516,9 +517,9 @@ function buildSortClause(sort: string): string {
       // Most-cited first; ties fall back to newest so the order is stable (#804).
       // The total is derived from the two NOT NULL DEFAULT 0 addends (#1182);
       // there is no stored num_citations column any more.
-      return " ORDER BY (d.num_dataset_citations + d.num_datapaper_citations) DESC, d.created_at DESC";
+      return ` ORDER BY (d.num_dataset_citations + d.num_datapaper_citations) DESC, ${PUBLISHED_AT_SQL} DESC`;
     default:
-      return " ORDER BY d.created_at DESC";
+      return ` ORDER BY ${PUBLISHED_AT_SQL} DESC`;
   }
 }
 
@@ -1008,6 +1009,9 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
                d.total_files,
                d.data_complete,
                d.bytes_present,
+               -- #1477: the date the newest/oldest sort orders by (with
+               -- created_at as its fallback), so a reader can see why.
+               d.first_published_at,
                ${FACET_PROJECTION_COLUMNS},
                'managed' AS source_type,
                (
@@ -1128,6 +1132,9 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
              d.total_files,
              d.data_complete,
              d.bytes_present,
+             -- #1477: the date the newest/oldest sort orders by (with
+             -- created_at as its fallback), so a reader can see why.
+             d.first_published_at,
              ${FACET_PROJECTION_COLUMNS},
              CASE WHEN d.owner_user_id = ${SYSTEM_USER_ID} THEN 'catalog' ELSE 'managed' END AS source_type,
              (

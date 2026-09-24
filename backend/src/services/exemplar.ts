@@ -9,7 +9,8 @@
  * admit exemplars with an `is_exemplar = 1` SQL fragment — canonicalized as
  * exemplarOrFragment() (used by the programmatic reindex-filter query and by
  * the signal-defaults-sweep / availability-report backfill sweeps, issue
- * #1168; the inline catalog/search/data predicates write the literal for
+ * #1168, and by the catalog-fact sweeps in routes/admin/datasets-lifecycle.ts,
+ * issue #1496; the inline catalog/search/data predicates write the literal for
  * readability). Note the `nemar admin summary` coverage query
  * (manifest-coverage.ts) is the one xx filter deliberately left broad; it is
  * an internal report, not a gate.
@@ -103,9 +104,11 @@ export function isExemplarReindexAllowed(
  * `(d.is_sandbox = 0 OR d.is_sandbox IS NULL OR ${exemplarOrFragment("d")})`.
  * Returns `<alias>.is_exemplar = 1` (or bare `is_exemplar = 1` when alias is "").
  * Safe on production because no is_exemplar=1 rows exist there. Canonical form used
- * by the programmatically-built reindex-filter SQL (buildReindexFilterQuery) and by
+ * by the programmatically-built reindex-filter SQL (buildReindexFilterQuery), by
  * the signal-defaults-sweep / availability-report candidate+remaining queries
- * (both unaliased, so called with alias=""); the inline visibility predicates
+ * (both unaliased, so called with alias=""), and by the archive, zarr,
+ * channel-montage, hed and data-integrity sweeps and vectorize/reindex-all in
+ * routes/admin/datasets-lifecycle.ts (#1496); the inline visibility predicates
  * in the catalog/search/data routes mirror `<alias>.is_exemplar = 1` literally
  * for SQL readability.
  */

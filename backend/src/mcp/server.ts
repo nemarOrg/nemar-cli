@@ -238,7 +238,9 @@ export function buildMcpServer(deps: BuildMcpServerDeps): McpServer {
       description:
         "Get one recording's BIDS events (onset, duration, trial_type, value, HED, sample_index). " +
         "Reads events.parquet when the dataset has one (exact sample_index); otherwise falls back " +
-        "to the recording's sibling events.tsv and flags the result estimated.",
+        "to the recording's sibling events.tsv and flags the result estimated. " +
+        "columns_summary lists every column, with its values when it has few, so call with limit 1 first, then " +
+        "narrow with where (rows to keep) and columns (fields to return) to keep the answer small.",
       inputSchema: getEventsInputSchema4,
       outputSchema: getEventsOutputSchema4,
     },

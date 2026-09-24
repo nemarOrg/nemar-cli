@@ -96,7 +96,14 @@
 # `work/sss_<basename>`, so sibling detection is the wrong question -- and BIDS
 # inheritance means the applicable sidecar may live in an ancestor directory
 # rather than beside the recording at all.
-biosigio[zarr,meg,mef3,hdf5]>=1.2.7
+# >=1.2.8: the streaming export writes each level-0 shard and view chunk once,
+# in aligned blocks, instead of rewriting every shard once per channel
+# (biosigio#129/#130, nemar-cli#1483). Same bytes out; on a 128-channel EDF,
+# 110 s -> 8.8 s and +5.1 GB -> +1.8 GB RSS. The rewrites held whole shards in
+# flight per channel, which is what tripped the per-worker RLIMIT_DATA budget
+# as `recording_memory_exceeded` on on004789. Output is identical, so the engine
+# stamp does not move.
+biosigio[zarr,meg,mef3,hdf5]>=1.2.8
 
 # Draft 2020-12 validator for the converter's own pre-upload self-check: the index
 # it is about to publish is validated against `shared/zarr-index.schema.json` (and

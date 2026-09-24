@@ -21,8 +21,10 @@ on:
     # Phase PRs target the epic branch, not dev; without this pattern they ran
     # with no test workflow at all (found on epic #1181, 2026-09-02).
     branches: [main, dev, 'feature/issue-*-epic-*']
-    paths-ignore:
-      - 'CHANGELOG.md'
+    # No paths-ignore here, unlike push: `lint` and `unit-pure` are required
+    # checks on dev and main, so a pull request that skipped this workflow could
+    # never report them and could not merge. A CHANGELOG-only release entry
+    # (#1503) was the first to hit it.
 
 # Permissions needed for dorny/paths-filter to access PR files
 permissions:

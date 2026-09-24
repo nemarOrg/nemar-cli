@@ -307,6 +307,29 @@
           "type": "boolean",
           "description": "True when a channels.tsv that APPLIES to this recording exists at source_commit but could not be read, so the store carries the importer's units rather than the sidecar's. Distinct from an absent units_report, which means the dataset ships no applicable sidecar at all."
         },
+        "channels_tsv_count_mismatch": {
+          "type": "object",
+          "description": "Present when the recording's channels.tsv declares more channels than its data file holds. The store serves every channel the file's own header declares, so it is faithful to the data; the sidecar over-declares. A store short of the FILE is never published (channel_count_mismatch). Absent when the counts agree or no channels.tsv applies.",
+          "properties": {
+            "channels_tsv": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Data rows in the applicable channels.tsv."
+            },
+            "in_file": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Data channels the recording file's own header declares, read without the importer (EDF/BDF signal count less the annotation track; BrainVision NumberOfChannels)."
+            },
+            "in_store": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Channels this store serves, summed across its groups."
+            }
+          },
+          "required": ["channels_tsv", "in_file", "in_store"],
+          "additionalProperties": false
+        },
         "split_members": {
           "type": "array",
           "items": {

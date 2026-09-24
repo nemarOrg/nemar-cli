@@ -12,6 +12,7 @@ import {
   buildDatasetFilterClauses,
   escapeLikePattern,
 } from "../backend/src/routes/datasets/catalog";
+import { PUBLISHED_AT_SQL } from "../backend/src/services/dataset-filters";
 
 describe("buildDatasetFilterClauses search clause", () => {
   test("search includes dataset_id + source_id LIKE and routes free-text through FTS5", () => {
@@ -48,7 +49,8 @@ describe("buildDatasetFilterClauses search clause", () => {
     expect(clauses).toContain("LOWER(COALESCE(d.authors, '')) LIKE ?");
     expect(clauses).toContain("LOWER(COALESCE(d.tasks, '')) LIKE ?");
     expect(clauses).toContain("d.concept_doi IS NOT NULL");
-    expect(clauses).toContain("COALESCE(d.publish_date, d.created_at) > datetime('now', ?)");
+    // #1477: recent= reads the shared publication date, not a hand-copied SQL.
+    expect(clauses).toContain(`${PUBLISHED_AT_SQL} > datetime('now', ?)`);
     expect(params).toEqual(["%eeg%", "%ada%", "%rest%", "-30 days"]);
   });
 

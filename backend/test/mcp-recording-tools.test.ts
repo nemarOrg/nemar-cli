@@ -22,7 +22,12 @@ import type { Database } from "bun:sqlite";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Hono } from "hono";
+import { parquetMetadata } from "hyparquet";
+import type { FileMetaData } from "hyparquet";
 import {
+  type EventRow,
+  GET_EVENTS_SUMMARY_MAX_VALUES,
+  GET_EVENTS_SUMMARY_MAX_VALUE_CHARS,
   type GetEventsOutput,
   type ListRecordingsOutput,
   getEventsOutputSchema,
@@ -30,7 +35,11 @@ import {
 } from "../../shared/contract/mcp.js";
 import on003392MegSssSliceRaw from "../../test/fixtures/zarr-index-on003392-meg-sss-slice.json";
 import { projectionUrl } from "../src/mcp/projection-cache.js";
-import { MAX_STORE_FANOUT_ENTRIES } from "../src/mcp/tools/get-events.js";
+import {
+  MAX_STORE_FANOUT_ENTRIES,
+  storeRowGroupSpan,
+  summarizeEventColumns,
+} from "../src/mcp/tools/get-events.js";
 import { type McpRoutesDeps, createMcpRoutes } from "../src/routes/mcp.js";
 import { type CacheLike, createZarrDataRoutes } from "../src/routes/zarr-data.js";
 import type { Bindings } from "../src/types/bindings.js";
@@ -62,6 +71,20 @@ const FANOUT_ID = "nm000330";
 // real outlier is nm000104: 99,863,763 bytes and 5,411,570 rows across 1131
 // stores, which one anonymous call used to pull through the Worker whole.
 const OVERSIZED_EVENTS_ID = "nm000331";
+// Over the whole-file row budget, but sorted by store_path with statistics, as
+// the producer writes it (#1498): 120,000 rows in three row groups of 40,000,
+// the second store's 20 events across the first boundary. nm000132 (ERP CORE) is
+// the real case: 2.4 MB and 153,722 rows, each recording a few hundred rows.
+const ROW_GROUPS_ID = "nm000334";
+// The same rows written without column statistics: nothing locates a store.
+const NO_STATS_ID = "nm000335";
+// The stores those two files hold, in the index fixture's own names and in byte
+// order: calibration < clean, and sub-1/ < sub-10/ (`/` < `0`).
+const ROW_GROUP_STORES = [
+  "sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-calibration_run-0_eeg.zarr",
+  "sub-1/ses-0/eeg/sub-1_ses-0_task-imagery_acq-clean_run-1_eeg.zarr",
+  "sub-10/ses-0/eeg/sub-10_ses-0_task-imagery_acq-calibration_run-0_eeg.zarr",
+] as const;
 // A dataset whose first store declares TWO channel groups. events.parquet is one
 // row per (event, channel group), so this is the shape that used to return every
 // event twice with total_count doubled when `group` was omitted.
@@ -314,6 +337,24 @@ describe("list_recordings / get_events (epic #1065 phase 3)", () => {
       ),
     );
 
+    for (const [id, file] of [
+      [ROW_GROUPS_ID, "row-groups-events.parquet"],
+      [NO_STATS_ID, "no-stats-events.parquet"],
+    ] as const) {
+      fixtureServer.files.set(
+        `${id}/zarr/index.json`,
+        encode({
+          ...rewrittenV3Index,
+          dataset_id: id,
+          events_parquet: `${FIXTURE_PUBLIC_ORIGIN}/${id}/zarr/events.parquet`,
+        }),
+      );
+      fixtureServer.files.set(
+        `${id}/zarr/events.parquet`,
+        new Uint8Array(readFileSync(new URL(`./fixtures/mcp/${file}`, import.meta.url))),
+      );
+    }
+
     const eventsTsv = new TextEncoder().encode(
       readFileSync(
         new URL("./fixtures/mcp/nm000111-sub-I003-events.tsv", import.meta.url),
@@ -475,6 +516,13 @@ describe("list_recordings / get_events (epic #1065 phase 3)", () => {
       zarr_store_count: (nm000329IndexRaw as { store_count: number }).store_count,
       zarr_source_commit: V3_COMMIT,
     });
+    for (const id of [ROW_GROUPS_ID, NO_STATS_ID]) {
+      insertDataset(id, {
+        zarr_status: "ready",
+        zarr_store_count: (nm000329IndexRaw as { store_count: number }).store_count,
+        zarr_source_commit: V3_COMMIT,
+      });
+    }
     insertDataset(MULTI_GROUP_ID, {
       zarr_status: "ready",
       zarr_store_count: 1,
@@ -1086,11 +1134,210 @@ describe("list_recordings / get_events (epic #1065 phase 3)", () => {
       const text = errorTextOf(body);
       expect(text).toContain("declines");
       expect(text).toContain("100001 rows");
+      // Every row is this recording's, so even reading by row group (#1498) is
+      // over the budget, and the refusal says that is why.
+      expect(text).toContain("the row groups that hold this recording are over it too");
       // The remedy travels with the refusal: the file is public, so a client
       // that really wants every row can read it directly. Handing over a URL
       // instead of streaming bytes is the recipe-first posture (ADR 0049).
       expect(text).toContain("events.parquet");
       expect(text).toContain("read it directly");
+    });
+
+    const footerOf = (file: string): FileMetaData => {
+      const bytes = readFileSync(new URL(`./fixtures/mcp/${file}`, import.meta.url));
+      return parquetMetadata(
+        bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+      );
+    };
+
+    type EventsOut = {
+      events: Array<{
+        store_path: string;
+        onset_s: number;
+        sample_index: number;
+        trial_type?: string | null;
+      }>;
+      total_count: number;
+      source: string;
+      note: string | null;
+    };
+
+    test("a file over the row budget is read by row group: one recording's exact rows, across a boundary (#1498)", async () => {
+      const { body } = await callTool(app, env(db), 1, "get_events", {
+        dataset_id: ROW_GROUPS_ID,
+        recording: ROW_GROUP_STORES[1],
+      });
+      const out = structuredContentOf(body) as unknown as EventsOut;
+      expect(out.source).toBe("events_parquet");
+      expect(out.total_count).toBe(20);
+      const ks = Array.from({ length: 20 }, (_, i) => i + 1);
+      // Ten rows from the first row group and ten from the second, in order.
+      expect(out.events.map((e) => e.onset_s)).toEqual(ks);
+      expect(out.events.map((e) => e.sample_index)).toEqual(ks.map((k) => k * 250));
+      expect(out.events.map((e) => e.trial_type)).toEqual(
+        ks.map((k) => (k % 2 ? "face" : "scrambled_face")),
+      );
+      expect(out.events.every((e) => e.store_path === ROW_GROUP_STORES[1])).toBe(true);
+      expect(out.note).toBeNull();
+
+      // Only those two row groups' pages were read: after the footer, every ranged
+      // read ends before the third row group's first page. Reading the whole file
+      // would give the same rows, so this is what shows the bound holds.
+      const third = footerOf("row-groups-events.parquet").row_groups[2].columns[0].meta_data;
+      const thirdStart = Number(third?.dictionary_page_offset ?? third?.data_page_offset);
+      const pageReads = fixtureServer.requestLog
+        .filter((r) => r.url === `${ROW_GROUPS_ID}/zarr/events.parquet` && r.method === "GET")
+        .slice(1);
+      expect(pageReads.length).toBeGreaterThan(0);
+      for (const read of pageReads) {
+        expect(Number(read.range.split("-")[1])).toBeLessThan(thirdStart);
+      }
+    });
+
+    test("reading by row group caches only the recording asked for, never a placeholder for its neighbors", async () => {
+      await callTool(app, env(db), 1, "get_events", {
+        dataset_id: ROW_GROUPS_ID,
+        recording: ROW_GROUP_STORES[1],
+      });
+      expect(await cache.match(eventsKey(ROW_GROUPS_ID, ROW_GROUP_STORES[1]))).toBeDefined();
+      // The third store's rows continue into a row group that was not read, so an
+      // entry for it would be wrong: a whole-file read's `[]` placeholder here
+      // would answer "no events" for 79,990 rows.
+      expect(await cache.match(eventsKey(ROW_GROUPS_ID, ROW_GROUP_STORES[2]))).toBeUndefined();
+      expect(await cache.match(eventsKey(ROW_GROUPS_ID, ROW_GROUP_STORES[0]))).toBeUndefined();
+
+      const { body } = await callTool(app, env(db), 2, "get_events", {
+        dataset_id: ROW_GROUPS_ID,
+        recording: ROW_GROUP_STORES[2],
+      });
+      const out = structuredContentOf(body) as unknown as EventsOut;
+      expect(out.total_count).toBe(79_990);
+      expect(out.events).toHaveLength(1000);
+      expect(
+        out.events.every((e) => e.store_path === ROW_GROUP_STORES[2] && e.onset_s === 2.5),
+      ).toBe(true);
+
+      // A second call for the first recording is served from its own entry.
+      const again = await callTool(app, env(db), 3, "get_events", {
+        dataset_id: ROW_GROUPS_ID,
+        recording: ROW_GROUP_STORES[1],
+      });
+      expect((structuredContentOf(again.body) as unknown as EventsOut).total_count).toBe(20);
+    });
+
+    test("a recording the statistics place in no row group answers no rows, with the note, not a refusal", async () => {
+      // The index's last store sorts after every store_path in the file.
+      const stores = (nm000329IndexRaw as { stores: Array<{ zarr: string }> }).stores.map(
+        (st) => st.zarr,
+      );
+      const after = [...stores].sort().at(-1) as string;
+      expect(after > ROW_GROUP_STORES[2]).toBe(true);
+      const { body } = await callTool(app, env(db), 1, "get_events", {
+        dataset_id: ROW_GROUPS_ID,
+        recording: after,
+      });
+      const out = structuredContentOf(body) as unknown as EventsOut;
+      expect(out.events).toEqual([]);
+      expect(out.total_count).toBe(0);
+      expect(out.note).toContain("events.parquet has no rows for this store");
+      // Proven from the footer: no row group was read at all.
+      const reads = fixtureServer.requestLog.filter(
+        (r) => r.url === `${ROW_GROUPS_ID}/zarr/events.parquet` && r.method === "GET",
+      );
+      expect(reads).toHaveLength(1);
+    });
+
+    test("a file over the row budget with no store_path statistics is still DECLINED, saying why", async () => {
+      const { body } = await callTool(app, env(db), 1, "get_events", {
+        dataset_id: NO_STATS_ID,
+        recording: ROW_GROUP_STORES[1],
+      });
+      const text = errorTextOf(body);
+      expect(text).toContain("declines");
+      expect(text).toContain("120000 rows");
+      expect(text).toContain("no store_path statistics");
+      expect(text).toContain("read it directly");
+    });
+
+    test("storeRowGroupSpan: the row groups each store needs, from the real files' footers", () => {
+      const withStats = footerOf("row-groups-events.parquet");
+      expect(storeRowGroupSpan(withStats, ROW_GROUP_STORES[0])).toMatchObject({
+        rowStart: 0,
+        rowEnd: 40_000,
+        rows: 40_000,
+      });
+      expect(storeRowGroupSpan(withStats, ROW_GROUP_STORES[1])).toMatchObject({
+        rowStart: 0,
+        rowEnd: 80_000,
+        rows: 80_000,
+      });
+      expect(storeRowGroupSpan(withStats, ROW_GROUP_STORES[2])).toMatchObject({
+        rowStart: 40_000,
+        rowEnd: 120_000,
+        rows: 80_000,
+      });
+      expect(storeRowGroupSpan(withStats, "sub-9/x.zarr")).toMatchObject({ rows: 0 });
+      expect(storeRowGroupSpan(withStats, ROW_GROUP_STORES[1])?.compressedBytes).toBeGreaterThan(0);
+      expect(
+        storeRowGroupSpan(footerOf("no-stats-events.parquet"), ROW_GROUP_STORES[1]),
+      ).toBeNull();
+    });
+
+    test("storeRowGroupSpan compares store paths in UTF-8 byte order, as parquet does", () => {
+      // "a\u{1F600}" sorts AFTER "a\u{FF5E}" in UTF-8 (F0 > EF) but BEFORE it in
+      // UTF-16 code units (0xD83D < 0xFF5E), so a UTF-16 comparison would place
+      // the store inside a row group that cannot hold it.
+      const oneGroup = (min: string, max: string): FileMetaData =>
+        ({
+          num_rows: 10n,
+          row_groups: [
+            {
+              num_rows: 10n,
+              total_byte_size: 100n,
+              total_compressed_size: 50n,
+              columns: [
+                {
+                  file_offset: 0n,
+                  meta_data: {
+                    path_in_schema: ["store_path"],
+                    total_compressed_size: 50n,
+                    statistics: { min_value: min, max_value: max },
+                  },
+                },
+              ],
+            },
+          ],
+        }) as unknown as FileMetaData;
+      expect(storeRowGroupSpan(oneGroup("a", "a\u{FF5E}"), "a\u{1F600}")).toMatchObject({
+        rows: 0,
+      });
+      expect(storeRowGroupSpan(oneGroup("a", "a\u{1F601}"), "a\u{1F600}")).toMatchObject({
+        rows: 10,
+      });
+    });
+
+    test("storeRowGroupSpan ignores the deprecated min/max, which older writers compared signed", () => {
+      const deprecatedOnly = {
+        num_rows: 10n,
+        row_groups: [
+          {
+            num_rows: 10n,
+            total_byte_size: 100n,
+            columns: [
+              {
+                file_offset: 0n,
+                meta_data: {
+                  path_in_schema: ["store_path"],
+                  total_compressed_size: 50n,
+                  statistics: { min: "a", max: "z" },
+                },
+              },
+            ],
+          },
+        ],
+      } as unknown as FileMetaData;
+      expect(storeRowGroupSpan(deprecatedOnly, "m")).toBeNull();
     });
 
     test("a re-conversion at an UNCHANGED commit does not serve the old entry", async () => {
@@ -1148,6 +1395,184 @@ describe("list_recordings / get_events (epic #1065 phase 3)", () => {
           .slice(parquetReadsBefore)
           .filter((r) => r.url.endsWith("events.parquet")).length,
       ).toBe(0);
+    });
+  });
+
+  // #1500. nm000329's first store is 72 events in one group: 36 left_hand with
+  // value "1" and 36 right_hand with value "2" (the fixture parquet, read with
+  // pyarrow), so every count below is known rather than merely nonzero.
+  describe("where, columns and columns_summary (#1500)", () => {
+    const first = (nm000329IndexRaw as { stores: Array<{ zarr: string }> }).stores[0].zarr;
+
+    async function events(id: number, args: Record<string, unknown>): Promise<GetEventsOutput> {
+      const { body } = await callTool(app, env(db), id, "get_events", {
+        dataset_id: V3_ID,
+        recording: first,
+        ...args,
+      });
+      const output = structuredContentOf(body) as unknown as GetEventsOutput;
+      getEventsOutputSchema.parse(output);
+      return output;
+    }
+
+    test("where keeps the named values, and total_count and truncated count what it kept", async () => {
+      const page = await events(1, { where: { trial_type: ["left_hand"] }, limit: 10 });
+      expect(page.events.length).toBe(10);
+      expect(page.events.every((e) => e.trial_type === "left_hand")).toBe(true);
+      expect(page.total_count).toBe(36);
+      expect(page.truncated).toBe(true);
+      const last = await events(2, { where: { trial_type: ["left_hand"] }, offset: 30, limit: 10 });
+      expect(last.events.length).toBe(6);
+      expect(last.truncated).toBe(false);
+      const both = await events(3, { where: { trial_type: ["left_hand", "right_hand"] } });
+      expect(both.total_count).toBe(72);
+    });
+
+    test("where compares as strings, so a number matches the string column it names", async () => {
+      const output = await events(1, { where: { value: [1] } });
+      expect(output.total_count).toBe(36);
+      expect(output.events.every((e) => e.trial_type === "left_hand")).toBe(true);
+    });
+
+    test("where ANDs its columns: left_hand with right_hand's value keeps nothing, and says so", async () => {
+      const output = await events(1, { where: { trial_type: ["left_hand"], value: ["2"] } });
+      expect(output.events).toEqual([]);
+      expect(output.total_count).toBe(0);
+      expect(output.note).toContain("none of this recording's 72 events matched where");
+    });
+
+    test("a null never matches, not even the string null", async () => {
+      const output = await events(1, { where: { hed: ["null", "", "n/a"] } });
+      expect(output.total_count).toBe(0);
+    });
+
+    test("columns returns the two times and the columns named, and nothing else", async () => {
+      const output = await events(1, { columns: ["value", "trial_type", "onset_s"], limit: 3 });
+      expect(output.events.length).toBe(3);
+      for (const row of output.events) {
+        // Key order is the output schema's, not the request's: the tool parses its answer.
+        expect(Object.keys(row).sort()).toEqual(["onset_s", "sample_index", "trial_type", "value"]);
+      }
+      // The values are the rows' own, not placeholders.
+      const full = await events(2, { limit: 3 });
+      expect(output.events.map((e) => [e.onset_s, e.sample_index, e.value])).toEqual(
+        full.events.map((e) => [e.onset_s, e.sample_index, e.value]),
+      );
+    });
+
+    test("an unknown where or columns name is refused, naming the columns that exist", async () => {
+      for (const args of [
+        { where: { event_type: ["face"] } },
+        { columns: ["trial_type", "event_type"] },
+      ]) {
+        const { body } = await callTool(app, env(db), 1, "get_events", {
+          dataset_id: V3_ID,
+          recording: first,
+          ...args,
+        });
+        const text = errorTextOf(body);
+        expect(text).toContain('"event_type"');
+        expect(text).not.toContain('"trial_type"');
+        expect(text).toContain("trial_type, value, hed");
+      }
+    });
+
+    test("columns_summary describes the rows before where, and lists only short, few values", async () => {
+      const output = await events(1, { where: { trial_type: ["left_hand"] }, limit: 1 });
+      const byName = new Map((output.columns_summary ?? []).map((c) => [c.name, c]));
+      // The times differ on every row; the store and group are the ones asked for.
+      for (const name of ["onset_s", "sample_index", "store_path", "group_name"]) {
+        expect(byName.has(name)).toBe(false);
+      }
+      expect(byName.get("trial_type")).toEqual({
+        name: "trial_type",
+        distinct_count: 2,
+        null_count: 0,
+        values: [
+          { value: "left_hand", count: 36 },
+          { value: "right_hand", count: 36 },
+        ],
+      });
+      // 72 distinct sample strings: counted, not spelled out.
+      expect(byName.get("sample")).toMatchObject({ distinct_count: 72, values: null });
+      expect(byName.get("hed")).toEqual({
+        name: "hed",
+        distinct_count: 0,
+        null_count: 72,
+        values: [],
+      });
+      expect(byName.get("duration_s")?.values).toEqual([{ value: "4.5", count: 72 }]);
+    });
+
+    test("the store and group are left out of the summary, but where and columns still take them", async () => {
+      const output = await events(1, {
+        where: { group_name: ["eeg_250hz"], store_path: [first] },
+        columns: ["store_path", "group_name"],
+        limit: 1,
+      });
+      expect(output.total_count).toBe(72);
+      expect(output.events[0]).toMatchObject({ store_path: first, group_name: "eeg_250hz" });
+    });
+
+    test("where on a group with no events keeps the group's own note, not a where note", async () => {
+      // before > 0 is what stops "none of this recording's 0 events matched where"
+      // being said about a group that never had any.
+      const { body } = await callTool(app, env(db), 1, "get_events", {
+        dataset_id: MULTI_GROUP_ID,
+        recording: first,
+        group: MULTI_GROUP_EMPTY,
+        where: { trial_type: ["left_hand"] },
+      });
+      const output = getEventsOutputSchema.parse(structuredContentOf(body)) as GetEventsOutput;
+      expect(output.total_count).toBe(0);
+      expect(output.note).toContain(MULTI_GROUP_EMPTY);
+      expect(output.note).not.toContain("matched where");
+    });
+
+    test("a filtered call is served from the same cached rows as an unfiltered one", async () => {
+      await events(1, {});
+      const parquetReads = () =>
+        fixtureServer.requestLog.filter((r) => r.url === `${V3_ID}/zarr/events.parquet`).length;
+      const before = parquetReads();
+      const output = await events(2, { where: { trial_type: ["right_hand"] }, columns: ["value"] });
+      expect(output.total_count).toBe(36);
+      expect(parquetReads()).toBe(before);
+    });
+
+    test("the events.tsv fallback filters and projects the same way", async () => {
+      const { body } = await callTool(app, env(db), 1, "get_events", {
+        dataset_id: V1_ID,
+        recording: "sub-I003/eeg/sub-I003_task-sleep_eeg.zarr",
+        where: { trial_type: ["sleep_stage_2"] },
+        columns: ["value"],
+      });
+      const output = structuredContentOf(body) as unknown as GetEventsOutput;
+      expect(output.source).toBe("events_tsv_fallback");
+      expect(output.events).toEqual([{ onset_s: 2.5, sample_index: 500, value: "7" }]);
+    });
+
+    test("summarizeEventColumns lists up to the value and length bounds, and counts past them", () => {
+      const rows = (values: string[]) =>
+        values.map((v, i) => ({ onset_s: i, sample_index: i, x: v }) as unknown as EventRow);
+      const distinct = (n: number) => Array.from({ length: n }, (_, i) => `v${i}`);
+      const at = summarizeEventColumns(rows(distinct(GET_EVENTS_SUMMARY_MAX_VALUES)), ["x"]);
+      expect(at[0].values?.length).toBe(GET_EVENTS_SUMMARY_MAX_VALUES);
+      const over = summarizeEventColumns(rows(distinct(GET_EVENTS_SUMMARY_MAX_VALUES + 1)), ["x"]);
+      expect(over[0]).toMatchObject({
+        distinct_count: GET_EVENTS_SUMMARY_MAX_VALUES + 1,
+        values: null,
+      });
+      const long = "a".repeat(GET_EVENTS_SUMMARY_MAX_VALUE_CHARS);
+      expect(summarizeEventColumns(rows([long]), ["x"])[0].values).toEqual([
+        { value: long, count: 1 },
+      ]);
+      expect(summarizeEventColumns(rows([`${long}a`]), ["x"])[0].values).toBeNull();
+      // Most common first; a tie in value order, so the answer is the same every time.
+      expect(summarizeEventColumns(rows(["b", "a", "c", "c"]), ["x"])[0].values).toEqual([
+        { value: "c", count: 2 },
+        { value: "a", count: 1 },
+        { value: "b", count: 1 },
+      ]);
     });
   });
 });

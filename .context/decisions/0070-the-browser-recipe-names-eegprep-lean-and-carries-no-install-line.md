@@ -4,6 +4,10 @@
 **Date:** 2026-09-21
 **Owner:** Seyed Yahya Shirazi
 
+**Amendment 2026-09-22:** How the lane reads at level 0 is refined by ADR 0071:
+it now leads with `read_window`, and the `open_array` read of `array_path` described below follows it.
+This decision's verdict is unchanged.
+
 ## Context
 
 `read_window` hands the model a `how_to` block of ready-to-run snippets.

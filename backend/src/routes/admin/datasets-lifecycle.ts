@@ -38,6 +38,7 @@ import { reembedDatasetVector } from "../../services/dataset-search";
 import { ProdRepoFenceError, deleteDatasetCascade } from "../../services/deletion";
 import { DOCTOR_CHECKS, getCheck, listChecks } from "../../services/doctor/registry";
 import type { CheckContext, Finding } from "../../services/doctor/types";
+import { exemplarOrFragment } from "../../services/exemplar";
 import {
   addCollaborator,
   createRepository,
@@ -71,6 +72,16 @@ import { getS3Config } from "./shared";
 import type { AdminRouter } from "./shared";
 
 /**
+ * Every sweep below that skips sandbox rows carves the exemplar fleet back in with
+ * `exemplarOrFragment()` (#1496, as #1168 did for the signal-defaults sweep and the
+ * availability report): exemplars are inserted `is_sandbox = 1`, and they are the
+ * staging catalog's copies of real datasets, so they must carry the facts these
+ * sweeps give production's datasets, or test.nemar.org describes them differently
+ * (a converted exemplar with no Zarr tag). No `is_exemplar = 1` row exists in
+ * production (migration 0057), so the carve-out selects nothing more there.
+ */
+
+/**
  * Per-candidate stamp writes for the four inline route sweeps below
  * (archive / zarr / channel-montage / hed), exported so tests can exercise
  * the exact SQL text: each is only reachable end-to-end after a real
@@ -95,6 +106,21 @@ export const ZARR_SWEEP_READY_SQL = `UPDATE datasets
              WHERE dataset_id = ?`;
 export const ZARR_SWEEP_STAMP_ONLY_SQL =
   "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.zarr_checked_at', datetime('now')) WHERE dataset_id = ?";
+/**
+ * The two GitHub-backed sweeps' `remaining` counts, exported for the same reason
+ * as the writes above: each runs only after a real GitHub token fetch and tree
+ * walk, which tests cannot perform, so a test exercises the exact SQL text on a
+ * real database instead of a hand copy.
+ */
+export const CHANNEL_MONTAGE_SWEEP_REMAINING_SQL = `SELECT COUNT(*) AS n FROM datasets
+       WHERE github_repo IS NOT NULL
+         AND (is_sandbox = 0 OR is_sandbox IS NULL OR ${exemplarOrFragment("")})
+         AND modalities LIKE '%eeg%'
+         AND json_extract(sweep_stamps, '$.channel_montage_checked_at') IS NULL`;
+export const HED_SWEEP_REMAINING_SQL = `SELECT COUNT(*) AS n FROM datasets
+       WHERE github_repo IS NOT NULL
+         AND (is_sandbox = 0 OR is_sandbox IS NULL OR ${exemplarOrFragment("")})
+         AND json_extract(sweep_stamps, '$.hed_checked_at') IS NULL`;
 export const CHANNEL_MONTAGE_SWEEP_WRITE_SQL = `UPDATE datasets
            SET n_channels = ?, electrode_system = ?,
                sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.channel_montage_checked_at', datetime('now'))
@@ -149,7 +175,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
     const limitRaw = Number.parseInt(c.req.query("limit") || "50", 10);
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
 
-    // Candidates: real (non-catalog), public, non-sandbox datasets we have never
+    // Candidates: real (non-catalog), public, non-sandbox (exemplars included) datasets we have never
     // checked for an archive. Public-only because archives are a published-data
     // concern and the data-plane download is public-only (loadPublishedDataset).
     // A bare throw here (e.g. migration 0036 not yet applied) would surface a
@@ -162,7 +188,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
           // with no archive as 'skipped' (#752) instead of just 'absent'.
           `SELECT dataset_id, file_size, total_files FROM datasets
          WHERE owner_user_id != ${SYSTEM_USER_ID}
-           AND (is_sandbox = 0 OR is_sandbox IS NULL)
+           AND (is_sandbox = 0 OR is_sandbox IS NULL OR ${exemplarOrFragment("")})
            AND visibility = 'public'
            AND json_extract(sweep_stamps, '$.archive_checked_at') IS NULL
          ORDER BY dataset_id
@@ -235,7 +261,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       .prepare(
         `SELECT COUNT(*) as n FROM datasets
        WHERE owner_user_id != ${SYSTEM_USER_ID}
-         AND (is_sandbox = 0 OR is_sandbox IS NULL)
+         AND (is_sandbox = 0 OR is_sandbox IS NULL OR ${exemplarOrFragment("")})
          AND visibility = 'public'
          AND json_extract(sweep_stamps, '$.archive_checked_at') IS NULL`,
       )
@@ -283,7 +309,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
     const limitRaw = Number.parseInt(c.req.query("limit") || "50", 10);
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
 
-    // Candidates: real (non-catalog), public, non-sandbox datasets whose zarr
+    // Candidates: real (non-catalog), public, non-sandbox (exemplars included) datasets whose zarr
     // state is still unknown — neither the webhook (zarr_status) nor a prior sweep
     // (zarr_checked_at) has touched them. Public-only because zarr.nemar.org only
     // serves public datasets (zarr-data.ts). Mirrors archive-sweep's candidacy.
@@ -293,7 +319,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
         .prepare(
           `SELECT dataset_id FROM datasets
          WHERE owner_user_id != ${SYSTEM_USER_ID}
-           AND (is_sandbox = 0 OR is_sandbox IS NULL)
+           AND (is_sandbox = 0 OR is_sandbox IS NULL OR ${exemplarOrFragment("")})
            AND visibility = 'public'
            AND zarr_status IS NULL
            AND json_extract(sweep_stamps, '$.zarr_checked_at') IS NULL
@@ -360,7 +386,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       .prepare(
         `SELECT COUNT(*) as n FROM datasets
        WHERE owner_user_id != ${SYSTEM_USER_ID}
-         AND (is_sandbox = 0 OR is_sandbox IS NULL)
+         AND (is_sandbox = 0 OR is_sandbox IS NULL OR ${exemplarOrFragment("")})
          AND visibility = 'public'
          AND zarr_status IS NULL
          AND json_extract(sweep_stamps, '$.zarr_checked_at') IS NULL`,
@@ -433,7 +459,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
         .prepare(
           `SELECT dataset_id, github_repo FROM datasets
          WHERE github_repo IS NOT NULL
-           AND (is_sandbox = 0 OR is_sandbox IS NULL)
+           AND (is_sandbox = 0 OR is_sandbox IS NULL OR ${exemplarOrFragment("")})
            AND modalities LIKE '%eeg%'
            AND json_extract(sweep_stamps, '$.channel_montage_checked_at') IS NULL
          ORDER BY dataset_id
@@ -499,13 +525,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
     }
 
     const remainingRow = await db
-      .prepare(
-        `SELECT COUNT(*) AS n FROM datasets
-       WHERE github_repo IS NOT NULL
-         AND (is_sandbox = 0 OR is_sandbox IS NULL)
-         AND modalities LIKE '%eeg%'
-         AND json_extract(sweep_stamps, '$.channel_montage_checked_at') IS NULL`,
-      )
+      .prepare(CHANNEL_MONTAGE_SWEEP_REMAINING_SQL)
       .first<{ n: number }>();
 
     return c.json({
@@ -704,7 +724,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 30) : 15;
 
     // Candidates: every managed dataset (github_repo IS NOT NULL; catalog ds* rows
-    // have none), not sandbox, not yet probed. latest_version drives the per-version
+    // have none), not sandbox (exemplars included), not yet probed. latest_version drives the per-version
     // write -- null for unpublished datasets, which then get only the datasets-level
     // write (writeVersionHed is skipped, no spurious 0-row error).
     let candidates: { dataset_id: string; github_repo: string; latest_version: string | null }[];
@@ -716,7 +736,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
             ORDER BY created_at DESC LIMIT 1) AS latest_version
          FROM datasets d
          WHERE d.github_repo IS NOT NULL
-           AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
+           AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR ${exemplarOrFragment("d")})
            AND json_extract(d.sweep_stamps, '$.hed_checked_at') IS NULL
          ORDER BY d.dataset_id
          LIMIT ?`,
@@ -798,14 +818,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       }
     }
 
-    const remainingRow = await db
-      .prepare(
-        `SELECT COUNT(*) AS n FROM datasets
-       WHERE github_repo IS NOT NULL
-         AND (is_sandbox = 0 OR is_sandbox IS NULL)
-         AND json_extract(sweep_stamps, '$.hed_checked_at') IS NULL`,
-      )
-      .first<{ n: number }>();
+    const remainingRow = await db.prepare(HED_SWEEP_REMAINING_SQL).first<{ n: number }>();
 
     return c.json({
       processed: candidates.length,
@@ -918,7 +931,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
     }
 
     // Candidates: every managed dataset (github_repo IS NOT NULL; catalog ds*
-    // rows have none), not sandbox, not yet checked (or stale past --older-than).
+    // rows have none), not sandbox (exemplars included), not yet checked (or stale past --older-than).
     let candidates: { dataset_id: string }[];
     try {
       const rows = await db
@@ -926,7 +939,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
           `SELECT d.dataset_id
          FROM datasets d
          WHERE d.github_repo IS NOT NULL
-           AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
+           AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR ${exemplarOrFragment("d")})
            AND ${candidacyClause}
          ORDER BY d.dataset_id
          LIMIT ?`,
@@ -976,7 +989,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       .prepare(
         `SELECT COUNT(*) AS n FROM datasets d
        WHERE d.github_repo IS NOT NULL
-         AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL)
+         AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR ${exemplarOrFragment("d")})
          AND ${candidacyClause}`,
       )
       .bind(...candidacyParams)
@@ -1986,7 +1999,7 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
     const rows = await c.env.DB.prepare(
       `SELECT dataset_id FROM datasets
      WHERE status = 'active' AND visibility = 'public'
-       AND (is_sandbox = 0 OR is_sandbox IS NULL)
+       AND (is_sandbox = 0 OR is_sandbox IS NULL OR ${exemplarOrFragment("")})
        AND dataset_id > ?
      ORDER BY dataset_id
      LIMIT ?`,
