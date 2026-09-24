@@ -40,3 +40,96 @@ export class InMemoryCache implements CacheLike {
     this.store.set(keyFor(request), response.clone());
   }
 }
+
+/**
+ * A `CacheLike` whose `put()` CONSUMES the response body before storing it,
+ * the way the real Workers Cache API does (#1502). `InMemoryCache` above
+ * stores a `clone()` and never reads the original, which is fine for a body
+ * the caller already holds and wrong for a body the caller is still writing
+ * into: nothing would ever pull it. The manifest edge copy is written that
+ * way, so its tests need a cache that reads.
+ *
+ * `readDelayMs` slows the read down (a pause every `readDelayEvery` chunks),
+ * standing in for a cache write slower than the scan, which is the case the
+ * writer's bounded queue exists for. `keepBodies: false` counts bytes
+ * without keeping them, so a memory measurement sees only the code under
+ * test and not the cache's own storage.
+ */
+export class DrainingCache implements CacheLike {
+  readonly store = new Map<string, { body: Uint8Array; status: number; headers: Headers }>();
+  matches = 0;
+  puts = 0;
+  /** Bytes read by the most recently started `put()`, whether or not it completed. */
+  lastPutBytes = 0;
+  /** Why the last `put()` failed, if it did. */
+  lastPutError: unknown = null;
+  private startedPuts = 0;
+
+  constructor(
+    private readonly opts: {
+      readDelayMs?: number;
+      readDelayEvery?: number;
+      keepBodies?: boolean;
+    } = {},
+  ) {}
+
+  async match(request: RequestInfo | URL): Promise<Response | undefined> {
+    this.matches++;
+    const stored = this.store.get(keyFor(request));
+    if (!stored) return undefined;
+    return new Response(stored.body.slice(), { status: stored.status, headers: stored.headers });
+  }
+
+  async put(request: RequestInfo | URL, response: Response): Promise<void> {
+    this.puts++;
+    if (response.status === 206) throw new Error("Cache API cannot store a 206 response");
+    // Each put counts its own bytes: two puts can be in flight at once, as
+    // concurrent requests in one isolate make them, and a count shared on
+    // the instance would size one copy from the other's reads.
+    const started = ++this.startedPuts;
+    let read = 0;
+    this.lastPutBytes = 0;
+    this.lastPutError = null;
+    const chunks: Uint8Array[] = [];
+    const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+    const every = this.opts.readDelayEvery ?? 1;
+    let n = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        read += value.byteLength;
+        if (started === this.startedPuts) this.lastPutBytes = read;
+        if (this.opts.keepBodies !== false) chunks.push(value);
+        if (this.opts.readDelayMs && ++n % every === 0) await Bun.sleep(this.opts.readDelayMs);
+      }
+    } catch (err) {
+      // The real API rejects the put when the body errors, and stores nothing.
+      this.lastPutError = err;
+      throw err;
+    }
+    const body = new Uint8Array(read);
+    let at = 0;
+    for (const c of chunks) {
+      body.set(c, at);
+      at += c.byteLength;
+    }
+    this.store.set(keyFor(request), {
+      body: this.opts.keepBodies === false ? new Uint8Array(0) : body,
+      status: response.status,
+      headers: new Headers(response.headers),
+    });
+  }
+}
+
+/** A cache whose `put()` neither reads the body nor ever settles. */
+export class StalledCache implements CacheLike {
+  puts = 0;
+  async match(): Promise<Response | undefined> {
+    return undefined;
+  }
+  put(): Promise<void> {
+    this.puts++;
+    return new Promise<void>(() => {});
+  }
+}

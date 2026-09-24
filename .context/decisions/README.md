@@ -110,6 +110,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0069](0069-the-browser-runtime-is-its-own-package-and-eegprep-stays-whole.md) - The browser runtime is its own package, and eegprep stays whole
 - [ADR 0070](0070-the-browser-recipe-names-eegprep-lean-and-carries-no-install-line.md) - The browser recipe names eegprep-lean and carries no install line
 - [ADR 0071](0071-the-browser-recipe-leads-with-the-read-in-physical-units.md) - The browser recipe leads with the read in physical units
+- [ADR 0072](0072-the-data-plane-streams-a-manifest-and-revalidates-its-edge-copy.md) - The data plane streams a manifest, answers one question per read, and revalidates its edge copy on every use
 
 ## Backfill note (2026-07-31)
 
