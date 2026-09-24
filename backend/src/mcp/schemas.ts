@@ -47,7 +47,7 @@ import { DATASET_ID_RE, SOURCE_COMMIT_RE } from "../../../shared/contract/zarr-i
 import { FACETS, describeFacet } from "../../../shared/facets.js";
 
 const DATASET_ID_DESCRIPTION =
-  "NEMAR dataset id: two lowercase letters (nm/on/xx) followed by six digits, e.g. nm000329.";
+  "NEMAR dataset id: two lowercase letters (nm/on/xx) followed by six digits, e.g. nm000132 (ERP CORE).";
 
 // ---------------------------------------------------------------------------
 // search_datasets
