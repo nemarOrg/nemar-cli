@@ -19,23 +19,24 @@ import {
   type CatalogIndexRow,
   type DatasetRowForMetadata,
   type DatasetVersionRow,
+  type ManifestDigest,
   PUBLIC_DATASET_VERSIONS_SQL,
   type PublicManifestEntry,
   type VersionPickerEntry,
   buildBytesUrl,
   buildCatalogIndexPayload,
-  buildDatasetMetadata,
+  buildDatasetMetadataFromDigest,
   buildLandingPayload,
   buildRedirectUrl,
   contentTypeForBidsPath,
-  diffRemovedSince,
-  findLastSeenVersion,
+  diffRemovedSinceResolved,
+  digestManifest,
+  findLastSeenVersionBy,
   pickResponseFormat,
   renderCatalogIndexHtml,
   renderDatasetLandingHtml,
   renderIndexHtml,
   renderTombstone404Html,
-  resolveFile,
   resolveQaPath,
   resolveVersion,
   toHttpDate,
@@ -47,13 +48,22 @@ import { resolveDataBaseOrigin } from "../services/environment";
 import { ORG_NAME } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
 import { fetchGitTrackedFile } from "../services/github/git-file-broker";
-import type { ManifestFile, VersionManifest } from "../services/manifest";
+import type { ManifestFile } from "../services/manifest";
+import {
+  ContainsPathQuery,
+  DigestQuery,
+  EntriesQuery,
+  EntryCountQuery,
+  type ManifestQuery,
+  ResolvePathQuery,
+} from "../services/manifest-queries";
+import type { ManifestHeader } from "../services/manifest-scan";
+import { type ManifestCache, type ManifestRead, readManifest } from "../services/manifest-source";
 import { buildPageBundle } from "../services/page-bundle";
 import {
   type PresignedUrlOptions,
   generatePresignedGetUrl,
   getArchiveUrl,
-  getManifest,
   headArchive,
   loadRecords,
   loadSummary,
@@ -105,22 +115,50 @@ async function loadPublishedDataset(env: Bindings, datasetId: string) {
   return row;
 }
 
-async function loadManifest(
+/**
+ * The Workers Cache API where there is one. `bun test` has none, so the
+ * route suites run uncached unless a test installs a cache on
+ * `globalThis.caches` (the seam the rate-limiter suites already use).
+ */
+function edgeCache(): ManifestCache | null {
+  const storage = (globalThis as { caches?: { default?: ManifestCache } }).caches;
+  return storage?.default ?? null;
+}
+
+/**
+ * Read a version manifest and answer ONE question about it (#1502).
+ *
+ * This replaced `loadManifest`, which read the manifest whole and parsed it:
+ * nm000281's is 43 MB, and every request for it exceeded the isolate's
+ * memory. The manifest is now streamed through a scanner that keeps only what
+ * `makeQuery`'s query asks for (`services/manifest-queries.ts`), from an edge
+ * copy that S3 revalidates on every use (`services/manifest-source.ts`).
+ *
+ * Every failure still collapses to `null`, logged the way it always was:
+ * the hot call sites (the tombstone walk fans out up to 10 reads per 404,
+ * the "removed since" footer reads the prior version on every directory
+ * render) must degrade to "no hint / no footer" on a transient S3 blip,
+ * not 500 the whole response.
+ */
+async function queryManifest<T>(
   env: Bindings,
+  request: Request,
   datasetId: string,
   version: string,
-): Promise<VersionManifest | null> {
-  // getManifest can throw on network/S3 errors. Phase 3 introduces hot
-  // call sites (tombstone walk fans out up to 10 fetches per 404,
-  // "removed since" footer fetches the prior version on every directory
-  // index render) where a transient S3 blip should degrade to "no
-  // tombstone hint / no footer" instead of 500ing the whole response.
-  // Phase 1 callers only ever fetched the requested version once, so the
-  // original "throw kills the request" behavior was acceptable; not so
-  // any more.
-  let raw: string | null;
+  makeQuery: () => ManifestQuery<T>,
+): Promise<{ header: ManifestHeader; answer: T } | null> {
+  let read: ManifestRead<T>;
   try {
-    raw = await getManifest(s3OptionsFromEnv(env), datasetId, version);
+    read = await readManifest(
+      {
+        s3: s3OptionsFromEnv(env),
+        cache: edgeCache(),
+        cacheOrigin: new URL(request.url).origin,
+      },
+      datasetId,
+      version,
+      makeQuery,
+    );
   } catch (err) {
     console.error(
       `[data] manifest fetch failed dataset=${datasetId} version=${version}:`,
@@ -128,28 +166,54 @@ async function loadManifest(
     );
     return null;
   }
-  if (!raw) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err) {
+  if (read.kind === "absent") return null;
+  if (read.kind === "malformed") {
     console.error(
       `[data] malformed manifest JSON dataset=${datasetId} version=${version}:`,
-      err instanceof Error ? err.message : String(err),
+      read.message,
     );
     return null;
   }
-  if (
-    !parsed ||
-    typeof parsed !== "object" ||
-    !("files" in parsed) ||
-    typeof (parsed as { files: unknown }).files !== "object" ||
-    (parsed as { files: unknown }).files === null
-  ) {
+  if (read.kind === "no_files") {
     console.error(`[data] manifest missing 'files' object dataset=${datasetId} version=${version}`);
     return null;
   }
-  return parsed as VersionManifest;
+  // Outside the try on purpose: an exception from ANSWERING (a manifest entry
+  // that is `null`, say) is not a failed read, and it reaches the app's error
+  // handler exactly as it did when the answer was computed from a parsed
+  // manifest after loadManifest returned.
+  return { header: read.header, answer: read.query.finish(read.header) };
+}
+
+/**
+ * Everything `metadata.json` needs from the latest manifest, without holding
+ * it. The streaming digest is exact only when the manifest's keys arrive in
+ * ascending order and its sizes are plain integers (see `DigestQuery`); when
+ * it cannot prove that, the manifest is read again and materialized for the
+ * reference `digestManifest`, which is the memory this route used to need,
+ * so that path says so in the log.
+ */
+async function loadManifestDigest(
+  env: Bindings,
+  request: Request,
+  datasetId: string,
+  version: string,
+): Promise<ManifestDigest | null> {
+  const read = await queryManifest(env, request, datasetId, version, () => new DigestQuery());
+  if (!read) return null;
+  if (read.answer.kind === "digest") return read.answer.digest;
+  console.warn(
+    `[data] metadata.json: ${read.answer.reason}; materializing the whole manifest for the digest dataset=${datasetId} version=${version}`,
+  );
+  const full = await queryManifest(
+    env,
+    request,
+    datasetId,
+    version,
+    () => new EntriesQuery(Number.POSITIVE_INFINITY),
+  );
+  if (!full || full.answer.kind !== "entries") return null;
+  return digestManifest({ ...full.header, files: full.answer.files });
 }
 
 /**
@@ -226,10 +290,55 @@ function parseChecksum(checksum: string): { algorithm: string; value: string } {
 }
 
 /**
+ * The most entries `manifest.json` will list (#1502).
+ *
+ * `manifest.json` names and presigns EVERY entry in one JSON document, so no
+ * scan can bound it: the entries, their presigned URLs and the serialized
+ * response are all held at once. Measured under Bun on nm000281-shaped
+ * entries (a path, an annex key or git SHA, a checksum and a bytes_url): about
+ * 1.7 KB of live memory per entry at the moment the response is serialized,
+ * 34.5 MB at 20,000 entries and 84 MB at 50,000, before the isolate's own
+ * baseline and before the manifest string the old path also held (20 MB at
+ * 50,000). 30,000 entries is about 52 MB, the most one response can take out
+ * of a 128 MB isolate that other requests share.
+ *
+ * Against the catalog on 2026-09-24 (the public `total_files` column): every
+ * dataset up to 26,410 files is under it, and the seven above it start at
+ * 45,424 (on002814) and run to nm000281's 102,532, where the old path already
+ * needed about 90 MB and more. So the bound refuses what could not be served
+ * reliably and nothing that could.
+ */
+export const MAX_MANIFEST_JSON_ENTRIES = 30_000;
+
+/**
+ * The refusal for a manifest over {@link MAX_MANIFEST_JSON_ENTRIES}. 413
+ * because the refusal is about size and is permanent for this version; a
+ * client should not retry it. It names the way to enumerate the files that
+ * does scale: the per-directory JSON listing, one directory per request.
+ */
+function manifestJsonTooLarge(request: Request, datasetId: string, version: string): Response {
+  const listing = new URL(`../${encodeURIComponent(version)}/?format=json`, request.url).toString();
+  return new Response(
+    JSON.stringify({
+      error: `This version has more than ${MAX_MANIFEST_JSON_ENTRIES} files, which is more than manifest.json can list and presign in one response. Enumerate it one directory at a time instead: ${listing} lists the top level, and each directory's URL with ?format=json lists that directory's own files and subdirectories.`,
+      dataset_id: datasetId,
+      version,
+      limit: MAX_MANIFEST_JSON_ENTRIES,
+      listing_url: listing,
+    }),
+    {
+      status: 413,
+      headers: { "Content-Type": "application/json", "Cache-Control": "public, max-age=60" },
+    },
+  );
+}
+
+/**
  * GET /<id>/<version>/manifest.json -> public file index with presigned URLs.
  */
 async function manifestJsonHandler(
   env: Bindings,
+  request: Request,
   datasetId: string,
   versionParam: string,
 ): Promise<Response> {
@@ -239,12 +348,38 @@ async function manifestJsonHandler(
   const resolved = await resolveVersion(env.DB, datasetId, versionParam);
   if (!resolved.ok) return notFound("Version not found");
 
-  const manifest = await loadManifest(env, datasetId, resolved.version);
-  if (!manifest) return notFound("Version not published");
+  // Count first, keeping nothing, so the refusal for an oversized manifest
+  // costs what any other lookup costs. The second read is the one that
+  // answers, and it enforces the bound itself, so a manifest rewritten
+  // between the two, or one whose keys do not ascend (the count cannot rule
+  // out a repeated key then), still cannot exceed it. With the edge cache the
+  // second read is a 304 and a scan of the copy.
+  const counted = await queryManifest(
+    env,
+    request,
+    datasetId,
+    resolved.version,
+    () => new EntryCountQuery(),
+  );
+  if (!counted) return notFound("Version not published");
+  if (counted.answer.kind === "count" && counted.answer.count > MAX_MANIFEST_JSON_ENTRIES) {
+    return manifestJsonTooLarge(request, datasetId, resolved.version);
+  }
+  const read = await queryManifest(
+    env,
+    request,
+    datasetId,
+    resolved.version,
+    () => new EntriesQuery(MAX_MANIFEST_JSON_ENTRIES),
+  );
+  if (!read) return notFound("Version not published");
+  if (read.answer.kind === "over_limit") {
+    return manifestJsonTooLarge(request, datasetId, resolved.version);
+  }
 
   const s3Options = s3OptionsFromEnv(env);
   const entries: PublicManifestEntry[] = await Promise.all(
-    Object.entries(manifest.files).map(async ([path, file]): Promise<PublicManifestEntry> => {
+    Object.entries(read.answer.files).map(async ([path, file]): Promise<PublicManifestEntry> => {
       const checksum = parseChecksum(file.checksum);
       const base = {
         path,
@@ -866,17 +1001,26 @@ async function fileOrIndexHandler(
   const resolved = await resolveVersion(env.DB, datasetId, versionParam);
   if (!resolved.ok) return notFound("Version not found");
 
-  const manifest = await loadManifest(env, datasetId, resolved.version);
-  if (!manifest) return notFound("Version not published");
+  // One scan answers the file-or-directory question; it keeps the entry, or
+  // this directory's immediate children, and nothing else (#1502).
+  const read = await queryManifest(
+    env,
+    request,
+    datasetId,
+    resolved.version,
+    () => new ResolvePathQuery(rawPath),
+  );
+  if (!read) return notFound("Version not published");
 
-  const result = resolveFile(manifest, rawPath);
+  const result = read.answer;
+  const createdIso = read.header.created;
 
   // HEAD branch: serve from `result` alone -- no D1 round-trip for
   // picker/footer (HEAD doesn't render HTML chrome), no tombstone walk
   // (rclone just needs the 404). Keeps `rclone sync` cheap per file.
   if (isHead) {
     if (result.kind === "file") {
-      const headers = new Headers(fileResponseHeaders(result.file, manifest.created, true));
+      const headers = new Headers(fileResponseHeaders(result.file, createdIso, true));
       // A git-tracked file's GET now answers with a content type, so its HEAD
       // has to agree: rclone's HTTP backend probes with HEAD and then GETs,
       // and a HEAD that describes a different response than the GET is how a
@@ -921,10 +1065,19 @@ async function fileOrIndexHandler(
     const currentIdx = versionTags.indexOf(resolved.version);
     const olderVersions =
       currentIdx === -1 ? versionTags.slice(1) : versionTags.slice(currentIdx + 1);
-    const lastSeen = await findLastSeenVersion({
-      path: rawPath.replace(/^\/+/, "").replace(/\/+$/, ""),
+    const tombstonePath = rawPath.replace(/^\/+/, "").replace(/\/+$/, "");
+    const lastSeen = await findLastSeenVersionBy({
       olderVersions,
-      loadManifest: (v) => loadManifest(env, datasetId, v),
+      containsPath: async (v) => {
+        const found = await queryManifest(
+          env,
+          request,
+          datasetId,
+          v,
+          () => new ContainsPathQuery(tombstonePath),
+        );
+        return found ? found.answer : null;
+      },
     });
     const urlObj = new URL(request.url);
     const lastSeenHref = lastSeen
@@ -950,7 +1103,7 @@ async function fileOrIndexHandler(
         version: resolved.version,
         bidsPath: result.path,
         file: result.file,
-        createdIso: manifest.created,
+        createdIso,
       });
     }
     const url = await buildRedirectUrl({
@@ -965,7 +1118,7 @@ async function fileOrIndexHandler(
     // Content-Length is deliberately omitted from the 302 -- per RFC
     // 9110 §8.6 it describes the (empty) message body, not the redirect
     // target. The S3 target's GET response carries it accurately.
-    const headers = new Headers(fileResponseHeaders(result.file, manifest.created, false));
+    const headers = new Headers(fileResponseHeaders(result.file, createdIso, false));
     headers.set("Location", url);
     return new Response(null, { status: 302, headers });
   }
@@ -1025,9 +1178,15 @@ async function fileOrIndexHandler(
     let removedSinceNote: { lastSeenVersion: string; names: string[] } | null = null;
     if (currentIdx >= 0 && currentIdx < versionTags.length - 1) {
       const priorVersion = versionTags[currentIdx + 1];
-      const priorManifest = await loadManifest(env, datasetId, priorVersion);
-      if (priorManifest) {
-        const removed = diffRemovedSince(result.children, priorManifest, result.path);
+      const prior = await queryManifest(
+        env,
+        request,
+        datasetId,
+        priorVersion,
+        () => new ResolvePathQuery(result.path),
+      );
+      if (prior) {
+        const removed = diffRemovedSinceResolved(result.children, prior.answer);
         if (removed.length > 0) {
           removedSinceNote = { lastSeenVersion: priorVersion, names: removed };
         }
@@ -1059,7 +1218,7 @@ async function fileOrIndexHandler(
 
 dataRoutes.get("/:datasetId/:version/manifest.json", (c) => {
   const { datasetId, version } = c.req.param();
-  return manifestJsonHandler(c.env, datasetId, version);
+  return manifestJsonHandler(c.env, c.req.raw, datasetId, version);
 });
 
 /**
@@ -1213,7 +1372,11 @@ dataRoutes.get("/:datasetId/:version/records.json", (c) => {
  * MUST be registered before `/:datasetId/:version` -- otherwise Hono's
  * param-matching captures `metadata.json` as a version string.
  */
-async function metadataJsonHandler(env: Bindings, datasetId: string): Promise<Response> {
+async function metadataJsonHandler(
+  env: Bindings,
+  request: Request,
+  datasetId: string,
+): Promise<Response> {
   const gate = await loadPublishedDataset(env, datasetId);
   if (!gate) return notFound("Dataset not found");
 
@@ -1263,19 +1426,19 @@ async function metadataJsonHandler(env: Bindings, datasetId: string): Promise<Re
     }
   }
 
-  let latestManifest: VersionManifest | null = null;
+  let manifestDigest: ManifestDigest | null = null;
   if (versions.length > 0) {
     const latest = versions[0];
     const versionTag = toVersionTag(latest.version);
-    latestManifest = await loadManifest(env, datasetId, versionTag);
-    if (!latestManifest) {
+    manifestDigest = await loadManifestDigest(env, request, datasetId, versionTag);
+    if (!manifestDigest) {
       console.warn(
         `[data] metadata.json: latest manifest unavailable dataset=${datasetId} version=${versionTag}; bids_index will be null`,
       );
     }
   }
 
-  const payload = buildDatasetMetadata({
+  const payload = buildDatasetMetadataFromDigest({
     row: {
       dataset_id: row.dataset_id,
       name: row.name,
@@ -1308,7 +1471,7 @@ async function metadataJsonHandler(env: Bindings, datasetId: string): Promise<Re
     },
     parsedEnrichment,
     versions,
-    latestManifest,
+    manifestDigest,
     githubOrg: ORG_NAME,
   });
 
@@ -1322,7 +1485,7 @@ async function metadataJsonHandler(env: Bindings, datasetId: string): Promise<Re
 
 dataRoutes.get("/:datasetId/metadata.json", (c) => {
   const { datasetId } = c.req.param();
-  return metadataJsonHandler(c.env, datasetId);
+  return metadataJsonHandler(c.env, c.req.raw, datasetId);
 });
 
 /**
