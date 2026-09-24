@@ -485,7 +485,13 @@ function buildHowTo(opts: {
 export function buildReadRecipe(input: {
   index: Pick<
     ZarrIndex,
-    "dataset_id" | "contract_base" | "data_base" | "s3_uri" | "s3_region" | "s3_anonymous" | "layout"
+    | "dataset_id"
+    | "contract_base"
+    | "data_base"
+    | "s3_uri"
+    | "s3_region"
+    | "s3_anonymous"
+    | "layout"
   >;
   store: Pick<ZarrStore, "path" | "zarr" | "groups">;
   groupName: string;
@@ -913,6 +919,19 @@ export type ListRecordingsOutput = z.infer<typeof listRecordingsOutputSchema>;
 export const GET_EVENTS_DEFAULT_LIMIT = 1000;
 export const GET_EVENTS_MAX_LIMIT = 5000;
 
+/** Bounds on `get_events`' `where` and `columns` (#1500). */
+export const GET_EVENTS_MAX_WHERE_COLUMNS = 8;
+export const GET_EVENTS_MAX_WHERE_VALUES = 100;
+export const GET_EVENTS_MAX_COLUMNS = 32;
+/** `columns_summary` lists a column's values only when it has at most this many
+ *  distinct values, each at most `GET_EVENTS_SUMMARY_MAX_VALUE_CHARS` long: the
+ *  summary is on every answer, so a column of per-event strings (`sample`, a HED
+ *  annotation) is counted, never spelled out. */
+export const GET_EVENTS_SUMMARY_MAX_VALUES = 50;
+export const GET_EVENTS_SUMMARY_MAX_VALUE_CHARS = 100;
+
+const eventColumnNameSchema = z.string().min(1).max(64);
+
 export const getEventsInputSchema = z
   .object({
     dataset_id: z.string().regex(DATASET_ID_RE),
@@ -923,6 +942,28 @@ export const getEventsInputSchema = z
      *  same way `list_recordings` pages recordings. */
     limit: z.number().int().positive().max(GET_EVENTS_MAX_LIMIT).default(GET_EVENTS_DEFAULT_LIMIT),
     offset: z.number().int().nonnegative().default(0),
+    /** Additive (#1500): keep a row only when, for every column named, its value
+     *  compared as a string is one of those listed. A column the recording's
+     *  events do not have is refused, never answered with an empty list. */
+    where: z
+      .record(
+        eventColumnNameSchema,
+        z
+          .array(z.union([z.string(), z.number()]))
+          .min(1)
+          .max(GET_EVENTS_MAX_WHERE_VALUES),
+      )
+      .refine(
+        (w) => {
+          const n = Object.keys(w).length;
+          return n >= 1 && n <= GET_EVENTS_MAX_WHERE_COLUMNS;
+        },
+        { message: `where names 1 to ${GET_EVENTS_MAX_WHERE_COLUMNS} columns` },
+      )
+      .optional(),
+    /** Additive (#1500): return only these columns. `onset_s` and `sample_index`
+     *  always come back; an event without its time is not usable. */
+    columns: z.array(eventColumnNameSchema).min(1).max(GET_EVENTS_MAX_COLUMNS).optional(),
   })
   .passthrough();
 export type GetEventsInput = z.infer<typeof getEventsInputSchema>;
@@ -941,11 +982,35 @@ export const eventRowSchema = z
   .passthrough();
 export type EventRow = z.infer<typeof eventRowSchema>;
 
+/** A row as `get_events` answers it: every column, or with `columns` only
+ *  `onset_s`, `sample_index` and the columns named (#1500). The cache and the
+ *  parquet read still validate each row against the full `eventRowSchema`. */
+export const eventRowOutputSchema = eventRowSchema
+  .partial()
+  .required({ onset_s: true, sample_index: true });
+export type EventRowOutput = z.infer<typeof eventRowOutputSchema>;
+
+/** One column of a recording's events, as `columns_summary` describes it. */
+export const eventColumnSummarySchema = z
+  .object({
+    name: z.string(),
+    distinct_count: z.number().int().nonnegative(),
+    null_count: z.number().int().nonnegative(),
+    /** Each distinct value (as a string) and how many rows hold it, most common
+     *  first. Null when the column has more than `GET_EVENTS_SUMMARY_MAX_VALUES`
+     *  distinct values or one longer than `GET_EVENTS_SUMMARY_MAX_VALUE_CHARS`. */
+    values: z
+      .array(z.object({ value: z.string(), count: z.number().int().positive() }).passthrough())
+      .nullable(),
+  })
+  .passthrough();
+export type EventColumnSummary = z.infer<typeof eventColumnSummarySchema>;
+
 export const getEventsOutputSchema = z
   .object({
     dataset_id: z.string().regex(DATASET_ID_RE),
     recording: z.string(),
-    events: z.array(eventRowSchema),
+    events: z.array(eventRowOutputSchema),
     source: z.enum(["events_parquet", "events_tsv_fallback"]),
     estimated: z.boolean(),
     /** Additive, phase 3: pagination facts mirroring `list_recordings`'.
@@ -958,6 +1023,10 @@ export const getEventsOutputSchema = z
     /** A short caveat, e.g. "no events file found next to this recording"
      *  (the fallback's clean-404 case). Null when there is none. */
     note: z.string().nullable().optional(),
+    /** Additive (#1500): every column of the recording's events for the group
+     *  answered, except `onset_s` and `sample_index`, computed BEFORE `where`, so
+     *  it says what a filter can ask for. `total_count` counts after `where`. */
+    columns_summary: z.array(eventColumnSummarySchema).optional(),
     envelope: provenanceEnvelopeSchema.optional(),
   })
   .passthrough();

@@ -302,6 +302,9 @@ describe("listRecordingsOutputSchema parity", () => {
 // get_events (epic #1065 phase 3, issue #1295)
 // ---------------------------------------------------------------------------
 
+const ONE = { dataset_id: "nm000329", recording: "x.zarr" };
+const range = (n: number) => Array.from({ length: n }, (_, i) => i);
+
 describe("getEventsInputSchema parity", () => {
   const cases: Array<[string, unknown]> = [
     [
@@ -320,6 +323,40 @@ describe("getEventsInputSchema parity", () => {
       "unknown top-level key -- passthrough keeps it",
       { dataset_id: "nm000329", recording: "x.zarr", future_field: "x" },
     ],
+    [
+      "where with string and number values, and columns (#1500)",
+      {
+        dataset_id: "nm000329",
+        recording: "x.zarr",
+        where: { trial_type: ["left_hand"], value: [1, "2"] },
+        columns: ["trial_type", "value"],
+      },
+    ],
+    [
+      "where at the column cap (8)",
+      { ...ONE, where: Object.fromEntries(range(8).map((i) => [`c${i}`, ["x"]])) },
+    ],
+    [
+      "where one past the column cap (9) -- rejected",
+      { ...ONE, where: Object.fromEntries(range(9).map((i) => [`c${i}`, ["x"]])) },
+    ],
+    ["where naming no column -- rejected", { ...ONE, where: {} }],
+    ["where with no values for a column -- rejected", { ...ONE, where: { trial_type: [] } }],
+    ["where at the value cap (100)", { ...ONE, where: { value: range(100) } }],
+    ["where one past the value cap (101) -- rejected", { ...ONE, where: { value: range(101) } }],
+    ["where with a boolean value -- rejected", { ...ONE, where: { value: [true] } }],
+    ["where with an empty column name -- rejected", { ...ONE, where: { "": ["x"] } }],
+    [
+      "where with a 65-character column name -- rejected",
+      { ...ONE, where: { ["c".repeat(65)]: ["x"] } },
+    ],
+    ["columns at the cap (32)", { ...ONE, columns: range(32).map((i) => `c${i}`) }],
+    [
+      "columns one past the cap (33) -- rejected",
+      { ...ONE, columns: range(33).map((i) => `c${i}`) },
+    ],
+    ["columns empty -- rejected", { ...ONE, columns: [] }],
+    ["columns not a list -- rejected", { ...ONE, columns: "trial_type" }],
   ];
   for (const [label, input] of cases) {
     test(label, () => assertParity(getEventsInputSchema, getEventsInputSchema4, input, label));
@@ -361,6 +398,53 @@ describe("getEventsOutputSchema parity", () => {
     [
       "unknown key nested inside an event row -- passthrough keeps it (subject/session/etc.)",
       { ...base, events: [{ ...oneEvent, subject: "1", session: "0" }] },
+    ],
+    [
+      "a projected row: the two times and a named column, no store_path or group_name (#1500)",
+      {
+        ...base,
+        events: [{ onset_s: 1.5, sample_index: 375, event_type: "face" }],
+        total_count: 1,
+      },
+    ],
+    [
+      "a row without onset_s -- rejected",
+      { ...base, events: [{ sample_index: 375, trial_type: "stimulus" }] },
+    ],
+    [
+      "a row without sample_index -- rejected",
+      { ...base, events: [{ onset_s: 1.5, trial_type: "stimulus" }] },
+    ],
+    [
+      "columns_summary with a listed and an unlisted column",
+      {
+        ...base,
+        columns_summary: [
+          {
+            name: "trial_type",
+            distinct_count: 2,
+            null_count: 0,
+            values: [
+              { value: "left_hand", count: 36 },
+              { value: "right_hand", count: 36 },
+            ],
+          },
+          { name: "sample", distinct_count: 72, null_count: 0, values: null },
+        ],
+      },
+    ],
+    [
+      "columns_summary with a zero count -- rejected",
+      {
+        ...base,
+        columns_summary: [
+          { name: "x", distinct_count: 1, null_count: 0, values: [{ value: "a", count: 0 }] },
+        ],
+      },
+    ],
+    [
+      "columns_summary without values -- rejected (null says unlisted; absent says nothing)",
+      { ...base, columns_summary: [{ name: "x", distinct_count: 1, null_count: 0 }] },
     ],
   ];
   for (const [label, input] of cases) {
