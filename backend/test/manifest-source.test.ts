@@ -31,6 +31,7 @@ import {
   type ManifestSource,
   manifestCacheKey,
   readManifest,
+  resetEdgeCopyNotices,
 } from "../src/services/manifest-source";
 import { DrainingCache, InMemoryCache, StalledCache } from "./helpers/cache";
 import { largeManifestText } from "./helpers/large-manifest";
@@ -276,15 +277,17 @@ describe("the cache can slow a request, never break it", () => {
 });
 
 describe("the cache write never holds an answer back, and says why it failed", () => {
-  /** Run `work` with console.warn and console.error captured. */
-  async function capturing<T>(work: () => Promise<T>) {
+  /** Run `work` with console.log, console.warn and console.error captured. */
+  async function capturingLogs<T>(work: () => Promise<T>) {
     const lines: string[] = [];
-    const saved = { warn: console.warn, error: console.error };
+    const saved = { log: console.log, warn: console.warn, error: console.error };
+    console.log = (...args: unknown[]) => lines.push(`log ${args.join(" ")}`);
     console.warn = (...args: unknown[]) => lines.push(`warn ${args.join(" ")}`);
     console.error = (...args: unknown[]) => lines.push(`error ${args.join(" ")}`);
     try {
       return { result: await work(), lines };
     } finally {
+      console.log = saved.log;
       console.warn = saved.warn;
       console.error = saved.error;
     }
@@ -306,9 +309,31 @@ describe("the cache write never holds an answer back, and says why it failed", (
     expect(deferred).toHaveLength(1);
   });
 
+  test("the first store and the first 304 answer are announced once per isolate", async () => {
+    s3.put(OBJECT, FIXTURE_TEXT);
+    resetEdgeCopyNotices();
+    const src = source(new DrainingCache());
+    const first = await capturingLogs(() => resolve(src, "sub-001"));
+    const second = await capturingLogs(() => resolve(src, "sub-001"));
+    const third = await capturingLogs(() => resolve(src, "sub-001"));
+    expect(first.lines.filter((l) => l.includes("stored an edge copy"))).toHaveLength(1);
+    expect(second.lines.filter((l) => l.includes("edge copy answered after a 304"))).toHaveLength(
+      1,
+    );
+    expect(third.lines.filter((l) => l.includes("[manifest-cache]"))).toEqual([]);
+    expect(traffic()).toEqual(["200", "INM 304", "INM 304"]);
+  });
+
+  test("a put that settles without reading is not announced as a stored copy", async () => {
+    s3.put(OBJECT, largeManifestText({ subjects: 30, runsPerSession: 50 }));
+    resetEdgeCopyNotices();
+    const { lines } = await capturingLogs(() => resolve(source(new InMemoryCache()), "sub-001"));
+    expect(lines.some((l) => l.includes("stored an edge copy"))).toBe(false);
+  });
+
   test("a put the writer discarded itself is logged as expected", async () => {
     s3.put(OBJECT, `${FIXTURE_TEXT.slice(0, -10)}!!!`);
-    const { result, lines } = await capturing(() => resolve(source(new DrainingCache()), ""));
+    const { result, lines } = await capturingLogs(() => resolve(source(new DrainingCache()), ""));
     expect(result).toBe("malformed");
     expect(lines.some((l) => l.startsWith("warn [manifest-cache] put ended: discarded"))).toBe(
       true,
@@ -325,7 +350,7 @@ describe("the cache write never holds an answer back, and says why it failed", (
         throw new Error("Cache API quota exceeded");
       },
     };
-    const { result, lines } = await capturing(() => resolve(source(faulty), "sub-001"));
+    const { result, lines } = await capturingLogs(() => resolve(source(faulty), "sub-001"));
     expect(result).toEqual(resolveFile(FIXTURE, "sub-001"));
     expect(
       lines.some(

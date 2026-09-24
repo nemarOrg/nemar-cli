@@ -112,6 +112,25 @@ export function manifestCacheKey(origin: string, datasetId: string, version: str
 let warnedIgnoredCondition = false;
 
 /**
+ * Which cache outcomes this isolate has already announced. Each is logged the
+ * FIRST time it happens in an isolate, which is enough for `wrangler tail` to
+ * prove the edge copy works under real workerd (a miss stores, the next use
+ * answers on a 304) without a log line on every data-plane request.
+ */
+const announced = new Set<"stored" | "answered">();
+
+function announceOnce(what: "stored" | "answered", message: string): void {
+  if (announced.has(what)) return;
+  announced.add(what);
+  console.log(message);
+}
+
+/** Forget what has been announced, so a test can watch the first time again. */
+export function resetEdgeCopyNotices(): void {
+  announced.clear();
+}
+
+/**
  * Read one manifest and answer one query from it. `makeQuery` is a factory
  * because a scan of a damaged edge copy is retried from S3 with a fresh query.
  * Transport failures (an S3 5xx, a body that breaks off) throw, as
@@ -139,7 +158,13 @@ export async function readManifest<T>(
     if (fetched.kind === "not_modified") {
       const query = makeQuery();
       const fromCopy = await scanEdgeCopy(cached.body, query, { datasetId, version, key });
-      if (fromCopy !== null) return settle(fromCopy, query);
+      if (fromCopy !== null) {
+        announceOnce(
+          "answered",
+          `[manifest-cache] edge copy answered after a 304 (first in this isolate) dataset=${datasetId} version=${version}`,
+        );
+        return settle(fromCopy, query);
+      }
       // The copy could not be read back whole, so S3 answers instead, exactly
       // as if there had been no copy. It is re-stored from that read.
       return fromS3(
@@ -335,6 +360,14 @@ class EdgeCopyWriter {
     this.putSettled = (async () => {
       try {
         await cache.put(new Request(key, { method: "GET" }), entry);
+        // Only a put that read a committed body to its end stored a copy; one
+        // that settled early (without reading) stored nothing usable.
+        if (this.state === "done" && this.discardedBecause === null) {
+          announceOnce(
+            "stored",
+            `[manifest-cache] stored an edge copy (first in this isolate) key=${this.key}`,
+          );
+        }
       } catch (err) {
         // Two different events, logged so a rising fault rate stands out from
         // the expected ones. Either way the answer is unaffected; only the
