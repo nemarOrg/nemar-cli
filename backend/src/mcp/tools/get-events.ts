@@ -249,7 +249,7 @@ export const MAX_STORE_FANOUT_ENTRIES = 2000;
 export const MAX_EVENTS_PARQUET_BYTES = 16 * 1024 * 1024;
 export const MAX_EVENTS_PARQUET_ROWS = 100_000;
 
-/** Thrown by {@link readWholeEventsParquet} when a bound is exceeded. The
+/** Thrown by {@link readEventsParquet} when a bound is exceeded. The
  *  caller already turns a throw from this path into a typed tool error, so this
  *  rides that seam rather than adding a second failure channel. */
 export class EventsParquetTooLargeError extends Error {}
