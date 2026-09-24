@@ -893,17 +893,29 @@ const BIDS_RUN_TOKEN_RE = /_run-([A-Za-z0-9]+)/;
 export function buildBidsIndex(
   files: Record<string, ManifestFile>,
 ): Record<string, BidsIndexSubjectNode> {
-  type Accum = {
-    sessions: Set<string>;
-    modalities: Map<string, Map<string, Set<string>>>;
-  };
-  const acc: Record<string, Accum> = {};
+  const builder = new BidsIndexBuilder();
+  for (const path of Object.keys(files)) builder.add(path);
+  return builder.build();
+}
 
-  for (const path of Object.keys(files)) {
+/**
+ * {@link buildBidsIndex} one path at a time, so a streamed manifest (#1502)
+ * can build the tree without holding the file list. Every step is a set
+ * insertion and the output is sorted, so neither the order paths arrive in
+ * nor a path arriving twice changes the result.
+ */
+export class BidsIndexBuilder {
+  private readonly acc: Record<
+    string,
+    { sessions: Set<string>; modalities: Map<string, Map<string, Set<string>>> }
+  > = {};
+
+  add(path: string): void {
+    const acc = this.acc;
     const parts = path.split("/");
-    if (parts.length < 2) continue;
+    if (parts.length < 2) return;
     const subject = parts[0];
-    if (!BIDS_SUB_RE.test(subject)) continue;
+    if (!BIDS_SUB_RE.test(subject)) return;
 
     let modalityIdx = 1;
     let sessionLabel: string | null = null;
@@ -924,7 +936,7 @@ export function buildBidsIndex(
 
     // No modality directory after the subject (or session) prefix -> the
     // subject is registered but this path doesn't add a modality entry.
-    if (modalityIdx >= parts.length - 1) continue;
+    if (modalityIdx >= parts.length - 1) return;
     const modality = parts[modalityIdx];
     const filename = parts[parts.length - 1];
 
@@ -932,35 +944,38 @@ export function buildBidsIndex(
       acc[subject].modalities.set(modality, new Map());
     }
     const tasksMap = acc[subject].modalities.get(modality);
-    if (!tasksMap) continue;
+    if (!tasksMap) return;
 
     const taskMatch = filename.match(BIDS_TASK_TOKEN_RE);
-    if (!taskMatch) continue;
+    if (!taskMatch) return;
     const task = taskMatch[1];
     if (!tasksMap.has(task)) tasksMap.set(task, new Set());
     const runMatch = filename.match(BIDS_RUN_TOKEN_RE);
     if (runMatch) tasksMap.get(task)?.add(runMatch[1]);
   }
 
-  const out: Record<string, BidsIndexSubjectNode> = {};
-  for (const subject of Object.keys(acc).sort()) {
-    const node = acc[subject];
-    const modalities: Record<string, BidsIndexModalityNode> = {};
-    for (const mod of [...node.modalities.keys()].sort()) {
-      const tasksMap = node.modalities.get(mod);
-      if (!tasksMap) continue;
-      const tasks: Record<string, BidsIndexTaskNode> = {};
-      for (const task of [...tasksMap.keys()].sort()) {
-        tasks[task] = { runs: [...(tasksMap.get(task) ?? [])].sort() };
+  build(): Record<string, BidsIndexSubjectNode> {
+    const acc = this.acc;
+    const out: Record<string, BidsIndexSubjectNode> = {};
+    for (const subject of Object.keys(acc).sort()) {
+      const node = acc[subject];
+      const modalities: Record<string, BidsIndexModalityNode> = {};
+      for (const mod of [...node.modalities.keys()].sort()) {
+        const tasksMap = node.modalities.get(mod);
+        if (!tasksMap) continue;
+        const tasks: Record<string, BidsIndexTaskNode> = {};
+        for (const task of [...tasksMap.keys()].sort()) {
+          tasks[task] = { runs: [...(tasksMap.get(task) ?? [])].sort() };
+        }
+        modalities[mod] = { tasks };
       }
-      modalities[mod] = { tasks };
+      out[subject] = {
+        sessions: [...node.sessions].sort(),
+        modalities,
+      };
     }
-    out[subject] = {
-      sessions: [...node.sessions].sort(),
-      modalities,
-    };
+    return out;
   }
-  return out;
 }
 
 /**
@@ -968,14 +983,64 @@ export function buildBidsIndex(
  * `ses-` prefix). Returns sorted output for byte stability.
  */
 export function deriveSessions(files: Record<string, ManifestFile>): string[] {
-  const sessions = new Set<string>();
-  for (const path of Object.keys(files)) {
+  const collector = new SessionsCollector();
+  for (const path of Object.keys(files)) collector.add(path);
+  return collector.build();
+}
+
+/** {@link deriveSessions} one path at a time; order-free for the same reason. */
+export class SessionsCollector {
+  private readonly sessions = new Set<string>();
+
+  add(path: string): void {
     const parts = path.split("/");
-    if (parts.length < 3) continue;
-    if (!BIDS_SUB_RE.test(parts[0])) continue;
-    if (BIDS_SES_RE.test(parts[1])) sessions.add(parts[1].slice("ses-".length));
+    if (parts.length < 3) return;
+    if (!BIDS_SUB_RE.test(parts[0])) return;
+    if (BIDS_SES_RE.test(parts[1])) this.sessions.add(parts[1].slice("ses-".length));
   }
-  return [...sessions].sort();
+
+  build(): string[] {
+    return [...this.sessions].sort();
+  }
+}
+
+/**
+ * Everything `metadata.json` reads from a manifest, reduced to what it keeps.
+ * Holding this instead of the manifest is what lets the route answer for a
+ * 100,000-entry dataset without materializing it (#1502): the sums and the
+ * two path-derived structures are all the document contributes.
+ */
+export interface ManifestDigest {
+  /** The manifest's own `version` field, as written (bare, e.g. "1.0.0"). */
+  version: string;
+  /** Sum of every entry's declared `size`. */
+  bytes: number;
+  /** Number of entries. */
+  files: number;
+  sessions: string[];
+  subjects: Record<string, BidsIndexSubjectNode>;
+}
+
+/**
+ * The reference digest over a whole parsed manifest: exactly the expressions
+ * `buildDatasetMetadata` evaluated inline before #1502, in the same order.
+ * The streaming route computes the same numbers without the manifest
+ * (`services/manifest-queries.ts`) and falls back to this when it cannot
+ * prove its shortcut exact.
+ */
+export function digestManifest(manifest: VersionManifest): ManifestDigest {
+  const totals = Object.values(manifest.files).reduce(
+    (acc, f) => ({ bytes: acc.bytes + f.size, files: acc.files + 1 }),
+    { bytes: 0, files: 0 },
+  );
+  const sessions = deriveSessions(manifest.files);
+  return {
+    version: manifest.version,
+    bytes: totals.bytes,
+    files: totals.files,
+    sessions,
+    subjects: buildBidsIndex(manifest.files),
+  };
 }
 
 /**
@@ -990,7 +1055,27 @@ export function buildDatasetMetadata(input: {
   latestManifest: VersionManifest | null;
   githubOrg: string;
 }): NeuroschemaDataset {
-  const { row, parsedEnrichment, versions, latestManifest, githubOrg } = input;
+  const { latestManifest, ...rest } = input;
+  return buildDatasetMetadataFromDigest({
+    ...rest,
+    manifestDigest: latestManifest ? digestManifest(latestManifest) : null,
+  });
+}
+
+/**
+ * {@link buildDatasetMetadata} from a {@link ManifestDigest} rather than the
+ * manifest itself. The route calls this one, with a digest it computed while
+ * streaming (#1502); the manifest-taking form stays for callers and tests
+ * that already hold a parsed manifest.
+ */
+export function buildDatasetMetadataFromDigest(input: {
+  row: DatasetRowForMetadata;
+  parsedEnrichment: NemarMetadata | null;
+  versions: DatasetVersionRow[];
+  manifestDigest: ManifestDigest | null;
+  githubOrg: string;
+}): NeuroschemaDataset {
+  const { row, parsedEnrichment, versions, manifestDigest, githubOrg } = input;
 
   const modalitiesCsv = splitCsv(row.modalities);
   const recordingModality = modalitiesCsv.map((m) => m.toUpperCase());
@@ -1015,34 +1100,28 @@ export function buildDatasetMetadata(input: {
 
   // Honest size (#970, epic #967 Phase 3): when the caller supplied a manifest,
   // sum ITS declared sizes live rather than trust the D1 row -- the manifest is
-  // fetched fresh from S3 (loadManifest), so it can't be stale between
-  // reindex/sweep runs the way row.file_size briefly can. `latestManifest` is
+  // fetched fresh from S3 by the route, so it can't be stale between
+  // reindex/sweep runs the way row.file_size briefly can. `manifestDigest` is
   // null, and this falls back to the (possibly stale) D1 row, in THREE cases,
   // not just "pre-manifest": (1) a genuinely pre-manifest dataset (no
   // version/v<X>.json yet); (2) page-bundle.ts deliberately passes null to skip
   // the multi-MB manifest fetch on every page-bundle response (perf), even for
-  // a fully-manifested dataset; (3) routes/data.ts's loadManifest call failed
+  // a fully-manifested dataset; (3) routes/data.ts's manifest read failed
   // (S3 error, corrupt JSON) for a dataset that DOES have a manifest. Cases 2
   // and 3 mean a healthy manifested dataset can still surface a stale D1 size
   // here -- this is a deliberate perf/availability tradeoff, not a bug.
-  const manifestTotals = latestManifest
-    ? Object.values(latestManifest.files).reduce(
-        (acc, f) => ({ bytes: acc.bytes + f.size, files: acc.files + 1 }),
-        { bytes: 0, files: 0 },
-      )
-    : null;
-  const sizeBytes = manifestTotals ? manifestTotals.bytes : row.file_size;
-  const totalFiles = manifestTotals ? manifestTotals.files : row.total_files;
+  const sizeBytes = manifestDigest ? manifestDigest.bytes : row.file_size;
+  const totalFiles = manifestDigest ? manifestDigest.files : row.total_files;
 
-  const sessionsList = latestManifest ? deriveSessions(latestManifest.files) : [];
+  const sessionsList = manifestDigest ? manifestDigest.sessions : [];
   // S3 version manifests store the version field bare (e.g. "1.0.0").
   // Coerce to tag form for wire consistency with every other version
   // field in the response and with the rest of the data.nemar.org
   // contract (`/<id>/v1.0.0/...`).
-  const bidsIndex: BidsIndex | null = latestManifest
+  const bidsIndex: BidsIndex | null = manifestDigest
     ? {
-        version: toVersionTag(latestManifest.version),
-        subjects: buildBidsIndex(latestManifest.files),
+        version: toVersionTag(manifestDigest.version),
+        subjects: manifestDigest.subjects,
       }
     : null;
 
@@ -1390,12 +1469,31 @@ export async function findLastSeenVersion(args: {
   loadManifest: (version: string) => Promise<VersionManifest | null>;
   lookback?: number;
 }): Promise<{ version: string } | null> {
+  return findLastSeenVersionBy({
+    olderVersions: args.olderVersions,
+    lookback: args.lookback,
+    containsPath: async (v) => {
+      const manifest = await args.loadManifest(v);
+      return manifest ? Object.hasOwn(manifest.files, args.path) : null;
+    },
+  });
+}
+
+/**
+ * The walk behind {@link findLastSeenVersion}, asking each older version
+ * only "does it contain the path?" (`null`: that version's manifest could not
+ * be read, so the walk moves on). The route answers the question with a
+ * streaming scan that holds nothing (#1502) instead of loading each manifest.
+ */
+export async function findLastSeenVersionBy(args: {
+  olderVersions: string[];
+  containsPath: (version: string) => Promise<boolean | null>;
+  lookback?: number;
+}): Promise<{ version: string } | null> {
   const cap = args.lookback ?? TOMBSTONE_LOOKBACK;
   const walk = args.olderVersions.slice(0, cap);
   for (const v of walk) {
-    const manifest = await args.loadManifest(v);
-    if (!manifest) continue;
-    if (Object.hasOwn(manifest.files, args.path)) return { version: v };
+    if ((await args.containsPath(v)) === true) return { version: v };
   }
   return null;
 }
@@ -1417,7 +1515,18 @@ export function diffRemovedSince(
   priorManifest: VersionManifest,
   path: string,
 ): string[] {
-  const prior = resolveFile(priorManifest, path);
+  return diffRemovedSinceResolved(currentEntries, resolveFile(priorManifest, path));
+}
+
+/**
+ * {@link diffRemovedSince} against the prior version's listing already
+ * resolved, which is what the route has once it has scanned the prior
+ * manifest for this one directory (#1502).
+ */
+export function diffRemovedSinceResolved(
+  currentEntries: DirectoryEntry[],
+  prior: ResolvedFile,
+): string[] {
   if (prior.kind !== "directory") return [];
   const currentNames = new Set(currentEntries.map((e) => e.name));
   const removed: string[] = [];
