@@ -50,7 +50,16 @@ type Verdict =
   | { kind: "no_files" }
   | { kind: "ok"; header: Record<string, unknown>; files: Record<string, unknown> };
 
-/** The contract: exactly what `loadManifest` decided from `JSON.parse`. */
+/**
+ * The contract: exactly what `loadManifest` decided from `JSON.parse`.
+ *
+ * This shape check is a COPY, kept on purpose as the oracle: `loadManifest`
+ * was removed by #1502, and the live rule is now `ManifestScanner.result()`
+ * in `src/services/manifest-scan.ts` (the `topIsObject` and `files` state it
+ * reports). If that rule is ever changed deliberately, change this copy in
+ * the same commit and say why; if only one of them changes, these tests are
+ * what should fail.
+ */
 function referenceVerdict(text: string): Verdict {
   let parsed: unknown;
   try {
