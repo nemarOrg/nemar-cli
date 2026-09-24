@@ -238,11 +238,12 @@ describe("file and directory requests answer what the whole parse answered", () 
   });
 
   test("a file removed since v1.0.0 answers the tombstone", async () => {
-    for (const path of [REMOVED_FILE, REMOVED_ROOT, REMOVED_DIR_FILE]) {
+    // The trailing-slash form is the one the walk has to strip before it asks.
+    for (const path of [REMOVED_FILE, REMOVED_ROOT, REMOVED_DIR_FILE, `${REMOVED_FILE}/`]) {
       const res = await get(`/${SMALL}/v1.1.1/${path}`);
       expect(res.status).toBe(404);
       const lastSeen = await findLastSeenVersion({
-        path,
+        path: path.replace(/\/+$/, ""),
         olderVersions: ["v1.0.0"],
         loadManifest: async (v) => (v === "v1.0.0" ? PRIOR : null),
       });
@@ -256,6 +257,19 @@ describe("file and directory requests answer what the whole parse answered", () 
         last_seen_url: `https://data.nemar.org/${SMALL}/v1.0.0/${path}`,
       });
     }
+  });
+
+  // Synthetic: no real manifest has a null entry, and the old route answered
+  // one with a TypeError, i.e. a 500. What must not happen is that error
+  // being swallowed as a failed read and relabeled "Version not published".
+  test("a null entry still reaches the error handler, as it did", async () => {
+    const text =
+      '{"version":"1.0.0","created":"2026-01-01T00:00:00Z","files":{"d/a":null,"e/b":{"key":"git:1","size":1,"checksum":"git:1"}}}';
+    seed("nm000903", "public", [["1.0.0", "2026-01-01 00:00:00"]]);
+    s3.put("/nm000903/version/v1.0.0.json", text);
+    expect(() => resolveFile(JSON.parse(text), "d")).toThrow(TypeError);
+    expect((await get("/nm000903/v1.0.0/d/?format=json")).status).toBe(500);
+    expect((await get("/nm000903/v1.0.0/e/?format=json")).status).toBe(200);
   });
 
   test("a path that never existed is a plain 404", async () => {
@@ -369,6 +383,26 @@ describe("metadata.json", () => {
       });
     });
   }
+
+  // Synthetic: every real manifest is sorted, so only this reaches the
+  // fallback that re-reads and materializes the manifest for the reference.
+  test("an unsorted manifest takes the whole-parse fallback and still matches", async () => {
+    const unsorted: VersionManifest = {
+      ...CURRENT,
+      files: Object.fromEntries(Object.entries(CURRENT.files).reverse()),
+    };
+    seed("nm000909", "public", [["1.1.1", "2026-04-04 06:05:15"]]);
+    s3.put("/nm000909/version/v1.1.1.json", JSON.stringify(unsorted));
+    const res = await get("/nm000909/metadata.json");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MetadataShape;
+    const digest = digestManifest(unsorted);
+    expect(body.data_summary?.total_files).toBe(digest.files);
+    expect(body.data_summary?.size_bytes).toBe(digest.bytes);
+    expect(body.extensions.nemar.bids_index?.subjects).toEqual(digest.subjects);
+    // Two reads: the streaming digest that gave up, then the whole one.
+    expect(s3.log.filter((r) => r.path === "/nm000909/version/v1.1.1.json")).toHaveLength(2);
+  });
 });
 
 describe("the large manifest: answers, and memory that does not follow it", () => {
