@@ -11,7 +11,7 @@
  * existing nemar-cli + git-annex flow.
  */
 
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
 import { recordAccess } from "../services/access-metrics";
 import { CONCEPT_DOI_SQL } from "../services/anonymity";
 import {
@@ -124,6 +124,24 @@ function edgeCache(): ManifestCache | null {
   return storage?.default ?? null;
 }
 
+/** Hands work to `executionCtx.waitUntil`, so it can outlive the response. */
+type Defer = (work: Promise<unknown>) => void;
+
+/**
+ * The request's `waitUntil`, or undefined where there is no execution context
+ * (Hono throws on `c.executionCtx` then, which is what `app.request` without
+ * one gives the route suites). The edge-cache write uses it so a slow or
+ * wedged `cache.put` never holds a response back.
+ */
+function deferOf(c: Context<{ Bindings: Bindings; Variables: Variables }>): Defer | undefined {
+  try {
+    const ctx = c.executionCtx;
+    return (work) => ctx.waitUntil(work);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Read a version manifest and answer ONE question about it (#1502).
  *
@@ -145,6 +163,7 @@ async function queryManifest<T>(
   datasetId: string,
   version: string,
   makeQuery: () => ManifestQuery<T>,
+  defer: Defer | undefined,
 ): Promise<{ header: ManifestHeader; answer: T } | null> {
   let read: ManifestRead<T>;
   try {
@@ -153,6 +172,7 @@ async function queryManifest<T>(
         s3: s3OptionsFromEnv(env),
         cache: edgeCache(),
         cacheOrigin: new URL(request.url).origin,
+        waitUntil: defer,
       },
       datasetId,
       version,
@@ -197,8 +217,16 @@ async function loadManifestDigest(
   request: Request,
   datasetId: string,
   version: string,
+  defer: Defer | undefined,
 ): Promise<ManifestDigest | null> {
-  const read = await queryManifest(env, request, datasetId, version, () => new DigestQuery());
+  const read = await queryManifest(
+    env,
+    request,
+    datasetId,
+    version,
+    () => new DigestQuery(),
+    defer,
+  );
   if (!read) return null;
   const { digest, unproven, excludedSizes } = read.answer;
   if (unproven !== null) {
@@ -339,6 +367,7 @@ async function manifestJsonHandler(
   request: Request,
   datasetId: string,
   versionParam: string,
+  defer: Defer | undefined,
 ): Promise<Response> {
   const dataset = await loadPublishedDataset(env, datasetId);
   if (!dataset) return notFound("Dataset not found");
@@ -358,6 +387,7 @@ async function manifestJsonHandler(
     datasetId,
     resolved.version,
     () => new EntryCountQuery(),
+    defer,
   );
   if (!counted) return notFound("Version not published");
   if (counted.answer.kind === "count" && counted.answer.count > MAX_MANIFEST_JSON_ENTRIES) {
@@ -369,6 +399,7 @@ async function manifestJsonHandler(
     datasetId,
     resolved.version,
     () => new EntriesQuery(MAX_MANIFEST_JSON_ENTRIES),
+    defer,
   );
   if (!read) return notFound("Version not published");
   if (read.answer.kind === "over_limit") {
@@ -990,6 +1021,7 @@ async function fileOrIndexHandler(
   datasetId: string,
   versionParam: string,
   rawPath: string,
+  defer: Defer | undefined,
 ): Promise<Response> {
   const isHead = request.method === "HEAD";
 
@@ -1007,6 +1039,7 @@ async function fileOrIndexHandler(
     datasetId,
     resolved.version,
     () => new ResolvePathQuery(rawPath),
+    defer,
   );
   if (!read) return notFound("Version not published");
 
@@ -1073,6 +1106,7 @@ async function fileOrIndexHandler(
           datasetId,
           v,
           () => new ContainsPathQuery(tombstonePath),
+          defer,
         );
         return found ? found.answer : null;
       },
@@ -1182,6 +1216,7 @@ async function fileOrIndexHandler(
         datasetId,
         priorVersion,
         () => new ResolvePathQuery(result.path),
+        defer,
       );
       if (prior) {
         const removed = diffRemovedSinceResolved(result.children, prior.answer);
@@ -1216,7 +1251,7 @@ async function fileOrIndexHandler(
 
 dataRoutes.get("/:datasetId/:version/manifest.json", (c) => {
   const { datasetId, version } = c.req.param();
-  return manifestJsonHandler(c.env, c.req.raw, datasetId, version);
+  return manifestJsonHandler(c.env, c.req.raw, datasetId, version, deferOf(c));
 });
 
 /**
@@ -1374,6 +1409,7 @@ async function metadataJsonHandler(
   env: Bindings,
   request: Request,
   datasetId: string,
+  defer: Defer | undefined,
 ): Promise<Response> {
   const gate = await loadPublishedDataset(env, datasetId);
   if (!gate) return notFound("Dataset not found");
@@ -1428,7 +1464,7 @@ async function metadataJsonHandler(
   if (versions.length > 0) {
     const latest = versions[0];
     const versionTag = toVersionTag(latest.version);
-    manifestDigest = await loadManifestDigest(env, request, datasetId, versionTag);
+    manifestDigest = await loadManifestDigest(env, request, datasetId, versionTag, defer);
     if (!manifestDigest) {
       console.warn(
         `[data] metadata.json: latest manifest unavailable dataset=${datasetId} version=${versionTag}; bids_index will be null`,
@@ -1483,7 +1519,7 @@ async function metadataJsonHandler(
 
 dataRoutes.get("/:datasetId/metadata.json", (c) => {
   const { datasetId } = c.req.param();
-  return metadataJsonHandler(c.env, c.req.raw, datasetId);
+  return metadataJsonHandler(c.env, c.req.raw, datasetId, deferOf(c));
 });
 
 /**
@@ -1787,7 +1823,7 @@ dataRoutes.get("/:datasetId/:version/*", (c) => {
   const prefix = `/${datasetId}/${version}/`;
   const idx = c.req.path.indexOf(prefix);
   const rawPath = idx === -1 ? "" : c.req.path.slice(idx + prefix.length);
-  return fileOrIndexHandler(c.env, c.req.raw, datasetId, version, rawPath);
+  return fileOrIndexHandler(c.env, c.req.raw, datasetId, version, rawPath, deferOf(c));
 });
 
 /**

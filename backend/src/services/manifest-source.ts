@@ -39,7 +39,8 @@
  * alone, so the cache can slow a request down but can never make it hold the
  * manifest. An entry is only committed after the scan has accepted the whole
  * document; a body that fails to scan, or that breaks off mid-read, is never
- * stored.
+ * stored. In a Worker the tail of the write goes to `waitUntil`, so the cache
+ * never delays an answer that is already known.
  */
 
 import type { ManifestQuery } from "./manifest-queries";
@@ -57,6 +58,12 @@ export interface ManifestSource {
   cacheOrigin: string;
   /** Override of {@link CACHE_STALL_MS}, for the stalled-cache test. */
   cacheStallMs?: number;
+  /**
+   * `executionCtx.waitUntil` in a Worker. With it, finishing the cache write
+   * is handed to the runtime and never delays the answer; without it (the
+   * unit suites), the answer waits for the write, at most the stall bound.
+   */
+  waitUntil?: (work: Promise<unknown>) => void;
 }
 
 /**
@@ -240,17 +247,25 @@ async function fromS3<T>(
   const etag = response.headers.get("ETag");
   const sink =
     source.cache && etag
-      ? new EdgeCopyWriter(source.cache, key, etag, source.cacheStallMs ?? CACHE_STALL_MS)
+      ? new EdgeCopyWriter(
+          source.cache,
+          key,
+          etag,
+          source.cacheStallMs ?? CACHE_STALL_MS,
+          source.waitUntil,
+        )
       : null;
   let result: ScanResult;
   try {
     result = await scanManifestStream(body, query, sink ? (chunk) => sink.write(chunk) : undefined);
   } catch (err) {
-    await sink?.discard(err);
+    await sink?.discard(
+      `the body failed mid-read: ${err instanceof Error ? err.message : String(err)}`,
+    );
     throw err;
   }
   if (result.kind === "ok") await sink?.commit();
-  else await sink?.discard(new Error(`manifest did not scan: ${result.kind}`));
+  else await sink?.discard(`the document did not scan: ${result.kind}`);
   return settle(result, query);
 }
 
@@ -286,12 +301,15 @@ class EdgeCopyWriter {
   /** Settles (never rejects) when `cache.put` does. */
   private readonly putSettled: Promise<void>;
   private putDone = false;
+  /** Why this writer errored its own body, if it did: a put failing after that is expected. */
+  private discardedBecause: string | null = null;
 
   constructor(
     cache: ManifestCache,
     private readonly key: string,
     etag: string,
     private readonly stallMs: number,
+    private readonly waitUntil: ((work: Promise<unknown>) => void) | undefined,
   ) {
     const body = new ReadableStream<Uint8Array>(
       {
@@ -318,13 +336,19 @@ class EdgeCopyWriter {
       try {
         await cache.put(new Request(key, { method: "GET" }), entry);
       } catch (err) {
-        // Expected when the write was abandoned or discarded (the body was
-        // errored on purpose); otherwise a real cache failure. Either way the
-        // answer is unaffected; only the next request's cost is.
-        console.warn(
-          `[manifest-cache] put did not complete key=${this.key}:`,
-          err instanceof Error ? err.message : String(err),
-        );
+        // Two different events, logged so a rising fault rate stands out from
+        // the expected ones. Either way the answer is unaffected; only the
+        // next request's cost is.
+        const message = err instanceof Error ? err.message : String(err);
+        if (this.discardedBecause !== null) {
+          // This writer errored the body itself: a scan that did not accept
+          // the document, or a cache write it gave up on. Expected.
+          console.warn(
+            `[manifest-cache] put ended: discarded (${this.discardedBecause}) key=${this.key}`,
+          );
+        } else {
+          console.error(`[manifest-cache] put FAILED: cache fault key=${this.key}: ${message}`);
+        }
       }
     })();
     this.putSettled.then(() => {
@@ -359,7 +383,7 @@ class EdgeCopyWriter {
     console.warn(
       `[manifest-cache] abandoning the edge-cache write (${outcome}); answering without it key=${this.key}`,
     );
-    await this.discard(new Error(`edge-cache write abandoned: ${outcome}`));
+    await this.discard(`abandoned: ${outcome}`);
   }
 
   /** The scan accepted the document: let the cache read to the end. */
@@ -368,18 +392,34 @@ class EdgeCopyWriter {
       this.state = "closed";
       this.wakePull?.();
     }
-    await this.putOrTimeout();
+    await this.finishPut();
   }
 
-  /** Error the entry's body so the cache never stores a partial copy. */
-  async discard(reason: unknown): Promise<void> {
+  /**
+   * Error the entry's body so the cache never stores a partial copy. `why`
+   * is what the put's own failure is then logged as.
+   */
+  async discard(why: string): Promise<void> {
     if (this.state !== "done") {
+      this.discardedBecause = why;
       this.drop();
       try {
-        this.controller?.error(reason);
+        this.controller?.error(new Error(`manifest edge copy discarded: ${why}`));
       } catch {
         // Already closed or errored; nothing left to stop.
       }
+    }
+    await this.finishPut();
+  }
+
+  /**
+   * Hand the rest of the put to `waitUntil` where there is one, so the answer
+   * is never held back by the cache; otherwise wait, bounded.
+   */
+  private async finishPut(): Promise<void> {
+    if (this.waitUntil) {
+      this.waitUntil(this.putSettled);
+      return;
     }
     await this.putOrTimeout();
   }

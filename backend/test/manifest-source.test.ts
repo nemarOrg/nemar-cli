@@ -275,6 +275,68 @@ describe("the cache can slow a request, never break it", () => {
   });
 });
 
+describe("the cache write never holds an answer back, and says why it failed", () => {
+  /** Run `work` with console.warn and console.error captured. */
+  async function capturing<T>(work: () => Promise<T>) {
+    const lines: string[] = [];
+    const saved = { warn: console.warn, error: console.error };
+    console.warn = (...args: unknown[]) => lines.push(`warn ${args.join(" ")}`);
+    console.error = (...args: unknown[]) => lines.push(`error ${args.join(" ")}`);
+    try {
+      return { result: await work(), lines };
+    } finally {
+      console.warn = saved.warn;
+      console.error = saved.error;
+    }
+  }
+
+  test("with waitUntil, a wedged put is handed off and the answer returns at once", async () => {
+    s3.put(OBJECT, FIXTURE_TEXT);
+    const deferred: Promise<unknown>[] = [];
+    const cache = new StalledCache();
+    const started = performance.now();
+    const answer = await resolve(
+      source(cache, { waitUntil: (work) => deferred.push(work) }),
+      "sub-001",
+    );
+    expect(answer).toEqual(resolveFile(FIXTURE, "sub-001"));
+    // CACHE_STALL_MS is 5 s; a waited-for wedged put would cost all of it.
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(cache.puts).toBe(1);
+    expect(deferred).toHaveLength(1);
+  });
+
+  test("a put the writer discarded itself is logged as expected", async () => {
+    s3.put(OBJECT, `${FIXTURE_TEXT.slice(0, -10)}!!!`);
+    const { result, lines } = await capturing(() => resolve(source(new DrainingCache()), ""));
+    expect(result).toBe("malformed");
+    expect(lines.some((l) => l.startsWith("warn [manifest-cache] put ended: discarded"))).toBe(
+      true,
+    );
+    expect(lines.some((l) => l.includes("cache fault"))).toBe(false);
+  });
+
+  test("a put the Cache API rejected on its own is logged as a fault", async () => {
+    s3.put(OBJECT, FIXTURE_TEXT);
+    const faulty: ManifestCache = {
+      match: async () => undefined,
+      put: async (_request, response) => {
+        await response.body?.cancel();
+        throw new Error("Cache API quota exceeded");
+      },
+    };
+    const { result, lines } = await capturing(() => resolve(source(faulty), "sub-001"));
+    expect(result).toEqual(resolveFile(FIXTURE, "sub-001"));
+    expect(
+      lines.some(
+        (l) =>
+          l.startsWith("error [manifest-cache] put FAILED: cache fault") &&
+          l.includes("Cache API quota exceeded"),
+      ),
+    ).toBe(true);
+  });
+});
+
 describe("memory on a miss is bounded by the lag cap, not the manifest", () => {
   function liveBytes(): number {
     Bun.gc(true);

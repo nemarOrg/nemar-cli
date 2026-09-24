@@ -41,7 +41,7 @@ import {
 import type { VersionManifest } from "../src/services/manifest";
 import { manifestCacheKey } from "../src/services/manifest-source";
 import type { Bindings, Variables } from "../src/types/bindings";
-import { DrainingCache } from "./helpers/cache";
+import { DrainingCache, StalledCache } from "./helpers/cache";
 import { freshDb, realD1 } from "./helpers/d1";
 import { largeManifestPaths, largeManifestText } from "./helpers/large-manifest";
 import { type S3ManifestStandin, startS3ManifestStandin } from "./helpers/s3-manifest-standin";
@@ -563,5 +563,83 @@ describe("the edge cache sits behind the visibility gate", () => {
     await get(`/${SMALL}/v1.1.1/participants.tsv`, { method: "HEAD" });
     expect(cache.matches).toBeGreaterThan(matchesBefore);
     expect(s3.log.length).toBeGreaterThan(0);
+  });
+});
+
+describe("a broken or stalled edge cache never breaks the route", () => {
+  let original: unknown;
+
+  beforeAll(() => {
+    original = (globalThis as { caches?: unknown }).caches;
+  });
+
+  afterAll(() => {
+    (globalThis as { caches?: unknown }).caches = original;
+  });
+
+  /** A Workers execution context: `waitUntil` collects, nothing else is used. */
+  function executionContext() {
+    const deferred: Promise<unknown>[] = [];
+    const ctx = {
+      waitUntil: (work: Promise<unknown>) => {
+        deferred.push(work);
+      },
+      passThroughOnException: () => {},
+      props: {},
+    } as unknown as ExecutionContext;
+    return { ctx, deferred };
+  }
+
+  const expectedListing = () => {
+    const resolved = resolveFile(CURRENT, "sub-001");
+    if (resolved.kind !== "directory") throw new Error("expected a directory");
+    return JSON.stringify({
+      dataset_id: SMALL,
+      version: "v1.1.1",
+      path: resolved.path,
+      kind: "directory",
+      children: resolved.children,
+    });
+  };
+
+  test("a put that never reads and never settles: answered at once, the write deferred", async () => {
+    const cache = new StalledCache();
+    (globalThis as { caches?: unknown }).caches = { default: cache };
+    const { ctx, deferred } = executionContext();
+    const started = performance.now();
+    const res = await app().request(
+      `https://data.nemar.org/${SMALL}/v1.1.1/sub-001/`,
+      JSON_ACCEPT,
+      env(),
+      ctx,
+    );
+    expect(await res.text()).toBe(expectedListing());
+    // Far under the 5 s stall bound: the wedged put was handed to waitUntil
+    // instead of being waited for.
+    expect(performance.now() - started).toBeLessThan(2000);
+    expect(cache.puts).toBe(1);
+    expect(deferred.length).toBeGreaterThan(0);
+  });
+
+  test("without an execution context the wait is bounded, and the answer still right", async () => {
+    (globalThis as { caches?: unknown }).caches = { default: new StalledCache() };
+    const res = await get(`/${SMALL}/v1.1.1/sub-001/`, JSON_ACCEPT);
+    expect(await res.text()).toBe(expectedListing());
+  }, 15_000);
+
+  test("a cache whose match and put both throw: answered from S3", async () => {
+    (globalThis as { caches?: unknown }).caches = {
+      default: {
+        match: async () => {
+          throw new Error("cache down");
+        },
+        put: async () => {
+          throw new Error("cache down");
+        },
+      },
+    };
+    const res = await get(`/${SMALL}/v1.1.1/sub-001/`, JSON_ACCEPT);
+    expect(await res.text()).toBe(expectedListing());
+    expect(s3.log.map((r) => `${r.ifNoneMatch ? "INM " : ""}${r.status}`)).toEqual(["200"]);
   });
 });
