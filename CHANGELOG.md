@@ -13,6 +13,34 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## 0.10.7 - 2026-09-25
+
+### Fixed
+
+- **data.nemar.org answers datasets with very large manifests (#1502, #1505).** Every
+  file, directory and HEAD request used to read the version's manifest whole and parse
+  it. nm000281's is 43 MB (102,532 entries), so each request for it ended in
+  `exceededMemory` (503) and took the rest of its isolate with it. The data plane now
+  streams the manifest through a scanner that keeps only what the request needs: one
+  entry for a file, one directory's children for a listing, totals and the BIDS index
+  for `metadata.json`. Answers are unchanged. A manifest broken anywhere, even after
+  the wanted entry, is still "Version not published", never a partial answer. ADR 0072
+  records the decision.
+
+### Changed
+
+- **A version's `manifest.json` is refused with 413 above 30,000 entries.** It presigns
+  every entry into one document, so no scan can bound it. The refusal carries
+  `listing_url`, the version's `?format=json` listing, to read it through instead. Below
+  the bound nothing changes. Every public dataset up to 26,410 files is under it; the
+  seven above it start at 45,424 files.
+- **The data plane keeps an edge copy of each manifest** and revalidates it with S3
+  (`If-None-Match`), so a repeat request pays for a 304 rather than the whole body.
+- **The CLI shows a refusal's reason for any status.** For the 413 above, `nemar
+  dataset download --http` says it cannot fetch that version, and says to install
+  git-annex and download without `--http`. It also shows the listing URL (#1506 tracks
+  a `--http` path for these versions).
+
 ## 0.10.6 - 2026-09-24
 
 ### Added
