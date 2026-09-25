@@ -472,12 +472,48 @@ export async function uploadManifest(
  * Fetch unsigned so a Worker-side AWS credentials outage does not also
  * take down dataset browsing. Falls back to a signed GET if unsigned
  * is rejected (private / pre-publish datasets).
+ *
+ * This reads the whole object into one string. The data plane no longer
+ * does (#1502): a large manifest is tens of megabytes, and it reads the body
+ * as a stream through {@link fetchManifestObject} instead.
  */
 export async function getManifest(
   options: PresignedUrlOptions,
   datasetId: string,
   version: string,
 ): Promise<string | null> {
+  const fetched = await fetchManifestObject(options, datasetId, version);
+  return fetched.kind === "found" ? fetched.response.text() : null;
+}
+
+/**
+ * What {@link fetchManifestObject} found. `not_modified` is only ever
+ * returned for a conditional request.
+ */
+export type ManifestObjectFetch =
+  | { kind: "found"; response: Response }
+  | { kind: "not_modified" }
+  | { kind: "absent" };
+
+/**
+ * GET a version manifest and hand back the response unread, so the caller
+ * decides whether the body is streamed or buffered. Same access strategy and
+ * the same outcomes as {@link getManifest}, which is built on it: unsigned
+ * first, a signed retry on 403, `absent` for a 404 or a 403 that survives the
+ * retry (logged, since that one means credentials rather than absence), and
+ * a throw for any other failure.
+ *
+ * `ifNoneMatch` makes the request conditional on the object having changed
+ * since the ETag the caller already holds; S3 answers 304 with no body when
+ * it has not, which is what lets the data plane's edge copy be revalidated on
+ * every use without moving the manifest's bytes again.
+ */
+export async function fetchManifestObject(
+  options: PresignedUrlOptions,
+  datasetId: string,
+  version: string,
+  conditional?: { ifNoneMatch: string },
+): Promise<ManifestObjectFetch> {
   const { bucket, region, endpointUrl } = options;
   const versionTag = version.startsWith("v") ? version : `v${version}`;
   const key = `${datasetId}/version/${versionTag}.json`;
@@ -487,25 +523,31 @@ export async function getManifest(
     "",
   );
   const url = `${origin}/${encodedKey}`;
+  const headers: Record<string, string> | undefined = conditional
+    ? { "If-None-Match": conditional.ifNoneMatch }
+    : undefined;
 
-  let response = await fetch(url);
+  let response = await fetch(url, headers ? { headers } : undefined);
   if (response.status === 403) {
     // Object exists but is not public-read (private dataset / pre-publish).
-    // Try a signed GET as fallback.
+    // Try a signed GET as fallback. The refusal's body is never read, so
+    // release it rather than leave the connection to the collector.
+    await response.body?.cancel().catch(() => {});
     try {
       const aws = createS3Client(options);
-      const signed = await aws.sign(url, { method: "GET" });
+      const signed = await aws.sign(url, { method: "GET", headers });
       response = await fetch(signed);
     } catch (err) {
       console.error(
         `[s3] getManifest signed-fallback failed dataset=${datasetId} version=${version}:`,
         err instanceof Error ? err.message : String(err),
       );
-      return null;
+      return { kind: "absent" };
     }
   }
 
-  if (response.status === 404) return null;
+  if (response.status === 304 && conditional) return { kind: "not_modified" };
+  if (response.status === 404) return { kind: "absent" };
   if (response.status === 403) {
     // Still 403 after the signed fallback: credentials are dead or IAM
     // lacks GetObject on this private manifest. Preserves the legacy
@@ -514,13 +556,13 @@ export async function getManifest(
     console.error(
       `[s3] getManifest 403 after fallback (credentials/permissions) dataset=${datasetId} version=${version}`,
     );
-    return null;
+    return { kind: "absent" };
   }
   if (!response.ok) {
     throw new Error(`Failed to get manifest: HTTP ${response.status}`);
   }
 
-  return response.text();
+  return { kind: "found", response };
 }
 
 /**

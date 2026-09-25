@@ -117,7 +117,10 @@ token is used, and the cache is keyed by request URL and NEVER by blob SHA),
 check that could not run is `unchecked` rather than clean),
 0068 (the top 100 ids of a band are reserved for standing test fixtures and the allocator
 never returns one: real datasets grow upward, fixtures are assigned downward from
-`nm099999`, and the reservation is not environment-fenced because the GitHub org is shared).
+`nm099999`, and the reservation is not environment-fenced because the GitHub org is shared),
+0072 (the data plane never reads a manifest whole: it streams it through a query that keeps
+only its answer, its edge copy answers only after S3 says 304 for the copy's ETag because
+manifests are rewritten in place, and `manifest.json` refuses more than 30,000 entries).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and

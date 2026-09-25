@@ -99,7 +99,7 @@ export class DataPlaneUnavailableError extends Error {}
  * the silent-cast failure `request()` in api/client.ts takes a schema to
  * prevent, and the same reasoning applies here.
  */
-async function getDocument<T>(
+export async function getDocument<T>(
   url: string,
   schema: { safeParse: (value: unknown) => { success: boolean; data?: T } },
   what: string,
@@ -114,9 +114,7 @@ async function getDocument<T>(
     );
   }
   if (response.status === 404) throw new DataPlaneUnavailableError(notFoundMessage());
-  if (!response.ok) {
-    throw new DataPlaneUnavailableError(`${what} could not be read (HTTP ${response.status}).`);
-  }
+  if (!response.ok) throw new DataPlaneUnavailableError(await refusalSentence(response, what));
 
   let parsed: unknown;
   try {
@@ -135,6 +133,43 @@ async function getDocument<T>(
     );
   }
   return result.data;
+}
+
+/**
+ * The sentence for a non-OK answer. The data plane says why in a JSON
+ * `error`, and that is worth more to a user than a status code, so it is read
+ * when it is there (and ignored when the body is not JSON, which is what a
+ * proxy error page is).
+ *
+ * A 413 is the one refusal with a way forward to name: `manifest.json`
+ * declines a version with more files than it lists in one response
+ * (nemarOrg/nemar-cli#1502; seven datasets, nm000281 among them). This path
+ * has no other way to learn every file's checksum algorithm, so it cannot
+ * fetch such a version by itself; git-annex can, and the body's
+ * `listing_url` lets a person browse the files. Both are said.
+ */
+async function refusalSentence(response: Response, what: string): Promise<string> {
+  let body: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = await response.json();
+    if (parsed !== null && typeof parsed === "object") body = parsed as Record<string, unknown>;
+  } catch {
+    // Not JSON: the status alone is all there is to say.
+  }
+  const detail = typeof body.error === "string" ? body.error : null;
+  if (response.status === 413) {
+    const listing = typeof body.listing_url === "string" ? body.listing_url : null;
+    return [
+      `${what} was refused (HTTP 413): ${detail ?? "it lists more files than the data service sends in one response."}`,
+      "A plain-HTTP download cannot fetch this version; install git-annex and run the download again without --http, which fetches any version.",
+      listing && !detail?.includes(listing) ? `Its files can be browsed from ${listing}` : null,
+    ]
+      .filter((line): line is string => line !== null)
+      .join(" ");
+  }
+  return detail
+    ? `${what} could not be read (HTTP ${response.status}): ${detail}`
+    : `${what} could not be read (HTTP ${response.status}).`;
 }
 
 /** Published versions of a dataset, newest first, as the data plane sees them. */

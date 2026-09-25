@@ -19,10 +19,21 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "bun";
+import { MAX_MANIFEST_JSON_ENTRIES, dataRoutes } from "../backend/src/routes/data";
+import type { Bindings } from "../backend/src/types/bindings";
+import { freshDb, realD1 } from "../backend/test/helpers/d1";
+import { largeManifestEntryCount, largeManifestText } from "../backend/test/helpers/large-manifest";
+import {
+  type S3ManifestStandin,
+  startS3ManifestStandin,
+} from "../backend/test/helpers/s3-manifest-standin";
+import { dataPlaneManifestSchema } from "../shared/contract/data-plane";
 import { buildBidsFilterArgs, matchesBidsFilter } from "../src/lib/bids-filter";
 import {
   type DataPlaneManifestEntry,
+  DataPlaneUnavailableError,
   downloadEntries,
+  getDocument,
   inspectOutputDir,
   isMetadataEntry,
   selectEntries,
@@ -389,5 +400,93 @@ describe("output directory identity", () => {
     mkdirSync(out, { recursive: true });
     writeSnapshotStamp(out, "nm000104", "v1.0.0");
     expect(inspectOutputDir(out, "nm000104", "v1.0.0")).toBeNull();
+  });
+});
+
+// The real data plane's refusal, read by the real CLI reader: the backend's
+// `dataRoutes` over a real D1 and a local S3 stand-in serve a manifest over
+// the manifest.json bound (#1502), and `getDocument` has to turn the 413 into
+// a sentence that says what to do, not "could not be read (HTTP 413)".
+describe("a refusal from the data plane reaches the user with its reason", () => {
+  let s3: S3ManifestStandin;
+  let plane: Server;
+  let plain: Server;
+  let base: string;
+  let plainBase: string;
+
+  beforeAll(() => {
+    s3 = startS3ManifestStandin();
+    const opts = { subjects: 75, runsPerSession: 50, datasetId: "nm000281" };
+    expect(largeManifestEntryCount(opts)).toBeGreaterThan(MAX_MANIFEST_JSON_ENTRIES);
+    s3.put("/nm000281/version/v1.0.3.json", largeManifestText(opts));
+    const db = freshDb();
+    db.prepare(
+      `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, is_sandbox)
+       VALUES ('nm000281', 'nm000281', 1, 'active', 'public', 0)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO dataset_versions (dataset_id, version, doi, provider, created_at)
+       VALUES ('nm000281', '1.0.3', '10.5072/FK2test', 'ezid', '2026-08-31 00:21:32')`,
+    ).run();
+    const env = {
+      DB: realD1(db),
+      ENVIRONMENT: "test",
+      DATA_BASE_URL: "https://data.nemar.org",
+      S3_ENDPOINT_URL: s3.url,
+      S3_BUCKET: "nemar",
+      AWS_REGION: "us-east-2",
+      AWS_ACCESS_KEY_ID: "AKIATEST",
+      AWS_SECRET_ACCESS_KEY: "secret",
+    } as Bindings;
+    // The data sub-app served at the root, the way data.nemar.org serves it.
+    plane = Bun.serve({ port: 0, fetch: (req) => dataRoutes.fetch(req, env) });
+    base = `http://127.0.0.1:${plane.port}`;
+    plain = Bun.serve({
+      port: 0,
+      fetch(req) {
+        if (new URL(req.url).pathname === "/json-error") {
+          return Response.json({ error: "Upstream content host unavailable" }, { status: 503 });
+        }
+        return new Response("<html>Bad Gateway</html>", {
+          status: 502,
+          headers: { "Content-Type": "text/html" },
+        });
+      },
+    });
+    plainBase = `http://127.0.0.1:${plain.port}`;
+  });
+
+  afterAll(() => {
+    plane.stop(true);
+    plain.stop(true);
+    s3.stop();
+  });
+
+  const read = (url: string) =>
+    getDocument(url, dataPlaneManifestSchema, "Manifest for nm000281 v1.0.3", () => "absent");
+
+  test("a 413 names git-annex and the listing the data plane pointed to", async () => {
+    const listing = `${base}/nm000281/v1.0.3/?format=json`;
+    const error = await read(`${base}/nm000281/v1.0.3/manifest.json`).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(DataPlaneUnavailableError);
+    const message = (error as Error).message;
+    expect(message).toContain("HTTP 413");
+    expect(message).toContain(`more than ${MAX_MANIFEST_JSON_ENTRIES} files`);
+    expect(message).toContain("install git-annex");
+    expect(message).toContain(listing);
+    // And the listing it names is one the data plane really answers.
+    expect((await fetch(listing)).status).toBe(200);
+  });
+
+  test("another refusal with a JSON reason carries the reason", async () => {
+    await expect(read(`${plainBase}/json-error`)).rejects.toThrow(
+      "Manifest for nm000281 v1.0.3 could not be read (HTTP 503): Upstream content host unavailable",
+    );
+  });
+
+  test("a refusal that is not JSON keeps the plain sentence", async () => {
+    await expect(read(`${plainBase}/proxy`)).rejects.toThrow(
+      "Manifest for nm000281 v1.0.3 could not be read (HTTP 502).",
+    );
   });
 });
