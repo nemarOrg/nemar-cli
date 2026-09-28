@@ -26,6 +26,7 @@ import type {
 } from "../../../shared/datacite-constants.js";
 import { escapeHtml } from "../lib/escape";
 import { VERSION_DOI_SQL } from "./anonymity";
+import { isArchiveStaleForLatestVersion } from "./archive-policy";
 import { isValidDatasetId } from "./datasetId";
 import type { ManifestFile, VersionManifest } from "./manifest";
 import {
@@ -1602,7 +1603,15 @@ export interface LandingPayload {
 export function buildLandingPayload(args: {
   datasetId: string;
   versionRows: DatasetVersionRow[];
-  archive?: { status?: string | null; size?: number | null; skip_reason?: string | null };
+  archive?: {
+    status?: string | null;
+    size?: number | null;
+    skip_reason?: string | null;
+    /** `sweep_stamps.archive_checked_at` (#1514): when the ready webhook or
+     *  the backfill sweep last confirmed a zip. Used only to tell a
+     *  latest-version-current 'ready' from a stale one -- see below. */
+    checked_at?: string | null;
+  };
 }): LandingPayload {
   const { datasetId, versionRows } = args;
   const versions: LandingVersion[] = versionRows.map((row) => {
@@ -1615,15 +1624,29 @@ export function buildLandingPayload(args: {
       browse_url: `/${datasetId}/${tag}/`,
     };
   });
+  const rawArchive = args.archive;
+  // Archive readiness is tracked latest-only (#752) with no notion of which
+  // version a 'ready' zip was built for beyond "whatever was newest at the
+  // time". A dataset that publishes a NEWER version after that build
+  // completed has a zip on record for a version that no longer exists at
+  // this URL (#1514, the nm000284 incident: v1.0.0's zip marked ready, then
+  // v1.0.1 published, and the page kept advertising a "ready" download that
+  // 404'd on click). Downgrade a stale 'ready' to "unknown" (null status,
+  // null size) rather than advertise it; `skip_reason` carries no
+  // per-version claim (it always describes the row's CURRENT size
+  // classification) and passes through unchanged either way.
+  const archiveIsStale =
+    rawArchive?.status === "ready" &&
+    isArchiveStaleForLatestVersion(rawArchive.checked_at, versionRows[0]?.created_at ?? null);
   return {
     dataset_id: datasetId,
     latest: versions.length > 0 ? versions[0].version : null,
     metadata_url: `/${datasetId}/metadata.json`,
     versions,
     archive: {
-      status: args.archive?.status ?? null,
-      size: args.archive?.size ?? null,
-      skip_reason: args.archive?.skip_reason ?? null,
+      status: archiveIsStale ? null : (rawArchive?.status ?? null),
+      size: archiveIsStale ? null : (rawArchive?.size ?? null),
+      skip_reason: rawArchive?.skip_reason ?? null,
     },
   };
 }

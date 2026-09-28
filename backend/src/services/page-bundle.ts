@@ -372,14 +372,20 @@ export async function buildPageBundle(
   const versionRows = await loadVersionRowsForBundle(env, datasetId);
   // Latest-only archive state (#752) so the bundle's landing payload carries the
   // skip/ready signal, matching the /<id>/ landing route (data.ts).
+  // archive_checked_at (#1514) lets buildLandingPayload tell a
+  // latest-version-current 'ready' from one that predates a newer published
+  // version -- see its own comment for the nm000284 incident this guards.
   const archiveRow = await env.DB.prepare(
-    "SELECT archive_status, archive_size, archive_skip_reason FROM datasets WHERE dataset_id = ?",
+    `SELECT archive_status, archive_size, archive_skip_reason,
+            json_extract(sweep_stamps, '$.archive_checked_at') AS archive_checked_at
+       FROM datasets WHERE dataset_id = ?`,
   )
     .bind(datasetId)
     .first<{
       archive_status: string | null;
       archive_size: number | null;
       archive_skip_reason: string | null;
+      archive_checked_at: string | null;
     }>();
   const landingPayload = buildLandingPayload({
     datasetId,
@@ -389,6 +395,7 @@ export async function buildPageBundle(
           status: archiveRow.archive_status,
           size: archiveRow.archive_size,
           skip_reason: archiveRow.archive_skip_reason,
+          checked_at: archiveRow.archive_checked_at,
         }
       : undefined,
   });
