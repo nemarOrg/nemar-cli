@@ -180,6 +180,35 @@ Harder, and worth stating plainly:
   stalled or faulted write never changes what a request answers, the same contract every other
   cache write in this codebase keeps.
 
+  **The stored copy's own TTL is seven days, and it is a DIFFERENT number from the 300 seconds
+  a client is told.** Found in review, before this shipped: the first version of this cache
+  reused the client-facing `public, max-age=300` verbatim as the STORED response's own
+  `Cache-Control`. The Workers Cache API honors that header for the entry's OWN freshness --
+  `cache.match` answers `undefined` once a copy has aged past the max-age it was stored with,
+  independent of anything the route decides afterward -- so every copy silently stopped
+  answering after five minutes, which defeats the point for a second downloader arriving later,
+  #1494's whole scenario. The two numbers answer different questions: 300 seconds bounds how
+  long an AUTHORIZATION decision may go unchecked by a downstream cache, which is what this
+  ADR's original TTL argument was about; seven days bounds how long a VERIFIED copy may sit
+  unused in the cache before it is no longer considered fresh, which is safe to set long because
+  every hit re-validates against the gate and the live manifest's blob SHA regardless of the
+  entry's age -- a stale-but-unexpired entry can still only ever answer for what the CURRENT
+  manifest says is at that path. `services/git-file-cache.ts` stores the client's original
+  `Cache-Control` under an internal-only header and restores it verbatim on every hit, so a
+  client never sees the difference between the two numbers.
+
+  **Abuse on the brokered-bytes path is bounded three ways, not by a single number.** A cache
+  hit is cheap and bounded by request volume alone (`DATA_MAX_REQUESTS`,
+  `middleware/rateLimit.ts`). A cache MISS is the expensive case -- a token mint plus a real
+  GitHub request -- and is bounded per IP by its own budget (`data-miss-ip`,
+  `checkDataMissBudget`, 10,000/60s, sized against a real cold full-dataset download), so hits
+  can never be throttled by how many other requests missed, and a scraper cannot turn "every
+  file is a miss" into an unbounded amplifier. And the manifest is still the capability list: no
+  request can make either bucket spend on a path the current manifest does not name, so the
+  blast radius of exhausting either budget is "this IP waits a minute," never "a path outside
+  the catalog is reachable." None of this is a Cloudflare zone setting; it is enforced in this
+  Worker, the same way every other bucket in `rateLimit.ts` is.
+
 ## Alternatives considered
 
 - **Redirect to `raw.githubusercontent.com` with a token in the URL.** Leaks the credential to
@@ -193,13 +222,18 @@ Harder, and worth stating plainly:
 
 - Epic #1406, issue #1403, PR #1410; the 2026-09-16 amendment is #1419, PRs #1420 (the
   attempt that deployed and did not work) and #1422 (the fix)
-- The 2026-09-28 amendment (the edge cache) is #1494 (measurement) and #1516 (implementation).
+- The 2026-09-28 amendment (the edge cache) is #1494 (measurement) and #1516 (implementation); a
+  review of #1516 found the stored-TTL bug and asked for the miss budget, both recorded above.
   Guards: `backend/test/git-file-cache.test.ts` (the cache module in isolation: key shape, hit,
-  miss, a manifest-rewrite mismatch, a faulted or stalled cache) and the "the edge cache" describe
-  block in `backend/test/git-file-broker.test.ts` (the route: a hit skips GitHub and never mints a
-  token, a private flip touches neither the cache nor GitHub, the streamed branch above the buffer
-  ceiling is never cached, HEAD and Range are unaffected, `Server-Timing` is present and
-  well-formed)
+  miss, a manifest-rewrite mismatch, a faulted or stalled cache), `backend/test/helpers/cache.test.ts`
+  (the shared test doubles' own Workers Cache API rules: expiry from a stored max-age with an
+  injectable clock, `Vary: *` refused, `Set-Cookie` never stored), and two describe blocks in
+  `backend/test/git-file-broker.test.ts`: "the edge cache" (a hit skips GitHub and never mints a
+  token, a private flip touches neither the cache nor GitHub, the stored copy's own freshness
+  survives well past the client's 300s, the streamed branch above the buffer ceiling is never
+  cached, HEAD and Range are unaffected, `Server-Timing` is present and well-formed) and "the miss
+  budget" (a miss counts and trips at 10,000/60s per IP, a hit keeps being served after the miss
+  budget trips, HEAD/a redirect/an ordinary 404 count toward neither budget)
 - The oracle for every "measured against the deployed worker" claim in the amendment is
   `test/git-broker-live.test.ts`, run against the staging data plane; it is also what caught
   #1419
