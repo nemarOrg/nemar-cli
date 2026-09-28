@@ -35,12 +35,14 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
 import { Hono } from "hono";
 import { dataRoutes } from "../src/routes/data";
+import { gitFileCacheKey } from "../src/services/git-file-cache";
 import { fetchGitTrackedFile } from "../src/services/github/git-file-broker";
 import type { Bindings, Variables } from "../src/types/bindings";
+import { DrainingCache, StalledCache } from "./helpers/cache";
 import { freshDb, realD1 } from "./helpers/d1";
 
 /**
@@ -761,5 +763,419 @@ describe("the route: the gate, then the bytes", () => {
 
     expect(res.status).toBe(404);
     expect(seen).toHaveLength(0);
+  });
+
+  describe("the edge cache (#1516)", () => {
+    let originalCaches: unknown;
+
+    beforeAll(() => {
+      originalCaches = (globalThis as { caches?: unknown }).caches;
+    });
+
+    afterEach(() => {
+      (globalThis as { caches?: unknown }).caches = originalCaches;
+    });
+
+    function install(cache: unknown): void {
+      (globalThis as { caches?: unknown }).caches = { default: cache };
+    }
+
+    /** Same shape as `manifestBody`, naming an arbitrary sha and size --
+     *  needed to simulate a manifest rewrite (ADR 0072) at the same path. */
+    function manifestBodyNaming(sha: string, size: number): string {
+      return JSON.stringify({
+        dataset_id: "nm000862",
+        version: "1.0.0",
+        doi: null,
+        concept_doi: null,
+        created: "2026-01-01T00:00:00Z",
+        files: { [PATH]: { key: `git:${sha}`, size, checksum: `git:${sha}` } },
+      });
+    }
+
+    // A second real file body and its real git blob SHA (`git hash-object`),
+    // standing in for what a manifest rewrite would point the same path at.
+    const FILE_BODY_V2 = '{"Name":"A dataset","BIDSVersion":"1.12.0"}';
+    const BLOB_SHA_V2 = "a4713cbe03fc942b472d586c7b8ddeb40b0b9124";
+
+    function rawHits(): number {
+      return seen.filter((s) => s.path === publicRawPath).length;
+    }
+
+    test("a miss fetches and stores; the identical next request is a hit with no upstream traffic", async () => {
+      const cache = new DrainingCache();
+      install(cache);
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+
+      const first = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      expect(first.status).toBe(200);
+      expect(await first.text()).toBe(FILE_BODY);
+      expect(rawHits()).toBe(1);
+      expect(
+        cache.store.get(gitFileCacheKey("http://localhost", "nm000862", VERSION, PATH)),
+      ).toBeDefined();
+
+      const second = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      expect(second.status).toBe(200);
+      expect(await second.text()).toBe(FILE_BODY);
+      // The bytes came back with zero new requests to the raw host or the
+      // blob API -- the strongest evidence available (under the PAT auth
+      // this suite uses throughout) that no token mint was attempted either:
+      // `getDatasetsToken` is called from inside `streamGitTrackedFile`,
+      // which a hit never reaches at all.
+      expect(rawHits()).toBe(1);
+    });
+
+    test("headers on a hit match what a miss would have sent, plus nothing extra", async () => {
+      install(new DrainingCache());
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length), "Content-Type": "text/plain" },
+          }),
+      });
+      const first = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      const second = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+
+      for (const name of [
+        "Content-Type",
+        "Content-Length",
+        "ETag",
+        "Cache-Control",
+        "Access-Control-Allow-Origin",
+        "X-Content-Type-Options",
+        "Content-Security-Policy",
+      ]) {
+        expect(second.headers.get(name)).toBe(first.headers.get(name));
+      }
+      // No internal bookkeeping header leaks to the client.
+      expect([...second.headers.keys()].some((k) => k.toLowerCase().includes("blob-sha"))).toBe(
+        false,
+      );
+    });
+
+    test("a manifest rewrite (ADR 0072) makes the cached entry a miss, and the NEW blob is served and stored", async () => {
+      install(new DrainingCache());
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+      const first = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      expect(await first.text()).toBe(FILE_BODY);
+
+      // Same path, a different blob -- exactly what a retag or a same-size
+      // edit behind a moved tag looks like (ADR 0066's 2026-09-16 amendment).
+      reset({
+        [manifestKey]: () =>
+          new Response(manifestBodyNaming(BLOB_SHA_V2, FILE_BODY_V2.length), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY_V2, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY_V2.length) },
+          }),
+      });
+
+      const second = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      expect(second.status).toBe(200);
+      expect(await second.text()).toBe(FILE_BODY_V2);
+      // The rewrite forced a real upstream fetch: this is not the stale entry.
+      expect(rawHits()).toBe(1);
+
+      // And the replacement sticks: a third request answers from the cache
+      // again, with the NEW content and no further upstream traffic.
+      const third = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      expect(await third.text()).toBe(FILE_BODY_V2);
+      expect(rawHits()).toBe(1);
+    });
+
+    test("a dataset that goes private is never served from the git-file cache", async () => {
+      const cache = new DrainingCache();
+      install(cache);
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+      const first = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      expect(first.status).toBe(200);
+      expect(cache.store.size).toBeGreaterThan(0);
+
+      db.prepare("UPDATE datasets SET visibility = 'private' WHERE dataset_id = ?").run("nm000862");
+      const matchesBefore = cache.matches;
+      const hitsBefore = rawHits();
+
+      const second = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+
+      expect(second.status).toBe(404);
+      // The gate ran first and rejected the request before the cache was
+      // ever asked (ADR 0066's amendment: nothing to purge, because nothing
+      // reaches the cache without re-proving visibility first) -- not merely
+      // that its answer went unused.
+      expect(cache.matches).toBe(matchesBefore);
+      expect(rawHits()).toBe(hitsBefore);
+    });
+
+    /** A Workers execution context: `waitUntil` collects, nothing else runs. */
+    function executionContext() {
+      const deferred: Promise<unknown>[] = [];
+      const ctx = {
+        waitUntil: (work: Promise<unknown>) => {
+          deferred.push(work);
+        },
+        passThroughOnException: () => {},
+        props: {},
+      } as unknown as ExecutionContext;
+      return { ctx, deferred };
+    }
+
+    test("a cache whose put never settles is handed to waitUntil, not awaited", async () => {
+      const cache = new StalledCache();
+      install(cache);
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+      const { ctx, deferred } = executionContext();
+
+      const started = performance.now();
+      const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db), ctx);
+      const elapsed = performance.now() - started;
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(FILE_BODY);
+      // Far under GIT_FILE_CACHE_STALL_MS's no-waitUntil fallback bound: the
+      // wedged put was handed off instead of being waited for.
+      expect(elapsed).toBeLessThan(200);
+      expect(cache.puts).toBe(1);
+      expect(deferred).toHaveLength(1);
+    });
+
+    test("without an execution context, a stalled cache write is bounded and the answer is still right", async () => {
+      install(new StalledCache());
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+
+      const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(FILE_BODY);
+    }, 5_000);
+
+    test("a cache that throws on match and on put still answers", async () => {
+      const broken = {
+        match: async () => {
+          throw new Error("cache down");
+        },
+        put: async () => {
+          throw new Error("cache down");
+        },
+      };
+      install(broken);
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+
+      const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(FILE_BODY);
+    });
+
+    test("above the buffer ceiling, the streamed branch is never cached", async () => {
+      const cache = new DrainingCache();
+      install(cache);
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () => streamed(FILE_BODY),
+      });
+
+      const res = await app().request(
+        `/nm000862/${VERSION}/${PATH}`,
+        {},
+        { ...env(db), BROKER_BUFFER_MAX_BYTES: String(FILE_BODY.length - 1) },
+      );
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Content-Length")).toBeNull();
+      expect(cache.store.size).toBe(0);
+
+      // And the next request fetches again -- there was nothing to answer from.
+      const before = rawHits();
+      await app().request(
+        `/nm000862/${VERSION}/${PATH}`,
+        {},
+        { ...env(db), BROKER_BUFFER_MAX_BYTES: String(FILE_BODY.length - 1) },
+      );
+      expect(rawHits()).toBeGreaterThan(before);
+    });
+
+    test("HEAD is unaffected: same headers, and it never touches the cache", async () => {
+      const cache = new DrainingCache();
+      install(cache);
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+      // Warm the cache with a GET first.
+      await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      const gitFileEntryBefore = cache.store.get(
+        gitFileCacheKey("http://localhost", "nm000862", VERSION, PATH),
+      );
+      expect(gitFileEntryBefore).toBeDefined();
+      const hitsBefore = rawHits();
+
+      const head = await app().request(`/nm000862/${VERSION}/${PATH}`, { method: "HEAD" }, env(db));
+      expect(head.status).toBe(200);
+      expect(head.headers.get("Content-Length")).toBe(String(FILE_BODY.length));
+      expect(head.headers.get("ETag")).toBe(`"git:${BLOB_SHA}"`);
+      expect(await head.text()).toBe("");
+      // HEAD never reaches GitHub (unchanged from before #1516) and the
+      // git-file cache entry it would have consulted is untouched -- HEAD's
+      // own branch in `fileOrIndexHandler` returns before `serveGitTrackedFile`
+      // is ever called.
+      expect(rawHits()).toBe(hitsBefore);
+      expect(
+        cache.store.get(gitFileCacheKey("http://localhost", "nm000862", VERSION, PATH)),
+      ).toEqual(gitFileEntryBefore);
+    });
+
+    test("a Range request is still ignored: full 200 body, on a hit exactly as on a miss", async () => {
+      install(new DrainingCache());
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+      const miss = await app().request(
+        `/nm000862/${VERSION}/${PATH}`,
+        { headers: { Range: "bytes=0-3" } },
+        env(db),
+      );
+      expect(miss.status).toBe(200);
+      expect(await miss.text()).toBe(FILE_BODY);
+
+      const hit = await app().request(
+        `/nm000862/${VERSION}/${PATH}`,
+        { headers: { Range: "bytes=0-3" } },
+        env(db),
+      );
+      expect(hit.status).toBe(200);
+      expect(await hit.text()).toBe(FILE_BODY);
+    });
+
+    test("Server-Timing is present and well formed, with `upstream` only when it ran", async () => {
+      function parse(header: string | null): Record<string, number> {
+        expect(header).not.toBeNull();
+        const out: Record<string, number> = {};
+        for (const part of (header as string).split(", ")) {
+          const m = part.match(/^(gate|manifest|cache|upstream);dur=(\d+(?:\.\d+)?)$/);
+          expect(m).not.toBeNull();
+          if (m) out[m[1]] = Number(m[2]);
+        }
+        return out;
+      }
+
+      install(new DrainingCache());
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+
+      const miss = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      const missTiming = parse(miss.headers.get("Server-Timing"));
+      expect(missTiming.gate).toBeGreaterThanOrEqual(0);
+      expect(missTiming.manifest).toBeGreaterThanOrEqual(0);
+      expect(missTiming.cache).toBeGreaterThanOrEqual(0);
+      expect(missTiming.upstream).toBeGreaterThanOrEqual(0);
+
+      const hit = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      const hitTiming = parse(hit.headers.get("Server-Timing"));
+      expect(hitTiming.cache).toBeGreaterThanOrEqual(0);
+      // No upstream stage ran on a hit.
+      expect(hitTiming.upstream).toBeUndefined();
+    });
+
+    test("without an edge cache at all (no globalThis.caches), the route behaves exactly as before #1516", async () => {
+      (globalThis as { caches?: unknown }).caches = undefined;
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+      const first = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      const second = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      expect(await first.text()).toBe(FILE_BODY);
+      expect(await second.text()).toBe(FILE_BODY);
+      // No cache anywhere -- every GET is a real upstream fetch.
+      expect(rawHits()).toBe(2);
+    });
   });
 });

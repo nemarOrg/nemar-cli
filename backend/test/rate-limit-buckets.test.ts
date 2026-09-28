@@ -337,6 +337,7 @@ function buildApp(env: Bindings): { app: Hono<AppEnv>; env: Bindings } {
   app.use("*", rateLimiter);
   app.get("/datasets", (c) => c.json({ ok: true }));
   app.get("/admin/users", (c) => c.json({ ok: true }));
+  app.get("/data/*", (c) => c.json({ ok: true }));
   return { app, env };
 }
 
@@ -552,6 +553,107 @@ describe("rateLimiter end-to-end", () => {
 
     // Restore the real clock for subsequent tests.
     ourCache.getNow = () => Date.now();
+  });
+});
+
+// --------------------------------------------------------------------------
+// The data-plane bucket, raised and taken off the hot path (#1516)
+// --------------------------------------------------------------------------
+
+describe("the data-ip bucket after #1516", () => {
+  test("DATA_MAX_REQUESTS is well above the previous 10,000 cap", () => {
+    // The number itself is justified with arithmetic where it is declared
+    // (rateLimit.ts); this just pins that it was actually raised, not only
+    // documented as raised.
+    expect(__limits.DATA_MAX_REQUESTS).toBeGreaterThanOrEqual(100_000);
+  });
+
+  test("a burst of a thousand small data-plane requests never 429s", async () => {
+    // Representative of one session's sidecar fetches (small, IP-keyed,
+    // well under the new cap) -- the shape #1494 measured as thousands of
+    // requests for one dataset download, scaled down so the test stays fast.
+    const { app, env } = buildApp(PROD_ENV);
+    const headers = { "CF-Connecting-IP": "10.99.1.1" };
+
+    let okCount = 0;
+    for (let i = 0; i < 1000; i++) {
+      const res = await hit(app, env, "/data/nm000108/v1.0.0/dataset_description.json", headers);
+      if (res.status === 200) okCount++;
+    }
+    expect(okCount).toBe(1000);
+  }, 20_000);
+
+  test("the bucket still enforces its cap at the boundary", async () => {
+    // Reaching DATA_MAX_REQUESTS by looping real requests would be slow and
+    // would not test anything the loop above doesn't already; instead, seed
+    // the bucket's own cache record one under the cap (the same
+    // `{count, warned}` shape and `rl:<kind>:<key>` URL the middleware itself
+    // writes) and confirm the very next request is the one that trips it.
+    const { app, env } = buildApp(PROD_ENV);
+    const ip = "10.99.1.2";
+    const cacheKeyUrl = `https://rate-limit.internal/rl:data-ip:${ip}`;
+    await ourCache.put(
+      new Request(cacheKeyUrl),
+      new Response(JSON.stringify({ count: __limits.DATA_MAX_REQUESTS - 1, warned: false }), {
+        headers: { "Content-Type": "application/json", "Cache-Control": "max-age=60" },
+      }),
+    );
+
+    const last = await hit(app, env, "/data/nm000108/v1.0.0/x", { "CF-Connecting-IP": ip });
+    expect(last.status).toBe(200);
+    expect(last.headers.get("X-RateLimit-Remaining")).toBe("0");
+
+    const over = await hit(app, env, "/data/nm000108/v1.0.0/x", { "CF-Connecting-IP": ip });
+    expect(over.status).toBe(429);
+    expect(over.headers.get("X-RateLimit-Bucket")).toBe("data-ip");
+  });
+
+  test("a stalled cache write never blocks a data-plane response", async () => {
+    // `app.fetch(request, env)` below supplies no execution context, so this
+    // exercises the bounded-wait fallback (`RATE_LIMIT_WRITE_STALL_MS`), not
+    // the `waitUntil` handoff a real Worker invocation would take -- the
+    // `keyKind !== "data-ip"` branch is untouched, so every other bucket
+    // keeps awaiting its write exactly as it always did.
+    class StalledPutCache implements Cache {
+      async match(): Promise<Response | undefined> {
+        return undefined;
+      }
+      put(): Promise<void> {
+        return new Promise<void>(() => {});
+      }
+      async add(): Promise<void> {
+        throw new Error("not implemented");
+      }
+      async addAll(): Promise<void> {
+        throw new Error("not implemented");
+      }
+      async delete(): Promise<boolean> {
+        return false;
+      }
+      async keys(): Promise<readonly Request[]> {
+        return [];
+      }
+      async matchAll(): Promise<readonly Response[]> {
+        return [];
+      }
+    }
+    const saved = (globalThis as { caches?: CacheStorage }).caches;
+    // biome-ignore lint/suspicious/noExplicitAny: test-only runtime patch
+    (globalThis as any).caches = { default: new StalledPutCache() } as unknown as CacheStorage;
+    try {
+      const { app, env } = buildApp(PROD_ENV);
+      const started = performance.now();
+      const res = await hit(app, env, "/data/nm000108/v1.0.0/x", {
+        "CF-Connecting-IP": "10.99.1.3",
+      });
+      const elapsed = performance.now() - started;
+      expect(res.status).toBe(200);
+      // Bounded by RATE_LIMIT_WRITE_STALL_MS (500ms), not hung indefinitely.
+      expect(elapsed).toBeLessThan(2000);
+    } finally {
+      // biome-ignore lint/suspicious/noExplicitAny: test-only runtime restore
+      (globalThis as any).caches = saved as CacheStorage;
+    }
   });
 });
 
