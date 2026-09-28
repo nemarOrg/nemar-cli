@@ -249,6 +249,43 @@ The check codes (`description_authors_named`, `description_funding_named`,
 them.
 `isPlaceholderAuthor` and `submission-minimums.ts`'s own `Authors` rule are untouched.
 
+**Follow-up from PR review (#1517), same day.**
+Three more refinements to `isBlindedEntry`, all in `backend/src/services/anonymity-sweep.ts`.
+
+`unspecified` and `placeholder` moved OUT of a free substring match and INTO the whole-entry
+vocabulary test, as ordinary core words.
+`isPlaceholderAuthor` matches those two words anywhere in the entry, and the first cut of
+`isBlindedEntry` copied that, which fires on "National Institutes of Health Unspecified
+Program" and "Placeholderville Foundation" -- real funders that merely CONTAIN the word, the
+same class of bug #1515 itself was.
+Folded into the vocabulary, "Unspecified" and "Placeholder" alone (or bracketed) still blind a
+field, but a real name carrying the word alongside other content does not.
+
+An entry built ENTIRELY from vocabulary words -- "Funding details available after acceptance",
+"Grant Information Not Available", "Grant Award Not Yet Available" -- is blinded even though it
+names no specific redaction reason.
+This is accepted, not fixed: an entry made of nothing but stock words has no identifying
+content left to leak, by construction, and the test suite pins these three examples so a future
+vocabulary addition has to keep proving that.
+
+A narrow, explicit list of "no funding received" and "not applicable" declarations
+(`NO_FUNDING_DECLARATION`) is recognized as naming nobody -- "None declared", "No funding was
+received for this work", "Not applicable" -- which closes a false positive of the same class as
+#1515 in the opposite direction (a legitimate non-answer reported as naming a funder). It is a
+whole-entry anchor, not a token-vocabulary rule, specifically so "No funding from NIH" and "Not
+funded by the Wellcome Trust" keep failing it: the declaration has to be the entire entry, and a
+funder named after it is exactly the content this predicate exists to still report.
+
+**A known, accepted limitation: the vocabulary is English-only.**
+`BLINDED_CORE_WORDS`, `BLINDED_CONNECTOR_WORDS` and `NO_FUNDING_DECLARATION` all match English
+words and phrases.
+A depositor who blinds a field in another language -- "Anonymisiert", "Anónimo" -- is not
+recognized, and the entry is reported as naming someone even though it does not.
+That is the SAFE direction for a check whose job is to never assume clean (ADR 0005, ADR 0054):
+an over-reported finding costs a depositor a look at a sentence that was already fine, while an
+under-reported one is the disclosure this sweep exists to catch.
+Extending the vocabulary to other languages is future work, not a defect in this one.
+
 ## Consequences
 
 - The sweep is PRODUCTION-ONLY on the cron and deliberately absent from
@@ -316,3 +353,9 @@ them.
   Foundation" / "Blinded Veterans Association" / real grant numbers still reported -- driven
   both at the `isBlindedEntry`/`scanDepositFile` unit level and end to end through
   `runAnonymitySweep`.
+- The same-day PR-review follow-up (#1517) added its own tests to
+  `backend/test/anonymity-sweep.test.ts`: "unspecified"/"placeholder" as a whole token rather
+  than a substring (both directions), the three vocabulary-only entries pinned as intentionally
+  blinded, and the no-funding/not-applicable declarations (both directions, including "No
+  funding from NIH" and "Not funded by the Wellcome Trust" still reported). All four were
+  confirmed to fail when the corresponding code was disabled, then restored.
