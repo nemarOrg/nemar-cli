@@ -51,6 +51,37 @@ async function gitBlobSha(bytes: Uint8Array): Promise<string> {
     .join("");
 }
 
+/**
+ * Backs ONLY the rate limiter's own counter keys (`rate-limit.internal/rl:...`);
+ * every other key -- the git-file content cache, the manifest cache, both of
+ * which also read `caches.default` -- is always a miss and every write to one
+ * is silently dropped. Installed for the "before" phase (review: #1519) so
+ * `checkDataMissBudget` behaves exactly as it does in production (a working
+ * counter, no fail-open) while the content and manifest caches stay exactly
+ * as absent as they were before this class existed (`globalThis.caches =
+ * undefined`) -- without it, EVERY "before" miss threw
+ * `caches.default is undefined` inside `checkDataMissBudget`'s try/catch and
+ * logged `[rate-limit] cache failure`, hundreds of lines and exception
+ * overhead that neither production nor the pre-#1516 code ever paid.
+ */
+class RateLimitOnlyCache implements Pick<Cache, "match" | "put"> {
+  private counters = new Map<string, Response>();
+  private static isCounterKey(request: RequestInfo | URL): boolean {
+    const url = request instanceof Request ? request.url : String(request);
+    return url.startsWith("https://rate-limit.internal/");
+  }
+  async match(request: RequestInfo | URL): Promise<Response | undefined> {
+    if (!RateLimitOnlyCache.isCounterKey(request)) return undefined;
+    const url = request instanceof Request ? request.url : String(request);
+    return this.counters.get(url)?.clone();
+  }
+  async put(request: RequestInfo | URL, response: Response): Promise<void> {
+    if (!RateLimitOnlyCache.isCounterKey(request)) return;
+    const url = request instanceof Request ? request.url : String(request);
+    this.counters.set(url, response.clone());
+  }
+}
+
 interface Fixture {
   paths: string[];
   bidsPathOf(i: number): string;
@@ -185,10 +216,15 @@ async function main() {
 
   const indices = fixture.paths.map((_, i) => i);
 
-  // ---- BEFORE: no edge cache installed. Every request is a real upstream
-  // fetch, exactly the shape the route had before #1516 (edgeCache()
-  // returns null and cacheWrite is never offered).
-  (globalThis as { caches?: unknown }).caches = undefined;
+  // ---- BEFORE: no CONTENT or manifest caching -- every request is a real
+  // upstream fetch, exactly the shape the route had before #1516
+  // (`edgeCache()` sees a cache object, but `RateLimitOnlyCache` answers
+  // every non-rate-limit key as an absent miss with a no-op write, so
+  // neither cache actually does anything). The rate limiter's OWN counter
+  // still works normally against this same object, matching production
+  // (`checkDataMissBudget` always has a real `caches.default`) instead of
+  // throwing and logging a fail-open on every single miss.
+  (globalThis as { caches?: unknown }).caches = { default: new RateLimitOnlyCache() };
   upstreamRequests = 0;
   const beforeFirst = await fetchFile(0);
   const beforeWall = await parallelWallClock(indices, PARALLELISM);
