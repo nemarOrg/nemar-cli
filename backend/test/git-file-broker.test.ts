@@ -38,6 +38,7 @@ import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
 import { Hono } from "hono";
+import { __limits } from "../src/middleware/rateLimit";
 import { dataRoutes } from "../src/routes/data";
 import { gitFileCacheKey } from "../src/services/git-file-cache";
 import { fetchGitTrackedFile } from "../src/services/github/git-file-broker";
@@ -865,6 +866,51 @@ describe("the route: the gate, then the bytes", () => {
       expect([...second.headers.keys()].some((k) => k.toLowerCase().includes("blob-sha"))).toBe(
         false,
       );
+      expect(second.headers.has("X-Nemar-Cache-Client-Cache-Control")).toBe(false);
+      // The literal value, not just "equal to the miss's" -- ADR 0066's
+      // number, unchanged by #1516.
+      expect(second.headers.get("Cache-Control")).toBe("public, max-age=300");
+    });
+
+    test("the stored copy's OWN freshness is not the client's 300s (review: the TTL bug)", async () => {
+      // The bug this test exists to catch: an earlier version of this cache
+      // reused the client-facing `public, max-age=300` verbatim as the
+      // STORED response's own `Cache-Control`. The real Workers Cache API
+      // honors that for the entry's OWN freshness, so `cache.match` would
+      // have started answering `undefined` after 300 seconds regardless of
+      // what the route decided -- defeating #1494's cross-session scenario
+      // silently, since every symptom looks identical to "there was no
+      // traffic in between." `DrainingCache.getNow` simulates the clock
+      // advancing without a real five-minute sleep.
+      const cache = new DrainingCache();
+      install(cache);
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+
+      const first = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      expect(first.status).toBe(200);
+      const storedAt = Date.now();
+
+      // 301 seconds later: past the CLIENT'S 300s Cache-Control, well inside
+      // GIT_FILE_CACHE_TTL_SECONDS (seven days).
+      cache.getNow = () => storedAt + 301_000;
+      const hitsBefore = rawHits();
+      const second = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+
+      expect(second.status).toBe(200);
+      expect(await second.text()).toBe(FILE_BODY);
+      // Still a hit: no new upstream request, and the client still sees
+      // exactly today's 300s value, not the internal seven-day one.
+      expect(rawHits()).toBe(hitsBefore);
+      expect(second.headers.get("Cache-Control")).toBe("public, max-age=300");
     });
 
     test("a manifest rewrite (ADR 0072) makes the cached entry a miss, and the NEW blob is served and stored", async () => {
@@ -976,8 +1022,11 @@ describe("the route: the gate, then the bytes", () => {
       // Far under GIT_FILE_CACHE_STALL_MS's no-waitUntil fallback bound: the
       // wedged put was handed off instead of being waited for.
       expect(elapsed).toBeLessThan(200);
-      expect(cache.puts).toBe(1);
-      expect(deferred).toHaveLength(1);
+      // Two writes share this one stalled cache: the git-file entry itself,
+      // and the miss-budget counter (#1516 review) -- both handed to
+      // waitUntil, neither awaited.
+      expect(cache.puts).toBe(2);
+      expect(deferred).toHaveLength(2);
     });
 
     test("without an execution context, a stalled cache write is bounded and the answer is still right", async () => {
@@ -1043,7 +1092,12 @@ describe("the route: the gate, then the bytes", () => {
       );
       expect(res.status).toBe(200);
       expect(res.headers.get("Content-Length")).toBeNull();
-      expect(cache.store.size).toBe(0);
+      // Not "the store is empty": it legitimately holds the miss-budget
+      // counter entry (#1516 review) now, which shares this same cache. Only
+      // the GIT-FILE entry itself must be absent.
+      expect(
+        cache.store.get(gitFileCacheKey("http://localhost", "nm000862", VERSION, PATH)),
+      ).toBeUndefined();
 
       // And the next request fetches again -- there was nothing to answer from.
       const before = rawHits();
@@ -1176,6 +1230,188 @@ describe("the route: the gate, then the bytes", () => {
       expect(await second.text()).toBe(FILE_BODY);
       // No cache anywhere -- every GET is a real upstream fetch.
       expect(rawHits()).toBe(2);
+    });
+
+    describe("the miss budget (#1516 review)", () => {
+      const PATH2 = "CHANGES.md";
+      const SECOND_BODY = "nothing changed";
+      const SECOND_BLOB_SHA = "f906b97310d39c554b0f699aea54901533f2076b";
+      const ANNEX_PATH = "sub-01/eeg/data.set";
+      const MISS_IP = "203.0.113.50";
+      const secondRawPath = `/nemarDatasets/nm000862/${VERSION}/${PATH2}`;
+
+      function manifestBodyTwoFilesAndAnAnnex(): string {
+        return JSON.stringify({
+          dataset_id: "nm000862",
+          version: "1.0.0",
+          doi: null,
+          concept_doi: null,
+          created: "2026-01-01T00:00:00Z",
+          files: {
+            [PATH]: { key: `git:${BLOB_SHA}`, size: FILE_BODY.length, checksum: `git:${BLOB_SHA}` },
+            [PATH2]: {
+              key: `git:${SECOND_BLOB_SHA}`,
+              size: SECOND_BODY.length,
+              checksum: `git:${SECOND_BLOB_SHA}`,
+            },
+            [ANNEX_PATH]: { key: "SHA256E-s10--aaaa.set", size: 10, checksum: "sha256:aaaa" },
+          },
+        });
+      }
+
+      /** Seed the miss budget's own counter directly, the same shape
+       *  `checkDataMissBudget` itself writes, so a test can put the counter
+       *  AT the limit without a 10,000-request loop. */
+      function seedMissBudgetCount(cache: DrainingCache, ip: string, count: number): void {
+        cache.store.set(`https://rate-limit.internal/rl:data-miss-ip:${ip}`, {
+          body: new TextEncoder().encode(JSON.stringify({ count })),
+          status: 200,
+          headers: new Headers({
+            "Content-Type": "application/json",
+            "Cache-Control": "max-age=60",
+          }),
+          // Without this, the stricter cache double (#1516 review) treats a
+          // directly-injected entry as stored at time 0 and therefore always
+          // already past its own 60s max-age -- the exact class of bug that
+          // review caught in the git-file cache itself.
+          storedAtMs: cache.getNow(),
+        });
+      }
+
+      test("a miss counts toward its own per-IP budget, independent of data-ip, and trips at the limit", async () => {
+        const cache = new DrainingCache();
+        install(cache);
+        const db = freshDb();
+        seed(db, "nm000862", "public");
+        reset({
+          [manifestKey]: () => new Response(manifestBodyTwoFilesAndAnAnnex(), { status: 200 }),
+          [publicRawPath]: () =>
+            new Response(FILE_BODY, {
+              status: 200,
+              headers: { "Content-Length": String(FILE_BODY.length) },
+            }),
+          [secondRawPath]: () =>
+            new Response(SECOND_BODY, {
+              status: 200,
+              headers: { "Content-Length": String(SECOND_BODY.length) },
+            }),
+        });
+        seedMissBudgetCount(cache, MISS_IP, __limits.DATA_MISS_MAX_REQUESTS - 1);
+
+        // The request that reaches the limit: still a genuine miss, still served.
+        const atLimit = await app().request(
+          `/nm000862/${VERSION}/${PATH}`,
+          { headers: { "CF-Connecting-IP": MISS_IP } },
+          env(db),
+        );
+        expect(atLimit.status).toBe(200);
+        expect(await atLimit.text()).toBe(FILE_BODY);
+
+        // A second, DIFFERENT file -- still a genuine miss -- is refused.
+        const overLimit = await app().request(
+          `/nm000862/${VERSION}/${PATH2}`,
+          { headers: { "CF-Connecting-IP": MISS_IP } },
+          env(db),
+        );
+        expect(overLimit.status).toBe(429);
+        expect(overLimit.headers.get("X-RateLimit-Bucket")).toBe("data-miss-ip");
+        expect(overLimit.headers.get("Retry-After")).toBe("60");
+        expect(overLimit.headers.get("X-RateLimit-Remaining")).toBe("0");
+        expect(await overLimit.json()).toMatchObject({ error: "Rate limit exceeded" });
+      });
+
+      test("a hit is still served after the miss budget is exhausted", async () => {
+        const cache = new DrainingCache();
+        install(cache);
+        const db = freshDb();
+        seed(db, "nm000862", "public");
+        reset({
+          [manifestKey]: () => new Response(manifestBodyTwoFilesAndAnAnnex(), { status: 200 }),
+          [publicRawPath]: () =>
+            new Response(FILE_BODY, {
+              status: 200,
+              headers: { "Content-Length": String(FILE_BODY.length) },
+            }),
+          [secondRawPath]: () =>
+            new Response(SECOND_BODY, {
+              status: 200,
+              headers: { "Content-Length": String(SECOND_BODY.length) },
+            }),
+        });
+
+        // Warm the content cache for PATH from an UNTHROTTLED IP first.
+        const warm = await app().request(
+          `/nm000862/${VERSION}/${PATH}`,
+          { headers: { "CF-Connecting-IP": "203.0.113.51" } },
+          env(db),
+        );
+        expect(warm.status).toBe(200);
+
+        // Now exhaust the miss budget for a DIFFERENT ip.
+        seedMissBudgetCount(cache, MISS_IP, __limits.DATA_MISS_MAX_REQUESTS);
+        const missRefused = await app().request(
+          `/nm000862/${VERSION}/${PATH2}`,
+          { headers: { "CF-Connecting-IP": MISS_IP } },
+          env(db),
+        );
+        expect(missRefused.status).toBe(429);
+
+        // The already-cached PATH is still served to the SAME exhausted IP --
+        // a hit is never charged against, or blocked by, the miss budget.
+        const hitStillServed = await app().request(
+          `/nm000862/${VERSION}/${PATH}`,
+          { headers: { "CF-Connecting-IP": MISS_IP } },
+          env(db),
+        );
+        expect(hitStillServed.status).toBe(200);
+        expect(await hitStillServed.text()).toBe(FILE_BODY);
+      });
+
+      test("HEAD, an annexed file's redirect, and an ordinary 404 do not count against the miss budget", async () => {
+        const cache = new DrainingCache();
+        install(cache);
+        const db = freshDb();
+        seed(db, "nm000862", "public");
+        reset({
+          [manifestKey]: () => new Response(manifestBodyTwoFilesAndAnAnnex(), { status: 200 }),
+          [publicRawPath]: () =>
+            new Response(FILE_BODY, {
+              status: 200,
+              headers: { "Content-Length": String(FILE_BODY.length) },
+            }),
+        });
+        seedMissBudgetCount(cache, MISS_IP, __limits.DATA_MISS_MAX_REQUESTS - 1);
+
+        const head = await app().request(
+          `/nm000862/${VERSION}/${PATH2}`,
+          { method: "HEAD", headers: { "CF-Connecting-IP": MISS_IP } },
+          env(db),
+        );
+        expect(head.status).toBe(200);
+
+        const redirect = await app().request(
+          `/nm000862/${VERSION}/${ANNEX_PATH}`,
+          { headers: { "CF-Connecting-IP": MISS_IP }, redirect: "manual" },
+          env(db),
+        );
+        expect(redirect.status).toBe(302);
+
+        const notFound = await app().request(
+          `/nm000862/${VERSION}/does-not-exist.json`,
+          { headers: { "CF-Connecting-IP": MISS_IP } },
+          env(db),
+        );
+        expect(notFound.status).toBe(404);
+
+        // None of the three spent the one remaining slot: this genuine miss
+        // is still the request AT the limit, not over it.
+        const stillAllowed = await app().request(
+          `/nm000862/${VERSION}/${PATH}`,
+          { headers: { "CF-Connecting-IP": MISS_IP } },
+          env(db),
+        );
+        expect(stillAllowed.status).toBe(200);
+      });
     });
   });
 });
