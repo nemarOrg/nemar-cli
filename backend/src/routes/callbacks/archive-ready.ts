@@ -8,6 +8,7 @@
  */
 
 import { timingSafeEqual } from "../../lib/constant-time.js";
+import { ARCHIVE_SKIP_UPDATE_SQL, shouldSkipArchive } from "../../services/archive-policy.js";
 import { MAX_ARCHIVE_RETRIES, decideArchiveRetry } from "../../services/archive-retry.js";
 import { isValidDatasetId } from "../../services/datasetId.js";
 import { getDatasetsToken } from "../../services/github-auth.js";
@@ -229,6 +230,11 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
     // daily archiveRetrySweep is the backstop. See services/archive-retry.ts.
     let changed = 0;
     let retry: ReturnType<typeof decideArchiveRetry> | null = null;
+    // The row's declared totals, carried from the 'failed' branch's read to the
+    // retry dispatch below (#1514) so the workflow's preflight has a fallback
+    // when the version manifest isn't publicly fetchable yet.
+    let retryTotalBytes: number | null = null;
+    let retryTotalFiles: number | null = null;
     try {
       if (status === "ready") {
         const { complete, absent, declared, unreadable, malformed } =
@@ -271,37 +277,60 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
         // Reset archive_retry_count too (cross-epic with #736): a skip is a clean
         // state transition, so a prior failed-retry history must not block a future
         // auto-retry if the dataset later shrinks and a `failed` arrives.
-        const result = await c.env.DB.prepare(
-          `UPDATE datasets
-           SET archive_skip_reason = ?,
-               archive_status = NULL,
-               archive_retry_count = 0,
-               sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now'))
-           WHERE dataset_id = ?`,
-        )
+        const result = await c.env.DB.prepare(ARCHIVE_SKIP_UPDATE_SQL)
           .bind(body.reason ?? "archive skipped (size policy)", body.dataset_id)
           .run();
         changed = result.meta.changes ?? 0;
       } else {
-        // Read the current dispatch count to decide whether to re-dispatch. The
-        // count is NOT advanced here -- it is incremented only after a successful
-        // dispatch (in the waitUntil below), so a failed dispatch can't consume a
-        // retry slot. Matches archiveRetrySweep's dispatch-then-increment order.
+        // status === "failed". Read the current dispatch count AND the row's
+        // declared size (#1514): a dataset that has grown past the archive
+        // policy since its last good build must not auto-retry into another
+        // doomed, oversized run just because this callback says 'failed' --
+        // the dispatcher applies the same policy the workflow's own preflight
+        // would, and skips instead.
         const row = await c.env.DB.prepare(
-          "SELECT archive_retry_count FROM datasets WHERE dataset_id = ?",
+          "SELECT archive_retry_count, file_size, total_files FROM datasets WHERE dataset_id = ?",
         )
           .bind(body.dataset_id)
-          .first<{ archive_retry_count: number }>();
-        retry = decideArchiveRetry("failed", row?.archive_retry_count ?? 0, body.version);
-        const result = await c.env.DB.prepare(
-          `UPDATE datasets
-           SET archive_status = 'failed',
-               sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now'))
-           WHERE dataset_id = ?`,
-        )
-          .bind(body.dataset_id)
-          .run();
-        changed = result.meta.changes ?? 0;
+          .first<{
+            archive_retry_count: number;
+            file_size: number | null;
+            total_files: number | null;
+          }>();
+        const sizePolicy = shouldSkipArchive({
+          totalBytes: row?.file_size,
+          totalFiles: row?.total_files,
+        });
+        if (sizePolicy.skip) {
+          // Over policy right now: record the skip with the exact statement
+          // the 'skipped' branch above runs, and leave `retry` null so the
+          // dispatch block below is a no-op. A dataset in this state is
+          // never both 'failed' and over-policy at once -- skip supersedes.
+          const result = await c.env.DB.prepare(ARCHIVE_SKIP_UPDATE_SQL)
+            .bind(sizePolicy.reason ?? "archive skipped (size policy)", body.dataset_id)
+            .run();
+          changed = result.meta.changes ?? 0;
+          console.log(
+            `[archive-ready] dataset=${body.dataset_id} 'failed' callback superseded by size policy: ${sizePolicy.reason}`,
+          );
+        } else {
+          // The count is NOT advanced here -- it is incremented only after a
+          // successful dispatch (in the waitUntil below), so a failed dispatch
+          // can't consume a retry slot. Matches archiveRetrySweep's
+          // dispatch-then-increment order.
+          retry = decideArchiveRetry("failed", row?.archive_retry_count ?? 0, body.version);
+          retryTotalBytes = row?.file_size ?? null;
+          retryTotalFiles = row?.total_files ?? null;
+          const result = await c.env.DB.prepare(
+            `UPDATE datasets
+             SET archive_status = 'failed',
+                 sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now'))
+             WHERE dataset_id = ?`,
+          )
+            .bind(body.dataset_id)
+            .run();
+          changed = result.meta.changes ?? 0;
+        }
       }
     } catch (err) {
       console.error(
@@ -340,6 +369,8 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
             await triggerArchiveGeneration(retryDatasetId, retryDatasetId, retryVersion, pat, {
               s3Bucket: c.env.S3_BUCKET,
               callbackBaseUrl: c.env.API_BASE_URL,
+              totalBytes: retryTotalBytes,
+              totalFiles: retryTotalFiles,
             });
             await c.env.DB.prepare(
               "UPDATE datasets SET archive_retry_count = ? WHERE dataset_id = ?",

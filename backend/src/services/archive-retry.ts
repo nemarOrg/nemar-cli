@@ -20,6 +20,7 @@
  * records state for the observability dashboard.
  */
 import type { Bindings } from "../types/bindings.js";
+import { ARCHIVE_SKIP_UPDATE_SQL, shouldSkipArchive } from "./archive-policy.js";
 import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { triggerArchiveGeneration } from "./github.js";
@@ -115,8 +116,14 @@ export function resolveCurrentVersion(row: {
  * The version predicate stays in the WHERE clause rather than moving to the
  * loop's `!version` skip: `LIMIT 20` is the run's whole budget, and a row that
  * can never be dispatched must not consume one of the twenty slots.
+ *
+ * `file_size`/`total_files` (#1514) ride along so the loop can apply
+ * `shouldSkipArchive` before dispatching: a dataset that failed once and has
+ * since grown over the archive-size policy must not be re-dispatched into
+ * another doomed, oversized build.
  */
 export const ARCHIVE_RETRY_SWEEP_QUERY = `SELECT d.dataset_id, d.latest_version_doi, d.archive_retry_count,
+         d.file_size, d.total_files,
          (SELECT version FROM dataset_versions dv WHERE dv.dataset_id = d.dataset_id
           ORDER BY created_at DESC LIMIT 1) AS recorded_version
    FROM datasets d
@@ -134,6 +141,8 @@ interface SweepRow {
   latest_version_doi: string | null;
   recorded_version: string | null;
   archive_retry_count: number;
+  file_size: number | null;
+  total_files: number | null;
 }
 
 /**
@@ -185,10 +194,32 @@ export async function archiveRetrySweep(env: Bindings): Promise<void> {
 
   let dispatched = 0;
   let skipped = 0;
+  let overPolicy = 0;
   for (const row of candidates) {
     const version = resolveCurrentVersion(row);
     if (!version) {
       skipped++;
+      continue;
+    }
+    // The dispatcher applies the size policy before dispatching (#1514): a
+    // dataset that failed once and has since grown over ARCHIVE_MAX_BYTES/
+    // ARCHIVE_MAX_FILES must not be re-dispatched into another doomed,
+    // oversized build. Record the skip with the same statement the webhook's
+    // skip branch runs, and never dispatch.
+    const policy = shouldSkipArchive({ totalBytes: row.file_size, totalFiles: row.total_files });
+    if (policy.skip) {
+      try {
+        await env.DB.prepare(ARCHIVE_SKIP_UPDATE_SQL)
+          .bind(policy.reason ?? "archive skipped (size policy)", row.dataset_id)
+          .run();
+        overPolicy++;
+      } catch (err) {
+        console.error(
+          `[archive-retry-sweep] skip-record failed dataset=${row.dataset_id}:`,
+          err instanceof Error ? err.message : String(err),
+        );
+        skipped++;
+      }
       continue;
     }
     try {
@@ -201,6 +232,8 @@ export async function archiveRetrySweep(env: Bindings): Promise<void> {
       await triggerArchiveGeneration(row.dataset_id, row.dataset_id, version, pat, {
         s3Bucket: env.S3_BUCKET,
         callbackBaseUrl: env.API_BASE_URL,
+        totalBytes: row.file_size,
+        totalFiles: row.total_files,
       });
       await env.DB.prepare(
         `UPDATE datasets
@@ -220,6 +253,6 @@ export async function archiveRetrySweep(env: Bindings): Promise<void> {
     }
   }
   console.log(
-    `[archive-retry-sweep] candidates=${candidates.length} dispatched=${dispatched} skipped=${skipped}`,
+    `[archive-retry-sweep] candidates=${candidates.length} dispatched=${dispatched} over_policy=${overPolicy} skipped=${skipped}`,
   );
 }
