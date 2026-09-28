@@ -19,7 +19,7 @@ import {
   ANONYMITY_SWEEP_RESET_SQL,
   runAnonymitySweep,
 } from "../../services/anonymity-sweep";
-import { shouldSkipArchive } from "../../services/archive-policy";
+import { ARCHIVE_SKIP_UPDATE_SQL, decideArchiveSweepOutcome } from "../../services/archive-policy";
 import {
   AVAILABILITY_REPORT_SWEEP_MAX,
   AvailabilityReportError,
@@ -93,8 +93,14 @@ import type { AdminRouter } from "./shared";
  */
 export const ARCHIVE_SWEEP_READY_SQL =
   "UPDATE datasets SET archive_status = 'ready', archive_size = ?, sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now')), archive_skip_reason = NULL WHERE dataset_id = ?";
-export const ARCHIVE_SWEEP_SKIP_SQL =
-  "UPDATE datasets SET archive_skip_reason = ?, sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now')) WHERE dataset_id = ?";
+/**
+ * The sweep's skip path (#1514): literally `ARCHIVE_SKIP_UPDATE_SQL`, not a
+ * hand-copy. The prior copy here only set `archive_skip_reason` and left
+ * `archive_status` untouched, so a dataset that grew over the size policy
+ * after an old zip was marked 'ready' kept reading 'ready' forever -- the
+ * skip never cleared it, unlike the webhook's own skip branch.
+ */
+export const ARCHIVE_SWEEP_SKIP_SQL = ARCHIVE_SKIP_UPDATE_SQL;
 export const ARCHIVE_SWEEP_STAMP_ONLY_SQL =
   "UPDATE datasets SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now')) WHERE dataset_id = ?";
 export const ZARR_SWEEP_READY_SQL = `UPDATE datasets
@@ -224,35 +230,37 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
         });
         continue;
       }
+      // Policy wins over "a zip happens to exist" (#1514): a dataset over the
+      // size policy is ALWAYS 'skip', regardless of whether getArchiveSize
+      // found a zip under its archive prefix (grew past the ceiling since an
+      // old build, or a zip left over from before the policy existed).
+      const outcome = decideArchiveSweepOutcome(size, { file_size, total_files });
       try {
-        if (size > 0) {
-          // Clear any stale archive_skip_reason: a real zip exists (#752).
-          await db.prepare(ARCHIVE_SWEEP_READY_SQL).bind(size, dataset_id).run();
+        if (outcome.action === "ready") {
+          // Clear any stale archive_skip_reason: a real, in-policy zip exists (#752).
+          await db.prepare(ARCHIVE_SWEEP_READY_SQL).bind(outcome.size, dataset_id).run();
           ready++;
+        } else if (outcome.action === "skip") {
+          // Over the size policy: record WHY no zip is advertised
+          // (archive_skip_reason) so the UI shows the direct-download recipe
+          // instead of "missing archive", and clear archive_status the same
+          // way the ready webhook's skip branch does (#1514) -- a leftover
+          // zip must not keep reading as 'ready'.
+          await db.prepare(ARCHIVE_SWEEP_SKIP_SQL).bind(outcome.reason, dataset_id).run();
+          skipped++;
         } else {
-          // Checked, no archive on S3. If the dataset is over the size policy
-          // (#752), record WHY no zip exists (archive_skip_reason) so the UI shows
-          // the direct-download recipe instead of "missing archive". Otherwise it's
-          // genuinely absent: stamp checked_at, leave archive_status NULL.
-          const decision = shouldSkipArchive({ totalBytes: file_size, totalFiles: total_files });
-          if (decision.skip) {
-            await db
-              .prepare(ARCHIVE_SWEEP_SKIP_SQL)
-              .bind(decision.reason ?? "archive skipped (size policy)", dataset_id)
-              .run();
-            skipped++;
-          } else {
-            await db.prepare(ARCHIVE_SWEEP_STAMP_ONLY_SQL).bind(dataset_id).run();
-            absent++;
-          }
+          // Checked, no archive on S3, and in policy: genuinely absent.
+          await db.prepare(ARCHIVE_SWEEP_STAMP_ONLY_SQL).bind(dataset_id).run();
+          absent++;
         }
       } catch (err) {
-        // S3 confirmed the size; only the D1 write failed. Note the branch (ready
-        // vs skip/absent) + size so a re-run's duplicate entry is explicable and a
-        // dropped archive_skip_reason write is attributable, not masked as "ready".
+        // S3 confirmed the size; only the D1 write failed. Note the branch
+        // (ready vs skip/absent) + size so a re-run's duplicate entry is
+        // explicable and a dropped archive_skip_reason write is attributable,
+        // not masked as "ready".
         errors.push({
           dataset_id,
-          error: `d1 write [${size > 0 ? "ready" : "skip/absent"}] (s3 size=${size}): ${err instanceof Error ? err.message : String(err)}`,
+          error: `d1 write [${outcome.action}] (s3 size=${size}): ${err instanceof Error ? err.message : String(err)}`,
         });
       }
     }
