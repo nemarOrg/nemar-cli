@@ -8,6 +8,10 @@ manifest-vs-upstream length check this ADR records had never once run in product
 stands; its enforcement moved, and it was strengthened from a length comparison to a content
 one. Read "Amendment, 2026-09-16" below before relying on any `Content-Length` statement in
 this document. The decision text is left as originally written.
+**Amendment 2026-09-28 (#1516):** The Consequences bullet below reading "An edge-cache write
+for brokered files is deliberately not here" is superseded -- brokered git-tracked files are
+now cached at the edge. Read "Amendment, 2026-09-28" at that bullet for the mechanism and the
+argument that made the deferred purge-on-visibility-change design unnecessary.
 **Date:** 2026-09-14
 **Owner:** Seyed Yahya Shirazi
 
@@ -146,6 +150,36 @@ Harder, and worth stating plainly:
   together with purge-on-visibility-change, and a cache that outlives a revocation is the
   failure this ADR's TTL choice is already working around.
 
+  **Amendment, 2026-09-28 (#1516): this is no longer true, and the reason is that
+  purge-on-visibility-change turned out not to be needed.** #1494 measured a brokered file
+  costing 1.8 s cold and 22.9-38.4 s on repeat requests for the SAME URL -- no `cf-cache-status`,
+  no `age`, because the response was never written to the edge at all (a Worker response on a
+  custom domain is not stored automatically; the manifest cache added by ADR 0072 had already
+  made the same observation about its own bytes). The argument this ADR's TTL choice was already
+  making, restated as the reason a cache is now safe: **the visibility gate
+  (`loadPublishedDataset`) runs on EVERY request, before the manifest is read, before a git-file
+  cache lookup, before a token would be minted -- exactly where it always ran.** A cached copy is
+  therefore never reachable except through a request that has already re-proven the dataset is
+  public, on THAT request. There is nothing to purge on a visibility change, because there is no
+  code path from "dataset went private" to "cached bytes reach a client" that does not pass back
+  through the gate first. This is the same property PR #1505 relies on for the manifest cache
+  (tested there as "a dataset gone private is refused before the cache or S3 is touched") and
+  #1516 tests identically for this cache: flip a dataset private after a cache entry exists for
+  it, and the next request 404s without the cache or GitHub being consulted at all.
+
+  What actually changed to make this safe, since the ADR's original concern was real: nothing
+  about the gate did. What changed is recognizing that a TTL-bounded, purge-free cache and a
+  gate-that-always-runs-first are two different ways of bounding the same staleness, and this
+  broker already had the second one. `manifestCacheKey`'s reasoning (dataset- and version-scoped,
+  never content-addressed, under a path no data route serves) carries over unchanged: see
+  `gitFileCacheKey` in `services/git-file-cache.ts`. The one addition specific to a git blob,
+  which a manifest entry does not need: a stored copy is re-validated on every use against the
+  CURRENT manifest's blob SHA for that path (not the SHA true when it was stored), because a
+  manifest can be rewritten in place (ADR 0072) and a retag or same-size edit must not be served
+  from a copy of the blob that used to be there. `cache.put` runs through `waitUntil`, so a
+  stalled or faulted write never changes what a request answers, the same contract every other
+  cache write in this codebase keeps.
+
 ## Alternatives considered
 
 - **Redirect to `raw.githubusercontent.com` with a token in the URL.** Leaks the credential to
@@ -159,6 +193,13 @@ Harder, and worth stating plainly:
 
 - Epic #1406, issue #1403, PR #1410; the 2026-09-16 amendment is #1419, PRs #1420 (the
   attempt that deployed and did not work) and #1422 (the fix)
+- The 2026-09-28 amendment (the edge cache) is #1494 (measurement) and #1516 (implementation).
+  Guards: `backend/test/git-file-cache.test.ts` (the cache module in isolation: key shape, hit,
+  miss, a manifest-rewrite mismatch, a faulted or stalled cache) and the "the edge cache" describe
+  block in `backend/test/git-file-broker.test.ts` (the route: a hit skips GitHub and never mints a
+  token, a private flip touches neither the cache nor GitHub, the streamed branch above the buffer
+  ceiling is never cached, HEAD and Range are unaffected, `Server-Timing` is present and
+  well-formed)
 - The oracle for every "measured against the deployed worker" claim in the amendment is
   `test/git-broker-live.test.ts`, run against the staging data plane; it is also what caught
   #1419
