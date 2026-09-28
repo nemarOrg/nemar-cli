@@ -76,7 +76,6 @@ import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { fetchGitTrackedFile } from "./github/git-file-broker.js";
 import { GITHUB_API, ORG_NAME } from "./github/shared.js";
-import { isPlaceholderAuthor } from "./submission-minimums.js";
 import {
   ANONYMITY_ATTEMPTED_AT_PATH,
   ANONYMITY_CHECKED_AT_PATH,
@@ -632,6 +631,12 @@ export const ANONYMITY_OWNER_PROJECTION_SQL = `SELECT ${OWNER_USERNAME_SQL}, ${O
  * Coauthor"`) and an array of objects (`[{"name": "Jane Coauthor"}]`). The
  * bare string is interpretable, so it is read as a single entry rather than
  * discarded; anything else is reported.
+ *
+ * `isPlaceholder` stays a parameter, not a hardcoded call to `isBlindedEntry`
+ * below, because it is a pure predicate over strings and this function's own
+ * tests exercise it against `isPlaceholderAuthor` directly (#1515) to prove it
+ * generalizes -- the wiring that matters, which predicate `scanDepositFile`
+ * actually passes for each field, lives there instead.
  */
 export function namedEntriesIn(
   description: Record<string, unknown>,
@@ -652,6 +657,183 @@ export function namedEntriesIn(
 }
 
 /**
+ * Sentinel forms that mean "nothing here", the WHOLE entry and no more: n/a,
+ * none, tbd, todo, unknown, a run of dashes. Anchored at both ends, unlike
+ * `PLACEHOLDER_AUTHOR`'s `unspecified`/`placeholder` branches below, because
+ * those two words are unambiguous wherever they appear while a sentinel like
+ * "none" is only evidence when it is the entire entry -- "Wellcome Trust (none
+ * withheld)" is a real funder, not a placeholder.
+ */
+const EXACT_SENTINEL = /^(n\/?a|none|tbd|todo|unknown|-+)$/i;
+
+/**
+ * A value wrapped entirely in brackets -- "[Redacted]", "[TBD]",
+ * "[Unspecified1]" (the MOABB failure mode `PLACEHOLDER_AUTHOR` was written
+ * for, #817). Whole-entry, same as `PLACEHOLDER_AUTHOR`'s own bracket rule:
+ * bracketing a value is itself the placeholder convention, whatever word is
+ * inside it.
+ */
+const BRACKETED_PLACEHOLDER = /^\[.*\]$/;
+
+/** Unambiguous anywhere in the entry, matching `PLACEHOLDER_AUTHOR`'s own rule. */
+const SUBSTRING_SENTINEL = /unspecified|placeholder/i;
+
+/**
+ * Redaction verbs this predicate treats as blinding wording.
+ *
+ * Deliberately excludes "anonymous" as a STANDALONE leading-word match the way
+ * `PLACEHOLDER_AUTHOR`'s `^anonymous\b` branch does -- that branch matches any
+ * entry that merely OPENS with the word, which is correct for `Authors` (an
+ * author entry opening with "Anonymous" is asserting anonymity; NEMAR's own
+ * blinded label starts that way) but wrong for `Funding`, where "Anonymous
+ * Donor Foundation" is a real funder's name. Here "anonymous" is a token like
+ * any other core word, subject to the whole-entry test below, so it is
+ * recognized alone or combined with connector words ("Anonymous (withheld
+ * until publication)") but not when it opens a name carrying other content.
+ */
+const BLINDED_CORE_WORDS = new Set([
+  "anonymous",
+  "anonymised",
+  "anonymized",
+  "redacted",
+  "withheld",
+  "blinded",
+  "concealed",
+  "removed",
+  "omitted",
+  "hidden",
+  "available",
+]);
+
+/**
+ * Ordinary connector words a redaction SENTENCE carries alongside a core word
+ * -- "Funding information removed for review", "Redacted for double-blind
+ * review", "Available after publication". None of these alone constitutes a
+ * finding-worthy sentinel (`hasCore` below still requires a core word), so
+ * adding a word here only ever widens what a redaction sentence may contain,
+ * never what counts as one on its own.
+ */
+const BLINDED_CONNECTOR_WORDS = new Set([
+  "a",
+  "an",
+  "the",
+  "for",
+  "is",
+  "are",
+  "was",
+  "were",
+  "has",
+  "have",
+  "been",
+  "will",
+  "be",
+  "until",
+  "after",
+  "review",
+  "reviews",
+  "reviewing",
+  "double",
+  "blind",
+  "peer",
+  "publication",
+  "acceptance",
+  "information",
+  "info",
+  "details",
+  "name",
+  "names",
+  "funder",
+  "funding",
+  "fund",
+  "grant",
+  "grants",
+  "award",
+  "awards",
+  "financial",
+  "support",
+  "acknowledgment",
+  "acknowledgments",
+  "acknowledgement",
+  "acknowledgements",
+  "not",
+  "yet",
+  "known",
+  "disclosed",
+  "and",
+  "or",
+]);
+
+/**
+ * Does the WHOLE entry reduce to redaction vocabulary and nothing else?
+ *
+ * Tokenized rather than matched as a substring, on purpose: a substring test
+ * for "anonymous" or "blinded" would also fire on "Anonymous Donor
+ * Foundation" and "Blinded Veterans Association" -- real funder names that
+ * happen to start with the word NEMAR's own blinded label uses. Requiring
+ * EVERY token to be either a redaction verb or an ordinary connector word
+ * means a name carrying any OTHER token -- "Donor", "Foundation", "Veterans",
+ * a grant number -- fails the test and is reported exactly like any other
+ * name. `hasCore` guards against a sentence of nothing but connector words
+ * ("for the") passing on its own.
+ */
+function isWhollyRedactionWording(entry: string): boolean {
+  const tokens = entry
+    .toLowerCase()
+    .replace(/[.,;:!()[\]]/g, " ")
+    .split(/[\s/_-]+/)
+    .filter((t) => t.length > 0);
+  if (tokens.length === 0) return false;
+  const hasCore = tokens.some((t) => BLINDED_CORE_WORDS.has(t));
+  if (!hasCore) return false;
+  return tokens.every((t) => BLINDED_CORE_WORDS.has(t) || BLINDED_CONNECTOR_WORDS.has(t));
+}
+
+/**
+ * Does this `dataset_description.json` entry stand for "withheld" rather than
+ * name a real person, funder or organization? Shared by `Authors`, `Funding`
+ * and `Acknowledgements` (#1515): before this, all three reused
+ * `isPlaceholderAuthor`, written for `Authors` alone, so a `Funding` entry
+ * blinded in any wording other than its exact sentinels -- "Redacted for
+ * double-blind review", "Withheld", "Funding information removed for review"
+ * -- was reported as naming someone.
+ *
+ * Recognizes the classic sentinels (exact n/a-style strings, a bracketed
+ * value, "unspecified"/"placeholder" anywhere) plus redaction wording a
+ * depositor writes in their own words, via `isWhollyRedactionWording`'s
+ * whole-entry vocabulary test. Deliberately does NOT call `isPlaceholderAuthor`:
+ * that function's `^anonymous\b` branch is a documented overmatch for the one
+ * field it was written for and would misclassify "Anonymous Donor Foundation"
+ * as a placeholder here. `isPlaceholderAuthor` itself is unchanged and still
+ * governs the publication gate in `submission-minimums.ts`, which asks a
+ * different question at a different moment.
+ */
+export function isBlindedEntry(entry: string): boolean {
+  const trimmed = entry.trim();
+  if (trimmed.length === 0) return false;
+  if (EXACT_SENTINEL.test(trimmed)) return true;
+  if (BRACKETED_PLACEHOLDER.test(trimmed)) return true;
+  if (SUBSTRING_SENTINEL.test(trimmed)) return true;
+  return isWhollyRedactionWording(trimmed);
+}
+
+/** "1 entry"/"names" vs "2 entries"/"name": subject-verb agreement for a count. */
+function entryCountWords(n: number): { noun: string; verb: string } {
+  return n === 1 ? { noun: "entry", verb: "names" } : { noun: "entries", verb: "name" };
+}
+
+/**
+ * What a named entry in this field asserts about the world, for the finding
+ * sentence. `Funding` is usually an organization, so "names someone" was
+ * simply wrong for it; `Acknowledgements` may thank a group rather than a
+ * person. `Authors` keeps its original, person-shaped wording.
+ */
+const NAMED_ENTRY_TARGET: Record<string, string> = {
+  Authors: "someone",
+  Funding: "a funder or a grant",
+  Acknowledgements: "a person or a group",
+};
+
+/**
  * Scan one git-tracked text file for the three deterministic patterns.
  *
  * Returns findings, never the matched text (see `AnonymityFinding.detail`).
@@ -662,7 +844,7 @@ export function scanDepositFile(
   path: string,
   text: string,
   owner: OwnerIdentity,
-  isPlaceholder: (value: string) => boolean,
+  isBlinded: (value: string) => boolean,
 ): { findings: AnonymityFinding[]; unchecked: string[] } {
   const findings: AnonymityFinding[] = [];
   const unchecked: string[] = [];
@@ -701,17 +883,19 @@ export function scanDepositFile(
       // a depositor can commit to `main` freely while their repository is still
       // private -- which is exactly the window this deposit lives in.
       for (const field of ["Authors", "Funding", "Acknowledgements"]) {
-        const { named, readable } = namedEntriesIn(document, field, isPlaceholder);
+        const { named, readable } = namedEntriesIn(document, field, isBlinded);
         if (!readable) {
           unchecked.push(`description_field:${field}`);
           continue;
         }
         if (named.length > 0) {
+          const { noun, verb } = entryCountWords(named.length);
+          const target = NAMED_ENTRY_TARGET[field] ?? "someone";
           findings.push({
             check: `description_${field.toLowerCase()}_named`,
             severity: "deposit",
             file: path,
-            detail: `${field} in dataset_description.json has ${named.length} entry/entries that name someone. This file is part of the dataset and is served publicly, so NEMAR cannot conceal what it says.`,
+            detail: `${field} in dataset_description.json has ${named.length} ${noun} that ${verb} ${target}. This file is part of the dataset and is served publicly, so NEMAR cannot conceal what it says.`,
           });
         }
       }
@@ -842,7 +1026,7 @@ async function scanDataset(
   row: AnonymityCandidate,
   token: string | null,
   seams: AnonymitySweepSeams,
-  isPlaceholder: (value: string) => boolean,
+  isBlinded: (value: string) => boolean,
   budget: { remaining: number },
 ): Promise<Scan> {
   const rowCheck = checkRowInvariants(row);
@@ -1094,7 +1278,7 @@ async function scanDataset(
       }
       filesScanned += 1;
       try {
-        const scanned = scanDepositFile(path, text, owner, isPlaceholder);
+        const scanned = scanDepositFile(path, text, owner, isBlinded);
         findings.push(...scanned.findings);
         unchecked.push(...scanned.unchecked);
       } catch (err) {
@@ -1204,7 +1388,7 @@ export async function runAnonymitySweep(
 
     let scan: Scan;
     try {
-      scan = await scanDataset(env, row, token, resolvedSeams, isPlaceholderAuthor, budget);
+      scan = await scanDataset(env, row, token, resolvedSeams, isBlindedEntry, budget);
     } catch (err) {
       errors.push({
         dataset_id: row.dataset_id,
