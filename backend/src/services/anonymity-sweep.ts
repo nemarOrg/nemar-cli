@@ -658,11 +658,18 @@ export function namedEntriesIn(
 
 /**
  * Sentinel forms that mean "nothing here", the WHOLE entry and no more: n/a,
- * none, tbd, todo, unknown, a run of dashes. Anchored at both ends, unlike
- * `PLACEHOLDER_AUTHOR`'s `unspecified`/`placeholder` branches below, because
- * those two words are unambiguous wherever they appear while a sentinel like
- * "none" is only evidence when it is the entire entry -- "Wellcome Trust (none
- * withheld)" is a real funder, not a placeholder.
+ * none, tbd, todo, unknown, a run of dashes. Anchored at both ends: a
+ * sentinel like "none" is only evidence when it is the entire entry --
+ * "Wellcome Trust (none withheld)" is a real funder, not a placeholder.
+ *
+ * `unspecified` and `placeholder` are NOT here, on purpose (#1517 review).
+ * `PLACEHOLDER_AUTHOR` matches those two words as a free substring anywhere
+ * in the entry, which also fires on "National Institutes of Health
+ * Unspecified Program" and "Placeholderville Foundation" -- real funders that
+ * merely CONTAIN the word. `isBlindedEntry` instead folds both into
+ * `BLINDED_CORE_WORDS` below, so they are recognized only as a whole TOKEN in
+ * an entry made of nothing else. `isPlaceholderAuthor`'s own substring rule is
+ * unchanged; this is a divergence specific to the sweep's predicate.
  */
 const EXACT_SENTINEL = /^(n\/?a|none|tbd|todo|unknown|-+)$/i;
 
@@ -675,11 +682,31 @@ const EXACT_SENTINEL = /^(n\/?a|none|tbd|todo|unknown|-+)$/i;
  */
 const BRACKETED_PLACEHOLDER = /^\[.*\]$/;
 
-/** Unambiguous anywhere in the entry, matching `PLACEHOLDER_AUTHOR`'s own rule. */
-const SUBSTRING_SENTINEL = /unspecified|placeholder/i;
+/**
+ * Explicit "no funding received" and "not applicable" declarations (#1517
+ * review). A narrow, WHOLE-ENTRY list of the conventional ways a depositor
+ * says a field does not apply -- not a free substring test and not folded
+ * into the token vocabulary below, because a generic "every word is a stock
+ * word or a negation" rule would also swallow "No funding from NIH" and "Not
+ * funded by the Wellcome Trust": real funders the entry goes on to name AFTER
+ * the negation. Anchoring the whole entry means the declaration has to be
+ * everything the entry says; content appended after it is exactly the
+ * identifying material this predicate exists to still report, so those two
+ * examples fall through to `isWhollyRedactionWording` and fail it (a name and
+ * an organization word appear that are in neither vocabulary).
+ */
+const NO_FUNDING_DECLARATION =
+  /^(not applicable|none declared|none reported|no funding to declare|no funding(?: (?:was|is) (?:received|provided|obtained))?(?: for (?:this|the) (?:work|study|project|research))?|(?:the )?authors? received no (?:specific )?funding(?: for (?:this|the) (?:work|study|project|research))?)\.?$/i;
 
 /**
- * Redaction verbs this predicate treats as blinding wording.
+ * Redaction verbs this predicate treats as blinding wording, plus
+ * `unspecified` and `placeholder` (#1517 review; see `EXACT_SENTINEL`'s
+ * comment for why those two moved here instead of staying a free substring
+ * match): "Unspecified" alone still blinds a field, but "National Institutes
+ * of Health Unspecified Program" does not, because "institutes", "of",
+ * "health" and "program" are in neither this set nor the connector set below,
+ * so the whole-entry test fails and the entry is reported like any other
+ * name.
  *
  * Deliberately excludes "anonymous" as a STANDALONE leading-word match the way
  * `PLACEHOLDER_AUTHOR`'s `^anonymous\b` branch does -- that branch matches any
@@ -703,6 +730,8 @@ const BLINDED_CORE_WORDS = new Set([
   "omitted",
   "hidden",
   "available",
+  "unspecified",
+  "placeholder",
 ]);
 
 /**
@@ -712,6 +741,17 @@ const BLINDED_CORE_WORDS = new Set([
  * finding-worthy sentinel (`hasCore` below still requires a core word), so
  * adding a word here only ever widens what a redaction sentence may contain,
  * never what counts as one on its own.
+ *
+ * That is a deliberate, accepted risk, not an oversight (#1517 review): an
+ * entry built ENTIRELY from this vocabulary plus at least one core word --
+ * "Funding details available after acceptance", "Grant Information Not
+ * Available", "Grant Award Not Yet Available" -- is treated as blinded even
+ * though it names no specific redaction reason. The rule is that an entry
+ * made of nothing but these stock words has no identifying content left to
+ * leak, by construction: the moment a real funder, grant number or name
+ * appears, that token is not in this set, `isWhollyRedactionWording` fails,
+ * and the entry is reported. See the test that pins these three examples;
+ * a future addition to this set has to keep that test passing.
  */
 const BLINDED_CONNECTOR_WORDS = new Set([
   "a",
@@ -797,22 +837,26 @@ function isWhollyRedactionWording(entry: string): boolean {
  * double-blind review", "Withheld", "Funding information removed for review"
  * -- was reported as naming someone.
  *
- * Recognizes the classic sentinels (exact n/a-style strings, a bracketed
- * value, "unspecified"/"placeholder" anywhere) plus redaction wording a
- * depositor writes in their own words, via `isWhollyRedactionWording`'s
- * whole-entry vocabulary test. Deliberately does NOT call `isPlaceholderAuthor`:
- * that function's `^anonymous\b` branch is a documented overmatch for the one
- * field it was written for and would misclassify "Anonymous Donor Foundation"
- * as a placeholder here. `isPlaceholderAuthor` itself is unchanged and still
- * governs the publication gate in `submission-minimums.ts`, which asks a
- * different question at a different moment.
+ * Recognizes, in order: the classic sentinels (exact n/a-style strings, a
+ * bracketed value); an explicit "no funding received" or "not applicable"
+ * declaration (`NO_FUNDING_DECLARATION`, #1517 review); and, for everything
+ * else, redaction wording a depositor writes in their own words via
+ * `isWhollyRedactionWording`'s whole-entry vocabulary test -- which is also
+ * where `unspecified` and `placeholder` are recognized now, as a whole token
+ * rather than a free substring (see `EXACT_SENTINEL`'s comment). Deliberately
+ * does NOT call `isPlaceholderAuthor`: that function's `^anonymous\b` branch
+ * is a documented overmatch for the one field it was written for and would
+ * misclassify "Anonymous Donor Foundation" as a placeholder here.
+ * `isPlaceholderAuthor` itself is unchanged and still governs the publication
+ * gate in `submission-minimums.ts`, which asks a different question at a
+ * different moment.
  */
 export function isBlindedEntry(entry: string): boolean {
   const trimmed = entry.trim();
   if (trimmed.length === 0) return false;
   if (EXACT_SENTINEL.test(trimmed)) return true;
   if (BRACKETED_PLACEHOLDER.test(trimmed)) return true;
-  if (SUBSTRING_SENTINEL.test(trimmed)) return true;
+  if (NO_FUNDING_DECLARATION.test(trimmed)) return true;
   return isWhollyRedactionWording(trimmed);
 }
 
@@ -821,13 +865,21 @@ function entryCountWords(n: number): { noun: string; verb: string } {
   return n === 1 ? { noun: "entry", verb: "names" } : { noun: "entries", verb: "name" };
 }
 
+/** The `dataset_description.json` person-like fields the sweep checks for named entries. */
+const DEPOSIT_NAME_FIELDS = ["Authors", "Funding", "Acknowledgements"] as const;
+
 /**
  * What a named entry in this field asserts about the world, for the finding
  * sentence. `Funding` is usually an organization, so "names someone" was
  * simply wrong for it; `Acknowledgements` may thank a group rather than a
  * person. `Authors` keeps its original, person-shaped wording.
+ *
+ * Typed against `DEPOSIT_NAME_FIELDS` rather than `Record<string, string>`
+ * (#1517 review): a field added to that list without adding its wording here
+ * is now a compile error, not a silent fallback to "someone" that a real
+ * organization or group field would have quietly inherited.
  */
-const NAMED_ENTRY_TARGET: Record<string, string> = {
+const NAMED_ENTRY_TARGET: Record<(typeof DEPOSIT_NAME_FIELDS)[number], string> = {
   Authors: "someone",
   Funding: "a funder or a grant",
   Acknowledgements: "a person or a group",
@@ -882,7 +934,7 @@ export function scanDepositFile(
       // time. Re-checked here because the gate runs ONCE, at the request, and
       // a depositor can commit to `main` freely while their repository is still
       // private -- which is exactly the window this deposit lives in.
-      for (const field of ["Authors", "Funding", "Acknowledgements"]) {
+      for (const field of DEPOSIT_NAME_FIELDS) {
         const { named, readable } = namedEntriesIn(document, field, isBlinded);
         if (!readable) {
           unchecked.push(`description_field:${field}`);
@@ -890,7 +942,7 @@ export function scanDepositFile(
         }
         if (named.length > 0) {
           const { noun, verb } = entryCountWords(named.length);
-          const target = NAMED_ENTRY_TARGET[field] ?? "someone";
+          const target = NAMED_ENTRY_TARGET[field];
           findings.push({
             check: `description_${field.toLowerCase()}_named`,
             severity: "deposit",

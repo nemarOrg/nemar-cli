@@ -642,6 +642,62 @@ describe("the deterministic matchers", () => {
       expect(isBlindedEntry(real)).toBe(false);
     }
   });
+
+  test("unspecified/placeholder are a whole token, not a substring match (#1517)", () => {
+    // PLACEHOLDER_AUTHOR matches these two words anywhere in the entry, which
+    // also fires on a real funder that merely CONTAINS one -- the review
+    // finding on this PR. isBlindedEntry folds them into the whole-entry
+    // vocabulary instead, so only an entry made of nothing else blinds.
+    for (const real of [
+      "National Institutes of Health Unspecified Program",
+      "Placeholderville Foundation",
+      "National Institutes of Health, specific award number unspecified",
+    ]) {
+      expect(isBlindedEntry(real)).toBe(false);
+    }
+    // The word alone, or bracketed, still blinds: only the substring match
+    // inside a longer real name was the bug.
+    for (const blinded of ["Unspecified", "Placeholder", "[placeholder]"]) {
+      expect(isBlindedEntry(blinded)).toBe(true);
+    }
+  });
+
+  test("an entry built only from redaction vocabulary blinds, even with no specific reason (#1517)", () => {
+    // Accepted, documented risk (see BLINDED_CONNECTOR_WORDS's comment): none
+    // of these name a specific redaction reason, but an entry made of
+    // nothing but stock words has no identifying content left to leak. The
+    // moment a real funder, grant number or name appears, that token is
+    // outside the vocabulary and the entry is reported -- as the surrounding
+    // tests prove. A future addition to the vocabulary has to keep this test
+    // passing.
+    for (const genericallyBlinded of [
+      "Funding details available after acceptance",
+      "Grant Information Not Available",
+      "Grant Award Not Yet Available",
+    ]) {
+      expect(isBlindedEntry(genericallyBlinded)).toBe(true);
+    }
+  });
+
+  test("an explicit no-funding or not-applicable declaration is not a name (#1517)", () => {
+    for (const declared of [
+      "None declared",
+      "No funding was received for this work",
+      "The authors received no specific funding for this work",
+      "Not applicable",
+    ]) {
+      expect(isBlindedEntry(declared)).toBe(true);
+    }
+  });
+
+  test("a no-funding statement that goes on to name a funder is still reported (#1517)", () => {
+    // The declaration only covers the entry when it IS the whole entry:
+    // content appended after the negation -- a real funder's name -- is
+    // exactly what this predicate exists to still report.
+    for (const named of ["No funding from NIH", "Not funded by the Wellcome Trust"]) {
+      expect(isBlindedEntry(named)).toBe(false);
+    }
+  });
 });
 
 describe("the bounded file scan", () => {
