@@ -22,13 +22,28 @@ import { GITHUB_API, VALIDATOR_VERSION } from "./shared";
  * client_payload shape stays compatible: `dataset_id`, `version`, `public`.
  * The central workflow mints a per-repo App token scoped to `dataset_id`
  * and checks out the dataset repo at `v$VERSION`.
+ *
+ * `options.totalBytes`/`totalFiles` (#1514) carry the row's already-known
+ * size so the workflow's preflight can apply the archive size policy without
+ * depending on the version manifest being publicly fetchable -- which it
+ * isn't for a private dataset, an anonymous deposit before release, or a
+ * version whose `dataset_versions` row hasn't landed yet (the nm000284
+ * incident). Omitted when the caller doesn't have a number to offer; the
+ * workflow's preflight falls back to a manifest-only check either way, so an
+ * older Worker build and an older workflow both keep working unchanged.
  */
 export async function triggerArchiveGeneration(
   repo: string,
   datasetId: string,
   version: string,
   pat: string,
-  options?: { public?: boolean; s3Bucket?: string; callbackBaseUrl?: string },
+  options?: {
+    public?: boolean;
+    s3Bucket?: string;
+    callbackBaseUrl?: string;
+    totalBytes?: number | null;
+    totalFiles?: number | null;
+  },
 ): Promise<void> {
   // Sanity check the legacy parameter so callsites that still pass the
   // dataset's own repo name don't drift from the dataset_id payload.
@@ -56,6 +71,10 @@ export async function triggerArchiveGeneration(
         // default) when unset, so existing prod deliveries are unchanged.
         s3_bucket: options?.s3Bucket,
         callback_base_url: options?.callbackBaseUrl,
+        // #1514: nullish -> omitted (JSON.stringify drops undefined keys), so
+        // a caller with nothing to offer dispatches exactly the old payload.
+        total_bytes: options?.totalBytes ?? undefined,
+        total_files: options?.totalFiles ?? undefined,
       },
     }),
   });
