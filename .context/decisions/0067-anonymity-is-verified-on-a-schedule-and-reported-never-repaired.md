@@ -202,6 +202,53 @@ the engine stamp is archive-wide, so NULL there would re-convert everything
 (hence the seeding in `migrate_schema`),
 while this one is per-dataset and its blast radius is the one dataset that was asked for.
 
+## Amendment 2026-09-28 (#1515): the deposit-file matcher gets its own predicate
+
+`scanDepositFile`'s loop over `Authors`, `Funding` and `Acknowledgements` reused
+`isPlaceholderAuthor`, which `submission-minimums.ts` wrote for the publication gate's own
+`Authors` check.
+That predicate recognizes the classic sentinels (`n/a`, `none`, bracketed placeholders, a
+leading `anonymous`) and nothing else, so a `Funding` entry blinded in ordinary prose --
+"Redacted for double-blind review", "Funding information removed for review", "Withheld" --
+was reported as `description_funding_named`, naming someone it did not name.
+
+**The fix is a new predicate, `isBlindedEntry`, shared by all three fields, that does not call
+`isPlaceholderAuthor`.**
+Two kinds of match: the classic sentinels, unchanged in spirit, plus a whole-entry vocabulary
+test over anything else.
+Every token in the trimmed entry, with brackets and punctuation stripped, must be either a
+redaction verb (`anonymous`, `anonymized`/`anonymised`, `redacted`, `withheld`, `blinded`,
+`concealed`, `removed`, `omitted`, `hidden`, `available`) or an ordinary connector word ("for",
+"review", "double-blind", "until", "publication", "information", and the like), and at least
+one token must be a redaction verb.
+
+**Why not just widen `isPlaceholderAuthor` itself.**
+Its `^anonymous\b` branch matches any entry that merely OPENS with the word, which is correct
+for `Authors` -- an author entry starting with "Anonymous" is asserting anonymity, and NEMAR's
+own blinded label does exactly this -- and wrong for `Funding`: "Anonymous Donor Foundation" is
+a real funder, and the leading-word rule would have blinded it away.
+`isBlindedEntry` treats "anonymous" as one token among others, subject to the whole-entry test,
+so it recognizes "Anonymous" alone or "Anonymous (withheld until publication)" but not a name
+that merely starts with the word and carries other content: "Donor", "Foundation", "Veterans",
+"Association".
+The same reasoning covers "Blinded Veterans Association".
+`isPlaceholderAuthor` itself is unchanged and still governs the publication gate, which asks a
+different question at a different moment; the two are allowed to diverge.
+
+**The finding text is now field-specific.**
+"Funding ... has N entries that name someone" misdescribed an organization; it now reads
+"names a funder or a grant".
+`Acknowledgements` reads "names a person or a group".
+`Authors` keeps its original "names someone".
+Pluralization now agrees with the count ("1 entry ... names", "2 entries ... name") rather than
+the literal "entry/entries" the message printed regardless of count.
+
+**What this does not change.**
+The check codes (`description_authors_named`, `description_funding_named`,
+`description_acknowledgements_named`) are unchanged, since `sweep_stamps` and the CLI key on
+them.
+`isPlaceholderAuthor` and `submission-minimums.ts`'s own `Authors` rule are untouched.
+
 ## Consequences
 
 - The sweep is PRODUCTION-ONLY on the cron and deliberately absent from
@@ -263,3 +310,9 @@ while this one is per-dataset and its blast radius is the one dataset that was a
   `backend/test/anonymity-sweep.test.ts`: appending the matched file body to a `detail`
   pasted the concealed depositor's name into `sweep_stamps`, the `audit_log` row and
   forwardable mail at once, and left every other test green.
+- The 2026-09-28 amendment (#1515): `isBlindedEntry` and its tests live in
+  `backend/src/services/anonymity-sweep.ts` and `backend/test/anonymity-sweep.test.ts`, with
+  both directions covered -- every listed redaction phrasing recognized, and "Anonymous Donor
+  Foundation" / "Blinded Veterans Association" / real grant numbers still reported -- driven
+  both at the `isBlindedEntry`/`scanDepositFile` unit level and end to end through
+  `runAnonymitySweep`.
