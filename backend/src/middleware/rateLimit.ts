@@ -93,10 +93,17 @@ const RATE_LIMIT_WRITE_STALL_MS = 500;
 // traffic naturally spans several 60s windows at real network latency
 // regardless of the cap, and the bucket resets every window, so this is not
 // a gap in practice -- it is why the cap does not need to be sized for that
-// dataset's total in one window at all. Bot Fight Mode at the zone level
-// (Cloudflare, not this file) is the intended guard against sustained
-// scraping; this cap stays a defense-in-depth floor, the same role it has
-// always had (see the MAX_REQUESTS comment below).
+// dataset's total in one window at all.
+//
+// This bucket alone is not the abuse control for the EXPENSIVE path. A cache
+// hit is cheap (the number above), but a MISS on a brokered git-tracked file
+// still mints a token and makes a real GitHub request, so 100,000/60s of
+// misses would still be 100,000 GitHub requests a minute from one IP. That
+// is why a MISS on that path is ALSO counted against its own, much smaller
+// per-IP budget (`data-miss-ip`, `checkDataMissBudget` below) -- this bucket
+// stays sized for the cheap, common case; the expensive, rare case gets its
+// own floor. This cap stays a defense-in-depth floor for request volume, the
+// same role it has always had (see the MAX_REQUESTS comment below).
 //
 // Public read data-plane bucket (`data.nemar.org/*`, which the host fork in
 // index.ts rewrites to `/data/*`; also reachable as `/nemar/data/*`). These
@@ -555,8 +562,9 @@ export async function rateLimiter(
   // response; it costs this bucket a wider (already-existing) race window
   // where a burst of concurrent requests can all read the same stale count
   // before any of their writes land, undercounting by a few requests at
-  // most. Acceptable for a bucket sized in the hundred-thousands and whose
-  // real backstop is Bot Fight Mode at the zone level, not this counter.
+  // most. Acceptable for a bucket sized in the hundred-thousands where the
+  // undercounted requests are cache hits (`checkDataMissBudget` below counts
+  // the expensive misses synchronously, on its own much smaller budget).
   // Every other bucket keeps the exact synchronous behavior it always had.
   async function writeCount(write: Promise<unknown>): Promise<void> {
     if (keyKind !== "data-ip") {
@@ -685,6 +693,154 @@ export async function rateLimiter(
   await next();
 }
 
+/**
+ * Per-IP budget on a brokered git-tracked file CACHE MISS (#1516 review).
+ *
+ * `DATA_MAX_REQUESTS` above is sized for the cheap case -- a cache hit costs
+ * a D1 read, a manifest lookup and a Cache API read, no GitHub round trip.
+ * A MISS is the expensive case: it mints a token and makes a real request to
+ * GitHub's raw host (occasionally the blobs API too), so letting misses ride
+ * the 100,000/60s data-ip bucket unbounded would let one IP spend up to
+ * 100,000 GitHub requests a minute -- the exact amplifier
+ * `BLOB_FALLBACK_PER_WINDOW` already exists to bound on the blobs side, with
+ * nothing bounding the raw-host side at all. This is that bound, and it is
+ * deliberately its OWN counter rather than a second check against `data-ip`:
+ * a request that hits the cache must never be throttled by how many OTHER
+ * requests happened to miss.
+ *
+ * 10,000/60s -- the data plane's PREVIOUS overall cap, before #1516 made
+ * hits cheap enough to need a bigger one. Sized against a real cold
+ * full-dataset download: nm000134 has 7,891 git-tracked files, and a cold
+ * miss (no token cached yet, a real GitHub round trip) costs on the order of
+ * 1 second under real network conditions. At 16 requests in flight, that
+ * download produces roughly 16 misses/second while it runs, about
+ * 1,000/minute -- an order of magnitude under this budget. A client that
+ * trips it is not downloading one dataset; it is missing on a scale no
+ * legitimate cold download reaches.
+ */
+const DATA_MISS_MAX_REQUESTS = 10_000;
+
+/** The bucket name `X-RateLimit-Bucket` and the internal cache key report
+ *  for the git-file miss budget. Not part of `__selectBucket`'s
+ *  `__BucketSelection` union: this bucket is never chosen from a request
+ *  PATH the way the others are, because whether a request is a "miss" is
+ *  something only `serveGitTrackedFile` can know, after it has already
+ *  checked the git-file cache. */
+const DATA_MISS_BUCKET_KIND = "data-miss-ip";
+
+export type DataMissBudgetOutcome =
+  | { allowed: true }
+  | {
+      allowed: false;
+      /** A ready-to-serve 429, the same shape `rateLimiter`'s own blocking
+       *  branch answers with, so a client cannot tell which bucket tripped
+       *  from the response shape alone -- only `X-RateLimit-Bucket` differs. */
+      response: Response;
+    };
+
+/**
+ * Count one cache miss against its IP's miss budget, and refuse it if the
+ * budget is already spent. Call exactly once per miss, immediately before
+ * going upstream -- never on a hit (the whole point), never on HEAD (HEAD
+ * never reaches GitHub at all), never on an annexed file's 302, a directory
+ * listing, or the "not in the manifest at all" 404 (none of those go through
+ * this path either).
+ *
+ * Mirrors `rateLimiter`'s own mechanics exactly: the same Cache API counter
+ * shape (`{count, warned}` under `max-age=<WINDOW_SIZE>`), the same
+ * dev-environment and `X-Test-Bypass` exemptions, and the same
+ * `waitUntil`-deferred write with the bounded no-context fallback (so a
+ * route-suite call with no execution context cannot hang on a stalled test
+ * cache). Kept as a standalone function rather than folded into the
+ * `rateLimiter` middleware because the decision it makes cannot be made from
+ * a request's PATH: the middleware runs before the route handler even knows
+ * whether this git-tracked file is cached.
+ */
+export async function checkDataMissBudget(
+  env: Pick<Bindings, "ENVIRONMENT" | "TEST_BYPASS_TOKEN">,
+  request: Request,
+  waitUntil: ((work: Promise<unknown>) => void) | undefined,
+): Promise<DataMissBudgetOutcome> {
+  if (env.ENVIRONMENT === "development") return { allowed: true };
+
+  const testBypassToken = request.headers.get("X-Test-Bypass");
+  if (testBypassToken && env.TEST_BYPASS_TOKEN && testBypassToken === env.TEST_BYPASS_TOKEN) {
+    return { allowed: true };
+  }
+
+  const ip =
+    request.headers.get("CF-Connecting-IP") ||
+    request.headers.get("X-Forwarded-For") ||
+    crypto.randomUUID();
+  const cacheKey = new Request(`https://rate-limit.internal/rl:${DATA_MISS_BUCKET_KIND}:${ip}`);
+
+  try {
+    const cache = caches.default;
+    const cached = await cache.match(cacheKey);
+    const count = cached ? ((await cached.json()) as { count: number }).count : 0;
+
+    if (count >= DATA_MISS_MAX_REQUESTS) {
+      const retryAfter = WINDOW_SIZE;
+      return {
+        allowed: false,
+        response: new Response(
+          JSON.stringify({
+            error: "Rate limit exceeded",
+            message: `Too many requests. Please try again in ${retryAfter} seconds.`,
+            retry_after: retryAfter,
+          }),
+          {
+            status: 429,
+            headers: {
+              "Content-Type": "application/json",
+              "Retry-After": retryAfter.toString(),
+              "X-RateLimit-Limit": DATA_MISS_MAX_REQUESTS.toString(),
+              "X-RateLimit-Remaining": "0",
+              "X-RateLimit-Reset": (Math.floor(Date.now() / 1000) + retryAfter).toString(),
+              "X-RateLimit-Bucket": DATA_MISS_BUCKET_KIND,
+            },
+          },
+        ),
+      };
+    }
+
+    const newCount = count + 1;
+    const write = cache
+      .put(
+        cacheKey,
+        new Response(JSON.stringify({ count: newCount }), {
+          headers: {
+            "Content-Type": "application/json",
+            "Cache-Control": `max-age=${WINDOW_SIZE}`,
+          },
+        }),
+      )
+      .catch((err: unknown) => {
+        console.error("[rate-limit] cache failure", {
+          keyKind: DATA_MISS_BUCKET_KIND,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    if (waitUntil) {
+      waitUntil(write);
+    } else {
+      await Promise.race([
+        write,
+        new Promise<void>((resolve) => setTimeout(resolve, RATE_LIMIT_WRITE_STALL_MS)),
+      ]);
+    }
+    return { allowed: true };
+  } catch (error) {
+    // Fail open, the same policy `rateLimiter` itself follows on a cache
+    // outage: a broken Cache API must not block data-plane traffic.
+    console.error("[rate-limit] cache failure", {
+      keyKind: DATA_MISS_BUCKET_KIND,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { allowed: true };
+  }
+}
+
 // Internal limits exposed for the focused unit test in
 // `test/rate-limit-buckets.test.ts`. Prefixed with `__` so static
 // analysis flags any production code that tries to import them.
@@ -693,5 +849,6 @@ export const __limits = {
   TOKEN_MAX_REQUESTS_AUTHED,
   MAX_REQUESTS,
   DATA_MAX_REQUESTS,
+  DATA_MISS_MAX_REQUESTS,
   WINDOW_SIZE,
 };

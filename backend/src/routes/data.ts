@@ -12,6 +12,7 @@
  */
 
 import { type Context, Hono } from "hono";
+import { checkDataMissBudget } from "../middleware/rateLimit";
 import { recordAccess } from "../services/access-metrics";
 import { CONCEPT_DOI_SQL } from "../services/anonymity";
 import {
@@ -844,6 +845,13 @@ async function serveGitTrackedFile(args: {
   } else {
     timing.cache = 0;
   }
+
+  // A MISS, about to go upstream: the expensive path (a token mint plus a
+  // real GitHub request), bounded per IP by its own budget (#1516 review) --
+  // a hit above must never be throttled by how many OTHER requests missed.
+  // Refused here means upstream never ran, so `timing.upstream` stays unset.
+  const missBudget = await checkDataMissBudget(env, request, defer);
+  if (!missBudget.allowed) return missBudget.response;
 
   const start = performance.now();
   const response = await streamGitTrackedFile({
