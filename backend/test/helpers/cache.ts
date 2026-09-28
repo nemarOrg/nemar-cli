@@ -14,14 +14,16 @@
 // storage but not EXPIRY -- a stored entry answered forever, so a test could
 // not tell "cached" from "cached for five more minutes". Three more real
 // Workers Cache API rules are modeled now:
-//  - An entry expires from its OWN stored `Cache-Control: max-age=N`, the
-//    same number the real edge honors to decide whether `cache.match`
-//    answers or returns `undefined`. `getNow` is an injectable clock
-//    (defaulting to the real wall clock, matching `rate-limit-buckets.
-//    test.ts`'s own double) so a test can simulate time passing without a
-//    real sleep. An entry with no `Cache-Control` at all -- true only of a
-//    handful of tests that poke `.store` directly rather than going through
-//    `put()` -- never expires; every real write in this codebase sets one.
+//  - An entry expires from its OWN stored `Cache-Control` (`s-maxage` when
+//    present, else `max-age` -- the real Cache API is a shared cache and
+//    prefers `s-maxage`, RFC 9111 SS5.2.2.10), the same number the real edge
+//    honors to decide whether `cache.match` answers or returns `undefined`.
+//    `getNow` is an injectable clock (defaulting to the real wall clock,
+//    matching `rate-limit-buckets.test.ts`'s own double) so a test can
+//    simulate time passing without a real sleep. An entry with no
+//    `Cache-Control` at all -- true only of a handful of tests that poke
+//    `.store` directly rather than going through `put()` -- never expires;
+//    every real write in this codebase sets one.
 //  - `Vary: *` is refused outright (`put()` throws), because there is no way
 //    to key a cache entry on "every possible header". Only the literal `*`
 //    value is refused: `Vary: Accept` and `Vary: Origin`, which the data and
@@ -43,14 +45,22 @@ export function keyFor(request: RequestInfo | URL): string {
   return request instanceof Request ? request.url : String(request);
 }
 
-/** `max-age=<seconds>` off a stored response's own `Cache-Control`, or
- *  `null` when absent or unparsable. `null` means "never expires" here --
- *  see the module comment for why that default is safe. */
+function directiveSeconds(cacheControl: string, directive: "s-maxage" | "max-age"): number | null {
+  const m = cacheControl.match(new RegExp(`(?:^|[,\\s])${directive}=(\\d+)`, "i"));
+  return m ? Number(m[1]) : null;
+}
+
+/** `s-maxage=<seconds>` if a stored response carries one, else
+ *  `max-age=<seconds>`, else `null` ("never expires" -- see the module
+ *  comment). The real Workers Cache API is a shared cache, and RFC 9111
+ *  SS5.2.2.10 gives `s-maxage` precedence over `max-age` for exactly that
+ *  kind of cache when a response carries both -- `catalog.ts` and `data.ts`
+ *  both set `public, max-age=<client>, s-maxage=<edge>` pairs, so a test
+ *  double that only read `max-age` would honor the wrong number for those. */
 function maxAgeSecondsOf(headers: Headers): number | null {
   const raw = headers.get("Cache-Control");
   if (!raw) return null;
-  const m = raw.match(/(?:^|[,\s])max-age=(\d+)/i);
-  return m ? Number(m[1]) : null;
+  return directiveSeconds(raw, "s-maxage") ?? directiveSeconds(raw, "max-age");
 }
 
 /** Whether `getNow() - storedAtMs` has passed the entry's own max-age.

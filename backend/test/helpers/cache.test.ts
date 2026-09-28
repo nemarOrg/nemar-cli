@@ -1,10 +1,11 @@
 /**
  * The shared in-memory Cache API test doubles (`InMemoryCache`, `DrainingCache`),
  * pinned against the real Workers Cache API rules they model (#1516 review):
- * an entry expires from its OWN stored `Cache-Control` max-age, `Vary: *` is
- * refused, and a `Set-Cookie` response is never stored. These are unit tests
- * of the doubles themselves -- the regression these rules exist to catch
- * (the git-file cache's stored TTL bug) is exercised end to end in
+ * an entry expires from its OWN stored `Cache-Control` (`s-maxage` takes
+ * precedence over `max-age` when both are present), `Vary: *` is refused,
+ * and a `Set-Cookie` response is never stored. These are unit tests of the
+ * doubles themselves -- the regression these rules exist to catch (the
+ * git-file cache's stored TTL bug) is exercised end to end in
  * `git-file-broker.test.ts`'s "the stored copy's OWN freshness is not the
  * client's 300s" test.
  */
@@ -105,6 +106,37 @@ for (const [name, makeCache] of [
       );
       cache.getNow = () => 301_000; // 301s later: past a hypothetical 300s TTL
       expect(await cache.match(new Request("https://x/long-ttl"))).toBeDefined();
+    });
+
+    test("s-maxage takes precedence over max-age when a response carries both", async () => {
+      // `catalog.ts` and `data.ts` both set `public, max-age=<client>,
+      // s-maxage=<edge>` pairs; the real Workers Cache API (a shared cache)
+      // honors s-maxage for its OWN freshness, per RFC 9111 SS5.2.2.10.
+      const cache = makeCache();
+      cache.getNow = () => 0;
+      await cache.put(
+        new Request("https://x/s-maxage"),
+        response("body", { "Cache-Control": "public, max-age=30, s-maxage=300" }),
+      );
+
+      // Past the smaller max-age, still inside s-maxage: still a hit.
+      cache.getNow = () => 31_000;
+      expect(await cache.match(new Request("https://x/s-maxage"))).toBeDefined();
+
+      // Past s-maxage itself: expired.
+      cache.getNow = () => 300_000;
+      expect(await cache.match(new Request("https://x/s-maxage"))).toBeUndefined();
+    });
+
+    test("max-age alone still applies when there is no s-maxage", async () => {
+      const cache = makeCache();
+      cache.getNow = () => 0;
+      await cache.put(
+        new Request("https://x/max-age-only"),
+        response("body", { "Cache-Control": "public, max-age=60" }),
+      );
+      cache.getNow = () => 60_000;
+      expect(await cache.match(new Request("https://x/max-age-only"))).toBeUndefined();
     });
   });
 }
