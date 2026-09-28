@@ -40,6 +40,23 @@
  * key forever with nothing left to ever evict it. An explicit,
  * internal-only marker header lets a rewrite REPLACE the one entry this
  * path has, rather than leak a new one per historical blob.
+ *
+ * WHY THE STORED ENTRY'S OWN `Cache-Control` IS NOT THE CLIENT'S. Found in
+ * review: the first version of this module reused the client-facing
+ * `public, max-age=300` verbatim as the STORED response's own header. The
+ * Workers Cache API honors a stored response's `Cache-Control` for that
+ * entry's OWN freshness -- `cache.match` answers `undefined` once it has
+ * aged past the max-age it was stored with, independent of anything the
+ * route decides afterward -- so every copy silently stopped being a hit
+ * after five minutes, which defeats the point for a second downloader
+ * arriving later, #1494's main scenario. The 300s number is about how long
+ * an AUTHORIZATION decision may go unchecked by a downstream cache (ADR
+ * 0066); it says nothing about how long THIS cache, which re-checks the
+ * gate and the blob SHA on every single use, may keep a verified copy
+ * around. `GIT_FILE_CACHE_TTL_SECONDS`, below, is that second, unrelated
+ * number, stored under the entry's `Cache-Control` while the client-facing
+ * value is preserved separately (`CLIENT_CACHE_CONTROL_HEADER`) and restored
+ * verbatim on every hit, so nothing a client sees changes.
  */
 
 import type { ManifestFile } from "./manifest";
@@ -52,6 +69,36 @@ import type { ManifestCache } from "./manifest-source";
  * internal-only headers so a stray leak would be recognizable in a log.
  */
 const BLOB_SHA_HEADER = "X-Nemar-Cache-Blob-Sha";
+
+/**
+ * Carries the ORIGINAL client-facing `Cache-Control` on a stored copy, so a
+ * hit can hand it back unchanged even though the entry's own `Cache-Control`
+ * (what the Cache API reads for the entry's freshness) is
+ * {@link GIT_FILE_CACHE_TTL_SECONDS}, a different number for a different
+ * question. Stored rather than hardcoded here because this module has no
+ * business assuming what `routes/data.ts` sends a client -- only that
+ * whatever it is must come back unchanged.
+ */
+const CLIENT_CACHE_CONTROL_HEADER = "X-Nemar-Cache-Client-Cache-Control";
+
+/**
+ * How long a stored copy is fresh AS FAR AS THE CACHE API IS CONCERNED --
+ * never seen by a client, and unrelated to the 300s a client is told to
+ * trust an authorization decision for (ADR 0066). Seven days, matching
+ * `manifest-source.ts`'s `MANIFEST_CACHE_TTL_SECONDS`, for the same reason
+ * that one is long: every hit is re-validated before it answers, here
+ * against the blob SHA the CURRENT manifest names for this path, so a long
+ * TTL cannot serve anything the live manifest disagrees with -- it only
+ * bounds how long an entry nobody has asked for occupies the cache before
+ * `cache.match` stops considering it fresh. A git blob is immutable by
+ * construction (the object name IS the content hash), so this cache's
+ * verification is actually stronger than the manifest cache's ETag-based
+ * one: seven days is not a ceiling this needs to defend, just the number
+ * that keeps the two TTLs easy to compare at a glance. The real Cache API
+ * also evicts under its own storage pressure regardless of what a TTL
+ * claims, so this is a freshness ceiling, not a retention guarantee.
+ */
+export const GIT_FILE_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 /** How long the writer waits for `cache.put` when there is no `waitUntil` to
  *  hand it to (bun test driving the route directly, as `app.request` without
@@ -81,6 +128,14 @@ function blobShaOf(file: Pick<ManifestFile, "key">): string {
  * dataset-id check 404s. The path is percent-encoded one segment at a time
  * so a `/` inside a BIDS path stays a path separator in the key instead of
  * becoming `%2F` and colliding subdirectories into one cache entry.
+ *
+ * Including the request's origin means the same file reached via
+ * `data.nemar.org` and via the `/nemar/data` mount on another host stores
+ * two copies. Deliberate, not an oversight: it is the same choice
+ * `manifestCacheKey` (#1505) already made, and a Workers Cache API key must
+ * be on a hostname the zone actually serves, so the alternative (a
+ * synthetic, origin-independent host) is not simpler, just less honest about
+ * what the cache actually is.
  */
 export function gitFileCacheKey(
   origin: string,
@@ -148,6 +203,15 @@ export async function matchGitFileCache(
   }
   const headers = new Headers(hit.headers);
   headers.delete(BLOB_SHA_HEADER);
+  // Undo `putGitFileCache`'s substitution: the entry's own `Cache-Control`
+  // (what just decided whether this counted as fresh) is
+  // GIT_FILE_CACHE_TTL_SECONDS, not what a client should be told. Restore
+  // the value that was actually served last time, verbatim; if somehow
+  // absent, drop the header rather than leak the internal TTL to a client.
+  const clientCacheControl = headers.get(CLIENT_CACHE_CONTROL_HEADER);
+  headers.delete(CLIENT_CACHE_CONTROL_HEADER);
+  if (clientCacheControl !== null) headers.set("Cache-Control", clientCacheControl);
+  else headers.delete("Cache-Control");
   return { status: hit.status, headers, body };
 }
 
@@ -162,7 +226,13 @@ export async function matchGitFileCache(
  *
  * `headers` are the EXACT headers the client received: the entry stores the
  * real response, marked with the blob SHA, rather than a second
- * representation that could drift from what was actually served.
+ * representation that could drift from what was actually served. The one
+ * exception is `Cache-Control` itself: the client's value is preserved
+ * verbatim under {@link CLIENT_CACHE_CONTROL_HEADER} so a hit can restore it,
+ * and the header the STORED response carries is overwritten with
+ * {@link GIT_FILE_CACHE_TTL_SECONDS} -- what the Cache API reads to decide
+ * whether this copy is still fresh, a different question with a different
+ * answer (see the module comment).
  *
  * Never throws: a failed `cache.put` is logged and otherwise ignored, the
  * same contract `manifest-source.ts`'s writer keeps, because a cache fault
@@ -178,6 +248,11 @@ async function putGitFileCache(args: {
   const { cache, key, blobSha, body, headers } = args;
   const stored = new Headers(headers);
   stored.set(BLOB_SHA_HEADER, blobSha);
+  const clientCacheControl = stored.get("Cache-Control");
+  if (clientCacheControl !== null) {
+    stored.set(CLIENT_CACHE_CONTROL_HEADER, clientCacheControl);
+  }
+  stored.set("Cache-Control", `max-age=${GIT_FILE_CACHE_TTL_SECONDS}`);
   const entry = new Response(body, { status: 200, headers: stored });
   try {
     await cache.put(new Request(key, { method: "GET" }), entry);
