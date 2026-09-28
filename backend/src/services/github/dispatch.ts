@@ -200,11 +200,21 @@ export async function triggerManifestGeneration(
  * Mirrors `triggerEnrichmentRun` and `triggerManifestGeneration`. The `pat`
  * must carry write access on `nemarDatasets/.github`'s dispatch endpoint —
  * use `getDatasetsToken()`. Phase 2 of epic #601 (sub-issue #606).
+ *
+ * `options.totalBytes`/`totalFiles` (#1514) ride along to `run-version-doi.yml`,
+ * which forwards them into its OWN `generate-archive` dispatch (the
+ * `trigger-archive` job). This is the first-publish path: a v*-tag push is
+ * what actually builds nm000284's incident window (the version manifest
+ * 404s because the `dataset_versions` row this same webhook mints comes
+ * AFTER this dispatch fires), and it never went through
+ * `triggerArchiveGeneration` at all. Omitted when the caller has nothing to
+ * offer, so an older caller's dispatch is byte-for-byte unchanged.
  */
 export async function triggerVersionDoiRun(
   datasetId: string,
   tag: string,
   pat: string,
+  options?: { totalBytes?: number | null; totalFiles?: number | null },
 ): Promise<void> {
   const response = await fetch(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
     method: "POST",
@@ -219,6 +229,8 @@ export async function triggerVersionDoiRun(
       client_payload: {
         dataset_id: datasetId,
         tag,
+        total_bytes: options?.totalBytes ?? undefined,
+        total_files: options?.totalFiles ?? undefined,
       },
     }),
   });

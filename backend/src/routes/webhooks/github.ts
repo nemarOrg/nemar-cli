@@ -556,14 +556,31 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
     // payload -- and the payload cannot be trusted to say anything about
     // anonymity. The state is read from the dataset row.
     let anonymousDeposit = false;
+    // Carried to the triggerVersionDoiRun call below (#1514): the row is
+    // already being read here for the anonymity check, so its declared size
+    // rides along for free rather than costing the archive workflow's
+    // preflight a second D1 round trip it has no route to make. Populated
+    // only on a successful read; the anonymity check's own failure path
+    // already refuses the dispatch entirely, so these stay null together
+    // with that refusal.
+    let versionDoiTotalBytes: number | null = null;
+    let versionDoiTotalFiles: number | null = null;
     if (versionDoiDecision.dispatch) {
       try {
-        const row = await c.env.DB.prepare("SELECT anonymous FROM datasets WHERE dataset_id = ?")
+        const row = await c.env.DB.prepare(
+          "SELECT anonymous, file_size, total_files FROM datasets WHERE dataset_id = ?",
+        )
           .bind(versionDoiDecision.datasetId)
-          .first<{ anonymous: number | null }>();
+          .first<{
+            anonymous: number | null;
+            file_size: number | null;
+            total_files: number | null;
+          }>();
         // A row that is absent is refused for the same reason an unreadable
         // one is: nothing here knows it is safe to mint.
         anonymousDeposit = row?.anonymous !== 0;
+        versionDoiTotalBytes = row?.file_size ?? null;
+        versionDoiTotalFiles = row?.total_files ?? null;
       } catch (err) {
         // Unreadable state is not permission to mint. A version DOI is
         // permanent; skipping one is a re-push away.
@@ -615,7 +632,10 @@ export function registerGithubWebhookRoutes(webhooks: WebhookRouter): void {
 
     if (versionDoiDecision.dispatch && !anonymousDeposit) {
       try {
-        await triggerVersionDoiRun(versionDoiDecision.datasetId, versionDoiDecision.tag, pat);
+        await triggerVersionDoiRun(versionDoiDecision.datasetId, versionDoiDecision.tag, pat, {
+          totalBytes: versionDoiTotalBytes,
+          totalFiles: versionDoiTotalFiles,
+        });
         console.log(
           `[github-webhook] dispatched run-version-doi for ${versionDoiDecision.datasetId}@${versionDoiDecision.tag} delivery=${deliveryId}`,
         );
