@@ -20,6 +20,7 @@ import type { Database } from "bun:sqlite";
 import { Hono } from "hono";
 import { dataRoutes } from "../src/routes/data";
 import type { Bindings, Variables } from "../src/types/bindings";
+import { DrainingCache } from "../test/helpers/cache";
 import { freshDb, realD1 } from "../test/helpers/d1";
 
 const args = new Map(
@@ -48,20 +49,6 @@ async function gitBlobSha(bytes: Uint8Array): Promise<string> {
   return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
-}
-
-/** A working (not just satisfying `match`/`put`) in-memory Workers Cache API,
- *  good enough for both the manifest cache and the git-file cache. */
-class BenchCache implements Pick<Cache, "match" | "put"> {
-  private store = new Map<string, Response>();
-  async match(request: RequestInfo | URL): Promise<Response | undefined> {
-    const key = request instanceof Request ? request.url : String(request);
-    return this.store.get(key)?.clone();
-  }
-  async put(request: RequestInfo | URL, response: Response): Promise<void> {
-    const key = request instanceof Request ? request.url : String(request);
-    this.store.set(key, response.clone());
-  }
 }
 
 interface Fixture {
@@ -207,9 +194,14 @@ async function main() {
   const beforeWall = await parallelWallClock(indices, PARALLELISM);
   const beforeUpstream = upstreamRequests;
 
-  // ---- AFTER: a real edge cache installed. First pass is a cold miss for
-  // every file (writes the cache); second pass is a warm hit for every file.
-  (globalThis as { caches?: unknown }).caches = { default: new BenchCache() };
+  // ---- AFTER: a real edge cache installed (the same `DrainingCache` the
+  // route tests use, not a bespoke stand-in, so this bench and the test
+  // suite agree on what the Workers Cache API does). First pass is a cold
+  // miss for every file (writes the cache); second pass is a warm hit for
+  // every file.
+  const cache = new DrainingCache();
+  const storedAt = Date.now();
+  (globalThis as { caches?: unknown }).caches = { default: cache };
   upstreamRequests = 0;
   const afterMissFirst = await fetchFile(0);
   const afterMissWall = await parallelWallClock(indices.slice(1), PARALLELISM);
@@ -220,6 +212,20 @@ async function main() {
   const afterHitWall = await parallelWallClock(indices.slice(1), PARALLELISM);
   const afterHitUpstream = upstreamRequests;
 
+  // ---- AFTER, WARM, PAST THE CLIENT'S 300s: the cross-session case #1494
+  // actually cares about. The stored entries are now "old" by more than the
+  // client-facing `public, max-age=300` -- simulating a second downloader
+  // arriving 6 minutes after the first, well inside GIT_FILE_CACHE_TTL_SECONDS
+  // (7 days) but past the number a naive implementation would have reused as
+  // the STORED entry's own freshness (the bug found in review: reusing the
+  // client's Cache-Control verbatim made every copy expire after 5 minutes).
+  // Still a hit here is the numbers proving the fix, not just the code.
+  cache.getNow = () => storedAt + 6 * 60 * 1000;
+  upstreamRequests = 0;
+  const afterExpiryFirst = await fetchFile(0);
+  const afterExpiryWall = await parallelWallClock(indices.slice(1), PARALLELISM);
+  const afterExpiryUpstream = upstreamRequests;
+
   server.stop(true);
 
   const row = (label: string, ms: number, extra = "") =>
@@ -229,11 +235,17 @@ async function main() {
   row("before (no cache, upstream fetch)", beforeFirst);
   row("after, cold (cache miss, writes cache)", afterMissFirst);
   row("after, warm (cache hit)", afterHitFirst);
+  row("after, warm, 6 min later (cross-session hit)", afterExpiryFirst);
   console.log();
   console.log(`${PARALLELISM}-parallel wall clock over ${FILE_COUNT} files`);
   row("before (no cache)", beforeWall, `upstream requests: ${beforeUpstream}`);
-  row("after, cold (cache miss)", afterMissWall, `upstream requests: ${afterMissUpstream + 1}`);
+  row("after, cold (cache miss)", afterMissWall, `upstream requests: ${afterMissUpstream}`);
   row("after, warm (cache hit)", afterHitWall, `upstream requests: ${afterHitUpstream}`);
+  row(
+    "after, warm, 6 min later (cross-session)",
+    afterExpiryWall,
+    `upstream requests: ${afterExpiryUpstream}`,
+  );
 }
 
 main().catch((err) => {
