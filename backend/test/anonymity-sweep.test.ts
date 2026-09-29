@@ -22,6 +22,7 @@ import {
   type AnonymitySweepSeams,
   checkRowInvariants,
   inScopeDepositFiles,
+  isBlindedEntry,
   namedEntriesIn,
   ownerIdentityOf,
   parseVersionDois,
@@ -498,18 +499,13 @@ describe("the deterministic matchers", () => {
       "README.md",
       "Co-authored with 0000-0001-2345-6789.",
       owner,
-      isPlaceholderAuthor,
+      isBlindedEntry,
     );
     expect(found.findings.map((f) => f.check)).toEqual(["orcid_in_deposit"]);
   });
 
   test("an email is reported once, not twice, when it is also the depositor's", () => {
-    const found = scanDepositFile(
-      "README.md",
-      `write to ${OWNER.email}`,
-      owner,
-      isPlaceholderAuthor,
-    );
+    const found = scanDepositFile("README.md", `write to ${OWNER.email}`, owner, isBlindedEntry);
     expect(found.findings.map((f) => f.check)).toEqual(["depositor_named_in_deposit"]);
   });
 
@@ -518,7 +514,7 @@ describe("the deterministic matchers", () => {
       "participants.tsv",
       "contact\tsomeone@elsewhere.org",
       owner,
-      isPlaceholderAuthor,
+      isBlindedEntry,
     );
     expect(found.findings.map((f) => f.check)).toEqual(["email_in_deposit"]);
   });
@@ -529,7 +525,7 @@ describe("the deterministic matchers", () => {
       "dataset_description.json",
       JSON.stringify({ Name: "A study", Authors: ["Anonymous"], Funding: ["N/A"] }),
       owner,
-      isPlaceholderAuthor,
+      isBlindedEntry,
     );
     expect(found.findings).toEqual([]);
     expect(found.unchecked).toEqual([]);
@@ -544,7 +540,7 @@ describe("the deterministic matchers", () => {
         Acknowledgements: ["Thanks to Mary Somerville"],
       }),
       owner,
-      isPlaceholderAuthor,
+      isBlindedEntry,
     );
     expect(found.findings.map((f) => f.check).sort()).toEqual([
       "description_acknowledgements_named",
@@ -553,9 +549,49 @@ describe("the deterministic matchers", () => {
     ]);
   });
 
-  test("the placeholder rule is the publication gate's own", () => {
-    // Imported, not re-implemented: the two run at different moments and must
-    // not be able to disagree about what counts as naming nobody.
+  test("the finding wording is field-specific and singular (#1515)", () => {
+    const found = scanDepositFile(
+      "dataset_description.json",
+      JSON.stringify({
+        Authors: ["Babbage, Charles"],
+        Funding: ["The Analytical Engine Trust"],
+        Acknowledgements: ["Thanks to Mary Somerville"],
+      }),
+      owner,
+      isBlindedEntry,
+    );
+    const byCheck = Object.fromEntries(found.findings.map((f) => [f.check, f.detail]));
+    // "Funding ... names someone" misdescribes an organization, which is what
+    // the reported bug's sibling wording problem was; "Acknowledgements" may
+    // thank a group. Both get their own noun; Authors keeps the original.
+    expect(byCheck.description_authors_named).toContain("has 1 entry that names someone.");
+    expect(byCheck.description_funding_named).toContain(
+      "has 1 entry that names a funder or a grant.",
+    );
+    expect(byCheck.description_acknowledgements_named).toContain(
+      "has 1 entry that names a person or a group.",
+    );
+  });
+
+  test("the finding wording pluralizes correctly for more than one entry", () => {
+    const found = scanDepositFile(
+      "dataset_description.json",
+      JSON.stringify({
+        Funding: ["The Analytical Engine Trust", "The Difference Engine Fund"],
+      }),
+      owner,
+      isBlindedEntry,
+    );
+    expect(found.findings).toHaveLength(1);
+    expect(found.findings[0].detail).toContain("has 2 entries that name a funder or a grant.");
+  });
+
+  test("namedEntriesIn generalizes over whatever predicate it is given", () => {
+    // A pure function over a predicate parameter -- exercised here against
+    // `isPlaceholderAuthor` (the publication gate's own rule) to prove it is
+    // not hardwired to `isBlindedEntry`, the predicate `scanDepositFile`
+    // actually wires up below (#1515: the two are no longer the same rule for
+    // every field, so this test must not claim they are).
     expect(
       namedEntriesIn(
         { Authors: ["N/A", "Anonymous", "Real Person"] },
@@ -563,6 +599,104 @@ describe("the deterministic matchers", () => {
         isPlaceholderAuthor,
       ),
     ).toEqual({ named: ["Real Person"], readable: true });
+  });
+
+  test("isBlindedEntry recognizes redaction wording beyond the author sentinels (#1515)", () => {
+    for (const blinded of [
+      "Anonymous",
+      "Anonymized",
+      "Anonymised",
+      "Redacted",
+      "Withheld",
+      "Blinded",
+      "Concealed",
+      "Redacted for double-blind review",
+      "Anonymized for review",
+      "Omitted for double-blind review",
+      "Funding information removed for review",
+      "Hidden for review",
+      "Available after review",
+      "Available after publication",
+      "[Redacted]",
+      ANONYMOUS_AUTHORS_LABEL,
+    ]) {
+      expect(isBlindedEntry(blinded)).toBe(true);
+    }
+  });
+
+  test("isBlindedEntry does not blind a real name that merely contains the word", () => {
+    // The dangerous direction: a real funder or acknowledgee whose name
+    // happens to start with a word this predicate also treats as redaction
+    // vocabulary must still be reported. Deciding this the other way would
+    // let "Anonymous Donor Foundation" disappear from a Funding field the way
+    // the reported bug made "removed for review" disappear from one.
+    for (const real of [
+      "Anonymous Donor Foundation",
+      "Blinded Veterans Association",
+      "National Institutes of Health",
+      "NIH Grant R01MH123456",
+      "European Research Council Grant 12345",
+      "Jane Doe",
+      "Thanks to the reviewers",
+    ]) {
+      expect(isBlindedEntry(real)).toBe(false);
+    }
+  });
+
+  test("unspecified/placeholder are a whole token, not a substring match (#1517)", () => {
+    // PLACEHOLDER_AUTHOR matches these two words anywhere in the entry, which
+    // also fires on a real funder that merely CONTAINS one -- the review
+    // finding on this PR. isBlindedEntry folds them into the whole-entry
+    // vocabulary instead, so only an entry made of nothing else blinds.
+    for (const real of [
+      "National Institutes of Health Unspecified Program",
+      "Placeholderville Foundation",
+      "National Institutes of Health, specific award number unspecified",
+    ]) {
+      expect(isBlindedEntry(real)).toBe(false);
+    }
+    // The word alone, or bracketed, still blinds: only the substring match
+    // inside a longer real name was the bug.
+    for (const blinded of ["Unspecified", "Placeholder", "[placeholder]"]) {
+      expect(isBlindedEntry(blinded)).toBe(true);
+    }
+  });
+
+  test("an entry built only from redaction vocabulary blinds, even with no specific reason (#1517)", () => {
+    // Accepted, documented risk (see BLINDED_CONNECTOR_WORDS's comment): none
+    // of these name a specific redaction reason, but an entry made of
+    // nothing but stock words has no identifying content left to leak. The
+    // moment a real funder, grant number or name appears, that token is
+    // outside the vocabulary and the entry is reported -- as the surrounding
+    // tests prove. A future addition to the vocabulary has to keep this test
+    // passing.
+    for (const genericallyBlinded of [
+      "Funding details available after acceptance",
+      "Grant Information Not Available",
+      "Grant Award Not Yet Available",
+    ]) {
+      expect(isBlindedEntry(genericallyBlinded)).toBe(true);
+    }
+  });
+
+  test("an explicit no-funding or not-applicable declaration is not a name (#1517)", () => {
+    for (const declared of [
+      "None declared",
+      "No funding was received for this work",
+      "The authors received no specific funding for this work",
+      "Not applicable",
+    ]) {
+      expect(isBlindedEntry(declared)).toBe(true);
+    }
+  });
+
+  test("a no-funding statement that goes on to name a funder is still reported (#1517)", () => {
+    // The declaration only covers the entry when it IS the whole entry:
+    // content appended after the negation -- a real funder's name -- is
+    // exactly what this predicate exists to still report.
+    for (const named of ["No funding from NIH", "Not funded by the Wellcome Trust"]) {
+      expect(isBlindedEntry(named)).toBe(false);
+    }
   });
 });
 
@@ -653,7 +787,7 @@ describe("a finding never carries the text it matched", () => {
       owner_email: OWNER.email,
       owner_orcid: OWNER.orcid,
     });
-    const found = scanDepositFile("README", leaky, owner, isPlaceholderAuthor);
+    const found = scanDepositFile("README", leaky, owner, isBlindedEntry);
     expect(found.findings.length).toBeGreaterThan(0);
     const serialized = JSON.stringify(found.findings);
     for (const secret of [OWNER.family, OWNER.email, OWNER.orcid, OWNER.username, OWNER.github]) {
@@ -842,6 +976,51 @@ describe("the deposit-file scan, through the real sweep", () => {
     expect(res.results[0].unchecked).toContain("deposit_file_unreadable:participants.tsv");
     db.close();
   });
+
+  test("a Funding field blinded in redaction wording VERIFIES, end to end (#1515)", async () => {
+    // The reported bug, reproduced through the real sweep rather than the unit
+    // (scanDepositFile) it dispatches to: nm000284's Funding entry was already
+    // blinded, in wording `isPlaceholderAuthor` did not recognize, and the
+    // sweep reported it as naming someone.
+    const db = freshDb();
+    seed(db, "nm000968");
+    const res = await runAnonymitySweep(env(db), {
+      seams: cleanSeams({
+        "dataset_description.json": JSON.stringify({
+          Name: "A sufficiently descriptive dataset title",
+          Authors: ["Anonymous"],
+          Funding: ["Funding information removed for review"],
+          Acknowledgements: ["Redacted for double-blind review"],
+        }),
+        README: "Nothing identifying here.",
+      }),
+    });
+    expect(res.results[0].status).toBe("verified");
+    expect(res.results[0].findings).toEqual([]);
+    db.close();
+  });
+
+  test("a real funder whose name contains blinding vocabulary still reaches the verdict (#1515)", async () => {
+    // The dangerous direction, end to end: "Anonymous Donor Foundation" is a
+    // real funder, not a placeholder, and must not disappear the way the
+    // reported bug made an actually-blinded entry disappear in the other
+    // direction.
+    const db = freshDb();
+    seed(db, "nm000969");
+    const res = await runAnonymitySweep(env(db), {
+      seams: cleanSeams({
+        "dataset_description.json": JSON.stringify({
+          Name: "A sufficiently descriptive dataset title",
+          Authors: ["Anonymous"],
+          Funding: ["Anonymous Donor Foundation"],
+        }),
+        README: "Nothing identifying here.",
+      }),
+    });
+    expect(res.results[0].status).toBe("findings");
+    expect(res.results[0].findings.map((f) => f.check)).toEqual(["description_funding_named"]);
+    db.close();
+  });
 });
 
 describe("the owner projection, re-run rather than trusted", () => {
@@ -1002,14 +1181,14 @@ describe("the shapes a depositor's dataset_description.json actually takes", () 
       "dataset_description.json",
       '{"Authors": ["Jane Coauthor"],,}',
       owner,
-      isPlaceholderAuthor,
+      isBlindedEntry,
     );
     expect(found.findings).toEqual([]);
     expect(found.unchecked).toEqual(["description_structured:dataset_description.json"]);
   });
 
   test("a bare-string Authors field is read as one entry, not discarded", () => {
-    expect(namedEntriesIn({ Authors: "Jane Coauthor" }, "Authors", isPlaceholderAuthor)).toEqual({
+    expect(namedEntriesIn({ Authors: "Jane Coauthor" }, "Authors", isBlindedEntry)).toEqual({
       named: ["Jane Coauthor"],
       readable: true,
     });
@@ -1019,7 +1198,7 @@ describe("the shapes a depositor's dataset_description.json actually takes", () 
     // `[{"name": "Jane Coauthor"}]` used to filter down to `[]`, which is
     // indistinguishable from "this field names nobody" and fed `verified`.
     expect(
-      namedEntriesIn({ Authors: [{ name: "Jane Coauthor" }] }, "Authors", isPlaceholderAuthor),
+      namedEntriesIn({ Authors: [{ name: "Jane Coauthor" }] }, "Authors", isBlindedEntry),
     ).toEqual({ named: [], readable: false });
   });
 
@@ -1028,7 +1207,7 @@ describe("the shapes a depositor's dataset_description.json actually takes", () 
       "dataset_description.json",
       JSON.stringify({ Authors: [{ name: "Jane Coauthor" }] }),
       owner,
-      isPlaceholderAuthor,
+      isBlindedEntry,
     );
     expect(found.findings).toEqual([]);
     expect(found.unchecked).toEqual(["description_field:Authors"]);
@@ -1043,7 +1222,7 @@ describe("the shapes a depositor's dataset_description.json actually takes", () 
       // check that NEMAR's own blind failed.
       JSON.stringify({ authors: { "Charles Babbage": {} }, title: "t" }),
       owner,
-      isPlaceholderAuthor,
+      isBlindedEntry,
     );
     expect(found.findings.map((f) => f.check)).toEqual(["repo_metadata_not_blinded"]);
     expect(found.findings[0].severity).toBe("invariant");
@@ -1055,19 +1234,14 @@ describe("the shapes a depositor's dataset_description.json actually takes", () 
       ".nemar/metadata.json",
       JSON.stringify({ title: "t", description: "d" }),
       owner,
-      isPlaceholderAuthor,
+      isBlindedEntry,
     );
     expect(found.findings).toEqual([]);
     expect(found.unchecked).toEqual([]);
   });
 
   test("a lowercase ORCID checksum is still an ORCID", () => {
-    const found = scanDepositFile(
-      "README",
-      "ORCID 0000-0002-1694-233x",
-      owner,
-      isPlaceholderAuthor,
-    );
+    const found = scanDepositFile("README", "ORCID 0000-0002-1694-233x", owner, isBlindedEntry);
     expect(found.findings.map((f) => f.check)).toEqual(["orcid_in_deposit"]);
   });
 });
