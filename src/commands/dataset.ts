@@ -78,7 +78,7 @@ import {
   updateValidatorCache,
   validateBidsDataset,
 } from "../lib/bids-validator.js";
-import { printPartialRetrieval, requireAuth } from "../lib/cli-output.js";
+import { printNoVerifyNotice, printPartialRetrieval, requireAuth } from "../lib/cli-output.js";
 import { triggerOpportunisticRefresh } from "../lib/completion/refresh.js";
 import { getConfig, isAuthenticated } from "../lib/config.js";
 import { NO_DESCRIPTION, YES_DESCRIPTION, YES_OPTION, confirm } from "../lib/confirm.js";
@@ -814,7 +814,11 @@ async function fetchPrivateDatasetCreds(
 
 async function handleOpenNeuroDownload(
   datasetId: string,
-  options: { output?: string; jobs?: string; data?: boolean },
+  // `verify?: boolean` mirrors runHttpDownload's option: `--no-verify` is a
+  // documented no-op here too, since this path already checks size only
+  // (AWS CLI sync, or the shared size-verified pool in lib/file-download.ts)
+  // and never computes a checksum for OpenNeuro's files.
+  options: { output?: string; jobs?: string; data?: boolean; verify?: boolean },
 ): Promise<void> {
   // Warning: no version control
   console.log();
@@ -840,6 +844,15 @@ async function handleOpenNeuroDownload(
       ),
     );
     console.log();
+  }
+
+  if (options.verify === false) {
+    console.error(
+      chalk.dim(
+        "Note: --no-verify has no effect here; OpenNeuro downloads already check size only " +
+          "and have no checksum step to skip.",
+      ),
+    );
   }
 
   const outputPath = options.output || datasetId;
@@ -1003,6 +1016,16 @@ async function runHttpDownload(
     prune?: boolean;
     resume?: boolean;
     requireComplete?: boolean;
+    /**
+     * `--no-verify` negated to `options.verify === false` (Commander's
+     * `--no-` convention). Unlike the git-annex path, this is a documented
+     * no-op here: `downloadEntries`/`downloadFiles` already check size only
+     * and never compute a checksum (ADR 0062), so there is no verification
+     * step to skip. Accepted rather than refused so the flag works "regardless
+     * of transport" (#1523) -- a script that always passes --no-verify must
+     * not break on the run where git-annex happens to be missing.
+     */
+    verify?: boolean;
   },
   filter: BidsFilterResult,
 ): Promise<void> {
@@ -1023,6 +1046,15 @@ async function runHttpDownload(
       }
       process.exit(1);
     }
+  }
+
+  if (options.verify === false) {
+    console.error(
+      chalk.dim(
+        "Note: --no-verify has no effect here; an HTTP download already checks size only " +
+          "and has no checksum step to skip.",
+      ),
+    );
   }
 
   const jobs = Number.parseInt(options.jobs || "4", 10);
@@ -1213,6 +1245,11 @@ export function createDownloadCommand(): Command {
       "--require-complete",
       "Exit non-zero if any file is unavailable from the archive (for strict pipelines)",
     )
+    .option(
+      "--no-verify",
+      "Skip git-annex checksum verification for this run only (size is still checked); " +
+        "a documented no-op on --http or OpenNeuro downloads, which already check size only",
+    )
     .addHelpText(
       "after",
       ({ command }) => `
@@ -1245,6 +1282,15 @@ Without git-annex:
   Re-running resumes, since a file already present at its declared size is
   skipped.
 
+Verification:
+  By default every file is checksum-verified against its git-annex key as it
+  arrives. --no-verify skips that hash for this run only (never written to
+  git config); size is still checked, so a truncated or wrong-size file is
+  still rejected, but wrong content at the right size is not caught. Use it
+  only over a trusted link, to save the CPU time hashing costs on a large
+  dataset. It is a documented no-op on --http and OpenNeuro downloads, which
+  already verify by size alone and have no checksum step to skip.
+
 Examples:
   $ ${invokedAs(command)} nm000104              # Download NEMAR dataset (skips stimuli/derivatives)
   $ ${invokedAs(command)} nm000104 -o ./data    # Custom output directory
@@ -1254,6 +1300,7 @@ Examples:
   $ ${invokedAs(command)} nm000104 --update     # Pull only the version diff
   $ ${invokedAs(command)} nm000104 --update --prune  # Plus drop orphan objects
   $ ${invokedAs(command)} nm000104 --http       # No git-annex needed (snapshot)
+  $ ${invokedAs(command)} nm000104 --no-verify  # Skip checksum verification (size still checked)
   $ ${invokedAs(command)} nm000104 --subjects sub-01,02      # Only these subjects
   $ ${invokedAs(command)} nm000104 --tasks rest --datatypes eeg  # Subset
   $ ${invokedAs(command)} nm000104 --stimuli                 # Also download stimuli/
@@ -1276,6 +1323,11 @@ Examples:
         console.log(chalk.red("Error: --prune requires --update."));
         process.exit(1);
       }
+
+      // Commander's `--no-verify` negates an implicit `verify` default of
+      // true, the same pattern `--no-data` uses above: `options.verify` is
+      // `undefined` unless the flag was passed, in which case it is `false`.
+      const noVerify = options.verify === false;
 
       const filter = buildBidsFilterArgs({
         subjects: options.subjects,
@@ -1650,6 +1702,7 @@ Examples:
           paths: updatePaths,
           extraArgs: matchArgs,
           requireComplete: Boolean(options.requireComplete),
+          noVerify,
           onProgress: (line) => tracker.processLine(line),
         });
 
@@ -1676,6 +1729,7 @@ Examples:
         } else {
           console.log(chalk.green(`Data downloaded (${getResult.filesDownloaded} files)`));
         }
+        if (noVerify) printNoVerifyNotice();
       }
 
       // --prune: drop annex objects that are no longer referenced by any branch
@@ -4363,6 +4417,10 @@ datasetCommand
     "--require-complete",
     "Exit non-zero if any file is unavailable from the archive (for strict pipelines)",
   )
+  .option(
+    "--no-verify",
+    "Skip git-annex checksum verification for this run only (size is still checked)",
+  )
   .addHelpText(
     "after",
     `
@@ -4378,13 +4436,19 @@ Description:
   fetch them. When you supply explicit file paths, the path itself is
   treated as the filter and the default-skip is not applied.
 
+  --no-verify runs git-annex with checksum verification off for this call
+  only (never written to git config), trading the hash check for speed on a
+  trusted link. Size is still checked: a truncated or wrong-size file is
+  still rejected, but wrong content at the right size is not caught.
+
 Examples:
   $ nemar dataset get                       # Get all files (skips stimuli/derivatives)
   $ nemar dataset get --stimuli             # Get all files including stimuli/
   $ nemar dataset get --stimuli --derivatives  # Get everything
   $ nemar dataset get sub-01/eeg/           # Get specific directory
   $ nemar dataset get stimuli/              # Explicit path: fetches stimuli/
-  $ nemar dataset get *.edf -j 8            # Get EDF files with 8 streams`,
+  $ nemar dataset get *.edf -j 8            # Get EDF files with 8 streams
+  $ nemar dataset get --no-verify           # Skip checksum verification (size still checked)`,
   )
   .action(async (files, options) => {
     const cwd = process.cwd();
@@ -4532,12 +4596,17 @@ Examples:
 
     const tracker = new DownloadProgressTracker(pending?.fileCount ?? 0, pending?.totalBytes ?? 0);
 
+    // See the download command's identical comment: Commander negates
+    // `--no-verify` onto an implicit `verify` default of true.
+    const noVerify = options.verify === false;
+
     const result = await getDatasetData(cwd, {
       jobs,
       paths,
       credentials: getS3Creds,
       extraArgs: matchArgs,
       requireComplete: Boolean(options.requireComplete),
+      noVerify,
       onProgress: (line) => tracker.processLine(line),
     });
     if (!result.success) {
@@ -4565,6 +4634,7 @@ Examples:
     } else {
       console.log(chalk.green(`Downloaded ${result.filesDownloaded} file(s)`));
     }
+    if (noVerify) printNoVerifyNotice();
   });
 
 // Shared action handler for commit/save

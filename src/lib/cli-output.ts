@@ -78,3 +78,18 @@ export function printPartialRetrieval(result: GetDataResult): void {
   console.log(chalk.dim("  Per-file detail, including why each file is missing:"));
   console.log(chalk.dim("    .nemar/availability-report.json"));
 }
+
+/**
+ * The one wording for "this run skipped git-annex checksum verification"
+ * (#1523's `--no-verify`). On stderr, deliberately: it is a caveat about how
+ * the files were obtained, not download output a script parsing stdout for
+ * file lists or counts should have to filter out.
+ */
+export function printNoVerifyNotice(): void {
+  console.error(
+    chalk.yellow(
+      "Note: --no-verify skipped checksum verification. Sizes were still checked; " +
+        "file contents were not.",
+    ),
+  );
+}
