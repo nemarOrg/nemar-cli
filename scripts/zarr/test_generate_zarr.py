@@ -8359,6 +8359,33 @@ class TestSidecarJoinReport(unittest.TestCase):
             "unmatched_examples": ["FP1-F7"],
         })
 
+    def test_a_case_only_match_biosigio_reported_is_not_unmatched(self):
+        # biosigio 1.2.10 applied `Fp1-F7` to `FP1-F7` and said so; a row it
+        # left alone (`t8` against `T8`, ambiguous there) is still unmatched
+        # and still case-only. The map is biosigIO's own
+        # `matched_case_insensitive`, `{sidecar_name: channel_label}`.
+        #
+        # The end-to-end proof is the canary in TestDuplicateLabelsThroughConvertOne,
+        # but biosigio 1.2.9 (the cap in requirements.txt) never emits that key, so
+        # in CI only this pure case reaches the arithmetic.
+        report = sidecar_join_report(
+            ["FP1-F7", "F7-T7", "T8"],
+            ["Fp1-F7", "F7-T7", "t8"],
+            {},
+            {"Fp1-F7": "FP1-F7"},
+        )
+        self.assertEqual(report, {
+            "unmatched_channels": 1, "unmatched_case_only": 1,
+            "unmatched_examples": ["T8"],
+        })
+        # Without the map the same inputs count both, which is 1.2.9's truth.
+        self.assertEqual(
+            sidecar_join_report(["FP1-F7", "F7-T7", "T8"], ["Fp1-F7", "F7-T7", "t8"], {})[
+                "unmatched_channels"
+            ],
+            2,
+        )
+
     def test_renamed_labels_inherit_a_position_and_override_nothing(self):
         positions = {"Fp1": [1.0, 2.0, 3.0], "Fp1-1": [9.0, 9.0, 9.0]}
         out = generate_zarr.positions_for_renamed_labels(
@@ -8390,6 +8417,27 @@ class TestSidecarJoinReport(unittest.TestCase):
         self.assertEqual(report["unmatched_examples"], labels[:generate_zarr.UNMATCHED_EXAMPLES_MAX])
         self.assertNotIn("unmatched_case_only", report)
         self.assertNotIn("unmatched_raw_label", report)
+
+
+def biosigio_matches_case_only_rows() -> bool:
+    """Whether the installed biosigIO applies a channels.tsv row to a channel
+    whose label differs from the row's name only in case (biosigio#136).
+
+    Asked of biosigIO itself on a real EDF and a real sidecar, through
+    `Recording.from_file`, and answered from the account it gives of its own
+    join: 1.2.10 records `matched_case_insensitive` under `channels_tsv_units`
+    when it matched that way, 1.2.9 has no such key. No conversion by this
+    repo's code is involved, so the answer cannot depend on what it is used to
+    check."""
+    from biosigio import Recording
+
+    with tempfile.TemporaryDirectory() as tmp:
+        edf = build_labeled_edf(os.path.join(tmp, "probe.edf"), ["FP1-F7", "F7-T7"])
+        tsv = os.path.join(tmp, "probe_channels.tsv")
+        with open(tsv, "w") as fh:
+            fh.write("name\ttype\tunits\nFp1-F7\tEEG\tV\nF7-T7\tEEG\tV\n")
+        rec = Recording.from_file(edf, bids_channels=tsv)
+    return "matched_case_insensitive" in rec.metadata.get("channels_tsv_units", {})
 
 
 class TestDuplicateLabelsThroughConvertOne(unittest.TestCase):
@@ -8561,26 +8609,55 @@ class TestDuplicateLabelsThroughConvertOne(unittest.TestCase):
         self.assertEqual(positions["F7"], [-0.07, 0.04, 0.0])
         self.assertIn("Fp1", positions)  # the sidecar's own key is kept
 
-    def test_a_case_only_difference_is_disclosed(self):
+    def test_a_case_only_row_is_reported_per_biosigios_join(self):
         # biosigio#136: EDF header `FP1-F7`, channels.tsv `Fp1-F7`.
         #
-        # CANARY. This pins biosigio 1.2.9's EXACT-match join: the row is not
-        # applied, so the channel keeps the importer's unit and the index says
-        # why. biosigio#136 is fixed in open biosigio PR #140; once a release
-        # carrying it is the floor in requirements.txt, this test fails
-        # (the row now matches), and that failure is the signal to delete
-        # `unmatched_case_only` from `sidecar_join_report`, the JSON Schema
-        # and both zod mirrors, and to rewrite this test to expect a match.
-        # `unmatched_case_only` stays declared until then on purpose.
+        # CANARY for biosigIO's channels.tsv join, and it must pass on either
+        # side of that change without skipping (a skip counts toward the CI
+        # gate). Which side this run is on is decided by asking biosigIO
+        # directly (`biosigio_matches_case_only_rows`), not by a version number
+        # and not by the outcome under test:
+        #
+        # * biosigio 1.2.9 joins by exact label. The row is not applied, so the
+        #   channel keeps the importer's unit and the index says why
+        #   (`unmatched_case_only`).
+        # * biosigio 1.2.10 also matches the row to the one channel that differs
+        #   from it only in case, and reports it as `matched_case_insensitive`.
+        #   The row IS applied, so the index must not claim otherwise: nothing
+        #   unmatched, no `unmatched_case_only`, no warning.
+        #
+        # The second branch cannot run in CI while requirements.txt caps
+        # biosigio below 1.2.10; it was run against biosigio's `main` when the
+        # cap was set. The branch whose assertion fails on the wrong side is the
+        # point: a stale probe (biosigIO renames its report key) lands in the
+        # 1.2.9 branch and fails on the unit that was in fact converted.
+        matches = biosigio_matches_case_only_rows()
         names = ["Fp1-F7", *CHB_MIT_SUFFIXED[1:]]
-        result, out = self.convert(names)
-        self.assertTrue(result["ok"], result.get("error"))
-        report = result["entry"]["units_report"]
-        self.assertEqual(report["unmatched_channels"], 1)
-        self.assertEqual(report["unmatched_case_only"], 1)
-        self.assertEqual(report["unmatched_examples"], ["FP1-F7"])
-        self.assertEqual(self.store_units(result["entry"])["FP1-F7"], "uV")
-        self.assertIn("differ only in case", out)
+        saved = generate_zarr.STREAM_EDF_MIN_BYTES
+        self.addCleanup(setattr, generate_zarr, "STREAM_EDF_MIN_BYTES", saved)
+        for path_name, threshold in (("in-memory", saved), ("streaming", 1)):
+            with self.subTest(path_name, biosigio_matches_case_only_rows=matches):
+                generate_zarr.STREAM_EDF_MIN_BYTES = threshold
+                shutil.rmtree(self.synced_dir, ignore_errors=True)
+                result, out = self.convert(names)
+                self.assertTrue(result["ok"], result.get("error"))
+                report = result["entry"]["units_report"]
+                unit = self.store_units(result["entry"])["FP1-F7"]
+                if matches:
+                    self.assertEqual(unit, "V")  # the sidecar's, so the row was applied
+                    self.assertEqual(report["matched_case_insensitive"], {"Fp1-F7": "FP1-F7"})
+                    self.assertEqual(report["unmatched_channels"], 0)
+                    self.assertNotIn("unmatched_case_only", report)
+                    self.assertNotIn("unmatched_examples", report)
+                    self.assertNotIn("names no row", out)
+                    self.assertNotIn("differ only in case", out)
+                else:
+                    self.assertEqual(unit, "uV")  # the importer's: the row was not applied
+                    self.assertNotIn("matched_case_insensitive", report)
+                    self.assertEqual(report["unmatched_channels"], 1)
+                    self.assertEqual(report["unmatched_case_only"], 1)
+                    self.assertEqual(report["unmatched_examples"], ["FP1-F7"])
+                    self.assertIn("differ only in case", out)
 
 
 def build_edf_family(

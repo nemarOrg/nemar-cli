@@ -2260,7 +2260,10 @@ class SidecarJoinReport(TypedDict, total=False):
 
 
 def sidecar_join_report(
-    store_labels: list[str], sidecar_names: list[str], renames: dict[str, str]
+    store_labels: list[str],
+    sidecar_names: list[str],
+    renames: dict[str, str],
+    matched_case_insensitive: dict[str, str] | None = None,
 ) -> SidecarJoinReport:
     """Account for the store channels channels.tsv did NOT reach.
 
@@ -2283,14 +2286,27 @@ def sidecar_join_report(
     the rest appear only when non-zero. With no store labels (a store whose
     groups record none) there was no join, and the report is empty rather
     than a vacuous 0.
-    Exact-match semantics mirror biosigio 1.2.9. If biosigIO starts matching
-    case-insensitively (biosigio#136), ``unmatched_case_only`` must go.
+    biosigio 1.2.9 joins by exact match only, so a case-only difference is
+    never applied and ``unmatched_case_only`` is a true statement about it.
+    biosigio 1.2.10 (biosigio#140) also matches a row to the one channel that
+    differs from it only in case, and reports each such match as
+    ``matched_case_insensitive``, ``{sidecar_name: channel_label}``, in the same
+    `channels_tsv_units` account this function's caller republishes as
+    `units_report`. Pass that map as `matched_case_insensitive` and those
+    channels count as matched, because the sidecar DID reach them; what is left
+    under ``unmatched_case_only`` is then only the ambiguous rows biosigIO
+    warns about and leaves unapplied. On 1.2.9 the map is absent and the
+    behavior is unchanged.
     """
     if not store_labels:
         return {}
     exact = set(sidecar_names)
     folded = {name.casefold() for name in sidecar_names}
-    unmatched = [label for label in store_labels if label not in exact]
+    matched_by_case = set((matched_case_insensitive or {}).values())
+    unmatched = [
+        label for label in store_labels
+        if label not in exact and label not in matched_by_case
+    ]
     report: SidecarJoinReport = {"unmatched_channels": len(unmatched)}
     if not unmatched:
         return report
@@ -6339,8 +6355,10 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             # report cannot say: it counts only what matched rows did.
             names = channels_tsv_names(channels_text) if channels_text is not None else None
             if names is not None:
+                by_case = entry["units_report"].get("matched_case_insensitive")
                 join = sidecar_join_report(
-                    meta.get("_channel_labels") or [], names, meta.get("_label_renames") or {}
+                    meta.get("_channel_labels") or [], names, meta.get("_label_renames") or {},
+                    by_case if isinstance(by_case, dict) else None,
                 )
                 entry["units_report"].update(join)
                 if join.get("unmatched_channels"):
