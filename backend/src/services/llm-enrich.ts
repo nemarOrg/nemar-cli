@@ -19,6 +19,7 @@ import {
 import {
   DATA_DESCRIBING_RELATION_TYPES,
   NEVER_DATA_PAPER_DOIS,
+  isOwnNemarDoi,
   isStandardSpecTitle,
   normalizeDoiKey,
 } from "../../../shared/never-data-paper.js";
@@ -531,10 +532,18 @@ const RECLASSIFIABLE_RELATION_TYPES: ReadonlySet<string> = new Set([
  *  Within the #826 triad, any move. Out of it, exactly one (#1549):
  *  `References` -> `IsDerivedFrom`, for a deposit of the same data (figshare,
  *  Zenodo, OpenNeuro) that ReferencesAndLinks seeded as a mere reference.
- *  The reverse stays locked, so SourceDatasets provenance is never undone. */
-function isReclassifiable(current: RelatedIdentifierEntry, next: string): boolean {
+ *  IsDerivedFrom is locked once written, so that move is a ratchet, and it
+ *  is allowed only for a DOI whose DataCite resourceTypeGeneral is `Dataset`
+ *  (`derivableDois`); a paper can never be ratcheted into provenance. */
+function isReclassifiable(
+  current: RelatedIdentifierEntry,
+  next: string,
+  derivableDois: ReadonlySet<string>,
+): boolean {
   if (current.identifier_type === "URL") return false;
-  if (current.relation_type === "References" && next === "IsDerivedFrom") return true;
+  if (current.relation_type === "References" && next === "IsDerivedFrom") {
+    return derivableDois.has(normalizeDoiKey(current.identifier));
+  }
   return (
     RECLASSIFIABLE_RELATION_TYPES.has(current.relation_type) &&
     RECLASSIFIABLE_RELATION_TYPES.has(next)
@@ -604,44 +613,71 @@ export interface DemoteOutcome<T> {
   result: T;
   /** Entries that were demoted, as they were BEFORE demotion. */
   demoted: RelatedIdentifierEntry[];
+  /** DOI entries naming the dataset's own NEMAR DOI, removed. */
+  dropped: RelatedIdentifierEntry[];
+}
+
+export interface RelationGuardContext {
+  /** Resolved registry titles keyed by {@link normalizeDoiKey}, for the
+   *  BIDS-spec title rule. */
+  resolvedTitles?: ReadonlyMap<string, string>;
+  /** The dataset being enriched; its own concept and version DOIs are
+   *  dropped from related_identifiers. */
+  datasetId?: string;
 }
 
 /**
- * Demote never-data-paper DOIs to `References` (#1549).
+ * Enforce the deterministic relation rules (#1549, ADR 0075).
  *
- * A DOI on {@link NEVER_DATA_PAPER_DOIS}, or one whose resolved title is a
- * BIDS specification title, is never this dataset's data paper, whatever the
- * LLM, the BIDS seed (SourceDatasets / ReferencesAndLinks), or an older
- * metadata.json says. Only DOI entries carrying a data-describing relation
- * are touched: URL entries (the GitHub repo and NEMAR landing page are
- * `IsDescribedBy` URLs) and every other relation type pass through.
- * Demotion can leave the same DOI listed twice as `References`; those exact
- * duplicates collapse to the first.
+ * 1. A DOI on {@link NEVER_DATA_PAPER_DOIS}, or one whose resolved title is a
+ *    BIDS specification title, is never this dataset's data paper, whatever
+ *    the LLM, the BIDS seed (SourceDatasets / ReferencesAndLinks), or an older
+ *    metadata.json says: under a data-describing relation it is demoted to
+ *    `References`. Demotion can leave the same DOI listed twice as
+ *    `References`; those duplicates collapse to the first.
+ * 2. The dataset's own NEMAR DOI (concept or version) is dropped under any
+ *    relation. A dataset never relates to itself, yet on008862 and on007655
+ *    carried their own DOI as `IsSupplementTo`, and a README badge DOI can be
+ *    promoted to `IsDescribedBy` by the merge.
  *
- * `resolvedTitles` is keyed by {@link normalizeDoiKey}. enrichDataset calls
- * this after every stage that can write a relation and once more on the final
- * document, so no later stage can re-promote a demoted DOI.
+ * Only DOI entries are touched: URL entries (the GitHub repo and NEMAR
+ * landing page are `IsDescribedBy` URLs) pass through, and so does every
+ * relation of an unblocked DOI, `IsSupplementTo` included. enrichDataset
+ * calls this after every stage that can write a relation and once more on
+ * the final document, so no later stage can undo it.
  */
 export function enforceNeverDataPaper<T extends { related_identifiers?: RelatedIdentifierEntry[] }>(
   target: T,
-  resolvedTitles?: ReadonlyMap<string, string>,
+  context: RelationGuardContext = {},
 ): DemoteOutcome<T> {
   const rels = target.related_identifiers;
-  if (!rels || rels.length === 0) return { result: target, demoted: [] };
+  if (!rels || rels.length === 0) return { result: target, demoted: [], dropped: [] };
 
+  const { resolvedTitles, datasetId } = context;
+  const doiKey = (r: RelatedIdentifierEntry): string | null =>
+    r.identifier_type === "DOI" ? normalizeDoiKey(r.identifier) : null;
+  const isOwn = (r: RelatedIdentifierEntry): boolean => {
+    const key = doiKey(r);
+    return key !== null && isOwnNemarDoi(key, datasetId);
+  };
   const isBlocked = (r: RelatedIdentifierEntry): boolean => {
-    if (r.identifier_type !== "DOI") return false;
-    const key = normalizeDoiKey(r.identifier);
+    const key = doiKey(r);
+    if (key === null) return false;
     return NEVER_DATA_PAPER_DOIS.has(key) || isStandardSpecTitle(resolvedTitles?.get(key));
   };
+
+  const dropped = rels.filter(isOwn);
   const demoted = rels.filter(
-    (r) => isBlocked(r) && DATA_DESCRIBING_RELATION_TYPES.has(r.relation_type),
+    (r) => !isOwn(r) && isBlocked(r) && DATA_DESCRIBING_RELATION_TYPES.has(r.relation_type),
   );
-  if (demoted.length === 0) return { result: target, demoted };
+  if (demoted.length === 0 && dropped.length === 0) {
+    return { result: target, demoted, dropped };
+  }
 
   const kept: RelatedIdentifierEntry[] = [];
   const blockedReferences = new Set<string>();
   for (const r of rels) {
+    if (isOwn(r)) continue;
     if (!isBlocked(r)) {
       kept.push(r);
       continue;
@@ -656,7 +692,7 @@ export function enforceNeverDataPaper<T extends { related_identifiers?: RelatedI
     }
     kept.push(entry);
   }
-  return { result: { ...target, related_identifiers: kept }, demoted };
+  return { result: { ...target, related_identifiers: kept }, demoted, dropped };
 }
 
 /**
@@ -664,10 +700,15 @@ export function enforceNeverDataPaper<T extends { related_identifiers?: RelatedI
  *
  * related_identifiers: existing entries within the citation triad are
  * reclassifiable by the LLM (#826), and a `References` entry may become
- * `IsDerivedFrom` (#1549); IsDerivedFrom, URL entries, and non-LLM relation
- * types are locked; new entries are appended. DOIs match case-insensitively. funding_references
- * merge additively with LLM-parsed entries replacing matching raw BIDS
- * strings.
+ * `IsDerivedFrom` when its DOI is in `derivableDois` (#1549); IsDerivedFrom,
+ * URL entries, and non-LLM relation types are locked; new entries are
+ * appended, a new DOI claimed as IsDerivedFrom outside `derivableDois` as
+ * `References`. DOIs match case-insensitively. funding_references merge
+ * additively with LLM-parsed entries replacing matching raw BIDS strings.
+ *
+ * `derivableDois`: normalized DOIs whose DataCite resourceTypeGeneral is
+ * `Dataset` (see datasetDoisOf in doi-metadata.ts). Empty by default, so
+ * without resolved metadata the LLM cannot write IsDerivedFrom at all.
  *
  * LLM overwrites: description, methods_description, keywords (LLM's domain).
  * Authors are never touched by the LLM.
@@ -675,6 +716,7 @@ export function enforceNeverDataPaper<T extends { related_identifiers?: RelatedI
 export function mergeWithExisting(
   existing: NemarMetadataV2 | null,
   llmResult: LlmEnrichmentResultV2,
+  derivableDois: ReadonlySet<string> = new Set(),
 ): NemarMetadataV2 {
   const merged: NemarMetadataV2 = {
     version: "2.0",
@@ -725,7 +767,7 @@ export function mergeWithExisting(
   // deposit of the same data (isReclassifiable). Everything else is locked:
   // IsDerivedFrom (BIDS SourceDatasets), URL entries (GitHub/NEMAR links),
   // and any relation type outside the triad (importer's IsIdenticalTo,
-  // curator-set types) — the LLM never overwrites another subsystem's
+  // curator-set types); the LLM never overwrites another subsystem's
   // assertion. All duplicate entries for an identifier are updated
   // consistently, and DOIs match regardless of case or resolver prefix.
   if (llmResult.related_identifiers) {
@@ -736,13 +778,19 @@ export function mergeWithExisting(
       const matches = allRels.filter((r) => mergeKey(r) === key);
       if (matches.length > 0) {
         for (const current of matches) {
-          if (isReclassifiable(current, newRel.relation_type)) {
+          if (isReclassifiable(current, newRel.relation_type, derivableDois)) {
             current.relation_type = newRel.relation_type;
           }
         }
         continue;
       }
-      allRels.push(newRel);
+      // A new IsDerivedFrom would be locked on the next run just like a
+      // promoted one, so it needs the same Dataset evidence.
+      const unprovenDerivation =
+        newRel.relation_type === "IsDerivedFrom" &&
+        newRel.identifier_type === "DOI" &&
+        !derivableDois.has(normalizeDoiKey(newRel.identifier));
+      allRels.push(unprovenDerivation ? { ...newRel, relation_type: "References" } : newRel);
     }
     merged.related_identifiers = allRels;
   }
@@ -935,20 +983,21 @@ Rate each criterion from 0-100 confidence that the metadata is CORRECT:
   - IsDerivedFrom: this dataset was created from that source (e.g. a figshare, Zenodo, or
     OpenNeuro deposit of the same data)
   - IsVersionOf: this is a newer version of the same dataset
-  - IsDescribedBy: a paper that introduces/describes THIS dataset's own data — its data
+  - IsDescribedBy: a paper that introduces/describes THIS dataset's own data, i.e. its data
     paper (also valid for GitHub repo and NEMAR landing page URLs)
   - IsSupplementTo: this dataset supplements that publication (a data-paper relation;
     IsDescribedBy is preferred)
-  - References: general citation — reused paradigm/stimulus resources (e.g. ERP CORE),
+  - References: general citation, e.g. reused paradigm/stimulus resources (ERP CORE),
     umbrella initiatives (e.g. HBN, ABCD), standards/specification papers (e.g. BIDS,
     iEEG-BIDS, HED), methods and software papers (e.g. EEGLAB, MNE-Python, fMRIPrep)
-- FLAG as a blocking issue any DOI tagged IsDescribedBy/IsSupplementTo/IsDerivedFrom whose
-  paper is a standard, shared resource, umbrella initiative, or method/software paper
-  rather than this dataset's own data or data paper, or whose resolved title is unrelated
-  to this dataset — and the reverse: this dataset's own data paper tagged as mere
-  References.
+- FLAG as a blocking issue any DOI tagged IsDescribedBy/IsSupplementTo whose paper is a
+  standard, shared resource, umbrella initiative, or method/software paper rather than this
+  dataset's own data paper, or whose resolved title is unrelated to this dataset; and the
+  reverse: this dataset's own data paper tagged as mere References.
+- Do NOT raise a blocking issue about IsDerivedFrom, in either direction: BIDS
+  SourceDatasets become IsDerivedFrom automatically, and the correction step cannot change
+  an IsDerivedFrom entry.
 - Are the DOIs valid identifiers?
-- Cross-check: does dataset_description.json have SourceDatasets that should be IsDerivedFrom?
 - NOTE: GitHub repo URLs (github.com/nemarDatasets/...) and NEMAR landing page URLs (nemar.org/dataset/...) with relation type IsDescribedBy are CORRECT and should NOT be flagged as issues.
 
 ### 3. Description Accuracy (weight: medium)
@@ -1050,7 +1099,7 @@ IMPORTANT:
 - Only return fields that need correction. Do NOT return unchanged fields.
 - Do NOT modify authors (those are locked from BIDS).
 - Do NOT modify IsDerivedFrom entries or GitHub/NEMAR URL entries in related_identifiers.
-  You MAY reclassify other DOI relation_types — e.g. correct THIS dataset's own data paper
+  You MAY reclassify other DOI relation_types, e.g. correct THIS dataset's own data paper
   to IsDescribedBy, a deposit of the same data from References to IsDerivedFrom, or a
   standard/resource/software paper (or an unrelated, typo'd DOI) wrongly tagged
   IsDescribedBy back to References. Use the "Resolved DOI metadata" block to check what

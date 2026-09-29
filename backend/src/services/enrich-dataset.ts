@@ -35,9 +35,13 @@ import {
 import { reembedDatasetVector } from "./dataset-search.js";
 import {
   type DoiResolution,
+  type DoiResolutionSummary,
   EMPTY_DOI_RESOLUTION,
+  MAX_RESOLVED_DOIS,
   collectCandidateDois,
+  datasetDoisOf,
   resolveDoisForEnrichment,
+  summarizeDoiResolution,
   titlesByDoi,
 } from "./doi-metadata.js";
 import {
@@ -46,6 +50,7 @@ import {
   extractDoisFromRelatedIdentifiers,
   mergeOrcidDiscoveries,
 } from "./doi-orcid-discovery.js";
+import type { RegistryCache } from "./doi-registry.js";
 import { buildOrcidEnrichment, resolveEzidAuth } from "./doi.js";
 import { resolveDatasetLandingBase } from "./environment.js";
 import { conceptEzidIdentifier, extractDoi, updateIdentifier } from "./ezid.js";
@@ -60,6 +65,7 @@ import {
 } from "./github.js";
 import {
   type LlmUsageTotals,
+  type RelationGuardContext,
   correctFromFeedback,
   enforceNeverDataPaper,
   enrichFromReadme,
@@ -155,6 +161,13 @@ export interface EnrichmentSuccessBody {
   /** DOIs forced from a data-describing relation to `References` by the
    *  never-data-paper guard this run (see enforceNeverDataPaper, #1549). */
   demoted_dois?: string[];
+  /** The dataset's own NEMAR DOIs removed from related_identifiers this run
+   *  (see enforceNeverDataPaper, #1549). */
+  self_dois_dropped?: string[];
+  /** Stage 1d DOI lookups (#1549). `failed` counts DOIs no registry answered
+   *  for (429, 5xx, timeout), so a sweep can retry the dataset; `unresolved`
+   *  counts DOIs the registries say do not exist. */
+  doi_resolution: DoiResolutionSummary;
 }
 
 /** Why a DOI metadata sync did not run. One typed object rather than a
@@ -592,24 +605,36 @@ export async function enrichDataset(
       );
     };
     // Standards, software, and platform papers are never this dataset's data
-    // paper (#1549). Demote them after every stage that can write a relation
-    // (the seed carries older metadata.json entries forward) and log it.
+    // paper, and the dataset's own DOI is never a relation (#1549). Enforce
+    // both after every stage that can write a relation (the seed carries
+    // older metadata.json entries forward) and log it. guardContext gains the
+    // resolved titles once stage 1d has run.
     const demotedDois: string[] = [];
-    const logDemote = (stage: string, outcome: { demoted: { identifier: string }[] }) => {
-      if (outcome.demoted.length === 0) return;
-      const ids = outcome.demoted.map((d) => d.identifier);
-      for (const id of ids) if (!demotedDois.includes(id)) demotedDois.push(id);
-      console.warn(
-        `[llm-enrich] Demoted ${ids.length} never-data-paper DOI(s) to References at ${stage} for ${datasetId}: ${ids.join(", ")}`,
-      );
+    const droppedSelfDois: string[] = [];
+    const logDemote = (
+      stage: string,
+      outcome: { demoted: { identifier: string }[]; dropped: { identifier: string }[] },
+    ) => {
+      for (const [list, entries, what] of [
+        [demotedDois, outcome.demoted, "never-data-paper DOI(s) demoted to References"],
+        [droppedSelfDois, outcome.dropped, "self-referencing DOI(s) dropped"],
+      ] as const) {
+        if (entries.length === 0) continue;
+        const ids = entries.map((d) => d.identifier);
+        for (const id of ids) if (!list.includes(id)) list.push(id);
+        console.warn(
+          `[llm-enrich] ${ids.length} ${what} at ${stage} for ${datasetId}: ${ids.join(", ")}`,
+        );
+      }
     };
+    let guardContext: RelationGuardContext = { datasetId };
     const seedPrune = pruneUnsourcedDois(
       seedFromBids(bidsDescription, existingMetadata, datasetId, treePaths, landingBase),
       readmeContent,
       bidsDescription,
     );
     logPrune("seed", seedPrune);
-    const seedDemote = enforceNeverDataPaper(seedPrune.result);
+    const seedDemote = enforceNeverDataPaper(seedPrune.result, guardContext);
     logDemote("seed", seedDemote);
     const seeded = seedDemote.result;
     console.log(
@@ -700,11 +725,20 @@ export async function enrichDataset(
       }
     }
 
+    // One registry cache for the run: stages 1b, 1d, and 2c all look DOIs up
+    // in DataCite / Crossref, and each (registry, DOI) pair is fetched once.
+    const registryCache: RegistryCache = new Map();
+
     // Stage 1b: ORCID discovery from referenced DOIs (deterministic, no LLM)
     let seededWithOrcids = seeded;
     let orcidDiscoveryCount = 0;
     try {
-      const orcidResult = await discoverOrcidsFromReferencedDois(bidsDescription, seeded.authors);
+      const orcidResult = await discoverOrcidsFromReferencedDois(
+        bidsDescription,
+        seeded.authors,
+        undefined,
+        registryCache,
+      );
       orcidDiscoveryCount = Object.keys(orcidResult.discoveries).length;
       if (orcidDiscoveryCount > 0) {
         seededWithOrcids = {
@@ -729,31 +763,40 @@ export async function enrichDataset(
     // LLM stages compare real titles/authors/years against this dataset
     // instead of guessing from bare DOI strings, and so the never-data-paper
     // guard can match BIDS-spec titles that are not on its DOI list.
-    // Non-fatal: an empty resolution reproduces the pre-#1549 behavior.
+    // Non-fatal: an empty resolution reproduces the pre-#1549 behavior, and
+    // lookups that got no answer are counted as `failed` in the response.
+    const candidateDois = collectCandidateDois(
+      readmeContent,
+      bidsDescription,
+      seededWithOrcids.related_identifiers,
+      datasetId,
+    );
     let doiResolution: DoiResolution = EMPTY_DOI_RESOLUTION;
     try {
-      doiResolution = await resolveDoisForEnrichment(
-        collectCandidateDois(
-          readmeContent,
-          bidsDescription,
-          seededWithOrcids.related_identifiers,
-          datasetId,
-        ),
-      );
-      const { resolved, unresolved, skipped } = doiResolution;
-      const unresolvedNote = unresolved.length > 0 ? `, unresolved: ${unresolved.join(", ")}` : "";
-      const skippedNote =
-        skipped.length > 0 ? `, ${skipped.length} over the cap not looked up` : "";
+      doiResolution = await resolveDoisForEnrichment(candidateDois, registryCache);
+      const { resolved, unresolved, failed, skipped } = doiResolution;
+      const notes = [
+        unresolved.length > 0 && `unresolved: ${unresolved.join(", ")}`,
+        failed.length > 0 && `lookup failed: ${failed.join(", ")}`,
+        skipped.length > 0 && `${skipped.length} over the cap not looked up`,
+      ].filter(Boolean);
       console.log(
-        `[llm-enrich] Stage 1d (DOI metadata): ${datasetId} - resolved ${resolved.length}/${resolved.length + unresolved.length}${unresolvedNote}${skippedNote}`,
+        `[llm-enrich] Stage 1d (DOI metadata): ${datasetId} - resolved ${resolved.length}/${resolved.length + unresolved.length + failed.length}${notes.length > 0 ? `; ${notes.join("; ")}` : ""}`,
       );
     } catch (resolveErr) {
+      doiResolution = {
+        ...EMPTY_DOI_RESOLUTION,
+        failed: candidateDois.slice(0, MAX_RESOLVED_DOIS),
+        skipped: candidateDois.slice(MAX_RESOLVED_DOIS),
+      };
       console.warn(
         `[llm-enrich] Stage 1d (DOI metadata) failed for ${datasetId}, continuing without it: ${errorMessage(resolveErr)}`,
       );
     }
-    const resolvedTitles = titlesByDoi(doiResolution);
-    const resolveDemote = enforceNeverDataPaper(seededWithOrcids, resolvedTitles);
+    guardContext = { datasetId, resolvedTitles: titlesByDoi(doiResolution) };
+    // Only a DataCite `Dataset` may be marked IsDerivedFrom by the LLM.
+    const derivableDois = datasetDoisOf(doiResolution);
+    const resolveDemote = enforceNeverDataPaper(seededWithOrcids, guardContext);
     logDemote("resolve", resolveDemote);
     seededWithOrcids = resolveDemote.result;
 
@@ -766,8 +809,8 @@ export async function enrichDataset(
     logPrune("enrich", llmPrune);
     const llmResult = llmPrune.result;
     const enrichDemote = enforceNeverDataPaper(
-      mergeWithExisting(seededWithOrcids, llmResult),
-      resolvedTitles,
+      mergeWithExisting(seededWithOrcids, llmResult, derivableDois),
+      guardContext,
     );
     logDemote("enrich", enrichDemote);
     const enriched = enrichDemote.result;
@@ -816,6 +859,7 @@ export async function enrichDataset(
           { Authors: bidsDescription.Authors },
           meshValidated.authors,
           llmDois,
+          registryCache,
         );
         const newOrcids = Object.keys(secondPass.discoveries).length;
         if (newOrcids > 0) {
@@ -889,8 +933,8 @@ export async function enrichDataset(
           );
           logPrune(`correction-${correctionAttempts}`, correctionPrune);
           const correctionDemote = enforceNeverDataPaper(
-            mergeWithExisting(currentMetadata, correctionPrune.result),
-            resolvedTitles,
+            mergeWithExisting(currentMetadata, correctionPrune.result, derivableDois),
+            guardContext,
           );
           logDemote(`correction-${correctionAttempts}`, correctionDemote);
           currentMetadata = correctionDemote.result;
@@ -1001,7 +1045,7 @@ export async function enrichDataset(
 
     // Last word on relation types: whatever the stages above did, a
     // never-data-paper DOI leaves this function as References.
-    const finalDemote = enforceNeverDataPaper(finalMetadata, resolvedTitles);
+    const finalDemote = enforceNeverDataPaper(finalMetadata, guardContext);
     logDemote("final", finalDemote);
     finalMetadata = finalDemote.result;
 
@@ -1262,6 +1306,8 @@ export async function enrichDataset(
         llm_usage: { ...llmUsage, est_cost_usd: estCostUsd },
         ...(prunedDois.length > 0 && { pruned_dois: prunedDois }),
         ...(demotedDois.length > 0 && { demoted_dois: demotedDois }),
+        ...(droppedSelfDois.length > 0 && { self_dois_dropped: droppedSelfDois }),
+        doi_resolution: summarizeDoiResolution(doiResolution),
         seeded_fields: {
           authors: Object.keys(seeded.authors || {}).length,
           related_identifiers: (seeded.related_identifiers || []).length,
