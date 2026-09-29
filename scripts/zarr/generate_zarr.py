@@ -2643,7 +2643,12 @@ def _fif_declared_channel_count(path: str) -> int | None:
     """
     try:
         import mne  # type: ignore[import-not-found]  # lazy: runtime-only dep
-    except ImportError:
+    except ImportError as exc:
+        print(
+            f"::warning::could not read the FIF header of {path} for its channel "
+            f"count (MNE is not importable: {exc}); the gate uses channels.tsv alone",
+            flush=True,
+        )
         return None
     try:
         info = mne.io.read_info(path, verbose="ERROR")

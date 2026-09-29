@@ -3077,6 +3077,26 @@ class TestFileDeclaredChannelCount(unittest.TestCase):
         self.assertEqual(file_declared_channel_count(p), 4)
 
 
+class TestFifDeclaredChannelCountWithoutMne(unittest.TestCase):
+    """No MNE means no header count, and the log says so. Run in a real
+    interpreter without site-packages (`-S`), so MNE is genuinely absent
+    whether or not this suite's environment has it."""
+
+    def test_a_missing_mne_is_unknown_and_says_so(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        code = (
+            "import sys; sys.path.insert(0, sys.argv[1]); import generate_zarr as g; "
+            "print('RESULT', g.file_declared_channel_count(sys.argv[2]))"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-S", "-c", code, here, "sub-01_task-rest_meg.fif"],
+            capture_output=True, text=True, check=True,
+        )
+        self.assertIn("RESULT None", proc.stdout)
+        self.assertIn("MNE is not importable", proc.stdout)
+        self.assertIn("sub-01_task-rest_meg.fif", proc.stdout)
+
+
 class TestFifDeclaredChannelCount(unittest.TestCase):
     """The FIF branch of the header count (on000117: an MEG sidecar declaring
     404 channels over a FIF that holds 395, refused as a truncation because no
