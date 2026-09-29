@@ -132,6 +132,59 @@ describe("probe-github-token", () => {
     }
   });
 
+  /** A stand-in whose token is valid and expires `days` days from now. */
+  function fakeGithubExpiringIn(days: number) {
+    const expiry = formatGithubExpiry(new Date(Date.now() + days * 24 * 60 * 60 * 1000));
+    return startFakeGithub({
+      "GET /user": () =>
+        new Response(JSON.stringify({ login: "nemarAdmin" }), {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+            "x-oauth-scopes": "repo, workflow",
+            "github-authentication-token-expiration": expiry,
+          },
+        }),
+    });
+  }
+
+  test("--fail-days: an expiry inside the threshold fails with an error naming it", async () => {
+    // 5 days out against --fail-days 14: the credential-probe workflow's own
+    // setting. A token this close to expiry must turn the daily run red, not
+    // merely warn, so the rotation happens before an e2e run finds it dead.
+    const fake = fakeGithubExpiringIn(5);
+    try {
+      const result = await runProbe(["GH_TOKEN", "--owner", "nemarAdmin", "--fail-days", "14"], {
+        GH_TOKEN: "fake-token",
+        GITHUB_API_BASE_URL: fake.url,
+      });
+      expect(result.stdout).toContain("::error::GH_TOKEN expires in 5.0 day(s)");
+      expect(result.stdout).toContain("--fail-days 14");
+      expect(result.stdout).toContain("gh secret set GH_TOKEN --repo nemarOrg/nemar-cli");
+      expect(result.exitCode).toBe(1);
+    } finally {
+      fake.stop();
+    }
+  });
+
+  test("--fail-days: an expiry outside the threshold passes", async () => {
+    // 20 days out against --fail-days 14: the default 30-day warning fires,
+    // but the run stays green. Pairs with the case above, so a condition that
+    // failed every token, or none, cannot satisfy both.
+    const fake = fakeGithubExpiringIn(20);
+    try {
+      const result = await runProbe(["GH_TOKEN", "--owner", "nemarAdmin", "--fail-days", "14"], {
+        GH_TOKEN: "fake-token",
+        GITHUB_API_BASE_URL: fake.url,
+      });
+      expect(result.stdout).toContain("(20.0 day(s) from now)");
+      expect(result.stdout).not.toContain("::error::");
+      expect(result.exitCode).toBe(0);
+    } finally {
+      fake.stop();
+    }
+  });
+
   test("200 missing a required scope fails even though the token authenticates", async () => {
     const fake = startFakeGithub({
       "GET /user": () =>
