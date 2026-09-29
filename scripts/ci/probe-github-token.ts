@@ -24,7 +24,8 @@
  * Exit codes:
  *   0  token authenticates, and every requested check passed
  *   1  token is rejected (401), missing a required scope, expiring within
- *      --fail-days, or the probe could not reach the API at all
+ *      --fail-days, the request timed out or hit a network error, or the
+ *      probe could not reach the API at all
  *
  * A 200 whose `login` does not match `--owner` (case-insensitively) is a
  * `::warning::`, not a failure: the token still authenticates.
@@ -297,6 +298,8 @@ export function parseCliArgs(argv: string[]): CliArgs {
   };
 }
 
+const FETCH_TIMEOUT_MS = 10_000;
+
 async function fetchUser(
   base: string,
   token: string,
@@ -310,6 +313,13 @@ async function fetchUser(
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "nemar-cli-credential-probe",
       },
+      // A hung connection (a dead load balancer, a stand-in that never
+      // answers) must fail the probe, not hang the job until the runner's
+      // own timeout kills it. AbortSignal.timeout rejects the fetch with an
+      // AbortError, which the catch below folds into the same
+      // "network-error" verdict as a connection failure -- neither is ever
+      // reported as a pass.
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
   } catch {
     return { status: "network-error", headers: { scopes: null, expiration: null }, body: null };
