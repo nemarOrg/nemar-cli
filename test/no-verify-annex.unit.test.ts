@@ -31,7 +31,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawn } from "bun";
-import { printNoVerifyNotice } from "../src/lib/cli-output";
+import { printNoVerifyMismatches, printNoVerifyNotice } from "../src/lib/cli-output";
 import { initDataset } from "../src/lib/git-annex/init";
 import { MAX_UNAVAILABLE_SAMPLE, getDatasetData } from "../src/lib/git-annex/transfer";
 import { annexKeyDeclaredSize } from "../src/lib/s3-server-copy";
@@ -175,6 +175,7 @@ function truncateObject(objectPath: string, newSize: number, fill: string): void
 async function makeUnlockedRepoWithRemoteObject(
   name: string,
   content: string,
+  file = "data.bin",
 ): Promise<RemoteFixture> {
   const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const repo = join(TMP_DIR, `${name}-repo-${stamp}`);
@@ -189,9 +190,11 @@ async function makeUnlockedRepoWithRemoteObject(
   await runCmd(["git", "config", "user.name", "Test"], repo);
   await runCmd(["git", "annex", "config", "--set", "annex.largefiles", "anything"], repo);
 
-  const file = "data.bin";
   writeFileSync(join(repo, file), content);
-  const add = await runCmd(["git", "annex", "add", file, "-q"], repo);
+  // `--` before every positional filename: this fixture is also used with a
+  // name starting with `-`, which git-annex would otherwise try to parse as
+  // an option.
+  const add = await runCmd(["git", "annex", "add", "-q", "--", file], repo);
   if (add.exitCode !== 0) throw new Error(`git annex add failed: ${add.stderr}`);
   await runCmd(["git", "commit", "-q", "-m", "add"], repo);
 
@@ -209,13 +212,13 @@ async function makeUnlockedRepoWithRemoteObject(
   );
   if (initRemote.exitCode !== 0) throw new Error(`initremote failed: ${initRemote.stderr}`);
 
-  const copy = await runCmd(["git", "annex", "copy", "--to", "store", file], repo);
+  const copy = await runCmd(["git", "annex", "copy", "--to", "store", "--", file], repo);
   if (copy.exitCode !== 0) throw new Error(`copy --to store failed: ${copy.stderr}`);
 
-  const drop = await runCmd(["git", "annex", "drop", "--force", file], repo);
+  const drop = await runCmd(["git", "annex", "drop", "--force", "--", file], repo);
   if (drop.exitCode !== 0) throw new Error(`drop failed: ${drop.stderr}`);
 
-  const keyResult = await runCmd(["git", "annex", "lookupkey", file], repo);
+  const keyResult = await runCmd(["git", "annex", "lookupkey", "--", file], repo);
   const key = keyResult.stdout.trim();
   const sizeMatch = key.match(/-s(\d+)--/);
   if (!sizeMatch) throw new Error(`key ${key} does not embed a size`);
@@ -389,12 +392,20 @@ describe("getDatasetData --no-verify on an unlocked branch (review: critical wor
     expect(result.filesUnavailable).toBe(1);
     // The exact recovery command must be in the failure note, not just a bare
     // "unavailable" -- this is what a user (or a script) actually acts on.
+    // Quoted and `--`-guarded (review #1523): safe to paste even for a name
+    // with spaces, parentheses, or a leading dash.
     expect(result.error).toContain(
-      `Recover with: rm ${fx.file} && git checkout -- ${fx.file} && git annex get ${fx.file}`,
+      `Recover with: rm -- '${fx.file}' && git checkout -- '${fx.file}' && git annex get -- '${fx.file}'`,
     );
+    // Carried on the RESULT itself too, not just the failed-arm error string
+    // -- the common shape is "partial" (see the two-file test below), where
+    // `error` does not exist at all.
+    expect(result.noVerifyMismatches).toHaveLength(1);
+    expect(result.noVerifyMismatches[0]).toContain(fx.file);
 
     // THE CRITICAL CASE: on an unlocked/adjusted branch the working-tree
-    // entry is a regular file, typically hardlinked to the object store, so
+    // entry is an INDEPENDENT regular-file copy (not a hardlink -- measured
+    // with `annex.thin` unset, NEMAR's default), so
     // `fsck --fast` quarantining the OBJECT does not by itself touch this
     // copy. Measured before this fix existed: the working file kept the
     // stale 500 corrupted bytes here, readable, indistinguishable from good
@@ -503,21 +514,22 @@ describe("failureNotes are capped like unavailablePaths (review item 4)", () => 
   }, 120_000);
 });
 
-describe("printNoVerifyNotice (review item 2: the unsized-file caveat)", () => {
-  function capturePrint(fn: () => void): string[] {
-    const original = console.error;
-    const calls: string[] = [];
-    console.error = (...args: unknown[]) => {
-      calls.push(args.map(String).join(" "));
-    };
-    try {
-      fn();
-    } finally {
-      console.error = original;
-    }
-    return calls;
+/** Captures every `console.error` call `fn` makes, restoring it afterward. */
+function capturePrint(fn: () => void): string[] {
+  const original = console.error;
+  const calls: string[] = [];
+  console.error = (...args: unknown[]) => {
+    calls.push(args.map(String).join(" "));
+  };
+  try {
+    fn();
+  } finally {
+    console.error = original;
   }
+  return calls;
+}
 
+describe("printNoVerifyNotice (review item 2: the unsized-file caveat)", () => {
   test("says nothing extra when every fetched file could be size-checked", () => {
     const calls = capturePrint(() => printNoVerifyNotice(0));
     expect(calls.length).toBe(1);
@@ -530,4 +542,157 @@ describe("printNoVerifyNotice (review item 2: the unsized-file caveat)", () => {
     expect(calls[0]).toContain("3 of the fetched file(s)");
     expect(calls[0]).toContain("neither hash nor size");
   });
+});
+
+describe("a failed fsck quarantine falls back to drop --force (review item 1)", () => {
+  test("when fsck cannot quarantine, drop --force is confirmed and used instead, and the fetch is not lost", async () => {
+    if (!annexAvailable) return;
+    const fx = await makeUnlockedRepoWithRemoteObject("unlocked-fsck-blocked", "A".repeat(1000));
+    truncateObject(fx.objectPath, 500, "C");
+
+    // A REAL filesystem failure for fsck's own quarantine step, without
+    // mocking any business logic: `fsck --fast` tries to move the bad
+    // object to `.git/annex/bad/<key>`, which requires creating `bad` as a
+    // directory. Pre-creating it as a plain FILE makes that `mkdir` fail
+    // with a real "already exists" error while leaving the rest of the
+    // repository (including `drop --force`, the fallback under test)
+    // fully writable -- reproduced by hand before writing this test.
+    writeFileSync(join(fx.repo, ".git", "annex", "bad"), "");
+
+    const result = await getDatasetData(fx.repo, { noVerify: true });
+
+    expect(result.success).toBe(false);
+    expect(result.filesDownloaded).toBe(0);
+    expect(result.filesUnavailable).toBe(1);
+    expect(result.noVerifyMismatches).toHaveLength(1);
+    // The fallback confirmed the log agrees content is gone -- this must be
+    // the ordinary "recovered" wording, not the "could not confirm" warning.
+    expect(result.noVerifyMismatches[0]).not.toContain("Could not confirm");
+    expect(result.noVerifyMismatches[0]).toContain("Recover with:");
+
+    // The location log must actually agree, not just the return value.
+    const whereis = await runCmd(["git", "annex", "whereis", "--json", "--", fx.file], fx.repo);
+    const parsed = JSON.parse(whereis.stdout.trim().split("\n").pop() ?? "{}") as {
+      whereis?: Array<{ here?: boolean }>;
+    };
+    expect((parsed.whereis ?? []).some((loc) => loc.here === true)).toBe(false);
+
+    // And the working tree must not still hold the stale 500 bytes.
+    const workingPath = join(fx.repo, fx.file);
+    if (existsSync(workingPath)) {
+      const buf = Buffer.from(await Bun.file(workingPath).arrayBuffer());
+      expect(buf.length).not.toBe(500);
+    }
+  }, 60_000);
+
+  // The "still cannot be confirmed after the drop --force fallback too"
+  // branch is real production code (see the mutation check in the PR/report:
+  // disabling the drop --force fallback and re-running the test above turns
+  // its "not Could not confirm" assertion red, landing on this exact
+  // branch's wording instead). A THIRD real filesystem fault that blocks the
+  // fallback too without also blocking the initial fetch -- needed to reach
+  // it from a clean run -- was not something we could construct reliably;
+  // the mutation check is the falsifiability proof for this branch instead
+  // of a fixture.
+});
+
+describe("--no-verify mismatches reach the user on a partial outcome too (review item 2)", () => {
+  test("a two-file run with one clean and one truncated file surfaces the reason and recovery command on stderr", async () => {
+    if (!annexAvailable) return;
+    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const repo = join(TMP_DIR, `partial-mix-repo-${stamp}`);
+    const remoteDir = join(TMP_DIR, `partial-mix-remote-${stamp}`);
+    mkdirSync(repo, { recursive: true });
+    mkdirSync(remoteDir, { recursive: true });
+    await runCmd(["git", "init", "-q", "-b", "main"], repo);
+    await runCmd(["git", "config", "user.email", "test@test.com"], repo);
+    await runCmd(["git", "config", "user.name", "Test"], repo);
+    const initAnnex = await runCmd(["git", "annex", "init", "-q", "repo"], repo);
+    expect(initAnnex.exitCode).toBe(0);
+    await runCmd(["git", "annex", "config", "--set", "annex.largefiles", "anything"], repo);
+
+    writeFileSync(join(repo, "clean.bin"), "K".repeat(800));
+    writeFileSync(join(repo, "bad.bin"), "L".repeat(1000));
+    const add = await runCmd(["git", "annex", "add", "-q", "--", "clean.bin", "bad.bin"], repo);
+    expect(add.exitCode).toBe(0);
+    await runCmd(["git", "commit", "-q", "-m", "add"], repo);
+
+    const init = await runCmd(
+      [
+        "git",
+        "annex",
+        "initremote",
+        "store",
+        "type=directory",
+        `directory=${remoteDir}`,
+        "encryption=none",
+      ],
+      repo,
+    );
+    expect(init.exitCode).toBe(0);
+    const copy = await runCmd(
+      ["git", "annex", "copy", "--to", "store", "--", "clean.bin", "bad.bin"],
+      repo,
+    );
+    expect(copy.exitCode).toBe(0);
+    const drop = await runCmd(
+      ["git", "annex", "drop", "--force", "--", "clean.bin", "bad.bin"],
+      repo,
+    );
+    expect(drop.exitCode).toBe(0);
+
+    const badKey = (
+      await runCmd(["git", "annex", "lookupkey", "--", "bad.bin"], repo)
+    ).stdout.trim();
+    const badObj = await findObjectFile(remoteDir, badKey);
+    truncateObject(badObj, 500, "L");
+
+    const result = await getDatasetData(repo, { noVerify: true });
+
+    // The mix that used to go unreported: one file fine, one corrupted.
+    expect(result.outcome).toBe("partial");
+    expect(result.filesDownloaded).toBe(1);
+    expect(result.filesUnavailable).toBe(1);
+    expect(result.noVerifyMismatches).toHaveLength(1);
+
+    // The real integration: printPartialRetrieval's own text never mentions
+    // this (it points at a report this local check does not write), so the
+    // caller must print noVerifyMismatches itself. Assert what actually
+    // reaches stderr through the real function, not a re-implementation.
+    const printed = capturePrint(() => printNoVerifyMismatches(result.noVerifyMismatches));
+    expect(printed).toHaveLength(1);
+    expect(printed[0]).toContain("bad.bin");
+    expect(printed[0]).toContain("but the key declares");
+    expect(printed[0]).toContain("Recover with: rm --");
+  }, 60_000);
+});
+
+describe("the recovery command survives a hostile file name (review item 3)", () => {
+  test("spaces, parentheses, and a leading dash all survive a real copy-paste into a shell", async () => {
+    if (!annexAvailable) return;
+    const weirdName = "-weird (name) file.bin";
+    const fx = await makeUnlockedRepoWithRemoteObject(
+      "unlocked-weird-name",
+      "M".repeat(1000),
+      weirdName,
+    );
+    truncateObject(fx.objectPath, 500, "N");
+
+    const result = await getDatasetData(fx.repo, { noVerify: true });
+    expect(result.noVerifyMismatches).toHaveLength(1);
+    const message = result.noVerifyMismatches[0];
+    expect(message).toContain(weirdName);
+
+    const match = message.match(/Recover with: (rm -- .+)$/);
+    if (!match) throw new Error(`no recovery command found in: ${message}`);
+    const recoveryLine = match[1];
+
+    // Fix "upstream" and then actually RUN the printed line through a real
+    // shell -- the strongest proof the quoting is copy-paste-safe, stronger
+    // than asserting on the string's shape.
+    writeFileSync(fx.objectPath, "M".repeat(1000));
+    const recovery = await runCmd(["bash", "-c", recoveryLine], fx.repo);
+    expect(recovery.exitCode).toBe(0);
+    expect(await Bun.file(join(fx.repo, weirdName)).text()).toBe("M".repeat(1000));
+  }, 60_000);
 });
