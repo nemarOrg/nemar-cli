@@ -8358,6 +8358,18 @@ class TestSidecarJoinReport(unittest.TestCase):
         })
         self.assertEqual(positions, {"Fp1": [1.0, 2.0, 3.0], "Fp1-1": [9.0, 9.0, 9.0]})
 
+    def test_the_example_bound_is_the_published_schema_bound(self):
+        # The JSON Schema spells the same bound as `maxItems`; a converter
+        # that named more examples would fail its own pre-upload validation.
+        # The two zod mirrors are tied to this constant on the TypeScript
+        # side (test/zarr-schema-contract.test.ts, mcp-schema-parity).
+        with open(INDEX_SCHEMA_PATH, encoding="utf-8") as fh:
+            schema = json.load(fh)
+        units = schema["$defs"]["store"]["properties"]["units_report"]["properties"]
+        self.assertEqual(
+            units["unmatched_examples"]["maxItems"], generate_zarr.UNMATCHED_EXAMPLES_MAX
+        )
+
     def test_examples_are_bounded(self):
         labels = [f"X{i}" for i in range(12)]
         report = sidecar_join_report(labels, [], {})
