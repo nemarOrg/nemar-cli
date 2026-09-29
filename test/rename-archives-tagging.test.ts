@@ -36,6 +36,15 @@
  * (`scripts/lib/aws-creds-guard.sh`), so the stand-in serves STS too, via
  * `AWS_ENDPOINT_URL_STS` on a second local port.
  *
+ * Each scenario spawns the real `bun` binary, which in turn spawns the
+ * real `aws` CLI (a Python-backed process) up to about nine times --
+ * the credential guard's own STS call, a listing, a HEAD, `aws s3 cp`'s own
+ * internal preflight HEAD plus its copy call, another HEAD to verify,
+ * put/get-object-tagging, a version listing, and the final delete. On the
+ * CI runner that took 3.6-4.4s per scenario (measured on a real run), well
+ * past `bun test`'s 5s default when run without `--timeout` (the required
+ * `unit-pure` tier's own invocation) -- hence the explicit timeout below.
+ *
  * Skipped when `aws` is not on PATH.
  */
 
@@ -106,133 +115,137 @@ async function runScript(standin: RenameS3Standin, args: string[]): Promise<RunR
   return { exitCode, stdout, stderr };
 }
 
-describe.skipIf(!awsInstalled)("rename-archives.ts entry point (real aws CLI, stand-in S3)", () => {
-  let standin: RenameS3Standin;
+describe.skipIf(!awsInstalled)(
+  "rename-archives.ts entry point (real aws CLI, stand-in S3)",
+  { timeout: 20000 },
+  () => {
+    let standin: RenameS3Standin;
 
-  beforeEach(() => {
-    standin = startRenameS3Standin();
-  });
-
-  afterEach(() => {
-    standin.stop();
-  });
-
-  test("copies the legacy archive, tags the destination, then deletes the old object by version id", async () => {
-    standin.putObject(BUCKET, OLD_KEY, {
-      size: 500,
-      etag: '"abc123"',
-      lastModified: LAST_MODIFIED,
-    });
-    const oldVersionId = standin.getObject(BUCKET, OLD_KEY)?.versionId;
-    expect(oldVersionId).toBeTruthy();
-
-    const run = await runScript(standin, ["--apply", "--dataset", DATASET, "--bucket", BUCKET]);
-    expect(run.exitCode).toBe(0);
-
-    // Old key gone, new key present under the #1491 shape.
-    expect(standin.has(BUCKET, OLD_KEY)).toBe(false);
-    expect(standin.has(BUCKET, NEW_KEY)).toBe(true);
-    expect(standin.getObject(BUCKET, NEW_KEY)?.tags["nemar-kind"]).toBe("archive");
-
-    const copyEntry = standin.log.find((e) => e.op === "CopyObject" && e.destKey === NEW_KEY);
-    expect(copyEntry).toBeDefined();
-
-    const tagEntry = standin.log.find((e) => e.op === "PutObjectTagging" && e.key === NEW_KEY);
-    expect(tagEntry).toBeDefined();
-    if (tagEntry?.op === "PutObjectTagging") {
-      expect(tagEntry.body).toContain("nemar-kind");
-      expect(tagEntry.body).toContain("archive");
-    }
-
-    const deleteEntry = standin.log.find((e) => e.op === "DeleteObject" && e.key === OLD_KEY);
-    expect(deleteEntry).toBeDefined();
-    if (deleteEntry?.op === "DeleteObject") {
-      expect(deleteEntry.versionId).toBe(oldVersionId ?? null);
-      expect(deleteEntry.status).toBe(204);
-    }
-
-    // Order matters: copy, then tag, then delete.
-    if (copyEntry && tagEntry && deleteEntry) {
-      const copyIdx = standin.log.indexOf(copyEntry);
-      const tagIdx = standin.log.indexOf(tagEntry);
-      const deleteIdx = standin.log.indexOf(deleteEntry);
-      expect(copyIdx).toBeLessThan(tagIdx);
-      expect(tagIdx).toBeLessThan(deleteIdx);
-    }
-  });
-
-  test("a PutObjectTagging failure leaves the old object undeleted and the run reports failure", async () => {
-    standin.putObject(BUCKET, OLD_KEY, {
-      size: 500,
-      etag: '"abc123"',
-      lastModified: LAST_MODIFIED,
-    });
-    standin.failNextPutTagging(BUCKET, NEW_KEY);
-
-    const run = await runScript(standin, ["--apply", "--dataset", DATASET, "--bucket", BUCKET]);
-    expect(run.exitCode).not.toBe(0);
-
-    // The copy itself succeeded (that is what made tagging reachable)...
-    expect(standin.log.some((e) => e.op === "CopyObject" && e.destKey === NEW_KEY)).toBe(true);
-    // ...tagging was attempted and failed...
-    const failedTag = standin.log.find(
-      (e) => e.op === "PutObjectTagging" && e.key === NEW_KEY && e.status === 403,
-    );
-    expect(failedTag).toBeDefined();
-    // ...and NEITHER object was deleted.
-    expect(standin.log.some((e) => e.op === "DeleteObject")).toBe(false);
-    expect(standin.has(BUCKET, OLD_KEY)).toBe(true);
-  });
-
-  test("the already-renamed path tags the (previously untagged) destination before deleting the old object", async () => {
-    // Simulates a prior run that copied the object and died before tagging
-    // it: both keys exist, matching size/ETag, destination untagged.
-    standin.putObject(BUCKET, OLD_KEY, {
-      size: 500,
-      etag: '"abc123"',
-      lastModified: LAST_MODIFIED,
-    });
-    standin.putObject(BUCKET, NEW_KEY, {
-      size: 500,
-      etag: '"abc123"',
-      lastModified: LAST_MODIFIED,
-    });
-    expect(standin.getObject(BUCKET, NEW_KEY)?.tags["nemar-kind"]).toBeUndefined();
-
-    const run = await runScript(standin, ["--apply", "--dataset", DATASET, "--bucket", BUCKET]);
-    expect(run.exitCode).toBe(0);
-
-    // No copy on the resumed path -- the destination was already there.
-    expect(standin.log.some((e) => e.op === "CopyObject")).toBe(false);
-
-    const tagEntry = standin.log.find((e) => e.op === "PutObjectTagging" && e.key === NEW_KEY);
-    const deleteEntry = standin.log.find((e) => e.op === "DeleteObject" && e.key === OLD_KEY);
-    expect(tagEntry).toBeDefined();
-    expect(deleteEntry).toBeDefined();
-    if (tagEntry && deleteEntry) {
-      expect(standin.log.indexOf(tagEntry)).toBeLessThan(standin.log.indexOf(deleteEntry));
-    }
-
-    expect(standin.getObject(BUCKET, NEW_KEY)?.tags["nemar-kind"]).toBe("archive");
-    expect(standin.has(BUCKET, OLD_KEY)).toBe(false);
-  });
-
-  test("a dry run makes no Copy, PutObjectTagging or Delete requests", async () => {
-    standin.putObject(BUCKET, OLD_KEY, {
-      size: 500,
-      etag: '"abc123"',
-      lastModified: LAST_MODIFIED,
+    beforeEach(() => {
+      standin = startRenameS3Standin();
     });
 
-    const run = await runScript(standin, ["--dataset", DATASET, "--bucket", BUCKET]);
-    expect(run.exitCode).toBe(0);
-    expect(run.stdout).toContain("DRY RUN");
+    afterEach(() => {
+      standin.stop();
+    });
 
-    const writeOps = standin.log.filter(
-      (e) => e.op === "CopyObject" || e.op === "PutObjectTagging" || e.op === "DeleteObject",
-    );
-    expect(writeOps).toEqual([]);
-    expect(standin.has(BUCKET, OLD_KEY)).toBe(true);
-    expect(standin.has(BUCKET, NEW_KEY)).toBe(false);
-  });
-});
+    test("copies the legacy archive, tags the destination, then deletes the old object by version id", async () => {
+      standin.putObject(BUCKET, OLD_KEY, {
+        size: 500,
+        etag: '"abc123"',
+        lastModified: LAST_MODIFIED,
+      });
+      const oldVersionId = standin.getObject(BUCKET, OLD_KEY)?.versionId;
+      expect(oldVersionId).toBeTruthy();
+
+      const run = await runScript(standin, ["--apply", "--dataset", DATASET, "--bucket", BUCKET]);
+      expect(run.exitCode).toBe(0);
+
+      // Old key gone, new key present under the #1491 shape.
+      expect(standin.has(BUCKET, OLD_KEY)).toBe(false);
+      expect(standin.has(BUCKET, NEW_KEY)).toBe(true);
+      expect(standin.getObject(BUCKET, NEW_KEY)?.tags["nemar-kind"]).toBe("archive");
+
+      const copyEntry = standin.log.find((e) => e.op === "CopyObject" && e.destKey === NEW_KEY);
+      expect(copyEntry).toBeDefined();
+
+      const tagEntry = standin.log.find((e) => e.op === "PutObjectTagging" && e.key === NEW_KEY);
+      expect(tagEntry).toBeDefined();
+      if (tagEntry?.op === "PutObjectTagging") {
+        expect(tagEntry.body).toContain("nemar-kind");
+        expect(tagEntry.body).toContain("archive");
+      }
+
+      const deleteEntry = standin.log.find((e) => e.op === "DeleteObject" && e.key === OLD_KEY);
+      expect(deleteEntry).toBeDefined();
+      if (deleteEntry?.op === "DeleteObject") {
+        expect(deleteEntry.versionId).toBe(oldVersionId ?? null);
+        expect(deleteEntry.status).toBe(204);
+      }
+
+      // Order matters: copy, then tag, then delete.
+      if (copyEntry && tagEntry && deleteEntry) {
+        const copyIdx = standin.log.indexOf(copyEntry);
+        const tagIdx = standin.log.indexOf(tagEntry);
+        const deleteIdx = standin.log.indexOf(deleteEntry);
+        expect(copyIdx).toBeLessThan(tagIdx);
+        expect(tagIdx).toBeLessThan(deleteIdx);
+      }
+    });
+
+    test("a PutObjectTagging failure leaves the old object undeleted and the run reports failure", async () => {
+      standin.putObject(BUCKET, OLD_KEY, {
+        size: 500,
+        etag: '"abc123"',
+        lastModified: LAST_MODIFIED,
+      });
+      standin.failNextPutTagging(BUCKET, NEW_KEY);
+
+      const run = await runScript(standin, ["--apply", "--dataset", DATASET, "--bucket", BUCKET]);
+      expect(run.exitCode).not.toBe(0);
+
+      // The copy itself succeeded (that is what made tagging reachable)...
+      expect(standin.log.some((e) => e.op === "CopyObject" && e.destKey === NEW_KEY)).toBe(true);
+      // ...tagging was attempted and failed...
+      const failedTag = standin.log.find(
+        (e) => e.op === "PutObjectTagging" && e.key === NEW_KEY && e.status === 403,
+      );
+      expect(failedTag).toBeDefined();
+      // ...and NEITHER object was deleted.
+      expect(standin.log.some((e) => e.op === "DeleteObject")).toBe(false);
+      expect(standin.has(BUCKET, OLD_KEY)).toBe(true);
+    });
+
+    test("the already-renamed path tags the (previously untagged) destination before deleting the old object", async () => {
+      // Simulates a prior run that copied the object and died before tagging
+      // it: both keys exist, matching size/ETag, destination untagged.
+      standin.putObject(BUCKET, OLD_KEY, {
+        size: 500,
+        etag: '"abc123"',
+        lastModified: LAST_MODIFIED,
+      });
+      standin.putObject(BUCKET, NEW_KEY, {
+        size: 500,
+        etag: '"abc123"',
+        lastModified: LAST_MODIFIED,
+      });
+      expect(standin.getObject(BUCKET, NEW_KEY)?.tags["nemar-kind"]).toBeUndefined();
+
+      const run = await runScript(standin, ["--apply", "--dataset", DATASET, "--bucket", BUCKET]);
+      expect(run.exitCode).toBe(0);
+
+      // No copy on the resumed path -- the destination was already there.
+      expect(standin.log.some((e) => e.op === "CopyObject")).toBe(false);
+
+      const tagEntry = standin.log.find((e) => e.op === "PutObjectTagging" && e.key === NEW_KEY);
+      const deleteEntry = standin.log.find((e) => e.op === "DeleteObject" && e.key === OLD_KEY);
+      expect(tagEntry).toBeDefined();
+      expect(deleteEntry).toBeDefined();
+      if (tagEntry && deleteEntry) {
+        expect(standin.log.indexOf(tagEntry)).toBeLessThan(standin.log.indexOf(deleteEntry));
+      }
+
+      expect(standin.getObject(BUCKET, NEW_KEY)?.tags["nemar-kind"]).toBe("archive");
+      expect(standin.has(BUCKET, OLD_KEY)).toBe(false);
+    });
+
+    test("a dry run makes no Copy, PutObjectTagging or Delete requests", async () => {
+      standin.putObject(BUCKET, OLD_KEY, {
+        size: 500,
+        etag: '"abc123"',
+        lastModified: LAST_MODIFIED,
+      });
+
+      const run = await runScript(standin, ["--dataset", DATASET, "--bucket", BUCKET]);
+      expect(run.exitCode).toBe(0);
+      expect(run.stdout).toContain("DRY RUN");
+
+      const writeOps = standin.log.filter(
+        (e) => e.op === "CopyObject" || e.op === "PutObjectTagging" || e.op === "DeleteObject",
+      );
+      expect(writeOps).toEqual([]);
+      expect(standin.has(BUCKET, OLD_KEY)).toBe(true);
+      expect(standin.has(BUCKET, NEW_KEY)).toBe(false);
+    });
+  },
+);
