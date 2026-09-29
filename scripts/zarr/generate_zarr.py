@@ -2992,6 +2992,18 @@ def _fif_declared_channel_count(path: str) -> int | None:
 # probes); a count that could never be real must not refuse a faithful store.
 EEGLAB_MAX_NBCHAN = 100_000
 
+# The most bytes one classic `.set` header read may inflate or inspect before
+# it gives up (None, with the usual warning). Only the fields ahead of `nbchan`
+# and `data` are ever inflated; in EEGLAB's order the largest is `times`, one
+# double per sample. A MAT v5/v7 variable cannot exceed 2 GiB, so with inline
+# single-precision samples `times` stays under this cap from 15 channels up;
+# a header read that does reach it (say a very long `.fdt`-backed recording)
+# is only unknown, the gate it had before the header count existed. What the
+# cap bounds is a crafted stream (a zlib bomb declaring gigabytes of zeros
+# ahead of `nbchan`), which would otherwise cost seconds of CPU per file;
+# memory is flat either way (`_MatStream`).
+EEGLAB_MAX_HEADER_READ_BYTES = 256 << 20
+
 # The leading text of a MATLAB v7.3 (HDF5) file, as biosigIO's `_is_matlab_v73`
 # sniffs it; a classic v5/v7 file opens with "MATLAB 5.0 MAT-file" instead.
 _MATLAB_V73_MAGIC = b"MATLAB 7.3 MAT-file"
@@ -3109,11 +3121,13 @@ class _MatStream:
     end. Skipping decompresses in bounded chunks and keeps nothing, so memory
     stays flat whatever the size of the matrix skipped. The chunk bounds both
     the compressed input read at once and each skip step; it is kept small
-    because a header read usually needs a few hundred bytes of it."""
+    because a header read usually needs a few hundred bytes of it. `limit`
+    caps the bytes it hands out by `read` (skipping a compressed field reads
+    it; skipping an uncompressed one seeks), past which it raises."""
 
     CHUNK = 1 << 16
 
-    def __init__(self, fh: Any, compressed_bytes: int | None = None) -> None:
+    def __init__(self, fh: Any, compressed_bytes: int | None, limit: int) -> None:
         import zlib
 
         self.fh = fh
@@ -3121,8 +3135,15 @@ class _MatStream:
         self.left = compressed_bytes
         self.z = zlib.decompressobj() if compressed_bytes is not None else None
         self.buf = bytearray()
+        self.limit = limit  # bytes this stream may hand out (read, never seeked past)
+        self.spent = 0
 
     def read(self, n: int) -> bytes:
+        if self.spent + n > self.limit:
+            raise ValueError(
+                f"reading its header would inflate or inspect more than "
+                f"{EEGLAB_MAX_HEADER_READ_BYTES} bytes"
+            )
         if self.z is None:
             out = self.fh.read(n)
         else:
@@ -3140,6 +3161,7 @@ class _MatStream:
         if len(out) < n:
             raise EOFError(f"MAT element ends {n - len(out)} byte(s) early")
         self.pos += n
+        self.spent += n
         return out
 
     def skip(self, n: int) -> None:
@@ -3224,6 +3246,7 @@ def _mat5_eeglab_header(path: str) -> dict[str, Any]:
 
     flat: dict[str, Any] = {}
     wrapped: dict[str, Any] = {}
+    budget = EEGLAB_MAX_HEADER_READ_BYTES
     with open(path, "rb") as fh:
         head = fh.read(128)
         if len(head) < 128 or head[126:128] not in (b"IM", b"MI"):
@@ -3238,7 +3261,7 @@ def _mat5_eeglab_header(path: str) -> dict[str, Any]:
             after = fh.tell() + nbytes + (0 if mtype == _MI_COMPRESSED else -nbytes % 8)
             if after > size:
                 raise EOFError(f"a variable runs {after - size} byte(s) past the end")
-            src = _MatStream(fh, nbytes if mtype == _MI_COMPRESSED else None)
+            src = _MatStream(fh, nbytes if mtype == _MI_COMPRESSED else None, budget)
             if mtype == _MI_COMPRESSED:
                 mtype, nbytes = struct.unpack(end + "II", src.read(8))
             if mtype == _MI_MATRIX and nbytes:
@@ -3247,6 +3270,7 @@ def _mat5_eeglab_header(path: str) -> dict[str, Any]:
                     wrapped = _mat5_struct_fields(src, end)
                 elif name in ("nbchan", "data"):
                     flat[name] = _mat5_field(src, end, name, mclass, dims)
+            budget -= src.spent
             fh.seek(after)
     return {**flat, **wrapped}
 

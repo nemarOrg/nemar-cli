@@ -3682,6 +3682,61 @@ class TestEeglabDeclaredChannelCount(unittest.TestCase):
                 else:
                     self.assertEqual(file_declared_channel_count(p), expected)
 
+    def test_a_zlib_bomb_ahead_of_nbchan_is_cut_off(self):
+        """A compressed `EEG` whose first field declares more zeros than
+        `EEGLAB_MAX_HEADER_READ_BYTES` (a few hundred KB on disk) is given up
+        on after the cap, not inflated to its end: None, one warning, quickly.
+        Just under the cap the same shape is read through and counted, so the
+        cap is what stops it."""
+        import struct
+        import zlib
+
+        cap = generate_zarr.EEGLAB_MAX_HEADER_READ_BYTES
+        m = Mat5("<")
+        chunk = b"\0" * (1 << 20)
+
+        def bomb(p: str, zeros: int) -> str:
+            # EEG = struct(comments=<`zeros` bytes of char>, nbchan, ..., data),
+            # compressed as one stream without ever holding `zeros` in memory.
+            fields = m.eeg_fields(4, 4)
+            comments_head = (
+                m.elem(6, struct.pack("<II", 4, 0))
+                + m.elem(5, struct.pack("<2i", 1, zeros // 2))
+                + m.elem(1, b"")
+            )
+            comments_len = len(comments_head) + 8 + zeros + (-zeros % 8)
+            names = ["comments"] + [name for name, _ in fields]
+            body_head = (
+                m.elem(6, struct.pack("<II", 2, 0)) + m.elem(5, struct.pack("<2i", 1, 1))
+                + m.elem(1, b"EEG") + m.elem(5, struct.pack("<i", 32))
+                + m.elem(1, b"".join(n.encode().ljust(32, b"\0") for n in names))
+            )
+            rest = b"".join(matrix for _, matrix in fields)
+            total = len(body_head) + 8 + comments_len + len(rest)
+            co = zlib.compressobj(1)
+            blob = co.compress(
+                struct.pack("<II", 14, total) + body_head
+                + struct.pack("<II", 14, comments_len) + comments_head
+                + struct.pack("<II", 4, zeros)
+            )
+            for _ in range(zeros // len(chunk)):
+                blob += co.compress(chunk)
+            blob += co.compress(b"\0" * (zeros % len(chunk) + (-zeros % 8)) + rest) + co.flush()
+            m.file(p, [])
+            with open(p, "ab") as fh:
+                fh.write(struct.pack("<II", 15, len(blob)) + blob)
+            return p
+
+        under = bomb(self.path("undercap"), cap - (1 << 20))
+        self.assertEqual(file_declared_channel_count(under), 4)
+        over = bomb(self.path("overcap"), cap + (1 << 20))
+        self.assertLess(os.path.getsize(over), 2 << 20)
+        started = time.monotonic()
+        log = self.quiet_none(over)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertIn(f"more than {cap} bytes", log)
+        self.assertEqual(log.count("::warning::"), 1)
+
     def test_the_sample_matrix_is_never_loaded(self):
         """The whole point of reading nbchan by hand: `loadmat(variable_names=
         ["EEG"])` still materializes every sample, because a classic export is
