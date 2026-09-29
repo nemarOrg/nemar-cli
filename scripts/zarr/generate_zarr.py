@@ -5024,7 +5024,13 @@ def stage_declared_fdt(
     """Put the declared `.fdt` beside the `.set` under the sibling name the
     EEGLAB reader looks for first (``<set stem>.fdt``) and return the `.set` path
     the converter should read. Refuses (``FdtDeclarationRefused``) instead of
-    guessing whenever the declaration and the data disagree."""
+    guessing whenever the declaration and the data disagree.
+
+    ``bucket`` and ``dataset_id`` name where the remote path fetches the `.fdt`
+    from, so they are required unless ``local``; a missing one is a caller bug
+    (ValueError), never an empty S3 path."""
+    if not local and not (bucket and dataset_id):
+        raise ValueError("stage_declared_fdt needs bucket and dataset_id unless local")
     fdt = decl["fdt"]
     if fdt not in head_files:
         raise FdtDeclarationRefused(f"declared .fdt {fdt!r} is not tracked at {head[:8]}")
@@ -5069,7 +5075,8 @@ def stage_declared_fdt(
             os.symlink(os.path.abspath(primary_local), set_local)
         os.symlink(os.path.abspath(src), staged)
     else:
-        found, _ = _fetch_blob(repo, bucket or "", dataset_id or "", fdt, head, staged)
+        assert bucket and dataset_id  # checked on entry; narrows for the type checker
+        found, _ = _fetch_blob(repo, bucket, dataset_id, fdt, head, staged)
         if not found:
             raise FdtDeclarationRefused(f"declared .fdt {fdt!r} could not be fetched at {head[:8]}")
     got = os.path.getsize(staged)
