@@ -231,6 +231,46 @@ export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 DRIVER_REPO="${ZARR_DRIVER_REPO:-${STATE_DIR}/nemar-cli}"   # clone of nemarOrg/nemar-cli
 DRIVER_REF="${ZARR_DRIVER_REF:-main}"
 VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
+# The floor half of BIOSIGIO_SPEC below, as a bare version for setup()'s post-install
+# check (test_hallu_zarr_config.py holds the two together). The probe prints the installed
+# version and exits non-zero when it is below the floor. Versions are compared AS
+# versions: `packaging` when the venv has it, else the leading numeric fields as a
+# tuple, because as strings "1.2.10" sorts below "1.2.9". An unreadable or
+# unparseable version fails closed.
+BIOSIGIO_FLOOR="1.2.9"
+BIOSIGIO_FLOOR_PROBE='
+import sys
+import biosigio
+
+have = getattr(biosigio, "__version__", "<unknown>")
+floor = sys.argv[1]
+
+
+def fields(text):
+    out = []
+    for piece in text.split("."):
+        digits = ""
+        for ch in piece:
+            if not ch.isdigit():
+                break
+            digits += ch
+        if not digits:
+            break
+        out.append(int(digits))
+    return tuple(out)
+
+
+try:
+    from packaging.version import Version as parse
+except ImportError:
+    parse = fields
+try:
+    ok = parse(have) >= parse(floor)
+except Exception:
+    ok = False
+print(have)
+sys.exit(0 if ok else 3)
+'
 # Fallback only (used when the clone predates scripts/zarr/requirements.txt, which
 # is the real pin). Floor is 1.2.6: 1.2.3 added MEF3 .mefd / 4D-BTi import (so a
 # run below it would discover a .mefd/BTi recording via generate_zarr.py's
@@ -249,6 +289,10 @@ VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
 # channels) and raises host I/O errors as the OSError itself, which is retried,
 # instead of a typed file failure. The engine stamp did not move (see
 # requirements.txt).
+# The `<1.2.10` half is a CAP, not a floor: biosigio 1.2.10 matches channels.tsv
+# names case-insensitively, and the schema, zod and MCP texts for the join report
+# still say matching is exact. requirements.txt lists what adopting it needs; raise
+# the cap in all three places (that file, this default, test_hallu_zarr_config.py).
 # Extras are not optional here: [mef3] carries pymef and [hdf5] carries h5py, and
 # without either the matching recordings raise ImportError at convert time even
 # though discovery finds them.
@@ -289,10 +333,6 @@ ENGINE_ACK_FILE="${ZARR_ENGINE_BUMP_ACK_FILE:-${STATE_DIR}/.zarr-engine-bump-ack
 # NEMAR_WEBHOOK_TOKEN is loaded further down, once log()/err() exist -- a missing
 # token has to be able to announce itself.
 
-# The `<1.2.10` half is a CAP, not a floor: biosigio 1.2.10 matches channels.tsv
-# names case-insensitively, and the schema, zod and MCP texts for the join report
-# still say matching is exact. requirements.txt lists what adopting it needs; raise
-# the cap in all three places (that file, this default, test_hallu_zarr_config.py).
 ONLY_DATASET=""
 LIMIT="${ZARR_LIMIT:-0}"
 STATS_ONLY=""
@@ -676,7 +716,20 @@ setup() {
     echo "[setup] FATAL: biosigio not importable after install ($BIOSIGIO_SPEC)" >&2
     exit 1
   fi
-  VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" -c "import biosigio; print(f'[setup] biosigio {biosigio.__version__}')"
+  # ...and it must be AT the floor. Importable is not enough: the install above
+  # ends `| tail -2 || true`, and `tail` exits 0 whatever uv did, so a failed
+  # upgrade (an unreachable index, a resolver conflict) leaves the venv on the old
+  # wheel and passes the import guard. On 1.2.8 a streaming EDF that repeats a
+  # channel label still publishes, with the repeated label as is, and the header
+  # gate in generate_zarr.py cannot catch it: every channel is there, only the
+  # names collapse for a consumer that keys by label.
+  local installed
+  if ! installed="$(VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" -c "$BIOSIGIO_FLOOR_PROBE" "$BIOSIGIO_FLOOR" 2>&1)"; then
+    echo "[setup] FATAL: biosigio ${installed:-<unreadable>} is below the ${BIOSIGIO_FLOOR} floor after install ($BIOSIGIO_SPEC)." >&2
+    echo "[setup] The upgrade did not take effect; refusing to convert on a stale library." >&2
+    exit 1
+  fi
+  echo "[setup] biosigio ${installed}"
 }
 
 DRIVER="$DRIVER_REPO/scripts/zarr/generate_zarr.py"

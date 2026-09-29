@@ -64,6 +64,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -707,18 +708,21 @@ if __name__ == "__main__":
 
 FAKE_PY = """#!/usr/bin/env python3
 # Stands in for the venv's python. Records the argv of every `qpy` call so a
-# test can assert which flags reconcile was given, and answers the two probes
-# `setup()` makes. It stands in for the INTERPRETER, never for hallu-zarr.sh's
-# own logic: the ack file is found, consumed and re-armed by the real script.
+# test can assert which flags reconcile was given, and hands the `-c` probes
+# `setup()` makes to a real interpreter. It stands in for the INTERPRETER, never
+# for hallu-zarr.sh's own logic: the ack file is found, consumed and re-armed by
+# the real script.
 import os
 import sys
 
 argv = sys.argv[1:]
 if argv[:1] == ["-c"]:
-    # setup()'s biosigio import guard and version print.
-    if "print" in (argv[1] if len(argv) > 1 else ""):
-        print("[setup] biosigio 9.9.9")
-    sys.exit(0)
+    # setup()'s biosigio probes (import guard, floor check). These run for REAL, in
+    # the interpreter that runs the tests, against a `biosigio` package the test
+    # wrote whose only content is a `__version__`: the script's own version
+    # comparison is what is under test, not biosigIO.
+    real = os.environ["FAKE_REAL_PYTHON"]
+    os.execv(real, [real, *argv])
 
 with open(os.environ["QPY_LOG"], "a") as fh:
     fh.write(" ".join(argv) + chr(10))
@@ -800,12 +804,27 @@ def ack_run(tmp_path: Path):
 
     qpy_log = tmp_path / "qpy.log"
     ack_file = state / ".zarr-engine-bump-ack"
+    stubs = tmp_path / "stubs"
 
     def run(
         reconcile_out: str = "queued=0 parked=0",
         extra_env: dict[str, str] | None = None,
         args: list[str] | None = None,
+        biosigio_version: str = "9.9.9",
+        packaging_importable: bool = True,
     ) -> subprocess.CompletedProcess[str]:
+        # The venv's `biosigio`: a package that is only a version, which is all
+        # setup()'s floor check reads. `packaging_importable=False` shadows
+        # `packaging` with a module that fails to import, which is what a venv
+        # without it looks like to the check's fallback.
+        shutil.rmtree(stubs, ignore_errors=True)
+        (stubs / "biosigio").mkdir(parents=True)
+        (stubs / "biosigio" / "__init__.py").write_text(f'__version__ = "{biosigio_version}"\n')
+        if not packaging_importable:
+            (stubs / "packaging").mkdir()
+            (stubs / "packaging" / "__init__.py").write_text(
+                'raise ImportError("packaging is not installed in this venv")\n'
+            )
         env = base_env(zarr_base, home)
         env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
         env.update(
@@ -815,6 +834,8 @@ def ack_run(tmp_path: Path):
                 "ZARR_VENV_DIR": str(venv_bin.parent),
                 "QPY_LOG": str(qpy_log),
                 "QPY_RECONCILE_OUT": reconcile_out,
+                "FAKE_REAL_PYTHON": sys.executable,
+                "PYTHONPATH": str(stubs),
             }
         )
         if extra_env:
@@ -893,6 +914,81 @@ def test_the_env_var_form_arms_a_run_without_touching_the_file(ack_run) -> None:
     assert "ZARR_ENGINE_BUMP_ACK" in result.stdout + result.stderr
     # No file was created, and none was needed.
     assert not ack_file.exists()
+
+
+# -- setup(): the installed biosigIO must be AT the floor, not merely importable --
+
+
+@pytest.mark.parametrize("packaging_importable", [True, False], ids=["packaging", "tuple"])
+@pytest.mark.parametrize("stale", ["1.2.8", "1.2.0", "0.9.9"])
+def test_setup_refuses_a_biosigio_below_the_floor(
+    ack_run, stale: str, packaging_importable: bool
+) -> None:
+    """The install line ends `| tail -2 || true` and `tail` exits 0 whatever uv
+    did, so a failed upgrade leaves the venv on its old wheel, which still
+    imports. On 1.2.8 a streaming EDF with repeated labels publishes, and the
+    converter's header gate cannot catch it (every channel is present, only the
+    names collapse), so setup has to stop the run before it converts anything.
+    Both comparison paths are driven: `packaging` when the venv has it, the
+    numeric-tuple fallback when it does not."""
+    run, qpy_calls, _ack_file, _log = ack_run
+
+    proc = run(biosigio_version=stale, packaging_importable=packaging_importable)
+
+    assert proc.returncode != 0, proc.stdout
+    assert "FATAL" in proc.stderr
+    assert stale in proc.stderr
+    assert "1.2.9" in proc.stderr
+    assert qpy_calls() == [], "setup must stop before the queue is touched"
+
+
+@pytest.mark.parametrize("packaging_importable", [True, False], ids=["packaging", "tuple"])
+@pytest.mark.parametrize("version", ["1.2.9", "1.2.10", "1.10.0", "2.0.0"])
+def test_setup_accepts_a_biosigio_at_or_above_the_floor(
+    ack_run, version: str, packaging_importable: bool
+) -> None:
+    """Compared AS versions: as strings "1.2.10" sorts below "1.2.9", which
+    would refuse a node that is above the floor. (The floor check does not
+    enforce the cap; that is the resolver's job at install time.)"""
+    run, qpy_calls, _ack_file, _log = ack_run
+
+    proc = run(biosigio_version=version, packaging_importable=packaging_importable)
+
+    assert proc.returncode == 0, proc.stderr
+    assert f"[setup] biosigio {version}" in proc.stdout
+    assert any("reconcile" in c for c in qpy_calls()), qpy_calls()
+
+
+@pytest.mark.parametrize("packaging_importable", [True, False], ids=["packaging", "tuple"])
+def test_setup_fails_closed_on_a_version_it_cannot_read(
+    ack_run, packaging_importable: bool
+) -> None:
+    run, qpy_calls, _ack_file, _log = ack_run
+
+    proc = run(biosigio_version="not-a-version", packaging_importable=packaging_importable)
+
+    assert proc.returncode != 0, proc.stdout
+    assert "FATAL" in proc.stderr
+    assert qpy_calls() == []
+
+
+def test_the_floor_variable_is_the_floor_of_the_spec() -> None:
+    """`BIOSIGIO_FLOOR` (what setup() checks) and the `>=` half of
+    `BIOSIGIO_SPEC` (what setup() installs) are two spellings of one number, and
+    a bump that changes only one leaves a check that either refuses a good node
+    or waves a stale one through."""
+    text = SCRIPT.read_text()
+    floor = next(
+        line.split("=", 1)[1].strip('"')
+        for line in text.splitlines()
+        if line.startswith("BIOSIGIO_FLOOR=")
+    )
+    spec = next(
+        line.split(":-", 1)[1].rstrip('}"')
+        for line in text.splitlines()
+        if line.startswith("BIOSIGIO_SPEC=")
+    )
+    assert f">={floor}," in spec + ",", f"floor {floor!r} is not the >= bound of {spec!r}"
 
 
 def _calls_for(qpy_calls, subcommand: str) -> list[str]:
