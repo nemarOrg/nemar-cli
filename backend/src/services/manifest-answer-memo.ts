@@ -32,11 +32,13 @@
  * pushes hard on (#1502) -- an isolate juggling several concurrent scans of a
  * large manifest must not ALSO be carrying a memo sized like another one. A
  * single entry may use at most half the cap: `manifest.json`'s own answer
- * (`EntriesQuery`, capped at 30,000 entries, itself capped near 9 MB per
- * `MAX_MANIFEST_JSON_ENTRIES`'s own measurement) is large enough that
- * memoizing it whole could otherwise evict every small, hot per-file entry
- * this memo mainly exists for; past that fraction, the answer is still
- * returned to the caller, it is just not remembered.
+ * (`EntriesQuery`) is capped PER BRANCH, not at one number (ADR 0074): 38,000
+ * entries unsigned (`MAX_MANIFEST_JSON_ENTRIES`, `routes/data.ts`), 30,000
+ * presigned (`MAX_MANIFEST_JSON_ENTRIES_PRESIGNED`, smaller because a
+ * presigned URL is far longer than a plain S3 object URL). Either bound is
+ * large enough that memoizing the answer whole could otherwise evict every
+ * small, hot per-file entry this memo mainly exists for; past that fraction,
+ * the answer is still returned to the caller, it is just not remembered.
  */
 
 /** Answers larger than this are not memoized at all: see the module comment. */
@@ -104,10 +106,15 @@ function estimateBytes(value: unknown): number {
     // Rough but conservative: UTF-16 code units, not the (smaller) UTF-8 byte
     // count, plus a fixed overhead for the Map entry itself.
     return JSON.stringify(value).length * 2 + 64;
-  } catch {
+  } catch (err) {
     // A value that cannot be serialized (should not happen for anything
     // `manifest-queries.ts` produces) is never memoized rather than sized
-    // wrong.
+    // wrong. Logged because "should not happen" is exactly the case worth
+    // knowing about if it ever does.
+    console.warn(
+      "[manifest-answer-memo] estimateBytes failed to serialize a value; skipping memoization:",
+      err instanceof Error ? err.message : String(err),
+    );
     return Number.POSITIVE_INFINITY;
   }
 }
