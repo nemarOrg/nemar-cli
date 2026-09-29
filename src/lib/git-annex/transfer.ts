@@ -6,7 +6,7 @@
  * verbatim.
  */
 
-import { statSync } from "node:fs";
+import { lstatSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "bun";
 import { annexKeyDeclaredSize } from "../s3-server-copy.js";
@@ -145,6 +145,14 @@ interface GetDataCounts {
   filesUnavailable: number;
   /** Bounded sample of unavailable paths, for user-facing reporting. */
   unavailablePaths: string[];
+  /**
+   * Among this run's retrieved files, how many had a key declaring no size
+   * (a `URL--` key from `addurl --relaxed`, a WORM key, ...) and so could be
+   * checked by NEITHER hash NOR size under `--no-verify` -- the same gap
+   * `import-openneuro.ts`'s tree gate counts and reports rather than folding
+   * into a reassuring total. Always 0 when `noVerify` was not requested.
+   */
+  unsizedFiles: number;
 }
 
 /**
@@ -356,9 +364,20 @@ export async function getDatasetData(
 
     let filesDownloaded = 0;
     let filesUnavailable = 0;
+    let unsizedFiles = 0;
     const unavailablePaths: string[] = [];
     // Per-file failure notes, joined with stderr for the classifier tie-break.
+    // Capped like unavailablePaths: a many-file failure must not build an
+    // unbounded string, and the "X more omitted" line still says the total.
     const failureNotes: string[] = [];
+    let failureNotesOmitted = 0;
+    const addFailureNote = (note: string): void => {
+      if (failureNotes.length < MAX_UNAVAILABLE_SAMPLE) {
+        failureNotes.push(note);
+      } else {
+        failureNotesOmitted++;
+      }
+    };
     let stderrOutput = "";
     const stderrChunks: Uint8Array[] = [];
     // Files this run reported as retrieved, kept only to re-check their size
@@ -386,9 +405,9 @@ export async function getDatasetData(
         // Real `-J --json-progress` failure events carry the cause in `note`
         // ("from s3-PUBLIC...\nUnable to access these remotes: ...") alongside
         // an `error-messages` array; the scalar `error` is belt-and-braces.
-        if (parsed.note) failureNotes.push(parsed.note);
-        if (parsed["error-messages"]?.length) failureNotes.push(...parsed["error-messages"]);
-        if (parsed.error) failureNotes.push(parsed.error);
+        if (parsed.note) addFailureNote(parsed.note);
+        for (const message of parsed["error-messages"] ?? []) addFailureNote(message);
+        if (parsed.error) addFailureNote(parsed.error);
       }
     };
 
@@ -459,6 +478,7 @@ export async function getDatasetData(
         filesDownloaded,
         filesUnavailable,
         unavailablePaths,
+        unsizedFiles: 0,
       };
     }
 
@@ -473,12 +493,37 @@ export async function getDatasetData(
     // file is, not silently kept as a success.
     if (options.noVerify && retrievedThisRun.length > 0) {
       const badPaths: string[] = [];
+      // Bad paths whose WORKING-TREE entry is a regular file, not a symlink --
+      // an unlocked or `git annex adjust --unlock` branch (what `initDataset`
+      // puts every NEMAR-created dataset on). On a locked tree the entry is a
+      // symlink into `.git/annex/objects/`, so quarantining the object below
+      // leaves it correctly dangling and nothing further is needed. On an
+      // unlocked tree the working file is typically hardlinked to that same
+      // object, so quarantining the object does NOT touch this copy: the
+      // corrupted bytes stay readable at the path a caller actually opens,
+      // while the location log correctly says they are not "here" -- and no
+      // later `git annex get` fixes it, because `get` in unlocked mode never
+      // clobbers a file that already exists at the path, treating it as a
+      // possible local edit. Measured on git-annex 10.20260901 through the
+      // exact `git init` -> `annex init` -> `adjust --unlock` sequence
+      // `initDataset` runs: a truncated fetch left stale bytes in place
+      // through fsck, a second `get`, AND a fixed-upstream `get` that
+      // reported `"success":true` -- only `rm` + `git checkout --` recovers.
+      const unlockedBadPaths: string[] = [];
       for (const { file, key } of retrievedThisRun) {
         const declaredSize = annexKeyDeclaredSize(key);
-        if (declaredSize === null) continue; // key does not embed a size to check
+        if (declaredSize === null) {
+          // No embedded length to check against (a URL key from `addurl
+          // --relaxed`, a WORM key, ...): accepted on the key's name alone,
+          // same as import-openneuro.ts's tree gate. Counted, not silently
+          // folded into a success this run cannot actually back up.
+          unsizedFiles++;
+          continue;
+        }
+        const fullPath = join(datasetPath, file);
         let actualSize: number | null;
         try {
-          actualSize = statSync(join(datasetPath, file)).size;
+          actualSize = statSync(fullPath).size;
         } catch {
           actualSize = null;
         }
@@ -487,22 +532,51 @@ export async function getDatasetData(
         filesUnavailable++;
         badPaths.push(file);
         if (unavailablePaths.length < MAX_UNAVAILABLE_SAMPLE) unavailablePaths.push(file);
-        failureNotes.push(
-          `${file}: --no-verify accepted ${actualSize === null ? "a file that is no longer readable" : `${actualSize} byte(s)`}, but the key declares ${declaredSize}`,
+        addFailureNote(
+          `${file}: --no-verify accepted ${actualSize === null ? "a file that is no longer readable" : `${actualSize} byte(s)`}, but the key declares ${declaredSize}. ` +
+            `Recover with: rm ${file} && git checkout -- ${file} && git annex get ${file}`,
         );
+        let isSymlink = false;
+        try {
+          isSymlink = lstatSync(fullPath).isSymbolicLink();
+        } catch {
+          // Already gone -- nothing to hunt for an unlocked-style copy of.
+        }
+        if (!isSymlink) unlockedBadPaths.push(file);
       }
       // Best-effort quarantine through git-annex's own fsck, so the location
       // log stops claiming "here" holds good content. `--fast` is a stat, not
       // a re-hash of every good file too, so it costs nothing this run has
       // not already paid; its own success or failure does not change the
-      // result already computed above.
+      // result already computed above. Runs BEFORE the working-tree cleanup
+      // below so the object store has already given up its only (bad) copy --
+      // the two must agree before `git checkout --` decides what belongs at
+      // each path.
       if (badPaths.length > 0) {
         await runCommand(["git", "annex", "fsck", "--fast", "--", ...badPaths], {
           cwd: datasetPath,
         });
       }
+      // The fix fsck alone does not reach: remove the stale working-tree
+      // bytes and let `git checkout --` put back whatever git-annex now
+      // legitimately has for that path -- a pointer, since fsck just
+      // retracted the only copy. Best-effort in both steps; the failure note
+      // above already gives the same recovery by hand.
+      if (unlockedBadPaths.length > 0) {
+        for (const file of unlockedBadPaths) {
+          try {
+            rmSync(join(datasetPath, file), { force: true });
+          } catch {
+            // Best effort; the failure note already covers manual recovery.
+          }
+        }
+        await runCommand(["git", "checkout", "--", ...unlockedBadPaths], { cwd: datasetPath });
+      }
     }
 
+    if (failureNotesOmitted > 0) {
+      failureNotes.push(`...(${failureNotesOmitted} more failure note(s) omitted)`);
+    }
     const failureText = `${stderrOutput}\n${failureNotes.join("\n")}`;
     const outcome = classifyGetOutcome({
       retrieved: filesDownloaded,
@@ -512,7 +586,7 @@ export async function getDatasetData(
     });
     return toGetDataResult(
       outcome,
-      { filesDownloaded, filesUnavailable, unavailablePaths },
+      { filesDownloaded, filesUnavailable, unavailablePaths, unsizedFiles },
       // `failureText` (stderr plus per-file notes), not bare stderr: a
       // no-verify size mismatch has nothing in git-annex's own stderr --
       // git-annex thought the transfer succeeded -- so the only place the
@@ -527,6 +601,7 @@ export async function getDatasetData(
       filesDownloaded: 0,
       filesUnavailable: 0,
       unavailablePaths: [],
+      unsizedFiles: 0,
     };
   }
 }
