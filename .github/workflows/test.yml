@@ -731,6 +731,7 @@ jobs:
   # reason they cannot fix. Skipping is the correct outcome there.
   e2e-upload:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: changes
     if: |
       (
