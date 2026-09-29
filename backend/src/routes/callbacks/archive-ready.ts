@@ -188,6 +188,17 @@ export const ARCHIVE_READY_UPDATE_SQL = `UPDATE datasets
                )
            WHERE dataset_id = ?`;
 
+/**
+ * The dataset's most recently minted version, by the same "latest" rule
+ * `PUBLIC_DATASET_VERSIONS_SQL` (data-router.ts) uses: `ORDER BY created_at
+ * DESC`. Exported so the 'ready' guard below and its test run the identical
+ * query rather than a second copy of the ordering rule.
+ */
+export const LATEST_DATASET_VERSION_SQL = `SELECT version FROM dataset_versions
+    WHERE dataset_id = ?
+ ORDER BY created_at DESC
+    LIMIT 1`;
+
 export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
   webhooks.post("/archive-ready", async (c) => {
     const token = c.req.header("X-Webhook-Token");
@@ -235,41 +246,77 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
     // when the version manifest isn't publicly fetchable yet.
     let retryTotalBytes: number | null = null;
     let retryTotalFiles: number | null = null;
+    // Set when a 'ready' callback names a version that is NOT the dataset's
+    // latest (#1514 review): surfaced in the response body so the caller
+    // (and anyone reading the workflow log) can tell a stale callback was
+    // acknowledged but deliberately not applied, rather than silently
+    // treated the same as a normal write.
+    let notLatestVersion = false;
     try {
       if (status === "ready") {
-        const { complete, absent, declared, unreadable, malformed } =
-          deriveArchiveCompleteness(body);
-        // A real build whose tally arrived unparseable is NOT the same event as
-        // the skip path that sends no tally, but the persisted row cannot tell
-        // you apart: both leave the completeness columns COALESCE-preserved
-        // while archive_size and archive_checked_at are overwritten
-        // unconditionally. So the row ends up advertising a brand-new
-        // "checked just now" timestamp beside a verdict from an older build.
-        // Nothing else would ever surface that, so say it here.
-        if (malformed.length > 0) {
-          console.error(
-            `[archive-ready] ANOMALY dataset=${body.dataset_id}: completeness tally violates the all-or-nothing contract (${malformed.join(", ")}); columns keep the PREVIOUS build's verdict while archive_size/archive_checked_at advance`,
-          );
+        // Guard against a callback for an OLDER version clobbering the
+        // latest version's numbers: a retry or re-dispatch that finishes
+        // AFTER a newer build has already gone 'ready' must not overwrite
+        // it with the older zip's size/completeness. Same "latest" rule
+        // PUBLIC_DATASET_VERSIONS_SQL uses (ORDER BY created_at DESC). No
+        // version on the callback, or no dataset_versions row yet for this
+        // dataset, means there is nothing to contradict -> apply as before
+        // (ADR 0012's fail-open: unknown means write, not withhold).
+        let isStaleVersion = false;
+        if (body.version) {
+          const latest = await c.env.DB.prepare(LATEST_DATASET_VERSION_SQL)
+            .bind(body.dataset_id)
+            .first<{ version: string }>();
+          isStaleVersion = !!latest && latest.version !== body.version;
         }
-        // A 'ready' callback carrying unreadable>0 should be impossible: the
-        // build exits non-zero and the wrapper deletes the zip in that case. If
-        // it happens the classification logic has drifted, so say so loudly
-        // rather than silently recording the archive as merely partial.
-        if (unreadable !== null && unreadable > 0) {
-          console.error(
-            `[archive-ready] ANOMALY dataset=${body.dataset_id}: status=ready with unreadable=${unreadable}; the build should have failed and deleted the zip`,
+
+        if (isStaleVersion) {
+          notLatestVersion = true;
+          // The UPDATE above is what normally tells us the dataset exists
+          // (its affected-row count); skip it here, so check directly --
+          // still needed to answer 404 vs. 200-not-applied correctly.
+          const exists = await c.env.DB.prepare("SELECT 1 FROM datasets WHERE dataset_id = ?")
+            .bind(body.dataset_id)
+            .first();
+          changed = exists ? 1 : 0;
+          console.log(
+            `[archive-ready] dataset=${body.dataset_id} 'ready' callback for version=${body.version} not applied: not the dataset's latest version`,
           );
+        } else {
+          const { complete, absent, declared, unreadable, malformed } =
+            deriveArchiveCompleteness(body);
+          // A real build whose tally arrived unparseable is NOT the same event as
+          // the skip path that sends no tally, but the persisted row cannot tell
+          // you apart: both leave the completeness columns COALESCE-preserved
+          // while archive_size and archive_checked_at are overwritten
+          // unconditionally. So the row ends up advertising a brand-new
+          // "checked just now" timestamp beside a verdict from an older build.
+          // Nothing else would ever surface that, so say it here.
+          if (malformed.length > 0) {
+            console.error(
+              `[archive-ready] ANOMALY dataset=${body.dataset_id}: completeness tally violates the all-or-nothing contract (${malformed.join(", ")}); columns keep the PREVIOUS build's verdict while archive_size/archive_checked_at advance`,
+            );
+          }
+          // A 'ready' callback carrying unreadable>0 should be impossible: the
+          // build exits non-zero and the wrapper deletes the zip in that case. If
+          // it happens the classification logic has drifted, so say so loudly
+          // rather than silently recording the archive as merely partial.
+          if (unreadable !== null && unreadable > 0) {
+            console.error(
+              `[archive-ready] ANOMALY dataset=${body.dataset_id}: status=ready with unreadable=${unreadable}; the build should have failed and deleted the zip`,
+            );
+          }
+          const result = await c.env.DB.prepare(ARCHIVE_READY_UPDATE_SQL)
+            .bind(
+              typeof body.size === "number" ? body.size : null,
+              complete,
+              absent,
+              declared,
+              body.dataset_id,
+            )
+            .run();
+          changed = result.meta.changes ?? 0;
         }
-        const result = await c.env.DB.prepare(ARCHIVE_READY_UPDATE_SQL)
-          .bind(
-            typeof body.size === "number" ? body.size : null,
-            complete,
-            absent,
-            declared,
-            body.dataset_id,
-          )
-          .run();
-        changed = result.meta.changes ?? 0;
       } else if (status === "skipped") {
         // Over the size/file-count policy (#752): the workflow built no zip and
         // steers users to direct download. Record the reason; leave archive_status
@@ -391,9 +438,16 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
     }
 
     console.log(
-      `[archive-ready] dataset=${body.dataset_id} status=${status} size=${body.size ?? "?"} version=${body.version ?? "?"} complete=${body.complete ?? "?"} absent=${body.absent ?? "?"}${retry ? ` retry=${retry.reason} count=${retry.nextCount}` : ""}`,
+      `[archive-ready] dataset=${body.dataset_id} status=${status} size=${body.size ?? "?"} version=${body.version ?? "?"} complete=${body.complete ?? "?"} absent=${body.absent ?? "?"}${retry ? ` retry=${retry.reason} count=${retry.nextCount}` : ""}${notLatestVersion ? " applied=false (not latest version)" : ""}`,
     );
 
-    return c.json({ ok: true, dataset_id: body.dataset_id, status });
+    return c.json({
+      ok: true,
+      dataset_id: body.dataset_id,
+      status,
+      ...(notLatestVersion
+        ? { applied: false, reason: "version is not the dataset's latest" }
+        : {}),
+    });
   });
 }
