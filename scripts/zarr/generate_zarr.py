@@ -950,6 +950,16 @@ class MaxShieldProbeFailed(Exception):
 # cannot read is a property of that file's content, not of node conditions.
 RETRYABLE_CODES = frozenset({RecordingMemoryExceeded.code})
 
+# Typed codes that are permanent for the RECORDING but say nothing permanent
+# about the DATASET: they describe what storage held at the moment of the run.
+# Unlike `RETRYABLE_CODES` they stay typed failures in the index (the viewer is
+# told why, the rest of the dataset still serves, the recording is not retried
+# on its own), but a run whose failures are ALL of these codes is not
+# `deterministic`: see `dataset_failure_is_deterministic`. A literal rather than
+# `AnnexObjectMissing.code` only because the class is defined further down; a
+# test pins the two together.
+STORAGE_STATE_CODES = frozenset({"annex_object_missing"})
+
 
 def memory_failure_result(
     primary: str, exc: BaseException, peak_rss: int | None = None
@@ -991,6 +1001,45 @@ def count_infra_failures(failures: list, failure_entries: list) -> int:
     """
     retryable_coded = sum(1 for e in failure_entries if e.get("code") in RETRYABLE_CODES)
     return len(failures) - len(failure_entries) + retryable_coded
+
+
+def dataset_failure_is_deterministic(failures: list, failure_entries: list) -> bool:
+    """Whether this run's failures are a permanent property of the DATASET, which
+    `hallu-zarr.sh` turns into a terminal `data_failed` on a run that converted
+    nothing (no retry, #774).
+
+    True only when there is a failure, none of them is infra
+    (`count_infra_failures` is zero), and at least one is a typed code that is
+    NOT in `STORAGE_STATE_CODES`. The last term is the one that matters for
+    `annex_object_missing`: that code is permanent for its recording, but when
+    EVERY failure is a missing object the likeliest cause is an upload or an
+    import whose objects have not all landed yet, and burying the dataset as
+    `data_failed` on the first run would need a human to notice and requeue it.
+    So such a run takes the queue's ordinary bounded backoff and ends `failed`
+    if the objects never arrive.
+
+    A mix is still deterministic when anything in it is a genuine data failure:
+    a recording biosigIO cannot read will fail identically on every retry, and
+    retrying the whole dataset for the sake of the missing objects would only
+    delay the same verdict. A partially successful run is unaffected: it exits
+    0 and the dataset is `done` whatever this returns.
+    """
+    if not failures or count_infra_failures(failures, failure_entries):
+        return False
+    return any(e.get("code") not in STORAGE_STATE_CODES for e in failure_entries)
+
+
+def annex_missing_summary(missing: list[tuple[str, str | None]]) -> dict:
+    """The callback's account of recordings refused as `annex_object_missing`:
+    how many, and the first by path (sorted, so a pool's completion order does
+    not decide which one the operator is shown) with the annex key storage
+    lacks. `hallu-zarr.sh` names that key in the queue's `last_error`."""
+    first = min(missing, default=(None, None))
+    return {
+        "annex_missing_count": len(missing),
+        "annex_missing_first_path": first[0],
+        "annex_missing_first_key": first[1],
+    }
 
 
 class ChannelCountMismatch(Exception):
@@ -4601,9 +4650,27 @@ class AnnexObjectMissing(Exception):
     reaches this class -- a 404, or a successful listing that lacks the chunk.
     A throttle, a 5xx, a timeout or a listing that errored stays an uncoded
     RuntimeError and is retried. Recovery once the content is uploaded is a
-    requeue of the dataset."""
+    requeue of the dataset.
+
+    Permanent for the RECORDING, not for the dataset: it is in
+    `STORAGE_STATE_CODES`, so a run in which every failure is this code does not
+    make the dataset `deterministic` (see `dataset_failure_is_deterministic`).
+    Every recording missing its object at once is what an upload still landing
+    looks like, and the queue's bounded backoff is the right answer to that.
+
+    `key` is carried separately from the message so the run can name the first
+    missing object to the operator without parsing text."""
 
     code = "annex_object_missing"
+
+    def __init__(self, key: str, problem: str) -> None:
+        # Both in `args`, so the exception pickles and unpickles as itself.
+        super().__init__(key, problem)
+        self.key = key
+        self.problem = problem
+
+    def __str__(self) -> str:
+        return f"{self.key}: {self.problem}"
 
 
 # --- git-annex chunked storage ---------------------------------------------
@@ -4784,7 +4851,7 @@ def fetch_annex_object(bucket: str, dataset_id: str, key: str, dst: str) -> None
         if size is None or "--" not in key:
             # Without a declared size the chunk names cannot be derived, so the
             # plain object was the only place this content could be.
-            raise AnnexObjectMissing(f"{key}: no object at the plain key ({exc})") from exc
+            raise AnnexObjectMissing(key, f"no object at the plain key ({exc})") from exc
     cache = (bucket, dataset_id)
     cached = _ANNEX_CHUNK_SIZE.get(cache)
     if cached is not None:
@@ -4794,7 +4861,7 @@ def fetch_annex_object(bucket: str, dataset_id: str, key: str, dst: str) -> None
         except S3ObjectAbsent as exc:
             if exc.chunk != 1:
                 raise AnnexObjectMissing(
-                    f"{key}: chunk C{exc.chunk} of its {cached}-byte chunking is absent"
+                    key, f"chunk C{exc.chunk} of its {cached}-byte chunking is absent"
                 ) from exc
             # Not stored under the cached size at all: this key may have been
             # uploaded with another chunking. Its own listing decides.
@@ -4809,14 +4876,14 @@ def fetch_annex_object(bucket: str, dataset_id: str, key: str, dst: str) -> None
         _list_annex_chunks(bucket, dataset_id, key), size, cached
     )
     if chunk_size is None:
-        raise AnnexObjectMissing(f"{key}: {problem}")
+        raise AnnexObjectMissing(key, problem)
     _ANNEX_CHUNK_SIZE[cache] = chunk_size
     try:
         _download_chunks(base, key, size, chunk_size, dst)
     except S3ObjectAbsent as exc:
         # Listed a moment ago and gone now: a deletion, which is still an answer.
         raise AnnexObjectMissing(
-            f"{key}: chunk C{exc.chunk} of its {chunk_size}-byte chunking is absent"
+            key, f"chunk C{exc.chunk} of its {chunk_size}-byte chunking is absent"
         ) from exc
 
 
@@ -6915,6 +6982,9 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             # is the only way an uncoded failure says anything at all from
             # outside the conversion node. #1197
             "detail": failure_detail(exc),
+            # The object storage lacks, so the driver can name it (see
+            # `annex_missing_summary`).
+            "annex_key": exc.key if isinstance(exc, AnnexObjectMissing) else None,
         }
     finally:
         # Parallel workers share the NVMe scratch; reclaim each recording's copy
@@ -7437,6 +7507,9 @@ def main() -> int:
     # what derives `zarr` and the attempt count and produces the published
     # entries -- see `_pending_entry`.
     pending_entries: list[dict] = []
+    # (path, annex key) of each recording refused as `annex_object_missing`; the
+    # callback names the first so the queue's error can (`annex_missing_summary`).
+    annex_missing: list[tuple[str, str | None]] = []
     # Event rows go to disk as each recording finishes, never into a list that
     # grows with the dataset: nm000281 is ~25k stores (#1060).
     events_staging = EventsStaging()
@@ -7507,6 +7580,8 @@ def main() -> int:
             # list and were indistinguishable from "still generating" forever.
             code = r.get("code")
             detail = r.get("detail") or failure_detail(r.get("error"))
+            if code == AnnexObjectMissing.code:
+                annex_missing.append((r["primary"], r.get("annex_key")))
             if code and code not in RETRYABLE_CODES:
                 failure_entries.append(_failure_entry(r["primary"], code, detail))
             else:
@@ -7675,17 +7750,19 @@ def main() -> int:
         print(f"[zarr] removed store {rel_store}", flush=True)
 
     # `deterministic` = every failure is a typed DATA failure (biosigIO carries a
-    # `.code`); none are infra (crashed worker / transient S3). The driver uses
-    # this to mark a total failure terminal (`data_failed`, no retry) vs infra
-    # (bounded retry) — and the backend records it for the failures dashboard.
-    # See nemarOrg/nemar-cli#774.
+    # `.code`); none are infra (crashed worker / transient S3), and not all of
+    # them are a storage-state code like `annex_object_missing`. The driver uses
+    # this to mark a total failure terminal (`data_failed`, no retry) vs
+    # retryable (bounded retry) — and the backend records it for the failures
+    # dashboard. See nemarOrg/nemar-cli#774 and `dataset_failure_is_deterministic`.
     infra_failures = count_infra_failures(failures, failure_entries)
     # Recordings that failed for a reason that is NOT a property of the data. On a
     # run where anything converted, `main` returns 0 and the driver marks the
     # dataset `done`, so these are not retried by the queue on their own -- say so
     # loudly rather than let the index carry a failure nobody revisits. #1113
     retryable_failures = infra_failures
-    deterministic = bool(failures) and infra_failures == 0
+    deterministic = dataset_failure_is_deterministic(failures, failure_entries)
+    annex_missing_fields = annex_missing_summary(annex_missing)
 
     # Set by the events.parquet step below. Bound HERE, before
     # `write_failed_callback` closes over them, because the total-failure exit
@@ -7723,6 +7800,7 @@ def main() -> int:
                     "failure_count": len(failure_entries),
                     "data_failures": failure_entries,
                     "deterministic": deterministic,
+                    **annex_missing_fields,
                     "pool_breaks": pool_breaks,
                     # Coverage (#1197). Reported even here, where the index was
                     # NOT rewritten: the queue's pending-driven requeue needs to
@@ -7766,6 +7844,14 @@ def main() -> int:
     # `failed` instead of backing off.
     if convert and not converted_entries and not remove and retry_paths is None:
         print(f"::error::all {len(convert)} conversion(s) failed; index left untouched", flush=True)
+        if annex_missing and not deterministic:
+            print(
+                f"::error::storage lacks the annex object(s) of {len(annex_missing)} "
+                f"recording(s) (first: {annex_missing_fields['annex_missing_first_key']} "
+                f"for {annex_missing_fields['annex_missing_first_path']}); the dataset "
+                "is retryable, not data_failed, in case an upload is still landing",
+                flush=True,
+            )
         write_failed_callback()
         return 1
 
@@ -8020,6 +8106,10 @@ def main() -> int:
         # converted); `deterministic` only tells the backend whether the skipped
         # recordings are data (won't retry) vs infra. See #774.
         "deterministic": deterministic,
+        # Recordings refused because storage lacks their object; the count and
+        # the first one, by path. Reported here too, where the dataset is `done`,
+        # so a partial run's missing objects are visible without the index.
+        **annex_missing_fields,
         # Worker-pool breaks recovered during this run. Zero is the healthy
         # value; a non-zero trend means the node is under memory pressure and
         # is only visible here -- the log is far too large to watch. #1110.

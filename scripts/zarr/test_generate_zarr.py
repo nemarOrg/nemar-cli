@@ -10526,12 +10526,16 @@ class TestMainConvertsADeclaredFdt(unittest.TestCase):
 
 # A stand-in `aws` that serves a local directory laid out EXACTLY like the bucket:
 # `<root>/<bucket>/<id>/objects/<key>` holds the object `s3://<bucket>/<id>/objects/<key>`.
-# It answers the three calls the annex fetch and the store upload make, with the
-# real CLI's shapes: `s3 cp` (a missing key prints the CLI's own 404 line and
-# exits 1), `s3api list-objects-v2 --query Contents[].[Key,Size] --output json`
-# (prefix match, `null` when nothing matches) and `s3 sync` (a copy into the
-# tree). Every call is logged, so a test can count requests.
+# It answers the calls the annex fetch, the store upload and `main()`'s index
+# round trip make, with the real CLI's shapes: `s3 cp` (a missing key prints the
+# CLI's own 404 line and exits 1; `-` streams to stdout; a local source uploads),
+# `s3api list-objects-v2` (prefix match: `Contents[].[Key,Size]` as JSON,
+# `null` when nothing matches; `Contents[0].Key` and `CommonPrefixes[].Prefix`
+# as text, `None` when empty), `s3api get-object`/`put-object` with the ETag
+# and the conditional-write refusal, `s3 sync` and `s3 rm`. Every call is
+# logged, so a test can count requests.
 BUCKET_AWS = r"""#!/usr/bin/env python3
+import hashlib
 import json
 import os
 import shutil
@@ -10562,6 +10566,22 @@ def split(uri):
     return bucket, key
 
 
+def etag(path):
+    with open(path, "rb") as fh:
+        return chr(34) + hashlib.md5(fh.read()).hexdigest() + chr(34)
+
+
+def keys_under(bucket, prefix):
+    top = os.path.join(ROOT, bucket)
+    out = []
+    for d, _, files in os.walk(top):
+        for f in files:
+            key = os.path.relpath(os.path.join(d, f), top).replace(os.sep, "/")
+            if key.startswith(prefix):
+                out.append([key, os.path.getsize(os.path.join(d, f))])
+    return sorted(out)
+
+
 fail = os.environ.get("ZARR_TEST_BUCKET_FAIL")
 if fail and any(fail in a for a in args):
     # The CLI's own shape for a transfer that failed part-way: it quotes the
@@ -10590,6 +10610,10 @@ if args[:2] == ["s3", "cp"] and args[2].startswith("s3://"):
         sys.stderr.write("fatal error: An error occurred (404) when calling the HeadObject "
                          f'operation: Key "{key}" does not exist\n')
         sys.exit(1)
+    if args[3] == "-":
+        with open(path, "rb") as fh:
+            sys.stdout.buffer.write(fh.read())
+        sys.exit(0)
     shutil.copyfile(path, args[3])
     short = os.environ.get("ZARR_TEST_BUCKET_SHORT_ONCE")
     marker = os.path.join(ROOT, ".short-once-done")
@@ -10600,20 +10624,57 @@ if args[:2] == ["s3", "cp"] and args[2].startswith("s3://"):
         with open(args[3], "r+b") as fh:
             fh.truncate(max(0, os.path.getsize(path) - 1))
     sys.exit(0)
+if args[:2] == ["s3", "cp"] and args[3].startswith("s3://"):
+    bucket, key = split(args[3])
+    os.makedirs(os.path.dirname(os.path.join(ROOT, bucket, key)), exist_ok=True)
+    shutil.copyfile(args[2], os.path.join(ROOT, bucket, key))
+    sys.exit(0)
 if args[:2] == ["s3api", "list-objects-v2"]:
     bucket, prefix = opt("--bucket"), opt("--prefix")
-    top = os.path.join(ROOT, bucket)
-    rows = []
-    for d, _, files in os.walk(top):
-        for f in files:
-            key = os.path.relpath(os.path.join(d, f), top).replace(os.sep, "/")
-            if key.startswith(prefix):
-                rows.append([key, os.path.getsize(os.path.join(d, f))])
-    print(json.dumps(sorted(rows) or None))
+    rows = keys_under(bucket, prefix)
+    query = opt("--query")
+    if query == "Contents[0].Key":
+        print(rows[0][0] if rows else "None")
+    elif query == "CommonPrefixes[].Prefix":
+        subs = sorted({prefix + k[len(prefix):].split("/", 1)[0] + "/"
+                       for k, _ in rows if "/" in k[len(prefix):]})
+        print("\t".join(subs) if subs else "None")
+    else:
+        print(json.dumps(rows or None))
+    sys.exit(0)
+if args[:2] == ["s3api", "get-object"]:
+    path = os.path.join(ROOT, opt("--bucket"), opt("--key"))
+    if not os.path.isfile(path):
+        sys.stderr.write("An error occurred (NoSuchKey) when calling the GetObject "
+                         "operation: The specified key does not exist.\n")
+        sys.exit(254)
+    shutil.copyfile(path, args[args.index("--key") + 2])
+    print(etag(path))
+    sys.exit(0)
+if args[:2] == ["s3api", "put-object"]:
+    path = os.path.join(ROOT, opt("--bucket"), opt("--key"))
+    exists = os.path.isfile(path)
+    if ("--if-match" in args and (not exists or etag(path) != opt("--if-match"))) or (
+        "--if-none-match" in args and exists
+    ):
+        sys.stderr.write("An error occurred (PreconditionFailed) when calling the "
+                         "PutObject operation\n")
+        sys.exit(254)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    shutil.copyfile(opt("--body"), path)
+    print(json.dumps({"ETag": etag(path)}))
     sys.exit(0)
 if args[:2] == ["s3", "sync"]:
     bucket, key = split(args[3])
     shutil.copytree(args[2], os.path.join(ROOT, bucket, key), dirs_exist_ok=True)
+    sys.exit(0)
+if args[:2] == ["s3", "rm"]:
+    bucket, key = split(args[2])
+    target = os.path.join(ROOT, bucket, key)
+    if os.path.isdir(target):
+        shutil.rmtree(target)
+    elif os.path.isfile(target):
+        os.remove(target)
     sys.exit(0)
 sys.stderr.write("unexpected aws call: " + " ".join(args) + "\n")
 sys.exit(2)
@@ -11017,6 +11078,194 @@ class TestChunkedAnnexConvertOne(unittest.TestCase):
         self.assertIn("missing or incomplete", generate_zarr.reason_for_code(result["code"]))
         self.assertFalse(os.path.exists(os.path.join(self.s3.root, self.s3.BUCKET, self.s3.DATASET, "zarr")),
                          "nothing published for a refused recording")
+
+
+
+class TestAnnexMissingDatasetVerdict(unittest.TestCase):
+    """`dataset_failure_is_deterministic`, the rule behind the callback's
+    `deterministic`, which `hallu-zarr.sh` turns into a terminal `data_failed`
+    for a run that converted nothing. `annex_object_missing` is permanent for
+    its recording but must not, on its own, make the DATASET terminal."""
+
+    @staticmethod
+    def entry(path: str, code: str) -> generate_zarr.FailureEntry:
+        return _failure_entry(path, code, f"{code} detail")
+
+    def verdict(self, *codes: str | None) -> bool:
+        paths = [f"sub-{i:02d}/eeg/r.edf" for i in range(len(codes))]
+        entries = [self.entry(p, c) for p, c in zip(paths, codes) if c]
+        return generate_zarr.dataset_failure_is_deterministic(paths, entries)
+
+    def test_the_code_is_a_storage_state_code_and_not_a_retryable_one(self):
+        code = generate_zarr.AnnexObjectMissing.code
+        self.assertIn(code, generate_zarr.STORAGE_STATE_CODES)
+        self.assertNotIn(code, RETRYABLE_CODES)
+
+    def test_every_recording_missing_its_object_is_not_deterministic(self):
+        self.assertFalse(self.verdict("annex_object_missing"))
+        self.assertFalse(self.verdict("annex_object_missing", "annex_object_missing"))
+
+    def test_a_genuine_data_failure_among_missing_objects_is_deterministic(self):
+        self.assertTrue(self.verdict("annex_object_missing", "corrupt_or_truncated"))
+        self.assertTrue(self.verdict("channel_count_mismatch", "annex_object_missing"))
+
+    def test_the_existing_rule_is_unchanged_for_every_other_code(self):
+        self.assertFalse(self.verdict())  # nothing failed
+        self.assertTrue(self.verdict("corrupt_or_truncated"))
+        self.assertTrue(self.verdict("corrupt_or_truncated", "maxshield_uncalibrated"))
+        # Any infra failure keeps the run retryable, with or without the code.
+        self.assertFalse(self.verdict("corrupt_or_truncated", None))
+        self.assertFalse(self.verdict("annex_object_missing", None))
+        self.assertFalse(self.verdict("recording_memory_exceeded", "corrupt_or_truncated"))
+
+    def test_the_summary_names_the_first_missing_object_by_path(self):
+        summary = generate_zarr.annex_missing_summary(
+            [("sub-02/eeg/b.edf", "KEY-B"), ("sub-01/eeg/a.edf", "KEY-A")]
+        )
+        self.assertEqual(summary, {
+            "annex_missing_count": 2,
+            "annex_missing_first_path": "sub-01/eeg/a.edf",
+            "annex_missing_first_key": "KEY-A",
+        })
+        self.assertEqual(generate_zarr.annex_missing_summary([]), {
+            "annex_missing_count": 0,
+            "annex_missing_first_path": None,
+            "annex_missing_first_key": None,
+        })
+
+    def test_the_exception_keeps_its_key_across_a_pickle(self):
+        import pickle
+
+        exc = generate_zarr.AnnexObjectMissing("SHA256E-s5--ab.edf", "no chunked copy")
+        back = pickle.loads(pickle.dumps(exc))
+        self.assertEqual((back.key, str(back)), (exc.key, "SHA256E-s5--ab.edf: no chunked copy"))
+
+
+class TestMainAnnexMissingVerdict(unittest.TestCase):
+    """`main()` end to end in remote mode, over real EDF recordings whose annex
+    objects are served by the stand-in `aws` from a file-backed bucket: what the
+    callback tells `hallu-zarr.sh` when storage lacks some or all of them."""
+
+    CHUNK = 1024
+    RECS = ("sub-01/ieeg/sub-01_task-rest_ieeg.edf", "sub-02/ieeg/sub-02_task-rest_ieeg.edf")
+
+    @classmethod
+    def setUpClass(cls):
+        TestChunkedAnnexConvertOne.setUpClass()
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        self.s3 = BucketStandIn(self, self.dir)
+        self.repo = os.path.join(self.dir, "repo")
+        os.makedirs(self.repo)
+        saved_ctx = dict(generate_zarr._CTX)
+        self.addCleanup(lambda: (generate_zarr._CTX.clear(), generate_zarr._CTX.update(saved_ctx)))
+
+    def build(self, stored: dict[str, str]) -> dict[str, str]:
+        """One real EDF per recording, committed as an annex pointer; `stored`
+        says what the bucket holds for it: "chunked", "missing" (nothing), or
+        "truncated" (the plain object, cut short INSIDE the file, so the size
+        in the key matches and biosigIO is what refuses it)."""
+
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=self.repo, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.org")
+        git("config", "user.name", "t")
+        keys = {}
+        for i, (rec, how) in enumerate(stored.items()):
+            # Distinct labels per recording: identical files would share one
+            # annex key, and storing one would store the other.
+            content = build_labeled_edf(os.path.join(self.dir, os.path.basename(rec)),
+                                        [f"R{i}C{n}" for n in (1, 2, 3)])
+            with open(content, "rb") as fh:
+                data = fh.read()
+            if how == "truncated":
+                # Same length, garbage after the fixed header: a file the key
+                # vouches for and no reader can decode.
+                data = data[:256] + b"\xff" * (len(data) - 256)
+            key = sha256e(data, ".edf")
+            if how == "chunked":
+                self.s3.put_chunked(key, data, self.CHUNK)
+            elif how == "truncated":
+                self.s3.put_plain(key, data)
+            link = os.path.join(self.repo, rec)
+            os.makedirs(os.path.dirname(link), exist_ok=True)
+            target = os.path.join(self.repo, ".git", "annex", "objects", "Xx", "Yy", key, key)
+            os.symlink(os.path.relpath(target, os.path.dirname(link)), link)
+            keys[rec] = key
+        git("add", "-A")
+        git("commit", "-q", "-m", "fixture")
+        return keys
+
+    def run_main(self) -> tuple[int, str, dict]:
+        callback = os.path.join(self.dir, "cb.json")
+        argv = [
+            "generate_zarr.py", "--dataset-id", self.s3.DATASET, "--repo-dir", self.repo,
+            "--bucket", self.s3.BUCKET, "--callback-out", callback,
+            "--clean", "--jobs", "1", "--api-base", "http://127.0.0.1:9",
+        ]
+        saved, sys.argv = sys.argv, argv
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = generate_zarr.main()
+        finally:
+            sys.argv = saved
+        with open(callback) as fh:
+            return rc, out.getvalue(), json.load(fh)
+
+    def published_index(self) -> dict | None:
+        path = os.path.join(self.s3.root, self.s3.BUCKET, self.s3.DATASET, "zarr", "index.json")
+        if not os.path.exists(path):
+            return None
+        with open(path) as fh:
+            return json.load(fh)
+
+    def test_every_recording_missing_is_a_retryable_total_failure(self):
+        keys = self.build({rec: "missing" for rec in self.RECS})
+        rc, log, cb = self.run_main()
+        self.assertEqual(rc, 1, log)
+        self.assertEqual(cb["status"], "failed")
+        self.assertEqual([e["code"] for e in cb["data_failures"]], ["annex_object_missing"] * 2)
+        self.assertFalse(cb["deterministic"], "all missing must not be data_failed")
+        self.assertEqual(cb["annex_missing_count"], 2)
+        self.assertEqual(cb["annex_missing_first_path"], self.RECS[0])
+        self.assertEqual(cb["annex_missing_first_key"], keys[self.RECS[0]])
+        self.assertIn("storage lacks the annex object(s) of 2 recording(s)", log)
+        self.assertIsNone(self.published_index(), "a total failure publishes nothing")
+
+    def test_a_genuine_data_failure_alongside_a_missing_object_is_deterministic(self):
+        self.build({self.RECS[0]: "missing", self.RECS[1]: "truncated"})
+        rc, log, cb = self.run_main()
+        self.assertEqual(rc, 1, log)
+        codes = sorted(e["code"] for e in cb["data_failures"])
+        self.assertEqual(len(codes), 2, log)
+        self.assertIn("annex_object_missing", codes)
+        other = next(c for c in codes if c != "annex_object_missing")
+        self.assertNotIn(other, RETRYABLE_CODES)
+        self.assertTrue(cb["deterministic"], log)
+        self.assertEqual(cb["annex_missing_count"], 1)
+        self.assertNotIn("storage lacks the annex object", log)
+
+    def test_a_partial_run_still_serves_and_lists_the_missing_recording(self):
+        keys = self.build({self.RECS[0]: "chunked", self.RECS[1]: "missing"})
+        rc, log, cb = self.run_main()
+        self.assertEqual(rc, 0, log)
+        self.assertEqual(cb["status"], "ready")
+        self.assertEqual(cb["converted"], [store_rel_for(self.RECS[0])])
+        self.assertFalse(cb["deterministic"])
+        self.assertEqual(cb["annex_missing_first_key"], keys[self.RECS[1]])
+        index = self.published_index()
+        if index is None:
+            self.fail("a partial run publishes its index")
+        self.assertEqual([e["path"] for e in index["stores"]], [self.RECS[0]])
+        (failure,) = index["failures"]
+        self.assertEqual((failure["path"], failure["code"]), (self.RECS[1], "annex_object_missing"))
+        self.assertEqual(index["pending"], [], "typed, so not pending")
 
 
 if __name__ == "__main__":
