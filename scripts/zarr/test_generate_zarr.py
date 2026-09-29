@@ -3674,18 +3674,33 @@ class TestEeglabDeclaredChannelCount(unittest.TestCase):
         """The whole point of reading nbchan by hand: `loadmat(variable_names=
         ["EEG"])` still materializes every sample, because a classic export is
         ONE variable, `EEG`, with `data` inside. Measured here against the same
-        file, so the bound is shown to separate the two reads."""
+        file, so the bound is shown to separate the two reads.
+
+        With `nbchan` stored after `data` the walk has to skip the whole matrix,
+        inflating it when compressed; memory must stay flat through that too.
+        The bound (a sixteenth of the samples, 3.2 MB) sits far above the
+        parser's measured peak (under 0.4 MB) and far below loadmat's."""
         import tracemalloc
 
+        import numpy as np
         import scipy.io
 
-        for compress in (False, True):
-            with self.subTest(compress=compress):
-                p = build_eeglab_set(
-                    self.path(f"big{int(compress)}"), 32, pnts=150_000,
-                    compress=compress, dtype="float32",
-                )  # 19.2 MB of samples, inline
-                data_bytes = 32 * 150_000 * 4
+        nbchan, pnts = 32, 400_000
+        data_bytes = nbchan * pnts * 4  # 51.2 MB of float32 samples, inline
+        block = np.random.default_rng(3).standard_normal((nbchan, 1000)).astype(np.float32)
+        samples = np.tile(block, (1, pnts // 1000))  # tiled: quick to compress
+        for compress, nbchan_after_data in itertools.product((False, True), repeat=2):
+            with self.subTest(compress=compress, nbchan_after_data=nbchan_after_data):
+                p = self.path(f"big{int(compress)}{int(nbchan_after_data)}")
+                fields: dict[str, object] = {
+                    "setname": "big", "trials": np.array([[1.0]]),
+                    "pnts": np.array([[float(pnts)]]), "srate": np.array([[250.0]]),
+                }
+                if not nbchan_after_data:
+                    fields["nbchan"] = np.array([[float(nbchan)]])
+                fields["data"] = samples
+                fields["nbchan"] = np.array([[float(nbchan)]])
+                scipy.io.savemat(p, {"EEG": fields}, do_compression=compress)
                 tracemalloc.start()
                 try:
                     self.assertEqual(file_declared_channel_count(p), 32)
@@ -3696,7 +3711,7 @@ class TestEeglabDeclaredChannelCount(unittest.TestCase):
                 finally:
                     tracemalloc.stop()
                 self.assertGreater(loadmat_peak, data_bytes * 0.9)
-                self.assertLess(header_peak, data_bytes / 3)
+                self.assertLess(header_peak, data_bytes / 16)
 
     def test_a_store_short_of_the_set_header_is_still_truncated(self):
         # biosigIO keeps every row, so a short store cannot be produced through
