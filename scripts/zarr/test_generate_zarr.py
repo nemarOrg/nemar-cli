@@ -29,7 +29,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -9062,7 +9062,7 @@ class TestDeclaredFdtConvertOne(unittest.TestCase):
                 kwargs = {"bucket": "nemar-test", "dataset_id": "on000001", missing: None}
                 with self.assertRaises(ValueError):
                     generate_zarr.stage_declared_fdt(
-                        self.decl(), self.SET, os.path.join(self.repo, self.SET), work,
+                        cast("generate_zarr.FdtDeclaration", self.decl()), self.SET, os.path.join(self.repo, self.SET), work,
                         repo=self.repo, head_files={self.SET, self.FDT}, head=head,
                         local=False, **kwargs,
                     )
@@ -9263,8 +9263,10 @@ class TestDeclaredFdtWiring(unittest.TestCase):
             git("commit", "-q", "-m", "fixture")
             head = git("rev-parse", "HEAD")
             head_set = set(generate_zarr.git_ls_files(repo, head))
-            decl = {"fdt": self.FDT, "nbchan": 4, "pnts": 1000, "trials": 1,
-                    "fdt_bytes": 16000, "annex_key": "SHA256E-s16000--" + "0" * 64 + ".fdt"}
+            decl: generate_zarr.FdtDeclaration = {
+                "fdt": self.FDT, "nbchan": 4, "pnts": 1000, "trials": 1,
+                "fdt_bytes": 16000, "annex_key": "SHA256E-s16000--" + "0" * 64 + ".fdt",
+            }
             bare = generate_zarr.admission_sizes(repo, [self.SET], head_set, head, {})
             declared = generate_zarr.admission_sizes(
                 repo, [self.SET], head_set, head, {self.SET: decl}
