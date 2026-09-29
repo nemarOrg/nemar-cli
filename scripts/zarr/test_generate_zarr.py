@@ -8341,6 +8341,18 @@ class TestSidecarJoinReport(unittest.TestCase):
             "unmatched_examples": ["FP1-F7"],
         })
 
+    def test_renamed_labels_inherit_a_position_and_override_nothing(self):
+        positions = {"Fp1": [1.0, 2.0, 3.0], "Fp1-1": [9.0, 9.0, 9.0]}
+        out = generate_zarr.positions_for_renamed_labels(
+            positions, {"Fp1-0": "Fp1", "Fp1-1": "Fp1", "--0": "-"}
+        )
+        self.assertEqual(out, {
+            "Fp1": [1.0, 2.0, 3.0],
+            "Fp1-0": [1.0, 2.0, 3.0],
+            "Fp1-1": [9.0, 9.0, 9.0],  # the sidecar named it; left as it is
+        })
+        self.assertEqual(positions, {"Fp1": [1.0, 2.0, 3.0], "Fp1-1": [9.0, 9.0, 9.0]})
+
     def test_examples_are_bounded(self):
         labels = [f"X{i}" for i in range(12)]
         report = sidecar_join_report(labels, [], {})
@@ -8382,6 +8394,7 @@ class TestDuplicateLabelsThroughConvertOne(unittest.TestCase):
         self.repo = os.path.join(self._tmp.name, "repo")
         os.makedirs(os.path.join(self.repo, "sub-01", "eeg"))
         build_labelled_edf(os.path.join(self.repo, self.PRIMARY), CHB_MIT_LABELS)
+        self.extra_head_files: set[str] = set()
         self.synced_dir = os.path.join(self._tmp.name, "synced")
         bindir = os.path.join(self._tmp.name, "bin")
         os.makedirs(bindir)
@@ -8400,7 +8413,7 @@ class TestDuplicateLabelsThroughConvertOne(unittest.TestCase):
         self.addCleanup(lambda: (generate_zarr._CTX.clear(), generate_zarr._CTX.update(saved_ctx)))
 
     def convert(self, tsv_names: list[str] | None):
-        head_files = {self.PRIMARY}
+        head_files = {self.PRIMARY, *self.extra_head_files}
         if tsv_names is not None:
             with open(os.path.join(self.repo, self.TSV), "w") as fh:
                 fh.writelines(["name\ttype\tunits\n"] + [f"{n}\tEEG\tV\n" for n in tsv_names])
@@ -8501,6 +8514,22 @@ class TestDuplicateLabelsThroughConvertOne(unittest.TestCase):
         self.assertEqual(units["T8-P8-0"], "uV")  # the importer's, not the sidecar's
         self.assertEqual(units["FP1-F7"], "V")
         self.assertIn("names no row for 5 store channel(s)", out)
+
+    def test_repeated_electrodes_keep_their_position(self):
+        # A monopolar repeat: `Fp1` twice in the file, served as Fp1-0/Fp1-1,
+        # while electrodes.tsv names the electrode once, as `Fp1`.
+        build_labelled_edf(os.path.join(self.repo, self.PRIMARY), ["Fp1", "F7", "Fp1"])
+        elec = "sub-01/eeg/sub-01_electrodes.tsv"
+        with open(os.path.join(self.repo, elec), "w") as fh:
+            fh.write("name\tx\ty\tz\nFp1\t-0.03\t0.08\t0.0\nF7\t-0.07\t0.04\t0.0\n")
+        self.extra_head_files = {elec}
+        result, _ = self.convert(None)
+        self.assertTrue(result["ok"], result.get("error"))
+        positions = self.synced_store(result["entry"]).attrs["electrode_positions"]
+        self.assertEqual(positions["Fp1-0"], [-0.03, 0.08, 0.0])
+        self.assertEqual(positions["Fp1-1"], [-0.03, 0.08, 0.0])
+        self.assertEqual(positions["F7"], [-0.07, 0.04, 0.0])
+        self.assertIn("Fp1", positions)  # the sidecar's own key is kept
 
     def test_a_case_only_difference_is_disclosed(self):
         # biosigio#136: EDF header `FP1-F7`, channels.tsv `Fp1-F7`.
