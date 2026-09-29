@@ -947,12 +947,36 @@ describe("the trust window and answer memo at the route (#1494 amendment)", () =
     });
     expect(memoed.headers.get("Server-Timing")).toMatch(/manifest;dur=[\d.]+;desc="memo"/);
 
+    // A THIRD, never-before-queried file: past the window, so this still
+    // costs a conditional GET, but the review's fix means a 304 now checks
+    // the memo first too (see the "a 304 at a window boundary..." test in
+    // manifest-source.test.ts). A path with no memo entry yet is what
+    // actually exercises "revalidated" now -- `participants.tsv` itself
+    // would answer from its own now-confirmed-current memo entry instead.
     const revalidated = await withClockAdvanced(MANIFEST_TRUST_WINDOW_MS + 1_000, () =>
-      get(`/${SMALL}/v1.1.1/participants.tsv`, { method: "HEAD" }),
+      get(`/${SMALL}/v1.1.1/dataset_description.json`, { method: "HEAD" }),
     );
     expect(revalidated.headers.get("Server-Timing")).toMatch(
       /manifest;dur=[\d.]+;desc="revalidated"/,
     );
+  });
+
+  test("a 304 right at the window boundary answers from the memo, at the route (review, #1526)", async () => {
+    const first = await get(`/${SMALL}/v1.1.1/participants.tsv`, { method: "HEAD" });
+    expect(first.status).toBe(200);
+    expect(first.headers.get("Server-Timing")).toMatch(/manifest;dur=[\d.]+;desc="rewrite"/);
+
+    s3.log.length = 0;
+    // Past the window: a conditional GET must still happen (an S3 read), but
+    // the memo -- keyed by the now-304-confirmed ETag -- must answer this
+    // exact query without a second scan, not just without a second S3 body
+    // transfer.
+    const second = await withClockAdvanced(MANIFEST_TRUST_WINDOW_MS + 1_000, () =>
+      get(`/${SMALL}/v1.1.1/participants.tsv`, { method: "HEAD" }),
+    );
+    expect(second.status).toBe(200);
+    expect(second.headers.get("Server-Timing")).toMatch(/manifest;dur=[\d.]+;desc="memo"/);
+    expect(readsOf(SMALL)).toEqual([`GET INM 304 ${SMALL_OBJECT}`]);
   });
 
   test("a dataset flipped private is refused even with a warm memo and a fresh trust window", async () => {

@@ -207,17 +207,30 @@ const manifestAnswerMemo = new ManifestAnswerMemo();
 /**
  * The composite key a memoized answer lives under: the manifest's own content
  * identity (dataset, version, ETag) plus the caller's own description of
- * which question was asked of it. `\u0000` cannot appear in any of these
- * inputs (a dataset id, a version tag, an S3 ETag, or a caller-authored
- * descriptor built from those plus a BIDS path), so it is a safe separator.
+ * which question was asked of it, joined by `\u0000`.
+ *
+ * Each component is `encodeURIComponent`-escaped first (the same defense
+ * `manifestCacheKey` already uses for its own synthetic key), so the raw
+ * `\u0000` separator can only ever appear as a separator, never inside a
+ * component -- `encodeURIComponent` always emits `%00` for a literal NUL,
+ * never the byte itself. This is load-bearing, not decorative: `queryDescriptor`
+ * is built from a raw, URL-decoded BIDS path (`resolve:${rawPath}`,
+ * `contains:${tombstonePath}`), so a request naming a path with an embedded
+ * NUL controls part of this key directly. Without escaping, a NUL inside one
+ * component can shift where the join "appears" to fall, making two DIFFERENT
+ * tuples produce the IDENTICAL key -- for example
+ * `("a\0b", "c", "d", "e")` and `("a", "b\0c", "d", "e")` both joined to the
+ * literal 9-character string `a\0b\0c\0d\0e` under a plain join. Escaping
+ * first makes that impossible by construction rather than relying on an
+ * assumption that no component ever contains the separator.
  */
-function manifestAnswerKey(
+export function manifestAnswerKey(
   datasetId: string,
   version: string,
   etag: string,
   queryDescriptor: string,
 ): string {
-  return `${datasetId}\u0000${version}\u0000${etag}\u0000${queryDescriptor}`;
+  return [datasetId, version, etag, queryDescriptor].map(encodeURIComponent).join("\u0000");
 }
 
 /** What the memo stores per key: the answer, the header it was read with (a
@@ -395,7 +408,6 @@ export async function readManifest<T>(
       throw err;
     }
     if (fetched.kind === "not_modified") {
-      const query = makeQuery();
       // The window just expired: restamp the copy's validated-at time so the
       // NEXT MANIFEST_TRUST_WINDOW_MS worth of reads can skip S3 again,
       // streamed through the same bounded-queue writer a miss uses (the tap
@@ -411,6 +423,37 @@ export async function readManifest<T>(
             now,
           )
         : null;
+
+      // A 304 confirms `cached.etag` is still current, exactly like the
+      // within-window branch already trusts it -- so the memo is checked
+      // here too, before paying for a scan the memo could make unnecessary.
+      // The window still needs restamping either way (a memo hit does not
+      // mean the copy is still valid for free), so the copy's bytes are
+      // still piped to the sink -- just without tokenizing them (review
+      // finding: the first version of this always rescanned on a 304, which
+      // defeated the memo for exactly the query it should have helped most:
+      // one asked again right as its window boundary passed).
+      const memoKey = memoKeyFor(cached.etag);
+      const memoized = memoKey ? recallManifestAnswer<T>(memoKey) : undefined;
+      if (memoized !== undefined) {
+        if (sink) {
+          const piped = await pipeToSink(cached.body, sink);
+          if (piped) await sink.commit();
+          else await sink.discard("the cached body failed mid-read while restamping a memo hit");
+        } else {
+          await cached.body.cancel().catch(() => {});
+        }
+        return {
+          kind: "ok",
+          header: memoized.header,
+          query: memoizedQuery(memoized.value),
+          etag: memoized.etag,
+          source: "memo",
+          memoKey: null,
+        };
+      }
+
+      const query = makeQuery();
       const fromCopy = await scanEdgeCopy(
         cached.body,
         query,
@@ -423,7 +466,7 @@ export async function readManifest<T>(
           "answered",
           `[manifest-cache] edge copy answered after a 304 (first in this isolate) dataset=${datasetId} version=${version}`,
         );
-        return settle(fromCopy, query, cached.etag, "revalidated", memoKeyFor(cached.etag));
+        return settle(fromCopy, query, cached.etag, "revalidated", memoKey);
       }
       await sink?.discard("the edge copy did not scan cleanly while restamping after a 304");
       // The copy could not be read back whole, so S3 answers instead, exactly
@@ -508,6 +551,34 @@ async function matchEdgeCopy(
   const validatedAtMs =
     validatedAtRaw !== null && /^\d+$/.test(validatedAtRaw) ? Number(validatedAtRaw) : null;
   return { etag, body: hit.body, validatedAtMs };
+}
+
+/**
+ * Feed a body's raw bytes to a sink WITHOUT scanning them (#1494 amendment,
+ * review). Used only when a 304 confirms an ETag the per-isolate memo already
+ * has an answer for: the copy still needs restamping (its full bytes still
+ * have to be re-stored under the new validated-at time), but nothing needs to
+ * be tokenized to get there, which is the whole point of a memo hit. Never
+ * throws: a read failure here costs the cache write, never the answer, which
+ * the caller already has from the memo before this runs.
+ */
+async function pipeToSink(
+  body: ReadableStream<Uint8Array>,
+  sink: EdgeCopyWriter,
+): Promise<boolean> {
+  const reader = body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return true;
+      if (value === undefined || value.byteLength === 0) continue;
+      await sink.write(value);
+    }
+  } catch {
+    return false;
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 /**

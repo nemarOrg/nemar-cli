@@ -46,6 +46,7 @@ import {
   MANIFEST_TRUST_WINDOW_MS,
   type ManifestCache,
   type ManifestSource,
+  manifestAnswerKey,
   manifestAnswerMemoStats,
   manifestCacheKey,
   readManifest,
@@ -385,6 +386,69 @@ describe("the per-isolate answer memo (#1494 amendment)", () => {
     expect(traffic()).toEqual(["200"]);
   });
 
+  test("a 304 at a window boundary answers from the memo, not a rescan; a rewrite still rescans", async () => {
+    s3.put(OBJECT, FIXTURE_TEXT);
+    const cache = new DrainingCache();
+    let now = 0;
+    const src = source(cache, { now: () => now });
+    let scans = 0;
+    const countedQuery = (raw: string) => {
+      const inner = new ResolvePathQuery(raw);
+      const query: ManifestQuery<ReturnType<ResolvePathQuery["finish"]>> = {
+        reset: () => inner.reset(),
+        key: (p) => inner.key(p),
+        value: (p, v) => inner.value(p, v),
+        finish: (h) => {
+          scans++;
+          return inner.finish(h);
+        },
+      };
+      return query;
+    };
+    const descriptor = "resolve:/participants.tsv";
+    const makeQ = () => countedQuery("participants.tsv");
+
+    // Cold: populates the cache and the memo.
+    const first = await readManifest(src, ID, VERSION, makeQ, descriptor);
+    if (first.kind !== "ok") throw new Error(first.kind);
+    const answer1 = first.query.finish(first.header);
+    expect(first.memoKey).not.toBeNull();
+    rememberManifestAnswer(first.memoKey as string, first.header, answer1);
+    expect(scans).toBe(1);
+
+    // Past the window: S3 must be asked (a 304, since the object is
+    // unchanged), but review found the code rescanned the copy anyway
+    // instead of checking the memo for the now-confirmed ETag first. Fixed:
+    // this must answer from the memo with no second scan.
+    now = MANIFEST_TRUST_WINDOW_MS + 1;
+    const second = await readManifest(src, ID, VERSION, makeQ, descriptor);
+    if (second.kind !== "ok") throw new Error(second.kind);
+    const answer2 = second.query.finish(second.header);
+    expect(second.source).toBe("memo");
+    expect(answer2).toEqual(answer1);
+    expect(scans).toBe(1);
+    expect(traffic()).toEqual(["200", "INM 304"]);
+
+    // A genuine rewrite (a new ETag) is a memo MISS regardless of the 304
+    // machinery -- it never reaches the memo check under the old ETag, and
+    // the fresh read scans normally.
+    now = 2 * MANIFEST_TRUST_WINDOW_MS + 2;
+    const rewritten: VersionManifest = {
+      ...FIXTURE,
+      files: Object.fromEntries(
+        Object.entries(FIXTURE.files).filter(([path]) => path !== "participants.tsv"),
+      ),
+    };
+    s3.put(OBJECT, JSON.stringify(rewritten, null, 2));
+    const third = await readManifest(src, ID, VERSION, makeQ, descriptor);
+    if (third.kind !== "ok") throw new Error(third.kind);
+    const answer3 = third.query.finish(third.header);
+    expect(third.source).toBe("rewrite");
+    expect(answer3).toEqual({ kind: "not_found" });
+    expect(scans).toBe(2);
+    expect(traffic()).toEqual(["200", "INM 304", "INM 200"]);
+  });
+
   test("a different query for the same manifest is a memo miss but not an S3 hit", async () => {
     s3.put(OBJECT, FIXTURE_TEXT);
     const src = source(new DrainingCache());
@@ -458,6 +522,43 @@ describe("the per-isolate answer memo (#1494 amendment)", () => {
     expect(stats.entries).toBeGreaterThan(0);
     expect(stats.entries).toBeLessThanOrEqual(paths.length);
     expect(stats.bytes).toBeLessThanOrEqual(4 * 1024 * 1024);
+  });
+});
+
+describe("manifestAnswerKey never collides across different tuples (review, #1526)", () => {
+  test("a component boundary cannot shift across a raw NUL", () => {
+    // Under a plain `\u0000` join with no per-component escaping, these two
+    // DIFFERENT (datasetId, version, etag, queryDescriptor) tuples both
+    // produce the literal 9-character string "a\0b\0c\0d\0e": the NUL inside
+    // the first tuple's datasetId lines up exactly where the second tuple's
+    // version/datasetId boundary falls.
+    const a = manifestAnswerKey("a\u0000b", "c", "d", "e");
+    const b = manifestAnswerKey("a", "b\u0000c", "d", "e");
+    expect(a).not.toBe(b);
+  });
+
+  test("a queryDescriptor built from a URL-decoded path cannot collide with a shifted etag", () => {
+    // The realistic vector the review named: queryDescriptor embeds a raw,
+    // URL-decoded BIDS path (`resolve:${rawPath}`), so a request naming a
+    // path with an embedded NUL (a literal `%00` in the URL) controls part
+    // of this key directly. Held constant: datasetId and version.
+    const first = manifestAnswerKey("nm000132", "v1.1.1", "e\u0000X", "Y");
+    const second = manifestAnswerKey("nm000132", "v1.1.1", "e", "X\u0000Y");
+    expect(first).not.toBe(second);
+  });
+
+  test("the same tuple always produces the same key", () => {
+    const key = () =>
+      manifestAnswerKey("nm000132", "v1.1.1", "etag-1", "resolve:/participants.tsv");
+    expect(key()).toBe(key());
+  });
+
+  test("the key still uses the raw separator only between components", () => {
+    // No literal NUL anywhere in a normal (non-adversarial) key: every
+    // component is `encodeURIComponent`-safe, so the three `\u0000`
+    // characters inserted by the join are the only ones in the string.
+    const key = manifestAnswerKey("nm000132", "v1.1.1", "etag-1", "resolve:/participants.tsv");
+    expect(key.split("\u0000")).toHaveLength(4);
   });
 });
 
