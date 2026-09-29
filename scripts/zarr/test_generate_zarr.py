@@ -8185,10 +8185,6 @@ class TestConvertOneFifSidecarOvercount(unittest.TestCase):
         self.assertNotIn("channels_tsv_count_mismatch", result["entry"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestMainRoutesSingleRecordingsThroughThePool(unittest.TestCase):
     """#1483: a single-recording run with --jobs > 1 converts in a pool worker,
     the only path with the serial memory retry; --jobs 1 stays in-process.
@@ -8709,3 +8705,7 @@ class TestAdmissionFollowsTheCeiling(unittest.TestCase):
         first_end = spans[0][1]
         self.assertLess(spans[1][0], first_end)
         self.assertLess(spans[2][0], first_end)
+
+
+if __name__ == "__main__":
+    unittest.main()
