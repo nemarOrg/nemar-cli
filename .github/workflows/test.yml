@@ -712,13 +712,21 @@ jobs:
           NPM_TAG: ${{ steps.npm-tag.outputs.tag }}
         run: bun test test/e2e-sandbox.test.ts
 
-  # E2E upload tests - full upload workflow, only on main push
+  # E2E upload tests - full upload workflow. Runs on push to main (the
+  # release itself) AND on a pull request targeting main (the release PR),
+  # so a dead GH_TOKEN or a broken upload path is caught before the merge
+  # that deploys it, not only after (issue #1321). `pull_request` events
+  # targeting `main` already trigger this workflow (see the `on:` block
+  # above), and a same-repo PR (never a fork) still gets secrets, so no
+  # separate wiring is needed to reach this job.
   e2e-upload:
     runs-on: ubuntu-latest
     needs: changes
     if: |
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/main' &&
+      (
+        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        (github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main')
+      ) &&
       (needs.changes.outputs.backend == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.cli == 'true')
     steps:
       - name: Checkout code
