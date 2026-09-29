@@ -77,6 +77,27 @@ earlier releases are described only by their generated notes.
   requeued, and `find_collapsed_channel_stores.py --case-only` lists the datasets whose
   index reports `unmatched_case_only`.
 
+- **Zarr: recordings stored as git-annex chunks convert (#1563).** A dataset uploaded with
+  git-annex chunking keeps only chunked object names in the bucket (nm000276 stores a
+  100 GB `.eeg` as 94 objects), so every recording failed as an unexplained infra error
+  and was retried until `retry_exhausted`. The converter now asks for the plain object
+  first, and on a 404 lists the key's chunks, downloads them in order, checks the total
+  against the key's size and assembles the file. A bucket with no complete copy is
+  reported as `annex_object_missing` for that recording, so the rest of the dataset still
+  serves; a dataset whose every recording is missing stays retryable. A 404 is no longer
+  retried four times; throttles, 5xx answers and timeouts are retried as before. The data
+  plane still builds plain object URLs, so a chunked dataset's files do not download
+  through `data.nemar.org` yet (#1565).
+- **Zarr: EEGLAB `.set` headers count toward the channel-count gate (#1564).** For `.set`
+  recordings the gate had only channels.tsv to compare a store with, so a subject-level
+  channels.tsv inherited from MEG recordings (on003645: 404 MEG channels over 75-channel
+  `.set` files) refused all 108 EEG recordings. The converter now reads `nbchan` from the
+  header of classic MAT and MATLAB v7.3 files without reading the data, and trusts it only
+  where it matches what the importer serves; an over-declaring channels.tsv is then
+  disclosed as `channels_tsv_count_mismatch` and the store is published. An unreadable
+  header falls back to the old, stricter check. The Zarr fidelity sweep accepts a short
+  store that carries that disclosure.
+
 ### Migrations
 
 - `0087_news_posts.sql` adds the `news_posts` table and an index on
@@ -90,6 +111,11 @@ earlier releases are described only by their generated notes.
   buckets were created before this release.
 - Merging to `main` makes the Hallu converter use biosigio 1.2.10 on its next run. Stores
   already published are replaced only when requeued.
+- The chunked-object fetch (#1563) lists `<id>/objects/` in the bucket, so the Hallu
+  profile needs `s3:ListBucket` on those prefixes; without it a missing plain key answers
+  403 and the dataset still ends `retry_exhausted`. nm000276 and on003645 convert only
+  when requeued; requeue nm000276 on its own with a low `--jobs`, since its largest file
+  is reassembled on the scratch disk (#1568).
 - The re-enrichment sweep described in #1550 runs against production after this release,
   one dataset at a time.
 
