@@ -1,0 +1,468 @@
+#!/usr/bin/env python3
+"""Find published Zarr stores that lost channels to a repeated label. READ-ONLY.
+
+Before biosigio 1.2.9 a channel label the source file repeated (CHB-MIT's
+`T8-P8`, its `-` placeholders for unused inputs) overwrote an earlier channel
+on the in-memory import path, because a Recording is keyed by label. The store
+then held FEWER channels than the file: nm000110 serves 22 of 23. The
+streaming EDF path kept every channel but wrote the repeated label as is, so a
+consumer that keys channels by label collapses them instead. biosigio 1.2.9
+suffixes repeats MNE-style (`T8-P8-0`, `T8-P8-1`) and the converter's
+channel-count gate now reads the file header for every recording, so neither
+can be published again. This script finds the stores published before that.
+
+What it flags, per store in a dataset's published `index.json`:
+
+* ``short_of_channels_tsv``: the store's channel count (summed over its
+  groups, exactly as `store_total_channels` sums them) is below the row count
+  of the recording's channels.tsv (counted exactly as the converter's gate
+  counts it, `channels_tsv_row_count`). A store whose index entry already
+  carries `channels_tsv_count_mismatch` is NOT flagged: the gate compared it
+  to the file's own header and found the SIDECAR over-declares, so the store
+  is faithful. It is counted as ``sidecar_overcount`` instead.
+* ``repeated_labels``: the channel labels the store's groups record repeat a
+  label (read from each group's `zarr.json`). Only checked for EDF/BDF
+  sources by default (`--labels`), the formats that can carry a repeated
+  label into the store; every other importer either rejects a repeat or
+  renames it.
+
+A store short of the file's own header cannot be found without downloading
+the data file, which this script never does; a dataset that ships no
+channels.tsv is therefore reported as ``no_channels_tsv`` for its stores
+rather than as clean.
+
+Safety
+------
+* Reads only, over public HTTPS: `<zarr-base>/<id>/zarr/index.json`, each
+  store's group `zarr.json` for the label check, and each recording's
+  channels.tsv from `raw.githubusercontent.com/nemarDatasets/<id>/<commit>/`
+  at the commit the index was BUILT from (`source_commit`). No S3
+  credentials, no GitHub token, no writes anywhere, no queue access.
+* `--repo-dir` reads channels.tsv from a local clone of ONE dataset instead,
+  with the converter's own BIDS-inheritance resolution (`channels_tsv_for`)
+  over the tree at `source_commit`. Without it the sidecar is resolved
+  nearest-first over the four placements real datasets use (the same bounded
+  list the backend's fidelity sweep uses), which can miss an unusual one; a
+  miss is reported as ``no_channels_tsv``, never as clean.
+* Never run it from CI against production. It is for a maintainer, by hand.
+
+Usage
+-----
+    python3 scripts/zarr/find_collapsed_channel_stores.py --dataset nm000110
+    python3 scripts/zarr/find_collapsed_channel_stores.py --dataset nm000110 \\
+        --repo-dir ~/datasets/nm000110
+    python3 scripts/zarr/find_collapsed_channel_stores.py --all --out report.json
+
+Exit status: 0 nothing flagged and every dataset checked, 1 something
+flagged, 2 nothing flagged but at least one dataset could not be checked.
+
+What follows a finding is a re-conversion under biosigio >= 1.2.9, which the
+report spells out per dataset (`requeue`): on the conversion host,
+`zarr_queue.py --db <queue db> requeue --status done --dataset <id> --execute`
+(the next cron tick rebuilds it), or `hallu-zarr.sh --dataset <id>` for one now.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TypedDict
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from generate_zarr import (  # type: ignore[import-not-found]
+    DEFAULT_CONTRACT_BASE,
+    _decode_sidecar_text,
+    channels_tsv_for,
+    channels_tsv_row_count,
+    store_total_channels,
+)
+
+REPORT_FORMAT = "nemar-zarr-collapsed-channel-report"
+REPORT_FORMAT_VERSION = 1
+GITHUB_RAW_BASE = "https://raw.githubusercontent.com"
+DATASET_ORG = "nemarDatasets"
+DEFAULT_API_BASE = "https://api.nemar.org"
+# Cloudflare 403s the default Python-urllib User-Agent; see generate_zarr.USER_AGENT.
+USER_AGENT = "nemar-zarr-collapsed-channel-check/1.0 (+https://github.com/nemarOrg/nemar-cli)"
+# The source formats whose labels can reach a store repeated (see module doc).
+REPEATABLE_LABEL_EXTS = (".edf", ".bdf")
+
+
+class Finding(TypedDict, total=False):
+    dataset: str
+    recording: str
+    zarr: str
+    store_channels: int
+    tsv_channels: int | None
+    channels_tsv: str | None
+    reasons: list[str]
+    repeated_labels: list[str]
+
+
+# --- Pure --------------------------------------------------------------------
+
+
+def sidecar_candidates(recording_path: str, suffix: str = "channels.tsv") -> list[str]:
+    """Nearest-first sidecar paths for one recording: its own directory with
+    its full entities, the session directory, the subject directory, the
+    dataset root. A port of the backend's `bidsSidecarCandidates`
+    (zarr-fidelity-sweep.ts), used only when no local clone is given."""
+    parts = [p for p in recording_path.split("/") if p]
+    if not parts:
+        return [suffix]
+    filename = parts[-1]
+    directory = "/".join(parts[:-1])
+    dot = filename.rfind(".")
+    stem = filename[:dot] if dot > 0 else filename
+    entities = [t for t in stem.split("_")[:-1] if "-" in t]
+    subject = next((t for t in entities if t.startswith("sub-")), None)
+    session = next((t for t in entities if t.startswith("ses-")), None)
+    subject_dir = parts[0] if parts[0].startswith("sub-") else None
+    session_dir = (
+        f"{parts[0]}/{parts[1]}"
+        if subject_dir and len(parts) > 1 and parts[1].startswith("ses-")
+        else None
+    )
+    out: list[str] = []
+
+    def add(where: str, ents: list[str]) -> None:
+        name = f"{'_'.join(ents)}_{suffix}" if ents else suffix
+        path = f"{where}/{name}" if where else name
+        if path not in out:
+            out.append(path)
+
+    add(directory, entities)
+    if session_dir and subject and session:
+        add(session_dir, [subject, session])
+    if subject_dir and subject:
+        add(subject_dir, [subject])
+    add("", [])
+    return out
+
+
+def repeated_labels(labels: list[str]) -> list[str]:
+    """Every label that occurs more than once, in first-occurrence order."""
+    counts = Counter(labels)
+    return [label for label in dict.fromkeys(labels) if counts[label] > 1]
+
+
+def wants_label_check(recording_path: str, mode: str) -> bool:
+    if mode == "all":
+        return True
+    if mode == "none":
+        return False
+    return recording_path.lower().endswith(REPEATABLE_LABEL_EXTS)
+
+
+def classify_store(
+    dataset_id: str,
+    entry: dict,
+    tsv_channels: int | None,
+    channels_tsv: str | None,
+    labels: list[str] | None,
+) -> tuple[str, Finding | None]:
+    """One store's verdict and, when flagged, its finding.
+
+    Verdicts: ``flagged``, ``sidecar_overcount`` (short of channels.tsv but
+    the converter's gate matched it to the file header), ``no_channels_tsv``
+    (nothing to count against and no repeated label seen), ``ok``.
+    """
+    store_channels = store_total_channels(entry)
+    reasons: list[str] = []
+    overcount = False
+    if tsv_channels and store_channels < tsv_channels:
+        if isinstance(entry.get("channels_tsv_count_mismatch"), dict):
+            overcount = True
+        else:
+            reasons.append("short_of_channels_tsv")
+    repeats = repeated_labels(labels) if labels is not None else []
+    if repeats:
+        reasons.append("repeated_labels")
+    if reasons:
+        finding: Finding = {
+            "dataset": dataset_id,
+            "recording": str(entry.get("path", "")),
+            "zarr": str(entry.get("zarr", "")),
+            "store_channels": store_channels,
+            "tsv_channels": tsv_channels,
+            "channels_tsv": channels_tsv,
+            "reasons": reasons,
+        }
+        if repeats:
+            finding["repeated_labels"] = repeats
+        return "flagged", finding
+    if overcount:
+        return "sidecar_overcount", None
+    if not tsv_channels:
+        return "no_channels_tsv", None
+    return "ok", None
+
+
+def requeue_commands(dataset_id: str) -> list[str]:
+    """What a maintainer runs on the conversion host once a dataset is
+    flagged. Printed, never executed."""
+    return [
+        (
+            "python3 scripts/zarr/zarr_queue.py --db <queue db> requeue --status done "
+            f"--dataset {dataset_id} --execute"
+        ),
+        f"./scripts/zarr/hallu-zarr.sh --dataset {dataset_id}",
+    ]
+
+
+def summarize(results: list[dict]) -> dict:
+    flagged = [r for r in results if r.get("findings")]
+    return {
+        "datasets_checked": sum(1 for r in results if not r.get("error")),
+        "datasets_unchecked": sum(1 for r in results if r.get("error")),
+        "datasets_flagged": len(flagged),
+        "stores_checked": sum(r.get("stores", 0) for r in results),
+        "stores_flagged": sum(len(r.get("findings", [])) for r in results),
+        "stores_sidecar_overcount": sum(r.get("sidecar_overcount", 0) for r in results),
+        "stores_without_channels_tsv": sum(r.get("no_channels_tsv", 0) for r in results),
+    }
+
+
+# --- I/O ---------------------------------------------------------------------
+
+
+class NotFound(Exception):
+    """A 404: the object is not there, which is an answer, not an error."""
+
+
+def http_get(url: str, *, timeout: int = 60, attempts: int = 3) -> bytes:
+    """GET `url`. Raises NotFound on 404; retries anything else transient."""
+    last: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise NotFound(url) from exc
+            if exc.code < 500 and exc.code != 429:
+                raise
+            last = exc
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            last = exc
+        if attempt < attempts:
+            time.sleep(2.0 * attempt)
+    assert last is not None
+    raise last
+
+
+def http_get_json(url: str) -> dict:
+    doc = json.loads(http_get(url).decode("utf-8"))
+    if not isinstance(doc, dict):
+        raise TypeError(f"{url} is not a JSON object")
+    return doc
+
+
+def store_labels(zarr_base: str, dataset_id: str, entry: dict) -> list[str]:
+    """Every channel label a published store records, across its groups, in
+    store order. A list, so a repeat stays visible."""
+    labels: list[str] = []
+    for group in entry.get("groups") or []:
+        name = group.get("name") if isinstance(group, dict) else None
+        if not name:
+            continue
+        url = _join(zarr_base, dataset_id, "zarr", entry["zarr"], name, "zarr.json")
+        attrs = http_get_json(url).get("attributes") or {}
+        labels.extend(
+            str(ch.get("label", "")) for ch in attrs.get("channels") or [] if isinstance(ch, dict)
+        )
+    return labels
+
+
+def _join(base: str, *parts: str) -> str:
+    return "/".join([base.rstrip("/"), *(urllib.parse.quote(p.strip("/")) for p in parts)])
+
+
+class TsvReader:
+    """channels.tsv for a recording at the commit its store was built from:
+    from a local clone (`repo_dir`) with the converter's own resolution, or
+    over public HTTPS nearest-first. Returns (path, row count) or (None, None).
+    Caches per path, since a dataset-level sidecar serves many recordings."""
+
+    def __init__(self, dataset_id: str, commit: str, raw_base: str, repo_dir: str | None):
+        self.dataset_id = dataset_id
+        self.commit = commit
+        self.raw_base = raw_base
+        self.repo_dir = repo_dir
+        self.cache: dict[str, int | None] = {}
+        self.head_files: set[str] | None = None
+        if repo_dir:
+            self.head_files = set(
+                subprocess.check_output(
+                    ["git", "-C", repo_dir, "ls-tree", "-r", "--name-only", commit], text=True
+                ).splitlines()
+            )
+
+    def rows(self, recording_path: str) -> tuple[str | None, int | None]:
+        if self.repo_dir is not None and self.head_files is not None:
+            path = channels_tsv_for(recording_path, self.head_files)
+            if path is None:
+                return None, None
+            if path not in self.cache:
+                # At the commit, never the working tree: the clone may have
+                # moved on since the store was built.
+                raw = subprocess.check_output(
+                    ["git", "-C", self.repo_dir, "cat-file", "blob", f"{self.commit}:{path}"]
+                )
+                self.cache[path] = channels_tsv_row_count(_decode_sidecar_text(raw, path))
+            return path, self.cache[path]
+        for path in sidecar_candidates(recording_path):
+            if path not in self.cache:
+                url = _join(self.raw_base, DATASET_ORG, self.dataset_id, self.commit, path)
+                try:
+                    self.cache[path] = channels_tsv_row_count(http_get(url).decode("utf-8", "replace"))
+                except NotFound:
+                    self.cache[path] = None
+            if self.cache[path] is not None:
+                return path, self.cache[path]
+        return None, None
+
+
+def check_dataset(
+    dataset_id: str,
+    *,
+    zarr_base: str,
+    raw_base: str,
+    repo_dir: str | None,
+    labels_mode: str,
+) -> dict:
+    """One dataset's result. Never raises for a dataset-level problem: the
+    reason lands in `error` and the dataset counts as unchecked."""
+    result: dict = {"dataset": dataset_id, "stores": 0, "findings": []}
+    try:
+        index = http_get_json(_join(zarr_base, dataset_id, "zarr", "index.json"))
+    except NotFound:
+        result["error"] = "no_index"
+        return result
+    except Exception as exc:  # noqa: BLE001 - one dataset must not stop the run
+        result["error"] = f"index_unreadable: {type(exc).__name__}: {exc}"
+        return result
+    commit = index.get("source_commit")
+    if not isinstance(commit, str) or not commit:
+        result["error"] = "index_has_no_source_commit"
+        return result
+    result["source_commit"] = commit
+    try:
+        tsv = TsvReader(dataset_id, commit, raw_base, repo_dir)
+    except (subprocess.CalledProcessError, OSError) as exc:
+        result["error"] = f"repo_dir_unreadable_at_{commit[:12]}: {exc}"
+        return result
+    counts: Counter[str] = Counter()
+    for entry in index.get("stores") or []:
+        if not isinstance(entry, dict) or not isinstance(entry.get("zarr"), str):
+            continue
+        result["stores"] += 1
+        recording = str(entry.get("path", ""))
+        try:
+            path, rows = tsv.rows(recording)
+            labels = (
+                store_labels(zarr_base, dataset_id, entry)
+                if wants_label_check(recording, labels_mode)
+                else None
+            )
+        except Exception as exc:  # noqa: BLE001 - record and keep going
+            counts["unreadable"] += 1
+            result.setdefault("store_errors", []).append(
+                {"recording": recording, "error": f"{type(exc).__name__}: {exc}"}
+            )
+            continue
+        verdict, finding = classify_store(dataset_id, entry, rows, path, labels)
+        counts[verdict] += 1
+        if finding is not None:
+            result["findings"].append(finding)
+    result["sidecar_overcount"] = counts["sidecar_overcount"]
+    result["no_channels_tsv"] = counts["no_channels_tsv"]
+    result["unreadable_stores"] = counts["unreadable"]
+    if result["findings"]:
+        result["requeue"] = requeue_commands(dataset_id)
+    return result
+
+
+def list_public_dataset_ids(api_base: str) -> list[str]:
+    """Every public catalog id, via the same paginated walk the queue uses."""
+    from zarr_queue import fetch_public_catalog_rows  # type: ignore[import-not-found]
+
+    rows, complete = fetch_public_catalog_rows(api_base)
+    if not complete:
+        print("::warning::the catalog walk was incomplete; --all covers a subset", flush=True)
+    return sorted({str(r["dataset_id"]) for r in rows if r.get("dataset_id")})
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description="Find published Zarr stores that lost channels to a repeated label (read-only)."
+    )
+    target = ap.add_mutually_exclusive_group(required=True)
+    target.add_argument("--dataset", action="append", help="dataset id; repeatable")
+    target.add_argument("--all", action="store_true", help="every public catalog dataset")
+    ap.add_argument("--zarr-base", default=DEFAULT_CONTRACT_BASE)
+    ap.add_argument("--github-raw-base", default=GITHUB_RAW_BASE)
+    ap.add_argument("--api-base", default=DEFAULT_API_BASE, help="catalog, for --all")
+    ap.add_argument(
+        "--repo-dir",
+        help="local clone of the ONE --dataset given; channels.tsv is read from it",
+    )
+    ap.add_argument(
+        "--labels", choices=("repeatable", "all", "none"), default="repeatable",
+        help="which stores get the repeated-label check (default: EDF/BDF sources)",
+    )
+    ap.add_argument("--sleep", type=float, default=0.0, help="pause between datasets (s)")
+    ap.add_argument("--out", help="write the JSON report here as well as to stdout")
+    args = ap.parse_args(argv)
+
+    if args.repo_dir and (args.all or len(args.dataset or []) != 1):
+        ap.error("--repo-dir is a clone of one dataset: give exactly one --dataset")
+    ids = list_public_dataset_ids(args.api_base) if args.all else list(dict.fromkeys(args.dataset))
+
+    results = []
+    for i, dataset_id in enumerate(ids):
+        if i and args.sleep:
+            time.sleep(args.sleep)
+        result = check_dataset(
+            dataset_id, zarr_base=args.zarr_base, raw_base=args.github_raw_base,
+            repo_dir=os.path.expanduser(args.repo_dir) if args.repo_dir else None,
+            labels_mode=args.labels,
+        )
+        results.append(result)
+        state = result.get("error") or f"{len(result['findings'])} flagged of {result['stores']}"
+        print(f"{dataset_id}: {state}", file=sys.stderr, flush=True)
+
+    report = {
+        "format": REPORT_FORMAT,
+        "format_version": REPORT_FORMAT_VERSION,
+        "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "zarr_base": args.zarr_base,
+        "findings": [f for r in results for f in r["findings"]],
+        "datasets": results,
+        "summary": summarize(results),
+    }
+    text = json.dumps(report, indent=2)
+    print(text)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+    summary = report["summary"]
+    if summary["stores_flagged"]:
+        return 1
+    return 2 if summary["datasets_unchecked"] else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
