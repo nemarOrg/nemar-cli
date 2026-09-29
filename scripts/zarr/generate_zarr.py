@@ -2519,10 +2519,16 @@ def file_declared_channel_count(primary_local: str) -> int | None:
 
     EDF/BDF: `ns` at bytes 252-256, then ns 16-byte labels; the annotation
     pseudo-signal is not a channel. BrainVision: `NumberOfChannels` in the
-    `.vhdr`'s `[Common Infos]` section. Anything unreadable returns None, which
-    leaves the gate on channels.tsv alone -- exactly its behavior before this
-    existed.
+    `.vhdr`'s `[Common Infos]` section. FIF (`.fif`, and `.fif.gz`, which MNE
+    reads transparently): `nchan` from the measurement info, read with
+    `mne.io.read_info`, which parses the header tags and never loads data. For
+    a split recording that is the chain head's info, which every split shares.
+    on000117's MEG sidecars list CHPI and EEG channels the FIF never had.
+    Anything unreadable returns None, which leaves the gate on channels.tsv
+    alone -- exactly its behavior before this existed.
     """
+    if primary_local.lower().endswith((".fif", ".fif.gz")):
+        return _fif_declared_channel_count(primary_local)
     ext = lower_ext(primary_local)
     try:
         if ext in (".edf", ".bdf"):
@@ -2551,6 +2557,32 @@ def file_declared_channel_count(primary_local: str) -> int | None:
     except (OSError, ValueError):
         return None
     return None
+
+
+def _fif_declared_channel_count(path: str) -> int | None:
+    """`nchan` from a FIF's measurement info, or None if it cannot be read.
+
+    MNE raises a spread of types on a malformed FIF (ValueError, KeyError,
+    RuntimeError, struct.error, ...), so the read is guarded broadly; None is
+    the conservative answer, since it keeps the strict channels.tsv-only gate.
+    It is not silent: a FIF the converter just read but whose header MNE cannot
+    parse is worth a line in the log.
+    """
+    try:
+        import mne  # type: ignore[import-not-found]  # lazy: runtime-only dep
+    except ImportError:
+        return None
+    try:
+        info = mne.io.read_info(path, verbose="ERROR")
+        nchan = int(info["nchan"])
+    except Exception as exc:  # noqa: BLE001 - any header failure means "unknown"
+        print(
+            f"::warning::could not read the FIF header of {path} for its channel "
+            f"count ({type(exc).__name__}: {exc}); the gate uses channels.tsv alone",
+            flush=True,
+        )
+        return None
+    return nchan if nchan > 0 else None
 
 
 ChannelGateVerdict = Literal["pass", "sidecar_overcount", "truncated"]

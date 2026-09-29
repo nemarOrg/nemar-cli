@@ -2936,6 +2936,61 @@ class TestFileDeclaredChannelCount(unittest.TestCase):
         self.assertEqual(file_declared_channel_count(p), 4)
 
 
+class TestFifDeclaredChannelCount(unittest.TestCase):
+    """The FIF branch of the header count (on000117: an MEG sidecar declaring
+    404 channels over a FIF that holds 395, refused as a truncation because no
+    header count existed for FIF)."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not _have_mne():
+            raise unittest.SkipTest("mne not installed")
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+
+    def test_a_real_fif_reports_every_channel_in_its_info(self):
+        p = build_real_fif(os.path.join(self.dir, "sub-01_task-rest_meg.fif"))
+        self.assertEqual(file_declared_channel_count(p), len(FIF_CHANNELS))
+
+    def test_a_gzipped_fif_is_read_too(self):
+        p = build_real_fif(os.path.join(self.dir, "sub-01_task-rest_meg.fif.gz"))
+        self.assertEqual(file_declared_channel_count(p), len(FIF_CHANNELS))
+
+    def test_a_split_recording_is_counted_from_its_head(self):
+        # 2 MB splits over ~20 MB of samples: several `split-NN` files, of which
+        # the converter hands the gate the head.
+        build_real_fif(
+            os.path.join(self.dir, "sub-01_task-rest_meg.fif"),
+            rate=1000.0, seconds=500, split_size="2MB", split_naming="bids",
+        )
+        head = os.path.join(self.dir, "sub-01_task-rest_split-01_meg.fif")
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "sub-01_task-rest_split-02_meg.fif")))
+        self.assertEqual(file_declared_channel_count(head), len(FIF_CHANNELS))
+
+    def test_an_unreadable_fif_is_unknown_and_says_so(self):
+        p = os.path.join(self.dir, "broken_meg.fif")
+        with open(p, "wb") as fh:
+            fh.write(b"not a fif header at all")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertIsNone(file_declared_channel_count(p))
+        self.assertIn("could not read the FIF header", out.getvalue())
+        self.assertIsNone(file_declared_channel_count(os.path.join(self.dir, "absent_meg.fif")))
+
+    def test_a_store_short_of_the_fif_header_is_still_truncated(self):
+        # The header count loosens nothing for a real truncation: a store
+        # missing a channel the FIF declares is withheld, sidecar or not.
+        p = build_real_fif(os.path.join(self.dir, "sub-01_task-rest_meg.fif"))
+        in_file = file_declared_channel_count(p)
+        assert in_file is not None
+        self.assertEqual(channel_gate_verdict(in_file - 1, in_file + 9, in_file), "truncated")
+        self.assertEqual(channel_gate_verdict(in_file - 1, in_file, in_file), "truncated")
+        self.assertEqual(channel_gate_verdict(in_file, in_file + 9, in_file), "sidecar_overcount")
+
+
 class TestChannelGateVerdict(unittest.TestCase):
     def test_no_applicable_sidecar_passes(self):
         self.assertEqual(channel_gate_verdict(10, None, None), "pass")
@@ -4416,6 +4471,37 @@ def build_real_edf(directory: str, stem: str, n_channels: int = 4,
     writer.writeSamples([rng.normal(0, 20, rate * seconds) for _ in range(n_channels)])
     writer.close()
     return path
+
+
+# A small Neuromag-shaped channel set: MEG sensors, one EEG, one trigger line.
+FIF_CHANNELS = (
+    ("MEG0111", "mag"), ("MEG0112", "grad"), ("MEG0113", "grad"),
+    ("EEG001", "eeg"), ("STI101", "stim"),
+)
+
+
+def build_real_fif(path: str, rate: float = 250.0, seconds: int = 10, **save_kwargs) -> str:
+    """Write a REAL FIF with MNE (`RawArray(...).save`) and return its path.
+
+    MNE is the reader biosigIO uses for FIF, so the header written here is the
+    header both the converter and `file_declared_channel_count` read back."""
+    import mne
+    import numpy as np
+
+    names = [n for n, _ in FIF_CHANNELS]
+    types = [t for _, t in FIF_CHANNELS]
+    info = mne.create_info(names, rate, types)
+    data = np.random.default_rng(0).normal(0, 1e-12, (len(names), int(rate * seconds)))
+    mne.io.RawArray(data, info, verbose="ERROR").save(path, verbose="ERROR", **save_kwargs)
+    return path
+
+
+def _have_mne() -> bool:
+    try:
+        import mne  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 # --- real recordings ----------------------------------------------------------
@@ -7801,6 +7887,79 @@ class TestConvertOneEndToEnd(unittest.TestCase):
         result = self.convert(dataset_row=None, provenance_failed=True)
         self.assertTrue(result["ok"], result.get("error"))
         self.assertEqual(result["entry"]["path"], self.primary)
+
+
+class TestConvertOneFifSidecarOvercount(unittest.TestCase):
+    """on000117 through `convert_one`: an MEG channels.tsv listing channels its
+    FIF never had (CHPI coils, EEG inherited from another run) was refused as
+    `channel_count_mismatch` because FIF had no header count. A real FIF, a
+    real conversion; only `aws s3 sync` is absorbed, as in
+    TestConvertOneEndToEnd."""
+
+    PRIMARY = "sub-01/meg/sub-01_task-rest_meg.fif"
+    TSV = "sub-01/meg/sub-01_task-rest_channels.tsv"
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import mne  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = os.path.join(self._tmp.name, "repo")
+        meg = os.path.join(self.repo, "sub-01", "meg")
+        os.makedirs(meg)
+        build_real_fif(os.path.join(self.repo, self.PRIMARY))
+        bindir = os.path.join(self._tmp.name, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        path = os.environ["PATH"]
+        os.environ["PATH"] = bindir + os.pathsep + path
+        self.addCleanup(os.environ.__setitem__, "PATH", path)
+
+    def convert(self, tsv_rows: int):
+        with open(os.path.join(self.repo, self.TSV), "w") as fh:
+            fh.writelines(
+                ["name\ttype\tunits\n"] + [f"CH{i:03d}\tMISC\tV\n" for i in range(tsv_rows)]
+            )
+        work = os.path.join(self._tmp.name, "work")
+        os.makedirs(work, exist_ok=True)
+        generate_zarr._init_worker({
+            "repo": self.repo, "bucket": "nemar-test", "dataset_id": "on000117",
+            "head": "b" * 40, "head_files": {self.PRIMARY, self.TSV}, "local": True,
+            "tmp": work, "updated": "2026-09-28T00:00:00Z",
+            "contract_base": "https://zarr.nemar.org", "engine_version": "3",
+            "dataset_row": None, "provenance_fetch_failed": False,
+            "mem_budget": None, "hard_ceiling": None, "projections": {},
+        })
+        return convert_one(self.PRIMARY)
+
+    def test_an_over_declaring_sidecar_publishes_and_discloses(self):
+        n = len(FIF_CHANNELS)
+        result = self.convert(n + 9)  # nine phantom channels, as on000117's CHPI00x
+        self.assertTrue(result["ok"], result.get("error"))
+        entry = result["entry"]
+        self.assertEqual(
+            entry["channels_tsv_count_mismatch"],
+            {"channels_tsv": n + 9, "in_file": n, "in_store": n},
+        )
+        index = merge_index(
+            None, "on000117", "b" * 40, [entry], [], "2026-09-28T00:00:00Z",
+            [], [], discovered=[self.PRIMARY],
+        )
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_a_matching_sidecar_adds_no_note(self):
+        result = self.convert(len(FIF_CHANNELS))
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertNotIn("channels_tsv_count_mismatch", result["entry"])
 
 
 if __name__ == "__main__":
