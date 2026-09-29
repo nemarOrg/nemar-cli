@@ -1,4 +1,4 @@
-# ADR 0072: The data plane streams a manifest, answers one question per read, and revalidates its edge copy on every use
+# ADR 0072: The data plane streams a manifest, answers one question per read, and revalidates its edge copy on every use (amended 2026-09-28: it trusts the copy for 60 seconds before revalidating)
 
 **Status:** accepted
 **Amendment 2026-09-28 (#1494):** "Every read costs one conditional S3 request even on a

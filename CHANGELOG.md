@@ -18,22 +18,43 @@ earlier releases are described only by their generated notes.
 ### Fixed
 
 - **An archive request gives an honest answer for every version (#1539).**
-  `GET /<id>/<version>.zip` now applies the size policy (ADR 0012) before anything else.
+  `GET /<id>/<version>.zip` now applies the size policy (ADR 0012) after the visibility and
+  version checks, and before the latest-version check and any S3 request.
   A dataset over 100 GiB or 200,000 files answers 404 with `reason: "archive_skipped"` and
   the skip reason for every version, and a zip left in storage from before the policy is
-  never served; two such zips, of 120 GiB and 109 GiB, were still downloadable in 0.10.8.
+  never served. Two such zips, of 120 GiB and 109 GiB, were downloadable until they were
+  deleted by hand while this release was being prepared, together with two more
+  over-policy zips (606 GiB and 102 GiB), 937 GiB in all.
   A version that was never published answers "Version not found" instead of "not the
-  latest version", and a catalog read failure answers 503 instead of 500. A `ready`
-  callback that carries no size no longer erases the recorded archive size.
+  latest version", and a D1 database fault while checking an archive answers 503 instead
+  of 500. The skip reason now says GiB, the unit it was always measured in, where it said
+  GB; a reason already stored on a dataset keeps the old unit until its next skip write.
+  A `ready` callback that carries no size no longer erases the recorded archive size.
 - **Zarr: a store with fewer channels than its source file is refused (#1535, #1538).**
   Before biosigio 1.2.9, a channel label a recording repeats (CHB-MIT's `T8-P8`)
-  overwrote the earlier channel, so nm000110's store held 22 of its 23 channels. The
-  converter now requires biosigio 1.2.9, which renames repeats the way MNE does, and
-  compares every store with the channel count in the file header, not only when
-  `channels.tsv` disagrees. Channels a sidecar row did not match are listed in
-  `units_report` instead of looking clean, renamed channels keep their electrode
-  positions, and `scripts/zarr/find_collapsed_channel_stores.py` finds stores published
-  before the fix.
+  overwrote the earlier channel, so every one of nm000110's 686 stores lost channels (22
+  of 23 is the commonest case). The converter now requires biosigio 1.2.9, which renames
+  repeats the way MNE does, and compares every store with the channel count in the file
+  header, not only when `channels.tsv` disagrees. The header comparison applies to
+  European Data Format (EDF) and BioSemi Data Format (BDF), BrainVision, and Functional
+  Image File format (FIF) recordings; other formats still rely on `channels.tsv`.
+  Channels a sidecar row did not match are listed in `units_report` instead of looking
+  clean, through four new optional fields: `unmatched_channels`, `unmatched_case_only`,
+  `unmatched_raw_label` and `unmatched_examples` (at most 5 examples). Renamed channels
+  keep their electrode positions, and `scripts/zarr/find_collapsed_channel_stores.py`
+  finds stores published before the fix. Stores already published stay served until they
+  are requeued (see Deploy coupling).
+
+### Migrations
+
+None.
+
+### Deploy coupling
+
+Merging to `main` makes the Hallu converter (the Zarr conversion host) use the header gate
+and biosigio 1.2.9 on its next run. That run converts only what is queued: a short store
+already published keeps being served, and is replaced only by
+`zarr_queue.py requeue --status done --dataset <id> --execute`.
 
 ## 0.10.8 - 2026-09-29
 

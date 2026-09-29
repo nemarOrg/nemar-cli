@@ -303,13 +303,15 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
           // A real build whose tally arrived unparseable is NOT the same event as
           // the skip path that sends no tally, but the persisted row cannot tell
           // you apart: both leave the completeness columns COALESCE-preserved
-          // while archive_size and archive_checked_at are overwritten
-          // unconditionally. So the row ends up advertising a brand-new
-          // "checked just now" timestamp beside a verdict from an older build.
+          // while archive_checked_at is restamped unconditionally. (archive_size
+          // is COALESCEd too: it is replaced only when the callback carries a
+          // size, and kept otherwise.) So the row ends up advertising a
+          // brand-new "checked just now" timestamp beside a verdict from an
+          // older build.
           // Nothing else would ever surface that, so say it here.
           if (malformed.length > 0) {
             console.error(
-              `[archive-ready] ANOMALY dataset=${body.dataset_id}: completeness tally violates the all-or-nothing contract (${malformed.join(", ")}); columns keep the PREVIOUS build's verdict while archive_size/archive_checked_at advance`,
+              `[archive-ready] ANOMALY dataset=${body.dataset_id}: completeness tally violates the all-or-nothing contract (${malformed.join(", ")}); columns keep the PREVIOUS build's verdict while archive_checked_at advances`,
             );
           }
           // A 'ready' callback carrying unreadable>0 should be impossible: the

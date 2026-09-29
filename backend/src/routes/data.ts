@@ -24,6 +24,7 @@ import {
   type ManifestDigest,
   PUBLIC_DATASET_VERSIONS_SQL,
   type PublicManifestEntry,
+  type ResolvedVersion,
   type VersionPickerEntry,
   buildAnnexPublicUrl,
   buildBytesUrl,
@@ -366,6 +367,11 @@ interface FileNotFoundPayload {
   /** #1518: where to get this version's files instead of a zip. */
   browse_url?: string;
 }
+
+/** The 503 body for a fault while checking whether an archive can be served
+ *  (a D1 read or the S3 HEAD): the client should retry, not treat the archive
+ *  as absent. */
+const ARCHIVE_CHECK_FAILED_MESSAGE = "Unable to check archive availability";
 
 function notFound(message: string, payload?: FileNotFoundPayload, noStore = false) {
   const body = payload ? { error: message, ...payload } : { error: message };
@@ -2175,18 +2181,27 @@ dataRoutes.get("/:datasetId/:version", async (c) => {
   // resolveVersion("v1.0.0.zip") fails the version regex and 404s even
   // though the archive exists. (#670)
   if (version.endsWith(".zip")) {
-    const resolved = await resolveVersion(c.env.DB, datasetId, version.slice(0, -4));
-    if (!resolved.ok) return notFound("Version not found");
-
     // `resolveVersion` only checked the STRING SHAPE for a non-"latest"
     // version (review finding): a well-formed but never-published version
     // (e.g. `v99.99.99`) resolves `ok: true` exactly like a real one. Left
     // unchecked, that fell into the `not_latest_version` branch below with a
     // `browse_url` that itself 404s, rather than a plain "not found." Confirm
     // the version actually exists BEFORE asking whether it is the latest one.
-    if (!(await versionExists(c.env.DB, datasetId, resolved.version))) {
-      return notFound("Version not found");
+    //
+    // Both calls can read D1 (`resolveVersion` does for `latest.zip`,
+    // `versionExists` always does), so both sit in one try: a D1 fault here
+    // is a 503, like the size lookup and the archive HEAD below, never a
+    // bare 500.
+    let resolved: ResolvedVersion;
+    let published = false;
+    try {
+      resolved = await resolveVersion(c.env.DB, datasetId, version.slice(0, -4));
+      if (resolved.ok) published = await versionExists(c.env.DB, datasetId, resolved.version);
+    } catch (err) {
+      console.error(`[data] archive version lookup failed for ${datasetId}:`, err);
+      return c.json({ error: ARCHIVE_CHECK_FAILED_MESSAGE }, 503);
     }
+    if (!resolved.ok || !published) return notFound("Version not found");
 
     // ADR 0012 review, and review-of-the-review: the size policy is checked
     // HERE, before the not-latest check below, deliberately. An over-policy
@@ -2220,7 +2235,7 @@ dataRoutes.get("/:datasetId/:version", async (c) => {
         .first<{ file_size: number | null; total_files: number | null }>();
     } catch (err) {
       console.error(`[data] archive size-policy lookup failed for ${datasetId}:`, err);
-      return c.json({ error: "Unable to check archive availability" }, 503);
+      return c.json({ error: ARCHIVE_CHECK_FAILED_MESSAGE }, 503);
     }
     const sizePolicy = shouldSkipArchive({
       totalBytes: sizeRow?.file_size,
@@ -2244,7 +2259,13 @@ dataRoutes.get("/:datasetId/:version", async (c) => {
     // exist under any name; say so plainly and point at the browsable files
     // instead of a failed download. Reached only for a WITHIN-policy dataset
     // now: an over-policy one already returned above, for every version.
-    const latestResolved = await resolveVersion(c.env.DB, datasetId, "latest");
+    let latestResolved: ResolvedVersion;
+    try {
+      latestResolved = await resolveVersion(c.env.DB, datasetId, "latest");
+    } catch (err) {
+      console.error(`[data] archive latest-version lookup failed for ${datasetId}:`, err);
+      return c.json({ error: ARCHIVE_CHECK_FAILED_MESSAGE }, 503);
+    }
     if (latestResolved.ok && resolved.version !== latestResolved.version) {
       return notFound(
         "Only the latest version has a downloadable archive; download files directly.",
@@ -2274,7 +2295,7 @@ dataRoutes.get("/:datasetId/:version", async (c) => {
       archiveKeyResolved = await resolveArchiveKey(s3, datasetId, resolved.version);
     } catch (err) {
       console.error(`[data] archive HEAD failed for ${datasetId} ${resolved.version}:`, err);
-      return c.json({ error: "Unable to check archive availability" }, 503);
+      return c.json({ error: ARCHIVE_CHECK_FAILED_MESSAGE }, 503);
     }
     if (!archiveKeyResolved) {
       // Reached only for a WITHIN-policy dataset (the over-policy case

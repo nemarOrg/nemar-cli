@@ -19,11 +19,16 @@ describe("shouldSkipArchive", () => {
     expect(shouldSkipArchive({ totalBytes: 79 * GiB, totalFiles: 3265 })).toEqual({ skip: false });
   });
 
-  test("over the byte ceiling -> skip with a GB reason", () => {
+  test("over the byte ceiling -> skip with a GiB reason (binary units, never a bare GB)", () => {
     const d = shouldSkipArchive({ totalBytes: 680 * GiB, totalFiles: 11000 });
     expect(d.skip).toBe(true);
-    expect(d.reason).toContain("GB");
-    expect(d.reason).toContain("archive limit");
+    // The whole text is public: it reaches the `.zip` 404 and the landing page.
+    expect(d.reason).toBe("dataset 680.0 GiB exceeds 100.0 GiB archive limit; use direct download");
+  });
+
+  test("a fractional size keeps one decimal and the same unit", () => {
+    const d = shouldSkipArchive({ totalBytes: 131.7 * GiB, totalFiles: 10 });
+    expect(d.reason).toBe("dataset 131.7 GiB exceeds 100.0 GiB archive limit; use direct download");
   });
 
   test("byte ceiling is strict (== is NOT over)", () => {
