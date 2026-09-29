@@ -105,6 +105,7 @@ from generate_zarr import (  # type: ignore[import-not-found]
     _decode_sidecar_text,
     channels_tsv_for,
     channels_tsv_row_count,
+    is_commit_sha,
     store_total_channels,
 )
 
@@ -425,6 +426,13 @@ def check_dataset(
     commit = index.get("source_commit")
     if not isinstance(commit, str) or not commit:
         result["error"] = "index_has_no_source_commit"
+        return result
+    # The commit reaches `git ls-tree`/`git cat-file` argv and raw-GitHub URLs,
+    # so it must be exactly what the converter writes (`merge_index` refuses
+    # anything else): 40 lowercase hex. A value like `--output=...` from a
+    # hostile or corrupt index would otherwise be read by git as an option.
+    if not is_commit_sha(commit):
+        result["error"] = "index_source_commit_not_a_sha"
         return result
     result["source_commit"] = commit
     try:

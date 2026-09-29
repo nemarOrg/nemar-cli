@@ -491,6 +491,25 @@ class TestRepoDir(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(report["findings"][0]["tsv_channels"], 6)
 
+    def test_a_source_commit_that_is_not_a_sha_never_reaches_git(self):
+        # A hostile index: the "commit" is a git option that would write a
+        # file if `git ls-tree` ever parsed it.
+        self.git("init", "-q")
+        planted = os.path.join(self._tmp.name, "planted")
+        self.site.publish(DATASET, [store(1, 4, ext="set")], {}, commit=f"--output={planted}")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = fc.main([
+                "--dataset", DATASET, "--repo-dir", self.repo,
+                "--zarr-base", self.site.zarr_base, "--github-raw-base", self.site.raw_base,
+            ])
+        report = json.loads(out.getvalue())
+        self.assertEqual(rc, 2)
+        self.assertEqual(report["datasets"][0]["error"], "index_source_commit_not_a_sha")
+        self.assertFalse(os.path.exists(planted))
+        self.assertEqual(self.site.hits.get(f"/zarr/{DATASET}/zarr/index.json"), 1)
+        self.assertFalse([p for p in self.site.hits if p.startswith("/raw/")])
+
     def test_repo_dir_needs_exactly_one_dataset(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             fc.main(["--dataset", "a", "--dataset", "b", "--repo-dir", self.repo])
