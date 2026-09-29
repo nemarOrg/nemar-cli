@@ -654,6 +654,12 @@ describe("--no-verify mismatches reach the user on a partial outcome too (review
     expect(result.filesDownloaded).toBe(1);
     expect(result.filesUnavailable).toBe(1);
     expect(result.noVerifyMismatches).toHaveLength(1);
+    // The total is honest, but the corrupt file must appear exactly once --
+    // in the mismatch block with its own recovery command -- not also in
+    // the generic "not available from the archive" sample that
+    // printPartialRetrieval prints (review round 3, item 2).
+    expect(result.unavailablePaths).not.toContain("bad.bin");
+    expect(result.unavailablePaths).toHaveLength(0);
 
     // The real integration: printPartialRetrieval's own text never mentions
     // this (it points at a report this local check does not write), so the

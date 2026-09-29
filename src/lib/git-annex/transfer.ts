@@ -578,8 +578,15 @@ export async function getDatasetData(
         }
         if (actualSize === declaredSize) continue;
         filesDownloaded--;
+        // Counted here (the totals `classifyGetOutcome` and the CLI's
+        // summary line report stay correct) but deliberately NOT added to
+        // `unavailablePaths`: that list backs `printPartialRetrieval`'s
+        // generic "not available from the archive" text, which points at a
+        // server-side report this local check never wrote. A no-verify
+        // mismatch gets its own reason and recovery command from
+        // `noVerifyMismatches` instead, so it must not also show up in the
+        // generic list meant for genuinely-missing-upstream files.
         filesUnavailable++;
-        if (unavailablePaths.length < MAX_UNAVAILABLE_SAMPLE) unavailablePaths.push(file);
         let isSymlink = false;
         try {
           isSymlink = lstatSync(fullPath).isSymbolicLink();
