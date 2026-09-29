@@ -13,6 +13,7 @@ Run: `pytest scripts/zarr/test_find_collapsed_channel_stores.py`.
 from __future__ import annotations
 
 import contextlib
+import email.utils
 import functools
 import http.server
 import io
@@ -22,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from typing import ClassVar
@@ -45,15 +47,16 @@ class _Quiet(http.server.SimpleHTTPRequestHandler):
     configured status (and headers) instead, the way a rate-limited or failing
     host does. `hits` counts every request per path."""
 
-    faults: ClassVar[dict[str, tuple[int, dict[str, str]]]] = {}
+    faults: ClassVar[dict[str, list]] = {}
     hits: ClassVar[dict[str, int]] = {}
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         self.hits[path] = self.hits.get(path, 0) + 1
         fault = self.faults.get(path)
-        if fault is not None:
-            status, headers = fault
+        if fault is not None and fault[2] != 0:
+            status, headers, remaining = fault
+            fault[2] = remaining - 1 if remaining > 0 else remaining
             self.send_response(status)
             for key, value in headers.items():
                 self.send_header(key, value)
@@ -75,7 +78,7 @@ class Site:
         # Per-site fault table and hit counter, shared with the handler class
         # the server instantiates per request.
         handler_cls = type("_Handler", (_Quiet,), {"faults": {}, "hits": {}})
-        self.faults: dict[str, tuple[int, dict[str, str]]] = handler_cls.faults
+        self.faults: dict[str, list] = handler_cls.faults
         self.hits: dict[str, int] = handler_cls.hits
         handler = functools.partial(handler_cls, directory=root)
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -135,9 +138,10 @@ class Site:
         with open(path, "wb") as fh:
             fh.write(content)
 
-    def fail(self, rel: str, status: int, **headers: str) -> None:
-        """Answer every GET of `rel` (relative to the site root) with `status`."""
-        self.faults["/" + rel] = (status, headers)
+    def fail(self, rel: str, status: int, times: int = -1, **headers: str) -> None:
+        """Answer GETs of `rel` (relative to the site root) with `status`: the
+        next `times` of them, or every one when `times` is -1."""
+        self.faults["/" + rel] = [status, headers, times]
 
 
 def store(run: int, n_channels: int, ext: str = "edf", **extra) -> dict:
@@ -222,6 +226,22 @@ class TestPure(unittest.TestCase):
         self.assertFalse(fc.wants_label_check("a_eeg.edf", "none"))
 
 
+class TestRetryAfter(unittest.TestCase):
+    def test_delta_seconds_and_http_dates(self):
+        self.assertEqual(fc.retry_after_seconds("7"), 7.0)
+        self.assertEqual(fc.retry_after_seconds(" 0 "), 0.0)
+        now = 1_800_000_000.0
+        date = email.utils.formatdate(now + 30, usegmt=True)
+        self.assertAlmostEqual(fc.retry_after_seconds(date, now=now), 30.0)
+        past = email.utils.formatdate(now - 30, usegmt=True)
+        self.assertEqual(fc.retry_after_seconds(past, now=now), 0.0)
+
+    def test_absent_or_garbage_is_none_and_huge_is_capped(self):
+        for value in (None, "", "soon", "-5", "1.5"):
+            self.assertIsNone(fc.retry_after_seconds(value), value)
+        self.assertEqual(fc.retry_after_seconds("86400"), fc.RETRY_AFTER_MAX_S)
+
+
 class TestOverHttp(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -233,6 +253,7 @@ class TestOverHttp(unittest.TestCase):
         backoff = fc.RETRY_BACKOFF_S
         fc.RETRY_BACKOFF_S = 0.01
         self.addCleanup(setattr, fc, "RETRY_BACKOFF_S", backoff)
+        self.addCleanup(setattr, fc.PACER, "interval", 0.0)
 
     def run_main(self, *args: str) -> tuple[int, dict]:
         argv = ["--zarr-base", self.site.zarr_base, "--github-raw-base", self.site.raw_base, *args]
@@ -394,6 +415,42 @@ class TestOverHttp(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(report["summary"]["stores_flagged"], 1)
         self.assertEqual(report["summary"]["datasets_unchecked"], 1)
+
+    def test_a_429_waits_what_retry_after_asks(self):
+        # raw.githubusercontent.com answers a burst with 429 and Retry-After.
+        # The backoff is 10 ms here, so only the header explains a 1 s wait.
+        labels = [f"C{i}" for i in range(6)]
+        self.site.publish(DATASET, [store(1, 6)], {store(1, 6)["zarr"]: labels})
+        self.site.sidecar(DATASET, tsv_rel(1), tsv(labels))
+        rel = f"raw/nemarDatasets/{DATASET}/{COMMIT}/{tsv_rel(1)}"
+        self.site.fail(rel, 429, times=1, **{"Retry-After": "1"})
+        started = time.monotonic()
+        rc, report = self.run_main("--dataset", DATASET)
+        self.assertGreaterEqual(time.monotonic() - started, 1.0)
+        self.assertEqual((rc, report["findings"]), (0, []))
+        self.assertEqual(self.site.hits["/" + rel], 2)
+        self.assertEqual(report["summary"]["stores_unreadable"], 0)
+
+    def test_requests_are_paced(self):
+        labels = [f"C{i}" for i in range(6)]
+        self.site.publish(DATASET, [store(1, 6)], {store(1, 6)["zarr"]: labels})
+        self.site.sidecar(DATASET, tsv_rel(1), tsv(labels))
+        started = time.monotonic()
+        rc, _ = self.run_main("--dataset", DATASET, "--request-interval", "0.2")
+        elapsed = time.monotonic() - started
+        requests = sum(self.site.hits.values())
+        self.assertEqual(rc, 0)
+        # index, root zarr.json, group zarr.json, channels.tsv
+        self.assertEqual(requests, 4)
+        self.assertGreaterEqual(elapsed, 0.2 * (requests - 1))
+
+    def test_all_paces_by_default_and_a_single_dataset_does_not(self):
+        self.site.write("api/datasets", json.dumps({"total_count": 0, "datasets": []}))
+        api = self.site.zarr_base.rsplit("/", 1)[0] + "/api"
+        self.run_main("--all", "--api-base", api)
+        self.assertEqual(fc.PACER.interval, fc.ALL_REQUEST_INTERVAL_S)
+        self.run_main("--dataset", "nm999998")
+        self.assertEqual(fc.PACER.interval, 0.0)
 
     def test_all_walks_the_public_catalog(self):
         other = "nm000111"
