@@ -26,6 +26,9 @@
  *   1  token is rejected (401), missing a required scope, expiring within
  *      --fail-days, or the probe could not reach the API at all
  *
+ * A 200 whose `login` does not match `--owner` (case-insensitively) is a
+ * `::warning::`, not a failure: the token still authenticates.
+ *
  * The token is never printed, logged, or included in any error message.
  *
  * The pure decision logic lives in `evaluateTokenStatus`: HTTP status plus
@@ -162,6 +165,22 @@ export function evaluateTokenStatus(
   );
 
   let ok = true;
+
+  // A mismatch here is a warning, not a failure: the token still authenticates
+  // and may still be perfectly usable (e.g. rotated onto a different but still
+  // authorized account). It is worth flagging because a probe configured with
+  // `--owner nemarAdmin` that quietly starts passing as a different account
+  // would otherwise go unnoticed until that account loses access.
+  if (
+    login !== null &&
+    options.owner.toLowerCase() !== "unknown" &&
+    login.toLowerCase() !== options.owner.toLowerCase()
+  ) {
+    lines.push(
+      `::warning::${options.secretName} authenticated as ${login}, but --owner expected ` +
+        `${options.owner}. Update --owner if this account change is intentional.`,
+    );
+  }
 
   if (scopes !== "unknown" && options.requireScopes.length > 0) {
     const missing = options.requireScopes.filter((s) => !scopes.includes(s));
