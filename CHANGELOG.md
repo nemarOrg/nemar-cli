@@ -13,6 +13,45 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## 0.10.10 - 2026-09-29
+
+### Changed
+
+- **Dataset enrichment runs on Claude Sonnet 5.5 and reads what each DOI is before
+  labeling it (#1549, #1550).** Enrichment, validation and correction move to
+  `claude-sonnet-5-5`. The model used to see bare DOI strings, so it mislabeled them in
+  both directions: nm000275's own Scientific Data paper was typed `References`, while
+  MNE-BIDS, EEG-BIDS and MEG-BIDS were typed `IsDescribedBy` on dozens of datasets. Each
+  run now resolves up to 15 DOIs (from the BIDS fields, the existing related identifiers
+  and the README) through DataCite and Crossref, and gives the model each one's title,
+  first author, year, venue and type. A deterministic guard then demotes known standards,
+  software, platform and umbrella papers (the BIDS family, MNE, EEGLAB, FieldTrip, the
+  Hierarchical Event Descriptors, OpenNeuro, NEMAR, the Healthy Brain Network program and
+  others) from any data-describing relation to `References`, and drops a dataset's own
+  `10.82901/nemar.<id>` DOI from its related identifiers.
+  `IsDerivedFrom` is kept only for a DOI that DataCite types as `Dataset`. ADR 0075
+  records the rules, and the list must stay in step with nemar-citations' never-anchor
+  list. A dataset's `.nemar/metadata.json` changes only when it is next reindexed; a
+  re-enrichment sweep of the catalog follows this release.
+- **`nemar admin reindex` reports its DOI lookups and gains `--json` (#1550).** Single and
+  bulk reindex responses carry `doi_resolution` (`resolved`, `unresolved`, `failed`,
+  `skipped`). A `failed` count means a registry did not answer (429, 5xx or a timeout), so
+  that DOI was labeled without its metadata and the dataset is worth reindexing again. An
+  enrichment body also lists `demoted_dois` and `self_dois_dropped` when there are any.
+
+### Fixed
+
+- **Zarr: a channels.tsv row that differs from the recording's label only in letter case
+  now applies (#1552).** The converter requires biosigio 1.2.10, which matches such a row
+  to its channel when the match is unambiguous, so its type and unit are applied
+  (nm000110's `Fp1-F7` against the file's `FP1-F7`). The store index reports these
+  matches as `units_report.matched_case_only` with at most five examples, rather than
+  republishing biosigio's per-channel map, and an index carried forward with that map is
+  repaired on its next merge. The engine stamp is not bumped (ADR 0033), so nothing
+  requeues on its own: stores converted earlier keep the importer's units until they are
+  requeued, and `find_collapsed_channel_stores.py --case-only` lists the datasets whose
+  index reports `unmatched_case_only`.
+
 ## 0.10.9 - 2026-09-29
 
 ### Fixed
