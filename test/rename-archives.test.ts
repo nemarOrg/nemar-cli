@@ -364,40 +364,79 @@ describe("isDatasetIdPrefix", () => {
   });
 });
 
-describe("classifyHeadObjectError (PR review finding: a transient error is not a 404)", () => {
-  test("a real aws s3api head-object 404 body classifies as not-found", () => {
-    // Actual shape of `aws s3api head-object` stderr for a missing key.
-    const stderr = "An error occurred (404) when calling the HeadObject operation: Not Found";
-    expect(classifyHeadObjectError(stderr)).toBe("not-found");
+describe("classifyHeadObjectError (a transient error is not a 404)", () => {
+  // Every stderr below is REAL: captured from the actual aws-cli 2.36.47
+  // against a local S3 stand-in (or a closed port), with the dataset id
+  // nm000404 wherever a key appears, because a URL embeds the key and the key
+  // can contain "404".
+  const key = "nm000404/archives/nm000404_v1.0.0.zip";
+
+  test("the real head-object 404 classifies as not-found", () => {
+    expect(
+      classifyHeadObjectError(
+        "\naws: [ERROR]: An error occurred (404) when calling the HeadObject operation: Not Found\n",
+      ),
+    ).toBe("not-found");
   });
 
-  test("a NoSuchKey body classifies as not-found", () => {
-    const stderr =
-      "An error occurred (NoSuchKey) when calling the HeadObject operation: The specified key does not exist.";
-    expect(classifyHeadObjectError(stderr)).toBe("not-found");
+  test("the same 404 with the CLI's retry annotation still classifies as not-found", () => {
+    expect(
+      classifyHeadObjectError(
+        "\naws: [ERROR]: An error occurred (404) when calling the HeadObject operation (reached max retries: 0): Not Found\n",
+      ),
+    ).toBe("not-found");
   });
 
-  test("is case-insensitive on the not-found markers", () => {
-    expect(classifyHeadObjectError("not found")).toBe("not-found");
-    expect(classifyHeadObjectError("nosuchkey")).toBe("not-found");
+  test("a NoSuchKey / NotFound error line classifies as not-found", () => {
+    expect(
+      classifyHeadObjectError(
+        "An error occurred (NoSuchKey) when calling the HeadObject operation: The specified key does not exist.",
+      ),
+    ).toBe("not-found");
+    expect(
+      classifyHeadObjectError("An error occurred (NotFound) when calling the HeadObject operation"),
+    ).toBe("not-found");
+  });
+
+  test("a refused connection whose URL contains 404 is an error, never a silent not-found", () => {
+    const stderr = `\naws: [ERROR]: Could not connect to the endpoint URL: "http://127.0.0.1:9/nemar/${key}"\n`;
+    expect(stderr).toContain("404");
+    expect(classifyHeadObjectError(stderr)).toBe("error");
+  });
+
+  test("a dropped connection whose URL contains 404 is an error, never a silent not-found", () => {
+    const stderr = `\naws: [ERROR]: Connection was closed before we received a valid response from endpoint URL: "http://127.0.0.1:55561/nemar/${key}".\n`;
+    expect(stderr).toContain("404");
+    expect(classifyHeadObjectError(stderr)).toBe("error");
+  });
+
+  test("a real 403 is an error, never a silent not-found", () => {
+    expect(
+      classifyHeadObjectError(
+        "\naws: [ERROR]: An error occurred (403) when calling the HeadObject operation: Forbidden\n",
+      ),
+    ).toBe("error");
+  });
+
+  test("a real 503 is an error, never a silent not-found", () => {
+    expect(
+      classifyHeadObjectError(
+        "\naws: [ERROR]: An error occurred (503) when calling the HeadObject operation (reached max retries: 0): Service Unavailable\n",
+      ),
+    ).toBe("error");
   });
 
   test("throttling is an error, never a silent not-found", () => {
-    const stderr =
-      "An error occurred (SlowDown) when calling the HeadObject operation: Please reduce your request rate.";
-    expect(classifyHeadObjectError(stderr)).toBe("error");
+    expect(
+      classifyHeadObjectError(
+        "An error occurred (SlowDown) when calling the HeadObject operation: Please reduce your request rate.",
+      ),
+    ).toBe("error");
   });
 
-  test("a network failure is an error, never a silent not-found", () => {
-    const stderr =
-      'Could not connect to the endpoint URL: "https://nemar.s3.us-east-2.amazonaws.com/"';
-    expect(classifyHeadObjectError(stderr)).toBe("error");
-  });
-
-  test("a permissions hiccup (AccessDenied) is an error, never a silent not-found", () => {
-    const stderr =
-      "An error occurred (AccessDenied) when calling the HeadObject operation: Access Denied";
-    expect(classifyHeadObjectError(stderr)).toBe("error");
+  test("bare not-found words outside the CLI's error line are not a signal", () => {
+    expect(classifyHeadObjectError("not found")).toBe("error");
+    expect(classifyHeadObjectError("nosuchkey")).toBe("error");
   });
 
   test("empty stderr (e.g. a non-2xx with no body) is an error, never a silent not-found", () => {

@@ -346,17 +346,23 @@ export function isDatasetIdPrefix(prefix: string): boolean {
 
 /**
  * Classify a FAILED `aws s3api head-object` invocation from its captured
- * stderr. A genuine 404/NoSuchKey/Not Found means "no such object" -- the
+ * stderr. A genuine 404/NoSuchKey/NotFound means "no such object" -- the
  * one case where treating the destination as absent is correct. Any other
  * failure (throttling, a network blip, a permissions hiccup) must NOT be
  * read the same way: `decideRenameAction` treats a null destination as
  * "copy", and copying on the strength of an unrelated error could
- * overwrite a destination that may well exist. Mirrors the idempotency
- * guard in nemarDatasets/.github's run-generate-archive.yml, which makes
- * the identical distinction against the identical CLI's stderr shape.
+ * overwrite a destination that may well exist.
+ *
+ * The match is anchored on the CLI's own error line, `An error occurred
+ * (404) when calling the HeadObject operation: Not Found`. A bare `404`
+ * anywhere in stderr is NOT a not-found signal: the CLI's connection-error
+ * text embeds the request URL, and the URL embeds the key
+ * (`Could not connect to the endpoint URL: ".../nm000404_v1.0.0.zip"`), so a
+ * dataset id containing 404 would have read a dropped connection as "the
+ * destination does not exist" and copied over one that does.
  */
 export function classifyHeadObjectError(stderr: string): "not-found" | "error" {
-  return /Not Found|404|NoSuchKey/i.test(stderr) ? "not-found" : "error";
+  return /An error occurred \((404|NoSuchKey|NotFound)\)/i.test(stderr) ? "not-found" : "error";
 }
 
 // ---------------------------------------------------------------------------
