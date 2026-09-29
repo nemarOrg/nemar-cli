@@ -612,6 +612,68 @@ describe("units_report.unmatched_examples bound (both mirrors vs the converter)"
   });
 });
 
+describe("units_report.matched_case_only_examples bound (both mirrors vs the converter)", () => {
+  // generate_zarr.py's CASE_MATCH_EXAMPLES_MAX bounds how many of biosigio's
+  // case-only sidecar matches an index entry names; both zod copies restate
+  // it as `.max()`.
+  const source = readFileSync(
+    new URL("../../scripts/zarr/generate_zarr.py", import.meta.url),
+    "utf8",
+  );
+  const match = /^CASE_MATCH_EXAMPLES_MAX = (\d+)$/m.exec(source);
+  if (!match) throw new Error("CASE_MATCH_EXAMPLES_MAX not found in generate_zarr.py");
+  const max = Number(match[1]);
+  const envelope = (n: number, count = n) => ({
+    dataset_id: "on003392",
+    doi: null,
+    license: null,
+    citation: null,
+    source_commit: "1035360c2cbb5a349cc43a46a58543c5f02a4e38",
+    index_etag: null,
+    engine_version: "3",
+    source_tree: "raw",
+    derived: false,
+    lossy: true,
+    dtype: "int16",
+    effective_rate_hz: 250,
+    source_rate_hz: 250,
+    zarr_verify_status: null,
+    units_report: {
+      converted: count,
+      unmatched_channels: 0,
+      matched_case_only: count,
+      matched_case_only_examples: Array.from({ length: n }, (_, i) => `x${i} -> X${i}`),
+    },
+  });
+  test("exactly the bound is accepted by both copies", () => {
+    expect(provenanceEnvelopeSchema.safeParse(envelope(max)).success).toBe(true);
+    assertParity(
+      provenanceEnvelopeSchema,
+      provenanceEnvelopeSchema4,
+      envelope(max),
+      "at the bound -- accepted",
+    );
+  });
+  test("one past the bound is rejected by both copies", () => {
+    expect(provenanceEnvelopeSchema.safeParse(envelope(max + 1)).success).toBe(false);
+    assertParity(
+      provenanceEnvelopeSchema,
+      provenanceEnvelopeSchema4,
+      envelope(max + 1),
+      "one past the bound -- rejected",
+    );
+  });
+  test("a zero count is rejected by both copies (absent when there are none)", () => {
+    expect(provenanceEnvelopeSchema.safeParse(envelope(0, 0)).success).toBe(false);
+    assertParity(
+      provenanceEnvelopeSchema,
+      provenanceEnvelopeSchema4,
+      envelope(0, 0),
+      "matched_case_only: 0 -- rejected",
+    );
+  });
+});
+
 describe("envelope embedded in the three recording-level tools' outputs (item 24)", () => {
   const derivedEnvelope = {
     dataset_id: "on003392",

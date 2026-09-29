@@ -329,14 +329,31 @@ const zarrUnitsReportSchema4 = z4
       .nonnegative()
       .optional()
       .describe(
-        "Store channels no channels.tsv row names exactly, so they kept the importer's type and unit. 0 means every channel met a row. Absent when there was no join: no store labels, no name column in the sidecar, or no units_report at all.",
+        "Store channels no channels.tsv row reached, so they kept the importer's type and unit. A row reaches the channel it names exactly and, from biosigio 1.2.10, the one channel it names in another letter case when that is unambiguous (counted in matched_case_only). 0 means every channel met a row. Absent when there was no join: no store labels, no name column in the sidecar, or no units_report at all.",
       ),
     unmatched_case_only: z4
       .number()
       .int()
       .positive()
       .optional()
-      .describe("Of unmatched_channels, those a row names in a different letter case."),
+      .describe(
+        "Of unmatched_channels, those a row names in a different letter case but that were not matched: converted before biosigio 1.2.10 (exact matching), or the case-insensitive match was ambiguous.",
+      ),
+    matched_case_only: z4
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe(
+        "Store channels a channels.tsv row reached only by ignoring letter case (biosigio 1.2.10 and later); the sidecar's type and unit were applied, converting a unit that differed from the file's.",
+      ),
+    matched_case_only_examples: z4
+      .array(z4.string())
+      .max(5)
+      .optional()
+      .describe(
+        "Up to five of the matched_case_only matches, as '<channels.tsv name> -> <store label>'.",
+      ),
     unmatched_raw_label: z4
       .number()
       .int()

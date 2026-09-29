@@ -113,6 +113,7 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     channel_gate_verdict,
     channels_tsv_names,
     sidecar_join_report,
+    bound_units_report,
     store_total_channels,
     store_metadata,
     embed_attr,
@@ -8481,9 +8482,8 @@ class TestSidecarJoinReport(unittest.TestCase):
         # and still case-only. The map is biosigIO's own
         # `matched_case_insensitive`, `{sidecar_name: channel_label}`.
         #
-        # The end-to-end proof is the canary in TestDuplicateLabelsThroughConvertOne,
-        # but biosigio 1.2.9 (the cap in requirements.txt) never emits that key, so
-        # in CI only this pure case reaches the arithmetic.
+        # The end-to-end proof, on the real biosigIO requirements.txt installs,
+        # is the canary in TestDuplicateLabelsThroughConvertOne.
         report = sidecar_join_report(
             ["FP1-F7", "F7-T7", "T8"],
             ["Fp1-F7", "F7-T7", "t8"],
@@ -8524,6 +8524,52 @@ class TestSidecarJoinReport(unittest.TestCase):
         units = schema["$defs"]["store"]["properties"]["units_report"]["properties"]
         self.assertEqual(
             units["unmatched_examples"]["maxItems"], generate_zarr.UNMATCHED_EXAMPLES_MAX
+        )
+
+    def test_the_case_match_map_is_published_as_a_count_and_examples(self):
+        # biosigio >= 1.2.10's `matched_case_insensitive` is one entry per
+        # matched channel; the index carries a count and a bounded sample,
+        # and the full map comes back for the join report.
+        n = 300
+        full = {f"ch{i:03d}": f"CH{i:03d}" for i in range(n)}
+        biosigio_report = {
+            "converted": n, "relabelled": 0, "kept_importer_unit": 0,
+            "units_column_present": True, "matched_case_insensitive": full,
+        }
+        published, matches = bound_units_report(biosigio_report)
+        self.assertEqual(matches, full)
+        self.assertNotIn("matched_case_insensitive", published)
+        self.assertEqual(published["matched_case_only"], n)
+        self.assertEqual(
+            published["matched_case_only_examples"],
+            [f"ch{i:03d} -> CH{i:03d}" for i in range(generate_zarr.CASE_MATCH_EXAMPLES_MAX)],
+        )
+        # Every other key biosigIO reported is republished as it was.
+        for key in ("converted", "relabelled", "kept_importer_unit", "units_column_present"):
+            self.assertEqual(published[key], biosigio_report[key])
+        # The input is not mutated: it is the store's own attribute.
+        self.assertIs(biosigio_report["matched_case_insensitive"], full)
+
+    def test_no_case_match_leaves_the_report_as_biosigio_wrote_it(self):
+        report = {"converted": 2, "relabelled": 0, "kept_importer_unit": 0,
+                  "units_column_present": True}
+        self.assertEqual(bound_units_report(report), (report, {}))
+
+    def test_a_case_match_value_of_an_unknown_shape_is_dropped(self):
+        # Never republished as is, and it matched nothing this code can name.
+        published, matches = bound_units_report(
+            {"converted": 1, "matched_case_insensitive": ["Fp1-F7"]}
+        )
+        self.assertEqual(published, {"converted": 1})
+        self.assertEqual(matches, {})
+
+    def test_the_case_match_example_bound_is_the_published_schema_bound(self):
+        with open(INDEX_SCHEMA_PATH, encoding="utf-8") as fh:
+            schema = json.load(fh)
+        units = schema["$defs"]["store"]["properties"]["units_report"]["properties"]
+        self.assertEqual(
+            units["matched_case_only_examples"]["maxItems"],
+            generate_zarr.CASE_MATCH_EXAMPLES_MAX,
         )
 
     def test_examples_are_bounded(self):
@@ -8761,7 +8807,10 @@ class TestDuplicateLabelsThroughConvertOne(unittest.TestCase):
                 unit = self.store_units(result["entry"])["FP1-F7"]
                 if matches:
                     self.assertEqual(unit, "V")  # the sidecar's, so the row was applied
-                    self.assertEqual(report["matched_case_insensitive"], {"Fp1-F7": "FP1-F7"})
+                    # Bounded: a count and an example, never biosigIO's map.
+                    self.assertNotIn("matched_case_insensitive", report)
+                    self.assertEqual(report["matched_case_only"], 1)
+                    self.assertEqual(report["matched_case_only_examples"], ["Fp1-F7 -> FP1-F7"])
                     self.assertEqual(report["unmatched_channels"], 0)
                     self.assertNotIn("unmatched_case_only", report)
                     self.assertNotIn("unmatched_examples", report)
@@ -8769,7 +8818,7 @@ class TestDuplicateLabelsThroughConvertOne(unittest.TestCase):
                     self.assertNotIn("differ only in case", out)
                 else:
                     self.assertEqual(unit, "uV")  # the importer's: the row was not applied
-                    self.assertNotIn("matched_case_insensitive", report)
+                    self.assertNotIn("matched_case_only", report)
                     self.assertEqual(report["unmatched_channels"], 1)
                     self.assertEqual(report["unmatched_case_only"], 1)
                     self.assertEqual(report["unmatched_examples"], ["FP1-F7"])
