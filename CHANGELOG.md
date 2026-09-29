@@ -29,10 +29,12 @@ earlier releases are described only by their generated notes.
   Hierarchical Event Descriptors, OpenNeuro, NEMAR, the Healthy Brain Network program and
   others) from any data-describing relation to `References`, and drops a dataset's own
   `10.82901/nemar.<id>` DOI from its related identifiers.
-  `IsDerivedFrom` is kept only for a DOI that DataCite types as `Dataset`. ADR 0075
-  records the rules, and the list must stay in step with nemar-citations' never-anchor
-  list. A dataset's `.nemar/metadata.json` changes only when it is next reindexed; a
-  re-enrichment sweep of the catalog follows this release.
+  The model may write or promote `IsDerivedFrom` only for a DOI that DataCite types as
+  `Dataset`; existing `IsDerivedFrom` entries are left as they are. ADR 0075 records the
+  rules, and the list must stay in step with nemar-citations' never-anchor list. A
+  dataset's `.nemar/metadata.json` changes only when it is next re-enriched (a reindex, or
+  a push that changes `README.md` or `dataset_description.json`); a re-enrichment sweep of
+  the catalog follows this release.
 - **`nemar admin reindex` reports its DOI lookups and warnings, and gains `--json` (#1550,
   #1556).** Single and bulk reindex responses carry `doi_resolution` (`resolved`,
   `unresolved`, `failed`, `skipped`). A lookup that gets no registry answer (429, 5xx, a
@@ -40,10 +42,12 @@ earlier releases are described only by their generated notes.
   `failed` and adds a warning saying to reindex the dataset again; the run still succeeds.
   DOIs past the 15-lookup cap are listed to the model as not looked up rather than left
   unmarked. The summary output now prints each result's warnings, including the DOI-sync
-  skip (#1255), which it never showed before. An enrichment body also lists
-  `demoted_dois` and `self_dois_dropped` when there are any. The bulk route still has no
-  per-request dataset cap (#1555), so a large reindex is best driven one dataset at a
-  time.
+  skip (#1255), which it never showed before. The warning is raised on the reindex path
+  only; an enrichment triggered by a push logs failed lookups to the Worker log. The
+  enrichment service's own response also lists `demoted_dois` and `self_dois_dropped`
+  when there are any; the reindex response does not pass them through. The bulk route
+  still has no per-request dataset cap (#1555), so a large reindex is best driven one
+  dataset at a time.
 
 ### Fixed
 

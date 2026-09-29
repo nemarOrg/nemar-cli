@@ -16,8 +16,9 @@
  * registry cache (doi-registry.ts), so a DOI that ORCID discovery already
  * fetched costs nothing here. A lookup that got no answer is `failed`, not
  * `unresolved`: the run still completes, labeling that DOI the way it did
- * before this module existed, and the reindex response reports the count so
- * the sweep can retry the dataset.
+ * before this module existed, and the reindex response reports the count and
+ * a warning so the operator can reindex the dataset again (nothing in the
+ * backend retries).
  */
 
 import type { RelatedIdentifierEntry } from "../../../shared/datacite-constants.js";
