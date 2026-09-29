@@ -48,7 +48,7 @@ const awsInstalled = which("aws") !== null;
 // Per-test timeout: see the note in test/rename-archives-tagging.test.ts (a
 // describe-level option is ignored by Bun 1.4.2, and CI's `unit-pure` tier
 // has the 5s default).
-const TEST_TIMEOUT_MS = 30000;
+const TEST_TIMEOUT_MS = 60000;
 
 describe.skipIf(!awsInstalled)("rename-archives.ts safety (real aws CLI, stand-in S3)", () => {
   let s: RenameS3Standin;

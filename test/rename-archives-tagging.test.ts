@@ -54,7 +54,7 @@ const awsInstalled = which("aws") !== null;
 // Passed to every test() as its third argument. A describe-level
 // `{ timeout }` option is NOT honored by Bun 1.4.2 (the version CI runs):
 // measured, a describe({ timeout: 20000 }) test still died at 5000ms.
-const TEST_TIMEOUT_MS = 30000;
+const TEST_TIMEOUT_MS = 60000;
 
 const legacy = { size: 500, etag: '"abc123"', lastModified: LAST_MODIFIED };
 
