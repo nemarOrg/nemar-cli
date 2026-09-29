@@ -43,7 +43,7 @@
  * put/get-object-tagging, a version listing, and the final delete. On the
  * CI runner that took 3.6-4.4s per scenario (measured on a real run), well
  * past `bun test`'s 5s default when run without `--timeout` (the required
- * `unit-pure` tier's own invocation) -- hence the explicit timeout below.
+ * `unit-pure` tier's own invocation) -- hence the explicit per-test timeout (TEST_TIMEOUT_MS).
  *
  * Skipped when `aws` is not on PATH.
  */
@@ -64,6 +64,11 @@ const NEW_KEY = `${DATASET}/archives/${DATASET}_v1.0.0.zip`;
 const LAST_MODIFIED = "2026-03-01T00:00:00.000Z";
 
 const awsInstalled = which("aws") !== null;
+
+// Passed to every test() as its third argument. A describe-level
+// `{ timeout }` option is NOT honored by Bun 1.4.2 (the version CI runs):
+// measured, a describe({ timeout: 20000 }) test still died at 5000ms.
+const TEST_TIMEOUT_MS = 30000;
 
 interface RunResult {
   exitCode: number;
@@ -115,21 +120,20 @@ async function runScript(standin: RenameS3Standin, args: string[]): Promise<RunR
   return { exitCode, stdout, stderr };
 }
 
-describe.skipIf(!awsInstalled)(
-  "rename-archives.ts entry point (real aws CLI, stand-in S3)",
-  { timeout: 20000 },
-  () => {
-    let standin: RenameS3Standin;
+describe.skipIf(!awsInstalled)("rename-archives.ts entry point (real aws CLI, stand-in S3)", () => {
+  let standin: RenameS3Standin;
 
-    beforeEach(() => {
-      standin = startRenameS3Standin();
-    });
+  beforeEach(() => {
+    standin = startRenameS3Standin();
+  });
 
-    afterEach(() => {
-      standin.stop();
-    });
+  afterEach(() => {
+    standin.stop();
+  });
 
-    test("copies the legacy archive, tags the destination, then deletes the old object by version id", async () => {
+  test(
+    "copies the legacy archive, tags the destination, then deletes the old object by version id",
+    async () => {
       standin.putObject(BUCKET, OLD_KEY, {
         size: 500,
         etag: '"abc123"',
@@ -171,9 +175,13 @@ describe.skipIf(!awsInstalled)(
         expect(copyIdx).toBeLessThan(tagIdx);
         expect(tagIdx).toBeLessThan(deleteIdx);
       }
-    });
+    },
+    TEST_TIMEOUT_MS,
+  );
 
-    test("a PutObjectTagging failure leaves the old object undeleted and the run reports failure", async () => {
+  test(
+    "a PutObjectTagging failure leaves the old object undeleted and the run reports failure",
+    async () => {
       standin.putObject(BUCKET, OLD_KEY, {
         size: 500,
         etag: '"abc123"',
@@ -194,9 +202,13 @@ describe.skipIf(!awsInstalled)(
       // ...and NEITHER object was deleted.
       expect(standin.log.some((e) => e.op === "DeleteObject")).toBe(false);
       expect(standin.has(BUCKET, OLD_KEY)).toBe(true);
-    });
+    },
+    TEST_TIMEOUT_MS,
+  );
 
-    test("the already-renamed path tags the (previously untagged) destination before deleting the old object", async () => {
+  test(
+    "the already-renamed path tags the (previously untagged) destination before deleting the old object",
+    async () => {
       // Simulates a prior run that copied the object and died before tagging
       // it: both keys exist, matching size/ETag, destination untagged.
       standin.putObject(BUCKET, OLD_KEY, {
@@ -227,9 +239,13 @@ describe.skipIf(!awsInstalled)(
 
       expect(standin.getObject(BUCKET, NEW_KEY)?.tags["nemar-kind"]).toBe("archive");
       expect(standin.has(BUCKET, OLD_KEY)).toBe(false);
-    });
+    },
+    TEST_TIMEOUT_MS,
+  );
 
-    test("a dry run makes no Copy, PutObjectTagging or Delete requests", async () => {
+  test(
+    "a dry run makes no Copy, PutObjectTagging or Delete requests",
+    async () => {
       standin.putObject(BUCKET, OLD_KEY, {
         size: 500,
         etag: '"abc123"',
@@ -246,6 +262,7 @@ describe.skipIf(!awsInstalled)(
       expect(writeOps).toEqual([]);
       expect(standin.has(BUCKET, OLD_KEY)).toBe(true);
       expect(standin.has(BUCKET, NEW_KEY)).toBe(false);
-    });
-  },
-);
+    },
+    TEST_TIMEOUT_MS,
+  );
+});
