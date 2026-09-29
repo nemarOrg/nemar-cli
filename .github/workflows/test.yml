@@ -59,6 +59,12 @@ jobs:
               - 'src/**'
               - 'package.json'
               - 'tsconfig.json'
+              # CI-support scripts that ship and are tested alongside the CLI
+              # (e.g. scripts/ci/probe-github-token.ts) but live outside src/.
+              # Without this, a change to the probe alone matched no category,
+              # so unit-pure -- the job that actually runs
+              # test/probe-github-token.test.ts -- silently skipped it.
+              - 'scripts/ci/**'
             backend:
               - 'backend/**'
             tests:
