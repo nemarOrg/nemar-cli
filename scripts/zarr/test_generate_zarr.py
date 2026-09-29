@@ -3582,14 +3582,40 @@ class TestEeglabDeclaredChannelCount(unittest.TestCase):
 
     def test_nbchan_disagreeing_with_the_matrix_is_not_a_count(self):
         # biosigIO serves the matrix's rows whatever nbchan says. An nbchan
-        # ABOVE them would refuse a faithful store, so neither direction vouches.
+        # ABOVE them would refuse a faithful store; one BELOW them is not taken
+        # as a lower bound either, since the count is published as `in_file`
+        # and a header its own matrix contradicts proves nothing. Neither
+        # direction vouches.
         for label, nbchan, v73 in (
-            ("classicover", 5, False), ("classicunder", 3, False), ("v73over", 5, True),
+            ("classicover", 5, False), ("classicunder", 3, False),
+            ("v73over", 5, True), ("v73under", 3, True),
         ):
             with self.subTest(label):
                 p = build_eeglab_set(self.path(label), nbchan, rows=4, v73=v73)
                 self.assertIn("disagrees with the 4-row data matrix", self.quiet_none(p))
                 self.assertEqual(self.imported(p), 4)
+
+    def test_a_fractional_nbchan_is_unknown_whatever_biosigio_makes_of_it(self):
+        # biosigIO truncates a classic file's nbchan and rounds a v7.3 file's,
+        # so 3.6 is 3 channels to one importer path and 4 to the other. The
+        # header read vouches for neither: None, never a count.
+        import h5py
+        import numpy as np
+        import scipy.io
+
+        p = build_eeglab_set(self.path("fracclassic"), 3, fdt=True)
+        mat = scipy.io.loadmat(p)["EEG"][0, 0]
+        fields = {name: mat[name] for name in mat.dtype.names}
+        fields["nbchan"] = np.array([[3.6]])
+        scipy.io.savemat(p, {"EEG": fields})
+        self.assertIn("nbchan is 3.6", self.quiet_none(p))
+        self.assertEqual(self.imported(p), 3)  # int(3.6)
+
+        q = build_eeglab_set(self.path("fracv73"), 4, v73=True)
+        with h5py.File(q, "r+") as f:
+            f["EEG"]["nbchan"][...] = 3.6
+        self.assertIn("nbchan is 3.6", self.quiet_none(q))
+        self.assertEqual(self.imported(q), 4)  # int(round(3.6))
 
     def test_an_unusable_nbchan_is_unknown(self):
         for label, value in {"zero": 0, "negative": -3, "fraction": 3.5, "absurd": 10**7}.items():

@@ -3049,6 +3049,11 @@ def _eeglab_declared_channel_count(path: str) -> int | None:
         _warn_unreadable_header("EEGLAB", path, f"{type(exc).__name__}: {exc}")
         return None
     nbchan = fields.get("nbchan")
+    # A non-integral nbchan is unknown, deliberately. biosigIO does not agree
+    # with itself on one (classic files truncate it, `int()`; v7.3 files round
+    # it, `int(round())`), so no single integer is what it serves; and a
+    # fraction says the field is not a channel count. None is the safe
+    # direction: it leaves the gate on channels.tsv alone, never lower.
     if nbchan is None or not math.isfinite(nbchan) or nbchan != int(nbchan):
         _warn_unreadable_header("EEGLAB", path, f"nbchan is {nbchan!r}")
         return None
@@ -3062,6 +3067,13 @@ def _eeglab_declared_channel_count(path: str) -> int | None:
     if rows is None:
         _warn_unreadable_header("EEGLAB", path, "it has no readable data matrix")
         return None
+    # Either direction is unknown, deliberately. nbchan ABOVE the rows would
+    # call a faithful store truncated. nbchan BELOW them is not taken as a
+    # lower bound either: the count is used as proof of what the file holds
+    # (a store equal to it is complete, and it is published as `in_file` in
+    # the `channels_tsv_count_mismatch` disclosure), and a file whose header
+    # and matrix disagree proves nothing, so a lower number would publish an
+    # `in_file` the store itself contradicts. None leaves channels.tsv alone.
     if rows != count:
         _warn_unreadable_header(
             "EEGLAB", path,
