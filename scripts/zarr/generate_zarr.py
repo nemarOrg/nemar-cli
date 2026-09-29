@@ -2027,23 +2027,18 @@ def _decode_sidecar_text(raw: bytes, path: str) -> str:
     so a CRLF sidecar reaches every caller (and the copy staged for biosigIO)
     exactly as before.
     """
-    text: str | None = None
     try:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
-        for encoding in ("cp1252", "latin-1"):
-            try:
-                text = raw.decode(encoding)
-            except UnicodeDecodeError:
-                continue
-            print(
-                f"::warning::{path} is not valid UTF-8 (BIDS requires it); "
-                f"read it as {encoding}",
-                flush=True,
-            )
-            break
-    if text is None:  # latin-1 maps every byte, so this cannot happen
-        raise AssertionError(f"could not decode {path} even as latin-1")
+        try:
+            text, encoding = raw.decode("cp1252"), "cp1252"
+        except UnicodeDecodeError:
+            text, encoding = raw.decode("latin-1"), "latin-1"
+        print(
+            f"::warning::{path} is not valid UTF-8 (BIDS requires it); "
+            f"read it as {encoding}",
+            flush=True,
+        )
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
