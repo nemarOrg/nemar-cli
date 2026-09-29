@@ -78,8 +78,8 @@ newsRoutes.get("/", async (c) => {
  */
 newsRoutes.get("/media/:file", async (c) => {
   const file = c.req.param("file");
-  const fallbackType = contentTypeForFile(file);
-  if (!fallbackType) return c.json({ error: "not_found" }, 404);
+  const contentType = contentTypeForFile(file);
+  if (!contentType) return c.json({ error: "not_found" }, 404);
 
   const bucket = c.env.NEWS_MEDIA;
   if (!bucket) {
@@ -107,7 +107,11 @@ newsRoutes.get("/media/:file", async (c) => {
   if (!hasBody(object)) {
     return new Response(null, { status: 304, headers });
   }
-  headers.set("Content-Type", object.httpMetadata?.contentType ?? fallbackType);
+  // From the file name, never from the object's stored metadata. The name
+  // is locked to four image extensions by the check above; the metadata is
+  // whatever the last write set, and a stray `text/html` there would make
+  // this origin serve HTML.
+  headers.set("Content-Type", contentType);
   return new Response(object.body, { status: 200, headers });
 });
 
