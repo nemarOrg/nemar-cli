@@ -13,6 +13,71 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## 0.10.8 - 2026-09-29
+
+### Changed
+
+- **Git-tracked files through data.nemar.org are cached (#1494, #1516, #1519).** The
+  Worker keeps a Workers Cache API copy of each brokered file (sidecars, `events.tsv`,
+  `channels.tsv`) for up to 7 days per data center. The visibility gate and the
+  blob-SHA check against the current manifest still run on every request, so a dataset
+  that goes private stops being served at once, and a rewritten manifest is never
+  answered from a stale copy. Clients still receive `public, max-age=300`. ADR 0066
+  records the decision.
+- **The `data-ip` limit is 100,000 requests per minute per IP, up from 10,000, and
+  cache misses have their own budget of 10,000 per minute (#1516).** A full download
+  makes thousands of small requests; only the misses, which reach GitHub, are bounded
+  separately. A file already in the cache is still served once the miss budget is spent.
+- **The Worker runs with Smart Placement, and trusts a checked manifest for 60 seconds
+  (#1494, #1526).** The `nemar.org` zone's traffic is answered from distant data centers
+  (a client in Los Angeles was served from Dublin, Manchester and Sydney), so every D1
+  read and S3 call crossed an ocean. Placement runs the Worker near its backends. A
+  manifest confirmed against S3 within the last 60 seconds is used without asking again,
+  and each isolate remembers resolved answers in a 4 MiB memo. Data-plane responses
+  carry `Server-Timing` (gate, manifest, cache, upstream). ADR 0072 is amended.
+- **`manifest.json` lists plain public S3 URLs for annexed files (#1522, #1529).** Every
+  public dataset's objects are publicly readable, so the per-request signature added
+  nothing. It made up 8.9 of nm000134's 16.1 MB and most of its ~10 s response, and
+  expired after an hour, so a long download from one manifest failed partway. A dataset
+  the bucket policy excludes still gets presigned URLs. Field names and order are
+  unchanged. The document is cached behind the visibility gate, clients may keep it for
+  300 seconds (60 when presigned), and the entry bound is 38,000 for unsigned manifests
+  (30,000 when presigned). Code that parsed the `X-Amz-*` parameters or relied on the
+  URL expiring must change. ADR 0074 records the decision.
+- **Archive zips are named `<id>_v<version>.zip`, and only the latest version has one
+  (#1491, #1518, #1521).** A download of `on002718` used to save as `v1.0.0.zip`. The
+  backend reads the new name and falls back to the old one until the stored archives are
+  renamed. An older version's archive request answers 404 with the latest version and a
+  direct-download link instead of a failed download.
+
+### Fixed
+
+- **Oversized datasets no longer get an archive (#1514, #1520).** The size policy (100 GiB
+  or 200,000 files, ADR 0012) was checked against a manifest the data plane only serves
+  once a version is public, so an unpublished or private version built anyway; nm000284
+  (512 GiB) produced a 345 GB zip. The dispatcher and both retry paths now apply the
+  policy from the catalog row before dispatching, dispatches carry the size, a stale
+  `ready` archive is no longer advertised for a newer version, and a `ready` callback for
+  an older version no longer overwrites the latest version's archive fields. The
+  workflow half is nemarDatasets/.github#121.
+- **The anonymity sweep no longer reports a blinded Funding or Acknowledgements entry as
+  naming someone (#1515, #1517).** Those fields reused the author-name placeholder rule,
+  so wording such as "Redacted for double-blind review" was reported. Whole-entry
+  redaction wording and no-funding declarations are now recognized; a real funder or
+  name is still reported. ADR 0067 is amended.
+- **Zarr: a FIF recording whose `channels.tsv` over-declares channels is served with a
+  disclosure, and non-UTF-8 sidecars are read (#1527).** The channel gate reads the FIF
+  header's channel count instead of refusing the store as truncated, and a Latin-1
+  `channels.tsv` no longer retries forever.
+
+### Added
+
+- **Zarr: a reviewed per-dataset declaration for EEGLAB `.fdt` files kept away from their
+  `.set` (#1528).** on004306 keeps its `.fdt` files under `derivatives/` with unrelated
+  names, so its 15 raw recordings were unconvertible. Each declared pairing is checked
+  against the header dimensions and the file size before and after staging, and nothing
+  is matched by name. ADR 0073 records the decision.
+
 ## 0.10.7 - 2026-09-25
 
 ### Fixed
