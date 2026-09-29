@@ -8713,9 +8713,13 @@ def write_eeglab_set(set_path: str, fdt_path: str | None, *, nbchan: int = 4,
     """A real classic EEGLAB `.set` (fields saved flat, as EEGLAB's own
     `pop_saveset` does) whose samples are a float32 `.fdt` written column-major
     at `fdt_path`, which need NOT sit beside the `.set`. `fdt_path=None` embeds
-    the matrix inline instead."""
-    import numpy as np
-    import scipy.io
+    the matrix inline instead. Skips the calling test when numpy or scipy is
+    missing (the CI fast tier installs neither)."""
+    try:
+        import numpy as np
+        import scipy.io
+    except ImportError as exc:
+        raise unittest.SkipTest(f"{exc.name} not installed") from exc
 
     rng = np.random.default_rng(7)
     data = (rng.standard_normal((nbchan, pnts)) * 1e-5).astype(np.float32)
