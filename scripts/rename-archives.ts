@@ -28,8 +28,26 @@
  * Shells out to the `aws` CLI rather than pulling in an SDK dependency:
  * `aws s3 cp` performs a real server-side copy (bytes never leave AWS's
  * network) and manages multipart copy automatically above 5 GB, which is
- * required here -- production archives run into the hundreds of GB (the
- * #1518 inventory found archives up to ~350 GB).
+ * required here -- production archives run into the hundreds of GB (up to
+ * about 606 GiB).
+ *
+ * Tagging is a SEPARATE step from the copy. `aws s3 cp` has no equivalent
+ * of `s3api copy-object`'s `--tagging-directive`/`--tagging` -- checked
+ * against aws-cli 2.36.47's `aws s3 cp help`, it accepts only
+ * `--copy-props`/`--metadata-directive` -- and passing the copy-object
+ * flags to it is exactly what made a production run fail 88/88 copies
+ * immediately with `ParamValidation: Unknown options:
+ * --tagging-directive,REPLACE,--tagging,nemar-kind=archive` before anything
+ * in S3 was touched. So the copy (`buildCopyArgs`) carries no tagging
+ * flags at all, and every path that can leave an untagged destination
+ * (a fresh copy, or a resumed run's already-copied destination) tags it
+ * afterward with `s3api put-object-tagging` and reads the tag set back
+ * with `get-object-tagging` to confirm `nemar-kind=archive` actually
+ * landed, BEFORE the old object is deleted (`tagDestination`). The
+ * #1518 lifecycle rule that expires noncurrent archive versions filters on
+ * this exact tag, and the source's tag set is empty (pre-#1491 archives
+ * were never tagged), so an untagged renamed archive would never be
+ * covered by it.
  *
  * For each dataset (discovered by listing the bucket's top-level id
  * prefixes, or scoped to one id via --dataset), every pre-#1491 key found
@@ -37,20 +55,20 @@
  * dry-run and apply, so the dry-run preview is exactly what apply would
  * do) and classified into one of four actions (see `decideRenameAction`):
  *
- *   - **copy**: destination doesn't exist yet. `aws s3 cp` with
- *     `--tagging-directive REPLACE --tagging nemar-kind=archive` (content
- *     type and metadata are preserved by the default COPY directive, only
- *     the tag set is replaced -- the source's tag set is empty, so a plain
- *     copy would carry the empty set forward and the #1518 lifecycle rule,
- *     which filters on this tag, would never apply to a renamed archive).
- *     Verifies size, and ETag when comparable, then deletes the OLD object
- *     BY VERSION ID (never a bare `aws s3 rm`: the bucket is versioned with
- *     no noncurrent-version expiration configured before #1518's lifecycle
- *     rule, so a bare delete only adds a delete marker and frees nothing).
+ *   - **copy**: destination doesn't exist yet. `aws s3 cp` (content type
+ *     and metadata are preserved by the default COPY directive), then
+ *     verifies size, and ETag when comparable, then tags the destination
+ *     and verifies the tag landed (`tagDestination`), then deletes the OLD
+ *     object BY VERSION ID (never a bare `aws s3 rm`: the bucket is
+ *     versioned with no noncurrent-version expiration configured before
+ *     #1518's lifecycle rule, so a bare delete only adds a delete marker
+ *     and frees nothing).
  *   - **already-renamed**: destination exists and verifies as an exact
  *     match of the source (a previous partial run copied it but didn't
- *     finish deleting the old object). No copy is repeated; the old object
- *     is deleted by version id.
+ *     finish tagging and deleting). No copy is repeated; `tagDestination`
+ *     runs again regardless (idempotent: `put-object-tagging` simply
+ *     replaces the tag set), since a prior run may have died between the
+ *     copy and the tag. The old object is then deleted by version id.
  *   - **skip-collision**: destination exists and does NOT match the
  *     source. NEVER overwritten -- a destination that differs is most
  *     often a fresh build the new workflow already wrote for this exact
@@ -61,8 +79,9 @@
  *   - **delete-stale-legacy**: only reachable with `--delete-stale-legacy`,
  *     and only when the destination is both newer (LastModified) than the
  *     legacy source AND non-empty. Deletes ONLY the legacy source by
- *     version id; the destination is never touched (no copy is performed,
- *     since it's already there and being trusted as authoritative).
+ *     version id; the destination is never touched -- no copy, no
+ *     tagging, since it's already there and being trusted as authoritative
+ *     and the new workflow already tags what it writes.
  *
  * Resumable: a key already in the new shape (found directly in the current
  * listing) is skipped as "already renamed" before this decision even
@@ -262,14 +281,21 @@ export function decideRenameAction(
 }
 
 /**
- * Args for the server-side copy. `--tagging-directive REPLACE --tagging
- * nemar-kind=archive` is required: the default tagging directive is COPY,
- * which would carry the source's tag set (empty, pre-#1491 archives were
- * never tagged) forward to the renamed object, and the #1518 lifecycle
- * rule expires noncurrent archive versions by filtering on this exact tag
- * -- an untagged renamed archive would never be covered by it. Content
- * type and metadata are NOT touched here and are preserved by the default
- * metadata directive (COPY).
+ * Args for the server-side copy. No tagging flags: `aws s3 cp` has no
+ * equivalent of `s3api copy-object`'s `--tagging-directive`/`--tagging` --
+ * checked against aws-cli 2.36.47's `aws s3 cp help`, it accepts only
+ * `--copy-props`/`--metadata-directive` -- and passing them here is what
+ * made a production run fail 88/88 copies immediately with `ParamValidation:
+ * Unknown options: --tagging-directive,REPLACE,--tagging,nemar-kind=archive`.
+ * Content type and metadata are NOT touched here and are preserved by the
+ * default COPY behavior. The tag is applied afterward by a separate
+ * `s3api put-object-tagging` call (`buildTagArgs`) and verified with
+ * `get-object-tagging` before anything is deleted -- see `tagDestination`.
+ *
+ * `--no-progress`: `runAws` runs this through `spawnSync` with piped
+ * stdout, and a copy of a multi-hundred-GiB archive would otherwise buffer
+ * `aws s3 cp`'s progress output for the whole transfer instead of
+ * streaming it.
  */
 export function buildCopyArgs(bucket: string, item: RenamePlanItem): string[] {
   return [
@@ -277,11 +303,39 @@ export function buildCopyArgs(bucket: string, item: RenamePlanItem): string[] {
     "cp",
     `s3://${bucket}/${item.oldKey}`,
     `s3://${bucket}/${item.newKey}`,
-    "--tagging-directive",
-    "REPLACE",
-    "--tagging",
-    "nemar-kind=archive",
+    "--no-progress",
   ];
+}
+
+/**
+ * Args for `s3api put-object-tagging` against the rename destination.
+ * `s3api copy-object`'s `--tagging-directive`/`--tagging` is not used here
+ * because the copy itself is done with `aws s3 cp` (see `buildCopyArgs`),
+ * which has no tagging option at all -- so the tag is always set as its
+ * own call, never folded into the copy.
+ */
+export function buildTagArgs(bucket: string, key: string): string[] {
+  return [
+    "s3api",
+    "put-object-tagging",
+    "--bucket",
+    bucket,
+    "--key",
+    key,
+    "--tagging",
+    "TagSet=[{Key=nemar-kind,Value=archive}]",
+  ];
+}
+
+/**
+ * True when a `get-object-tagging` tag set already carries
+ * `nemar-kind=archive`. The one check `tagDestination` requires before
+ * treating a destination as safely tagged and deleting the old object --
+ * exported and pure so it is unit-tested directly rather than only through
+ * the AWS-CLI-shelling half of this script.
+ */
+export function hasArchiveTag(tagSet: Array<{ Key: string; Value: string }>): boolean {
+  return tagSet.some((tag) => tag.Key === "nemar-kind" && tag.Value === "archive");
 }
 
 /** True for a bucket-listing "directory" prefix shaped like a NEMAR dataset id. */
@@ -456,6 +510,49 @@ function headObject(bucket: string, key: string): HeadObjectResult {
   };
 }
 
+/**
+ * Tag the rename destination and read the tag set back to confirm
+ * `nemar-kind=archive` actually landed, before the caller is allowed to
+ * delete the old object. Used on BOTH the "copy" path (a fresh copy is
+ * always untagged) and the "already-renamed" path (a previous run may have
+ * copied the object and died before tagging it) -- `put-object-tagging`
+ * replaces the whole tag set, so calling it again on an already-tagged
+ * object is a safe no-op.
+ */
+function tagDestination(bucket: string, key: string): boolean {
+  const tag = runAws(buildTagArgs(bucket, key));
+  if (!tag.ok) {
+    console.error(`  FAILED to tag ${key}: ${tag.stderr.trim()}`);
+    console.error("  refusing to delete the old object: tagging failed.");
+    return false;
+  }
+  let tagSet: Array<{ Key: string; Value: string }>;
+  try {
+    const read = runAwsJson<{ TagSet?: Array<{ Key: string; Value: string }> }>([
+      "s3api",
+      "get-object-tagging",
+      "--bucket",
+      bucket,
+      "--key",
+      key,
+    ]);
+    tagSet = read.TagSet ?? [];
+  } catch (err) {
+    console.error(
+      `  FAILED to read back the tag set on ${key}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    console.error("  refusing to delete the old object: could not verify the tag.");
+    return false;
+  }
+  if (!hasArchiveTag(tagSet)) {
+    console.error(`  FAILED: ${key} has no nemar-kind=archive tag after tagging it`);
+    console.error("  refusing to delete the old object: tag verification failed.");
+    return false;
+  }
+  console.log(`  tagged and verified ${key} (nemar-kind=archive).`);
+  return true;
+}
+
 function deleteOldByVersionId(bucket: string, oldKey: string): boolean {
   const versionId = currentVersionId(bucket, oldKey);
   if (!versionId) {
@@ -516,9 +613,7 @@ async function processOne(
 
   switch (decision.action) {
     case "copy": {
-      console.log(
-        "  copying (server-side, aws s3 cp handles multipart above 5 GB, tags nemar-kind=archive)...",
-      );
+      console.log("  copying (server-side, aws s3 cp handles multipart above 5 GB)...");
       const copy = runAws(buildCopyArgs(bucket, item));
       if (!copy.ok) {
         console.error(`  FAILED to copy: ${copy.stderr.trim()}`);
@@ -539,12 +634,15 @@ async function processOne(
         console.error("  refusing to delete the old object: verification failed.");
         return "failed";
       }
+      console.log("  tagging destination (nemar-kind=archive)...");
+      if (!tagDestination(bucket, item.newKey)) return "failed";
       return deleteOldByVersionId(bucket, item.oldKey) ? "renamed" : "failed";
     }
     case "already-renamed": {
       console.log(
-        "  destination already present and verified (resumed run); deleting the stale old object.",
+        "  destination already present and verified (resumed run); tagging it (a prior run may have died before tagging) and deleting the stale old object.",
       );
+      if (!tagDestination(bucket, item.newKey)) return "failed";
       return deleteOldByVersionId(bucket, item.oldKey) ? "renamed" : "failed";
     }
     case "delete-stale-legacy": {

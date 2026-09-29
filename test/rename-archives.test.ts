@@ -16,8 +16,10 @@ import { describe, expect, test } from "bun:test";
 import {
   type ArchiveObjectInfo,
   buildCopyArgs,
+  buildTagArgs,
   classifyHeadObjectError,
   decideRenameAction,
+  hasArchiveTag,
   isDatasetIdPrefix,
   isNewFormatArchiveKey,
   planDatasetRename,
@@ -264,8 +266,8 @@ describe("decideRenameAction (PR review finding: never overwrite an existing des
   });
 });
 
-describe("buildCopyArgs (PR review finding: renamed objects must carry the archive tag)", () => {
-  test("includes --tagging-directive REPLACE and the nemar-kind=archive tag", () => {
+describe("buildCopyArgs (bug: aws s3 cp has no --tagging-directive/--tagging)", () => {
+  test("is a plain s3 cp with --no-progress, no tagging flags", () => {
     const item = {
       datasetId: "on002718",
       oldKey: "on002718/archives/v1.0.0.zip",
@@ -280,14 +282,14 @@ describe("buildCopyArgs (PR review finding: renamed objects must carry the archi
       "cp",
       "s3://nemar/on002718/archives/v1.0.0.zip",
       "s3://nemar/on002718/archives/on002718_v1.0.0.zip",
-      "--tagging-directive",
-      "REPLACE",
-      "--tagging",
-      "nemar-kind=archive",
+      "--no-progress",
     ]);
   });
 
-  test("does not pass a metadata directive (content type and metadata stay on the default COPY behavior)", () => {
+  // This is the exact bug (#1491/#1518 sweep, measured against production):
+  // `aws s3 cp` rejects `s3api copy-object`'s tagging flags outright with a
+  // ParamValidation error, so buildCopyArgs must never emit them again.
+  test("never includes --tagging-directive or --tagging (that combination belongs to s3api copy-object)", () => {
     const item = {
       datasetId: "nm000132",
       oldKey: "nm000132/archives/v1.1.1.zip",
@@ -297,8 +299,52 @@ describe("buildCopyArgs (PR review finding: renamed objects must carry the archi
       lastModified: T1,
     };
     const args = buildCopyArgs("nemar", item);
+    expect(args).not.toContain("--tagging-directive");
+    expect(args).not.toContain("--tagging");
     expect(args).not.toContain("--metadata-directive");
     expect(args).not.toContain("--content-type");
+  });
+});
+
+describe("buildTagArgs", () => {
+  test("builds an s3api put-object-tagging call carrying nemar-kind=archive", () => {
+    expect(buildTagArgs("nemar", "on002718/archives/on002718_v1.0.0.zip")).toEqual([
+      "s3api",
+      "put-object-tagging",
+      "--bucket",
+      "nemar",
+      "--key",
+      "on002718/archives/on002718_v1.0.0.zip",
+      "--tagging",
+      "TagSet=[{Key=nemar-kind,Value=archive}]",
+    ]);
+  });
+});
+
+describe("hasArchiveTag", () => {
+  test("true when the tag set carries nemar-kind=archive", () => {
+    expect(hasArchiveTag([{ Key: "nemar-kind", Value: "archive" }])).toBe(true);
+  });
+
+  test("true when it is one of several tags", () => {
+    expect(
+      hasArchiveTag([
+        { Key: "other", Value: "thing" },
+        { Key: "nemar-kind", Value: "archive" },
+      ]),
+    ).toBe(true);
+  });
+
+  test("false for an empty tag set", () => {
+    expect(hasArchiveTag([])).toBe(false);
+  });
+
+  test("false when the key is present with a different value", () => {
+    expect(hasArchiveTag([{ Key: "nemar-kind", Value: "something-else" }])).toBe(false);
+  });
+
+  test("false when unrelated tags are present but not nemar-kind", () => {
+    expect(hasArchiveTag([{ Key: "other", Value: "thing" }])).toBe(false);
   });
 });
 
