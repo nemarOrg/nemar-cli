@@ -6,13 +6,25 @@
  * here are the pure decision/transform helpers.
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 // The publication gate's own predicate, imported rather than restated: the
 // clone writes a placeholder and the gate decides whether it counts, so a test
 // that spelled the rule twice could pass while the two disagreed.
 import { isPlaceholderAuthor } from "../backend/src/services/submission-minimums";
 import {
   type ExemplarFleetEntry,
+  type PrepareExemplarResult,
+  copyExemplarData,
   findMissingCopiedKeys,
   isAnnexContentKey,
   parseExemplarFleet,
@@ -325,5 +337,135 @@ describe("planSubPrefixCopy / findMissingCopiedKeys (#982, same #967 bug)", () =
     const existing = new Map([["git:deadbeef", 0]]);
     const missing = findMissingCopiedKeys(keys, existing);
     expect(missing).toEqual([]); // present, no declared size to check -> not missing
+  });
+});
+
+describe("copyExemplarData's archives/ wiring reaches the real copy invocation (0.10.8 review)", () => {
+  // Only `rewriteArchiveKeyPrefix` itself was unit-tested (the describe block
+  // above); nothing proved `copyExemplarData` -> `copySubPrefix` actually PASSES
+  // it for the "archives/" sub-prefix, as opposed to the default
+  // `rewriteObjectKeyPrefix` every other sub-prefix uses. This drives the real,
+  // exported entry point (`copyExemplarData`) with a real `aws` CLI shim on
+  // PATH (the same install-a-shim-binary convention
+  // `fleet-content-recovery.test.ts` uses for git-annex's own S3 calls) and
+  // inspects the real `aws s3 cp` invocation it makes.
+  let shimDir: string;
+  let realPath: string | undefined;
+  const scratch: string[] = [];
+
+  function shimLog(): string[] {
+    const path = join(shimDir, "calls.log");
+    return existsSync(path) ? readFileSync(path, "utf8").split("\n").filter(Boolean) : [];
+  }
+
+  /**
+   * A real `aws` binary on PATH. `list-objects-v2` answers the one item this
+   * test cares about (a new-format archive under the SOURCE dataset's
+   * `archives/` prefix) and an empty listing for every other bucket/prefix
+   * combination `copyExemplarData` also queries (objects/, zarr/, version/,
+   * and the DESTINATION's own archives/ listing), so those phases are all
+   * "nothing to copy" no-ops and only the archives/ copy is exercised.
+   * `s3 cp` (the real server-side copy invocation) just logs its args and
+   * succeeds -- this test is about WHICH destination key it is called with,
+   * not about a real transfer.
+   */
+  function installAwsShim(sourcePrefix: string, sourceKey: string): void {
+    writeFileSync(
+      join(shimDir, "aws"),
+      `#!/bin/sh
+echo "$@" >> "${join(shimDir, "calls.log")}"
+case "$1" in
+  --version) echo "aws-cli/2.0.0 shim"; exit 0 ;;
+  s3api)
+    case "$2" in
+      list-objects-v2)
+        shift 2
+        bucket=""
+        prefix=""
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --bucket) bucket="$2"; shift 2 ;;
+            --prefix) prefix="$2"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        if [ "$bucket" = "nemar" ] && [ "$prefix" = "${sourcePrefix}" ]; then
+          echo '{"Contents":[{"Key":"${sourceKey}","Size":42}]}'
+        else
+          echo '{"Contents":[]}'
+        fi
+        exit 0
+        ;;
+    esac
+    exit 0
+    ;;
+  s3)
+    case "$2" in
+      cp) exit 0 ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 0
+`,
+    );
+    chmodSync(join(shimDir, "aws"), 0o755);
+  }
+
+  beforeEach(() => {
+    const root = mkdtempSync(join(tmpdir(), "nemar-exemplar-clone-"));
+    scratch.push(root);
+    shimDir = join(root, "bin");
+    mkdirSync(shimDir, { recursive: true });
+    realPath = process.env.PATH;
+    process.env.PATH = `${shimDir}:${realPath ?? ""}`;
+  });
+
+  afterEach(() => {
+    // Delete rather than assign `undefined`, which would store the literal
+    // string "undefined" for the rest of this shared `bun test` process and
+    // break every later test that shells out (same footgun
+    // `fleet-content-recovery.test.ts` documents).
+    if (realPath === undefined) {
+      // biome-ignore lint/performance/noDelete: the rule targets hot-path objects, not env teardown.
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = realPath;
+    }
+    scratch.length = 0;
+  });
+
+  test("the archive-aware rewrite, not the generic one, names the real copy's destination", async () => {
+    const sourceId = "nm000104";
+    const xxId = "xx099901";
+    // A new-format (#1491) archive file name: the source dataset's own id is
+    // embedded in the file name, which is exactly what `rewriteArchiveKeyPrefix`
+    // (unlike the generic `rewriteObjectKeyPrefix`) also rewrites.
+    const sourceKey = `${sourceId}/archives/${sourceId}_v1.0.0.zip`;
+    installAwsShim(`${sourceId}/archives/`, sourceKey);
+
+    const prep: PrepareExemplarResult = {
+      datasetPath: "/unused",
+      xxId,
+      sourceId,
+      nemarS3DevUuid: "unused",
+    };
+
+    const result = await copyExemplarData(prep, { includeDerived: true });
+
+    // objects/ has nothing to copy (empty listing), so the only key reported
+    // back is the archives/ one below, carried through the SOURCE-relative
+    // key exactly as `copySubPrefix` returns it.
+    expect(result.keys).toEqual([]);
+
+    const cpCalls = shimLog().filter((line) => line.startsWith("s3 cp"));
+    expect(cpCalls).toHaveLength(1);
+    // The archive-aware destination: the DESTINATION dataset's id folded into
+    // the file name too (`xx099901_v1.0.0.zip`), not the generic rewrite's
+    // `nm000104_v1.0.0.zip` (the source's id left in the file name at the new
+    // path -- neither the new-format nor the pre-#1491 name).
+    expect(cpCalls[0]).toContain(`s3://nemar/${sourceKey}`);
+    expect(cpCalls[0]).toContain(`s3://nemar-dev/${xxId}/archives/${xxId}_v1.0.0.zip`);
+    expect(cpCalls[0]).not.toContain(`${xxId}/archives/${sourceId}_v1.0.0.zip`);
   });
 });
