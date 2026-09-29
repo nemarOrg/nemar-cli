@@ -3121,11 +3121,13 @@ class TestFifDeclaredChannelCount(unittest.TestCase):
         self.assertEqual(file_declared_channel_count(p), len(FIF_CHANNELS))
 
     def test_a_split_recording_is_counted_from_its_head(self):
-        # 2 MB splits over ~20 MB of samples: several `split-NN` files, of which
-        # the converter hands the gate the head.
+        # The converter hands the gate the chain head. Cost: MNE reserves a 1 MB
+        # cushion per split, so a "2MB" split holds ~1 MB of samples; 120 s at
+        # 1 kHz x 5 float32 channels (~2.4 MB) is the least that yields three
+        # `split-NN` files, written to a tmpdir in well under a second.
         build_real_fif(
             os.path.join(self.dir, "sub-01_task-rest_meg.fif"),
-            rate=1000.0, seconds=500, split_size="2MB", split_naming="bids",
+            rate=1000.0, seconds=120, split_size="2MB", split_naming="bids",
         )
         head = os.path.join(self.dir, "sub-01_task-rest_split-01_meg.fif")
         self.assertTrue(os.path.exists(os.path.join(self.dir, "sub-01_task-rest_split-02_meg.fif")))
