@@ -153,6 +153,19 @@ interface GetDataCounts {
    * into a reassuring total. Always 0 when `noVerify` was not requested.
    */
   unsizedFiles: number;
+  /**
+   * Print-ready lines for every `--no-verify` size mismatch this run found,
+   * each ending in the manual recovery command -- present on EVERY arm
+   * (`success: true` included), because the common shape is a `"partial"`
+   * outcome (most files fine, one corrupt), and `failureText`/`error` is
+   * only carried on `success: false`. `printPartialRetrieval`'s own text
+   * points at a report this local check never writes, so the caller must
+   * print these itself rather than relying on that generic path. A file
+   * whose removal could not be confirmed gets a line here too, worded as an
+   * unresolved warning rather than a completed reset (see the option doc on
+   * `noVerify` above). Always `[]` when `noVerify` was not requested.
+   */
+  noVerifyMismatches: string[];
 }
 
 /**
@@ -276,6 +289,45 @@ export function classifyGetOutcome(input: {
 }
 
 /**
+ * Whether the location log currently claims `file`'s content is present
+ * "here" (this clone), read directly from `whereis --json` rather than
+ * trusted from another command's exit code -- an exit code is not evidence
+ * (`.memory/git-annex-flag-and-log-truths.md`). Returns null when the
+ * answer could not be read at all, which callers must treat as NOT
+ * confirmed absent, the same fail-closed rule `batchSetKeyPresence` uses
+ * for a retraction.
+ */
+async function isRecordedHere(datasetPath: string, file: string): Promise<boolean | null> {
+  const { stdout } = await runCommand(["git", "annex", "whereis", "--json", "--", file], {
+    cwd: datasetPath,
+  });
+  const line = stdout.split("\n").find((candidate) => candidate.trim().startsWith("{"));
+  if (!line) return null;
+  try {
+    const parsed = JSON.parse(line) as { whereis?: Array<{ here?: boolean }> };
+    if (!Array.isArray(parsed.whereis)) return null;
+    return parsed.whereis.some((location) => location.here === true);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * POSIX single-quoted, safe to paste into any shell: spaces, parentheses, a
+ * leading dash, and an embedded quote all survive (review of #1523: a bare
+ * `rm <file>` breaks on the first three).
+ */
+function shQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** The one manual-recovery line for a no-verify mismatch, `--`-guarded and quoted. */
+function recoveryCommand(file: string): string {
+  const quoted = shQuote(file);
+  return `rm -- ${quoted} && git checkout -- ${quoted} && git annex get -- ${quoted}`;
+}
+
+/**
  * Get data files from remote (S3) for a cloned dataset.
  *
  * Always runs with `--json --json-progress` and tallies the per-file completion
@@ -365,6 +417,13 @@ export async function getDatasetData(
     let filesDownloaded = 0;
     let filesUnavailable = 0;
     let unsizedFiles = 0;
+    // Print-ready per-mismatch lines (see the field doc on GetDataCounts).
+    // Not capped like unavailablePaths/failureNotes: this only ever holds
+    // entries for a run's own `--no-verify` corruption, which -- unlike a
+    // dataset with thousands of legitimately-missing upstream files -- is
+    // rare by construction (it requires a bad transfer, not just an absent
+    // file), so there is no realistic unbounded-growth case to guard here.
+    const noVerifyMismatches: string[] = [];
     const unavailablePaths: string[] = [];
     // Per-file failure notes, joined with stderr for the classifier tie-break.
     // Capped like unavailablePaths: a many-file failure must not build an
@@ -479,6 +538,7 @@ export async function getDatasetData(
         filesUnavailable,
         unavailablePaths,
         unsizedFiles: 0,
+        noVerifyMismatches: [],
       };
     }
 
@@ -492,24 +552,13 @@ export async function getDatasetData(
     // corrupted no-verify fetch is reported the same way a genuinely missing
     // file is, not silently kept as a success.
     if (options.noVerify && retrievedThisRun.length > 0) {
-      const badPaths: string[] = [];
-      // Bad paths whose WORKING-TREE entry is a regular file, not a symlink --
-      // an unlocked or `git annex adjust --unlock` branch (what `initDataset`
-      // puts every NEMAR-created dataset on). On a locked tree the entry is a
-      // symlink into `.git/annex/objects/`, so quarantining the object below
-      // leaves it correctly dangling and nothing further is needed. On an
-      // unlocked tree the working file is typically hardlinked to that same
-      // object, so quarantining the object does NOT touch this copy: the
-      // corrupted bytes stay readable at the path a caller actually opens,
-      // while the location log correctly says they are not "here" -- and no
-      // later `git annex get` fixes it, because `get` in unlocked mode never
-      // clobbers a file that already exists at the path, treating it as a
-      // possible local edit. Measured on git-annex 10.20260901 through the
-      // exact `git init` -> `annex init` -> `adjust --unlock` sequence
-      // `initDataset` runs: a truncated fetch left stale bytes in place
-      // through fsck, a second `get`, AND a fixed-upstream `get` that
-      // reported `"success":true` -- only `rm` + `git checkout --` recovers.
-      const unlockedBadPaths: string[] = [];
+      interface Mismatch {
+        file: string;
+        /** A locked tree's entry is a symlink into `.git/annex/objects/`. */
+        isSymlink: boolean;
+        reason: string;
+      }
+      const mismatches: Mismatch[] = [];
       for (const { file, key } of retrievedThisRun) {
         const declaredSize = annexKeyDeclaredSize(key);
         if (declaredSize === null) {
@@ -530,47 +579,83 @@ export async function getDatasetData(
         if (actualSize === declaredSize) continue;
         filesDownloaded--;
         filesUnavailable++;
-        badPaths.push(file);
         if (unavailablePaths.length < MAX_UNAVAILABLE_SAMPLE) unavailablePaths.push(file);
-        addFailureNote(
-          `${file}: --no-verify accepted ${actualSize === null ? "a file that is no longer readable" : `${actualSize} byte(s)`}, but the key declares ${declaredSize}. ` +
-            `Recover with: rm ${file} && git checkout -- ${file} && git annex get ${file}`,
-        );
         let isSymlink = false;
         try {
           isSymlink = lstatSync(fullPath).isSymbolicLink();
         } catch {
-          // Already gone -- nothing to hunt for an unlocked-style copy of.
+          // Already gone -- treated as unlocked below; there is no symlink
+          // left to leave alone, and the cleanup step is a safe no-op on an
+          // absent path either way.
         }
-        if (!isSymlink) unlockedBadPaths.push(file);
-      }
-      // Best-effort quarantine through git-annex's own fsck, so the location
-      // log stops claiming "here" holds good content. `--fast` is a stat, not
-      // a re-hash of every good file too, so it costs nothing this run has
-      // not already paid; its own success or failure does not change the
-      // result already computed above. Runs BEFORE the working-tree cleanup
-      // below so the object store has already given up its only (bad) copy --
-      // the two must agree before `git checkout --` decides what belongs at
-      // each path.
-      if (badPaths.length > 0) {
-        await runCommand(["git", "annex", "fsck", "--fast", "--", ...badPaths], {
-          cwd: datasetPath,
+        mismatches.push({
+          file,
+          isSymlink,
+          reason: `--no-verify accepted ${actualSize === null ? "a file that is no longer readable" : `${actualSize} byte(s)`}, but the key declares ${declaredSize}`,
         });
       }
-      // The fix fsck alone does not reach: remove the stale working-tree
-      // bytes and let `git checkout --` put back whatever git-annex now
-      // legitimately has for that path -- a pointer, since fsck just
-      // retracted the only copy. Best-effort in both steps; the failure note
-      // above already gives the same recovery by hand.
-      if (unlockedBadPaths.length > 0) {
-        for (const file of unlockedBadPaths) {
-          try {
-            rmSync(join(datasetPath, file), { force: true });
-          } catch {
-            // Best effort; the failure note already covers manual recovery.
+
+      if (mismatches.length > 0) {
+        // Best-effort quarantine through git-annex's own fsck. ITS EXIT CODE
+        // IS NOT TRUSTED (an exit code is not evidence -- .memory/git-annex-
+        // flag-and-log-truths.md): every path below is confirmed directly
+        // against the location log, with `drop --force` as the fallback when
+        // fsck did not manage to retract the claim. Measured: a `.git/annex
+        // /bad` that fsck cannot create (a permissions issue, or something
+        // already at that path) fails fsck's quarantine for that key while
+        // leaving the rest of the repository -- and `drop --force`, whose
+        // only job is making the log agree, not verifying content -- fully
+        // writable.
+        await runCommand(
+          ["git", "annex", "fsck", "--fast", "--", ...mismatches.map((m) => m.file)],
+          { cwd: datasetPath },
+        );
+
+        for (const { file, isSymlink, reason } of mismatches) {
+          let confirmedGone = (await isRecordedHere(datasetPath, file)) === false;
+          if (!confirmedGone) {
+            await runCommand(["git", "annex", "drop", "--force", "--", file], {
+              cwd: datasetPath,
+            });
+            confirmedGone = (await isRecordedHere(datasetPath, file)) === false;
           }
+
+          if (!confirmedGone) {
+            // Neither fsck nor a forced drop got the location log to agree
+            // the content is gone. Do not touch the working tree, and do not
+            // claim this file was cleaned: silently resetting a file the log
+            // still calls present risks losing the only signal that
+            // something here is still wrong.
+            const warning = `${file}: ${reason}. Could not confirm this file was removed after a failed --no-verify fetch -- it may still hold corrupted content. Recover by hand: ${recoveryCommand(file)}`;
+            addFailureNote(warning);
+            noVerifyMismatches.push(warning);
+            continue;
+          }
+
+          if (!isSymlink) {
+            // A confirmed retraction already leaves a LOCKED tree's symlink
+            // correctly dangling -- nothing further needed there. An
+            // unlocked/adjusted tree's entry is an INDEPENDENT regular-file
+            // copy, not a hardlink (measured: a distinct inode from the
+            // object store even with `annex.thin` unset, which is NEMAR's
+            // default), and neither fsck nor `drop --force` reliably resets
+            // it once the location log already agrees content is gone
+            // (measured in both orders). Removing it and letting `git
+            // checkout --` restore whatever git-annex now legitimately has
+            // for that path -- a pointer, since no copy is recorded here --
+            // is the one mechanism that was reliable in every case tried.
+            try {
+              rmSync(join(datasetPath, file), { force: true });
+            } catch {
+              // Best effort; the recovery note below still covers it by hand.
+            }
+            await runCommand(["git", "checkout", "--", file], { cwd: datasetPath });
+          }
+
+          const message = `${file}: ${reason}. Recover with: ${recoveryCommand(file)}`;
+          addFailureNote(message);
+          noVerifyMismatches.push(message);
         }
-        await runCommand(["git", "checkout", "--", ...unlockedBadPaths], { cwd: datasetPath });
       }
     }
 
@@ -586,7 +671,7 @@ export async function getDatasetData(
     });
     return toGetDataResult(
       outcome,
-      { filesDownloaded, filesUnavailable, unavailablePaths, unsizedFiles },
+      { filesDownloaded, filesUnavailable, unavailablePaths, unsizedFiles, noVerifyMismatches },
       // `failureText` (stderr plus per-file notes), not bare stderr: a
       // no-verify size mismatch has nothing in git-annex's own stderr --
       // git-annex thought the transfer succeeded -- so the only place the
@@ -602,6 +687,7 @@ export async function getDatasetData(
       filesUnavailable: 0,
       unavailablePaths: [],
       unsizedFiles: 0,
+      noVerifyMismatches: [],
     };
   }
 }
