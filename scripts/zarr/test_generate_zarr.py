@@ -8707,5 +8707,221 @@ class TestAdmissionFollowsTheCeiling(unittest.TestCase):
         self.assertLess(spans[2][0], first_end)
 
 
+def write_eeglab_set(set_path: str, fdt_path: str | None, *, nbchan: int = 4,
+                     pnts: int = 1000, srate: float = 250.0,
+                     embedded: str = "orig_name.fdt") -> None:
+    """A real classic EEGLAB `.set` (fields saved flat, as EEGLAB's own
+    `pop_saveset` does) whose samples are a float32 `.fdt` written column-major
+    at `fdt_path`, which need NOT sit beside the `.set`. `fdt_path=None` embeds
+    the matrix inline instead."""
+    import numpy as np
+    import scipy.io
+
+    rng = np.random.default_rng(7)
+    data = (rng.standard_normal((nbchan, pnts)) * 1e-5).astype(np.float32)
+    fields = {
+        "setname": np.array(["fdt_declaration_fixture"]),
+        "nbchan": np.array([[nbchan]]),
+        "trials": np.array([[1]]),
+        "pnts": np.array([[pnts]]),
+        "srate": np.array([[srate]]),
+        "xmin": np.array([[0.0]]),
+        "xmax": np.array([[(pnts - 1) / srate]]),
+    }
+    if fdt_path is None:
+        fields["data"] = data.astype(np.float64)
+    else:
+        os.makedirs(os.path.dirname(fdt_path), exist_ok=True)
+        data.flatten(order="F").tofile(fdt_path)
+        fields["data"] = np.array([embedded])
+    os.makedirs(os.path.dirname(set_path), exist_ok=True)
+    scipy.io.savemat(set_path, fields)
+
+
+class TestFdtDeclarationFile(unittest.TestCase):
+    """The committed declaration file, and the loader's refusals."""
+
+    def write(self, doc) -> str:
+        fd, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as fh:
+            json.dump(doc, fh)
+        self.addCleanup(os.remove, path)
+        return path
+
+    @staticmethod
+    def doc(recordings):
+        return {"datasets": {"on000001": {"reviewed": "2026-09-28", "recordings": recordings}}}
+
+    ENTRY: ClassVar[dict] = {
+        "fdt": "derivatives/fdt/a.fdt", "nbchan": 2, "pnts": 10, "trials": 1, "fdt_bytes": 80,
+    }
+
+    def test_the_committed_file_loads_and_names_only_raw_recordings(self):
+        decls = generate_zarr.load_fdt_declarations()
+        self.assertEqual(set(decls), {"on004306"})
+        recs = decls["on004306"]
+        self.assertEqual(len(recs), 15)
+        for set_path, d in recs.items():
+            self.assertFalse(generate_zarr.is_excluded_from_discovery(set_path))
+            self.assertEqual(d["fdt_bytes"], d["nbchan"] * d["pnts"] * d["trials"] * 4)
+        # The misnamed file is paired by size and folder, not by its name.
+        self.assertEqual(
+            recs["sub-013/ses-01/eeg/sub-013_ses-01_task-experiment_run-01_eeg.set"]["fdt"],
+            "derivatives/fdt_files/sub13_sess-01/sub12_sess01.fdt",
+        )
+
+    def test_a_missing_file_declares_nothing(self):
+        self.assertEqual(generate_zarr.load_fdt_declarations("/nonexistent/decl.json"), {})
+
+    def test_a_valid_entry_loads(self):
+        path = self.write(self.doc({"sub-01/eeg/sub-01_eeg.set": dict(self.ENTRY)}))
+        self.assertEqual(
+            generate_zarr.load_fdt_declarations(path)["on000001"]["sub-01/eeg/sub-01_eeg.set"]["fdt"],
+            "derivatives/fdt/a.fdt",
+        )
+
+    def test_refusals(self):
+        cases = {
+            "bytes disagree with the dimensions":
+                {"sub-01/eeg/sub-01_eeg.set": {**self.ENTRY, "fdt_bytes": 84}},
+            "unknown key": {"sub-01/eeg/sub-01_eeg.set": {**self.ENTRY, "fdt_path": "x.fdt"}},
+            "missing key": {"sub-01/eeg/sub-01_eeg.set": {
+                k: v for k, v in self.ENTRY.items() if k != "pnts"}},
+            "one fdt for two sets": {
+                "sub-01/eeg/sub-01_eeg.set": dict(self.ENTRY),
+                "sub-02/eeg/sub-02_eeg.set": dict(self.ENTRY),
+            },
+            "a non-raw recording": {"derivatives/x/sub-01_eeg.set": dict(self.ENTRY)},
+            "path escapes the repo": {"sub-01/eeg/sub-01_eeg.set": {
+                **self.ENTRY, "fdt": "../elsewhere/a.fdt"}},
+            "a boolean count": {"sub-01/eeg/sub-01_eeg.set": {**self.ENTRY, "trials": True}},
+        }
+        for name, recordings in cases.items():
+            with self.subTest(name), self.assertRaises(ValueError):
+                generate_zarr.load_fdt_declarations(self.write(self.doc(recordings)))
+        with self.assertRaises(ValueError):
+            generate_zarr.load_fdt_declarations(
+                self.write({"datasets": {"on000001": {"recordings": {}}}})  # no `reviewed`
+            )
+
+
+class TestDeclaredFdtConvertOne(unittest.TestCase):
+    """`convert_one` over a real EEGLAB `.set` whose `.fdt` lives under
+    `derivatives/`, as on004306 ships it. Both materialisation paths are driven:
+    local mode (the working tree) and the remote path, whose blob fetch reads a
+    real git repository (in-git blobs, so no S3 read is needed). `aws s3 sync`
+    is the only external call and a no-op executable absorbs it, as in
+    TestConvertOneEndToEnd."""
+
+    SET = "sub-01/eeg/sub-01_task-x_eeg.set"
+    FDT = "derivatives/fdt_files/sub1_sess-01/sub1_sess1.fdt"
+    NBCHAN, PNTS = 4, 1000
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import scipy.io  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = os.path.join(self._tmp.name, "repo")
+        write_eeglab_set(os.path.join(self.repo, self.SET), os.path.join(self.repo, self.FDT),
+                         nbchan=self.NBCHAN, pnts=self.PNTS)
+        bindir = os.path.join(self._tmp.name, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        path = os.environ["PATH"]
+        os.environ["PATH"] = bindir + os.pathsep + path
+        self.addCleanup(os.environ.__setitem__, "PATH", path)
+
+    def commit(self) -> str:
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=self.repo, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.org")
+        git("config", "user.name", "t")
+        git("add", "-A")
+        git("commit", "-q", "-m", "fixture")
+        return git("rev-parse", "HEAD")
+
+    def decl(self, **over) -> dict:
+        d = {"fdt": self.FDT, "nbchan": self.NBCHAN, "pnts": self.PNTS, "trials": 1,
+             "fdt_bytes": self.NBCHAN * self.PNTS * 4}
+        d.update(over)
+        return d
+
+    def convert(self, declarations, *, local=True, head="b" * 40):
+        work = tempfile.TemporaryDirectory()
+        self.addCleanup(work.cleanup)
+        generate_zarr._init_worker({
+            "repo": self.repo, "bucket": "nemar-test", "dataset_id": "on000001",
+            "head": head, "head_files": {self.SET, self.FDT}, "local": local,
+            "tmp": work.name, "updated": "2026-09-28T00:00:00Z",
+            "contract_base": "https://zarr.nemar.org", "engine_version": "3",
+            "dataset_row": None, "provenance_fetch_failed": False,
+            "mem_budget": None, "hard_ceiling": None, "projections": {},
+            "fdt_declarations": declarations,
+        })
+        return convert_one(self.SET)
+
+    def assert_converted(self, result):
+        self.assertTrue(result["ok"], result.get("error"))
+        (group,) = result["entry"]["groups"]
+        self.assertEqual(group["n_channels"], self.NBCHAN)
+        self.assertEqual(group["n_samples"], self.PNTS)
+
+    def test_an_undeclared_dataset_fails_exactly_as_before(self):
+        result = self.convert({})
+        self.assertFalse(result["ok"])
+        self.assertIn("none was found", result["error"])
+        self.assertNotEqual(result["code"], "fdt_declaration_refused")
+
+    def test_a_declared_fdt_converts_in_local_mode(self):
+        self.assert_converted(self.convert({self.SET: self.decl()}))
+        # The working tree is untouched: nothing was written beside the .set.
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "sub-01/eeg/sub-01_task-x_eeg.fdt")))
+
+    def test_a_declared_fdt_converts_through_the_blob_fetch(self):
+        head = self.commit()
+        self.assert_converted(self.convert({self.SET: self.decl()}, local=False, head=head))
+
+    def test_a_size_mismatch_is_refused_before_conversion(self):
+        # The declaration agrees with itself and with the header; the FILE is short.
+        with open(os.path.join(self.repo, self.FDT), "r+b") as fh:
+            fh.truncate(self.NBCHAN * self.PNTS * 4 - 4)
+        for local in (True, False):
+            with self.subTest(local=local):
+                head = "b" * 40 if local else self.commit()
+                result = self.convert({self.SET: self.decl()}, local=local, head=head)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["code"], "fdt_declaration_refused")
+                self.assertIn("bytes", result["error"])
+
+    def test_a_declaration_the_header_contradicts_is_refused(self):
+        wrong = self.decl(nbchan=8, fdt_bytes=8 * self.PNTS * 4)
+        result = self.convert({self.SET: wrong})
+        self.assertEqual(result["code"], "fdt_declaration_refused")
+        self.assertIn("header", result["error"])
+
+    def test_an_fdt_absent_at_head_is_refused(self):
+        result = self.convert({self.SET: self.decl(fdt="derivatives/fdt_files/other.fdt")})
+        self.assertEqual(result["code"], "fdt_declaration_refused")
+
+    def test_a_set_with_inline_samples_is_refused(self):
+        write_eeglab_set(os.path.join(self.repo, self.SET), None,
+                         nbchan=self.NBCHAN, pnts=self.PNTS)
+        result = self.convert({self.SET: self.decl()})
+        self.assertEqual(result["code"], "fdt_declaration_refused")
+        self.assertIn("inline", result["error"])
+
+
 if __name__ == "__main__":
     unittest.main()
