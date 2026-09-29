@@ -29,6 +29,100 @@ routes = [
 # custom domain ever misbehaves.
 workers_dev = true
 
+# Smart Placement (#1494 placement/trust-window follow-up). The nemar.org
+# zone is on Cloudflare's FREE plan (the owner will not upgrade it; Workers
+# itself is Paid), so a request is answered from whichever data center its
+# ANYCAST route lands on, with no say from us. Staging measured this costing
+# real money: from one Los Angeles client (`cdn-cgi/trace` says `colo=LAX`),
+# requests to data-test.nemar.org and data.nemar.org were served from ATL,
+# BOS, DUB, MAN, MIA and SJC -- and from DUB or MAN every D1 read (primary in
+# WNAM, colo DFW) and S3 call (us-east-2) crosses the Atlantic. The Workers
+# Cache API is scoped to the data center that served the request
+# (https://developers.cloudflare.com/workers/runtime-apis/cache/: "the
+# contents of the cache do not replicate outside of the originating data
+# center"), so scattering across six colos also scattered the manifest and
+# git-file edge caches (ADR 0072, ADR 0066 amendment) into six separate,
+# mostly-cold copies -- measured as a 15% hit rate on a second full pass over
+# one dataset's files.
+#
+# Smart Placement over an explicit region hint
+# (https://developers.cloudflare.com/workers/configuration/placement/,
+# "Understand placement" / "Configure explicit Placement Hints", both read
+# 2026-09-28): the docs' own table picks between the two by backend count --
+# "Region: single back-end service in a known cloud region" versus "Smart:
+# multiple back-end services, or unknown infrastructure locations" -- and
+# this Worker has several backends that are not all the same place: D1's
+# primary (WNAM/DFW), S3 (us-east-2), GitHub's raw host (no single named
+# region), and this Worker's own Anthropic endpoint (also us-east-2, `[vars]`
+# above). Smart Placement measures actual request latency across candidate
+# locations and follows it; a single region hint would have to pick one of
+# these and accept worse latency to the others. A `[placement] region =
+# "aws:us-east-2"` hint was also considered and is NOT what shipped here: an
+# open, untriaged Cloudflare-side bug as of 2026-09-28
+# (cloudflare/workers-sdk#15642) 500s the Workers *versions* API for any
+# Worker with an explicit `region` set, which is a rougher edge on an
+# eight-month-old feature (GA 2026-01-22) than this repo's deploy pipeline
+# should take on for no latency benefit over Smart Placement here. (The bug
+# is scoped to `wrangler versions secret bulk`/gradual-deployment endpoints
+# this pipeline's plain `wrangler deploy` does not call, so it would likely
+# not have broken CI either way; avoiding a live, unresolved control-plane
+# bug in the feature we would be turning on for the first time was reason
+# enough not to need that to be true.)
+#
+# Interactions checked:
+#  - Cron (`[triggers]` below, and `[env.dev.triggers]`): unaffected.
+#    "Placement only affects the execution of fetch event handlers... Workers
+#    without a fetch event handler are ignored by placement" -- scheduled()
+#    is not a fetch handler, so both crons keep running wherever they always
+#    did, in every environment.
+#  - Durable Objects: none in this Worker (no `[durable_objects]` binding),
+#    so the documented DO placement behavior (automatic, unconfigured) is not
+#    a factor.
+#  - Every hostname this Worker serves (api.nemar.org, data.nemar.org,
+#    zarr.nemar.org, mcp.nemar.org, and their -test mirrors on the dev
+#    environment below) is one Worker script, so Smart Placement is one
+#    decision for all of them, not a per-route setting. Their own dominant
+#    backends -- D1, S3, the Anthropic endpoint, GitHub -- are all
+#    US-based, so none is expected to be placed worse by a decision optimized
+#    for data.nemar.org's traffic.
+#  - The Workers Cache API: per the docs above, its contents are scoped to
+#    the data center the Worker executed in. Smart Placement does not
+#    special-case this, but it is the mechanism this change relies on --
+#    consolidating which FEW data centers this Worker's `caches.default`
+#    calls land in (instead of scattering across every ingress colo) is what
+#    raises the manifest, git-file and zarr edge-cache hit rates.
+#
+# Enabled here (top level = production `nemar-api`) and, explicitly, in
+# `[env.dev]` below for `nemar-api-dev` -- `placement` is a Wrangler
+# "inheritable" key (a `[env.*]` block would get this by inheritance even
+# unset; per the reference at
+# https://developers.cloudflare.com/workers/wrangler/configuration/#inheritable-keys),
+# but it is spelled out in both places rather than relied on implicitly, so
+# either environment's block can be changed or rolled back on its own without
+# having to reason about what the other inherits.
+#
+# TO CONFIRM after deploy: the `cf-placement` response header on a live
+# request (`remote-<IATA>` means Smart Placement moved it; `local-<IATA>`
+# means it ran at the default, nearest-to-the-request location; the header
+# may be absent for the first ~15 minutes after a deploy, or longer on
+# staging if traffic is too low to decide -- see the API check below), or
+# query placement status directly:
+#   curl -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+#     https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/workers/services/nemar-api
+#   curl -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+#     https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/workers/services/nemar-api-dev
+# (absent = not yet analyzed; `SUCCESS` = active; `INSUFFICIENT_INVOCATIONS` =
+# not enough multi-location traffic yet to decide, plausible on the dev
+# worker's staging-level volume; `UNSUPPORTED_APPLICATION` = Cloudflare tried
+# it and it made this Worker slower, so it reverted -- rare, per the docs
+# "fewer than 1% of Workers").
+#
+# TO ROLL BACK: delete this block (and the one in `[env.dev]`) and redeploy;
+# Smart Placement is a per-Worker setting with no separate state to unwind,
+# and the Worker reverts to running at the data center nearest each request.
+[placement]
+mode = "smart"
+
 # Scheduled cleanup: daily at 3 AM UTC
 # Two schedules share the scheduled() handler (it branches on event.cron):
 #   "0 3 * * *"    daily cleanup/sweeps
@@ -255,6 +349,22 @@ routes = [
   { pattern = "zarr-test.nemar.org", custom_domain = true },
   { pattern = "mcp-test.nemar.org", custom_domain = true }
 ]
+
+# Smart Placement, explicitly restated for this environment (see the
+# top-level `[placement]` block above for the full rationale, the doc
+# citations and how to confirm/roll it back). `placement` is an inheritable
+# Wrangler key, so this environment would get it even unset; it is written
+# out so this environment's placement can be changed or removed without
+# having to reason about the top-level block, and so a reader of just this
+# section sees the whole picture. Placed AFTER `routes` above deliberately:
+# TOML assigns a bare `key = value` line to the last `[table]` header that
+# preceded it, so `[env.dev.placement]` before `routes` would have made
+# `routes` a member of `env.dev.placement` instead of `env.dev`.
+# `nemar-api-dev`'s own traffic (staging-level volume) is the one most likely
+# to sit at `INSUFFICIENT_INVOCATIONS` for a while after this deploys --
+# expected, not a sign anything is wrong; see the status-check commands above.
+[env.dev.placement]
+mode = "smart"
 
 [[env.dev.d1_databases]]
 binding = "DB"
