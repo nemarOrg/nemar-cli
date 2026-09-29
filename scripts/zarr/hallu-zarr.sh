@@ -243,11 +243,12 @@ VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
 # `Recording.from_file` -- which is what makes engine "3" safe, since below that
 # floor the streaming and in-memory paths disagree about a recording's units --
 # and 1.2.8 writes each streamed shard once instead of once per channel, which is
-# what kept large EDFs inside their memory budget (#1483), and 1.2.9 reads the
-# real-file cases that stranded datasets on an old Zarr (EEGLAB v7.3 flat root and
-# empty fields, BrainVision stale DataFile/MarkerFile names, repeated EDF/BDF/WFDB
-# labels) and raises host I/O errors as the OSError itself instead of a typed file
-# failure the queue would treat as permanent.
+# what kept large EDFs inside their memory budget (#1483), and 1.2.9 converts real
+# files that failed before (EEGLAB v7.3 flat root and empty fields, BrainVision
+# stale DataFile/MarkerFile names, repeated EDF/BDF/WFDB labels that used to lose
+# channels) and raises host I/O errors as the OSError itself, which is retried,
+# instead of a typed file failure. The engine stamp did not move (see
+# requirements.txt).
 # Extras are not optional here: [mef3] carries pymef and [hdf5] carries h5py, and
 # without either the matching recordings raise ImportError at convert time even
 # though discovery finds them.
