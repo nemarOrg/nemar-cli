@@ -86,6 +86,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import email.utils
+import http.client
 import json
 import os
 import subprocess
@@ -119,8 +121,13 @@ DEFAULT_API_BASE = "https://api.nemar.org"
 USER_AGENT = "nemar-zarr-collapsed-channel-check/1.0 (+https://github.com/nemarOrg/nemar-cli)"
 # The source formats whose labels can reach a store repeated (see module doc).
 REPEATABLE_LABEL_EXTS = (".edf", ".bdf")
-# Seconds before the n-th retry of a transient failure is `n * RETRY_BACKOFF_S`.
+# Seconds before the n-th retry of a transient failure is `n * RETRY_BACKOFF_S`,
+# unless the host said how long to wait (`Retry-After`, capped below).
 RETRY_BACKOFF_S = 2.0
+RETRY_AFTER_MAX_S = 300.0
+# Minimum spacing between requests under `--all` (`--request-interval`), which
+# walks every public dataset against raw.githubusercontent.com and the zarr host.
+ALL_REQUEST_INTERVAL_S = 0.1
 
 
 class Finding(TypedDict, total=False):
@@ -304,11 +311,54 @@ class NotFound(Exception):
     """A 404: the object is not there, which is an answer, not an error."""
 
 
+def retry_after_seconds(value: str | None, now: float | None = None) -> float | None:
+    """A `Retry-After` header as seconds to wait, capped at RETRY_AFTER_MAX_S,
+    or None when absent or unparseable. It is either delta-seconds or an
+    HTTP-date (RFC 9110 10.2.3); a date in the past means no wait."""
+    if value is None or not value.strip():
+        return None
+    value = value.strip()
+    if value.isdigit():
+        seconds = float(value)
+    else:
+        try:
+            when = email.utils.parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if when.tzinfo is None:
+            return None
+        seconds = when.timestamp() - (time.time() if now is None else now)
+    return min(max(seconds, 0.0), RETRY_AFTER_MAX_S)
+
+
+class Pacer:
+    """Spaces successive requests at least `interval` seconds apart."""
+
+    def __init__(self, interval: float = 0.0):
+        self.interval = interval
+        self._last: float | None = None
+
+    def wait(self) -> None:
+        if self.interval > 0 and self._last is not None:
+            delay = self._last + self.interval - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+        self._last = time.monotonic()
+
+
+# Every GET this script makes goes through this one pacer; `main` sets its
+# interval (non-zero by default under `--all`).
+PACER = Pacer()
+
+
 def http_get(url: str, *, timeout: int = 60, attempts: int = 3) -> bytes:
-    """GET `url`. Raises NotFound on 404; retries anything else transient."""
+    """GET `url`. Raises NotFound on 404; retries a 429, a 5xx or a network
+    failure, waiting what a 429/503 `Retry-After` asks for when it says."""
     last: Exception | None = None
     for attempt in range(1, attempts + 1):
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        wait = RETRY_BACKOFF_S * attempt
+        PACER.wait()
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.read()
@@ -318,10 +368,18 @@ def http_get(url: str, *, timeout: int = 60, attempts: int = 3) -> bytes:
             if exc.code < 500 and exc.code != 429:
                 raise
             last = exc
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            if exc.code in (429, 503):
+                asked = retry_after_seconds(exc.headers.get("Retry-After"))
+                if asked is not None:
+                    wait = asked
+        # `http.client.HTTPException` (RemoteDisconnected, BadStatusLine) is not
+        # wrapped by urllib and is as transient as a 503.
+        except (
+            urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException,
+        ) as exc:
             last = exc
         if attempt < attempts:
-            time.sleep(RETRY_BACKOFF_S * attempt)
+            time.sleep(wait)
     assert last is not None
     raise last
 
@@ -510,11 +568,22 @@ def main(argv: list[str] | None = None) -> int:
         help="which stores get the repeated-label check (default: EDF/BDF sources)",
     )
     ap.add_argument("--sleep", type=float, default=0.0, help="pause between datasets (s)")
+    ap.add_argument(
+        "--request-interval", type=float, default=None,
+        help=f"minimum spacing between requests (s); default {ALL_REQUEST_INTERVAL_S} "
+        "under --all, 0 otherwise",
+    )
     ap.add_argument("--out", help="write the JSON report here as well as to stdout")
     args = ap.parse_args(argv)
 
     if args.repo_dir and (args.all or len(args.dataset or []) != 1):
         ap.error("--repo-dir is a clone of one dataset: give exactly one --dataset")
+    if args.request_interval is not None and args.request_interval < 0:
+        ap.error("--request-interval must be >= 0")
+    PACER.interval = (
+        args.request_interval if args.request_interval is not None
+        else ALL_REQUEST_INTERVAL_S if args.all else 0.0
+    )
     # stdout carries the JSON report and nothing else. The converter helpers
     # this reuses (`_decode_sidecar_text`, the catalog walk) print their
     # `::warning::` lines to stdout, so send those to stderr with the progress.
