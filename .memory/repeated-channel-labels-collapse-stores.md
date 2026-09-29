@@ -15,8 +15,13 @@ the collapse into any consumer that keys channels by label.
 biosigio 1.2.9 suffixes repeats the way MNE does (`T8-P8-0`, `T8-P8-1`; `-` becomes
 `--0`, `--1`, ...), records `{new_label: file_label}` under
 `recording_metadata.channel_labels_deduplicated`, and `Recording.add_channel` now
-raises on a duplicate. Its EEGLAB importer renames repeats `<label>_1`, ... and does
-NOT record that map (verified against 1.2.9 on 2026-09-28).
+raises on a duplicate. Its EEGLAB importer uses a different scheme: the FIRST
+occurrence keeps its label and the second becomes `<label>_2`, then `_3`, ... (never
+`_1`); it does NOT record that map (verified in `importers/eeglab.py` of 1.2.9 on
+2026-09-28). biosigio PR #140 (open) records the EEGLAB, XDF and neo renames under
+`channel_labels_deduplicated` too; once a release carrying it is the floor,
+`positions_for_renamed_labels` and `units_report.unmatched_raw_label` cover EEGLAB
+renames with no change here, since both read only that map.
 
 **Why it matters:** the fidelity gate used to consult the file header only when a store
 fell short of channels.tsv. A dataset with no channels.tsv, or one written by a tool
