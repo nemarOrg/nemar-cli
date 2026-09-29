@@ -3173,6 +3173,18 @@ class TestFileDeclaredChannelCount(unittest.TestCase):
             fh.write(b"MATLAB 5.0")
         self.assertEqual(self.count_and_log(p), (None, ""))
 
+    def test_brainvision_reads_its_count_key_without_regard_to_case(self):
+        # MNE's configparser lowercases option names, so `numberofchannels=4`
+        # converts; the section name stays case-sensitive there, and here.
+        p = self.path("lc_eeg.vhdr")
+        with open(p, "w") as fh:
+            fh.write("[Common Infos]\nDataFile=lc_eeg.eeg\nnumberofchannels=4\n")
+        self.assertEqual(self.count_and_log(p), (4, ""))
+        q = self.path("lcsection_eeg.vhdr")
+        with open(q, "w") as fh:
+            fh.write("[common infos]\nNumberOfChannels=4\n")
+        self.assertIsNone(self.count_and_log(q)[0])
+
     def test_a_real_edf_plus_from_pyedflib(self):
         # EDF+ writers append the annotation pseudo-signal; it must not count.
         try:
@@ -9043,6 +9055,17 @@ class TestHeaderGateFalseRefusalMatrix(unittest.TestCase):
             fh.seek(252)
             fh.write(b"4\x00\x00\x00")
         self.assert_published_whole(primary, set(), 3, 3)
+
+    def test_brainvision_with_a_lowercase_count_key(self):
+        primary = "sub-01/eeg/sub-01_task-rest_eeg.vhdr"
+        paths = write_brainvision(self.place(primary), ["Fp1", "Fp2", "Cz", "Pz"])
+        with open(paths[0], encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("NumberOfChannels=4", text)
+        with open(paths[0], "w", encoding="utf-8") as fh:
+            fh.write(text.replace("NumberOfChannels=4", "numberofchannels=4"))
+        rels = {os.path.relpath(p, self.repo) for p in paths}
+        self.assert_published_whole(primary, rels - {primary}, 4, 4)
 
     def test_plain_edf_whose_header_under_counts(self):
         # A plain EDF (not EDF+) with an ordinary signal that happens to be

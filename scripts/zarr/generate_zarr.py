@@ -2821,10 +2821,13 @@ def _vhdr_declared_channel_count(path: str) -> int | None:
         _warn_unreadable_header("BrainVision", path, f"{type(exc).__name__}: {exc}")
         return None
     # Scoped to [Common Infos], the section MNE reads it from, so a
-    # comment elsewhere in the header can never supply the count.
+    # comment elsewhere in the header can never supply the count. The section
+    # name is matched exactly and the key without regard to case, because that
+    # is how MNE's configparser reads them: `numberofchannels=4` converts, and
+    # a case-sensitive key here left such a file with no header count.
     section = re.search(r"^\[Common Infos\][^\n]*\n(.*?)(?=^\[|\Z)", text, re.M | re.S)
     m = section and re.search(
-        r"^\s*NumberOfChannels\s*=\s*(\d+)", section.group(1), re.MULTILINE
+        r"^\s*NumberOfChannels\s*=\s*(\d+)", section.group(1), re.MULTILINE | re.IGNORECASE
     )
     if not m:
         _warn_unreadable_header(
