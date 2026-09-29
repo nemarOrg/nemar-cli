@@ -4558,7 +4558,13 @@ def _s3_not_found(stderr: str) -> bool:
     Deliberately narrower than `s3_read_json`'s bare ``"404"`` test. A transfer
     failure prints ``download failed: s3://.../<key> to ...``, and an annex key
     is a 64-digit hex hash plus a byte count: ``404`` turns up inside one often
-    enough that the loose test would read a dropped connection as an absence."""
+    enough that the loose test would read a dropped connection as an absence.
+
+    A 403 is deliberately NOT an absence. S3 answers a missing key with 403
+    when the caller lacks s3:ListBucket, but also for expired credentials, a
+    private object, or a signature without its session token
+    (``.memory/s3-403-is-not-absence.md``). So a 403 is retried and ends
+    uncoded, and the chunked fallback, which only a 404 unlocks, never runs."""
     err = stderr.lower()
     return "(404)" in err or "nosuchkey" in err
 

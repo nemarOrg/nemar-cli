@@ -10570,10 +10570,23 @@ if fail and any(fail in a for a in args):
     sys.stderr.write(where + "An error occurred (InternalError) when calling the GetObject "
                      "operation (reached max retries: 9): We encountered an internal error.\n")
     sys.exit(1)
+# A caller without s3:ListBucket, the way `s3://nemar` treats anonymous callers
+# (.memory/s3-403-is-not-absence.md): "all" -- S3 will not say whether a key
+# exists, so a missing key answers 403 rather than 404, and a listing is
+# AccessDenied; "list" -- only the listing is denied.
+no_list = os.environ.get("ZARR_TEST_BUCKET_NO_LIST")
+if no_list and args[:2] == ["s3api", "list-objects-v2"]:
+    sys.stderr.write("An error occurred (AccessDenied) when calling the ListObjectsV2 "
+                     "operation: Access Denied\n")
+    sys.exit(254)
 if args[:2] == ["s3", "cp"] and args[2].startswith("s3://"):
     bucket, key = split(args[2])
     path = os.path.join(ROOT, bucket, key)
     if not os.path.isfile(path):
+        if no_list == "all":
+            sys.stderr.write("fatal error: An error occurred (403) when calling the "
+                             "HeadObject operation: Forbidden\n")
+            sys.exit(1)
         sys.stderr.write("fatal error: An error occurred (404) when calling the HeadObject "
                          f'operation: Key "{key}" does not exist\n')
         sys.exit(1)
@@ -10630,12 +10643,13 @@ class BucketStandIn:
         self.log = os.path.join(root, "aws.log")
         saved = {k: os.environ.get(k) for k in
                  ("PATH", "ZARR_TEST_BUCKET_ROOT", "ZARR_TEST_BUCKET_LOG", "ZARR_TEST_BUCKET_FAIL",
-                  "ZARR_TEST_BUCKET_SHORT_ONCE")}
+                  "ZARR_TEST_BUCKET_SHORT_ONCE", "ZARR_TEST_BUCKET_NO_LIST")}
         os.environ["PATH"] = bindir + os.pathsep + (saved["PATH"] or "")
         os.environ["ZARR_TEST_BUCKET_ROOT"] = self.root
         os.environ["ZARR_TEST_BUCKET_LOG"] = self.log
         os.environ.pop("ZARR_TEST_BUCKET_FAIL", None)
         os.environ.pop("ZARR_TEST_BUCKET_SHORT_ONCE", None)
+        os.environ.pop("ZARR_TEST_BUCKET_NO_LIST", None)
 
         def restore():
             for k, v in saved.items():
@@ -10801,6 +10815,50 @@ class TestChunkedAnnexFetch(unittest.TestCase):
             self.fetch(key)
         self.assertNotIsInstance(cm.exception, generate_zarr.AnnexObjectMissing)
         self.assertIn("listing chunked copies", str(cm.exception))
+
+    def test_a_403_on_the_plain_key_is_retried_uncoded_and_never_looks_for_chunks(self):
+        # Without s3:ListBucket, S3 answers a MISSING key with 403, not 404, and
+        # a 403 has other causes too: expired credentials, a private dataset, a
+        # signature without its session token. None of them is evidence of
+        # absence, so the copy is retried like any other failure, ends uncoded
+        # (infra, the recording stays pending), and the chunk fallback -- which
+        # a 404 alone unlocks -- is never tried. For a chunked dataset that
+        # means every recording fails this way: safe, but the feature does
+        # nothing until the profile can list `<id>/objects/`.
+        generate_zarr._AWS_RETRIES = 2
+        data = os.urandom(2500)
+        key = sha256e(data, ".eeg")
+        self.s3.put_chunked(key, data, self.CHUNK)
+        os.environ["ZARR_TEST_BUCKET_NO_LIST"] = "all"
+        with self.assertRaises(RuntimeError) as cm:
+            self.fetch(key)
+        self.assertNotIsInstance(cm.exception, generate_zarr.AnnexObjectMissing)
+        self.assertIsNone(getattr(cm.exception, "code", None))
+        self.assertIn("(403)", str(cm.exception))
+        plain = f"s3://nemar/nm000276/objects/{key}"
+        self.assertEqual([c.split()[2] for c in self.s3.calls("s3 cp")], [plain, plain],
+                         "the plain key, retried; no chunk fetched")
+        self.assertEqual(self.s3.calls("s3api"), [], "a 403 is not a 404; no chunk discovery")
+        self.assertEqual(os.listdir(self.scratch), [])
+
+    def test_an_access_denied_listing_is_retried_uncoded(self):
+        # The plain key is a definite 404, so the listing runs, and is refused.
+        # Refused is not empty: an empty listing would type the recording as
+        # missing, a refused one says nothing about what is stored.
+        generate_zarr._AWS_RETRIES = 2
+        data = os.urandom(2500)
+        key = sha256e(data, ".eeg")
+        self.s3.put_chunked(key, data, self.CHUNK)
+        os.environ["ZARR_TEST_BUCKET_NO_LIST"] = "list"
+        with self.assertRaises(RuntimeError) as cm:
+            self.fetch(key)
+        self.assertNotIsInstance(cm.exception, generate_zarr.AnnexObjectMissing)
+        self.assertIsNone(getattr(cm.exception, "code", None))
+        self.assertIn("listing chunked copies", str(cm.exception))
+        self.assertIn("AccessDenied", str(cm.exception))
+        self.assertEqual(len(self.s3.calls("s3api list-objects-v2")), 2, "retried")
+        self.assertEqual(len(self.s3.calls("s3 cp")), 1, "the plain 404 only; no chunk fetched")
+        self.assertNotIn(("nemar", "nm000276"), generate_zarr._ANNEX_CHUNK_SIZE)
 
     def test_the_chunk_size_is_discovered_once_per_dataset(self):
         blobs = [os.urandom(n) for n in (3000, 982, 2500)]

@@ -349,6 +349,13 @@ S3_BUCKET="${S3_BUCKET:-nemar}"
 AWS_REGION="${AWS_DEFAULT_REGION:-us-east-2}"
 # Scoped service profile (IAM user nemar-hallu-zarr; s3:Get/Put/Delete on
 # nemar/*/zarr/* + ListBucket). The driver's `aws s3 ...` calls inherit it.
+# Reading annex content needs s3:GetObject on nemar/<id>/objects/* AND
+# s3:ListBucket for the <id>/objects/ prefixes: a git-annex chunked upload
+# stores only `<key-fields>-S<chunk>-C<n>--...` objects, and the chunk size is
+# discovered by listing them. Without ListBucket, S3 answers the missing plain
+# key with 403 instead of 404, a 403 is never read as absence, so the chunked
+# fallback never runs and every chunked recording fails uncoded and retries.
+# Safe, but the chunked fetch silently does nothing.
 export AWS_PROFILE="${ZARR_AWS_PROFILE:-nemar-zarr}"
 export AWS_DEFAULT_REGION="$AWS_REGION"
 QUEUE_DB="${ZARR_QUEUE_DB:-${STATE_DIR}/zarr-queue.db}"
