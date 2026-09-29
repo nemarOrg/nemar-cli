@@ -10578,6 +10578,14 @@ if args[:2] == ["s3", "cp"] and args[2].startswith("s3://"):
                          f'operation: Key "{key}" does not exist\n')
         sys.exit(1)
     shutil.copyfile(path, args[3])
+    short = os.environ.get("ZARR_TEST_BUCKET_SHORT_ONCE")
+    marker = os.path.join(ROOT, ".short-once-done")
+    if short and short in args[2] and not os.path.exists(marker):
+        # A transfer that "succeeds" but lands short, once: the transient
+        # shape `download_blob`'s size check exists for.
+        open(marker, "w").close()
+        with open(args[3], "r+b") as fh:
+            fh.truncate(max(0, os.path.getsize(path) - 1))
     sys.exit(0)
 if args[:2] == ["s3api", "list-objects-v2"]:
     bucket, prefix = opt("--bucket"), opt("--prefix")
@@ -10621,11 +10629,13 @@ class BucketStandIn:
         os.chmod(os.path.join(bindir, "aws"), 0o755)
         self.log = os.path.join(root, "aws.log")
         saved = {k: os.environ.get(k) for k in
-                 ("PATH", "ZARR_TEST_BUCKET_ROOT", "ZARR_TEST_BUCKET_LOG", "ZARR_TEST_BUCKET_FAIL")}
+                 ("PATH", "ZARR_TEST_BUCKET_ROOT", "ZARR_TEST_BUCKET_LOG", "ZARR_TEST_BUCKET_FAIL",
+                  "ZARR_TEST_BUCKET_SHORT_ONCE")}
         os.environ["PATH"] = bindir + os.pathsep + (saved["PATH"] or "")
         os.environ["ZARR_TEST_BUCKET_ROOT"] = self.root
         os.environ["ZARR_TEST_BUCKET_LOG"] = self.log
         os.environ.pop("ZARR_TEST_BUCKET_FAIL", None)
+        os.environ.pop("ZARR_TEST_BUCKET_SHORT_ONCE", None)
 
         def restore():
             for k, v in saved.items():
@@ -10820,6 +10830,41 @@ class TestChunkedAnnexFetch(unittest.TestCase):
         os.remove(os.path.join(self.scratch, "a"))
         os.remove(os.path.join(self.s3.objects, generate_zarr.annex_chunk_key(kb, self.CHUNK, 3)))
         self.assert_refused(kb, "chunk C3", "absent")
+
+    def test_a_chunk_stored_at_the_wrong_size_under_the_cached_size_is_typed(self):
+        # With the chunk size cached, the chunks are fetched without a listing,
+        # so the only thing that sees a wrong-sized chunk is `download_blob`'s
+        # size check. That used to end uncoded after every retry, on every run,
+        # for a chunk that is simply stored wrong. It now hands over to the
+        # listing, which reads the STORED size and types the refusal.
+        generate_zarr._AWS_RETRIES = 2
+        a, b = os.urandom(3000), os.urandom(3000)
+        ka, kb = sha256e(a, ".eeg"), sha256e(b, ".eeg")
+        self.s3.put_chunked(ka, a, self.CHUNK)
+        self.s3.put_chunked(kb, b, self.CHUNK)
+        self.fetch(ka, "a")
+        os.remove(os.path.join(self.scratch, "a"))
+        bad = generate_zarr.annex_chunk_key(kb, self.CHUNK, 2)
+        with open(os.path.join(self.s3.objects, bad), "wb") as fh:
+            fh.write(b"\0" * 1000)
+        self.assert_refused(kb, "chunk C2", "1000 bytes", f"expected {self.CHUNK}")
+        # The bad chunk was retried as a possibly short transfer, then the
+        # listing decided: a second listing, for this key alone.
+        self.assertEqual(len([c for c in self.s3.calls("s3 cp") if bad in c]), 2)
+        self.assertEqual(len(self.s3.calls("s3api list-objects-v2")), 2)
+
+    def test_a_short_transfer_under_the_cached_size_is_fetched_again(self):
+        # The other half: the stored chunk is right and the copy was short.
+        # The listing agrees with the key, so the fetch goes ahead and succeeds.
+        generate_zarr._AWS_RETRIES = 1
+        a, b = os.urandom(3000), os.urandom(3000)
+        ka, kb = sha256e(a, ".eeg"), sha256e(b, ".eeg")
+        self.s3.put_chunked(ka, a, self.CHUNK)
+        self.s3.put_chunked(kb, b, self.CHUNK)
+        self.fetch(ka, "a")
+        os.environ["ZARR_TEST_BUCKET_SHORT_ONCE"] = generate_zarr.annex_chunk_key(kb, self.CHUNK, 2)
+        self.assert_bytes(self.fetch(kb, "b"), b)
+        self.assertEqual(len(self.s3.calls("s3api list-objects-v2")), 2)
 
 
 class TestChunkedAnnexConvertOne(unittest.TestCase):
