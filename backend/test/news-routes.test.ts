@@ -724,6 +724,152 @@ describe("DELETE /admin/news/:id", () => {
   });
 });
 
+describe("audit_log rows for admin writes", () => {
+  interface AuditRow {
+    user_id: number;
+    action: string;
+    resource_type: string;
+    resource_id: string;
+    details: Record<string, unknown>;
+  }
+
+  function newsAuditRows(): AuditRow[] {
+    return db
+      .query<Omit<AuditRow, "details"> & { details: string }, []>(
+        `SELECT user_id, action, resource_type, resource_id, details
+           FROM audit_log WHERE action LIKE 'news_post_%' ORDER BY id`,
+      )
+      .all()
+      .map((row) => ({ ...row, details: JSON.parse(row.details) as Record<string, unknown> }));
+  }
+
+  test("create, update and delete each write one row with the post id, slug and actor", async () => {
+    const post = await create({ slug: "audited", published_at: "2026-05-01T09:00:00+02:00" });
+    const id = String(post.id);
+    expect(newsAuditRows()).toEqual([
+      {
+        user_id: adminId,
+        action: "news_post_created",
+        resource_type: "news_post",
+        resource_id: id,
+        details: {
+          id: Number(id),
+          slug: "audited",
+          status: "draft",
+          published_at: "2026-05-01T07:00:00Z",
+          actor: "newsadmin",
+        },
+      },
+    ]);
+
+    const put = await call(`/admin/news/${id}`, {
+      method: "PUT",
+      key: EDITOR_KEY,
+      body: replaceInput({
+        slug: "audited-renamed",
+        status: "published",
+        published_at: "2026-05-02T00:00:00Z",
+      }),
+    });
+    expect(put.status).toBe(200);
+    // The row describes the post as the update left it.
+    expect(newsAuditRows()[1]).toEqual({
+      user_id: editorId,
+      action: "news_post_updated",
+      resource_type: "news_post",
+      resource_id: id,
+      details: {
+        id: Number(id),
+        slug: "audited-renamed",
+        status: "published",
+        published_at: "2026-05-02T00:00:00Z",
+        actor: "newseditor",
+      },
+    });
+
+    expect((await call(`/admin/news/${id}`, { method: "DELETE", key: ADMIN_KEY })).status).toBe(
+      200,
+    );
+    // And the delete's row describes the post it removed.
+    expect(newsAuditRows()[2]).toEqual({
+      user_id: adminId,
+      action: "news_post_deleted",
+      resource_type: "news_post",
+      resource_id: id,
+      details: {
+        id: Number(id),
+        slug: "audited-renamed",
+        status: "published",
+        published_at: "2026-05-02T00:00:00Z",
+        actor: "newsadmin",
+      },
+    });
+    expect(newsAuditRows()).toHaveLength(3);
+  });
+
+  test("a refused or missed write leaves no audit row", async () => {
+    const owner = await create({ slug: "owner" });
+    const other = await create({ slug: "other" });
+    const before = newsAuditRows();
+    expect(before.map((r) => r.action)).toEqual(["news_post_created", "news_post_created"]);
+
+    const refused: [string, { method: string; key: string; body?: unknown }, number][] = [
+      ["/admin/news", { method: "POST", key: ADMIN_KEY, body: input({ slug: "owner" }) }, 409],
+      ["/admin/news", { method: "POST", key: ADMIN_KEY, body: input({ title: " " }) }, 400],
+      ["/admin/news", { method: "POST", key: MEMBER_KEY, body: input({ slug: "member" }) }, 403],
+      [
+        `/admin/news/${other.id}`,
+        { method: "PUT", key: ADMIN_KEY, body: replaceInput({ slug: "owner" }) },
+        409,
+      ],
+      ["/admin/news/424242", { method: "PUT", key: ADMIN_KEY, body: replaceInput() }, 404],
+      ["/admin/news/424242", { method: "DELETE", key: ADMIN_KEY }, 404],
+      [`/admin/news/${owner.id}`, { method: "DELETE", key: MEMBER_KEY }, 403],
+    ];
+    for (const [path, init, status] of refused) {
+      expect((await call(path, init)).status).toBe(status);
+    }
+    expect(newsAuditRows()).toEqual(before);
+  });
+
+  describe("a failed audit insert rolls the write back", () => {
+    function breakNewsAudit() {
+      db.exec(
+        `CREATE TRIGGER news_audit_down BEFORE INSERT ON audit_log
+           WHEN NEW.action LIKE 'news_post_%'
+         BEGIN SELECT RAISE(ABORT, 'audit_log unavailable'); END`,
+      );
+    }
+
+    test("create: 500 and no post", async () => {
+      breakNewsAudit();
+      const res = await call("/admin/news", { method: "POST", key: ADMIN_KEY, body: input() });
+      expect(res.status).toBe(500);
+      expect(db.query("SELECT COUNT(*) AS n FROM news_posts").get()).toEqual({ n: 0 });
+    });
+
+    test("update: 500 and the post unchanged", async () => {
+      const post = await create({ slug: "kept", title: "Kept title" });
+      breakNewsAudit();
+      const res = await call(`/admin/news/${post.id}`, {
+        method: "PUT",
+        key: ADMIN_KEY,
+        body: replaceInput({ slug: "changed", title: "Changed title" }),
+      });
+      expect(res.status).toBe(500);
+      expect(rawRow(post.id)).toMatchObject({ slug: "kept", title: "Kept title" });
+    });
+
+    test("delete: 500 and the post still there", async () => {
+      const post = await create({ slug: "survivor" });
+      breakNewsAudit();
+      const res = await call(`/admin/news/${post.id}`, { method: "DELETE", key: ADMIN_KEY });
+      expect(res.status).toBe(500);
+      expect(rawRow(post.id)?.slug).toBe("survivor");
+    });
+  });
+});
+
 describe("migration 0087 backstops writes that bypass the route", () => {
   function insert(
     published_at: string,

@@ -9,11 +9,16 @@
  *   DELETE /admin/news/:id                        200 | 404
  *   POST   /admin/news/media    raw image body -> { url, content_type, bytes }
  *
+ * Every create, update and delete writes an audit_log row in the same D1
+ * batch as the write (services/news.ts, newsAuditStatement), so a failed
+ * audit insert fails the request with nothing written.
+ *
  * Validation failures answer with zValidator's default 400 envelope, the
  * same one the notices routes produce.
  */
 
 import { zValidator } from "@hono/zod-validator";
+import type { Context } from "hono";
 import { z } from "zod";
 
 import {
@@ -22,6 +27,7 @@ import {
   NEWS_SLUG_MIN,
   NEWS_SLUG_RE,
   NEWS_STATUSES,
+  type NewsActor,
   NewsSlugTakenError,
   type NewsWrite,
   RESERVED_NEWS_SLUGS,
@@ -39,6 +45,7 @@ import {
   sniffImageType,
   storeNewsImage,
 } from "../../services/news-media";
+import type { Bindings, Variables } from "../../types/bindings";
 import { hasRealUtcOffset } from "./notices";
 import type { AdminRouter } from "./shared";
 
@@ -151,6 +158,12 @@ function toWrite(input: NewsInput): NewsWrite {
   return { ...input, published_at: input.published_at ?? new Date().toISOString() };
 }
 
+/** The signed-in admin, as the audit rows record them. */
+function actorOf(c: Context<{ Bindings: Bindings; Variables: Variables }>): NewsActor {
+  const user = c.get("user");
+  return { id: user.id, username: user.username ?? null };
+}
+
 /** A positive integer id from the path, or null (which the caller answers 404). */
 function parseId(raw: string): number | null {
   if (!/^\d+$/.test(raw)) return null;
@@ -178,9 +191,8 @@ export function registerNewsRoutes(admin: AdminRouter): void {
   });
 
   admin.post("/news", zValidator("json", newsInputSchema), async (c) => {
-    const user = c.get("user");
     try {
-      const post = await createNews(c.env.DB, toWrite(c.req.valid("json")), user.id);
+      const post = await createNews(c.env.DB, toWrite(c.req.valid("json")), actorOf(c));
       return c.json({ post }, 201);
     } catch (err) {
       if (err instanceof NewsSlugTakenError) return c.json(slugTaken(err), 409);
@@ -191,9 +203,8 @@ export function registerNewsRoutes(admin: AdminRouter): void {
   admin.put("/news/:id", zValidator("json", newsReplaceSchema), async (c) => {
     const id = parseId(c.req.param("id"));
     if (id === null) return c.json(NOT_FOUND, 404);
-    const user = c.get("user");
     try {
-      const post = await updateNews(c.env.DB, id, toWrite(c.req.valid("json")), user.id);
+      const post = await updateNews(c.env.DB, id, toWrite(c.req.valid("json")), actorOf(c));
       if (!post) return c.json(NOT_FOUND, 404);
       return c.json({ post });
     } catch (err) {
@@ -204,7 +215,7 @@ export function registerNewsRoutes(admin: AdminRouter): void {
 
   admin.delete("/news/:id", async (c) => {
     const id = parseId(c.req.param("id"));
-    const deleted = id === null ? false : await deleteNews(c.env.DB, id);
+    const deleted = id === null ? false : await deleteNews(c.env.DB, id, actorOf(c));
     if (!deleted) return c.json(NOT_FOUND, 404);
     return c.json({ ok: true });
   });
