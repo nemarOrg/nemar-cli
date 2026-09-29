@@ -5347,6 +5347,43 @@ def embed_root_attr(store_path: str, key: str, value: object) -> None:
     embed_attr(os.path.join(store_path, "zarr.json"), key, value)
 
 
+def store_label_renames(store_path: str) -> dict[str, str]:
+    """biosigIO's `channel_labels_deduplicated` map from a written store's
+    `recording_metadata`, `{new_label: file_label}`, or {} when it renamed
+    nothing (or predates 1.2.9, which is when it started recording this)."""
+    try:
+        with open(os.path.join(store_path, "zarr.json"), encoding="utf-8") as fh:
+            attrs = json.load(fh).get("attributes") or {}
+    except (OSError, ValueError):
+        return {}
+    rec_meta = attrs.get("recording_metadata")
+    renames = rec_meta.get("channel_labels_deduplicated") if isinstance(rec_meta, dict) else None
+    if not isinstance(renames, dict):
+        return {}
+    return {str(k): str(v) for k, v in renames.items()}
+
+
+def positions_for_renamed_labels(
+    positions: dict[str, list[float]], renames: dict[str, str]
+) -> dict[str, list[float]]:
+    """Electrode positions a viewer can join to the STORE's channel labels.
+
+    Positions are keyed by the electrodes.tsv `name`, and a viewer finds a
+    channel's position by its label. When the file repeats a label, biosigIO
+    serves the repeats as `<label>-0`, `<label>-1`, ... and a sidecar written
+    from the file names only `<label>`, so every repeat would lose its position.
+    Each renamed label inherits its file label's position, which is the
+    electrode that label names. Only fills a gap: a sidecar that names the
+    suffixed label itself (as MNE-BIDS writes it) is left as it is, and no
+    existing key is dropped or overwritten.
+    """
+    out = dict(positions)
+    for new_label, file_label in renames.items():
+        if new_label not in out and file_label in positions:
+            out[new_label] = positions[file_label]
+    return out
+
+
 def fix_source_file_attr(store_path: str, bids_relpath: str) -> None:
     """Overwrite the store's `recording_metadata.source_file` root attribute
     with the repository-relative BIDS path.
@@ -5978,7 +6015,12 @@ def convert_recording(
         if os.path.exists(events_meta):
             embed_attr(events_meta, "value_descriptions", value_descriptions)
     if electrode_positions is not None:
-        embed_root_attr(store_path, "electrode_positions", electrode_positions["positions"])
+        embed_root_attr(
+            store_path, "electrode_positions",
+            positions_for_renamed_labels(
+                electrode_positions["positions"], store_label_renames(store_path)
+            ),
+        )
         embed_root_attr(store_path, "electrode_coordinate_system", electrode_positions["coordinate_system"])
         embed_root_attr(store_path, "electrode_coordinate_units", electrode_positions["coordinate_units"])
 
