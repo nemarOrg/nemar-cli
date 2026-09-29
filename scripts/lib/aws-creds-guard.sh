@@ -17,13 +17,20 @@
 # Usage in a script:
 #
 #   . "$(dirname "${BASH_SOURCE[0]}")/lib/aws-creds-guard.sh"
-#   nemar_guard_aws_credentials
+#   nemar_guard_aws_credentials [REGION]
+#
+# REGION is optional. When given it is passed to the identity probe as
+# `--region`, so a caller that names its region on its own command line does
+# not also depend on AWS_DEFAULT_REGION or a config-file region being set just
+# for the guard's sake. Without it the probe uses the ambient configuration,
+# exactly as before.
 #
 # The function exits the script with code 2 on credential policy
 # violations (long-lived AKIA in env, or no resolvable identity).
 
 nemar_guard_aws_credentials() {
   local key="${AWS_ACCESS_KEY_ID:-}"
+  local region="${1:-}"
 
   if [[ -n "$key" ]]; then
     case "$key" in
@@ -77,7 +84,12 @@ EOF
   # - Stale SSO sessions
   # - Wrong region or expired ASIA* token
   local identity
-  if ! identity=$(aws sts get-caller-identity --output text --query Arn 2>&1); then
+  local -a region_args=()
+  if [[ -n "$region" ]]; then
+    region_args=(--region "$region")
+  fi
+  # ${arr[@]+...} keeps an empty array from tripping `set -u` on bash < 4.4.
+  if ! identity=$(aws sts get-caller-identity ${region_args[@]+"${region_args[@]}"} --output text --query Arn 2>&1); then
     cat >&2 <<EOF
 ERROR: No AWS credentials available to this script.
 

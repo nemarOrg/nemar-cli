@@ -1,8 +1,10 @@
 /**
- * Unit tests for the pure planning logic in scripts/rename-archives.ts
- * (#1491's one-time rename sweep). Pure functions, no network, no AWS --
- * per the PR's test plan, the AWS-CLI-shelling half of that script is
- * exercised manually by the lead in dry-run mode, never in CI or here.
+ * Unit tests for the pure planning, verification and selection logic in
+ * scripts/rename-archives.ts (#1491's one-time rename sweep). Pure functions,
+ * no network, no AWS. The half of that script that shells out to `aws` is
+ * exercised through its real entry point, with the real `aws` CLI against a
+ * local S3 stand-in, in test/rename-archives-tagging.test.ts and
+ * test/rename-archives-copy.test.ts.
  *
  * Sample shapes are drawn from a real `aws s3api list-objects-v2
  * --bucket nemar --prefix nm000132/archives/` read (2026-09-28):
@@ -15,14 +17,22 @@
 import { describe, expect, test } from "bun:test";
 import {
   type ArchiveObjectInfo,
+  type ObjectVersionInfo,
   buildCopyArgs,
+  buildTagArgs,
   classifyHeadObjectError,
   decideRenameAction,
+  findLeftoverVersions,
+  formatBytes,
+  hasArchiveTag,
   isDatasetIdPrefix,
   isNewFormatArchiveKey,
+  mergeArchiveTag,
   planDatasetRename,
   planRenameKey,
+  selectVersionToDelete,
   verifyRenameCopy,
+  withRegion,
 } from "../scripts/rename-archives";
 
 const T1 = "2026-03-01T00:00:00.000Z";
@@ -182,6 +192,24 @@ describe("verifyRenameCopy", () => {
     expect(verdict.reason).toContain("skipped");
   });
 
+  test("a plain-MD5 source copied multipart: size match is sufficient (multipart ETag on the DEST side)", () => {
+    // `aws s3 cp` copies anything from 8 MiB up as a multipart upload, so a
+    // source that was uploaded in a single PUT (plain MD5 ETag) still comes
+    // out with a `-<parts>` ETag. The pair can never match; the size can.
+    const source = { size: 20971520, etag: '"d41d8cd98f00b204e9800998ecf8427e"' };
+    const dest = { size: 20971520, etag: '"00000000000000000000000000000abc-3"' };
+    const verdict = verifyRenameCopy(source, dest);
+    expect(verdict.ok).toBe(true);
+    expect(verdict.reason).toContain("skipped");
+  });
+
+  test("a multipart ETag on either side never rescues a size mismatch", () => {
+    const plain = { size: 20971520, etag: '"d41d8cd98f00b204e9800998ecf8427e"' };
+    const multipart = { size: 20971519, etag: '"00000000000000000000000000000abc-3"' };
+    expect(verifyRenameCopy(plain, multipart).ok).toBe(false);
+    expect(verifyRenameCopy(multipart, { ...plain, size: 20971520 }).ok).toBe(false);
+  });
+
   test("single-part ETag: must match exactly", () => {
     const source = { size: 500, etag: '"abc123"' };
     expect(verifyRenameCopy(source, { size: 500, etag: '"abc123"' }).ok).toBe(true);
@@ -241,11 +269,39 @@ describe("decideRenameAction (PR review finding: never overwrite an existing des
     expect(decision.action).toBe("skip-collision");
   });
 
-  test("destination differs, newer AND non-empty, --delete-stale-legacy passed -> delete-stale-legacy", () => {
+  test("destination differs, newer, non-empty AND at least as large, --delete-stale-legacy passed -> delete-stale-legacy", () => {
     const dest = { size: 999, etag: '"different"', lastModified: T2 };
     expect(decideRenameAction(source, dest, { allowDeleteStaleLegacy: true })).toEqual({
       action: "delete-stale-legacy",
     });
+  });
+
+  test("a destination exactly as large as the source is enough for delete-stale-legacy", () => {
+    const dest = { size: 500, etag: '"different"', lastModified: T2 };
+    expect(decideRenameAction(source, dest, { allowDeleteStaleLegacy: true }).action).toBe(
+      "delete-stale-legacy",
+    );
+  });
+
+  test("destination newer and non-empty but SMALLER than the source -> skip-collision, never delete-stale-legacy", () => {
+    // A truncated or partial destination must not be trusted as the winner:
+    // deleting the legacy object would destroy the only intact copy.
+    const dest = { size: 499, etag: '"different"', lastModified: T2 };
+    const decision = decideRenameAction(source, dest, { allowDeleteStaleLegacy: true });
+    expect(decision.action).toBe("skip-collision");
+    if (decision.action === "skip-collision") {
+      expect(decision.reason).toContain("at least as large");
+    }
+  });
+
+  test("the collision reason tells the operator to inspect the destination before using the flag", () => {
+    const dest = { size: 999, etag: '"different"', lastModified: T2 };
+    const decision = decideRenameAction(source, dest, { allowDeleteStaleLegacy: false });
+    expect(decision.action).toBe("skip-collision");
+    if (decision.action === "skip-collision") {
+      expect(decision.reason).toContain("inspect the destination first");
+      expect(decision.reason).toContain("--delete-stale-legacy");
+    }
   });
 
   // Mutation-relevant: every branch other than "no destination" must never
@@ -264,8 +320,8 @@ describe("decideRenameAction (PR review finding: never overwrite an existing des
   });
 });
 
-describe("buildCopyArgs (PR review finding: renamed objects must carry the archive tag)", () => {
-  test("includes --tagging-directive REPLACE and the nemar-kind=archive tag", () => {
+describe("buildCopyArgs (bug: aws s3 cp has no --tagging-directive/--tagging)", () => {
+  test("is a plain s3 cp with --no-progress, no tagging flags", () => {
     const item = {
       datasetId: "on002718",
       oldKey: "on002718/archives/v1.0.0.zip",
@@ -280,14 +336,14 @@ describe("buildCopyArgs (PR review finding: renamed objects must carry the archi
       "cp",
       "s3://nemar/on002718/archives/v1.0.0.zip",
       "s3://nemar/on002718/archives/on002718_v1.0.0.zip",
-      "--tagging-directive",
-      "REPLACE",
-      "--tagging",
-      "nemar-kind=archive",
+      "--no-progress",
     ]);
   });
 
-  test("does not pass a metadata directive (content type and metadata stay on the default COPY behavior)", () => {
+  // This is the exact bug (#1491/#1518 sweep, measured against production):
+  // `aws s3 cp` rejects `s3api copy-object`'s tagging flags outright with a
+  // ParamValidation error, so buildCopyArgs must never emit them again.
+  test("never includes --tagging-directive or --tagging (that combination belongs to s3api copy-object)", () => {
     const item = {
       datasetId: "nm000132",
       oldKey: "nm000132/archives/v1.1.1.zip",
@@ -297,8 +353,218 @@ describe("buildCopyArgs (PR review finding: renamed objects must carry the archi
       lastModified: T1,
     };
     const args = buildCopyArgs("nemar", item);
+    expect(args).not.toContain("--tagging-directive");
+    expect(args).not.toContain("--tagging");
     expect(args).not.toContain("--metadata-directive");
     expect(args).not.toContain("--content-type");
+  });
+});
+
+describe("buildTagArgs", () => {
+  test("builds an s3api put-object-tagging call carrying the given tag set as JSON", () => {
+    const args = buildTagArgs("nemar", "on002718/archives/on002718_v1.0.0.zip", [
+      { Key: "nemar-kind", Value: "archive" },
+    ]);
+    expect(args.slice(0, 7)).toEqual([
+      "s3api",
+      "put-object-tagging",
+      "--bucket",
+      "nemar",
+      "--key",
+      "on002718/archives/on002718_v1.0.0.zip",
+      "--tagging",
+    ]);
+    expect(JSON.parse(args[7])).toEqual({ TagSet: [{ Key: "nemar-kind", Value: "archive" }] });
+  });
+
+  test("a preserved tag that shorthand syntax could not quote survives intact", () => {
+    const tricky = { Key: "note", Value: "a,b [c]=d" };
+    const args = buildTagArgs("nemar", "k", [tricky]);
+    expect(JSON.parse(args[7]).TagSet).toEqual([tricky]);
+  });
+});
+
+describe("mergeArchiveTag (put-object-tagging replaces the whole set, so merge)", () => {
+  test("adds nemar-kind=archive to an empty set", () => {
+    expect(mergeArchiveTag([])).toEqual([{ Key: "nemar-kind", Value: "archive" }]);
+  });
+
+  test("keeps every other tag", () => {
+    const merged = mergeArchiveTag([
+      { Key: "owner", Value: "lab" },
+      { Key: "keep", Value: "me" },
+    ]);
+    expect(merged).toEqual([
+      { Key: "owner", Value: "lab" },
+      { Key: "keep", Value: "me" },
+      { Key: "nemar-kind", Value: "archive" },
+    ]);
+  });
+
+  test("overwrites a nemar-kind tag that holds another value, without duplicating the key", () => {
+    const merged = mergeArchiveTag([
+      { Key: "nemar-kind", Value: "scratch" },
+      { Key: "keep", Value: "me" },
+    ]);
+    expect(merged.filter((t) => t.Key === "nemar-kind")).toEqual([
+      { Key: "nemar-kind", Value: "archive" },
+    ]);
+    expect(merged).toContainEqual({ Key: "keep", Value: "me" });
+  });
+
+  test("the merged set always passes hasArchiveTag", () => {
+    expect(hasArchiveTag(mergeArchiveTag([{ Key: "nemar-kind", Value: "scratch" }]))).toBe(true);
+  });
+});
+
+describe("hasArchiveTag", () => {
+  test("true when the tag set carries nemar-kind=archive", () => {
+    expect(hasArchiveTag([{ Key: "nemar-kind", Value: "archive" }])).toBe(true);
+  });
+
+  test("true when it is one of several tags", () => {
+    expect(
+      hasArchiveTag([
+        { Key: "other", Value: "thing" },
+        { Key: "nemar-kind", Value: "archive" },
+      ]),
+    ).toBe(true);
+  });
+
+  test("false for an empty tag set", () => {
+    expect(hasArchiveTag([])).toBe(false);
+  });
+
+  test("false when the key is present with a different value", () => {
+    expect(hasArchiveTag([{ Key: "nemar-kind", Value: "something-else" }])).toBe(false);
+  });
+
+  test("false when unrelated tags are present but not nemar-kind", () => {
+    expect(hasArchiveTag([{ Key: "other", Value: "thing" }])).toBe(false);
+  });
+});
+
+describe("selectVersionToDelete (delete only the exact, verified object)", () => {
+  const key = "nm000132/archives/v1.0.1.zip";
+  const planned = { size: 1000, etag: '"aaa"' };
+  const v = (over: Partial<ObjectVersionInfo>): ObjectVersionInfo => ({
+    Key: key,
+    VersionId: "vid-1",
+    IsLatest: true,
+    ETag: '"aaa"',
+    Size: 1000,
+    ...over,
+  });
+
+  test("the current version that matches the plan is selected", () => {
+    expect(selectVersionToDelete(key, [v({})], planned)).toEqual({ ok: true, versionId: "vid-1" });
+  });
+
+  test("refuses when the current version's ETag is not the planned one", () => {
+    const r = selectVersionToDelete(key, [v({ ETag: '"rebuilt"' })], planned);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("not the object that was planned and verified");
+  });
+
+  test("refuses when the current version's Size is not the planned one", () => {
+    const r = selectVersionToDelete(key, [v({ Size: 1001 })], planned);
+    expect(r.ok).toBe(false);
+  });
+
+  test("a noncurrent version is never the one selected, even when it matches the plan", () => {
+    const r = selectVersionToDelete(
+      key,
+      [v({ VersionId: "new", IsLatest: true, Size: 5 }), v({ VersionId: "old", IsLatest: false })],
+      planned,
+    );
+    expect(r.ok).toBe(false);
+  });
+
+  test("a delete marker on top means nothing is deleted, even if a noncurrent version matches the plan", () => {
+    // The legacy key was deleted after it was planned: the newest entry is a
+    // delete marker (a marker is in the listing's DeleteMarkers, not Versions),
+    // so every version left in `Versions` is noncurrent. The old one matches
+    // the plan exactly, and must still never be selected.
+    const r = selectVersionToDelete(key, [v({ VersionId: "old", IsLatest: false })], planned);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("no current version");
+  });
+
+  test("only entries for the EXACT key count (the listing is a prefix match)", () => {
+    const neighbor = v({ Key: `${key}.bak`, VersionId: "neighbor", IsLatest: true });
+    // The neighbor matches size and ETag and IsLatest, and sorts after the
+    // real key, but it is a different object and must never be picked.
+    expect(selectVersionToDelete(key, [neighbor], planned).ok).toBe(false);
+    expect(selectVersionToDelete(key, [neighbor, v({})], planned)).toEqual({
+      ok: true,
+      versionId: "vid-1",
+    });
+  });
+
+  test("no current version at all (gone, or hidden by a delete marker) is a refusal", () => {
+    const r = selectVersionToDelete(key, [], planned);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("no current version");
+  });
+});
+
+describe("findLeftoverVersions (what the delete left behind)", () => {
+  const key = "nm000132/archives/v1.0.1.zip";
+  const entry = (over: Partial<ObjectVersionInfo>): ObjectVersionInfo => ({
+    Key: key,
+    VersionId: "vid",
+    IsLatest: false,
+    ...over,
+  });
+
+  test("nothing left is an empty list", () => {
+    expect(findLeftoverVersions(key, [], [])).toEqual([]);
+  });
+
+  test("names every remaining version and delete marker of the exact key", () => {
+    expect(
+      findLeftoverVersions(
+        key,
+        [entry({ VersionId: "old-1" }), entry({ VersionId: "old-2" })],
+        [entry({ VersionId: "marker-1" })],
+      ),
+    ).toEqual([
+      { kind: "version", versionId: "old-1" },
+      { kind: "version", versionId: "old-2" },
+      { kind: "delete-marker", versionId: "marker-1" },
+    ]);
+  });
+
+  test("other keys the prefix listing dragged in are not leftovers", () => {
+    expect(
+      findLeftoverVersions(
+        key,
+        [entry({ Key: `${key}.bak`, VersionId: "neighbor" })],
+        [entry({ Key: `${key}.bak`, VersionId: "neighbor-marker" })],
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("withRegion", () => {
+  test("appends the region as the CLI's own --region flag", () => {
+    expect(withRegion(["s3api", "head-object", "--bucket", "nemar"], "eu-west-1")).toEqual([
+      "s3api",
+      "head-object",
+      "--bucket",
+      "nemar",
+      "--region",
+      "eu-west-1",
+    ]);
+  });
+});
+
+describe("formatBytes", () => {
+  test("picks the unit a person would read", () => {
+    expect(formatBytes(500)).toBe("500 bytes");
+    expect(formatBytes(1536)).toBe("1.5 KiB");
+    expect(formatBytes(20 * 1024 ** 2)).toBe("20.0 MiB");
+    expect(formatBytes(606 * 1024 ** 3)).toBe("606.00 GiB");
   });
 });
 
@@ -318,40 +584,79 @@ describe("isDatasetIdPrefix", () => {
   });
 });
 
-describe("classifyHeadObjectError (PR review finding: a transient error is not a 404)", () => {
-  test("a real aws s3api head-object 404 body classifies as not-found", () => {
-    // Actual shape of `aws s3api head-object` stderr for a missing key.
-    const stderr = "An error occurred (404) when calling the HeadObject operation: Not Found";
-    expect(classifyHeadObjectError(stderr)).toBe("not-found");
+describe("classifyHeadObjectError (a transient error is not a 404)", () => {
+  // Every stderr below is REAL: captured from the actual aws-cli 2.36.47
+  // against a local S3 stand-in (or a closed port), with the dataset id
+  // nm000404 wherever a key appears, because a URL embeds the key and the key
+  // can contain "404".
+  const key = "nm000404/archives/nm000404_v1.0.0.zip";
+
+  test("the real head-object 404 classifies as not-found", () => {
+    expect(
+      classifyHeadObjectError(
+        "\naws: [ERROR]: An error occurred (404) when calling the HeadObject operation: Not Found\n",
+      ),
+    ).toBe("not-found");
   });
 
-  test("a NoSuchKey body classifies as not-found", () => {
-    const stderr =
-      "An error occurred (NoSuchKey) when calling the HeadObject operation: The specified key does not exist.";
-    expect(classifyHeadObjectError(stderr)).toBe("not-found");
+  test("the same 404 with the CLI's retry annotation still classifies as not-found", () => {
+    expect(
+      classifyHeadObjectError(
+        "\naws: [ERROR]: An error occurred (404) when calling the HeadObject operation (reached max retries: 0): Not Found\n",
+      ),
+    ).toBe("not-found");
   });
 
-  test("is case-insensitive on the not-found markers", () => {
-    expect(classifyHeadObjectError("not found")).toBe("not-found");
-    expect(classifyHeadObjectError("nosuchkey")).toBe("not-found");
+  test("a NoSuchKey / NotFound error line classifies as not-found", () => {
+    expect(
+      classifyHeadObjectError(
+        "An error occurred (NoSuchKey) when calling the HeadObject operation: The specified key does not exist.",
+      ),
+    ).toBe("not-found");
+    expect(
+      classifyHeadObjectError("An error occurred (NotFound) when calling the HeadObject operation"),
+    ).toBe("not-found");
+  });
+
+  test("a refused connection whose URL contains 404 is an error, never a silent not-found", () => {
+    const stderr = `\naws: [ERROR]: Could not connect to the endpoint URL: "http://127.0.0.1:9/nemar/${key}"\n`;
+    expect(stderr).toContain("404");
+    expect(classifyHeadObjectError(stderr)).toBe("error");
+  });
+
+  test("a dropped connection whose URL contains 404 is an error, never a silent not-found", () => {
+    const stderr = `\naws: [ERROR]: Connection was closed before we received a valid response from endpoint URL: "http://127.0.0.1:55561/nemar/${key}".\n`;
+    expect(stderr).toContain("404");
+    expect(classifyHeadObjectError(stderr)).toBe("error");
+  });
+
+  test("a real 403 is an error, never a silent not-found", () => {
+    expect(
+      classifyHeadObjectError(
+        "\naws: [ERROR]: An error occurred (403) when calling the HeadObject operation: Forbidden\n",
+      ),
+    ).toBe("error");
+  });
+
+  test("a real 503 is an error, never a silent not-found", () => {
+    expect(
+      classifyHeadObjectError(
+        "\naws: [ERROR]: An error occurred (503) when calling the HeadObject operation (reached max retries: 0): Service Unavailable\n",
+      ),
+    ).toBe("error");
   });
 
   test("throttling is an error, never a silent not-found", () => {
-    const stderr =
-      "An error occurred (SlowDown) when calling the HeadObject operation: Please reduce your request rate.";
-    expect(classifyHeadObjectError(stderr)).toBe("error");
+    expect(
+      classifyHeadObjectError(
+        "An error occurred (SlowDown) when calling the HeadObject operation: Please reduce your request rate.",
+      ),
+    ).toBe("error");
   });
 
-  test("a network failure is an error, never a silent not-found", () => {
-    const stderr =
-      'Could not connect to the endpoint URL: "https://nemar.s3.us-east-2.amazonaws.com/"';
-    expect(classifyHeadObjectError(stderr)).toBe("error");
-  });
-
-  test("a permissions hiccup (AccessDenied) is an error, never a silent not-found", () => {
-    const stderr =
-      "An error occurred (AccessDenied) when calling the HeadObject operation: Access Denied";
-    expect(classifyHeadObjectError(stderr)).toBe("error");
+  test("bare not-found words outside the CLI's error line are not a signal", () => {
+    expect(classifyHeadObjectError("not found")).toBe("error");
+    expect(classifyHeadObjectError("nosuchkey")).toBe("error");
   });
 
   test("empty stderr (e.g. a non-2xx with no body) is an error, never a silent not-found", () => {
