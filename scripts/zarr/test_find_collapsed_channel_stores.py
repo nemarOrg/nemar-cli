@@ -24,6 +24,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from typing import ClassVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -40,6 +41,27 @@ def tsv(names: list[str]) -> str:
 
 
 class _Quiet(http.server.SimpleHTTPRequestHandler):
+    """Serves the directory, except that a path in `faults` answers with the
+    configured status (and headers) instead, the way a rate-limited or failing
+    host does. `hits` counts every request per path."""
+
+    faults: ClassVar[dict[str, tuple[int, dict[str, str]]]] = {}
+    hits: ClassVar[dict[str, int]] = {}
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        self.hits[path] = self.hits.get(path, 0) + 1
+        fault = self.faults.get(path)
+        if fault is not None:
+            status, headers = fault
+            self.send_response(status)
+            for key, value in headers.items():
+                self.send_header(key, value)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        super().do_GET()
+
     def log_message(self, format, *args):
         pass
 
@@ -50,7 +72,12 @@ class Site:
 
     def __init__(self, root: str):
         self.root = root
-        handler = functools.partial(_Quiet, directory=root)
+        # Per-site fault table and hit counter, shared with the handler class
+        # the server instantiates per request.
+        handler_cls = type("_Handler", (_Quiet,), {"faults": {}, "hits": {}})
+        self.faults: dict[str, tuple[int, dict[str, str]]] = handler_cls.faults
+        self.hits: dict[str, int] = handler_cls.hits
+        handler = functools.partial(handler_cls, directory=root)
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -86,6 +113,10 @@ class Site:
 
     def sidecar(self, dataset: str, rel: str, content: str) -> None:
         self.write(f"raw/nemarDatasets/{dataset}/{COMMIT}/{rel}", content)
+
+    def fail(self, rel: str, status: int, **headers: str) -> None:
+        """Answer every GET of `rel` (relative to the site root) with `status`."""
+        self.faults["/" + rel] = (status, headers)
 
 
 def store(run: int, n_channels: int, ext: str = "edf", **extra) -> dict:
@@ -153,6 +184,11 @@ class TestOverHttp(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.site = Site(self._tmp.name)
         self.addCleanup(self.site.close)
+        # The retries are real; only their spacing is shortened, so a store
+        # that keeps failing costs the test milliseconds rather than seconds.
+        backoff = fc.RETRY_BACKOFF_S
+        fc.RETRY_BACKOFF_S = 0.01
+        self.addCleanup(setattr, fc, "RETRY_BACKOFF_S", backoff)
 
     def run_main(self, *args: str) -> tuple[int, dict]:
         argv = ["--zarr-base", self.site.zarr_base, "--github-raw-base", self.site.raw_base, *args]
@@ -214,6 +250,102 @@ class TestOverHttp(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertEqual(report["datasets"][0]["error"], "no_index")
         self.assertEqual(report["summary"]["datasets_unchecked"], 1)
+
+    def _two_clean_stores_one_failing(self, status: int) -> tuple[int, dict]:
+        labels = [f"C{i}" for i in range(6)]
+        stores = [store(1, 6), store(2, 6)]
+        self.site.publish(DATASET, stores, {s["zarr"]: labels for s in stores})
+        for run in (1, 2):
+            self.site.sidecar(DATASET, tsv_rel(run), tsv(labels))
+        bad = f"zarr/{DATASET}/zarr/{stores[1]['zarr']}/eeg_250hz/zarr.json"
+        self.site.fail(bad, status)
+        rc, report = self.run_main("--dataset", DATASET)
+        self.assertEqual(self.site.hits["/" + bad], 3, "every attempt was made")
+        return rc, report
+
+    def test_a_rate_limited_store_leaves_the_dataset_unchecked(self):
+        rc, report = self._two_clean_stores_one_failing(429)
+        self.assertEqual(rc, 2, "a store the run could not read is not clean")
+        self.assertEqual(report["findings"], [])
+        summary = report["summary"]
+        self.assertEqual(
+            (summary["datasets_checked"], summary["datasets_unchecked"]), (0, 1)
+        )
+        self.assertEqual((summary["stores_checked"], summary["stores_unreadable"]), (1, 1))
+        errors = report["datasets"][0]["store_errors"]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("429", errors[0]["error"])
+
+    def test_a_failing_store_leaves_the_dataset_unchecked(self):
+        rc, report = self._two_clean_stores_one_failing(503)
+        self.assertEqual(rc, 2)
+        self.assertEqual(report["summary"]["datasets_unchecked"], 1)
+        self.assertIn("503", report["datasets"][0]["store_errors"][0]["error"])
+
+    def test_an_unreadable_sidecar_leaves_the_dataset_unchecked(self):
+        labels = [f"C{i}" for i in range(6)]
+        self.site.publish(DATASET, [store(1, 6)], {store(1, 6)["zarr"]: labels})
+        self.site.sidecar(DATASET, tsv_rel(1), tsv(labels))
+        self.site.fail(f"raw/nemarDatasets/{DATASET}/{COMMIT}/{tsv_rel(1)}", 500)
+        rc, report = self.run_main("--dataset", DATASET)
+        self.assertEqual(rc, 2)
+        self.assertEqual(report["summary"]["stores_unreadable"], 1)
+
+    def test_a_finding_outranks_an_unreadable_store(self):
+        stores = [store(1, 4), store(2, 6)]
+        self.site.publish(DATASET, stores, {})
+        for run in (1, 2):
+            self.site.sidecar(DATASET, tsv_rel(run), tsv(CHB_LABELS))
+        self.site.fail(f"zarr/{DATASET}/zarr/{stores[1]['zarr']}/eeg_250hz/zarr.json", 502)
+        rc, report = self.run_main("--dataset", DATASET)
+        self.assertEqual(rc, 1)
+        self.assertEqual(report["summary"]["stores_flagged"], 1)
+        self.assertEqual(report["summary"]["datasets_unchecked"], 1)
+
+    def test_all_walks_the_public_catalog(self):
+        other = "nm000111"
+        labels = [f"C{i}" for i in range(6)]
+        self.site.publish(DATASET, [store(1, 4)], {})
+        self.site.sidecar(DATASET, tsv_rel(1), tsv(CHB_LABELS))
+        self.site.publish(other, [store(1, 6)], {store(1, 6)["zarr"]: labels})
+        self.site.sidecar(other, tsv_rel(1), tsv(labels))
+        # The catalog's own shape (`GET /datasets`, paginated by
+        # `total_count`); a private row must not be walked.
+        self.site.write("api/datasets", json.dumps({
+            "total_count": 3,
+            "datasets": [
+                {"dataset_id": other, "visibility": "public"},
+                {"dataset_id": DATASET, "visibility": "public"},
+                {"dataset_id": "nm000999", "visibility": "private"},
+            ],
+        }))
+        api = self.site.zarr_base.rsplit("/", 1)[0] + "/api"
+        rc, report = self.run_main("--all", "--api-base", api)
+        self.assertEqual(rc, 1)
+        self.assertEqual([d["dataset"] for d in report["datasets"]], [DATASET, other])
+        self.assertEqual([f["dataset"] for f in report["findings"]], [DATASET])
+        self.assertEqual(report["summary"]["datasets_checked"], 2)
+
+    def test_labels_mode_decides_which_stores_are_read(self):
+        # A non-EDF store whose labels repeat: only `--labels all` reads it.
+        entry = store(1, 6, ext="set")
+        self.site.publish(DATASET, [entry], {entry["zarr"]: CHB_LABELS})
+        self.site.sidecar(DATASET, tsv_rel(1), tsv(CHB_LABELS))
+        group = f"/zarr/{DATASET}/zarr/{entry['zarr']}/eeg_250hz/zarr.json"
+        rc, report = self.run_main("--dataset", DATASET)
+        self.assertEqual((rc, report["findings"]), (0, []))
+        self.assertNotIn(group, self.site.hits)
+        rc, report = self.run_main("--dataset", DATASET, "--labels", "all")
+        self.assertEqual(rc, 1)
+        self.assertEqual(report["findings"][0]["repeated_labels"], ["-", "T8-P8"])
+        # And `none` skips even an EDF store's labels.
+        edf = store(2, 6)
+        self.site.publish(DATASET, [edf], {edf["zarr"]: CHB_LABELS})
+        self.site.sidecar(DATASET, tsv_rel(2), tsv(CHB_LABELS))
+        rc, report = self.run_main("--dataset", DATASET, "--labels", "none")
+        self.assertEqual((rc, report["findings"]), (0, []))
+        rc, report = self.run_main("--dataset", DATASET)
+        self.assertEqual(rc, 1)
 
     def test_a_real_biosigio_store_is_read(self):
         # The group layout the detector reads is biosigIO's, not this file's:

@@ -54,7 +54,10 @@ Usage
     python3 scripts/zarr/find_collapsed_channel_stores.py --all --out report.json
 
 Exit status: 0 nothing flagged and every dataset checked, 1 something
-flagged, 2 nothing flagged but at least one dataset could not be checked.
+flagged, 2 nothing flagged but at least one dataset could not be checked. A
+dataset is unchecked when its index could not be read OR when any one of its
+stores could not be (a 429 or 5xx that outlived the retries, a malformed
+group): unchecked is never reported as clean.
 
 What follows a finding is a re-conversion under biosigio >= 1.2.9, which the
 report spells out per dataset (`requeue`): on the conversion host,
@@ -101,6 +104,8 @@ DEFAULT_API_BASE = "https://api.nemar.org"
 USER_AGENT = "nemar-zarr-collapsed-channel-check/1.0 (+https://github.com/nemarOrg/nemar-cli)"
 # The source formats whose labels can reach a store repeated (see module doc).
 REPEATABLE_LABEL_EXTS = (".edf", ".bdf")
+# Seconds before the n-th retry of a transient failure is `n * RETRY_BACKOFF_S`.
+RETRY_BACKOFF_S = 2.0
 
 
 class Finding(TypedDict, total=False):
@@ -225,17 +230,36 @@ def requeue_commands(dataset_id: str) -> list[str]:
     ]
 
 
+def is_unchecked(result: dict) -> bool:
+    """A dataset is unchecked when it could not be read at all (`error`) OR
+    when any one of its stores could not be (`unreadable_stores`). Unchecked
+    is never clean: a store the run could not read is a store it cannot vouch
+    for, whatever the rest of the dataset looked like."""
+    return bool(result.get("error")) or bool(result.get("unreadable_stores"))
+
+
 def summarize(results: list[dict]) -> dict:
     flagged = [r for r in results if r.get("findings")]
+    unchecked = [r for r in results if is_unchecked(r)]
     return {
-        "datasets_checked": sum(1 for r in results if not r.get("error")),
-        "datasets_unchecked": sum(1 for r in results if r.get("error")),
+        "datasets_checked": len(results) - len(unchecked),
+        "datasets_unchecked": len(unchecked),
         "datasets_flagged": len(flagged),
-        "stores_checked": sum(r.get("stores", 0) for r in results),
+        "stores_checked": sum(
+            r.get("stores", 0) - r.get("unreadable_stores", 0) for r in results
+        ),
+        "stores_unreadable": sum(r.get("unreadable_stores", 0) for r in results),
         "stores_flagged": sum(len(r.get("findings", [])) for r in results),
         "stores_sidecar_overcount": sum(r.get("sidecar_overcount", 0) for r in results),
         "stores_without_channels_tsv": sum(r.get("no_channels_tsv", 0) for r in results),
     }
+
+
+def exit_status(summary: dict) -> int:
+    """1 when anything is flagged; else 2 when anything went unchecked; else 0."""
+    if summary["stores_flagged"]:
+        return 1
+    return 2 if summary["datasets_unchecked"] else 0
 
 
 # --- I/O ---------------------------------------------------------------------
@@ -262,7 +286,7 @@ def http_get(url: str, *, timeout: int = 60, attempts: int = 3) -> bytes:
         except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
             last = exc
         if attempt < attempts:
-            time.sleep(2.0 * attempt)
+            time.sleep(RETRY_BACKOFF_S * attempt)
     assert last is not None
     raise last
 
@@ -446,6 +470,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         results.append(result)
         state = result.get("error") or f"{len(result['findings'])} flagged of {result['stores']}"
+        if result.get("unreadable_stores"):
+            state += f", {result['unreadable_stores']} unreadable (unchecked)"
         print(f"{dataset_id}: {state}", file=sys.stderr, flush=True)
 
     report = {
@@ -462,10 +488,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
-    summary = report["summary"]
-    if summary["stores_flagged"]:
-        return 1
-    return 2 if summary["datasets_unchecked"] else 0
+    return exit_status(report["summary"])
 
 
 if __name__ == "__main__":
