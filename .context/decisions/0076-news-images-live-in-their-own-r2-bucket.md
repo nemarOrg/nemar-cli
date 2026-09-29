@@ -1,4 +1,4 @@
-# ADR 0075: News images live in their own R2 bucket and are served by the Worker
+# ADR 0076: News images live in their own R2 bucket and are served by the Worker
 
 **Status:** accepted
 **Date:** 2026-09-29

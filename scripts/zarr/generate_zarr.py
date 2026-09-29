@@ -2249,6 +2249,51 @@ def channels_tsv_names(text: str) -> list[str] | None:
 # thousands of stores does not pay for it in index bytes (#1178).
 UNMATCHED_EXAMPLES_MAX = 5
 
+# How many case-only matches an index entry names, as `"<sidecar name> ->
+# <channel>"`. The same reasoning as UNMATCHED_EXAMPLES_MAX: enough to see the
+# pattern, and no per-channel map in every store's entry.
+CASE_MATCH_EXAMPLES_MAX = 5
+
+# biosigIO's (>= 1.2.10, biosigio#140) key in its `channels_tsv_units` account:
+# `{sidecar_name: channel_label}` for every row it matched to a channel only by
+# ignoring case. One entry per such channel, so it is never published as is.
+BIOSIGIO_CASE_MATCH_KEY = "matched_case_insensitive"
+
+
+def bound_units_report(report: dict) -> tuple[dict, dict[str, str]]:
+    """biosigIO's `channels_tsv_units` account as the index publishes it, and
+    the full case-match map it carried.
+
+    Every key biosigIO reports is republished unchanged except
+    `matched_case_insensitive`, whose value grows with the channel count (a
+    300-channel recording whose sidecar spells every label in another case is
+    300 entries, in every store's entry). It is replaced by:
+
+    - ``matched_case_only``: how many channels a row reached only by ignoring
+      case, so the sidecar's type and unit WERE applied to them. Present only
+      when non-zero, like ``unmatched_case_only``.
+    - ``matched_case_only_examples``: up to CASE_MATCH_EXAMPLES_MAX of those
+      matches as ``"<sidecar name> -> <channel label>"``, in biosigIO's order
+      (channels.tsv row order). Present exactly when the count is.
+
+    The map is returned separately, for `sidecar_join_report`, which needs
+    every matched channel to know which ones the sidecar did NOT reach. A
+    value that is not a map (a biosigIO shape this code does not know) is
+    dropped rather than republished, and contributes no matches.
+    """
+    out = {k: v for k, v in report.items() if k != BIOSIGIO_CASE_MATCH_KEY}
+    raw = report.get(BIOSIGIO_CASE_MATCH_KEY)
+    matches = (
+        {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+    )
+    if matches:
+        out["matched_case_only"] = len(matches)
+        out["matched_case_only_examples"] = [
+            f"{name} -> {label}"
+            for name, label in list(matches.items())[:CASE_MATCH_EXAMPLES_MAX]
+        ]
+    return out, matches
+
 
 class SidecarJoinReport(TypedDict, total=False):
     """What `sidecar_join_report` adds to an index entry's `units_report`."""
@@ -2290,13 +2335,14 @@ def sidecar_join_report(
     never applied and ``unmatched_case_only`` is a true statement about it.
     biosigio 1.2.10 (biosigio#140) also matches a row to the one channel that
     differs from it only in case, and reports each such match as
-    ``matched_case_insensitive``, ``{sidecar_name: channel_label}``, in the same
-    `channels_tsv_units` account this function's caller republishes as
-    `units_report`. Pass that map as `matched_case_insensitive` and those
-    channels count as matched, because the sidecar DID reach them; what is left
-    under ``unmatched_case_only`` is then only the ambiguous rows biosigIO
-    warns about and leaves unapplied. On 1.2.9 the map is absent and the
-    behavior is unchanged.
+    ``matched_case_insensitive``, ``{sidecar_name: channel_label}``, in its
+    `channels_tsv_units` account (which `bound_units_report` republishes as a
+    count and a few examples, never the map). Pass that map as
+    `matched_case_insensitive` and those channels count as matched, because the
+    sidecar DID reach them; what is left under ``unmatched_case_only`` is then
+    only the ambiguous rows biosigIO warns about and leaves unapplied. Without
+    the map (biosigio 1.2.9, or no case-only match) every non-exact name is
+    unmatched.
     """
     if not store_labels:
         return {}
@@ -3411,6 +3457,27 @@ def pending_retry_worklist(
     return paths, f"{len(paths)} pending recording(s)"
 
 
+def _heal_carried_units_report(entry: dict) -> dict:
+    """A prior index entry with its `units_report` bounded, as `merge_index`
+    carries it.
+
+    Entries for unchanged stores are carried verbatim, and the schema refuses
+    biosigIO's raw per-channel `matched_case_insensitive` map. An entry
+    published with that map (a biosigio 1.2.10 run before the converter bounded
+    it: staging, an exemplar, an ad hoc `--dataset` with BIOSIGIO_SPEC
+    overridden) would otherwise be re-carried by every incremental run and fail
+    the pre-upload validation each time, wedging the dataset until a `--clean`
+    rebuild. Passing it through `bound_units_report` derives the count and the
+    examples from the map and drops the map, so the entry heals on the next
+    merge. Every other entry is returned as it is, and `prior` is not mutated.
+    """
+    report = entry.get("units_report")
+    if not (isinstance(report, dict) and BIOSIGIO_CASE_MATCH_KEY in report):
+        return entry
+    bounded, _matches = bound_units_report(report)
+    return {**entry, "units_report": bounded}
+
+
 def merge_index(
     prior: dict | None,
     dataset_id: str,
@@ -3488,7 +3555,7 @@ def merge_index(
     if prior and isinstance(prior.get("stores"), list):
         for entry in prior["stores"]:
             if isinstance(entry, dict) and isinstance(entry.get("zarr"), str):
-                stores[entry["zarr"]] = entry
+                stores[entry["zarr"]] = _heal_carried_units_report(entry)
     for rel in removed_store_rels:
         stores.pop(rel, None)
     for entry in converted:
@@ -5058,7 +5125,10 @@ def store_metadata(store_path: str) -> dict:
             rec_meta.get("channels_tsv_units") if isinstance(rec_meta, dict) else None,
         ):
             if isinstance(candidate, dict):
-                result["units_report"] = candidate
+                # Republished bounded: biosigIO's per-channel case-match map
+                # becomes a count and a few examples (`bound_units_report`).
+                # The full map rides along as a diagnostic for the join report.
+                result["units_report"], result["_case_matches"] = bound_units_report(candidate)
                 break
         # Diagnostics for the sidecar join (`sidecar_join_report`), `_`-prefixed
         # so they never reach the published entry. `channel_labels_deduplicated`
@@ -6433,10 +6503,9 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             # report cannot say: it counts only what matched rows did.
             names = channels_tsv_names(channels_text) if channels_text is not None else None
             if names is not None:
-                by_case = entry["units_report"].get("matched_case_insensitive")
                 join = sidecar_join_report(
                     meta.get("_channel_labels") or [], names, meta.get("_label_renames") or {},
-                    by_case if isinstance(by_case, dict) else None,
+                    meta.get("_case_matches") or None,
                 )
                 entry["units_report"].update(join)
                 if join.get("unmatched_channels"):

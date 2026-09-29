@@ -16,8 +16,20 @@ import {
   datasetLandingUrl,
   isValidRelationType,
 } from "../../../shared/datacite-constants.js";
+import {
+  DATA_DESCRIBING_RELATION_TYPES,
+  NEVER_DATA_PAPER_DOIS,
+  isOwnNemarDoi,
+  isStandardSpecTitle,
+  normalizeDoiKey,
+} from "../../../shared/never-data-paper.js";
 
 import { detectModalitiesFromTree, mapModalityToResourceType } from "./datacite.js";
+import {
+  type DoiResolution,
+  EMPTY_DOI_RESOLUTION,
+  formatResolvedDoiBlock,
+} from "./doi-metadata.js";
 
 /** Result of LLM enrichment (v2 format fields only). */
 export interface LlmEnrichmentResultV2 {
@@ -38,7 +50,7 @@ function truncateReadme(content: string): string {
 
 /** Exact model ID — the Anthropic API has no rolling "latest" alias, so
  *  version bumps are a deliberate one-line change here. */
-const CLAUDE_MODEL = "claude-sonnet-5";
+const CLAUDE_MODEL = "claude-sonnet-5-5";
 
 /** Accumulated token usage across the LLM calls of one enrichment run.
  *  `calls` counts ATTEMPTS (incremented on dispatch), so failed HTTP calls
@@ -56,11 +68,11 @@ export interface LlmUsageTotals extends LlmUsage {
   est_cost_usd: number;
 }
 
-/** Estimated cost in USD for accumulated usage at claude-sonnet-5 standard
- *  rates ($3 / $15 per MTok). Intro pricing through 2026-08-31 is lower, so
- *  this reads slightly conservative until then. */
+/** Estimated cost in USD for accumulated usage at claude-sonnet-5-5 standard
+ *  rates ($2 / $10 per MTok). Prompt-cache discounts are not modeled, so this
+ *  is an upper bound for runs that hit the cache. */
 export function estimateUsageCostUsd(usage: LlmUsage): number {
-  const usd = (usage.input_tokens * 3 + usage.output_tokens * 15) / 1_000_000;
+  const usd = (usage.input_tokens * 2 + usage.output_tokens * 10) / 1_000_000;
   return Math.round(usd * 10000) / 10000;
 }
 
@@ -174,18 +186,26 @@ Rules:
 - keywords: 3-8 domain-specific terms. Include modality (EEG, MEG, etc.) if applicable. Use subject_scheme "MeSH" ONLY when you are confident the term is a real MeSH descriptor. Do NOT use "LCSH" or any other scheme. Terms that are not MeSH descriptors should have no subject_scheme.
 - funding_references: Parse funding strings into structured format. Common funders: NIH, NSF, ERC, DFG. Use funder_name (not funderName).
 - related_identifiers: Only include actual DOIs (10.XXXX/...) with identifier_type "DOI".
-  The relation_type is CRITICAL for downstream citation attribution. Assign it by what the
-  paper IS to THIS dataset, not by where the DOI appeared:
-  * IsDescribedBy or IsSupplementTo: ONLY for a paper that introduces or describes THIS
-    dataset's own data (its data paper / data descriptor). A dataset has at most one or two
-    such papers.
-  * References: everything this dataset merely uses or cites — shared paradigm/stimulus
-    resources (e.g. ERP CORE), other datasets it reuses (e.g. HBN-EEG), standards and
-    specification papers (e.g. BIDS, iEEG-BIDS), methods/analysis papers, and software
-    papers (e.g. EEGLAB, MNE-Python, fMRIPrep). A paper describing a STANDARD or RESOURCE
-    the dataset follows is NOT the dataset's data paper.
-  * IsDerivedFrom: a source dataset this dataset was created from.
-  * When unsure whether a paper is THIS dataset's own data paper, use References.
+  The relation_type is CRITICAL for downstream citation attribution: every citation of a
+  DOI marked IsDescribedBy or IsDerivedFrom is credited to THIS dataset. Assign it by what
+  the DOI IS to THIS dataset, not by where it appeared. When a "Resolved DOI metadata"
+  block is present, use each DOI's actual title, first author, year, venue, and type, and
+  compare them with this dataset's Name and Authors:
+  * IsDescribedBy: ONLY this dataset's own data paper, meaning the data descriptor or the
+    article that introduces or reports THIS dataset's own recordings (its title and authors
+    match this dataset). A dataset has at most one or two. Use IsDescribedBy for it, not
+    IsSupplementTo.
+  * IsDerivedFrom: a deposit of the same data in another repository (figshare, Zenodo, OSF,
+    OpenNeuro, PhysioNet) that this dataset was created from.
+  * References: everything else. That includes shared paradigm/stimulus resources (e.g.
+    ERP CORE), other datasets or umbrella initiatives it reuses or belongs to (e.g. HBN,
+    HBN-EEG, ABCD), standards and specification papers (e.g. BIDS, EEG-BIDS, iEEG-BIDS,
+    HED), methods/analysis papers, software papers (e.g. EEGLAB, MNE-Python, MNE-BIDS,
+    fMRIPrep), and any DOI whose resolved title has nothing to do with this dataset (a
+    typo'd or mis-cited DOI). A paper describing a STANDARD or RESOURCE the dataset
+    follows is NOT the dataset's data paper.
+  * When unsure whether a DOI is THIS dataset's own data paper, use References.
+  * Never list this dataset's own DOI (its DatasetDOI or the DOI in its README badge).
 - Omit any field where you have no information. Return {} if nothing can be extracted.
 - Do NOT hallucinate DOIs or funding numbers. Include a DOI ONLY when it appears verbatim
   in the README or dataset description. If a paper is cited without a DOI, OMIT it —
@@ -203,17 +223,32 @@ export async function enrichFromReadme(
   readmeContent: string,
   bidsDescription: Record<string, unknown>,
   config: LlmClientConfig,
+  doiResolution: DoiResolution = EMPTY_DOI_RESOLUTION,
 ): Promise<LlmEnrichmentResultV2> {
-  const userPrompt = `## BIDS dataset_description.json
+  const userPrompt = buildSourcesPrompt(readmeContent, bidsDescription, doiResolution);
+  const parsed = await callClaude(SYSTEM_PROMPT, userPrompt, config);
+  return validateLlmResultV2(parsed);
+}
+
+/**
+ * The source-material section shared by the enrichment, validation, and
+ * correction prompts: the BIDS description (dataset name and authors), then
+ * what each candidate DOI resolves to (#1549), then the README. The resolved
+ * block sits next to the name and authors so the model can compare them.
+ */
+export function buildSourcesPrompt(
+  readmeContent: string,
+  bidsDescription: Record<string, unknown>,
+  doiResolution: DoiResolution = EMPTY_DOI_RESOLUTION,
+): string {
+  const resolvedBlock = formatResolvedDoiBlock(doiResolution);
+  return `## BIDS dataset_description.json
 \`\`\`json
 ${JSON.stringify(bidsDescription, null, 2)}
 \`\`\`
-
+${resolvedBlock ? `\n${resolvedBlock}\n` : ""}
 ## README.md
 ${truncateReadme(readmeContent)}`;
-
-  const parsed = await callClaude(SYSTEM_PROMPT, userPrompt, config);
-  return validateLlmResultV2(parsed);
 }
 
 /**
@@ -493,6 +528,38 @@ const RECLASSIFIABLE_RELATION_TYPES: ReadonlySet<string> = new Set([
   "References",
 ]);
 
+/** Whether the LLM may move an existing entry from `current` to `next`.
+ *  Within the #826 triad, any move. Out of it, exactly one (#1549):
+ *  `References` -> `IsDerivedFrom`, for a deposit of the same data (figshare,
+ *  Zenodo, OpenNeuro) that ReferencesAndLinks seeded as a mere reference.
+ *  IsDerivedFrom is locked once written, so that move is a ratchet, and it
+ *  is allowed only for a DOI whose DataCite resourceTypeGeneral is `Dataset`
+ *  (`derivableDois`); a paper can never be ratcheted into provenance. */
+function isReclassifiable(
+  current: RelatedIdentifierEntry,
+  next: string,
+  derivableDois: ReadonlySet<string>,
+): boolean {
+  if (current.identifier_type === "URL") return false;
+  if (current.relation_type === "References" && next === "IsDerivedFrom") {
+    return derivableDois.has(normalizeDoiKey(current.identifier));
+  }
+  return (
+    RECLASSIFIABLE_RELATION_TYPES.has(current.relation_type) &&
+    RECLASSIFIABLE_RELATION_TYPES.has(next)
+  );
+}
+
+/** Match key for merging: a DOI-shaped identifier compares case- and
+ *  prefix-insensitively (the LLM may echo `10.1109/tbcas...` for a seeded
+ *  `10.1109/TBCAS...`); anything else compares exactly. Keyed on the value,
+ *  not the declared identifier_type, so an LLM entry that mistypes a URL as a
+ *  DOI still matches (and stays locked to) the existing URL entry. */
+function mergeKey(r: RelatedIdentifierEntry): string {
+  const doi = normalizeDoiKey(r.identifier);
+  return /^10\.\d{4,}\//.test(doi) ? `doi:${doi}` : r.identifier;
+}
+
 export interface PruneOutcome<T> {
   result: T;
   /** Identifiers that were removed, for logging/response surfacing. */
@@ -542,14 +609,106 @@ export function pruneUnsourcedDois<T extends { related_identifiers?: RelatedIden
   return { result: { ...target, related_identifiers: kept }, pruned };
 }
 
+export interface DemoteOutcome<T> {
+  result: T;
+  /** Entries that were demoted, as they were BEFORE demotion. */
+  demoted: RelatedIdentifierEntry[];
+  /** DOI entries naming the dataset's own NEMAR DOI, removed. */
+  dropped: RelatedIdentifierEntry[];
+}
+
+export interface RelationGuardContext {
+  /** Resolved registry titles keyed by {@link normalizeDoiKey}, for the
+   *  BIDS-spec title rule. */
+  resolvedTitles?: ReadonlyMap<string, string>;
+  /** The dataset being enriched; its own concept and version DOIs are
+   *  dropped from related_identifiers. */
+  datasetId?: string;
+}
+
+/**
+ * Enforce the deterministic relation rules (#1549, ADR 0075).
+ *
+ * 1. A DOI on {@link NEVER_DATA_PAPER_DOIS}, or one whose resolved title is a
+ *    BIDS specification title, is never this dataset's data paper, whatever
+ *    the LLM, the BIDS seed (SourceDatasets / ReferencesAndLinks), or an older
+ *    metadata.json says: under a data-describing relation it is demoted to
+ *    `References`. Demotion can leave the same DOI listed twice as
+ *    `References`; those duplicates collapse to the first.
+ * 2. The dataset's own NEMAR DOI (concept or version) is dropped under any
+ *    relation. A dataset never relates to itself, yet on008862 and on007655
+ *    carried their own DOI as `IsSupplementTo`, and a README badge DOI can be
+ *    promoted to `IsDescribedBy` by the merge.
+ *
+ * Only DOI entries are touched: URL entries (the GitHub repo and NEMAR
+ * landing page are `IsDescribedBy` URLs) pass through, and so does every
+ * relation of an unblocked DOI, `IsSupplementTo` included. enrichDataset
+ * calls this after every stage that can write a relation and once more on
+ * the final document, so no later stage can undo it.
+ */
+export function enforceNeverDataPaper<T extends { related_identifiers?: RelatedIdentifierEntry[] }>(
+  target: T,
+  context: RelationGuardContext = {},
+): DemoteOutcome<T> {
+  const rels = target.related_identifiers;
+  if (!rels || rels.length === 0) return { result: target, demoted: [], dropped: [] };
+
+  const { resolvedTitles, datasetId } = context;
+  const doiKey = (r: RelatedIdentifierEntry): string | null =>
+    r.identifier_type === "DOI" ? normalizeDoiKey(r.identifier) : null;
+  const isOwn = (r: RelatedIdentifierEntry): boolean => {
+    const key = doiKey(r);
+    return key !== null && isOwnNemarDoi(key, datasetId);
+  };
+  const isBlocked = (r: RelatedIdentifierEntry): boolean => {
+    const key = doiKey(r);
+    if (key === null) return false;
+    return NEVER_DATA_PAPER_DOIS.has(key) || isStandardSpecTitle(resolvedTitles?.get(key));
+  };
+
+  const dropped = rels.filter(isOwn);
+  const demoted = rels.filter(
+    (r) => !isOwn(r) && isBlocked(r) && DATA_DESCRIBING_RELATION_TYPES.has(r.relation_type),
+  );
+  if (demoted.length === 0 && dropped.length === 0) {
+    return { result: target, demoted, dropped };
+  }
+
+  const kept: RelatedIdentifierEntry[] = [];
+  const blockedReferences = new Set<string>();
+  for (const r of rels) {
+    if (isOwn(r)) continue;
+    if (!isBlocked(r)) {
+      kept.push(r);
+      continue;
+    }
+    const entry = DATA_DESCRIBING_RELATION_TYPES.has(r.relation_type)
+      ? { ...r, relation_type: "References" }
+      : r;
+    if (entry.relation_type === "References") {
+      const key = normalizeDoiKey(entry.identifier);
+      if (blockedReferences.has(key)) continue;
+      blockedReferences.add(key);
+    }
+    kept.push(entry);
+  }
+  return { result: { ...target, related_identifiers: kept }, demoted, dropped };
+}
+
 /**
  * Merge LLM enrichment results into a seeded NemarMetadataV2 object.
  *
  * related_identifiers: existing entries within the citation triad are
- * reclassifiable by the LLM (#826); IsDerivedFrom, URL entries, and non-LLM
- * relation types are locked; new entries are appended. funding_references
- * merge additively with LLM-parsed entries replacing matching raw BIDS
- * strings.
+ * reclassifiable by the LLM (#826), and a `References` entry may become
+ * `IsDerivedFrom` when its DOI is in `derivableDois` (#1549); IsDerivedFrom,
+ * URL entries, and non-LLM relation types are locked; new entries are
+ * appended, a new DOI claimed as IsDerivedFrom outside `derivableDois` as
+ * `References`. DOIs match case-insensitively. funding_references merge
+ * additively with LLM-parsed entries replacing matching raw BIDS strings.
+ *
+ * `derivableDois`: normalized DOIs whose DataCite resourceTypeGeneral is
+ * `Dataset` (see datasetDoisOf in doi-metadata.ts). Empty by default, so
+ * without resolved metadata the LLM cannot write IsDerivedFrom at all.
  *
  * LLM overwrites: description, methods_description, keywords (LLM's domain).
  * Authors are never touched by the LLM.
@@ -557,6 +716,7 @@ export function pruneUnsourcedDois<T extends { related_identifiers?: RelatedIden
 export function mergeWithExisting(
   existing: NemarMetadataV2 | null,
   llmResult: LlmEnrichmentResultV2,
+  derivableDois: ReadonlySet<string> = new Set(),
 ): NemarMetadataV2 {
   const merged: NemarMetadataV2 = {
     version: "2.0",
@@ -603,27 +763,34 @@ export function mergeWithExisting(
   // the LLM's relation_type replaces the existing one in place, letting
   // re-enrichment upgrade a data paper that ReferencesAndLinks seeded as mere
   // "References" and downgrade a standard/resource paper wrongly tagged
-  // IsDescribedBy. Everything else is locked: IsDerivedFrom (BIDS
-  // SourceDatasets), URL entries (GitHub/NEMAR links), and any relation type
-  // outside the triad (importer's IsIdenticalTo, curator-set types) — the LLM
-  // never overwrites another subsystem's assertion. All duplicate entries for
-  // an identifier are updated consistently.
+  // IsDescribedBy, plus the single References -> IsDerivedFrom move for a
+  // deposit of the same data (isReclassifiable). Everything else is locked:
+  // IsDerivedFrom (BIDS SourceDatasets), URL entries (GitHub/NEMAR links),
+  // and any relation type outside the triad (importer's IsIdenticalTo,
+  // curator-set types); the LLM never overwrites another subsystem's
+  // assertion. All duplicate entries for an identifier are updated
+  // consistently, and DOIs match regardless of case or resolver prefix.
   if (llmResult.related_identifiers) {
     const existingRels = existing?.related_identifiers || [];
     const allRels = existingRels.map((r) => ({ ...r }));
     for (const newRel of llmResult.related_identifiers) {
-      const matches = allRels.filter((r) => r.identifier === newRel.identifier);
+      const key = mergeKey(newRel);
+      const matches = allRels.filter((r) => mergeKey(r) === key);
       if (matches.length > 0) {
         for (const current of matches) {
-          const reclassifiable =
-            current.identifier_type !== "URL" &&
-            RECLASSIFIABLE_RELATION_TYPES.has(current.relation_type) &&
-            RECLASSIFIABLE_RELATION_TYPES.has(newRel.relation_type);
-          if (reclassifiable) current.relation_type = newRel.relation_type;
+          if (isReclassifiable(current, newRel.relation_type, derivableDois)) {
+            current.relation_type = newRel.relation_type;
+          }
         }
         continue;
       }
-      allRels.push(newRel);
+      // A new IsDerivedFrom would be locked on the next run just like a
+      // promoted one, so it needs the same Dataset evidence.
+      const unprovenDerivation =
+        newRel.relation_type === "IsDerivedFrom" &&
+        newRel.identifier_type === "DOI" &&
+        !derivableDois.has(normalizeDoiKey(newRel.identifier));
+      allRels.push(unprovenDerivation ? { ...newRel, relation_type: "References" } : newRel);
     }
     merged.related_identifiers = allRels;
   }
@@ -811,20 +978,26 @@ Rate each criterion from 0-100 confidence that the metadata is CORRECT:
 - Do author names match between sources?
 
 ### 2. Related Identifier Accuracy (weight: high)
-- Is each relation type correct?
-  - IsDerivedFrom: this dataset was created from that source
+- Is each relation type correct? Check each DOI against its entry in the "Resolved DOI
+  metadata" block when present (actual title, first author, year, venue, type).
+  - IsDerivedFrom: this dataset was created from that source (e.g. a figshare, Zenodo, or
+    OpenNeuro deposit of the same data)
   - IsVersionOf: this is a newer version of the same dataset
-  - IsDescribedBy: a paper that introduces/describes THIS dataset's own data — its data
+  - IsDescribedBy: a paper that introduces/describes THIS dataset's own data, i.e. its data
     paper (also valid for GitHub repo and NEMAR landing page URLs)
-  - IsSupplementTo: this dataset supplements that publication (also a data-paper relation)
-  - References: general citation — reused paradigm/stimulus resources (e.g. ERP CORE),
-    standards/specification papers (e.g. BIDS, iEEG-BIDS), methods and software papers
-    (e.g. EEGLAB, MNE-Python, fMRIPrep)
+  - IsSupplementTo: this dataset supplements that publication (a data-paper relation;
+    IsDescribedBy is preferred)
+  - References: general citation, e.g. reused paradigm/stimulus resources (ERP CORE),
+    umbrella initiatives (e.g. HBN, ABCD), standards/specification papers (e.g. BIDS,
+    iEEG-BIDS, HED), methods and software papers (e.g. EEGLAB, MNE-Python, fMRIPrep)
 - FLAG as a blocking issue any DOI tagged IsDescribedBy/IsSupplementTo whose paper is a
-  standard, shared resource, or method/software paper rather than this dataset's own data
-  paper — and the reverse: this dataset's own data paper tagged as mere References.
+  standard, shared resource, umbrella initiative, or method/software paper rather than this
+  dataset's own data paper, or whose resolved title is unrelated to this dataset; and the
+  reverse: this dataset's own data paper tagged as mere References.
+- Do NOT raise a blocking issue about IsDerivedFrom, in either direction: BIDS
+  SourceDatasets become IsDerivedFrom automatically, and the correction step cannot change
+  an IsDerivedFrom entry.
 - Are the DOIs valid identifiers?
-- Cross-check: does dataset_description.json have SourceDatasets that should be IsDerivedFrom?
 - NOTE: GitHub repo URLs (github.com/nemarDatasets/...) and NEMAR landing page URLs (nemar.org/dataset/...) with relation type IsDescribedBy are CORRECT and should NOT be flagged as issues.
 
 ### 3. Description Accuracy (weight: medium)
@@ -883,19 +1056,14 @@ export async function validateMetadata(
   readmeContent: string,
   bidsDescription: Record<string, unknown>,
   config: LlmClientConfig,
+  doiResolution: DoiResolution = EMPTY_DOI_RESOLUTION,
 ): Promise<{ metadata: NemarMetadataV2; validation: ValidationResult }> {
   const userPrompt = `## .nemar/metadata.json
 \`\`\`json
 ${JSON.stringify(metadata, null, 2)}
 \`\`\`
 
-## BIDS dataset_description.json
-\`\`\`json
-${JSON.stringify(bidsDescription, null, 2)}
-\`\`\`
-
-## README.md
-${truncateReadme(readmeContent)}`;
+${buildSourcesPrompt(readmeContent, bidsDescription, doiResolution)}`;
 
   const parsed = await callClaude(VALIDATION_PROMPT, userPrompt, config, 6000);
   const validation = parseValidationResult(parsed);
@@ -921,6 +1089,7 @@ export async function correctFromFeedback(
   readmeContent: string,
   bidsDescription: Record<string, unknown>,
   config: LlmClientConfig,
+  doiResolution: DoiResolution = EMPTY_DOI_RESOLUTION,
 ): Promise<LlmEnrichmentResultV2> {
   const correctionPrompt = `You are a metadata correction assistant for neuroimaging datasets.
 A validation judge has reviewed the metadata and found issues that need to be fixed.
@@ -930,9 +1099,11 @@ IMPORTANT:
 - Only return fields that need correction. Do NOT return unchanged fields.
 - Do NOT modify authors (those are locked from BIDS).
 - Do NOT modify IsDerivedFrom entries or GitHub/NEMAR URL entries in related_identifiers.
-  You MAY reclassify other DOI relation_types — e.g. correct THIS dataset's own data paper
-  to IsDescribedBy, or a standard/resource/software paper wrongly tagged IsDescribedBy
-  back to References.
+  You MAY reclassify other DOI relation_types, e.g. correct THIS dataset's own data paper
+  to IsDescribedBy, a deposit of the same data from References to IsDerivedFrom, or a
+  standard/resource/software paper (or an unrelated, typo'd DOI) wrongly tagged
+  IsDescribedBy back to References. Use the "Resolved DOI metadata" block to check what
+  each DOI actually is.
 - Focus on fixing the blocking issues. Warnings are optional to address.
 
 Return ONLY valid JSON with the corrected fields (same schema as enrichment):
@@ -958,13 +1129,7 @@ ${numberedList(blockingIssues)}
 ## WARNINGS (optional to fix)
 ${numberedList(warnings)}
 
-## BIDS dataset_description.json
-\`\`\`json
-${JSON.stringify(bidsDescription, null, 2)}
-\`\`\`
-
-## README.md
-${truncateReadme(readmeContent)}`;
+${buildSourcesPrompt(readmeContent, bidsDescription, doiResolution)}`;
 
   const parsed = await callClaude(correctionPrompt, userPrompt, config, 6000);
   return validateLlmResultV2(parsed);

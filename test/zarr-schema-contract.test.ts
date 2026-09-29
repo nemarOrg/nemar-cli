@@ -46,6 +46,15 @@ const UNMATCHED_EXAMPLES_MAX = (() => {
   return Number(match[1]);
 })();
 
+/** The converter's bound on `units_report.matched_case_only_examples`
+ *  (`CASE_MATCH_EXAMPLES_MAX`), read the same way. */
+const CASE_MATCH_EXAMPLES_MAX = (() => {
+  const source = readFileSync(new URL("../scripts/zarr/generate_zarr.py", import.meta.url), "utf8");
+  const match = /^CASE_MATCH_EXAMPLES_MAX = (\d+)$/m.exec(source);
+  if (!match) throw new Error("CASE_MATCH_EXAMPLES_MAX not found in generate_zarr.py");
+  return Number(match[1]);
+})();
+
 const examples = (n: number) => Array.from({ length: n }, (_, i) => `X${i}`);
 
 /** A fresh compiler per test: Ajv caches by `$id`, and the mutation tests
@@ -134,6 +143,12 @@ describe("shared/zarr-index.schema.json", () => {
       { unmatched_case_only: 0 },
       { unmatched_raw_label: 0 },
       { unmatched_examples: examples(UNMATCHED_EXAMPLES_MAX + 1) },
+      { matched_case_only: 0 },
+      { matched_case_only: 1, matched_case_only_examples: [1] },
+      {
+        matched_case_only: CASE_MATCH_EXAMPLES_MAX + 1,
+        matched_case_only_examples: examples(CASE_MATCH_EXAMPLES_MAX + 1),
+      },
     ]) {
       const doc = withReport(bad);
       expect(validate(doc)).toBe(false);
@@ -170,6 +185,51 @@ describe("shared/zarr-index.schema.json", () => {
     expect(zarrIndexSchema.safeParse(doc(UNMATCHED_EXAMPLES_MAX)).success).toBe(true);
     expect(validate(doc(UNMATCHED_EXAMPLES_MAX + 1))).toBe(false);
     expect(zarrIndexSchema.safeParse(doc(UNMATCHED_EXAMPLES_MAX + 1)).success).toBe(false);
+  });
+
+  test("matched_case_only_examples is bounded where the converter bounds it", () => {
+    // biosigio >= 1.2.10 reports every case-only sidecar match in a
+    // per-channel map; the converter publishes a count and at most
+    // `CASE_MATCH_EXAMPLES_MAX` examples instead (`bound_units_report`).
+    const units = (
+      indexSchema as {
+        $defs: {
+          store: { properties: { units_report: { properties: Record<string, unknown> } } };
+        };
+      }
+    ).$defs.store.properties.units_report.properties;
+    expect((units.matched_case_only_examples as { maxItems: number }).maxItems).toBe(
+      CASE_MATCH_EXAMPLES_MAX,
+    );
+    const validate = compile(indexSchema);
+    const doc = (n: number) => {
+      const d = structuredClone(indexFixture) as { stores: Record<string, unknown>[] };
+      d.stores[0].units_report = {
+        converted: n,
+        unmatched_channels: 0,
+        matched_case_only: n,
+        matched_case_only_examples: examples(n).map((x) => `${x.toLowerCase()} -> ${x}`),
+      };
+      return d;
+    };
+    expect(validate(doc(CASE_MATCH_EXAMPLES_MAX))).toBe(true);
+    expect(zarrIndexSchema.safeParse(doc(CASE_MATCH_EXAMPLES_MAX)).success).toBe(true);
+    expect(validate(doc(CASE_MATCH_EXAMPLES_MAX + 1))).toBe(false);
+    expect(zarrIndexSchema.safeParse(doc(CASE_MATCH_EXAMPLES_MAX + 1)).success).toBe(false);
+  });
+
+  test("biosigio's per-channel case-match map is refused by the published schema", () => {
+    // The unbounded shape the converter must never republish. The JSON Schema
+    // is the converter's pre-upload gate, so it refuses the key outright; the
+    // zod mirror stays lenient (passthrough), a consumer does not reject an
+    // index over it.
+    const validate = compile(indexSchema);
+    const d = structuredClone(indexFixture) as { stores: Record<string, unknown>[] };
+    d.stores[0].units_report = {
+      converted: 1,
+      matched_case_insensitive: { "Fp1-F7": "FP1-F7" },
+    };
+    expect(validate(d)).toBe(false);
   });
 
   test("a schema whose $ref dangles fails to compile, not to validate", () => {

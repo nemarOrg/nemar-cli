@@ -842,7 +842,14 @@ export interface ReindexOptions {
 
 export interface ReindexResponse {
   dataset_id: string;
-  enrichment: { status: "ok" | "failed" | "skipped"; ref?: string; error?: string };
+  enrichment: {
+    status: "ok" | "failed" | "skipped";
+    ref?: string;
+    error?: string;
+    /** DOI metadata lookups (#1549). `failed` counts DOIs no registry
+     *  answered for (rate limit, server error, timeout): worth a retry. */
+    doi_resolution?: { resolved: number; unresolved: number; failed: number; skipped: number };
+  };
   sync: {
     status: "ok" | "failed" | "skipped";
     metadata_columns_written?: boolean;

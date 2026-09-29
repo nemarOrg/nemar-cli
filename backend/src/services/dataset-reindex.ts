@@ -384,6 +384,7 @@ export async function refreshMetadataAfterVersionDoi(
   }
 }
 
+import type { DoiResolutionSummary } from "./doi-metadata.js";
 import type { LlmUsageTotals } from "./llm-enrich.js";
 
 export interface EnrichmentRunResult {
@@ -400,6 +401,10 @@ export interface EnrichmentRunResult {
   /** Token usage + estimated USD cost of this run's LLM calls, when the
    *  pipeline completed and reported it. */
   llm_usage?: LlmUsageTotals;
+  /** Stage 1d DOI lookup counts (#1549). `failed > 0` means a registry did
+   *  not answer, so the relation labels were chosen without some DOIs'
+   *  metadata; the enrichment sweep retries such a dataset. */
+  doi_resolution?: DoiResolutionSummary;
 }
 
 /**
@@ -520,16 +525,21 @@ export async function runEnrichmentForDataset(
         ref,
       };
     }
-    const llmUsage = "llm_usage" in outcome.body ? outcome.body.llm_usage : undefined;
+    // Carried on both branches: a run that fails after its LLM calls still
+    // spent the tokens and made the DOI lookups.
+    const reported = {
+      llm_usage: "llm_usage" in outcome.body ? outcome.body.llm_usage : undefined,
+      doi_resolution: "doi_resolution" in outcome.body ? outcome.body.doi_resolution : undefined,
+    };
     const subErrors = extractEnrichmentSubErrors(outcome.body);
     if (subErrors.length > 0) {
-      return { ok: false, error: subErrors.join("; "), ref, llm_usage: llmUsage };
+      return { ok: false, error: subErrors.join("; "), ref, ...reported };
     }
     const skips = extractEnrichmentSkips(outcome.body);
     return {
       ok: true,
       ref,
-      llm_usage: llmUsage,
+      ...reported,
       ...(skips.length > 0 && { warnings: skips }),
     };
   } catch (err) {

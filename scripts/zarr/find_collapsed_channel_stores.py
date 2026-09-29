@@ -84,6 +84,44 @@ That requeue is what replaces a bad store; nothing else does. The fidelity
 gate only stops a NEW short store from being uploaded, and `--clean`
 reconciles rather than wiping (ADR 0023), so a flagged store stays published
 until a good re-conversion overwrites it.
+
+``--case-only``: sidecars that missed their channel by letter case
+--------------------------------------------------------------------
+Before biosigio 1.2.10 a channels.tsv row applied only to the channel whose
+label matched it exactly, case included (biosigio#136): CHB-MIT's `Fp1-F7`
+never reached the EDF header's `FP1-F7`, so that channel kept the importer's
+type and unit behind a clean `units_report`. 1.2.10 applies such a row when
+exactly one channel folds to it. `--case-only` finds the stores published
+before that, from each dataset's `index.json` ALONE (no store, sidecar or git
+read):
+
+* flagged: an entry whose ``units_report.unmatched_case_only`` is above 0.
+  Its sidecar named channels that the conversion did not apply. Requeue the
+  dataset (`requeue`, as above). A store converted on 1.2.10 or later can
+  still carry the count when the case match was AMBIGUOUS (two channels, or
+  two rows, fold to one name); a requeue leaves that one flagged, and the
+  sidecar is what needs fixing.
+* ``unverifiable``: an entry with no join report at all (no
+  ``units_report.unmatched_channels``), published before the converter
+  reported the join (0.10.9), or before it republished `units_report` at all,
+  or with no channel labels or no `name` column to join on. Those CANNOT be
+  enumerated from the index: whether their sidecar missed a channel by case is
+  answered only by comparing the recording's channels.tsv with the store's
+  channel labels. They are counted, never reported as clean, and make the run
+  exit 2 when nothing is flagged. Of them, ``no_units_report`` had no
+  `units_report` either (no channels.tsv applied, or converted before the
+  report existed).
+* ``case_matched`` (informational): entries whose ``matched_case_only`` says
+  1.2.10 DID apply a row by ignoring case.
+
+Exit status and the unchecked rules are the same as the default mode, with
+``unverifiable`` in the place of ``unwitnessed``. Only this case has a
+detector: the other 1.2.10 change to a store's bytes (XDF, EEGLAB, neo and
+Trigno repeats whose suffix collided with a label the file really uses) leaves
+nothing in the index to find it by.
+
+    python3 scripts/zarr/find_collapsed_channel_stores.py --case-only --dataset nm000110
+    python3 scripts/zarr/find_collapsed_channel_stores.py --case-only --all --out case.json
 """
 
 from __future__ import annotations
@@ -118,6 +156,10 @@ from generate_zarr import (  # type: ignore[import-not-found]
 
 REPORT_FORMAT = "nemar-zarr-collapsed-channel-report"
 REPORT_FORMAT_VERSION = 1
+# `--case-only` writes a different report (different findings and summary), so
+# it names itself rather than reusing REPORT_FORMAT.
+CASE_ONLY_REPORT_FORMAT = "nemar-zarr-case-only-join-report"
+CASE_ONLY_REPORT_FORMAT_VERSION = 1
 GITHUB_RAW_BASE = "https://raw.githubusercontent.com"
 DATASET_ORG = "nemarDatasets"
 DEFAULT_API_BASE = "https://api.nemar.org"
@@ -144,6 +186,16 @@ class Finding(TypedDict, total=False):
     channels_tsv: str | None
     reasons: list[str]
     repeated_labels: list[str]
+
+
+class CaseOnlyFinding(TypedDict, total=False):
+    dataset: str
+    recording: str
+    zarr: str
+    unmatched_case_only: int
+    unmatched_channels: int | None
+    unmatched_examples: list[str]
+    reasons: list[str]
 
 
 # --- Pure --------------------------------------------------------------------
@@ -261,6 +313,53 @@ def classify_store(
     return "ok", None
 
 
+def _positive_int(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def classify_case_only(dataset_id: str, entry: dict) -> tuple[str, CaseOnlyFinding | None]:
+    """One index entry's `--case-only` verdict, from the entry alone.
+
+    Verdicts: ``flagged`` (``unmatched_case_only`` > 0: a sidecar row missed
+    its channel by letter case and was not applied), ``no_units_report`` and
+    ``no_join_report`` (both unverifiable: nothing in the entry says whether a
+    row missed by case), ``case_matched`` (the join is reported, nothing
+    missed by case, and some rows were applied by ignoring case), ``ok``.
+    """
+    report = entry.get("units_report")
+    if report is None:
+        return "no_units_report", None
+    if not isinstance(report, dict):
+        return "no_join_report", None
+    missed = _positive_int(report.get("unmatched_case_only"))
+    if missed is not None:
+        finding: CaseOnlyFinding = {
+            "dataset": dataset_id,
+            "recording": str(entry.get("path", "")),
+            "zarr": str(entry.get("zarr", "")),
+            "unmatched_case_only": missed,
+            "unmatched_channels": (
+                report["unmatched_channels"]
+                if isinstance(report.get("unmatched_channels"), int)
+                and not isinstance(report.get("unmatched_channels"), bool)
+                else None
+            ),
+            "reasons": ["unmatched_case_only"],
+        }
+        examples = report.get("unmatched_examples")
+        if isinstance(examples, list):
+            finding["unmatched_examples"] = [str(x) for x in examples]
+        return "flagged", finding
+    unmatched = report.get("unmatched_channels")
+    if isinstance(unmatched, bool) or not isinstance(unmatched, int):
+        return "no_join_report", None
+    if _positive_int(report.get("matched_case_only")) is not None:
+        return "case_matched", None
+    return "ok", None
+
+
 def requeue_commands(dataset_id: str) -> list[str]:
     """What a maintainer runs on the conversion host once a dataset is
     flagged. Printed, never executed."""
@@ -304,15 +403,37 @@ def summarize(results: list[dict], catalog_complete: bool = True) -> dict:
     }
 
 
+def summarize_case_only(results: list[dict], catalog_complete: bool = True) -> dict:
+    """The `--case-only` summary. `stores_unverifiable` counts every entry with
+    no join report (``no_units_report`` included), which the index cannot
+    answer for; it plays the part `stores_unwitnessed` plays in `summarize`."""
+    flagged = [r for r in results if r.get("findings")]
+    unchecked = [r for r in results if is_unchecked(r)]
+    no_units = sum(r.get("no_units_report", 0) for r in results)
+    no_join = sum(r.get("no_join_report", 0) for r in results)
+    return {
+        "catalog_complete": catalog_complete,
+        "datasets_checked": len(results) - len(unchecked),
+        "datasets_unchecked": len(unchecked),
+        "datasets_flagged": len(flagged),
+        "stores_checked": sum(r.get("stores", 0) for r in results),
+        "stores_flagged": sum(len(r.get("findings", [])) for r in results),
+        "stores_case_matched": sum(r.get("case_matched", 0) for r in results),
+        "stores_unverifiable": no_units + no_join,
+        "stores_unverifiable_no_units_report": no_units,
+    }
+
+
 def exit_status(summary: dict) -> int:
     """1 when anything is flagged; else 2 when any dataset went unchecked, any
-    store had no witness, or the catalog walk behind `--all` was incomplete;
-    else 0."""
+    store had no witness (`--case-only`: no join report), or the catalog walk
+    behind `--all` was incomplete; else 0."""
     if summary["stores_flagged"]:
         return 1
     if (
         summary["datasets_unchecked"]
-        or summary["stores_unwitnessed"]
+        or summary.get("stores_unwitnessed")
+        or summary.get("stores_unverifiable")
         or not summary.get("catalog_complete", True)
     ):
         return 2
@@ -554,6 +675,50 @@ def check_dataset(
     return result
 
 
+def check_dataset_case_only(dataset_id: str, *, zarr_base: str) -> dict:
+    """One dataset's `--case-only` result, from its `index.json` alone. Never
+    raises for a dataset-level problem: the reason lands in `error` and the
+    dataset counts as unchecked. Reads no store, no sidecar and no git, so
+    `source_commit` is recorded when it is a SHA but not required."""
+    result: dict = {"dataset": dataset_id, "stores": 0, "findings": []}
+    try:
+        index = http_get_json(_join(zarr_base, dataset_id, "zarr", "index.json"))
+    except NotFound:
+        result["error"] = "no_index"
+        return result
+    except Exception as exc:  # noqa: BLE001 - one dataset must not stop the run
+        result["error"] = f"index_unreadable: {type(exc).__name__}: {exc}"
+        return result
+    stores = index.get("stores")
+    if not isinstance(stores, list):
+        result["error"] = "index_has_no_stores_list"
+        return result
+    commit = index.get("source_commit")
+    if isinstance(commit, str) and is_commit_sha(commit):
+        result["source_commit"] = commit
+    # The version of the run that last WROTE the index, not of every store in
+    # it: an incremental run carries older entries unchanged.
+    version = index.get("biosigio_version")
+    if isinstance(version, str):
+        result["index_biosigio_version"] = version
+    counts: Counter[str] = Counter()
+    for entry in stores:
+        if not isinstance(entry, dict) or not isinstance(entry.get("zarr"), str):
+            continue
+        result["stores"] += 1
+        verdict, finding = classify_case_only(dataset_id, entry)
+        counts[verdict] += 1
+        if finding is not None:
+            result["findings"].append(finding)
+    result["case_matched"] = counts["case_matched"]
+    result["no_join_report"] = counts["no_join_report"]
+    result["no_units_report"] = counts["no_units_report"]
+    result["unreadable_stores"] = 0
+    if result["findings"]:
+        result["requeue"] = requeue_commands(dataset_id)
+    return result
+
+
 def list_public_dataset_ids(api_base: str) -> tuple[list[str], bool]:
     """Every public catalog id, via the same paginated walk the queue uses, and
     whether the walk saw every page. An incomplete walk still returns the ids
@@ -572,7 +737,8 @@ def list_public_dataset_ids(api_base: str) -> tuple[list[str], bool]:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        description="Find published Zarr stores that lost channels to a repeated label (read-only)."
+        description="Find published Zarr stores that lost channels to a repeated label, "
+        "or (--case-only) whose channels.tsv missed a channel by letter case (read-only)."
     )
     target = ap.add_mutually_exclusive_group(required=True)
     target.add_argument("--dataset", action="append", help="dataset id; repeatable")
@@ -594,11 +760,19 @@ def main(argv: list[str] | None = None) -> int:
         help=f"minimum spacing between requests (s); default {ALL_REQUEST_INTERVAL_S} "
         "under --all, 0 otherwise",
     )
+    ap.add_argument(
+        "--case-only", action="store_true",
+        help="instead: list stores whose index entry says a channels.tsv row missed "
+        "its channel by letter case (converted before biosigio 1.2.10); reads "
+        "index.json only",
+    )
     ap.add_argument("--out", help="write the JSON report here as well as to stdout")
     args = ap.parse_args(argv)
 
     if args.repo_dir and (args.all or len(args.dataset or []) != 1):
         ap.error("--repo-dir is a clone of one dataset: give exactly one --dataset")
+    if args.case_only and (args.repo_dir or args.labels != "repeatable"):
+        ap.error("--case-only reads index.json only: --repo-dir and --labels do not apply")
     if args.request_interval is not None and args.request_interval < 0:
         ap.error("--request-interval must be >= 0")
     PACER.interval = (
@@ -634,26 +808,47 @@ def main(argv: list[str] | None = None) -> int:
         for i, dataset_id in enumerate(ids):
             if i and args.sleep:
                 time.sleep(args.sleep)
-            result = check_dataset(
-                dataset_id, zarr_base=args.zarr_base, raw_base=args.github_raw_base,
-                repo_dir=os.path.expanduser(args.repo_dir) if args.repo_dir else None,
-                labels_mode=args.labels,
-            )
+            if args.case_only:
+                result = check_dataset_case_only(dataset_id, zarr_base=args.zarr_base)
+            else:
+                result = check_dataset(
+                    dataset_id, zarr_base=args.zarr_base, raw_base=args.github_raw_base,
+                    repo_dir=os.path.expanduser(args.repo_dir) if args.repo_dir else None,
+                    labels_mode=args.labels,
+                )
             results.append(result)
             state = result.get("error") or f"{len(result['findings'])} flagged of {result['stores']}"
             if result.get("unreadable_stores"):
                 state += f", {result['unreadable_stores']} unreadable (unchecked)"
+            unverifiable = result.get("no_join_report", 0) + result.get("no_units_report", 0)
+            if unverifiable:
+                state += (
+                    f", {unverifiable} with no join report (unverifiable from the index; "
+                    "compare their channels.tsv with the store's labels)"
+                )
             print(f"{dataset_id}: {state}", file=sys.stderr, flush=True)
 
     report = {
-        "format": REPORT_FORMAT,
-        "format_version": REPORT_FORMAT_VERSION,
+        "format": CASE_ONLY_REPORT_FORMAT if args.case_only else REPORT_FORMAT,
+        "format_version": (
+            CASE_ONLY_REPORT_FORMAT_VERSION if args.case_only else REPORT_FORMAT_VERSION
+        ),
         "generated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "zarr_base": args.zarr_base,
         "findings": [f for r in results for f in r["findings"]],
         "datasets": results,
-        "summary": summarize(results, catalog_complete),
+        "summary": (
+            summarize_case_only(results, catalog_complete) if args.case_only
+            else summarize(results, catalog_complete)
+        ),
     }
+    if args.case_only:
+        report["unverifiable_note"] = (
+            "stores_unverifiable counts published entries with no join report "
+            "(converted before the converter reported it, or with nothing to join "
+            "on). They cannot be enumerated from index.json: compare each "
+            "recording's channels.tsv with the store's channel labels."
+        )
     if catalog_error is not None:
         report["catalog_error"] = catalog_error
     text = json.dumps(report, indent=2)

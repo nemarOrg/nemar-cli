@@ -4,7 +4,7 @@
 -- is editable (PUT replaces it, bumping updated_at/updated_by), it carries a
 -- slug for its public URL, and it can reference images stored in the
 -- NEWS_MEDIA R2 bucket under `news/<sha256>.<ext>` (banner_url, and inline
--- in the Markdown body). See ADR 0075.
+-- in the Markdown body). See ADR 0076.
 --
 -- Publicly visible means `status = 'published' AND published_at <=
 -- datetime('now')`: a published post dated in the future is scheduled and
