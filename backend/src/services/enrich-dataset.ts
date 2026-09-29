@@ -54,6 +54,7 @@ import {
 import {
   type LlmUsageTotals,
   correctFromFeedback,
+  enforceNeverDataPaper,
   enrichFromReadme,
   estimateUsageCostUsd,
   mergeWithExisting,
@@ -144,6 +145,9 @@ export interface EnrichmentSuccessBody {
   /** DOIs removed by the unsourced-DOI guard this run (see
    *  pruneUnsourcedDois). Surfaced so silent metadata loss is impossible. */
   pruned_dois?: string[];
+  /** DOIs forced from a data-describing relation to `References` by the
+   *  never-data-paper guard this run (see enforceNeverDataPaper, #1549). */
+  demoted_dois?: string[];
 }
 
 /** Why a DOI metadata sync did not run. One typed object rather than a
@@ -580,13 +584,27 @@ export async function enrichDataset(
         `[llm-enrich] Pruned ${ids.length} unsourced DOI(s) at ${stage} for ${datasetId}: ${ids.join(", ")}`,
       );
     };
+    // Standards, software, and platform papers are never this dataset's data
+    // paper (#1549). Demote them after every stage that can write a relation
+    // (the seed carries older metadata.json entries forward) and log it.
+    const demotedDois: string[] = [];
+    const logDemote = (stage: string, outcome: { demoted: { identifier: string }[] }) => {
+      if (outcome.demoted.length === 0) return;
+      const ids = outcome.demoted.map((d) => d.identifier);
+      for (const id of ids) if (!demotedDois.includes(id)) demotedDois.push(id);
+      console.warn(
+        `[llm-enrich] Demoted ${ids.length} never-data-paper DOI(s) to References at ${stage} for ${datasetId}: ${ids.join(", ")}`,
+      );
+    };
     const seedPrune = pruneUnsourcedDois(
       seedFromBids(bidsDescription, existingMetadata, datasetId, treePaths, landingBase),
       readmeContent,
       bidsDescription,
     );
     logPrune("seed", seedPrune);
-    const seeded = seedPrune.result;
+    const seedDemote = enforceNeverDataPaper(seedPrune.result);
+    logDemote("seed", seedDemote);
+    const seeded = seedDemote.result;
     console.log(
       `[llm-enrich] Stage 1 (seed): ${datasetId} - ${Object.keys(seeded.authors || {}).length} authors, ${(seeded.related_identifiers || []).length} related IDs`,
     );
@@ -708,7 +726,9 @@ export async function enrichDataset(
     );
     logPrune("enrich", llmPrune);
     const llmResult = llmPrune.result;
-    const enriched = mergeWithExisting(seededWithOrcids, llmResult);
+    const enrichDemote = enforceNeverDataPaper(mergeWithExisting(seededWithOrcids, llmResult));
+    logDemote("enrich", enrichDemote);
+    const enriched = enrichDemote.result;
     const enrichedFields = Object.keys(llmResult).filter(
       (k) => llmResult[k as keyof typeof llmResult] !== undefined,
     );
@@ -824,7 +844,11 @@ export async function enrichDataset(
             bidsDescription,
           );
           logPrune(`correction-${correctionAttempts}`, correctionPrune);
-          currentMetadata = mergeWithExisting(currentMetadata, correctionPrune.result);
+          const correctionDemote = enforceNeverDataPaper(
+            mergeWithExisting(currentMetadata, correctionPrune.result),
+          );
+          logDemote(`correction-${correctionAttempts}`, correctionDemote);
+          currentMetadata = correctionDemote.result;
         } catch (corrErr) {
           console.warn(
             `[llm-enrich] Correction attempt ${correctionAttempts} failed for ${datasetId}: ${errorMessage(corrErr)}`,
@@ -929,6 +953,12 @@ export async function enrichDataset(
         );
       }
     }
+
+    // Last word on relation types: whatever the stages above did, a
+    // never-data-paper DOI leaves this function as References.
+    const finalDemote = enforceNeverDataPaper(finalMetadata);
+    logDemote("final", finalDemote);
+    finalMetadata = finalDemote.result;
 
     // Store source hash for future change detection
     finalMetadata.source_hash = sourceHash;
@@ -1186,6 +1216,7 @@ export async function enrichDataset(
         pipeline_stage: finalMetadata.pipeline_stage,
         llm_usage: { ...llmUsage, est_cost_usd: estCostUsd },
         ...(prunedDois.length > 0 && { pruned_dois: prunedDois }),
+        ...(demotedDois.length > 0 && { demoted_dois: demotedDois }),
         seeded_fields: {
           authors: Object.keys(seeded.authors || {}).length,
           related_identifiers: (seeded.related_identifiers || []).length,

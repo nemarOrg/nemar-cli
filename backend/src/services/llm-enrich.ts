@@ -16,6 +16,12 @@ import {
   datasetLandingUrl,
   isValidRelationType,
 } from "../../../shared/datacite-constants.js";
+import {
+  DATA_DESCRIBING_RELATION_TYPES,
+  NEVER_DATA_PAPER_DOIS,
+  isStandardSpecTitle,
+  normalizeDoiKey,
+} from "../../../shared/never-data-paper.js";
 
 import { detectModalitiesFromTree, mapModalityToResourceType } from "./datacite.js";
 
@@ -540,6 +546,65 @@ export function pruneUnsourcedDois<T extends { related_identifiers?: RelatedIden
   });
   if (pruned.length === 0) return { result: target, pruned };
   return { result: { ...target, related_identifiers: kept }, pruned };
+}
+
+export interface DemoteOutcome<T> {
+  result: T;
+  /** Entries that were demoted, as they were BEFORE demotion. */
+  demoted: RelatedIdentifierEntry[];
+}
+
+/**
+ * Demote never-data-paper DOIs to `References` (#1549).
+ *
+ * A DOI on {@link NEVER_DATA_PAPER_DOIS}, or one whose resolved title is a
+ * BIDS specification title, is never this dataset's data paper, whatever the
+ * LLM, the BIDS seed (SourceDatasets / ReferencesAndLinks), or an older
+ * metadata.json says. Only DOI entries carrying a data-describing relation
+ * are touched: URL entries (the GitHub repo and NEMAR landing page are
+ * `IsDescribedBy` URLs) and every other relation type pass through.
+ * Demotion can leave the same DOI listed twice as `References`; those exact
+ * duplicates collapse to the first.
+ *
+ * `resolvedTitles` is keyed by {@link normalizeDoiKey}. enrichDataset calls
+ * this after every stage that can write a relation and once more on the final
+ * document, so no later stage can re-promote a demoted DOI.
+ */
+export function enforceNeverDataPaper<T extends { related_identifiers?: RelatedIdentifierEntry[] }>(
+  target: T,
+  resolvedTitles?: ReadonlyMap<string, string>,
+): DemoteOutcome<T> {
+  const rels = target.related_identifiers;
+  if (!rels || rels.length === 0) return { result: target, demoted: [] };
+
+  const isBlocked = (r: RelatedIdentifierEntry): boolean => {
+    if (r.identifier_type !== "DOI") return false;
+    const key = normalizeDoiKey(r.identifier);
+    return NEVER_DATA_PAPER_DOIS.has(key) || isStandardSpecTitle(resolvedTitles?.get(key));
+  };
+  const demoted = rels.filter(
+    (r) => isBlocked(r) && DATA_DESCRIBING_RELATION_TYPES.has(r.relation_type),
+  );
+  if (demoted.length === 0) return { result: target, demoted };
+
+  const kept: RelatedIdentifierEntry[] = [];
+  const blockedReferences = new Set<string>();
+  for (const r of rels) {
+    if (!isBlocked(r)) {
+      kept.push(r);
+      continue;
+    }
+    const entry = DATA_DESCRIBING_RELATION_TYPES.has(r.relation_type)
+      ? { ...r, relation_type: "References" }
+      : r;
+    if (entry.relation_type === "References") {
+      const key = normalizeDoiKey(entry.identifier);
+      if (blockedReferences.has(key)) continue;
+      blockedReferences.add(key);
+    }
+    kept.push(entry);
+  }
+  return { result: { ...target, related_identifiers: kept }, demoted };
 }
 
 /**
