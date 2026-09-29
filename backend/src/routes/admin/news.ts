@@ -62,9 +62,34 @@ const bannerUrlField = z
   .regex(NEWS_BANNER_URL_RE, "banner_url must be a /news/media/<sha256>.<ext> path")
   .nullable();
 const bannerAltField = z.string().trim().max(300);
-const publishedAtField = z.string().datetime({ offset: true }).refine(hasRealUtcOffset, {
-  message: "published_at has an out-of-range UTC offset (valid offsets are -12:00 to +14:00)",
-});
+
+/**
+ * The years a post may be dated in, as written (before the offset is
+ * applied). zod accepts any four-digit year, but SQLite's `datetime()` reads
+ * only years 0000 through 9999 once the offset has moved the time to UTC:
+ * `9999-12-31T23:59:59-12:00` is year 10000 in UTC, so `datetime()` returns
+ * NULL and the NOT NULL insert fails as a 500, and
+ * `0000-01-01T00:00:00+14:00` is stored as year -0001. A real post is dated
+ * well inside this window, and an offset moves the UTC time by less than a
+ * day, so a date inside it always stays readable.
+ */
+export const NEWS_PUBLISHED_YEAR_MIN = 2000;
+export const NEWS_PUBLISHED_YEAR_MAX = 2100;
+
+function hasPublishableYear(value: string): boolean {
+  const year = Number(value.slice(0, 4));
+  return year >= NEWS_PUBLISHED_YEAR_MIN && year <= NEWS_PUBLISHED_YEAR_MAX;
+}
+
+const publishedAtField = z
+  .string()
+  .datetime({ offset: true })
+  .refine(hasRealUtcOffset, {
+    message: "published_at has an out-of-range UTC offset (valid offsets are -12:00 to +14:00)",
+  })
+  .refine(hasPublishableYear, {
+    message: `published_at must be in the years ${NEWS_PUBLISHED_YEAR_MIN} through ${NEWS_PUBLISHED_YEAR_MAX}`,
+  });
 
 const contentFields = {
   slug: slugField,

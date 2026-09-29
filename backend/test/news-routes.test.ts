@@ -496,6 +496,67 @@ describe("POST /admin/news", () => {
       expect(cleared.banner_url).toBeNull();
     });
 
+    describe("published_at year bounds", () => {
+      const message = "published_at must be in the years 2000 through 2100";
+
+      function publishedAtMessages(body: unknown): string[] {
+        const { issues } = (body as { error: { issues: { path: string[]; message: string }[] } })
+          .error;
+        return issues.filter((i) => i.path[0] === "published_at").map((i) => i.message);
+      }
+
+      // Both pass zod's datetime check. SQLite's datetime() returns NULL for
+      // the first (year 10000 once the -12:00 offset is applied), which
+      // failed the NOT NULL insert as a 500, and stores the second as year
+      // -0001.
+      for (const published_at of ["9999-12-31T23:59:59-12:00", "0000-01-01T00:00:00+14:00"]) {
+        test(`POST and PUT refuse ${published_at} with a 400 naming the field`, async () => {
+          const created = await call("/admin/news", {
+            method: "POST",
+            key: ADMIN_KEY,
+            body: input({ published_at }),
+          });
+          expect(created.status).toBe(400);
+          expect(publishedAtMessages(await created.json())).toEqual([message]);
+          expect(db.query("SELECT COUNT(*) AS n FROM news_posts").get()).toEqual({ n: 0 });
+
+          const post = await create();
+          const storedBefore = rawRow(post.id)?.published_at;
+          const replaced = await call(`/admin/news/${post.id}`, {
+            method: "PUT",
+            key: ADMIN_KEY,
+            body: replaceInput({ published_at }),
+          });
+          expect(replaced.status).toBe(400);
+          expect(publishedAtMessages(await replaced.json())).toEqual([message]);
+          expect(rawRow(post.id)?.published_at).toBe(storedBefore);
+        });
+      }
+
+      test("the years just outside the window are refused", async () => {
+        for (const published_at of ["1999-12-31T23:59:59Z", "2101-01-01T00:00:00Z"]) {
+          const res = await call("/admin/news", {
+            method: "POST",
+            key: ADMIN_KEY,
+            body: input({ published_at }),
+          });
+          expect(res.status).toBe(400);
+          expect(publishedAtMessages(await res.json())).toEqual([message]);
+        }
+      });
+
+      test("the edge years are accepted, even when the offset moves them out of it in UTC", async () => {
+        const earliest = await create({
+          slug: "earliest",
+          published_at: "2000-01-01T00:00:00+14:00",
+        });
+        expect(rawRow(earliest.id)?.published_at).toBe("1999-12-31 10:00:00");
+        const latest = await create({ slug: "latest", published_at: "2100-12-31T23:59:59-12:00" });
+        expect(rawRow(latest.id)?.published_at).toBe("2101-01-01 11:59:59");
+        expect(latest.published_at).toBe("2101-01-01T11:59:59Z");
+      });
+    });
+
     test("the validation envelope is the one the notices route produces", async () => {
       const news = await call("/admin/news", { method: "POST", key: ADMIN_KEY, body: {} });
       const notice = await call("/admin/notices", { method: "POST", key: ADMIN_KEY, body: {} });
