@@ -3174,6 +3174,117 @@ class TestChannelGateVerdict(unittest.TestCase):
     def test_an_unreadable_header_keeps_the_old_strict_gate(self):
         self.assertEqual(channel_gate_verdict(120, 128, None), "truncated")
 
+    def test_a_store_short_of_the_header_is_withheld_without_a_sidecar(self):
+        # nm000110's shape before biosigio 1.2.9: a repeated EDF label
+        # overwrote a channel, 22 in the store, 23 in the file. With no
+        # channels.tsv at all this used to pass unexamined.
+        self.assertEqual(channel_gate_verdict(22, None, 23), "truncated")
+
+    def test_a_collapsed_sidecar_cannot_vouch_for_a_collapsed_store(self):
+        # A sidecar written by a tool that keys channels by label collapses the
+        # same way the store did and agrees with it; the header still counts
+        # every channel.
+        self.assertEqual(channel_gate_verdict(22, 22, 23), "truncated")
+        self.assertEqual(channel_gate_verdict(23, 22, 23), "pass")
+
+
+def build_labelled_edf(path: str, labels: list[str], rate: int = 256, seconds: int = 10) -> str:
+    """Write a REAL EDF+ with pyedflib whose signals carry exactly `labels`,
+    repeats included (EDF does not require unique labels; CHB-MIT repeats
+    `T8-P8` and uses `-` for unused inputs). Returns `path`."""
+    import numpy as np
+    import pyedflib
+
+    writer = pyedflib.EdfWriter(path, len(labels), file_type=pyedflib.FILETYPE_EDFPLUS)
+    writer.setSignalHeaders([
+        {
+            "label": label,
+            "dimension": "uV",
+            "sample_frequency": rate,
+            "physical_max": 3000.0,
+            "physical_min": -3000.0,
+            "digital_max": 32767,
+            "digital_min": -32768,
+            "transducer": "",
+            "prefilter": "",
+        }
+        for label in labels
+    ])
+    rng = np.random.default_rng(0)
+    writer.writeSamples([rng.normal(0, 20, rate * seconds) for _ in labels])
+    writer.close()
+    return path
+
+
+# CHB-MIT's montage, shortened: a bipolar label the file repeats, and `-`
+# placeholders for unused amplifier inputs.
+CHB_MIT_LABELS = [
+    "FP1-F7", "F7-T7", "T7-P7", "P7-O1", "-", "T8-P8", "-", "T8-P8", "-",
+]
+# What biosigio >= 1.2.9 (and MNE, and so an MNE-BIDS channels.tsv) names them.
+CHB_MIT_SUFFIXED = [
+    "FP1-F7", "F7-T7", "T7-P7", "P7-O1", "--0", "T8-P8-0", "--1", "T8-P8-1", "--2",
+]
+
+
+class TestChannelGateOnRealFiles(unittest.TestCase):
+    """`enforce_channel_gate`, the step `convert_one` runs before any sync,
+    driven with a store biosigIO really built and an EDF header really written.
+
+    A store short of its file cannot be produced through `convert_one` on
+    biosigio >= 1.2.9: the importer now keeps every repeated label, which is
+    the fix this gate exists to back up. So the collapsed store is built the
+    way the old importer left it, from the file's labels with the repeats
+    removed, and gated against the file that repeats them."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+            from biosigio import Recording  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+
+    def store_from(self, labels: list[str]) -> int:
+        from biosigio import Recording
+
+        src = build_labelled_edf(os.path.join(self.dir, "collapsed.edf"), labels)
+        store = os.path.join(self.dir, "collapsed.zarr")
+        Recording.from_file(src).to_zarr(store, dtype="int16")
+        return store_total_channels(store_metadata(store))
+
+    def test_the_header_counts_every_repeated_label(self):
+        f = build_labelled_edf(os.path.join(self.dir, "chb_eeg.edf"), CHB_MIT_LABELS)
+        self.assertEqual(file_declared_channel_count(f), len(CHB_MIT_LABELS))
+
+    def test_a_collapsed_store_is_refused_with_or_without_a_sidecar(self):
+        f = build_labelled_edf(os.path.join(self.dir, "chb_eeg.edf"), CHB_MIT_LABELS)
+        collapsed = list(dict.fromkeys(CHB_MIT_LABELS))  # what a label-keyed import kept
+        in_store = self.store_from(collapsed)
+        self.assertEqual(in_store, len(collapsed))
+        in_file = file_declared_channel_count(f)
+        for tsv in (None, len(collapsed), len(CHB_MIT_LABELS)):
+            with self.subTest(channels_tsv=tsv):
+                with self.assertRaises(ChannelCountMismatch) as cm:
+                    generate_zarr.enforce_channel_gate(
+                        "sub-01/eeg/x_eeg.edf", in_store, tsv, in_file
+                    )
+                self.assertIn(f"header declares {in_file}", str(cm.exception))
+
+    def test_a_complete_store_passes(self):
+        f = build_labelled_edf(os.path.join(self.dir, "chb_eeg.edf"), CHB_MIT_LABELS)
+        in_store = self.store_from(CHB_MIT_SUFFIXED)
+        self.assertIsNone(generate_zarr.enforce_channel_gate(
+            "sub-01/eeg/x_eeg.edf", in_store, len(CHB_MIT_LABELS),
+            file_declared_channel_count(f),
+        ))
+
 
 class TestCleanOrphanSelection(unittest.TestCase):
     """`--clean` no longer wipes the prefix; it removes only the stores that are
