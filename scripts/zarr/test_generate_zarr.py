@@ -8965,6 +8965,19 @@ class TestDeclaredFdtConvertOne(unittest.TestCase):
                 self.assertEqual(result["code"], "fdt_declaration_refused")
                 self.assertIn("could not be read", result["error"])
 
+    def test_the_remote_path_requires_bucket_and_dataset_id(self):
+        head = self.commit()
+        for missing in ("bucket", "dataset_id"):
+            with self.subTest(missing), tempfile.TemporaryDirectory() as work:
+                kwargs = {"bucket": "nemar-test", "dataset_id": "on000001", missing: None}
+                with self.assertRaises(ValueError):
+                    generate_zarr.stage_declared_fdt(
+                        self.decl(), self.SET, os.path.join(self.repo, self.SET), work,
+                        repo=self.repo, head_files={self.SET, self.FDT}, head=head,
+                        local=False, **kwargs,
+                    )
+                self.assertEqual(os.listdir(work), [], "nothing staged")
+
     def test_a_set_with_inline_samples_is_refused(self):
         write_eeglab_set(os.path.join(self.repo, self.SET), None,
                          nbchan=self.NBCHAN, pnts=self.PNTS)
