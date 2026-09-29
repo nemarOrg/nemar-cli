@@ -12,6 +12,7 @@
  */
 
 import { type Context, Hono } from "hono";
+import { checkDataMissBudget } from "../middleware/rateLimit";
 import { recordAccess } from "../services/access-metrics";
 import { CONCEPT_DOI_SQL } from "../services/anonymity";
 import {
@@ -44,6 +45,11 @@ import {
 import { parseNemarMetadata } from "../services/datacite";
 import { isValidDatasetId } from "../services/datasetId";
 import { resolveDataBaseOrigin } from "../services/environment";
+import {
+  gitFileCacheKey,
+  matchGitFileCache,
+  scheduleGitFileCacheWrite,
+} from "../services/git-file-cache";
 import { ORG_NAME } from "../services/github";
 import { getDatasetsToken } from "../services/github-auth";
 import { fetchGitTrackedFile } from "../services/github/git-file-broker";
@@ -140,6 +146,44 @@ function deferOf(c: Context<{ Bindings: Bindings; Variables: Variables }>): Defe
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Millisecond durations for `Server-Timing` on a data-plane FILE response
+ * (#1516): the D1 visibility-and-version gate, the manifest read that
+ * resolved the path, the brokered-file edge-cache lookup, and the upstream
+ * GitHub fetch when the cache did not answer. Not every stage applies to
+ * every response -- an annexed file's 302 never touches `cache` or
+ * `upstream`, and a cache hit never touches `upstream` -- so each field is
+ * optional and only the stages that actually ran are reported.
+ *
+ * This exists so production uplift from the cache can be measured from
+ * outside (`curl -w`, a browser's network panel) without a deploy that adds
+ * logging first, per the issue this closes. It carries only durations: no
+ * URL, no dataset id, no header or credential, so it is safe on every
+ * response regardless of the dataset's visibility.
+ */
+interface FileTiming {
+  gate?: number;
+  manifest?: number;
+  cache?: number;
+  upstream?: number;
+}
+
+/** `null` when nothing was timed, so a caller can skip the header entirely. */
+function serverTimingHeader(t: FileTiming): string | null {
+  const parts: string[] = [];
+  for (const key of ["gate", "manifest", "cache", "upstream"] as const) {
+    const value = t[key];
+    if (value !== undefined) parts.push(`${key};dur=${value.toFixed(1)}`);
+  }
+  return parts.length > 0 ? parts.join(", ") : null;
+}
+
+/** Attach `Server-Timing` to `headers` in place, when there is anything to report. */
+function applyServerTiming(headers: Headers, t: FileTiming): void {
+  const header = serverTimingHeader(t);
+  if (header) headers.set("Server-Timing", header);
 }
 
 /**
@@ -520,8 +564,15 @@ async function streamGitTrackedFile(args: {
   bidsPath: string;
   file: ManifestFile;
   createdIso: string;
+  /**
+   * Offered the verified bytes and the exact headers about to be sent,
+   * ONLY on the buffered branch's 200 (#1516). Absent when there is no edge
+   * cache to write to (`edgeCache()` returned null, e.g. `bun test` with no
+   * `caches.default` installed).
+   */
+  cacheWrite?: (body: Uint8Array, headers: Headers) => Promise<void>;
 }): Promise<Response> {
-  const { env, datasetId, version, bidsPath, file, createdIso } = args;
+  const { env, datasetId, version, bidsPath, file, createdIso, cacheWrite } = args;
 
   // Read anonymously when no credential is CONFIGURED: a public repo serves
   // fine without one, and a local or preview deployment with no GitHub App
@@ -736,8 +787,91 @@ async function streamGitTrackedFile(args: {
   // unconditional set that #1420 shipped passes the whole suite.
   if (outgoing.kind === "buffered") {
     headers.set("Content-Length", String(outgoing.body.byteLength));
+    // Cache exactly what is about to be sent -- same bytes, same headers --
+    // so a hit is indistinguishable from a fresh fetch to the client. Never
+    // offered for the streamed branch: above the buffer ceiling there is no
+    // declared length either, and nothing here should encourage raising the
+    // ceiling to grow the cache.
+    if (cacheWrite) await cacheWrite(outgoing.body, headers);
   }
   return new Response(outgoing.body, { status: 200, headers });
+}
+
+/**
+ * The cache-then-broker front door for a git-tracked file GET (#1516).
+ *
+ * Runs strictly AFTER the caller's visibility gate and manifest resolution --
+ * the same ordering `streamGitTrackedFile` always ran under, now with a cache
+ * lookup inserted at the same point a token mint used to be the first thing
+ * that happened. A hit never mints a token and never reaches GitHub: the
+ * cached bytes already passed the size and blob-SHA check the first time they
+ * were fetched, and they are re-validated on every use against the CURRENT
+ * manifest entry (not the one that was true when they were stored), which is
+ * what makes a manifest rewrite (ADR 0072) a miss rather than a stale answer.
+ *
+ * `timing` is mutated in place: `cache` always gets a value when there is an
+ * edge cache to ask (0 when there is none, so the header still reports a
+ * completed stage rather than silently omitting it), and `upstream` is set
+ * only when this fell through to `streamGitTrackedFile`.
+ */
+async function serveGitTrackedFile(args: {
+  env: Bindings;
+  request: Request;
+  datasetId: string;
+  version: string;
+  bidsPath: string;
+  file: ManifestFile;
+  createdIso: string;
+  defer: Defer | undefined;
+  timing: FileTiming;
+}): Promise<Response> {
+  const { env, request, datasetId, version, bidsPath, file, createdIso, defer, timing } = args;
+  const cache = edgeCache();
+  const key = cache
+    ? gitFileCacheKey(new URL(request.url).origin, datasetId, version, bidsPath)
+    : null;
+
+  if (cache && key) {
+    const start = performance.now();
+    const hit = await matchGitFileCache(cache, key, file);
+    timing.cache = performance.now() - start;
+    if (hit) {
+      // Same accounting the served-from-GitHub path gets, under its own
+      // detail so the observability dashboard can tell a cache hit from an
+      // upstream fetch; the bytes delivered are identical either way.
+      recordAccess(env, { datasetId, source: "file", detail: "git-cache", bytes: file.size });
+      return new Response(hit.body, { status: hit.status, headers: hit.headers });
+    }
+  } else {
+    timing.cache = 0;
+  }
+
+  // A MISS, about to go upstream: the expensive path (a token mint plus a
+  // real GitHub request), bounded per IP by its own budget (#1516 review) --
+  // a hit above must never be throttled by how many OTHER requests missed.
+  // Refused here means upstream never ran, so `timing.upstream` stays unset.
+  const missBudget = await checkDataMissBudget(env, request, defer);
+  if (!missBudget.allowed) return missBudget.response;
+
+  const start = performance.now();
+  const response = await streamGitTrackedFile({
+    env,
+    datasetId,
+    version,
+    bidsPath,
+    file,
+    createdIso,
+    cacheWrite:
+      cache && key
+        ? (body, headers) =>
+            scheduleGitFileCacheWrite(
+              { cache, key, blobSha: file.key.replace(/^git:/, ""), body, headers },
+              defer,
+            )
+        : undefined,
+  });
+  timing.upstream = performance.now() - start;
+  return response;
 }
 
 /**
@@ -1024,15 +1158,19 @@ async function fileOrIndexHandler(
   defer: Defer | undefined,
 ): Promise<Response> {
   const isHead = request.method === "HEAD";
+  const timing: FileTiming = {};
 
+  const gateStart = performance.now();
   const dataset = await loadPublishedDataset(env, datasetId);
   if (!dataset) return notFound("Dataset not found");
 
   const resolved = await resolveVersion(env.DB, datasetId, versionParam);
+  timing.gate = performance.now() - gateStart;
   if (!resolved.ok) return notFound("Version not found");
 
   // One scan answers the file-or-directory question; it keeps the entry, or
   // this directory's immediate children, and nothing else (#1502).
+  const manifestStart = performance.now();
   const read = await queryManifest(
     env,
     request,
@@ -1041,6 +1179,7 @@ async function fileOrIndexHandler(
     () => new ResolvePathQuery(rawPath),
     defer,
   );
+  timing.manifest = performance.now() - manifestStart;
   if (!read) return notFound("Version not published");
 
   const result = read.answer;
@@ -1048,7 +1187,11 @@ async function fileOrIndexHandler(
 
   // HEAD branch: serve from `result` alone -- no D1 round-trip for
   // picker/footer (HEAD doesn't render HTML chrome), no tombstone walk
-  // (rclone just needs the 404). Keeps `rclone sync` cheap per file.
+  // (rclone just needs the 404). Keeps `rclone sync` cheap per file. It also
+  // never touches the git-file cache or GitHub (#1516): HEAD's shape has not
+  // changed, only GET's has, and a rewritten Content-Type/HEAD-vs-GET
+  // agreement contract is exactly what #1403 was careful about the first
+  // time.
   if (isHead) {
     if (result.kind === "file") {
       const headers = new Headers(fileResponseHeaders(result.file, createdIso, true));
@@ -1059,6 +1202,7 @@ async function fileOrIndexHandler(
       if (isGitTrackedFile(result.file)) {
         headers.set("Content-Type", contentTypeForBidsPath(result.path));
       }
+      applyServerTiming(headers, timing);
       return new Response(null, { status: 200, headers });
     }
     if (result.kind === "directory") {
@@ -1129,14 +1273,19 @@ async function fileOrIndexHandler(
     // GitHub (#1403): it is the only way a dataset whose repo is private
     // stays readable, and it is the only way we can count what we delivered.
     if (isGitTrackedFile(result.file)) {
-      return streamGitTrackedFile({
+      const response = await serveGitTrackedFile({
         env,
+        request,
         datasetId: dataset.dataset_id,
         version: resolved.version,
         bidsPath: result.path,
         file: result.file,
         createdIso,
+        defer,
+        timing,
       });
+      applyServerTiming(response.headers, timing);
+      return response;
     }
     const url = await buildRedirectUrl({
       datasetId,
@@ -1152,6 +1301,7 @@ async function fileOrIndexHandler(
     // target. The S3 target's GET response carries it accurately.
     const headers = new Headers(fileResponseHeaders(result.file, createdIso, false));
     headers.set("Location", url);
+    applyServerTiming(headers, timing);
     return new Response(null, { status: 302, headers });
   }
 

@@ -35,12 +35,15 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
 import { Hono } from "hono";
+import { __limits } from "../src/middleware/rateLimit";
 import { dataRoutes } from "../src/routes/data";
+import { gitFileCacheKey } from "../src/services/git-file-cache";
 import { fetchGitTrackedFile } from "../src/services/github/git-file-broker";
 import type { Bindings, Variables } from "../src/types/bindings";
+import { DrainingCache, StalledCache } from "./helpers/cache";
 import { freshDb, realD1 } from "./helpers/d1";
 
 /**
@@ -761,5 +764,654 @@ describe("the route: the gate, then the bytes", () => {
 
     expect(res.status).toBe(404);
     expect(seen).toHaveLength(0);
+  });
+
+  describe("the edge cache (#1516)", () => {
+    let originalCaches: unknown;
+
+    beforeAll(() => {
+      originalCaches = (globalThis as { caches?: unknown }).caches;
+    });
+
+    afterEach(() => {
+      (globalThis as { caches?: unknown }).caches = originalCaches;
+    });
+
+    function install(cache: unknown): void {
+      (globalThis as { caches?: unknown }).caches = { default: cache };
+    }
+
+    /** Same shape as `manifestBody`, naming an arbitrary sha and size --
+     *  needed to simulate a manifest rewrite (ADR 0072) at the same path. */
+    function manifestBodyNaming(sha: string, size: number): string {
+      return JSON.stringify({
+        dataset_id: "nm000862",
+        version: "1.0.0",
+        doi: null,
+        concept_doi: null,
+        created: "2026-01-01T00:00:00Z",
+        files: { [PATH]: { key: `git:${sha}`, size, checksum: `git:${sha}` } },
+      });
+    }
+
+    // A second real file body and its real git blob SHA (`git hash-object`),
+    // standing in for what a manifest rewrite would point the same path at.
+    const FILE_BODY_V2 = '{"Name":"A dataset","BIDSVersion":"1.12.0"}';
+    const BLOB_SHA_V2 = "a4713cbe03fc942b472d586c7b8ddeb40b0b9124";
+
+    function rawHits(): number {
+      return seen.filter((s) => s.path === publicRawPath).length;
+    }
+
+    test("a miss fetches and stores; the identical next request is a hit with no upstream traffic", async () => {
+      const cache = new DrainingCache();
+      install(cache);
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+
+      const first = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      expect(first.status).toBe(200);
+      expect(await first.text()).toBe(FILE_BODY);
+      expect(rawHits()).toBe(1);
+      expect(
+        cache.store.get(gitFileCacheKey("http://localhost", "nm000862", VERSION, PATH)),
+      ).toBeDefined();
+
+      const second = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      expect(second.status).toBe(200);
+      expect(await second.text()).toBe(FILE_BODY);
+      // The bytes came back with zero new requests to the raw host or the
+      // blob API -- the strongest evidence available (under the PAT auth
+      // this suite uses throughout) that no token mint was attempted either:
+      // `getDatasetsToken` is called from inside `streamGitTrackedFile`,
+      // which a hit never reaches at all.
+      expect(rawHits()).toBe(1);
+    });
+
+    test("headers on a hit match what a miss would have sent, plus nothing extra", async () => {
+      install(new DrainingCache());
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length), "Content-Type": "text/plain" },
+          }),
+      });
+      const first = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      const second = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+
+      for (const name of [
+        "Content-Type",
+        "Content-Length",
+        "ETag",
+        "Cache-Control",
+        "Access-Control-Allow-Origin",
+        "X-Content-Type-Options",
+        "Content-Security-Policy",
+      ]) {
+        expect(second.headers.get(name)).toBe(first.headers.get(name));
+      }
+      // No internal bookkeeping header leaks to the client.
+      expect([...second.headers.keys()].some((k) => k.toLowerCase().includes("blob-sha"))).toBe(
+        false,
+      );
+      expect(second.headers.has("X-Nemar-Cache-Client-Cache-Control")).toBe(false);
+      // The literal value, not just "equal to the miss's" -- ADR 0066's
+      // number, unchanged by #1516.
+      expect(second.headers.get("Cache-Control")).toBe("public, max-age=300");
+    });
+
+    test("the stored copy's OWN freshness is not the client's 300s (review: the TTL bug)", async () => {
+      // The bug this test exists to catch: an earlier version of this cache
+      // reused the client-facing `public, max-age=300` verbatim as the
+      // STORED response's own `Cache-Control`. The real Workers Cache API
+      // honors that for the entry's OWN freshness, so `cache.match` would
+      // have started answering `undefined` after 300 seconds regardless of
+      // what the route decided -- defeating #1494's cross-session scenario
+      // silently, since every symptom looks identical to "there was no
+      // traffic in between." `DrainingCache.getNow` simulates the clock
+      // advancing without a real five-minute sleep.
+      const cache = new DrainingCache();
+      install(cache);
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+
+      const first = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      expect(first.status).toBe(200);
+      const storedAt = Date.now();
+
+      // 301 seconds later: past the CLIENT'S 300s Cache-Control, well inside
+      // GIT_FILE_CACHE_TTL_SECONDS (seven days).
+      cache.getNow = () => storedAt + 301_000;
+      const hitsBefore = rawHits();
+      const second = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+
+      expect(second.status).toBe(200);
+      expect(await second.text()).toBe(FILE_BODY);
+      // Still a hit: no new upstream request, and the client still sees
+      // exactly today's 300s value, not the internal seven-day one.
+      expect(rawHits()).toBe(hitsBefore);
+      expect(second.headers.get("Cache-Control")).toBe("public, max-age=300");
+    });
+
+    test("a manifest rewrite (ADR 0072) makes the cached entry a miss, and the NEW blob is served and stored", async () => {
+      install(new DrainingCache());
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+      const first = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      expect(await first.text()).toBe(FILE_BODY);
+
+      // Same path, a different blob -- exactly what a retag or a same-size
+      // edit behind a moved tag looks like (ADR 0066's 2026-09-16 amendment).
+      reset({
+        [manifestKey]: () =>
+          new Response(manifestBodyNaming(BLOB_SHA_V2, FILE_BODY_V2.length), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY_V2, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY_V2.length) },
+          }),
+      });
+
+      const second = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      expect(second.status).toBe(200);
+      expect(await second.text()).toBe(FILE_BODY_V2);
+      // The rewrite forced a real upstream fetch: this is not the stale entry.
+      expect(rawHits()).toBe(1);
+
+      // And the replacement sticks: a third request answers from the cache
+      // again, with the NEW content and no further upstream traffic.
+      const third = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      expect(await third.text()).toBe(FILE_BODY_V2);
+      expect(rawHits()).toBe(1);
+    });
+
+    test("a dataset that goes private is never served from the git-file cache", async () => {
+      const cache = new DrainingCache();
+      install(cache);
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+      const first = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      expect(first.status).toBe(200);
+      expect(cache.store.size).toBeGreaterThan(0);
+
+      db.prepare("UPDATE datasets SET visibility = 'private' WHERE dataset_id = ?").run("nm000862");
+      const matchesBefore = cache.matches;
+      const hitsBefore = rawHits();
+
+      const second = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+
+      expect(second.status).toBe(404);
+      // The gate ran first and rejected the request before the cache was
+      // ever asked (ADR 0066's amendment: nothing to purge, because nothing
+      // reaches the cache without re-proving visibility first) -- not merely
+      // that its answer went unused.
+      expect(cache.matches).toBe(matchesBefore);
+      expect(rawHits()).toBe(hitsBefore);
+    });
+
+    /** A Workers execution context: `waitUntil` collects, nothing else runs. */
+    function executionContext() {
+      const deferred: Promise<unknown>[] = [];
+      const ctx = {
+        waitUntil: (work: Promise<unknown>) => {
+          deferred.push(work);
+        },
+        passThroughOnException: () => {},
+        props: {},
+      } as unknown as ExecutionContext;
+      return { ctx, deferred };
+    }
+
+    test("a cache whose put never settles is handed to waitUntil, not awaited", async () => {
+      const cache = new StalledCache();
+      install(cache);
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+      const { ctx, deferred } = executionContext();
+
+      const started = performance.now();
+      const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db), ctx);
+      const elapsed = performance.now() - started;
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(FILE_BODY);
+      // Far under GIT_FILE_CACHE_STALL_MS's no-waitUntil fallback bound: the
+      // wedged put was handed off instead of being waited for.
+      expect(elapsed).toBeLessThan(200);
+      // Two writes share this one stalled cache: the git-file entry itself,
+      // and the miss-budget counter (#1516 review) -- both handed to
+      // waitUntil, neither awaited.
+      expect(cache.puts).toBe(2);
+      expect(deferred).toHaveLength(2);
+    });
+
+    test("without an execution context, a stalled cache write is bounded and the answer is still right", async () => {
+      install(new StalledCache());
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+
+      const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(FILE_BODY);
+    }, 5_000);
+
+    test("a cache that throws on match and on put still answers", async () => {
+      const broken = {
+        match: async () => {
+          throw new Error("cache down");
+        },
+        put: async () => {
+          throw new Error("cache down");
+        },
+      };
+      install(broken);
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+
+      const res = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(FILE_BODY);
+    });
+
+    test("above the buffer ceiling, the streamed branch is never cached", async () => {
+      const cache = new DrainingCache();
+      install(cache);
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () => streamed(FILE_BODY),
+      });
+
+      const res = await app().request(
+        `/nm000862/${VERSION}/${PATH}`,
+        {},
+        { ...env(db), BROKER_BUFFER_MAX_BYTES: String(FILE_BODY.length - 1) },
+      );
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Content-Length")).toBeNull();
+      // Not "the store is empty": it legitimately holds the miss-budget
+      // counter entry (#1516 review) now, which shares this same cache. Only
+      // the GIT-FILE entry itself must be absent.
+      expect(
+        cache.store.get(gitFileCacheKey("http://localhost", "nm000862", VERSION, PATH)),
+      ).toBeUndefined();
+
+      // And the next request fetches again -- there was nothing to answer from.
+      const before = rawHits();
+      await app().request(
+        `/nm000862/${VERSION}/${PATH}`,
+        {},
+        { ...env(db), BROKER_BUFFER_MAX_BYTES: String(FILE_BODY.length - 1) },
+      );
+      expect(rawHits()).toBeGreaterThan(before);
+    });
+
+    test("HEAD is unaffected: same headers, and it never touches the cache", async () => {
+      const cache = new DrainingCache();
+      install(cache);
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+      // Warm the cache with a GET first.
+      await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      const gitFileEntryBefore = cache.store.get(
+        gitFileCacheKey("http://localhost", "nm000862", VERSION, PATH),
+      );
+      expect(gitFileEntryBefore).toBeDefined();
+      const hitsBefore = rawHits();
+
+      const head = await app().request(`/nm000862/${VERSION}/${PATH}`, { method: "HEAD" }, env(db));
+      expect(head.status).toBe(200);
+      expect(head.headers.get("Content-Length")).toBe(String(FILE_BODY.length));
+      expect(head.headers.get("ETag")).toBe(`"git:${BLOB_SHA}"`);
+      expect(await head.text()).toBe("");
+      // HEAD never reaches GitHub (unchanged from before #1516) and the
+      // git-file cache entry it would have consulted is untouched -- HEAD's
+      // own branch in `fileOrIndexHandler` returns before `serveGitTrackedFile`
+      // is ever called.
+      expect(rawHits()).toBe(hitsBefore);
+      expect(
+        cache.store.get(gitFileCacheKey("http://localhost", "nm000862", VERSION, PATH)),
+      ).toEqual(gitFileEntryBefore);
+    });
+
+    test("a Range request is still ignored: full 200 body, on a hit exactly as on a miss", async () => {
+      install(new DrainingCache());
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+      const miss = await app().request(
+        `/nm000862/${VERSION}/${PATH}`,
+        { headers: { Range: "bytes=0-3" } },
+        env(db),
+      );
+      expect(miss.status).toBe(200);
+      expect(await miss.text()).toBe(FILE_BODY);
+
+      const hit = await app().request(
+        `/nm000862/${VERSION}/${PATH}`,
+        { headers: { Range: "bytes=0-3" } },
+        env(db),
+      );
+      expect(hit.status).toBe(200);
+      expect(await hit.text()).toBe(FILE_BODY);
+    });
+
+    test("Server-Timing is present and well formed, with `upstream` only when it ran", async () => {
+      function parse(header: string | null): Record<string, number> {
+        expect(header).not.toBeNull();
+        const out: Record<string, number> = {};
+        for (const part of (header as string).split(", ")) {
+          const m = part.match(/^(gate|manifest|cache|upstream);dur=(\d+(?:\.\d+)?)$/);
+          expect(m).not.toBeNull();
+          if (m) out[m[1]] = Number(m[2]);
+        }
+        return out;
+      }
+
+      install(new DrainingCache());
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+
+      const miss = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      const missTiming = parse(miss.headers.get("Server-Timing"));
+      expect(missTiming.gate).toBeGreaterThanOrEqual(0);
+      expect(missTiming.manifest).toBeGreaterThanOrEqual(0);
+      expect(missTiming.cache).toBeGreaterThanOrEqual(0);
+      expect(missTiming.upstream).toBeGreaterThanOrEqual(0);
+
+      const hit = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      const hitTiming = parse(hit.headers.get("Server-Timing"));
+      expect(hitTiming.cache).toBeGreaterThanOrEqual(0);
+      // No upstream stage ran on a hit.
+      expect(hitTiming.upstream).toBeUndefined();
+    });
+
+    test("without an edge cache at all (no globalThis.caches), the route behaves exactly as before #1516", async () => {
+      (globalThis as { caches?: unknown }).caches = undefined;
+      const db = freshDb();
+      seed(db, "nm000862", "public");
+      reset({
+        [manifestKey]: () => new Response(manifestBody(), { status: 200 }),
+        [publicRawPath]: () =>
+          new Response(FILE_BODY, {
+            status: 200,
+            headers: { "Content-Length": String(FILE_BODY.length) },
+          }),
+      });
+      const first = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      const second = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+      expect(await first.text()).toBe(FILE_BODY);
+      expect(await second.text()).toBe(FILE_BODY);
+      // No cache anywhere -- every GET is a real upstream fetch.
+      expect(rawHits()).toBe(2);
+    });
+
+    describe("the miss budget (#1516 review)", () => {
+      const PATH2 = "CHANGES.md";
+      const SECOND_BODY = "nothing changed";
+      const SECOND_BLOB_SHA = "f906b97310d39c554b0f699aea54901533f2076b";
+      const ANNEX_PATH = "sub-01/eeg/data.set";
+      const MISS_IP = "203.0.113.50";
+      const secondRawPath = `/nemarDatasets/nm000862/${VERSION}/${PATH2}`;
+
+      function manifestBodyTwoFilesAndAnAnnex(): string {
+        return JSON.stringify({
+          dataset_id: "nm000862",
+          version: "1.0.0",
+          doi: null,
+          concept_doi: null,
+          created: "2026-01-01T00:00:00Z",
+          files: {
+            [PATH]: { key: `git:${BLOB_SHA}`, size: FILE_BODY.length, checksum: `git:${BLOB_SHA}` },
+            [PATH2]: {
+              key: `git:${SECOND_BLOB_SHA}`,
+              size: SECOND_BODY.length,
+              checksum: `git:${SECOND_BLOB_SHA}`,
+            },
+            [ANNEX_PATH]: { key: "SHA256E-s10--aaaa.set", size: 10, checksum: "sha256:aaaa" },
+          },
+        });
+      }
+
+      /** Seed the miss budget's own counter directly, the same shape
+       *  `checkDataMissBudget` itself writes, so a test can put the counter
+       *  AT the limit without a 10,000-request loop. */
+      function seedMissBudgetCount(cache: DrainingCache, ip: string, count: number): void {
+        cache.store.set(`https://rate-limit.internal/rl:data-miss-ip:${ip}`, {
+          body: new TextEncoder().encode(JSON.stringify({ count })),
+          status: 200,
+          headers: new Headers({
+            "Content-Type": "application/json",
+            "Cache-Control": "max-age=60",
+          }),
+          // Without this, the stricter cache double (#1516 review) treats a
+          // directly-injected entry as stored at time 0 and therefore always
+          // already past its own 60s max-age -- the exact class of bug that
+          // review caught in the git-file cache itself.
+          storedAtMs: cache.getNow(),
+        });
+      }
+
+      test("a miss counts toward its own per-IP budget, independent of data-ip, and trips at the limit", async () => {
+        const cache = new DrainingCache();
+        install(cache);
+        const db = freshDb();
+        seed(db, "nm000862", "public");
+        reset({
+          [manifestKey]: () => new Response(manifestBodyTwoFilesAndAnAnnex(), { status: 200 }),
+          [publicRawPath]: () =>
+            new Response(FILE_BODY, {
+              status: 200,
+              headers: { "Content-Length": String(FILE_BODY.length) },
+            }),
+          [secondRawPath]: () =>
+            new Response(SECOND_BODY, {
+              status: 200,
+              headers: { "Content-Length": String(SECOND_BODY.length) },
+            }),
+        });
+        seedMissBudgetCount(cache, MISS_IP, __limits.DATA_MISS_MAX_REQUESTS - 1);
+
+        // The request that reaches the limit: still a genuine miss, still served.
+        const atLimit = await app().request(
+          `/nm000862/${VERSION}/${PATH}`,
+          { headers: { "CF-Connecting-IP": MISS_IP } },
+          env(db),
+        );
+        expect(atLimit.status).toBe(200);
+        expect(await atLimit.text()).toBe(FILE_BODY);
+
+        // A second, DIFFERENT file -- still a genuine miss -- is refused.
+        const overLimit = await app().request(
+          `/nm000862/${VERSION}/${PATH2}`,
+          { headers: { "CF-Connecting-IP": MISS_IP } },
+          env(db),
+        );
+        expect(overLimit.status).toBe(429);
+        expect(overLimit.headers.get("X-RateLimit-Bucket")).toBe("data-miss-ip");
+        expect(overLimit.headers.get("Retry-After")).toBe("60");
+        expect(overLimit.headers.get("X-RateLimit-Remaining")).toBe("0");
+        expect(await overLimit.json()).toMatchObject({ error: "Rate limit exceeded" });
+      });
+
+      test("a hit is still served after the miss budget is exhausted", async () => {
+        const cache = new DrainingCache();
+        install(cache);
+        const db = freshDb();
+        seed(db, "nm000862", "public");
+        reset({
+          [manifestKey]: () => new Response(manifestBodyTwoFilesAndAnAnnex(), { status: 200 }),
+          [publicRawPath]: () =>
+            new Response(FILE_BODY, {
+              status: 200,
+              headers: { "Content-Length": String(FILE_BODY.length) },
+            }),
+          [secondRawPath]: () =>
+            new Response(SECOND_BODY, {
+              status: 200,
+              headers: { "Content-Length": String(SECOND_BODY.length) },
+            }),
+        });
+
+        // Warm the content cache for PATH from an UNTHROTTLED IP first.
+        const warm = await app().request(
+          `/nm000862/${VERSION}/${PATH}`,
+          { headers: { "CF-Connecting-IP": "203.0.113.51" } },
+          env(db),
+        );
+        expect(warm.status).toBe(200);
+
+        // Now exhaust the miss budget for a DIFFERENT ip.
+        seedMissBudgetCount(cache, MISS_IP, __limits.DATA_MISS_MAX_REQUESTS);
+        const missRefused = await app().request(
+          `/nm000862/${VERSION}/${PATH2}`,
+          { headers: { "CF-Connecting-IP": MISS_IP } },
+          env(db),
+        );
+        expect(missRefused.status).toBe(429);
+
+        // The already-cached PATH is still served to the SAME exhausted IP --
+        // a hit is never charged against, or blocked by, the miss budget.
+        const hitStillServed = await app().request(
+          `/nm000862/${VERSION}/${PATH}`,
+          { headers: { "CF-Connecting-IP": MISS_IP } },
+          env(db),
+        );
+        expect(hitStillServed.status).toBe(200);
+        expect(await hitStillServed.text()).toBe(FILE_BODY);
+      });
+
+      test("HEAD, an annexed file's redirect, and an ordinary 404 do not count against the miss budget", async () => {
+        const cache = new DrainingCache();
+        install(cache);
+        const db = freshDb();
+        seed(db, "nm000862", "public");
+        reset({
+          [manifestKey]: () => new Response(manifestBodyTwoFilesAndAnAnnex(), { status: 200 }),
+          [publicRawPath]: () =>
+            new Response(FILE_BODY, {
+              status: 200,
+              headers: { "Content-Length": String(FILE_BODY.length) },
+            }),
+        });
+        seedMissBudgetCount(cache, MISS_IP, __limits.DATA_MISS_MAX_REQUESTS - 1);
+
+        const head = await app().request(
+          `/nm000862/${VERSION}/${PATH2}`,
+          { method: "HEAD", headers: { "CF-Connecting-IP": MISS_IP } },
+          env(db),
+        );
+        expect(head.status).toBe(200);
+
+        const redirect = await app().request(
+          `/nm000862/${VERSION}/${ANNEX_PATH}`,
+          { headers: { "CF-Connecting-IP": MISS_IP }, redirect: "manual" },
+          env(db),
+        );
+        expect(redirect.status).toBe(302);
+
+        const notFound = await app().request(
+          `/nm000862/${VERSION}/does-not-exist.json`,
+          { headers: { "CF-Connecting-IP": MISS_IP } },
+          env(db),
+        );
+        expect(notFound.status).toBe(404);
+
+        // None of the three spent the one remaining slot: this genuine miss
+        // is still the request AT the limit, not over it.
+        const stillAllowed = await app().request(
+          `/nm000862/${VERSION}/${PATH}`,
+          { headers: { "CF-Connecting-IP": MISS_IP } },
+          env(db),
+        );
+        expect(stillAllowed.status).toBe(200);
+      });
+    });
   });
 });
