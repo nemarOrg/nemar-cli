@@ -71,7 +71,7 @@ Operational limits an operator will meet:
   because the pointer walk cannot see a file outside the recording's directory.
 
 The file is a list a person maintains.
-It fixes one dataset's layout and does not generalise;
+It fixes one dataset's layout and does not generalize;
 a second dataset needs its own reviewed entries.
 
 ## Alternatives considered
@@ -81,7 +81,7 @@ a second dataset needs its own reviewed entries.
 - **Discover `derivatives/` `.fdt` files and match them automatically by size.**
   Rejected: it reopens discovery under an excluded tree, which ADR 0027 closed,
   and it would act on every dataset without review.
-  Size is the evidence a person uses to write the entry; it is not a licence to act unreviewed.
+  Size is the evidence a person uses to write the entry; it is not a license to act unreviewed.
 - **Rewrite the dataset** (move or rename the `.fdt` files beside their `.set`).
   Rejected: the dataset is mirrored from OpenNeuro, and a NEMAR-side rewrite would diverge from the source.
 - **Serve on the header check alone.** Rejected: a header and a size can both agree with the wrong

@@ -119,8 +119,15 @@ check that could not run is `unchecked` rather than clean),
 never returns one: real datasets grow upward, fixtures are assigned downward from
 `nm099999`, and the reservation is not environment-fenced because the GitHub org is shared),
 0072 (the data plane never reads a manifest whole: it streams it through a query that keeps
-only its answer, its edge copy answers only after S3 says 304 for the copy's ETag because
-manifests are rewritten in place, and `manifest.json` refuses more than 30,000 entries).
+only its answer, its edge copy is trusted for 60 seconds and otherwise answers only after S3
+says 304 for the copy's ETag because manifests are rewritten in place, and `manifest.json`'s
+entry bound is per branch, see 0074),
+0073 (a declared `.fdt` outside the raw tree is fetched for its `.set`, never discovered: only a
+reviewed, verified declaration in `eeglab-fdt-declarations.json` pairs one, and any disagreement
+refuses that recording rather than guessing the pairing by name),
+0074 (`manifest.json` emits the plain public S3 URL for a dataset the bucket policy does not
+exclude from public read, and keeps the legacy presigned URL, always, for one it does -- so
+correctness never depends on the catalog and the bucket policy agreeing).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
