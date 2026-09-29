@@ -3457,6 +3457,27 @@ def pending_retry_worklist(
     return paths, f"{len(paths)} pending recording(s)"
 
 
+def _heal_carried_units_report(entry: dict) -> dict:
+    """A prior index entry with its `units_report` bounded, as `merge_index`
+    carries it.
+
+    Entries for unchanged stores are carried verbatim, and the schema refuses
+    biosigIO's raw per-channel `matched_case_insensitive` map. An entry
+    published with that map (a biosigio 1.2.10 run before the converter bounded
+    it: staging, an exemplar, an ad hoc `--dataset` with BIOSIGIO_SPEC
+    overridden) would otherwise be re-carried by every incremental run and fail
+    the pre-upload validation each time, wedging the dataset until a `--clean`
+    rebuild. Passing it through `bound_units_report` derives the count and the
+    examples from the map and drops the map, so the entry heals on the next
+    merge. Every other entry is returned as it is, and `prior` is not mutated.
+    """
+    report = entry.get("units_report")
+    if not (isinstance(report, dict) and BIOSIGIO_CASE_MATCH_KEY in report):
+        return entry
+    bounded, _matches = bound_units_report(report)
+    return {**entry, "units_report": bounded}
+
+
 def merge_index(
     prior: dict | None,
     dataset_id: str,
@@ -3534,7 +3555,7 @@ def merge_index(
     if prior and isinstance(prior.get("stores"), list):
         for entry in prior["stores"]:
             if isinstance(entry, dict) and isinstance(entry.get("zarr"), str):
-                stores[entry["zarr"]] = entry
+                stores[entry["zarr"]] = _heal_carried_units_report(entry)
     for rel in removed_store_rels:
         stores.pop(rel, None)
     for entry in converted:
