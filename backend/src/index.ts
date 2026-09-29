@@ -33,6 +33,7 @@ import { authWebRoutes } from "./routes/auth-web";
 import { catalogIndexResponse, dataRoutes } from "./routes/data";
 import { datasetRoutes } from "./routes/datasets";
 import { mcpRoutes } from "./routes/mcp";
+import { newsRoutes } from "./routes/news";
 import { openApiRoutes } from "./routes/openapi";
 import { sandboxRoutes } from "./routes/sandbox";
 import { schemaRoutes } from "./routes/schemas";
@@ -164,6 +165,11 @@ api.get("/notices", optionalAuthMiddleware, async (c) => {
     return c.json({ notices: [] });
   }
 });
+
+// Public news posts (#1551): the published list, one post by slug, and the
+// posts' images from the NEWS_MEDIA bucket. Admin writes are in
+// routes/admin/news.ts.
+api.route("/news", newsRoutes);
 
 // Mount route handlers
 api.route("/auth", authRoutes);
