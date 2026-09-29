@@ -30,6 +30,11 @@ export interface Bindings {
   // buildAccessDataPoint's. Optional: recordMcpToolCall() no-ops when absent.
   ANALYTICS_MCP?: AnalyticsEngineDataset;
 
+  // News post images (#1551): R2 bucket holding `news/<sha256>.<ext>`,
+  // written by POST /admin/news/media and read by GET /news/media/:file.
+  // `nemar-news-media` in production, `nemar-news-media-dev` in [env.dev].
+  NEWS_MEDIA: R2Bucket;
+
   // Environment variables
   ENVIRONMENT: "production" | "development" | "staging" | "test";
   API_BASE_URL: string;

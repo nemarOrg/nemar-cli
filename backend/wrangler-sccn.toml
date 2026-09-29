@@ -173,6 +173,15 @@ dataset = "nemar_llm_metrics"
 binding = "ANALYTICS_MCP"
 dataset = "nemar_mcp_metrics"
 
+# News post images (#1551): banner and inline images for nemar.org/news,
+# stored content-addressed as `news/<sha256>.<ext>` and served by
+# GET /news/media/:file. Written only by POST /admin/news/media.
+# The bucket must exist before the next deploy that carries this binding
+# (`wrangler r2 bucket create nemar-news-media`), or that deploy fails.
+[[r2_buckets]]
+binding = "NEWS_MEDIA"
+bucket_name = "nemar-news-media"
+
 # Workers Observability (Workers Paid plan).
 # Captures invocation logs (inbound request shape, response status, duration,
 # subrequest count) and console.log output for searchable runtime telemetry.
@@ -394,6 +403,14 @@ dataset = "nemar_llm_metrics_dev"
 [[env.dev.analytics_engine_datasets]]
 binding = "ANALYTICS_MCP"
 dataset = "nemar_mcp_metrics_dev"
+
+# News post images for dev (not inherited from top-level; see the top-level
+# NEWS_MEDIA block). Its own bucket, so staging uploads never reach
+# production's. Must exist before the next dev deploy
+# (`wrangler r2 bucket create nemar-news-media-dev`), or that deploy fails.
+[[env.dev.r2_buckets]]
+binding = "NEWS_MEDIA"
+bucket_name = "nemar-news-media-dev"
 
 # Observability for dev (not inherited from top-level)
 [env.dev.observability]
