@@ -3153,9 +3153,10 @@ def _mat5_eeglab_header(path: str) -> dict[str, Any]:
     Every top-level variable is visited by its header and then skipped by
     seeking past it, compressed or not. The `EEG` struct is walked field by
     field: each field's matrix header is read, the field is skipped to its end,
-    and the walk stops once `nbchan` and `data` have both been seen. A field
-    skipped inside a compressed variable is decompressed in bounded chunks and
-    discarded, and `data` is never read past its dimensions. A field in `EEG`
+    and the walk stops the moment `nbchan` and `data` have both been read,
+    without skipping past the second. A field skipped inside a compressed
+    variable is decompressed in bounded chunks and discarded, and `data` is
+    never read past its dimensions. A field in `EEG`
     wins over a top-level variable of the same name, as in biosigIO's
     `_normalize_eeglab_dict`.
     """
@@ -3207,8 +3208,6 @@ def _mat5_struct_fields(src: _MatStream, end: str) -> dict[str, Any]:
     ]
     out: dict[str, Any] = {}
     for name in names:
-        if "nbchan" in out and "data" in out:
-            break
         mtype, nbytes = struct.unpack(end + "II", src.read(8))
         if mtype != _MI_MATRIX:
             raise ValueError(f"struct field {name!r} is element type {mtype}")
@@ -3218,6 +3217,11 @@ def _mat5_struct_fields(src: _MatStream, end: str) -> dict[str, Any]:
             if nbytes:
                 mclass, dims, _ = _mat5_matrix_header(src, end)
                 out[name] = _mat5_field(src, end, name, mclass, dims)
+            # Stop here, BEFORE skipping to the field's end: in the usual order
+            # `data` is the second of the two, and skipping it inside a
+            # compressed `EEG` would inflate every sample only to discard them.
+            if "nbchan" in out and "data" in out:
+                return out
         src.skip(start + nbytes - src.pos)
     return out
 

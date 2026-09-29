@@ -3336,6 +3336,115 @@ def build_eeglab_set(
     return path
 
 
+class Mat5:
+    """A minimal MAT v5 writer, byte for byte per MathWorks' "MAT-File Format",
+    for the layouts `scipy.io.savemat` cannot produce: big-endian files, a 1xN
+    `EEG` struct array, fields in an arbitrary order, several top-level
+    variables. Every file it writes is also checked by `scipy.io.loadmat` in the
+    tests that use it, so the writer is not trusted on its own word.
+
+    `end` is the struct byte order, "<" or ">". A matrix is returned as the
+    bytes of one whole miMATRIX element; `file` wraps variables in the 128-byte
+    header, each optionally in its own miCOMPRESSED element."""
+
+    def __init__(self, end: str = "<") -> None:
+        self.end = end
+
+    def elem(self, mtype: int, data: bytes) -> bytes:
+        import struct
+
+        n = len(data)
+        if 0 < n <= 4:  # small data element: packed into the tag
+            return struct.pack(self.end + "I", (n << 16) | mtype) + data.ljust(4, b"\0")
+        return struct.pack(self.end + "II", mtype, n) + data + b"\0" * (-n % 8)
+
+    def matrix(
+        self, name: str, mclass: int, dims: list[int], body: bytes = b"",
+    ) -> bytes:
+        import struct
+
+        payload = (
+            self.elem(6, struct.pack(self.end + "II", mclass, 0))
+            + self.elem(5, struct.pack(self.end + f"{len(dims)}i", *dims))
+            + self.elem(1, name.encode())
+            + body
+        )
+        return struct.pack(self.end + "II", 14, len(payload)) + payload
+
+    def scalar(self, name: str, value: float, kind: str = "double") -> bytes:
+        """A 1x1 numeric matrix; `uint8` and `int32` store their value in a
+        small data element (the tag's own 8 bytes)."""
+        import struct
+
+        mclass, mtype, fmt = {
+            "double": (6, 9, "d"), "uint8": (9, 2, "B"), "int32": (12, 5, "i"),
+        }[kind]
+        value_bytes = struct.pack(self.end + fmt, int(value) if fmt != "d" else value)
+        return self.matrix(name, mclass, [1, 1], self.elem(mtype, value_bytes))
+
+    def chars(self, name: str, text: str) -> bytes:
+        import struct
+
+        body = self.elem(4, struct.pack(self.end + f"{len(text)}H", *map(ord, text)))
+        return self.matrix(name, 4, [1, len(text)], body)
+
+    def doubles(self, name: str, rows: int, cols: int, seed: int = 0) -> bytes:
+        import numpy as np
+
+        arr = np.random.default_rng(seed).standard_normal((rows, cols)).astype(self.end + "f8")
+        return self.matrix(name, 6, [rows, cols], self.elem(9, arr.tobytes(order="F")))
+
+    def struct(self, name: str, elements: list[list[tuple[str, bytes]]]) -> bytes:
+        """A 1xN struct array; every element lists the same fields in the same
+        order, each field a matrix (its own name is ignored, as MATLAB's is)."""
+        import struct
+
+        width = 32
+        names = [field for field, _ in elements[0]]
+        body = self.elem(5, struct.pack(self.end + "i", width)) + self.elem(
+            1, b"".join(n.encode().ljust(width, b"\0") for n in names)
+        )
+        for element in elements:
+            assert [field for field, _ in element] == names
+            body += b"".join(matrix for _, matrix in element)
+        return self.matrix(name, 2, [1, len(elements)], body)
+
+    def eeg_fields(
+        self, nbchan: float, rows: int, pnts: int = 20, *, nbchan_kind: str = "double",
+        nbchan_after_data: bool = False,
+    ) -> list[tuple[str, bytes]]:
+        """The fields biosigIO's importer needs, in EEGLAB's order unless
+        `nbchan_after_data` moves `nbchan` past `data`."""
+        fields = [
+            ("setname", self.chars("", "fixture")),
+            ("nbchan", self.scalar("", nbchan, nbchan_kind)),
+            ("trials", self.scalar("", 1)),
+            ("pnts", self.scalar("", pnts)),
+            ("srate", self.scalar("", 100.0)),
+            ("data", self.doubles("", rows, pnts)),
+        ]
+        if nbchan_after_data:
+            fields.append(fields.pop(1))
+        return fields
+
+    def file(self, path: str, variables: list[bytes], compress: bool = False) -> str:
+        import struct
+        import zlib
+
+        head = b"MATLAB 5.0 MAT-file, written by the test suite".ljust(116)
+        out = head + b"\0" * 8 + struct.pack(self.end + "H", 0x0100)
+        out += b"IM" if self.end == "<" else b"MI"
+        for variable in variables:
+            if compress:
+                blob = zlib.compress(variable)
+                out += struct.pack(self.end + "II", 15, len(blob)) + blob
+            else:
+                out += variable
+        with open(path, "wb") as fh:
+            fh.write(out)
+        return path
+
+
 class TestEeglabDeclaredChannelCount(unittest.TestCase):
     """The EEGLAB branch of the header count (on003645: EEG `.set` recordings
     holding 75 channels under a subject-level channels.tsv listing its 404 MEG
@@ -3529,6 +3638,37 @@ class TestEeglabDeclaredChannelCount(unittest.TestCase):
         with open(p, "r+b") as fh:
             fh.write(b"MATLAB 7.3 MAT-file".ljust(116))
         self.quiet_none(p)
+
+    def test_a_compressed_data_matrix_is_never_inflated(self):
+        """The walk stops at `data`'s dimensions instead of skipping to its
+        end, which inside a compressed `EEG` would inflate every sample (CPU
+        linear in the file, for nothing). Here the deflate stream is real for
+        the header and the first 64 KiB of samples and garbage after, so a
+        read that inflates any further fails and returns None. The same file
+        with `nbchan` moved past `data`, where skipping `data` is unavoidable,
+        shows the garbage is reached when it is read."""
+        import struct
+        import zlib
+
+        m = Mat5("<")
+        for nbchan_after_data, expected in ((False, 4), (True, None)):
+            with self.subTest(nbchan_after_data=nbchan_after_data):
+                fields = m.eeg_fields(4, 4, pnts=200_000, nbchan_after_data=nbchan_after_data)
+                eeg = m.struct("EEG", [fields])
+                data = dict(fields)["data"]
+                cut = eeg.index(data) + 64 * 1024
+                co = zlib.compressobj()
+                head = co.compress(eeg[:cut]) + co.flush(zlib.Z_SYNC_FLUSH)
+                blob = head + b"\xff" * (len(zlib.compress(eeg)) - len(head))
+                with self.assertRaises(zlib.error):
+                    zlib.decompress(blob)
+                p = m.file(self.path(f"garbled{int(nbchan_after_data)}"), [])
+                with open(p, "ab") as fh:
+                    fh.write(struct.pack("<II", 15, len(blob)) + blob)
+                if expected is None:
+                    self.assertIn("decompressing", self.quiet_none(p))
+                else:
+                    self.assertEqual(file_declared_channel_count(p), expected)
 
     def test_the_sample_matrix_is_never_loaded(self):
         """The whole point of reading nbchan by hand: `loadmat(variable_names=
