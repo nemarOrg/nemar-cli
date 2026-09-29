@@ -151,4 +151,21 @@ describe("triggerVersionDoiRun client_payload (#1514)", () => {
     expect("total_bytes" in body.client_payload).toBe(false);
     expect("total_files" in body.client_payload).toBe(false);
   });
+
+  test("numeric zero totals are sent as 0, not treated as absent (NIT, #1514 review)", async () => {
+    // `options?.totalBytes ?? undefined` only substitutes for null/undefined;
+    // a real 0 (a genuinely empty dataset) must reach the payload as the
+    // number 0, not be dropped the way null/undefined are.
+    await triggerVersionDoiRun("nm000013", "v1.0.0", "test-token", {
+      totalBytes: 0,
+      totalFiles: 0,
+    });
+
+    expect(dispatches).toHaveLength(1);
+    const body = dispatches[0].body as VersionDoiDispatchBody;
+    expect("total_bytes" in body.client_payload).toBe(true);
+    expect("total_files" in body.client_payload).toBe(true);
+    expect(body.client_payload.total_bytes).toBe(0);
+    expect(body.client_payload.total_files).toBe(0);
+  });
 });

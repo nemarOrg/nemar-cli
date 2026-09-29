@@ -182,4 +182,23 @@ describe("a pushed version tag's run-version-doi dispatch carries the row's size
     expect("total_bytes" in body.client_payload).toBe(false);
     expect("total_files" in body.client_payload).toBe(false);
   });
+
+  test("a genuinely empty dataset (file_size: 0, total_files: 0) sends numeric zero, not omitted (NIT, #1514 review)", async () => {
+    // `?? null` / `?? undefined` only treat null/undefined as "absent"; a
+    // real 0 must survive both hops (the row read in github.ts, then
+    // triggerVersionDoiRun's own `??`) as the number 0, not be conflated
+    // with "no declared size yet" and dropped.
+    const db = freshDb();
+    seed(db, "xx090288", { file_size: 0, total_files: 0 });
+
+    const res = await post(db, tagPush("xx090288"));
+    expect(res.status).toBe(200);
+
+    expect(dispatches).toHaveLength(1);
+    const body = dispatches[0].body as VersionDoiDispatchBody;
+    expect("total_bytes" in body.client_payload).toBe(true);
+    expect("total_files" in body.client_payload).toBe(true);
+    expect(body.client_payload.total_bytes).toBe(0);
+    expect(body.client_payload.total_files).toBe(0);
+  });
 });
