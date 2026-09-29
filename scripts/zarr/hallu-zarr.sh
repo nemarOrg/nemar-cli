@@ -252,7 +252,7 @@ VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
 # Extras are not optional here: [mef3] carries pymef and [hdf5] carries h5py, and
 # without either the matching recordings raise ImportError at convert time even
 # though discovery finds them.
-BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.9}"
+BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.9,<1.2.10}"
 API_BASE="${API_BASE:-https://api.nemar.org}"
 # The STABLE base published in each index as `contract_base` and in each store's
 # `nemar.contract_url` (#1059/#1064). Distinct from S3_BUCKET/AWS_REGION, which
@@ -289,6 +289,10 @@ ENGINE_ACK_FILE="${ZARR_ENGINE_BUMP_ACK_FILE:-${STATE_DIR}/.zarr-engine-bump-ack
 # NEMAR_WEBHOOK_TOKEN is loaded further down, once log()/err() exist -- a missing
 # token has to be able to announce itself.
 
+# The `<1.2.10` half is a CAP, not a floor: biosigio 1.2.10 matches channels.tsv
+# names case-insensitively, and the schema, zod and MCP texts for the join report
+# still say matching is exact. requirements.txt lists what adopting it needs; raise
+# the cap in all three places (that file, this default, test_hallu_zarr_config.py).
 ONLY_DATASET=""
 LIMIT="${ZARR_LIMIT:-0}"
 STATS_ONLY=""

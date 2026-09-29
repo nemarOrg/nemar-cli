@@ -192,8 +192,10 @@ def test_test_mode_print_config_defaults(dirs: tuple[Path, Path]) -> None:
     # channels.tsv units, which is what gates the engine bump, and below 1.2.8
     # the streaming export rewrites every shard once per channel (#1483), and
     # below 1.2.9 real EEGLAB v7.3 and BrainVision files fail to convert and
-    # EDF files that repeat a channel label lose channels.
-    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.9"
+    # EDF files that repeat a channel label lose channels. The upper bound is a
+    # cap, not a floor: 1.2.10 matches channels.tsv names case-insensitively,
+    # which the published join report was not written for (requirements.txt).
+    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.9,<1.2.10"
     assert cfg["S3_BUCKET"] == "nemar-dev"
     assert cfg["AWS_PROFILE"] == "nemar-zarr-dev"
     assert cfg["STATE_DIR"] == state_dir
@@ -260,7 +262,7 @@ def test_print_config_without_test_uses_prod_defaults(dirs: tuple[Path, Path]) -
     assert cfg["TEST_API_URL"] == ""
     assert cfg["CALLBACK_URL"] == "https://api.nemar.org/webhooks/zarr-ready"
     assert cfg["CONTRACT_BASE"] == "https://zarr.nemar.org"
-    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.9"
+    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.9,<1.2.10"
     assert cfg["S3_BUCKET"] == "nemar"
     assert cfg["AWS_PROFILE"] == "nemar-zarr"
     assert cfg["STATE_DIR"] == f"{zarr_base}/zarr-state"
