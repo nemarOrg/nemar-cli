@@ -581,8 +581,9 @@ describe("GET /admin/news and /admin/news/:id", () => {
     expect(res.status).toBe(200);
     const { posts } = (await res.json()) as { posts: { slug: string; body: string }[] };
     expect(posts.map((p) => p.slug)).toEqual(["future-one", "live-one", "draft-one"]);
-    // Admin rows are full posts.
-    expect(posts[0]?.body).toBe("# Heading\n\nSome **Markdown**.");
+    // Admin rows are full posts: the website's admin client drops any row
+    // without a string body (see listAllNews), so every row must keep it.
+    for (const post of posts) expect(post.body).toBe("# Heading\n\nSome **Markdown**.");
   });
 
   test("fetches one post by id, drafts included", async () => {

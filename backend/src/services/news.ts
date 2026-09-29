@@ -185,7 +185,16 @@ export async function getPublicNewsBySlug(db: D1Database, slug: string): Promise
     .first<NewsPost>();
 }
 
-/** Every post, drafts and scheduled included, for the admin view. */
+/**
+ * Every post, drafts and scheduled included, for the admin view.
+ *
+ * Full posts, body included, although the admin list page shows no body:
+ * the website's admin client (`parseAdminNewsList` in nemarOrg/website's
+ * `src/lib/news.ts`, website#372) parses each row as a full post and drops
+ * any row without a string body, so returning NEWS_SUMMARY_COLUMNS here
+ * would empty that page without an error. Switch to the summary columns
+ * only after the website parses this list as summaries.
+ */
 export async function listAllNews(db: D1Database): Promise<NewsPost[]> {
   const rows = await db
     .prepare(`SELECT ${NEWS_COLUMNS} FROM news_posts ORDER BY ${NEWS_ORDER}`)
