@@ -1,14 +1,17 @@
 /**
  * Regression guard for listObjectSizes' multi-page merge (#969 review). The
  * pagination decision (IsTruncated / NextContinuationToken -> fetch another
- * page) lives in listObjectPages, which builds its request URL from a
- * literal `<bucket>.s3.<region>.amazonaws.com` host with no override seam to
- * redirect to a local Bun.serve fake -- so this targets the extracted,
- * exported page-parser directly: feed it two synthetic ListBucketResult XML
- * pages (mirroring what two real pages would contain) and assert both merge
- * into one Map, keyed by the prefix-stripped annex key. No mocks -- pure
- * string parsing over plain data, same as the rest of the pagination logic
- * this module already exercises via listObjectKeys/getDatasetS3Stats.
+ * page) lives in listObjectPages; this targets the extracted, exported
+ * page-parser directly: feed it two synthetic ListBucketResult XML pages
+ * (mirroring what two real pages would contain) and assert both merge into
+ * one Map, keyed by the prefix-stripped annex key. No mocks -- pure string
+ * parsing over plain data, same as the rest of the pagination logic this
+ * module already exercises via listObjectKeys/getDatasetS3Stats.
+ *
+ * `listObjectPages` also gained an `endpointUrl` override seam (#1514), so a
+ * live multi-page LIST against a local Bun.serve fake is possible too (see
+ * the admin archive-sweep route test) -- this file stays as the cheaper,
+ * no-I/O complement rather than being replaced by it.
  */
 
 import { describe, expect, test } from "bun:test";

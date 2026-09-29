@@ -1,4 +1,4 @@
-# ADR 0073: manifest.json emits unsigned public URLs, presigned only for a bucket-policy exclusion
+# ADR 0074: manifest.json emits unsigned public URLs, presigned only for a bucket-policy exclusion
 
 **Status:** accepted
 **Date:** 2026-09-28

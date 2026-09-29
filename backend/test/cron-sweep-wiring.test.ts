@@ -101,6 +101,10 @@ const SWEEP_WIRING: Record<string, "prod-only" | "all-envs" | "cron-wrapped" | "
   // exported so the test imports the REAL clause rather than retyping it. Pure,
   // driven only by the sweep above, and never a cron entry point of its own.
   blockedSweepScope: "helper",
+  // #1514: a pure decision function (S3 size + row totals -> ready/skip/
+  // absent) that the admin archive-sweep ROUTE calls; not a cron entry point
+  // of its own, same shape as blockedSweepScope.
+  decideArchiveSweepOutcome: "helper",
   importIssueSweepLogLines: "helper",
   importCoverageSweepSummary: "helper",
   availabilityReportSweepWhere: "helper",

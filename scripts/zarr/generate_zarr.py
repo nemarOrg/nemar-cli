@@ -57,6 +57,7 @@ import json
 import math
 import os
 import pickle
+import posixpath
 import re
 import shutil
 import subprocess
@@ -1321,6 +1322,14 @@ _FALLBACK_REASONS = {
         "check whether it needs internal-active-shielding correction before "
         "converting it, and no viewer copy is offered."
     ),
+    # NEMAR-side (not a biosigIO code): an EEGLAB `.set` whose `.fdt` is declared
+    # elsewhere in the dataset (eeglab-fdt-declarations.json), and the declared
+    # file did not verify against the `.set` header. See FdtDeclarationRefused.
+    "fdt_declaration_refused": (
+        "This recording's data file is stored elsewhere in the dataset, and the "
+        "file declared for it did not match the recording's header, so no viewer "
+        "copy is offered."
+    ),
     # NEMAR-side (not a biosigIO code): the producer gave up retrying. A recording
     # that fails for an INFRA reason is listed in the index's `pending` with an
     # attempt count instead of a failure; after PENDING_MAX_ATTEMPTS rounds it is
@@ -2011,23 +2020,95 @@ def _bids_entities(stem: str) -> dict[str, str]:
     return ents
 
 
+_UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
+
+# Sidecar paths already warned about as non-UTF-8 in this process.
+_NON_UTF8_WARNED: set[str] = set()
+
+
+def _decode_sidecar_bytes(raw: bytes) -> tuple[str, str]:
+    """`(text, encoding)` for a sidecar's bytes; see `_decode_sidecar_text`."""
+    if raw.startswith(_UTF16_BOMS):
+        try:
+            return raw.decode("utf-16"), "utf-16"
+        except UnicodeDecodeError:
+            pass  # a BOM-shaped prefix on bytes that are not UTF-16 after all
+    for encoding in ("utf-8-sig", "cp1252"):
+        try:
+            return raw.decode(encoding), encoding
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("latin-1"), "latin-1"  # maps every byte, never raises
+
+
+def _decode_sidecar_text(raw: bytes, path: str) -> str:
+    """Decode a sidecar's bytes: UTF-8 (a leading BOM dropped), else UTF-16
+    when the file opens with a UTF-16 BOM, else a legacy single-byte encoding;
+    anything but UTF-8 draws a warning naming the file.
+
+    BIDS requires UTF-8, but real datasets ship Latin-1/Windows-1252 sidecars
+    (on005691's channels.tsv spells microvolts `µV` as the single byte 0xb5).
+    A strict decode raised UnicodeDecodeError, which is not an OSError, so it
+    escaped every caller uncoded and the job retried forever. A UTF-16 BOM
+    (Windows "Unicode" text, `FF FE`/`FE FF`) is honored first: cp1252 would
+    otherwise accept those bytes and hand every caller text with a NUL between
+    each character. cp1252 is tried before latin-1 because it is what Windows
+    tools actually write (and a superset of latin-1's printable range);
+    latin-1 maps every byte, so this always returns.
+
+    Behaviour change for UTF-8 files with a BOM: the strict text-mode read
+    kept the BOM as U+FEFF, so `json.loads` raised ValueError and the JSON
+    callers (PowerLineFrequency, coordsystem, event descriptions) swallowed
+    it and ignored the sidecar. The BOM is now dropped and those sidecars
+    parse, so a rebuilt store for such a dataset can newly carry a power-line
+    frequency, electrode coordinates or event descriptions it lacked before.
+    That is the sidecar's declared content reaching the store, not a new
+    guess; a UTF-8 BOM is still UTF-8, so it draws no warning. (A BOM'd TSV
+    likewise no longer has its first column header spelled `\\ufeffname`.)
+
+    The warning is issued once per path per process: an inherited sidecar
+    (a top-level `eeg.json`, say) is re-read for every recording it applies
+    to, and thousands of identical lines would bury the rest of the log.
+
+    Newlines are normalized to `\\n`, as the text-mode reads this replaced did,
+    so a CRLF sidecar reaches every caller (and the copy staged for biosigIO)
+    exactly as before.
+    """
+    text, encoding = _decode_sidecar_bytes(raw)
+    if encoding != "utf-8-sig" and path not in _NON_UTF8_WARNED:
+        _NON_UTF8_WARNED.add(path)
+        print(
+            f"::warning::{path} is not valid UTF-8 (BIDS requires it); "
+            f"read it as {encoding}",
+            flush=True,
+        )
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _read_repo_text(repo_dir: str, head: str, path: str) -> str | None:
     """Read a git-tracked text file at `head`. Uses the working tree when present
     (local/Hallu mode), else falls back to `git cat-file` -- the workflow clones
-    `--no-checkout`, so there is no working tree there. None if unreadable."""
+    `--no-checkout`, so there is no working tree there. None if unreadable.
+
+    Both sources are read as BYTES and decoded once by `_decode_sidecar_text`,
+    so every caller (the channel-count fidelity gate, the channels.tsv staged
+    for biosigIO's units, PLF, electrode positions, coordsystem and event
+    descriptions) gets the same non-UTF-8 fallback."""
+    raw: bytes | None = None
     try:
-        with open(os.path.join(repo_dir, path), encoding="utf-8") as fh:
-            return fh.read()
+        with open(os.path.join(repo_dir, path), "rb") as fh:
+            raw = fh.read()
     except OSError:
         pass
-    try:
-        return subprocess.check_output(
-            ["git", "-C", repo_dir, "cat-file", "blob", f"{head}:{path}"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        )
-    except (subprocess.CalledProcessError, OSError):
-        return None
+    if raw is None:
+        try:
+            raw = subprocess.check_output(
+                ["git", "-C", repo_dir, "cat-file", "blob", f"{head}:{path}"],
+                stderr=subprocess.DEVNULL,
+            )
+        except (subprocess.CalledProcessError, OSError):
+            return None
+    return _decode_sidecar_text(raw, path)
 
 
 def power_line_frequency_for(
@@ -2519,10 +2600,16 @@ def file_declared_channel_count(primary_local: str) -> int | None:
 
     EDF/BDF: `ns` at bytes 252-256, then ns 16-byte labels; the annotation
     pseudo-signal is not a channel. BrainVision: `NumberOfChannels` in the
-    `.vhdr`'s `[Common Infos]` section. Anything unreadable returns None, which
-    leaves the gate on channels.tsv alone -- exactly its behavior before this
-    existed.
+    `.vhdr`'s `[Common Infos]` section. FIF (`.fif`, and `.fif.gz`, which MNE
+    reads transparently): `nchan` from the measurement info, read with
+    `mne.io.read_info`, which parses the header tags and never loads data. For
+    a split recording that is the chain head's info, which every split shares.
+    on000117's MEG sidecars list CHPI and EEG channels the FIF never had.
+    Anything unreadable returns None, which leaves the gate on channels.tsv
+    alone -- exactly its behavior before this existed.
     """
+    if primary_local.lower().endswith((".fif", ".fif.gz")):
+        return _fif_declared_channel_count(primary_local)
     ext = lower_ext(primary_local)
     try:
         if ext in (".edf", ".bdf"):
@@ -2551,6 +2638,42 @@ def file_declared_channel_count(primary_local: str) -> int | None:
     except (OSError, ValueError):
         return None
     return None
+
+
+def _fif_declared_channel_count(path: str) -> int | None:
+    """`nchan` from a FIF's measurement info, or None if it cannot be read.
+
+    MNE raises a spread of types on a malformed FIF (ValueError, KeyError,
+    RuntimeError, struct.error, ...), so the read is guarded broadly; None is
+    the conservative answer, since it keeps the strict channels.tsv-only gate.
+    It is not silent: a FIF the converter just read but whose header MNE cannot
+    parse is worth a line in the log. MemoryError is the exception: it is a
+    host condition, re-raised so the job retries instead of gating on less.
+    """
+    try:
+        import mne  # type: ignore[import-not-found]  # lazy: runtime-only dep
+    except ImportError as exc:
+        print(
+            f"::warning::could not read the FIF header of {path} for its channel "
+            f"count (MNE is not importable: {exc}); the gate uses channels.tsv alone",
+            flush=True,
+        )
+        return None
+    try:
+        info = mne.io.read_info(path, verbose="ERROR")
+        nchan = int(info["nchan"])
+    except MemoryError:
+        # The node was busy, not the header wrong: let it reach convert_one's
+        # retryable `recording_memory_exceeded` verdict, as apply_sss does.
+        raise
+    except Exception as exc:  # noqa: BLE001 - any header failure means "unknown"
+        print(
+            f"::warning::could not read the FIF header of {path} for its channel "
+            f"count ({type(exc).__name__}: {exc}); the gate uses channels.tsv alone",
+            flush=True,
+        )
+        return None
+    return nchan if nchan > 0 else None
 
 
 ChannelGateVerdict = Literal["pass", "sidecar_overcount", "truncated"]
@@ -3978,6 +4101,12 @@ def _blob_key_and_size(repo_dir: str, path: str, head: str) -> tuple[str | None,
         return None, 0
     mode, _, rest = meta.split(" ", 2)
     sha = rest.split("\t", 1)[0].strip()
+    # Only a symlink or a small blob can be a pointer, so ask git for the size
+    # first: a multi-GB in-git blob is sized without being read into memory.
+    if mode != "120000":
+        size = int(_run(["git", "-C", repo_dir, "cat-file", "-s", sha]).strip())
+        if size >= 1024:
+            return None, size
     blob = subprocess.check_output(["git", "-C", repo_dir, "cat-file", "blob", sha])
     if mode == "120000" or len(blob) < 1024:
         key = parse_annex_key(blob.decode("utf-8", "replace"))
@@ -4693,6 +4822,347 @@ def materialize_local(
     except OSError:
         primary_key = None
     return primary_local, events_local, primary_key
+
+
+# --- Declared EEGLAB `.fdt` locations (per dataset, reviewed) -----------------
+#
+# An EEGLAB `.set` whose samples live in a separate `.fdt` is read from the
+# `.fdt` BESIDE it. A few datasets ship the `.fdt` elsewhere (on004306 keeps
+# them under `derivatives/fdt_files/`, under names that do not match the `.set`
+# or even each other), so the reader fails with "EEGLAB data is in a separate
+# .fdt file but none was found". Discovery stays raw-only (ADR 0027): the `.set`
+# is the recording, and the `.fdt` is only fetched because a person paired it
+# with that `.set` in `eeglab-fdt-declarations.json` and recorded the evidence.
+#
+# Nothing here pairs files by name. A declaration is checked against the `.set`
+# header (channels x samples x trials), against the target's byte size, and
+# against the reviewed content (its git-annex key, or the SHA-256 of its bytes
+# when it has no key), and any disagreement REFUSES the recording with a typed code rather than serving a
+# signal read from the wrong file. Datasets and recordings the file does not name
+# are untouched.
+FDT_DECLARATIONS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "eeglab-fdt-declarations.json"
+)
+_FDT_DATASET_ID_RE = re.compile(r"[a-z]{2}\d{6}")
+_FDT_DATASET_KEYS = frozenset({"reviewed", "note", "recordings"})
+_FDT_RECORDING_KEYS = frozenset(
+    {"fdt", "nbchan", "pnts", "trials", "fdt_bytes", "annex_key", "evidence"}
+)
+# The content pin: a git-annex SHA-256 key, whose size field and hash are both
+# checked at conversion (an in-git `.fdt` is hashed against the same key).
+_FDT_ANNEX_KEY_RE = re.compile(r"SHA256E?-s(\d+)--([0-9a-f]{64})(?:\.[A-Za-z0-9]+)*")
+
+
+def _sha256_file(path: str) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(8 * 1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+class FdtDeclarationRefused(Exception):
+    """A declared `.fdt` for an EEGLAB `.set` failed verification: absent at HEAD,
+    contradicted by (or unreadable in) the `.set` header, the wrong size, or not
+    the reviewed content. A property of the
+    dataset plus its declaration, so NOT retryable; the fix is a reviewed edit to
+    `eeglab-fdt-declarations.json`, never a guess at another file."""
+
+    code = "fdt_declaration_refused"
+
+
+class FdtDeclarationFileError(ValueError):
+    """`eeglab-fdt-declarations.json` is malformed. One type for every refusal
+    the loader makes, wrong shape or wrong value alike, so a caller never has to
+    know which check fired; it fails the whole run, never one recording."""
+
+
+class FdtDeclaration(TypedDict):
+    fdt: str
+    nbchan: int
+    pnts: int
+    trials: int
+    fdt_bytes: int
+    annex_key: str
+
+
+def _fdt_positive_int(value: object, where: str) -> int:
+    # bool is an int subclass; `true` is never a channel count.
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise FdtDeclarationFileError(f"{where} must be a positive integer, got {value!r}")
+    return value
+
+
+def _fdt_safe_rel(value: object, ext: str, where: str) -> str:
+    # `normpath(value) == value` refuses empty and `.` segments and a trailing
+    # slash; the explicit terms refuse what normpath leaves alone (`..`, an
+    # absolute path, a backslash, NUL) and a bare extension with no stem.
+    if (
+        not isinstance(value, str)
+        or not value.endswith(ext)
+        or posixpath.basename(value) == ext
+        or posixpath.normpath(value) != value
+        or value.startswith("/")
+        or ".." in value.split("/")
+        or "\\" in value
+        or "\0" in value
+    ):
+        raise FdtDeclarationFileError(f"{where} must be a repository-relative {ext} path, got {value!r}")
+    return value
+
+
+def load_fdt_declarations(
+    path: str | None = None,
+) -> dict[str, dict[str, FdtDeclaration]]:
+    """Parse and validate the declaration file into
+    ``{dataset_id: {set_path: FdtDeclaration}}``.
+
+    Strict on purpose: an unknown key is refused (a misspelt field would
+    otherwise be dropped and the entry read as something nobody reviewed), the
+    declared byte count must equal ``nbchan * pnts * trials * 4`` (EEGLAB writes
+    `.fdt` as float32), ``annex_key`` must be a SHA256E key whose size field is
+    ``fdt_bytes``, and one `.fdt` (by path or by key) may back only one `.set`.
+    A malformed file raises FdtDeclarationFileError (a ValueError; invalid JSON
+    raises json.JSONDecodeError, also a ValueError) and so fails the run loudly
+    rather than converting against a half-read declaration. A missing file
+    means no declarations. ``path`` defaults to ``FDT_DECLARATIONS_PATH``, read
+    at call time."""
+    path = path or FDT_DECLARATIONS_PATH
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    if (
+        not isinstance(doc, dict)
+        or not isinstance(doc.get("datasets"), dict)
+        or set(doc) - {"description", "datasets"}
+    ):
+        raise FdtDeclarationFileError(f"{path}: expected an object with 'description' and a 'datasets' object")
+    out: dict[str, dict[str, FdtDeclaration]] = {}
+    for dataset_id, ds in doc["datasets"].items():
+        if not _FDT_DATASET_ID_RE.fullmatch(dataset_id):
+            raise FdtDeclarationFileError(f"{path}: {dataset_id!r} is not a dataset id")
+        if not isinstance(ds, dict) or not isinstance(ds.get("recordings"), dict):
+            raise FdtDeclarationFileError(f"{path}: {dataset_id} needs a 'recordings' object")
+        unknown = set(ds) - _FDT_DATASET_KEYS
+        if unknown:
+            raise FdtDeclarationFileError(f"{path}: {dataset_id} has unknown key(s) {sorted(unknown)}")
+        if not isinstance(ds.get("reviewed"), str) or not ds["reviewed"]:
+            raise FdtDeclarationFileError(f"{path}: {dataset_id} must record when it was 'reviewed'")
+        recs: dict[str, FdtDeclaration] = {}
+        claimed: dict[str, str] = {}
+        pinned_keys: dict[str, str] = {}
+        for set_path, entry in ds["recordings"].items():
+            where = f"{path}: {dataset_id} {set_path!r}"
+            _fdt_safe_rel(set_path, ".set", where)
+            if is_excluded_from_discovery(set_path):
+                raise FdtDeclarationFileError(f"{where}: only a raw recording can be declared (ADR 0027)")
+            if not isinstance(entry, dict):
+                raise FdtDeclarationFileError(f"{where}: expected an object")
+            unknown = set(entry) - _FDT_RECORDING_KEYS
+            missing = (_FDT_RECORDING_KEYS - {"evidence"}) - set(entry)
+            if unknown or missing:
+                raise FdtDeclarationFileError(
+                    f"{where}: unknown key(s) {sorted(unknown)}, missing key(s) {sorted(missing)}"
+                )
+            fdt = _fdt_safe_rel(entry["fdt"], ".fdt", f"{where} fdt")
+            if fdt in claimed:
+                raise FdtDeclarationFileError(f"{where}: {fdt!r} is already declared for {claimed[fdt]!r}")
+            claimed[fdt] = set_path
+            fdt_bytes = _fdt_positive_int(entry["fdt_bytes"], f"{where} fdt_bytes")
+            key = entry["annex_key"]
+            m = _FDT_ANNEX_KEY_RE.fullmatch(key) if isinstance(key, str) else None
+            if m is None:
+                raise FdtDeclarationFileError(f"{where}: annex_key must be a SHA256E git-annex key, got {key!r}")
+            if int(m[1]) != fdt_bytes:
+                raise FdtDeclarationFileError(f"{where}: annex_key size {m[1]} != fdt_bytes {fdt_bytes}")
+            if key in pinned_keys:
+                raise FdtDeclarationFileError(f"{where}: {key} is already declared for {pinned_keys[key]!r}")
+            pinned_keys[key] = set_path
+            decl: FdtDeclaration = {
+                "fdt": fdt,
+                "nbchan": _fdt_positive_int(entry["nbchan"], f"{where} nbchan"),
+                "pnts": _fdt_positive_int(entry["pnts"], f"{where} pnts"),
+                "trials": _fdt_positive_int(entry["trials"], f"{where} trials"),
+                "fdt_bytes": fdt_bytes,
+                "annex_key": key,
+            }
+            implied = decl["nbchan"] * decl["pnts"] * decl["trials"] * 4
+            if decl["fdt_bytes"] != implied:
+                raise FdtDeclarationFileError(
+                    f"{where}: fdt_bytes {decl['fdt_bytes']} != nbchan x pnts x trials x 4 "
+                    f"= {implied}"
+                )
+            recs[set_path] = decl
+        out[dataset_id] = recs
+    return out
+
+
+def eeglab_fdt_layout(set_local: str) -> tuple[int, int, int] | None:
+    """``(nbchan, pnts, trials)`` from a classic EEGLAB `.set` header, or None
+    when the `.set` carries its samples inline (``EEG.data`` is numeric, so there
+    is no `.fdt` to find). Handles both saved forms: fields wrapped in one ``EEG``
+    struct, and fields saved flat at the top level.
+
+    A MATLAB v7.3 (HDF5) `.set` is refused rather than half-supported: no
+    declared dataset uses one, and a declaration should not be the first code
+    path to read that form's header."""
+    with open(set_local, "rb") as fh:
+        if fh.read(19) == b"MATLAB 7.3 MAT-file":
+            raise FdtDeclarationRefused(
+                "a declared .fdt is only supported for a classic (non-v7.3) EEGLAB .set"
+            )
+    import struct
+    import zlib
+
+    from scipy.io import loadmat  # biosigIO's own dependency
+    from scipy.io.matlab import MatReadError
+
+    # The `.set` was fetched successfully by this same attempt, so a header scipy
+    # cannot parse is a property of the file, not of the node: refuse it typed
+    # rather than let it escape uncoded and retry forever. MemoryError is not in
+    # this tuple on purpose; convert_one types that one itself.
+    try:
+        mat = loadmat(set_local, squeeze_me=True, struct_as_record=False)
+    except (
+        MatReadError, ValueError, OSError, TypeError, EOFError, struct.error, zlib.error,
+    ) as exc:
+        raise FdtDeclarationRefused(
+            f"the .set header could not be read to verify the declaration ({exc})"
+        ) from exc
+    src: Any = mat.get("EEG")
+
+    def field(name: str) -> Any:
+        if src is not None:
+            return getattr(src, name, None)
+        return mat.get(name)
+
+    data = field("data")
+    if not isinstance(data, str):
+        return None
+    try:
+        nbchan = int(field("nbchan"))
+        pnts = int(field("pnts"))
+        trials = int(field("trials") or 1) or 1
+    except (TypeError, ValueError) as exc:
+        raise FdtDeclarationRefused(
+            f"the .set header has no usable nbchan/pnts/trials ({exc})"
+        ) from exc
+    return nbchan, pnts, trials
+
+
+def stage_declared_fdt(
+    decl: FdtDeclaration,
+    primary: str,
+    primary_local: str,
+    work: str,
+    *,
+    repo: str,
+    head_files: set[str],
+    head: str,
+    local: bool,
+    bucket: str | None = None,
+    dataset_id: str | None = None,
+) -> str:
+    """Put the declared `.fdt` beside the `.set` under the sibling name the
+    EEGLAB reader looks for first (``<set stem>.fdt``) and return the `.set` path
+    the converter should read. Refuses (``FdtDeclarationRefused``) instead of
+    guessing whenever the declaration and the data disagree.
+
+    ``bucket`` and ``dataset_id`` name where the remote path fetches the `.fdt`
+    from, so they are required unless ``local``; a missing one is a caller bug
+    (ValueError), never an empty S3 path."""
+    if not local and not (bucket and dataset_id):
+        raise ValueError("stage_declared_fdt needs bucket and dataset_id unless local")
+    fdt = decl["fdt"]
+    if fdt not in head_files:
+        raise FdtDeclarationRefused(f"declared .fdt {fdt!r} is not tracked at {head[:8]}")
+    sibling_rel = os.path.splitext(primary)[0] + ".fdt"
+    if sibling_rel in head_files:
+        raise FdtDeclarationRefused(
+            f"{primary!r} already has a sibling .fdt; the declaration of {fdt!r} contradicts the tree"
+        )
+    layout = eeglab_fdt_layout(primary_local)
+    if layout is None:
+        raise FdtDeclarationRefused(
+            f"{primary!r} carries its samples inline, so no .fdt belongs to it"
+        )
+    declared = (decl["nbchan"], decl["pnts"], decl["trials"])
+    if layout != declared:
+        raise FdtDeclarationRefused(
+            f"{primary!r} header says nbchan x pnts x trials = {layout}, the declaration says {declared}"
+        )
+    want = decl["fdt_bytes"]
+    pinned = decl["annex_key"]
+
+    def refuse_size(known: int) -> FdtDeclarationRefused:
+        return FdtDeclarationRefused(
+            f"declared .fdt {fdt!r} is {known} bytes; {primary!r} needs {want} "
+            f"(nbchan {declared[0]} x pnts {declared[1]} x trials {declared[2]} x 4)"
+        )
+
+    def refuse_content(found: str) -> FdtDeclarationRefused:
+        return FdtDeclarationRefused(
+            f"declared .fdt {fdt!r} is {found}, not the reviewed content {pinned}"
+        )
+
+    # Size and content identity BEFORE fetching, from the pointer (annex key) or
+    # the in-git blob, so a wrong pairing never costs a multi-GB download. An
+    # annexed `.fdt` is pinned by its key; one without a key (in git, or an
+    # unlocked working-tree file) is pinned by hashing the bytes against the
+    # key's SHA-256 once they are local.
+    key: str | None
+    if local:
+        src = os.path.join(repo, fdt)
+        if not os.path.exists(src):
+            raise FdtDeclarationRefused(f"declared .fdt {fdt!r} has no local content (run `git annex get`)")
+        # The working tree, not HEAD: local mode converts what is checked out
+        # (annex content present), so the size and bytes that matter are that
+        # file's.
+        known = os.path.getsize(src)
+        key = parse_annex_key(os.readlink(src)) if os.path.islink(src) else None
+    else:
+        key, known = _blob_key_and_size(repo, fdt, head)
+        if key is None and known == 0:
+            # Listed in head_files but not in the tree at the pinned head (a
+            # declared size is always positive, so an empty blob cannot match).
+            raise FdtDeclarationRefused(f"declared .fdt {fdt!r} is not in the tree at {head[:8]}")
+    if key is not None:
+        if key != pinned:
+            raise refuse_content(f"annex key {key}")
+        known = annex_key_size(key)
+    if known is not None and known != want:
+        raise refuse_size(known)
+    set_local = os.path.join(work, os.path.basename(primary))
+    staged = os.path.splitext(set_local)[0] + ".fdt"
+    if local:
+        # Never write into the working tree: link both halves into `work`, which
+        # convert_one removes afterwards.
+        os.makedirs(work, exist_ok=True)
+        if os.path.abspath(primary_local) != os.path.abspath(set_local):
+            os.symlink(os.path.abspath(primary_local), set_local)
+        os.symlink(os.path.abspath(src), staged)
+    else:
+        assert bucket and dataset_id  # checked on entry; narrows for the type checker
+        found, _ = _fetch_blob(repo, bucket, dataset_id, fdt, head, staged)
+        if not found:
+            raise FdtDeclarationRefused(f"declared .fdt {fdt!r} could not be fetched at {head[:8]}")
+    # No cleanup on refusal: `staged` is inside `work`, which convert_one's
+    # `finally` removes whatever happens here.
+    got = os.path.getsize(staged)
+    if got != want:
+        raise FdtDeclarationRefused(f"staged .fdt {fdt!r} is {got} bytes; expected {want}")
+    if key is None:
+        # The loader accepted `pinned` only as a SHA256E key, so its hash field
+        # is the content's SHA-256.
+        digest = _sha256_file(staged)
+        if digest != pinned.split("--", 1)[1].split(".", 1)[0]:
+            raise refuse_content(f"SHA-256 {digest}")
+    print(f"[zarr] {primary}: using declared .fdt {fdt!r} ({want} bytes)", flush=True)
+    return set_local
 
 
 def embed_attr(meta_path: str, key: str, value: object) -> None:
@@ -5420,6 +5890,13 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             primary_local, events_local, primary_key = materialize_recording(
                 c["repo"], c["bucket"], c["dataset_id"], primary, c["head_files"], c["head"], work
             )
+        fdt_decl = (c.get("fdt_declarations") or {}).get(primary)
+        if fdt_decl is not None:
+            primary_local = stage_declared_fdt(
+                fdt_decl, primary, primary_local, work,
+                repo=c["repo"], head_files=c["head_files"], head=c["head"],
+                local=c["local"], bucket=c.get("bucket"), dataset_id=c.get("dataset_id"),
+            )
         # ADR 0028. Substituted HERE rather than inside convert_recording, which
         # derives modality, size and the streaming decision from the path it is given
         # (a late rebind would leave all three describing the unfiltered file). The
@@ -6009,6 +6486,36 @@ def _drain_with_admission(
     return pool_breaks, max_suspects_at_once
 
 
+def admission_sizes(
+    repo: str,
+    convert: list[str],
+    head_set: set[str],
+    head: str,
+    fdt_declarations: dict[str, FdtDeclaration],
+) -> dict[str, int]:
+    """On-disk bytes admission projects each recording from: its pointer-walked
+    file set, plus a declared `.fdt`'s size. The declared `.fdt` lives outside
+    the recording's directory, so the pointer walk cannot see it, and without
+    the addition a multi-GB in-memory `.set` read is projected as a few tens of
+    MB."""
+    return {
+        p: recording_size_from_pointers(repo, p, head_set, head)
+        + (fdt_declarations[p]["fdt_bytes"] if p in fdt_declarations else 0)
+        for p in convert
+    }
+
+
+def memory_retry_context(ctx: dict) -> tuple[dict, int]:
+    """The worker context for the serial memory retry (#1483): the run's own
+    context, every key carried (the `.fdt` declarations included), with the
+    budget re-read now. The retry runs alone after the parallel pass, so it may
+    have the whole usable node, never past the hardware ceiling."""
+    budget = per_recording_ceiling_bytes()
+    if ctx["hard_ceiling"]:
+        budget = min(budget, ctx["hard_ceiling"])
+    return {**ctx, "mem_budget": budget}, budget
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Generate NEMAR Zarr serving copies")
     ap.add_argument("--dataset-id", required=True)
@@ -6318,7 +6825,12 @@ def main() -> int:
     # Charge admission what each worker is PERMITTED (projection * slack), not the
     # bare projection -- otherwise the in-flight sum is bounded while the memory
     # those workers may actually take is not. See `admission_reserve_bytes`.
-    sizes = {p: recording_size_from_pointers(repo, p, head_set, head) for p in convert}
+    # A declared `.fdt` counts toward its `.set`'s size (see `admission_sizes`).
+    # The declaration file is read unconditionally, for every dataset: a
+    # malformed one fails every run, which is why the committed file is loaded
+    # by a test in CI.
+    fdt_declarations = load_fdt_declarations().get(dataset_id, {})
+    sizes = admission_sizes(repo, convert, head_set, head, fdt_declarations)
     # channels.tsv is already the fidelity gate's ground truth; reuse it so the
     # streaming projection can account for its per-channel term (see
     # `streaming_peak_bytes`). Best-effort: an unreadable sidecar falls back to
@@ -6416,6 +6928,7 @@ def main() -> int:
             # independent /proc/meminfo read, which could disagree with this one.
             "hard_ceiling": hardware_ceiling_bytes(),
             "projections": projections,
+            "fdt_declarations": fdt_declarations,
         }
         pool_breaks = 0
         # --jobs 1 converts in this process, as an operator asked for. Anything
@@ -6428,12 +6941,7 @@ def main() -> int:
                 record(convert_one(p, peaks[p]), i)
         else:
             def memory_retry() -> tuple[dict, int]:
-                # Read now, after the parallel pass: the retry runs alone, so it
-                # may have the whole usable node, never past the hardware ceiling.
-                budget = per_recording_ceiling_bytes()
-                if ctx["hard_ceiling"]:
-                    budget = min(budget, ctx["hard_ceiling"])
-                return {**ctx, "mem_budget": budget}, budget
+                return memory_retry_context(ctx)
 
             pool_breaks, _max_suspects = _drain_with_admission(
                 convert, peaks, cpu_cap, ram_ceiling, ctx, record,

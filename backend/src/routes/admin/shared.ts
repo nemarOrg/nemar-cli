@@ -18,5 +18,9 @@ export function getS3Config(env: Bindings) {
     region: env.AWS_REGION,
     accessKeyId: env.AWS_ACCESS_KEY_ID,
     secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+    // Test-only origin override (#1514), unset in every deployment; mirrors
+    // routes/data.ts's s3OptionsFromEnv so every admin S3 call can be driven
+    // by a local Bun.serve stand-in at its real route, not just data.ts's.
+    endpointUrl: env.S3_ENDPOINT_URL,
   };
 }

@@ -2,8 +2,10 @@
  * Catalog latest_version canonicalization (epic #896, #899).
  *
  * The api.nemar.org catalog plane must emit latest_version in the canonical
- * vX.Y.Z tag form (matching the data plane + hallu-sync's archives/<v>.zip
- * URLs), regardless of whether the D1 row stored it bare or tagged.
+ * vX.Y.Z tag form (matching the data plane + hallu-sync's
+ * archives/<id>_<v>.zip URLs, pre-#1491 archives/<v>.zip during the rename
+ * sweep's transition window), regardless of whether the D1 row stored it
+ * bare or tagged.
  */
 
 import { describe, expect, test } from "bun:test";

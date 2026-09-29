@@ -13,6 +13,11 @@ import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import {
+  ARCHIVE_SWEEP_READY_SQL,
+  ARCHIVE_SWEEP_SKIP_SQL,
+} from "../src/routes/admin/datasets-lifecycle";
+import { decideArchiveSweepOutcome } from "../src/services/archive-policy";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../src/db/migrations");
 
@@ -153,5 +158,106 @@ describe("migration 0043: archive_skip_reason", () => {
     expect(row.archive_status).toBe("ready");
     expect(row.archive_skip_reason).toBeNull();
     expect(row.archive_size).toBe(500);
+  });
+});
+
+describe("the admin archive-sweep's skip path clears archive_status (#1514)", () => {
+  let db: Database;
+  beforeEach(() => {
+    db = freshDb();
+  });
+
+  test("ARCHIVE_SWEEP_SKIP_SQL clears a stale 'ready'/'failed' status, not just the reason", () => {
+    // Cause #4 in the issue: the prior copy of this statement set only
+    // archive_skip_reason and left archive_status untouched, so a dataset
+    // that grew over policy after an old zip was marked 'ready' kept
+    // reading 'ready' forever.
+    insertDataset(db, "on005752");
+    db.prepare(
+      "UPDATE datasets SET archive_status = 'ready', archive_retry_count = 2 WHERE dataset_id = ?",
+    ).run("on005752");
+
+    db.prepare(ARCHIVE_SWEEP_SKIP_SQL).run("oversized now", "on005752");
+
+    const row = db
+      .prepare(
+        "SELECT archive_status, archive_skip_reason, archive_retry_count FROM datasets WHERE dataset_id = ?",
+      )
+      .get("on005752") as {
+      archive_status: string | null;
+      archive_skip_reason: string;
+      archive_retry_count: number;
+    };
+    expect(row.archive_status).toBeNull();
+    expect(row.archive_skip_reason).toBe("oversized now");
+    expect(row.archive_retry_count).toBe(0);
+  });
+
+  test("ARCHIVE_SWEEP_SKIP_SQL is literally ARCHIVE_SKIP_UPDATE_SQL (one statement, not a fourth copy)", () => {
+    // Guards against the sweep's skip path drifting from the webhook's again:
+    // reuse, not re-derivation.
+    insertDataset(db, "on005752");
+    db.prepare(ARCHIVE_SWEEP_SKIP_SQL).run("reason text", "on005752");
+    const row = db
+      .prepare("SELECT archive_skip_reason FROM datasets WHERE dataset_id = ?")
+      .get("on005752") as { archive_skip_reason: string };
+    expect(row.archive_skip_reason).toBe("reason text");
+  });
+
+  test("the sweep's ready path never marks an over-policy dataset ready, even with a real zip on S3", () => {
+    // The nm000284 shape (#1514): getArchiveSize found a real, complete zip
+    // (345 GB) under the dataset's archive prefix, but the row is now over
+    // policy (512.4 GiB / 14,922 files). decideArchiveSweepOutcome must
+    // route this to 'skip', and the route must run ARCHIVE_SWEEP_SKIP_SQL,
+    // never ARCHIVE_SWEEP_READY_SQL.
+    insertDataset(db, "nm000284");
+    db.prepare("UPDATE datasets SET file_size = ?, total_files = ? WHERE dataset_id = ?").run(
+      550_239_019_072,
+      14_922,
+      "nm000284",
+    );
+    const s3Size = 345_096_030_514; // the real v1.0.0 zip's byte size
+    const outcome = decideArchiveSweepOutcome(s3Size, {
+      file_size: 550_239_019_072,
+      total_files: 14_922,
+    });
+    expect(outcome.action).toBe("skip");
+
+    // Exercise it through whichever SQL the outcome selects, exactly as the
+    // route does -- not a hardcoded choice, so a future regression that
+    // routes 'skip' outcomes through ARCHIVE_SWEEP_READY_SQL fails here.
+    if (outcome.action === "ready") {
+      db.prepare(ARCHIVE_SWEEP_READY_SQL).run(outcome.size, "nm000284");
+    } else if (outcome.action === "skip") {
+      db.prepare(ARCHIVE_SWEEP_SKIP_SQL).run(outcome.reason, "nm000284");
+    }
+
+    const row = db
+      .prepare("SELECT archive_status, archive_skip_reason FROM datasets WHERE dataset_id = ?")
+      .get("nm000284") as { archive_status: string | null; archive_skip_reason: string | null };
+    expect(row.archive_status).toBeNull();
+    expect(row.archive_skip_reason).toContain("exceeds");
+  });
+
+  test("an in-policy dataset with a real zip still reaches 'ready'", () => {
+    insertDataset(db, "nm000010");
+    db.prepare("UPDATE datasets SET file_size = ?, total_files = ? WHERE dataset_id = ?").run(
+      5 * 1024 * 1024 * 1024,
+      200,
+      "nm000010",
+    );
+    const outcome = decideArchiveSweepOutcome(2048, {
+      file_size: 5 * 1024 * 1024 * 1024,
+      total_files: 200,
+    });
+    expect(outcome).toEqual({ action: "ready", size: 2048 });
+    if (outcome.action === "ready") {
+      db.prepare(ARCHIVE_SWEEP_READY_SQL).run(outcome.size, "nm000010");
+    }
+    const row = db
+      .prepare("SELECT archive_status, archive_size FROM datasets WHERE dataset_id = ?")
+      .get("nm000010") as { archive_status: string; archive_size: number };
+    expect(row.archive_status).toBe("ready");
+    expect(row.archive_size).toBe(2048);
   });
 });

@@ -246,7 +246,7 @@ async function* listObjectPages(
   options: PresignedUrlOptions,
   prefix: string,
 ): AsyncGenerator<string> {
-  const { bucket, region } = options;
+  const { bucket, region, endpointUrl } = options;
   const aws = createS3Client(options);
   let continuationToken: string | undefined;
 
@@ -257,7 +257,16 @@ async function* listObjectPages(
       ...(continuationToken ? { "continuation-token": continuationToken } : {}),
     });
 
-    const url = `https://${bucket}.s3.${region}.amazonaws.com/?${params.toString()}`;
+    // endpointUrl (#1514): same test-only override every other function in
+    // this file honors (see PresignedUrlOptions); this generator was the one
+    // holdout that built its URL from the literal AWS host unconditionally,
+    // which left getArchiveSize/getDatasetS3Stats/listObjectKeys with no way
+    // to be driven by a local Bun.serve stand-in at their real entry point.
+    const origin = (endpointUrl ?? `https://${bucket}.s3.${region}.amazonaws.com`).replace(
+      /\/+$/,
+      "",
+    );
+    const url = `${origin}/?${params.toString()}`;
     const response = await aws.sign(url, { method: "GET" });
     const res = await fetch(response);
 
@@ -423,11 +432,13 @@ export async function listObjectsWithDelimiter(
 /**
  * Parse one ListBucketResult XML page's `<Contents>` entries into `sizes`
  * (mutated in place): S3 key with `prefix` stripped -> size. Extracted from
- * listObjectSizes so multi-page merging is testable without a live S3
- * endpoint -- `listObjectPages` builds its URL from a literal
- * `<bucket>.s3.<region>.amazonaws.com` host with no override seam to redirect
- * it to a local fake server, so this is the seam instead: feed it two
- * synthetic pages and assert both merge into one Map. Exported for testing.
+ * listObjectSizes so multi-page merging is testable purely, with no I/O at
+ * all: feed it two synthetic pages and assert both merge into one Map.
+ * `listObjectPages` gained an `endpointUrl` override seam of its own (#1514,
+ * `PresignedUrlOptions`), so a live-page test is also possible now (see the
+ * admin archive-sweep route test), but this pure parser test stays -- it is
+ * cheaper and does not depend on a server being reachable. Exported for
+ * testing.
  */
 export function mergeObjectSizesPage(
   xml: string,
@@ -760,6 +771,13 @@ export async function listManifests(
 /**
  * Get the latest zip archive size for a dataset from S3.
  * Scans archives/ prefix and returns the largest (latest version) zip file size in bytes.
+ *
+ * Matches any key ending `.zip` regardless of the #1491 naming change (old
+ * `v<version>.zip` or new `<id>_v<version>.zip`), so this needed no change
+ * for that rename. Since #1518 retains at most one archive per dataset, the
+ * "largest" heuristic only actually disambiguates during the narrow window
+ * between a rebuild's upload and its post-callback cleanup, when the new
+ * and outgoing zips can briefly coexist.
  */
 export async function getArchiveSize(
   options: PresignedUrlOptions,
@@ -1046,11 +1064,11 @@ export interface ZarrIndexInfo {
  * zarr-sweep backfill to reconcile the stale zarr_status column from S3.
  *
  * Returns the parsed facts on 200, null on 404/403 (not converted). A 403 is
- * treated as absent (not thrown), following the same rationale as `headArchive`:
+ * treated as absent (not thrown), following the same rationale as `headArchiveKey`:
  * with the Worker's S3 creds (which lack s3:ListBucket), a missing object returns
  * 403 (AccessDenied), not 404. Throwing on 403 would make the sweep never
  * converge — every legitimately-zarr-less public dataset would error on every run
- * instead of being stamped checked. (Unlike `headArchive`, which retries a 403
+ * instead of being stamped checked. (Unlike `headArchiveKey`, which retries a 403
  * before treating it as absent, this does a single GET; and unlike
  * `headVersionArtifact`, which throws on 403, this returns null.) Any OTHER
  * non-2xx still throws (a true infra failure, recorded per-dataset). The "creds
@@ -1080,7 +1098,7 @@ export async function getZarrIndex(
   if (response.status === 404) return null;
   if (response.status === 403) {
     // Missing object without s3:ListBucket, or a creds issue. Treat as absent
-    // (mirrors headArchive); the sweep stamps zarr_checked_at and moves on.
+    // (mirrors headArchiveKey); the sweep stamps zarr_checked_at and moves on.
     console.warn(`getZarrIndex: 403 for ${key} (missing-without-ListBucket or creds) — absent`);
     return null;
   }
@@ -1460,37 +1478,49 @@ export async function hasPublicRead(
 }
 
 /**
- * Get a presigned GET URL for downloading a dataset archive.
- * Archives are stored at: <datasetId>/archives/v<version>.zip
+ * Canonical (post-#1491) archive S3 key. The file name in a presigned S3
+ * URL's path is the browser's default Save-As name, so embedding the
+ * dataset id here is what makes a download named `on002718_v1.0.0.zip`
+ * instead of the pre-#1491 bare `v1.0.0.zip` -- no
+ * `response-content-disposition` header involved, by owner decision (#1491).
  */
-export async function getArchiveUrl(
-  options: PresignedUrlOptions,
-  datasetId: string,
-  version: string,
-  expiresIn = 3600,
-): Promise<string> {
+export function archiveKey(datasetId: string, version: string): string {
   const versionTag = version.startsWith("v") ? version : `v${version}`;
-  const key = `${datasetId}/archives/${versionTag}.zip`;
-  return generatePresignedGetUrl(options, key, expiresIn);
+  return `${datasetId}/archives/${datasetId}_${versionTag}.zip`;
 }
 
 /**
- * HEAD the archive zip object. true = present, false = 404 (e.g. archive
- * generation still in flight after a fresh publish). Throws on 403
+ * #1491 TRANSITION FALLBACK. The pre-#1491 archive key
+ * (`<id>/archives/v<version>.zip`, no dataset id in the file name).
+ * `resolveArchiveKey` is the ONLY caller: every reader tries {@link
+ * archiveKey} first and falls back to this one so a download keeps working
+ * for a dataset the lead's one-time rename sweep
+ * (`scripts/rename-archives.ts`) has not reached yet. DELETE this function
+ * and its one call site in `resolveArchiveKey` once the sweep has run
+ * against every pre-#1491 archive -- that is the whole removal.
+ */
+export function legacyArchiveKey(datasetId: string, version: string): string {
+  const versionTag = version.startsWith("v") ? version : `v${version}`;
+  return `${datasetId}/archives/${versionTag}.zip`;
+}
+
+/**
+ * HEAD one archive key. true = present, false = 404. Throws on 403
  * (credentials) or other non-404 errors so the caller can 503 rather than
  * 302 to a presigned URL that would dump an S3 NoSuchKey XML error (#670).
+ *
+ * `endpointUrl` is the same TEST-ONLY origin override `fetchManifestObject`
+ * honors; unset in every deployment.
  */
-export async function headArchive(
-  options: PresignedUrlOptions,
-  datasetId: string,
-  version: string,
-): Promise<boolean> {
-  const { bucket, region } = options;
+async function headArchiveKey(options: PresignedUrlOptions, key: string): Promise<boolean> {
+  const { bucket, region, endpointUrl } = options;
   const aws = createS3Client(options);
-  const versionTag = version.startsWith("v") ? version : `v${version}`;
-  const key = `${datasetId}/archives/${versionTag}.zip`;
   const encodedKey = key.split("/").map(encodeURIComponent).join("/");
-  const url = `https://${bucket}.s3.${region}.amazonaws.com/${encodedKey}`;
+  const origin = (endpointUrl ?? `https://${bucket}.s3.${region}.amazonaws.com`).replace(
+    /\/+$/,
+    "",
+  );
+  const url = `${origin}/${encodedKey}`;
 
   // The first HEAD from a cold Worker isolate intermittently fails with a
   // transient network error or 5xx; retry so a download click doesn't fail on
@@ -1517,18 +1547,48 @@ export async function headArchive(
     if (status !== 403 && status < 500) break;
   }
 
-  // A persistent 403 means the archive is missing (no s3:ListBucket to get a
+  // A persistent 403 means the object is missing (no s3:ListBucket to get a
   // 404) or the credentials are wrong; either way it is not downloadable, so
   // report "not available" (the caller returns a clean 404) rather than 503ing
   // the user. Log for operators -- a genuine credentials outage also breaks
   // the manifest/summary routes, so it will not go unnoticed.
   if (lastStatus === 403) {
     console.warn(
-      `headArchive: persistent 403 for ${key} (missing archive without s3:ListBucket, or credentials issue); treating as not available`,
+      `headArchiveKey: persistent 403 for ${key} (missing object without s3:ListBucket, or credentials issue); treating as not available`,
     );
     return false;
   }
   throw new Error(`Failed to HEAD ${key} after ${MAX_ATTEMPTS} attempts: ${lastError}`);
+}
+
+/**
+ * Resolve which archive key actually exists in S3 for (datasetId, version):
+ * the #1491 name first, falling back to the pre-#1491 name during the
+ * transition window (see {@link legacyArchiveKey}). Returns null when
+ * neither HEADs present (e.g. generation still in flight after a fresh
+ * publish). This is the ONE place the #1491 fallback lives, so retiring the
+ * fallback after the lead's rename sweep is a one-line change here.
+ *
+ * The route (`routes/data.ts`) calls this directly and presigns the result
+ * itself in one pass. Earlier versions of this module exposed `headArchive`
+ * and `getArchiveUrl` convenience wrappers that each called this a second
+ * time; they were removed (PR review, #1491) once nothing else imported
+ * them, since keeping unused wrappers around this exact function would
+ * invite a future caller back into the double-resolve they were removed to
+ * avoid.
+ */
+export async function resolveArchiveKey(
+  options: PresignedUrlOptions,
+  datasetId: string,
+  version: string,
+): Promise<string | null> {
+  const newKey = archiveKey(datasetId, version);
+  if (await headArchiveKey(options, newKey)) return newKey;
+  // #1491 TRANSITION FALLBACK: remove this branch (and legacyArchiveKey)
+  // once the lead confirms the rename sweep has reached every archive.
+  const oldKey = legacyArchiveKey(datasetId, version);
+  if (await headArchiveKey(options, oldKey)) return oldKey;
+  return null;
 }
 
 // ---------------------------------------------------------------------------
