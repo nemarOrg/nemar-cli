@@ -8891,7 +8891,25 @@ class TestHeaderGateFalseRefusalMatrix(unittest.TestCase):
     `recording_metadata.number_of_signals` (the witness
     find_collapsed_channel_stores.py reads) never exceeds what it serves.
     Only `aws s3 sync` is absorbed (it copies the store aside), as in
-    TestDuplicateLabelsThroughConvertOne."""
+    TestDuplicateLabelsThroughConvertOne.
+
+    It also pins the CALL SITE. `convert_one` must hand the gate the header
+    count for every recording, sidecar or none: a reviewer once changed that
+    line to `file_declared_channel_count(primary_local) if expected else None`,
+    which restores the old channels.tsv-only gate, and every test stayed green.
+    Each case therefore records what `convert_one` passes to
+    `enforce_channel_gate` (a pass-through: the real gate still runs on it).
+
+    Why the REFUSAL cannot be driven from here: on biosigio >= 1.2.9 no real
+    file yields a store short of its header. Probed with real files through
+    `convert_one`, on both exporters: repeated, empty and colliding labels
+    (suffixed, all kept), zero-rate and mixed-rate signals, NUL-padded fields,
+    annotation-label variants (pyedflib rejects them), and BrainVision channel
+    infos that disagree with the count (rejected, or read at the count). Each
+    either converts whole or fails before a store exists. So real data cannot
+    falsify a call site that stops passing the header, and the only thing left
+    to observe is the argument. The refusal itself is proved on a store built
+    the way biosigio <= 1.2.8 built one, in TestChannelGateOnRealFiles."""
 
     @classmethod
     def setUpClass(cls):
@@ -8933,12 +8951,31 @@ class TestHeaderGateFalseRefusalMatrix(unittest.TestCase):
         return path
 
     def assert_published_whole(
-        self, primary: str, extra_files: set[str], in_file: int, in_store: int
+        self,
+        primary: str,
+        extra_files: set[str],
+        in_file: int,
+        in_store: int,
+        unusable_sidecar: str | None = None,
     ):
+        """`unusable_sidecar` is a channels.tsv listed at HEAD that gives the
+        gate no count (unreadable, or a header row and nothing else), so the
+        header is still the only witness."""
         head_files = {primary, *extra_files}
         self.assertFalse(
             any(p.endswith("_channels.tsv") for p in head_files), "no sidecar: header only"
         )
+        if unusable_sidecar:
+            head_files.add(unusable_sidecar)
+        gate_calls: list[tuple] = []
+        real_gate = generate_zarr.enforce_channel_gate
+
+        def recording_gate(*args, **kwargs):
+            gate_calls.append(args)
+            return real_gate(*args, **kwargs)
+
+        setattr(generate_zarr, "enforce_channel_gate", recording_gate)  # noqa: B010
+        self.addCleanup(setattr, generate_zarr, "enforce_channel_gate", real_gate)
         work = os.path.join(self._tmp.name, "work")
         os.makedirs(work, exist_ok=True)
         generate_zarr._init_worker({
@@ -8960,6 +8997,11 @@ class TestHeaderGateFalseRefusalMatrix(unittest.TestCase):
         self.assertNotIn("channels_tsv_count_mismatch", entry)
         self.assertEqual(store_total_channels(entry), in_store)
         self.assertGreaterEqual(in_store, in_file)
+        self.assertEqual(
+            gate_calls, [(primary, in_store, None, in_file)],
+            "convert_one must hand the gate the file's own header count even "
+            "when no channels.tsv gives a count",
+        )
         with open(
             os.path.join(self.synced_dir, os.path.basename(entry["zarr"]), "zarr.json"),
             encoding="utf-8",
@@ -9066,6 +9108,33 @@ class TestHeaderGateFalseRefusalMatrix(unittest.TestCase):
             fh.write(text.replace("NumberOfChannels=4", "numberofchannels=4"))
         rels = {os.path.relpath(p, self.repo) for p in paths}
         self.assert_published_whole(primary, rels - {primary}, 4, 4)
+
+    def test_a_header_only_sidecar_leaves_the_header_as_the_witness(self):
+        # A channels.tsv with a header row and no data rows counts nothing
+        # (`expected_channel_count_for` -> None), which is the same "no count
+        # from the sidecar" the call site must not confuse with "no header".
+        import pyedflib
+
+        primary = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+        tsv = "sub-01/eeg/sub-01_task-rest_channels.tsv"
+        build_edf_family(
+            self.place(primary), [("Fp1", 256), ("Fp2", 256), ("Cz", 256)],
+            pyedflib.FILETYPE_EDFPLUS,
+        )
+        with open(self.place(tsv), "w") as fh:
+            fh.write("name\ttype\tunits\n")
+        self.assert_published_whole(primary, set(), 3, 3, unusable_sidecar=tsv)
+
+    def test_an_unreadable_sidecar_leaves_the_header_as_the_witness(self):
+        import pyedflib
+
+        primary = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+        tsv = "sub-01/eeg/sub-01_task-rest_channels.tsv"  # listed at HEAD, never written
+        build_edf_family(
+            self.place(primary), [("Fp1", 256), ("Fp2", 256), ("Cz", 256)],
+            pyedflib.FILETYPE_EDFPLUS,
+        )
+        self.assert_published_whole(primary, set(), 3, 3, unusable_sidecar=tsv)
 
     def test_plain_edf_whose_header_under_counts(self):
         # A plain EDF (not EDF+) with an ordinary signal that happens to be
