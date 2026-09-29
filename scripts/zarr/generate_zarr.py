@@ -5079,9 +5079,10 @@ def stage_declared_fdt(
         found, _ = _fetch_blob(repo, bucket, dataset_id, fdt, head, staged)
         if not found:
             raise FdtDeclarationRefused(f"declared .fdt {fdt!r} could not be fetched at {head[:8]}")
+    # No cleanup on refusal: `staged` is inside `work`, which convert_one's
+    # `finally` removes whatever happens here.
     got = os.path.getsize(staged)
     if got != want:
-        os.remove(staged)
         raise FdtDeclarationRefused(f"staged .fdt {fdt!r} is {got} bytes; expected {want}")
     print(f"[zarr] {primary}: using declared .fdt {fdt!r} ({want} bytes)", flush=True)
     return set_local
