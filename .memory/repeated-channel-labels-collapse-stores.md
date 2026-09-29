@@ -28,9 +28,14 @@ cover EEGLAB renames with no change here, since both read only that map.
 fell short of channels.tsv. A dataset with no channels.tsv, or one written by a tool
 that also keys by label, agrees with the collapsed store and passed. Since #1538 the
 header is read for every EDF/BDF, BrainVision and FIF recording, and a store short of it
-is always withheld (`channel_gate_verdict`). Other formats (EEGLAB `.set`, CTF, MEF3,
-4D/BTi, KIT) have no cheap header read (`file_declared_channel_count` returns None), so
-they are still compared with channels.tsv alone.
+is always withheld (`channel_gate_verdict`). EEGLAB `.set` joined them later: `nbchan`,
+read from classic MAT and v7.3 headers without the sample matrix, and only where it
+equals the data matrix's rows (biosigIO serves the rows whatever `nbchan` says), so a
+disagreeing file falls back to channels.tsv alone. `loadmat(variable_names=...)` does
+NOT make that read cheap: a classic export is one `EEG` variable with `data` inside, and
+it materializes every sample (measured). Other formats (CTF, MEF3, 4D/BTi, KIT) have no
+cheap header read (`file_declared_channel_count` returns None), so they are still
+compared with channels.tsv alone.
 
 A second trap sits in biosigIO's sidecar join: on 1.2.9 a channels.tsv row applies only
 to the channel whose label matches exactly, case included (biosigio#136), and the
