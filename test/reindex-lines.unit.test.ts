@@ -31,6 +31,22 @@ describe("reindexLines", () => {
     ]);
   });
 
+  test("failed lookups still say to reindex when the backend sent no warning", () => {
+    // A backend from before the lookup warning (#1556) sends the counts alone.
+    const response: ReindexResponse = {
+      dataset_id: "on002721",
+      enrichment: {
+        status: "ok",
+        doi_resolution: { resolved: 3, unresolved: 0, failed: 2, skipped: 0 },
+      },
+      sync: { status: "ok", metadata_columns_written: true },
+    };
+    expect(plain(reindexLines(response))).toEqual([
+      "  on002721     enrich:ok  sync:ok  cols:written",
+      "    DOI lookups: 3 resolved, 0 unresolved, 2 failed (reindex this dataset again)",
+    ]);
+  });
+
   test("a clean run prints no warning and no cap line", () => {
     const response: ReindexResponse = {
       dataset_id: "nm000273",

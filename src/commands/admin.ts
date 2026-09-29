@@ -5157,11 +5157,15 @@ export function reindexLines(r: ReindexResponse, opts?: { showRef?: boolean }): 
   }
   const doi = r.enrichment.doi_resolution;
   if (doi) {
-    lines.push(
-      chalk.dim(
-        `    DOI lookups: ${doi.resolved} resolved, ${doi.unresolved} unresolved, ${doi.failed} failed`,
-      ),
-    );
+    const counts = `    DOI lookups: ${doi.resolved} resolved, ${doi.unresolved} unresolved, ${doi.failed} failed`;
+    if (doi.failed > 0) {
+      // A backend from before the lookup warning sends the counts alone, so
+      // the cue to reindex again has to come from the count itself.
+      const warned = (r.enrichment.warnings ?? []).some((w) => w.startsWith("doi_resolution:"));
+      lines.push(chalk.yellow(warned ? counts : `${counts} (reindex this dataset again)`));
+    } else {
+      lines.push(chalk.dim(counts));
+    }
     if (doi.skipped > 0) {
       lines.push(
         chalk.yellow(
