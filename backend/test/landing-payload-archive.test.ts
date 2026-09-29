@@ -6,6 +6,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { buildLandingPayload } from "../src/services/data-router";
+import { archiveForRequestedVersion } from "../src/services/page-bundle";
 
 describe("buildLandingPayload archive", () => {
   test("archive defaults to all-null when the arg is omitted", () => {
@@ -90,5 +91,60 @@ describe("buildLandingPayload archive staleness (#1514)", () => {
     });
     expect(skipped.archive.skip_reason).toBe("too big");
     expect(skipped.archive.status).toBeNull();
+  });
+});
+
+describe("archiveForRequestedVersion (#1518)", () => {
+  test("returns the dataset's real archive field for the latest version", () => {
+    const p = buildLandingPayload({
+      datasetId: "nm000001",
+      versionRows: [],
+      archive: { status: "ready", size: 12345 },
+    });
+    expect(archiveForRequestedVersion(p, true)).toEqual({
+      status: "ready",
+      size: 12345,
+      skip_reason: null,
+    });
+  });
+
+  test("overrides to a no-archive note for a non-latest version, even if the dataset row says ready", () => {
+    const p = buildLandingPayload({
+      datasetId: "nm000001",
+      versionRows: [
+        { version: "1.1.0", doi: null, created_at: "2026-09-20 00:00:00" },
+        { version: "1.0.0", doi: null, created_at: "2026-08-01 00:00:00" },
+      ],
+      // The dataset row's archive state always describes the LATEST build
+      // (#752); a stale-but-"ready" value must not leak into an older
+      // version's bundle.
+      archive: { status: "ready", size: 999 },
+    });
+    const note = archiveForRequestedVersion(p, false);
+    expect(note.status).toBeNull();
+    expect(note.size).toBeNull();
+    expect(note.skip_reason).toContain("v1.1.0");
+    expect(note.skip_reason).toContain("download files directly");
+  });
+
+  // #1514 x #1518: the latest version's OWN archive can still be stale (a
+  // new version just published, its own build not done yet) -- the two
+  // rules are not redundant. archiveForRequestedVersion(payload, true) just
+  // returns payload.archive unchanged, so this only proves the composition:
+  // buildLandingPayload already nulled it out for staleness before
+  // archiveForRequestedVersion ever sees it.
+  test("a stale 'ready' archive is withheld even when the requested version IS the latest", () => {
+    const oldVersion = { version: "1.0.1", doi: "d2", created_at: "2026-09-28 19:43:14" };
+    const olderVersion = { version: "1.0.0", doi: "d1", created_at: "2026-01-01 00:00:00" };
+    const p = buildLandingPayload({
+      datasetId: "nm000284",
+      versionRows: [oldVersion, olderVersion],
+      archive: { status: "ready", size: 345_096_030_514, checked_at: "2026-09-28 17:58:40" },
+    });
+    expect(archiveForRequestedVersion(p, true)).toEqual({
+      status: null,
+      size: null,
+      skip_reason: null,
+    });
   });
 });

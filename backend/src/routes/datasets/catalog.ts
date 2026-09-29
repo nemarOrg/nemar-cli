@@ -135,8 +135,9 @@ export { buildDatasetFilterClauses, escapeLikePattern };
  * D1's `dataset_versions.version` stores a mix of bare (`1.0.0`) and tagged
  * (`v1.0.0`) rows; the catalog plane historically forwarded them raw while the
  * data plane already normalized to the tag. Consumers that build data-plane
- * URLs from this value (hallu-sync `archives/<v>.zip`, hallu-zarr) need the tag
- * form, and the website double-prefixed a bare value as `v1.0.0` but an
+ * URLs from this value (hallu-sync `archives/<id>_<v>.zip` since #1491,
+ * hallu-zarr) need the tag form, and the website double-prefixed a bare
+ * value as `v1.0.0` but an
  * already-tagged one as `vv1.0.0`. Idempotent; leaves null untouched.
  * Exported for unit testing.
  */

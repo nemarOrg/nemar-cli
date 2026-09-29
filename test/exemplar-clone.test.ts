@@ -17,6 +17,7 @@ import {
   isAnnexContentKey,
   parseExemplarFleet,
   planSubPrefixCopy,
+  rewriteArchiveKeyPrefix,
   rewriteObjectKeyPrefix,
   scrubDatasetDescription,
 } from "../src/lib/exemplar-clone";
@@ -120,6 +121,30 @@ describe("rewriteObjectKeyPrefix", () => {
     expect(() =>
       rewriteObjectKeyPrefix("nm0001320/objects/a.edf", "nm000132", "xx099900"),
     ).toThrow();
+  });
+});
+
+describe("rewriteArchiveKeyPrefix", () => {
+  test("#1491: rewrites the dataset id inside a new-format archive file name too", () => {
+    expect(
+      rewriteArchiveKeyPrefix("nm000104/archives/nm000104_v1.0.0.zip", "nm000104", "xx099902"),
+    ).toBe("xx099902/archives/xx099902_v1.0.0.zip");
+  });
+
+  test("leaves a pre-#1491 archive file name (no dataset id prefix) unchanged", () => {
+    expect(rewriteArchiveKeyPrefix("nm000104/archives/v1.0.0.zip", "nm000104", "xx099902")).toBe(
+      "xx099902/archives/v1.0.0.zip",
+    );
+  });
+
+  test("throws when the key does not start with the source prefix (delegates to rewriteObjectKeyPrefix)", () => {
+    expect(() =>
+      rewriteArchiveKeyPrefix(
+        "other000001/archives/other000001_v1.0.0.zip",
+        "nm000132",
+        "xx099900",
+      ),
+    ).toThrow(/does not start with expected source prefix/);
   });
 });
 
