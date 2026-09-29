@@ -3411,17 +3411,23 @@ class Mat5:
 
     def eeg_fields(
         self, nbchan: float, rows: int, pnts: int = 20, *, nbchan_kind: str = "double",
-        nbchan_after_data: bool = False,
+        nbchan_after_data: bool = False, flat: bool = False,
     ) -> list[tuple[str, bytes]]:
         """The fields biosigIO's importer needs, in EEGLAB's order unless
-        `nbchan_after_data` moves `nbchan` past `data`."""
+        `nbchan_after_data` moves `nbchan` past `data`. Struct fields carry no
+        name of their own, as MATLAB writes them; `flat` names each matrix, to
+        be saved as top-level variables."""
+
+        def name(field: str) -> str:
+            return field if flat else ""
+
         fields = [
-            ("setname", self.chars("", "fixture")),
-            ("nbchan", self.scalar("", nbchan, nbchan_kind)),
-            ("trials", self.scalar("", 1)),
-            ("pnts", self.scalar("", pnts)),
-            ("srate", self.scalar("", 100.0)),
-            ("data", self.doubles("", rows, pnts)),
+            ("setname", self.chars(name("setname"), "fixture")),
+            ("nbchan", self.scalar(name("nbchan"), nbchan, nbchan_kind)),
+            ("trials", self.scalar(name("trials"), 1)),
+            ("pnts", self.scalar(name("pnts"), pnts)),
+            ("srate", self.scalar(name("srate"), 100.0)),
+            ("data", self.doubles(name("data"), rows, pnts)),
         ]
         if nbchan_after_data:
             fields.append(fields.pop(1))
@@ -3664,6 +3670,118 @@ class TestEeglabDeclaredChannelCount(unittest.TestCase):
         with open(p, "r+b") as fh:
             fh.write(b"MATLAB 7.3 MAT-file".ljust(116))
         self.quiet_none(p)
+
+    def loadmat_nbchan(self, p: str) -> float:
+        """nbchan as scipy reads the same file: the hand-built writer's check."""
+        import scipy.io
+
+        mat = scipy.io.loadmat(p)
+        eeg = mat["EEG"][0, 0] if "EEG" in mat else mat
+        return float(eeg["nbchan"].ravel()[0])
+
+    def test_hand_built_layouts(self):
+        """Layouts scipy's writer cannot produce, each read three ways: by the
+        header read, by scipy, and by biosigIO's importer (the count must be
+        the rows it serves)."""
+        for end, compress, nbchan_kind, nbchan_after_data in itertools.product(
+            "<>", (False, True), ("double", "uint8", "int32"), (False, True),
+        ):
+            # uint8/int32 nbchan sit in a small data element, whose tag a
+            # big-endian file stores with its halves swapped.
+            m = Mat5(end)
+            label = f"{'be' if end == '>' else 'le'}{int(compress)}{nbchan_kind}{int(nbchan_after_data)}"
+            with self.subTest(label):
+                fields = m.eeg_fields(7, 7, nbchan_kind=nbchan_kind,
+                                      nbchan_after_data=nbchan_after_data)
+                p = m.file(self.path(label), [m.struct("EEG", [fields])], compress=compress)
+                self.assertEqual(self.loadmat_nbchan(p), 7)
+                self.assert_counts(p, 7)
+
+    def test_hand_built_flat_big_endian(self):
+        for compress in (False, True):
+            with self.subTest(compress=compress):
+                m = Mat5(">")
+                fields = m.eeg_fields(5, 5, flat=True)
+                p = m.file(self.path(f"beflat{int(compress)}"),
+                           [matrix for _, matrix in fields], compress=compress)
+                self.assertEqual(self.loadmat_nbchan(p), 5)
+                self.assert_counts(p, 5)
+
+    def test_the_first_element_of_an_eeg_struct_array_wins(self):
+        # biosigIO takes EEG(1); MAT v5 stores a struct array element by element.
+        for compress in (False, True):
+            with self.subTest(compress=compress):
+                m = Mat5("<")
+                elements = [m.eeg_fields(3, 3), m.eeg_fields(9, 9)]
+                p = m.file(self.path(f"sarr{int(compress)}"), [m.struct("EEG", elements)],
+                           compress=compress)
+                self.assertEqual(self.loadmat_nbchan(p), 3)
+                self.assert_counts(p, 3)
+                # And a first element that disagrees with itself is not rescued
+                # by a consistent second one.
+                elements = [m.eeg_fields(5, 3), m.eeg_fields(9, 9)]
+                q = m.file(self.path(f"sarrbad{int(compress)}"), [m.struct("EEG", elements)],
+                           compress=compress)
+                self.quiet_none(q)
+
+    def test_other_top_level_variables_around_eeg(self):
+        # An EEGLAB workspace save: variables before and after `EEG`, one of
+        # them a large matrix skipped unread, and flat nbchan/data decoys the
+        # `EEG` struct outranks.
+        for compress in (False, True):
+            with self.subTest(compress=compress):
+                m = Mat5("<")
+                p = m.file(self.path(f"multi{int(compress)}"), [
+                    m.chars("LASTCOM", "pop_loadset();"),
+                    m.doubles("ALLCOM", 50, 2000, seed=1),
+                    m.scalar("nbchan", 9),
+                    m.struct("EEG", [m.eeg_fields(6, 6)]),
+                    m.doubles("data", 9, 20, seed=2),
+                    m.scalar("CURRENTSET", 1, "int32"),
+                ], compress=compress)
+                self.assertEqual(self.loadmat_nbchan(p), 6)
+                self.assert_counts(p, 6)
+
+    def test_a_file_cut_anywhere_is_unknown_or_right(self):
+        """Truncated at every 2% (and at every byte of the first 512) of a real
+        compressed, uncompressed and big-endian file: each read returns None
+        or the true count, never raises, and ends promptly."""
+        import signal
+
+        files = {
+            "scipyc": (build_eeglab_set(self.path("cutc"), 5, pnts=4000, compress=True), 5),
+            "scipyu": (build_eeglab_set(self.path("cutu"), 5, pnts=4000, compress=False), 5),
+            "be": (Mat5(">").file(self.path("cutbe"), [
+                Mat5(">").struct("EEG", [Mat5(">").eeg_fields(7, 7, pnts=4000)])
+            ], compress=True), 7),
+        }
+        guard = hasattr(signal, "SIGALRM")
+
+        def timeout(*_):
+            raise TimeoutError("header read did not return within 5 s")
+
+        previous = signal.signal(signal.SIGALRM, timeout) if guard else None
+        self.addCleanup(lambda: guard and signal.signal(signal.SIGALRM, previous))
+        for name, (src, truth) in files.items():
+            with open(src, "rb") as fh:
+                raw = fh.read()
+            cuts = sorted({len(raw) * pct // 100 for pct in range(0, 101, 2)} | set(range(512)))
+            cut_path = self.path(f"{name}cut")
+            for cut in cuts:
+                with self.subTest(name, cut=cut):
+                    with open(cut_path, "wb") as fh:
+                        fh.write(raw[:cut])
+                    if guard:
+                        signal.alarm(5)
+                    try:
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            got = file_declared_channel_count(cut_path)
+                    finally:
+                        if guard:
+                            signal.alarm(0)
+                    self.assertIn(got, (None, truth))
+                    if cut == len(raw):
+                        self.assertEqual(got, truth)
 
     def test_a_compressed_data_matrix_is_never_inflated(self):
         """The walk stops at `data`'s dimensions instead of skipping to its
