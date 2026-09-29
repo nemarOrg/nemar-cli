@@ -31,6 +31,16 @@ const args = new Map(
 );
 const FILE_COUNT = Number(args.get("files") ?? 300);
 const UPSTREAM_LATENCY_MS = Number(args.get("latency") ?? 60);
+// The manifest stand-in answered instantly until #1494's placement/window
+// follow-up: every git-file-cache measurement above was paying zero cost for
+// the manifest conditional GET that precedes every single request
+// (`fileOrIndexHandler` resolves the path via the manifest before it ever
+// looks at the git-file cache), which understated how much a manifest round
+// trip actually costs on staging (measured 120-460ms per #1494). Default
+// chosen as a plausible same-region S3 conditional GET; staging's own number
+// is worse (cross-Atlantic colos), which the placement change addresses
+// separately from this bench.
+const S3_LATENCY_MS = Number(args.get("s3-latency") ?? 40);
 const PARALLELISM = Number(args.get("parallel") ?? 16);
 const DATASET_ID = "nm000900";
 const VERSION = "v1.0.0";
@@ -143,11 +153,14 @@ async function main() {
   const manifestEtag = `"bench-${manifestBody.length}"`;
 
   let upstreamRequests = 0;
+  let manifestRequests = 0;
   const server = Bun.serve({
     port: 0,
     async fetch(request) {
       const url = new URL(request.url);
       if (url.pathname === manifestKey) {
+        manifestRequests++;
+        if (S3_LATENCY_MS > 0) await Bun.sleep(S3_LATENCY_MS);
         const inm = request.headers.get("If-None-Match");
         if (inm === manifestEtag) return new Response(null, { status: 304 });
         return new Response(manifestBody, {
@@ -200,14 +213,33 @@ async function main() {
     return performance.now() - start;
   }
 
-  async function parallelWallClock(indices: number[], parallelism: number): Promise<number> {
+  /**
+   * HEAD instead of GET: `fileOrIndexHandler`'s HEAD branch resolves the path
+   * through the manifest (the gate + `queryManifest`) and returns without ever
+   * touching the git-file cache or GitHub. Isolates the manifest layer's own
+   * cost from the content-cache measurements above, which is the layer #1494's
+   * placement/trust-window follow-up changes.
+   */
+  async function headFile(i: number): Promise<number> {
+    const path = fixture.bidsPathOf(i);
+    const start = performance.now();
+    const res = await app().request(`/${DATASET_ID}/${VERSION}/${path}`, { method: "HEAD" }, env());
+    if (res.status !== 200) throw new Error(`unexpected status ${res.status} for ${path}`);
+    return performance.now() - start;
+  }
+
+  async function parallelWallClock(
+    indices: number[],
+    parallelism: number,
+    fetchOne: (i: number) => Promise<number> = fetchFile,
+  ): Promise<number> {
     const start = performance.now();
     let next = 0;
     async function worker() {
       for (;;) {
         const i = next++;
         if (i >= indices.length) return;
-        await fetchFile(indices[i]);
+        await fetchOne(indices[i]);
       }
     }
     await Promise.all(Array.from({ length: parallelism }, worker));
@@ -262,6 +294,49 @@ async function main() {
   const afterExpiryWall = await parallelWallClock(indices.slice(1), PARALLELISM);
   const afterExpiryUpstream = upstreamRequests;
 
+  // ---- MANIFEST LAYER (#1494 placement/trust-window follow-up). HEAD only,
+  // so this isolates the manifest read from the git-file content cache above:
+  // every one of these FILE_COUNT requests resolves a DIFFERENT path in the
+  // SAME dataset/version manifest, so a content-cache hit/miss is irrelevant
+  // and what varies is purely how many of these reads cost a manifest S3
+  // conditional GET (`manifestRequests`) versus how many are answered from
+  // the edge copy without one.
+  //
+  // A fresh cache for this section: the git-file-cache passes above already
+  // populated `manifestCacheKey` for this dataset/version, and reusing that
+  // cache would make "cold" mean something different than it does elsewhere
+  // in this report.
+  const manifestCache = new DrainingCache();
+  (globalThis as { caches?: unknown }).caches = { default: manifestCache };
+
+  manifestRequests = 0;
+  const manifestColdWall = await parallelWallClock(indices, PARALLELISM, headFile);
+  const manifestColdRequests = manifestRequests;
+
+  // Same paths again, immediately: still within the trust window on patched
+  // code (and, on unpatched code, this is exactly today's "every read is a
+  // conditional GET" behavior -- the comparison this section exists to make).
+  manifestRequests = 0;
+  const manifestWarmWall = await parallelWallClock(indices, PARALLELISM, headFile);
+  const manifestWarmRequests = manifestRequests;
+
+  // 70 seconds later: past a 60s trust window. `Date.now` is monkey-patched
+  // rather than threaded through a test-only seam in the route itself --
+  // acceptable in a throwaway-process bench script, not something a unit test
+  // should do (see `test/manifest-source.test.ts` for the real seam,
+  // `ManifestSource.now`).
+  const realDateNow = Date.now;
+  Date.now = () => realDateNow() + 70_000;
+  manifestRequests = 0;
+  let manifestExpiredWall: number;
+  let manifestExpiredRequests: number;
+  try {
+    manifestExpiredWall = await parallelWallClock(indices, PARALLELISM, headFile);
+    manifestExpiredRequests = manifestRequests;
+  } finally {
+    Date.now = realDateNow;
+  }
+
   server.stop(true);
 
   const row = (label: string, ms: number, extra = "") =>
@@ -281,6 +356,25 @@ async function main() {
     "after, warm, 6 min later (cross-session)",
     afterExpiryWall,
     `upstream requests: ${afterExpiryUpstream}`,
+  );
+  console.log();
+  console.log(
+    `Manifest layer only (HEAD, ${PARALLELISM}-parallel, ${FILE_COUNT} distinct paths, ${S3_LATENCY_MS}ms simulated S3 latency)`,
+  );
+  row(
+    "cold (first pass, fresh manifest cache)",
+    manifestColdWall,
+    `manifest S3 reads: ${manifestColdRequests}`,
+  );
+  row(
+    "warm (same paths again, immediately)",
+    manifestWarmWall,
+    `manifest S3 reads: ${manifestWarmRequests}`,
+  );
+  row(
+    "warm, 70s later (past a 60s trust window)",
+    manifestExpiredWall,
+    `manifest S3 reads: ${manifestExpiredRequests}`,
   );
 }
 

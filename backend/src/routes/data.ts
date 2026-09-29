@@ -70,13 +70,17 @@ import {
   ResolvePathQuery,
 } from "../services/manifest-queries";
 import type { ManifestHeader } from "../services/manifest-scan";
-import { type ManifestCache, type ManifestRead, readManifest } from "../services/manifest-source";
+import {
+  type ManifestCache,
+  type ManifestRead,
+  type ManifestReadSource,
+  readManifest,
+  rememberManifestAnswer,
+} from "../services/manifest-source";
 import { buildPageBundle } from "../services/page-bundle";
 import { isDatasetExcludedFromPublicRead } from "../services/public-read-cache";
 import {
-  type ManifestObjectFetch,
   type PresignedUrlOptions,
-  fetchManifestObject,
   generatePresignedGetUrl,
   loadRecords,
   loadSummary,
@@ -182,6 +186,15 @@ function deferOf(c: Context<{ Bindings: Bindings; Variables: Variables }>): Defe
 interface FileTiming {
   gate?: number;
   manifest?: number;
+  /**
+   * Which tier answered the manifest read (#1494 amendment): `"memo"` and
+   * `"fresh"` never asked S3, `"revalidated"` got a 304, `"rewrite"` got a
+   * fresh 200 (or there was no usable copy at all). Only set alongside
+   * `manifest`, and only reported when there is one -- this is what makes the
+   * trust window's effect visible from outside without a deploy that adds
+   * logging first, the same reason `Server-Timing` exists here at all.
+   */
+  manifestDesc?: ManifestReadSource;
   cache?: number;
   upstream?: number;
 }
@@ -191,7 +204,9 @@ function serverTimingHeader(t: FileTiming): string | null {
   const parts: string[] = [];
   for (const key of ["gate", "manifest", "cache", "upstream"] as const) {
     const value = t[key];
-    if (value !== undefined) parts.push(`${key};dur=${value.toFixed(1)}`);
+    if (value === undefined) continue;
+    const desc = key === "manifest" && t.manifestDesc ? `;desc="${t.manifestDesc}"` : "";
+    parts.push(`${key};dur=${value.toFixed(1)}${desc}`);
   }
   return parts.length > 0 ? parts.join(", ") : null;
 }
@@ -216,6 +231,14 @@ function applyServerTiming(headers: Headers, t: FileTiming): void {
  * the "removed since" footer reads the prior version on every directory
  * render) must degrade to "no hint / no footer" on a transient S3 blip,
  * not 500 the whole response.
+ *
+ * `queryDescriptor` names WHICH question is being asked (a path, a fixed word
+ * for the whole-manifest digest), so a warm isolate can skip re-scanning the
+ * manifest for a query it has already answered (#1494 amendment; the memo
+ * itself lives in `manifest-source.ts`, keyed by dataset, version, the
+ * manifest's own ETag and this string). Every call site below passes one;
+ * there is no call site in this file that deliberately opts out, so a new one
+ * added later should pass one too rather than silently missing the memo.
  */
 async function queryManifest<T>(
   env: Bindings,
@@ -223,8 +246,14 @@ async function queryManifest<T>(
   datasetId: string,
   version: string,
   makeQuery: () => ManifestQuery<T>,
+  queryDescriptor: string,
   defer: Defer | undefined,
-): Promise<{ header: ManifestHeader; answer: T; etag: string | null } | null> {
+): Promise<{
+  header: ManifestHeader;
+  answer: T;
+  etag: string | null;
+  source: ManifestReadSource;
+} | null> {
   let read: ManifestRead<T>;
   try {
     read = await readManifest(
@@ -237,6 +266,7 @@ async function queryManifest<T>(
       datasetId,
       version,
       makeQuery,
+      queryDescriptor,
     );
   } catch (err) {
     console.error(
@@ -261,7 +291,17 @@ async function queryManifest<T>(
   // that is `null`, say) is not a failed read, and it reaches the app's error
   // handler exactly as it did when the answer was computed from a parsed
   // manifest after loadManifest returned.
-  return { header: read.header, answer: read.query.finish(read.header), etag: read.etag };
+  const answer = read.query.finish(read.header);
+  // Also outside the try, and after `finish()` succeeded: a memo write is
+  // never this function's business to attempt on an answer that has not
+  // proven itself real (see `rememberManifestAnswer`'s own doc comment).
+  // Only possible when `read.etag` is non-null too: a memoized answer must
+  // carry a real ETag (`ManifestRead.ok.etag` is only ever null when S3
+  // answered without one, which `rememberManifestAnswer` cannot key by).
+  if (read.memoKey !== null && read.etag !== null) {
+    rememberManifestAnswer(read.memoKey, read.header, read.etag, answer);
+  }
+  return { header: read.header, answer, etag: read.etag, source: read.source };
 }
 
 /**
@@ -285,6 +325,7 @@ async function loadManifestDigest(
     datasetId,
     version,
     () => new DigestQuery(),
+    "digest",
     defer,
   );
   if (!read) return null;
@@ -591,36 +632,6 @@ function buildPublicManifestEntries(
 }
 
 /**
- * Is a manifest.json document stored under `hit.etag` still the current
- * manifest? A cheap conditional GET against S3 (no body on a match), the
- * same idiom `manifest-source.ts` uses to revalidate its own copy. `found`
- * means the manifest changed since the copy was stored: its body is
- * released unread, because the caller re-reads it through the normal
- * streaming path rather than from this probe.
- */
-async function manifestJsonCacheStillFresh(
-  s3Options: PresignedUrlOptions,
-  datasetId: string,
-  version: string,
-  etag: string,
-): Promise<boolean> {
-  let fetched: ManifestObjectFetch;
-  try {
-    fetched = await fetchManifestObject(s3Options, datasetId, version, { ifNoneMatch: etag });
-  } catch (err) {
-    console.error(
-      `[data] manifest.json cache revalidation failed dataset=${datasetId} version=${version}:`,
-      err instanceof Error ? err.message : String(err),
-    );
-    return false;
-  }
-  if (fetched.kind === "found") {
-    await fetched.response.body?.cancel().catch(() => {});
-  }
-  return fetched.kind === "not_modified";
-}
-
-/**
  * GET /<id>/<version>/manifest.json -> public file index.
  *
  * Annex-backed entries carry the plain public S3 URL for a dataset the
@@ -635,7 +646,13 @@ async function manifestJsonCacheStillFresh(
  * a public (non-excluded) dataset, so it is cached behind that same gate and
  * revalidated against the manifest's ETag before ever answering from the
  * cache (`manifest-json-cache.ts`); an excluded dataset's presigned document
- * is never cached.
+ * is never cached. That revalidation rides the entry-count query below
+ * rather than a conditional GET of its own: the count query already goes
+ * through the manifest trust window (`manifest-source.ts`), so a cache hit
+ * confirmed within the window costs no S3 call at all, and a hit confirmed
+ * past the window costs exactly the one conditional GET the count query
+ * already pays to restamp the window for the read that would otherwise
+ * follow it.
  */
 async function manifestJsonHandler(
   env: Bindings,
@@ -663,21 +680,7 @@ async function manifestJsonHandler(
   const cacheKey = cache
     ? manifestJsonCacheKey(new URL(request.url).origin, datasetId, resolved.version)
     : null;
-
-  if (cache && cacheKey) {
-    const hit = await matchManifestJsonCache(cache, cacheKey);
-    if (
-      hit &&
-      (await manifestJsonCacheStillFresh(s3Options, datasetId, resolved.version, hit.etag))
-    ) {
-      return new Response(hit.body, {
-        headers: {
-          "Content-Type": "application/json",
-          "Cache-Control": hit.clientCacheControl ?? clientCacheControl,
-        },
-      });
-    }
-  }
+  const hit = cache && cacheKey ? await matchManifestJsonCache(cache, cacheKey) : null;
 
   // The bound is per branch: excluded (presigned) entries cost more live
   // memory than unsigned ones, so each branch is measured and bounded
@@ -687,29 +690,42 @@ async function manifestJsonHandler(
   const bound = excluded ? MAX_MANIFEST_JSON_ENTRIES_PRESIGNED : MAX_MANIFEST_JSON_ENTRIES;
 
   // Count first, keeping nothing, so the refusal for an oversized manifest
-  // costs what any other lookup costs. The second read is the one that
-  // answers, and it enforces the bound itself, so a manifest rewritten
-  // between the two, or one whose keys do not ascend (the count cannot rule
-  // out a repeated key then), still cannot exceed it. With the edge cache the
-  // second read is a 304 and a scan of the copy.
+  // costs what any other lookup costs, and so a cache hit's freshness is
+  // confirmed by THIS query's own (windowed) ETag rather than a second S3
+  // round trip. The second read is the one that answers on a miss, and it
+  // enforces the bound itself, so a manifest rewritten between the two, or
+  // one whose keys do not ascend (the count cannot rule out a repeated key
+  // then), still cannot exceed it.
   const counted = await queryManifest(
     env,
     request,
     datasetId,
     resolved.version,
     () => new EntryCountQuery(),
+    "count",
     defer,
   );
   if (!counted) return notFound("Version not published");
   if (counted.answer.kind === "count" && counted.answer.count > bound) {
     return manifestJsonTooLarge(request, datasetId, resolved.version, bound);
   }
+
+  if (hit && counted.etag !== null && counted.etag === hit.etag) {
+    return new Response(hit.body, {
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": hit.clientCacheControl ?? clientCacheControl,
+      },
+    });
+  }
+
   const read = await queryManifest(
     env,
     request,
     datasetId,
     resolved.version,
     () => new EntriesQuery(bound),
+    `entries:${bound}`,
     defer,
   );
   if (!read) return notFound("Version not published");
@@ -1421,9 +1437,11 @@ async function fileOrIndexHandler(
     datasetId,
     resolved.version,
     () => new ResolvePathQuery(rawPath),
+    `resolve:${rawPath}`,
     defer,
   );
   timing.manifest = performance.now() - manifestStart;
+  if (read) timing.manifestDesc = read.source;
   if (!read) return notFound("Version not published");
 
   const result = read.answer;
@@ -1494,6 +1512,7 @@ async function fileOrIndexHandler(
           datasetId,
           v,
           () => new ContainsPathQuery(tombstonePath),
+          `contains:${tombstonePath}`,
           defer,
         );
         return found ? found.answer : null;
@@ -1610,6 +1629,7 @@ async function fileOrIndexHandler(
         datasetId,
         priorVersion,
         () => new ResolvePathQuery(result.path),
+        `resolve:${result.path}`,
         defer,
       );
       if (prior) {
