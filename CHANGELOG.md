@@ -15,6 +15,21 @@ earlier releases are described only by their generated notes.
 
 ## 0.10.10 - 2026-09-29
 
+### Added
+
+- **News posts (#1551, #1553, #1559).** The API stores and serves short news posts for the
+  website (nemarOrg/website#371). `GET /news` lists published posts, newest first (10 by
+  default, at most 50), and `GET /news/<slug>` returns one; a draft, or a post scheduled
+  for later, answers 404 until its `published_at` passes. Admins create, edit and delete
+  posts under `/admin/news`, and upload images with `POST /admin/news/media`: PNG, JPEG,
+  WebP or GIF, checked by their leading bytes, at most 5 MiB, stored once under the
+  SHA-256 of their bytes in a dedicated R2 bucket and never overwritten.
+  `GET /news/media/<file>` serves them with the type their file name implies, a one-year
+  immutable cache and `X-Content-Type-Options: nosniff`. Every post write and image upload
+  leaves an audit-log row, written with the post change or before the image is stored.
+  ADR 0076 records why images live in R2 and dataset bytes stay in S3, and how to recall
+  an image uploaded by mistake.
+
 ### Changed
 
 - **Dataset enrichment runs on Claude Sonnet 5.5 and reads what each DOI is before
@@ -61,6 +76,22 @@ earlier releases are described only by their generated notes.
   requeues on its own: stores converted earlier keep the importer's units until they are
   requeued, and `find_collapsed_channel_stores.py --case-only` lists the datasets whose
   index reports `unmatched_case_only`.
+
+### Migrations
+
+- `0087_news_posts.sql` adds the `news_posts` table and an index on
+  `(status, published_at DESC)`. It is additive (`CREATE TABLE IF NOT EXISTS`,
+  `CREATE INDEX IF NOT EXISTS`), so rolling the Worker back leaves the table unused.
+
+### Deploy coupling
+
+- The Worker binds the R2 bucket `NEWS_MEDIA` (`nemar-news-media` in production,
+  `nemar-news-media-dev` on dev), and a deploy fails if its bucket does not exist. Both
+  buckets were created before this release.
+- Merging to `main` makes the Hallu converter use biosigio 1.2.10 on its next run. Stores
+  already published are replaced only when requeued.
+- The re-enrichment sweep described in #1550 runs against production after this release,
+  one dataset at a time.
 
 ## 0.10.9 - 2026-09-29
 
