@@ -8,7 +8,7 @@
  * pulling 43 MB from S3. So the raw body is kept in the Workers Cache API
  * and each use costs S3 a conditional GET that answers 304 with no body.
  *
- * WHY REVALIDATE EVERY USE, rather than trust a TTL. A version's manifest is
+ * WHY REVALIDATE, rather than trust a TTL forever. A version's manifest is
  * NOT immutable in practice: the S3 objects for nm000132's three versions
  * were all last written on 2026-05-27, months after those versions were
  * published, and nm000281's on 2026-08-31, because the pipeline regenerates
@@ -16,12 +16,33 @@
  * A cache that answered from a copy without asking would serve a rewritten
  * manifest stale, and the manifest is the capability list (ADR 0066): which
  * paths are readable at all. So the copy is stored with the S3 ETag it came
- * with and every use sends `If-None-Match`; only a 304 lets the copy answer.
- * A rewrite gets a 200 with the new body, which replaces the copy. A deleted
- * object gets a 404 and the route answers exactly as it did without a cache.
- * The cache changes where the bytes come from, never what the route decides.
+ * with, and every use OUTSIDE the trust window below sends `If-None-Match`;
+ * only a 304 lets the copy answer. A rewrite gets a 200 with the new body,
+ * which replaces the copy. A deleted object gets a 404 and the route answers
+ * exactly as it did without a cache. The cache changes where the bytes come
+ * from, never what the route decides.
  *
- * THE GATE STAYS IN FRONT. Every caller runs `loadPublishedDataset` (the
+ * THE TRUST WINDOW (#1494 amendment, 2026-09-28 -- ADR 0072). Staging
+ * measured this module's OWN conditional GET as most of a cache hit's cost
+ * (120-460ms of a 200-600ms response) once the Worker itself was no longer
+ * colocated with its backends: every read paid a cross-colo round trip to S3
+ * to confirm what the last read already confirmed a moment earlier. An edge
+ * copy validated within the last {@link MANIFEST_TRUST_WINDOW_MS} is now used
+ * WITHOUT asking S3 again; the validation time is recorded as a header on the
+ * stored copy itself (`X-Nemar-Manifest-Validated-At`), not in per-isolate
+ * memory, so the window is a property of the CACHE ENTRY and applies across
+ * every isolate sharing it in a data center, not just the one that first
+ * validated it. Once the window has passed, the next read revalidates against
+ * S3 exactly as before; a 304 there both answers the read and restamps the
+ * copy's validated-at time (streamed through the same bounded-queue writer a
+ * miss uses, never buffered whole), so the window is a rolling one, and a
+ * genuine rewrite (a 200 instead of a 304) is still caught the moment the
+ * window next expires -- at most {@link MANIFEST_TRUST_WINDOW_MS} after it
+ * happens, never later. See `manifest-answer-memo.ts` for the second,
+ * independent speedup layered on top: memoizing the ANSWER, so a warm isolate
+ * does not even re-scan the (now-trusted) copy for a query it has already run.
+ *
+ * THE GATE STAYS IN FRONT, for both. Every caller runs `loadPublishedDataset` (the
  * visibility check) before it reads a manifest, so an entry, including one
  * for a manifest that needed the signed fallback, is only ever read on
  * behalf of a request that already passed the gate for that dataset. The key
@@ -43,6 +64,7 @@
  * never delays an answer that is already known.
  */
 
+import { ManifestAnswerMemo } from "./manifest-answer-memo";
 import type { ManifestQuery } from "./manifest-queries";
 import { type ManifestHeader, type ScanResult, scanManifestStream } from "./manifest-scan";
 import { type ManifestObjectFetch, type PresignedUrlOptions, fetchManifestObject } from "./s3";
@@ -64,24 +86,58 @@ export interface ManifestSource {
    * unit suites), the answer waits for the write, at most the stall bound.
    */
   waitUntil?: (work: Promise<unknown>) => void;
+  /**
+   * The clock the trust window is measured against. Defaults to `Date.now`;
+   * tests override it to move a cached copy in and out of the window without
+   * a real sleep, the same pattern `test/helpers/cache.ts`'s `getNow` uses.
+   */
+  now?: () => number;
 }
+
+/**
+ * How a read's answer was obtained, for `Server-Timing` (#1494 amendment):
+ * `"memo"` skipped both S3 and the scan (the per-isolate answer memo already
+ * held this exact query); `"fresh"` skipped S3 (the copy was within the trust
+ * window) but still scanned; `"revalidated"` asked S3 and got a 304;
+ * `"rewrite"` asked S3 (or had no usable copy at all) and got a fresh 200.
+ */
+export type ManifestReadSource = "memo" | "fresh" | "revalidated" | "rewrite";
 
 /**
  * `ok` carries the query that ran rather than its answer: the caller calls
  * `finish` itself, outside whatever it wraps this in, so an exception from
  * answering (the `TypeError` a `null` entry has always produced) keeps its
- * old meaning instead of being mistaken for a failed read.
+ * old meaning instead of being mistaken for a failed read. This still holds
+ * for a `"memo"` source too -- `query` there is a trivial wrapper whose
+ * `finish` only returns a value that a real `finish()` call already produced
+ * successfully once before, so it cannot newly throw, but the caller's
+ * calling convention (finish outside this module's own try/catch) stays the
+ * same regardless of which source answered.
  *
  * `etag` is the manifest object's CURRENT S3 ETag -- the one the edge copy
- * either just confirmed with a 304 or just stored fresh from a 200 -- so a
- * caller that wants to key its own cache off "this exact manifest" (#1522's
- * manifest.json response cache) never has to fetch the object a second time
- * to learn it. `null` only when S3 answered without one, which `settle`
- * cannot recover from; a caller that needs the etag treats `null` as "do not
- * cache this answer" rather than a fault.
+ * either just confirmed with a 304, just stored fresh from a 200, or (on a
+ * `"memo"` source) was keyed under when this exact answer was first
+ * memoized -- so a caller that wants to key its own cache off "this exact
+ * manifest" (#1522's manifest.json response cache) never has to fetch the
+ * object a second time to learn it. `null` only when S3 answered without
+ * one, which `settle` cannot recover from; a caller that needs the etag
+ * treats `null` as "do not cache this answer" rather than a fault.
+ *
+ * `memoKey` is set on every NON-memo source that has a usable ETag: the
+ * caller stores the finished answer under it (`rememberManifestAnswer`),
+ * again outside this module, for the same reason `finish()` is called
+ * outside it. `null` when the answer already came from the memo (nothing
+ * further to store) or no ETag was available to key it safely by.
  */
 export type ManifestRead<T> =
-  | { kind: "ok"; header: ManifestHeader; query: ManifestQuery<T>; etag: string | null }
+  | {
+      kind: "ok";
+      header: ManifestHeader;
+      query: ManifestQuery<T>;
+      etag: string | null;
+      source: ManifestReadSource;
+      memoKey: string | null;
+    }
   /** 404, or a 403 the signed fallback could not get past (both logged by s3.ts). */
   | { kind: "absent" }
   | { kind: "malformed"; message: string }
@@ -117,6 +173,121 @@ export function manifestCacheKey(origin: string, datasetId: string, version: str
   return `${origin}/__nemar-internal/manifest-cache/v1/${encodeURIComponent(datasetId)}/${encodeURIComponent(tag)}.json`;
 }
 
+/**
+ * How long an edge copy is trusted without asking S3 again (#1494 amendment,
+ * ADR 0072). 60 seconds: manifests are rewritten in place but rarely (a
+ * publish, a heal run, not continuously), and every client-facing response
+ * this route already serves is trusted for at least as long without
+ * revalidation -- `public, max-age=60` on the JSON directory listing,
+ * `manifest.json` and the tombstone 404, `max-age=300` on a brokered
+ * git-tracked file. This window is therefore never the largest source of
+ * staleness a client already accepts; it only removes a REDUNDANT S3 round
+ * trip the client cannot observe either way. A rewrite still takes effect
+ * within this many seconds of the window's start, never later (see
+ * `manifest-source.test.ts`, "a rewrite is visible within the trust window").
+ */
+export const MANIFEST_TRUST_WINDOW_MS = 60_000;
+
+/**
+ * Marker on a STORED edge copy only, recording when it was last confirmed
+ * fresh against S3 (a first store, or a later 304). Never read by anything
+ * outside this module: unlike the git-file cache (`git-file-cache.ts`), the
+ * manifest's own bytes never reach a client directly, so there is no
+ * client-facing header to protect here.
+ */
+const VALIDATED_AT_HEADER = "X-Nemar-Manifest-Validated-At";
+
+/**
+ * The per-isolate memo of a query's finished answer (`manifest-answer-memo.ts`).
+ * Module-level so it survives across requests in a warm isolate, the same
+ * lifetime `announced` above already has.
+ */
+const manifestAnswerMemo = new ManifestAnswerMemo();
+
+/**
+ * The composite key a memoized answer lives under: the manifest's own content
+ * identity (dataset, version, ETag) plus the caller's own description of
+ * which question was asked of it. `\u0000` cannot appear in any of these
+ * inputs (a dataset id, a version tag, an S3 ETag, or a caller-authored
+ * descriptor built from those plus a BIDS path), so it is a safe separator.
+ */
+function manifestAnswerKey(
+  datasetId: string,
+  version: string,
+  etag: string,
+  queryDescriptor: string,
+): string {
+  return `${datasetId}\u0000${version}\u0000${etag}\u0000${queryDescriptor}`;
+}
+
+/** What the memo stores per key: the answer, the header it was read with (a
+ *  memo hit skips the scan entirely, so there is no fresh header to pair the
+ *  answer with otherwise), and the ETag it was keyed under (so a `"memo"`
+ *  source can still carry `ManifestRead.ok.etag`, same as every other
+ *  source -- #1522's manifest.json response cache needs it regardless of
+ *  which tier answered). */
+interface MemoizedAnswer<T> {
+  header: ManifestHeader;
+  etag: string;
+  value: T;
+}
+
+/**
+ * Recall a previously finished answer, if this isolate's memo still has it.
+ * `readManifest` calls this internally to decide whether a read can skip the
+ * scan entirely; not exported, because a caller only ever needs
+ * `rememberManifestAnswer` (the read side is already reflected in
+ * `ManifestRead.source === "memo"`).
+ */
+function recallManifestAnswer<T>(memoKey: string): MemoizedAnswer<T> | undefined {
+  return manifestAnswerMemo.get<MemoizedAnswer<T>>(memoKey);
+}
+
+/**
+ * Remember a finished answer under `memoKey` (from a successful
+ * `ManifestRead.ok`). Called by the caller AFTER `query.finish(header)`
+ * succeeds, never from inside this module -- the same rule that keeps
+ * `finish()` itself outside `readManifest`'s own error handling applies here:
+ * a memo write is not this module's business to attempt before the caller has
+ * proven the answer is real.
+ */
+export function rememberManifestAnswer<T>(
+  memoKey: string,
+  header: ManifestHeader,
+  etag: string,
+  value: T,
+): void {
+  manifestAnswerMemo.set(memoKey, { header, etag, value });
+}
+
+/** Forget every memoized answer, so a test can start from an empty memo. */
+export function resetManifestAnswerMemo(): void {
+  manifestAnswerMemo.clear();
+}
+
+/** Introspection for tests: how many answers are memoized, and how many
+ *  bytes they are estimated to cost. */
+export function manifestAnswerMemoStats(): { entries: number; bytes: number } {
+  return { entries: manifestAnswerMemo.size, bytes: manifestAnswerMemo.byteSize };
+}
+
+/** A `ManifestQuery` whose `finish` only returns an already-computed value.
+ *  Used for a memo hit, where nothing was scanned and there is no real query
+ *  to hand back -- see the `ManifestRead.ok` doc comment for why this keeps
+ *  the same "the caller calls finish()" shape as every other source. */
+function memoizedQuery<T>(value: T): ManifestQuery<T> {
+  return {
+    reset() {},
+    key() {
+      return false;
+    },
+    value() {},
+    finish() {
+      return value;
+    },
+  };
+}
+
 let warnedIgnoredCondition = false;
 
 /**
@@ -143,17 +314,77 @@ export function resetEdgeCopyNotices(): void {
  * because a scan of a damaged edge copy is retried from S3 with a fresh query.
  * Transport failures (an S3 5xx, a body that breaks off) throw, as
  * `getManifest` did; the caller logs them.
+ *
+ * `queryDescriptor`, when given, opts this read into the per-isolate answer
+ * memo (`manifest-answer-memo.ts`): a short, caller-chosen string identifying
+ * WHICH question this is (a path, a fixed word for a whole-manifest digest),
+ * combined here with the manifest's own dataset/version/ETag into a key safe
+ * to memoize by. Omitted, this read still gets the trust window below, just
+ * never the memo (`manifest-source.test.ts`'s existing suite omits it
+ * throughout, deliberately unaffected by this parameter's addition).
  */
 export async function readManifest<T>(
   source: ManifestSource,
   datasetId: string,
   version: string,
   makeQuery: () => ManifestQuery<T>,
+  queryDescriptor?: string,
 ): Promise<ManifestRead<T>> {
   const key = manifestCacheKey(source.cacheOrigin, datasetId, version);
   const cached = source.cache ? await matchEdgeCopy(source.cache, key) : null;
+  const now = source.now ? source.now() : Date.now();
 
   if (cached !== null) {
+    // The memo is checked ONLY once `cached.etag` is known to be current --
+    // either because the window below still trusts it, or because a 304
+    // just confirmed it. Checking it any earlier would key a lookup on an
+    // etag the cache merely REMEMBERS, not one anything has confirmed is
+    // still on S3, which would let a stale memo entry outlive the very
+    // revalidation meant to catch a rewrite (caught by
+    // "a manifest rewrite is not served from the old memo entry").
+    const memoKeyFor = (etag: string): string | null =>
+      queryDescriptor !== undefined
+        ? manifestAnswerKey(datasetId, version, etag, queryDescriptor)
+        : null;
+
+    const withinWindow =
+      cached.validatedAtMs !== null && now - cached.validatedAtMs < MANIFEST_TRUST_WINDOW_MS;
+    if (withinWindow) {
+      const memoKey = memoKeyFor(cached.etag);
+      const memoized = memoKey ? recallManifestAnswer<T>(memoKey) : undefined;
+      if (memoized !== undefined) {
+        await cached.body.cancel().catch(() => {});
+        return {
+          kind: "ok",
+          header: memoized.header,
+          query: memoizedQuery(memoized.value),
+          etag: memoized.etag,
+          source: "memo",
+          memoKey: null,
+        };
+      }
+
+      const query = makeQuery();
+      const fromCopy = await scanEdgeCopy(cached.body, query, { datasetId, version, key });
+      if (fromCopy !== null) {
+        announceOnce(
+          "answered",
+          `[manifest-cache] edge copy answered within the trust window (first in this isolate) dataset=${datasetId} version=${version}`,
+        );
+        return settle(fromCopy, query, cached.etag, "fresh", memoKey);
+      }
+      // A damaged copy inside the window is treated exactly like one found
+      // outside it: read S3 fresh, unconditionally, and let that replace it.
+      return fromS3(
+        source,
+        key,
+        await fetchManifestObject(source.s3, datasetId, version),
+        makeQuery,
+        { datasetId, version, queryDescriptor },
+        now,
+      );
+    }
+
     let fetched: ManifestObjectFetch;
     try {
       fetched = await fetchManifestObject(source.s3, datasetId, version, {
@@ -165,14 +396,36 @@ export async function readManifest<T>(
     }
     if (fetched.kind === "not_modified") {
       const query = makeQuery();
-      const fromCopy = await scanEdgeCopy(cached.body, query, { datasetId, version, key });
+      // The window just expired: restamp the copy's validated-at time so the
+      // NEXT MANIFEST_TRUST_WINDOW_MS worth of reads can skip S3 again,
+      // streamed through the same bounded-queue writer a miss uses (the tap
+      // on `scanEdgeCopy` below) rather than buffered whole -- this can run
+      // against nm000281's 43 MB manifest exactly as a miss already does.
+      const sink = source.cache
+        ? new EdgeCopyWriter(
+            source.cache,
+            key,
+            cached.etag,
+            source.cacheStallMs ?? CACHE_STALL_MS,
+            source.waitUntil,
+            now,
+          )
+        : null;
+      const fromCopy = await scanEdgeCopy(
+        cached.body,
+        query,
+        { datasetId, version, key },
+        sink ? (chunk) => sink.write(chunk) : undefined,
+      );
       if (fromCopy !== null) {
+        await sink?.commit();
         announceOnce(
           "answered",
           `[manifest-cache] edge copy answered after a 304 (first in this isolate) dataset=${datasetId} version=${version}`,
         );
-        return settle(fromCopy, query, cached.etag);
+        return settle(fromCopy, query, cached.etag, "revalidated", memoKeyFor(cached.etag));
       }
+      await sink?.discard("the edge copy did not scan cleanly while restamping after a 304");
       // The copy could not be read back whole, so S3 answers instead, exactly
       // as if there had been no copy. It is re-stored from that read.
       return fromS3(
@@ -180,6 +433,8 @@ export async function readManifest<T>(
         key,
         await fetchManifestObject(source.s3, datasetId, version),
         makeQuery,
+        { datasetId, version, queryDescriptor },
+        now,
       );
     }
     await cached.body.cancel().catch(() => {});
@@ -195,25 +450,38 @@ export async function readManifest<T>(
         `[manifest-cache] S3 answered 200 to If-None-Match for an unchanged ETag; the condition may not be reaching S3 dataset=${datasetId} version=${version}`,
       );
     }
-    return fromS3(source, key, fetched, makeQuery);
+    return fromS3(source, key, fetched, makeQuery, { datasetId, version, queryDescriptor }, now);
   }
 
-  return fromS3(source, key, await fetchManifestObject(source.s3, datasetId, version), makeQuery);
+  return fromS3(
+    source,
+    key,
+    await fetchManifestObject(source.s3, datasetId, version),
+    makeQuery,
+    { datasetId, version, queryDescriptor },
+    now,
+  );
 }
 
 function settle<T>(
   result: ScanResult,
   query: ManifestQuery<T>,
   etag: string | null,
+  readSource: ManifestReadSource,
+  memoKey: string | null,
 ): ManifestRead<T> {
   if (result.kind !== "ok") return result;
-  return { kind: "ok", header: result.header, query, etag };
+  return { kind: "ok", header: result.header, query, etag, source: readSource, memoKey };
 }
 
 async function matchEdgeCopy(
   cache: ManifestCache,
   key: string,
-): Promise<{ etag: string; body: ReadableStream<Uint8Array> } | null> {
+): Promise<{
+  etag: string;
+  body: ReadableStream<Uint8Array>;
+  validatedAtMs: number | null;
+} | null> {
   let hit: Response | undefined;
   try {
     hit = await cache.match(new Request(key, { method: "GET" }));
@@ -232,7 +500,14 @@ async function matchEdgeCopy(
     await hit.body?.cancel().catch(() => {});
     return null;
   }
-  return { etag, body: hit.body };
+  // Absent or unparsable means "treat as already outside the trust window":
+  // an entry stored before this module knew about the header, or one a test
+  // built by hand, revalidates on its very next use rather than being trusted
+  // on the strength of a timestamp nobody ever recorded.
+  const validatedAtRaw = hit.headers.get(VALIDATED_AT_HEADER);
+  const validatedAtMs =
+    validatedAtRaw !== null && /^\d+$/.test(validatedAtRaw) ? Number(validatedAtRaw) : null;
+  return { etag, body: hit.body, validatedAtMs };
 }
 
 /**
@@ -241,15 +516,20 @@ async function matchEdgeCopy(
  * about the manifest: only a copy whose scan was accepted is ever stored, so a
  * copy that no longer scans is a damaged copy, and the manifest it came from
  * deserves to be read again rather than reported broken on the copy's word.
+ *
+ * `tap`, when given, sees every raw chunk as it is read -- used only while
+ * restamping a copy after a 304 (see `readManifest`), so the whole body is
+ * never held to re-store it.
  */
 async function scanEdgeCopy<T>(
   body: ReadableStream<Uint8Array>,
   query: ManifestQuery<T>,
   where: { datasetId: string; version: string; key: string },
+  tap?: (chunk: Uint8Array) => void | Promise<void>,
 ): Promise<ScanResult | null> {
   let result: ScanResult;
   try {
-    result = await scanManifestStream(body, query);
+    result = await scanManifestStream(body, query, tap);
   } catch (err) {
     console.error(
       `[manifest-cache] edge copy failed mid-read; reading S3 instead dataset=${where.datasetId} version=${where.version}:`,
@@ -271,6 +551,8 @@ async function fromS3<T>(
   key: string,
   fetched: ManifestObjectFetch,
   makeQuery: () => ManifestQuery<T>,
+  where: { datasetId: string; version: string; queryDescriptor: string | undefined },
+  now: number,
 ): Promise<ManifestRead<T>> {
   if (fetched.kind !== "found") return { kind: "absent" };
   const { response } = fetched;
@@ -290,6 +572,7 @@ async function fromS3<T>(
           etag,
           source.cacheStallMs ?? CACHE_STALL_MS,
           source.waitUntil,
+          now,
         )
       : null;
   let result: ScanResult;
@@ -303,7 +586,11 @@ async function fromS3<T>(
   }
   if (result.kind === "ok") await sink?.commit();
   else await sink?.discard(`the document did not scan: ${result.kind}`);
-  return settle(result, query, etag);
+  const memoKey =
+    etag && where.queryDescriptor !== undefined
+      ? manifestAnswerKey(where.datasetId, where.version, etag, where.queryDescriptor)
+      : null;
+  return settle(result, query, etag, "rewrite", memoKey);
 }
 
 /**
@@ -347,6 +634,7 @@ class EdgeCopyWriter {
     etag: string,
     private readonly stallMs: number,
     private readonly waitUntil: ((work: Promise<unknown>) => void) | undefined,
+    validatedAtMs: number,
   ) {
     const body = new ReadableStream<Uint8Array>(
       {
@@ -367,6 +655,7 @@ class EdgeCopyWriter {
         "Content-Type": "application/json",
         "Cache-Control": `max-age=${MANIFEST_CACHE_TTL_SECONDS}`,
         ETag: etag,
+        [VALIDATED_AT_HEADER]: String(validatedAtMs),
       },
     });
     this.putSettled = (async () => {

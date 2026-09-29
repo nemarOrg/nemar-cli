@@ -1179,7 +1179,12 @@ describe("the route: the gate, then the bytes", () => {
         expect(header).not.toBeNull();
         const out: Record<string, number> = {};
         for (const part of (header as string).split(", ")) {
-          const m = part.match(/^(gate|manifest|cache|upstream);dur=(\d+(?:\.\d+)?)$/);
+          // `manifest` alone may carry a trailing `;desc="..."` naming which
+          // trust-window tier answered it (#1494 amendment); the other
+          // stages never do.
+          const m = part.match(
+            /^(gate|manifest|cache|upstream);dur=(\d+(?:\.\d+)?)(?:;desc="\w+")?$/,
+          );
           expect(m).not.toBeNull();
           if (m) out[m[1]] = Number(m[2]);
         }

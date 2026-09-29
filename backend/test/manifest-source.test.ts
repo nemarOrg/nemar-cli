@@ -15,7 +15,19 @@
  *  - a copy that cannot be read back whole never decides anything: S3 does;
  *  - a body that fails to scan, or breaks off, is never stored;
  *  - a cache that stops reading, stalls, or throws costs the request at
- *    most a bounded delay, never the answer and never the memory bound.
+ *    most a bounded delay, never the answer and never the memory bound;
+ *  - within the trust window (#1494 amendment) a read costs no S3 traffic at
+ *    all, a rewrite during the window is still visible once the window
+ *    expires and never later, and the per-isolate answer memo skips even the
+ *    scan for a query this isolate has already run -- bounded by an LRU byte
+ *    cap so it cannot grow with the manifest (`manifest-answer-memo.ts`).
+ *
+ * Tests in this file that predate the trust window and want "every use
+ * revalidates" literally (the original ADR 0072 behavior) inject
+ * `advancingClock()` so successive reads are always far enough apart in the
+ * injected clock to fall outside the window; tests below that want the
+ * window itself use the default clock (real, but reads in one test run in
+ * microseconds, well inside 60s).
  */
 
 import { heapStats } from "bun:jsc";
@@ -24,14 +36,22 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveFile } from "../src/services/data-router";
 import type { VersionManifest } from "../src/services/manifest";
-import { type ManifestQuery, ResolvePathQuery } from "../src/services/manifest-queries";
+import {
+  EntriesQuery,
+  type ManifestQuery,
+  ResolvePathQuery,
+} from "../src/services/manifest-queries";
 import {
   CACHE_WRITE_MAX_LAG_BYTES,
+  MANIFEST_TRUST_WINDOW_MS,
   type ManifestCache,
   type ManifestSource,
+  manifestAnswerMemoStats,
   manifestCacheKey,
   readManifest,
+  rememberManifestAnswer,
   resetEdgeCopyNotices,
+  resetManifestAnswerMemo,
 } from "../src/services/manifest-source";
 import { DrainingCache, InMemoryCache, StalledCache } from "./helpers/cache";
 import { LARGE_MANIFEST_TEST_TIMEOUT_MS, largeManifestText } from "./helpers/large-manifest";
@@ -60,6 +80,7 @@ afterAll(() => {
 beforeEach(() => {
   s3.objects.clear();
   s3.log.length = 0;
+  resetManifestAnswerMemo();
 });
 
 function source(cache: ManifestCache | null, extra: Partial<ManifestSource> = {}): ManifestSource {
@@ -77,11 +98,63 @@ function source(cache: ManifestCache | null, extra: Partial<ManifestSource> = {}
   };
 }
 
-/** Resolve one path and return the answer, or the non-ok verdict's kind. */
-async function resolve(src: ManifestSource, raw: string, version = VERSION) {
-  const read = await readManifest(src, ID, version, () => new ResolvePathQuery(raw));
+/**
+ * A clock that jumps forward by more than the trust window on every read, so
+ * a test built around "every use revalidates" (true before the #1494
+ * amendment, still true once a read is far enough outside the window) keeps
+ * meaning what it says instead of the window silently absorbing a repeat
+ * read the test means to exercise. Starts at an arbitrary large value so
+ * `validatedAtMs - MANIFEST_TRUST_WINDOW_MS` never goes negative.
+ */
+function advancingClock(stepMs = MANIFEST_TRUST_WINDOW_MS + 1_000): () => number {
+  let now = MANIFEST_TRUST_WINDOW_MS * 10;
+  return () => {
+    now += stepMs;
+    return now;
+  };
+}
+
+/** Resolve one path and return the answer, or the non-ok verdict's kind.
+ *  `queryDescriptor`, when given, opts the read into the per-isolate memo,
+ *  exactly like a real call site in `routes/data.ts` would. */
+async function resolve(
+  src: ManifestSource,
+  raw: string,
+  version = VERSION,
+  queryDescriptor?: string,
+) {
+  const read = await readManifest(
+    src,
+    ID,
+    version,
+    () => new ResolvePathQuery(raw),
+    queryDescriptor,
+  );
   if (read.kind !== "ok") return read.kind;
-  return read.query.finish(read.header);
+  const answer = read.query.finish(read.header);
+  if (read.memoKey !== null) rememberManifestAnswer(read.memoKey, read.header, answer);
+  return answer;
+}
+
+/** Like {@link resolve}, but returns the full `ManifestRead.ok` result (minus
+ *  the query, already finished) so a test can inspect `source`/`memoKey`. */
+async function resolveWithSource(
+  src: ManifestSource,
+  raw: string,
+  version = VERSION,
+  queryDescriptor?: string,
+) {
+  const read = await readManifest(
+    src,
+    ID,
+    version,
+    () => new ResolvePathQuery(raw),
+    queryDescriptor,
+  );
+  if (read.kind !== "ok") throw new Error(`expected ok, got ${read.kind}`);
+  const answer = read.query.finish(read.header);
+  if (read.memoKey !== null) rememberManifestAnswer(read.memoKey, read.header, answer);
+  return { answer, source: read.source };
 }
 
 const traffic = () =>
@@ -103,11 +176,11 @@ describe("without a cache", () => {
   });
 });
 
-describe("the edge copy is revalidated on every use", () => {
+describe("the edge copy is revalidated on every use outside the trust window", () => {
   test("a miss stores the body with its ETag; a hit costs a bodiless 304", async () => {
     const etag = s3.put(OBJECT, FIXTURE_TEXT);
     const cache = new DrainingCache();
-    const src = source(cache);
+    const src = source(cache, { now: advancingClock() });
 
     expect(await resolve(src, "sub-001/eeg")).toEqual(resolveFile(FIXTURE, "sub-001/eeg"));
     const stored = cache.store.get(manifestCacheKey(ORIGIN, ID, VERSION));
@@ -123,7 +196,7 @@ describe("the edge copy is revalidated on every use", () => {
 
   test("a rewritten manifest is read fresh, never served from the old copy", async () => {
     const cache = new DrainingCache();
-    const src = source(cache);
+    const src = source(cache, { now: advancingClock() });
     s3.put(OBJECT, FIXTURE_TEXT);
     expect(await resolve(src, "participants.tsv")).toMatchObject({ kind: "file" });
 
@@ -149,7 +222,7 @@ describe("the edge copy is revalidated on every use", () => {
 
   test("a deleted manifest is absent even with a copy in the cache", async () => {
     const cache = new DrainingCache();
-    const src = source(cache);
+    const src = source(cache, { now: advancingClock() });
     s3.put(OBJECT, FIXTURE_TEXT);
     await resolve(src, "");
     s3.remove(OBJECT);
@@ -159,7 +232,7 @@ describe("the edge copy is revalidated on every use", () => {
 
   test("a private manifest goes through the signed fallback, both times", async () => {
     const cache = new DrainingCache();
-    const src = source(cache);
+    const src = source(cache, { now: advancingClock() });
     s3.put(OBJECT, FIXTURE_TEXT, { private: true });
     expect(await resolve(src, "sub-002")).toEqual(resolveFile(FIXTURE, "sub-002"));
     expect(await resolve(src, "sub-002")).toEqual(resolveFile(FIXTURE, "sub-002"));
@@ -172,6 +245,219 @@ describe("the edge copy is revalidated on every use", () => {
     expect(manifestCacheKey(ORIGIN, ID, "1.1.1")).toBe(key);
     expect(manifestCacheKey(ORIGIN, "nm000133", VERSION)).not.toBe(key);
     expect(manifestCacheKey(ORIGIN, ID, "v1.1.0")).not.toBe(key);
+  });
+});
+
+describe("the trust window (#1494 amendment)", () => {
+  test("within the window, a repeat read for a different path costs no S3 traffic", async () => {
+    s3.put(OBJECT, FIXTURE_TEXT);
+    const cache = new DrainingCache();
+    const src = source(cache); // default (real, fast) clock: everything below is within the window.
+
+    const first = await resolveWithSource(src, "sub-001/eeg");
+    expect(first.source).toBe("rewrite"); // cold: no cache yet, fetched fresh from S3.
+    expect(first.answer).toEqual(resolveFile(FIXTURE, "sub-001/eeg"));
+
+    for (const raw of ["", "participants.tsv", "nope"]) {
+      const read = await resolveWithSource(src, raw);
+      expect(read.source).toBe("fresh");
+      expect(read.answer).toEqual(resolveFile(FIXTURE, raw));
+    }
+    // Exactly the one store; not one conditional GET for any of the four reads.
+    expect(traffic()).toEqual(["200"]);
+  });
+
+  test("a rewrite during the window is invisible until the window expires, never later", async () => {
+    const cache = new DrainingCache();
+    let now = 0;
+    const src = source(cache, { now: () => now });
+    s3.put(OBJECT, FIXTURE_TEXT);
+    expect(await resolve(src, "participants.tsv")).toMatchObject({ kind: "file" });
+
+    const rewritten: VersionManifest = {
+      ...FIXTURE,
+      files: Object.fromEntries(
+        Object.entries(FIXTURE.files).filter(([path]) => path !== "participants.tsv"),
+      ),
+    };
+    s3.put(OBJECT, JSON.stringify(rewritten, null, 2));
+
+    // Still inside the window: the rewrite already happened on S3, but this
+    // read must not know that yet -- that is the staleness bound the window
+    // exists to accept in exchange for skipping the round trip.
+    now = MANIFEST_TRUST_WINDOW_MS - 1;
+    expect(await resolve(src, "participants.tsv")).toMatchObject({ kind: "file" });
+    expect(traffic()).toEqual(["200"]);
+
+    // The window has now passed: the very next read must see the rewrite,
+    // not some later one. S3 answers 200 (a real content change, so a new
+    // ETag), not 304 -- the conditional GET still only cost one request.
+    now = MANIFEST_TRUST_WINDOW_MS + 1;
+    expect(await resolve(src, "participants.tsv")).toEqual({ kind: "not_found" });
+    expect(traffic()).toEqual(["200", "INM 200"]);
+  });
+
+  test("revalidating after the window restamps the copy, starting a new window", async () => {
+    const cache = new DrainingCache();
+    let now = 0;
+    const src = source(cache, { now: () => now });
+    s3.put(OBJECT, FIXTURE_TEXT);
+    expect(await resolveWithSource(src, "sub-001")).toMatchObject({ source: "rewrite" });
+
+    now = MANIFEST_TRUST_WINDOW_MS + 1;
+    const revalidated = await resolveWithSource(src, "");
+    expect(revalidated.source).toBe("revalidated");
+    expect(traffic()).toEqual(["200", "INM 304"]);
+    const stored = cache.store.get(manifestCacheKey(ORIGIN, ID, VERSION));
+    expect(stored?.headers.get("X-Nemar-Manifest-Validated-At")).toBe(String(now));
+
+    // A new window, measured from the restamp -- not from the original store.
+    now += MANIFEST_TRUST_WINDOW_MS - 1;
+    const stillFresh = await resolveWithSource(src, "participants.tsv");
+    expect(stillFresh.source).toBe("fresh");
+    expect(traffic()).toEqual(["200", "INM 304"]);
+  });
+
+  test("a copy stored before this header existed revalidates on its very next use", async () => {
+    const etag = s3.put(OBJECT, FIXTURE_TEXT);
+    const cache = new DrainingCache();
+    cache.store.set(manifestCacheKey(ORIGIN, ID, VERSION), {
+      body: new TextEncoder().encode(FIXTURE_TEXT),
+      status: 200,
+      headers: new Headers({ ETag: etag }), // no validated-at header at all
+    });
+    expect(await resolveWithSource(source(cache), "sub-001")).toMatchObject({
+      source: "revalidated",
+    });
+    expect(traffic()).toEqual(["INM 304"]);
+  });
+});
+
+describe("the per-isolate answer memo (#1494 amendment)", () => {
+  test("a repeated identical query is answered without a second scan", async () => {
+    s3.put(OBJECT, FIXTURE_TEXT);
+    const cache = new DrainingCache();
+    const src = source(cache);
+    let scans = 0;
+    const countedQuery = (raw: string) => {
+      const inner = new ResolvePathQuery(raw);
+      const query: ManifestQuery<ReturnType<ResolvePathQuery["finish"]>> = {
+        reset: () => inner.reset(),
+        key: (p) => inner.key(p),
+        value: (p, v) => inner.value(p, v),
+        finish: (h) => {
+          scans++;
+          return inner.finish(h);
+        },
+      };
+      return query;
+    };
+
+    const first = await readManifest(
+      src,
+      ID,
+      VERSION,
+      () => countedQuery("participants.tsv"),
+      "resolve:/participants.tsv",
+    );
+    if (first.kind !== "ok") throw new Error(first.kind);
+    const answer1 = first.query.finish(first.header);
+    expect(first.memoKey).not.toBeNull();
+    rememberManifestAnswer(first.memoKey as string, first.header, answer1);
+    expect(scans).toBe(1);
+
+    const second = await readManifest(
+      src,
+      ID,
+      VERSION,
+      () => countedQuery("participants.tsv"),
+      "resolve:/participants.tsv",
+    );
+    if (second.kind !== "ok") throw new Error(second.kind);
+    const answer2 = second.query.finish(second.header);
+    expect(second.source).toBe("memo");
+    expect(second.memoKey).toBeNull();
+    expect(answer2).toEqual(answer1);
+    // The factory ran again (readManifest always calls `makeQuery`, cheaply --
+    // constructing a `ResolvePathQuery` does no I/O), but `finish` -- the
+    // expensive, scan-shaped step this memo exists to skip -- did not.
+    expect(scans).toBe(1);
+    expect(traffic()).toEqual(["200"]);
+  });
+
+  test("a different query for the same manifest is a memo miss but not an S3 hit", async () => {
+    s3.put(OBJECT, FIXTURE_TEXT);
+    const src = source(new DrainingCache());
+    expect(await resolve(src, "sub-001", VERSION, "resolve:/sub-001")).toEqual(
+      resolveFile(FIXTURE, "sub-001"),
+    );
+    expect(await resolve(src, "sub-002", VERSION, "resolve:/sub-002")).toEqual(
+      resolveFile(FIXTURE, "sub-002"),
+    );
+    // Different descriptor -> different memo key -> both scanned, neither an
+    // S3 round trip (still within the trust window).
+    expect(traffic()).toEqual(["200"]);
+  });
+
+  test("a manifest rewrite is not served from the old memo entry", async () => {
+    let now = 0;
+    const src = source(new DrainingCache(), { now: () => now });
+    s3.put(OBJECT, FIXTURE_TEXT);
+    expect(
+      await resolve(src, "participants.tsv", VERSION, "resolve:/participants.tsv"),
+    ).toMatchObject({ kind: "file" });
+
+    now = MANIFEST_TRUST_WINDOW_MS + 1;
+    const rewritten: VersionManifest = {
+      ...FIXTURE,
+      files: Object.fromEntries(
+        Object.entries(FIXTURE.files).filter(([path]) => path !== "participants.tsv"),
+      ),
+    };
+    s3.put(OBJECT, JSON.stringify(rewritten, null, 2));
+    // New ETag -> a different memo key -> the memo cannot answer this from
+    // the old entry, so the read goes all the way to `not_found`, not to a
+    // stale "file" answer.
+    expect(await resolve(src, "participants.tsv", VERSION, "resolve:/participants.tsv")).toEqual({
+      kind: "not_found",
+    });
+  });
+
+  test("an oversized answer is never memoized, but is still answered", async () => {
+    resetManifestAnswerMemo();
+    const text = largeManifestText({ subjects: 30, runsPerSession: 50 });
+    s3.put(OBJECT, text);
+    const src = source(new DrainingCache());
+    // The whole-manifest EntriesQuery (manifest.json's own query): thousands
+    // of entries, serialized well past MANIFEST_ANSWER_MEMO_CAP_BYTES * 0.5.
+    const read = await readManifest(
+      src,
+      ID,
+      VERSION,
+      () => new EntriesQuery(1_000_000),
+      "entries:1000000",
+    );
+    if (read.kind !== "ok") throw new Error(read.kind);
+    const answer = read.query.finish(read.header);
+    expect(answer.kind).toBe("entries");
+    expect(read.memoKey).not.toBeNull();
+    rememberManifestAnswer(read.memoKey as string, read.header, answer);
+    expect(manifestAnswerMemoStats().entries).toBe(0);
+  });
+
+  test("many small answers stay under the byte cap via LRU eviction", async () => {
+    resetManifestAnswerMemo();
+    s3.put(OBJECT, FIXTURE_TEXT);
+    const src = source(new DrainingCache());
+    const paths = Object.keys(FIXTURE.files);
+    expect(paths.length).toBeGreaterThan(5);
+    for (const path of paths) {
+      await resolve(src, path, VERSION, `resolve:/${path}`);
+    }
+    const stats = manifestAnswerMemoStats();
+    expect(stats.entries).toBeGreaterThan(0);
+    expect(stats.entries).toBeLessThanOrEqual(paths.length);
+    expect(stats.bytes).toBeLessThanOrEqual(4 * 1024 * 1024);
   });
 });
 
@@ -203,7 +489,7 @@ describe("a copy that cannot be read back never decides", () => {
     const parsed = JSON.parse(text) as VersionManifest;
     s3.put(OBJECT, text);
     const cache = new InMemoryCache();
-    const src = source(cache);
+    const src = source(cache, { now: advancingClock() });
     expect(await resolve(src, "sub-004")).toEqual(resolveFile(parsed, "sub-004"));
     expect(await resolve(src, "sub-004")).toEqual(resolveFile(parsed, "sub-004"));
     expect(traffic()).toEqual(["200", "INM 304", "200"]);
@@ -212,7 +498,7 @@ describe("a copy that cannot be read back never decides", () => {
   test("below the lag cap, even a cache that never reads ends up with a whole copy", async () => {
     s3.put(OBJECT, FIXTURE_TEXT);
     const cache = new InMemoryCache();
-    const src = source(cache);
+    const src = source(cache, { now: advancingClock() });
     expect(await resolve(src, "sub-004")).toEqual(resolveFile(FIXTURE, "sub-004"));
     expect(await resolve(src, "sub-004")).toEqual(resolveFile(FIXTURE, "sub-004"));
     expect(traffic()).toEqual(["200", "INM 304"]);
@@ -312,7 +598,7 @@ describe("the cache write never holds an answer back, and says why it failed", (
   test("the first store and the first 304 answer are announced once per isolate", async () => {
     s3.put(OBJECT, FIXTURE_TEXT);
     resetEdgeCopyNotices();
-    const src = source(new DrainingCache());
+    const src = source(new DrainingCache(), { now: advancingClock() });
     const first = await capturingLogs(() => resolve(src, "sub-001"));
     const second = await capturingLogs(() => resolve(src, "sub-001"));
     const third = await capturingLogs(() => resolve(src, "sub-001"));
