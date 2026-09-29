@@ -8434,6 +8434,59 @@ class TestDuplicateLabelsThroughConvertOne(unittest.TestCase):
             for ch in root[g].attrs["channels"]
         }
 
+    def test_every_repeated_label_is_served_on_both_exporters(self):
+        # The sidecar names the channels exactly as MNE (and so MNE-BIDS)
+        # suffixes them. Both exporters, because either can take an EDF: the
+        # streaming one above STREAM_EDF_MIN_BYTES, here lowered to 1 byte.
+        saved = generate_zarr.STREAM_EDF_MIN_BYTES
+        self.addCleanup(setattr, generate_zarr, "STREAM_EDF_MIN_BYTES", saved)
+        for path_name, threshold in (("in-memory", saved), ("streaming", 1)):
+            with self.subTest(path_name):
+                generate_zarr.STREAM_EDF_MIN_BYTES = threshold
+                shutil.rmtree(self.synced_dir, ignore_errors=True)
+                result, out = self.convert(CHB_MIT_SUFFIXED)
+                self.assertTrue(result["ok"], result.get("error"))
+                entry = result["entry"]
+
+                # Every channel the file declares, under the suffixed labels,
+                # so the channel-count gate passed with nothing to disclose.
+                self.assertEqual(store_total_channels(entry), len(CHB_MIT_LABELS))
+                self.assertNotIn("channels_tsv_count_mismatch", entry)
+                root = self.synced_store(entry)
+                labels = [
+                    ch["label"]
+                    for g in root.attrs["channel_groups"]
+                    for ch in root[g].attrs["channels"]
+                ]
+                self.assertEqual(labels, CHB_MIT_SUFFIXED)
+
+                # The sidecar reached the suffixed channels: every unit is the
+                # sidecar's V rather than the file's uV, and nothing went unmatched.
+                self.assertEqual(set(self.store_units(entry).values()), {"V"})
+                report = entry["units_report"]
+                self.assertEqual(report["converted"], len(CHB_MIT_LABELS))
+                self.assertEqual(report["unmatched_channels"], 0)
+                self.assertNotIn("names no row", out)
+
+                # biosigIO's record of what it renamed, in the store itself.
+                self.assertEqual(
+                    root.attrs["recording_metadata"]["channel_labels_deduplicated"],
+                    {"--0": "-", "--1": "-", "--2": "-",
+                     "T8-P8-0": "T8-P8", "T8-P8-1": "T8-P8"},
+                )
+
+                index = merge_index(
+                    None, "nm000110", "c" * 40, [entry], [], "2026-09-28T00:00:00Z",
+                    [], [], discovered=[self.PRIMARY],
+                )
+                check_index_invariant(index)
+                validate_document(index, INDEX_SCHEMA_PATH, "index")
+                manifest = merge_manifest(
+                    None, "nm000110", [result["manifest"]], [entry["zarr"]],
+                    "2026-09-28T00:00:00Z",
+                )
+                validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+
     def test_a_sidecar_naming_the_file_label_is_disclosed(self):
         # A sidecar that names the repeat the way the FILE spells it: nothing
         # can tell which row meant which channel, so biosigIO applies neither,
