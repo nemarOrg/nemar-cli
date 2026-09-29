@@ -8570,6 +8570,276 @@ class TestDuplicateLabelsThroughConvertOne(unittest.TestCase):
         self.assertIn("differ only in case", out)
 
 
+def build_edf_family(
+    path: str,
+    signals: list[tuple[str, int]],
+    file_type: int,
+    *,
+    annotations: bool = False,
+    seconds: int = 10,
+) -> str:
+    """Write a REAL EDF/BDF (plain or +) with pyedflib: `signals` is
+    `(label, sample_rate)` per signal, so a mixed-rate file is just unequal
+    rates. With `annotations`, EDF+/BDF+ get an annotation track in the
+    header (pyedflib adds the `EDF Annotations`/`BDF Annotations` signal)."""
+    import numpy as np
+    import pyedflib
+
+    bdf = file_type in (pyedflib.FILETYPE_BDF, pyedflib.FILETYPE_BDFPLUS)
+    dmax, dmin = (8388607, -8388608) if bdf else (32767, -32768)
+    writer = pyedflib.EdfWriter(path, len(signals), file_type=file_type)
+    writer.setSignalHeaders([
+        {
+            "label": label,
+            # A BioSemi Status channel is a trigger word, not a voltage.
+            "dimension": "Boolean" if label == "Status" else "uV",
+            "sample_frequency": rate,
+            "physical_max": dmax if label == "Status" else 3000.0,
+            "physical_min": dmin if label == "Status" else -3000.0,
+            "digital_max": dmax,
+            "digital_min": dmin,
+            "transducer": "",
+            "prefilter": "",
+        }
+        for label, rate in signals
+    ])
+    rng = np.random.default_rng(0)
+    writer.writeSamples([
+        np.zeros(rate * seconds) if label == "Status" else rng.normal(0, 20, rate * seconds)
+        for label, rate in signals
+    ])
+    if annotations:
+        writer.writeAnnotation(1.0, -1, "stimulus")
+        writer.writeAnnotation(4.5, 0.5, "response")
+    writer.close()
+    return path
+
+
+def write_plain_edf(path: str, labels: list[str], rate: int = 128, seconds: int = 4) -> str:
+    """A REAL plain EDF (reserved field empty, so not EDF+), byte for byte per
+    the EDF spec, 1-second data records of int16 zeros. Written by hand
+    because pyedflib will not put the label `EDF Annotations` on an ordinary
+    signal, and some legacy writers did exactly that."""
+    ns = len(labels)
+    fixed = (
+        "0".ljust(8) + "X".ljust(80) + "X".ljust(80) + "01.01.26" + "00.00.00"
+        + str(256 * (ns + 1)).ljust(8) + "".ljust(44) + str(seconds).ljust(8)
+        + "1".ljust(8) + str(ns).ljust(4)
+    )
+    per_signal = (
+        "".join(label.ljust(16) for label in labels)
+        + "".ljust(80) * ns                    # transducer type
+        + "uV".ljust(8) * ns                   # physical dimension
+        + "-3000".ljust(8) * ns                # physical minimum
+        + "3000".ljust(8) * ns                 # physical maximum
+        + "-32768".ljust(8) * ns               # digital minimum
+        + "32767".ljust(8) * ns                # digital maximum
+        + "".ljust(80) * ns                    # prefiltering
+        + str(rate).ljust(8) * ns              # samples per data record
+        + "".ljust(32) * ns                    # reserved
+    )
+    header = (fixed + per_signal).encode("ascii")
+    assert len(header) == 256 * (ns + 1)
+    with open(path, "wb") as fh:
+        fh.write(header)
+        fh.write(b"\x00\x00" * rate * ns * seconds)
+    return path
+
+
+def write_brainvision(vhdr: str, labels: list[str], rate: int = 250, seconds: int = 4) -> list[str]:
+    """A REAL BrainVision triplet (.vhdr/.vmrk/.eeg, multiplexed INT_16), as
+    the format specifies it. Returns the three paths."""
+    stem = os.path.splitext(vhdr)[0]
+    base = os.path.basename(stem)
+    with open(vhdr, "w", encoding="utf-8") as fh:
+        fh.write(
+            "Brain Vision Data Exchange Header File Version 1.0\n"
+            "[Common Infos]\nCodepage=UTF-8\n"
+            f"DataFile={base}.eeg\nMarkerFile={base}.vmrk\n"
+            "DataFormat=BINARY\nDataOrientation=MULTIPLEXED\n"
+            f"NumberOfChannels={len(labels)}\nSamplingInterval={1_000_000 // rate}\n"
+            "[Binary Infos]\nBinaryFormat=INT_16\n[Channel Infos]\n"
+            + "".join(f"Ch{i + 1}={label},,0.1,µV\n" for i, label in enumerate(labels))
+        )
+    with open(stem + ".vmrk", "w", encoding="utf-8") as fh:
+        fh.write(
+            "Brain Vision Data Exchange Marker File, Version 1.0\n"
+            f"[Common Infos]\nCodepage=UTF-8\nDataFile={base}.eeg\n"
+            "[Marker Infos]\nMk1=New Segment,,1,1,0\nMk2=Stimulus,S  1,250,1,0\n"
+        )
+    with open(stem + ".eeg", "wb") as fh:
+        fh.write(b"\x00\x00" * rate * seconds * len(labels))
+    return [vhdr, stem + ".vmrk", stem + ".eeg"]
+
+
+class TestHeaderGateFalseRefusalMatrix(unittest.TestCase):
+    """The always-on header gate must not refuse a COMPLETE store.
+
+    Since the gate reads the file header for every recording, a format whose
+    header counts something the store does not serve as a channel (an
+    annotation track, a trigger channel) would now be refused even with no
+    channels.tsv at all. Each case is a real file, converted by the real
+    biosigio stack through `convert_one` with NO channels.tsv, so the header
+    is the only witness; each must publish, with the store holding at least
+    what the header declares. Also asserted: the store's own
+    `recording_metadata.number_of_signals` (the witness
+    find_collapsed_channel_stores.py reads) never exceeds what it serves.
+    Only `aws s3 sync` is absorbed (it copies the store aside), as in
+    TestDuplicateLabelsThroughConvertOne."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import mne  # noqa: F401
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+            from biosigio import __version__ as biosigio_version
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+        parts = tuple(int(p) for p in biosigio_version.split(".")[:3] if p.isdigit())
+        if parts < (1, 2, 9):
+            raise unittest.SkipTest(f"biosigio {biosigio_version} is below the 1.2.9 floor")
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = os.path.join(self._tmp.name, "repo")
+        self.synced_dir = os.path.join(self._tmp.name, "synced")
+        bindir = os.path.join(self._tmp.name, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write(
+                "#!/bin/sh\n"
+                'if [ "$1" = s3 ] && [ "$2" = sync ]; then\n'
+                f'  mkdir -p "{self.synced_dir}" && cp -R "$3" "{self.synced_dir}/"\n'
+                "fi\nexit 0\n"
+            )
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        path = os.environ["PATH"]
+        os.environ["PATH"] = bindir + os.pathsep + path
+        self.addCleanup(os.environ.__setitem__, "PATH", path)
+        saved_ctx = dict(generate_zarr._CTX)
+        self.addCleanup(lambda: (generate_zarr._CTX.clear(), generate_zarr._CTX.update(saved_ctx)))
+
+    def place(self, rel: str) -> str:
+        path = os.path.join(self.repo, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        return path
+
+    def assert_published_whole(
+        self, primary: str, extra_files: set[str], in_file: int, in_store: int
+    ):
+        head_files = {primary, *extra_files}
+        self.assertFalse(
+            any(p.endswith("_channels.tsv") for p in head_files), "no sidecar: header only"
+        )
+        work = os.path.join(self._tmp.name, "work")
+        os.makedirs(work, exist_ok=True)
+        generate_zarr._init_worker({
+            "repo": self.repo, "bucket": "nemar-test", "dataset_id": "nm000110",
+            "head": "d" * 40, "head_files": head_files, "local": True,
+            "tmp": work, "updated": "2026-09-28T00:00:00Z",
+            "contract_base": "https://zarr.nemar.org", "engine_version": ZARR_ENGINE_VERSION,
+            "dataset_row": None, "provenance_fetch_failed": False,
+            "mem_budget": None, "hard_ceiling": None, "projections": {},
+        })
+        self.assertEqual(
+            file_declared_channel_count(os.path.join(self.repo, primary)), in_file,
+            "the header count this case is about",
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = convert_one(primary)
+        self.assertTrue(result["ok"], result.get("error"))
+        entry = result["entry"]
+        self.assertNotIn("channels_tsv_count_mismatch", entry)
+        self.assertEqual(store_total_channels(entry), in_store)
+        self.assertGreaterEqual(in_store, in_file)
+        with open(
+            os.path.join(self.synced_dir, os.path.basename(entry["zarr"]), "zarr.json"),
+            encoding="utf-8",
+        ) as fh:
+            rec_meta = json.load(fh)["attributes"].get("recording_metadata") or {}
+        witness = rec_meta.get("number_of_signals")
+        if witness is not None:
+            self.assertLessEqual(witness, in_store, "the detector's witness would misfire")
+        return entry
+
+    def test_bdf_with_a_status_channel(self):
+        import pyedflib
+
+        primary = "sub-01/eeg/sub-01_task-rest_eeg.bdf"
+        build_edf_family(
+            self.place(primary), [("Fp1", 256), ("Fp2", 256), ("Status", 256)],
+            pyedflib.FILETYPE_BDF,
+        )
+        self.assert_published_whole(primary, set(), 3, 3)
+
+    def test_edf_plus_with_annotations(self):
+        import pyedflib
+
+        primary = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+        build_edf_family(
+            self.place(primary), [("Fp1", 256), ("Fp2", 256), ("Cz", 256)],
+            pyedflib.FILETYPE_EDFPLUS, annotations=True,
+        )
+        self.assert_published_whole(primary, set(), 3, 3)
+
+    def test_bdf_plus_with_annotations(self):
+        import pyedflib
+
+        primary = "sub-01/eeg/sub-01_task-rest_eeg.bdf"
+        build_edf_family(
+            self.place(primary), [("Fp1", 256), ("Fp2", 256), ("Status", 256)],
+            pyedflib.FILETYPE_BDFPLUS, annotations=True,
+        )
+        self.assert_published_whole(primary, set(), 3, 3)
+
+    def test_mixed_rate_edf(self):
+        # Unequal rates take the converter's `mixed_rate="resample"` path.
+        import pyedflib
+
+        primary = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+        build_edf_family(
+            self.place(primary), [("Fp1", 256), ("Fp2", 256), ("ECG", 128), ("Resp", 32)],
+            pyedflib.FILETYPE_EDFPLUS,
+        )
+        self.assert_published_whole(primary, set(), 4, 4)
+
+    def test_brainvision(self):
+        primary = "sub-01/eeg/sub-01_task-rest_eeg.vhdr"
+        paths = write_brainvision(self.place(primary), ["Fp1", "Fp2", "Cz", "Pz"])
+        rels = {os.path.relpath(p, self.repo) for p in paths}
+        self.assert_published_whole(primary, rels - {primary}, 4, 4)
+
+    def test_fif(self):
+        primary = "sub-01/meg/sub-01_task-rest_meg.fif"
+        build_real_fif(self.place(primary))
+        self.assert_published_whole(primary, set(), len(FIF_CHANNELS), len(FIF_CHANNELS))
+
+    def test_split_fif(self):
+        # Three `split-NN` files (see TestFifDeclaredChannelCount for the cost).
+        build_real_fif(
+            self.place("sub-01/meg/sub-01_task-rest_meg.fif"),
+            rate=1000.0, seconds=120, split_size="2MB", split_naming="bids",
+        )
+        meg = os.path.join(self.repo, "sub-01", "meg")
+        splits = sorted(f"sub-01/meg/{n}" for n in os.listdir(meg) if "_split-" in n)
+        self.assertGreaterEqual(len(splits), 2)
+        entry = self.assert_published_whole(
+            splits[0], set(splits[1:]), len(FIF_CHANNELS), len(FIF_CHANNELS)
+        )
+        self.assertEqual(entry["path"], splits[0])
+
+    def test_plain_edf_whose_header_under_counts(self):
+        # A plain EDF (not EDF+) with an ordinary signal that happens to be
+        # LABELLED `EDF Annotations`. The header count drops that label, so it
+        # under-counts (2 of 3); the importer serves all three. A store above
+        # the header is not a truncation and must publish.
+        primary = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+        write_plain_edf(self.place(primary), ["Fp1", "Fp2", "EDF Annotations"])
+        self.assert_published_whole(primary, set(), 2, 3)
+
+
 class TestMainRoutesSingleRecordingsThroughThePool(unittest.TestCase):
     """#1483: a single-recording run with --jobs > 1 converts in a pool worker,
     the only path with the serial memory retry; --jobs 1 stays in-process.
