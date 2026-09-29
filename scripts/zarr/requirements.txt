@@ -160,8 +160,9 @@
 # <1.2.11 is a CAP, not a floor, raised deliberately per release: a biosigIO
 # patch release has changed what a store contains twice in a row (1.2.9,
 # 1.2.10), so the next one is read before the converter takes it. Raise it in
-# three places at once: here, `BIOSIGIO_SPEC` (and `BIOSIGIO_FLOOR` for the
-# floor) in hallu-zarr.sh, and test_hallu_zarr_config.py.
+# three places at once: here, `BIOSIGIO_SPEC`, `BIOSIGIO_FLOOR` and `BIOSIGIO_CAP`
+# in hallu-zarr.sh (setup() refuses an installed biosigIO outside [floor, cap)
+# after install, and any pre-release), and test_hallu_zarr_config.py.
 biosigio[zarr,meg,mef3,hdf5]>=1.2.10,<1.2.11
 
 # Draft 2020-12 validator for the converter's own pre-upload self-check: the index
