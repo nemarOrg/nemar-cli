@@ -2788,13 +2788,17 @@ def file_declared_channel_count(primary_local: str) -> int | None:
     `mne.io.read_info`, which parses the header tags and never loads data. For
     a split recording that is the chain head's info, which every split shares.
     on000117's MEG sidecars list CHPI and EEG channels the FIF never had.
+    EEGLAB `.set` (classic MAT v5/v7 and MATLAB v7.3): `nbchan`, read without
+    the sample matrix, and only where it provably equals the rows biosigIO
+    serves (`_eeglab_declared_channel_count`). on003645's EEG recordings hold
+    75 channels under a subject-level channels.tsv listing its 404 MEG ones.
 
     None leaves the gate on channels.tsv alone -- exactly its behavior before
     this existed. For a format that normally HAS a readable header here (the
-    three above) a None from an unreadable one is not silent: it is worth a line
+    four above) a None from an unreadable one is not silent: it is worth a line
     in the log, because the recording the converter just read but whose header
     it cannot is the one the header gate then does not cover. Formats with no
-    cheap header (EEGLAB `.set`, CTF, MEF3, ...) return None quietly. A declared
+    cheap header (CTF, MEF3, 4D/BTi, KIT, ...) return None quietly. A declared
     count of zero or less is unreadable too, not a recording with no channels.
     """
     if primary_local.lower().endswith((".fif", ".fif.gz")):
@@ -2804,6 +2808,8 @@ def file_declared_channel_count(primary_local: str) -> int | None:
         return _edf_declared_channel_count(primary_local)
     if ext == ".vhdr":
         return _vhdr_declared_channel_count(primary_local)
+    if ext == ".set":
+        return _eeglab_declared_channel_count(primary_local)
     return None
 
 
@@ -2921,6 +2927,299 @@ def _fif_declared_channel_count(path: str) -> int | None:
         )
         return None
     return nchan if nchan > 0 else None
+
+
+# An EEGLAB `nbchan` above this is not a channel count but a corrupt field. The
+# densest real recordings are a few thousand channels (high-density iEEG,
+# probes); a count that could never be real must not refuse a faithful store.
+EEGLAB_MAX_NBCHAN = 100_000
+
+# The leading text of a MATLAB v7.3 (HDF5) file, as biosigIO's `_is_matlab_v73`
+# sniffs it; a classic v5/v7 file opens with "MATLAB 5.0 MAT-file" instead.
+_MATLAB_V73_MAGIC = b"MATLAB 7.3 MAT-file"
+
+
+def _eeglab_declared_channel_count(path: str) -> int | None:
+    """`nbchan` from an EEGLAB `.set`, read from its header alone, or None.
+
+    Read the way biosigIO's importer tells the two containers apart (the MAT
+    header text): a MATLAB v7.3 `.set` through h5py, a classic MAT v5/v7 `.set`
+    through `_mat5_eeglab_header`, a bounded streaming parse that stops at the
+    fields it needs and never materializes the sample matrix. `scipy.io.loadmat`
+    cannot do that for the common layout: `variable_names` selects top-level
+    variables, and a real EEGLAB export saves the whole dataset as ONE variable,
+    `EEG`, whose fields include `data`. Measured on a 100 MB inline-data `.set`:
+    `loadmat(variable_names=["EEG"])` peaked at 103 MB traced.
+
+    The count is returned only where it provably equals what biosigIO serves.
+    biosigIO keeps every row of the data matrix, whatever `nbchan` says (it
+    warns and uses the matrix); chanlocs only names rows, so a short or long
+    chanlocs never changes the count. So:
+
+    - samples in a `.fdt` (`EEG.data` is the file name): biosigIO reshapes the
+      `.fdt` to `nbchan` rows, and refuses it when its size disagrees, so the
+      store holds exactly `nbchan` channels. Epoched files flatten to the same
+      rows.
+    - samples inline: the matrix's own row count (from its header, in MATLAB
+      orientation; for v7.3 by biosigIO's transpose rule) must equal `nbchan`.
+      A disagreement returns None: `nbchan` above the rows would refuse a
+      faithful store, so the header vouches for nothing there.
+
+    Both layouts are read: fields wrapped in an `EEG` struct (the first element
+    of a struct array, as biosigIO takes it), or saved flat at the top level; an
+    `EEG` struct wins when both exist, as it does in the importer.
+    """
+    try:
+        with open(path, "rb") as fh:
+            v73 = fh.read(len(_MATLAB_V73_MAGIC)) == _MATLAB_V73_MAGIC
+        fields = _h5_eeglab_header(path) if v73 else _mat5_eeglab_header(path)
+    except MemoryError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - any header failure means "unknown"
+        _warn_unreadable_header("EEGLAB", path, f"{type(exc).__name__}: {exc}")
+        return None
+    nbchan = fields.get("nbchan")
+    if nbchan is None or not math.isfinite(nbchan) or nbchan != int(nbchan):
+        _warn_unreadable_header("EEGLAB", path, f"nbchan is {nbchan!r}")
+        return None
+    count = int(nbchan)
+    if not 0 < count <= EEGLAB_MAX_NBCHAN:
+        _warn_unreadable_header("EEGLAB", path, f"nbchan is {count}")
+        return None
+    rows = fields.get("data")
+    if rows == "fdt":
+        return count
+    if rows is None:
+        _warn_unreadable_header("EEGLAB", path, "it has no readable data matrix")
+        return None
+    if rows != count:
+        _warn_unreadable_header(
+            "EEGLAB", path,
+            f"nbchan {count} disagrees with the {rows}-row data matrix biosigIO serves",
+        )
+        return None
+    return count
+
+
+def _h5_eeglab_header(path: str) -> dict[str, Any]:
+    """`nbchan` and the data matrix's shape from a MATLAB v7.3 `.set`, through
+    h5py's metadata alone (`Dataset.shape` reads no samples). Layout and
+    orientation follow biosigIO's `_load_v73`: an `EEG` group, else the flat
+    root when it carries nbchan/srate/pnts/data; h5py hands back MATLAB's
+    (nbchan, pnts) transposed, and a 2-D matrix already channel-major is kept."""
+    import h5py  # type: ignore[import-not-found]  # biosigIO's [hdf5] extra
+    import numpy as np
+
+    with h5py.File(path, "r") as f:
+        if "EEG" in f:
+            eeg = f["EEG"]
+        elif all(key in f for key in ("nbchan", "srate", "pnts", "data")):
+            eeg = f
+        else:
+            raise ValueError("no 'EEG' group and no flat nbchan/srate/pnts/data")
+        out: dict[str, Any] = {"nbchan": None, "data": None}
+        if "nbchan" in eeg:
+            value = np.asarray(eeg["nbchan"][()]).ravel()
+            if value.size == 1:
+                out["nbchan"] = float(value[0])
+        if "data" in eeg and eeg["data"].size:
+            ds = eeg["data"]
+            if ds.dtype.kind != "f":
+                out["data"] = "fdt"  # char codes naming the .fdt
+            elif len(ds.shape) != 2:
+                out["data"] = 1  # biosigIO reshapes it to one row
+            else:
+                a, b = ds.shape
+                nbchan = out["nbchan"]
+                out["data"] = a if (a == nbchan and b != nbchan) else b
+        return out
+
+
+# MAT v5 element types and array classes the header read needs
+# (MathWorks, "MAT-File Format", tables 1-2 and 1-3).
+_MI_INT8, _MI_INT32, _MI_UINT32, _MI_MATRIX, _MI_COMPRESSED = 1, 5, 6, 14, 15
+_MI_NUMERIC = {
+    1: "b", 2: "B", 3: "h", 4: "H", 5: "i", 6: "I", 7: "f", 9: "d", 12: "q", 13: "Q",
+}
+_MX_STRUCT, _MX_CHAR = 2, 4
+_MX_NUMERIC = frozenset(range(6, 16))  # double, single, int8 ... uint64
+
+
+class _MatStream:
+    """Forward-only byte source over a classic MAT file or one zlib-compressed
+    element of it, counting its position so an element can be skipped to its
+    end. Skipping decompresses in bounded chunks and keeps nothing, so memory
+    stays flat whatever the size of the matrix skipped."""
+
+    CHUNK = 1 << 20
+
+    def __init__(self, fh: Any, compressed_bytes: int | None = None) -> None:
+        import zlib
+
+        self.fh = fh
+        self.pos = 0
+        self.left = compressed_bytes
+        self.z = zlib.decompressobj() if compressed_bytes is not None else None
+        self.buf = bytearray()
+
+    def read(self, n: int) -> bytes:
+        if self.z is None:
+            out = self.fh.read(n)
+        else:
+            while len(self.buf) < n:
+                tail = self.z.unconsumed_tail
+                if not tail:
+                    if not self.left:
+                        break
+                    tail = self.fh.read(min(self.left, self.CHUNK))
+                    if not tail:
+                        break
+                    self.left -= len(tail)
+                self.buf += self.z.decompress(tail, max(n - len(self.buf), 1))
+            out, self.buf = bytes(self.buf[:n]), self.buf[n:]
+        if len(out) < n:
+            raise EOFError(f"MAT element ends {n - len(out)} byte(s) early")
+        self.pos += n
+        return out
+
+    def skip(self, n: int) -> None:
+        if self.z is None:
+            self.fh.seek(n, os.SEEK_CUR)
+            self.pos += n
+            return
+        while n > 0:
+            step = min(n, self.CHUNK)
+            self.read(step)
+            n -= step
+
+
+def _mat5_element(src: _MatStream, end: str) -> tuple[int, bytes]:
+    """One whole (small) data element: its type and its bytes, padding
+    consumed. Only for header subelements, never a sample matrix."""
+    import struct
+
+    mtype, nbytes = struct.unpack(end + "II", src.read(8))
+    if mtype >> 16:  # small data element: packed into the tag's 8 bytes
+        return mtype & 0xFFFF, struct.pack(end + "I", nbytes)[: mtype >> 16]
+    if nbytes > 1 << 20:
+        raise ValueError(f"a {nbytes}-byte header subelement")
+    data = src.read(nbytes)
+    src.read(-nbytes % 8)
+    return mtype, data
+
+
+def _mat5_matrix_header(src: _MatStream, end: str) -> tuple[int, list[int], str]:
+    """Array class, dimensions and name of the miMATRIX whose tag was just read."""
+    import struct
+
+    _, flags = _mat5_element(src, end)
+    mclass = struct.unpack(end + "I", flags[:4])[0] & 0xFF
+    _, raw_dims = _mat5_element(src, end)
+    dims = list(struct.unpack(end + f"{len(raw_dims) // 4}i", raw_dims))
+    _, name = _mat5_element(src, end)
+    return mclass, dims, name.decode("latin-1")
+
+
+def _mat5_scalar(src: _MatStream, end: str, mclass: int, dims: list[int]) -> float | None:
+    """The single value of a 1x1 numeric matrix, or None for any other shape."""
+    import struct
+
+    if mclass not in _MX_NUMERIC or math.prod(dims) != 1:
+        return None
+    mtype, data = _mat5_element(src, end)
+    fmt = _MI_NUMERIC.get(mtype)
+    if fmt is None or len(data) < struct.calcsize(fmt):
+        return None
+    return float(struct.unpack(end + fmt, data[: struct.calcsize(fmt)])[0])
+
+
+def _mat5_field(src: _MatStream, end: str, name: str, mclass: int, dims: list[int]) -> Any:
+    """What the header read keeps of one `nbchan` or `data` matrix: nbchan's
+    value; for data, ``"fdt"`` when it is the `.fdt`'s name (a char array), its
+    row count when numeric (MATLAB's (nbchan, pnts[, trials]) order), else None."""
+    if name == "nbchan":
+        return _mat5_scalar(src, end, mclass, dims)
+    if not math.prod(dims):
+        return None
+    if mclass == _MX_CHAR:
+        return "fdt"
+    return dims[0] if mclass in _MX_NUMERIC else None
+
+
+def _mat5_eeglab_header(path: str) -> dict[str, Any]:
+    """``{"nbchan": ..., "data": ...}`` (see `_mat5_field`) from a classic MAT
+    v5/v7 `.set`, reading element headers only.
+
+    Every top-level variable is visited by its header and then skipped by
+    seeking past it, compressed or not. The `EEG` struct is walked field by
+    field: each field's matrix header is read, the field is skipped to its end,
+    and the walk stops once `nbchan` and `data` have both been seen. A field
+    skipped inside a compressed variable is decompressed in bounded chunks and
+    discarded, and `data` is never read past its dimensions. A field in `EEG`
+    wins over a top-level variable of the same name, as in biosigIO's
+    `_normalize_eeglab_dict`.
+    """
+    import struct
+
+    flat: dict[str, Any] = {}
+    wrapped: dict[str, Any] = {}
+    with open(path, "rb") as fh:
+        head = fh.read(128)
+        if len(head) < 128 or head[126:128] not in (b"IM", b"MI"):
+            raise ValueError("not a MAT v5 file (no endian indicator)")
+        end = "<" if head[126:128] == b"IM" else ">"
+        size = os.fstat(fh.fileno()).st_size
+        while fh.tell() < size:
+            raw = fh.read(8)
+            if len(raw) < 8:
+                raise EOFError("truncated variable tag")
+            mtype, nbytes = struct.unpack(end + "II", raw)
+            after = fh.tell() + nbytes + (0 if mtype == _MI_COMPRESSED else -nbytes % 8)
+            if after > size:
+                raise EOFError(f"a variable runs {after - size} byte(s) past the end")
+            src = _MatStream(fh, nbytes if mtype == _MI_COMPRESSED else None)
+            if mtype == _MI_COMPRESSED:
+                mtype, nbytes = struct.unpack(end + "II", src.read(8))
+            if mtype == _MI_MATRIX and nbytes:
+                mclass, dims, name = _mat5_matrix_header(src, end)
+                if name == "EEG" and mclass == _MX_STRUCT and math.prod(dims):
+                    wrapped = _mat5_struct_fields(src, end)
+                elif name in ("nbchan", "data"):
+                    flat[name] = _mat5_field(src, end, name, mclass, dims)
+            fh.seek(after)
+    return {**flat, **wrapped}
+
+
+def _mat5_struct_fields(src: _MatStream, end: str) -> dict[str, Any]:
+    """`nbchan` and `data` from the first element of the struct whose matrix
+    header was just read (biosigIO takes the first of a struct array; MAT v5
+    stores a struct array element by element, fields in order)."""
+    import struct
+
+    _, raw_len = _mat5_element(src, end)
+    name_len = struct.unpack(end + "i", raw_len[:4])[0]
+    _, raw_names = _mat5_element(src, end)
+    if name_len <= 0:
+        return {}
+    names = [
+        raw_names[i:i + name_len].split(b"\x00", 1)[0].decode("latin-1")
+        for i in range(0, len(raw_names), name_len)
+    ]
+    out: dict[str, Any] = {}
+    for name in names:
+        if "nbchan" in out and "data" in out:
+            break
+        mtype, nbytes = struct.unpack(end + "II", src.read(8))
+        if mtype != _MI_MATRIX:
+            raise ValueError(f"struct field {name!r} is element type {mtype}")
+        start = src.pos
+        if name in ("nbchan", "data"):
+            out[name] = None
+            if nbytes:
+                mclass, dims, _ = _mat5_matrix_header(src, end)
+                out[name] = _mat5_field(src, end, name, mclass, dims)
+        src.skip(start + nbytes - src.pos)
+    return out
 
 
 ChannelGateVerdict = Literal["pass", "sidecar_overcount", "truncated"]
