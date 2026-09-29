@@ -103,17 +103,26 @@
 # flight per channel, which is what tripped the per-worker RLIMIT_DATA budget
 # as `recording_memory_exceeded` on on004789. Output is identical, so the engine
 # stamp does not move.
-# >=1.2.9: reads the real-file cases that left datasets stranded on an old (v1)
-# Zarr. EEGLAB v7.3 `.set` with the struct flat at the HDF5 root, or with empty
-# `chanlocs`/`event` fields (biosigio#131); BrainVision headers whose `DataFile=`
-# and `MarkerFile=` still name pre-BIDS-rename files (biosigio#132); repeated
-# EDF/BDF/WFDB channel labels, which used to lose all but one channel and so
-# tripped the channel-count gate, now suffixed as MNE does (biosigio#133); and
-# host I/O errors (EACCES, EIO, ENOSPC, ...) raised as the OSError itself instead
-# of a typed file failure that the queue would treat as permanent (biosigio#139).
-# Stores that already converted are unchanged; a recording that repeats an EDF
-# label gets suffixed channel names when it is reconverted, and its renames are
-# recorded in `recording_metadata.channel_labels_deduplicated`.
+# >=1.2.9: converts real files that failed before. EEGLAB v7.3 `.set` with the
+# struct flat at the HDF5 root, or with empty `chanlocs`/`event` fields
+# (biosigio#131); BrainVision headers whose `DataFile=`/`MarkerFile=` still name
+# pre-BIDS-rename files (biosigio#132); repeated EDF/BDF/WFDB channel labels,
+# which used to overwrite each other and are now suffixed as MNE does
+# (biosigio#133; EEGLAB keeps its own `_2`, `_3` scheme). We observed these as
+# datasets left on an old (v1) Zarr, and the repeated-label EDF case as a
+# `channel_count_mismatch` refusal (nm000110); biosigio's changelog makes
+# neither claim. Host I/O errors (EACCES, EIO, ENOSPC, ...) are now raised as the
+# OSError itself, which the converter records as an uncoded infrastructure
+# failure and retries, instead of a typed file failure (biosigio#139). No
+# nemar-cli caller uses `add_channel`, which now raises on a duplicate label.
+# ZARR_ENGINE_VERSION is deliberately NOT bumped (ADR 0033): this is a bug fix,
+# not something the engine "can now see", and a bump would requeue the whole
+# archive. Stores that already converted are unchanged; the stranded datasets are
+# recovered by a targeted `--dataset` or requeue run, not by the stamp. A
+# recording that repeats an EDF label gets suffixed channel names when it is
+# reconverted, and `recording_metadata` gains `channel_labels_deduplicated`,
+# `brainvision_header_recovered` and `eeglab_fdt_recovered`, each only when it
+# applies.
 biosigio[zarr,meg,mef3,hdf5]>=1.2.9
 
 # Draft 2020-12 validator for the converter's own pre-upload self-check: the index

@@ -191,8 +191,8 @@ def test_test_mode_print_config_defaults(dirs: tuple[Path, Path]) -> None:
     # goes: below 1.2.7 the streaming and in-memory paths disagree about
     # channels.tsv units, which is what gates the engine bump, and below 1.2.8
     # the streaming export rewrites every shard once per channel (#1483), and
-    # below 1.2.9 real EEGLAB v7.3, BrainVision and repeated-label EDF files that
-    # strand a dataset on an old Zarr do not convert.
+    # below 1.2.9 real EEGLAB v7.3 and BrainVision files fail to convert and
+    # EDF files that repeat a channel label lose channels.
     assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.9"
     assert cfg["S3_BUCKET"] == "nemar-dev"
     assert cfg["AWS_PROFILE"] == "nemar-zarr-dev"
