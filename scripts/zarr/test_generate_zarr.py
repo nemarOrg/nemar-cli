@@ -787,6 +787,21 @@ class TestPowerLineFrequencyFor(unittest.TestCase):
             head = {"sub-01/eeg/sub-01_task-rest_eeg.json"}
             self.assertIsNone(power_line_frequency_for(d, rec, head, "HEAD"))
 
+    def test_a_utf8_bom_sidecar_is_honored(self):
+        # Behaviour change (#1527): the strict UTF-8 read kept the BOM, so
+        # json.loads raised and this sidecar was silently skipped (PLF None).
+        # It now parses, and quietly: a UTF-8 BOM is still UTF-8.
+        with tempfile.TemporaryDirectory() as d:
+            rec = "sub-01/eeg/sub-01_task-rest_eeg.set"
+            sidecar = "sub-01/eeg/sub-01_task-rest_eeg.json"
+            os.makedirs(os.path.join(d, "sub-01", "eeg"))
+            with open(os.path.join(d, sidecar), "wb") as fh:
+                fh.write(b"\xef\xbb\xbf" + json.dumps({"PowerLineFrequency": 50}).encode())
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(power_line_frequency_for(d, rec, {sidecar}, "HEAD"), 50.0)
+            self.assertEqual(out.getvalue(), "")
+
     def test_reads_via_git_when_no_working_tree(self):
         # The workflow clones --no-checkout, so the sidecar is only in the git
         # object store, not on disk. Resolution must fall back to `git cat-file`.

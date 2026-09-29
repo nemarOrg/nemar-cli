@@ -2047,6 +2047,16 @@ def _decode_sidecar_text(raw: bytes, path: str) -> str:
     tools actually write (and a superset of latin-1's printable range);
     latin-1 maps every byte, so this always returns.
 
+    Behaviour change for UTF-8 files with a BOM: the strict text-mode read
+    kept the BOM as U+FEFF, so `json.loads` raised ValueError and the JSON
+    callers (PowerLineFrequency, coordsystem, event descriptions) swallowed
+    it and ignored the sidecar. The BOM is now dropped and those sidecars
+    parse, so a rebuilt store for such a dataset can newly carry a power-line
+    frequency, electrode coordinates or event descriptions it lacked before.
+    That is the sidecar's declared content reaching the store, not a new
+    guess; a UTF-8 BOM is still UTF-8, so it draws no warning. (A BOM'd TSV
+    likewise no longer has its first column header spelled `\\ufeffname`.)
+
     The warning is issued once per path per process: an inherited sidecar
     (a top-level `eeg.json`, say) is re-read for every recording it applies
     to, and thousands of identical lines would bury the rest of the log.
