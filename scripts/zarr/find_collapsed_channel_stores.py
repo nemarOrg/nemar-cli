@@ -67,10 +67,14 @@ Usage
 
 Exit status: 0 nothing flagged and every dataset and store checked, 1
 something flagged, 2 nothing flagged but at least one dataset could not be
-checked or at least one store had no witness to check it against. A
-dataset is unchecked when its index could not be read OR when any one of its
-stores could not be (a 429 or 5xx that outlived the retries, a malformed
-group): unchecked is never reported as clean.
+checked, at least one store had no witness to check it against, or (with
+`--all`) the catalog walk was incomplete or failed outright. A dataset is
+unchecked when its index could not be read OR when any one of its stores could
+not be (a 429 or 5xx that outlived the retries, a malformed group): unchecked
+is never reported as clean. The same goes for the catalog: a walk that saw only
+some of its pages checked a subset of the archive, and the report says so in
+`summary.catalog_complete` (always true for explicit `--dataset` ids, which
+walk nothing).
 
 What follows a finding is a re-conversion under biosigio >= 1.2.9, which the
 report spells out per dataset (`requeue`): on the conversion host,
@@ -277,10 +281,14 @@ def is_unchecked(result: dict) -> bool:
     return bool(result.get("error")) or bool(result.get("unreadable_stores"))
 
 
-def summarize(results: list[dict]) -> dict:
+def summarize(results: list[dict], catalog_complete: bool = True) -> dict:
+    """`catalog_complete` is False when `--all` did not see the whole catalog:
+    the datasets in `results` are then a subset of the archive, and a run that
+    found nothing in them has not shown the archive clean."""
     flagged = [r for r in results if r.get("findings")]
     unchecked = [r for r in results if is_unchecked(r)]
     return {
+        "catalog_complete": catalog_complete,
         "datasets_checked": len(results) - len(unchecked),
         "datasets_unchecked": len(unchecked),
         "datasets_flagged": len(flagged),
@@ -297,11 +305,18 @@ def summarize(results: list[dict]) -> dict:
 
 
 def exit_status(summary: dict) -> int:
-    """1 when anything is flagged; else 2 when any dataset went unchecked or
-    any store had no witness; else 0."""
+    """1 when anything is flagged; else 2 when any dataset went unchecked, any
+    store had no witness, or the catalog walk behind `--all` was incomplete;
+    else 0."""
     if summary["stores_flagged"]:
         return 1
-    return 2 if summary["datasets_unchecked"] or summary["stores_unwitnessed"] else 0
+    if (
+        summary["datasets_unchecked"]
+        or summary["stores_unwitnessed"]
+        or not summary.get("catalog_complete", True)
+    ):
+        return 2
+    return 0
 
 
 # --- I/O ---------------------------------------------------------------------
@@ -539,14 +554,20 @@ def check_dataset(
     return result
 
 
-def list_public_dataset_ids(api_base: str) -> list[str]:
-    """Every public catalog id, via the same paginated walk the queue uses."""
+def list_public_dataset_ids(api_base: str) -> tuple[list[str], bool]:
+    """Every public catalog id, via the same paginated walk the queue uses, and
+    whether the walk saw every page. An incomplete walk still returns the ids
+    it saw: they are worth checking, but the caller must not call the run clean."""
     from zarr_queue import fetch_public_catalog_rows  # type: ignore[import-not-found]
 
     rows, complete = fetch_public_catalog_rows(api_base)
     if not complete:
-        print("::warning::the catalog walk was incomplete; --all covers a subset", flush=True)
-    return sorted({str(r["dataset_id"]) for r in rows if r.get("dataset_id")})
+        print(
+            "::warning::the catalog walk was incomplete; --all covers a subset, "
+            "so the run cannot exit 0",
+            flush=True,
+        )
+    return sorted({str(r["dataset_id"]) for r in rows if r.get("dataset_id")}), complete
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -587,8 +608,27 @@ def main(argv: list[str] | None = None) -> int:
     # stdout carries the JSON report and nothing else. The converter helpers
     # this reuses (`_decode_sidecar_text`, the catalog walk) print their
     # `::warning::` lines to stdout, so send those to stderr with the progress.
+    catalog_complete = True
+    catalog_error: str | None = None
     with contextlib.redirect_stdout(sys.stderr):
-        ids = list_public_dataset_ids(args.api_base) if args.all else list(dict.fromkeys(args.dataset))
+        if args.all:
+            try:
+                ids, catalog_complete = list_public_dataset_ids(args.api_base)
+            except (OSError, ValueError, TypeError, AttributeError, http.client.HTTPException) as exc:
+                # The walk raises on any page that fails (HTTPError and URLError
+                # are OSErrors; a body that is not the catalog's JSON is a
+                # ValueError or an AttributeError). Nothing was checked, and
+                # that is "unchecked" (exit 2), not the traceback's exit 1, which
+                # reads as "something was flagged".
+                ids, catalog_complete = [], False
+                catalog_error = f"{type(exc).__name__}: {exc}"
+                print(
+                    f"::error::could not read the catalog from {args.api_base}: "
+                    f"{catalog_error}; nothing was checked",
+                    file=sys.stderr, flush=True,
+                )
+        else:
+            ids = list(dict.fromkeys(args.dataset))
 
         results = []
         for i, dataset_id in enumerate(ids):
@@ -612,8 +652,10 @@ def main(argv: list[str] | None = None) -> int:
         "zarr_base": args.zarr_base,
         "findings": [f for r in results for f in r["findings"]],
         "datasets": results,
-        "summary": summarize(results),
+        "summary": summarize(results, catalog_complete),
     }
+    if catalog_error is not None:
+        report["catalog_error"] = catalog_error
     text = json.dumps(report, indent=2)
     print(text)
     if args.out:

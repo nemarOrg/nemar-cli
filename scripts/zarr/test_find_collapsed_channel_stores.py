@@ -25,6 +25,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
 from pathlib import Path
 from typing import ClassVar
 
@@ -49,10 +50,31 @@ class _Quiet(http.server.SimpleHTTPRequestHandler):
 
     faults: ClassVar[dict[str, list]] = {}
     hits: ClassVar[dict[str, int]] = {}
+    # The catalog, paged: `{"total": N, <offset>: [row, ...] or a status, ...}`.
+    # An offset with no page answers an empty page, which is how the real API
+    # ends a walk that has run out of rows; an int page answers that status.
+    # Empty means `api/datasets` is a plain file.
+    catalog: ClassVar[dict] = {}
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         self.hits[path] = self.hits.get(path, 0) + 1
+        if path == "/api/datasets" and self.catalog and path not in self.faults:
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            offset = int(query.get("offset", ["0"])[0])
+            page = self.catalog.get(offset, [])
+            if isinstance(page, int):  # this page fails with that status
+                self.send_response(page)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            body = json.dumps({"total_count": self.catalog["total"], "datasets": page}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         fault = self.faults.get(path)
         if fault is not None and fault[2] != 0:
             status, headers, remaining = fault
@@ -77,9 +99,10 @@ class Site:
         self.root = root
         # Per-site fault table and hit counter, shared with the handler class
         # the server instantiates per request.
-        handler_cls = type("_Handler", (_Quiet,), {"faults": {}, "hits": {}})
+        handler_cls = type("_Handler", (_Quiet,), {"faults": {}, "hits": {}, "catalog": {}})
         self.faults: dict[str, list] = handler_cls.faults
         self.hits: dict[str, int] = handler_cls.hits
+        self.catalog_pages: dict = handler_cls.catalog
         handler = functools.partial(handler_cls, directory=root)
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -137,6 +160,18 @@ class Site:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as fh:
             fh.write(content)
+
+    def catalog(self, total: int, *pages: list[dict] | int) -> None:
+        """Serve `GET /api/datasets` as the real API pages it: `pages[i]` is the
+        page at the offset the earlier pages add up to (an int is an HTTP
+        status that page fails with), and `total` is what every page reports
+        as `total_count`. A walk that asks past the last page gets an empty one."""
+        self.catalog_pages.clear()
+        self.catalog_pages["total"] = total
+        offset = 0
+        for page in pages:
+            self.catalog_pages[offset] = page
+            offset += 0 if isinstance(page, int) else len(page)
 
     def fail(self, rel: str, status: int, times: int = -1, **headers: str) -> None:
         """Answer GETs of `rel` (relative to the site root) with `status`: the
@@ -262,6 +297,7 @@ class TestOverHttp(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = fc.main(argv)
+        self.stderr = err.getvalue()
         return rc, json.loads(out.getvalue())
 
     def test_the_nm000110_shape_is_found(self):
@@ -477,6 +513,94 @@ class TestOverHttp(unittest.TestCase):
         self.assertEqual([d["dataset"] for d in report["datasets"]], [DATASET, other])
         self.assertEqual([f["dataset"] for f in report["findings"]], [DATASET])
         self.assertEqual(report["summary"]["datasets_checked"], 2)
+
+    def _two_clean_datasets(self) -> tuple[str, str]:
+        """Two public datasets whose every store is complete: nothing to flag."""
+        first, second = DATASET, "nm000111"
+        labels = [f"C{i}" for i in range(6)]
+        for ds in (first, second):
+            self.site.publish(ds, [store(1, 6)], {store(1, 6)["zarr"]: labels})
+            self.site.sidecar(ds, tsv_rel(1), tsv(labels))
+        return first, second
+
+    def _api(self) -> str:
+        return self.site.zarr_base.rsplit("/", 1)[0] + "/api"
+
+    def test_a_complete_catalog_walk_is_recorded_and_exits_zero(self):
+        first, second = self._two_clean_datasets()
+        # Two pages, so the walk really pages: 2 rows, then 1, of a total of 3.
+        self.site.catalog(
+            3,
+            [{"dataset_id": second, "visibility": "public"},
+             {"dataset_id": "nm000999", "visibility": "private"}],
+            [{"dataset_id": first, "visibility": "public"}],
+        )
+        rc, report = self.run_main("--all", "--api-base", self._api())
+        self.assertEqual(rc, 0)
+        self.assertIs(report["summary"]["catalog_complete"], True)
+        self.assertEqual(report["summary"]["datasets_checked"], 2)
+        self.assertNotIn("catalog_error", report)
+
+    def test_explicit_datasets_walk_no_catalog(self):
+        self._two_clean_datasets()
+        rc, report = self.run_main("--dataset", DATASET)
+        self.assertEqual(rc, 0)
+        self.assertIs(report["summary"]["catalog_complete"], True)
+        self.assertNotIn("/api/datasets", self.site.hits)
+
+    def test_an_incomplete_catalog_walk_is_unchecked_not_clean(self):
+        # The API says 4 datasets and hands over 2 before running dry: every
+        # dataset the run DID see is clean, and the run still cannot call the
+        # archive clean.
+        first, second = self._two_clean_datasets()
+        self.site.catalog(
+            4,
+            [{"dataset_id": second, "visibility": "public"},
+             {"dataset_id": first, "visibility": "public"}],
+        )
+        rc, report = self.run_main("--all", "--api-base", self._api())
+        self.assertEqual(rc, 2)
+        self.assertIs(report["summary"]["catalog_complete"], False)
+        self.assertEqual(report["summary"]["datasets_checked"], 2)
+        self.assertEqual(report["findings"], [])
+        self.assertIn("catalog walk was incomplete", self.stderr)
+
+    def test_a_finding_outranks_an_incomplete_catalog_walk(self):
+        self.site.publish(DATASET, [store(1, 4)], {})
+        self.site.sidecar(DATASET, tsv_rel(1), tsv(CHB_LABELS))
+        self.site.catalog(3, [{"dataset_id": DATASET, "visibility": "public"}])
+        rc, report = self.run_main("--all", "--api-base", self._api())
+        self.assertEqual(rc, 1)
+        self.assertIs(report["summary"]["catalog_complete"], False)
+        self.assertEqual([f["dataset"] for f in report["findings"]], [DATASET])
+
+    def test_a_failed_catalog_fetch_is_unchecked_not_a_traceback(self):
+        # Before: the fetch's HTTPError escaped main() as a traceback, exit 1,
+        # which reads as "something was flagged".
+        self.site.fail("api/datasets", 500)
+        rc, report = self.run_main("--all", "--api-base", self._api())
+        self.assertEqual(rc, 2)
+        self.assertIs(report["summary"]["catalog_complete"], False)
+        self.assertEqual(report["datasets"], [])
+        self.assertIn("HTTPError", report["catalog_error"])
+        self.assertIn("could not read the catalog", self.stderr)
+
+    def test_a_catalog_page_that_fails_midwalk_is_unchecked(self):
+        # The first page is fine and the second is not: the datasets on page
+        # one are not reported as if they were the whole catalog.
+        first, second = self._two_clean_datasets()
+        self.site.catalog(
+            3,
+            [{"dataset_id": second, "visibility": "public"},
+             {"dataset_id": first, "visibility": "public"}],
+            503,
+        )
+        rc, report = self.run_main("--all", "--api-base", self._api())
+        self.assertEqual(rc, 2)
+        self.assertIs(report["summary"]["catalog_complete"], False)
+        self.assertEqual(report["datasets"], [])
+        self.assertIn("503", report["catalog_error"])
+        self.assertEqual(self.site.hits["/api/datasets"], 2)  # page one, then the failing page
 
     def test_labels_mode_decides_which_stores_are_read(self):
         # A non-EDF store whose labels repeat: only `--labels all` reads it.
