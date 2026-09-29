@@ -990,11 +990,13 @@ def count_infra_failures(failures: list, failure_entries: list) -> int:
 
 
 class ChannelCountMismatch(Exception):
-    """The converted store carries fewer channels than the recording's BIDS
-    `_channels.tsv` declares AND fewer than the file's own header declares (or
-    the header could not be read), so publishing it would serve a silently
-    unfaithful copy (the failure mode behind nemarDatasets/on002718#1, where
-    biosigio#110 truncated 74-channel EEGLAB files to one channel). Typed so
+    """The converted store carries fewer channels than the recording file's own
+    header declares, with or without a channels.tsv; or fewer than its BIDS
+    `_channels.tsv` declares while the header could not be read. Publishing it
+    would serve a silently unfaithful copy (the failure mode behind
+    nemarDatasets/on002718#1, where biosigio#110 truncated 74-channel EEGLAB
+    files to one channel, and behind nm000110, where biosigio before 1.2.9
+    let a repeated EDF label overwrite a channel). Typed so
     the gate is a DETERMINISTIC data failure surfaced in the index and the
     unfaithful store is never uploaded.
 
@@ -1297,14 +1299,15 @@ _FALLBACK_REASONS = {
         "This recording is too large to convert to an interactive viewer copy "
         "within the conversion node's memory limits."
     ),
-    # NEMAR-side fidelity gate: the converted copy came up short of the
-    # recording's channels.tsv and of the file's own header (or the header was
-    # unreadable), so it was withheld rather than served. A sidecar that merely
+    # NEMAR-side fidelity gate: the converted copy came up short of the file's
+    # own header, or of the recording's channels.tsv where the header was
+    # unreadable, so it was withheld rather than served. A sidecar that merely
     # over-declares is not this failure; see channel_gate_verdict.
     "channel_count_mismatch": (
-        "The converted viewer copy carried fewer channels than this recording's "
-        "channels.tsv declares (and than the data file itself, where its header "
-        "could be read), so it was withheld pending a converter fix."
+        "The converted viewer copy carried fewer channels than the data file "
+        "itself declares (or, where its header could not be read, than this "
+        "recording's channels.tsv declares), so it was withheld pending a "
+        "converter fix."
     ),
     # NEMAR-side (not a biosigIO code): ADR 0028. Surfaces MEGIN's own position,
     # which is why the file cannot simply be shown, rather than a bare read error.
@@ -2684,20 +2687,78 @@ def channel_gate_verdict(
 ) -> ChannelGateVerdict:
     """The fidelity gate's decision, kept pure so every branch is testable.
 
-    - ``pass``: no applicable channels.tsv, or the store holds at least what it
-      declares.
+    - ``truncated``: the store falls short of the file's OWN header, whatever
+      channels.tsv says or whether one exists at all; or it falls short of
+      channels.tsv while the file's count is unknown. Withheld
+      (``ChannelCountMismatch``): better no store than a wrong one.
+    - ``pass``: the store holds every channel the header declares (or the
+      header is unreadable) and at least what channels.tsv declares (or no
+      channels.tsv applies).
     - ``sidecar_overcount``: the store falls short of channels.tsv but holds
       every channel the file's own header declares, so the SIDECAR over-declares
       and the store is faithful. Published, with the disagreement recorded.
-    - ``truncated``: the store falls short of channels.tsv and either falls
-      short of the file too, or the file's count is unknown. Withheld
-      (``ChannelCountMismatch``), as before: better no store than a wrong one.
+
+    The header check comes first, and on its own, because channels.tsv is not
+    an independent witness of a label collapse. Before biosigio 1.2.9 a label
+    the file repeats (CHB-MIT's ``T8-P8``, its ``-`` placeholders) overwrote a
+    channel on import, so the store came up one short per repeat. A sidecar
+    written by a tool that keys channels by label collapses the same way and
+    agrees with the short store; a dataset that ships no channels.tsv has
+    nothing to compare against at all. Both passed this gate before, and only
+    the header, read with no importer in between, still counts every channel.
     """
+    if in_file is not None and in_store < in_file:
+        return "truncated"
     if not channels_tsv or in_store >= channels_tsv:
         return "pass"
-    if in_file is not None and in_store >= in_file:
+    if in_file is not None:
         return "sidecar_overcount"
     return "truncated"
+
+
+class ChannelCountNote(TypedDict):
+    """The index entry's ``channels_tsv_count_mismatch`` object."""
+
+    channels_tsv: int
+    in_file: int
+    in_store: int
+
+
+def enforce_channel_gate(
+    primary: str, in_store: int, channels_tsv: int | None, in_file: int | None
+) -> ChannelCountNote | None:
+    """Apply ``channel_gate_verdict`` to a built store, before its sync.
+
+    Raises ``ChannelCountMismatch`` on ``truncated``. Returns the note to
+    disclose on the index entry for ``sidecar_overcount``, else None.
+    ``convert_one`` calls this with the store it just built and the header of
+    the very file it converted, so the two counts describe the same recording.
+    """
+    verdict = channel_gate_verdict(in_store, channels_tsv, in_file)
+    if verdict == "sidecar_overcount":
+        # `sidecar_overcount` is only reachable with both counts known.
+        assert channels_tsv is not None and in_file is not None
+        # The store holds every channel the file itself declares; the sidecar
+        # lists channels the file never had. Serve the faithful copy and
+        # disclose the disagreement on the index entry.
+        print(
+            f"::warning::{primary}: channels.tsv declares {channels_tsv} channel(s) "
+            f"but the file itself holds {in_file}; serving the {in_store}-channel "
+            "store, which matches the file",
+            flush=True,
+        )
+        return {"channels_tsv": channels_tsv, "in_file": in_file, "in_store": in_store}
+    if verdict == "truncated":
+        declared = []
+        if in_file is not None:
+            declared.append(f"the file's own header declares {in_file}")
+        if channels_tsv:
+            declared.append(f"its channels.tsv declares {channels_tsv}")
+        raise ChannelCountMismatch(
+            f"store has {in_store} channel(s) but {primary}: {' and '.join(declared)}; "
+            "refusing to publish an unfaithful copy"
+        )
+    return None
 
 
 def affected_primaries(
@@ -6024,48 +6085,27 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
                 f"store has no channel groups: {store_local}"
                 + (f" (reading it failed: {why})" if why else "")
             )
-        # Fidelity gate: the BIDS channels.tsv is ground truth for how many
-        # channels this recording has. A store that comes up short means the
-        # importer silently dropped signals (biosigio#110 served 74-channel
-        # EEGLAB recordings as 1 channel for weeks, nemarDatasets/on002718#1);
-        # withhold it as a typed data failure rather than publish an unfaithful
-        # copy. Runs BEFORE the sync, so on the incremental path this
-        # recording's previous store survives untouched; under --clean the
+        # Fidelity gate: the file's own header and the BIDS channels.tsv are
+        # the two ground truths for how many channels this recording has. A
+        # store that comes up short means the importer silently dropped
+        # signals (biosigio#110 served 74-channel EEGLAB recordings as 1
+        # channel for weeks, nemarDatasets/on002718#1; before biosigio 1.2.9 a
+        # repeated EDF label overwrote a channel, nm000110 22 of 23); withhold
+        # it as a typed data failure rather than publish an unfaithful copy.
+        # The header is read for EVERY recording, not only when a sidecar
+        # disagrees: see channel_gate_verdict. Runs BEFORE the sync, so on the
+        # incremental path this recording's previous store survives
+        # untouched; under --clean the
         # prefix was already wiped and the recording simply stays absent (see
         # the ChannelCountMismatch docstring for why absent beats unfaithful,
         # and note a gated recording needs an explicit re-run after a fix).
         expected = expected_channel_count_for(
             c["repo"], primary, c["head_files"], c["head"]
         )
-        channel_count_note = None
-        if expected:
-            total = store_total_channels(meta)
-            in_file = (
-                file_declared_channel_count(primary_local) if total < expected else None
-            )
-            verdict = channel_gate_verdict(total, expected, in_file)
-            if verdict == "sidecar_overcount":
-                # The store holds every channel the file itself declares; the
-                # sidecar lists channels the file never had. Serve the faithful
-                # copy and disclose the disagreement on the index entry.
-                channel_count_note = {
-                    "channels_tsv": expected, "in_file": in_file, "in_store": total,
-                }
-                print(
-                    f"::warning::{primary}: channels.tsv declares {expected} channel(s) "
-                    f"but the file itself holds {in_file}; serving the {total}-channel "
-                    "store, which matches the file",
-                    flush=True,
-                )
-            elif verdict == "truncated":
-                file_part = (
-                    f" and the file itself declares {in_file}" if in_file is not None else ""
-                )
-                raise ChannelCountMismatch(
-                    f"store has {total} channel(s) but {primary}'s channels.tsv "
-                    f"declares {expected}{file_part}; refusing to publish an "
-                    "unfaithful copy"
-                )
+        channel_count_note = enforce_channel_gate(
+            primary, store_total_channels(meta), expected,
+            file_declared_channel_count(primary_local),
+        )
         # Latest-only: --delete drops stale chunk objects a smaller new store no
         # longer needs. Long origin TTL; the callback purges zarr.json/index.json.
         # Through `_aws` for the wall-clock timeout + retry: a store is thousands of
