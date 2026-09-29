@@ -8098,12 +8098,21 @@ class TestConvertOneFifSidecarOvercount(unittest.TestCase):
         build_real_fif(os.path.join(self.repo, self.PRIMARY))
         bindir = os.path.join(self._tmp.name, "bin")
         os.makedirs(bindir)
+        # The aws stand-in records its argv, so a test can tell whether a store
+        # was ever pushed.
+        self.aws_log = os.path.join(self._tmp.name, "aws.log")
         with open(os.path.join(bindir, "aws"), "w") as fh:
-            fh.write("#!/bin/sh\nexit 0\n")
+            fh.write(f'#!/bin/sh\necho "$*" >> "{self.aws_log}"\nexit 0\n')
         os.chmod(os.path.join(bindir, "aws"), 0o755)
         path = os.environ["PATH"]
         os.environ["PATH"] = bindir + os.pathsep + path
         self.addCleanup(os.environ.__setitem__, "PATH", path)
+
+    def synced(self) -> bool:
+        if not os.path.exists(self.aws_log):
+            return False
+        with open(self.aws_log) as fh:
+            return any(line.startswith("s3 sync") for line in fh)
 
     def convert(self, tsv_rows: int):
         with open(os.path.join(self.repo, self.TSV), "w") as fh:
@@ -8126,6 +8135,7 @@ class TestConvertOneFifSidecarOvercount(unittest.TestCase):
         n = len(FIF_CHANNELS)
         result = self.convert(n + 9)  # nine phantom channels, as on000117's CHPI00x
         self.assertTrue(result["ok"], result.get("error"))
+        self.assertTrue(self.synced())
         entry = result["entry"]
         self.assertEqual(
             entry["channels_tsv_count_mismatch"],
@@ -8137,6 +8147,37 @@ class TestConvertOneFifSidecarOvercount(unittest.TestCase):
         )
         check_index_invariant(index)
         validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_the_overcount_exemption_never_launders_an_unreadable_fif(self):
+        # The load-bearing guarantee is that a store SHORT of the file is still
+        # withheld. It cannot be driven end to end with a real FIF: MNE refuses
+        # a FIF whose nchan disagrees with its channel definitions ("Incorrect
+        # number of channel definitions found"), and biosigIO maps every MNE
+        # channel type (unknown ones to MISC/OTHER), so a readable FIF always
+        # converts to exactly its header's channels. `channel_gate_verdict`
+        # covers the `truncated` branch directly. What CAN be driven is the
+        # other way the header count goes missing, a FIF MNE cannot parse:
+        # with a sidecar over-declaring it, it must be refused before any
+        # store exists, never reach the gate's "header unknown" path and publish.
+        cases = {
+            "garbage header": lambda data: b"not a fif header at all",
+            "header cut short": lambda data: data[:600],
+            "data cut short": lambda data: data[: len(data) // 2],
+        }
+        path = os.path.join(self.repo, self.PRIMARY)
+        with open(path, "rb") as fh:
+            original = fh.read()
+        for name, corrupt in cases.items():
+            with self.subTest(name):
+                with open(path, "wb") as fh:
+                    fh.write(corrupt(original))
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    result = self.convert(len(FIF_CHANNELS) + 9)
+                self.assertFalse(result["ok"])
+                self.assertIn(result["code"], ("maxshield_probe_failed", "file_read_error"))
+                self.assertNotIn("entry", result)
+                self.assertFalse(self.synced())
 
     def test_a_matching_sidecar_adds_no_note(self):
         result = self.convert(len(FIF_CHANNELS))
