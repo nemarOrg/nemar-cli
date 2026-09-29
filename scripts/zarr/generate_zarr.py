@@ -4719,8 +4719,13 @@ def _download_chunks(base: str, key: str, size: int, chunk_size: int, dst: str) 
                 os.remove(piece)
         got = os.path.getsize(assembly)
         if got != size:
-            raise AnnexObjectMissing(
-                f"{key}: its {chunk_size}-byte chunks reassemble to {got} bytes, the key declares {size}"
+            # Unreachable by construction: every chunk was size-checked against
+            # `annex_chunk_sizes`, which sums to `size`. Reaching it is a bug in
+            # THIS code, not a fact about the bucket, so it must not carry the
+            # permanent `annex_object_missing` verdict: uncoded, it stays infra.
+            raise RuntimeError(
+                f"{key}: its {chunk_size}-byte chunks reassembled to {got} bytes, the "
+                f"key declares {size} (internal error: each chunk passed its size check)"
             )
         os.replace(assembly, dst)
     finally:
