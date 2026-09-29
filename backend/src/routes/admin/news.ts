@@ -4,7 +4,8 @@
  *   GET    /admin/news          every post, drafts and scheduled included
  *   GET    /admin/news/:id
  *   POST   /admin/news          create            201 | 409 slug_taken
- *   PUT    /admin/news/:id      full replacement  200 | 404 | 409 slug_taken
+ *   PUT    /admin/news/:id      full replacement, every field required
+ *                                                  200 | 400 | 404 | 409 slug_taken
  *   DELETE /admin/news/:id                        200 | 404
  *   POST   /admin/news/media    raw image body -> { url, content_type, bytes }
  *
@@ -42,57 +43,85 @@ import { hasRealUtcOffset } from "./notices";
 import type { AdminRouter } from "./shared";
 
 /**
- * `NewsInput`. Title, summary and alt text are trimmed before their length
- * is checked, so whitespace alone never satisfies a required field; the
- * body is checked for non-whitespace content but stored as sent, because
- * leading indentation and trailing spaces are meaningful in Markdown.
+ * The fields every write carries. Title, summary and alt text are trimmed
+ * before their length is checked, so whitespace alone never satisfies a
+ * required field; the body is checked for non-whitespace content but stored
+ * as sent, because leading indentation and trailing spaces are meaningful in
+ * Markdown.
  */
+const slugField = z
+  .string()
+  .min(NEWS_SLUG_MIN)
+  .max(NEWS_SLUG_MAX)
+  .regex(NEWS_SLUG_RE, "slug must be lowercase letters and digits joined by single hyphens")
+  .refine((slug) => !RESERVED_NEWS_SLUGS.has(slug), {
+    message: "slug is reserved",
+  });
+const bannerUrlField = z
+  .string()
+  .regex(NEWS_BANNER_URL_RE, "banner_url must be a /news/media/<sha256>.<ext> path")
+  .nullable();
+const bannerAltField = z.string().trim().max(300);
+const publishedAtField = z.string().datetime({ offset: true }).refine(hasRealUtcOffset, {
+  message: "published_at has an out-of-range UTC offset (valid offsets are -12:00 to +14:00)",
+});
+
+const contentFields = {
+  slug: slugField,
+  title: z.string().trim().min(1).max(140),
+  summary: z.string().trim().min(1).max(300),
+  body: z
+    .string()
+    .min(1)
+    .max(50000)
+    .refine((body) => body.trim().length > 0, { message: "body must not be blank" }),
+};
+
+function requireBannerAlt(
+  input: { banner_url: string | null; banner_alt: string },
+  ctx: z.RefinementCtx,
+): void {
+  if (input.banner_url !== null && input.banner_alt === "") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["banner_alt"],
+      message: "banner_alt is required when banner_url is set",
+    });
+  }
+}
+
+/** `NewsInput` for POST: optional fields take their defaults. */
 export const newsInputSchema = z
   .object({
-    slug: z
-      .string()
-      .min(NEWS_SLUG_MIN)
-      .max(NEWS_SLUG_MAX)
-      .regex(NEWS_SLUG_RE, "slug must be lowercase letters and digits joined by single hyphens")
-      .refine((slug) => !RESERVED_NEWS_SLUGS.has(slug), {
-        message: "slug is reserved",
-      }),
-    title: z.string().trim().min(1).max(140),
-    summary: z.string().trim().min(1).max(300),
-    body: z
-      .string()
-      .min(1)
-      .max(50000)
-      .refine((body) => body.trim().length > 0, { message: "body must not be blank" }),
+    ...contentFields,
     category: z.enum(NEWS_CATEGORIES).default("feature"),
-    banner_url: z
-      .string()
-      .regex(NEWS_BANNER_URL_RE, "banner_url must be a /news/media/<sha256>.<ext> path")
-      .nullable()
-      .default(null),
-    banner_alt: z.string().trim().max(300).default(""),
+    banner_url: bannerUrlField.default(null),
+    banner_alt: bannerAltField.default(""),
     status: z.enum(NEWS_STATUSES).default("draft"),
-    published_at: z
-      .string()
-      .datetime({ offset: true })
-      .refine(hasRealUtcOffset, {
-        message: "published_at has an out-of-range UTC offset (valid offsets are -12:00 to +14:00)",
-      })
-      .optional(),
+    published_at: publishedAtField.optional(),
   })
-  .superRefine((input, ctx) => {
-    if (input.banner_url !== null && input.banner_alt === "") {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["banner_alt"],
-        message: "banner_alt is required when banner_url is set",
-      });
-    }
-  });
+  .superRefine(requireBannerAlt);
 
-type NewsInput = z.infer<typeof newsInputSchema>;
+/**
+ * `NewsInput` for PUT, a full replacement: every field is required. With
+ * POST's defaults, a client that sent only the text it meant to fix would
+ * silently unpublish the post (`status` back to draft), re-date it to now,
+ * and drop its banner. Refusing the partial body is the safe answer.
+ */
+export const newsReplaceSchema = z
+  .object({
+    ...contentFields,
+    category: z.enum(NEWS_CATEGORIES),
+    banner_url: bannerUrlField,
+    banner_alt: bannerAltField,
+    status: z.enum(NEWS_STATUSES),
+    published_at: publishedAtField,
+  })
+  .superRefine(requireBannerAlt);
 
-/** An omitted `published_at` means now, on create and on PUT alike. */
+type NewsInput = z.infer<typeof newsInputSchema> | z.infer<typeof newsReplaceSchema>;
+
+/** An omitted `published_at` (possible on create only) means now. */
 function toWrite(input: NewsInput): NewsWrite {
   return { ...input, published_at: input.published_at ?? new Date().toISOString() };
 }
@@ -134,7 +163,7 @@ export function registerNewsRoutes(admin: AdminRouter): void {
     }
   });
 
-  admin.put("/news/:id", zValidator("json", newsInputSchema), async (c) => {
+  admin.put("/news/:id", zValidator("json", newsReplaceSchema), async (c) => {
     const id = parseId(c.req.param("id"));
     if (id === null) return c.json(NOT_FOUND, 404);
     const user = c.get("user");

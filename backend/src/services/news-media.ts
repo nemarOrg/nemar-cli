@@ -53,7 +53,9 @@ export const NEWS_BANNER_URL_RE = /^\/news\/media\/[0-9a-f]{64}\.(png|jpg|webp|g
 export function declaredImageType(header: string | undefined): NewsImageType | null {
   if (!header) return null;
   const base = header.split(";")[0]?.trim().toLowerCase() ?? "";
-  return base in EXT_BY_TYPE ? (base as NewsImageType) : null;
+  // Own keys only: `in` would also accept inherited names such as
+  // `constructor`, letting one past this gate.
+  return Object.hasOwn(EXT_BY_TYPE, base) ? (base as NewsImageType) : null;
 }
 
 export function extensionFor(type: NewsImageType): NewsImageExt {

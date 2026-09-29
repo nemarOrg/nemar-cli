@@ -225,6 +225,10 @@ describe("POST /admin/news/media: refusals write nothing", () => {
     }
     const none = await upload(png(), null);
     expect(none.status).toBe(415);
+    // An inherited property name is not an accepted type either.
+    for (const type of ["constructor", "__proto__", "toString"]) {
+      expect((await upload(png(), type)).status).toBe(415);
+    }
     expect(await storedKeys()).toEqual([]);
   });
 

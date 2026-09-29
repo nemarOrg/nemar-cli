@@ -18,6 +18,9 @@
 -- the bug migration 0064 repaired for notices.expires_at (#1024). The
 -- CHECK below enforces the stored shape, so a hand-written INSERT that
 -- skips the normalization fails loudly instead of hiding a post for a day.
+-- Its IS NOT NULL half is load-bearing: datetime() of an unparseable string
+-- is NULL, and a CHECK that evaluates to NULL passes, so without it a junk
+-- value would be stored and the post would simply never appear.
 --
 -- `media` is reserved as a slug because `/news/media/<file>` is the image
 -- path on both the API and the website. The route layer refuses it; the
@@ -43,7 +46,7 @@ CREATE TABLE IF NOT EXISTS news_posts (
   status TEXT NOT NULL DEFAULT 'draft'
     CHECK (status IN ('draft', 'published')),
   published_at TEXT NOT NULL
-    CHECK (published_at = datetime(published_at)),
+    CHECK (datetime(published_at) IS NOT NULL AND published_at = datetime(published_at)),
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   created_by INTEGER NOT NULL REFERENCES users(id),

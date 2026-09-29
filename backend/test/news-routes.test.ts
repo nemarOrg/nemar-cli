@@ -87,6 +87,18 @@ function input(overrides: Record<string, unknown> = {}): Record<string, unknown>
   };
 }
 
+/** A complete PUT body: PUT is a full replacement and requires every field. */
+function replaceInput(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return input({
+    category: "feature",
+    banner_url: null,
+    banner_alt: "",
+    status: "draft",
+    published_at: "2026-01-01T00:00:00Z",
+    ...overrides,
+  });
+}
+
 async function create(overrides: Record<string, unknown> = {}) {
   const res = await call("/admin/news", { method: "POST", key: ADMIN_KEY, body: input(overrides) });
   if (res.status !== 201) {
@@ -226,6 +238,11 @@ describe("GET /news (public list)", () => {
       expect(body.posts[0]?.slug).toBe("post-12");
     });
 
+    test("is short-cached at the edge", async () => {
+      const res = await call("/news");
+      expect(res.headers.get("cache-control")).toMatch(/^public, max-age=30, s-maxage=300/);
+    });
+
     test("limit and offset select the page", async () => {
       const body = await page("?limit=5&offset=10");
       expect(body.posts.map((p) => p.slug)).toEqual(["post-02", "post-01"]);
@@ -239,6 +256,8 @@ describe("GET /news (public list)", () => {
       expect((await page("?limit=abc")).limit).toBe(10);
       expect((await page("?offset=-3")).offset).toBe(0);
       expect((await page("?offset=abc")).offset).toBe(0);
+      // Past SQLite's 64-bit integer range: D1 would refuse it with a 500.
+      expect((await page("?offset=10000000000000000000")).offset).toBe(1_000_000);
       const past = await page("?offset=500");
       expect(past.posts).toEqual([]);
       expect(past.total_count).toBe(12);
@@ -277,14 +296,17 @@ describe("GET /news/:slug (public detail)", () => {
     expect(post.slug).toBe("detail");
     expect(post).not.toHaveProperty("created_by");
     expect(post).not.toHaveProperty("updated_by");
+    expect(res.headers.get("cache-control")).toMatch(/^public, max-age=30, s-maxage=300/);
   });
 
   test("404s for a missing, draft, or scheduled slug, all with the same body", async () => {
     await create({ slug: "a-draft", status: "draft", published_at: "2020-01-01T00:00:00Z" });
     await create({ slug: "a-scheduled", status: "published", published_at: isoInHours(3) });
     for (const slug of ["no-such-post", "a-draft", "a-scheduled", "media"]) {
+      // Never cached: a scheduled post turns from 404 to 200 at its time.
       const res = await call(`/news/${slug}`);
       expect(res.status).toBe(404);
+      expect(res.headers.get("cache-control")).toBe("no-store");
       expect(await res.json()).toEqual({ error: "not_found", message: "News post not found" });
     }
   });
@@ -529,7 +551,7 @@ describe("PUT /admin/news/:id", () => {
     const res = await call(`/admin/news/${post.id}`, {
       method: "PUT",
       key: EDITOR_KEY,
-      body: input({
+      body: replaceInput({
         slug: "edited",
         title: "Edited title",
         category: "data",
@@ -557,26 +579,27 @@ describe("PUT /admin/news/:id", () => {
     expect(row?.published_at).toBe("2021-02-03 04:05:06");
   });
 
-  test("is a full replacement: omitted optional fields take their defaults", async () => {
+  test("400 for a partial body: an omitted field must not unpublish or re-date the post", async () => {
     const post = await create({
       category: "event",
       status: "published",
-      banner_url: `/news/media/${"d".repeat(64)}.gif`,
-      banner_alt: "An animation",
+      published_at: "2020-01-01T00:00:00Z",
     });
+    for (const omitted of ["status", "published_at", "category", "banner_url", "banner_alt"]) {
+      const body = replaceInput({ status: "published", published_at: "2020-01-01T00:00:00Z" });
+      delete body[omitted];
+      const res = await call(`/admin/news/${post.id}`, { method: "PUT", key: ADMIN_KEY, body });
+      expect(res.status).toBe(400);
+    }
     const res = await call(`/admin/news/${post.id}`, {
       method: "PUT",
       key: ADMIN_KEY,
-      body: input(),
+      body: input({ title: "Only the typo fixed" }),
     });
-    expect(res.status).toBe(200);
-    const { post: updated } = (await res.json()) as { post: Record<string, unknown> };
-    expect(updated).toMatchObject({
-      category: "feature",
-      status: "draft",
-      banner_url: null,
-      banner_alt: "",
-    });
+    expect(res.status).toBe(400);
+    const row = rawRow(post.id);
+    expect(row?.status).toBe("published");
+    expect(row?.published_at).toBe("2020-01-01 00:00:00");
   });
 
   test("keeping its own slug is not a conflict", async () => {
@@ -584,7 +607,7 @@ describe("PUT /admin/news/:id", () => {
     const res = await call(`/admin/news/${post.id}`, {
       method: "PUT",
       key: ADMIN_KEY,
-      body: input({ slug: "same-slug", title: "New title" }),
+      body: replaceInput({ slug: "same-slug", title: "New title" }),
     });
     expect(res.status).toBe(200);
   });
@@ -595,7 +618,7 @@ describe("PUT /admin/news/:id", () => {
     const res = await call(`/admin/news/${other.id}`, {
       method: "PUT",
       key: ADMIN_KEY,
-      body: input({ slug: "owner" }),
+      body: replaceInput({ slug: "owner" }),
     });
     expect(res.status).toBe(409);
     expect(((await res.json()) as { error: string }).error).toBe("slug_taken");
@@ -606,7 +629,7 @@ describe("PUT /admin/news/:id", () => {
     const missing = await call("/admin/news/424242", {
       method: "PUT",
       key: ADMIN_KEY,
-      body: input(),
+      body: replaceInput(),
     });
     expect(missing.status).toBe(404);
     expect(((await missing.json()) as { error: string }).error).toBe("not_found");
@@ -615,7 +638,7 @@ describe("PUT /admin/news/:id", () => {
     const invalid = await call(`/admin/news/${post.id}`, {
       method: "PUT",
       key: ADMIN_KEY,
-      body: input({ slug: "media" }),
+      body: replaceInput({ slug: "media" }),
     });
     expect(invalid.status).toBe(400);
     expect(rawRow(post.id)?.slug).toBe("first-post");
@@ -655,6 +678,12 @@ describe("migration 0087 backstops writes that bypass the route", () => {
   test("refuses a published_at not in datetime() form", () => {
     expect(() => insert("2026-07-25T12:30:00Z")).toThrow(/CHECK constraint failed/);
     expect(() => insert("2026-07-25 12:30:00")).not.toThrow();
+  });
+
+  test("refuses a published_at datetime() cannot read at all", () => {
+    // datetime('garbage') is NULL, and a CHECK that evaluates to NULL passes,
+    // which is why the constraint also demands IS NOT NULL.
+    expect(() => insert("garbage", "junk-date")).toThrow(/CHECK constraint failed/);
   });
 
   test("refuses the reserved slug and out-of-range lengths", () => {

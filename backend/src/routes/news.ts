@@ -33,8 +33,20 @@ export const newsRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>
 /**
  * `limit` and `offset` never fail a request: a missing or unparseable value
  * takes the default, and an out-of-range one is clamped (limit 1..50,
- * offset >= 0). Same shape as GET /datasets.
+ * offset 0..NEWS_OFFSET_MAX). Same shape as GET /datasets. The offset's upper
+ * bound matters: a 20-digit offset parses to a number past SQLite's 64-bit
+ * integer range, which D1 refuses with a datatype mismatch, a 500 on a public
+ * route.
  */
+export const NEWS_OFFSET_MAX = 1_000_000;
+
+/**
+ * Public reads are short-cached at the edge. The website renders them from
+ * shared egress IPs that share one unauthenticated rate-limit bucket (the
+ * reason GET /datasets does the same, #639), and a post changing a few
+ * minutes late is harmless.
+ */
+const NEWS_READ_CACHE_CONTROL = "public, max-age=30, s-maxage=300, stale-while-revalidate=600";
 export function parseNewsPage(
   rawLimit: string | undefined,
   rawOffset: string | undefined,
@@ -43,7 +55,7 @@ export function parseNewsPage(
   const offset = Number.parseInt(rawOffset ?? "", 10);
   return {
     limit: Math.min(Math.max(Number.isNaN(limit) ? NEWS_PAGE_DEFAULT : limit, 1), NEWS_PAGE_MAX),
-    offset: Math.max(Number.isNaN(offset) ? 0 : offset, 0),
+    offset: Math.min(Math.max(Number.isNaN(offset) ? 0 : offset, 0), NEWS_OFFSET_MAX),
   };
 }
 
@@ -55,6 +67,7 @@ function hasBody(object: R2Object | R2ObjectBody): object is R2ObjectBody {
 newsRoutes.get("/", async (c) => {
   const page = parseNewsPage(c.req.query("limit"), c.req.query("offset"));
   const { posts, total_count } = await listPublicNews(c.env.DB, page);
+  c.header("Cache-Control", NEWS_READ_CACHE_CONTROL);
   return c.json({ posts, total_count, limit: page.limit, offset: page.offset });
 });
 
@@ -101,7 +114,10 @@ newsRoutes.get("/media/:file", async (c) => {
 newsRoutes.get("/:slug", async (c) => {
   const post = await getPublicNewsBySlug(c.env.DB, c.req.param("slug"));
   if (!post) {
+    // Not cached: a scheduled post turns from 404 to 200 at its time.
+    c.header("Cache-Control", "no-store");
     return c.json({ error: "not_found", message: "News post not found" }, 404);
   }
+  c.header("Cache-Control", NEWS_READ_CACHE_CONTROL);
   return c.json({ post });
 });
