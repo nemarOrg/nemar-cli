@@ -3107,9 +3107,11 @@ class _MatStream:
     """Forward-only byte source over a classic MAT file or one zlib-compressed
     element of it, counting its position so an element can be skipped to its
     end. Skipping decompresses in bounded chunks and keeps nothing, so memory
-    stays flat whatever the size of the matrix skipped."""
+    stays flat whatever the size of the matrix skipped. The chunk bounds both
+    the compressed input read at once and each skip step; it is kept small
+    because a header read usually needs a few hundred bytes of it."""
 
-    CHUNK = 1 << 20
+    CHUNK = 1 << 16
 
     def __init__(self, fh: Any, compressed_bytes: int | None = None) -> None:
         import zlib
