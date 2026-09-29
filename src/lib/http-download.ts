@@ -34,10 +34,13 @@
  * now names the data host for every entry, annexed or git-tracked
  * (nemarOrg/nemar-cli#1403: the Worker serves git-tracked files itself
  * instead of redirecting to raw.githubusercontent.com, which is what lets a
- * dataset with a private repo stay readable). The presigned `url` on each
- * entry is deliberately ignored in favor of `bytes_url`: for an annexed file
- * `url` expires in about an hour, which a long transfer outlives, while
- * `bytes_url` is durable by contract.
+ * dataset with a private repo stay readable). `url` on each entry is
+ * deliberately ignored in favor of `bytes_url`: an annexed file's `url` is
+ * usually the plain, never-expiring public S3 URL (nemarOrg/nemar-cli#1522),
+ * but a dataset the bucket policy excludes from public read still gets a
+ * presigned one that expires in about an hour, which a long transfer can
+ * outlive, so `bytes_url` -- durable by contract either way, and the same
+ * field regardless of which case applies -- stays the one this path reads.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -252,8 +255,9 @@ export function selectEntries(
  * and the transport-versus-404 split -- is `downloadFiles` in
  * `lib/file-download.ts`, shared with the OpenNeuro path. What is specific to
  * the data plane, and so stays here, is which URL a manifest entry is fetched
- * from: `bytes_url` rather than the presigned `url`, because `url` expires in
- * about an hour and a long transfer outlives it.
+ * from: `bytes_url` rather than `url`, because `url` is only sometimes
+ * durable (an excluded dataset's presigned form expires in about an hour,
+ * which a long transfer can outlive) while `bytes_url` always is.
  */
 export async function downloadEntries(
   entries: DataPlaneManifestEntry[],
