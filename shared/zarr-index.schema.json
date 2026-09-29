@@ -359,7 +359,7 @@
             "in_file": {
               "type": "integer",
               "minimum": 0,
-              "description": "Data channels the recording file's own header declares, read without the importer (EDF/BDF signal count less the annotation track; BrainVision NumberOfChannels)."
+              "description": "Data channels the recording file's own header declares, read without the importer (EDF/BDF signal count less the annotation track; BrainVision NumberOfChannels; FIF nchan; EEGLAB .set nbchan, used only where it equals the data matrix's rows)."
             },
             "in_store": {
               "type": "integer",
