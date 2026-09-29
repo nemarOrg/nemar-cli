@@ -4969,9 +4969,24 @@ def eeglab_fdt_layout(set_local: str) -> tuple[int, int, int] | None:
             raise FdtDeclarationRefused(
                 "a declared .fdt is only supported for a classic (non-v7.3) EEGLAB .set"
             )
-    from scipy.io import loadmat  # biosigIO's own dependency
+    import struct
+    import zlib
 
-    mat = loadmat(set_local, squeeze_me=True, struct_as_record=False)
+    from scipy.io import loadmat  # biosigIO's own dependency
+    from scipy.io.matlab import MatReadError
+
+    # The `.set` was fetched successfully by this same attempt, so a header scipy
+    # cannot parse is a property of the file, not of the node: refuse it typed
+    # rather than let it escape uncoded and retry forever. MemoryError is not in
+    # this tuple on purpose; convert_one types that one itself.
+    try:
+        mat = loadmat(set_local, squeeze_me=True, struct_as_record=False)
+    except (
+        MatReadError, ValueError, OSError, TypeError, EOFError, struct.error, zlib.error,
+    ) as exc:
+        raise FdtDeclarationRefused(
+            f"the .set header could not be read to verify the declaration ({exc})"
+        ) from exc
     src: Any = mat.get("EEG")
 
     def field(name: str) -> Any:
