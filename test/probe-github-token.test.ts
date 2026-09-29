@@ -227,6 +227,20 @@ describe("probe-github-token", () => {
     }
   });
 
+  test("an unreachable host fails as a network error and never leaks the token", async () => {
+    // Port 1 is a reserved low port nothing listens on; the connection is
+    // refused immediately rather than hanging, so this stays fast.
+    const result = await runProbe(["GH_TOKEN"], {
+      GH_TOKEN: "fake-token-should-never-appear",
+      GITHUB_API_BASE_URL: "http://127.0.0.1:1",
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain("::error::");
+    expect(result.stdout.toLowerCase()).toContain("network error");
+    expect(result.stdout).not.toContain("fake-token-should-never-appear");
+    expect(result.stderr).not.toContain("fake-token-should-never-appear");
+  });
+
   test("--owner is compared case-insensitively: mismatch warns, case-only difference does not", async () => {
     const mismatched = startFakeGithub({
       "GET /user": () =>
