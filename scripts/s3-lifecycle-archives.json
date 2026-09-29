@@ -1,0 +1,27 @@
+{
+  "Rules": [
+    {
+      "ID": "abort-incomplete-multipart-uploads",
+      "Filter": {
+        "Prefix": ""
+      },
+      "Status": "Enabled",
+      "AbortIncompleteMultipartUpload": {
+        "DaysAfterInitiation": 7
+      }
+    },
+    {
+      "ID": "expire-noncurrent-archive-versions",
+      "Filter": {
+        "Tag": {
+          "Key": "nemar-kind",
+          "Value": "archive"
+        }
+      },
+      "Status": "Enabled",
+      "NoncurrentVersionExpiration": {
+        "NoncurrentDays": 3
+      }
+    }
+  ]
+}

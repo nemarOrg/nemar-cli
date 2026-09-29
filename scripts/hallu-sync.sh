@@ -328,12 +328,28 @@ sync_dataset_zip() {
     return 0
   fi
 
-  local archive_url="${S3_BASE}/${dataset_id}/archives/${latest_version}.zip"
+  # #1491: archives moved from "<id>/archives/<v>.zip" to
+  # "<id>/archives/<id>_<v>.zip" so the presigned/direct download's file name
+  # already matches the dataset. Try the new name first, then fall back to
+  # the pre-#1491 name for any dataset the lead's one-time rename sweep
+  # (nemarOrg/nemar-cli scripts/rename-archives.ts) hasn't reached yet.
+  # TRANSITION FALLBACK: drop the second HEAD/URL once the sweep is done.
+  local archive_url="${S3_BASE}/${dataset_id}/archives/${dataset_id}_${latest_version}.zip"
+  local legacy_archive_url="${S3_BASE}/${dataset_id}/archives/${latest_version}.zip"
   local zip_file="${ZIP_DIR}/${dataset_id}.zip"
 
   # HEAD check: archive may not exist yet (async generation)
   local http_status
   http_status=$(curl -s -o /dev/null -w '%{http_code}' --head "$archive_url" 2>/dev/null) || http_status="000"
+
+  if [[ "$http_status" != "200" ]]; then
+    local legacy_status
+    legacy_status=$(curl -s -o /dev/null -w '%{http_code}' --head "$legacy_archive_url" 2>/dev/null) || legacy_status="000"
+    if [[ "$legacy_status" == "200" ]]; then
+      archive_url="$legacy_archive_url"
+      http_status="$legacy_status"
+    fi
+  fi
 
   if [[ "$http_status" != "200" ]]; then
     log "[WAIT] ${dataset_id}: zip archive not available yet (HTTP ${http_status})"

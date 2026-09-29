@@ -22,8 +22,11 @@ import type { WebhookRouter } from "../webhooks/shared.js";
 /**
  * POST /webhooks/archive-ready — callback from nemarDatasets/.github
  * `run-generate-archive.yml` once a dataset's downloadable zip archive has been
- * (re)built and uploaded to `s3://nemar/<id>/archives/v<version>.zip`
- * (epic #695, dashboard.nemar.org/observability).
+ * (re)built and uploaded to `s3://nemar/<id>/archives/<id>_v<version>.zip`
+ * (#1491; older uploads used `<id>/archives/v<version>.zip`)
+ * (epic #695, dashboard.nemar.org/observability). The workflow also deletes
+ * every other object version under `<id>/archives/` after this callback
+ * succeeds (#1518), so at most one archive exists per dataset going forward.
  *
  * Mirror of /zarr-ready: same shared `X-Webhook-Token` (NEMAR_WEBHOOK_TOKEN)
  * auth, records the latest-only archive state on the `datasets` row. No cache

@@ -68,10 +68,9 @@ import { buildPageBundle } from "../services/page-bundle";
 import {
   type PresignedUrlOptions,
   generatePresignedGetUrl,
-  getArchiveUrl,
-  headArchive,
   loadRecords,
   loadSummary,
+  resolveArchiveKey,
 } from "../services/s3";
 import type { Bindings, Variables } from "../types/bindings";
 
@@ -303,9 +302,14 @@ async function loadManifestDigest(
 interface FileNotFoundPayload {
   version: string;
   path: string;
-  reason?: "removed";
+  reason?: "removed" | "not_latest_version";
   last_seen_version?: string;
   last_seen_url?: string;
+  /** #1518: set alongside reason: "not_latest_version" -- the version whose
+   *  archive is actually retained. */
+  latest_version?: string;
+  /** #1518: where to get this version's files instead of a zip. */
+  browse_url?: string;
 }
 
 function notFound(message: string, payload?: FileNotFoundPayload, noStore = false) {
@@ -1902,32 +1906,64 @@ dataRoutes.get("/:datasetId/:version", async (c) => {
   if (!dataset) return notFound("Dataset not found");
 
   // Archive zip download: /<id>/<version>.zip -> 302 to the presigned S3
-  // archive (stored at <id>/archives/v<version>.zip). The website's
-  // archiveZipUrl() links here (nemarOrg/website src/lib/data-api.ts) and
-  // expects the Worker to resolve+presign. Without this branch the request
-  // falls through to the 308 below, then resolveVersion("v1.0.0.zip") fails
-  // the version regex and 404s even though the archive exists. (#670)
+  // archive (stored at <id>/archives/<id>_v<version>.zip since #1491; the
+  // pre-#1491 <id>/archives/v<version>.zip is read as a fallback during the
+  // rename sweep's transition window, see resolveArchiveKey in services/s3).
+  // The website's archiveZipUrl() links here (nemarOrg/website
+  // src/lib/data-api.ts) and expects the Worker to resolve+presign. Without
+  // this branch the request falls through to the 308 below, then
+  // resolveVersion("v1.0.0.zip") fails the version regex and 404s even
+  // though the archive exists. (#670)
   if (version.endsWith(".zip")) {
     const resolved = await resolveVersion(c.env.DB, datasetId, version.slice(0, -4));
     if (!resolved.ok) return notFound("Version not found");
+
+    // #1518: only the latest version keeps a retained archive -- an
+    // older-version zip is deleted once the newer one's upload is confirmed
+    // (going forward), and the lead's one-time sweep already removed what
+    // existed for older versions before this shipped. Without this check an
+    // older version's zip request falls through to the "not yet available"
+    // 404 below, which reads as "still building" for a zip that will never
+    // exist under any name; say so plainly and point at the browsable files
+    // instead of a failed download.
+    const latestResolved = await resolveVersion(c.env.DB, datasetId, "latest");
+    if (latestResolved.ok && resolved.version !== latestResolved.version) {
+      return notFound(
+        "Only the latest version has a downloadable archive; download files directly.",
+        {
+          version: resolved.version,
+          path: `${resolved.version}.zip`,
+          reason: "not_latest_version",
+          latest_version: latestResolved.version,
+          browse_url: `/${datasetId}/${resolved.version}/`,
+        },
+      );
+    }
+
     const s3 = s3OptionsFromEnv(c.env);
-    // HEAD first: the archive is generated asynchronously after publish, so a
-    // download click in that window would otherwise 302 to a presigned URL
-    // that dumps an S3 NoSuchKey XML error. Return a clean 404 instead. A
-    // credentials/5xx error throws -> 503. (#670, review)
-    let present: boolean;
+    // Resolve (HEAD) the archive key ONCE: the archive is generated
+    // asynchronously after publish, so a download click in that window
+    // would otherwise 302 to a presigned URL that dumps an S3 NoSuchKey XML
+    // error; return a clean 404 instead. A credentials/5xx error throws ->
+    // 503. (#670, review). PR review: this used to call headArchive() then
+    // getArchiveUrl() separately, each independently re-running
+    // resolveArchiveKey's new-name/old-name fallback -- up to four
+    // sequential HEADs during the #1491 transition window for what is one
+    // decision. Resolving once and presigning the resolved key directly
+    // halves that to at most two.
+    let archiveKeyResolved: string | null;
     try {
-      present = await headArchive(s3, datasetId, resolved.version);
+      archiveKeyResolved = await resolveArchiveKey(s3, datasetId, resolved.version);
     } catch (err) {
       console.error(`[data] archive HEAD failed for ${datasetId} ${resolved.version}:`, err);
       return c.json({ error: "Unable to check archive availability" }, 503);
     }
-    if (!present) {
+    if (!archiveKeyResolved) {
       return notFound(
         "Archive not yet available for this version (generation may still be in progress)",
       );
     }
-    const archiveUrl = await getArchiveUrl(s3, datasetId, resolved.version);
+    const archiveUrl = await generatePresignedGetUrl(s3, archiveKeyResolved);
     // Count the download (not HEAD probes). bytes=0: the Worker 302s to S3 and
     // never streams the archive, so it can't measure transferred bytes.
     if (c.req.method === "GET") {
