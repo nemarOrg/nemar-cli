@@ -631,7 +631,7 @@ class DatasetHasIssueTests(unittest.TestCase):
 
 class WriteAuditLogTests(unittest.TestCase):
     """Real local-filesystem I/O (no S3, no faking): these exercise the
-    actual atomic-write behaviour `write_audit_log` promises."""
+    actual atomic-write behavior `write_audit_log` promises."""
 
     def test_writes_valid_json_matching_the_report(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -913,7 +913,7 @@ class MainSnapshotWiringTests(unittest.TestCase):
 
 
 # A real "aws" stand-in over a local directory, with genuine ETag semantics:
-# every object's ETag is the md5 of its bytes, put-object honours --if-match /
+# every object's ETag is the md5 of its bytes, put-object honors --if-match /
 # --if-none-match the way S3 does (412 on a mismatch), and the list/remove verbs
 # cover the stat-and-delete half of the pipeline. It stands in for the SERVICE,
 # never for logic under test: every line of purge_non_raw_stores that decides
@@ -1216,7 +1216,7 @@ class ConditionalIndexWriteTests(unittest.TestCase):
         classified as an ERROR, never folded into the conflict path and never
         reported as a successful rewrite.
 
-        The two are handled by the same `except` neighbourhood and mean opposite
+        The two are handled by the same `except` neighborhood and mean opposite
         things: a 412 says another writer won and the newer document is intact
         (nothing to fix, re-run later), while a 500 / AccessDenied / expired
         credential says this rewrite did not happen and the index still lists

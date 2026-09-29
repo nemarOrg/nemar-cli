@@ -64,7 +64,7 @@
 #     `shard_seconds`, level-0 `source_rate_hz` / `chunk_samples` / `shard_samples`,
 #     view-array `chunk_columns`, root `view_chunk_columns`.
 #   - Adopting a channels.tsv `units` value CONVERTS the channel's samples into
-#     that unit rather than only relabelling them, exempts the discrete channel
+#     that unit rather than only relabeling them, exempts the discrete channel
 #     types, and reports what it did per file in
 #     `rec.metadata["channels_tsv_units"]` (biosigio#125, closing #122), which
 #     the converter republishes as the index's per-store `units_report` -- so a
@@ -92,7 +92,7 @@
 #     probe that saves you from that; only the floor does.
 # The converter passes the sidecar EXPLICITLY on both paths (`bids_channels_arg`)
 # and never uses "auto": the file handed to an exporter is a scratch
-# materialisation, and on the ADR 0028 MaxShield path it is the filtered copy at
+# materialization, and on the ADR 0028 MaxShield path it is the filtered copy at
 # `work/sss_<basename>`, so sibling detection is the wrong question -- and BIDS
 # inheritance means the applicable sidecar may live in an ancestor directory
 # rather than beside the recording at all.
@@ -123,7 +123,21 @@
 # reconverted, and `recording_metadata` gains `channel_labels_deduplicated`,
 # `brainvision_header_recovered` and `eeglab_fdt_recovered`, each only when it
 # applies.
-biosigio[zarr,meg,mef3,hdf5]>=1.2.9
+# <1.2.10 is a CAP, not a floor. biosigio 1.2.10 (biosigio#140, closing #136)
+# matches a channels.tsv row to the one channel whose label differs from it only
+# in case, and reports each match under `channels_tsv_units["matched_case_insensitive"]`.
+# Everything this repo publishes about the join was written against 1.2.9's exact
+# match: the schema, zod and MCP texts for `unmatched_channels` and
+# `unmatched_case_only` say matching is exact. `sidecar_join_report` already reads
+# biosigio's map, and the canary
+# `test_a_case_only_row_is_reported_per_biosigios_join` has a 1.2.10 branch (run
+# against biosigio's `main` when this cap was set, not in CI), so the join report
+# stays true on 1.2.10. What adopting it still needs: reword those three texts,
+# and declare or bound `matched_case_insensitive`, which `units_report` republishes
+# verbatim, one entry per matched channel in every store's index entry. Then raise
+# the cap in three places at once: here, `BIOSIGIO_SPEC` in hallu-zarr.sh, and
+# test_hallu_zarr_config.py.
+biosigio[zarr,meg,mef3,hdf5]>=1.2.9,<1.2.10
 
 # Draft 2020-12 validator for the converter's own pre-upload self-check: the index
 # it is about to publish is validated against `shared/zarr-index.schema.json` (and

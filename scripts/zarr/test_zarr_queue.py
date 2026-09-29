@@ -1479,7 +1479,7 @@ class EngineStampRequeueTest(unittest.TestCase):
         """Fail-safe: a NULL that escaped the migration must not requeue.
 
         `migrate_schema` seeds every pre-existing row, so this should be
-        unreachable -- which is exactly why the behaviour needs pinning. If a
+        unreachable -- which is exactly why the behavior needs pinning. If a
         NULL ever does appear (an older driver writing into a migrated DB, a
         hand-edited row), the wrong reading of it re-converts the entire archive.
         """
@@ -1714,7 +1714,7 @@ class EngineBumpGuardTest(unittest.TestCase):
 
     def test_the_suppression_flag_reports_nothing_pending(self):
         # --no-engine-requeue is a deliberate "don't", not a blocked "can't", so
-        # it must not read as a bump awaiting acknowledgement.
+        # it must not read as a bump awaiting acknowledgment.
         res = reconcile(
             self.conn, self.catalog(), 3600, engine_requeue=False, engine_requeue_limit=5
         )
@@ -1810,7 +1810,7 @@ class BackfillClassificationTest(unittest.TestCase):
         """The precision rule, found by running the sweep against production.
 
         A directory recording listed in `failures` was SEEN by the converter: the
-        pre-#1095 engine could not have put it there, since it did not recognise
+        pre-#1095 engine could not have put it there, since it did not recognize
         the directory as a recording at all. Counting it as missing re-queues
         datasets whose `.ds` recordings a current engine has already tried and
         rejected -- on005752 alone would have re-queued 471 CTF MEG recordings.

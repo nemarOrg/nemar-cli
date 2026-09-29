@@ -790,7 +790,7 @@ class TestPowerLineFrequencyFor(unittest.TestCase):
             self.assertIsNone(power_line_frequency_for(d, rec, head, "HEAD"))
 
     def test_a_utf8_bom_sidecar_is_honored(self):
-        # Behaviour change (#1527): the strict UTF-8 read kept the BOM, so
+        # Behavior change (#1527): the strict UTF-8 read kept the BOM, so
         # json.loads raised and this sidecar was silently skipped (PLF None).
         # It now parses, and quietly: a UTF-8 BOM is still UTF-8.
         with tempfile.TemporaryDirectory() as d:
@@ -1919,7 +1919,7 @@ class TestMemoryGuard(unittest.TestCase):
         )
         self.assertGreater(STREAM_MEM_FACTOR_BY_EXT[".mefd"], 10)
         # Other streamed formats keep the flat bound: nothing measured says
-        # otherwise, and charging them 12x would serialise the archive.
+        # otherwise, and charging them 12x would serialize the archive.
         self.assertEqual(projected_peak_bytes("sub-01/meg/sub-01_meg.fif", size, 306), STREAM_PEAK_BYTES)
         self.assertEqual(projected_peak_bytes("sub-01/meg/sub-01_meg.ds", size, 275), STREAM_PEAK_BYTES)
         self.assertEqual(stream_factor_for("sub-01/meg/sub-01_meg.fif"), 0.0)
@@ -2811,6 +2811,22 @@ class TestExpectedChannelCountFor(unittest.TestCase):
             self._write(d, tsv, "name\ttype\tunits\n")
             self.assertIsNone(expected_channel_count_for(d, rec, {tsv}, "HEAD"))
 
+    def test_an_unreadable_channels_tsv_says_what_the_gate_still_does(self):
+        # The sidecar is listed at HEAD and cannot be read. Only the sidecar
+        # drops out: the file's own header still gates the recording, so the
+        # log must not claim the gate is off (it used to, after the header
+        # gate stopped depending on channels.tsv).
+        with tempfile.TemporaryDirectory() as d:
+            rec = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+            tsv = "sub-01/eeg/sub-01_task-rest_channels.tsv"  # never written
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertIsNone(expected_channel_count_for(d, rec, {tsv}, "HEAD"))
+        log = out.getvalue()
+        self.assertIn(f"could not read {tsv}", log)
+        self.assertIn("its file header alone", log)
+        self.assertNotIn("OFF", log)
+
 
     def test_reads_via_git_when_no_working_tree(self):
         # The workflow clones --no-checkout, so channels.tsv is only in the git
@@ -3069,6 +3085,106 @@ class TestFileDeclaredChannelCount(unittest.TestCase):
         self.assertIsNone(file_declared_channel_count(p))
         self.assertIsNone(file_declared_channel_count(self.path("absent_eeg.edf")))
 
+    def count_and_log(self, path):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            value = file_declared_channel_count(path)
+        return value, out.getvalue()
+
+    def patched_edf(self, name, labels, offset, field):
+        """`write_edf_header`'s file with `field` written over the bytes at
+        `offset`, so a fixed-width field holds what a real writer put there."""
+        p = self.path(name)
+        write_edf_header(p, labels)
+        with open(p, "r+b") as fh:
+            fh.seek(offset)
+            fh.write(field)
+        return p
+
+    def test_a_nul_padded_signal_count_is_read(self):
+        # An EDF+ whose `ns` field is NUL-padded (b"4\x00\x00\x00") instead of
+        # space-padded: real writers do this (biosigio#109) and biosigIO converts
+        # the file. `int()` of the raw field refuses it, so the count was None
+        # without a word.
+        p = self.patched_edf(
+            "nul_ns_eeg.edf", ["Fp1", "Fp2", "Cz", "EDF Annotations"], 252, b"4\x00\x00\x00"
+        )
+        self.assertEqual(self.count_and_log(p), (3, ""))
+
+    def test_a_field_is_cut_at_its_first_nul_then_stripped(self):
+        # biosigio's `_decode_field`: everything after the first NUL is
+        # ignored, so a value followed by NULs and junk is still the value, and
+        # trailing spaces before the NUL go too.
+        p = self.patched_edf(
+            "nul_junk_eeg.edf", ["Fp1", "Fp2", "Cz", "EDF Annotations"], 252, b"4 \x009"
+        )
+        self.assertEqual(self.count_and_log(p), (3, ""))
+
+    def test_a_nul_padded_annotation_label_is_still_the_annotation_track(self):
+        # `strip()` leaves the NUL, so "EDF Annotations\x00" != "EDF Annotations"
+        # and the pseudo-signal was counted as a data channel: 4 in the header,
+        # 3 in the store, a complete store refused.
+        p = self.patched_edf(
+            "nul_label_eeg.edf", ["Fp1", "Fp2", "Cz", "EDF Annotations"],
+            256 + 16 * 3, b"EDF Annotations\x00",
+        )
+        self.assertEqual(self.count_and_log(p), (3, ""))
+
+    def test_an_unreadable_header_is_unknown_and_says_so(self):
+        four = ["Fp1", "Fp2", "Cz", "EDF Annotations"]
+        short = self.path("short_eeg.edf")
+        with open(short, "wb") as fh:
+            fh.write(b"0" * 100)
+        cut = self.patched_edf("cut_eeg.edf", four, 0, b"")
+        with open(cut, "r+b") as fh:
+            fh.truncate(256 + 20)
+        no_count = self.path("no_count_eeg.vhdr")
+        with open(no_count, "w") as fh:
+            fh.write("[Common Infos]\nDataFile=x.eeg\n")
+        zero_count = self.path("zero_count_eeg.vhdr")
+        with open(zero_count, "w") as fh:
+            fh.write("[Common Infos]\nNumberOfChannels=0\n")
+        cases = {
+            "EDF header short of 256 bytes": (short, "EDF"),
+            "EDF signal count not an integer": (
+                self.patched_edf("word_eeg.edf", four, 252, b"abcd"), "EDF"),
+            "EDF declares no signals": (
+                self.patched_edf("none_eeg.edf", four, 252, b"0   "), "EDF"),
+            "EDF label block cut short": (cut, "EDF"),
+            "BDF signal count not an integer": (
+                self.patched_edf("word_eeg.bdf", four, 252, b"??  "), "BDF"),
+            "EDF file that is not there": (self.path("absent_eeg.edf"), "EDF"),
+            "BrainVision without a channel count": (no_count, "BrainVision"),
+            "BrainVision with a zero channel count": (zero_count, "BrainVision"),
+        }
+        for name, (path, kind) in cases.items():
+            with self.subTest(name):
+                value, log = self.count_and_log(path)
+                self.assertIsNone(value)
+                self.assertIn(f"could not read the {kind} header", log)
+                self.assertIn(path, log)
+                self.assertIn("the gate uses channels.tsv alone", log)
+
+    def test_a_format_with_no_cheap_header_is_unknown_without_a_warning(self):
+        # Nothing here was expected to have a header to read, so nothing is
+        # unreadable: the quiet None is the whole answer.
+        p = self.path("r_eeg.set")
+        with open(p, "wb") as fh:
+            fh.write(b"MATLAB 5.0")
+        self.assertEqual(self.count_and_log(p), (None, ""))
+
+    def test_brainvision_reads_its_count_key_without_regard_to_case(self):
+        # MNE's configparser lowercases option names, so `numberofchannels=4`
+        # converts; the section name stays case-sensitive there, and here.
+        p = self.path("lc_eeg.vhdr")
+        with open(p, "w") as fh:
+            fh.write("[Common Infos]\nDataFile=lc_eeg.eeg\nnumberofchannels=4\n")
+        self.assertEqual(self.count_and_log(p), (4, ""))
+        q = self.path("lcsection_eeg.vhdr")
+        with open(q, "w") as fh:
+            fh.write("[common infos]\nNumberOfChannels=4\n")
+        self.assertIsNone(self.count_and_log(q)[0])
+
     def test_a_real_edf_plus_from_pyedflib(self):
         # EDF+ writers append the annotation pseudo-signal; it must not count.
         try:
@@ -3190,7 +3306,7 @@ class TestChannelGateVerdict(unittest.TestCase):
         self.assertEqual(channel_gate_verdict(23, 22, 23), "pass")
 
 
-def build_labelled_edf(path: str, labels: list[str], rate: int = 256, seconds: int = 10) -> str:
+def build_labeled_edf(path: str, labels: list[str], rate: int = 256, seconds: int = 10) -> str:
     """Write a REAL EDF+ with pyedflib whose signals carry exactly `labels`,
     repeats included (EDF does not require unique labels; CHB-MIT repeats
     `T8-P8` and uses `-` for unused inputs). Returns `path`."""
@@ -3256,17 +3372,17 @@ class TestChannelGateOnRealFiles(unittest.TestCase):
     def store_from(self, labels: list[str]) -> int:
         from biosigio import Recording
 
-        src = build_labelled_edf(os.path.join(self.dir, "collapsed.edf"), labels)
+        src = build_labeled_edf(os.path.join(self.dir, "collapsed.edf"), labels)
         store = os.path.join(self.dir, "collapsed.zarr")
         Recording.from_file(src).to_zarr(store, dtype="int16")
         return store_total_channels(store_metadata(store))
 
     def test_the_header_counts_every_repeated_label(self):
-        f = build_labelled_edf(os.path.join(self.dir, "chb_eeg.edf"), CHB_MIT_LABELS)
+        f = build_labeled_edf(os.path.join(self.dir, "chb_eeg.edf"), CHB_MIT_LABELS)
         self.assertEqual(file_declared_channel_count(f), len(CHB_MIT_LABELS))
 
     def test_a_collapsed_store_is_refused_with_or_without_a_sidecar(self):
-        f = build_labelled_edf(os.path.join(self.dir, "chb_eeg.edf"), CHB_MIT_LABELS)
+        f = build_labeled_edf(os.path.join(self.dir, "chb_eeg.edf"), CHB_MIT_LABELS)
         collapsed = list(dict.fromkeys(CHB_MIT_LABELS))  # what a label-keyed import kept
         in_store = self.store_from(collapsed)
         self.assertEqual(in_store, len(collapsed))
@@ -3280,7 +3396,7 @@ class TestChannelGateOnRealFiles(unittest.TestCase):
                 self.assertIn(f"header declares {in_file}", str(cm.exception))
 
     def test_a_complete_store_passes(self):
-        f = build_labelled_edf(os.path.join(self.dir, "chb_eeg.edf"), CHB_MIT_LABELS)
+        f = build_labeled_edf(os.path.join(self.dir, "chb_eeg.edf"), CHB_MIT_LABELS)
         in_store = self.store_from(CHB_MIT_SUFFIXED)
         self.assertIsNone(generate_zarr.enforce_channel_gate(
             "sub-01/eeg/x_eeg.edf", in_store, len(CHB_MIT_LABELS),
@@ -4523,7 +4639,7 @@ class TestStreamingAdmissionThroughput(unittest.TestCase):
             projected_peak_bytes(name, size), ceiling, streamed=True
         )
         self.assertGreater(
-            ceiling // reserve, 1, "streaming the default must not serialise the queue"
+            ceiling // reserve, 1, "streaming the default must not serialize the queue"
         )
 
     def test_in_memory_recordings_still_carry_slack(self):
@@ -4643,7 +4759,7 @@ class TestOn004917BatchAdmission(unittest.TestCase):
 
 
 class TestMneEmbeddedSetCanary(unittest.TestCase):
-    """ADR 0030 rests on MNE eagerly materialising an EEGLAB `.set` whose samples
+    """ADR 0030 rests on MNE eagerly materializing an EEGLAB `.set` whose samples
     are embedded in the MAT struct rather than a sibling `.fdt`. That is a claim
     about a third-party library, verified once by hand; if a future MNE gains real
     lazy support the `.set` exclusion goes stale silently. This is the canary."""
@@ -4667,7 +4783,7 @@ class TestMneEmbeddedSetCanary(unittest.TestCase):
 class TestStreamingPeakIsChannelAware(unittest.TestCase):
     """#1112: STREAM_PEAK_BYTES is a FLOOR, not a bound.
 
-    Pass 2 of the streaming exporter materialises one whole channel at native
+    Pass 2 of the streaming exporter materializes one whole channel at native
     rate as anonymous float64 (`n_samples * 8`). That term scales with duration
     and sample rate and is independent of channel count, so a few-channel, long,
     high-rate recording can have a single channel that alone exceeds the flat
@@ -6213,7 +6329,7 @@ class TestCoverageInvariant(unittest.TestCase):
         """A carried-over store under `derivatives/` must NOT be republished.
 
         ADR 0027 made discovery raw-only and `purge_non_raw_stores.py` is the
-        authorised deletion of what it stopped producing, so those stores are not
+        authorized deletion of what it stopped producing, so those stores are not
         hosted -- an index that kept describing one would advertise bytes that are
         being removed. The drop is deliberate, but it is LOUD: `merge_index` logs
         each one with the tree that excluded it, and `main` reports the count as
@@ -6799,7 +6915,7 @@ class TestRealRecordingV3Fields(unittest.TestCase):
         Without this, the SSS test above could pass for the wrong reason on some
         future release whose auto-detection searches more widely -- and a staged
         sidecar would be at risk of being applied twice, which matters because
-        adopting a unit CONVERTS samples rather than relabelling them.
+        adopting a unit CONVERTS samples rather than relabeling them.
         """
         with tempfile.TemporaryDirectory() as d:
             recording = os.path.join(d, "sub-01_task-rest_eeg.edf")
@@ -6815,7 +6931,7 @@ class TestRealRecordingV3Fields(unittest.TestCase):
     def test_bids_channels_arg_is_the_path_or_off_never_auto(self):
         """"auto" is biosigIO's default and is always wrong here: it resolves the
         sidecar as a SIBLING of the file the exporter was handed, which is a
-        scratch materialisation (and, on the MaxShield path, a filtered copy).
+        scratch materialization (and, on the MaxShield path, a filtered copy).
         The driver therefore passes the resolved path, or "off" when no sidecar
         applies -- an explicit "there is none" rather than a guess."""
         self.assertEqual(generate_zarr.bids_channels_arg(self.channels), self.channels)
@@ -7045,7 +7161,7 @@ class TestMainRefusesToPublish(unittest.TestCase):
 # included.
 #
 # `s3api get-object`/`put-object` carry GENUINE ETag semantics -- an object's
-# ETag is the md5 of its bytes, and put-object honours `--if-match` /
+# ETag is the md5 of its bytes, and put-object honors `--if-match` /
 # `--if-none-match` the way S3 does (412 on a mismatch). That is the same
 # stand-in test_purge_non_raw_stores.py uses, and it has to be: the two scripts
 # now share one conditional write (`generate_zarr.write_index`), so a stub that
@@ -7153,7 +7269,7 @@ class TestMainCleanRunAgainstPriorIndexes(unittest.TestCase):
     """A `--clean` run over a REAL prior index, v1 and v3, through `main()`.
 
     This is the production path (hallu-zarr.sh always passes `--clean`) and no
-    test reached it: every prior-index behaviour was exercised through
+    test reached it: every prior-index behavior was exercised through
     `merge_index` directly, which `--clean` hands `prior=None` -- so the facts
     that must survive a clean rebuild travel a route nothing covered. They come
     from the PUBLISHED document rather than from what the merge is given:
@@ -7323,7 +7439,7 @@ class TestMainCleanRunAgainstPriorIndexes(unittest.TestCase):
         ))
         self.assertEqual(self.run_main(), 0)
         # The recording is not at HEAD any more, so the entry drops rather than
-        # ageing -- what is asserted here is that `main` READ it: the attempt
+        # aging -- what is asserted here is that `main` READ it: the attempt
         # history reached the merge, which is the wiring `--clean` breaks.
         self.assertEqual(self.published("index.json")["pending_count"], 0)
         # And the merge does age it when the recording IS still discovered,
@@ -8308,7 +8424,7 @@ class TestSidecarJoinReport(unittest.TestCase):
         self.assertEqual(channels_tsv_names(text), ["T8-P8", "T8-P8", "-"])
 
     def test_names_are_read_with_pandas_quoting(self):
-        # biosigIO reads channels.tsv with pandas, which honours `"` quoting:
+        # biosigIO reads channels.tsv with pandas, which honors `"` quoting:
         # a quoted name loses its quotes and keeps a quoted tab, and a lone
         # quote inside a cell is literal. A plain split would disagree.
         text = 'name\ttype\n"Fp1"\tEEG\n"A\tB"\tEEG\n  C \tEEG\nD"x\tEEG\n'
@@ -8359,6 +8475,33 @@ class TestSidecarJoinReport(unittest.TestCase):
             "unmatched_examples": ["FP1-F7"],
         })
 
+    def test_a_case_only_match_biosigio_reported_is_not_unmatched(self):
+        # biosigio 1.2.10 applied `Fp1-F7` to `FP1-F7` and said so; a row it
+        # left alone (`t8` against `T8`, ambiguous there) is still unmatched
+        # and still case-only. The map is biosigIO's own
+        # `matched_case_insensitive`, `{sidecar_name: channel_label}`.
+        #
+        # The end-to-end proof is the canary in TestDuplicateLabelsThroughConvertOne,
+        # but biosigio 1.2.9 (the cap in requirements.txt) never emits that key, so
+        # in CI only this pure case reaches the arithmetic.
+        report = sidecar_join_report(
+            ["FP1-F7", "F7-T7", "T8"],
+            ["Fp1-F7", "F7-T7", "t8"],
+            {},
+            {"Fp1-F7": "FP1-F7"},
+        )
+        self.assertEqual(report, {
+            "unmatched_channels": 1, "unmatched_case_only": 1,
+            "unmatched_examples": ["T8"],
+        })
+        # Without the map the same inputs count both, which is 1.2.9's truth.
+        self.assertEqual(
+            sidecar_join_report(["FP1-F7", "F7-T7", "T8"], ["Fp1-F7", "F7-T7", "t8"], {})[
+                "unmatched_channels"
+            ],
+            2,
+        )
+
     def test_renamed_labels_inherit_a_position_and_override_nothing(self):
         positions = {"Fp1": [1.0, 2.0, 3.0], "Fp1-1": [9.0, 9.0, 9.0]}
         out = generate_zarr.positions_for_renamed_labels(
@@ -8392,6 +8535,27 @@ class TestSidecarJoinReport(unittest.TestCase):
         self.assertNotIn("unmatched_raw_label", report)
 
 
+def biosigio_matches_case_only_rows() -> bool:
+    """Whether the installed biosigIO applies a channels.tsv row to a channel
+    whose label differs from the row's name only in case (biosigio#136).
+
+    Asked of biosigIO itself on a real EDF and a real sidecar, through
+    `Recording.from_file`, and answered from the account it gives of its own
+    join: 1.2.10 records `matched_case_insensitive` under `channels_tsv_units`
+    when it matched that way, 1.2.9 has no such key. No conversion by this
+    repo's code is involved, so the answer cannot depend on what it is used to
+    check."""
+    from biosigio import Recording
+
+    with tempfile.TemporaryDirectory() as tmp:
+        edf = build_labeled_edf(os.path.join(tmp, "probe.edf"), ["FP1-F7", "F7-T7"])
+        tsv = os.path.join(tmp, "probe_channels.tsv")
+        with open(tsv, "w") as fh:
+            fh.write("name\ttype\tunits\nFp1-F7\tEEG\tV\nF7-T7\tEEG\tV\n")
+        rec = Recording.from_file(edf, bids_channels=tsv)
+    return "matched_case_insensitive" in rec.metadata.get("channels_tsv_units", {})
+
+
 class TestDuplicateLabelsThroughConvertOne(unittest.TestCase):
     """A REAL EDF that repeats a label, CHB-MIT shaped, through `convert_one`.
 
@@ -8423,7 +8587,7 @@ class TestDuplicateLabelsThroughConvertOne(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.repo = os.path.join(self._tmp.name, "repo")
         os.makedirs(os.path.join(self.repo, "sub-01", "eeg"))
-        build_labelled_edf(os.path.join(self.repo, self.PRIMARY), CHB_MIT_LABELS)
+        build_labeled_edf(os.path.join(self.repo, self.PRIMARY), CHB_MIT_LABELS)
         self.extra_head_files: set[str] = set()
         self.synced_dir = os.path.join(self._tmp.name, "synced")
         bindir = os.path.join(self._tmp.name, "bin")
@@ -8548,7 +8712,7 @@ class TestDuplicateLabelsThroughConvertOne(unittest.TestCase):
     def test_repeated_electrodes_keep_their_position(self):
         # A monopolar repeat: `Fp1` twice in the file, served as Fp1-0/Fp1-1,
         # while electrodes.tsv names the electrode once, as `Fp1`.
-        build_labelled_edf(os.path.join(self.repo, self.PRIMARY), ["Fp1", "F7", "Fp1"])
+        build_labeled_edf(os.path.join(self.repo, self.PRIMARY), ["Fp1", "F7", "Fp1"])
         elec = "sub-01/eeg/sub-01_electrodes.tsv"
         with open(os.path.join(self.repo, elec), "w") as fh:
             fh.write("name\tx\ty\tz\nFp1\t-0.03\t0.08\t0.0\nF7\t-0.07\t0.04\t0.0\n")
@@ -8561,26 +8725,55 @@ class TestDuplicateLabelsThroughConvertOne(unittest.TestCase):
         self.assertEqual(positions["F7"], [-0.07, 0.04, 0.0])
         self.assertIn("Fp1", positions)  # the sidecar's own key is kept
 
-    def test_a_case_only_difference_is_disclosed(self):
+    def test_a_case_only_row_is_reported_per_biosigios_join(self):
         # biosigio#136: EDF header `FP1-F7`, channels.tsv `Fp1-F7`.
         #
-        # CANARY. This pins biosigio 1.2.9's EXACT-match join: the row is not
-        # applied, so the channel keeps the importer's unit and the index says
-        # why. biosigio#136 is fixed in open biosigio PR #140; once a release
-        # carrying it is the floor in requirements.txt, this test fails
-        # (the row now matches), and that failure is the signal to delete
-        # `unmatched_case_only` from `sidecar_join_report`, the JSON Schema
-        # and both zod mirrors, and to rewrite this test to expect a match.
-        # `unmatched_case_only` stays declared until then on purpose.
+        # CANARY for biosigIO's channels.tsv join, and it must pass on either
+        # side of that change without skipping (a skip counts toward the CI
+        # gate). Which side this run is on is decided by asking biosigIO
+        # directly (`biosigio_matches_case_only_rows`), not by a version number
+        # and not by the outcome under test:
+        #
+        # * biosigio 1.2.9 joins by exact label. The row is not applied, so the
+        #   channel keeps the importer's unit and the index says why
+        #   (`unmatched_case_only`).
+        # * biosigio 1.2.10 also matches the row to the one channel that differs
+        #   from it only in case, and reports it as `matched_case_insensitive`.
+        #   The row IS applied, so the index must not claim otherwise: nothing
+        #   unmatched, no `unmatched_case_only`, no warning.
+        #
+        # The second branch cannot run in CI while requirements.txt caps
+        # biosigio below 1.2.10; it was run against biosigio's `main` when the
+        # cap was set. The branch whose assertion fails on the wrong side is the
+        # point: a stale probe (biosigIO renames its report key) lands in the
+        # 1.2.9 branch and fails on the unit that was in fact converted.
+        matches = biosigio_matches_case_only_rows()
         names = ["Fp1-F7", *CHB_MIT_SUFFIXED[1:]]
-        result, out = self.convert(names)
-        self.assertTrue(result["ok"], result.get("error"))
-        report = result["entry"]["units_report"]
-        self.assertEqual(report["unmatched_channels"], 1)
-        self.assertEqual(report["unmatched_case_only"], 1)
-        self.assertEqual(report["unmatched_examples"], ["FP1-F7"])
-        self.assertEqual(self.store_units(result["entry"])["FP1-F7"], "uV")
-        self.assertIn("differ only in case", out)
+        saved = generate_zarr.STREAM_EDF_MIN_BYTES
+        self.addCleanup(setattr, generate_zarr, "STREAM_EDF_MIN_BYTES", saved)
+        for path_name, threshold in (("in-memory", saved), ("streaming", 1)):
+            with self.subTest(path_name, biosigio_matches_case_only_rows=matches):
+                generate_zarr.STREAM_EDF_MIN_BYTES = threshold
+                shutil.rmtree(self.synced_dir, ignore_errors=True)
+                result, out = self.convert(names)
+                self.assertTrue(result["ok"], result.get("error"))
+                report = result["entry"]["units_report"]
+                unit = self.store_units(result["entry"])["FP1-F7"]
+                if matches:
+                    self.assertEqual(unit, "V")  # the sidecar's, so the row was applied
+                    self.assertEqual(report["matched_case_insensitive"], {"Fp1-F7": "FP1-F7"})
+                    self.assertEqual(report["unmatched_channels"], 0)
+                    self.assertNotIn("unmatched_case_only", report)
+                    self.assertNotIn("unmatched_examples", report)
+                    self.assertNotIn("names no row", out)
+                    self.assertNotIn("differ only in case", out)
+                else:
+                    self.assertEqual(unit, "uV")  # the importer's: the row was not applied
+                    self.assertNotIn("matched_case_insensitive", report)
+                    self.assertEqual(report["unmatched_channels"], 1)
+                    self.assertEqual(report["unmatched_case_only"], 1)
+                    self.assertEqual(report["unmatched_examples"], ["FP1-F7"])
+                    self.assertIn("differ only in case", out)
 
 
 def build_edf_family(
@@ -8698,7 +8891,25 @@ class TestHeaderGateFalseRefusalMatrix(unittest.TestCase):
     `recording_metadata.number_of_signals` (the witness
     find_collapsed_channel_stores.py reads) never exceeds what it serves.
     Only `aws s3 sync` is absorbed (it copies the store aside), as in
-    TestDuplicateLabelsThroughConvertOne."""
+    TestDuplicateLabelsThroughConvertOne.
+
+    It also pins the CALL SITE. `convert_one` must hand the gate the header
+    count for every recording, sidecar or none: a reviewer once changed that
+    line to `file_declared_channel_count(primary_local) if expected else None`,
+    which restores the old channels.tsv-only gate, and every test stayed green.
+    Each case therefore records what `convert_one` passes to
+    `enforce_channel_gate` (a pass-through: the real gate still runs on it).
+
+    Why the REFUSAL cannot be driven from here: on biosigio >= 1.2.9 no real
+    file yields a store short of its header. Probed with real files through
+    `convert_one`, on both exporters: repeated, empty and colliding labels
+    (suffixed, all kept), zero-rate and mixed-rate signals, NUL-padded fields,
+    annotation-label variants (pyedflib rejects them), and BrainVision channel
+    infos that disagree with the count (rejected, or read at the count). Each
+    either converts whole or fails before a store exists. So real data cannot
+    falsify a call site that stops passing the header, and the only thing left
+    to observe is the argument. The refusal itself is proved on a store built
+    the way biosigio <= 1.2.8 built one, in TestChannelGateOnRealFiles."""
 
     @classmethod
     def setUpClass(cls):
@@ -8740,12 +8951,31 @@ class TestHeaderGateFalseRefusalMatrix(unittest.TestCase):
         return path
 
     def assert_published_whole(
-        self, primary: str, extra_files: set[str], in_file: int, in_store: int
+        self,
+        primary: str,
+        extra_files: set[str],
+        in_file: int,
+        in_store: int,
+        unusable_sidecar: str | None = None,
     ):
+        """`unusable_sidecar` is a channels.tsv listed at HEAD that gives the
+        gate no count (unreadable, or a header row and nothing else), so the
+        header is still the only witness."""
         head_files = {primary, *extra_files}
         self.assertFalse(
             any(p.endswith("_channels.tsv") for p in head_files), "no sidecar: header only"
         )
+        if unusable_sidecar:
+            head_files.add(unusable_sidecar)
+        gate_calls: list[tuple] = []
+        real_gate = generate_zarr.enforce_channel_gate
+
+        def recording_gate(*args, **kwargs):
+            gate_calls.append(args)
+            return real_gate(*args, **kwargs)
+
+        setattr(generate_zarr, "enforce_channel_gate", recording_gate)  # noqa: B010
+        self.addCleanup(setattr, generate_zarr, "enforce_channel_gate", real_gate)
         work = os.path.join(self._tmp.name, "work")
         os.makedirs(work, exist_ok=True)
         generate_zarr._init_worker({
@@ -8767,6 +8997,11 @@ class TestHeaderGateFalseRefusalMatrix(unittest.TestCase):
         self.assertNotIn("channels_tsv_count_mismatch", entry)
         self.assertEqual(store_total_channels(entry), in_store)
         self.assertGreaterEqual(in_store, in_file)
+        self.assertEqual(
+            gate_calls, [(primary, in_store, None, in_file)],
+            "convert_one must hand the gate the file's own header count even "
+            "when no channels.tsv gives a count",
+        )
         with open(
             os.path.join(self.synced_dir, os.path.basename(entry["zarr"]), "zarr.json"),
             encoding="utf-8",
@@ -8843,9 +9078,67 @@ class TestHeaderGateFalseRefusalMatrix(unittest.TestCase):
         )
         self.assertEqual(entry["path"], splits[0])
 
+    def test_edf_plus_with_a_nul_padded_signal_count(self):
+        # pyedflib refuses a NUL-padded header field, so biosigIO converts this
+        # through its tolerant fallback (biosigio#109). A header reader that
+        # cannot parse the field has no count, and the gate then runs blind on a
+        # file it has every reason to check.
+        import pyedflib
+
+        primary = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+        path = self.place(primary)
+        build_edf_family(
+            path, [("Fp1", 256), ("Fp2", 256), ("Cz", 256)],
+            pyedflib.FILETYPE_EDFPLUS, annotations=True,
+        )
+        with open(path, "r+b") as fh:
+            fh.seek(252)
+            self.assertEqual(fh.read(4), b"4   ")  # 3 signals + the annotation track
+            fh.seek(252)
+            fh.write(b"4\x00\x00\x00")
+        self.assert_published_whole(primary, set(), 3, 3)
+
+    def test_brainvision_with_a_lowercase_count_key(self):
+        primary = "sub-01/eeg/sub-01_task-rest_eeg.vhdr"
+        paths = write_brainvision(self.place(primary), ["Fp1", "Fp2", "Cz", "Pz"])
+        with open(paths[0], encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("NumberOfChannels=4", text)
+        with open(paths[0], "w", encoding="utf-8") as fh:
+            fh.write(text.replace("NumberOfChannels=4", "numberofchannels=4"))
+        rels = {os.path.relpath(p, self.repo) for p in paths}
+        self.assert_published_whole(primary, rels - {primary}, 4, 4)
+
+    def test_a_header_only_sidecar_leaves_the_header_as_the_witness(self):
+        # A channels.tsv with a header row and no data rows counts nothing
+        # (`expected_channel_count_for` -> None), which is the same "no count
+        # from the sidecar" the call site must not confuse with "no header".
+        import pyedflib
+
+        primary = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+        tsv = "sub-01/eeg/sub-01_task-rest_channels.tsv"
+        build_edf_family(
+            self.place(primary), [("Fp1", 256), ("Fp2", 256), ("Cz", 256)],
+            pyedflib.FILETYPE_EDFPLUS,
+        )
+        with open(self.place(tsv), "w") as fh:
+            fh.write("name\ttype\tunits\n")
+        self.assert_published_whole(primary, set(), 3, 3, unusable_sidecar=tsv)
+
+    def test_an_unreadable_sidecar_leaves_the_header_as_the_witness(self):
+        import pyedflib
+
+        primary = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+        tsv = "sub-01/eeg/sub-01_task-rest_channels.tsv"  # listed at HEAD, never written
+        build_edf_family(
+            self.place(primary), [("Fp1", 256), ("Fp2", 256), ("Cz", 256)],
+            pyedflib.FILETYPE_EDFPLUS,
+        )
+        self.assert_published_whole(primary, set(), 3, 3, unusable_sidecar=tsv)
+
     def test_plain_edf_whose_header_under_counts(self):
         # A plain EDF (not EDF+) with an ordinary signal that happens to be
-        # LABELLED `EDF Annotations`. The header count drops that label, so it
+        # LABELED `EDF Annotations`. The header count drops that label, so it
         # under-counts (2 of 3); the importer serves all three. A store above
         # the header is not a truncation and must publish.
         primary = "sub-01/eeg/sub-01_task-rest_eeg.edf"
@@ -9585,7 +9878,7 @@ class TestFdtDeclarationFile(unittest.TestCase):
 
 class TestDeclaredFdtConvertOne(unittest.TestCase):
     """`convert_one` over a real EEGLAB `.set` whose `.fdt` lives under
-    `derivatives/`, as on004306 ships it. Both materialisation paths are driven:
+    `derivatives/`, as on004306 ships it. Both materialization paths are driven:
     local mode (the working tree) and the remote path, whose blob fetch reads a
     real git repository (in-git blobs, so no S3 read is needed). `aws s3 sync`
     is the only external call and a no-op executable absorbs it, as in

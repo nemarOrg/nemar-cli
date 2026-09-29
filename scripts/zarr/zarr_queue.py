@@ -166,7 +166,7 @@ def dataset_id_admitted(dataset_id: str, accept_exemplars: bool = False) -> bool
 #
 # "3" is epic #1181 phase 7. This one is not a widening of DISCOVERY -- the same
 # recordings are found -- but of what a converted store SAYS and what it
-# contains, which reaches the back catalogue by exactly the same route and so
+# contains, which reaches the back catalog by exactly the same route and so
 # needs the same stamp:
 #   - index.json becomes format v3: the data plane is declared, coverage is
 #     accounted for (`discovered_count == store_count + failure_count +
@@ -188,8 +188,8 @@ def dataset_id_admitted(dataset_id: str, accept_exemplars: bool = False) -> bool
 ZARR_ENGINE_VERSION = "3"
 
 # How many stamp-stale rows a routine `reconcile` will requeue without an
-# explicit acknowledgement. Above this, it requeues none and says so (see
-# `reconcile`). The number is a judgement, not a measurement: small enough that
+# explicit acknowledgment. Above this, it requeues none and says so (see
+# `reconcile`). The number is a judgment, not a measurement: small enough that
 # the guard fires on any real bump (the whole point is that a bump is never
 # routine), large enough that it never fires on the handful of rows a hand-fixed
 # stamp or a rolled-back driver could leave behind.
@@ -1017,7 +1017,7 @@ def fetch_public_catalog_rows(api_base: str) -> tuple[list[dict], bool]:
     instead of hiding it (#1048).
 
     `offset` advances by the number of rows the page RETURNED, not the number
-    kept: filtering to public here must not desynchronise the paging arithmetic.
+    kept: filtering to public here must not desynchronize the paging arithmetic.
     """
     base = api_base.rstrip("/")
     out: list[dict] = []
@@ -1199,7 +1199,7 @@ def index_failure_keys(index_doc: dict | None) -> tuple[set[str], set[str]]:
     A recording here was **seen** by the converter and could not be converted,
     which is a different problem from the one this sweep exists to find -- and
     the distinction is what keeps the sweep precise. The pre-#1095 engine did not
-    recognise `.mefd`/`.ds`/BTi directories as recordings at all, so a
+    recognize `.mefd`/`.ds`/BTi directories as recordings at all, so a
     directory-format recording it processed landed in NEITHER list; one sitting
     in `failures` therefore proves a POST-#1095 engine already looked at it and
     failed on the data.

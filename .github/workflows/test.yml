@@ -301,25 +301,40 @@ jobs:
             test_find_collapsed_channel_stores.py
 
       # A skip is invisible in a green job, and that is exactly how 43 tests
-      # went unrun for the life of this epic. TWO are expected here and no
-      # more: the real-data download test (opted out of, or unreachable) and
-      # the bash-3.2 guard-rail test (this runner has bash 5). Anything above
-      # that is a dependency that did not install -- the failure mode the
-      # threshold exists to make loud.
-      - name: Fail if more than two tests skipped
+      # went unrun for the life of this epic. Only two KINDS of skip are
+      # expected here, matched by their reason and not by how many there are:
+      # the real-data download tests (`real-data test skipped: ...`, opted out
+      # of or data.nemar.org unreachable -- TestSampleIndexAgainstARealRateChange
+      # skips as a class, so one transient error is five skips, and a count
+      # threshold tripped on run 36530497447) and the bash-3.2 guard-rail test
+      # (`... is not bash 3.x ...`, this runner has bash 5). Any other skip is a
+      # dependency that did not install or a test that quietly stopped running
+      # -- the failure mode this step exists to make loud.
+      - name: Fail on any unexpected skip
         run: |
           python - <<'PY'
           import sys, xml.etree.ElementTree as ET
           root = ET.parse("/tmp/zarr-tests.xml").getroot()
-          suite = root if root.tag == "testsuite" else root.find("testsuite")
-          skipped = int(suite.get("skipped", "0"))
-          tests = int(suite.get("tests", "0"))
-          print(f"{tests} tests, {skipped} skipped")
-          if skipped > 2:
+          expected, unexpected, tests = 0, [], 0
+          for case in root.iter("testcase"):
+              tests += 1
+              skip = case.find("skipped")
+              if skip is None:
+                  continue
+              reason = skip.get("message") or (skip.text or "")
+              if reason.startswith("real-data test skipped") or "is not bash 3.x" in reason:
+                  expected += 1
+              else:
+                  unexpected.append((f"{case.get('classname')}.{case.get('name')}", reason))
+          print(f"{tests} tests, {expected + len(unexpected)} skipped "
+                f"({expected} expected, {len(unexpected)} unexpected)")
+          if unexpected:
+              for name, reason in unexpected:
+                  print(f"::error::unexpected skip: {name}: {reason}")
               print(
-                  "::error::%d tests skipped (expected at most 2: the real-data "
-                  "download test and the bash-3.2 test). A dependency probably "
-                  "did not install -- the suite passed without asserting." % skipped
+                  "::error::%d test(s) skipped for a reason other than the real-data "
+                  "download or the bash-3.2 test. A dependency probably did not "
+                  "install -- the suite passed without asserting." % len(unexpected)
               )
               sys.exit(1)
           PY
