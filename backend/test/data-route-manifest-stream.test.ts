@@ -27,7 +27,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Hono } from "hono";
-import { MAX_MANIFEST_JSON_ENTRIES, dataRoutes } from "../src/routes/data";
+import {
+  MAX_MANIFEST_JSON_ENTRIES,
+  MAX_MANIFEST_JSON_ENTRIES_PRESIGNED,
+  dataRoutes,
+} from "../src/routes/data";
 import { addPrivateDataset, buildPublicAccessPolicy } from "../src/services/bucket-policy";
 import {
   buildAnnexPublicUrl,
@@ -49,6 +53,7 @@ import { DrainingCache, StalledCache } from "./helpers/cache";
 import { freshDb, realD1 } from "./helpers/d1";
 import {
   LARGE_MANIFEST_TEST_TIMEOUT_MS,
+  largeManifestEntryCount,
   largeManifestPaths,
   largeManifestText,
 } from "./helpers/large-manifest";
@@ -82,6 +87,11 @@ const SMALL = "nm000132";
 const SMALL_OBJECT = `/${SMALL}/version/v1.1.1.json`;
 const LARGE_ID = "nm000281";
 const LARGE_OPTS = { subjects: 374, runsPerSession: 50, datasetId: LARGE_ID };
+// Sized strictly between the two per-branch bounds (30,000 presigned,
+// 38,000 unsigned): 88 subjects * 401 entries/subject + 5 root entries =
+// 35,293, per largeManifestEntryCount's formula.
+const MID_ID = "nm000283";
+const MID_OPTS = { subjects: 88, runsPerSession: 50, datasetId: MID_ID };
 
 let s3: S3ManifestStandin;
 let db: Database;
@@ -106,6 +116,7 @@ beforeAll(() => {
   largeText = largeManifestText(LARGE_OPTS);
   large = JSON.parse(largeText);
   s3.put(`/${LARGE_ID}/version/v1.0.3.json`, largeText);
+  s3.put(`/${MID_ID}/version/v1.0.0.json`, largeManifestText(MID_OPTS));
 });
 
 afterAll(() => {
@@ -457,6 +468,36 @@ describe("manifest.json", () => {
         const listing = await get(`/${LARGE_ID}/v1.0.3/?format=json`);
         expect(listing.status).toBe(200);
       }
+    },
+    LARGE_MANIFEST_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "the per-branch bound: presigned refuses at 30,000, unsigned serves up to 38,000",
+    async () => {
+      const midCount = largeManifestEntryCount(MID_OPTS);
+      expect(midCount).toBeGreaterThan(MAX_MANIFEST_JSON_ENTRIES_PRESIGNED);
+      expect(midCount).toBeLessThan(MAX_MANIFEST_JSON_ENTRIES);
+      seed(MID_ID, "public", [["1.0.0", "2026-09-01 00:00:00"]]);
+
+      // Excluded (presigned) branch: the SAME manifest, refused at the
+      // unraised 30,000 bound -- it never got cheaper, so it never moved.
+      s3.setBucketPolicy(addPrivateDataset(buildPublicAccessPolicy("nemar", []), "nemar", MID_ID));
+      __resetPublicReadCacheForTests();
+      const presigned = await get(`/${MID_ID}/v1.0.0/manifest.json`);
+      expect(presigned.status).toBe(413);
+      const presignedBody = (await presigned.json()) as Record<string, unknown>;
+      expect(presignedBody.limit).toBe(MAX_MANIFEST_JSON_ENTRIES_PRESIGNED);
+      expect(String(presignedBody.error)).toContain(`${MAX_MANIFEST_JSON_ENTRIES_PRESIGNED} files`);
+
+      // Not excluded (unsigned) branch: same manifest, same dataset, served
+      // under the raised 38,000 bound.
+      s3.setBucketPolicy(null);
+      __resetPublicReadCacheForTests();
+      const unsigned = await get(`/${MID_ID}/v1.0.0/manifest.json`);
+      expect(unsigned.status).toBe(200);
+      const entries = (await unsigned.json()) as unknown[];
+      expect(entries.length).toBe(midCount);
     },
     LARGE_MANIFEST_TEST_TIMEOUT_MS,
   );
