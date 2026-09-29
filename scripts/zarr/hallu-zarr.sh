@@ -821,6 +821,11 @@ convert_dataset() {
   # row into a retry loop it never earned.
   LAST_PENDING_COUNT=0
   LAST_NOT_ATTEMPTED=0
+  # Same again: whether every failure was storage lacking an annex object, and
+  # the first such key, for record_conversion_failure's queue message.
+  LAST_STORAGE_MISSING=false
+  LAST_ANNEX_MISSING_COUNT=0
+  LAST_ANNEX_MISSING_KEY=""
   log "[$id] start (version=${version:-?})"
 
   # In-progress signal so the observability dashboard's "Processing" tile reflects
@@ -881,6 +886,17 @@ convert_dataset() {
     # round, since nothing has actually failed for those recordings.
     LAST_NOT_ATTEMPTED="$(jq -r '.not_attempted_count // 0' "$cb" 2>/dev/null || echo 0)"
     [[ "$LAST_NOT_ATTEMPTED" =~ ^[0-9]+$ ]] || LAST_NOT_ATTEMPTED=0
+    # Every failed recording refused because storage lacks its annex object
+    # (`annex_object_missing`), and the run failed for no other reason (no
+    # producer `error`). The driver already keeps such a run non-deterministic,
+    # so it is retried with backoff; this only chooses the message.
+    LAST_STORAGE_MISSING="$(jq -r '
+      (.annex_missing_count // 0) as $n
+      | if .error == null and $n > 0 and $n == (.errors // -1) then "true" else "false" end
+    ' "$cb" 2>/dev/null || echo false)"
+    LAST_ANNEX_MISSING_COUNT="$(jq -r '.annex_missing_count // 0' "$cb" 2>/dev/null || echo 0)"
+    [[ "$LAST_ANNEX_MISSING_COUNT" =~ ^[0-9]+$ ]] || LAST_ANNEX_MISSING_COUNT=0
+    LAST_ANNEX_MISSING_KEY="$(jq -r '.annex_missing_first_key // ""' "$cb" 2>/dev/null || echo "")"
     retryable="$(jq -r '.retryable_failures // 0' "$cb" 2>/dev/null || echo 0)"
     if [[ "$retryable" =~ ^[0-9]+$ && "$retryable" -gt 0 ]]; then
       err "[$id] $retryable recording(s) failed for a RETRYABLE reason; they are listed as pending in index.json and the dataset will be re-queued automatically after a backoff. To retry now: $0 --dataset $id --requeue done --execute"
@@ -898,6 +914,29 @@ convert_dataset() {
   safe_rm "$dir"; rm -f "$cb"
   if [[ "$rc" -eq 0 ]]; then log "[$id] done"; else err "[$id] driver rc=$rc"; fi
   return "$rc"
+}
+
+# --- Queue verdict for a failed conversion ------------------------------------
+# Reads the LAST_* values convert_dataset set from the driver's callback.
+#   deterministic       -> `data_failed` now, never retried (#774)
+#   storage lacks the   -> the queue's bounded backoff, then `failed`: every
+#   annex object(s)        recording missing its object at once is what an
+#                          upload still landing looks like, so it must not be
+#                          buried as data_failed on the first run
+#   anything else       -> the same bounded backoff, generic message
+record_conversion_failure() {
+  local id="$1"
+  if [[ "$LAST_DETERMINISTIC" == "true" ]]; then
+    # Every recording is an unreadable DATA failure -- terminal, no retry (#774).
+    qpy fail "$id" "all recordings failed to convert (typed data failures; see ${LOG_FILE})" --deterministic ||
+      err "[$id] marking the deterministic failure FAILED; the row stays inprogress and will be retried despite being terminal"
+  elif [[ "$LAST_STORAGE_MISSING" == "true" ]]; then
+    qpy fail "$id" "storage lacks the annex object(s) of all ${LAST_ANNEX_MISSING_COUNT} failed recording(s); first missing: s3://${S3_BUCKET}/${id}/objects/${LAST_ANNEX_MISSING_KEY}. Retrying with backoff in case an upload is still landing; if the objects never arrive this ends failed. Remedy: fix the upload, then requeue: $0 --dataset ${id} --requeue failed --execute (see ${LOG_FILE})" ||
+      err "[$id] marking the missing-object failure FAILED; the row stays inprogress until the stale sweep reclaims it"
+  else
+    qpy fail "$id" "conversion failed (see ${LOG_FILE})" ||
+      err "[$id] marking the failure FAILED; the row stays inprogress until the stale sweep reclaims it"
+  fi
 }
 
 # --- Single-instance lock -----------------------------------------------------
@@ -1171,13 +1210,8 @@ while :; do
     qpy done "$id" "$version" --pending-count "${LAST_PENDING_COUNT:-0}" \
       --not-attempted-count "${LAST_NOT_ATTEMPTED:-0}" ||
       err "[$id] converted, but marking it done FAILED; the row stays inprogress until the stale sweep reclaims it (~6h) and it will be converted again"
-  elif [[ "$LAST_DETERMINISTIC" == "true" ]]; then
-    # Every recording is an unreadable DATA failure -- terminal, no retry (#774).
-    qpy fail "$id" "all recordings failed to convert (typed data failures; see ${LOG_FILE})" --deterministic ||
-      err "[$id] marking the deterministic failure FAILED; the row stays inprogress and will be retried despite being terminal"
   else
-    qpy fail "$id" "conversion failed (see ${LOG_FILE})" ||
-      err "[$id] marking the failure FAILED; the row stays inprogress until the stale sweep reclaims it"
+    record_conversion_failure "$id"
   fi
   n=$((n + 1))
   if [[ "$LIMIT" -gt 0 && "$n" -ge "$LIMIT" ]]; then
