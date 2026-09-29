@@ -3285,6 +3285,318 @@ class TestFifDeclaredChannelCount(unittest.TestCase):
         self.assertEqual(channel_gate_verdict(in_file, in_file + 9, in_file), "sidecar_overcount")
 
 
+def build_eeglab_set(
+    path: str, nbchan: int = 3, *, rows: int | None = None, pnts: int = 500,
+    trials: int = 1, fdt: bool = False, v73: bool = False, wrapped: bool = True,
+    compress: bool = True, labels: list[str] | None = None, dtype: str = "float64",
+) -> str:
+    """Write a REAL EEGLAB `.set` the way biosigIO reads it, and return `path`.
+
+    Classic (MAT v5/v7) files are written with `scipy.io.savemat`, v7.3 files
+    with h5py under the MATLAB 7.3 header text in a 512-byte user block, which
+    is what MATLAB writes and what biosigIO's `_is_matlab_v73` sniffs.
+    `wrapped` puts every field in one `EEG` struct (classic EEGLAB) or an `EEG`
+    group (v7.3); otherwise they are saved flat. `rows` is the data matrix's row
+    count when it should disagree with `nbchan`. `fdt=True` writes the samples
+    to a float32 `.fdt` beside the `.set`, column-major, and stores its name in
+    `data`. `labels` becomes a classic `chanlocs` struct array (it may be shorter
+    than `nbchan`: chanlocs only names rows)."""
+    import numpy as np
+
+    rows = nbchan if rows is None else rows
+    rng = np.random.default_rng(3)
+    data = (rng.standard_normal((rows, pnts * trials)) * 1e-5).astype(np.float32)
+    fdt_name = os.path.splitext(os.path.basename(path))[0] + ".fdt"
+    if fdt:
+        data.flatten(order="F").tofile(os.path.splitext(path)[0] + ".fdt")
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    header = {"nbchan": nbchan, "trials": trials, "pnts": pnts, "srate": 250.0}
+    if v73:
+        import h5py
+
+        with h5py.File(path, "w", userblock_size=512) as f:
+            eeg = f.create_group("EEG") if wrapped else f
+            for key, value in header.items():
+                eeg.create_dataset(key, data=np.array([[float(value)]]))
+            if fdt:
+                codes = np.array([[ord(ch)] for ch in fdt_name], dtype=np.uint16)
+                eeg.create_dataset("data", data=codes)
+            else:
+                # h5py sees MATLAB's (nbchan, pnts) transposed.
+                eeg.create_dataset("data", data=data.T.astype(dtype))
+        with open(path, "r+b") as fh:
+            fh.write(b"MATLAB 7.3 MAT-file, Platform: GLNXA64, Created by: test".ljust(116))
+        return path
+    import scipy.io
+
+    fields: dict[str, object] = {"setname": "eeglab_fixture"}
+    fields.update({k: np.array([[float(v)]]) for k, v in header.items()})
+    if fdt:
+        fields["data"] = fdt_name
+    elif trials > 1:
+        fields["data"] = data.reshape((rows, pnts, trials), order="F").astype(dtype)
+    else:
+        fields["data"] = data.astype(dtype)
+    if labels is not None:
+        locs = np.zeros((1, len(labels)), dtype=[("labels", "O"), ("type", "O")])
+        for i, label in enumerate(labels):
+            locs[0, i] = (label, "EEG")
+        fields["chanlocs"] = locs
+    scipy.io.savemat(path, {"EEG": fields} if wrapped else fields, do_compression=compress)
+    return path
+
+
+class TestEeglabDeclaredChannelCount(unittest.TestCase):
+    """The EEGLAB branch of the header count (on003645: EEG `.set` recordings
+    holding 75 channels under a subject-level channels.tsv listing its 404 MEG
+    channels, refused as truncations because `.set` had no header count).
+
+    Every file is real, written by scipy or h5py, and wherever the count is
+    returned it is checked against the channels biosigIO actually imports from
+    the same file: the header may only vouch for what the importer serves."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import h5py  # noqa: F401
+            import scipy.io  # noqa: F401
+            from biosigio import Recording  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"EEGLAB deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+
+    def path(self, name: str) -> str:
+        return os.path.join(self.dir, f"sub-01_task-{name}_eeg.set")
+
+    def imported(self, p: str) -> int:
+        import warnings
+
+        from biosigio import Recording
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # the importer warns on a short chanlocs
+            signals = Recording.from_file(p).signals
+        assert signals is not None
+        return signals.shape[1]
+
+    def assert_counts(self, p: str, expected: int) -> None:
+        self.assertEqual(file_declared_channel_count(p), expected)
+        self.assertEqual(self.imported(p), expected)
+
+    def quiet_none(self, p: str) -> str:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertIsNone(file_declared_channel_count(p))
+        self.assertIn("could not read the EEGLAB header", out.getvalue())
+        self.assertIn(p, out.getvalue())
+        return out.getvalue()
+
+    def test_a_classic_set_in_every_layout(self):
+        for wrapped in (True, False):
+            for compress in (True, False):
+                with self.subTest(wrapped=wrapped, compress=compress):
+                    p = build_eeglab_set(
+                        self.path(f"c{int(wrapped)}{int(compress)}"), 5,
+                        wrapped=wrapped, compress=compress,
+                    )
+                    self.assert_counts(p, 5)
+
+    def test_integer_and_single_precision_matrices(self):
+        # MATLAB stores what it saves in the narrowest type that holds it; the
+        # header read must not care which numeric class `data` or `nbchan` has.
+        for dtype in ("float32", "int16"):
+            with self.subTest(dtype=dtype):
+                p = build_eeglab_set(self.path(dtype), 6, dtype=dtype)
+                self.assertEqual(file_declared_channel_count(p), 6)
+
+    def test_a_classic_set_with_its_samples_in_a_fdt(self):
+        for wrapped in (True, False):
+            with self.subTest(wrapped=wrapped):
+                p = build_eeglab_set(self.path(f"fdt{int(wrapped)}"), 7, fdt=True, wrapped=wrapped)
+                self.assert_counts(p, 7)
+
+    def test_a_v73_set_nested_and_flat(self):
+        for wrapped in (True, False):
+            with self.subTest(wrapped=wrapped):
+                p = build_eeglab_set(self.path(f"h{int(wrapped)}"), 4, v73=True, wrapped=wrapped)
+                self.assert_counts(p, 4)
+
+    def test_a_v73_set_with_its_samples_in_a_fdt(self):
+        p = build_eeglab_set(self.path("hfdt"), 4, v73=True, fdt=True)
+        self.assert_counts(p, 4)
+
+    def test_a_v73_matrix_as_wide_as_it_is_long(self):
+        # biosigIO transposes unless axis 0 alone matches nbchan; a square matrix
+        # is transposed, and either way has nbchan rows.
+        p = build_eeglab_set(self.path("sq"), 4, pnts=4, v73=True)
+        self.assert_counts(p, 4)
+
+    def test_an_epoched_set_still_counts_nbchan(self):
+        # A `.fdt`-backed epoched classic set converts, flattened to nbchan rows.
+        p = build_eeglab_set(self.path("epfdt"), 3, trials=4, fdt=True)
+        self.assert_counts(p, 3)
+        # An inline 3-D matrix and a v7.3 epoched file are refused by the
+        # importer before any gate runs; the header count is still nbchan.
+        self.assertEqual(
+            file_declared_channel_count(build_eeglab_set(self.path("ep"), 3, trials=4)), 3
+        )
+        self.assertEqual(
+            file_declared_channel_count(build_eeglab_set(self.path("hep"), 3, trials=4, v73=True)),
+            3,
+        )
+
+    def test_a_short_chanlocs_changes_nothing(self):
+        # chanlocs only names rows: biosigIO pads the labels and keeps every row.
+        p = build_eeglab_set(self.path("locs"), 4, labels=["Fz", "Cz"])
+        self.assert_counts(p, 4)
+
+    def test_an_eeg_struct_wins_over_flat_variables(self):
+        # biosigIO's `_normalize_eeglab_dict`: the struct's fields, then any
+        # top-level variable the struct does not have.
+        import numpy as np
+        import scipy.io
+
+        p = self.path("both")
+        rows = np.zeros((4, 50))
+        scipy.io.savemat(p, {
+            "nbchan": np.array([[9.0]]), "data": np.zeros((9, 50)),
+            "EEG": {"nbchan": np.array([[4.0]]), "trials": np.array([[1.0]]),
+                    "pnts": np.array([[50.0]]), "srate": np.array([[250.0]]), "data": rows},
+        })
+        self.assert_counts(p, 4)
+
+    def test_nbchan_disagreeing_with_the_matrix_is_not_a_count(self):
+        # biosigIO serves the matrix's rows whatever nbchan says. An nbchan
+        # ABOVE them would refuse a faithful store, so neither direction vouches.
+        for label, nbchan, v73 in (
+            ("classicover", 5, False), ("classicunder", 3, False), ("v73over", 5, True),
+        ):
+            with self.subTest(label):
+                p = build_eeglab_set(self.path(label), nbchan, rows=4, v73=v73)
+                self.assertIn("disagrees with the 4-row data matrix", self.quiet_none(p))
+                self.assertEqual(self.imported(p), 4)
+
+    def test_an_unusable_nbchan_is_unknown(self):
+        for label, value in {"zero": 0, "negative": -3, "fraction": 3.5, "absurd": 10**7}.items():
+            with self.subTest(label):
+                # `.fdt`-backed, so nbchan is the only count the header has:
+                # no inline matrix can disagree with it and mask the check.
+                p = build_eeglab_set(self.path(label), 3, fdt=True)
+                # Rewrite nbchan in place.
+                import numpy as np
+                import scipy.io
+
+                mat = scipy.io.loadmat(p)["EEG"][0, 0]
+                fields = {name: mat[name] for name in mat.dtype.names}
+                fields["nbchan"] = np.array([[float(value)]])
+                scipy.io.savemat(p, {"EEG": fields})
+                self.quiet_none(p)
+
+    def test_a_set_with_no_nbchan_or_no_data_is_unknown(self):
+        import numpy as np
+        import scipy.io
+
+        p = self.path("nonb")
+        scipy.io.savemat(p, {"EEG": {"pnts": np.array([[50.0]]), "data": np.zeros((3, 50))}})
+        self.quiet_none(p)
+        q = self.path("nodata")
+        scipy.io.savemat(q, {"EEG": {"nbchan": np.array([[3.0]]), "pnts": np.array([[50.0]])}})
+        self.assertIn("no readable data matrix", self.quiet_none(q))
+
+    def test_an_unreadable_set_is_unknown_and_says_so(self):
+        good = build_eeglab_set(self.path("good"), 3, compress=True)
+        with open(good, "rb") as fh:
+            original = fh.read()
+        hgood = build_eeglab_set(self.path("hgood"), 3, v73=True)
+        with open(hgood, "rb") as fh:
+            h_original = fh.read()
+        cases = {
+            "garbage": b"not a MAT file at all",
+            "empty": b"",
+            "header only": original[:128],
+            "cut mid-variable": original[: len(original) // 2],
+            "compressed stream corrupted": original[:200] + b"\xff" * 64 + original[264:],
+            "v7.3 cut short": h_original[:600],
+        }
+        for name, content in cases.items():
+            with self.subTest(name):
+                p = self.path(name.replace(" ", "").replace(".", ""))
+                with open(p, "wb") as fh:
+                    fh.write(content)
+                self.quiet_none(p)
+        self.assertIsNone(file_declared_channel_count(self.path("absent")))
+
+    def test_a_v73_file_that_is_not_an_eeglab_set_is_unknown(self):
+        import h5py
+
+        p = self.path("otherh5")
+        with h5py.File(p, "w", userblock_size=512) as f:
+            f.create_dataset("something_else", data=[1.0])
+        with open(p, "r+b") as fh:
+            fh.write(b"MATLAB 7.3 MAT-file".ljust(116))
+        self.quiet_none(p)
+
+    def test_the_sample_matrix_is_never_loaded(self):
+        """The whole point of reading nbchan by hand: `loadmat(variable_names=
+        ["EEG"])` still materializes every sample, because a classic export is
+        ONE variable, `EEG`, with `data` inside. Measured here against the same
+        file, so the bound is shown to separate the two reads."""
+        import tracemalloc
+
+        import scipy.io
+
+        for compress in (False, True):
+            with self.subTest(compress=compress):
+                p = build_eeglab_set(
+                    self.path(f"big{int(compress)}"), 32, pnts=150_000,
+                    compress=compress, dtype="float32",
+                )  # 19.2 MB of samples, inline
+                data_bytes = 32 * 150_000 * 4
+                tracemalloc.start()
+                try:
+                    self.assertEqual(file_declared_channel_count(p), 32)
+                    header_peak = tracemalloc.get_traced_memory()[1]
+                    tracemalloc.reset_peak()
+                    scipy.io.loadmat(p, variable_names=["EEG"])
+                    loadmat_peak = tracemalloc.get_traced_memory()[1]
+                finally:
+                    tracemalloc.stop()
+                self.assertGreater(loadmat_peak, data_bytes * 0.9)
+                self.assertLess(header_peak, data_bytes / 3)
+
+    def test_a_store_short_of_the_set_header_is_still_truncated(self):
+        # biosigIO keeps every row, so a short store cannot be produced through
+        # the importer; the gate is driven with a real store built from fewer
+        # channels and the real header of a file that holds more, as the FIF
+        # and EDF tests do.
+        from biosigio import Recording
+
+        p = build_eeglab_set(self.path("full"), 5)
+        short = build_eeglab_set(self.path("short"), 3)
+        store = os.path.join(self.dir, "short.zarr")
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            Recording.from_file(short).to_zarr(store, dtype="int16")
+        in_store = store_total_channels(store_metadata(store))
+        self.assertEqual(in_store, 3)
+        in_file = file_declared_channel_count(p)
+        self.assertEqual(in_file, 5)
+        for tsv in (None, 3, 5, 404):
+            with self.subTest(channels_tsv=tsv):
+                self.assertEqual(channel_gate_verdict(in_store, tsv, in_file), "truncated")
+                with self.assertRaises(ChannelCountMismatch) as cm:
+                    generate_zarr.enforce_channel_gate(
+                        "sub-01/eeg/x_eeg.set", in_store, tsv, in_file
+                    )
+                self.assertIn("header declares 5", str(cm.exception))
+
+
 class TestChannelGateVerdict(unittest.TestCase):
     def test_no_applicable_sidecar_passes(self):
         self.assertEqual(channel_gate_verdict(10, None, None), "pass")
@@ -8477,6 +8789,139 @@ class TestConvertOneFifSidecarOvercount(unittest.TestCase):
         self.assertNotIn("channels_tsv_count_mismatch", result["entry"])
 
 
+class TestConvertOneEeglabSidecarOvercount(unittest.TestCase):
+    """on003645 through `convert_one`: a dataset mixing MEG `.fif` and EEG
+    `.set`, whose subject-level channels.tsv lists the 404 MEG channels and is
+    inherited by the EEG recordings. Their `.set` files hold 75 channels, and
+    with no header count for `.set` all 108 were refused as
+    `channel_count_mismatch`. Real `.set` files, a real conversion; only
+    `aws s3 sync` is absorbed, and logged so a test can tell whether a store
+    was pushed."""
+
+    PRIMARY = "sub-01/eeg/sub-01_task-rest_eeg.set"
+    TSV = "sub-01/sub-01_task-rest_channels.tsv"  # subject level: inherited
+    N = 3
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import h5py  # noqa: F401
+            import scipy.io  # noqa: F401
+            import zarr  # noqa: F401
+            from biosigio import Recording  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = os.path.join(self._tmp.name, "repo")
+        bindir = os.path.join(self._tmp.name, "bin")
+        os.makedirs(bindir)
+        self.aws_log = os.path.join(self._tmp.name, "aws.log")
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write(f'#!/bin/sh\necho "$*" >> "{self.aws_log}"\nexit 0\n')
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        path = os.environ["PATH"]
+        os.environ["PATH"] = bindir + os.pathsep + path
+        self.addCleanup(os.environ.__setitem__, "PATH", path)
+
+    def synced(self) -> bool:
+        if not os.path.exists(self.aws_log):
+            return False
+        with open(self.aws_log) as fh:
+            return any(line.startswith("s3 sync") for line in fh)
+
+    def write_set(self, **kwargs) -> str:
+        kwargs.setdefault("nbchan", self.N)
+        return build_eeglab_set(os.path.join(self.repo, self.PRIMARY), **kwargs)
+
+    def convert(self, tsv_rows: int):
+        os.makedirs(os.path.join(self.repo, "sub-01"), exist_ok=True)
+        with open(os.path.join(self.repo, self.TSV), "w") as fh:
+            fh.writelines(
+                ["name\ttype\tunits\n"] + [f"MEG{i:04d}\tMEGMAG\tT\n" for i in range(tsv_rows)]
+            )
+        work = os.path.join(self._tmp.name, "work")
+        os.makedirs(work, exist_ok=True)
+        generate_zarr._init_worker({
+            "repo": self.repo, "bucket": "nemar-test", "dataset_id": "on003645",
+            "head": "b" * 40, "head_files": {self.PRIMARY, self.TSV}, "local": True,
+            "tmp": work, "updated": "2026-09-29T00:00:00Z",
+            "contract_base": "https://zarr.nemar.org", "engine_version": "3",
+            "dataset_row": None, "provenance_fetch_failed": False,
+            "mem_budget": None, "hard_ceiling": None, "projections": {},
+        })
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = convert_one(self.PRIMARY)
+        result["_log"] = out.getvalue()
+        return result
+
+    def assert_published_with_note(self, result, tsv_rows: int):
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertTrue(self.synced())
+        entry = result["entry"]
+        self.assertEqual(
+            entry["channels_tsv_count_mismatch"],
+            {"channels_tsv": tsv_rows, "in_file": self.N, "in_store": self.N},
+        )
+        index = merge_index(
+            None, "on003645", "b" * 40, [entry], [], "2026-09-29T00:00:00Z",
+            [], [], discovered=[self.PRIMARY],
+        )
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_an_over_declaring_inherited_sidecar_publishes_and_discloses(self):
+        cases = {
+            "classic, samples inline": {},
+            "classic, samples in a .fdt": {"fdt": True},
+            "classic, fields flat": {"wrapped": False},
+            "v7.3, samples inline": {"v73": True},
+            "v7.3, samples in a .fdt": {"v73": True, "fdt": True},
+        }
+        for name, kwargs in cases.items():
+            for tsv_rows in (404, 9):
+                with self.subTest(name, channels_tsv=tsv_rows):
+                    self.write_set(**kwargs)
+                    if os.path.exists(self.aws_log):
+                        os.remove(self.aws_log)
+                    self.assert_published_with_note(self.convert(tsv_rows), tsv_rows)
+
+    def test_a_matching_sidecar_adds_no_note(self):
+        for kwargs in ({}, {"fdt": True}, {"v73": True}):
+            with self.subTest(**kwargs):
+                self.write_set(**kwargs)
+                result = self.convert(self.N)
+                self.assertTrue(result["ok"], result.get("error"))
+                self.assertNotIn("channels_tsv_count_mismatch", result["entry"])
+
+    def test_without_a_usable_header_the_strict_gate_still_refuses(self):
+        # nbchan 5 over a 3-row matrix: biosigIO serves the 3 rows, and the
+        # header vouches for nothing, so the gate is channels.tsv alone again,
+        # exactly as for every `.set` before the header count existed.
+        self.write_set(nbchan=5, rows=self.N)
+        result = self.convert(404)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "channel_count_mismatch")
+        self.assertIn("channels.tsv declares 404", result["error"])
+        self.assertNotIn("header declares", result["error"])
+        self.assertIn("could not read the EEGLAB header", result["_log"])
+        self.assertFalse(self.synced())
+
+    def test_a_corrupt_set_is_refused_before_any_store_exists(self):
+        p = self.write_set()
+        with open(p, "rb") as fh:
+            original = fh.read()
+        with open(p, "wb") as fh:
+            fh.write(original[: len(original) // 2])
+        result = self.convert(404)
+        self.assertFalse(result["ok"])
+        self.assertNotIn("entry", result)
+        self.assertFalse(self.synced())
+
+
 class TestSidecarJoinReport(unittest.TestCase):
     """`channels_tsv_names` + `sidecar_join_report`, the pure half of what
     `convert_one` adds to `units_report`. `TestDuplicateLabelsThroughConvertOne`
@@ -10132,6 +10577,20 @@ class TestDeclaredFdtConvertOne(unittest.TestCase):
         self.assert_converted(self.convert({self.SET: self.decl()}))
         # The working tree is untouched: nothing was written beside the .set.
         self.assertFalse(os.path.exists(os.path.join(self.repo, "sub-01/eeg/sub-01_task-x_eeg.fdt")))
+
+    def test_the_header_gate_reads_the_staged_set(self):
+        # The gate reads the header of the `.set` actually converted, here the
+        # staged one beside its declared `.fdt`: an inherited channels.tsv that
+        # over-declares is disclosed, not refused.
+        tsv = "sub-01/sub-01_task-x_channels.tsv"
+        with open(os.path.join(self.repo, tsv), "w") as fh:
+            fh.writelines(["name\ttype\tunits\n"] + [f"M{i}\tMEGMAG\tT\n" for i in range(9)])
+        result = self.convert({self.SET: self.decl()}, extra_files=(tsv,))
+        self.assert_converted(result)
+        self.assertEqual(
+            result["entry"]["channels_tsv_count_mismatch"],
+            {"channels_tsv": 9, "in_file": self.NBCHAN, "in_store": self.NBCHAN},
+        )
 
     def test_a_declared_fdt_converts_through_the_blob_fetch(self):
         head = self.commit()
