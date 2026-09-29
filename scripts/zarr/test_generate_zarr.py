@@ -2903,6 +2903,19 @@ class TestReadRepoTextEncodings(unittest.TestCase):
         self.assertEqual(text, "name\tunits\nCz\t\x81µV\n")
         self.assertIn("as latin-1", log)
 
+    def test_a_utf16_bom_decodes_as_utf16_not_cp1252(self):
+        # Windows "Unicode" text: without the BOM check cp1252 accepts these
+        # bytes and every character comes back followed by a NUL.
+        body = "name\ttype\tunits\r\nCz\tEEG\tµV\r\n"
+        for codec, bom in (("utf-16-le", b"\xff\xfe"), ("utf-16-be", b"\xfe\xff")):
+            with self.subTest(codec=codec):
+                clone = self._commit(bom + body.encode(codec))
+                text, log = self._read(clone)
+                self.assertEqual(text, "name\ttype\tunits\nCz\tEEG\tµV\n")
+                self.assertIn("read it as utf-16", log)
+                shutil.rmtree(self.src)
+                shutil.rmtree(clone)
+
     def test_crlf_is_normalized_as_the_text_mode_read_did(self):
         clone = self._commit(b"name\ttype\r\nCz\tEEG\r\n")
         text, _ = self._read(clone)
