@@ -78,3 +78,48 @@ export function printPartialRetrieval(result: GetDataResult): void {
   console.log(chalk.dim("  Per-file detail, including why each file is missing:"));
   console.log(chalk.dim("    .nemar/availability-report.json"));
 }
+
+/**
+ * The one wording for "this run skipped git-annex checksum verification"
+ * (#1523's `--no-verify`). On stderr, deliberately: it is a caveat about how
+ * the files were obtained, not download output a script parsing stdout for
+ * file lists or counts should have to filter out.
+ *
+ * `unsizedFiles` (from `GetDataResult`) names files whose key declares no
+ * size (a `URL--` key from `addurl --relaxed`, a WORM key, ...), so the size
+ * check that backs the "sizes were still checked" claim did not run on them
+ * either -- said out loud rather than left for the blanket sentence to paper
+ * over, the same way `import-openneuro.ts`'s tree gate counts and reports an
+ * unsized key instead of folding it into a reassuring total.
+ */
+export function printNoVerifyNotice(unsizedFiles = 0): void {
+  const sizeCaveat =
+    unsizedFiles > 0
+      ? ` ${unsizedFiles} of the fetched file(s) declare no size in their key and could be verified by neither hash nor size.`
+      : "";
+  console.error(
+    chalk.yellow(
+      `Note: --no-verify skipped checksum verification. Sizes were still checked; file contents were not.${sizeCaveat}`,
+    ),
+  );
+}
+
+/**
+ * The per-file detail for every `--no-verify` size mismatch this run found,
+ * each already ending in its manual recovery command (`GetDataResult
+ * .noVerifyMismatches`). On stderr, same reasoning as `printNoVerifyNotice`.
+ *
+ * This exists because `printPartialRetrieval`'s generic text -- correct for
+ * a file genuinely missing upstream -- points at
+ * `.nemar/availability-report.json`, a SERVER-SIDE report this local check
+ * never writes. `GetDataResult.error` (the `success: false` arm only) is the
+ * other place a mismatch reason can surface, so without this call the common
+ * "partial" outcome (most files fine, one corrupted) never shows the reason
+ * or the recovery command at all. Call unconditionally after the normal
+ * outcome print; it is a no-op when the array is empty.
+ */
+export function printNoVerifyMismatches(mismatches: string[]): void {
+  for (const mismatch of mismatches) {
+    console.error(chalk.red(`  ${mismatch}`));
+  }
+}
