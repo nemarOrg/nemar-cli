@@ -85,6 +85,34 @@ describe("matchManifestJsonCache", () => {
     expect(raw?.headers.get("X-Nemar-Cache-Client-Cache-Control")).toBe("public, max-age=300");
   });
 
+  test("the stored copy's OWN freshness is not the client's 300s (mirrors the git-file broker's TTL-bug test)", async () => {
+    // Same bug class `git-file-broker.test.ts`'s "the stored copy's OWN
+    // freshness is not the client's 300s" test catches: if this module ever
+    // reused the client-facing `clientCacheControl` verbatim as the STORED
+    // response's own `Cache-Control`, a real Cache API would expire the entry
+    // after 300s regardless of the 7-day TTL the module documents
+    // (`X-Nemar-Cache-Client-Cache-Control` exists precisely so the two never
+    // share one header). `DrainingCache.getNow` simulates the clock advancing
+    // without a real five-minute sleep.
+    const cache = new DrainingCache();
+    await scheduleManifestJsonCacheWrite(
+      { cache, key: KEY, etag: ETAG, body: body("[]"), clientCacheControl: "public, max-age=300" },
+      undefined,
+    );
+    const storedAt = Date.now();
+
+    // 301 seconds later: past the CLIENT's 300s Cache-Control, well inside
+    // the stored copy's own 7-day TTL.
+    cache.getNow = () => storedAt + 301_000;
+    const hit = await matchManifestJsonCache(cache, KEY);
+
+    expect(hit).not.toBeNull();
+    expect(hit?.body).toBe("[]");
+    expect(hit?.etag).toBe(ETAG);
+    // Still today's 300s value, not the internal seven-day one.
+    expect(hit?.clientCacheControl).toBe("public, max-age=300");
+  });
+
   test("a cache that throws on match is a miss, not a failure", async () => {
     const broken: ManifestCache = {
       match: async () => {

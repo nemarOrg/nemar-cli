@@ -14,87 +14,29 @@
  *     unauthenticated client still 429s at the IP cap.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { Hono } from "hono";
 import {
   __limits,
   __normalizeMountPath,
   __readBearerTokenFromHeader,
+  __resetCacheFaultLogForTests,
   __selectBucket,
   rateLimiter,
 } from "../src/middleware/rateLimit";
 import { createMcpRoutes } from "../src/routes/mcp";
 import type { Bindings, Variables } from "../src/types/bindings";
+import { InMemoryCache } from "./helpers/cache";
 
 type AppEnv = { Bindings: Bindings; Variables: Variables };
 
-// --------------------------------------------------------------------------
-// Minimal in-memory Cache implementation — not a mock; this is a real
-// Cache that stores Response objects against Request URLs. The rate
-// limiter only uses `match`/`put` and the body is small, so we don't
-// need to reproduce the full HTTP semantics.
-// --------------------------------------------------------------------------
-
-class InMemoryCache implements Cache {
-  private store = new Map<
-    string,
-    { body: string; headers: Record<string, string>; expiresAt: number }
-  >();
-
-  // Injected clock so tests can advance time without real sleeps.
-  // Defaults to the real wall clock.
-  getNow: () => number = () => Date.now();
-
-  async match(req: RequestInfo | URL): Promise<Response | undefined> {
-    const url = req instanceof Request ? req.url : String(req);
-    const entry = this.store.get(url);
-    if (!entry) return undefined;
-    // Honour TTL: expired entries are invisible (matches CF Cache API behavior).
-    if (this.getNow() >= entry.expiresAt) {
-      this.store.delete(url);
-      return undefined;
-    }
-    return new Response(entry.body, { headers: entry.headers });
-  }
-
-  async put(req: RequestInfo | URL, res: Response): Promise<void> {
-    const url = req instanceof Request ? req.url : String(req);
-    const body = await res.text();
-    const headers: Record<string, string> = {};
-    res.headers.forEach((v, k) => {
-      headers[k] = v;
-    });
-    // Parse Cache-Control: max-age=N to compute expiry using the injected clock.
-    const cc = res.headers.get("Cache-Control") || "";
-    const maxAgeMatch = cc.match(/max-age=(\d+)/);
-    const maxAgeSec = maxAgeMatch ? Number.parseInt(maxAgeMatch[1], 10) : 60;
-    this.store.set(url, { body, headers, expiresAt: this.getNow() + maxAgeSec * 1000 });
-  }
-
-  async add(): Promise<void> {
-    throw new Error("not implemented");
-  }
-  async addAll(): Promise<void> {
-    throw new Error("not implemented");
-  }
-  async delete(req: RequestInfo | URL): Promise<boolean> {
-    const url = req instanceof Request ? req.url : String(req);
-    return this.store.delete(url);
-  }
-  async keys(): Promise<readonly Request[]> {
-    return Array.from(this.store.keys()).map((u) => new Request(u));
-  }
-  async matchAll(): Promise<readonly Response[]> {
-    return [];
-  }
-
-  // Convenience used by tests to reset between runs.
-  clear(): void {
-    this.store.clear();
-  }
-}
-
-const ourCache = new InMemoryCache();
+// The shared real (in-memory) Cache double (#1516 review; `helpers/cache.ts`):
+// not a mock, a working Cache backed by a Map, and the same one every other
+// suite in this codebase trusts for `caches.default`. It models real Workers
+// Cache API expiry rules this file's own hand-rolled double did NOT (an entry
+// with no `Cache-Control` at all never expires here, rather than defaulting
+// to a permissive 60s -- see `beforeEach` below for where that mattered).
+let ourCache = new InMemoryCache();
 let originalCaches: typeof caches | undefined;
 
 // Cloudflare exposes a `caches.default` singleton. Bun has no `caches`
@@ -104,8 +46,6 @@ let originalCaches: typeof caches | undefined;
 beforeAll(() => {
   // biome-ignore lint/suspicious/noExplicitAny: test-only runtime patch
   originalCaches = (globalThis as any).caches;
-  // biome-ignore lint/suspicious/noExplicitAny: test-only runtime patch
-  (globalThis as any).caches = { default: ourCache } as unknown as CacheStorage;
 });
 
 afterAll(() => {
@@ -114,7 +54,12 @@ afterAll(() => {
 });
 
 beforeEach(() => {
-  ourCache.clear();
+  // A fresh instance per test, the same reset convention every other
+  // consumer of this shared double uses (rather than a `.clear()` method the
+  // shared double does not provide -- it is deliberately minimal).
+  ourCache = new InMemoryCache();
+  // biome-ignore lint/suspicious/noExplicitAny: test-only runtime patch
+  (globalThis as any).caches = { default: ourCache } as unknown as CacheStorage;
 });
 
 // --------------------------------------------------------------------------
@@ -653,6 +598,84 @@ describe("the data-ip bucket after #1516", () => {
     } finally {
       // biome-ignore lint/suspicious/noExplicitAny: test-only runtime restore
       (globalThis as any).caches = saved as CacheStorage;
+    }
+  });
+});
+
+// --------------------------------------------------------------------------
+// logCacheFaultOnce dedup (review: no test previously covered this -- a
+// reviewer removed the dedup outright and all other tests in this file
+// still passed).
+// --------------------------------------------------------------------------
+
+describe("logCacheFaultOnce dedup", () => {
+  // A full `Cache`, matching the `StalledPutCache` pattern above: `match`
+  // rejects, standing in for a real Cache API outage (the platform failing,
+  // not business logic under test). `rateLimiter` fails open on this --
+  // every request still 200s -- but must log the fault at most once per
+  // window per isolate rather than once per request.
+  class FaultingCache implements Cache {
+    async match(): Promise<Response | undefined> {
+      throw new Error("simulated cache outage");
+    }
+    async put(): Promise<void> {
+      throw new Error("simulated cache outage");
+    }
+    async add(): Promise<void> {
+      throw new Error("not implemented");
+    }
+    async addAll(): Promise<void> {
+      throw new Error("not implemented");
+    }
+    async delete(): Promise<boolean> {
+      return false;
+    }
+    async keys(): Promise<readonly Request[]> {
+      return [];
+    }
+    async matchAll(): Promise<readonly Response[]> {
+      return [];
+    }
+  }
+
+  test("two faults inside one window log once; a third after the window resets logs again", async () => {
+    // Module-level state (`lastCacheFaultLoggedAt`), and this file shares a
+    // process with the rest of the suite -- start from a known-clean slate
+    // rather than trusting nothing else tripped it first.
+    __resetCacheFaultLogForTests();
+    const saved = (globalThis as { caches?: CacheStorage }).caches;
+    // biome-ignore lint/suspicious/noExplicitAny: test-only runtime patch
+    (globalThis as any).caches = { default: new FaultingCache() } as unknown as CacheStorage;
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { app, env } = buildApp(PROD_ENV);
+      const headers = { "CF-Connecting-IP": "10.99.3.1" };
+
+      const first = await hit(app, env, "/datasets", headers);
+      const second = await hit(app, env, "/datasets", headers);
+      // Fails open: the cache outage never blocks the request itself.
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+
+      const faultLines = errorSpy.mock.calls.filter((c) => c[0] === "[rate-limit] cache failure");
+      expect(faultLines.length).toBe(1);
+
+      // Advancing the real 60s window is not worth a real sleep; the reset
+      // hook exists for exactly this ("let a test see the very next fault
+      // log again rather than waiting out a real window").
+      __resetCacheFaultLogForTests();
+
+      const third = await hit(app, env, "/datasets", headers);
+      expect(third.status).toBe(200);
+      const faultLinesAfterReset = errorSpy.mock.calls.filter(
+        (c) => c[0] === "[rate-limit] cache failure",
+      );
+      expect(faultLinesAfterReset.length).toBe(2);
+    } finally {
+      errorSpy.mockRestore();
+      // biome-ignore lint/suspicious/noExplicitAny: test-only runtime restore
+      (globalThis as any).caches = saved as CacheStorage;
+      __resetCacheFaultLogForTests();
     }
   });
 });

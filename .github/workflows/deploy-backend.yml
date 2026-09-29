@@ -86,7 +86,7 @@ jobs:
           # with test.yml so the deploy gate and the PR gate assert the same set.
           shopt -s nullglob
           files=()
-          for f in test/*.test.ts backend/test/*.test.ts; do
+          for f in test/*.test.ts backend/test/*.test.ts backend/test/helpers/*.test.ts; do
             base="$(basename "$f")"
             case "$base" in
               e2e-sandbox.test.ts|e2e-upload.test.ts|zenodo-sandbox.test.ts|ezid.test.ts|ezid-sandbox.test.ts|auth-passwordless.test.ts) continue;;

@@ -64,6 +64,7 @@
  * never delays an answer that is already known.
  */
 
+import { toVersionTag } from "../../../shared/contract/version.js";
 import { ManifestAnswerMemo } from "./manifest-answer-memo";
 import type { ManifestQuery } from "./manifest-queries";
 import { type ManifestHeader, type ScanResult, scanManifestStream } from "./manifest-scan";
@@ -128,14 +129,34 @@ export type ManifestReadSource = "memo" | "fresh" | "revalidated" | "rewrite";
  * again outside this module, for the same reason `finish()` is called
  * outside it. `null` when the answer already came from the memo (nothing
  * further to store) or no ETag was available to key it safely by.
+ *
+ * The `ok` variant is a discriminated union on `source` so the two
+ * paragraphs above are enforced by the type, not just documented by it:
+ * `source: "memo"` forces `etag: string` (non-null) and `memoKey: null`;
+ * every other source allows `etag: string | null` and `memoKey: string | null`.
+ * A construction site that gets this wrong fails to compile rather than
+ * relying on a reader having noticed the comment.
+ *
+ * A caller that needs the non-null `etag` must narrow on `source === "memo"`
+ * specifically: narrowing on `kind === "ok"` alone only picks the `ok`
+ * variant as a whole, which is still the union of both branches above, so
+ * `etag` stays widened back to `string | null` there.
  */
 export type ManifestRead<T> =
   | {
       kind: "ok";
       header: ManifestHeader;
       query: ManifestQuery<T>;
+      source: "memo";
+      etag: string;
+      memoKey: null;
+    }
+  | {
+      kind: "ok";
+      header: ManifestHeader;
+      query: ManifestQuery<T>;
+      source: "fresh" | "revalidated" | "rewrite";
       etag: string | null;
-      source: ManifestReadSource;
       memoKey: string | null;
     }
   /** 404, or a 403 the signed fallback could not get past (both logged by s3.ts). */
@@ -157,9 +178,12 @@ export const CACHE_WRITE_MAX_LAG_BYTES = 4 * 1024 * 1024;
 export const CACHE_STALL_MS = 5000;
 
 /**
- * Lifetime of an edge copy. Long, because it is revalidated against S3 on
- * every use and a stale copy can never answer; the TTL only bounds how long
- * an unused copy occupies the cache.
+ * Lifetime of an edge copy's stored `Cache-Control: max-age`. Long, because a
+ * stale copy can never answer: it is revalidated against S3 outside the
+ * {@link MANIFEST_TRUST_WINDOW_MS trust window} below, and even inside that
+ * window it was confirmed against S3 within the last 60 seconds. The TTL
+ * only bounds how long an unused copy occupies the cache; it is not, on its
+ * own, how long a copy answers without S3 being asked.
  */
 export const MANIFEST_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60;
 
@@ -169,7 +193,7 @@ export const MANIFEST_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60;
  * and `v1` names the entry format so a change to it can move to new keys.
  */
 export function manifestCacheKey(origin: string, datasetId: string, version: string): string {
-  const tag = version.startsWith("v") ? version : `v${version}`;
+  const tag = toVersionTag(version);
   return `${origin}/__nemar-internal/manifest-cache/v1/${encodeURIComponent(datasetId)}/${encodeURIComponent(tag)}.json`;
 }
 
@@ -510,7 +534,7 @@ function settle<T>(
   result: ScanResult,
   query: ManifestQuery<T>,
   etag: string | null,
-  readSource: ManifestReadSource,
+  readSource: Exclude<ManifestReadSource, "memo">,
   memoKey: string | null,
 ): ManifestRead<T> {
   if (result.kind !== "ok") return result;

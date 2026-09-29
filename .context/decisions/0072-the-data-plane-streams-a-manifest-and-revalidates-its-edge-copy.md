@@ -54,10 +54,14 @@ version-scoped synthetic key on a path no public route serves, and every use sen
 404 is absent. The cache is read only after the visibility gate, as the manifest always
 was. A copy is stored only after the scanner accepted the whole document, and a copy that
 cannot be read back whole is not trusted: S3 answers instead.
+(Amended 2026-09-28: within the 60 s trust window described below, a copy S3 confirmed
+recently answers without a revalidation.)
 
 **`manifest.json` refuses more than 30,000 entries** with a 413 that names the
 per-directory JSON listing. It counts first and keeps nothing, so the refusal costs what
 any other lookup costs.
+(Amended 2026-09-28: see ADR 0074 for the per-branch bound, 38,000 unsigned / 30,000
+presigned.)
 
 ## Consequences
 
@@ -130,6 +134,8 @@ nm000281's 43 MB manifest already pushes hard on, so a memo entry can never mean
 compete with the memory bound #1502 exists to hold. A single answer larger than half the cap
 (`manifest.json`'s own `EntriesQuery`, near its 30,000-entry/~9 MB ceiling) is answered but
 never memoized, so one large listing cannot evict every small, hot entry.
+(Amended 2026-09-28: see ADR 0074 for the per-branch bound, 38,000 unsigned / 30,000
+presigned -- either is still answered but not memoized.)
 
 `Server-Timing`'s `manifest` stage now carries `desc="memo"`, `"fresh"` (window hit, still
 scanned), `"revalidated"` (a 304) or `"rewrite"` (a fresh 200), so the window's effect is

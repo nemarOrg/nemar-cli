@@ -44,6 +44,7 @@ import {
   resolveFile,
   toHttpDate,
 } from "../src/services/data-router";
+import { gitFileCacheKey } from "../src/services/git-file-cache";
 import type { ManifestFile, VersionManifest } from "../src/services/manifest";
 import { manifestJsonCacheKey } from "../src/services/manifest-json-cache";
 import {
@@ -667,6 +668,44 @@ describe("the manifest.json response cache sits behind the visibility gate", () 
     const key = manifestJsonCacheKey("https://data.nemar.org", SMALL, "v1.1.1");
     expect(cache.store.has(key)).toBe(false);
   });
+
+  test("warmed unsigned, then excluded: the next manifest.json is presigned, not the cached unsigned document (review)", async () => {
+    const annexPath = Object.keys(CURRENT.files).find(
+      (p) => !CURRENT.files[p].key.startsWith("git:"),
+    );
+    if (!annexPath) throw new Error("fixture has no annexed file");
+
+    // Not excluded yet (no bucket policy set): warm the response cache with
+    // the UNSIGNED document (#1522).
+    const first = await get(`/${SMALL}/v1.1.1/manifest.json`);
+    expect(first.status).toBe(200);
+    const key = manifestJsonCacheKey("https://data.nemar.org", SMALL, "v1.1.1");
+    expect(cache.store.has(key)).toBe(true);
+    const firstAnnex = (
+      JSON.parse(await first.text()) as { path: string; url: string | null }[]
+    ).find((e) => e.path === annexPath);
+    expect(firstAnnex?.url).not.toBeNull();
+    // Unsigned: a plain object URL, no query string.
+    expect(firstAnnex?.url).not.toContain("?");
+
+    // The bucket policy now excludes this dataset from public read, through
+    // the real path (`isDatasetExcludedFromPublicRead`'s own bucket-policy
+    // read), not the `__seedPublicReadCacheForTests` seam.
+    s3.setBucketPolicy(addPrivateDataset(buildPublicAccessPolicy("nemar", []), "nemar", SMALL));
+    __resetPublicReadCacheForTests();
+
+    // `manifestJsonHandler` never even asks this cache once `excluded` is
+    // true (`const cache = excluded ? null : edgeCache()`), so the document
+    // just warmed above must not leak through as a stale unsigned answer.
+    const second = await get(`/${SMALL}/v1.1.1/manifest.json`);
+    expect(second.status).toBe(200);
+    const secondAnnex = (
+      JSON.parse(await second.text()) as { path: string; url: string | null }[]
+    ).find((e) => e.path === annexPath);
+    expect(secondAnnex?.url).not.toBeNull();
+    expect(secondAnnex?.url).toContain("?");
+    expect(secondAnnex?.url).not.toBe(firstAnnex?.url);
+  });
 });
 
 describe("metadata.json", () => {
@@ -940,8 +979,39 @@ describe("the trust window and answer memo at the route (#1494 amendment)", () =
   let cache: DrainingCache;
   let original: unknown;
 
+  // Real `git hash-object` of RAW_STANDIN_BODY (review, #1494/0.10.8): the
+  // git-file broker verifies the downloaded content's own blob SHA against
+  // the manifest's declared one for every git-tracked GET, so a stand-in for
+  // the raw content host has to serve bytes that actually hash to this value
+  // -- recompute with `printf '%s' '<RAW_STANDIN_BODY>' | git hash-object --stdin`.
+  const RAW_STANDIN_SHA = "8150e793495a4bc88b1af95f8129dc4c5eab759f";
+  const RAW_STANDIN_BODY = '{"raw-standin":"participants substitute for the 0.10.8 review test"}';
+  const RAW_STANDIN_PATH = "RAW-STANDIN-TEST.json";
+
+  /**
+   * A real local raw-content-host stand-in (mirrors `git-file-broker.test.ts`),
+   * so "a dataset flipped private is refused..." below issues a real GET for a
+   * git-tracked file without reaching production `raw.githubusercontent.com`
+   * (review finding: this test previously had no `GITHUB_RAW_BASE` override at
+   * all). Scoped to this describe block: it is the only place in this file
+   * that GETs (not HEADs) a git-tracked file's bytes.
+   */
+  let rawServer: import("bun").Server;
+  let rawBase: string;
+
   beforeAll(() => {
     original = (globalThis as { caches?: unknown }).caches;
+    rawServer = Bun.serve({
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname === `/nemarDatasets/${SMALL}/v1.1.1/${RAW_STANDIN_PATH}`) {
+          return new Response(RAW_STANDIN_BODY, { status: 200 });
+        }
+        return new Response("no route", { status: 404 });
+      },
+    });
+    rawBase = `http://127.0.0.1:${rawServer.port}`;
   });
 
   beforeEach(() => {
@@ -951,7 +1021,30 @@ describe("the trust window and answer memo at the route (#1494 amendment)", () =
 
   afterAll(() => {
     (globalThis as { caches?: unknown }).caches = original;
+    rawServer.stop(true);
   });
+
+  /** `env()` plus the raw-host override above, for the one test that GETs a
+   *  git-tracked file's bytes rather than only HEADing or listing it. */
+  function envWithRawStandin(): Bindings {
+    return { ...env(), GITHUB_RAW_BASE: rawBase };
+  }
+
+  /** A manifest identical to CURRENT, plus one synthetic git-tracked entry
+   *  whose content and blob SHA this test fully controls. */
+  function manifestWithRawStandinEntry(): string {
+    return JSON.stringify({
+      ...CURRENT,
+      files: {
+        ...CURRENT.files,
+        [RAW_STANDIN_PATH]: {
+          key: `git:${RAW_STANDIN_SHA}`,
+          size: RAW_STANDIN_BODY.length,
+          checksum: `git:${RAW_STANDIN_SHA}`,
+        },
+      },
+    });
+  }
 
   test("within the window, a repeat request for a different file costs no manifest S3 traffic", async () => {
     const first = await get(`/${SMALL}/v1.1.1/participants.tsv`, { method: "HEAD" });
@@ -1015,11 +1108,27 @@ describe("the trust window and answer memo at the route (#1494 amendment)", () =
   });
 
   test("a dataset flipped private is refused even with a warm memo and a fresh trust window", async () => {
+    // A git-tracked path this test fully controls (see `manifestWithRawStandinEntry`
+    // and the raw-host stand-in above) rather than a real file fetched from
+    // production -- this test issues a real GET, not a HEAD, so it actually
+    // reaches the git-file broker.
+    s3.put(`/${SMALL}/version/v1.1.1.json`, manifestWithRawStandinEntry());
+    const path = `/${SMALL}/v1.1.1/${RAW_STANDIN_PATH}`;
+
     // Warm the trust window AND the per-isolate answer memo for this exact
     // path while the dataset is still public.
-    const before = await get(`/${SMALL}/v1.1.1/participants.tsv`, JSON_ACCEPT);
+    const before = await app().request(
+      `https://data.nemar.org${path}`,
+      JSON_ACCEPT,
+      envWithRawStandin(),
+    );
     expect(before.status).toBe(200);
-    const again = await get(`/${SMALL}/v1.1.1/participants.tsv`, JSON_ACCEPT);
+    expect(await before.text()).toBe(RAW_STANDIN_BODY);
+    const again = await app().request(
+      `https://data.nemar.org${path}`,
+      JSON_ACCEPT,
+      envWithRawStandin(),
+    );
     expect(again.headers.get("Server-Timing")).toMatch(/manifest;dur=[\d.]+;desc="memo"/);
 
     db.prepare("UPDATE datasets SET visibility = 'private' WHERE dataset_id = ?").run(SMALL);
@@ -1029,9 +1138,68 @@ describe("the trust window and answer memo at the route (#1494 amendment)", () =
     // Still well inside the trust window, and the memo still holds this
     // exact answer -- neither matters, because `loadPublishedDataset` runs
     // before either is ever consulted (ADR 0066, ADR 0072).
-    const after = await get(`/${SMALL}/v1.1.1/participants.tsv`, JSON_ACCEPT);
+    const after = await app().request(
+      `https://data.nemar.org${path}`,
+      JSON_ACCEPT,
+      envWithRawStandin(),
+    );
     expect(after.status).toBe(404);
     expect(await after.json()).toEqual({ error: "Dataset not found" });
+    expect(cache.matches).toBe(matchesBefore);
+    expect(readsOf(SMALL)).toEqual([]);
+  });
+
+  test("a flip to private refuses every route at once, with all three caches warm for this dataset/version (review: no test covered all three together)", async () => {
+    // Each of the three caches below is proven individually elsewhere in this
+    // file ("the manifest.json response cache...", "the edge cache sits
+    // behind the visibility gate", and the memo test just above) -- but never
+    // all three warm for the SAME dataset/version at once, in one sequence,
+    // before the flip. This is that sequence.
+    s3.put(`/${SMALL}/version/v1.1.1.json`, manifestWithRawStandinEntry());
+    const filePath = `/${SMALL}/v1.1.1/${RAW_STANDIN_PATH}`;
+    const dirPath = `/${SMALL}/v1.1.1/`;
+    const manifestJsonPath = `/${SMALL}/v1.1.1/manifest.json`;
+
+    // 1) The manifest edge copy + trust window (any manifest read stores it).
+    // 2) The git-file cache (a real GET on a git-tracked file's bytes).
+    const fileRes = await app().request(
+      `https://data.nemar.org${filePath}`,
+      JSON_ACCEPT,
+      envWithRawStandin(),
+    );
+    expect(fileRes.status).toBe(200);
+    // 3) The manifest.json response cache.
+    const manifestJsonRes = await app().request(
+      `https://data.nemar.org${manifestJsonPath}`,
+      {},
+      envWithRawStandin(),
+    );
+    expect(manifestJsonRes.status).toBe(200);
+
+    // Prove all three are actually warm before flipping -- otherwise a
+    // refusal below would be meaningless (nothing to have served stale).
+    expect(cache.store.has(manifestCacheKey("https://data.nemar.org", SMALL, "v1.1.1"))).toBe(true);
+    expect(
+      cache.store.has(gitFileCacheKey("https://data.nemar.org", SMALL, "v1.1.1", RAW_STANDIN_PATH)),
+    ).toBe(true);
+    expect(cache.store.has(manifestJsonCacheKey("https://data.nemar.org", SMALL, "v1.1.1"))).toBe(
+      true,
+    );
+
+    db.prepare("UPDATE datasets SET visibility = 'private' WHERE dataset_id = ?").run(SMALL);
+    const matchesBefore = cache.matches;
+    s3.log.length = 0;
+
+    // Every route that touches one of the three warm caches refuses, still
+    // before any of them is ever consulted.
+    for (const path of [filePath, dirPath, manifestJsonPath]) {
+      const res = await app().request(
+        `https://data.nemar.org${path}`,
+        JSON_ACCEPT,
+        envWithRawStandin(),
+      );
+      expect(res.status).toBe(404);
+    }
     expect(cache.matches).toBe(matchesBefore);
     expect(readsOf(SMALL)).toEqual([]);
   });

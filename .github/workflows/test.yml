@@ -535,7 +535,7 @@ jobs:
           # silently flaking in the wrong tier.
           shopt -s nullglob
           files=()
-          for f in test/*.test.ts backend/test/*.test.ts; do
+          for f in test/*.test.ts backend/test/*.test.ts backend/test/helpers/*.test.ts; do
             base="$(basename "$f")"
             case "$base" in
               e2e-sandbox.test.ts|e2e-upload.test.ts|zenodo-sandbox.test.ts|ezid.test.ts|ezid-sandbox.test.ts|auth-passwordless.test.ts) continue;;
@@ -598,7 +598,7 @@ jobs:
           # cli.test.ts (runCli spawns the binary against the backend).
           shopt -s nullglob
           files=()
-          for f in test/*.test.ts backend/test/*.test.ts; do
+          for f in test/*.test.ts backend/test/*.test.ts backend/test/helpers/*.test.ts; do
             base="$(basename "$f")"
             case "$base" in
               e2e-sandbox.test.ts|e2e-upload.test.ts|zenodo-sandbox.test.ts|ezid.test.ts|ezid-sandbox.test.ts|auth-passwordless.test.ts) continue;;

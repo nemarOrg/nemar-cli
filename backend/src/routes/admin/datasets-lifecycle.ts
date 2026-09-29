@@ -236,22 +236,34 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
       // old build, or a zip left over from before the policy existed).
       const outcome = decideArchiveSweepOutcome(size, { file_size, total_files });
       try {
-        if (outcome.action === "ready") {
-          // Clear any stale archive_skip_reason: a real, in-policy zip exists (#752).
-          await db.prepare(ARCHIVE_SWEEP_READY_SQL).bind(outcome.size, dataset_id).run();
-          ready++;
-        } else if (outcome.action === "skip") {
-          // Over the size policy: record WHY no zip is advertised
-          // (archive_skip_reason) so the UI shows the direct-download recipe
-          // instead of "missing archive", and clear archive_status the same
-          // way the ready webhook's skip branch does (#1514) -- a leftover
-          // zip must not keep reading as 'ready'.
-          await db.prepare(ARCHIVE_SWEEP_SKIP_SQL).bind(outcome.reason, dataset_id).run();
-          skipped++;
-        } else {
-          // Checked, no archive on S3, and in policy: genuinely absent.
-          await db.prepare(ARCHIVE_SWEEP_STAMP_ONLY_SQL).bind(dataset_id).run();
-          absent++;
+        // Exhaustive on `outcome.action` (matching `processOne`'s switch in
+        // `scripts/rename-archives.ts`): the `default` branch's `never`
+        // assignment fails the build if `ArchiveSweepOutcome` ever grows a
+        // new action without a case here to handle it.
+        switch (outcome.action) {
+          case "ready":
+            // Clear any stale archive_skip_reason: a real, in-policy zip exists (#752).
+            await db.prepare(ARCHIVE_SWEEP_READY_SQL).bind(outcome.size, dataset_id).run();
+            ready++;
+            break;
+          case "skip":
+            // Over the size policy: record WHY no zip is advertised
+            // (archive_skip_reason) so the UI shows the direct-download recipe
+            // instead of "missing archive", and clear archive_status the same
+            // way the ready webhook's skip branch does (#1514) -- a leftover
+            // zip must not keep reading as 'ready'.
+            await db.prepare(ARCHIVE_SWEEP_SKIP_SQL).bind(outcome.reason, dataset_id).run();
+            skipped++;
+            break;
+          case "absent":
+            // Checked, no archive on S3, and in policy: genuinely absent.
+            await db.prepare(ARCHIVE_SWEEP_STAMP_ONLY_SQL).bind(dataset_id).run();
+            absent++;
+            break;
+          default: {
+            const _exhaustive: never = outcome;
+            throw new Error(`unhandled ArchiveSweepOutcome action: ${JSON.stringify(_exhaustive)}`);
+          }
         }
       } catch (err) {
         // S3 confirmed the size; only the D1 write failed. Note the branch

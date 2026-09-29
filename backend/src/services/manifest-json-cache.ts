@@ -50,6 +50,7 @@
  * client never sees the difference between the two numbers.
  */
 
+import { toVersionTag } from "../../../shared/contract/version.js";
 import type { ManifestCache } from "./manifest-source";
 
 /** Marker on a STORED copy only, carrying the manifest's ETag at the moment
@@ -96,7 +97,7 @@ export interface ManifestJsonCacheHit {
  * families of entry never collide.
  */
 export function manifestJsonCacheKey(origin: string, datasetId: string, version: string): string {
-  const tag = version.startsWith("v") ? version : `v${version}`;
+  const tag = toVersionTag(version);
   return `${origin}/__nemar-internal/manifest-json-cache/v1/${encodeURIComponent(datasetId)}/${encodeURIComponent(tag)}.json`;
 }
 
