@@ -72,6 +72,13 @@ earlier releases are described only by their generated notes.
 
 ### Added
 
+- **`nemar dataset download --no-verify` and `nemar dataset get --no-verify` (#1523,
+  #1525).** Opt-in: git-annex skips re-hashing each file it receives, a second full read of
+  every byte downloaded. The CLI still checks every retrieved file's size
+  against its annex key and marks a mismatch unavailable rather than downloaded. The
+  default is unchanged, and a run with the flag says on stderr that verification was
+  skipped. `--http` and OpenNeuro downloads already verify by size only, so the flag
+  does nothing there.
 - **Zarr: a reviewed per-dataset declaration for EEGLAB `.fdt` files kept away from their
   `.set` (#1528).** on004306 keeps its `.fdt` files under `derivatives/` with unrelated
   names, so its 15 raw recordings were unconvertible. Each declared pairing is checked
