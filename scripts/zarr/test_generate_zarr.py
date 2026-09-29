@@ -2257,6 +2257,18 @@ class TestAnnexKeySize(unittest.TestCase):
         self.assertIsNone(annex_key_size(None))
         self.assertIsNone(annex_key_size(""))
 
+    def test_a_size_like_run_in_the_name_is_not_a_size(self):
+        # WORM and URL keys carry the file name (or URL) after `--`, and BIDS
+        # names are full of `-s<digits>`-shaped runs. Unanchored, these read as
+        # a 5-byte file, and every chunk name and size check derived from it
+        # would be wrong.
+        self.assertIsNone(annex_key_size("WORM-m1700000000--sub-01-s5_eeg.edf"))
+        self.assertIsNone(annex_key_size("URL--https&c%%example.org%run-s5.edf"))
+        # A sized WORM key keeps its own size, not the name's.
+        self.assertEqual(annex_key_size("WORM-s100-m1700000000--sub-01-s5.edf"), 100)
+        # The chunk fields that follow the size do not bleed into it.
+        self.assertEqual(annex_key_size("SHA256E-s12-S1024-C1--abc.edf"), 12)
+
 
 class TestMaxShieldCalibrationResolution(unittest.TestCase):
     """ADR 0028: Signal-Space Separation runs only with the recording's OWN

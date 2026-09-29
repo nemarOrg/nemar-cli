@@ -4421,8 +4421,14 @@ def aws_cp(src: str, dst: str, *, extra: list[str] | None = None) -> None:
 def annex_key_size(key: str | None) -> int | None:
     """Byte size a git-annex SHA256E/MD5E key declares in its ``-s<N>`` field
     (``SHA256E-s628291820--<hash>.con`` -> ``628291820``). ``None`` when the key
-    carries no size (e.g. a URL/WORM key)."""
-    m = re.search(r"-s(\d+)", key or "")
+    carries no size (e.g. a URL/WORM key).
+
+    Read from the key's FIELDS only, the part before the first ``--``: the name
+    after it is free text for a WORM or URL key (``WORM-m1700000000--sub-01-s5.edf``,
+    ``URL--https&c%%host%run-s5.edf``), and a ``-s5`` there is not a size. The
+    size field is a whole ``-`` separated field, so ``-s12-S1024`` reads 12."""
+    fields = (key or "").partition("--")[0]
+    m = re.search(r"-s(\d+)(?=-|$)", fields)
     return int(m.group(1)) if m else None
 
 
