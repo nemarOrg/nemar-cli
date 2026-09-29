@@ -211,7 +211,10 @@ describe("ADR 0012 review: the zip route enforces the size policy, not just S3 o
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error: string; reason: string; browse_url: string };
     expect(body.reason).toBe("archive_skipped");
-    expect(body.error).toContain("exceeds");
+    // Binary units, spelled GiB: the value is bytes / 1024^3, never a decimal GB.
+    expect(body.error).toBe(
+      "dataset 130.0 GiB exceeds 100.0 GiB archive limit; use direct download",
+    );
     expect(body.browse_url).toBe(`/${DATASET}/v1.0.1/`);
     // The point of the fix: the route decides from the catalog row and never
     // even asks S3 whether a (stray) archive exists.

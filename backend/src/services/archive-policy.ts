@@ -29,9 +29,10 @@ export interface ArchiveSkipDecision {
   reason?: string;
 }
 
-/** Format bytes as a compact GB string for the skip reason. */
-function gb(bytes: number): string {
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+/** Format bytes as a compact GiB string for the skip reason. The divisor is
+ *  1024^3, so the unit is the binary gibibyte, never the decimal "GB". */
+function gib(bytes: number): string {
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
 }
 
 /**
@@ -46,7 +47,7 @@ export function shouldSkipArchive(input: ArchiveSizeInput): ArchiveSkipDecision 
   if (typeof totalBytes === "number" && totalBytes > ARCHIVE_MAX_BYTES) {
     return {
       skip: true,
-      reason: `dataset ${gb(totalBytes)} exceeds ${gb(ARCHIVE_MAX_BYTES)} archive limit; use direct download`,
+      reason: `dataset ${gib(totalBytes)} exceeds ${gib(ARCHIVE_MAX_BYTES)} archive limit; use direct download`,
     };
   }
   if (typeof totalFiles === "number" && totalFiles > ARCHIVE_MAX_FILES) {
