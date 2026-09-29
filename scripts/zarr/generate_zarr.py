@@ -4871,10 +4871,11 @@ def store_metadata(store_path: str) -> dict:
         labels: list[str] = []
         for gname in ra.get("channel_groups", []):
             ga = dict(root[gname].attrs)
-            labels.extend(
-                str(ch.get("label", "")) for ch in ga.get("channels") or []
-                if isinstance(ch, dict)
-            )
+            channels = ga.get("channels")
+            if isinstance(channels, list):
+                labels.extend(
+                    str(ch.get("label", "")) for ch in channels if isinstance(ch, dict)
+                )
             rate = ga.get("rate")
             nsamp = ga.get("n_samples")
             mod = ga.get("modality")
