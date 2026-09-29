@@ -8946,6 +8946,25 @@ class TestDeclaredFdtConvertOne(unittest.TestCase):
         result = self.convert({self.SET: self.decl(fdt="derivatives/fdt_files/other.fdt")})
         self.assertEqual(result["code"], "fdt_declaration_refused")
 
+    def test_a_corrupt_set_is_refused_typed_not_retried(self):
+        set_path = os.path.join(self.repo, self.SET)
+        with open(set_path, "rb") as fh:
+            raw = fh.read()
+        for name, content in {
+            "truncated": raw[: len(raw) // 2],
+            "not a MAT file": b"\x99" * 500,
+            "empty": b"",
+        }.items():
+            with self.subTest(name):
+                with open(set_path, "wb") as fh:
+                    fh.write(content)
+                with self.assertRaises(generate_zarr.FdtDeclarationRefused):
+                    generate_zarr.eeglab_fdt_layout(set_path)
+                result = self.convert({self.SET: self.decl()})
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["code"], "fdt_declaration_refused")
+                self.assertIn("could not be read", result["error"])
+
     def test_a_set_with_inline_samples_is_refused(self):
         write_eeglab_set(os.path.join(self.repo, self.SET), None,
                          nbchan=self.NBCHAN, pnts=self.PNTS)
