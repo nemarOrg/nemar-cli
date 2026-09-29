@@ -237,7 +237,7 @@ VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
 # versions: `packaging` when the venv has it, else the leading numeric fields as a
 # tuple, because as strings "1.2.10" sorts below "1.2.9". An unreadable or
 # unparseable version fails closed.
-BIOSIGIO_FLOOR="1.2.9"
+BIOSIGIO_FLOOR="1.2.10"
 BIOSIGIO_FLOOR_PROBE='
 import sys
 import biosigio
@@ -287,16 +287,19 @@ sys.exit(0 if ok else 3)
 # files that failed before (EEGLAB v7.3 flat root and empty fields, BrainVision
 # stale DataFile/MarkerFile names, repeated EDF/BDF/WFDB labels that used to lose
 # channels) and raises host I/O errors as the OSError itself, which is retried,
-# instead of a typed file failure. The engine stamp did not move (see
-# requirements.txt).
-# The `<1.2.10` half is a CAP, not a floor: biosigio 1.2.10 matches channels.tsv
-# names case-insensitively, and the schema, zod and MCP texts for the join report
-# still say matching is exact. requirements.txt lists what adopting it needs; raise
-# the cap in all three places (that file, this default, test_hallu_zarr_config.py).
+# instead of a typed file failure, and 1.2.10 applies a channels.tsv row to the
+# one channel whose label differs from it only in case (biosigio#140), which can
+# convert that channel's unit; the converter publishes those matches bounded
+# (`units_report.matched_case_only`), and the join texts in the schema, zod and
+# MCP mirrors were reworded with this bump. The engine stamp did not move for
+# either (see requirements.txt).
+# The `<1.2.11` half is a CAP, not a floor, raised deliberately per release; raise
+# it in all three places at once (requirements.txt, this default and
+# BIOSIGIO_FLOOR, test_hallu_zarr_config.py).
 # Extras are not optional here: [mef3] carries pymef and [hdf5] carries h5py, and
 # without either the matching recordings raise ImportError at convert time even
 # though discovery finds them.
-BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.9,<1.2.10}"
+BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.10,<1.2.11}"
 API_BASE="${API_BASE:-https://api.nemar.org}"
 # The STABLE base published in each index as `contract_base` and in each store's
 # `nemar.contract_url` (#1059/#1064). Distinct from S3_BUCKET/AWS_REGION, which
@@ -722,7 +725,9 @@ setup() {
   # wheel and passes the import guard. On 1.2.8 a streaming EDF that repeats a
   # channel label still publishes, with the repeated label as is, and the header
   # gate in generate_zarr.py cannot catch it: every channel is there, only the
-  # names collapse for a consumer that keys by label.
+  # names collapse for a consumer that keys by label. On 1.2.9 a channels.tsv row
+  # that differs from its channel only in case is silently not applied, so the
+  # store serves the importer's unit where the sidecar declares another.
   local installed
   if ! installed="$(VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" -c "$BIOSIGIO_FLOOR_PROBE" "$BIOSIGIO_FLOOR" 2>&1)"; then
     echo "[setup] FATAL: biosigio ${installed:-<unreadable>} is below the ${BIOSIGIO_FLOOR} floor after install ($BIOSIGIO_SPEC)." >&2

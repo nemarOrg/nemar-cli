@@ -193,10 +193,11 @@ def test_test_mode_print_config_defaults(dirs: tuple[Path, Path]) -> None:
     # channels.tsv units, which is what gates the engine bump, and below 1.2.8
     # the streaming export rewrites every shard once per channel (#1483), and
     # below 1.2.9 real EEGLAB v7.3 and BrainVision files fail to convert and
-    # EDF files that repeat a channel label lose channels. The upper bound is a
-    # cap, not a floor: 1.2.10 matches channels.tsv names case-insensitively,
-    # which the published join report was not written for (requirements.txt).
-    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.9,<1.2.10"
+    # EDF files that repeat a channel label lose channels, and below 1.2.10 a
+    # channels.tsv row that differs from its channel only in case is not
+    # applied. The upper bound is a cap, not a floor, raised deliberately per
+    # biosigIO release (requirements.txt).
+    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.10,<1.2.11"
     assert cfg["S3_BUCKET"] == "nemar-dev"
     assert cfg["AWS_PROFILE"] == "nemar-zarr-dev"
     assert cfg["STATE_DIR"] == state_dir
@@ -263,7 +264,7 @@ def test_print_config_without_test_uses_prod_defaults(dirs: tuple[Path, Path]) -
     assert cfg["TEST_API_URL"] == ""
     assert cfg["CALLBACK_URL"] == "https://api.nemar.org/webhooks/zarr-ready"
     assert cfg["CONTRACT_BASE"] == "https://zarr.nemar.org"
-    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.9,<1.2.10"
+    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.10,<1.2.11"
     assert cfg["S3_BUCKET"] == "nemar"
     assert cfg["AWS_PROFILE"] == "nemar-zarr"
     assert cfg["STATE_DIR"] == f"{zarr_base}/zarr-state"
@@ -920,7 +921,7 @@ def test_the_env_var_form_arms_a_run_without_touching_the_file(ack_run) -> None:
 
 
 @pytest.mark.parametrize("packaging_importable", [True, False], ids=["packaging", "tuple"])
-@pytest.mark.parametrize("stale", ["1.2.8", "1.2.0", "0.9.9"])
+@pytest.mark.parametrize("stale", ["1.2.9", "1.2.8", "1.2.0", "0.9.9"])
 def test_setup_refuses_a_biosigio_below_the_floor(
     ack_run, stale: str, packaging_importable: bool
 ) -> None:
@@ -930,7 +931,8 @@ def test_setup_refuses_a_biosigio_below_the_floor(
     converter's header gate cannot catch it (every channel is present, only the
     names collapse), so setup has to stop the run before it converts anything.
     Both comparison paths are driven: `packaging` when the venv has it, the
-    numeric-tuple fallback when it does not."""
+    numeric-tuple fallback when it does not. "1.2.9" is the case a string
+    comparison gets wrong against the 1.2.10 floor: as strings it sorts above."""
     run, qpy_calls, _ack_file, _log = ack_run
 
     proc = run(biosigio_version=stale, packaging_importable=packaging_importable)
@@ -938,12 +940,12 @@ def test_setup_refuses_a_biosigio_below_the_floor(
     assert proc.returncode != 0, proc.stdout
     assert "FATAL" in proc.stderr
     assert stale in proc.stderr
-    assert "1.2.9" in proc.stderr
+    assert "1.2.10" in proc.stderr
     assert qpy_calls() == [], "setup must stop before the queue is touched"
 
 
 @pytest.mark.parametrize("packaging_importable", [True, False], ids=["packaging", "tuple"])
-@pytest.mark.parametrize("version", ["1.2.9", "1.2.10", "1.10.0", "2.0.0"])
+@pytest.mark.parametrize("version", ["1.2.10", "1.2.11", "1.10.0", "2.0.0"])
 def test_setup_accepts_a_biosigio_at_or_above_the_floor(
     ack_run, version: str, packaging_importable: bool
 ) -> None:
