@@ -60,6 +60,10 @@ What follows a finding is a re-conversion under biosigio >= 1.2.9, which the
 report spells out per dataset (`requeue`): on the conversion host,
 `zarr_queue.py --db <queue db> requeue --status done --dataset <id> --execute`
 (the next cron tick rebuilds it), or `hallu-zarr.sh --dataset <id>` for one now.
+That requeue is what replaces a bad store; nothing else does. The fidelity
+gate only stops a NEW short store from being uploaded, and `--clean`
+reconciles rather than wiping (ADR 0023), so a flagged store stays published
+until a good re-conversion overwrites it.
 """
 
 from __future__ import annotations

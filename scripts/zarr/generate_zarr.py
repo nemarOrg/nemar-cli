@@ -1000,14 +1000,17 @@ class ChannelCountMismatch(Exception):
     the gate is a DETERMINISTIC data failure surfaced in the index and the
     unfaithful store is never uploaded.
 
-    Policy: better NO store than a wrong store. On the incremental path the
-    prior store survives (the gate runs before this recording's sync). Under
-    ``--clean`` (the Hallu bulk path) the dataset prefix is wiped up front, so
-    a gated recording ends with no serving copy at all -- intended, since a
-    copy that contradicts channels.tsv must not be served, and the prior copy
-    was built by the same converter lineage that just failed the check. Being
-    deterministic, a gated recording does NOT self-retry: after a converter
-    fix, re-run the dataset explicitly (hallu-zarr.sh --dataset <id>)."""
+    Policy: better NO new store than a wrong one. The gate runs before this
+    recording's sync, so the refused store is never uploaded, on the
+    incremental path and under ``--clean`` alike: ``--clean`` reconciles and
+    does NOT wipe the prefix (ADR 0023; only ``--wipe`` erases it), and a
+    recording still at HEAD is never an orphan. So a refused recording KEEPS
+    its previously published store objects until a good re-conversion's
+    ``sync --delete`` overwrites them; this run's index lists the recording
+    under ``failures`` rather than ``stores`` (``merge_index`` drops the entry
+    of a newly failed path). Being deterministic, a gated recording does NOT
+    self-retry: after a converter fix, re-run the dataset explicitly
+    (hallu-zarr.sh --dataset <id>, or a queue requeue)."""
 
     code = "channel_count_mismatch"
 
@@ -6243,12 +6246,14 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         # repeated EDF label overwrote a channel, nm000110 22 of 23); withhold
         # it as a typed data failure rather than publish an unfaithful copy.
         # The header is read for EVERY recording, not only when a sidecar
-        # disagrees: see channel_gate_verdict. Runs BEFORE the sync, so on the
-        # incremental path this recording's previous store survives
-        # untouched; under --clean the
-        # prefix was already wiped and the recording simply stays absent (see
-        # the ChannelCountMismatch docstring for why absent beats unfaithful,
-        # and note a gated recording needs an explicit re-run after a fix).
+        # disagrees: see channel_gate_verdict. Runs BEFORE the sync, so the
+        # refused store is never uploaded and this recording's previously
+        # published store objects survive untouched, under --clean as on the
+        # incremental path (--clean reconciles, it does not wipe: ADR 0023),
+        # until a good re-conversion overwrites them. The index lists the
+        # recording as a failure instead (see the ChannelCountMismatch
+        # docstring, and note a gated recording needs an explicit re-run
+        # after a fix).
         expected = expected_channel_count_for(
             c["repo"], primary, c["head_files"], c["head"]
         )
