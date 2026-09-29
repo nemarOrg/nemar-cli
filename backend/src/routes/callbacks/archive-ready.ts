@@ -157,11 +157,12 @@ export function deriveArchiveCompleteness(body: ArchiveReadyBody): ArchiveComple
  * an earlier (larger) version must not keep the UI on the direct-download
  * recipe (#752).
  *
- * COALESCE on the completeness columns so a callback that carries no
- * tally leaves prior values intact instead of blanking them. That is
- * the idempotent skip path (archive already existed, stream script
- * never ran): the existing archive's completeness is still true of it,
- * and overwriting with NULL would downgrade a known state to "not
+ * COALESCE on archive_size AND the completeness columns so a callback that
+ * carries no size or tally leaves prior values intact instead of blanking
+ * them. That is the idempotent skip path (archive already existed, stream
+ * script never ran): the existing archive's size and completeness are still
+ * true of it, and overwriting with NULL would erase a known value (a real
+ * zip whose size is now unknown) or downgrade a known state to "not
  * assessed".
  *
  * Removing the availability_report_at stamp marks the per-file report
@@ -172,18 +173,18 @@ export function deriveArchiveCompleteness(body: ArchiveReadyBody): ArchiveComple
  * key as NULL, #1183). The json_set half of the same expression stamps
  * archive_checked_at; COALESCE guards the never-swept NULL column, on
  * which json_set alone would return NULL and drop the write.
- * Deliberately a stamp write and NOT a direct
- * writeAvailabilityReport call: that helper does a GitHub commit
- * (createOrUpdateFile = a GET-sha + PUT pair on raw fetch, with no
- * rate-limit retry), and the sweep caps itself at 10 per invocation
- * precisely because a burst of those trips GitHub's secondary rate
- * limit. Calling it per callback would fan out unbounded writes on the
- * shared GITHUB_ADMIN_PAT and defeat the cap the sweep exists to
- * enforce -- #1040's rebuild of 630 archives would do exactly that.
+ * Deliberately a stamp write and NOT a direct writeAvailabilityReport call:
+ * that helper does a GitHub commit (createOrUpdateFile = a GET-sha + PUT
+ * pair on raw fetch, with no rate-limit retry), and the sweep caps itself at
+ * 30 per invocation (`AVAILABILITY_REPORT_SWEEP_MAX`) precisely because a
+ * burst of those trips GitHub's secondary rate limit. Calling it per
+ * callback would fan out unbounded writes on the shared GITHUB_ADMIN_PAT and
+ * defeat the cap the sweep exists to enforce -- #1040's rebuild of 630
+ * archives would do exactly that.
  */
 export const ARCHIVE_READY_UPDATE_SQL = `UPDATE datasets
            SET archive_status = 'ready',
-               archive_size = ?,
+               archive_size = COALESCE(?, archive_size),
                archive_retry_count = 0,
                archive_skip_reason = NULL,
                archive_complete = COALESCE(?, archive_complete),
