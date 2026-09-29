@@ -2244,7 +2244,7 @@ def channels_tsv_names(text: str) -> list[str] | None:
     ]
 
 
-# How many unmatched labels an index entry names. Enough to recognise the
+# How many unmatched labels an index entry names. Enough to recognize the
 # pattern (a case difference, a suffix), small enough that a dataset with
 # thousands of stores does not pay for it in index bytes (#1178).
 UNMATCHED_EXAMPLES_MAX = 5

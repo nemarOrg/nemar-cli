@@ -3190,7 +3190,7 @@ class TestChannelGateVerdict(unittest.TestCase):
         self.assertEqual(channel_gate_verdict(23, 22, 23), "pass")
 
 
-def build_labelled_edf(path: str, labels: list[str], rate: int = 256, seconds: int = 10) -> str:
+def build_labeled_edf(path: str, labels: list[str], rate: int = 256, seconds: int = 10) -> str:
     """Write a REAL EDF+ with pyedflib whose signals carry exactly `labels`,
     repeats included (EDF does not require unique labels; CHB-MIT repeats
     `T8-P8` and uses `-` for unused inputs). Returns `path`."""
@@ -3256,17 +3256,17 @@ class TestChannelGateOnRealFiles(unittest.TestCase):
     def store_from(self, labels: list[str]) -> int:
         from biosigio import Recording
 
-        src = build_labelled_edf(os.path.join(self.dir, "collapsed.edf"), labels)
+        src = build_labeled_edf(os.path.join(self.dir, "collapsed.edf"), labels)
         store = os.path.join(self.dir, "collapsed.zarr")
         Recording.from_file(src).to_zarr(store, dtype="int16")
         return store_total_channels(store_metadata(store))
 
     def test_the_header_counts_every_repeated_label(self):
-        f = build_labelled_edf(os.path.join(self.dir, "chb_eeg.edf"), CHB_MIT_LABELS)
+        f = build_labeled_edf(os.path.join(self.dir, "chb_eeg.edf"), CHB_MIT_LABELS)
         self.assertEqual(file_declared_channel_count(f), len(CHB_MIT_LABELS))
 
     def test_a_collapsed_store_is_refused_with_or_without_a_sidecar(self):
-        f = build_labelled_edf(os.path.join(self.dir, "chb_eeg.edf"), CHB_MIT_LABELS)
+        f = build_labeled_edf(os.path.join(self.dir, "chb_eeg.edf"), CHB_MIT_LABELS)
         collapsed = list(dict.fromkeys(CHB_MIT_LABELS))  # what a label-keyed import kept
         in_store = self.store_from(collapsed)
         self.assertEqual(in_store, len(collapsed))
@@ -3280,7 +3280,7 @@ class TestChannelGateOnRealFiles(unittest.TestCase):
                 self.assertIn(f"header declares {in_file}", str(cm.exception))
 
     def test_a_complete_store_passes(self):
-        f = build_labelled_edf(os.path.join(self.dir, "chb_eeg.edf"), CHB_MIT_LABELS)
+        f = build_labeled_edf(os.path.join(self.dir, "chb_eeg.edf"), CHB_MIT_LABELS)
         in_store = self.store_from(CHB_MIT_SUFFIXED)
         self.assertIsNone(generate_zarr.enforce_channel_gate(
             "sub-01/eeg/x_eeg.edf", in_store, len(CHB_MIT_LABELS),
@@ -8308,7 +8308,7 @@ class TestSidecarJoinReport(unittest.TestCase):
         self.assertEqual(channels_tsv_names(text), ["T8-P8", "T8-P8", "-"])
 
     def test_names_are_read_with_pandas_quoting(self):
-        # biosigIO reads channels.tsv with pandas, which honours `"` quoting:
+        # biosigIO reads channels.tsv with pandas, which honors `"` quoting:
         # a quoted name loses its quotes and keeps a quoted tab, and a lone
         # quote inside a cell is literal. A plain split would disagree.
         text = 'name\ttype\n"Fp1"\tEEG\n"A\tB"\tEEG\n  C \tEEG\nD"x\tEEG\n'
@@ -8423,7 +8423,7 @@ class TestDuplicateLabelsThroughConvertOne(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.repo = os.path.join(self._tmp.name, "repo")
         os.makedirs(os.path.join(self.repo, "sub-01", "eeg"))
-        build_labelled_edf(os.path.join(self.repo, self.PRIMARY), CHB_MIT_LABELS)
+        build_labeled_edf(os.path.join(self.repo, self.PRIMARY), CHB_MIT_LABELS)
         self.extra_head_files: set[str] = set()
         self.synced_dir = os.path.join(self._tmp.name, "synced")
         bindir = os.path.join(self._tmp.name, "bin")
@@ -8548,7 +8548,7 @@ class TestDuplicateLabelsThroughConvertOne(unittest.TestCase):
     def test_repeated_electrodes_keep_their_position(self):
         # A monopolar repeat: `Fp1` twice in the file, served as Fp1-0/Fp1-1,
         # while electrodes.tsv names the electrode once, as `Fp1`.
-        build_labelled_edf(os.path.join(self.repo, self.PRIMARY), ["Fp1", "F7", "Fp1"])
+        build_labeled_edf(os.path.join(self.repo, self.PRIMARY), ["Fp1", "F7", "Fp1"])
         elec = "sub-01/eeg/sub-01_electrodes.tsv"
         with open(os.path.join(self.repo, elec), "w") as fh:
             fh.write("name\tx\ty\tz\nFp1\t-0.03\t0.08\t0.0\nF7\t-0.07\t0.04\t0.0\n")
@@ -8845,7 +8845,7 @@ class TestHeaderGateFalseRefusalMatrix(unittest.TestCase):
 
     def test_plain_edf_whose_header_under_counts(self):
         # A plain EDF (not EDF+) with an ordinary signal that happens to be
-        # LABELLED `EDF Annotations`. The header count drops that label, so it
+        # LABELED `EDF Annotations`. The header count drops that label, so it
         # under-counts (2 of 3); the importer serves all three. A store above
         # the header is not a truncation and must publish.
         primary = "sub-01/eeg/sub-01_task-rest_eeg.edf"
