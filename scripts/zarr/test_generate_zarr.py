@@ -111,6 +111,8 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     expected_channel_count_for,
     file_declared_channel_count,
     channel_gate_verdict,
+    channels_tsv_names,
+    sidecar_join_report,
     store_total_channels,
     store_metadata,
     embed_attr,
@@ -8294,6 +8296,170 @@ class TestConvertOneFifSidecarOvercount(unittest.TestCase):
         result = self.convert(len(FIF_CHANNELS))
         self.assertTrue(result["ok"], result.get("error"))
         self.assertNotIn("channels_tsv_count_mismatch", result["entry"])
+
+
+class TestSidecarJoinReport(unittest.TestCase):
+    """`channels_tsv_names` + `sidecar_join_report`, the pure half of what
+    `convert_one` adds to `units_report`. `TestDuplicateLabelsThroughConvertOne`
+    drives the same thing through a real conversion."""
+
+    def test_names_keep_repeats_and_file_order(self):
+        text = "name\ttype\tunits\nT8-P8\tEEG\tV\n\nT8-P8\tEEG\tV\n -\tMISC\tn/a\n"
+        self.assertEqual(channels_tsv_names(text), ["T8-P8", "T8-P8", "-"])
+
+    def test_no_name_column_means_no_join(self):
+        self.assertIsNone(channels_tsv_names("label\ttype\nA\tEEG\n"))
+        self.assertIsNone(channels_tsv_names(""))
+        # biosigIO matches the header exactly, so this reader does too.
+        self.assertIsNone(channels_tsv_names("Name\ttype\nA\tEEG\n"))
+
+    def test_a_full_match_is_a_positive_zero(self):
+        self.assertEqual(
+            sidecar_join_report(CHB_MIT_SUFFIXED, CHB_MIT_SUFFIXED, {}),
+            {"unmatched_channels": 0},
+        )
+
+    def test_repeated_store_labels_are_each_counted(self):
+        # A list, not a set: two channels the sidecar misses are two.
+        report = sidecar_join_report(["A", "A", "B"], ["B"], {})
+        self.assertEqual(report["unmatched_channels"], 2)
+
+    def test_a_sidecar_naming_the_file_label_is_reported(self):
+        renames = {"T8-P8-0": "T8-P8", "T8-P8-1": "T8-P8"}
+        report = sidecar_join_report(
+            ["FP1-F7", "T8-P8-0", "T8-P8-1"], ["FP1-F7", "T8-P8", "T8-P8"], renames
+        )
+        self.assertEqual(report, {
+            "unmatched_channels": 2, "unmatched_raw_label": 2,
+            "unmatched_examples": ["T8-P8-0", "T8-P8-1"],
+        })
+
+    def test_a_case_only_difference_is_reported(self):
+        report = sidecar_join_report(["FP1-F7", "F7-T7"], ["Fp1-F7", "F7-T7"], {})
+        self.assertEqual(report, {
+            "unmatched_channels": 1, "unmatched_case_only": 1,
+            "unmatched_examples": ["FP1-F7"],
+        })
+
+    def test_examples_are_bounded(self):
+        labels = [f"X{i}" for i in range(12)]
+        report = sidecar_join_report(labels, [], {})
+        self.assertEqual(report["unmatched_channels"], 12)
+        self.assertEqual(report["unmatched_examples"], labels[:generate_zarr.UNMATCHED_EXAMPLES_MAX])
+        self.assertNotIn("unmatched_case_only", report)
+        self.assertNotIn("unmatched_raw_label", report)
+
+
+class TestDuplicateLabelsThroughConvertOne(unittest.TestCase):
+    """A REAL EDF that repeats a label, CHB-MIT shaped, through `convert_one`.
+
+    biosigio >= 1.2.9 suffixes each repeat MNE-style (`T8-P8` -> `T8-P8-0`,
+    `T8-P8-1`; `-` -> `--0`, `--1`, ...). Before it, a repeat overwrote a
+    channel and the store came up short of the file (nm000110: 22 of 23).
+    `aws` is a stand-in that copies a synced store aside, so the test can open
+    what would have been uploaded; nothing else is substituted."""
+
+    PRIMARY = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+    TSV = "sub-01/eeg/sub-01_task-rest_channels.tsv"
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+            from biosigio import __version__ as biosigio_version
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+        parts = tuple(int(p) for p in biosigio_version.split(".")[:3] if p.isdigit())
+        if parts < (1, 2, 9):
+            raise unittest.SkipTest(
+                f"biosigio {biosigio_version} predates repeated-label suffixing (1.2.9)"
+            )
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = os.path.join(self._tmp.name, "repo")
+        os.makedirs(os.path.join(self.repo, "sub-01", "eeg"))
+        build_labelled_edf(os.path.join(self.repo, self.PRIMARY), CHB_MIT_LABELS)
+        self.synced_dir = os.path.join(self._tmp.name, "synced")
+        bindir = os.path.join(self._tmp.name, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write(
+                "#!/bin/sh\n"
+                'if [ "$1" = s3 ] && [ "$2" = sync ]; then\n'
+                f'  mkdir -p "{self.synced_dir}" && cp -R "$3" "{self.synced_dir}/"\n'
+                "fi\nexit 0\n"
+            )
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        path = os.environ["PATH"]
+        os.environ["PATH"] = bindir + os.pathsep + path
+        self.addCleanup(os.environ.__setitem__, "PATH", path)
+        saved_ctx = dict(generate_zarr._CTX)
+        self.addCleanup(lambda: (generate_zarr._CTX.clear(), generate_zarr._CTX.update(saved_ctx)))
+
+    def convert(self, tsv_names: list[str] | None):
+        head_files = {self.PRIMARY}
+        if tsv_names is not None:
+            with open(os.path.join(self.repo, self.TSV), "w") as fh:
+                fh.writelines(["name\ttype\tunits\n"] + [f"{n}\tEEG\tV\n" for n in tsv_names])
+            head_files.add(self.TSV)
+        work = os.path.join(self._tmp.name, "work")
+        os.makedirs(work, exist_ok=True)
+        generate_zarr._init_worker({
+            "repo": self.repo, "bucket": "nemar-test", "dataset_id": "nm000110",
+            "head": "c" * 40, "head_files": head_files, "local": True,
+            "tmp": work, "updated": "2026-09-28T00:00:00Z",
+            "contract_base": "https://zarr.nemar.org", "engine_version": ZARR_ENGINE_VERSION,
+            "dataset_row": None, "provenance_fetch_failed": False,
+            "mem_budget": None, "hard_ceiling": None, "projections": {},
+        })
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            result = convert_one(self.PRIMARY)
+        return result, out.getvalue()
+
+    def synced_store(self, entry: dict):
+        import zarr
+
+        return zarr.open_group(
+            os.path.join(self.synced_dir, os.path.basename(entry["zarr"])), mode="r"
+        )
+
+    def store_units(self, entry: dict) -> dict[str, str]:
+        root = self.synced_store(entry)
+        return {
+            ch["label"]: ch.get("unit")
+            for g in root.attrs["channel_groups"]
+            for ch in root[g].attrs["channels"]
+        }
+
+    def test_a_sidecar_naming_the_file_label_is_disclosed(self):
+        # A sidecar that names the repeat the way the FILE spells it: nothing
+        # can tell which row meant which channel, so biosigIO applies neither,
+        # and the entry now says so instead of reporting a clean conversion.
+        result, out = self.convert(CHB_MIT_LABELS)
+        self.assertTrue(result["ok"], result.get("error"))
+        report = result["entry"]["units_report"]
+        self.assertEqual(report["unmatched_channels"], 5)  # 3 x `-`, 2 x T8-P8
+        self.assertEqual(report["unmatched_raw_label"], 5)
+        self.assertEqual(report["unmatched_examples"], ["--0", "T8-P8-0", "--1", "T8-P8-1", "--2"])
+        units = self.store_units(result["entry"])
+        self.assertEqual(units["T8-P8-0"], "uV")  # the importer's, not the sidecar's
+        self.assertEqual(units["FP1-F7"], "V")
+        self.assertIn("names no row for 5 store channel(s)", out)
+
+    def test_a_case_only_difference_is_disclosed(self):
+        # biosigio#136: EDF header `FP1-F7`, channels.tsv `Fp1-F7`.
+        names = ["Fp1-F7", *CHB_MIT_SUFFIXED[1:]]
+        result, out = self.convert(names)
+        self.assertTrue(result["ok"], result.get("error"))
+        report = result["entry"]["units_report"]
+        self.assertEqual(report["unmatched_channels"], 1)
+        self.assertEqual(report["unmatched_case_only"], 1)
+        self.assertEqual(report["unmatched_examples"], ["FP1-F7"])
+        self.assertEqual(self.store_units(result["entry"])["FP1-F7"], "uV")
+        self.assertIn("differ only in case", out)
 
 
 class TestMainRoutesSingleRecordingsThroughThePool(unittest.TestCase):
