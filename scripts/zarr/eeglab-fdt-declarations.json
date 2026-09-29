@@ -1,0 +1,131 @@
+{
+  "description": "Reviewed, per-dataset locations of EEGLAB .fdt data files that do not sit beside their .set. Read by generate_zarr.py (load_fdt_declarations). Every entry is re-verified at conversion time against the .set header and the target's byte size, and a mismatch refuses the recording (fdt_declaration_refused). Add an entry only with byte-size evidence, never from a similar name alone.",
+  "datasets": {
+    "on004306": {
+      "reviewed": "2026-09-28",
+      "note": "Every raw .set embeds a .fdt name (subNN_sessN.fdt) that is absent beside it; the data files are under derivatives/fdt_files/ with inconsistent names. Each .set header was read from its annex object (SHA-256 checked against the key) and paired with the single .fdt whose byte size equals nbchan x pnts x trials x 4. The extension-less tmp* file in several folders is the same annex object as the .fdt beside it and is not used.",
+      "recordings": {
+        "sub-010/ses-01/eeg/sub-010_ses-01_task-experiment_run-01_eeg.set": {
+          "fdt": "derivatives/fdt_files/sub10_sess-01/sub10_sess01.fdt",
+          "nbchan": 128,
+          "pnts": 4958828,
+          "trials": 1,
+          "fdt_bytes": 2538919936,
+          "evidence": "the only .fdt in the tree of this byte size; the .set header embeds 'sub10_sess1.fdt'"
+        },
+        "sub-011/ses-01/eeg/sub-011_ses-01_task-experiment_run-01_eeg.set": {
+          "fdt": "derivatives/fdt_files/sub11_sess-01/sub11_sess01.fdt",
+          "nbchan": 128,
+          "pnts": 3828197,
+          "trials": 1,
+          "fdt_bytes": 1960036864,
+          "evidence": "the only .fdt in the tree of this byte size; the .set header embeds 'sub11_sess1.fdt'"
+        },
+        "sub-012/ses-01/eeg/sub-012_ses-01_task-experiment_run-01_eeg.set": {
+          "fdt": "derivatives/fdt_files/sub12_sess-01/sub12_sess01.fdt",
+          "nbchan": 128,
+          "pnts": 4654129,
+          "trials": 1,
+          "fdt_bytes": 2382914048,
+          "evidence": "the only .fdt in the tree of this byte size; the .set header embeds 'sub12_sess1.fdt'"
+        },
+        "sub-012/ses-02/eeg/sub-012_ses-02_task-experiment_run-01_eeg.set": {
+          "fdt": "derivatives/fdt_files/sub12_sess-02/sub12_sess02.fdt",
+          "nbchan": 128,
+          "pnts": 4732975,
+          "trials": 1,
+          "fdt_bytes": 2423283200,
+          "evidence": "the only .fdt in the tree of this byte size; the .set header embeds 'sub12_sess2.fdt'"
+        },
+        "sub-013/ses-01/eeg/sub-013_ses-01_task-experiment_run-01_eeg.set": {
+          "fdt": "derivatives/fdt_files/sub13_sess-01/sub12_sess01.fdt",
+          "nbchan": 128,
+          "pnts": 4775879,
+          "trials": 1,
+          "fdt_bytes": 2445250048,
+          "evidence": "the only .fdt in the tree of this byte size; the .set header embeds 'sub13_sess1.fdt'; the file is named sub12_sess01.fdt but sits in the sub13_sess-01 folder, and its size differs from the sub-012 ses-01 recording's (2382914048)"
+        },
+        "sub-014/ses-01/eeg/sub-014_ses-01_task-experiment_run-01_eeg.set": {
+          "fdt": "derivatives/fdt_files/sub14_sess-01/sub14_sess1.fdt",
+          "nbchan": 128,
+          "pnts": 4480061,
+          "trials": 1,
+          "fdt_bytes": 2293791232,
+          "evidence": "the only .fdt in the tree of this byte size; the .set header embeds 'sub14_sess1.fdt'"
+        },
+        "sub-014/ses-02/eeg/sub-014_ses-02_task-experiment_run-01_eeg.set": {
+          "fdt": "derivatives/fdt_files/sub14_sess-02/sub14_sess02.fdt",
+          "nbchan": 128,
+          "pnts": 5199506,
+          "trials": 1,
+          "fdt_bytes": 2662147072,
+          "evidence": "the only .fdt in the tree of this byte size; the .set header embeds 'sub14_sess2.fdt'"
+        },
+        "sub-015/ses-01/eeg/sub-015_ses-01_task-experiment_run-01_eeg.set": {
+          "fdt": "derivatives/fdt_files/sub15_sess-01/sub15_sess01.fdt",
+          "nbchan": 128,
+          "pnts": 3452907,
+          "trials": 1,
+          "fdt_bytes": 1767888384,
+          "evidence": "the only .fdt in the tree of this byte size; the .set header embeds 'sub15_sess1.fdt'"
+        },
+        "sub-015/ses-02/eeg/sub-015_ses-02_task-experiment_run-01_eeg.set": {
+          "fdt": "derivatives/fdt_files/sub15_sess-02/sub15_sess02.fdt",
+          "nbchan": 128,
+          "pnts": 5155594,
+          "trials": 1,
+          "fdt_bytes": 2639664128,
+          "evidence": "the only .fdt in the tree of this byte size; the .set header embeds 'sub15_sess2.fdt'"
+        },
+        "sub-016/ses-01/eeg/sub-016_ses-01_task-experiment_run-01_eeg.set": {
+          "fdt": "derivatives/fdt_files/sub16_sess-01/sub16_sess01.fdt",
+          "nbchan": 128,
+          "pnts": 4340189,
+          "trials": 1,
+          "fdt_bytes": 2222176768,
+          "evidence": "the only .fdt in the tree of this byte size; the .set header embeds 'sub16_sess1.fdt'"
+        },
+        "sub-017/ses-01/eeg/sub-017_ses-01_task-experiment_run-01_eeg.set": {
+          "fdt": "derivatives/fdt_files/sub17_sess-01/sub17_sess01.fdt",
+          "nbchan": 128,
+          "pnts": 4676797,
+          "trials": 1,
+          "fdt_bytes": 2394520064,
+          "evidence": "the only .fdt in the tree of this byte size; the .set header embeds 'sub17_sess1.fdt'"
+        },
+        "sub-018/ses-01/eeg/sub-018_ses-01_task-experiment_run-01_eeg.set": {
+          "fdt": "derivatives/fdt_files/sub18_sess-01/sub18_sess01.fdt",
+          "nbchan": 128,
+          "pnts": 3665053,
+          "trials": 1,
+          "fdt_bytes": 1876507136,
+          "evidence": "the only .fdt in the tree of this byte size; the .set header embeds 'sub18_sess1.fdt'"
+        },
+        "sub-019/ses-01/eeg/sub-019_ses-01_task-experiment_run-01_eeg.set": {
+          "fdt": "derivatives/fdt_files/sub19_sess-01/sub19_sess01.fdt",
+          "nbchan": 128,
+          "pnts": 3463634,
+          "trials": 1,
+          "fdt_bytes": 1773380608,
+          "evidence": "the only .fdt in the tree of this byte size; the .set header embeds 'sub19_sess1.fdt'"
+        },
+        "sub-03/ses-03/eeg/sub-03_ses-03_task-experiment_run-01_eeg.set": {
+          "fdt": "derivatives/fdt_files/sub03_sess-03/sub03_sess03.fdt",
+          "nbchan": 128,
+          "pnts": 4930238,
+          "trials": 1,
+          "fdt_bytes": 2524281856,
+          "evidence": "the only .fdt in the tree of this byte size; the .set header embeds 'sub3_sess3.fdt'"
+        },
+        "sub-08/ses-03/eeg/sub-08_ses-03_task-experiment_run-01_eeg.set": {
+          "fdt": "derivatives/fdt_files/sub08_sess-03/sub08_sess03.fdt",
+          "nbchan": 128,
+          "pnts": 4716577,
+          "trials": 1,
+          "fdt_bytes": 2414887424,
+          "evidence": "the only .fdt in the tree of this byte size; the .set header embeds 'sub8_sess3.fdt'"
+        }
+      }
+    }
+  }
+}
