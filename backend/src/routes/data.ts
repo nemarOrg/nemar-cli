@@ -42,6 +42,7 @@ import {
   resolveVersion,
   toHttpDate,
   toVersionTag,
+  versionExists,
 } from "../services/data-router";
 import { parseNemarMetadata } from "../services/datacite";
 import { isValidDatasetId } from "../services/datasetId";
@@ -224,7 +225,9 @@ function applyServerTiming(headers: Headers, t: FileTiming): void {
  * nm000281's is 43 MB, and every request for it exceeded the isolate's
  * memory. The manifest is now streamed through a scanner that keeps only what
  * `makeQuery`'s query asks for (`services/manifest-queries.ts`), from an edge
- * copy that S3 revalidates on every use (`services/manifest-source.ts`).
+ * copy that S3 revalidates outside its 60-second trust window
+ * (`services/manifest-source.ts`); inside that window, and on a per-isolate
+ * answer memo hit, the read never asks S3 at all.
  *
  * Every failure still collapses to `null`, logged the way it always was:
  * the hot call sites (the tombstone walk fans out up to 10 reads per 404,
@@ -580,55 +583,52 @@ function manifestEntryError(
 }
 
 /**
- * Build every entry with a presigned annex URL, for a dataset the bucket
- * policy excludes from public read. Unchanged behavior from before #1522.
+ * Build every manifest.json entry, dispatching per-file on `excluded` (#1522;
+ * review collapse of what used to be two same-signature builders reached
+ * through one ternary at the call site). `excluded` datasets (the bucket
+ * policy carves them out of public read) keep the legacy presigned annex
+ * URL; every other dataset gets the plain public S3 URL. Either way a
+ * git-tracked file has no presigned form: the Worker streams it from the
+ * data plane, so the immediate URL and the durable one are the same route.
+ *
+ * Async end to end even though the public branch has no signature to await,
+ * so there is exactly one builder and one call site rather than one sync and
+ * one async function selected by the caller.
  */
-async function buildPresignedManifestEntries(
+async function buildManifestEntries(
   env: Bindings,
   datasetId: string,
   version: string,
   files: Record<string, ManifestFile>,
   s3Options: PresignedUrlOptions,
+  excluded: boolean,
 ): Promise<PublicManifestEntry[]> {
   return Promise.all(
     Object.entries(files).map(async ([path, file]): Promise<PublicManifestEntry> => {
       const base = manifestEntryBase(env, datasetId, version, path, file);
-      // A git-tracked file has no presigned form: the Worker streams it from
-      // the data plane, so the immediate URL and the durable one are the
-      // same route.
       if (isGitTrackedFile(file)) return { ...base, url: base.bytes_url };
+      if (excluded) {
+        try {
+          const url = await buildRedirectUrl({
+            datasetId,
+            version,
+            bidsPath: path,
+            file,
+            s3Options,
+          });
+          return { ...base, url };
+        } catch (err) {
+          return manifestEntryError(base, datasetId, version, path, "buildRedirectUrl", err);
+        }
+      }
       try {
-        const url = await buildRedirectUrl({ datasetId, version, bidsPath: path, file, s3Options });
+        const url = buildAnnexPublicUrl({ datasetId, file, s3Options });
         return { ...base, url };
       } catch (err) {
-        return manifestEntryError(base, datasetId, version, path, "buildRedirectUrl", err);
+        return manifestEntryError(base, datasetId, version, path, "buildAnnexPublicUrl", err);
       }
     }),
   );
-}
-
-/**
- * Build every entry with the plain public S3 URL, for a dataset the bucket
- * policy does not exclude from public read (#1522). Synchronous end to end
- * (no signature to await), unlike the presigned builder above.
- */
-function buildPublicManifestEntries(
-  env: Bindings,
-  datasetId: string,
-  version: string,
-  files: Record<string, ManifestFile>,
-  s3Options: PresignedUrlOptions,
-): PublicManifestEntry[] {
-  return Object.entries(files).map(([path, file]): PublicManifestEntry => {
-    const base = manifestEntryBase(env, datasetId, version, path, file);
-    if (isGitTrackedFile(file)) return { ...base, url: base.bytes_url };
-    try {
-      const url = buildAnnexPublicUrl({ datasetId, file, s3Options });
-      return { ...base, url };
-    } catch (err) {
-      return manifestEntryError(base, datasetId, version, path, "buildAnnexPublicUrl", err);
-    }
-  });
 }
 
 /**
@@ -733,15 +733,14 @@ async function manifestJsonHandler(
     return manifestJsonTooLarge(request, datasetId, resolved.version, bound);
   }
 
-  const entries = excluded
-    ? await buildPresignedManifestEntries(
-        env,
-        datasetId,
-        resolved.version,
-        read.answer.files,
-        s3Options,
-      )
-    : buildPublicManifestEntries(env, datasetId, resolved.version, read.answer.files, s3Options);
+  const entries = await buildManifestEntries(
+    env,
+    datasetId,
+    resolved.version,
+    read.answer.files,
+    s3Options,
+    excluded,
+  );
 
   const body = JSON.stringify(entries);
 
@@ -1065,9 +1064,12 @@ async function streamGitTrackedFile(args: {
  * lookup inserted at the same point a token mint used to be the first thing
  * that happened. A hit never mints a token and never reaches GitHub: the
  * cached bytes already passed the size and blob-SHA check the first time they
- * were fetched, and they are re-validated on every use against the CURRENT
- * manifest entry (not the one that was true when they were stored), which is
- * what makes a manifest rewrite (ADR 0072) a miss rather than a stale answer.
+ * were fetched, and they are compared, on every use, against the manifest
+ * entry (`file`, below) the caller already resolved for THIS request -- which
+ * may itself have answered from the trust window or the per-isolate answer
+ * memo rather than a fresh S3 read, never a fresh GitHub round trip either
+ * way. That comparison is what makes a manifest rewrite (ADR 0072) a miss
+ * rather than a stale answer.
  *
  * `timing` is mutated in place: `cache` always gets a value when there is an
  * edge cache to ask (0 when there is none, so the header still reports a
@@ -2174,6 +2176,16 @@ dataRoutes.get("/:datasetId/:version", async (c) => {
   if (version.endsWith(".zip")) {
     const resolved = await resolveVersion(c.env.DB, datasetId, version.slice(0, -4));
     if (!resolved.ok) return notFound("Version not found");
+
+    // `resolveVersion` only checked the STRING SHAPE for a non-"latest"
+    // version (review finding): a well-formed but never-published version
+    // (e.g. `v99.99.99`) resolves `ok: true` exactly like a real one. Left
+    // unchecked, that fell into the `not_latest_version` branch below with a
+    // `browse_url` that itself 404s, rather than a plain "not found." Confirm
+    // the version actually exists BEFORE asking whether it is the latest one.
+    if (!(await versionExists(c.env.DB, datasetId, resolved.version))) {
+      return notFound("Version not found");
+    }
 
     // #1518: only the latest version keeps a retained archive -- an
     // older-version zip is deleted once the newer one's upload is confirmed

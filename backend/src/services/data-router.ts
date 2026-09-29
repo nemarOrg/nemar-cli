@@ -12,7 +12,11 @@
 // (epic #896, #898). toVersionTag is re-exported below so existing importers
 // (routes/data.ts) keep working.
 import { formatBytesCompact, formatBytesDetailed } from "../../../shared/bytes.js";
-import { NEUROSCHEMA_VERSION, toVersionTag } from "../../../shared/contract/index.js";
+import {
+  NEUROSCHEMA_VERSION,
+  toBareVersion,
+  toVersionTag,
+} from "../../../shared/contract/index.js";
 import type {
   ContributorEntry,
   FundingReferenceEntry,
@@ -102,6 +106,36 @@ export async function resolveVersion(
   }
   if (!VERSION_TAG_RE.test(versionParam)) return { ok: false, reason: "invalid_version" };
   return { ok: true, version: versionParam };
+}
+
+/**
+ * Whether `version` -- already shape-valid (e.g. via {@link resolveVersion})
+ * -- actually has a row in `dataset_versions` for this dataset.
+ *
+ * `resolveVersion`'s non-"latest" branch only checks the STRING SHAPE
+ * (`VERSION_TAG_RE`), never whether that version was ever published: a
+ * well-formed but never-minted version (`v99.99.99`) resolves `ok: true`
+ * exactly like a real one, which let a caller that only compares against
+ * "latest" treat it as a genuine, merely-not-latest version rather than an
+ * unpublished one (the `.zip` archive route's `not_latest_version` bug,
+ * 0.10.8 review: it answered `not_latest_version` with a `browse_url` that
+ * itself 404s, for a version that was never published at all).
+ *
+ * Compares both the bare and `v`-prefixed forms because `dataset_versions
+ * .version` is stored either way across the catalog (some rows predate
+ * `version-doi.ts`'s normalization); a caller with only one spelling on hand
+ * must not miss a row stored in the other.
+ */
+export async function versionExists(
+  db: D1Database,
+  datasetId: string,
+  version: string,
+): Promise<boolean> {
+  const row = await db
+    .prepare("SELECT 1 FROM dataset_versions WHERE dataset_id = ? AND version IN (?, ?) LIMIT 1")
+    .bind(datasetId, toBareVersion(version), toVersionTag(version))
+    .first();
+  return row !== null;
 }
 
 // Reject literal `..` segments, empty segments, and absolute paths.

@@ -167,3 +167,20 @@ describe("#1518: an older version has no retained archive", () => {
     expect(res.status).toBe(302);
   });
 });
+
+describe("a well-formed but never-published version (review finding)", () => {
+  test("404s plainly rather than answering not_latest_version with a dead browse_url", async () => {
+    // v99.99.99 passes resolveVersion's shape check (VERSION_TAG_RE) but was
+    // never inserted into dataset_versions by `seed` above. Before the fix,
+    // this fell into the #1518 not-latest branch and answered
+    // `reason: "not_latest_version"` with a `browse_url` that itself 404s,
+    // rather than a plain "Version not found."
+    const res = await getZip("v99.99.99");
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string; reason?: string };
+    expect(body.error).toContain("Version not found");
+    expect(body.reason).not.toBe("not_latest_version");
+    // Never even asked whether it was the latest, let alone HEADed S3.
+    expect(s3.requestLog.some((r) => r.url.includes("archives/"))).toBe(false);
+  });
+});
