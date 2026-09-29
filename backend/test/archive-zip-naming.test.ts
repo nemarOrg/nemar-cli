@@ -257,16 +257,16 @@ describe("ADR 0012 review: the zip route enforces the size policy, not just S3 o
     expect(s3.requestLog.some((r) => r.url.includes("archives/"))).toBe(false);
   });
 
-  test("a D1 fault on the size lookup answers 503 like the archive-key HEAD, never a bare 500 (review)", async () => {
-    // D1 is the platform, not business logic: only the one size-policy
-    // statement is made to fail; every other query (the visibility gate,
-    // resolveVersion, versionExists) still runs against the real database
-    // through the real route.
+  // D1 is the platform, not business logic: each fault test makes exactly ONE
+  // statement fail (matched by a fragment of its SQL); every other query (the
+  // visibility gate, resolveVersion, versionExists, the size lookup) still
+  // runs against the real database through the real route.
+  function d1FaultingOn(sqlFragment: string): D1Database {
     const real = realD1(db);
-    const faulty = {
+    return {
       prepare(sql: string) {
         const stmt = real.prepare(sql);
-        if (!sql.includes("SELECT file_size, total_files FROM datasets")) return stmt;
+        if (!sql.includes(sqlFragment)) return stmt;
         const faulting = {
           bind: () => faulting,
           first: () => Promise.reject(new Error("simulated D1 outage")),
@@ -274,25 +274,88 @@ describe("ADR 0012 review: the zip route enforces the size policy, not just S3 o
         return faulting as unknown as D1PreparedStatement;
       },
     } as unknown as D1Database;
+  }
+
+  /** GET `<id>/<version>.zip` against a D1 that faults on `sqlFragment`, and
+   *  assert the answer is the 503 the route promises, that the fault was
+   *  logged (not swallowed) under `logFragment`, and that the route failed
+   *  closed: S3 was never asked about a (possibly stray) archive. */
+  async function expectFaultAnswers503(
+    version: string,
+    sqlFragment: string,
+    logFragment: string,
+  ): Promise<void> {
     const errorSpy = spyOn(console, "error").mockImplementation(() => {});
     try {
       const res = await app().request(
-        `https://data.nemar.org/${DATASET}/v1.0.1.zip`,
+        `https://data.nemar.org/${DATASET}/${version}.zip`,
         { redirect: "manual" },
-        { ...env(), DB: faulty },
+        { ...env(), DB: d1FaultingOn(sqlFragment) },
       );
       expect(res.status).toBe(503);
       const body = (await res.json()) as { error: string };
       expect(body.error).toBe("Unable to check archive availability");
-      // The fault is logged, not swallowed.
-      expect(
-        errorSpy.mock.calls.some((c) => String(c[0]).includes("archive size-policy lookup failed")),
-      ).toBe(true);
-      // Failed closed: S3 was never asked about a (possibly stray) archive.
+      expect(errorSpy.mock.calls.some((c) => String(c[0]).includes(logFragment))).toBe(true);
       expect(s3.requestLog.some((r) => r.url.includes("archives/"))).toBe(false);
     } finally {
       errorSpy.mockRestore();
     }
+  }
+
+  test("a D1 fault on the size lookup answers 503 like the archive-key HEAD, never a bare 500 (review)", async () => {
+    await expectFaultAnswers503(
+      "v1.0.1",
+      "SELECT file_size, total_files FROM datasets",
+      "archive size-policy lookup failed",
+    );
+  });
+
+  test("a D1 fault on the published-version check answers 503, never a bare 500 (0.10.9 review)", async () => {
+    // versionExists is the first D1 read after the visibility gate for an
+    // explicit version; it used to sit outside any try, so a fault answered a
+    // bare 500 while the size lookup right after it answered 503.
+    await expectFaultAnswers503(
+      "v1.0.1",
+      "SELECT 1 FROM dataset_versions",
+      "archive version lookup failed",
+    );
+  });
+
+  test("a D1 fault resolving `latest.zip` answers 503, never a bare 500 (0.10.9 review)", async () => {
+    // `latest` is the one spelling for which resolveVersion itself reads D1
+    // (an explicit version is only shape-checked), and it runs before
+    // versionExists.
+    await expectFaultAnswers503(
+      "latest",
+      "ORDER BY created_at DESC LIMIT 1",
+      "archive version lookup failed",
+    );
+  });
+
+  test("a D1 fault on the latest-version lookup answers 503, never a bare 500 (0.10.9 review)", async () => {
+    // The not-latest check is the last D1 read before S3. v1.0.0 (an older,
+    // within-policy version) reaches it; an explicit version is only
+    // shape-checked by resolveVersion, so this fault can hit only that lookup.
+    await expectFaultAnswers503(
+      "v1.0.0",
+      "ORDER BY created_at DESC LIMIT 1",
+      "archive latest-version lookup failed",
+    );
+  });
+
+  test("an over-policy dataset answers archive_skipped even when the latest-version lookup would fault", async () => {
+    // Pins the ordering the 503 handling must not disturb: the size policy
+    // runs BEFORE the latest-version lookup, so an over-policy dataset never
+    // reaches a D1 read that could fail.
+    setDatasetSize(OVER_POLICY_BYTES, 1000);
+    const res = await app().request(
+      `https://data.nemar.org/${DATASET}/v1.0.0.zip`,
+      { redirect: "manual" },
+      { ...env(), DB: d1FaultingOn("ORDER BY created_at DESC LIMIT 1") },
+    );
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { reason: string };
+    expect(body.reason).toBe("archive_skipped");
   });
 
   test("a within-policy dataset with a missing zip still answers 'not yet available'", async () => {
