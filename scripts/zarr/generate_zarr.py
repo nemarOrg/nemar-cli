@@ -2720,7 +2720,8 @@ EDF_ANNOTATION_LABELS = frozenset({"EDF Annotations", "BDF Annotations"})
 
 def file_declared_channel_count(primary_local: str) -> int | None:
     """Data-channel count the recording file's OWN header declares, read with no
-    importer in between, or None when the format has no cheap header to read.
+    importer in between, or None when the format has no cheap header to read or
+    the header cannot be read.
 
     This is the second ground truth the fidelity gate needs. channels.tsv alone
     cannot tell "the importer dropped channels" (biosigio#110, the failure the
@@ -2732,45 +2733,109 @@ def file_declared_channel_count(primary_local: str) -> int | None:
     a real truncation still shows up as a store short of THIS number.
 
     EDF/BDF: `ns` at bytes 252-256, then ns 16-byte labels; the annotation
-    pseudo-signal is not a channel. BrainVision: `NumberOfChannels` in the
+    pseudo-signal is not a channel. The fixed-width fields are decoded the way
+    biosigio's tolerant probe decodes them (`_edf_field`): cut at the first NUL,
+    then strip, because real writers NUL-pad short values (biosigio#109) and
+    biosigIO converts those files. BrainVision: `NumberOfChannels` in the
     `.vhdr`'s `[Common Infos]` section. FIF (`.fif`, and `.fif.gz`, which MNE
     reads transparently): `nchan` from the measurement info, read with
     `mne.io.read_info`, which parses the header tags and never loads data. For
     a split recording that is the chain head's info, which every split shares.
     on000117's MEG sidecars list CHPI and EEG channels the FIF never had.
-    Anything unreadable returns None, which leaves the gate on channels.tsv
-    alone -- exactly its behavior before this existed.
+
+    None leaves the gate on channels.tsv alone -- exactly its behavior before
+    this existed. For a format that normally HAS a readable header here (the
+    three above) a None from an unreadable one is not silent: it is worth a line
+    in the log, because the recording the converter just read but whose header
+    it cannot is the one the header gate then does not cover. Formats with no
+    cheap header (EEGLAB `.set`, CTF, MEF3, ...) return None quietly. A declared
+    count of zero or less is unreadable too, not a recording with no channels.
     """
     if primary_local.lower().endswith((".fif", ".fif.gz")):
         return _fif_declared_channel_count(primary_local)
     ext = lower_ext(primary_local)
-    try:
-        if ext in (".edf", ".bdf"):
-            with open(primary_local, "rb") as fh:
-                head = fh.read(256)
-                if len(head) < 256:
-                    return None
-                ns = int(head[252:256].decode("ascii").strip())
-                if ns <= 0:
-                    return None
-                raw = fh.read(16 * ns)
-            if len(raw) < 16 * ns:
-                return None
-            labels = [raw[i * 16:(i + 1) * 16].decode("latin-1").strip() for i in range(ns)]
-            return sum(1 for label in labels if label not in EDF_ANNOTATION_LABELS)
-        if ext == ".vhdr":
-            with open(primary_local, encoding="utf-8", errors="replace") as fh:
-                text = fh.read()
-            # Scoped to [Common Infos], the section MNE reads it from, so a
-            # comment elsewhere in the header can never supply the count.
-            section = re.search(r"^\[Common Infos\][^\n]*\n(.*?)(?=^\[|\Z)", text, re.M | re.S)
-            m = section and re.search(
-                r"^\s*NumberOfChannels\s*=\s*(\d+)", section.group(1), re.MULTILINE
-            )
-            return int(m.group(1)) if m else None
-    except (OSError, ValueError):
-        return None
+    if ext in (".edf", ".bdf"):
+        return _edf_declared_channel_count(primary_local)
+    if ext == ".vhdr":
+        return _vhdr_declared_channel_count(primary_local)
     return None
+
+
+def _warn_unreadable_header(kind: str, path: str, why: str) -> None:
+    """The one line a header the converter cannot read earns: what, where, why,
+    and what the gate does instead (the FIF reader says the same)."""
+    print(
+        f"::warning::could not read the {kind} header of {path} for its channel "
+        f"count ({why}); the gate uses channels.tsv alone",
+        flush=True,
+    )
+
+
+def _edf_field(raw: bytes) -> str:
+    """One fixed-width EDF/BDF ASCII header field, decoded the way biosigio's
+    `_decode_field` decodes it: cut at the first NUL, then strip. Real files pad
+    short values with NULs instead of spaces (b'4\\x00\\x00\\x00'), and
+    `strip()` alone leaves the NULs, so `int()` refuses the number and an
+    annotation label no longer equals `EDF_ANNOTATION_LABELS`."""
+    return raw.decode("latin-1").split("\x00", 1)[0].strip()
+
+
+def _edf_declared_channel_count(path: str) -> int | None:
+    kind = "BDF" if lower_ext(path) == ".bdf" else "EDF"
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(256)
+            if len(head) < 256:
+                _warn_unreadable_header(
+                    kind, path, f"{len(head)} bytes, short of the 256-byte main header"
+                )
+                return None
+            try:
+                ns = int(_edf_field(head[252:256]))
+            except ValueError:
+                _warn_unreadable_header(
+                    kind, path, f"the signal-count field {head[252:256]!r} is not an integer"
+                )
+                return None
+            if ns <= 0:
+                _warn_unreadable_header(kind, path, f"the header declares {ns} signals")
+                return None
+            raw = fh.read(16 * ns)
+    except OSError as exc:
+        _warn_unreadable_header(kind, path, f"{type(exc).__name__}: {exc}")
+        return None
+    if len(raw) < 16 * ns:
+        _warn_unreadable_header(
+            kind, path, f"the label block holds {len(raw)} of {16 * ns} bytes"
+        )
+        return None
+    labels = [_edf_field(raw[i * 16:(i + 1) * 16]) for i in range(ns)]
+    return sum(1 for label in labels if label not in EDF_ANNOTATION_LABELS)
+
+
+def _vhdr_declared_channel_count(path: str) -> int | None:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError as exc:
+        _warn_unreadable_header("BrainVision", path, f"{type(exc).__name__}: {exc}")
+        return None
+    # Scoped to [Common Infos], the section MNE reads it from, so a
+    # comment elsewhere in the header can never supply the count.
+    section = re.search(r"^\[Common Infos\][^\n]*\n(.*?)(?=^\[|\Z)", text, re.M | re.S)
+    m = section and re.search(
+        r"^\s*NumberOfChannels\s*=\s*(\d+)", section.group(1), re.MULTILINE
+    )
+    if not m:
+        _warn_unreadable_header(
+            "BrainVision", path, "no NumberOfChannels in its [Common Infos] section"
+        )
+        return None
+    count = int(m.group(1))
+    if count <= 0:
+        _warn_unreadable_header("BrainVision", path, f"NumberOfChannels is {count}")
+        return None
+    return count
 
 
 def _fif_declared_channel_count(path: str) -> int | None:

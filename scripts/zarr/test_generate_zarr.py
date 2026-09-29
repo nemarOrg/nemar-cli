@@ -3085,6 +3085,94 @@ class TestFileDeclaredChannelCount(unittest.TestCase):
         self.assertIsNone(file_declared_channel_count(p))
         self.assertIsNone(file_declared_channel_count(self.path("absent_eeg.edf")))
 
+    def count_and_log(self, path):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            value = file_declared_channel_count(path)
+        return value, out.getvalue()
+
+    def patched_edf(self, name, labels, offset, field):
+        """`write_edf_header`'s file with `field` written over the bytes at
+        `offset`, so a fixed-width field holds what a real writer put there."""
+        p = self.path(name)
+        write_edf_header(p, labels)
+        with open(p, "r+b") as fh:
+            fh.seek(offset)
+            fh.write(field)
+        return p
+
+    def test_a_nul_padded_signal_count_is_read(self):
+        # An EDF+ whose `ns` field is NUL-padded (b"4\x00\x00\x00") instead of
+        # space-padded: real writers do this (biosigio#109) and biosigIO converts
+        # the file. `int()` of the raw field refuses it, so the count was None
+        # without a word.
+        p = self.patched_edf(
+            "nul_ns_eeg.edf", ["Fp1", "Fp2", "Cz", "EDF Annotations"], 252, b"4\x00\x00\x00"
+        )
+        self.assertEqual(self.count_and_log(p), (3, ""))
+
+    def test_a_field_is_cut_at_its_first_nul_then_stripped(self):
+        # biosigio's `_decode_field`: everything after the first NUL is
+        # ignored, so a value followed by NULs and junk is still the value, and
+        # trailing spaces before the NUL go too.
+        p = self.patched_edf(
+            "nul_junk_eeg.edf", ["Fp1", "Fp2", "Cz", "EDF Annotations"], 252, b"4 \x009"
+        )
+        self.assertEqual(self.count_and_log(p), (3, ""))
+
+    def test_a_nul_padded_annotation_label_is_still_the_annotation_track(self):
+        # `strip()` leaves the NUL, so "EDF Annotations\x00" != "EDF Annotations"
+        # and the pseudo-signal was counted as a data channel: 4 in the header,
+        # 3 in the store, a complete store refused.
+        p = self.patched_edf(
+            "nul_label_eeg.edf", ["Fp1", "Fp2", "Cz", "EDF Annotations"],
+            256 + 16 * 3, b"EDF Annotations\x00",
+        )
+        self.assertEqual(self.count_and_log(p), (3, ""))
+
+    def test_an_unreadable_header_is_unknown_and_says_so(self):
+        four = ["Fp1", "Fp2", "Cz", "EDF Annotations"]
+        short = self.path("short_eeg.edf")
+        with open(short, "wb") as fh:
+            fh.write(b"0" * 100)
+        cut = self.patched_edf("cut_eeg.edf", four, 0, b"")
+        with open(cut, "r+b") as fh:
+            fh.truncate(256 + 20)
+        no_count = self.path("no_count_eeg.vhdr")
+        with open(no_count, "w") as fh:
+            fh.write("[Common Infos]\nDataFile=x.eeg\n")
+        zero_count = self.path("zero_count_eeg.vhdr")
+        with open(zero_count, "w") as fh:
+            fh.write("[Common Infos]\nNumberOfChannels=0\n")
+        cases = {
+            "EDF header short of 256 bytes": (short, "EDF"),
+            "EDF signal count not an integer": (
+                self.patched_edf("word_eeg.edf", four, 252, b"abcd"), "EDF"),
+            "EDF declares no signals": (
+                self.patched_edf("none_eeg.edf", four, 252, b"0   "), "EDF"),
+            "EDF label block cut short": (cut, "EDF"),
+            "BDF signal count not an integer": (
+                self.patched_edf("word_eeg.bdf", four, 252, b"??  "), "BDF"),
+            "EDF file that is not there": (self.path("absent_eeg.edf"), "EDF"),
+            "BrainVision without a channel count": (no_count, "BrainVision"),
+            "BrainVision with a zero channel count": (zero_count, "BrainVision"),
+        }
+        for name, (path, kind) in cases.items():
+            with self.subTest(name):
+                value, log = self.count_and_log(path)
+                self.assertIsNone(value)
+                self.assertIn(f"could not read the {kind} header", log)
+                self.assertIn(path, log)
+                self.assertIn("the gate uses channels.tsv alone", log)
+
+    def test_a_format_with_no_cheap_header_is_unknown_without_a_warning(self):
+        # Nothing here was expected to have a header to read, so nothing is
+        # unreadable: the quiet None is the whole answer.
+        p = self.path("r_eeg.set")
+        with open(p, "wb") as fh:
+            fh.write(b"MATLAB 5.0")
+        self.assertEqual(self.count_and_log(p), (None, ""))
+
     def test_a_real_edf_plus_from_pyedflib(self):
         # EDF+ writers append the annotation pseudo-signal; it must not count.
         try:
@@ -8935,6 +9023,26 @@ class TestHeaderGateFalseRefusalMatrix(unittest.TestCase):
             splits[0], set(splits[1:]), len(FIF_CHANNELS), len(FIF_CHANNELS)
         )
         self.assertEqual(entry["path"], splits[0])
+
+    def test_edf_plus_with_a_nul_padded_signal_count(self):
+        # pyedflib refuses a NUL-padded header field, so biosigIO converts this
+        # through its tolerant fallback (biosigio#109). A header reader that
+        # cannot parse the field has no count, and the gate then runs blind on a
+        # file it has every reason to check.
+        import pyedflib
+
+        primary = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+        path = self.place(primary)
+        build_edf_family(
+            path, [("Fp1", 256), ("Fp2", 256), ("Cz", 256)],
+            pyedflib.FILETYPE_EDFPLUS, annotations=True,
+        )
+        with open(path, "r+b") as fh:
+            fh.seek(252)
+            self.assertEqual(fh.read(4), b"4   ")  # 3 signals + the annotation track
+            fh.seek(252)
+            fh.write(b"4\x00\x00\x00")
+        self.assert_published_whole(primary, set(), 3, 3)
 
     def test_plain_edf_whose_header_under_counts(self):
         # A plain EDF (not EDF+) with an ordinary signal that happens to be
