@@ -713,7 +713,7 @@ class TestCaseOnlyOverHttp(_OverHttp):
     """`--case-only` against a real local HTTP server laid out like the zarr
     host. It reads each dataset's index.json and nothing else."""
 
-    def publish_index(self, dataset: str, stores: list[dict], **top) -> str:
+    def publish_index(self, dataset: str, stores: list[dict] | None, **top) -> str:
         rel = f"zarr/{dataset}/zarr/index.json"
         self.site.write(rel, json.dumps({
             "dataset_id": dataset, "format": "nemar-zarr-index", "format_version": 3,
@@ -778,7 +778,7 @@ class TestCaseOnlyOverHttp(_OverHttp):
         self.assertEqual(report["datasets"][0]["error"], "no_index")
 
     def test_an_index_without_a_stores_list_is_unchecked(self):
-        self.publish_index(DATASET, None)  # type: ignore[arg-type]
+        self.publish_index(DATASET, None)
         rc, report = self.run_main("--case-only", "--dataset", DATASET)
         self.assertEqual(rc, 2)
         self.assertEqual(report["datasets"][0]["error"], "index_has_no_stores_list")
