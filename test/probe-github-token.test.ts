@@ -179,4 +179,46 @@ describe("probe-github-token", () => {
       fake.stop();
     }
   });
+
+  test("--owner is compared case-insensitively: mismatch warns, case-only difference does not", async () => {
+    const mismatched = startFakeGithub({
+      "GET /user": () =>
+        new Response(JSON.stringify({ login: "someone-else" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json", "x-oauth-scopes": "repo" },
+        }),
+    });
+    try {
+      const result = await runProbe(["GH_TOKEN", "--owner", "nemarAdmin"], {
+        GH_TOKEN: "fake-token",
+        GITHUB_API_BASE_URL: mismatched.url,
+      });
+      expect(result.stdout).toContain("::warning::");
+      expect(result.stdout).toContain("someone-else");
+      expect(result.stdout).toContain("nemarAdmin");
+      expect(result.stdout).not.toContain("::error::");
+      expect(result.exitCode).toBe(0);
+    } finally {
+      mismatched.stop();
+    }
+
+    const caseOnlyDifference = startFakeGithub({
+      "GET /user": () =>
+        new Response(JSON.stringify({ login: "NemarAdmin" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json", "x-oauth-scopes": "repo" },
+        }),
+    });
+    try {
+      const result = await runProbe(["GH_TOKEN", "--owner", "nemaradmin"], {
+        GH_TOKEN: "fake-token",
+        GITHUB_API_BASE_URL: caseOnlyDifference.url,
+      });
+      expect(result.stdout).not.toContain("::warning::");
+      expect(result.stdout).not.toContain("::error::");
+      expect(result.exitCode).toBe(0);
+    } finally {
+      caseOnlyDifference.stop();
+    }
+  });
 });
