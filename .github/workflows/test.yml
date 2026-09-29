@@ -59,6 +59,12 @@ jobs:
               - 'src/**'
               - 'package.json'
               - 'tsconfig.json'
+              # CI-support scripts that ship and are tested alongside the CLI
+              # (e.g. scripts/ci/probe-github-token.ts) but live outside src/.
+              # Without this, a change to the probe alone matched no category,
+              # so unit-pure -- the job that actually runs
+              # test/probe-github-token.test.ts -- silently skipped it.
+              - 'scripts/ci/**'
             backend:
               - 'backend/**'
             tests:
@@ -712,13 +718,30 @@ jobs:
           NPM_TAG: ${{ steps.npm-tag.outputs.tag }}
         run: bun test test/e2e-sandbox.test.ts
 
-  # E2E upload tests - full upload workflow, only on main push
+  # E2E upload tests - full upload workflow. Runs on push to main (the
+  # release itself) AND on a pull request targeting main (the release PR),
+  # so a dead GH_TOKEN or a broken upload path is caught before the merge
+  # that deploys it, not only after (issue #1321). `pull_request` events
+  # targeting `main` already trigger this workflow (see the `on:` block
+  # above); a same-repo PR still gets secrets, but a fork PR does not, which
+  # is why the `pull_request` branch below also checks `head.repo.full_name`
+  # (same guard the "Check out the docs content tree" step above uses): a
+  # fork PR targeting main would otherwise run this job, fail on the missing
+  # GH_TOKEN, and turn an outside contributor's unrelated PR red for a
+  # reason they cannot fix. Skipping is the correct outcome there.
   e2e-upload:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: changes
     if: |
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/main' &&
+      (
+        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        (
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.base.ref == 'main' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        )
+      ) &&
       (needs.changes.outputs.backend == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.cli == 'true')
     steps:
       - name: Checkout code
@@ -747,6 +770,21 @@ jobs:
 
       - name: Install dependencies
         run: bun install
+
+      # Fails loudly, in its own labeled step, when GH_TOKEN is dead (#1321:
+      # every release since v0.10.0 has hit this as two cryptic
+      # "Bad credentials (HTTP 401)" test failures instead). GH_TOKEN has to
+      # stay a nemarAdmin user PAT, not a GitHub App token: the upload flow
+      # accepts collaborator invitations, pushes, and opens PRs as the user,
+      # and `gh api user` (what this probes) 403s for an installation token.
+      - name: Probe GH_TOKEN before running upload tests
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          bun run scripts/ci/probe-github-token.ts GH_TOKEN \
+            --owner nemarAdmin \
+            --require-scopes repo,workflow \
+            --issue 1321
 
       - name: Run E2E upload tests against dev environment
         env:
