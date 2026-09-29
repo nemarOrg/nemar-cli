@@ -279,7 +279,9 @@ class TestRetryAfter(unittest.TestCase):
         self.assertEqual(fc.retry_after_seconds("86400"), fc.RETRY_AFTER_MAX_S)
 
 
-class TestOverHttp(unittest.TestCase):
+class _OverHttp(unittest.TestCase):
+    """A real local site per test, and `main` run against it."""
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -300,6 +302,8 @@ class TestOverHttp(unittest.TestCase):
         self.stderr = err.getvalue()
         return rc, json.loads(out.getvalue())
 
+
+class TestOverHttp(_OverHttp):
     def test_the_nm000110_shape_is_found(self):
         # Run 1: collapsed in the importer (4 of 6). Run 2: streamed, every
         # channel kept but the labels repeat. Run 3: re-converted on 1.2.9.
@@ -655,6 +659,158 @@ class TestOverHttp(unittest.TestCase):
         # And the root carries the header witness, equal to what is served.
         root = fc.store_root_attrs(self.site.zarr_base, DATASET, entry)
         self.assertEqual(fc.header_signal_count(root), len(CHB_LABELS))
+
+
+def joined(unmatched: int, **extra) -> dict:
+    """A `units_report` as the converter publishes it once it reports the join."""
+    return {"converted": 0, "relabelled": 0, "kept_importer_unit": 0,
+            "units_column_present": True, "unmatched_channels": unmatched, **extra}
+
+
+class TestCaseOnlyPure(unittest.TestCase):
+    def test_a_case_only_miss_is_flagged(self):
+        entry = store(1, 23, units_report=joined(
+            2, unmatched_case_only=2, unmatched_examples=["FP1-F7", "FP2-F8"]))
+        verdict, finding = fc.classify_case_only(DATASET, entry)
+        self.assertEqual(verdict, "flagged")
+        assert finding is not None
+        self.assertEqual(finding["unmatched_case_only"], 2)
+        self.assertEqual(finding["unmatched_channels"], 2)
+        self.assertEqual(finding["unmatched_examples"], ["FP1-F7", "FP2-F8"])
+        self.assertEqual(finding["zarr"], entry["zarr"])
+
+    def test_no_join_report_is_unverifiable_not_clean(self):
+        # units_report from before the converter reported the join (0.10.9).
+        pre = store(1, 23, units_report={"converted": 23, "relabelled": 0,
+                                         "kept_importer_unit": 0,
+                                         "units_column_present": True})
+        self.assertEqual(fc.classify_case_only(DATASET, pre), ("no_join_report", None))
+        self.assertEqual(fc.classify_case_only(DATASET, store(1, 23)),
+                         ("no_units_report", None))
+        self.assertEqual(
+            fc.classify_case_only(DATASET, store(1, 23, units_report="garbage")),
+            ("no_join_report", None),
+        )
+
+    def test_a_reported_join_with_no_case_miss_is_ok(self):
+        self.assertEqual(fc.classify_case_only(DATASET, store(1, 23, units_report=joined(0))),
+                         ("ok", None))
+        # A 1.2.10 conversion that applied rows by ignoring case.
+        self.assertEqual(
+            fc.classify_case_only(DATASET, store(1, 23, units_report=joined(
+                0, matched_case_only=23, matched_case_only_examples=["Fp1-F7 -> FP1-F7"]))),
+            ("case_matched", None),
+        )
+
+    def test_a_non_positive_or_non_integer_count_is_not_a_finding(self):
+        for value in (0, True, "2", 1.5):
+            verdict, _ = fc.classify_case_only(
+                DATASET, store(1, 3, units_report=joined(1, unmatched_case_only=value)))
+            self.assertNotEqual(verdict, "flagged", value)
+
+
+class TestCaseOnlyOverHttp(_OverHttp):
+    """`--case-only` against a real local HTTP server laid out like the zarr
+    host. It reads each dataset's index.json and nothing else."""
+
+    def publish_index(self, dataset: str, stores: list[dict], **top) -> str:
+        rel = f"zarr/{dataset}/zarr/index.json"
+        self.site.write(rel, json.dumps({
+            "dataset_id": dataset, "format": "nemar-zarr-index", "format_version": 3,
+            "source_commit": COMMIT, "stores": stores, **top,
+        }))
+        return rel
+
+    def test_the_affected_stores_are_listed_and_the_rest_counted(self):
+        stores = [
+            store(1, 23, units_report=joined(23, unmatched_case_only=23,
+                                             unmatched_examples=["FP1-F7"])),
+            store(2, 23, units_report=joined(0, matched_case_only=23,
+                                             matched_case_only_examples=["Fp1-F7 -> FP1-F7"])),
+            store(3, 23, units_report={"converted": 23, "relabelled": 0,
+                                       "kept_importer_unit": 0,
+                                       "units_column_present": True}),
+            store(4, 23),
+            store(5, 23, units_report=joined(0)),
+        ]
+        self.publish_index(DATASET, stores, biosigio_version="1.2.9")
+        rc, report = self.run_main("--case-only", "--dataset", DATASET)
+        self.assertEqual(rc, 1)
+        self.assertEqual(report["format"], "nemar-zarr-case-only-join-report")
+        self.assertEqual([f["zarr"] for f in report["findings"]], [stores[0]["zarr"]])
+        summary = report["summary"]
+        self.assertEqual(summary["stores_checked"], 5)
+        self.assertEqual(summary["stores_flagged"], 1)
+        self.assertEqual(summary["stores_case_matched"], 1)
+        self.assertEqual(summary["stores_unverifiable"], 2)
+        self.assertEqual(summary["stores_unverifiable_no_units_report"], 1)
+        dataset = report["datasets"][0]
+        self.assertIn("--dataset nm000110", dataset["requeue"][0])
+        self.assertEqual(dataset["index_biosigio_version"], "1.2.9")
+        self.assertIn("cannot be enumerated", report["unverifiable_note"])
+        self.assertIn("unverifiable from the index", self.stderr)
+        # index.json alone: no store and no sidecar was read.
+        self.assertEqual(list(self.site.hits), [f"/zarr/{DATASET}/zarr/index.json"])
+
+    def test_unverifiable_entries_are_never_clean(self):
+        self.publish_index(DATASET, [store(1, 23, units_report={"converted": 23})])
+        rc, report = self.run_main("--case-only", "--dataset", DATASET)
+        self.assertEqual((rc, report["findings"]), (2, []))
+        self.assertEqual(report["summary"]["stores_unverifiable"], 1)
+
+    def test_a_fully_reported_clean_dataset_exits_zero(self):
+        self.publish_index(DATASET, [store(1, 23, units_report=joined(0))])
+        rc, report = self.run_main("--case-only", "--dataset", DATASET)
+        self.assertEqual((rc, report["findings"]), (0, []))
+
+    def test_an_unreadable_index_is_unchecked_not_clean(self):
+        rel = self.publish_index(DATASET, [store(1, 23, units_report=joined(0))])
+        self.site.fail(rel, 503)
+        rc, report = self.run_main("--case-only", "--dataset", DATASET)
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.site.hits["/" + rel], 3, "every attempt was made")
+        self.assertEqual(report["summary"]["datasets_unchecked"], 1)
+        self.assertIn("503", report["datasets"][0]["error"])
+
+    def test_a_missing_index_is_unchecked(self):
+        rc, report = self.run_main("--case-only", "--dataset", "nm999998")
+        self.assertEqual(rc, 2)
+        self.assertEqual(report["datasets"][0]["error"], "no_index")
+
+    def test_an_index_without_a_stores_list_is_unchecked(self):
+        self.publish_index(DATASET, None)  # type: ignore[arg-type]
+        rc, report = self.run_main("--case-only", "--dataset", DATASET)
+        self.assertEqual(rc, 2)
+        self.assertEqual(report["datasets"][0]["error"], "index_has_no_stores_list")
+
+    def test_a_finding_outranks_an_unreadable_dataset(self):
+        self.publish_index(DATASET, [store(1, 23, units_report=joined(1, unmatched_case_only=1))])
+        rc, report = self.run_main("--case-only", "--dataset", DATASET, "--dataset", "nm999998")
+        self.assertEqual(rc, 1)
+        self.assertEqual(report["summary"]["datasets_unchecked"], 1)
+
+    def test_a_429_waits_what_retry_after_asks(self):
+        rel = self.publish_index(DATASET, [store(1, 23, units_report=joined(0))])
+        self.site.fail(rel, 429, times=1, **{"Retry-After": "1"})
+        started = time.monotonic()
+        rc, _ = self.run_main("--case-only", "--dataset", DATASET)
+        self.assertGreaterEqual(time.monotonic() - started, 1.0)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.site.hits["/" + rel], 2)
+
+    def test_all_walks_the_catalog_and_an_incomplete_walk_is_unchecked(self):
+        self.publish_index(DATASET, [store(1, 23, units_report=joined(0))])
+        api = self.site.zarr_base.rsplit("/", 1)[0] + "/api"
+        self.site.catalog(3, [{"dataset_id": DATASET, "visibility": "public"}])
+        rc, report = self.run_main("--case-only", "--all", "--api-base", api)
+        self.assertEqual(rc, 2)
+        self.assertIs(report["summary"]["catalog_complete"], False)
+        self.assertEqual(report["summary"]["datasets_checked"], 1)
+
+    def test_repo_dir_and_labels_do_not_apply(self):
+        for extra in (["--repo-dir", self._tmp.name], ["--labels", "all"]):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                fc.main(["--case-only", "--dataset", DATASET, *extra])
 
 
 class TestRepoDir(unittest.TestCase):
