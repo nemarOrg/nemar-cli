@@ -25,76 +25,17 @@ import {
 } from "../src/middleware/rateLimit";
 import { createMcpRoutes } from "../src/routes/mcp";
 import type { Bindings, Variables } from "../src/types/bindings";
+import { InMemoryCache } from "./helpers/cache";
 
 type AppEnv = { Bindings: Bindings; Variables: Variables };
 
-// --------------------------------------------------------------------------
-// Minimal in-memory Cache implementation — not a mock; this is a real
-// Cache that stores Response objects against Request URLs. The rate
-// limiter only uses `match`/`put` and the body is small, so we don't
-// need to reproduce the full HTTP semantics.
-// --------------------------------------------------------------------------
-
-class InMemoryCache implements Cache {
-  private store = new Map<
-    string,
-    { body: string; headers: Record<string, string>; expiresAt: number }
-  >();
-
-  // Injected clock so tests can advance time without real sleeps.
-  // Defaults to the real wall clock.
-  getNow: () => number = () => Date.now();
-
-  async match(req: RequestInfo | URL): Promise<Response | undefined> {
-    const url = req instanceof Request ? req.url : String(req);
-    const entry = this.store.get(url);
-    if (!entry) return undefined;
-    // Honour TTL: expired entries are invisible (matches CF Cache API behavior).
-    if (this.getNow() >= entry.expiresAt) {
-      this.store.delete(url);
-      return undefined;
-    }
-    return new Response(entry.body, { headers: entry.headers });
-  }
-
-  async put(req: RequestInfo | URL, res: Response): Promise<void> {
-    const url = req instanceof Request ? req.url : String(req);
-    const body = await res.text();
-    const headers: Record<string, string> = {};
-    res.headers.forEach((v, k) => {
-      headers[k] = v;
-    });
-    // Parse Cache-Control: max-age=N to compute expiry using the injected clock.
-    const cc = res.headers.get("Cache-Control") || "";
-    const maxAgeMatch = cc.match(/max-age=(\d+)/);
-    const maxAgeSec = maxAgeMatch ? Number.parseInt(maxAgeMatch[1], 10) : 60;
-    this.store.set(url, { body, headers, expiresAt: this.getNow() + maxAgeSec * 1000 });
-  }
-
-  async add(): Promise<void> {
-    throw new Error("not implemented");
-  }
-  async addAll(): Promise<void> {
-    throw new Error("not implemented");
-  }
-  async delete(req: RequestInfo | URL): Promise<boolean> {
-    const url = req instanceof Request ? req.url : String(req);
-    return this.store.delete(url);
-  }
-  async keys(): Promise<readonly Request[]> {
-    return Array.from(this.store.keys()).map((u) => new Request(u));
-  }
-  async matchAll(): Promise<readonly Response[]> {
-    return [];
-  }
-
-  // Convenience used by tests to reset between runs.
-  clear(): void {
-    this.store.clear();
-  }
-}
-
-const ourCache = new InMemoryCache();
+// The shared real (in-memory) Cache double (#1516 review; `helpers/cache.ts`):
+// not a mock, a working Cache backed by a Map, and the same one every other
+// suite in this codebase trusts for `caches.default`. It models real Workers
+// Cache API expiry rules this file's own hand-rolled double did NOT (an entry
+// with no `Cache-Control` at all never expires here, rather than defaulting
+// to a permissive 60s -- see `beforeEach` below for where that mattered).
+let ourCache = new InMemoryCache();
 let originalCaches: typeof caches | undefined;
 
 // Cloudflare exposes a `caches.default` singleton. Bun has no `caches`
@@ -104,8 +45,6 @@ let originalCaches: typeof caches | undefined;
 beforeAll(() => {
   // biome-ignore lint/suspicious/noExplicitAny: test-only runtime patch
   originalCaches = (globalThis as any).caches;
-  // biome-ignore lint/suspicious/noExplicitAny: test-only runtime patch
-  (globalThis as any).caches = { default: ourCache } as unknown as CacheStorage;
 });
 
 afterAll(() => {
@@ -114,7 +53,12 @@ afterAll(() => {
 });
 
 beforeEach(() => {
-  ourCache.clear();
+  // A fresh instance per test, the same reset convention every other
+  // consumer of this shared double uses (rather than a `.clear()` method the
+  // shared double does not provide -- it is deliberately minimal).
+  ourCache = new InMemoryCache();
+  // biome-ignore lint/suspicious/noExplicitAny: test-only runtime patch
+  (globalThis as any).caches = { default: ourCache } as unknown as CacheStorage;
 });
 
 // --------------------------------------------------------------------------
