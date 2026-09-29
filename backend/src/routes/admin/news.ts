@@ -9,19 +9,27 @@
  *   DELETE /admin/news/:id                        200 | 404
  *   POST   /admin/news/media    raw image body -> { url, content_type, bytes }
  *
+ * Every create, update and delete writes an audit_log row in the same D1
+ * batch as the write (services/news.ts, newsAuditStatement), so a failed
+ * audit insert fails the request with nothing written. An image upload
+ * writes a `news_media_uploaded` row before its R2 put (see storeNewsImage).
+ *
  * Validation failures answer with zValidator's default 400 envelope, the
  * same one the notices routes produce.
  */
 
 import { zValidator } from "@hono/zod-validator";
+import type { Context } from "hono";
 import { z } from "zod";
 
+import { auditLogStatement } from "../../db/audit-log";
 import {
   NEWS_CATEGORIES,
   NEWS_SLUG_MAX,
   NEWS_SLUG_MIN,
   NEWS_SLUG_RE,
   NEWS_STATUSES,
+  type NewsActor,
   NewsSlugTakenError,
   type NewsWrite,
   RESERVED_NEWS_SLUGS,
@@ -39,6 +47,7 @@ import {
   sniffImageType,
   storeNewsImage,
 } from "../../services/news-media";
+import type { Bindings, Variables } from "../../types/bindings";
 import { hasRealUtcOffset } from "./notices";
 import type { AdminRouter } from "./shared";
 
@@ -62,9 +71,34 @@ const bannerUrlField = z
   .regex(NEWS_BANNER_URL_RE, "banner_url must be a /news/media/<sha256>.<ext> path")
   .nullable();
 const bannerAltField = z.string().trim().max(300);
-const publishedAtField = z.string().datetime({ offset: true }).refine(hasRealUtcOffset, {
-  message: "published_at has an out-of-range UTC offset (valid offsets are -12:00 to +14:00)",
-});
+
+/**
+ * The years a post may be dated in, as written (before the offset is
+ * applied). zod accepts any four-digit year, but SQLite's `datetime()` reads
+ * only years 0000 through 9999 once the offset has moved the time to UTC:
+ * `9999-12-31T23:59:59-12:00` is year 10000 in UTC, so `datetime()` returns
+ * NULL and the NOT NULL insert fails as a 500, and
+ * `0000-01-01T00:00:00+14:00` is stored as year -0001. A real post is dated
+ * well inside this window, and an offset moves the UTC time by less than a
+ * day, so a date inside it always stays readable.
+ */
+export const NEWS_PUBLISHED_YEAR_MIN = 2000;
+export const NEWS_PUBLISHED_YEAR_MAX = 2100;
+
+function hasPublishableYear(value: string): boolean {
+  const year = Number(value.slice(0, 4));
+  return year >= NEWS_PUBLISHED_YEAR_MIN && year <= NEWS_PUBLISHED_YEAR_MAX;
+}
+
+const publishedAtField = z
+  .string()
+  .datetime({ offset: true })
+  .refine(hasRealUtcOffset, {
+    message: "published_at has an out-of-range UTC offset (valid offsets are -12:00 to +14:00)",
+  })
+  .refine(hasPublishableYear, {
+    message: `published_at must be in the years ${NEWS_PUBLISHED_YEAR_MIN} through ${NEWS_PUBLISHED_YEAR_MAX}`,
+  });
 
 const contentFields = {
   slug: slugField,
@@ -126,6 +160,12 @@ function toWrite(input: NewsInput): NewsWrite {
   return { ...input, published_at: input.published_at ?? new Date().toISOString() };
 }
 
+/** The signed-in admin, as the audit rows record them. */
+function actorOf(c: Context<{ Bindings: Bindings; Variables: Variables }>): NewsActor {
+  const user = c.get("user");
+  return { id: user.id, username: user.username ?? null };
+}
+
 /** A positive integer id from the path, or null (which the caller answers 404). */
 function parseId(raw: string): number | null {
   if (!/^\d+$/.test(raw)) return null;
@@ -153,9 +193,8 @@ export function registerNewsRoutes(admin: AdminRouter): void {
   });
 
   admin.post("/news", zValidator("json", newsInputSchema), async (c) => {
-    const user = c.get("user");
     try {
-      const post = await createNews(c.env.DB, toWrite(c.req.valid("json")), user.id);
+      const post = await createNews(c.env.DB, toWrite(c.req.valid("json")), actorOf(c));
       return c.json({ post }, 201);
     } catch (err) {
       if (err instanceof NewsSlugTakenError) return c.json(slugTaken(err), 409);
@@ -166,9 +205,8 @@ export function registerNewsRoutes(admin: AdminRouter): void {
   admin.put("/news/:id", zValidator("json", newsReplaceSchema), async (c) => {
     const id = parseId(c.req.param("id"));
     if (id === null) return c.json(NOT_FOUND, 404);
-    const user = c.get("user");
     try {
-      const post = await updateNews(c.env.DB, id, toWrite(c.req.valid("json")), user.id);
+      const post = await updateNews(c.env.DB, id, toWrite(c.req.valid("json")), actorOf(c));
       if (!post) return c.json(NOT_FOUND, 404);
       return c.json({ post });
     } catch (err) {
@@ -179,7 +217,7 @@ export function registerNewsRoutes(admin: AdminRouter): void {
 
   admin.delete("/news/:id", async (c) => {
     const id = parseId(c.req.param("id"));
-    const deleted = id === null ? false : await deleteNews(c.env.DB, id);
+    const deleted = id === null ? false : await deleteNews(c.env.DB, id, actorOf(c));
     if (!deleted) return c.json(NOT_FOUND, 404);
     return c.json({ ok: true });
   });
@@ -237,7 +275,24 @@ export function registerNewsRoutes(admin: AdminRouter): void {
         503,
       );
     }
-    const stored = await storeNewsImage(bucket, bytes, declared);
+    // Audited because an upload publishes: the object is readable by anyone
+    // with its URL from this moment, whether or not a post ever uses it.
+    const actor = actorOf(c);
+    const stored = await storeNewsImage(bucket, bytes, declared, (image, alreadyStored) =>
+      auditLogStatement(c.env.DB, {
+        userId: actor.id,
+        action: "news_media_uploaded",
+        resourceType: "news_media",
+        resourceId: image.file,
+        details: JSON.stringify({
+          url: image.url,
+          content_type: image.content_type,
+          bytes: image.bytes,
+          already_stored: alreadyStored,
+          actor: actor.username,
+        }),
+      }).run(),
+    );
     return c.json({ url: stored.url, content_type: stored.content_type, bytes: stored.bytes }, 201);
   });
 }

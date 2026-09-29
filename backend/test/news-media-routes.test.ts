@@ -7,16 +7,18 @@
  * Uploads are read back from that bucket directly, so the stored bytes,
  * key and HTTP metadata are asserted against what R2 actually holds.
  *
- * ONE PATH IS NOT COVERED HERE: `GET /news/media/:file` returning 200 with
- * the image body. Under bun, reading `.body` from an object that Miniflare's
+ * `GET /news/media/:file` returning 200 with the image body cannot run in
+ * this process: under bun, reading `.body` from an object that Miniflare's
  * Node-side proxy returns throws `DataCloneError: Found invalid value in
- * transferList` (Bun's structuredClone cannot transfer the stream), so the
- * route's `new Response(object.body)` cannot run in this process. Every
- * other branch of that route (the file-name gate, a missing object, the 304
- * revalidation, a missing binding) is covered, and the streaming branch was
- * checked by hand against `wrangler dev` (see the PR).
+ * transferList` (Bun's structuredClone cannot transfer the stream). So the
+ * Miniflare instance runs the public news routes themselves in workerd,
+ * bundled from helpers/news-routes-worker.ts, against the same bucket, and
+ * the 200 branch is driven through `mf.dispatchFetch`. Every other branch of
+ * that route (the file-name gate, a missing object, the 304 revalidation, a
+ * missing binding) is driven through `worker.fetch` like the rest.
  *
- * Every refusal of an upload is also checked to have written nothing.
+ * Every refusal of an upload is also checked to have written nothing: no
+ * object in the bucket and no audit_log row.
  */
 
 import type { Database } from "bun:sqlite";
@@ -43,11 +45,27 @@ const ctx = {
 let mf: Miniflare;
 let bucket: R2Bucket;
 let db: Database;
+let adminId: number;
+
+/** The public news routes as one ES module workerd can run. */
+async function bundleNewsRoutesWorker(): Promise<string> {
+  const build = await Bun.build({
+    entrypoints: [`${import.meta.dir}/helpers/news-routes-worker.ts`],
+    target: "browser",
+    format: "esm",
+  });
+  const [output] = build.outputs;
+  if (!build.success || !output) {
+    throw new Error(`bundling the news routes failed: ${build.logs.join("\n")}`);
+  }
+  return output.text();
+}
 
 beforeAll(async () => {
   mf = new Miniflare({
     modules: true,
-    script: "export default { fetch() { return new Response(null, { status: 404 }); } }",
+    script: await bundleNewsRoutesWorker(),
+    compatibilityDate: "2024-12-01",
     r2Buckets: ["NEWS_MEDIA"],
   });
   bucket = (await mf.getR2Bucket("NEWS_MEDIA")) as unknown as R2Bucket;
@@ -81,8 +99,27 @@ beforeEach(async () => {
       await hashApiKey(key),
       key.slice(0, 8),
     );
+    if (role === "admin") adminId = row?.id ?? 0;
   }
 });
+
+interface UploadAuditRow {
+  user_id: number;
+  action: string;
+  resource_type: string;
+  resource_id: string;
+  details: Record<string, unknown>;
+}
+
+function uploadAuditRows(): UploadAuditRow[] {
+  return db
+    .query<Omit<UploadAuditRow, "details"> & { details: string }, []>(
+      `SELECT user_id, action, resource_type, resource_id, details
+         FROM audit_log WHERE action = 'news_media_uploaded' ORDER BY id`,
+    )
+    .all()
+    .map((row) => ({ ...row, details: JSON.parse(row.details) as Record<string, unknown> }));
+}
 
 function env(withBucket = true): Bindings {
   return {
@@ -112,6 +149,11 @@ function serve(
   withBucket = true,
 ): Promise<Response> {
   return worker.fetch(new Request(`${API}/news/media/${file}`, { headers }), env(withBucket), ctx);
+}
+
+/** The same route, run in workerd, where it can stream an object's body. */
+async function serveInWorkerd(file: string): Promise<Response> {
+  return (await mf.dispatchFetch(`${API}/news/media/${file}`)) as unknown as Response;
 }
 
 /** Minimal byte sequences that open with each format's real signature. */
@@ -230,6 +272,7 @@ describe("POST /admin/news/media: refusals write nothing", () => {
       expect((await upload(png(), type)).status).toBe(415);
     }
     expect(await storedKeys()).toEqual([]);
+    expect(uploadAuditRows()).toEqual([]);
   });
 
   test("413 too_large for a body over 5 MiB (Content-Length sent)", async () => {
@@ -237,6 +280,7 @@ describe("POST /admin/news/media: refusals write nothing", () => {
     expect(res.status).toBe(413);
     expect(((await res.json()) as { error: string }).error).toBe("too_large");
     expect(await storedKeys()).toEqual([]);
+    expect(uploadAuditRows()).toEqual([]);
   });
 
   test("413 too_large for an oversized body sent without Content-Length", async () => {
@@ -244,6 +288,7 @@ describe("POST /admin/news/media: refusals write nothing", () => {
     expect(res.status).toBe(413);
     expect(((await res.json()) as { error: string }).error).toBe("too_large");
     expect(await storedKeys()).toEqual([]);
+    expect(uploadAuditRows()).toEqual([]);
   });
 
   test("400 empty_body", async () => {
@@ -253,6 +298,7 @@ describe("POST /admin/news/media: refusals write nothing", () => {
       expect(((await res.json()) as { error: string }).error).toBe("empty_body");
     }
     expect(await storedKeys()).toEqual([]);
+    expect(uploadAuditRows()).toEqual([]);
   });
 
   test("400 type_mismatch when the magic bytes disagree with the declared type", async () => {
@@ -274,18 +320,57 @@ describe("POST /admin/news/media: refusals write nothing", () => {
       expect(((await res.json()) as { error: string }).error).toBe("type_mismatch");
     }
     expect(await storedKeys()).toEqual([]);
+    expect(uploadAuditRows()).toEqual([]);
   });
 
   test("a member is refused before anything is read or written", async () => {
     const res = await upload(png(), "image/png", { key: MEMBER_KEY });
     expect(res.status).toBe(403);
     expect(await storedKeys()).toEqual([]);
+    expect(uploadAuditRows()).toEqual([]);
   });
 
   test("503 storage_unavailable when the NEWS_MEDIA binding is missing", async () => {
     const res = await upload(png(), "image/png", { withBucket: false });
     expect(res.status).toBe(503);
     expect(((await res.json()) as { error: string }).error).toBe("storage_unavailable");
+    expect(uploadAuditRows()).toEqual([]);
+  });
+});
+
+describe("POST /admin/news/media: audit_log rows", () => {
+  test("each accepted upload writes one row naming the file and the actor", async () => {
+    const bytes = png(40);
+    const file = `${sha256(bytes)}.png`;
+    expect((await upload(bytes, "image/png")).status).toBe(201);
+    // Same bytes again: still a 201 and still audited, marked already stored.
+    expect((await upload(bytes, "image/png")).status).toBe(201);
+
+    const row = (alreadyStored: boolean): UploadAuditRow => ({
+      user_id: adminId,
+      action: "news_media_uploaded",
+      resource_type: "news_media",
+      resource_id: file,
+      details: {
+        url: `/news/media/${file}`,
+        content_type: "image/png",
+        bytes: bytes.length,
+        already_stored: alreadyStored,
+        actor: "mediaadmin",
+      },
+    });
+    expect(uploadAuditRows()).toEqual([row(false), row(true)]);
+  });
+
+  test("a failed audit insert fails the upload with nothing stored", async () => {
+    db.exec(
+      `CREATE TRIGGER news_media_audit_down BEFORE INSERT ON audit_log
+         WHEN NEW.action = 'news_media_uploaded'
+       BEGIN SELECT RAISE(ABORT, 'audit_log unavailable'); END`,
+    );
+    const res = await upload(png(), "image/png");
+    expect(res.status).toBe(500);
+    expect(await storedKeys()).toEqual([]);
   });
 });
 
@@ -342,5 +427,43 @@ describe("GET /news/media/:file", () => {
   test("503 storage_unavailable when the NEWS_MEDIA binding is missing", async () => {
     const res = await serve(`${"a".repeat(64)}.png`, {}, false);
     expect(res.status).toBe(503);
+  });
+
+  test("200 streams the stored bytes with the image headers (in workerd)", async () => {
+    const bytes = png(48);
+    expect((await upload(bytes, "image/png")).status).toBe(201);
+    const file = `${sha256(bytes)}.png`;
+
+    const res = await serveInWorkerd(file);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/png");
+    expect(res.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("etag")).toBe(String((await bucket.head(`news/${file}`))?.httpEtag));
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(bytes);
+  });
+
+  test("Content-Type comes from the file extension, never the object's metadata", async () => {
+    // A bad metadata write (a hand-run `wrangler r2 object put`, a future
+    // code path) must not make this origin serve HTML.
+    const cases: [string, string, string | undefined][] = [
+      ["png", "image/png", "text/html"],
+      ["jpg", "image/jpeg", "text/html; charset=utf-8"],
+      ["webp", "image/webp", "application/xhtml+xml"],
+      ["gif", "image/gif", undefined],
+    ];
+    for (const [ext, expected, stored] of cases) {
+      const file = `${sha256(enc.encode(ext))}.${ext}`;
+      await bucket.put(`news/${file}`, enc.encode("<script>alert(1)</script>"), {
+        httpMetadata: stored === undefined ? {} : { contentType: stored },
+      });
+      expect((await bucket.head(`news/${file}`))?.httpMetadata?.contentType).toBe(stored);
+
+      const res = await serveInWorkerd(file);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe(expected);
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+      await res.arrayBuffer();
+    }
   });
 });

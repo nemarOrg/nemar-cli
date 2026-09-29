@@ -496,6 +496,67 @@ describe("POST /admin/news", () => {
       expect(cleared.banner_url).toBeNull();
     });
 
+    describe("published_at year bounds", () => {
+      const message = "published_at must be in the years 2000 through 2100";
+
+      function publishedAtMessages(body: unknown): string[] {
+        const { issues } = (body as { error: { issues: { path: string[]; message: string }[] } })
+          .error;
+        return issues.filter((i) => i.path[0] === "published_at").map((i) => i.message);
+      }
+
+      // Both pass zod's datetime check. SQLite's datetime() returns NULL for
+      // the first (year 10000 once the -12:00 offset is applied), which
+      // failed the NOT NULL insert as a 500, and stores the second as year
+      // -0001.
+      for (const published_at of ["9999-12-31T23:59:59-12:00", "0000-01-01T00:00:00+14:00"]) {
+        test(`POST and PUT refuse ${published_at} with a 400 naming the field`, async () => {
+          const created = await call("/admin/news", {
+            method: "POST",
+            key: ADMIN_KEY,
+            body: input({ published_at }),
+          });
+          expect(created.status).toBe(400);
+          expect(publishedAtMessages(await created.json())).toEqual([message]);
+          expect(db.query("SELECT COUNT(*) AS n FROM news_posts").get()).toEqual({ n: 0 });
+
+          const post = await create();
+          const storedBefore = rawRow(post.id)?.published_at;
+          const replaced = await call(`/admin/news/${post.id}`, {
+            method: "PUT",
+            key: ADMIN_KEY,
+            body: replaceInput({ published_at }),
+          });
+          expect(replaced.status).toBe(400);
+          expect(publishedAtMessages(await replaced.json())).toEqual([message]);
+          expect(rawRow(post.id)?.published_at).toBe(storedBefore);
+        });
+      }
+
+      test("the years just outside the window are refused", async () => {
+        for (const published_at of ["1999-12-31T23:59:59Z", "2101-01-01T00:00:00Z"]) {
+          const res = await call("/admin/news", {
+            method: "POST",
+            key: ADMIN_KEY,
+            body: input({ published_at }),
+          });
+          expect(res.status).toBe(400);
+          expect(publishedAtMessages(await res.json())).toEqual([message]);
+        }
+      });
+
+      test("the edge years are accepted, even when the offset moves them out of it in UTC", async () => {
+        const earliest = await create({
+          slug: "earliest",
+          published_at: "2000-01-01T00:00:00+14:00",
+        });
+        expect(rawRow(earliest.id)?.published_at).toBe("1999-12-31 10:00:00");
+        const latest = await create({ slug: "latest", published_at: "2100-12-31T23:59:59-12:00" });
+        expect(rawRow(latest.id)?.published_at).toBe("2101-01-01 11:59:59");
+        expect(latest.published_at).toBe("2101-01-01T11:59:59Z");
+      });
+    });
+
     test("the validation envelope is the one the notices route produces", async () => {
       const news = await call("/admin/news", { method: "POST", key: ADMIN_KEY, body: {} });
       const notice = await call("/admin/notices", { method: "POST", key: ADMIN_KEY, body: {} });
@@ -520,8 +581,9 @@ describe("GET /admin/news and /admin/news/:id", () => {
     expect(res.status).toBe(200);
     const { posts } = (await res.json()) as { posts: { slug: string; body: string }[] };
     expect(posts.map((p) => p.slug)).toEqual(["future-one", "live-one", "draft-one"]);
-    // Admin rows are full posts.
-    expect(posts[0]?.body).toBe("# Heading\n\nSome **Markdown**.");
+    // Admin rows are full posts: the website's admin client drops any row
+    // without a string body (see listAllNews), so every row must keep it.
+    for (const post of posts) expect(post.body).toBe("# Heading\n\nSome **Markdown**.");
   });
 
   test("fetches one post by id, drafts included", async () => {
@@ -660,6 +722,152 @@ describe("DELETE /admin/news/:id", () => {
 
   test("404 for a malformed id", async () => {
     expect((await call("/admin/news/abc", { method: "DELETE", key: ADMIN_KEY })).status).toBe(404);
+  });
+});
+
+describe("audit_log rows for admin writes", () => {
+  interface AuditRow {
+    user_id: number;
+    action: string;
+    resource_type: string;
+    resource_id: string;
+    details: Record<string, unknown>;
+  }
+
+  function newsAuditRows(): AuditRow[] {
+    return db
+      .query<Omit<AuditRow, "details"> & { details: string }, []>(
+        `SELECT user_id, action, resource_type, resource_id, details
+           FROM audit_log WHERE action LIKE 'news_post_%' ORDER BY id`,
+      )
+      .all()
+      .map((row) => ({ ...row, details: JSON.parse(row.details) as Record<string, unknown> }));
+  }
+
+  test("create, update and delete each write one row with the post id, slug and actor", async () => {
+    const post = await create({ slug: "audited", published_at: "2026-05-01T09:00:00+02:00" });
+    const id = String(post.id);
+    expect(newsAuditRows()).toEqual([
+      {
+        user_id: adminId,
+        action: "news_post_created",
+        resource_type: "news_post",
+        resource_id: id,
+        details: {
+          id: Number(id),
+          slug: "audited",
+          status: "draft",
+          published_at: "2026-05-01T07:00:00Z",
+          actor: "newsadmin",
+        },
+      },
+    ]);
+
+    const put = await call(`/admin/news/${id}`, {
+      method: "PUT",
+      key: EDITOR_KEY,
+      body: replaceInput({
+        slug: "audited-renamed",
+        status: "published",
+        published_at: "2026-05-02T00:00:00Z",
+      }),
+    });
+    expect(put.status).toBe(200);
+    // The row describes the post as the update left it.
+    expect(newsAuditRows()[1]).toEqual({
+      user_id: editorId,
+      action: "news_post_updated",
+      resource_type: "news_post",
+      resource_id: id,
+      details: {
+        id: Number(id),
+        slug: "audited-renamed",
+        status: "published",
+        published_at: "2026-05-02T00:00:00Z",
+        actor: "newseditor",
+      },
+    });
+
+    expect((await call(`/admin/news/${id}`, { method: "DELETE", key: ADMIN_KEY })).status).toBe(
+      200,
+    );
+    // And the delete's row describes the post it removed.
+    expect(newsAuditRows()[2]).toEqual({
+      user_id: adminId,
+      action: "news_post_deleted",
+      resource_type: "news_post",
+      resource_id: id,
+      details: {
+        id: Number(id),
+        slug: "audited-renamed",
+        status: "published",
+        published_at: "2026-05-02T00:00:00Z",
+        actor: "newsadmin",
+      },
+    });
+    expect(newsAuditRows()).toHaveLength(3);
+  });
+
+  test("a refused or missed write leaves no audit row", async () => {
+    const owner = await create({ slug: "owner" });
+    const other = await create({ slug: "other" });
+    const before = newsAuditRows();
+    expect(before.map((r) => r.action)).toEqual(["news_post_created", "news_post_created"]);
+
+    const refused: [string, { method: string; key: string; body?: unknown }, number][] = [
+      ["/admin/news", { method: "POST", key: ADMIN_KEY, body: input({ slug: "owner" }) }, 409],
+      ["/admin/news", { method: "POST", key: ADMIN_KEY, body: input({ title: " " }) }, 400],
+      ["/admin/news", { method: "POST", key: MEMBER_KEY, body: input({ slug: "member" }) }, 403],
+      [
+        `/admin/news/${other.id}`,
+        { method: "PUT", key: ADMIN_KEY, body: replaceInput({ slug: "owner" }) },
+        409,
+      ],
+      ["/admin/news/424242", { method: "PUT", key: ADMIN_KEY, body: replaceInput() }, 404],
+      ["/admin/news/424242", { method: "DELETE", key: ADMIN_KEY }, 404],
+      [`/admin/news/${owner.id}`, { method: "DELETE", key: MEMBER_KEY }, 403],
+    ];
+    for (const [path, init, status] of refused) {
+      expect((await call(path, init)).status).toBe(status);
+    }
+    expect(newsAuditRows()).toEqual(before);
+  });
+
+  describe("a failed audit insert rolls the write back", () => {
+    function breakNewsAudit() {
+      db.exec(
+        `CREATE TRIGGER news_audit_down BEFORE INSERT ON audit_log
+           WHEN NEW.action LIKE 'news_post_%'
+         BEGIN SELECT RAISE(ABORT, 'audit_log unavailable'); END`,
+      );
+    }
+
+    test("create: 500 and no post", async () => {
+      breakNewsAudit();
+      const res = await call("/admin/news", { method: "POST", key: ADMIN_KEY, body: input() });
+      expect(res.status).toBe(500);
+      expect(db.query("SELECT COUNT(*) AS n FROM news_posts").get()).toEqual({ n: 0 });
+    });
+
+    test("update: 500 and the post unchanged", async () => {
+      const post = await create({ slug: "kept", title: "Kept title" });
+      breakNewsAudit();
+      const res = await call(`/admin/news/${post.id}`, {
+        method: "PUT",
+        key: ADMIN_KEY,
+        body: replaceInput({ slug: "changed", title: "Changed title" }),
+      });
+      expect(res.status).toBe(500);
+      expect(rawRow(post.id)).toMatchObject({ slug: "kept", title: "Kept title" });
+    });
+
+    test("delete: 500 and the post still there", async () => {
+      const post = await create({ slug: "survivor" });
+      breakNewsAudit();
+      const res = await call(`/admin/news/${post.id}`, { method: "DELETE", key: ADMIN_KEY });
+      expect(res.status).toBe(500);
+      expect(rawRow(post.id)?.slug).toBe("survivor");
+    });
   });
 });
 
