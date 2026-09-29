@@ -2188,6 +2188,53 @@ dataRoutes.get("/:datasetId/:version", async (c) => {
       return notFound("Version not found");
     }
 
+    // ADR 0012 review, and review-of-the-review: the size policy is checked
+    // HERE, before the not-latest check below, deliberately. An over-policy
+    // dataset never gets an archive for ANY version, so "not the latest" is
+    // misleading for it too -- reproduced: a 130 GiB dataset with published
+    // versions v1.0.0 and v1.0.1 (latest) answered `GET /<id>/v1.0.0.zip`
+    // with `reason: "not_latest_version"`, which reads as "download v1.0.1
+    // instead," but v1.0.1 has no archive either and never will. Checking
+    // policy first means EVERY version of an over-policy dataset answers the
+    // same honest `archive_skipped`, not just the latest one.
+    //
+    // An over-policy dataset's zip is never GENERATED, but a zip built before
+    // the dataset grew past the policy -- or before the policy applied to it
+    // at all -- can still be sitting in S3 (measured in production: nm000323
+    // v1.0.4 and nm000348 v1.0.5 were serving 302s to a 120 GiB and a 109 GiB
+    // zip that predated the policy). This route used to check only whether
+    // the S3 object existed, never the policy, so a stray zip served fine,
+    // and once an operator deleted it the request fell through to "not yet
+    // available" below, which is false for a dataset that will never get an
+    // archive. Decide the policy from the SAME rule the archive-ready
+    // dispatcher and the admin sweep already use (`shouldSkipArchive`), never
+    // a second copy of the thresholds, and do it BEFORE resolving the S3 key
+    // at all so a stray zip is never served. A D1 fault here is a 503, the
+    // same as a fault in the archive-key HEAD below -- never a bare 500.
+    let sizeRow: { file_size: number | null; total_files: number | null } | null;
+    try {
+      sizeRow = await c.env.DB.prepare(
+        "SELECT file_size, total_files FROM datasets WHERE dataset_id = ?",
+      )
+        .bind(datasetId)
+        .first<{ file_size: number | null; total_files: number | null }>();
+    } catch (err) {
+      console.error(`[data] archive size-policy lookup failed for ${datasetId}:`, err);
+      return c.json({ error: "Unable to check archive availability" }, 503);
+    }
+    const sizePolicy = shouldSkipArchive({
+      totalBytes: sizeRow?.file_size,
+      totalFiles: sizeRow?.total_files,
+    });
+    if (sizePolicy.skip) {
+      return notFound(sizePolicy.reason ?? "archive skipped (size policy)", {
+        version: resolved.version,
+        path: `${resolved.version}.zip`,
+        reason: "archive_skipped",
+        browse_url: `/${datasetId}/${resolved.version}/`,
+      });
+    }
+
     // #1518: only the latest version keeps a retained archive -- an
     // older-version zip is deleted once the newer one's upload is confirmed
     // (going forward), and the lead's one-time sweep already removed what
@@ -2195,7 +2242,8 @@ dataRoutes.get("/:datasetId/:version", async (c) => {
     // older version's zip request falls through to the "not yet available"
     // 404 below, which reads as "still building" for a zip that will never
     // exist under any name; say so plainly and point at the browsable files
-    // instead of a failed download.
+    // instead of a failed download. Reached only for a WITHIN-policy dataset
+    // now: an over-policy one already returned above, for every version.
     const latestResolved = await resolveVersion(c.env.DB, datasetId, "latest");
     if (latestResolved.ok && resolved.version !== latestResolved.version) {
       return notFound(
@@ -2208,36 +2256,6 @@ dataRoutes.get("/:datasetId/:version", async (c) => {
           browse_url: `/${datasetId}/${resolved.version}/`,
         },
       );
-    }
-
-    // ADR 0012 review: an over-policy dataset's zip is never GENERATED, but a
-    // zip built before the dataset grew past the policy -- or before the
-    // policy applied to it at all -- can still be sitting in S3 (measured in
-    // production: nm000323 v1.0.4 and nm000348 v1.0.5 were serving 302s to a
-    // 120 GiB and a 109 GiB zip that predated the policy). This route used to
-    // check only whether the S3 object existed, never the policy, so a stray
-    // zip served fine, and once an operator deleted it the request fell
-    // through to "not yet available" below, which is false for a dataset that
-    // will never get an archive. Decide the policy from the SAME rule the
-    // archive-ready dispatcher and the admin sweep already use
-    // (`shouldSkipArchive`), never a second copy of the thresholds, and do it
-    // BEFORE resolving the S3 key at all so a stray zip is never served.
-    const sizeRow = await c.env.DB.prepare(
-      "SELECT file_size, total_files FROM datasets WHERE dataset_id = ?",
-    )
-      .bind(datasetId)
-      .first<{ file_size: number | null; total_files: number | null }>();
-    const sizePolicy = shouldSkipArchive({
-      totalBytes: sizeRow?.file_size,
-      totalFiles: sizeRow?.total_files,
-    });
-    if (sizePolicy.skip) {
-      return notFound(sizePolicy.reason ?? "archive skipped (size policy)", {
-        version: resolved.version,
-        path: `${resolved.version}.zip`,
-        reason: "archive_skipped",
-        browse_url: `/${datasetId}/${resolved.version}/`,
-      });
     }
 
     const s3 = s3OptionsFromEnv(c.env);

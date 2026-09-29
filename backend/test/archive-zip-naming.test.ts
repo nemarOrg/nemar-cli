@@ -231,6 +231,32 @@ describe("ADR 0012 review: the zip route enforces the size policy, not just S3 o
     expect(body.error).not.toContain("not yet available");
   });
 
+  test("an OLDER version of an over-policy dataset answers archive_skipped, not not_latest_version (review)", async () => {
+    // Reproduced: a 130 GiB dataset with published v1.0.0 and v1.0.1 (latest)
+    // answered GET /<id>/v1.0.0.zip with reason: "not_latest_version", which
+    // reads as "download v1.0.1 instead" -- but v1.0.1 has no archive either
+    // and never will, because the whole dataset is over policy. The size
+    // check must run BEFORE the not-latest check so every version answers
+    // the same honest reason.
+    setDatasetSize(OVER_POLICY_BYTES, 1000);
+
+    const res = await getZip("v1.0.0");
+
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as {
+      error: string;
+      reason: string;
+      browse_url: string;
+      latest_version?: string;
+    };
+    expect(body.reason).toBe("archive_skipped");
+    expect(body.reason).not.toBe("not_latest_version");
+    expect(body.latest_version).toBeUndefined();
+    expect(body.browse_url).toBe(`/${DATASET}/v1.0.0/`);
+    // Never even asked whether it was the latest, let alone HEADed S3.
+    expect(s3.requestLog.some((r) => r.url.includes("archives/"))).toBe(false);
+  });
+
   test("a within-policy dataset with a missing zip still answers 'not yet available'", async () => {
     // Explicitly within policy (not just a null/unset size), to pin the
     // boundary the two tests above draw: the new size check must not reject
