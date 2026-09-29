@@ -7,17 +7,20 @@
  */
 
 import { Database } from "bun:sqlite";
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import type { Server } from "bun";
 import { ARCHIVE_READY_UPDATE_SQL } from "../src/routes/callbacks/archive-ready";
 import {
   ARCHIVE_RETRY_SWEEP_QUERY,
   MAX_ARCHIVE_RETRIES,
+  archiveRetrySweep,
   decideArchiveRetry,
   resolveCurrentVersion,
   versionFromDoi,
 } from "../src/services/archive-retry";
+import type { Bindings } from "../src/types/bindings";
 
 describe("decideArchiveRetry", () => {
   test("ready always resets the count and never retries", () => {
@@ -153,6 +156,8 @@ function insertDataset(
     latest_version_doi?: string | null;
     archive_retry_count?: number;
     archive_checked_at?: string | null;
+    file_size?: number | null;
+    total_files?: number | null;
   },
 ): void {
   // The stamp lives in sweep_stamps -> $.archive_checked_at since migration
@@ -161,9 +166,11 @@ function insertDataset(
   db.prepare(
     `INSERT INTO datasets
        (dataset_id, owner_user_id, name, visibility, is_sandbox,
-        archive_status, latest_version_doi, archive_retry_count, sweep_stamps)
+        archive_status, latest_version_doi, archive_retry_count, sweep_stamps,
+        file_size, total_files)
      VALUES (?, 1, ?, 'public', 0, ?, ?, COALESCE(?, 0),
-             CASE WHEN ? IS NULL THEN NULL ELSE json_object('archive_checked_at', ?) END)`,
+             CASE WHEN ? IS NULL THEN NULL ELSE json_object('archive_checked_at', ?) END,
+             ?, ?)`,
   ).run(
     d.dataset_id,
     d.dataset_id,
@@ -172,6 +179,8 @@ function insertDataset(
     d.archive_retry_count ?? 0,
     d.archive_checked_at ?? null,
     d.archive_checked_at ?? null,
+    d.file_size ?? null,
+    d.total_files ?? null,
   );
 }
 
@@ -227,6 +236,8 @@ describe("ARCHIVE_RETRY_SWEEP_QUERY", () => {
     latest_version_doi: string | null;
     recorded_version: string | null;
     archive_retry_count: number;
+    file_size: number | null;
+    total_files: number | null;
   }
 
   function sweepRows(): SweptRow[] {
@@ -308,6 +319,8 @@ describe("ARCHIVE_RETRY_SWEEP_QUERY", () => {
         latest_version_doi: null,
         recorded_version: "1.0.0",
         archive_retry_count: 0,
+        file_size: null,
+        total_files: null,
       },
     ]);
   });
@@ -356,5 +369,137 @@ describe("ARCHIVE_RETRY_SWEEP_QUERY", () => {
     // Both sources present: resolveCurrentVersion prefers the published one, so
     // the retry rebuilds v3.0.0 and not the stale version row.
     expect(resolveCurrentVersion(byId.get("nm000031") as SweptRow)).toBe("3.0.0");
+  });
+});
+
+describe("archiveRetrySweep applies the size policy before dispatching (#1514)", () => {
+  // Real engine: archiveRetrySweep is driven end to end against a real
+  // in-memory D1 (helpers/d1-style realD1 shape, inlined here since this file
+  // already has its own freshDb()/insertDataset() with the exact row shape
+  // the sweep query needs) and a Bun.serve() stand-in for api.github.com, the
+  // same pattern as manifest-dispatch-bucket-guard.test.ts.
+  let server: Server;
+  let dispatches: Array<{ path: string; body: { client_payload?: Record<string, unknown> } }> = [];
+
+  beforeAll(() => {
+    server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        dispatches.push({ path: url.pathname, body: await request.json() });
+        return new Response(null, { status: 204 });
+      },
+    });
+    (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL =
+      `http://127.0.0.1:${server.port}`;
+  });
+
+  afterEach(() => {
+    dispatches = [];
+  });
+
+  afterAll(() => {
+    (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = undefined;
+    server.stop(true);
+  });
+
+  function realD1(db: Database): D1Database {
+    return {
+      prepare(sql: string) {
+        const stmt = db.query(sql);
+        let bound: unknown[] = [];
+        const api = {
+          bind(...p: unknown[]) {
+            bound = p;
+            return api;
+          },
+          run() {
+            const r = stmt.run(...(bound as never[]));
+            return Promise.resolve({
+              success: true,
+              meta: { changes: r.changes, last_row_id: Number(r.lastInsertRowid) },
+            });
+          },
+          first<T>() {
+            return Promise.resolve((stmt.get(...(bound as never[])) as T) ?? null);
+          },
+          all<T>() {
+            return Promise.resolve({ results: stmt.all(...(bound as never[])) as T[] });
+          },
+        };
+        return api;
+      },
+    } as unknown as D1Database;
+  }
+
+  // ENVIRONMENT deliberately omitted: isNonProductionEnv treats an unset/
+  // unrecognized value as production, which is what lets this sweep run at
+  // all -- matches the production-only guard's own fail-closed convention.
+  function envFor(db: Database): Bindings {
+    return { DB: realD1(db), GITHUB_ADMIN_PAT: "test-token" } as unknown as Bindings;
+  }
+
+  test("an over-policy row is skipped, never dispatched, and recorded via the shared skip SQL", async () => {
+    const db = freshDb();
+    insertDataset(db, {
+      dataset_id: "nm000284",
+      archive_status: "failed",
+      latest_version_doi: "10.82901/nemar.nm000284.v1.0.1",
+      archive_retry_count: 0,
+      archive_checked_at: null,
+      file_size: 550_239_019_072,
+      total_files: 14_922,
+    });
+
+    await archiveRetrySweep(envFor(db));
+
+    expect(dispatches).toEqual([]);
+    const row = db
+      .prepare(
+        "SELECT archive_status, archive_skip_reason, archive_retry_count FROM datasets WHERE dataset_id = ?",
+      )
+      .get("nm000284") as {
+      archive_status: string | null;
+      archive_skip_reason: string | null;
+      archive_retry_count: number;
+    };
+    expect(row.archive_status).toBeNull();
+    expect(row.archive_skip_reason).toContain("exceeds");
+    expect(row.archive_retry_count).toBe(0);
+  });
+
+  test("an in-policy row dispatches, and the payload carries total_bytes/total_files", async () => {
+    const db = freshDb();
+    insertDataset(db, {
+      dataset_id: "nm000010",
+      archive_status: "failed",
+      latest_version_doi: "10.82901/nemar.nm000010.v1.0.0",
+      archive_retry_count: 0,
+      archive_checked_at: null,
+      file_size: 5 * 1024 * 1024 * 1024,
+      total_files: 200,
+    });
+
+    await archiveRetrySweep(envFor(db));
+
+    expect(dispatches).toHaveLength(1);
+    const payload = dispatches[0].body.client_payload as {
+      dataset_id: string;
+      version: string;
+      total_bytes?: number;
+      total_files?: number;
+    };
+    expect(payload.dataset_id).toBe("nm000010");
+    expect(payload.version).toBe("1.0.0");
+    expect(payload.total_bytes).toBe(5 * 1024 * 1024 * 1024);
+    expect(payload.total_files).toBe(200);
+
+    const row = db
+      .prepare("SELECT archive_status, archive_retry_count FROM datasets WHERE dataset_id = ?")
+      .get("nm000010") as { archive_status: string | null; archive_retry_count: number };
+    // The sweep only stamps checked_at/increments the counter; archive_status
+    // stays 'failed' until the workflow's own callback lands.
+    expect(row.archive_status).toBe("failed");
+    expect(row.archive_retry_count).toBe(1);
   });
 });

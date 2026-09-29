@@ -11,6 +11,7 @@
 
 import { timingSafeEqual } from "../../lib/constant-time.js";
 import { isAnonymous } from "../../services/anonymity";
+import { normalizeVersion } from "../../services/archive-retry.js";
 import {
   type EzidVersionDoiDataset,
   dispatchCentralManifestJob,
@@ -77,7 +78,7 @@ export function registerVersionDoiRoutes(webhooks: WebhookRouter): void {
     const { dataset_id, version: rawVersion, release_url } = body;
 
     // Normalize version: strip leading "v" or "V" prefix if present
-    const version = rawVersion.replace(/^[vV]/, "");
+    const version = normalizeVersion(rawVersion);
 
     // Validate semver format: only stable versions get permanent DOIs.
     // Pre-release versions (beta, rc, dev) are transient and must not receive
@@ -195,7 +196,7 @@ export function registerVersionDoiRoutes(webhooks: WebhookRouter): void {
     if (!datasetId || !rawVersion) {
       return c.json({ error: "Missing required query params: dataset_id, version" }, 400);
     }
-    const version = rawVersion.replace(/^[vV]/, "");
+    const version = normalizeVersion(rawVersion);
 
     let job: { status: string; doi: string | null; error_message: string | null } | null;
     try {

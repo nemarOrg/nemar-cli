@@ -200,7 +200,7 @@ async function* listObjectPages(
   options: PresignedUrlOptions,
   prefix: string,
 ): AsyncGenerator<string> {
-  const { bucket, region } = options;
+  const { bucket, region, endpointUrl } = options;
   const aws = createS3Client(options);
   let continuationToken: string | undefined;
 
@@ -211,7 +211,16 @@ async function* listObjectPages(
       ...(continuationToken ? { "continuation-token": continuationToken } : {}),
     });
 
-    const url = `https://${bucket}.s3.${region}.amazonaws.com/?${params.toString()}`;
+    // endpointUrl (#1514): same test-only override every other function in
+    // this file honors (see PresignedUrlOptions); this generator was the one
+    // holdout that built its URL from the literal AWS host unconditionally,
+    // which left getArchiveSize/getDatasetS3Stats/listObjectKeys with no way
+    // to be driven by a local Bun.serve stand-in at their real entry point.
+    const origin = (endpointUrl ?? `https://${bucket}.s3.${region}.amazonaws.com`).replace(
+      /\/+$/,
+      "",
+    );
+    const url = `${origin}/?${params.toString()}`;
     const response = await aws.sign(url, { method: "GET" });
     const res = await fetch(response);
 
@@ -377,11 +386,13 @@ export async function listObjectsWithDelimiter(
 /**
  * Parse one ListBucketResult XML page's `<Contents>` entries into `sizes`
  * (mutated in place): S3 key with `prefix` stripped -> size. Extracted from
- * listObjectSizes so multi-page merging is testable without a live S3
- * endpoint -- `listObjectPages` builds its URL from a literal
- * `<bucket>.s3.<region>.amazonaws.com` host with no override seam to redirect
- * it to a local fake server, so this is the seam instead: feed it two
- * synthetic pages and assert both merge into one Map. Exported for testing.
+ * listObjectSizes so multi-page merging is testable purely, with no I/O at
+ * all: feed it two synthetic pages and assert both merge into one Map.
+ * `listObjectPages` gained an `endpointUrl` override seam of its own (#1514,
+ * `PresignedUrlOptions`), so a live-page test is also possible now (see the
+ * admin archive-sweep route test), but this pure parser test stays -- it is
+ * cheaper and does not depend on a server being reachable. Exported for
+ * testing.
  */
 export function mergeObjectSizesPage(
   xml: string,

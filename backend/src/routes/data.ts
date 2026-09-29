@@ -99,7 +99,13 @@ async function loadPublishedDataset(env: Bindings, datasetId: string) {
     return null;
   }
   const row = await env.DB.prepare(
-    "SELECT dataset_id, visibility, archive_status, archive_size, archive_skip_reason FROM datasets WHERE dataset_id = ?",
+    // archive_checked_at (#1514) is when the archive was last confirmed
+    // ready/skipped (sweep_stamps.archive_checked_at); buildLandingPayload
+    // uses it to tell a latest-version-current 'ready' from one that
+    // predates a newer published version.
+    `SELECT dataset_id, visibility, archive_status, archive_size, archive_skip_reason,
+            json_extract(sweep_stamps, '$.archive_checked_at') AS archive_checked_at
+       FROM datasets WHERE dataset_id = ?`,
   )
     .bind(datasetId)
     .first<{
@@ -108,6 +114,7 @@ async function loadPublishedDataset(env: Bindings, datasetId: string) {
       archive_status: string | null;
       archive_size: number | null;
       archive_skip_reason: string | null;
+      archive_checked_at: string | null;
     }>();
   if (!row) {
     console.log(`[data] reject: not in catalog datasetId=${datasetId}`);
@@ -2006,6 +2013,7 @@ async function datasetRootResponse(
       status: dataset.archive_status,
       size: dataset.archive_size,
       skip_reason: dataset.archive_skip_reason,
+      checked_at: dataset.archive_checked_at,
     },
   });
 
