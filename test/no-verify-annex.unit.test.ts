@@ -701,4 +701,29 @@ describe("the recovery command survives a hostile file name (review item 3)", ()
     expect(recovery.exitCode).toBe(0);
     expect(await Bun.file(join(fx.repo, weirdName)).text()).toBe("M".repeat(1000));
   }, 60_000);
+
+  test("an embedded single quote survives a real copy-paste into a shell", async () => {
+    if (!annexAvailable) return;
+    const quoteName = "it's a file.bin";
+    const fx = await makeUnlockedRepoWithRemoteObject(
+      "unlocked-quote-name",
+      "P".repeat(1000),
+      quoteName,
+    );
+    truncateObject(fx.objectPath, 500, "Q");
+
+    const result = await getDatasetData(fx.repo, { noVerify: true });
+    expect(result.noVerifyMismatches).toHaveLength(1);
+    const message = result.noVerifyMismatches[0];
+    expect(message).toContain(quoteName);
+
+    const match = message.match(/Recover with: (rm -- .+)$/);
+    if (!match) throw new Error(`no recovery command found in: ${message}`);
+    const recoveryLine = match[1];
+
+    writeFileSync(fx.objectPath, "P".repeat(1000));
+    const recovery = await runCmd(["bash", "-c", recoveryLine], fx.repo);
+    expect(recovery.exitCode).toBe(0);
+    expect(await Bun.file(join(fx.repo, quoteName)).text()).toBe("P".repeat(1000));
+  }, 60_000);
 });
