@@ -2667,15 +2667,21 @@ def expected_channel_count_for(
     the recording's, the most specific wins. channels.tsv is git-tracked text
     (never annexed), so this is a head-file-list scan plus one small read.
 
-    This is the ground truth for the post-conversion fidelity gate: a store
-    whose total channel count falls short of this number is withheld
-    (``ChannelCountMismatch``) instead of served.
+    This is one of the two ground truths for the post-conversion fidelity
+    gate (`channel_gate_verdict`); the other is the file's own header
+    (`file_declared_channel_count`). Which one decides depends on whether the
+    header could be read. With it, a store short of the HEADER is withheld
+    (``ChannelCountMismatch``), and a store short of this number but not of the
+    header is published with the sidecar's over-declaration disclosed. Without
+    it, a store short of this number is withheld.
 
     Unlike PLF's per-field JSON inheritance, only the single most specific
     candidate is read (BIDS TSV inheritance is closest-file-wins, not a
     merge). If that read fails or the file has no data rows, this returns
-    None and the gate is silently OFF for the recording -- fail-open by
-    design: no ground truth, nothing to check against.
+    None and the sidecar takes no part in the gate for the recording. The
+    gate does not go off with it: the header still gates the recording
+    wherever it is readable. Only a recording with no usable sidecar AND an
+    unreadable header has nothing to check against -- fail-open by design.
     """
     best = channels_tsv_for(primary_path, head_files)
     if best is None:
@@ -2683,13 +2689,17 @@ def expected_channel_count_for(
     text = _read_repo_text(repo_dir, head, best)
     if text is None:
         # NOT the same as "no channels.tsv exists". Ground truth is present at
-        # HEAD and we failed to consult it, which turns off the very gate that
-        # exists to catch a repeat of biosigio#110 silently truncating a
-        # 74-channel recording to one (nemarDatasets/on002718#1) -- on precisely
-        # the recording most likely to be mid-incident. Fail open, but say so.
+        # HEAD and we failed to consult it. The file's own header still gates
+        # the recording where it is readable, so a repeat of biosigio#110
+        # silently truncating a 74-channel recording to one (nemarDatasets/
+        # on002718#1) is still caught; a recording whose header is unreadable
+        # too is unchecked, and that is the case worth a line in the log, on
+        # precisely the recording most likely to be mid-incident. Fail open,
+        # but say so.
         print(
-            f"::warning::could not read {best}; the channel-count fidelity gate "
-            "is OFF for this recording",
+            f"::warning::could not read {best}; the channel-count gate compares "
+            "this recording with its file header alone, and with nothing if "
+            "that header is unreadable too",
             flush=True,
         )
         return None

@@ -2811,6 +2811,22 @@ class TestExpectedChannelCountFor(unittest.TestCase):
             self._write(d, tsv, "name\ttype\tunits\n")
             self.assertIsNone(expected_channel_count_for(d, rec, {tsv}, "HEAD"))
 
+    def test_an_unreadable_channels_tsv_says_what_the_gate_still_does(self):
+        # The sidecar is listed at HEAD and cannot be read. Only the sidecar
+        # drops out: the file's own header still gates the recording, so the
+        # log must not claim the gate is off (it used to, after the header
+        # gate stopped depending on channels.tsv).
+        with tempfile.TemporaryDirectory() as d:
+            rec = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+            tsv = "sub-01/eeg/sub-01_task-rest_channels.tsv"  # never written
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertIsNone(expected_channel_count_for(d, rec, {tsv}, "HEAD"))
+        log = out.getvalue()
+        self.assertIn(f"could not read {tsv}", log)
+        self.assertIn("its file header alone", log)
+        self.assertNotIn("OFF", log)
+
 
     def test_reads_via_git_when_no_working_tree(self):
         # The workflow clones --no-checkout, so channels.tsv is only in the git
