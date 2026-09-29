@@ -129,6 +129,12 @@ class Site:
     def sidecar(self, dataset: str, rel: str, content: str) -> None:
         self.write(f"raw/nemarDatasets/{dataset}/{COMMIT}/{rel}", content)
 
+    def sidecar_bytes(self, dataset: str, rel: str, content: bytes) -> None:
+        path = os.path.join(self.root, f"raw/nemarDatasets/{dataset}/{COMMIT}/{rel}")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(content)
+
     def fail(self, rel: str, status: int, **headers: str) -> None:
         """Answer every GET of `rel` (relative to the site root) with `status`."""
         self.faults["/" + rel] = (status, headers)
@@ -320,6 +326,23 @@ class TestOverHttp(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertEqual(report["datasets"][0]["error"], "no_index")
         self.assertEqual(report["summary"]["datasets_unchecked"], 1)
+
+    def test_a_non_utf8_sidecar_is_decoded_as_the_converter_decodes_it(self):
+        # Windows "Unicode" (UTF-16 with a BOM) and cp1252 sidecars both ship
+        # in real datasets. Read as UTF-8 the UTF-16 one ends in a lone NUL
+        # line, one row too many, and a complete store would be flagged.
+        labels = [f"C{i}" for i in range(6)]
+        stores = [store(1, 6), store(2, 6)]
+        self.site.publish(DATASET, stores, {s["zarr"]: labels for s in stores},
+                          header_counts={s["zarr"]: 6 for s in stores})
+        self.site.sidecar_bytes(DATASET, tsv_rel(1), tsv(labels).encode("utf-16"))
+        self.site.sidecar_bytes(
+            DATASET, tsv_rel(2), tsv(labels).replace("uV", "\u00b5V").encode("cp1252")
+        )
+        # run_main parses stdout as JSON, so this also proves the decode's
+        # `::warning::` line went to stderr rather than into the report.
+        rc, report = self.run_main("--dataset", DATASET)
+        self.assertEqual((rc, report["findings"]), (0, []))
 
     def _two_clean_stores_one_failing(self, status: int) -> tuple[int, dict]:
         labels = [f"C{i}" for i in range(6)]

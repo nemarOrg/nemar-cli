@@ -85,6 +85,7 @@ until a good re-conversion overwrites it.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import subprocess
@@ -396,7 +397,11 @@ class TsvReader:
             if path not in self.cache:
                 url = _join(self.raw_base, DATASET_ORG, self.dataset_id, self.commit, path)
                 try:
-                    self.cache[path] = channels_tsv_row_count(http_get(url).decode("utf-8", "replace"))
+                    # The same decode as the --repo-dir path and the converter:
+                    # a UTF-16 sidecar read as UTF-8 grows a phantom NUL row.
+                    self.cache[path] = channels_tsv_row_count(
+                        _decode_sidecar_text(http_get(url), path)
+                    )
                 except NotFound:
                     self.cache[path] = None
             if self.cache[path] is not None:
@@ -510,22 +515,26 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.repo_dir and (args.all or len(args.dataset or []) != 1):
         ap.error("--repo-dir is a clone of one dataset: give exactly one --dataset")
-    ids = list_public_dataset_ids(args.api_base) if args.all else list(dict.fromkeys(args.dataset))
+    # stdout carries the JSON report and nothing else. The converter helpers
+    # this reuses (`_decode_sidecar_text`, the catalog walk) print their
+    # `::warning::` lines to stdout, so send those to stderr with the progress.
+    with contextlib.redirect_stdout(sys.stderr):
+        ids = list_public_dataset_ids(args.api_base) if args.all else list(dict.fromkeys(args.dataset))
 
-    results = []
-    for i, dataset_id in enumerate(ids):
-        if i and args.sleep:
-            time.sleep(args.sleep)
-        result = check_dataset(
-            dataset_id, zarr_base=args.zarr_base, raw_base=args.github_raw_base,
-            repo_dir=os.path.expanduser(args.repo_dir) if args.repo_dir else None,
-            labels_mode=args.labels,
-        )
-        results.append(result)
-        state = result.get("error") or f"{len(result['findings'])} flagged of {result['stores']}"
-        if result.get("unreadable_stores"):
-            state += f", {result['unreadable_stores']} unreadable (unchecked)"
-        print(f"{dataset_id}: {state}", file=sys.stderr, flush=True)
+        results = []
+        for i, dataset_id in enumerate(ids):
+            if i and args.sleep:
+                time.sleep(args.sleep)
+            result = check_dataset(
+                dataset_id, zarr_base=args.zarr_base, raw_base=args.github_raw_base,
+                repo_dir=os.path.expanduser(args.repo_dir) if args.repo_dir else None,
+                labels_mode=args.labels,
+            )
+            results.append(result)
+            state = result.get("error") or f"{len(result['findings'])} flagged of {result['stores']}"
+            if result.get("unreadable_stores"):
+                state += f", {result['unreadable_stores']} unreadable (unchecked)"
+            print(f"{dataset_id}: {state}", file=sys.stderr, flush=True)
 
     report = {
         "format": REPORT_FORMAT,
