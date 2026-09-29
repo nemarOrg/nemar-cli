@@ -1,5 +1,6 @@
 /**
- * Papers that are never a dataset's data paper (#1549).
+ * Papers that are never a dataset's data paper (#1549): standards, software,
+ * platforms, and umbrella initiatives.
  *
  * The citation pipeline (nemarOrg/nemar-citations) credits a dataset with the
  * citations of every DOI its `.nemar/metadata.json` marks as describing the
@@ -14,7 +15,8 @@
  */
 
 /** Normalized DOIs (see {@link normalizeDoiKey}); every entry resolved on
- *  Crossref when the list was written. */
+ *  Crossref when the list was written (2026-09-29). Mirrors
+ *  nemar-citations' never-anchor list. */
 export const NEVER_DATA_PAPER_DOIS: ReadonlySet<string> = new Set([
   // BIDS specification and its modality extensions
   "10.1038/sdata.2016.44", // BIDS
@@ -45,6 +47,11 @@ export const NEVER_DATA_PAPER_DOIS: ReadonlySet<string> = new Set([
   "10.1007/s12021-021-09537-4",
   "10.3389/fninf.2024.1292667",
   "10.1109/globalsip.2013.6736796",
+  // Umbrella initiative: describes the whole Healthy Brain Network program,
+  // not any one release carved out of it. (Its EEG resource paper,
+  // 10.1038/sdata.2017.40, is deliberately absent: it is nm000153's own
+  // data descriptor, MIPDB.)
+  "10.1038/sdata.2017.181", // Healthy Brain Network
 ]);
 
 /** Relation types that assert a DOI describes or IS this dataset's data. The
