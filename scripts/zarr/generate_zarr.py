@@ -4908,7 +4908,7 @@ def _fdt_safe_rel(value: object, ext: str, where: str) -> str:
 
 
 def load_fdt_declarations(
-    path: str = FDT_DECLARATIONS_PATH,
+    path: str | None = None,
 ) -> dict[str, dict[str, FdtDeclaration]]:
     """Parse and validate the declaration file into
     ``{dataset_id: {set_path: FdtDeclaration}}``.
@@ -4920,7 +4920,9 @@ def load_fdt_declarations(
     ``fdt_bytes``, and one `.fdt` (by path or by key) may back only one `.set`. A malformed
     file raises ValueError (json.JSONDecodeError, a ValueError subclass, for
     invalid JSON) and so fails the run loudly rather than converting against a half-read
-    declaration. A missing file means no declarations."""
+    declaration. A missing file means no declarations. ``path`` defaults to
+    ``FDT_DECLARATIONS_PATH``, read at call time."""
+    path = path or FDT_DECLARATIONS_PATH
     try:
         with open(path, encoding="utf-8") as fh:
             doc = json.load(fh)
@@ -6477,6 +6479,36 @@ def _drain_with_admission(
     return pool_breaks, max_suspects_at_once
 
 
+def admission_sizes(
+    repo: str,
+    convert: list[str],
+    head_set: set[str],
+    head: str,
+    fdt_declarations: dict[str, FdtDeclaration],
+) -> dict[str, int]:
+    """On-disk bytes admission projects each recording from: its pointer-walked
+    file set, plus a declared `.fdt`'s size. The declared `.fdt` lives outside
+    the recording's directory, so the pointer walk cannot see it, and without
+    the addition a multi-GB in-memory `.set` read is projected as a few tens of
+    MB."""
+    return {
+        p: recording_size_from_pointers(repo, p, head_set, head)
+        + (fdt_declarations[p]["fdt_bytes"] if p in fdt_declarations else 0)
+        for p in convert
+    }
+
+
+def memory_retry_context(ctx: dict) -> tuple[dict, int]:
+    """The worker context for the serial memory retry (#1483): the run's own
+    context, every key carried (the `.fdt` declarations included), with the
+    budget re-read now. The retry runs alone after the parallel pass, so it may
+    have the whole usable node, never past the hardware ceiling."""
+    budget = per_recording_ceiling_bytes()
+    if ctx["hard_ceiling"]:
+        budget = min(budget, ctx["hard_ceiling"])
+    return {**ctx, "mem_budget": budget}, budget
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Generate NEMAR Zarr serving copies")
     ap.add_argument("--dataset-id", required=True)
@@ -6786,15 +6818,12 @@ def main() -> int:
     # Charge admission what each worker is PERMITTED (projection * slack), not the
     # bare projection -- otherwise the in-flight sum is bounded while the memory
     # those workers may actually take is not. See `admission_reserve_bytes`.
-    # A declared `.fdt` lives outside the recording's directory, so the pointer
-    # walk cannot see it; add its declared size or admission under-projects a
-    # multi-GB in-memory `.set` read as a few tens of MB.
+    # A declared `.fdt` counts toward its `.set`'s size (see `admission_sizes`).
+    # The declaration file is read unconditionally, for every dataset: a
+    # malformed one fails every run, which is why the committed file is loaded
+    # by a test in CI.
     fdt_declarations = load_fdt_declarations().get(dataset_id, {})
-    sizes = {
-        p: recording_size_from_pointers(repo, p, head_set, head)
-        + (fdt_declarations[p]["fdt_bytes"] if p in fdt_declarations else 0)
-        for p in convert
-    }
+    sizes = admission_sizes(repo, convert, head_set, head, fdt_declarations)
     # channels.tsv is already the fidelity gate's ground truth; reuse it so the
     # streaming projection can account for its per-channel term (see
     # `streaming_peak_bytes`). Best-effort: an unreadable sidecar falls back to
@@ -6905,12 +6934,7 @@ def main() -> int:
                 record(convert_one(p, peaks[p]), i)
         else:
             def memory_retry() -> tuple[dict, int]:
-                # Read now, after the parallel pass: the retry runs alone, so it
-                # may have the whole usable node, never past the hardware ceiling.
-                budget = per_recording_ceiling_bytes()
-                if ctx["hard_ceiling"]:
-                    budget = min(budget, ctx["hard_ceiling"])
-                return {**ctx, "mem_budget": budget}, budget
+                return memory_retry_context(ctx)
 
             pool_breaks, _max_suspects = _drain_with_admission(
                 convert, peaks, cpu_cap, ram_ceiling, ctx, record,

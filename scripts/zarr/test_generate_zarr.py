@@ -9221,5 +9221,163 @@ class TestDeclaredFdtAnnexed(unittest.TestCase):
         self.assertEqual(self.fetched_objects(), [])
 
 
+class TestDeclaredFdtWiring(unittest.TestCase):
+    """What connects a declaration to a run: `main()` loads it and hands it to
+    the worker context on both conversion paths, admission counts the declared
+    bytes, the serial memory retry keeps it, and the refusal is classified as
+    data rather than infrastructure."""
+
+    SET = TestDeclaredFdtConvertOne.SET
+    FDT = TestDeclaredFdtConvertOne.FDT
+
+    def test_the_refusal_is_a_data_failure_with_its_own_reason(self):
+        code = generate_zarr.FdtDeclarationRefused.code
+        self.assertEqual(code, "fdt_declaration_refused")
+        self.assertNotIn(code, generate_zarr.RETRYABLE_CODES)
+        entry = generate_zarr._failure_entry(self.SET, code, "detail")
+        self.assertEqual(generate_zarr.count_infra_failures([self.SET], [entry]), 0)
+        self.assertIn("did not match the recording's header",
+                      generate_zarr.reason_for_code(code))
+        self.assertNotEqual(generate_zarr.reason_for_code(code),
+                            generate_zarr.reason_for_code("an_unknown_code"))
+
+    def test_admission_counts_the_declared_fdt(self):
+        with tempfile.TemporaryDirectory() as repo:
+            write_eeglab_set(os.path.join(repo, self.SET), os.path.join(repo, self.FDT))
+
+            def git(*args):
+                return subprocess.run(["git", *args], cwd=repo, check=True,
+                                      capture_output=True, text=True).stdout.strip()
+
+            git("init", "-q", "-b", "main")
+            git("config", "user.email", "t@example.org")
+            git("config", "user.name", "t")
+            git("add", "-A")
+            git("commit", "-q", "-m", "fixture")
+            head = git("rev-parse", "HEAD")
+            head_set = set(generate_zarr.git_ls_files(repo, head))
+            decl = {"fdt": self.FDT, "nbchan": 4, "pnts": 1000, "trials": 1,
+                    "fdt_bytes": 16000, "annex_key": "SHA256E-s16000--" + "0" * 64 + ".fdt"}
+            bare = generate_zarr.admission_sizes(repo, [self.SET], head_set, head, {})
+            declared = generate_zarr.admission_sizes(
+                repo, [self.SET], head_set, head, {self.SET: decl}
+            )
+        self.assertGreater(bare[self.SET], 0)
+        self.assertEqual(declared[self.SET], bare[self.SET] + 16000)
+
+    def test_the_memory_retry_context_keeps_the_declarations(self):
+        decls = {self.SET: {"fdt": self.FDT}}
+        ctx = {"hard_ceiling": None, "mem_budget": 1, "fdt_declarations": decls, "repo": "r"}
+        retry_ctx, budget = generate_zarr.memory_retry_context(ctx)
+        self.assertIs(retry_ctx["fdt_declarations"], decls)
+        self.assertEqual(retry_ctx["mem_budget"], budget)
+        self.assertEqual(retry_ctx["repo"], "r")
+        capped, capped_budget = generate_zarr.memory_retry_context({**ctx, "hard_ceiling": 5})
+        self.assertLessEqual(capped_budget, 5)
+        self.assertEqual(capped["mem_budget"], capped_budget)
+
+
+class TestMainConvertsADeclaredFdt(unittest.TestCase):
+    """`main()` end to end over a dataset whose `.fdt` sits under
+    `derivatives/`, with the declaration read from a real file. The recording
+    converts only if the declaration reached the worker context, so a run with
+    `--jobs 1` (in-process) and one with `--jobs 2` (a pool worker, whose context
+    travels through the pool initializer) each prove one wiring; the same run
+    with the declaration file empty fails as it did before this feature."""
+
+    SET = TestDeclaredFdtConvertOne.SET
+    FDT = TestDeclaredFdtConvertOne.FDT
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import scipy.io  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        self.s3 = os.path.join(self.dir, "s3")
+        os.makedirs(self.s3)
+        write_eeglab_set(os.path.join(self.repo, self.SET), os.path.join(self.repo, self.FDT))
+        for args in (("init", "-q", "-b", "main"), ("config", "user.email", "t@example.org"),
+                     ("config", "user.name", "t"), ("add", "-A"),
+                     ("commit", "-q", "-m", "fixture")):
+            subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True)
+        self.decl_path = os.path.join(self.dir, "decl.json")
+        saved_path = generate_zarr.FDT_DECLARATIONS_PATH
+        generate_zarr.FDT_DECLARATIONS_PATH = self.decl_path
+        self.addCleanup(setattr, generate_zarr, "FDT_DECLARATIONS_PATH", saved_path)
+
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write(STUB_AWS)
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        saved = {k: os.environ.get(k) for k in ("PATH", "ZARR_TEST_S3_ROOT")}
+        os.environ["PATH"] = bindir + os.pathsep + (saved["PATH"] or "")
+        os.environ["ZARR_TEST_S3_ROOT"] = self.s3
+        self.addCleanup(self._restore_env, saved)
+        saved_ctx = dict(generate_zarr._CTX)
+        self.addCleanup(lambda: (generate_zarr._CTX.clear(), generate_zarr._CTX.update(saved_ctx)))
+
+    @staticmethod
+    def _restore_env(saved):
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def declare(self, recordings: dict) -> None:
+        with open(self.decl_path, "w") as fh:
+            json.dump({"description": "test", "datasets": {"on000001": {
+                "reviewed": "2026-09-28", "recordings": recordings}}}, fh)
+
+    def run_main(self, jobs: int) -> tuple[int, str, dict]:
+        callback = os.path.join(self.dir, f"cb{jobs}.json")
+        argv = [
+            "generate_zarr.py", "--dataset-id", "on000001", "--repo-dir", self.repo,
+            "--bucket", "nemar-test", "--callback-out", callback,
+            "--local", "--clean", "--jobs", str(jobs), "--api-base", "http://127.0.0.1:9",
+        ]
+        saved, sys.argv = sys.argv, argv
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = generate_zarr.main()
+        finally:
+            sys.argv = saved
+        with open(callback) as fh:
+            return rc, out.getvalue(), json.load(fh)
+
+    def test_a_declared_fdt_converts_in_process_and_in_a_pool_worker(self):
+        self.declare({self.SET: {
+            "fdt": self.FDT, "nbchan": 4, "pnts": 1000, "trials": 1, "fdt_bytes": 16000,
+            "annex_key": sha256e_key(os.path.join(self.repo, self.FDT)),
+        }})
+        # --jobs 2 first, from an empty context: it must convert while leaving
+        # this process's context untouched, i.e. in a pool worker.
+        generate_zarr._CTX.clear()
+        rc, log, _ = self.run_main(2)
+        self.assertEqual(rc, 0, log)
+        self.assertIn(f"converted {self.SET}", log)
+        self.assertEqual(generate_zarr._CTX, {}, "converted in-process, not in the pool")
+        rc, log, _ = self.run_main(1)
+        self.assertEqual(rc, 0, log)
+        self.assertIn(f"converted {self.SET}", log)
+        self.assertIn(f"using declared .fdt {self.FDT!r}", log)
+        self.assertEqual(generate_zarr._CTX["fdt_declarations"][self.SET]["fdt"], self.FDT)
+
+    def test_without_a_declaration_the_recording_still_fails(self):
+        self.declare({})
+        _, log, _ = self.run_main(1)
+        self.assertNotIn(f"converted {self.SET}", log)
+        self.assertIn("none was found", log)
+
+
 if __name__ == "__main__":
     unittest.main()
