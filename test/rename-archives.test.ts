@@ -261,11 +261,39 @@ describe("decideRenameAction (PR review finding: never overwrite an existing des
     expect(decision.action).toBe("skip-collision");
   });
 
-  test("destination differs, newer AND non-empty, --delete-stale-legacy passed -> delete-stale-legacy", () => {
+  test("destination differs, newer, non-empty AND at least as large, --delete-stale-legacy passed -> delete-stale-legacy", () => {
     const dest = { size: 999, etag: '"different"', lastModified: T2 };
     expect(decideRenameAction(source, dest, { allowDeleteStaleLegacy: true })).toEqual({
       action: "delete-stale-legacy",
     });
+  });
+
+  test("a destination exactly as large as the source is enough for delete-stale-legacy", () => {
+    const dest = { size: 500, etag: '"different"', lastModified: T2 };
+    expect(decideRenameAction(source, dest, { allowDeleteStaleLegacy: true }).action).toBe(
+      "delete-stale-legacy",
+    );
+  });
+
+  test("destination newer and non-empty but SMALLER than the source -> skip-collision, never delete-stale-legacy", () => {
+    // A truncated or partial destination must not be trusted as the winner:
+    // deleting the legacy object would destroy the only intact copy.
+    const dest = { size: 499, etag: '"different"', lastModified: T2 };
+    const decision = decideRenameAction(source, dest, { allowDeleteStaleLegacy: true });
+    expect(decision.action).toBe("skip-collision");
+    if (decision.action === "skip-collision") {
+      expect(decision.reason).toContain("at least as large");
+    }
+  });
+
+  test("the collision reason tells the operator to inspect the destination before using the flag", () => {
+    const dest = { size: 999, etag: '"different"', lastModified: T2 };
+    const decision = decideRenameAction(source, dest, { allowDeleteStaleLegacy: false });
+    expect(decision.action).toBe("skip-collision");
+    if (decision.action === "skip-collision") {
+      expect(decision.reason).toContain("inspect the destination first");
+      expect(decision.reason).toContain("--delete-stale-legacy");
+    }
   });
 
   // Mutation-relevant: every branch other than "no destination" must never

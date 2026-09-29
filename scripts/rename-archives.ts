@@ -257,11 +257,16 @@ export type RenameAction =
  * - No destination: "copy" (the normal case).
  * - Destination exists and verifies as the same content: "already-renamed"
  *   (a prior partial run copied it; only the old object still needs
- *   deleting).
+ *   tagging and deleting).
  * - Destination exists and differs: a collision. Only actionable with
  *   `allowDeleteStaleLegacy` AND the destination independently proving
- *   itself the winner (strictly newer AND non-empty) -- otherwise
- *   "skip-collision", which touches neither object.
+ *   itself the winner: strictly newer, non-empty AND at least as large as
+ *   the source. The size floor is what stops a truncated or partial
+ *   destination (a copy that died part-way, or one that came out short)
+ *   from being trusted as the winner and the only intact copy from being
+ *   deleted -- a fresh build of the same version is never smaller than the
+ *   archive it replaces. Otherwise "skip-collision", which touches neither
+ *   object.
  */
 export function decideRenameAction(
   source: { size: number; etag: string; lastModified: string },
@@ -276,12 +281,13 @@ export function decideRenameAction(
   const destIsNewer =
     new Date(dest.lastModified).getTime() > new Date(source.lastModified).getTime();
   const destNonEmpty = dest.size > 0;
-  if (opts.allowDeleteStaleLegacy && destIsNewer && destNonEmpty) {
+  const destNotSmaller = dest.size >= source.size;
+  if (opts.allowDeleteStaleLegacy && destIsNewer && destNonEmpty && destNotSmaller) {
     return { action: "delete-stale-legacy" };
   }
   const why = opts.allowDeleteStaleLegacy
-    ? `not newer/non-empty enough to trust as the winner (destLastModified=${dest.lastModified}, destSize=${dest.size})`
-    : "pass --delete-stale-legacy to remove the legacy object once you've confirmed the destination is the real latest";
+    ? `not newer, non-empty and at least as large as the source, so not trusted as the winner (destLastModified=${dest.lastModified}, destSize=${dest.size}, sourceSize=${source.size})`
+    : "inspect the destination first (size, ETag and LastModified against the legacy object); only if it is the real latest, re-run with --delete-stale-legacy to remove the legacy object";
   return {
     action: "skip-collision",
     reason: `destination exists and differs from source (${verdict.reason}); ${why}`,
