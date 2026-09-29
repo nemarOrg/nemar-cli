@@ -15,6 +15,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   READ_WINDOW_TASTE_MAX_CHANNELS,
   READ_WINDOW_TASTE_MAX_CHANNEL_SAMPLES,
@@ -557,6 +558,58 @@ describe("provenanceEnvelopeSchema parity", () => {
     test(label, () =>
       assertParity(provenanceEnvelopeSchema, provenanceEnvelopeSchema4, input, label));
   }
+});
+
+describe("units_report.unmatched_examples bound (both mirrors vs the converter)", () => {
+  // generate_zarr.py's UNMATCHED_EXAMPLES_MAX is the producer's bound; both
+  // zod copies restate it as `.max()`. Read from the converter's source so a
+  // change there without the mirrors (or the reverse) fails here.
+  const source = readFileSync(
+    new URL("../../scripts/zarr/generate_zarr.py", import.meta.url),
+    "utf8",
+  );
+  const match = /^UNMATCHED_EXAMPLES_MAX = (\d+)$/m.exec(source);
+  if (!match) throw new Error("UNMATCHED_EXAMPLES_MAX not found in generate_zarr.py");
+  const max = Number(match[1]);
+  const envelope = (n: number) => ({
+    dataset_id: "on003392",
+    doi: null,
+    license: null,
+    citation: null,
+    source_commit: "1035360c2cbb5a349cc43a46a58543c5f02a4e38",
+    index_etag: null,
+    engine_version: "3",
+    source_tree: "raw",
+    derived: false,
+    lossy: true,
+    dtype: "int16",
+    effective_rate_hz: 250,
+    source_rate_hz: 250,
+    zarr_verify_status: null,
+    units_report: {
+      converted: 0,
+      unmatched_channels: n,
+      unmatched_examples: Array.from({ length: n }, (_, i) => `X${i}`),
+    },
+  });
+  test("exactly the bound is accepted by both copies", () => {
+    expect(provenanceEnvelopeSchema.safeParse(envelope(max)).success).toBe(true);
+    assertParity(
+      provenanceEnvelopeSchema,
+      provenanceEnvelopeSchema4,
+      envelope(max),
+      "at the bound -- accepted",
+    );
+  });
+  test("one past the bound is rejected by both copies", () => {
+    expect(provenanceEnvelopeSchema.safeParse(envelope(max + 1)).success).toBe(false);
+    assertParity(
+      provenanceEnvelopeSchema,
+      provenanceEnvelopeSchema4,
+      envelope(max + 1),
+      "one past the bound -- rejected",
+    );
+  });
 });
 
 describe("envelope embedded in the three recording-level tools' outputs (item 24)", () => {

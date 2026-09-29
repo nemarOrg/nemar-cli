@@ -11,7 +11,7 @@
  * `getBucketPolicy` against a real server.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { addPrivateDataset, buildPublicAccessPolicy } from "../src/services/bucket-policy";
 import {
   PUBLIC_READ_DECISION_TTL_MS,
@@ -50,8 +50,18 @@ function s3Options() {
 }
 
 describe("isDatasetExcludedFromPublicRead", () => {
-  test("no policy at all: nothing is excluded", async () => {
-    expect(await isDatasetExcludedFromPublicRead(s3Options(), "nm000111")).toBe(false);
+  test("no policy at all: nothing is excluded, and the fail-open is logged", async () => {
+    // Review finding: the 404-is-fail-open branch had no assertion that it
+    // actually warns, only that the boolean comes out right.
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(await isDatasetExcludedFromPublicRead(s3Options(), "nm000111")).toBe(false);
+      expect(warnSpy).toHaveBeenCalledWith(
+        "[data] bucket-policy read returned 404 (no policy document); treating every dataset as not excluded from public read",
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   test("a dataset in NotResource is excluded; one not in it is not", async () => {

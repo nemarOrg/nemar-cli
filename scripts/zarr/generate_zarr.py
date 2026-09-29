@@ -12,7 +12,7 @@ callback body the driver script POSTs to ``/webhooks/zarr-ready``.
 
 The conversion itself is biosigIO (``Recording.from_file -> bids.apply_events_tsv
 -> rec.to_zarr``); this driver owns the BIDS-tree orchestration: change
-detection, annex-content materialisation, S3 sync, and the index.
+detection, annex-content materialization, S3 sync, and the index.
 
 Design notes
 ------------
@@ -52,7 +52,9 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import csv
 import errno
+import io
 import json
 import math
 import os
@@ -306,7 +308,7 @@ def should_stream(primary_local: str, size_bytes: int) -> bool:
     2. For a classic `.set` whose samples are embedded in the MAT struct rather
        than a sibling `.fdt`, `preload=False` is a fiction: MNE's
        `_read_segment_file` detects `is_embedded` and calls `_readmat(preload=True)`,
-       materialising the whole recording and caching it. Streaming such a file
+       materializing the whole recording and caching it. Streaming such a file
        would load everything anyway AND add the scratch memmap on top -- strictly
        worse than the in-memory path it replaced.
 
@@ -738,7 +740,7 @@ def projection_factor_hint(primary_local: str, streaming: bool) -> str:
 #     on006012 sub-01    438 MiB -> 1.87 GiB   4.4x
 #     on006720 sub-155   716 MiB -> 2.95 GiB   4.2x
 #
-# The ratio FALLS with size as fixed overhead amortises, so the worst ratio sits where
+# The ratio FALLS with size as fixed overhead amortizes, so the worst ratio sits where
 # the absolute number is trivial and the largest recordings -- the ones that can
 # actually exhaust the node -- are the cheapest per byte. 6x clears every observed
 # point, and clears the largest by 43%.
@@ -901,7 +903,7 @@ class MaxShieldUncalibrated(Exception):
 
     MEGIN's position, which MNE enforces by refusing to read these files at all, is
     that raw Internal Active Shielding data is not fit for analysis until the
-    shielding's effect has been modelled out. ADR 0028 decides we correct it with
+    shielding's effect has been modeled out. ADR 0028 decides we correct it with
     Signal-Space Separation and serve the result -- but ONLY with the recording's own
     fine-calibration and cross-talk files, because uncalibrated Signal-Space
     Separation is a weaker correction whose quality varies by site and hardware, and
@@ -990,28 +992,33 @@ def count_infra_failures(failures: list, failure_entries: list) -> int:
 
 
 class ChannelCountMismatch(Exception):
-    """The converted store carries fewer channels than the recording's BIDS
-    `_channels.tsv` declares AND fewer than the file's own header declares (or
-    the header could not be read), so publishing it would serve a silently
-    unfaithful copy (the failure mode behind nemarDatasets/on002718#1, where
-    biosigio#110 truncated 74-channel EEGLAB files to one channel). Typed so
+    """The converted store carries fewer channels than the recording file's own
+    header declares, with or without a channels.tsv; or fewer than its BIDS
+    `_channels.tsv` declares while the header could not be read. Publishing it
+    would serve a silently unfaithful copy (the failure mode behind
+    nemarDatasets/on002718#1, where biosigio#110 truncated 74-channel EEGLAB
+    files to one channel, and behind nm000110, where biosigio before 1.2.9
+    let a repeated EDF label overwrite a channel). Typed so
     the gate is a DETERMINISTIC data failure surfaced in the index and the
     unfaithful store is never uploaded.
 
-    Policy: better NO store than a wrong store. On the incremental path the
-    prior store survives (the gate runs before this recording's sync). Under
-    ``--clean`` (the Hallu bulk path) the dataset prefix is wiped up front, so
-    a gated recording ends with no serving copy at all -- intended, since a
-    copy that contradicts channels.tsv must not be served, and the prior copy
-    was built by the same converter lineage that just failed the check. Being
-    deterministic, a gated recording does NOT self-retry: after a converter
-    fix, re-run the dataset explicitly (hallu-zarr.sh --dataset <id>)."""
+    Policy: better NO new store than a wrong one. The gate runs before this
+    recording's sync, so the refused store is never uploaded, on the
+    incremental path and under ``--clean`` alike: ``--clean`` reconciles and
+    does NOT wipe the prefix (ADR 0023; only ``--wipe`` erases it), and a
+    recording still at HEAD is never an orphan. So a refused recording KEEPS
+    its previously published store objects until a good re-conversion's
+    ``sync --delete`` overwrites them; this run's index lists the recording
+    under ``failures`` rather than ``stores`` (``merge_index`` drops the entry
+    of a newly failed path). Being deterministic, a gated recording does NOT
+    self-retry: after a converter fix, re-run the dataset explicitly
+    (hallu-zarr.sh --dataset <id>, or a queue requeue)."""
 
     code = "channel_count_mismatch"
 
 
 # Pass 2 of the streaming exporter does, per channel,
-# `x = np.asarray(mm[i], dtype=np.float64)` -- it materialises ONE WHOLE CHANNEL
+# `x = np.asarray(mm[i], dtype=np.float64)` -- it materializes ONE WHOLE CHANNEL
 # at native rate as anonymous float64. That term is `n_samples * 8` bytes: it
 # scales with duration and sample rate and is INDEPENDENT of channel count, so
 # STREAM_PEAK_BYTES is not the guaranteed bound it looks like. A many-channel
@@ -1087,7 +1094,7 @@ def usable_ram_bytes(meminfo_path: str = "/proc/meminfo") -> int:
     try:
         # Median of three samples. MemAvailable is a live number on a shared box,
         # and this is read ONCE for a run that lasts hours -- so a single unlucky
-        # instant (a neighbouring job's page-cache spike) would otherwise set an
+        # instant (a neighboring job's page-cache spike) would otherwise set an
         # absurdly low ceiling for everything that follows. `is not None` rather
         # than `or`: a genuine 0 must not silently fall through to MemTotal.
         samples = []
@@ -1297,14 +1304,15 @@ _FALLBACK_REASONS = {
         "This recording is too large to convert to an interactive viewer copy "
         "within the conversion node's memory limits."
     ),
-    # NEMAR-side fidelity gate: the converted copy came up short of the
-    # recording's channels.tsv and of the file's own header (or the header was
-    # unreadable), so it was withheld rather than served. A sidecar that merely
+    # NEMAR-side fidelity gate: the converted copy came up short of the file's
+    # own header, or of the recording's channels.tsv where the header was
+    # unreadable, so it was withheld rather than served. A sidecar that merely
     # over-declares is not this failure; see channel_gate_verdict.
     "channel_count_mismatch": (
-        "The converted viewer copy carried fewer channels than this recording's "
-        "channels.tsv declares (and than the data file itself, where its header "
-        "could be read), so it was withheld pending a converter fix."
+        "The converted viewer copy carried fewer channels than the data file "
+        "itself declares (or, where its header could not be read, than this "
+        "recording's channels.tsv declares), so it was withheld pending a "
+        "converter fix."
     ),
     # NEMAR-side (not a biosigIO code): ADR 0028. Surfaces MEGIN's own position,
     # which is why the file cannot simply be shown, rather than a bare read error.
@@ -1766,7 +1774,7 @@ def entities_base(stem: str) -> str:
 # the chain and returns the WHOLE recording. The other splits are not standalone
 # recordings -- reading one in isolation yields only its segment. So a split group
 # is ONE logical recording: the lowest-index split is the chain head (the only
-# buildable primary), every split must be materialised together for MNE to follow
+# buildable primary), every split must be materialized together for MNE to follow
 # the chain, and exactly one store is written (keyed at the head split's path).
 _SPLIT_RE = re.compile(r"_split-(\d+)")
 
@@ -1826,7 +1834,7 @@ def split_heads_and_members(primaries: list[str]) -> tuple[set[str], dict[str, s
 def split_members_for(primary_path: str, head_files: set[str]) -> list[str]:
     """Every FIF split that shares `primary_path`'s split group, sorted by index
     (includes the head). `[]` when `primary_path` is not a split file. Used to (a)
-    materialise the whole chain and (b) record the member list on the index entry so
+    materialize the whole chain and (b) record the member list on the index entry so
     the browser can resolve any split file to the one store."""
     if not is_split_fif(primary_path):
         return []
@@ -2056,7 +2064,7 @@ def _decode_sidecar_text(raw: bytes, path: str) -> str:
     tools actually write (and a superset of latin-1's printable range);
     latin-1 maps every byte, so this always returns.
 
-    Behaviour change for UTF-8 files with a BOM: the strict text-mode read
+    Behavior change for UTF-8 files with a BOM: the strict text-mode read
     kept the BOM as U+FEFF, so `json.loads` raised ValueError and the JSON
     callers (PowerLineFrequency, coordsystem, event descriptions) swallowed
     it and ignored the sidecar. The BOM is now dropped and those sidecars
@@ -2205,6 +2213,115 @@ def channels_tsv_for(primary_path: str, head_files) -> str | None:
         return None
     candidates.sort()
     return candidates[-1][2]  # most specific
+
+
+def channels_tsv_names(text: str) -> list[str] | None:
+    """The `name` column of a channels.tsv, in file order and with repeats
+    kept, or None when the header has no `name` column (biosigIO then applies
+    nothing, so there is no join to report on).
+
+    Read the way biosigIO reads it (`bids._read_channels_tsv`, pandas
+    `read_csv(sep="\\t")`): tab-separated with `"` quoting (so `"Fp1"` is
+    `Fp1`, and a quoted tab stays in the name), blank lines skipped, the header
+    matched exactly, each name stripped as biosigIO strips it when matching.
+    The two must agree, or `sidecar_join_report` would describe a join biosigIO
+    never made.
+    """
+    rows = [
+        row for row in csv.reader(io.StringIO(text), delimiter="\t")
+        if any(cell.strip() for cell in row)
+    ]
+    if not rows:
+        return None
+    header = rows[0]
+    if "name" not in header:
+        return None
+    col = header.index("name")
+    return [
+        cols[col].strip()
+        for cols in rows[1:]
+        if len(cols) > col and cols[col].strip()
+    ]
+
+
+# How many unmatched labels an index entry names. Enough to recognize the
+# pattern (a case difference, a suffix), small enough that a dataset with
+# thousands of stores does not pay for it in index bytes (#1178).
+UNMATCHED_EXAMPLES_MAX = 5
+
+
+class SidecarJoinReport(TypedDict, total=False):
+    """What `sidecar_join_report` adds to an index entry's `units_report`."""
+
+    unmatched_channels: int
+    unmatched_case_only: int
+    unmatched_raw_label: int
+    unmatched_examples: list[str]
+
+
+def sidecar_join_report(
+    store_labels: list[str],
+    sidecar_names: list[str],
+    renames: dict[str, str],
+    matched_case_insensitive: dict[str, str] | None = None,
+) -> SidecarJoinReport:
+    """Account for the store channels channels.tsv did NOT reach.
+
+    biosigIO applies a sidecar row to the channel whose label equals the row's
+    `name` exactly, and says nothing (a DEBUG log line) about a channel no row
+    names: its `units_report` counts only what the rows it matched did. So a
+    channel the sidecar misses keeps the importer's type and unit while the
+    report looks clean. Two ways that happens are worth naming, because each
+    looks like a match to a person reading the sidecar:
+
+    - ``unmatched_raw_label``: the sidecar names the label the FILE carries,
+      but the store holds biosigIO's de-duplicated one (``T8-P8`` in the
+      sidecar, ``T8-P8-0``/``T8-P8-1`` in the store). `renames` is the store's
+      ``channel_labels_deduplicated`` map, ``{new_label: file_label}``.
+    - ``unmatched_case_only``: the names differ only in case (EDF header
+      ``FP1-F7``, sidecar ``Fp1-F7``; biosigio#136).
+
+    ``unmatched_channels`` is present whenever there were store labels to
+    join, so 0 is a positive statement that every store channel met a row;
+    the rest appear only when non-zero. With no store labels (a store whose
+    groups record none) there was no join, and the report is empty rather
+    than a vacuous 0.
+    biosigio 1.2.9 joins by exact match only, so a case-only difference is
+    never applied and ``unmatched_case_only`` is a true statement about it.
+    biosigio 1.2.10 (biosigio#140) also matches a row to the one channel that
+    differs from it only in case, and reports each such match as
+    ``matched_case_insensitive``, ``{sidecar_name: channel_label}``, in the same
+    `channels_tsv_units` account this function's caller republishes as
+    `units_report`. Pass that map as `matched_case_insensitive` and those
+    channels count as matched, because the sidecar DID reach them; what is left
+    under ``unmatched_case_only`` is then only the ambiguous rows biosigIO
+    warns about and leaves unapplied. On 1.2.9 the map is absent and the
+    behavior is unchanged.
+    """
+    if not store_labels:
+        return {}
+    exact = set(sidecar_names)
+    folded = {name.casefold() for name in sidecar_names}
+    matched_by_case = set((matched_case_insensitive or {}).values())
+    unmatched = [
+        label for label in store_labels
+        if label not in exact and label not in matched_by_case
+    ]
+    report: SidecarJoinReport = {"unmatched_channels": len(unmatched)}
+    if not unmatched:
+        return report
+    raw = [label for label in unmatched if renames.get(label) in exact]
+    case_only = [
+        label for label in unmatched
+        if label not in raw
+        and (label.casefold() in folded or renames.get(label, "").casefold() in folded)
+    ]
+    if raw:
+        report["unmatched_raw_label"] = len(raw)
+    if case_only:
+        report["unmatched_case_only"] = len(case_only)
+    report["unmatched_examples"] = unmatched[:UNMATCHED_EXAMPLES_MAX]
+    return report
 
 
 # --- events -------------------------------------------------------------------
@@ -2550,15 +2667,21 @@ def expected_channel_count_for(
     the recording's, the most specific wins. channels.tsv is git-tracked text
     (never annexed), so this is a head-file-list scan plus one small read.
 
-    This is the ground truth for the post-conversion fidelity gate: a store
-    whose total channel count falls short of this number is withheld
-    (``ChannelCountMismatch``) instead of served.
+    This is one of the two ground truths for the post-conversion fidelity
+    gate (`channel_gate_verdict`); the other is the file's own header
+    (`file_declared_channel_count`). Which one decides depends on whether the
+    header could be read. With it, a store short of the HEADER is withheld
+    (``ChannelCountMismatch``), and a store short of this number but not of the
+    header is published with the sidecar's over-declaration disclosed. Without
+    it, a store short of this number is withheld.
 
     Unlike PLF's per-field JSON inheritance, only the single most specific
     candidate is read (BIDS TSV inheritance is closest-file-wins, not a
     merge). If that read fails or the file has no data rows, this returns
-    None and the gate is silently OFF for the recording -- fail-open by
-    design: no ground truth, nothing to check against.
+    None and the sidecar takes no part in the gate for the recording. The
+    gate does not go off with it: the header still gates the recording
+    wherever it is readable. Only a recording with no usable sidecar AND an
+    unreadable header has nothing to check against -- fail-open by design.
     """
     best = channels_tsv_for(primary_path, head_files)
     if best is None:
@@ -2566,18 +2689,28 @@ def expected_channel_count_for(
     text = _read_repo_text(repo_dir, head, best)
     if text is None:
         # NOT the same as "no channels.tsv exists". Ground truth is present at
-        # HEAD and we failed to consult it, which turns off the very gate that
-        # exists to catch a repeat of biosigio#110 silently truncating a
-        # 74-channel recording to one (nemarDatasets/on002718#1) -- on precisely
-        # the recording most likely to be mid-incident. Fail open, but say so.
+        # HEAD and we failed to consult it. The file's own header still gates
+        # the recording where it is readable, so a repeat of biosigio#110
+        # silently truncating a 74-channel recording to one (nemarDatasets/
+        # on002718#1) is still caught; a recording whose header is unreadable
+        # too is unchecked, and that is the case worth a line in the log, on
+        # precisely the recording most likely to be mid-incident. Fail open,
+        # but say so.
         print(
-            f"::warning::could not read {best}; the channel-count fidelity gate "
-            "is OFF for this recording",
+            f"::warning::could not read {best}; the channel-count gate compares "
+            "this recording with its file header alone, and with nothing if "
+            "that header is unreadable too",
             flush=True,
         )
         return None
-    rows = [line for line in text.splitlines()[1:] if line.strip()]
-    return len(rows) or None
+    return channels_tsv_row_count(text) or None
+
+
+def channels_tsv_row_count(text: str) -> int:
+    """Data rows in a channels.tsv: every non-blank line after the header. The
+    one counting rule the fidelity gate and `find_collapsed_channel_stores.py`
+    share, so the detector flags exactly what the gate would have refused."""
+    return sum(1 for line in text.splitlines()[1:] if line.strip())
 
 
 # EDF+/BDF+ carry their annotations as a pseudo-signal with this label; it is
@@ -2587,7 +2720,8 @@ EDF_ANNOTATION_LABELS = frozenset({"EDF Annotations", "BDF Annotations"})
 
 def file_declared_channel_count(primary_local: str) -> int | None:
     """Data-channel count the recording file's OWN header declares, read with no
-    importer in between, or None when the format has no cheap header to read.
+    importer in between, or None when the format has no cheap header to read or
+    the header cannot be read.
 
     This is the second ground truth the fidelity gate needs. channels.tsv alone
     cannot tell "the importer dropped channels" (biosigio#110, the failure the
@@ -2599,45 +2733,112 @@ def file_declared_channel_count(primary_local: str) -> int | None:
     a real truncation still shows up as a store short of THIS number.
 
     EDF/BDF: `ns` at bytes 252-256, then ns 16-byte labels; the annotation
-    pseudo-signal is not a channel. BrainVision: `NumberOfChannels` in the
+    pseudo-signal is not a channel. The fixed-width fields are decoded the way
+    biosigio's tolerant probe decodes them (`_edf_field`): cut at the first NUL,
+    then strip, because real writers NUL-pad short values (biosigio#109) and
+    biosigIO converts those files. BrainVision: `NumberOfChannels` in the
     `.vhdr`'s `[Common Infos]` section. FIF (`.fif`, and `.fif.gz`, which MNE
     reads transparently): `nchan` from the measurement info, read with
     `mne.io.read_info`, which parses the header tags and never loads data. For
     a split recording that is the chain head's info, which every split shares.
     on000117's MEG sidecars list CHPI and EEG channels the FIF never had.
-    Anything unreadable returns None, which leaves the gate on channels.tsv
-    alone -- exactly its behavior before this existed.
+
+    None leaves the gate on channels.tsv alone -- exactly its behavior before
+    this existed. For a format that normally HAS a readable header here (the
+    three above) a None from an unreadable one is not silent: it is worth a line
+    in the log, because the recording the converter just read but whose header
+    it cannot is the one the header gate then does not cover. Formats with no
+    cheap header (EEGLAB `.set`, CTF, MEF3, ...) return None quietly. A declared
+    count of zero or less is unreadable too, not a recording with no channels.
     """
     if primary_local.lower().endswith((".fif", ".fif.gz")):
         return _fif_declared_channel_count(primary_local)
     ext = lower_ext(primary_local)
-    try:
-        if ext in (".edf", ".bdf"):
-            with open(primary_local, "rb") as fh:
-                head = fh.read(256)
-                if len(head) < 256:
-                    return None
-                ns = int(head[252:256].decode("ascii").strip())
-                if ns <= 0:
-                    return None
-                raw = fh.read(16 * ns)
-            if len(raw) < 16 * ns:
-                return None
-            labels = [raw[i * 16:(i + 1) * 16].decode("latin-1").strip() for i in range(ns)]
-            return sum(1 for label in labels if label not in EDF_ANNOTATION_LABELS)
-        if ext == ".vhdr":
-            with open(primary_local, encoding="utf-8", errors="replace") as fh:
-                text = fh.read()
-            # Scoped to [Common Infos], the section MNE reads it from, so a
-            # comment elsewhere in the header can never supply the count.
-            section = re.search(r"^\[Common Infos\][^\n]*\n(.*?)(?=^\[|\Z)", text, re.M | re.S)
-            m = section and re.search(
-                r"^\s*NumberOfChannels\s*=\s*(\d+)", section.group(1), re.MULTILINE
-            )
-            return int(m.group(1)) if m else None
-    except (OSError, ValueError):
-        return None
+    if ext in (".edf", ".bdf"):
+        return _edf_declared_channel_count(primary_local)
+    if ext == ".vhdr":
+        return _vhdr_declared_channel_count(primary_local)
     return None
+
+
+def _warn_unreadable_header(kind: str, path: str, why: str) -> None:
+    """The one line a header the converter cannot read earns: what, where, why,
+    and what the gate does instead (the FIF reader says the same)."""
+    print(
+        f"::warning::could not read the {kind} header of {path} for its channel "
+        f"count ({why}); the gate uses channels.tsv alone",
+        flush=True,
+    )
+
+
+def _edf_field(raw: bytes) -> str:
+    """One fixed-width EDF/BDF ASCII header field, decoded the way biosigio's
+    `_decode_field` decodes it: cut at the first NUL, then strip. Real files pad
+    short values with NULs instead of spaces (b'4\\x00\\x00\\x00'), and
+    `strip()` alone leaves the NULs, so `int()` refuses the number and an
+    annotation label no longer equals `EDF_ANNOTATION_LABELS`."""
+    return raw.decode("latin-1").split("\x00", 1)[0].strip()
+
+
+def _edf_declared_channel_count(path: str) -> int | None:
+    kind = "BDF" if lower_ext(path) == ".bdf" else "EDF"
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(256)
+            if len(head) < 256:
+                _warn_unreadable_header(
+                    kind, path, f"{len(head)} bytes, short of the 256-byte main header"
+                )
+                return None
+            try:
+                ns = int(_edf_field(head[252:256]))
+            except ValueError:
+                _warn_unreadable_header(
+                    kind, path, f"the signal-count field {head[252:256]!r} is not an integer"
+                )
+                return None
+            if ns <= 0:
+                _warn_unreadable_header(kind, path, f"the header declares {ns} signals")
+                return None
+            raw = fh.read(16 * ns)
+    except OSError as exc:
+        _warn_unreadable_header(kind, path, f"{type(exc).__name__}: {exc}")
+        return None
+    if len(raw) < 16 * ns:
+        _warn_unreadable_header(
+            kind, path, f"the label block holds {len(raw)} of {16 * ns} bytes"
+        )
+        return None
+    labels = [_edf_field(raw[i * 16:(i + 1) * 16]) for i in range(ns)]
+    return sum(1 for label in labels if label not in EDF_ANNOTATION_LABELS)
+
+
+def _vhdr_declared_channel_count(path: str) -> int | None:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError as exc:
+        _warn_unreadable_header("BrainVision", path, f"{type(exc).__name__}: {exc}")
+        return None
+    # Scoped to [Common Infos], the section MNE reads it from, so a
+    # comment elsewhere in the header can never supply the count. The section
+    # name is matched exactly and the key without regard to case, because that
+    # is how MNE's configparser reads them: `numberofchannels=4` converts, and
+    # a case-sensitive key here left such a file with no header count.
+    section = re.search(r"^\[Common Infos\][^\n]*\n(.*?)(?=^\[|\Z)", text, re.M | re.S)
+    m = section and re.search(
+        r"^\s*NumberOfChannels\s*=\s*(\d+)", section.group(1), re.MULTILINE | re.IGNORECASE
+    )
+    if not m:
+        _warn_unreadable_header(
+            "BrainVision", path, "no NumberOfChannels in its [Common Infos] section"
+        )
+        return None
+    count = int(m.group(1))
+    if count <= 0:
+        _warn_unreadable_header("BrainVision", path, f"NumberOfChannels is {count}")
+        return None
+    return count
 
 
 def _fif_declared_channel_count(path: str) -> int | None:
@@ -2684,20 +2885,78 @@ def channel_gate_verdict(
 ) -> ChannelGateVerdict:
     """The fidelity gate's decision, kept pure so every branch is testable.
 
-    - ``pass``: no applicable channels.tsv, or the store holds at least what it
-      declares.
+    - ``truncated``: the store falls short of the file's OWN header, whatever
+      channels.tsv says or whether one exists at all; or it falls short of
+      channels.tsv while the file's count is unknown. Withheld
+      (``ChannelCountMismatch``): better no store than a wrong one.
+    - ``pass``: the store holds every channel the header declares (or the
+      header is unreadable) and at least what channels.tsv declares (or no
+      channels.tsv applies).
     - ``sidecar_overcount``: the store falls short of channels.tsv but holds
       every channel the file's own header declares, so the SIDECAR over-declares
       and the store is faithful. Published, with the disagreement recorded.
-    - ``truncated``: the store falls short of channels.tsv and either falls
-      short of the file too, or the file's count is unknown. Withheld
-      (``ChannelCountMismatch``), as before: better no store than a wrong one.
+
+    The header check comes first, and on its own, because channels.tsv is not
+    an independent witness of a label collapse. Before biosigio 1.2.9 a label
+    the file repeats (CHB-MIT's ``T8-P8``, its ``-`` placeholders) overwrote a
+    channel on import, so the store came up one short per repeat. A sidecar
+    written by a tool that keys channels by label collapses the same way and
+    agrees with the short store; a dataset that ships no channels.tsv has
+    nothing to compare against at all. Both passed this gate before, and only
+    the header, read with no importer in between, still counts every channel.
     """
+    if in_file is not None and in_store < in_file:
+        return "truncated"
     if not channels_tsv or in_store >= channels_tsv:
         return "pass"
-    if in_file is not None and in_store >= in_file:
+    if in_file is not None:
         return "sidecar_overcount"
     return "truncated"
+
+
+class ChannelCountNote(TypedDict):
+    """The index entry's ``channels_tsv_count_mismatch`` object."""
+
+    channels_tsv: int
+    in_file: int
+    in_store: int
+
+
+def enforce_channel_gate(
+    primary: str, in_store: int, channels_tsv: int | None, in_file: int | None
+) -> ChannelCountNote | None:
+    """Apply ``channel_gate_verdict`` to a built store, before its sync.
+
+    Raises ``ChannelCountMismatch`` on ``truncated``. Returns the note to
+    disclose on the index entry for ``sidecar_overcount``, else None.
+    ``convert_one`` calls this with the store it just built and the header of
+    the very file it converted, so the two counts describe the same recording.
+    """
+    verdict = channel_gate_verdict(in_store, channels_tsv, in_file)
+    if verdict == "sidecar_overcount":
+        # `sidecar_overcount` is only reachable with both counts known.
+        assert channels_tsv is not None and in_file is not None
+        # The store holds every channel the file itself declares; the sidecar
+        # lists channels the file never had. Serve the faithful copy and
+        # disclose the disagreement on the index entry.
+        print(
+            f"::warning::{primary}: channels.tsv declares {channels_tsv} channel(s) "
+            f"but the file itself holds {in_file}; serving the {in_store}-channel "
+            "store, which matches the file",
+            flush=True,
+        )
+        return {"channels_tsv": channels_tsv, "in_file": in_file, "in_store": in_store}
+    if verdict == "truncated":
+        declared = []
+        if in_file is not None:
+            declared.append(f"the file's own header declares {in_file}")
+        if channels_tsv:
+            declared.append(f"its channels.tsv declares {channels_tsv}")
+        raise ChannelCountMismatch(
+            f"store has {in_store} channel(s) but {primary}: {' and '.join(declared)}; "
+            "refusing to publish an unfaithful copy"
+        )
+    return None
 
 
 def affected_primaries(
@@ -3314,7 +3573,7 @@ def merge_index(
         wanted = set(discovered)
         # A carried-over store whose path is EXCLUDED from discovery goes, and
         # goes NOISILY. ADR 0027 made discovery raw-only and
-        # `purge_non_raw_stores.py` is the authorised deletion of what it stopped
+        # `purge_non_raw_stores.py` is the authorized deletion of what it stopped
         # producing, so a non-raw store is not something the archive serves -- an
         # index that kept describing one would advertise bytes that are being
         # removed. But dropping a store silently is how a real orphan bug would
@@ -4721,8 +4980,18 @@ def store_metadata(store_path: str) -> dict:
         ra = dict(root.attrs)
         groups = []
         modalities: set[str] = set()
+        # Every channel's label in store order, across groups. A LIST, never a
+        # set or a dict key: the point of reading it is to see each channel,
+        # and a repeated label must not collapse here the way it once did in
+        # the importer.
+        labels: list[str] = []
         for gname in ra.get("channel_groups", []):
             ga = dict(root[gname].attrs)
+            channels = ga.get("channels")
+            if isinstance(channels, list):
+                labels.extend(
+                    str(ch.get("label", "")) for ch in channels if isinstance(ch, dict)
+                )
             rate = ga.get("rate")
             nsamp = ga.get("n_samples")
             mod = ga.get("modality")
@@ -4791,6 +5060,12 @@ def store_metadata(store_path: str) -> dict:
             if isinstance(candidate, dict):
                 result["units_report"] = candidate
                 break
+        # Diagnostics for the sidecar join (`sidecar_join_report`), `_`-prefixed
+        # so they never reach the published entry. `channel_labels_deduplicated`
+        # is biosigIO's (>= 1.2.9) record of the labels it renamed because the
+        # file repeated them, `{new_label: file_label}`.
+        result["_channel_labels"] = labels
+        result["_label_renames"] = label_renames(ra)
         return result
     except Exception as exc:  # noqa: BLE001 - best-effort metadata, never fatal
         print(f"::warning::store_metadata failed for {store_path}: {exc}", flush=True)
@@ -4804,7 +5079,7 @@ def store_metadata(store_path: str) -> dict:
 def materialize_local(
     repo_dir: str, primary_path: str, head_files: set[str]
 ) -> tuple[str, str | None, str | None]:
-    """Local-mode materialisation (e.g. Hallu after `nemar dataset download`).
+    """Local-mode materialization (e.g. Hallu after `nemar dataset download`).
 
     The dataset working tree already holds the annex content (the data files are
     symlinks resolving to local annex objects), so biosigIO reads the
@@ -5186,13 +5461,58 @@ def embed_root_attr(store_path: str, key: str, value: object) -> None:
     embed_attr(os.path.join(store_path, "zarr.json"), key, value)
 
 
+def label_renames(root_attrs: dict) -> dict[str, str]:
+    """biosigIO's `channel_labels_deduplicated` map from a store's root
+    attributes' `recording_metadata`, `{new_label: file_label}`, or {} when it
+    renamed nothing (or predates 1.2.9, which is when it started recording
+    this). The one reader of that key: `store_metadata` hands it the attrs it
+    already opened, `store_label_renames` the ones it reads from disk."""
+    rec_meta = root_attrs.get("recording_metadata")
+    renames = rec_meta.get("channel_labels_deduplicated") if isinstance(rec_meta, dict) else None
+    if not isinstance(renames, dict):
+        return {}
+    return {str(k): str(v) for k, v in renames.items()}
+
+
+def store_label_renames(store_path: str) -> dict[str, str]:
+    """`label_renames` of a written store, read from its root `zarr.json`; {}
+    when that cannot be read."""
+    try:
+        with open(os.path.join(store_path, "zarr.json"), encoding="utf-8") as fh:
+            attrs = json.load(fh).get("attributes") or {}
+    except (OSError, ValueError):
+        return {}
+    return label_renames(attrs) if isinstance(attrs, dict) else {}
+
+
+def positions_for_renamed_labels(
+    positions: dict[str, list[float]], renames: dict[str, str]
+) -> dict[str, list[float]]:
+    """Electrode positions a viewer can join to the STORE's channel labels.
+
+    Positions are keyed by the electrodes.tsv `name`, and a viewer finds a
+    channel's position by its label. When the file repeats a label, biosigIO
+    serves the repeats as `<label>-0`, `<label>-1`, ... and a sidecar written
+    from the file names only `<label>`, so every repeat would lose its position.
+    Each renamed label inherits its file label's position, which is the
+    electrode that label names. Only fills a gap: a sidecar that names the
+    suffixed label itself (as MNE-BIDS writes it) is left as it is, and no
+    existing key is dropped or overwritten.
+    """
+    out = dict(positions)
+    for new_label, file_label in renames.items():
+        if new_label not in out and file_label in positions:
+            out[new_label] = positions[file_label]
+    return out
+
+
 def fix_source_file_attr(store_path: str, bids_relpath: str) -> None:
     """Overwrite the store's `recording_metadata.source_file` root attribute
     with the repository-relative BIDS path.
 
     Every biosigIO importer calls ``rec.set_metadata("source_file", filepath)``
     with whatever path this driver handed it -- the conversion host's scratch
-    materialisation (``.../zarr-scratch/tmpXXXXXXXX/work/...``), a fresh
+    materialization (``.../zarr-scratch/tmpXXXXXXXX/work/...``), a fresh
     ``mkdtemp`` name every run. Left as-is, re-converting the same recording at
     the same source commit produces byte-different store metadata (defeating
     reproducibility), needlessly publishes the conversion host's internal
@@ -5510,7 +5830,7 @@ def event_descriptions_for(
 
     Sidecars are small JSON files tracked in git (not annexed); read via the working
     tree when present and ``git cat-file`` otherwise, matching the no-checkout
-    workflow clone behaviour.
+    workflow clone behavior.
     """
     stem = filename_stem(primary_path)
     rec_dir = os.path.dirname(primary_path)
@@ -5635,7 +5955,7 @@ def bids_channels_arg(channels_local: str | None) -> str:
     wrong question twice over:
 
     * The file this driver hands the exporter is not the recording's own path. It
-      is a scratch materialisation in `work/`, and on the ADR 0028 MaxShield path
+      is a scratch materialization in `work/`, and on the ADR 0028 MaxShield path
       it is the Signal-Space-Separated copy at `work/sss_<basename>`. Sibling
       detection there finds whatever this driver happened to stage, or nothing.
     * BIDS inheritance is not siblinghood. The sidecar that applies to
@@ -5734,7 +6054,7 @@ def convert_recording(
         # (requires biosigio>=1.1.4; ignored for non-EDF formats). See nemar-cli#737.
         # `bids_channels` is the resolved sidecar path or "off", never "auto" --
         # see `bids_channels_arg` for why sibling auto-detection is the wrong
-        # question for a scratch materialisation. The importer applies it before
+        # question for a scratch materialization. The importer applies it before
         # the suffix override below, which deliberately has the last word on
         # modality (see its comment), and records what the `units` column did in
         # `rec.metadata["channels_tsv_units"]` -> the store's `recording_metadata`
@@ -5817,7 +6137,12 @@ def convert_recording(
         if os.path.exists(events_meta):
             embed_attr(events_meta, "value_descriptions", value_descriptions)
     if electrode_positions is not None:
-        embed_root_attr(store_path, "electrode_positions", electrode_positions["positions"])
+        embed_root_attr(
+            store_path, "electrode_positions",
+            positions_for_renamed_labels(
+                electrode_positions["positions"], store_label_renames(store_path)
+            ),
+        )
         embed_root_attr(store_path, "electrode_coordinate_system", electrode_positions["coordinate_system"])
         embed_root_attr(store_path, "electrode_coordinate_units", electrode_positions["coordinate_units"])
 
@@ -5918,7 +6243,7 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
                 cal_local = os.path.join(c["repo"], cal_rel)
                 ctc_local = os.path.join(c["repo"], ctc_rel)
                 # The remote branch below decides cleanly when a tracked file cannot
-                # be materialised; local mode has to check for itself. A working tree
+                # be materialized; local mode has to check for itself. A working tree
                 # can hold a git-annex POINTER whose content was never fetched, and
                 # `os.path.exists` is False for a dangling symlink -- so this catches
                 # the realistic case rather than letting apply_sss fail uncoded and
@@ -5953,6 +6278,7 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         # handed to biosigIO so the served samples carry the sidecar's units
         # (biosigio#125); the same resolution already feeds the fidelity gate.
         channels_local = None
+        channels_text: str | None = None
         channels_read_failed = False
         channels_rel = channels_tsv_for(primary, c["head_files"])
         if channels_rel:
@@ -6024,48 +6350,29 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
                 f"store has no channel groups: {store_local}"
                 + (f" (reading it failed: {why})" if why else "")
             )
-        # Fidelity gate: the BIDS channels.tsv is ground truth for how many
-        # channels this recording has. A store that comes up short means the
-        # importer silently dropped signals (biosigio#110 served 74-channel
-        # EEGLAB recordings as 1 channel for weeks, nemarDatasets/on002718#1);
-        # withhold it as a typed data failure rather than publish an unfaithful
-        # copy. Runs BEFORE the sync, so on the incremental path this
-        # recording's previous store survives untouched; under --clean the
-        # prefix was already wiped and the recording simply stays absent (see
-        # the ChannelCountMismatch docstring for why absent beats unfaithful,
-        # and note a gated recording needs an explicit re-run after a fix).
+        # Fidelity gate: the file's own header and the BIDS channels.tsv are
+        # the two ground truths for how many channels this recording has. A
+        # store that comes up short means the importer silently dropped
+        # signals (biosigio#110 served 74-channel EEGLAB recordings as 1
+        # channel for weeks, nemarDatasets/on002718#1; before biosigio 1.2.9 a
+        # repeated EDF label overwrote a channel, nm000110 22 of 23); withhold
+        # it as a typed data failure rather than publish an unfaithful copy.
+        # The header is read for EVERY recording, not only when a sidecar
+        # disagrees: see channel_gate_verdict. Runs BEFORE the sync, so the
+        # refused store is never uploaded and this recording's previously
+        # published store objects survive untouched, under --clean as on the
+        # incremental path (--clean reconciles, it does not wipe: ADR 0023),
+        # until a good re-conversion overwrites them. The index lists the
+        # recording as a failure instead (see the ChannelCountMismatch
+        # docstring, and note a gated recording needs an explicit re-run
+        # after a fix).
         expected = expected_channel_count_for(
             c["repo"], primary, c["head_files"], c["head"]
         )
-        channel_count_note = None
-        if expected:
-            total = store_total_channels(meta)
-            in_file = (
-                file_declared_channel_count(primary_local) if total < expected else None
-            )
-            verdict = channel_gate_verdict(total, expected, in_file)
-            if verdict == "sidecar_overcount":
-                # The store holds every channel the file itself declares; the
-                # sidecar lists channels the file never had. Serve the faithful
-                # copy and disclose the disagreement on the index entry.
-                channel_count_note = {
-                    "channels_tsv": expected, "in_file": in_file, "in_store": total,
-                }
-                print(
-                    f"::warning::{primary}: channels.tsv declares {expected} channel(s) "
-                    f"but the file itself holds {in_file}; serving the {total}-channel "
-                    "store, which matches the file",
-                    flush=True,
-                )
-            elif verdict == "truncated":
-                file_part = (
-                    f" and the file itself declares {in_file}" if in_file is not None else ""
-                )
-                raise ChannelCountMismatch(
-                    f"store has {total} channel(s) but {primary}'s channels.tsv "
-                    f"declares {expected}{file_part}; refusing to publish an "
-                    "unfaithful copy"
-                )
+        channel_count_note = enforce_channel_gate(
+            primary, store_total_channels(meta), expected,
+            file_declared_channel_count(primary_local),
+        )
         # Latest-only: --delete drops stale chunk objects a smaller new store no
         # longer needs. Long origin TTL; the callback purges zarr.json/index.json.
         # Through `_aws` for the wall-clock timeout + retry: a store is thousands of
@@ -6108,7 +6415,7 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         # and the rows `main` stages for events.parquet (#1060). The parsed rows
         # travel back with the result rather than being re-read there: the events
         # sidecar may be annexed, and this worker is the only place it is
-        # materialised.
+        # materialized.
         parsed_events = parse_events_tsv(events_text)
         entry.update(events_summary_of(parsed_events))
         # Which channels.tsv shaped this store, and that the converter chose it
@@ -6122,6 +6429,29 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
                 "sidecar": channels_rel,
                 "sidecar_supplied": True,
             }
+            # Which store channels the sidecar never reached. biosigIO's own
+            # report cannot say: it counts only what matched rows did.
+            names = channels_tsv_names(channels_text) if channels_text is not None else None
+            if names is not None:
+                by_case = entry["units_report"].get("matched_case_insensitive")
+                join = sidecar_join_report(
+                    meta.get("_channel_labels") or [], names, meta.get("_label_renames") or {},
+                    by_case if isinstance(by_case, dict) else None,
+                )
+                entry["units_report"].update(join)
+                if join.get("unmatched_channels"):
+                    print(
+                        f"::warning::{primary}: {channels_rel} names no row for "
+                        f"{join['unmatched_channels']} store channel(s) "
+                        f"(e.g. {', '.join(join.get('unmatched_examples', []))}), so their "
+                        "type and unit are the importer's"
+                        + (f"; {join['unmatched_case_only']} differ only in case"
+                           if join.get("unmatched_case_only") else "")
+                        + (f"; {join['unmatched_raw_label']} are named by the file's "
+                           "repeated label rather than the de-duplicated one"
+                           if join.get("unmatched_raw_label") else ""),
+                        flush=True,
+                    )
         if channels_read_failed:
             entry["channels_tsv_read_error"] = True
         if channel_count_note:
@@ -6132,7 +6462,7 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         if members:
             entry["split_members"] = members
         # ADR 0028 requires this to be DISCLOSED, not merely auditable. Every other
-        # store is the source signal quantised and rate-capped and nothing more; this
+        # store is the source signal quantized and rate-capped and nothing more; this
         # one has been processed. A model training across datasets would otherwise
         # silently mix filtered and unfiltered MEG with no signal that it was doing
         # so. MNE writes the parameters into the recording's own proc_history, but
@@ -6692,7 +7022,7 @@ def main() -> int:
     # never an orphan, so it keeps its previous store (ADR 0005: partial data
     # still serves) instead of being deleted by a wipe that ran before we knew.
     #
-    # `--wipe` keeps the old behaviour for recovery (a corrupt prefix, an index
+    # `--wipe` keeps the old behavior for recovery (a corrupt prefix, an index
     # that no longer describes what is on S3).
     if clean:
         # `compute_clean_orphans` also protects already-published stores under

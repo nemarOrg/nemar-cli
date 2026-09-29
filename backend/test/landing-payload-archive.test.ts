@@ -18,7 +18,7 @@ describe("buildLandingPayload archive", () => {
     const p = buildLandingPayload({
       datasetId: "on005752",
       versionRows: [],
-      archive: { skip_reason: "dataset 680.0 GB exceeds 100.0 GB archive limit" },
+      archive: { skip_reason: "dataset 680.0 GiB exceeds 100.0 GiB archive limit" },
     });
     expect(p.archive.skip_reason).toContain("exceeds");
     expect(p.archive.status).toBeNull();

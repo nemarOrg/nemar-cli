@@ -5,16 +5,16 @@
  * Cache API has no daily limits and is designed for this use case.
  *
  * Bucket policy:
- *   - Unauthenticated requests are keyed by IP and capped at 100/60s
+ *   - Unauthenticated requests are keyed by IP and capped at 500/60s
  *     (`MAX_REQUESTS`).
  *   - Authenticated requests are keyed by the SHA-256 hash of the
- *     bearer token and capped at 500/60s (`TOKEN_MAX_REQUESTS_AUTHED`).
+ *     bearer token and capped at 1000/60s (`TOKEN_MAX_REQUESTS_AUTHED`).
  *     This is the fix for #275: admin orchestration that fans out into
  *     many sequential backend calls (publication approve, CI deploy
  *     loops) used to drown out the per-IP bucket every time several
  *     datasets shipped in quick succession. Per-token bucketing means
  *     one admin's batch can't starve another admin's quota, and the
- *     500/60s cap still bounds a malformed loop hammering the worker.
+ *     1000/60s cap still bounds a malformed loop hammering the worker.
  *   - Auth endpoints (the explicit set in `AUTH_PATHS`) keep their
  *     stricter 10/60s cap and stay keyed by IP — those run pre-auth so
  *     a token isn't available, and they need to resist password
@@ -62,6 +62,35 @@ const TOKEN_MAX_REQUESTS_AUTHED = 1000;
 
 /** See `writeCount`'s no-`waitUntil` fallback, below. */
 const RATE_LIMIT_WRITE_STALL_MS = 500;
+
+/** Last time {@link logCacheFaultOnce} actually emitted a log, module-level so
+ *  it persists across requests in a warm isolate. */
+let lastCacheFaultLoggedAt = 0;
+
+/**
+ * Log a Cache API fault (the enforcement path failing open) at most once per
+ * rate-limit window, per isolate. During a sustained Cache API outage every
+ * request through `rateLimiter` or `checkDataMissBudget` used to hit this
+ * same catch block and log unconditionally, which turns an outage into a
+ * request-volume-scaled flood of `console.error` lines -- exactly the kind of
+ * noise that makes the ONE line worth reading (the fault itself) harder to
+ * find, not easier. A module-level timestamp is enough: it does not need to
+ * be keyed by bucket or route, because the thing being reported is "the Cache
+ * API is unavailable to this isolate right now," which is true for every
+ * caller at once.
+ */
+function logCacheFaultOnce(details: Record<string, unknown>): void {
+  const now = Date.now();
+  if (now - lastCacheFaultLoggedAt < WINDOW_SIZE * 1000) return;
+  lastCacheFaultLoggedAt = now;
+  console.error("[rate-limit] cache failure", details);
+}
+
+/** Test-only: let a test see the very next fault log again rather than
+ *  waiting out a real window. */
+export function __resetCacheFaultLogForTests(): void {
+  lastCacheFaultLoggedAt = 0;
+}
 
 // A legitimate full-dataset download over the data plane (`nemar-py
 // --jobs 16`, `rclone sync`) fires thousands of small per-file requests
@@ -305,13 +334,17 @@ export function __readBearerTokenFromHeader(authHeader: string | undefined): str
  *    yet), plus any authenticated endpoint whose per-request cost is an
  *    external call rather than a D1 read -- see AUTH_PATHS.
  *  - `token` for any request carrying a syntactically-valid bearer
- *    (500/60s). Admin orchestration (`publish approve`, CI deploy
+ *    (1000/60s). Admin orchestration (`publish approve`, CI deploy
  *    sweeps) fits here; per-token bucketing means one admin's batch
  *    can't 429 another admin's batch through the shared IP pool.
  *  - `data-ip` for the public read data plane (`/data/*`, `/nemar/data/*`).
- *    10000/60s, IP-keyed. Checked before the bearer branch because the data
+ *    100,000/60s, IP-keyed. Checked before the bearer branch because the data
  *    plane is anonymous-by-design; a tokened request to a public file is
  *    still charged to the (generous) IP bucket, not the tighter token bucket.
+ *    A MISS on this bucket (no cached copy, a real GitHub request) is
+ *    additionally charged against its own, much smaller `data-miss-ip`
+ *    budget (10,000/60s, `checkDataMissBudget`/`DATA_MISS_MAX_REQUESTS`
+ *    below) -- this bucket alone does not bound the expensive path.
  *  - `ip` for everything else (the unauthenticated cap).
  *
  * Admin endpoints used to be entirely exempt; that gave an admin
@@ -385,7 +418,7 @@ export function __selectBucket(
  * Cached lookup: does this token belong to an admin or owner user?
  *
  * Bulk admin orchestration (`nemar admin reindex --missing-metadata`,
- * release sweeps, mass-publish) routinely fans out beyond the 500/60s
+ * release sweeps, mass-publish) routinely fans out beyond the 1000/60s
  * token bucket. Capping admins at the same per-token bucket as any other
  * authenticated user makes those operations brittle and forces operators
  * to add manual pacing.
@@ -488,7 +521,12 @@ export async function rateLimiter(
   next: Next,
   options: RateLimiterOptions = {},
 ) {
-  // Skip rate limiting in development
+  // Skip rate limiting in development. Deliberately the exact string
+  // "development", not `isNonProductionEnv`: the staging worker runs with
+  // ENVIRONMENT="development" (this IS its bypass), but `isNonProductionEnv`
+  // would ALSO match "test", and every test that sets ENVIRONMENT="test" to
+  // exercise other behavior would silently stop exercising the limiter too.
+  // Both forms fail closed on an unset value; do not widen this one.
   if (c.env.ENVIRONMENT === "development") {
     await next();
     return;
@@ -537,7 +575,7 @@ export async function rateLimiter(
 
   // Admin / owner tokens bypass the app-side limiter entirely. Bulk
   // operations (mass reindex, release sweeps) routinely exceed the
-  // 500/60s token bucket; capping them produced opaque "Network error"
+  // 1000/60s token bucket; capping them produced opaque "Network error"
   // failures in the CLI because requests dropped after the local
   // limiter 429d. The CF-edge layer still enforces its own per-IP
   // ceilings, so the floor isn't absent.
@@ -681,9 +719,10 @@ export async function rateLimiter(
     c.header("X-RateLimit-Bucket", keyKind);
   } catch (error) {
     // Fail open so a cache outage doesn't block all traffic, but emit a
-    // structured log so Workers tail / log tooling surfaces the issue.
+    // structured log (deduped to once per window per isolate, see
+    // `logCacheFaultOnce`) so Workers tail / log tooling surfaces the issue.
     // TODO(#478): replace with Sentry captureException once DSN is wired.
-    console.error("[rate-limit] cache failure", {
+    logCacheFaultOnce({
       route: path,
       keyKind,
       error: error instanceof Error ? error.message : String(error),
@@ -761,6 +800,9 @@ export async function checkDataMissBudget(
   request: Request,
   waitUntil: ((work: Promise<unknown>) => void) | undefined,
 ): Promise<DataMissBudgetOutcome> {
+  // Same narrower check as `rateLimiter`'s dev bypass, deliberately: staging
+  // runs as "development" and must be exempt, but "test" must NOT be, or
+  // every test that sets ENVIRONMENT="test" stops exercising this budget.
   if (env.ENVIRONMENT === "development") return { allowed: true };
 
   const testBypassToken = request.headers.get("X-Test-Bypass");
@@ -832,8 +874,10 @@ export async function checkDataMissBudget(
     return { allowed: true };
   } catch (error) {
     // Fail open, the same policy `rateLimiter` itself follows on a cache
-    // outage: a broken Cache API must not block data-plane traffic.
-    console.error("[rate-limit] cache failure", {
+    // outage: a broken Cache API must not block data-plane traffic. Deduped
+    // the same way, and against the SAME timestamp: one outage should log
+    // once total, not once per bucket kind.
+    logCacheFaultOnce({
       keyKind: DATA_MISS_BUCKET_KIND,
       error: error instanceof Error ? error.message : String(error),
     });

@@ -59,6 +59,7 @@
  * verbatim on every hit, so nothing a client sees changes.
  */
 
+import { toVersionTag } from "../../../shared/contract/version.js";
 import type { ManifestFile } from "./manifest";
 import type { ManifestCache } from "./manifest-source";
 
@@ -143,7 +144,7 @@ export function gitFileCacheKey(
   version: string,
   bidsPath: string,
 ): string {
-  const tag = version.startsWith("v") ? version : `v${version}`;
+  const tag = toVersionTag(version);
   const path = bidsPath
     .split("/")
     .map((segment) => encodeURIComponent(segment))

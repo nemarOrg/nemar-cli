@@ -50,6 +50,23 @@ jobs:
     - run: pytest --cov=src
 ```
 
+## nemar-cli: long-lived GitHub-token secrets
+
+This repo's CI holds three long-lived GitHub personal access token (PAT) secrets. Only
+`GH_TOKEN` is known to have expired without warning (issues #1321 and #1022); neither of the
+other two has expired so far, and the daily probe below watches all three. **`GH_TOKEN`**
+backs the `e2e-upload` job's real upload flow (accepting collaborator invitations, pushing,
+opening PRs) as the user, so it has to stay a classic PAT owned by the `nemarAdmin` GitHub account with `repo` and `workflow`
+scopes -- a GitHub App installation token cannot substitute, because `gh api user` 403s for one.
+**`AUTO_TAG_PAT`** lets the release automation (`auto-tag.yml`, `auto-bump-dev.yml`,
+`sync-dev.yml`) push bump/release commits to protected `main`/`dev` and create GitHub Releases.
+**`DOCS_READ_TOKEN`** is the read-only fallback that lets `test.yml` check out the private
+`nemarOrg/docs` content tree (ADR 0059). Rotate any of them with
+`gh secret set <NAME> --repo nemarOrg/nemar-cli`. `scripts/ci/probe-github-token.ts` checks all
+three daily (`.github/workflows/credential-probe.yml`, `--fail-days 14`) and also runs `GH_TOKEN`
+specifically as a labeled pre-flight step in `e2e-upload` itself, so a dead credential fails
+there instead of as two opaque "Bad credentials (HTTP 401)" test failures.
+
 ## Key Practices (Think About Pipeline Flow)
 - **Pin versions:** `actions/checkout@v4` (reproducibility)
 - **Cache deps:** Speed matters for developer happiness

@@ -106,6 +106,17 @@ export async function isDatasetExcludedFromPublicRead(
     let excludedIds: ReadonlySet<string>;
     try {
       const policy = await getBucketPolicy(s3Options);
+      // `getBucketPolicy` returns `null` for a 404 (no policy document at all)
+      // and `listPrivateDatasets(null, ...)` answers `[]` -- "no exclusions",
+      // the same fail-open reading a read failure gets below, only reached
+      // silently rather than through the catch block. Named here so a bucket
+      // that unexpectedly has no policy document shows up in logs instead of
+      // quietly presigning nothing.
+      if (policy === null) {
+        console.warn(
+          "[data] bucket-policy read returned 404 (no policy document); treating every dataset as not excluded from public read",
+        );
+      }
       excludedIds = new Set(listPrivateDatasets(policy, s3Options.bucket));
     } catch (err) {
       console.error(

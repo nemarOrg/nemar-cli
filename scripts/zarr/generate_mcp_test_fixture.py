@@ -69,7 +69,7 @@ narrower chunk, verified against nm000329's own final present chunk, which
 decodes to 63 x 1000 for 750 real samples. Shard 0's
 local index 2 ([2000, 3000)) is deliberately marked ABSENT (both footer fields
 `2**64 - 1`) so the mid-array fill-value path is exercised too, and because
-its neighbours' byte offsets skip straight past it, it is what exercises
+its neighbors' byte offsets skip straight past it, it is what exercises
 `planShardReads`' "do not coalesce across an absent entry" rule at the route
 level, not just the pure-function level. Every present
 chunk's digital value is `channel * 100 + (global_sample % chunk_samples)` --

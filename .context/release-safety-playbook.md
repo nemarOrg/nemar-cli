@@ -79,7 +79,7 @@ Do NOT merge until every box is checked.
 
 ## Rollback plan
 
-- **Worker code:** `npx cfman wrangler --account sccn -c backend/wrangler-sccn.toml rollback` (or redeploy the previous tag's commit).
+- **Worker code:** `bunx cfman wrangler --account sccn -c backend/wrangler-sccn.toml rollback` (or redeploy the previous tag's commit).
   Fast, no data change.
 - **Migrations:** D1 has no down-migrations. The release migrations are ADDITIVE, so rolling back the *code* is safe on its own — old code ignores the new column/index. **Check that claim per release rather than inheriting it**: an additive migration that also REWRITES existing rows (0084 rewrote `web_sessions.expires_at`) is not undone by a code rollback, so its data half needs a restore or nothing. Two restore paths, and they are not equivalent: Time Travel (`wrangler d1 time-travel restore nemar-db --bookmark=…`) returns the whole database to an instant and needs no dump, while `scripts/restore-remote.sh` in `nemar-db-backup` (`--force-prod`) replays a row-level snapshot. Prefer Time Travel for "undo the last hour"; the snapshot is the floor for anything older than its retention.
 - **The merge itself:** if the release is fundamentally bad, revert the merge commit on `main` and let the pipeline redeploy the prior version; then investigate on `dev`.

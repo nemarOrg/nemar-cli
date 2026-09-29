@@ -6,7 +6,7 @@
  * integration).
  */
 
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import {
   MANIFEST_ANSWER_MEMO_CAP_BYTES,
   ManifestAnswerMemo,
@@ -72,11 +72,21 @@ describe("ManifestAnswerMemo", () => {
     expect(memo.size).toBe(0);
   });
 
-  test("a value that cannot be serialized is never stored", () => {
-    const memo = new ManifestAnswerMemo();
-    const circular: Record<string, unknown> = {};
-    circular.self = circular;
-    memo.set("circular", circular);
-    expect(memo.size).toBe(0);
+  test("a value that cannot be serialized is never stored, and the failure is logged", () => {
+    // Review finding: the catch in `estimateBytes` had no assertion that it
+    // actually warns, only that the value comes out unstored.
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const memo = new ManifestAnswerMemo();
+      const circular: Record<string, unknown> = {};
+      circular.self = circular;
+      memo.set("circular", circular);
+      expect(memo.size).toBe(0);
+      expect(warnSpy.mock.calls[0]?.[0]).toBe(
+        "[manifest-answer-memo] estimateBytes failed to serialize a value; skipping memoization:",
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });

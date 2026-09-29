@@ -67,7 +67,7 @@ describe("migration 0043: archive_skip_reason", () => {
          SET archive_skip_reason = ?, archive_status = NULL, archive_retry_count = 0, sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now'))
          WHERE dataset_id = ?`,
       )
-      .run("dataset 680.0 GB exceeds 100.0 GB archive limit; use direct download", "on005752");
+      .run("dataset 680.0 GiB exceeds 100.0 GiB archive limit; use direct download", "on005752");
     expect(r.changes).toBe(1);
     const row = db
       .prepare(

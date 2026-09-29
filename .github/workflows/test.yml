@@ -59,6 +59,12 @@ jobs:
               - 'src/**'
               - 'package.json'
               - 'tsconfig.json'
+              # CI-support scripts that ship and are tested alongside the CLI
+              # (e.g. scripts/ci/probe-github-token.ts) but live outside src/.
+              # Without this, a change to the probe alone matched no category,
+              # so unit-pure -- the job that actually runs
+              # test/probe-github-token.test.ts -- silently skipped it.
+              - 'scripts/ci/**'
             backend:
               - 'backend/**'
             tests:
@@ -215,6 +221,9 @@ jobs:
       - name: Non-raw store purge tests
         run: python scripts/zarr/test_purge_non_raw_stores.py
 
+      - name: Collapsed-channel detector tests
+        run: python scripts/zarr/test_find_collapsed_channel_stores.py
+
       - name: Power-line-frequency patch tests
         run: python scripts/zarr/test_patch_power_line_frequency.py
 
@@ -288,28 +297,44 @@ jobs:
           cd scripts/zarr
           pytest -q -rs --junit-xml=/tmp/zarr-tests.xml \
             test_generate_zarr.py test_zarr_queue.py \
-            test_purge_non_raw_stores.py test_hallu_zarr_config.py
+            test_purge_non_raw_stores.py test_hallu_zarr_config.py \
+            test_find_collapsed_channel_stores.py
 
       # A skip is invisible in a green job, and that is exactly how 43 tests
-      # went unrun for the life of this epic. TWO are expected here and no
-      # more: the real-data download test (opted out of, or unreachable) and
-      # the bash-3.2 guard-rail test (this runner has bash 5). Anything above
-      # that is a dependency that did not install -- the failure mode the
-      # threshold exists to make loud.
-      - name: Fail if more than two tests skipped
+      # went unrun for the life of this epic. Only two KINDS of skip are
+      # expected here, matched by their reason and not by how many there are:
+      # the real-data download tests (`real-data test skipped: ...`, opted out
+      # of or data.nemar.org unreachable -- TestSampleIndexAgainstARealRateChange
+      # skips as a class, so one transient error is five skips, and a count
+      # threshold tripped on run 36530497447) and the bash-3.2 guard-rail test
+      # (`... is not bash 3.x ...`, this runner has bash 5). Any other skip is a
+      # dependency that did not install or a test that quietly stopped running
+      # -- the failure mode this step exists to make loud.
+      - name: Fail on any unexpected skip
         run: |
           python - <<'PY'
           import sys, xml.etree.ElementTree as ET
           root = ET.parse("/tmp/zarr-tests.xml").getroot()
-          suite = root if root.tag == "testsuite" else root.find("testsuite")
-          skipped = int(suite.get("skipped", "0"))
-          tests = int(suite.get("tests", "0"))
-          print(f"{tests} tests, {skipped} skipped")
-          if skipped > 2:
+          expected, unexpected, tests = 0, [], 0
+          for case in root.iter("testcase"):
+              tests += 1
+              skip = case.find("skipped")
+              if skip is None:
+                  continue
+              reason = skip.get("message") or (skip.text or "")
+              if reason.startswith("real-data test skipped") or "is not bash 3.x" in reason:
+                  expected += 1
+              else:
+                  unexpected.append((f"{case.get('classname')}.{case.get('name')}", reason))
+          print(f"{tests} tests, {expected + len(unexpected)} skipped "
+                f"({expected} expected, {len(unexpected)} unexpected)")
+          if unexpected:
+              for name, reason in unexpected:
+                  print(f"::error::unexpected skip: {name}: {reason}")
               print(
-                  "::error::%d tests skipped (expected at most 2: the real-data "
-                  "download test and the bash-3.2 test). A dependency probably "
-                  "did not install -- the suite passed without asserting." % skipped
+                  "::error::%d test(s) skipped for a reason other than the real-data "
+                  "download or the bash-3.2 test. A dependency probably did not "
+                  "install -- the suite passed without asserting." % len(unexpected)
               )
               sys.exit(1)
           PY
@@ -525,7 +550,7 @@ jobs:
           # silently flaking in the wrong tier.
           shopt -s nullglob
           files=()
-          for f in test/*.test.ts backend/test/*.test.ts; do
+          for f in test/*.test.ts backend/test/*.test.ts backend/test/helpers/*.test.ts; do
             base="$(basename "$f")"
             case "$base" in
               e2e-sandbox.test.ts|e2e-upload.test.ts|zenodo-sandbox.test.ts|ezid.test.ts|ezid-sandbox.test.ts|auth-passwordless.test.ts) continue;;
@@ -588,7 +613,7 @@ jobs:
           # cli.test.ts (runCli spawns the binary against the backend).
           shopt -s nullglob
           files=()
-          for f in test/*.test.ts backend/test/*.test.ts; do
+          for f in test/*.test.ts backend/test/*.test.ts backend/test/helpers/*.test.ts; do
             base="$(basename "$f")"
             case "$base" in
               e2e-sandbox.test.ts|e2e-upload.test.ts|zenodo-sandbox.test.ts|ezid.test.ts|ezid-sandbox.test.ts|auth-passwordless.test.ts) continue;;
@@ -712,13 +737,30 @@ jobs:
           NPM_TAG: ${{ steps.npm-tag.outputs.tag }}
         run: bun test test/e2e-sandbox.test.ts
 
-  # E2E upload tests - full upload workflow, only on main push
+  # E2E upload tests - full upload workflow. Runs on push to main (the
+  # release itself) AND on a pull request targeting main (the release PR),
+  # so a dead GH_TOKEN or a broken upload path is caught before the merge
+  # that deploys it, not only after (issue #1321). `pull_request` events
+  # targeting `main` already trigger this workflow (see the `on:` block
+  # above); a same-repo PR still gets secrets, but a fork PR does not, which
+  # is why the `pull_request` branch below also checks `head.repo.full_name`
+  # (same guard the "Check out the docs content tree" step above uses): a
+  # fork PR targeting main would otherwise run this job, fail on the missing
+  # GH_TOKEN, and turn an outside contributor's unrelated PR red for a
+  # reason they cannot fix. Skipping is the correct outcome there.
   e2e-upload:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: changes
     if: |
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/main' &&
+      (
+        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        (
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.base.ref == 'main' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        )
+      ) &&
       (needs.changes.outputs.backend == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.cli == 'true')
     steps:
       - name: Checkout code
@@ -747,6 +789,21 @@ jobs:
 
       - name: Install dependencies
         run: bun install
+
+      # Fails loudly, in its own labeled step, when GH_TOKEN is dead (#1321:
+      # every release since v0.10.0 has hit this as two cryptic
+      # "Bad credentials (HTTP 401)" test failures instead). GH_TOKEN has to
+      # stay a nemarAdmin user PAT, not a GitHub App token: the upload flow
+      # accepts collaborator invitations, pushes, and opens PRs as the user,
+      # and `gh api user` (what this probes) 403s for an installation token.
+      - name: Probe GH_TOKEN before running upload tests
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          bun run scripts/ci/probe-github-token.ts GH_TOKEN \
+            --owner nemarAdmin \
+            --require-scopes repo,workflow \
+            --issue 1321
 
       - name: Run E2E upload tests against dev environment
         env:
