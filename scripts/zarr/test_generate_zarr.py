@@ -3168,10 +3168,12 @@ class TestFileDeclaredChannelCount(unittest.TestCase):
 
     def test_a_format_with_no_cheap_header_is_unknown_without_a_warning(self):
         # Nothing here was expected to have a header to read, so nothing is
-        # unreadable: the quiet None is the whole answer.
-        p = self.path("r_eeg.set")
+        # unreadable: the quiet None is the whole answer. (A `.set` used to be
+        # the example here; it has a header count now, and an unreadable one
+        # warns, see TestEeglabDeclaredChannelCount.)
+        p = self.path("r_meg.con")
         with open(p, "wb") as fh:
-            fh.write(b"MATLAB 5.0")
+            fh.write(b"KIT header bytes")
         self.assertEqual(self.count_and_log(p), (None, ""))
 
     def test_brainvision_reads_its_count_key_without_regard_to_case(self):
