@@ -2011,23 +2011,66 @@ def _bids_entities(stem: str) -> dict[str, str]:
     return ents
 
 
+def _decode_sidecar_text(raw: bytes, path: str) -> str:
+    """Decode a sidecar's bytes: UTF-8 (a leading BOM dropped), else a legacy
+    single-byte encoding, with a warning naming the file.
+
+    BIDS requires UTF-8, but real datasets ship Latin-1/Windows-1252 sidecars
+    (on005691's channels.tsv spells microvolts `µV` as the single byte 0xb5).
+    A strict decode raised UnicodeDecodeError, which is not an OSError, so it
+    escaped every caller uncoded and the job retried forever. cp1252 is tried
+    before latin-1 because it is what Windows tools actually write (and a
+    superset of latin-1's printable range); latin-1 maps every byte, so this
+    always returns.
+
+    Newlines are normalized to `\\n`, as the text-mode reads this replaced did,
+    so a CRLF sidecar reaches every caller (and the copy staged for biosigIO)
+    exactly as before.
+    """
+    text: str | None = None
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        for encoding in ("cp1252", "latin-1"):
+            try:
+                text = raw.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+            print(
+                f"::warning::{path} is not valid UTF-8 (BIDS requires it); "
+                f"read it as {encoding}",
+                flush=True,
+            )
+            break
+    if text is None:  # latin-1 maps every byte, so this cannot happen
+        raise AssertionError(f"could not decode {path} even as latin-1")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _read_repo_text(repo_dir: str, head: str, path: str) -> str | None:
     """Read a git-tracked text file at `head`. Uses the working tree when present
     (local/Hallu mode), else falls back to `git cat-file` -- the workflow clones
-    `--no-checkout`, so there is no working tree there. None if unreadable."""
+    `--no-checkout`, so there is no working tree there. None if unreadable.
+
+    Both sources are read as BYTES and decoded once by `_decode_sidecar_text`,
+    so every caller (the channel-count fidelity gate, the channels.tsv staged
+    for biosigIO's units, PLF, electrode positions, coordsystem and event
+    descriptions) gets the same non-UTF-8 fallback."""
+    raw: bytes | None = None
     try:
-        with open(os.path.join(repo_dir, path), encoding="utf-8") as fh:
-            return fh.read()
+        with open(os.path.join(repo_dir, path), "rb") as fh:
+            raw = fh.read()
     except OSError:
         pass
-    try:
-        return subprocess.check_output(
-            ["git", "-C", repo_dir, "cat-file", "blob", f"{head}:{path}"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        )
-    except (subprocess.CalledProcessError, OSError):
-        return None
+    if raw is None:
+        try:
+            raw = subprocess.check_output(
+                ["git", "-C", repo_dir, "cat-file", "blob", f"{head}:{path}"],
+                stderr=subprocess.DEVNULL,
+            )
+        except (subprocess.CalledProcessError, OSError):
+            return None
+    return _decode_sidecar_text(raw, path)
 
 
 def power_line_frequency_for(

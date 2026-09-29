@@ -2822,6 +2822,97 @@ class TestExpectedChannelCountFor(unittest.TestCase):
             self.assertEqual(expected_channel_count_for(clone, rec, {tsv}, "HEAD"), 2)
 
 
+class TestReadRepoTextEncodings(unittest.TestCase):
+    """on005691: a Latin-1 channels.tsv (`µV` as the byte 0xb5) raised
+    UnicodeDecodeError out of `_read_repo_text`. It is not an OSError, so it
+    escaped uncoded and the job retried forever. Both read paths (working tree
+    and the `--no-checkout` clone's `git cat-file`) are exercised in a real
+    repository."""
+
+    TSV = "sub-01/eeg/sub-01_task-rest_channels.tsv"
+    REC = "sub-01/eeg/sub-01_task-rest_eeg.set"
+    LATIN1 = "name\ttype\tunits\nCz\tEEG\tµV\nPz\tEEG\tµV\nEOG\tEOG\tµV\n".encode("latin-1")
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.src = os.path.join(self._tmp.name, "src")
+        self.env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+        }
+
+    def _git(self, *args: str) -> None:
+        subprocess.run(["git", *args], check=True, env=self.env, capture_output=True)
+
+    def _commit(self, data: bytes) -> str:
+        p = os.path.join(self.src, self.TSV)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as fh:
+            fh.write(data)
+        self._git("-C", self.src, "init", "-q", "-b", "main")
+        self._git("-C", self.src, "add", "-A")
+        self._git("-C", self.src, "commit", "-qm", "fixture")
+        clone = os.path.join(self._tmp.name, "clone")
+        self._git("clone", "--no-checkout", "-q", self.src, clone)
+        return clone
+
+    def _read(self, repo: str) -> tuple[str | None, str]:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            text = generate_zarr._read_repo_text(repo, "HEAD", self.TSV)
+        return text, out.getvalue()
+
+    def test_latin1_is_read_with_a_warning_on_both_paths(self):
+        clone = self._commit(self.LATIN1)
+        self.assertFalse(os.path.exists(os.path.join(clone, self.TSV)))
+        for repo in (self.src, clone):
+            with self.subTest(repo=os.path.basename(repo)):
+                text, log = self._read(repo)
+                self.assertIsNotNone(text)
+                self.assertIn("Cz\tEEG\tµV", text or "")
+                self.assertIn("::warning::", log)
+                self.assertIn(self.TSV, log)
+
+    def test_the_fidelity_gate_counts_a_latin1_sidecar(self):
+        # The caller the job died in: the gate's ground truth, not a helper.
+        clone = self._commit(self.LATIN1)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(expected_channel_count_for(clone, self.REC, {self.TSV}, "HEAD"), 3)
+        self.assertIn("not valid UTF-8", out.getvalue())
+
+    def test_utf8_with_a_bom_is_utf8_and_quiet(self):
+        clone = self._commit(b"\xef\xbb\xbf" + "name\ttype\tunits\nCz\tEEG\tµV\n".encode())
+        text, log = self._read(clone)
+        self.assertEqual(text, "name\ttype\tunits\nCz\tEEG\tµV\n")
+        self.assertEqual(log, "")
+
+    def test_cp1252_only_bytes_decode_as_cp1252(self):
+        # 0x80 is the euro sign in cp1252 and a C1 control in latin-1.
+        clone = self._commit(b"name\tdescription\nCz\tgain \x80 note\n")
+        text, log = self._read(clone)
+        self.assertIn("gain € note", text or "")
+        self.assertIn("as cp1252", log)
+
+    def test_bytes_cp1252_leaves_undefined_fall_back_to_latin1(self):
+        # 0x81 is undefined in cp1252, so only latin-1 can take it.
+        clone = self._commit(b"name\tunits\nCz\t\x81\xb5V\n")
+        text, log = self._read(clone)
+        self.assertEqual(text, "name\tunits\nCz\t\x81µV\n")
+        self.assertIn("as latin-1", log)
+
+    def test_crlf_is_normalized_as_the_text_mode_read_did(self):
+        clone = self._commit(b"name\ttype\r\nCz\tEEG\r\n")
+        text, _ = self._read(clone)
+        self.assertEqual(text, "name\ttype\nCz\tEEG\n")
+
+    def test_a_missing_file_is_still_none(self):
+        clone = self._commit(self.LATIN1)
+        self.assertIsNone(generate_zarr._read_repo_text(clone, "HEAD", "absent.tsv"))
+
+
 class TestStoreTotalChannels(unittest.TestCase):
     def test_sums_across_groups(self):
         meta = {"groups": [{"n_channels": 70}, {"n_channels": 4}]}
@@ -7862,6 +7953,24 @@ class TestConvertOneEndToEnd(unittest.TestCase):
 
     def test_agreeing_counts_add_no_mismatch_note(self):
         self.assertNotIn("channels_tsv_count_mismatch", self.convert()["entry"])
+
+    def test_a_latin1_channels_tsv_converts_instead_of_retrying_forever(self):
+        """on005691: `µV` written as the Latin-1 byte 0xb5. The strict UTF-8
+        read raised uncoded from convert_one, so the job retried forever."""
+        with open(os.path.join(self.eeg, "sub-01_task-rest_channels.tsv"), "wb") as fh:
+            fh.write(
+                ("name\ttype\tunits\n" + "".join(f"E{i + 1}\tEEG\tµV\n" for i in range(4)))
+                .encode("latin-1")
+            )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = self.convert()
+        self.assertTrue(result["ok"], result.get("error"))
+        entry = result["entry"]
+        self.assertNotIn("channels_tsv_count_mismatch", entry)
+        self.assertNotIn("channels_tsv_read_error", entry)
+        self.assertIs(entry["units_report"]["sidecar_supplied"], True)
+        self.assertIn("sub-01_task-rest_channels.tsv is not valid UTF-8", out.getvalue())
 
     def test_an_unreadable_sidecar_is_recorded_not_collapsed(self):
         """A channels.tsv that APPLIES but cannot be read must not look like a
