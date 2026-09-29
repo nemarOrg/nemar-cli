@@ -149,21 +149,37 @@ export interface StoredNewsImage {
  * Store validated image bytes under their content address. When the object
  * already exists it is left alone: the key is the hash of the bytes, so the
  * stored copy is identical by construction.
+ *
+ * `record` runs once the name is known and BEFORE anything is written; the
+ * upload route writes its audit row there. An R2 put cannot share a
+ * transaction with a D1 insert, and this order fails safe: a `record` that
+ * throws leaves nothing stored, whereas the opposite order could leave a
+ * public object that no audit row traces to its uploader (images cannot be
+ * listed or deleted through the API, ADR 0076). The cost is an audit row
+ * for a put that then fails, which the retry follows with another.
  */
 export async function storeNewsImage(
   bucket: R2Bucket,
   bytes: Uint8Array,
   type: NewsImageType,
+  record: (image: StoredNewsImage, alreadyStored: boolean) => Promise<unknown>,
 ): Promise<StoredNewsImage> {
   const file = `${await sha256Hex(bytes)}.${extensionFor(type)}`;
   const key = `${NEWS_MEDIA_PREFIX}${file}`;
-  const existing = await bucket.head(key);
-  if (!existing) {
+  const image: StoredNewsImage = {
+    file,
+    url: `${NEWS_MEDIA_URL_PREFIX}${file}`,
+    content_type: type,
+    bytes: bytes.length,
+  };
+  const alreadyStored = (await bucket.head(key)) !== null;
+  await record(image, alreadyStored);
+  if (!alreadyStored) {
     await bucket.put(key, bytes, {
       httpMetadata: { contentType: type, cacheControl: NEWS_MEDIA_CACHE_CONTROL },
     });
   }
-  return { file, url: `${NEWS_MEDIA_URL_PREFIX}${file}`, content_type: type, bytes: bytes.length };
+  return image;
 }
 
 /**

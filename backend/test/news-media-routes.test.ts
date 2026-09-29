@@ -17,7 +17,8 @@
  * that route (the file-name gate, a missing object, the 304 revalidation, a
  * missing binding) is driven through `worker.fetch` like the rest.
  *
- * Every refusal of an upload is also checked to have written nothing.
+ * Every refusal of an upload is also checked to have written nothing: no
+ * object in the bucket and no audit_log row.
  */
 
 import type { Database } from "bun:sqlite";
@@ -44,6 +45,7 @@ const ctx = {
 let mf: Miniflare;
 let bucket: R2Bucket;
 let db: Database;
+let adminId: number;
 
 /** The public news routes as one ES module workerd can run. */
 async function bundleNewsRoutesWorker(): Promise<string> {
@@ -97,8 +99,27 @@ beforeEach(async () => {
       await hashApiKey(key),
       key.slice(0, 8),
     );
+    if (role === "admin") adminId = row?.id ?? 0;
   }
 });
+
+interface UploadAuditRow {
+  user_id: number;
+  action: string;
+  resource_type: string;
+  resource_id: string;
+  details: Record<string, unknown>;
+}
+
+function uploadAuditRows(): UploadAuditRow[] {
+  return db
+    .query<Omit<UploadAuditRow, "details"> & { details: string }, []>(
+      `SELECT user_id, action, resource_type, resource_id, details
+         FROM audit_log WHERE action = 'news_media_uploaded' ORDER BY id`,
+    )
+    .all()
+    .map((row) => ({ ...row, details: JSON.parse(row.details) as Record<string, unknown> }));
+}
 
 function env(withBucket = true): Bindings {
   return {
@@ -251,6 +272,7 @@ describe("POST /admin/news/media: refusals write nothing", () => {
       expect((await upload(png(), type)).status).toBe(415);
     }
     expect(await storedKeys()).toEqual([]);
+    expect(uploadAuditRows()).toEqual([]);
   });
 
   test("413 too_large for a body over 5 MiB (Content-Length sent)", async () => {
@@ -258,6 +280,7 @@ describe("POST /admin/news/media: refusals write nothing", () => {
     expect(res.status).toBe(413);
     expect(((await res.json()) as { error: string }).error).toBe("too_large");
     expect(await storedKeys()).toEqual([]);
+    expect(uploadAuditRows()).toEqual([]);
   });
 
   test("413 too_large for an oversized body sent without Content-Length", async () => {
@@ -265,6 +288,7 @@ describe("POST /admin/news/media: refusals write nothing", () => {
     expect(res.status).toBe(413);
     expect(((await res.json()) as { error: string }).error).toBe("too_large");
     expect(await storedKeys()).toEqual([]);
+    expect(uploadAuditRows()).toEqual([]);
   });
 
   test("400 empty_body", async () => {
@@ -274,6 +298,7 @@ describe("POST /admin/news/media: refusals write nothing", () => {
       expect(((await res.json()) as { error: string }).error).toBe("empty_body");
     }
     expect(await storedKeys()).toEqual([]);
+    expect(uploadAuditRows()).toEqual([]);
   });
 
   test("400 type_mismatch when the magic bytes disagree with the declared type", async () => {
@@ -295,18 +320,57 @@ describe("POST /admin/news/media: refusals write nothing", () => {
       expect(((await res.json()) as { error: string }).error).toBe("type_mismatch");
     }
     expect(await storedKeys()).toEqual([]);
+    expect(uploadAuditRows()).toEqual([]);
   });
 
   test("a member is refused before anything is read or written", async () => {
     const res = await upload(png(), "image/png", { key: MEMBER_KEY });
     expect(res.status).toBe(403);
     expect(await storedKeys()).toEqual([]);
+    expect(uploadAuditRows()).toEqual([]);
   });
 
   test("503 storage_unavailable when the NEWS_MEDIA binding is missing", async () => {
     const res = await upload(png(), "image/png", { withBucket: false });
     expect(res.status).toBe(503);
     expect(((await res.json()) as { error: string }).error).toBe("storage_unavailable");
+    expect(uploadAuditRows()).toEqual([]);
+  });
+});
+
+describe("POST /admin/news/media: audit_log rows", () => {
+  test("each accepted upload writes one row naming the file and the actor", async () => {
+    const bytes = png(40);
+    const file = `${sha256(bytes)}.png`;
+    expect((await upload(bytes, "image/png")).status).toBe(201);
+    // Same bytes again: still a 201 and still audited, marked already stored.
+    expect((await upload(bytes, "image/png")).status).toBe(201);
+
+    const row = (alreadyStored: boolean): UploadAuditRow => ({
+      user_id: adminId,
+      action: "news_media_uploaded",
+      resource_type: "news_media",
+      resource_id: file,
+      details: {
+        url: `/news/media/${file}`,
+        content_type: "image/png",
+        bytes: bytes.length,
+        already_stored: alreadyStored,
+        actor: "mediaadmin",
+      },
+    });
+    expect(uploadAuditRows()).toEqual([row(false), row(true)]);
+  });
+
+  test("a failed audit insert fails the upload with nothing stored", async () => {
+    db.exec(
+      `CREATE TRIGGER news_media_audit_down BEFORE INSERT ON audit_log
+         WHEN NEW.action = 'news_media_uploaded'
+       BEGIN SELECT RAISE(ABORT, 'audit_log unavailable'); END`,
+    );
+    const res = await upload(png(), "image/png");
+    expect(res.status).toBe(500);
+    expect(await storedKeys()).toEqual([]);
   });
 });
 

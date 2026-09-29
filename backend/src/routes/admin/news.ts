@@ -11,7 +11,8 @@
  *
  * Every create, update and delete writes an audit_log row in the same D1
  * batch as the write (services/news.ts, newsAuditStatement), so a failed
- * audit insert fails the request with nothing written.
+ * audit insert fails the request with nothing written. An image upload
+ * writes a `news_media_uploaded` row before its R2 put (see storeNewsImage).
  *
  * Validation failures answer with zValidator's default 400 envelope, the
  * same one the notices routes produce.
@@ -21,6 +22,7 @@ import { zValidator } from "@hono/zod-validator";
 import type { Context } from "hono";
 import { z } from "zod";
 
+import { auditLogStatement } from "../../db/audit-log";
 import {
   NEWS_CATEGORIES,
   NEWS_SLUG_MAX,
@@ -273,7 +275,24 @@ export function registerNewsRoutes(admin: AdminRouter): void {
         503,
       );
     }
-    const stored = await storeNewsImage(bucket, bytes, declared);
+    // Audited because an upload publishes: the object is readable by anyone
+    // with its URL from this moment, whether or not a post ever uses it.
+    const actor = actorOf(c);
+    const stored = await storeNewsImage(bucket, bytes, declared, (image, alreadyStored) =>
+      auditLogStatement(c.env.DB, {
+        userId: actor.id,
+        action: "news_media_uploaded",
+        resourceType: "news_media",
+        resourceId: image.file,
+        details: JSON.stringify({
+          url: image.url,
+          content_type: image.content_type,
+          bytes: image.bytes,
+          already_stored: alreadyStored,
+          actor: actor.username,
+        }),
+      }).run(),
+    );
     return c.json({ url: stored.url, content_type: stored.content_type, bytes: stored.bytes }, 201);
   });
 }
