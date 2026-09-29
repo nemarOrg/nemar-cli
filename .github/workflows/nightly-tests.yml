@@ -75,7 +75,7 @@ jobs:
           # teardown is automated).
           shopt -s nullglob
           files=()
-          for f in test/*.test.ts backend/test/*.test.ts; do
+          for f in test/*.test.ts backend/test/*.test.ts backend/test/helpers/*.test.ts; do
             base="$(basename "$f")"
             case "$base" in
               e2e-upload.test.ts) echo "Skipping $base (creates persistent resources)"; continue;;
