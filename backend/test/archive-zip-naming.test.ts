@@ -23,7 +23,7 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { Hono } from "hono";
 import { dataRoutes } from "../src/routes/data";
 import { archiveKey, legacyArchiveKey } from "../src/services/s3";
@@ -255,6 +255,44 @@ describe("ADR 0012 review: the zip route enforces the size policy, not just S3 o
     expect(body.browse_url).toBe(`/${DATASET}/v1.0.0/`);
     // Never even asked whether it was the latest, let alone HEADed S3.
     expect(s3.requestLog.some((r) => r.url.includes("archives/"))).toBe(false);
+  });
+
+  test("a D1 fault on the size lookup answers 503 like the archive-key HEAD, never a bare 500 (review)", async () => {
+    // D1 is the platform, not business logic: only the one size-policy
+    // statement is made to fail; every other query (the visibility gate,
+    // resolveVersion, versionExists) still runs against the real database
+    // through the real route.
+    const real = realD1(db);
+    const faulty = {
+      prepare(sql: string) {
+        const stmt = real.prepare(sql);
+        if (!sql.includes("SELECT file_size, total_files FROM datasets")) return stmt;
+        const faulting = {
+          bind: () => faulting,
+          first: () => Promise.reject(new Error("simulated D1 outage")),
+        };
+        return faulting as unknown as D1PreparedStatement;
+      },
+    } as unknown as D1Database;
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await app().request(
+        `https://data.nemar.org/${DATASET}/v1.0.1.zip`,
+        { redirect: "manual" },
+        { ...env(), DB: faulty },
+      );
+      expect(res.status).toBe(503);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toBe("Unable to check archive availability");
+      // The fault is logged, not swallowed.
+      expect(
+        errorSpy.mock.calls.some((c) => String(c[0]).includes("archive size-policy lookup failed")),
+      ).toBe(true);
+      // Failed closed: S3 was never asked about a (possibly stray) archive.
+      expect(s3.requestLog.some((r) => r.url.includes("archives/"))).toBe(false);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   test("a within-policy dataset with a missing zip still answers 'not yet available'", async () => {
