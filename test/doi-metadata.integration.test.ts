@@ -111,3 +111,18 @@ describe("one registry cache per enrichment run", () => {
     expect([...cache.keys()].sort()).toEqual(afterOrcid);
   });
 });
+
+describe("stage 1d deadline on live requests", () => {
+  test("a deadline that fires mid-request aborts it and counts it as failed", async () => {
+    const started = Date.now();
+    const res = await resolveDoisForEnrichment(
+      ["10.1038/sdata.2016.44", "10.21105/joss.01896"],
+      new Map(),
+      undefined,
+      AbortSignal.timeout(1),
+    );
+    expect(res.failed).toEqual(["10.1038/sdata.2016.44", "10.21105/joss.01896"]);
+    expect(res.resolved).toEqual([]);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+});

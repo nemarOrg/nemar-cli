@@ -68,6 +68,12 @@ export const EMPTY_DOI_RESOLUTION: DoiResolution = {
 
 export const MAX_RESOLVED_DOIS = 15;
 const RESOLVE_CONCURRENCY = 5;
+/** Overall budget for stage 1d. One chunk's worst case is a DataCite
+ *  timeout followed by a Crossref timeout (10 s each, doi-registry.ts), so
+ *  25 s lets a single slow chunk run its course while the whole stage stays
+ *  well under the ~60 s three hung chunks would otherwise take. Lookups not
+ *  finished by then count as `failed`. */
+export const RESOLVE_DEADLINE_MS = 25_000;
 const MAX_TITLE_CHARS = 300;
 const MAX_FIELD_CHARS = 120;
 
@@ -216,20 +222,31 @@ export function interpretRegistryRecords(
 
 /** Look one DOI up in DataCite (content negotiation covers Crossref DOIs
  *  too), then, only when DataCite has no usable record, in Crossref. */
-export async function resolveDoi(doi: string, cache?: RegistryCache): Promise<DoiLookup> {
+export async function resolveDoi(
+  doi: string,
+  cache?: RegistryCache,
+  deadline?: AbortSignal,
+): Promise<DoiLookup> {
   const key = normalizeDoiKey(doi);
-  const dataCite = await fetchRegistryRecord("DataCite", key, cache);
+  const dataCite = await fetchRegistryRecord("DataCite", key, cache, deadline);
   const first = interpretRegistryRecords(key, dataCite);
   if (first.status === "resolved") return first;
-  const crossref = await fetchRegistryRecord("Crossref", key, cache);
+  const crossref = await fetchRegistryRecord("Crossref", key, cache, deadline);
   return interpretRegistryRecords(key, dataCite, crossref);
 }
 
-/** Resolve up to `cap` candidates, a few at a time. */
+/**
+ * Resolve up to `cap` candidates, a few at a time, within `deadline`
+ * (default {@link RESOLVE_DEADLINE_MS}). Never throws for a registry
+ * problem: a lookup the deadline cuts short, or one that never starts
+ * because the deadline has passed, is `failed`; an answer already in the
+ * run's cache still counts.
+ */
 export async function resolveDoisForEnrichment(
   dois: string[],
   cache?: RegistryCache,
   cap: number = MAX_RESOLVED_DOIS,
+  deadline: AbortSignal = AbortSignal.timeout(RESOLVE_DEADLINE_MS),
 ): Promise<DoiResolution> {
   const toResolve = dois.slice(0, cap);
   const resolution: DoiResolution = {
@@ -240,11 +257,16 @@ export async function resolveDoisForEnrichment(
   };
   for (let i = 0; i < toResolve.length; i += RESOLVE_CONCURRENCY) {
     const chunk = toResolve.slice(i, i + RESOLVE_CONCURRENCY);
-    const lookups = await Promise.all(chunk.map((doi) => resolveDoi(doi, cache)));
+    const lookups = await Promise.all(chunk.map((doi) => resolveDoi(doi, cache, deadline)));
     lookups.forEach((lookup, j) => {
       if (lookup.status === "resolved") resolution.resolved.push(lookup.record);
       else resolution[lookup.status].push(chunk[j]);
     });
+  }
+  if (deadline.aborted && resolution.failed.length > 0) {
+    console.warn(
+      `[doi-metadata] Stage 1d deadline reached; ${resolution.failed.length} DOI lookup(s) counted as failed: ${resolution.failed.join(", ")}`,
+    );
   }
   return resolution;
 }

@@ -3,17 +3,22 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   EMPTY_DOI_RESOLUTION,
+  MAX_RESOLVED_DOIS,
   collectCandidateDois,
   datasetDoisOf,
   formatResolvedDoiBlock,
   interpretRegistryRecords,
   parseCrossrefWork,
   parseDataCiteJson,
+  resolveDoisForEnrichment,
   sanitizeRegistryText,
   summarizeDoiResolution,
   titlesByDoi,
 } from "../backend/src/services/doi-metadata.js";
-import { classifyRegistryStatus } from "../backend/src/services/doi-registry.js";
+import {
+  type RegistryCache,
+  classifyRegistryStatus,
+} from "../backend/src/services/doi-registry.js";
 import { buildSourcesPrompt } from "../backend/src/services/llm-enrich.js";
 
 // Real registry responses, recorded 2026-09-29 with the same requests
@@ -316,5 +321,82 @@ describe("registry outcomes", () => {
     expect(titlesByDoi(resolution).get("10.1038/s41597-019-0027-4")).toBe(
       "Multi-channel EEG recordings during a sustained-attention driving task",
     );
+  });
+});
+
+describe("stage 1d deadline and cap (#1549 follow-up)", () => {
+  // The deadline is an AbortSignal; one that has already fired makes every
+  // uncached fetch reject before it reaches the network, so this stays in the
+  // offline tier. The cache holds a recorded real DataCite response, standing
+  // in for what stage 1b already fetched in the same run.
+  const cachedFromStage1b = (): RegistryCache =>
+    new Map([
+      [
+        "DataCite:10.1038/s41597-019-0027-4",
+        Promise.resolve({
+          outcome: "found" as const,
+          body: recorded("datacite-s41597-019-0027-4.json"),
+        }),
+      ],
+    ]);
+
+  test("after the deadline, lookups count as failed and nothing throws", async () => {
+    const cache = cachedFromStage1b();
+    const started = Date.now();
+    const res = await resolveDoisForEnrichment(
+      ["10.1038/s41597-019-0027-4", "10.1016/j.neuroimage.2014.01.015", "10.21105/joss.01896"],
+      cache,
+      MAX_RESOLVED_DOIS,
+      AbortSignal.abort(),
+    );
+    // Well under one 10 s registry timeout: nothing waited on the network.
+    expect(Date.now() - started).toBeLessThan(1_000);
+    // An answer already in the run's cache still counts.
+    expect(res.resolved.map((r) => r.doi)).toEqual(["10.1038/s41597-019-0027-4"]);
+    expect(res.failed).toEqual(["10.1016/j.neuroimage.2014.01.015", "10.21105/joss.01896"]);
+    expect(res.unresolved).toEqual([]);
+    // Cut-short lookups are evicted, so a later stage may ask again.
+    expect([...cache.keys()]).toEqual(["DataCite:10.1038/s41597-019-0027-4"]);
+  });
+
+  test("DOIs past the cap reach the prompt marked as not looked up", async () => {
+    // 17 real candidates from nm000275's README-style list: 15 fit the cap.
+    const readme = [
+      "https://doi.org/10.1038/s41597-019-0027-4",
+      "https://doi.org/10.6084/m9.figshare.6427334.v5",
+      "https://doi.org/10.6084/m9.figshare.7666055.v3",
+      "https://doi.org/10.1016/j.neuroimage.2014.01.015",
+      "https://doi.org/10.1038/srep21353",
+      "https://doi.org/10.1109/TBCAS.2014.2316224",
+      "https://doi.org/10.1109/TNNLS.2013.2275003",
+      "https://doi.org/10.1016/j.knosys.2015.01.007",
+      "https://doi.org/10.1109/TNNLS.2015.2496330",
+      "https://doi.org/10.1109/TFUZZ.2016.2633379",
+      "https://doi.org/10.1038/sdata.2016.44",
+      "https://doi.org/10.1038/s41597-019-0104-8",
+      "https://doi.org/10.21105/joss.01896",
+      "https://doi.org/10.1016/j.jneumeth.2003.10.009",
+      "https://doi.org/10.3389/fnins.2013.00267",
+      "https://doi.org/10.1155/2011/156869",
+      "https://doi.org/10.1155/2011/879716",
+    ].join("\n");
+    const candidates = collectCandidateDois(readme, {});
+    expect(candidates).toHaveLength(17);
+    const res = await resolveDoisForEnrichment(
+      candidates,
+      cachedFromStage1b(),
+      MAX_RESOLVED_DOIS,
+      AbortSignal.abort(),
+    );
+    expect(res.skipped).toEqual(["10.1155/2011/156869", "10.1155/2011/879716"]);
+    const block = formatResolvedDoiBlock(res);
+    expect(block).toContain("- 10.1155/2011/156869 | not looked up (over the per-run cap)");
+    expect(block).toContain("- 10.1155/2011/879716 | not looked up (over the per-run cap)");
+    expect(summarizeDoiResolution(res)).toEqual({
+      resolved: 1,
+      unresolved: 0,
+      failed: 14,
+      skipped: 2,
+    });
   });
 });
