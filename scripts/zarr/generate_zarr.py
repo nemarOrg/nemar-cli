@@ -4835,8 +4835,9 @@ def materialize_local(
 # with that `.set` in `eeglab-fdt-declarations.json` and recorded the evidence.
 #
 # Nothing here pairs files by name. A declaration is checked against the `.set`
-# header (channels x samples x trials) and against the target's byte size, and
-# any disagreement REFUSES the recording with a typed code rather than serving a
+# header (channels x samples x trials), against the target's byte size, and
+# against the reviewed content (its git-annex key, or the SHA-256 of its bytes
+# when it has no key), and any disagreement REFUSES the recording with a typed code rather than serving a
 # signal read from the wrong file. Datasets and recordings the file does not name
 # are untouched.
 FDT_DECLARATIONS_PATH = os.path.join(
@@ -4844,12 +4845,28 @@ FDT_DECLARATIONS_PATH = os.path.join(
 )
 _FDT_DATASET_ID_RE = re.compile(r"[a-z]{2}\d{6}")
 _FDT_DATASET_KEYS = frozenset({"reviewed", "note", "recordings"})
-_FDT_RECORDING_KEYS = frozenset({"fdt", "nbchan", "pnts", "trials", "fdt_bytes", "evidence"})
+_FDT_RECORDING_KEYS = frozenset(
+    {"fdt", "nbchan", "pnts", "trials", "fdt_bytes", "annex_key", "evidence"}
+)
+# The content pin: a git-annex SHA-256 key, whose size field and hash are both
+# checked at conversion (an in-git `.fdt` is hashed against the same key).
+_FDT_ANNEX_KEY_RE = re.compile(r"SHA256E?-s(\d+)--([0-9a-f]{64})(?:\.[A-Za-z0-9]+)*")
+
+
+def _sha256_file(path: str) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(8 * 1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 class FdtDeclarationRefused(Exception):
     """A declared `.fdt` for an EEGLAB `.set` failed verification: absent at HEAD,
-    contradicted by the `.set` header, or the wrong size. A property of the
+    contradicted by (or unreadable in) the `.set` header, the wrong size, or not
+    the reviewed content. A property of the
     dataset plus its declaration, so NOT retryable; the fix is a reviewed edit to
     `eeglab-fdt-declarations.json`, never a guess at another file."""
 
@@ -4862,6 +4879,7 @@ class FdtDeclaration(TypedDict):
     pnts: int
     trials: int
     fdt_bytes: int
+    annex_key: str
 
 
 def _fdt_positive_int(value: object, where: str) -> int:
@@ -4898,7 +4916,8 @@ def load_fdt_declarations(
     Strict on purpose: an unknown key is refused (a misspelt field would
     otherwise be dropped and the entry read as something nobody reviewed), the
     declared byte count must equal ``nbchan * pnts * trials * 4`` (EEGLAB writes
-    `.fdt` as float32), and one `.fdt` may back only one `.set`. A malformed
+    `.fdt` as float32), ``annex_key`` must be a SHA256E key whose size field is
+    ``fdt_bytes``, and one `.fdt` (by path or by key) may back only one `.set`. A malformed
     file raises ValueError (json.JSONDecodeError, a ValueError subclass, for
     invalid JSON) and so fails the run loudly rather than converting against a half-read
     declaration. A missing file means no declarations."""
@@ -4926,6 +4945,7 @@ def load_fdt_declarations(
             raise ValueError(f"{path}: {dataset_id} must record when it was 'reviewed'")
         recs: dict[str, FdtDeclaration] = {}
         claimed: dict[str, str] = {}
+        pinned_keys: dict[str, str] = {}
         for set_path, entry in ds["recordings"].items():
             where = f"{path}: {dataset_id} {set_path!r}"
             _fdt_safe_rel(set_path, ".set", where)
@@ -4943,12 +4963,23 @@ def load_fdt_declarations(
             if fdt in claimed:
                 raise ValueError(f"{where}: {fdt!r} is already declared for {claimed[fdt]!r}")
             claimed[fdt] = set_path
+            fdt_bytes = _fdt_positive_int(entry["fdt_bytes"], f"{where} fdt_bytes")
+            key = entry["annex_key"]
+            m = _FDT_ANNEX_KEY_RE.fullmatch(key) if isinstance(key, str) else None
+            if m is None:
+                raise ValueError(f"{where}: annex_key must be a SHA256E git-annex key, got {key!r}")
+            if int(m[1]) != fdt_bytes:
+                raise ValueError(f"{where}: annex_key size {m[1]} != fdt_bytes {fdt_bytes}")
+            if key in pinned_keys:
+                raise ValueError(f"{where}: {key} is already declared for {pinned_keys[key]!r}")
+            pinned_keys[key] = set_path
             decl: FdtDeclaration = {
                 "fdt": fdt,
                 "nbchan": _fdt_positive_int(entry["nbchan"], f"{where} nbchan"),
                 "pnts": _fdt_positive_int(entry["pnts"], f"{where} pnts"),
                 "trials": _fdt_positive_int(entry["trials"], f"{where} trials"),
-                "fdt_bytes": _fdt_positive_int(entry["fdt_bytes"], f"{where} fdt_bytes"),
+                "fdt_bytes": fdt_bytes,
+                "annex_key": key,
             }
             implied = decl["nbchan"] * decl["pnts"] * decl["trials"] * 4
             if decl["fdt_bytes"] != implied:
@@ -5056,23 +5087,46 @@ def stage_declared_fdt(
             f"{primary!r} header says nbchan x pnts x trials = {layout}, the declaration says {declared}"
         )
     want = decl["fdt_bytes"]
-    # Size BEFORE fetching, from the pointer (annex key) or the in-git blob, so a
-    # wrong pairing never costs a multi-GB download.
+    pinned = decl["annex_key"]
+
+    def refuse_size(known: int) -> FdtDeclarationRefused:
+        return FdtDeclarationRefused(
+            f"declared .fdt {fdt!r} is {known} bytes; {primary!r} needs {want} "
+            f"(nbchan {declared[0]} x pnts {declared[1]} x trials {declared[2]} x 4)"
+        )
+
+    def refuse_content(found: str) -> FdtDeclarationRefused:
+        return FdtDeclarationRefused(
+            f"declared .fdt {fdt!r} is {found}, not the reviewed content {pinned}"
+        )
+
+    # Size and content identity BEFORE fetching, from the pointer (annex key) or
+    # the in-git blob, so a wrong pairing never costs a multi-GB download. An
+    # annexed `.fdt` is pinned by its key; one without a key (in git, or an
+    # unlocked working-tree file) is pinned by hashing the bytes against the
+    # key's SHA-256 once they are local.
+    key: str | None
     if local:
         src = os.path.join(repo, fdt)
         if not os.path.exists(src):
             raise FdtDeclarationRefused(f"declared .fdt {fdt!r} has no local content (run `git annex get`)")
         # The working tree, not HEAD: local mode converts what is checked out
-        # (annex content present), so the size that matters is that file's.
-        known: int | None = os.path.getsize(src)
+        # (annex content present), so the size and bytes that matter are that
+        # file's.
+        known = os.path.getsize(src)
+        key = parse_annex_key(os.readlink(src)) if os.path.islink(src) else None
     else:
-        key, blob_size = _blob_key_and_size(repo, fdt, head)
-        known = annex_key_size(key) if key else blob_size
+        key, known = _blob_key_and_size(repo, fdt, head)
+        if key is None and known == 0:
+            # Listed in head_files but not in the tree at the pinned head (a
+            # declared size is always positive, so an empty blob cannot match).
+            raise FdtDeclarationRefused(f"declared .fdt {fdt!r} is not in the tree at {head[:8]}")
+    if key is not None:
+        if key != pinned:
+            raise refuse_content(f"annex key {key}")
+        known = annex_key_size(key)
     if known is not None and known != want:
-        raise FdtDeclarationRefused(
-            f"declared .fdt {fdt!r} is {known} bytes; {primary!r} needs {want} "
-            f"(nbchan {declared[0]} x pnts {declared[1]} x trials {declared[2]} x 4)"
-        )
+        raise refuse_size(known)
     set_local = os.path.join(work, os.path.basename(primary))
     staged = os.path.splitext(set_local)[0] + ".fdt"
     if local:
@@ -5092,6 +5146,12 @@ def stage_declared_fdt(
     got = os.path.getsize(staged)
     if got != want:
         raise FdtDeclarationRefused(f"staged .fdt {fdt!r} is {got} bytes; expected {want}")
+    if key is None:
+        # The loader accepted `pinned` only as a SHA256E key, so its hash field
+        # is the content's SHA-256.
+        digest = _sha256_file(staged)
+        if digest != pinned.split("--", 1)[1].split(".", 1)[0]:
+            raise refuse_content(f"SHA-256 {digest}")
     print(f"[zarr] {primary}: using declared .fdt {fdt!r} ({want} bytes)", flush=True)
     return set_local
 

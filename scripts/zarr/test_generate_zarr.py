@@ -8782,6 +8782,15 @@ class TestBlobKeyAndSize(unittest.TestCase):
                 self.assertEqual(generate_zarr._blob_key_and_size(self.repo, path, self.head), want)
 
 
+def sha256e_key(path: str) -> str:
+    """The git-annex SHA256E key of a file's bytes, as a declaration pins it."""
+    import hashlib
+
+    with open(path, "rb") as fh:
+        data = fh.read()
+    return f"SHA256E-s{len(data)}--{hashlib.sha256(data).hexdigest()}.fdt"
+
+
 class TestFdtDeclarationFile(unittest.TestCase):
     """The committed declaration file, and the loader's refusals."""
 
@@ -8798,6 +8807,7 @@ class TestFdtDeclarationFile(unittest.TestCase):
 
     ENTRY: ClassVar[dict] = {
         "fdt": "derivatives/fdt/a.fdt", "nbchan": 2, "pnts": 10, "trials": 1, "fdt_bytes": 80,
+        "annex_key": "SHA256E-s80--" + "0" * 64 + ".fdt",
     }
 
     def test_the_committed_file_loads_and_names_only_raw_recordings(self):
@@ -8808,6 +8818,10 @@ class TestFdtDeclarationFile(unittest.TestCase):
         for set_path, d in recs.items():
             self.assertFalse(generate_zarr.is_excluded_from_discovery(set_path))
             self.assertEqual(d["fdt_bytes"], d["nbchan"] * d["pnts"] * d["trials"] * 4)
+            # Every entry is pinned to content whose size is the declared size.
+            self.assertEqual(generate_zarr.annex_key_size(d["annex_key"]), d["fdt_bytes"])
+            self.assertTrue(d["annex_key"].endswith(".fdt"))
+        self.assertEqual(len({d["annex_key"] for d in recs.values()}), len(recs))
         # The misnamed file is paired by size and folder, not by its name.
         self.assertEqual(
             recs["sub-013/ses-01/eeg/sub-013_ses-01_task-experiment_run-01_eeg.set"]["fdt"],
@@ -8840,6 +8854,18 @@ class TestFdtDeclarationFile(unittest.TestCase):
                 **self.ENTRY, "fdt": "../elsewhere/a.fdt"}},
             "a boolean count": {"sub-01/eeg/sub-01_eeg.set": {**self.ENTRY, "trials": True}},
             "an entry that is not an object": {"sub-01/eeg/sub-01_eeg.set": ["x.fdt"]},
+            "no annex_key": {"sub-01/eeg/sub-01_eeg.set": {
+                k: v for k, v in self.ENTRY.items() if k != "annex_key"}},
+            "annex_key size disagrees": {"sub-01/eeg/sub-01_eeg.set": {
+                **self.ENTRY, "annex_key": "SHA256E-s84--" + "0" * 64 + ".fdt"}},
+            "annex_key is not SHA-256": {"sub-01/eeg/sub-01_eeg.set": {
+                **self.ENTRY, "annex_key": "MD5E-s80--" + "0" * 32 + ".fdt"}},
+            "annex_key is not a string": {"sub-01/eeg/sub-01_eeg.set": {
+                **self.ENTRY, "annex_key": 80}},
+            "one content for two sets": {
+                "sub-01/eeg/sub-01_eeg.set": dict(self.ENTRY),
+                "sub-02/eeg/sub-02_eeg.set": {**self.ENTRY, "fdt": "derivatives/fdt/b.fdt"},
+            },
         }
         # Paths the loader must refuse whichever side of the pairing they are on.
         unsafe = {
@@ -8906,6 +8932,8 @@ class TestDeclaredFdtConvertOne(unittest.TestCase):
         self.repo = os.path.join(self._tmp.name, "repo")
         write_eeglab_set(os.path.join(self.repo, self.SET), os.path.join(self.repo, self.FDT),
                          nbchan=self.NBCHAN, pnts=self.PNTS)
+        # The reviewed content, pinned before any test alters the file.
+        self.key = sha256e_key(os.path.join(self.repo, self.FDT))
         bindir = os.path.join(self._tmp.name, "bin")
         os.makedirs(bindir)
         with open(os.path.join(bindir, "aws"), "w") as fh:
@@ -8929,16 +8957,16 @@ class TestDeclaredFdtConvertOne(unittest.TestCase):
 
     def decl(self, **over) -> dict:
         d = {"fdt": self.FDT, "nbchan": self.NBCHAN, "pnts": self.PNTS, "trials": 1,
-             "fdt_bytes": self.NBCHAN * self.PNTS * 4}
+             "fdt_bytes": self.NBCHAN * self.PNTS * 4, "annex_key": self.key}
         d.update(over)
         return d
 
-    def convert(self, declarations, *, local=True, head="b" * 40):
+    def convert(self, declarations, *, local=True, head="b" * 40, extra_files=()):
         work = tempfile.TemporaryDirectory()
         self.addCleanup(work.cleanup)
         generate_zarr._init_worker({
             "repo": self.repo, "bucket": "nemar-test", "dataset_id": "on000001",
-            "head": head, "head_files": {self.SET, self.FDT}, "local": local,
+            "head": head, "head_files": {self.SET, self.FDT, *extra_files}, "local": local,
             "tmp": work.name, "updated": "2026-09-28T00:00:00Z",
             "contract_base": "https://zarr.nemar.org", "engine_version": "3",
             "dataset_row": None, "provenance_fetch_failed": False,
@@ -8979,6 +9007,19 @@ class TestDeclaredFdtConvertOne(unittest.TestCase):
                 self.assertFalse(result["ok"])
                 self.assertEqual(result["code"], "fdt_declaration_refused")
                 self.assertIn("bytes", result["error"])
+
+    def test_same_size_different_content_is_refused(self):
+        # Right name, right size, wrong bytes: only the content pin can tell.
+        path = os.path.join(self.repo, self.FDT)
+        with open(path, "r+b") as fh:
+            fh.write(b"\x00\x00\x00\x00")
+        for local in (True, False):
+            with self.subTest(local=local):
+                head = "b" * 40 if local else self.commit()
+                result = self.convert({self.SET: self.decl()}, local=local, head=head)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["code"], "fdt_declaration_refused")
+                self.assertIn("not the reviewed content", result["error"])
 
     def test_a_declaration_the_header_contradicts_is_refused(self):
         wrong = self.decl(nbchan=8, fdt_bytes=8 * self.PNTS * 4)
@@ -9028,6 +9069,132 @@ class TestDeclaredFdtConvertOne(unittest.TestCase):
         result = self.convert({self.SET: self.decl()})
         self.assertEqual(result["code"], "fdt_declaration_refused")
         self.assertIn("inline", result["error"])
+
+
+class TestDeclaredFdtAnnexed(unittest.TestCase):
+    """The remote path over an ANNEXED `.fdt`, as on004306 ships it: the tree
+    holds a git-annex symlink whose key is compared with the declaration's pin
+    and whose `-s` field is the size, both BEFORE any download; the bytes then
+    come from the (stubbed, file-backed) bucket's `objects/<key>`."""
+
+    SET = TestDeclaredFdtConvertOne.SET
+    FDT = TestDeclaredFdtConvertOne.FDT
+    NBCHAN, PNTS = 4, 1000
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import scipy.io  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        self.s3 = os.path.join(self.dir, "s3")
+        os.makedirs(self.s3)
+        content = os.path.join(self.dir, "content.fdt")
+        write_eeglab_set(os.path.join(self.repo, self.SET), content,
+                         nbchan=self.NBCHAN, pnts=self.PNTS)
+        self.key = sha256e_key(content)
+        shutil.copyfile(content, os.path.join(self.s3, f"on000001_objects_{self.key}"))
+
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=self.repo, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+
+        self.git = git
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.org")
+        git("config", "user.name", "t")
+        self.point_fdt_at(self.key)
+
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write(STUB_AWS)
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        self.log = os.path.join(self.dir, "aws.log")
+        saved = {k: os.environ.get(k) for k in ("PATH", "ZARR_TEST_S3_ROOT", "ZARR_TEST_S3_LOG")}
+        os.environ["PATH"] = bindir + os.pathsep + (saved["PATH"] or "")
+        os.environ["ZARR_TEST_S3_ROOT"] = self.s3
+        os.environ["ZARR_TEST_S3_LOG"] = self.log
+        self.addCleanup(self._restore_env, saved)
+
+    @staticmethod
+    def _restore_env(saved):
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def point_fdt_at(self, key: str) -> None:
+        """Commit the `.fdt` as a locked git-annex symlink to `key` (content
+        absent locally, exactly as a metadata clone has it)."""
+        link = os.path.join(self.repo, self.FDT)
+        os.makedirs(os.path.dirname(link), exist_ok=True)
+        if os.path.lexists(link):
+            os.remove(link)
+        target = os.path.join(self.repo, ".git", "annex", "objects", "Xx", "Yy", key, key)
+        os.symlink(os.path.relpath(target, os.path.dirname(link)), link)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", f"point at {key[:20]}")
+        self.head = self.git("rev-parse", "HEAD")
+
+    def decl(self) -> dict:
+        return {"fdt": self.FDT, "nbchan": self.NBCHAN, "pnts": self.PNTS, "trials": 1,
+                "fdt_bytes": self.NBCHAN * self.PNTS * 4, "annex_key": self.key}
+
+    def convert(self) -> dict:
+        work = tempfile.TemporaryDirectory()
+        self.addCleanup(work.cleanup)
+        generate_zarr._init_worker({
+            "repo": self.repo, "bucket": "nemar-test", "dataset_id": "on000001",
+            "head": self.head, "head_files": {self.SET, self.FDT}, "local": False,
+            "tmp": work.name, "updated": "2026-09-28T00:00:00Z",
+            "contract_base": "https://zarr.nemar.org", "engine_version": "3",
+            "dataset_row": None, "provenance_fetch_failed": False,
+            "mem_budget": None, "hard_ceiling": None, "projections": {},
+            "fdt_declarations": {self.SET: self.decl()},
+        })
+        return convert_one(self.SET)
+
+    def fetched_objects(self) -> list[str]:
+        if not os.path.exists(self.log):
+            return []
+        with open(self.log) as fh:
+            return [line for line in fh if "/objects/" in line]
+
+    def test_the_pinned_annex_object_is_downloaded_and_converts(self):
+        result = self.convert()
+        self.assertTrue(result["ok"], result.get("error"))
+        (group,) = result["entry"]["groups"]
+        self.assertEqual((group["n_channels"], group["n_samples"]), (self.NBCHAN, self.PNTS))
+        (fetch,) = self.fetched_objects()
+        self.assertIn(self.key, fetch)
+
+    def test_a_different_key_is_refused_before_download(self):
+        # Same declared size, different content: the key in the tree is not the pin.
+        other = self.key.replace(self.key.split("--")[1][:8], "00000000", 1)
+        self.point_fdt_at(other)
+        result = self.convert()
+        self.assertEqual(result["code"], "fdt_declaration_refused")
+        self.assertIn("not the reviewed content", result["error"])
+        self.assertEqual(self.fetched_objects(), [])
+
+    def test_a_key_of_another_size_is_refused_before_download(self):
+        # The annex key's `-s` field is the size seen before fetching; a key
+        # declaring any other size never reaches the multi-GB download.
+        want = self.NBCHAN * self.PNTS * 4
+        self.point_fdt_at(self.key.replace(f"-s{want}--", f"-s{want * 2}--"))
+        result = self.convert()
+        self.assertEqual(result["code"], "fdt_declaration_refused")
+        self.assertIn(f"-s{want * 2}--", result["error"])
+        self.assertEqual(self.fetched_objects(), [])
 
 
 if __name__ == "__main__":
