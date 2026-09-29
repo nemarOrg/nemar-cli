@@ -8738,6 +8738,50 @@ def write_eeglab_set(set_path: str, fdt_path: str | None, *, nbchan: int = 4,
     scipy.io.savemat(set_path, fields)
 
 
+class TestBlobKeyAndSize(unittest.TestCase):
+    """`_blob_key_and_size` over a real git repository: every tracked shape it
+    has to tell apart, including an in-git blob too large to be a pointer (sized
+    by `git cat-file -s`, never read)."""
+
+    KEY = "SHA256E-s2048--" + "a" * 64 + ".fdt"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = tmp.name
+
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=self.repo, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.org")
+        git("config", "user.name", "t")
+        with open(os.path.join(self.repo, "big.fdt"), "wb") as fh:
+            fh.write(b"\x01" * 5000)
+        with open(os.path.join(self.repo, "small.fdt"), "wb") as fh:
+            fh.write(b"\x01" * 10)
+        with open(os.path.join(self.repo, "unlocked.fdt"), "w") as fh:
+            fh.write(f"/annex/objects/{self.KEY}\n")
+        os.symlink(f".git/annex/objects/Xx/Yy/{self.KEY}/{self.KEY}",
+                   os.path.join(self.repo, "locked.fdt"))
+        git("add", "-A")
+        git("commit", "-q", "-m", "fixture")
+        self.head = git("rev-parse", "HEAD")
+
+    def test_each_shape(self):
+        cases = {
+            "big.fdt": (None, 5000),
+            "small.fdt": (None, 10),
+            "unlocked.fdt": (self.KEY, 0),
+            "locked.fdt": (self.KEY, 0),
+            "absent.fdt": (None, 0),
+        }
+        for path, want in cases.items():
+            with self.subTest(path):
+                self.assertEqual(generate_zarr._blob_key_and_size(self.repo, path, self.head), want)
+
+
 class TestFdtDeclarationFile(unittest.TestCase):
     """The committed declaration file, and the loader's refusals."""
 
