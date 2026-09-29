@@ -5124,7 +5124,9 @@ adminCommand.addCommand(exemplarCommand);
 // Phase 2 metadata columns for one or many datasets.
 // ============================================================================
 
-function printReindexLine(r: ReindexResponse, opts?: { showRef?: boolean }): void {
+/** The summary lines `nemar admin reindex` prints for one dataset. Pure, so
+ *  the wording operators act on (warnings, the lookup cap) is testable. */
+export function reindexLines(r: ReindexResponse, opts?: { showRef?: boolean }): string[] {
   const enrLabel = r.enrichment.status;
   const enr =
     enrLabel === "ok"
@@ -5146,16 +5148,36 @@ function printReindexLine(r: ReindexResponse, opts?: { showRef?: boolean }): voi
         ? chalk.red("cols:failed")
         : "";
   const ref = opts?.showRef && r.enrichment.ref ? chalk.dim(`@${r.enrichment.ref}`) : "";
-  console.log(`  ${r.dataset_id.padEnd(12)} ${enr}${ref}  ${sync}  ${cols}`);
-  if (r.enrichment.error) console.log(chalk.red(`    enrichment: ${r.enrichment.error}`));
+  const lines = [`  ${r.dataset_id.padEnd(12)} ${enr}${ref}  ${sync}  ${cols}`];
+  if (r.enrichment.error) lines.push(chalk.red(`    enrichment: ${r.enrichment.error}`));
+  // Warnings carry the actionable part (e.g. failed DOI lookups: reindex
+  // again), so the summary shows them; --json carries them in the body.
+  for (const warning of r.enrichment.warnings ?? []) {
+    lines.push(chalk.yellow(`    warning: ${warning}`));
+  }
   const doi = r.enrichment.doi_resolution;
   if (doi) {
-    const line = `    DOI lookups: ${doi.resolved} resolved, ${doi.unresolved} unresolved, ${doi.failed} failed, ${doi.skipped} over cap`;
-    console.log(doi.failed > 0 ? chalk.yellow(`${line} (retry this dataset)`) : chalk.dim(line));
+    lines.push(
+      chalk.dim(
+        `    DOI lookups: ${doi.resolved} resolved, ${doi.unresolved} unresolved, ${doi.failed} failed`,
+      ),
+    );
+    if (doi.skipped > 0) {
+      lines.push(
+        chalk.yellow(
+          `    ${doi.skipped} DOI(s) past the per-run lookup cap were not looked up; their relation labels were chosen without registry metadata`,
+        ),
+      );
+    }
   }
   if (r.sync.metadata_columns_error) {
-    console.log(chalk.red(`    metadata columns: ${r.sync.metadata_columns_error}`));
+    lines.push(chalk.red(`    metadata columns: ${r.sync.metadata_columns_error}`));
   }
+  return lines;
+}
+
+function printReindexLine(r: ReindexResponse, opts?: { showRef?: boolean }): void {
+  for (const line of reindexLines(r, opts)) console.log(line);
 }
 
 // ============================================================================
