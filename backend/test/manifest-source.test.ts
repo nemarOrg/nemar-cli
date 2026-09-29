@@ -133,7 +133,9 @@ async function resolve(
   );
   if (read.kind !== "ok") return read.kind;
   const answer = read.query.finish(read.header);
-  if (read.memoKey !== null) rememberManifestAnswer(read.memoKey, read.header, answer);
+  if (read.memoKey !== null && read.etag !== null) {
+    rememberManifestAnswer(read.memoKey, read.header, read.etag, answer);
+  }
   return answer;
 }
 
@@ -154,7 +156,9 @@ async function resolveWithSource(
   );
   if (read.kind !== "ok") throw new Error(`expected ok, got ${read.kind}`);
   const answer = read.query.finish(read.header);
-  if (read.memoKey !== null) rememberManifestAnswer(read.memoKey, read.header, answer);
+  if (read.memoKey !== null && read.etag !== null) {
+    rememberManifestAnswer(read.memoKey, read.header, read.etag, answer);
+  }
   return { answer, source: read.source };
 }
 
@@ -364,7 +368,7 @@ describe("the per-isolate answer memo (#1494 amendment)", () => {
     if (first.kind !== "ok") throw new Error(first.kind);
     const answer1 = first.query.finish(first.header);
     expect(first.memoKey).not.toBeNull();
-    rememberManifestAnswer(first.memoKey as string, first.header, answer1);
+    rememberManifestAnswer(first.memoKey as string, first.header, first.etag as string, answer1);
     expect(scans).toBe(1);
 
     const second = await readManifest(
@@ -413,7 +417,7 @@ describe("the per-isolate answer memo (#1494 amendment)", () => {
     if (first.kind !== "ok") throw new Error(first.kind);
     const answer1 = first.query.finish(first.header);
     expect(first.memoKey).not.toBeNull();
-    rememberManifestAnswer(first.memoKey as string, first.header, answer1);
+    rememberManifestAnswer(first.memoKey as string, first.header, first.etag as string, answer1);
     expect(scans).toBe(1);
 
     // Past the window: S3 must be asked (a 304, since the object is
@@ -505,7 +509,7 @@ describe("the per-isolate answer memo (#1494 amendment)", () => {
     const answer = read.query.finish(read.header);
     expect(answer.kind).toBe("entries");
     expect(read.memoKey).not.toBeNull();
-    rememberManifestAnswer(read.memoKey as string, read.header, answer);
+    rememberManifestAnswer(read.memoKey as string, read.header, read.etag as string, answer);
     expect(manifestAnswerMemoStats().entries).toBe(0);
   });
 

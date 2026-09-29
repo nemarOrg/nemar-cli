@@ -136,6 +136,18 @@ scanned), `"revalidated"` (a 304) or `"rewrite"` (a fresh 200), so the window's 
 visible from outside without a deploy that adds logging first -- the same reason the header
 exists at all (#1516).
 
+**`manifest.json`'s own response cache (ADR 0074) now rides this same window, instead of a
+second, independent conditional GET.** Its freshness check used to call `fetchManifestObject`
+directly (`manifestJsonCacheStillFresh`); every hit paid one conditional GET regardless of the
+window above. `manifestJsonHandler` now compares its cached document's ETag against the ETag
+the `EntryCountQuery` it already runs (to enforce the per-branch entry bound) came back with --
+that query goes through `readManifest` like any other, so a hit confirmed within the window
+costs no S3 call at all, and one confirmed past the window costs exactly the single conditional
+GET the count query already pays to restamp its own copy. `manifestJsonCacheStillFresh` is gone.
+See "the manifest.json response cache sits behind the visibility gate" in
+`data-route-manifest-stream.test.ts` for the within-window (zero calls), past-window (one call)
+and rewrite-visible-only-past-the-window guards.
+
 ## Alternatives considered
 
 - **Trust the edge copy for a TTL.** Rejected as an UNBOUNDED design (see the 2026-09-28
@@ -168,3 +180,9 @@ exists at all (#1516).
   placement change itself lives in `backend/wrangler-sccn.toml`'s `[placement]` /
   `[env.dev.placement]` blocks, with no ADR of its own (a Wrangler config knob, reversed by
   deleting it, rather than a decision that closes off another path).
+- The `manifest.json` response cache's freshness check (ADR 0074) routed through this window,
+  in the rebase that reconciled #1494's amendment with #1529 (ADR 0074): guards are in
+  `data-route-manifest-stream.test.ts`'s "the manifest.json response cache sits behind the
+  visibility gate" describe block ("a hit within the window makes zero S3 calls", "a hit past
+  the window still costs exactly one conditional GET", "a manifest rewrite invalidates the
+  cached document only once the window passes").

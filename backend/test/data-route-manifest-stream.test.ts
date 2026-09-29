@@ -570,7 +570,7 @@ describe("the manifest.json response cache sits behind the visibility gate", () 
     (globalThis as { caches?: unknown }).caches = original;
   });
 
-  test("a hit answers without a scan, after one conditional GET", async () => {
+  test("a hit within the window makes zero S3 calls (#1494 amendment)", async () => {
     const first = await get(`/${SMALL}/v1.1.1/manifest.json`);
     expect(first.status).toBe(200);
     const key = manifestJsonCacheKey("https://data.nemar.org", SMALL, "v1.1.1");
@@ -580,14 +580,36 @@ describe("the manifest.json response cache sits behind the visibility gate", () 
     expect(second.status).toBe(200);
     expect(await second.text()).toBe(await first.clone().text());
     expect(second.headers.get("Cache-Control")).toBe("public, max-age=300");
-    // One conditional GET to confirm the manifest has not changed, and
-    // nothing else: no second (uncached) read of the raw manifest object,
-    // which is what a rebuilt-from-scratch response would have needed.
+    // The freshness check rides the entry-count query's own ETag rather than
+    // a conditional GET of its own; that query goes through the manifest
+    // trust window (manifest-source.ts) exactly like any other query, so a
+    // hit confirmed within the window costs no S3 call at all -- not even
+    // the single conditional GET a rebuilt-from-scratch response would have
+    // needed.
+    expect(readsOf(SMALL)).toEqual([]);
+  });
+
+  test("a hit past the window still costs exactly one conditional GET", async () => {
+    const first = await get(`/${SMALL}/v1.1.1/manifest.json`);
+    expect(first.status).toBe(200);
+    const key = manifestJsonCacheKey("https://data.nemar.org", SMALL, "v1.1.1");
+    expect(cache.store.has(key)).toBe(true);
+    s3.log.length = 0;
+    const second = await withClockAdvanced(MANIFEST_TRUST_WINDOW_MS + 1_000, () =>
+      get(`/${SMALL}/v1.1.1/manifest.json`),
+    );
+    expect(second.status).toBe(200);
+    expect(await second.text()).toBe(await first.clone().text());
+    expect(second.headers.get("Cache-Control")).toBe("public, max-age=300");
+    // Once the window has passed, the count query pays one conditional GET
+    // to confirm the ETag (and restamp the copy's window) -- and nothing
+    // else: no second, uncached read of the raw manifest object.
     expect(readsOf(SMALL)).toEqual([`GET INM 304 ${SMALL_OBJECT}`]);
   });
 
-  test("a manifest rewrite invalidates the cached document", async () => {
+  test("a manifest rewrite invalidates the cached document only once the window passes", async () => {
     const first = await get(`/${SMALL}/v1.1.1/manifest.json`);
+    const firstText = await first.text();
     const key = manifestJsonCacheKey("https://data.nemar.org", SMALL, "v1.1.1");
     expect(cache.store.has(key)).toBe(true);
     const rewritten: VersionManifest = {
@@ -602,12 +624,25 @@ describe("the manifest.json response cache sits behind the visibility gate", () 
       },
     };
     s3.put(`/${SMALL}/version/v1.1.1.json`, JSON.stringify(rewritten, null, 2));
-    const second = await get(`/${SMALL}/v1.1.1/manifest.json`);
-    expect(second.status).toBe(200);
-    expect(await second.text()).not.toBe(await first.text());
-    const entries = (await get(`/${SMALL}/v1.1.1/manifest.json`).then((r) => r.json())) as {
-      path: string;
-    }[];
+
+    // Still inside the trust window: the count query answers from the
+    // now-stale-but-still-trusted edge copy (or its own memo entry keyed
+    // under the old ETag) without asking S3, so the rewrite is invisible and
+    // the response cache still serves the OLD document -- the same bounded
+    // staleness every other reader of this manifest already accepts
+    // (manifest-source.ts), never later than the window.
+    const stillCached = await get(`/${SMALL}/v1.1.1/manifest.json`);
+    expect(await stillCached.text()).toBe(firstText);
+
+    // Past the window: the count query's own conditional GET sees the new
+    // ETag, the response cache is rejected, and the document is rebuilt from
+    // the rewrite.
+    const second = await withClockAdvanced(MANIFEST_TRUST_WINDOW_MS + 1_000, () =>
+      get(`/${SMALL}/v1.1.1/manifest.json`),
+    );
+    const secondText = await second.text();
+    expect(secondText).not.toBe(firstText);
+    const entries = JSON.parse(secondText) as { path: string }[];
     expect(entries.some((e) => e.path === "NEW-FILE.txt")).toBe(true);
   });
 
