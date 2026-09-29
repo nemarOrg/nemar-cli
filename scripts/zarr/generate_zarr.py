@@ -2638,7 +2638,8 @@ def _fif_declared_channel_count(path: str) -> int | None:
     RuntimeError, struct.error, ...), so the read is guarded broadly; None is
     the conservative answer, since it keeps the strict channels.tsv-only gate.
     It is not silent: a FIF the converter just read but whose header MNE cannot
-    parse is worth a line in the log.
+    parse is worth a line in the log. MemoryError is the exception: it is a
+    host condition, re-raised so the job retries instead of gating on less.
     """
     try:
         import mne  # type: ignore[import-not-found]  # lazy: runtime-only dep
@@ -2647,6 +2648,10 @@ def _fif_declared_channel_count(path: str) -> int | None:
     try:
         info = mne.io.read_info(path, verbose="ERROR")
         nchan = int(info["nchan"])
+    except MemoryError:
+        # The node was busy, not the header wrong: let it reach convert_one's
+        # retryable `recording_memory_exceeded` verdict, as apply_sss does.
+        raise
     except Exception as exc:  # noqa: BLE001 - any header failure means "unknown"
         print(
             f"::warning::could not read the FIF header of {path} for its channel "
