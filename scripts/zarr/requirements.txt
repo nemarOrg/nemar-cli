@@ -103,7 +103,18 @@
 # flight per channel, which is what tripped the per-worker RLIMIT_DATA budget
 # as `recording_memory_exceeded` on on004789. Output is identical, so the engine
 # stamp does not move.
-biosigio[zarr,meg,mef3,hdf5]>=1.2.8
+# >=1.2.9: reads the real-file cases that left datasets stranded on an old (v1)
+# Zarr. EEGLAB v7.3 `.set` with the struct flat at the HDF5 root, or with empty
+# `chanlocs`/`event` fields (biosigio#131); BrainVision headers whose `DataFile=`
+# and `MarkerFile=` still name pre-BIDS-rename files (biosigio#132); repeated
+# EDF/BDF/WFDB channel labels, which used to lose all but one channel and so
+# tripped the channel-count gate, now suffixed as MNE does (biosigio#133); and
+# host I/O errors (EACCES, EIO, ENOSPC, ...) raised as the OSError itself instead
+# of a typed file failure that the queue would treat as permanent (biosigio#139).
+# Stores that already converted are unchanged; a recording that repeats an EDF
+# label gets suffixed channel names when it is reconverted, and its renames are
+# recorded in `recording_metadata.channel_labels_deduplicated`.
+biosigio[zarr,meg,mef3,hdf5]>=1.2.9
 
 # Draft 2020-12 validator for the converter's own pre-upload self-check: the index
 # it is about to publish is validated against `shared/zarr-index.schema.json` (and
