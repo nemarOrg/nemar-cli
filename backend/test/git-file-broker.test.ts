@@ -42,6 +42,7 @@ import { __limits } from "../src/middleware/rateLimit";
 import { dataRoutes } from "../src/routes/data";
 import { gitFileCacheKey } from "../src/services/git-file-cache";
 import { fetchGitTrackedFile } from "../src/services/github/git-file-broker";
+import { MANIFEST_TRUST_WINDOW_MS, resetManifestAnswerMemo } from "../src/services/manifest-source";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { DrainingCache, StalledCache } from "./helpers/cache";
 import { freshDb, realD1 } from "./helpers/d1";
@@ -1416,6 +1417,155 @@ describe("the route: the gate, then the bytes", () => {
           env(db),
         );
         expect(stillAllowed.status).toBe(200);
+      });
+
+      test("an exhausted budget still costs a COLD manifest fetch: the budget is charged AFTER the manifest resolves, not before (0.10.8 review)", async () => {
+        // `serveGitTrackedFile` (routes/data.ts) -- where `checkDataMissBudget`
+        // is called -- only runs once `fileOrIndexHandler` has already resolved
+        // the manifest and named a git-tracked file entry to serve. So an IP at
+        // its miss-budget limit is refused the UPSTREAM git-content fetch, but
+        // NOT the manifest read that had to happen first to even know this was
+        // a git-tracked file. This pins that ordering: without any pre-warm at
+        // all for this dataset/version, the request still costs one manifest
+        // fetch before it is refused.
+        const cache = new DrainingCache();
+        install(cache);
+        const db = freshDb();
+        seed(db, "nm000862", "public");
+        reset({
+          [manifestKey]: () => new Response(manifestBodyTwoFilesAndAnAnnex(), { status: 200 }),
+          [publicRawPath]: () =>
+            new Response(FILE_BODY, {
+              status: 200,
+              headers: { "Content-Length": String(FILE_BODY.length) },
+            }),
+        });
+        seedMissBudgetCount(cache, MISS_IP, __limits.DATA_MISS_MAX_REQUESTS);
+
+        const res = await app().request(
+          `/nm000862/${VERSION}/${PATH}`,
+          { headers: { "CF-Connecting-IP": MISS_IP } },
+          env(db),
+        );
+
+        expect(res.status).toBe(429);
+        // The manifest WAS fetched: the budget did not, and structurally
+        // cannot, protect this cold read.
+        expect(seen.filter((s) => s.path === manifestKey)).toHaveLength(1);
+        // But the upstream git-content fetch never happened: THAT is what the
+        // budget actually refused.
+        expect(seen.some((s) => s.path === publicRawPath)).toBe(false);
+      });
+    });
+
+    describe("the manifest trust window and answer memo (0.10.8 review)", () => {
+      // Every fixture above answers `manifestKey` with NO `ETag` header, which
+      // means the manifest edge copy is never actually stored (`fromS3`'s sink
+      // is only built `source.cache && etag ? ... : null`) and every request in
+      // this whole file re-fetches the manifest from "S3" from scratch --
+      // the trust window (`manifest-source.ts`) and the per-isolate answer
+      // memo (`manifest-answer-memo.ts`) never engage here at all. These tests
+      // give the manifest a real, content-derived ETag (mirroring
+      // `helpers/s3-manifest-standin.ts`'s `etagFor`) so that machinery is
+      // actually exercised through this file's real GET route, alongside the
+      // git-file cache it sits in front of.
+      function etagFor(body: string): string {
+        const hasher = new Bun.CryptoHasher("sha256");
+        hasher.update(body);
+        return `"${hasher.digest("hex")}"`;
+      }
+
+      /** `Server-Timing`'s `manifest` stage carries `desc="<source>"` (#1494
+       *  amendment): "memo" or "fresh" never asked S3 at all. */
+      function manifestDesc(res: Response): string | undefined {
+        return res.headers.get("Server-Timing")?.match(/manifest;dur=[\d.]+;desc="(\w+)"/)?.[1];
+      }
+
+      function manifestHits(): number {
+        return seen.filter((s) => s.path === manifestKey).length;
+      }
+
+      /** Same monkey-patch `data-route-manifest-stream.test.ts` uses: the
+       *  route builds its own `ManifestSource` per request with no clock seam
+       *  exposed to a caller, so pushing a cached copy outside the trust
+       *  window without a real 60s sleep means patching the global clock. */
+      async function withClockAdvanced<T>(ms: number, fn: () => Promise<T>): Promise<T> {
+        const real = Date.now;
+        Date.now = () => real() + ms;
+        try {
+          return await fn();
+        } finally {
+          Date.now = real;
+        }
+      }
+
+      test("a same-window repeat hits the memo; a manifest rewrite inside the window still serves the OLD blob until the window passes, then the NEW one", async () => {
+        install(new DrainingCache());
+        resetManifestAnswerMemo();
+        const db = freshDb();
+        seed(db, "nm000862", "public");
+
+        const bodyV1 = manifestBody();
+        reset({
+          [manifestKey]: () =>
+            new Response(bodyV1, { status: 200, headers: { ETag: etagFor(bodyV1) } }),
+          [publicRawPath]: () =>
+            new Response(FILE_BODY, {
+              status: 200,
+              headers: { "Content-Length": String(FILE_BODY.length) },
+            }),
+        });
+
+        // Cold: a real manifest fetch and a real upstream fetch.
+        const first = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+        expect(first.status).toBe(200);
+        expect(await first.text()).toBe(FILE_BODY);
+        expect(manifestHits()).toBe(1);
+        expect(rawHits()).toBe(1);
+
+        // A same-window repeat: the per-isolate answer memo already holds this
+        // exact (dataset, version, ETag, query) answer, so neither the
+        // manifest nor the git-tracked file is asked for again.
+        const second = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+        expect(second.status).toBe(200);
+        expect(await second.text()).toBe(FILE_BODY);
+        expect(manifestDesc(second)).toBe("memo");
+        expect(manifestHits()).toBe(1);
+        expect(rawHits()).toBe(1);
+
+        // Rewrite the manifest to point PATH at a DIFFERENT blob (a retag,
+        // ADR 0066's 2026-09-16 amendment) -- still inside the trust window,
+        // no time advanced. `reset` swaps in the new routes AND clears `seen`,
+        // so the counts below are fresh from this point.
+        const bodyV2 = manifestBodyNaming(BLOB_SHA_V2, FILE_BODY_V2.length);
+        reset({
+          [manifestKey]: () =>
+            new Response(bodyV2, { status: 200, headers: { ETag: etagFor(bodyV2) } }),
+          [publicRawPath]: () =>
+            new Response(FILE_BODY_V2, {
+              status: 200,
+              headers: { "Content-Length": String(FILE_BODY_V2.length) },
+            }),
+        });
+        const third = await app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db));
+        expect(third.status).toBe(200);
+        // Still the OLD bytes: the edge copy (and the memo keyed under its
+        // ETag) is trusted for the whole window, so the rewrite above is
+        // invisible until it passes -- neither "S3" nor the raw host was asked.
+        expect(await third.text()).toBe(FILE_BODY);
+        expect(manifestHits()).toBe(0);
+        expect(rawHits()).toBe(0);
+
+        // Advance past the 60s trust window (no further `reset`, so the v2
+        // routes above are still in effect): the manifest read now revalidates
+        // for real, sees the new ETag, and the NEW blob is fetched and served.
+        const fourth = await withClockAdvanced(MANIFEST_TRUST_WINDOW_MS + 1, () =>
+          app().request(`/nm000862/${VERSION}/${PATH}`, {}, env(db)),
+        );
+        expect(fourth.status).toBe(200);
+        expect(await fourth.text()).toBe(FILE_BODY_V2);
+        expect(manifestHits()).toBe(1);
+        expect(rawHits()).toBe(1);
       });
     });
   });
