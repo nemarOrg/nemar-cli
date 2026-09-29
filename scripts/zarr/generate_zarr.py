@@ -4699,10 +4699,19 @@ def _download_chunks(base: str, key: str, size: int, chunk_size: int, dst: str) 
 
     Each chunk goes through `download_blob`, so it keeps that function's
     timeout, retry and per-chunk size check. Memory stays bounded (one copy
-    buffer) and scratch holds at most the assembled file plus one chunk. `dst`
-    appears only complete (atomic rename after the total is checked); on any
-    failure nothing is left behind. A 404 raises `S3ObjectAbsent` with `chunk`
-    set to the absent chunk's number."""
+    buffer); scratch peaks at the whole file plus one chunk, the moment the
+    last chunk has landed and is being appended. `dst` appears only complete
+    (atomic rename after the total is checked); on any failure nothing is left
+    behind. A 404 raises `S3ObjectAbsent` with `chunk` set to the absent
+    chunk's number.
+
+    There is NO resume, deliberately for now. The chunks are fetched one after
+    another, one `aws s3 cp` each, and a failure discards the assembly: a
+    100 GB file in 1 GiB chunks is ~94 sequential copies, ~17 minutes at
+    100 MB/s, and one that fails for good at chunk 90 (after `download_blob`'s
+    own retries) is fetched again from chunk 1 on the next attempt. The
+    `_AWS_OP_TIMEOUT` cap (1800 s by default) applies to each chunk's copy, not
+    to the file, so a slow but healthy transfer of a large file is not cut off."""
     os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
     assembly = f"{dst}.chunked.{os.getpid()}"
     piece = f"{dst}.chunk.{os.getpid()}"
