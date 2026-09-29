@@ -52,7 +52,9 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import csv
 import errno
+import io
 import json
 import math
 import os
@@ -2218,20 +2220,26 @@ def channels_tsv_names(text: str) -> list[str] | None:
     kept, or None when the header has no `name` column (biosigIO then applies
     nothing, so there is no join to report on).
 
-    Read the way biosigIO reads it (`bids._read_channels_tsv`): tab-separated,
-    the header matched exactly, each name stripped. The two must agree, or
-    `sidecar_join_report` would describe a join biosigIO never made.
+    Read the way biosigIO reads it (`bids._read_channels_tsv`, pandas
+    `read_csv(sep="\\t")`): tab-separated with `"` quoting (so `"Fp1"` is
+    `Fp1`, and a quoted tab stays in the name), blank lines skipped, the header
+    matched exactly, each name stripped as biosigIO strips it when matching.
+    The two must agree, or `sidecar_join_report` would describe a join biosigIO
+    never made.
     """
-    lines = [line for line in text.splitlines() if line.strip()]
-    if not lines:
+    rows = [
+        row for row in csv.reader(io.StringIO(text), delimiter="\t")
+        if any(cell.strip() for cell in row)
+    ]
+    if not rows:
         return None
-    header = lines[0].split("\t")
+    header = rows[0]
     if "name" not in header:
         return None
     col = header.index("name")
     return [
         cols[col].strip()
-        for cols in (line.split("\t") for line in lines[1:])
+        for cols in rows[1:]
         if len(cols) > col and cols[col].strip()
     ]
 

@@ -8307,6 +8307,19 @@ class TestSidecarJoinReport(unittest.TestCase):
         text = "name\ttype\tunits\nT8-P8\tEEG\tV\n\nT8-P8\tEEG\tV\n -\tMISC\tn/a\n"
         self.assertEqual(channels_tsv_names(text), ["T8-P8", "T8-P8", "-"])
 
+    def test_names_are_read_with_pandas_quoting(self):
+        # biosigIO reads channels.tsv with pandas, which honours `"` quoting:
+        # a quoted name loses its quotes and keeps a quoted tab, and a lone
+        # quote inside a cell is literal. A plain split would disagree.
+        text = 'name\ttype\n"Fp1"\tEEG\n"A\tB"\tEEG\n  C \tEEG\nD"x\tEEG\n'
+        self.assertEqual(channels_tsv_names(text), ["Fp1", "A\tB", "C", 'D"x'])
+        try:  # the conversion tier has pandas; the fast tier does not
+            import pandas as pd
+        except ImportError:
+            return
+        frame = pd.read_csv(io.StringIO(text), sep="\t", dtype=str, keep_default_na=False)
+        self.assertEqual(channels_tsv_names(text), [n.strip() for n in frame["name"]])
+
     def test_no_name_column_means_no_join(self):
         self.assertIsNone(channels_tsv_names("label\ttype\nA\tEEG\n"))
         self.assertIsNone(channels_tsv_names(""))
