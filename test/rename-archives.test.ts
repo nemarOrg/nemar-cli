@@ -1,8 +1,10 @@
 /**
- * Unit tests for the pure planning logic in scripts/rename-archives.ts
- * (#1491's one-time rename sweep). Pure functions, no network, no AWS --
- * per the PR's test plan, the AWS-CLI-shelling half of that script is
- * exercised manually by the lead in dry-run mode, never in CI or here.
+ * Unit tests for the pure planning, verification and selection logic in
+ * scripts/rename-archives.ts (#1491's one-time rename sweep). Pure functions,
+ * no network, no AWS. The half of that script that shells out to `aws` is
+ * exercised through its real entry point, with the real `aws` CLI against a
+ * local S3 stand-in, in test/rename-archives-tagging.test.ts and
+ * test/rename-archives-copy.test.ts.
  *
  * Sample shapes are drawn from a real `aws s3api list-objects-v2
  * --bucket nemar --prefix nm000132/archives/` read (2026-09-28):
@@ -15,16 +17,22 @@
 import { describe, expect, test } from "bun:test";
 import {
   type ArchiveObjectInfo,
+  type ObjectVersionInfo,
   buildCopyArgs,
   buildTagArgs,
   classifyHeadObjectError,
   decideRenameAction,
+  findLeftoverVersions,
+  formatBytes,
   hasArchiveTag,
   isDatasetIdPrefix,
   isNewFormatArchiveKey,
+  mergeArchiveTag,
   planDatasetRename,
   planRenameKey,
+  selectVersionToDelete,
   verifyRenameCopy,
+  withRegion,
 } from "../scripts/rename-archives";
 
 const T1 = "2026-03-01T00:00:00.000Z";
@@ -353,8 +361,11 @@ describe("buildCopyArgs (bug: aws s3 cp has no --tagging-directive/--tagging)", 
 });
 
 describe("buildTagArgs", () => {
-  test("builds an s3api put-object-tagging call carrying nemar-kind=archive", () => {
-    expect(buildTagArgs("nemar", "on002718/archives/on002718_v1.0.0.zip")).toEqual([
+  test("builds an s3api put-object-tagging call carrying the given tag set as JSON", () => {
+    const args = buildTagArgs("nemar", "on002718/archives/on002718_v1.0.0.zip", [
+      { Key: "nemar-kind", Value: "archive" },
+    ]);
+    expect(args.slice(0, 7)).toEqual([
       "s3api",
       "put-object-tagging",
       "--bucket",
@@ -362,8 +373,47 @@ describe("buildTagArgs", () => {
       "--key",
       "on002718/archives/on002718_v1.0.0.zip",
       "--tagging",
-      "TagSet=[{Key=nemar-kind,Value=archive}]",
     ]);
+    expect(JSON.parse(args[7])).toEqual({ TagSet: [{ Key: "nemar-kind", Value: "archive" }] });
+  });
+
+  test("a preserved tag that shorthand syntax could not quote survives intact", () => {
+    const tricky = { Key: "note", Value: "a,b [c]=d" };
+    const args = buildTagArgs("nemar", "k", [tricky]);
+    expect(JSON.parse(args[7]).TagSet).toEqual([tricky]);
+  });
+});
+
+describe("mergeArchiveTag (put-object-tagging replaces the whole set, so merge)", () => {
+  test("adds nemar-kind=archive to an empty set", () => {
+    expect(mergeArchiveTag([])).toEqual([{ Key: "nemar-kind", Value: "archive" }]);
+  });
+
+  test("keeps every other tag", () => {
+    const merged = mergeArchiveTag([
+      { Key: "owner", Value: "lab" },
+      { Key: "keep", Value: "me" },
+    ]);
+    expect(merged).toEqual([
+      { Key: "owner", Value: "lab" },
+      { Key: "keep", Value: "me" },
+      { Key: "nemar-kind", Value: "archive" },
+    ]);
+  });
+
+  test("overwrites a nemar-kind tag that holds another value, without duplicating the key", () => {
+    const merged = mergeArchiveTag([
+      { Key: "nemar-kind", Value: "scratch" },
+      { Key: "keep", Value: "me" },
+    ]);
+    expect(merged.filter((t) => t.Key === "nemar-kind")).toEqual([
+      { Key: "nemar-kind", Value: "archive" },
+    ]);
+    expect(merged).toContainEqual({ Key: "keep", Value: "me" });
+  });
+
+  test("the merged set always passes hasArchiveTag", () => {
+    expect(hasArchiveTag(mergeArchiveTag([{ Key: "nemar-kind", Value: "scratch" }]))).toBe(true);
   });
 });
 
@@ -391,6 +441,130 @@ describe("hasArchiveTag", () => {
 
   test("false when unrelated tags are present but not nemar-kind", () => {
     expect(hasArchiveTag([{ Key: "other", Value: "thing" }])).toBe(false);
+  });
+});
+
+describe("selectVersionToDelete (delete only the exact, verified object)", () => {
+  const key = "nm000132/archives/v1.0.1.zip";
+  const planned = { size: 1000, etag: '"aaa"' };
+  const v = (over: Partial<ObjectVersionInfo>): ObjectVersionInfo => ({
+    Key: key,
+    VersionId: "vid-1",
+    IsLatest: true,
+    ETag: '"aaa"',
+    Size: 1000,
+    ...over,
+  });
+
+  test("the current version that matches the plan is selected", () => {
+    expect(selectVersionToDelete(key, [v({})], planned)).toEqual({ ok: true, versionId: "vid-1" });
+  });
+
+  test("refuses when the current version's ETag is not the planned one", () => {
+    const r = selectVersionToDelete(key, [v({ ETag: '"rebuilt"' })], planned);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("not the object that was planned and verified");
+  });
+
+  test("refuses when the current version's Size is not the planned one", () => {
+    const r = selectVersionToDelete(key, [v({ Size: 1001 })], planned);
+    expect(r.ok).toBe(false);
+  });
+
+  test("a noncurrent version is never the one selected, even when it matches the plan", () => {
+    const r = selectVersionToDelete(
+      key,
+      [v({ VersionId: "new", IsLatest: true, Size: 5 }), v({ VersionId: "old", IsLatest: false })],
+      planned,
+    );
+    expect(r.ok).toBe(false);
+  });
+
+  test("a delete marker on top means nothing is deleted, even if a noncurrent version matches the plan", () => {
+    // The legacy key was deleted after it was planned: the newest entry is a
+    // delete marker (a marker is in the listing's DeleteMarkers, not Versions),
+    // so every version left in `Versions` is noncurrent. The old one matches
+    // the plan exactly, and must still never be selected.
+    const r = selectVersionToDelete(key, [v({ VersionId: "old", IsLatest: false })], planned);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("no current version");
+  });
+
+  test("only entries for the EXACT key count (the listing is a prefix match)", () => {
+    const neighbor = v({ Key: `${key}.bak`, VersionId: "neighbor", IsLatest: true });
+    // The neighbor matches size and ETag and IsLatest, and sorts after the
+    // real key, but it is a different object and must never be picked.
+    expect(selectVersionToDelete(key, [neighbor], planned).ok).toBe(false);
+    expect(selectVersionToDelete(key, [neighbor, v({})], planned)).toEqual({
+      ok: true,
+      versionId: "vid-1",
+    });
+  });
+
+  test("no current version at all (gone, or hidden by a delete marker) is a refusal", () => {
+    const r = selectVersionToDelete(key, [], planned);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("no current version");
+  });
+});
+
+describe("findLeftoverVersions (what the delete left behind)", () => {
+  const key = "nm000132/archives/v1.0.1.zip";
+  const entry = (over: Partial<ObjectVersionInfo>): ObjectVersionInfo => ({
+    Key: key,
+    VersionId: "vid",
+    IsLatest: false,
+    ...over,
+  });
+
+  test("nothing left is an empty list", () => {
+    expect(findLeftoverVersions(key, [], [])).toEqual([]);
+  });
+
+  test("names every remaining version and delete marker of the exact key", () => {
+    expect(
+      findLeftoverVersions(
+        key,
+        [entry({ VersionId: "old-1" }), entry({ VersionId: "old-2" })],
+        [entry({ VersionId: "marker-1" })],
+      ),
+    ).toEqual([
+      { kind: "version", versionId: "old-1" },
+      { kind: "version", versionId: "old-2" },
+      { kind: "delete-marker", versionId: "marker-1" },
+    ]);
+  });
+
+  test("other keys the prefix listing dragged in are not leftovers", () => {
+    expect(
+      findLeftoverVersions(
+        key,
+        [entry({ Key: `${key}.bak`, VersionId: "neighbor" })],
+        [entry({ Key: `${key}.bak`, VersionId: "neighbor-marker" })],
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("withRegion", () => {
+  test("appends the region as the CLI's own --region flag", () => {
+    expect(withRegion(["s3api", "head-object", "--bucket", "nemar"], "eu-west-1")).toEqual([
+      "s3api",
+      "head-object",
+      "--bucket",
+      "nemar",
+      "--region",
+      "eu-west-1",
+    ]);
+  });
+});
+
+describe("formatBytes", () => {
+  test("picks the unit a person would read", () => {
+    expect(formatBytes(500)).toBe("500 bytes");
+    expect(formatBytes(1536)).toBe("1.5 KiB");
+    expect(formatBytes(20 * 1024 ** 2)).toBe("20.0 MiB");
+    expect(formatBytes(606 * 1024 ** 3)).toBe("606.00 GiB");
   });
 });
 
