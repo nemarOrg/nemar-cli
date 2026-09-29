@@ -201,17 +201,26 @@ export function planDatasetRename(datasetId: string, objects: ArchiveObjectInfo[
   return { toRename, skipped };
 }
 
+/** True for a multipart-form ETag, `"<hex>-<parts>"`, as the CLI prints it. */
+function isMultipartEtag(etag: string): boolean {
+  return /-\d+"$/.test(etag);
+}
+
 /**
  * Decide whether a copy at the destination can be trusted as complete:
  * same size, and (when comparable) the same ETag.
  *
  * A single-part upload's ETag is a plain hex MD5 of the object body and is
- * preserved exactly by a server-side copy, so it is checked. A multipart
- * upload's ETag instead encodes the part count (`<hex>-<N>`) and is NOT
- * expected to match after a copy that may use different part boundaries
- * (`aws s3 cp` picks its own), so ETag comparison is skipped -- not
- * failed -- for a multipart source, and the reason string says so
- * explicitly rather than silently passing.
+ * preserved exactly by a single-call server-side copy, so it is checked. A
+ * multipart upload's ETag instead encodes the part count (`<hex>-<N>`) and is
+ * NOT expected to match a copy that used different part boundaries (`aws s3
+ * cp` picks its own, and copies anything from 8 MiB up as a multipart upload).
+ * That goes for EITHER side: a plain-MD5 source above the multipart threshold
+ * is copied multipart and comes out with a multipart-form ETag, so the pair
+ * can never match even though the bytes are identical. ETag comparison is
+ * therefore skipped -- not failed -- when either ETag is multipart-form, and
+ * the reason string says so explicitly rather than silently passing. The size
+ * must still match exactly in every case.
  */
 export function verifyRenameCopy(
   source: { size: number; etag: string },
@@ -221,11 +230,10 @@ export function verifyRenameCopy(
   if (dest.size !== source.size) {
     return { ok: false, reason: `size mismatch: source ${source.size}, dest ${dest.size}` };
   }
-  const sourceIsMultipart = /-\d+"$/.test(source.etag);
-  if (sourceIsMultipart) {
+  if (isMultipartEtag(source.etag) || isMultipartEtag(dest.etag)) {
     return {
       ok: true,
-      reason: "size matches; source ETag is multipart-form, ETag comparison skipped",
+      reason: "size matches; an ETag is multipart-form, ETag comparison skipped",
     };
   }
   if (dest.etag !== source.etag) {

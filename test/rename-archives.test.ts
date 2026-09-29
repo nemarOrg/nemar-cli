@@ -184,6 +184,24 @@ describe("verifyRenameCopy", () => {
     expect(verdict.reason).toContain("skipped");
   });
 
+  test("a plain-MD5 source copied multipart: size match is sufficient (multipart ETag on the DEST side)", () => {
+    // `aws s3 cp` copies anything from 8 MiB up as a multipart upload, so a
+    // source that was uploaded in a single PUT (plain MD5 ETag) still comes
+    // out with a `-<parts>` ETag. The pair can never match; the size can.
+    const source = { size: 20971520, etag: '"d41d8cd98f00b204e9800998ecf8427e"' };
+    const dest = { size: 20971520, etag: '"00000000000000000000000000000abc-3"' };
+    const verdict = verifyRenameCopy(source, dest);
+    expect(verdict.ok).toBe(true);
+    expect(verdict.reason).toContain("skipped");
+  });
+
+  test("a multipart ETag on either side never rescues a size mismatch", () => {
+    const plain = { size: 20971520, etag: '"d41d8cd98f00b204e9800998ecf8427e"' };
+    const multipart = { size: 20971519, etag: '"00000000000000000000000000000abc-3"' };
+    expect(verifyRenameCopy(plain, multipart).ok).toBe(false);
+    expect(verifyRenameCopy(multipart, { ...plain, size: 20971520 }).ok).toBe(false);
+  });
+
   test("single-part ETag: must match exactly", () => {
     const source = { size: 500, etag: '"abc123"' };
     expect(verifyRenameCopy(source, { size: 500, etag: '"abc123"' }).ok).toBe(true);
