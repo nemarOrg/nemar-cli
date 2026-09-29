@@ -8,7 +8,8 @@
  * shape; Crossref's REST API is the second opinion. Every lookup is
  * classified, because "the registry says this DOI does not exist" and "the
  * registry did not answer" call for different follow-ups: the first is a
- * fact about the DOI, the second is an outage the enrichment sweep retries.
+ * fact about the DOI, the second is an outage, which only reindexing the
+ * dataset again can recover from (nothing in the backend retries).
  */
 
 import { normalizeDoiKey } from "../../../shared/never-data-paper.js";
@@ -87,12 +88,15 @@ async function fetchOnce(
 }
 
 /** Fetch one registry's record for `doi`, through `cache` when given. Never
- *  rejects: every failure comes back as `{ outcome: "failed" }`, logged.
+ *  rejects: every failure comes back as `{ outcome: "failed" }`. A registry
+ *  or network failure is logged per request; the deadline is not, since the
+ *  caller logs one summary line for it.
  *
  *  `deadline` aborts the request when the caller's overall budget runs out
  *  (it composes with the per-request timeout). A cached answer is returned
- *  even after the deadline, since it costs nothing; a lookup the deadline cut
- *  short is evicted from the cache once it settles, because it says nothing
+ *  even after the deadline, since it costs nothing, but no new request starts
+ *  once the deadline has passed. Any failed lookup that settles after the
+ *  deadline is evicted from the cache, because a failure then says nothing
  *  about the registry and a later stage should be free to ask again. */
 export function fetchRegistryRecord(
   registry: RegistryName,
@@ -104,6 +108,9 @@ export function fetchRegistryRecord(
   const cacheKey = `${registry}:${doiKey}`;
   const hit = cache?.get(cacheKey);
   if (hit) return hit;
+  if (deadline?.aborted) {
+    return Promise.resolve<RegistryRecord>({ outcome: "failed", detail: "deadline reached" });
+  }
   const pending = fetchOnce(registry, doiKey, deadline);
   if (cache) {
     cache.set(cacheKey, pending);
