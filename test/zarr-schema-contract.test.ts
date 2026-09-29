@@ -92,6 +92,42 @@ describe("shared/zarr-index.schema.json", () => {
     expect(validate({ ...indexFixture, surprise: 1 })).toBe(false);
   });
 
+  test("units_report's sidecar-join counts are declared on both sides", () => {
+    // What generate_zarr.py's `sidecar_join_report` adds: which store channels
+    // channels.tsv never reached. The zod schema is `.passthrough()`, so only a
+    // REJECTED value proves a key is declared there (an undeclared key passes
+    // with any value); each mutation below must fail both validators.
+    const validate = compile(indexSchema);
+    const withReport = (report: Record<string, unknown>) => {
+      const doc = structuredClone(indexFixture) as { stores: Record<string, unknown>[] };
+      doc.stores[0].units_report = {
+        converted: 4,
+        relabelled: 0,
+        kept_importer_unit: 0,
+        units_column_present: true,
+        ...report,
+      };
+      return doc;
+    };
+    const good = withReport({
+      unmatched_channels: 2,
+      unmatched_raw_label: 2,
+      unmatched_examples: ["T8-P8-0", "T8-P8-1"],
+    });
+    expect(validate(good)).toBe(true);
+    expect(zarrIndexSchema.safeParse(good).success).toBe(true);
+    for (const bad of [
+      { unmatched_channels: -1 },
+      { unmatched_case_only: 0 },
+      { unmatched_raw_label: 0 },
+      { unmatched_examples: ["a", "b", "c", "d", "e", "f"] },
+    ]) {
+      const doc = withReport(bad);
+      expect(validate(doc)).toBe(false);
+      expect(zarrIndexSchema.safeParse(doc).success).toBe(false);
+    }
+  });
+
   test("a schema whose $ref dangles fails to compile, not to validate", () => {
     // The failure mode this file exists for: the schema document itself
     // breaking. Ajv raises at COMPILE time, which is why compilation is
