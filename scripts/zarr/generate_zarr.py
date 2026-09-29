@@ -1321,6 +1321,14 @@ _FALLBACK_REASONS = {
         "check whether it needs internal-active-shielding correction before "
         "converting it, and no viewer copy is offered."
     ),
+    # NEMAR-side (not a biosigIO code): an EEGLAB `.set` whose `.fdt` is declared
+    # elsewhere in the dataset (eeglab-fdt-declarations.json), and the declared
+    # file did not verify against the `.set` header. See FdtDeclarationRefused.
+    "fdt_declaration_refused": (
+        "This recording's data file is stored elsewhere in the dataset, and the "
+        "file declared for it did not match the recording's header, so no viewer "
+        "copy is offered."
+    ),
     # NEMAR-side (not a biosigIO code): the producer gave up retrying. A recording
     # that fails for an INFRA reason is listed in the index's `pending` with an
     # attempt count instead of a failure; after PENDING_MAX_ATTEMPTS rounds it is
@@ -4809,6 +4817,247 @@ def materialize_local(
     return primary_local, events_local, primary_key
 
 
+# --- Declared EEGLAB `.fdt` locations (per dataset, reviewed) -----------------
+#
+# An EEGLAB `.set` whose samples live in a separate `.fdt` is read from the
+# `.fdt` BESIDE it. A few datasets ship the `.fdt` elsewhere (on004306 keeps
+# them under `derivatives/fdt_files/`, under names that do not match the `.set`
+# or even each other), so the reader fails with "EEGLAB data is in a separate
+# .fdt file but none was found". Discovery stays raw-only (ADR 0027): the `.set`
+# is the recording, and the `.fdt` is only fetched because a person paired it
+# with that `.set` in `eeglab-fdt-declarations.json` and recorded the evidence.
+#
+# Nothing here pairs files by name. A declaration is checked against the `.set`
+# header (channels x samples x trials) and against the target's byte size, and
+# any disagreement REFUSES the recording with a typed code rather than serving a
+# signal read from the wrong file. Datasets and recordings the file does not name
+# are untouched.
+FDT_DECLARATIONS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "eeglab-fdt-declarations.json"
+)
+_FDT_DATASET_ID_RE = re.compile(r"^[a-z]{2}\d{6}$")
+_FDT_DATASET_KEYS = frozenset({"reviewed", "note", "recordings"})
+_FDT_RECORDING_KEYS = frozenset({"fdt", "nbchan", "pnts", "trials", "fdt_bytes", "evidence"})
+
+
+class FdtDeclarationRefused(Exception):
+    """A declared `.fdt` for an EEGLAB `.set` failed verification: absent at HEAD,
+    contradicted by the `.set` header, or the wrong size. A property of the
+    dataset plus its declaration, so NOT retryable; the fix is a reviewed edit to
+    `eeglab-fdt-declarations.json`, never a guess at another file."""
+
+    code = "fdt_declaration_refused"
+
+
+class FdtDeclaration(TypedDict):
+    fdt: str
+    nbchan: int
+    pnts: int
+    trials: int
+    fdt_bytes: int
+
+
+def _fdt_positive_int(value: object, where: str) -> int:
+    # bool is an int subclass; `true` is never a channel count.
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(f"{where} must be a positive integer, got {value!r}")
+    return value
+
+
+def _fdt_safe_rel(value: object, ext: str, where: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.endswith(ext)
+        or value.startswith("/")
+        or ".." in value.split("/")
+        or "\\" in value
+    ):
+        raise ValueError(f"{where} must be a repository-relative {ext} path, got {value!r}")
+    return value
+
+
+def load_fdt_declarations(
+    path: str = FDT_DECLARATIONS_PATH,
+) -> dict[str, dict[str, FdtDeclaration]]:
+    """Parse and validate the declaration file into
+    ``{dataset_id: {set_path: FdtDeclaration}}``.
+
+    Strict on purpose: an unknown key is refused (a misspelt field would
+    otherwise be dropped and the entry read as something nobody reviewed), the
+    declared byte count must equal ``nbchan * pnts * trials * 4`` (EEGLAB writes
+    `.fdt` as float32), and one `.fdt` may back only one `.set`. A malformed
+    file raises (ValueError, or TypeError for a wrongly shaped value) and so
+    fails the run loudly rather than converting against a half-read
+    declaration. A missing file means no declarations."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    if (
+        not isinstance(doc, dict)
+        or not isinstance(doc.get("datasets"), dict)
+        or set(doc) - {"description", "datasets"}
+    ):
+        raise ValueError(f"{path}: expected an object with 'description' and a 'datasets' object")
+    out: dict[str, dict[str, FdtDeclaration]] = {}
+    for dataset_id, ds in doc["datasets"].items():
+        if not _FDT_DATASET_ID_RE.match(dataset_id):
+            raise ValueError(f"{path}: {dataset_id!r} is not a dataset id")
+        if not isinstance(ds, dict) or not isinstance(ds.get("recordings"), dict):
+            raise TypeError(f"{path}: {dataset_id} needs a 'recordings' object")
+        unknown = set(ds) - _FDT_DATASET_KEYS
+        if unknown:
+            raise ValueError(f"{path}: {dataset_id} has unknown key(s) {sorted(unknown)}")
+        if not isinstance(ds.get("reviewed"), str) or not ds["reviewed"]:
+            raise ValueError(f"{path}: {dataset_id} must record when it was 'reviewed'")
+        recs: dict[str, FdtDeclaration] = {}
+        claimed: dict[str, str] = {}
+        for set_path, entry in ds["recordings"].items():
+            where = f"{path}: {dataset_id} {set_path!r}"
+            _fdt_safe_rel(set_path, ".set", where)
+            if is_excluded_from_discovery(set_path):
+                raise ValueError(f"{where}: only a raw recording can be declared (ADR 0027)")
+            if not isinstance(entry, dict):
+                raise TypeError(f"{where}: expected an object")
+            unknown = set(entry) - _FDT_RECORDING_KEYS
+            missing = (_FDT_RECORDING_KEYS - {"evidence"}) - set(entry)
+            if unknown or missing:
+                raise ValueError(
+                    f"{where}: unknown key(s) {sorted(unknown)}, missing key(s) {sorted(missing)}"
+                )
+            fdt = _fdt_safe_rel(entry["fdt"], ".fdt", f"{where} fdt")
+            if fdt in claimed:
+                raise ValueError(f"{where}: {fdt!r} is already declared for {claimed[fdt]!r}")
+            claimed[fdt] = set_path
+            decl: FdtDeclaration = {
+                "fdt": fdt,
+                "nbchan": _fdt_positive_int(entry["nbchan"], f"{where} nbchan"),
+                "pnts": _fdt_positive_int(entry["pnts"], f"{where} pnts"),
+                "trials": _fdt_positive_int(entry["trials"], f"{where} trials"),
+                "fdt_bytes": _fdt_positive_int(entry["fdt_bytes"], f"{where} fdt_bytes"),
+            }
+            implied = decl["nbchan"] * decl["pnts"] * decl["trials"] * 4
+            if decl["fdt_bytes"] != implied:
+                raise ValueError(
+                    f"{where}: fdt_bytes {decl['fdt_bytes']} != nbchan x pnts x trials x 4 "
+                    f"= {implied}"
+                )
+            recs[set_path] = decl
+        out[dataset_id] = recs
+    return out
+
+
+def eeglab_fdt_layout(set_local: str) -> tuple[int, int, int] | None:
+    """``(nbchan, pnts, trials)`` from a classic EEGLAB `.set` header, or None
+    when the `.set` carries its samples inline (``EEG.data`` is numeric, so there
+    is no `.fdt` to find). Handles both saved forms: fields wrapped in one ``EEG``
+    struct, and fields saved flat at the top level.
+
+    A MATLAB v7.3 (HDF5) `.set` is refused rather than half-supported: no
+    declared dataset uses one, and a declaration should not be the first code
+    path to read that form's header."""
+    with open(set_local, "rb") as fh:
+        if fh.read(19) == b"MATLAB 7.3 MAT-file":
+            raise FdtDeclarationRefused(
+                "a declared .fdt is only supported for a classic (non-v7.3) EEGLAB .set"
+            )
+    from scipy.io import loadmat  # biosigIO's own dependency
+
+    mat = loadmat(set_local, squeeze_me=True, struct_as_record=False)
+    src: Any = mat.get("EEG")
+
+    def field(name: str) -> Any:
+        if src is not None:
+            return getattr(src, name, None)
+        return mat.get(name)
+
+    data = field("data")
+    if not isinstance(data, str):
+        return None
+    try:
+        nbchan = int(field("nbchan"))
+        pnts = int(field("pnts"))
+        trials = int(field("trials") or 1) or 1
+    except (TypeError, ValueError) as exc:
+        raise FdtDeclarationRefused(
+            f"the .set header has no usable nbchan/pnts/trials ({exc})"
+        ) from exc
+    return nbchan, pnts, trials
+
+
+def stage_declared_fdt(
+    decl: FdtDeclaration,
+    primary: str,
+    primary_local: str,
+    work: str,
+    *,
+    repo: str,
+    head_files: set[str],
+    head: str,
+    local: bool,
+    bucket: str | None = None,
+    dataset_id: str | None = None,
+) -> str:
+    """Put the declared `.fdt` beside the `.set` under the sibling name the
+    EEGLAB reader looks for first (``<set stem>.fdt``) and return the `.set` path
+    the converter should read. Refuses (``FdtDeclarationRefused``) instead of
+    guessing whenever the declaration and the data disagree."""
+    fdt = decl["fdt"]
+    if fdt not in head_files:
+        raise FdtDeclarationRefused(f"declared .fdt {fdt!r} is not tracked at {head[:8]}")
+    sibling_rel = os.path.splitext(primary)[0] + ".fdt"
+    if sibling_rel in head_files:
+        raise FdtDeclarationRefused(
+            f"{primary!r} already has a sibling .fdt; the declaration of {fdt!r} contradicts the tree"
+        )
+    layout = eeglab_fdt_layout(primary_local)
+    if layout is None:
+        raise FdtDeclarationRefused(
+            f"{primary!r} carries its samples inline, so no .fdt belongs to it"
+        )
+    declared = (decl["nbchan"], decl["pnts"], decl["trials"])
+    if layout != declared:
+        raise FdtDeclarationRefused(
+            f"{primary!r} header says nbchan x pnts x trials = {layout}, the declaration says {declared}"
+        )
+    want = decl["fdt_bytes"]
+    # Size BEFORE fetching, from the pointer (annex key) or the in-git blob, so a
+    # wrong pairing never costs a multi-GB download.
+    if local:
+        src = os.path.join(repo, fdt)
+        if not os.path.exists(src):
+            raise FdtDeclarationRefused(f"declared .fdt {fdt!r} has no local content (run `git annex get`)")
+        known: int | None = os.path.getsize(src)
+    else:
+        key, blob_size = _blob_key_and_size(repo, fdt, head)
+        known = annex_key_size(key) if key else blob_size
+    if known is not None and known != want:
+        raise FdtDeclarationRefused(
+            f"declared .fdt {fdt!r} is {known} bytes; {primary!r} needs {want} "
+            f"(nbchan {declared[0]} x pnts {declared[1]} x trials {declared[2]} x 4)"
+        )
+    set_local = os.path.join(work, os.path.basename(primary))
+    staged = os.path.splitext(set_local)[0] + ".fdt"
+    if local:
+        # Never write into the working tree: link both halves into `work`, which
+        # convert_one removes afterwards.
+        os.makedirs(work, exist_ok=True)
+        if os.path.abspath(primary_local) != os.path.abspath(set_local):
+            os.symlink(os.path.abspath(primary_local), set_local)
+        os.symlink(os.path.abspath(src), staged)
+    else:
+        found, _ = _fetch_blob(repo, bucket or "", dataset_id or "", fdt, head, staged)
+        if not found:
+            raise FdtDeclarationRefused(f"declared .fdt {fdt!r} could not be fetched at {head[:8]}")
+    got = os.path.getsize(staged)
+    if got != want:
+        os.remove(staged)
+        raise FdtDeclarationRefused(f"staged .fdt {fdt!r} is {got} bytes; expected {want}")
+    print(f"[zarr] {primary}: using declared .fdt {fdt!r} ({want} bytes)", flush=True)
+    return set_local
+
+
 def embed_attr(meta_path: str, key: str, value: object) -> None:
     """Write a key into the `attributes` dict of an arbitrary Zarr v3 group zarr.json.
 
@@ -5533,6 +5782,13 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         else:
             primary_local, events_local, primary_key = materialize_recording(
                 c["repo"], c["bucket"], c["dataset_id"], primary, c["head_files"], c["head"], work
+            )
+        fdt_decl = (c.get("fdt_declarations") or {}).get(primary)
+        if fdt_decl is not None:
+            primary_local = stage_declared_fdt(
+                fdt_decl, primary, primary_local, work,
+                repo=c["repo"], head_files=c["head_files"], head=c["head"],
+                local=c["local"], bucket=c.get("bucket"), dataset_id=c.get("dataset_id"),
             )
         # ADR 0028. Substituted HERE rather than inside convert_recording, which
         # derives modality, size and the streaming decision from the path it is given
@@ -6432,7 +6688,15 @@ def main() -> int:
     # Charge admission what each worker is PERMITTED (projection * slack), not the
     # bare projection -- otherwise the in-flight sum is bounded while the memory
     # those workers may actually take is not. See `admission_reserve_bytes`.
-    sizes = {p: recording_size_from_pointers(repo, p, head_set, head) for p in convert}
+    # A declared `.fdt` lives outside the recording's directory, so the pointer
+    # walk cannot see it; add its declared size or admission under-projects a
+    # multi-GB in-memory `.set` read as a few tens of MB.
+    fdt_declarations = load_fdt_declarations().get(dataset_id, {})
+    sizes = {
+        p: recording_size_from_pointers(repo, p, head_set, head)
+        + (fdt_declarations[p]["fdt_bytes"] if p in fdt_declarations else 0)
+        for p in convert
+    }
     # channels.tsv is already the fidelity gate's ground truth; reuse it so the
     # streaming projection can account for its per-channel term (see
     # `streaming_peak_bytes`). Best-effort: an unreadable sidecar falls back to
@@ -6530,6 +6794,7 @@ def main() -> int:
             # independent /proc/meminfo read, which could disagree with this one.
             "hard_ceiling": hardware_ceiling_bytes(),
             "projections": projections,
+            "fdt_declarations": fdt_declarations,
         }
         pool_breaks = 0
         # --jobs 1 converts in this process, as an operator asked for. Anything
