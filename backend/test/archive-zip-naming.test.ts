@@ -184,3 +184,64 @@ describe("a well-formed but never-published version (review finding)", () => {
     expect(s3.requestLog.some((r) => r.url.includes("archives/"))).toBe(false);
   });
 });
+
+describe("ADR 0012 review: the zip route enforces the size policy, not just S3 object existence", () => {
+  // Measured in production (nm000323 v1.0.4, nm000348 v1.0.5): both had a
+  // 302 to a 120 GiB / 109 GiB zip that predated the archive-size policy.
+  // Well over ARCHIVE_MAX_BYTES (100 GiB); total_files stays small so only
+  // the byte ceiling trips.
+  const OVER_POLICY_BYTES = 130 * 1024 * 1024 * 1024;
+
+  function setDatasetSize(fileSize: number, totalFiles: number): void {
+    db.prepare("UPDATE datasets SET file_size = ?, total_files = ? WHERE dataset_id = ?").run(
+      fileSize,
+      totalFiles,
+      DATASET,
+    );
+  }
+
+  test("a zip present in S3 for an over-policy dataset is never served: 404 archive_skipped, and the archive key is never even HEADed", async () => {
+    setDatasetSize(OVER_POLICY_BYTES, 1000);
+    // A real zip sitting in S3, exactly like the two production datasets --
+    // built before the policy applied, or before the dataset grew past it.
+    s3.files.set(`${DATASET}/archives/${DATASET}_v1.0.1.zip`, new Uint8Array([1]));
+
+    const res = await getZip("v1.0.1");
+
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string; reason: string; browse_url: string };
+    expect(body.reason).toBe("archive_skipped");
+    expect(body.error).toContain("exceeds");
+    expect(body.browse_url).toBe(`/${DATASET}/v1.0.1/`);
+    // The point of the fix: the route decides from the catalog row and never
+    // even asks S3 whether a (stray) archive exists.
+    expect(s3.requestLog.some((r) => r.url.includes("archives/"))).toBe(false);
+  });
+
+  test("no zip present for an over-policy dataset still answers archive_skipped, not 'not yet available'", async () => {
+    setDatasetSize(OVER_POLICY_BYTES, 1000);
+
+    const res = await getZip("v1.0.1");
+
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string; reason: string };
+    expect(body.reason).toBe("archive_skipped");
+    // The bug this closes: an over-policy dataset must never be told its
+    // archive is merely still building, because none will ever exist.
+    expect(body.error).not.toContain("not yet available");
+  });
+
+  test("a within-policy dataset with a missing zip still answers 'not yet available'", async () => {
+    // Explicitly within policy (not just a null/unset size), to pin the
+    // boundary the two tests above draw: the new size check must not reject
+    // a dataset that is actually fine.
+    setDatasetSize(5 * 1024 * 1024 * 1024, 500);
+
+    const res = await getZip("v1.0.1");
+
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string; reason?: string };
+    expect(body.error).toContain("not yet available");
+    expect(body.reason).toBeUndefined();
+  });
+});

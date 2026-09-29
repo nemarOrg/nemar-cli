@@ -15,6 +15,7 @@ import { type Context, Hono } from "hono";
 import { checkDataMissBudget } from "../middleware/rateLimit";
 import { recordAccess } from "../services/access-metrics";
 import { CONCEPT_DOI_SQL } from "../services/anonymity";
+import { shouldSkipArchive } from "../services/archive-policy";
 import {
   type CatalogIndexBuildResult,
   type CatalogIndexRow,
@@ -356,7 +357,7 @@ async function loadManifestDigest(
 interface FileNotFoundPayload {
   version: string;
   path: string;
-  reason?: "removed" | "not_latest_version";
+  reason?: "removed" | "not_latest_version" | "archive_skipped";
   last_seen_version?: string;
   last_seen_url?: string;
   /** #1518: set alongside reason: "not_latest_version" -- the version whose
@@ -2209,6 +2210,36 @@ dataRoutes.get("/:datasetId/:version", async (c) => {
       );
     }
 
+    // ADR 0012 review: an over-policy dataset's zip is never GENERATED, but a
+    // zip built before the dataset grew past the policy -- or before the
+    // policy applied to it at all -- can still be sitting in S3 (measured in
+    // production: nm000323 v1.0.4 and nm000348 v1.0.5 were serving 302s to a
+    // 120 GiB and a 109 GiB zip that predated the policy). This route used to
+    // check only whether the S3 object existed, never the policy, so a stray
+    // zip served fine, and once an operator deleted it the request fell
+    // through to "not yet available" below, which is false for a dataset that
+    // will never get an archive. Decide the policy from the SAME rule the
+    // archive-ready dispatcher and the admin sweep already use
+    // (`shouldSkipArchive`), never a second copy of the thresholds, and do it
+    // BEFORE resolving the S3 key at all so a stray zip is never served.
+    const sizeRow = await c.env.DB.prepare(
+      "SELECT file_size, total_files FROM datasets WHERE dataset_id = ?",
+    )
+      .bind(datasetId)
+      .first<{ file_size: number | null; total_files: number | null }>();
+    const sizePolicy = shouldSkipArchive({
+      totalBytes: sizeRow?.file_size,
+      totalFiles: sizeRow?.total_files,
+    });
+    if (sizePolicy.skip) {
+      return notFound(sizePolicy.reason ?? "archive skipped (size policy)", {
+        version: resolved.version,
+        path: `${resolved.version}.zip`,
+        reason: "archive_skipped",
+        browse_url: `/${datasetId}/${resolved.version}/`,
+      });
+    }
+
     const s3 = s3OptionsFromEnv(c.env);
     // Resolve (HEAD) the archive key ONCE: the archive is generated
     // asynchronously after publish, so a download click in that window
@@ -2228,6 +2259,9 @@ dataRoutes.get("/:datasetId/:version", async (c) => {
       return c.json({ error: "Unable to check archive availability" }, 503);
     }
     if (!archiveKeyResolved) {
+      // Reached only for a WITHIN-policy dataset (the over-policy case
+      // returned above, before this HEAD): a missing zip here really is
+      // still being built, never a zip that will never exist.
       return notFound(
         "Archive not yet available for this version (generation may still be in progress)",
       );
