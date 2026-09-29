@@ -8784,8 +8784,6 @@ class TestBlobKeyAndSize(unittest.TestCase):
 
 def sha256e_key(path: str) -> str:
     """The git-annex SHA256E key of a file's bytes, as a declaration pins it."""
-    import hashlib
-
     with open(path, "rb") as fh:
         data = fh.read()
     return f"SHA256E-s{len(data)}--{hashlib.sha256(data).hexdigest()}.fdt"
@@ -9069,6 +9067,32 @@ class TestDeclaredFdtConvertOne(unittest.TestCase):
         result = self.convert({self.SET: self.decl()})
         self.assertEqual(result["code"], "fdt_declaration_refused")
         self.assertIn("inline", result["error"])
+
+    def test_a_set_that_already_has_a_sibling_fdt_is_refused(self):
+        sibling = "sub-01/eeg/sub-01_task-x_eeg.fdt"
+        result = self.convert({self.SET: self.decl()}, extra_files=(sibling,))
+        self.assertEqual(result["code"], "fdt_declaration_refused")
+        self.assertIn("sibling", result["error"])
+
+    def test_a_v73_set_is_refused(self):
+        # A v7.3 MAT-file is an HDF5 container behind this 128-byte text header;
+        # the header alone is what the refusal reads.
+        with open(os.path.join(self.repo, self.SET), "wb") as fh:
+            fh.write(b"MATLAB 7.3 MAT-file, Platform: GLNXA64".ljust(128, b" "))
+            fh.write(b"\x89HDF\r\n\x1a\n" + b"\x00" * 512)
+        result = self.convert({self.SET: self.decl()})
+        self.assertEqual(result["code"], "fdt_declaration_refused")
+        self.assertIn("v7.3", result["error"])
+
+    def test_an_fdt_listed_but_absent_from_the_tree_is_refused(self):
+        # The remote path fetches against the pinned head: a path head_files
+        # names but the tree at that commit lacks is refused, never fetched.
+        ghost = "derivatives/fdt_files/ghost.fdt"
+        head = self.commit()
+        result = self.convert({self.SET: self.decl(fdt=ghost)}, local=False, head=head,
+                              extra_files=(ghost,))
+        self.assertEqual(result["code"], "fdt_declaration_refused")
+        self.assertIn("not in the tree", result["error"])
 
 
 class TestDeclaredFdtAnnexed(unittest.TestCase):
