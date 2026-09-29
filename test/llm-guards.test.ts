@@ -218,11 +218,11 @@ describe("mergeWithExisting relation locks", () => {
 });
 
 describe("estimateUsageCostUsd", () => {
-  test("applies sonnet-5 standard rates", () => {
-    // 1M input at $3 + 100k output at $15/M = 3 + 1.5
+  test("applies sonnet-5-5 standard rates", () => {
+    // 1M input at $2 + 100k output at $10/M = 2 + 1
     expect(
       estimateUsageCostUsd({ calls: 2, input_tokens: 1_000_000, output_tokens: 100_000 }),
-    ).toBe(4.5);
+    ).toBe(3);
   });
 });
 

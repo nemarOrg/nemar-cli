@@ -38,7 +38,7 @@ function truncateReadme(content: string): string {
 
 /** Exact model ID — the Anthropic API has no rolling "latest" alias, so
  *  version bumps are a deliberate one-line change here. */
-const CLAUDE_MODEL = "claude-sonnet-5";
+const CLAUDE_MODEL = "claude-sonnet-5-5";
 
 /** Accumulated token usage across the LLM calls of one enrichment run.
  *  `calls` counts ATTEMPTS (incremented on dispatch), so failed HTTP calls
@@ -56,11 +56,11 @@ export interface LlmUsageTotals extends LlmUsage {
   est_cost_usd: number;
 }
 
-/** Estimated cost in USD for accumulated usage at claude-sonnet-5 standard
- *  rates ($3 / $15 per MTok). Intro pricing through 2026-08-31 is lower, so
- *  this reads slightly conservative until then. */
+/** Estimated cost in USD for accumulated usage at claude-sonnet-5-5 standard
+ *  rates ($2 / $10 per MTok). Prompt-cache discounts are not modeled, so this
+ *  is an upper bound for runs that hit the cache. */
 export function estimateUsageCostUsd(usage: LlmUsage): number {
-  const usd = (usage.input_tokens * 3 + usage.output_tokens * 15) / 1_000_000;
+  const usd = (usage.input_tokens * 2 + usage.output_tokens * 10) / 1_000_000;
   return Math.round(usd * 10000) / 10000;
 }
 

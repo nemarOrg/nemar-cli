@@ -139,7 +139,7 @@ export interface EnrichmentSuccessBody {
    *  an existing DataCurator from a permanent DOI. */
   doi_sync?: DoiSyncOutcome;
   /** Token usage across this run's LLM calls, with an estimated USD cost
-   *  at claude-sonnet-5 standard rates. */
+   *  at claude-sonnet-5-5 standard rates. */
   llm_usage?: LlmUsageTotals;
   /** DOIs removed by the unsourced-DOI guard this run (see
    *  pruneUnsourcedDois). Surfaced so silent metadata loss is impossible. */
