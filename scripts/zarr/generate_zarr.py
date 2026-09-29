@@ -2270,11 +2270,16 @@ def sidecar_join_report(
     - ``unmatched_case_only``: the names differ only in case (EDF header
       ``FP1-F7``, sidecar ``Fp1-F7``; biosigio#136).
 
-    ``unmatched_channels`` is always present, so 0 is a positive statement
-    that every store channel met a row; the rest appear only when non-zero.
+    ``unmatched_channels`` is present whenever there were store labels to
+    join, so 0 is a positive statement that every store channel met a row;
+    the rest appear only when non-zero. With no store labels (a store whose
+    groups record none) there was no join, and the report is empty rather
+    than a vacuous 0.
     Exact-match semantics mirror biosigio 1.2.9. If biosigIO starts matching
     case-insensitively (biosigio#136), ``unmatched_case_only`` must go.
     """
+    if not store_labels:
+        return {}
     exact = set(sidecar_names)
     folded = {name.casefold() for name in sidecar_names}
     unmatched = [label for label in store_labels if label not in exact]
@@ -6330,7 +6335,7 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
                     meta.get("_channel_labels") or [], names, meta.get("_label_renames") or {}
                 )
                 entry["units_report"].update(join)
-                if join["unmatched_channels"]:
+                if join.get("unmatched_channels"):
                     print(
                         f"::warning::{primary}: {channels_rel} names no row for "
                         f"{join['unmatched_channels']} store channel(s) "

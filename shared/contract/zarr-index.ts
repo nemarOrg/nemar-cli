@@ -63,7 +63,9 @@ export const zarrUnitsReportSchema = z
     sidecar: z.string().optional(),
     sidecar_supplied: z.boolean().optional(),
     /** Store channels no channels.tsv row names exactly; the sidecar's type
-     *  and unit never reached them. 0 means every channel met a row. */
+     *  and unit never reached them. 0 means every channel met a row. Absent
+     *  when there was no join: the store records no labels, the sidecar has
+     *  no `name` column, or there is no `units_report` at all. */
     unmatched_channels: z.number().int().nonnegative().optional(),
     /** Of those, a row names them in another letter case (biosigio#136). */
     unmatched_case_only: z.number().int().positive().optional(),

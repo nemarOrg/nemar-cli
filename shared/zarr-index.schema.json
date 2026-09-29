@@ -304,7 +304,7 @@
             "unmatched_channels": {
               "type": "integer",
               "minimum": 0,
-              "description": "Store channels whose label no channels.tsv row names exactly, so the sidecar's type and unit were NOT applied to them and they carry the importer's. The counts above cover only matched rows, which is why this is reported separately. 0 means every channel met a row. Absent on stores converted before the converter reported it."
+              "description": "Store channels whose label no channels.tsv row names exactly, so the sidecar's type and unit were NOT applied to them and they carry the importer's. The counts above cover only matched rows, which is why this is reported separately. 0 means every channel met a row. Absent when there was no join to report on: the store records no channel labels, the channels.tsv has no name column, or there is no units_report at all (no channels.tsv applied); and on stores converted before the converter reported it."
             },
             "unmatched_case_only": {
               "type": "integer",

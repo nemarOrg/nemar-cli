@@ -323,10 +323,33 @@ const zarrUnitsReportSchema4 = z4
     units_column_present: z4.boolean().optional(),
     sidecar: z4.string().optional(),
     sidecar_supplied: z4.boolean().optional(),
-    unmatched_channels: z4.number().int().nonnegative().optional(),
-    unmatched_case_only: z4.number().int().positive().optional(),
-    unmatched_raw_label: z4.number().int().positive().optional(),
-    unmatched_examples: z4.array(z4.string()).max(5).optional(),
+    unmatched_channels: z4
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe(
+        "Store channels no channels.tsv row names exactly, so they kept the importer's type and unit. 0 means every channel met a row. Absent when there was no join: no store labels, no name column in the sidecar, or no units_report at all.",
+      ),
+    unmatched_case_only: z4
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe("Of unmatched_channels, those a row names in a different letter case."),
+    unmatched_raw_label: z4
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe(
+        "Of unmatched_channels, those the store de-duplicated (T8-P8 -> T8-P8-0) while channels.tsv names the file's repeated label.",
+      ),
+    unmatched_examples: z4
+      .array(z4.string())
+      .max(5)
+      .optional()
+      .describe("Up to five unmatched store labels, in store order."),
   })
   .passthrough();
 

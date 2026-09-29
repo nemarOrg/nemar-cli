@@ -8319,6 +8319,11 @@ class TestSidecarJoinReport(unittest.TestCase):
             {"unmatched_channels": 0},
         )
 
+    def test_no_store_labels_is_no_join_not_a_zero(self):
+        # A store whose groups record no labels: nothing was joined, and a
+        # 0 would claim every channel met a row.
+        self.assertEqual(sidecar_join_report([], ["A", "B"], {}), {})
+
     def test_repeated_store_labels_are_each_counted(self):
         # A list, not a set: two channels the sidecar misses are two.
         report = sidecar_join_report(["A", "A", "B"], ["B"], {})
