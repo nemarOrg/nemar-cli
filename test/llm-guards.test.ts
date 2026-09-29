@@ -3,6 +3,7 @@ import {
   estimateUsageCostUsd,
   mergeWithExisting,
   pruneUnsourcedDois,
+  seedFromBids,
 } from "../backend/src/services/llm-enrich.js";
 import { buildLlmUsageDataPoint } from "../backend/src/services/llm-metrics.js";
 
@@ -180,6 +181,84 @@ describe("mergeWithExisting relation locks", () => {
       ],
     };
     const merged = mergeWithExisting(existing, llmResult);
+    expect(merged.related_identifiers?.[0].relation_type).toBe("IsDescribedBy");
+  });
+
+  test("re-enrichment relabels nm000275's data paper and deposits (#1549)", () => {
+    // nm000275's real BIDS description: its Scientific Data descriptor and
+    // both figshare deposits sit in ReferencesAndLinks (seeded References),
+    // and the raw deposit is also a SourceDataset (seeded IsDerivedFrom).
+    const seeded = seedFromBids(
+      {
+        Name: "Multi-channel EEG recordings during a sustained-attention driving task",
+        ReferencesAndLinks: [
+          "https://doi.org/10.1038/s41597-019-0027-4",
+          "https://doi.org/10.6084/m9.figshare.6427334.v5",
+          "https://doi.org/10.6084/m9.figshare.7666055.v3",
+          "https://doi.org/10.1109/TBCAS.2014.2316224",
+        ],
+        SourceDatasets: [{ URL: "https://doi.org/10.6084/m9.figshare.6427334.v5" }],
+      },
+      null,
+    );
+    const merged = mergeWithExisting(seeded, {
+      related_identifiers: [
+        // Upper case in the LLM echo must still match the seeded entry.
+        {
+          identifier: "10.1038/S41597-019-0027-4",
+          identifier_type: "DOI",
+          relation_type: "IsDescribedBy",
+        },
+        // References -> IsDerivedFrom: the pre-processed deposit of the same data.
+        {
+          identifier: "10.6084/m9.figshare.7666055.v3",
+          identifier_type: "DOI",
+          relation_type: "IsDerivedFrom",
+        },
+        // IsDerivedFrom (SourceDatasets) is locked against a downgrade.
+        {
+          identifier: "10.6084/m9.figshare.6427334.v5",
+          identifier_type: "DOI",
+          relation_type: "References",
+        },
+        // Lower case echo of a seeded upper-case DOI: reclassified, not appended.
+        {
+          identifier: "10.1109/tbcas.2014.2316224",
+          identifier_type: "DOI",
+          relation_type: "References",
+        },
+      ],
+    });
+    expect(merged.related_identifiers?.map((r) => [r.identifier, r.relation_type])).toEqual([
+      ["10.6084/m9.figshare.6427334.v5", "IsDerivedFrom"],
+      ["10.1038/s41597-019-0027-4", "IsDescribedBy"],
+      ["10.6084/m9.figshare.7666055.v3", "IsDerivedFrom"],
+      ["10.1109/TBCAS.2014.2316224", "References"],
+    ]);
+  });
+
+  test("only References may move to IsDerivedFrom", () => {
+    const merged = mergeWithExisting(
+      {
+        version: "2.0" as const,
+        related_identifiers: [
+          {
+            identifier: "10.1038/s41597-019-0027-4",
+            identifier_type: "DOI" as const,
+            relation_type: "IsDescribedBy",
+          },
+        ],
+      },
+      {
+        related_identifiers: [
+          {
+            identifier: "10.1038/s41597-019-0027-4",
+            identifier_type: "DOI",
+            relation_type: "IsDerivedFrom",
+          },
+        ],
+      },
+    );
     expect(merged.related_identifiers?.[0].relation_type).toBe("IsDescribedBy");
   });
 
