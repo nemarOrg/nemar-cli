@@ -1729,7 +1729,7 @@ Examples:
         } else {
           console.log(chalk.green(`Data downloaded (${getResult.filesDownloaded} files)`));
         }
-        if (noVerify) printNoVerifyNotice();
+        if (noVerify) printNoVerifyNotice(getResult.unsizedFiles);
       }
 
       // --prune: drop annex objects that are no longer referenced by any branch
@@ -4634,7 +4634,7 @@ Examples:
     } else {
       console.log(chalk.green(`Downloaded ${result.filesDownloaded} file(s)`));
     }
-    if (noVerify) printNoVerifyNotice();
+    if (noVerify) printNoVerifyNotice(result.unsizedFiles);
   });
 
 // Shared action handler for commit/save
