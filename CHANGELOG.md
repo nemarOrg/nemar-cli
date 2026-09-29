@@ -13,6 +13,86 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## 0.10.10 - 2026-09-29
+
+### Added
+
+- **News posts (#1551, #1553, #1559).** The API stores and serves short news posts for the
+  website (nemarOrg/website#371). `GET /news` lists published posts, newest first (10 by
+  default, at most 50), and `GET /news/<slug>` returns one; a draft, or a post scheduled
+  for later, answers 404 until its `published_at` passes. Admins create, edit and delete
+  posts under `/admin/news`, and upload images with `POST /admin/news/media`: PNG, JPEG,
+  WebP or GIF, checked by their leading bytes, at most 5 MiB, stored once under the
+  SHA-256 of their bytes in a dedicated R2 bucket and never overwritten.
+  `GET /news/media/<file>` serves them with the type their file name implies, a one-year
+  immutable cache and `X-Content-Type-Options: nosniff`. Every post write and image upload
+  leaves an audit-log row, written with the post change or before the image is stored.
+  ADR 0076 records why images live in R2 and dataset bytes stay in S3, and how to recall
+  an image uploaded by mistake.
+
+### Changed
+
+- **Dataset enrichment runs on Claude Sonnet 5.5 and reads what each DOI is before
+  labeling it (#1549, #1550).** Enrichment, validation and correction move to
+  `claude-sonnet-5-5`. The model used to see bare DOI strings, so it mislabeled them in
+  both directions: nm000275's own Scientific Data paper was typed `References`, while
+  MNE-BIDS, EEG-BIDS and MEG-BIDS were typed `IsDescribedBy` on dozens of datasets. Each
+  run now resolves up to 15 DOIs (from the BIDS fields, the existing related identifiers
+  and the README) through DataCite and Crossref, and gives the model each one's title,
+  first author, year, venue and type. A deterministic guard then demotes known standards,
+  software, platform and umbrella papers (the BIDS family, MNE, EEGLAB, FieldTrip, the
+  Hierarchical Event Descriptors, OpenNeuro, NEMAR, the Healthy Brain Network program and
+  others) from any data-describing relation to `References`, and drops a dataset's own
+  `10.82901/nemar.<id>` DOI from its related identifiers.
+  The model may write or promote `IsDerivedFrom` only for a DOI that DataCite types as
+  `Dataset`; existing `IsDerivedFrom` entries are left as they are. ADR 0075 records the
+  rules, and the list must stay in step with nemar-citations' never-anchor list. A
+  dataset's `.nemar/metadata.json` changes only when it is next re-enriched (a reindex, or
+  a push that changes `README.md` or `dataset_description.json`); a re-enrichment sweep of
+  the catalog follows this release.
+- **`nemar admin reindex` reports its DOI lookups and warnings, and gains `--json` (#1550,
+  #1556).** Single and bulk reindex responses carry `doi_resolution` (`resolved`,
+  `unresolved`, `failed`, `skipped`). A lookup that gets no registry answer (429, 5xx, a
+  timeout, or the 25-second budget for the whole lookup stage running out) counts as
+  `failed` and adds a warning saying to reindex the dataset again; the run still succeeds.
+  DOIs past the 15-lookup cap are listed to the model as not looked up rather than left
+  unmarked. The summary output now prints each result's warnings, including the DOI-sync
+  skip (#1255), which it never showed before. The warning is raised on the reindex path
+  only; an enrichment triggered by a push logs failed lookups to the Worker log. The
+  enrichment service's own response also lists `demoted_dois` and `self_dois_dropped`
+  when there are any; the reindex response does not pass them through. The bulk route
+  still has no per-request dataset cap (#1555), so a large reindex is best driven one
+  dataset at a time.
+
+### Fixed
+
+- **Zarr: a channels.tsv row that differs from the recording's label only in letter case
+  now applies (#1552).** The converter requires biosigio 1.2.10, which matches such a row
+  to its channel when the match is unambiguous, so its type and unit are applied
+  (nm000110's `Fp1-F7` against the file's `FP1-F7`). The store index reports these
+  matches as `units_report.matched_case_only` with at most five examples, rather than
+  republishing biosigio's per-channel map, and an index carried forward with that map is
+  repaired on its next merge. The engine stamp is not bumped (ADR 0033), so nothing
+  requeues on its own: stores converted earlier keep the importer's units until they are
+  requeued, and `find_collapsed_channel_stores.py --case-only` lists the datasets whose
+  index reports `unmatched_case_only`.
+
+### Migrations
+
+- `0087_news_posts.sql` adds the `news_posts` table and an index on
+  `(status, published_at DESC)`. It is additive (`CREATE TABLE IF NOT EXISTS`,
+  `CREATE INDEX IF NOT EXISTS`), so rolling the Worker back leaves the table unused.
+
+### Deploy coupling
+
+- The Worker binds the R2 bucket `NEWS_MEDIA` (`nemar-news-media` in production,
+  `nemar-news-media-dev` on dev), and a deploy fails if its bucket does not exist. Both
+  buckets were created before this release.
+- Merging to `main` makes the Hallu converter use biosigio 1.2.10 on its next run. Stores
+  already published are replaced only when requeued.
+- The re-enrichment sweep described in #1550 runs against production after this release,
+  one dataset at a time.
+
 ## 0.10.9 - 2026-09-29
 
 ### Fixed

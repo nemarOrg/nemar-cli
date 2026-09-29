@@ -304,12 +304,29 @@
             "unmatched_channels": {
               "type": "integer",
               "minimum": 0,
-              "description": "Store channels whose label no channels.tsv row names exactly, so the sidecar's type and unit were NOT applied to them and they carry the importer's. The counts above cover only matched rows, which is why this is reported separately. 0 means every channel met a row. Absent when there was no join to report on: the store records no channel labels, the channels.tsv has no name column, or there is no units_report at all (no channels.tsv applied); and on stores converted before the converter reported it."
+              "description": "Store channels no channels.tsv row reached, so the sidecar's type and unit were NOT applied to them and they carry the importer's. A row reaches the channel it names exactly and, from biosigio 1.2.10, the one channel whose label differs from it only in letter case when that match is unambiguous (counted in matched_case_only, not here). The counts above cover only matched rows, which is why this is reported separately. 0 means every channel met a row. Absent when there was no join to report on: the store records no channel labels, the channels.tsv has no name column, or there is no units_report at all (no channels.tsv applied); and on stores converted before the converter reported it."
             },
             "unmatched_case_only": {
               "type": "integer",
               "minimum": 1,
-              "description": "Of unmatched_channels, those a row names in a different letter case (EDF header FP1-F7, channels.tsv Fp1-F7). Matching is exact, so these were not applied. Absent when there are none."
+              "description": "Of unmatched_channels, those a row names in a different letter case (EDF header FP1-F7, channels.tsv Fp1-F7) that were NOT matched: the store was converted with a biosigio before 1.2.10, which matched names exactly, or the case-insensitive match was ambiguous (two channels, or two rows, fold to the same name). Either way the sidecar's type and unit were not applied. Absent when there are none."
+            },
+            "matched_case_only": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Store channels a channels.tsv row reached only by ignoring letter case (EDF header FP1-F7, channels.tsv Fp1-F7; biosigio 1.2.10 and later). The sidecar's type and unit WERE applied to them, so a unit that differs from the file's was converted. Absent when there are none, and on stores converted before biosigio 1.2.10."
+            },
+            "matched_case_only_examples": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 5,
+              "description": "Up to five of the matched_case_only matches, each as \"<channels.tsv name> -> <store channel label>\", in channels.tsv row order. Present exactly when matched_case_only is."
+            },
+            "matched_case_insensitive": {
+              "not": {},
+              "description": "Never published. biosigio's own report names every case-only match in a per-channel map under this key; the converter republishes it bounded, as matched_case_only and matched_case_only_examples, so an index entry does not grow with the channel count. Declared here so the converter's pre-upload check refuses an index that carries the map."
             },
             "unmatched_raw_label": {
               "type": "integer",
@@ -342,7 +359,7 @@
             "in_file": {
               "type": "integer",
               "minimum": 0,
-              "description": "Data channels the recording file's own header declares, read without the importer (EDF/BDF signal count less the annotation track; BrainVision NumberOfChannels)."
+              "description": "Data channels the recording file's own header declares, read without the importer (EDF/BDF signal count less the annotation track; BrainVision NumberOfChannels; FIF nchan; EEGLAB .set nbchan, used only where it equals the data matrix's rows)."
             },
             "in_store": {
               "type": "integer",
@@ -457,7 +474,7 @@
         },
         "code": {
           "type": "string",
-          "description": "Stable machine code (biosigIO's own, plus the NEMAR-side recording_too_large / channel_count_mismatch / maxshield_uncalibrated / maxshield_probe_failed / fdt_declaration_refused / retry_exhausted)."
+          "description": "Stable machine code (biosigIO's own, plus the NEMAR-side recording_too_large / channel_count_mismatch / maxshield_uncalibrated / maxshield_probe_failed / fdt_declaration_refused / annex_object_missing / retry_exhausted)."
         },
         "reason": {
           "type": "string",

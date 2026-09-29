@@ -12,6 +12,7 @@ import type {
   RelatedIdentifierEntry,
 } from "../../../shared/datacite-constants.js";
 import { normalizeDoi, parseAuthorName } from "./datacite.js";
+import { type RegistryCache, fetchRegistryRecord } from "./doi-registry.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -146,47 +147,27 @@ export function extractDoisFromRelatedIdentifiers(
 }
 
 // ---------------------------------------------------------------------------
-// DataCite public API client
+// DataCite / Crossref public API clients
 // ---------------------------------------------------------------------------
+// Both go through fetchRegistryRecord (doi-registry.ts), which classifies and
+// logs every failure and, given the enrichment run's cache, shares each
+// response with the stage-1d DOI metadata resolver (#1549).
 
-const DATACITE_API = "https://api.datacite.org/application/vnd.datacite.datacite+json";
-
-/**
- * Log a DOI query error: network errors get a warning, others get a full error trace.
- */
-function logDoiQueryError(source: string, doi: string, err: unknown): void {
-  const msg = err instanceof Error ? err.message : String(err);
-  const isNetwork = msg.includes("AbortError") || msg.includes("timeout") || msg.includes("fetch");
-  if (isNetwork) {
-    console.warn(`[orcid-discovery] ${source} query failed for ${doi}: ${msg}`);
-  } else {
-    console.error(`[orcid-discovery] Unexpected error querying ${source} for ${doi}:`, err);
-  }
-}
-
-export async function queryDataCiteDoi(doi: string): Promise<DataCiteDoiResult | null> {
-  try {
-    const response = await fetch(`${DATACITE_API}/${encodeURIComponent(doi)}`, {
-      headers: { Accept: "application/vnd.datacite.datacite+json" },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!response.ok) {
-      if (response.status !== 404) {
-        console.warn(`[orcid-discovery] DataCite returned HTTP ${response.status} for ${doi}`);
-      }
-      return null;
-    }
-    const data = (await response.json()) as {
-      creators?: DataCiteCreator[];
-    };
-    return {
-      doi,
-      creators: Array.isArray(data.creators) ? data.creators : [],
-    };
-  } catch (err) {
-    logDoiQueryError("DataCite", doi, err);
-    return null;
-  }
+/** Query DataCite (content negotiation, which also covers Crossref DOIs) for
+ *  a DOI's creators. Null when the registry has no record or no answer. */
+export async function queryDataCiteDoi(
+  doi: string,
+  cache?: RegistryCache,
+): Promise<DataCiteDoiResult | null> {
+  const record = await fetchRegistryRecord("DataCite", doi, cache);
+  if (record.outcome !== "found") return null;
+  const data = record.body as { creators?: DataCiteCreator[] } | null;
+  return {
+    doi,
+    // Copies: queryDoi merges Crossref ORCIDs into these objects, and the
+    // parsed body may be shared with other stages through the cache.
+    creators: Array.isArray(data?.creators) ? data.creators.map((c) => ({ ...c })) : [],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -205,61 +186,45 @@ interface CrossrefAuthor {
  * Query the Crossref API for a DOI and return creators in DataCiteCreator format.
  * Crossref covers most journal DOIs (Nature, bioRxiv, etc.) that DataCite doesn't.
  */
-export async function queryCrossrefDoi(doi: string): Promise<DataCiteDoiResult | null> {
-  try {
-    const response = await fetch(`https://api.crossref.org/works/${encodeURIComponent(doi)}`, {
-      headers: {
-        Accept: "application/json",
-        // Polite pool: identify ourselves per Crossref etiquette
-        "User-Agent": "NEMAR/1.0 (https://nemar.org; mailto:nemar@ucsd.edu)",
-      },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!response.ok) {
-      if (response.status !== 404) {
-        console.warn(`[orcid-discovery] Crossref returned HTTP ${response.status} for ${doi}`);
+export async function queryCrossrefDoi(
+  doi: string,
+  cache?: RegistryCache,
+): Promise<DataCiteDoiResult | null> {
+  const record = await fetchRegistryRecord("Crossref", doi, cache);
+  if (record.outcome !== "found") return null;
+  const data = record.body as { message?: { author?: CrossrefAuthor[] } } | null;
+  const authors = data?.message?.author;
+  if (!Array.isArray(authors) || authors.length === 0) return null;
+
+  // Convert Crossref authors to DataCiteCreator format
+  const creators: DataCiteCreator[] = authors
+    .map((a) => {
+      const nameIdentifiers: DataCiteCreator["nameIdentifiers"] = [];
+      if (a.ORCID) {
+        nameIdentifiers.push({
+          nameIdentifier: a.ORCID,
+          nameIdentifierScheme: "ORCID",
+        });
       }
-      return null;
-    }
-    const data = (await response.json()) as {
-      message?: { author?: CrossrefAuthor[] };
-    };
-    const authors = data.message?.author;
-    if (!Array.isArray(authors) || authors.length === 0) return null;
+      return {
+        name: a.family && a.given ? `${a.family}, ${a.given}` : a.name || a.family || "",
+        givenName: a.given,
+        familyName: a.family,
+        nameIdentifiers,
+        affiliation: (a.affiliation || []).filter((aff) => aff.name),
+      };
+    })
+    .filter((c) => c.name.trim() !== "");
 
-    // Convert Crossref authors to DataCiteCreator format
-    const creators: DataCiteCreator[] = authors
-      .map((a) => {
-        const nameIdentifiers: DataCiteCreator["nameIdentifiers"] = [];
-        if (a.ORCID) {
-          nameIdentifiers.push({
-            nameIdentifier: a.ORCID,
-            nameIdentifierScheme: "ORCID",
-          });
-        }
-        return {
-          name: a.family && a.given ? `${a.family}, ${a.given}` : a.name || a.family || "",
-          givenName: a.given,
-          familyName: a.family,
-          nameIdentifiers,
-          affiliation: (a.affiliation || []).filter((aff) => aff.name),
-        };
-      })
-      .filter((c) => c.name.trim() !== "");
-
-    return { doi, creators };
-  } catch (err) {
-    logDoiQueryError("Crossref", doi, err);
-    return null;
-  }
+  return { doi, creators };
 }
 
 /**
  * Query a DOI against DataCite first, then fall back to Crossref.
  */
-async function queryDoi(doi: string): Promise<DataCiteDoiResult | null> {
-  const dcResult = await queryDataCiteDoi(doi);
-  const crResult = await queryCrossrefDoi(doi);
+async function queryDoi(doi: string, cache?: RegistryCache): Promise<DataCiteDoiResult | null> {
+  const dcResult = await queryDataCiteDoi(doi, cache);
+  const crResult = await queryCrossrefDoi(doi, cache);
   if (!dcResult) return crResult;
   if (!crResult) return dcResult;
 
@@ -425,12 +390,14 @@ const BATCH_SIZE = 5;
 
 /**
  * Discover ORCIDs from DOIs in BIDS fields and optionally from additional
- * DOIs (e.g. LLM-discovered related_identifiers).
+ * DOIs (e.g. LLM-discovered related_identifiers). `cache` is the enrichment
+ * run's registry cache, shared with DOI metadata resolution.
  */
 export async function discoverOrcidsFromReferencedDois(
   bidsDescription: Record<string, unknown>,
   existingAuthors?: Record<string, AuthorEnrichmentV2>,
   additionalDois?: ExtractedDoi[],
+  cache?: RegistryCache,
 ): Promise<OrcidDiscoveryResult> {
   const extracted = extractDoisFromBids(bidsDescription);
   if (additionalDois?.length) {
@@ -468,7 +435,7 @@ export async function discoverOrcidsFromReferencedDois(
   for (let i = 0; i < extracted.length; i += BATCH_SIZE) {
     const batch = extracted.slice(i, i + BATCH_SIZE);
     // queryDoi never rejects (catches internally), so Promise.all is safe
-    const results = await Promise.all(batch.map((e) => queryDoi(e.doi)));
+    const results = await Promise.all(batch.map((e) => queryDoi(e.doi, cache)));
     for (let j = 0; j < batch.length; j++) {
       if (results[j]) {
         allCreatorsByDoi.set(batch[j].doi, results[j]?.creators ?? []);

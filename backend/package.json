@@ -1,6 +1,6 @@
 {
   "name": "nemar-api",
-  "version": "0.10.9",
+  "version": "0.10.10-dev9",
   "private": true,
   "scripts": {
     "dev": "wrangler dev -c wrangler-sccn.toml --env dev",
@@ -25,6 +25,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241112.0",
+    "miniflare": "4.20260424.0",
     "typescript": "^5.6.0",
     "wrangler": "^4.85.0"
   }

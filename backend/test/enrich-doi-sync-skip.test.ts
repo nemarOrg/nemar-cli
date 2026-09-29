@@ -134,8 +134,11 @@ describe("a deliberate skip is a warning, never a failure (#1255 review item 26)
     const skipsAt = source.indexOf("const skips = extractEnrichmentSkips(outcome.body);");
     expect(subErrorReturn).toBeGreaterThan(-1);
     expect(skipsAt).toBeGreaterThan(subErrorReturn);
-    // The skip path returns ok:true and carries `warnings`.
-    expect(source.slice(skipsAt)).toContain("ok: true");
-    expect(source.slice(skipsAt)).toContain("warnings: skips");
+    // The skip path returns ok:true and carries the skips as `warnings`
+    // (merged with the DOI lookup warnings of #1549 since that change).
+    const okBranch = source.slice(skipsAt, source.indexOf("} catch", skipsAt));
+    expect(okBranch).toContain("ok: true");
+    expect(okBranch).toContain("const warnings = [...skips, ");
+    expect(okBranch).toContain("...(warnings.length > 0 && { warnings }),");
   });
 });

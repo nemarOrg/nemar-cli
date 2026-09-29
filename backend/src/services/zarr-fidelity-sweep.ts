@@ -79,6 +79,7 @@
  */
 
 import { AwsClient } from "aws4fetch";
+import { zarrChannelsTsvCountMismatchSchema } from "../../../shared/contract/zarr-index.js";
 import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import {
@@ -291,6 +292,7 @@ export interface ZarrFidelityStoreJson {
   path?: unknown;
   zarr?: unknown;
   groups?: unknown;
+  channels_tsv_count_mismatch?: unknown;
 }
 
 /** Shape of the parsed `<id>/zarr/index.json` this module reads (subset,
@@ -404,6 +406,27 @@ export function zarrFidelityStoreMetadataValid(groups: readonly ZarrFidelityGrou
  *  group's `n_channels` is already known-numeric. */
 export function zarrFidelityStoreChannelTotal(groups: readonly ZarrFidelityGroupJson[]): number {
   return groups.reduce((sum, g) => sum + (toFiniteNumber(g.n_channels) ?? 0), 0);
+}
+
+/** True when a store short of its channels.tsv carries the converter's own
+ *  proof that the SIDECAR is what over-declares: a
+ *  `channels_tsv_count_mismatch` disclosure whose `in_store` equals `in_file`
+ *  (the store serves every channel the data file's header declares) and
+ *  equals the store's own channel `total`. The converter publishes such a
+ *  store deliberately (FIF, EDF, BrainVision, EEGLAB header counts; on003645's
+ *  EEG `.set` recordings under a channels.tsv listing its MEG channels), so
+ *  counting it as `channel_count_mismatch` would fail every dataset it
+ *  serves. A store short of its header (`in_store < in_file`), or short of
+ *  the sidecar with no disclosure, or whose disclosure does not describe the
+ *  store as served, is still a mismatch. */
+export function zarrFidelityDisclosedSidecarOvercount(
+  store: ZarrFidelityStoreJson,
+  total: number,
+): boolean {
+  const parsed = zarrChannelsTsvCountMismatchSchema.safeParse(store.channels_tsv_count_mismatch);
+  if (!parsed.success) return false;
+  const { in_file, in_store } = parsed.data;
+  return in_store === in_file && in_store === total;
 }
 
 /** Longest `duration_s` across a set of groups (MAX within a store, mirroring
@@ -697,7 +720,8 @@ async function verifyStore(
   let checkedRate = false;
   const mismatches: ZarrFidelityMismatchExample[] = [];
 
-  // Channel count: total store channels vs. channels.tsv's data-row count.
+  // Channel count: total store channels vs. channels.tsv's data-row count,
+  // unless the store discloses that the sidecar is what over-declares.
   const channelsRes = await resolveSidecar(ctx, store.path, "channels.tsv");
   if (channelsRes.kind === "error") return { kind: "error", reason: channelsRes.reason };
   if (channelsRes.kind === "content") {
@@ -705,7 +729,7 @@ async function verifyStore(
     if (parsed && parsed.count >= 1) {
       checkedChannels = true;
       const total = zarrFidelityStoreChannelTotal(groups);
-      if (total < parsed.count) {
+      if (total < parsed.count && !zarrFidelityDisclosedSidecarOvercount(store, total)) {
         mismatches.push({ path: store.path, code: "channel_count_mismatch" });
       }
     } else {

@@ -20,7 +20,9 @@ Design notes
   this script reads the tree with git plumbing (``ls-tree``/``cat-file``/``diff``)
   exactly like ``emit_manifest.py``, and pulls annex *content* from
   ``s3://<bucket>/<id>/objects/<key>`` with authenticated ``aws s3 cp`` (works for
-  private datasets, unlike the archive workflow's public-HTTP fetch).
+  private datasets, unlike the archive workflow's public-HTTP fetch), or from
+  that key's git-annex chunks when the dataset was uploaded with chunking
+  (``fetch_annex_object``).
 * Incremental: the prior ``index.json`` records the commit it was built from;
   we ``git diff <prior>..HEAD`` and convert only the affected recordings, mapping
   a changed companion (``.fdt``/``.eeg``/``.vmrk``) or ``*_events.tsv`` back to its
@@ -948,6 +950,16 @@ class MaxShieldProbeFailed(Exception):
 # cannot read is a property of that file's content, not of node conditions.
 RETRYABLE_CODES = frozenset({RecordingMemoryExceeded.code})
 
+# Typed codes that are permanent for the RECORDING but say nothing permanent
+# about the DATASET: they describe what storage held at the moment of the run.
+# Unlike `RETRYABLE_CODES` they stay typed failures in the index (the viewer is
+# told why, the rest of the dataset still serves, the recording is not retried
+# on its own), but a run whose failures are ALL of these codes is not
+# `deterministic`: see `dataset_failure_is_deterministic`. A literal rather than
+# `AnnexObjectMissing.code` only because the class is defined further down; a
+# test pins the two together.
+STORAGE_STATE_CODES = frozenset({"annex_object_missing"})
+
 
 def memory_failure_result(
     primary: str, exc: BaseException, peak_rss: int | None = None
@@ -989,6 +1001,45 @@ def count_infra_failures(failures: list, failure_entries: list) -> int:
     """
     retryable_coded = sum(1 for e in failure_entries if e.get("code") in RETRYABLE_CODES)
     return len(failures) - len(failure_entries) + retryable_coded
+
+
+def dataset_failure_is_deterministic(failures: list, failure_entries: list) -> bool:
+    """Whether this run's failures are a permanent property of the DATASET, which
+    `hallu-zarr.sh` turns into a terminal `data_failed` on a run that converted
+    nothing (no retry, #774).
+
+    True only when there is a failure, none of them is infra
+    (`count_infra_failures` is zero), and at least one is a typed code that is
+    NOT in `STORAGE_STATE_CODES`. The last term is the one that matters for
+    `annex_object_missing`: that code is permanent for its recording, but when
+    EVERY failure is a missing object the likeliest cause is an upload or an
+    import whose objects have not all landed yet, and burying the dataset as
+    `data_failed` on the first run would need a human to notice and requeue it.
+    So such a run takes the queue's ordinary bounded backoff and ends `failed`
+    if the objects never arrive.
+
+    A mix is still deterministic when anything in it is a genuine data failure:
+    a recording biosigIO cannot read will fail identically on every retry, and
+    retrying the whole dataset for the sake of the missing objects would only
+    delay the same verdict. A partially successful run is unaffected: it exits
+    0 and the dataset is `done` whatever this returns.
+    """
+    if not failures or count_infra_failures(failures, failure_entries):
+        return False
+    return any(e.get("code") not in STORAGE_STATE_CODES for e in failure_entries)
+
+
+def annex_missing_summary(missing: list[tuple[str, str | None]]) -> dict:
+    """The callback's account of recordings refused as `annex_object_missing`:
+    how many, and the first by path (sorted, so a pool's completion order does
+    not decide which one the operator is shown) with the annex key storage
+    lacks. `hallu-zarr.sh` names that key in the queue's `last_error`."""
+    first = min(missing, default=(None, None))
+    return {
+        "annex_missing_count": len(missing),
+        "annex_missing_first_path": first[0],
+        "annex_missing_first_key": first[1],
+    }
 
 
 class ChannelCountMismatch(Exception):
@@ -1337,6 +1388,13 @@ _FALLBACK_REASONS = {
         "This recording's data file is stored elsewhere in the dataset, and the "
         "file declared for it did not match the recording's header, so no viewer "
         "copy is offered."
+    ),
+    # NEMAR-side (not a biosigIO code): the archive's storage holds no complete
+    # copy of a file this recording needs, plain or git-annex chunked. See
+    # AnnexObjectMissing.
+    "annex_object_missing": (
+        "A data file this recording needs is missing or incomplete in the "
+        "archive's storage, so the viewer could not be generated."
     ),
     # NEMAR-side (not a biosigIO code): the producer gave up retrying. A recording
     # that fails for an INFRA reason is listed in the index's `pending` with an
@@ -2249,6 +2307,51 @@ def channels_tsv_names(text: str) -> list[str] | None:
 # thousands of stores does not pay for it in index bytes (#1178).
 UNMATCHED_EXAMPLES_MAX = 5
 
+# How many case-only matches an index entry names, as `"<sidecar name> ->
+# <channel>"`. The same reasoning as UNMATCHED_EXAMPLES_MAX: enough to see the
+# pattern, and no per-channel map in every store's entry.
+CASE_MATCH_EXAMPLES_MAX = 5
+
+# biosigIO's (>= 1.2.10, biosigio#140) key in its `channels_tsv_units` account:
+# `{sidecar_name: channel_label}` for every row it matched to a channel only by
+# ignoring case. One entry per such channel, so it is never published as is.
+BIOSIGIO_CASE_MATCH_KEY = "matched_case_insensitive"
+
+
+def bound_units_report(report: dict) -> tuple[dict, dict[str, str]]:
+    """biosigIO's `channels_tsv_units` account as the index publishes it, and
+    the full case-match map it carried.
+
+    Every key biosigIO reports is republished unchanged except
+    `matched_case_insensitive`, whose value grows with the channel count (a
+    300-channel recording whose sidecar spells every label in another case is
+    300 entries, in every store's entry). It is replaced by:
+
+    - ``matched_case_only``: how many channels a row reached only by ignoring
+      case, so the sidecar's type and unit WERE applied to them. Present only
+      when non-zero, like ``unmatched_case_only``.
+    - ``matched_case_only_examples``: up to CASE_MATCH_EXAMPLES_MAX of those
+      matches as ``"<sidecar name> -> <channel label>"``, in biosigIO's order
+      (channels.tsv row order). Present exactly when the count is.
+
+    The map is returned separately, for `sidecar_join_report`, which needs
+    every matched channel to know which ones the sidecar did NOT reach. A
+    value that is not a map (a biosigIO shape this code does not know) is
+    dropped rather than republished, and contributes no matches.
+    """
+    out = {k: v for k, v in report.items() if k != BIOSIGIO_CASE_MATCH_KEY}
+    raw = report.get(BIOSIGIO_CASE_MATCH_KEY)
+    matches = (
+        {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+    )
+    if matches:
+        out["matched_case_only"] = len(matches)
+        out["matched_case_only_examples"] = [
+            f"{name} -> {label}"
+            for name, label in list(matches.items())[:CASE_MATCH_EXAMPLES_MAX]
+        ]
+    return out, matches
+
 
 class SidecarJoinReport(TypedDict, total=False):
     """What `sidecar_join_report` adds to an index entry's `units_report`."""
@@ -2290,13 +2393,14 @@ def sidecar_join_report(
     never applied and ``unmatched_case_only`` is a true statement about it.
     biosigio 1.2.10 (biosigio#140) also matches a row to the one channel that
     differs from it only in case, and reports each such match as
-    ``matched_case_insensitive``, ``{sidecar_name: channel_label}``, in the same
-    `channels_tsv_units` account this function's caller republishes as
-    `units_report`. Pass that map as `matched_case_insensitive` and those
-    channels count as matched, because the sidecar DID reach them; what is left
-    under ``unmatched_case_only`` is then only the ambiguous rows biosigIO
-    warns about and leaves unapplied. On 1.2.9 the map is absent and the
-    behavior is unchanged.
+    ``matched_case_insensitive``, ``{sidecar_name: channel_label}``, in its
+    `channels_tsv_units` account (which `bound_units_report` republishes as a
+    count and a few examples, never the map). Pass that map as
+    `matched_case_insensitive` and those channels count as matched, because the
+    sidecar DID reach them; what is left under ``unmatched_case_only`` is then
+    only the ambiguous rows biosigIO warns about and leaves unapplied. Without
+    the map (biosigio 1.2.9, or no case-only match) every non-exact name is
+    unmatched.
     """
     if not store_labels:
         return {}
@@ -2742,13 +2846,17 @@ def file_declared_channel_count(primary_local: str) -> int | None:
     `mne.io.read_info`, which parses the header tags and never loads data. For
     a split recording that is the chain head's info, which every split shares.
     on000117's MEG sidecars list CHPI and EEG channels the FIF never had.
+    EEGLAB `.set` (classic MAT v5/v7 and MATLAB v7.3): `nbchan`, read without
+    the sample matrix, and only where it provably equals the rows biosigIO
+    serves (`_eeglab_declared_channel_count`). on003645's EEG recordings hold
+    75 channels under a subject-level channels.tsv listing its 404 MEG ones.
 
     None leaves the gate on channels.tsv alone -- exactly its behavior before
     this existed. For a format that normally HAS a readable header here (the
-    three above) a None from an unreadable one is not silent: it is worth a line
+    four above) a None from an unreadable one is not silent: it is worth a line
     in the log, because the recording the converter just read but whose header
     it cannot is the one the header gate then does not cover. Formats with no
-    cheap header (EEGLAB `.set`, CTF, MEF3, ...) return None quietly. A declared
+    cheap header (CTF, MEF3, 4D/BTi, KIT, ...) return None quietly. A declared
     count of zero or less is unreadable too, not a recording with no channels.
     """
     if primary_local.lower().endswith((".fif", ".fif.gz")):
@@ -2758,6 +2866,8 @@ def file_declared_channel_count(primary_local: str) -> int | None:
         return _edf_declared_channel_count(primary_local)
     if ext == ".vhdr":
         return _vhdr_declared_channel_count(primary_local)
+    if ext == ".set":
+        return _eeglab_declared_channel_count(primary_local)
     return None
 
 
@@ -2875,6 +2985,341 @@ def _fif_declared_channel_count(path: str) -> int | None:
         )
         return None
     return nchan if nchan > 0 else None
+
+
+# An EEGLAB `nbchan` above this is not a channel count but a corrupt field. The
+# densest real recordings are a few thousand channels (high-density iEEG,
+# probes); a count that could never be real must not refuse a faithful store.
+EEGLAB_MAX_NBCHAN = 100_000
+
+# The most bytes one classic `.set` header read may inflate or inspect before
+# it gives up (None, with the usual warning). Only the fields ahead of `nbchan`
+# and `data` are ever inflated; in EEGLAB's order the largest is `times`, one
+# double per sample. A MAT v5/v7 variable cannot exceed 2 GiB, so with inline
+# single-precision samples `times` stays under this cap from 16 channels up;
+# a header read that does reach it (say a very long `.fdt`-backed recording)
+# is only unknown, the gate it had before the header count existed. What the
+# cap bounds is a crafted stream (a zlib bomb declaring gigabytes of zeros
+# ahead of `nbchan`), which would otherwise cost seconds of CPU per file;
+# memory is flat either way (`_MatStream`).
+EEGLAB_MAX_HEADER_READ_BYTES = 256 << 20
+
+# The leading text of a MATLAB v7.3 (HDF5) file, as biosigIO's `_is_matlab_v73`
+# sniffs it; a classic v5/v7 file opens with "MATLAB 5.0 MAT-file" instead.
+_MATLAB_V73_MAGIC = b"MATLAB 7.3 MAT-file"
+
+
+def _eeglab_declared_channel_count(path: str) -> int | None:
+    """`nbchan` from an EEGLAB `.set`, read from its header alone, or None.
+
+    Read the way biosigIO's importer tells the two containers apart (the MAT
+    header text): a MATLAB v7.3 `.set` through h5py, a classic MAT v5/v7 `.set`
+    through `_mat5_eeglab_header`, a bounded streaming parse that stops at the
+    fields it needs and never materializes the sample matrix. `scipy.io.loadmat`
+    cannot do that for the common layout: `variable_names` selects top-level
+    variables, and a real EEGLAB export saves the whole dataset as ONE variable,
+    `EEG`, whose fields include `data`. Measured on a 100 MB inline-data `.set`:
+    `loadmat(variable_names=["EEG"])` peaked at 103 MB traced.
+
+    The count is returned only where it provably equals what biosigIO serves.
+    biosigIO keeps every row of the data matrix, whatever `nbchan` says (it
+    warns and uses the matrix); chanlocs only names rows, so a short or long
+    chanlocs never changes the count. So:
+
+    - samples in a `.fdt` (`EEG.data` is the file name): biosigIO reshapes the
+      `.fdt` to `nbchan` rows, and refuses it when its size disagrees, so the
+      store holds exactly `nbchan` channels. Epoched files flatten to the same
+      rows.
+    - samples inline: the matrix's own row count (from its header, in MATLAB
+      orientation; for v7.3 by biosigIO's transpose rule) must equal `nbchan`.
+      A disagreement returns None: `nbchan` above the rows would refuse a
+      faithful store, so the header vouches for nothing there.
+
+    Both layouts are read: fields wrapped in an `EEG` struct (the first element
+    of a struct array, as biosigIO takes it), or saved flat at the top level; an
+    `EEG` struct wins when both exist, as it does in the importer.
+    """
+    try:
+        with open(path, "rb") as fh:
+            v73 = fh.read(len(_MATLAB_V73_MAGIC)) == _MATLAB_V73_MAGIC
+        fields = _h5_eeglab_header(path) if v73 else _mat5_eeglab_header(path)
+    except MemoryError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - any header failure means "unknown"
+        _warn_unreadable_header("EEGLAB", path, f"{type(exc).__name__}: {exc}")
+        return None
+    nbchan = fields.get("nbchan")
+    # A non-integral nbchan is unknown, deliberately. biosigIO does not agree
+    # with itself on one (classic files truncate it, `int()`; v7.3 files round
+    # it, `int(round())`), so no single integer is what it serves; and a
+    # fraction says the field is not a channel count. None is the safe
+    # direction: it leaves the gate on channels.tsv alone, never lower.
+    if nbchan is None or not math.isfinite(nbchan) or nbchan != int(nbchan):
+        _warn_unreadable_header("EEGLAB", path, f"nbchan is {nbchan!r}")
+        return None
+    count = int(nbchan)
+    if not 0 < count <= EEGLAB_MAX_NBCHAN:
+        _warn_unreadable_header("EEGLAB", path, f"nbchan is {count}")
+        return None
+    rows = fields.get("data")
+    if rows == "fdt":
+        return count
+    if rows is None:
+        _warn_unreadable_header("EEGLAB", path, "it has no readable data matrix")
+        return None
+    # Either direction is unknown, deliberately. nbchan ABOVE the rows would
+    # call a faithful store truncated. nbchan BELOW them is not taken as a
+    # lower bound either: the count is used as proof of what the file holds
+    # (a store equal to it is complete, and it is published as `in_file` in
+    # the `channels_tsv_count_mismatch` disclosure), and a file whose header
+    # and matrix disagree proves nothing, so a lower number would publish an
+    # `in_file` the store itself contradicts. None leaves channels.tsv alone.
+    if rows != count:
+        _warn_unreadable_header(
+            "EEGLAB", path,
+            f"nbchan {count} disagrees with the {rows}-row data matrix biosigIO serves",
+        )
+        return None
+    return count
+
+
+def _h5_eeglab_header(path: str) -> dict[str, Any]:
+    """`nbchan` and the data matrix's shape from a MATLAB v7.3 `.set`, through
+    h5py's metadata alone (`Dataset.shape` reads no samples). Layout and
+    orientation follow biosigIO's `_load_v73`: an `EEG` group, else the flat
+    root when it carries nbchan/srate/pnts/data; h5py hands back MATLAB's
+    (nbchan, pnts) transposed, and a 2-D matrix already channel-major is kept."""
+    import h5py  # type: ignore[import-not-found]  # biosigIO's [hdf5] extra
+    import numpy as np
+
+    with h5py.File(path, "r") as f:
+        if "EEG" in f:
+            eeg = f["EEG"]
+        elif all(key in f for key in ("nbchan", "srate", "pnts", "data")):
+            eeg = f
+        else:
+            raise ValueError("no 'EEG' group and no flat nbchan/srate/pnts/data")
+        out: dict[str, Any] = {"nbchan": None, "data": None}
+        if "nbchan" in eeg:
+            value = np.asarray(eeg["nbchan"][()]).ravel()
+            if value.size == 1:
+                out["nbchan"] = float(value[0])
+        if "data" in eeg and eeg["data"].size:
+            ds = eeg["data"]
+            if ds.dtype.kind != "f":
+                out["data"] = "fdt"  # char codes naming the .fdt
+            elif len(ds.shape) != 2:
+                out["data"] = 1  # biosigIO reshapes it to one row
+            else:
+                a, b = ds.shape
+                nbchan = out["nbchan"]
+                out["data"] = a if (a == nbchan and b != nbchan) else b
+        return out
+
+
+# MAT v5 element types and array classes the header read needs
+# (MathWorks, "MAT-File Format", tables 1-2 and 1-3).
+_MI_INT8, _MI_INT32, _MI_UINT32, _MI_MATRIX, _MI_COMPRESSED = 1, 5, 6, 14, 15
+_MI_NUMERIC = {
+    1: "b", 2: "B", 3: "h", 4: "H", 5: "i", 6: "I", 7: "f", 9: "d", 12: "q", 13: "Q",
+}
+_MX_STRUCT, _MX_CHAR = 2, 4
+_MX_NUMERIC = frozenset(range(6, 16))  # double, single, int8 ... uint64
+
+
+class _MatStream:
+    """Forward-only byte source over a classic MAT file or one zlib-compressed
+    element of it, counting its position so an element can be skipped to its
+    end. Skipping decompresses in bounded chunks and keeps nothing, so memory
+    stays flat whatever the size of the matrix skipped. The chunk bounds both
+    the compressed input read at once and each skip step; it is kept small
+    because a header read usually needs a few hundred bytes of it. `limit`
+    caps the bytes it hands out by `read` (skipping a compressed field reads
+    it; skipping an uncompressed one seeks), past which it raises."""
+
+    CHUNK = 1 << 16
+
+    def __init__(self, fh: Any, compressed_bytes: int | None, limit: int) -> None:
+        import zlib
+
+        self.fh = fh
+        self.pos = 0
+        self.left = compressed_bytes
+        self.z = zlib.decompressobj() if compressed_bytes is not None else None
+        self.buf = bytearray()
+        self.limit = limit  # bytes this stream may hand out (read, never seeked past)
+        self.spent = 0
+
+    def read(self, n: int) -> bytes:
+        if self.spent + n > self.limit:
+            raise ValueError(
+                f"reading its header would inflate or inspect more than "
+                f"{EEGLAB_MAX_HEADER_READ_BYTES} bytes"
+            )
+        if self.z is None:
+            out = self.fh.read(n)
+        else:
+            while len(self.buf) < n:
+                tail = self.z.unconsumed_tail
+                if not tail:
+                    if not self.left:
+                        break
+                    tail = self.fh.read(min(self.left, self.CHUNK))
+                    if not tail:
+                        break
+                    self.left -= len(tail)
+                self.buf += self.z.decompress(tail, max(n - len(self.buf), 1))
+            out, self.buf = bytes(self.buf[:n]), self.buf[n:]
+        if len(out) < n:
+            raise EOFError(f"MAT element ends {n - len(out)} byte(s) early")
+        self.pos += n
+        self.spent += n
+        return out
+
+    def skip(self, n: int) -> None:
+        if self.z is None:
+            self.fh.seek(n, os.SEEK_CUR)
+            self.pos += n
+            return
+        while n > 0:
+            step = min(n, self.CHUNK)
+            self.read(step)
+            n -= step
+
+
+def _mat5_element(src: _MatStream, end: str) -> tuple[int, bytes]:
+    """One whole (small) data element: its type and its bytes, padding
+    consumed. Only for header subelements, never a sample matrix."""
+    import struct
+
+    mtype, nbytes = struct.unpack(end + "II", src.read(8))
+    if mtype >> 16:  # small data element: packed into the tag's 8 bytes
+        return mtype & 0xFFFF, struct.pack(end + "I", nbytes)[: mtype >> 16]
+    if nbytes > 1 << 20:
+        raise ValueError(f"a {nbytes}-byte header subelement")
+    data = src.read(nbytes)
+    src.read(-nbytes % 8)
+    return mtype, data
+
+
+def _mat5_matrix_header(src: _MatStream, end: str) -> tuple[int, list[int], str]:
+    """Array class, dimensions and name of the miMATRIX whose tag was just read."""
+    import struct
+
+    _, flags = _mat5_element(src, end)
+    mclass = struct.unpack(end + "I", flags[:4])[0] & 0xFF
+    _, raw_dims = _mat5_element(src, end)
+    dims = list(struct.unpack(end + f"{len(raw_dims) // 4}i", raw_dims))
+    _, name = _mat5_element(src, end)
+    return mclass, dims, name.decode("latin-1")
+
+
+def _mat5_scalar(src: _MatStream, end: str, mclass: int, dims: list[int]) -> float | None:
+    """The single value of a 1x1 numeric matrix, or None for any other shape."""
+    import struct
+
+    if mclass not in _MX_NUMERIC or math.prod(dims) != 1:
+        return None
+    mtype, data = _mat5_element(src, end)
+    fmt = _MI_NUMERIC.get(mtype)
+    if fmt is None or len(data) < struct.calcsize(fmt):
+        return None
+    return float(struct.unpack(end + fmt, data[: struct.calcsize(fmt)])[0])
+
+
+def _mat5_field(src: _MatStream, end: str, name: str, mclass: int, dims: list[int]) -> Any:
+    """What the header read keeps of one `nbchan` or `data` matrix: nbchan's
+    value; for data, ``"fdt"`` when it is the `.fdt`'s name (a char array), its
+    row count when numeric (MATLAB's (nbchan, pnts[, trials]) order), else None."""
+    if name == "nbchan":
+        return _mat5_scalar(src, end, mclass, dims)
+    if not math.prod(dims):
+        return None
+    if mclass == _MX_CHAR:
+        return "fdt"
+    return dims[0] if mclass in _MX_NUMERIC else None
+
+
+def _mat5_eeglab_header(path: str) -> dict[str, Any]:
+    """``{"nbchan": ..., "data": ...}`` (see `_mat5_field`) from a classic MAT
+    v5/v7 `.set`, reading element headers only.
+
+    Every top-level variable is visited by its header and then skipped by
+    seeking past it, compressed or not. The `EEG` struct is walked field by
+    field: each field's matrix header is read, the field is skipped to its end,
+    and the walk stops the moment `nbchan` and `data` have both been read,
+    without skipping past the second. A field skipped inside a compressed
+    variable is decompressed in bounded chunks and discarded, and `data` is
+    never read past its dimensions. A field in `EEG`
+    wins over a top-level variable of the same name, as in biosigIO's
+    `_normalize_eeglab_dict`.
+    """
+    import struct
+
+    flat: dict[str, Any] = {}
+    wrapped: dict[str, Any] = {}
+    budget = EEGLAB_MAX_HEADER_READ_BYTES
+    with open(path, "rb") as fh:
+        head = fh.read(128)
+        if len(head) < 128 or head[126:128] not in (b"IM", b"MI"):
+            raise ValueError("not a MAT v5 file (no endian indicator)")
+        end = "<" if head[126:128] == b"IM" else ">"
+        size = os.fstat(fh.fileno()).st_size
+        while fh.tell() < size:
+            raw = fh.read(8)
+            if len(raw) < 8:
+                raise EOFError("truncated variable tag")
+            mtype, nbytes = struct.unpack(end + "II", raw)
+            after = fh.tell() + nbytes + (0 if mtype == _MI_COMPRESSED else -nbytes % 8)
+            if after > size:
+                raise EOFError(f"a variable runs {after - size} byte(s) past the end")
+            src = _MatStream(fh, nbytes if mtype == _MI_COMPRESSED else None, budget)
+            if mtype == _MI_COMPRESSED:
+                mtype, nbytes = struct.unpack(end + "II", src.read(8))
+            if mtype == _MI_MATRIX and nbytes:
+                mclass, dims, name = _mat5_matrix_header(src, end)
+                if name == "EEG" and mclass == _MX_STRUCT and math.prod(dims):
+                    wrapped = _mat5_struct_fields(src, end)
+                elif name in ("nbchan", "data"):
+                    flat[name] = _mat5_field(src, end, name, mclass, dims)
+            budget -= src.spent
+            fh.seek(after)
+    return {**flat, **wrapped}
+
+
+def _mat5_struct_fields(src: _MatStream, end: str) -> dict[str, Any]:
+    """`nbchan` and `data` from the first element of the struct whose matrix
+    header was just read (biosigIO takes the first of a struct array; MAT v5
+    stores a struct array element by element, fields in order)."""
+    import struct
+
+    _, raw_len = _mat5_element(src, end)
+    name_len = struct.unpack(end + "i", raw_len[:4])[0]
+    _, raw_names = _mat5_element(src, end)
+    if name_len <= 0:
+        return {}
+    names = [
+        raw_names[i:i + name_len].split(b"\x00", 1)[0].decode("latin-1")
+        for i in range(0, len(raw_names), name_len)
+    ]
+    out: dict[str, Any] = {}
+    for name in names:
+        mtype, nbytes = struct.unpack(end + "II", src.read(8))
+        if mtype != _MI_MATRIX:
+            raise ValueError(f"struct field {name!r} is element type {mtype}")
+        start = src.pos
+        if name in ("nbchan", "data"):
+            out[name] = None
+            if nbytes:
+                mclass, dims, _ = _mat5_matrix_header(src, end)
+                out[name] = _mat5_field(src, end, name, mclass, dims)
+            # Stop here, BEFORE skipping to the field's end: in the usual order
+            # `data` is the second of the two, and skipping it inside a
+            # compressed `EEG` would inflate every sample only to discard them.
+            if "nbchan" in out and "data" in out:
+                return out
+        src.skip(start + nbytes - src.pos)
+    return out
 
 
 ChannelGateVerdict = Literal["pass", "sidecar_overcount", "truncated"]
@@ -3411,6 +3856,27 @@ def pending_retry_worklist(
     return paths, f"{len(paths)} pending recording(s)"
 
 
+def _heal_carried_units_report(entry: dict) -> dict:
+    """A prior index entry with its `units_report` bounded, as `merge_index`
+    carries it.
+
+    Entries for unchanged stores are carried verbatim, and the schema refuses
+    biosigIO's raw per-channel `matched_case_insensitive` map. An entry
+    published with that map (a biosigio 1.2.10 run before the converter bounded
+    it: staging, an exemplar, an ad hoc `--dataset` with BIOSIGIO_SPEC
+    overridden) would otherwise be re-carried by every incremental run and fail
+    the pre-upload validation each time, wedging the dataset until a `--clean`
+    rebuild. Passing it through `bound_units_report` derives the count and the
+    examples from the map and drops the map, so the entry heals on the next
+    merge. Every other entry is returned as it is, and `prior` is not mutated.
+    """
+    report = entry.get("units_report")
+    if not (isinstance(report, dict) and BIOSIGIO_CASE_MATCH_KEY in report):
+        return entry
+    bounded, _matches = bound_units_report(report)
+    return {**entry, "units_report": bounded}
+
+
 def merge_index(
     prior: dict | None,
     dataset_id: str,
@@ -3488,7 +3954,7 @@ def merge_index(
     if prior and isinstance(prior.get("stores"), list):
         for entry in prior["stores"]:
             if isinstance(entry, dict) and isinstance(entry.get("zarr"), str):
-                stores[entry["zarr"]] = entry
+                stores[entry["zarr"]] = _heal_carried_units_report(entry)
     for rel in removed_store_rels:
         stores.pop(rel, None)
     for entry in converted:
@@ -4345,8 +4811,14 @@ def aws_cp(src: str, dst: str, *, extra: list[str] | None = None) -> None:
 def annex_key_size(key: str | None) -> int | None:
     """Byte size a git-annex SHA256E/MD5E key declares in its ``-s<N>`` field
     (``SHA256E-s628291820--<hash>.con`` -> ``628291820``). ``None`` when the key
-    carries no size (e.g. a URL/WORM key)."""
-    m = re.search(r"-s(\d+)", key or "")
+    carries no size (e.g. a URL/WORM key).
+
+    Read from the key's FIELDS only, the part before the first ``--``: the name
+    after it is free text for a WORM or URL key (``WORM-m1700000000--sub-01-s5.edf``,
+    ``URL--https&c%%host%run-s5.edf``), and a ``-s5`` there is not a size. The
+    size field is a whole ``-`` separated field, so ``-s12-S1024`` reads 12."""
+    fields = (key or "").partition("--")[0]
+    m = re.search(r"-s(\d+)(?=-|$)", fields)
     return int(m.group(1)) if m else None
 
 
@@ -4416,35 +4888,344 @@ def download_blob(src: str, dst: str, expected_size: int | None) -> None:
     that can't read its next file. A short/zero copy must never reach the reader:
     verify the byte count, and on any mismatch/transfer error drop the temp and
     retry rather than convert a corrupt file into a wrong store.
+
+    A 404 is the one failure that is NOT retried: it raises `S3ObjectAbsent` on
+    the first answer. S3 is strongly consistent, so asking again gets the same
+    answer, and the caller has something better to do with it (look for a
+    git-annex chunked copy, see `fetch_annex_object`). Everything else -- a
+    throttle, a 5xx, a wedge past the timeout, a short copy -- is retried as
+    before and ends in an uncoded RuntimeError, which the run treats as infra.
     """
     os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
     last: Exception | None = None
     for attempt in range(1, _AWS_RETRIES + 1):
         tmp = f"{dst}.part.{os.getpid()}.{attempt}"
         try:
-            subprocess.run(
+            # stderr is captured, not inherited, because it is how a 404 is told
+            # apart from a transient failure; it is carried in the exception.
+            res = subprocess.run(
                 ["aws", "s3", "cp", src, tmp, "--only-show-errors", *_AWS_TIMEOUTS],
-                check=True,
+                capture_output=True,
+                text=True,
                 timeout=_AWS_OP_TIMEOUT,
                 env=_aws_env(),
+                check=False,  # the return code is inspected below
             )
+            if res.returncode != 0:
+                stderr = res.stderr.strip()
+                if _s3_not_found(stderr):
+                    raise S3ObjectAbsent(src, stderr)
+                raise RuntimeError(f"aws s3 cp exited {res.returncode}: {stderr}")
             got = os.path.getsize(tmp)
             if expected_size is not None and got != expected_size:
-                raise RuntimeError(
+                raise S3SizeMismatch(
                     f"truncated download: got {got} of {expected_size} bytes"
                 )
             os.replace(tmp, dst)
             return
-        except Exception as exc:  # noqa: BLE001 - any failure -> drop temp + retry
+        except Exception as exc:  # any failure -> drop temp + retry (a 404 re-raises)
             last = exc
-            try:
+            with contextlib.suppress(OSError):
                 if os.path.exists(tmp):
                     os.remove(tmp)
-            except OSError:
-                pass
+            if isinstance(exc, S3ObjectAbsent):
+                raise
             if attempt < _AWS_RETRIES:
                 time.sleep(min(2**attempt, 30))
-    raise RuntimeError(f"download {src} -> {dst} failed after {_AWS_RETRIES} attempts: {last}")
+    # Still a RuntimeError either way, so every caller that treats this as an
+    # uncoded infra failure keeps doing so. The subclass only lets the chunk
+    # fetch tell "the copy kept arriving at the wrong size" apart, see
+    # `fetch_annex_object`.
+    failed = S3SizeMismatch if isinstance(last, S3SizeMismatch) else RuntimeError
+    raise failed(f"download {src} -> {dst} failed after {_AWS_RETRIES} attempts: {last}")
+
+
+def _s3_not_found(stderr: str) -> bool:
+    """Whether an `aws s3 cp` error says the object is absent, as opposed to any
+    other failure: the CLI's ``An error occurred (404) when calling the
+    HeadObject operation: Key "..." does not exist``, or ``NoSuchKey``.
+
+    Deliberately narrower than `s3_read_json`'s bare ``"404"`` test. A transfer
+    failure prints ``download failed: s3://.../<key> to ...``, and an annex key
+    is a 64-digit hex hash plus a byte count: ``404`` turns up inside one often
+    enough that the loose test would read a dropped connection as an absence.
+
+    A 403 is deliberately NOT an absence. S3 answers a missing key with 403
+    when the caller lacks s3:ListBucket, but also for expired credentials, a
+    private object, or a signature without its session token
+    (``.memory/s3-403-is-not-absence.md``). So a 403 is retried and ends
+    uncoded, and the chunked fallback, which only a 404 unlocks, never runs."""
+    err = stderr.lower()
+    return "(404)" in err or "nosuchkey" in err
+
+
+class S3SizeMismatch(RuntimeError):
+    """`download_blob` copied the object, but not the byte count it expected, on
+    its last attempt. Uncoded like any RuntimeError; a distinct class only so a
+    chunk fetched under a CACHED chunk size can hand the question to the
+    listing, which can tell a short transfer from a chunk stored at the wrong
+    size."""
+
+
+class S3ObjectAbsent(Exception):
+    """`download_blob`'s source answered 404. Internal to the annex fetch: it is
+    either answered by a chunked copy or turned into `AnnexObjectMissing`, and is
+    never what a recording fails with. `chunk` names the chunk number when the
+    absent object was one chunk of a chunked key."""
+
+    def __init__(self, src: str, stderr: str, chunk: int | None = None) -> None:
+        super().__init__(f"{src} does not exist ({stderr})" if stderr else f"{src} does not exist")
+        self.src = src
+        self.chunk = chunk
+
+
+class AnnexObjectMissing(Exception):
+    """The S3 bucket does not hold this annex key's content intact: no object at
+    the plain key and no complete git-annex chunked copy (a chunk absent, or a
+    chunk whose stored size is not the size its key implies).
+
+    A property of what the archive holds, not of this run, so it is typed and
+    NOT in `RETRYABLE_CODES`: the recording is refused (ADR 0005, the rest of the
+    dataset still serves) instead of being retried as infra five times and then
+    promoted to an unexplained `retry_exhausted`. Only a definite answer from S3
+    reaches this class -- a 404, or a successful listing that lacks the chunk.
+    A throttle, a 5xx, a timeout or a listing that errored stays an uncoded
+    RuntimeError and is retried. Recovery once the content is uploaded is a
+    requeue of the dataset.
+
+    Permanent for the RECORDING, not for the dataset: it is in
+    `STORAGE_STATE_CODES`, so a run in which every failure is this code does not
+    make the dataset `deterministic` (see `dataset_failure_is_deterministic`).
+    Every recording missing its object at once is what an upload still landing
+    looks like, and the queue's bounded backoff is the right answer to that.
+
+    `key` is carried separately from the message so the run can name the first
+    missing object to the operator without parsing text."""
+
+    code = "annex_object_missing"
+
+    def __init__(self, key: str, problem: str) -> None:
+        # Both in `args`, so the exception pickles and unpickles as itself.
+        super().__init__(key, problem)
+        self.key = key
+        self.problem = problem
+
+    def __str__(self) -> str:
+        return f"{self.key}: {self.problem}"
+
+
+# --- git-annex chunked storage ---------------------------------------------
+#
+# A special remote configured with `chunk=<size>` never stores the key a
+# pointer names. The content of `SHA256E-s<size>--<hash>.<ext>` is stored as
+# `SHA256E-s<size>-S<chunksize>-C<n>--<hash>.<ext>` for n = 1..ceil(size /
+# chunksize), every chunk `chunksize` bytes except the last (nm000276 was
+# uploaded this way with 1 GiB chunks, so even a 982-byte `.vhdr` exists only as
+# `...-S1073741824-C1--...`). The chunk size is not in the pointer, so it is
+# discovered by listing `objects/<fields>-S` once and then cached per dataset:
+# a dataset is uploaded with one chunk configuration, and a key that does not
+# match the cached size falls back to its own listing.
+_ANNEX_CHUNK_SIZE: dict[tuple[str, str], int] = {}
+# Bounded copy buffer for appending a downloaded chunk to the assembled file.
+_CHUNK_COPY_BUFFER = 8 * 1024 * 1024
+
+
+def annex_chunk_sizes(size: int, chunk_size: int) -> list[int]:
+    """Byte size of each chunk, in order, of a `size`-byte key stored in
+    `chunk_size` chunks. An empty key is one empty chunk."""
+    if chunk_size <= 0:
+        raise ValueError(f"chunk size must be positive, got {chunk_size}")
+    n = max(1, -(-size // chunk_size))
+    return [chunk_size] * (n - 1) + [size - chunk_size * (n - 1)]
+
+
+def annex_chunk_key(key: str, chunk_size: int, number: int) -> str:
+    """The object name git-annex stores chunk `number` of `key` under."""
+    fields, sep, name = key.partition("--")
+    if not sep:
+        raise ValueError(f"not a git-annex key: {key!r}")
+    return f"{fields}-S{chunk_size}-C{number}--{name}"
+
+
+def _list_annex_chunks(bucket: str, dataset_id: str, key: str) -> dict[int, dict[int, int]]:
+    """Every chunked copy of `key` in the bucket, as ``{chunk_size: {chunk_number:
+    stored_bytes}}``; ``{}`` when there is none.
+
+    One LIST of ``<id>/objects/<fields>-S``: it can also return chunks of other
+    keys with the same backend and size, which the exact-name match drops. A
+    failed listing RAISES (after retries) rather than returning ``{}``: an
+    empty answer means "not stored", and an error is not that answer."""
+    fields, _, name = key.partition("--")
+    prefix = f"{dataset_id}/objects/{fields}-S"
+    pattern = re.compile(
+        rf"{re.escape(prefix)}(\d+)-C(\d+)--{re.escape(name)}"
+    )
+    last = ""
+    for attempt in range(1, _AWS_RETRIES + 1):
+        try:
+            res = subprocess.run(
+                [
+                    "aws", "s3api", "list-objects-v2", "--bucket", bucket,
+                    "--prefix", prefix,
+                    "--query", "Contents[].[Key,Size]", "--output", "json",
+                    *_AWS_TIMEOUTS,
+                ],
+                capture_output=True, text=True, timeout=_AWS_OP_TIMEOUT, env=_aws_env(),
+                check=False,  # the return code is inspected below
+            )
+        except subprocess.TimeoutExpired as exc:
+            last = str(exc)
+        else:
+            if res.returncode == 0:
+                rows = json.loads(res.stdout or "null") or []
+                found: dict[int, dict[int, int]] = {}
+                for obj_key, obj_size in rows:
+                    m = pattern.fullmatch(obj_key)
+                    if m:
+                        found.setdefault(int(m[1]), {})[int(m[2])] = int(obj_size)
+                return found
+            last = f"exited {res.returncode}: {res.stderr.strip()}"
+        if attempt < _AWS_RETRIES:
+            time.sleep(min(2**attempt, 30))
+    raise RuntimeError(
+        f"listing chunked copies of {key} under s3://{bucket}/{prefix} failed after "
+        f"{_AWS_RETRIES} attempts: {last}"
+    )
+
+
+def _complete_chunk_size(
+    variants: dict[int, dict[int, int]], size: int, prefer: int | None
+) -> tuple[int | None, str]:
+    """The chunk size whose chunks are all present at their expected sizes, and
+    otherwise ``None`` with what is wrong, for the error. ``prefer`` (the cached
+    size) is tried first; the rest in ascending order."""
+    if not variants:
+        return None, "no object at the plain key and no chunked copy"
+    problems = []
+    order = sorted(variants, key=lambda s: (s != prefer, s))
+    for chunk_size in order:
+        stored = variants[chunk_size]
+        for number, want in enumerate(annex_chunk_sizes(size, chunk_size), start=1):
+            got = stored.get(number)
+            if got is None:
+                problems.append(f"chunk C{number} of the {chunk_size}-byte chunking is absent")
+                break
+            if got != want:
+                problems.append(
+                    f"chunk C{number} of the {chunk_size}-byte chunking is {got} bytes, "
+                    f"expected {want}"
+                )
+                break
+        else:
+            return chunk_size, ""
+    return None, "; ".join(problems)
+
+
+def _download_chunks(base: str, key: str, size: int, chunk_size: int, dst: str) -> None:
+    """Download every chunk of `key` in order and append each to `dst`.
+
+    Each chunk goes through `download_blob`, so it keeps that function's
+    timeout, retry and per-chunk size check. Memory stays bounded (one copy
+    buffer); scratch peaks at the whole file plus one chunk, the moment the
+    last chunk has landed and is being appended. `dst` appears only complete
+    (atomic rename after the total is checked); on any failure nothing is left
+    behind. A 404 raises `S3ObjectAbsent` with `chunk` set to the absent
+    chunk's number.
+
+    There is NO resume, deliberately for now. The chunks are fetched one after
+    another, one `aws s3 cp` each, and a failure discards the assembly: a
+    100 GB file in 1 GiB chunks is ~94 sequential copies, ~17 minutes at
+    100 MB/s, and one that fails for good at chunk 90 (after `download_blob`'s
+    own retries) is fetched again from chunk 1 on the next attempt. The
+    `_AWS_OP_TIMEOUT` cap (1800 s by default) applies to each chunk's copy, not
+    to the file, so a slow but healthy transfer of a large file is not cut off."""
+    os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+    assembly = f"{dst}.chunked.{os.getpid()}"
+    piece = f"{dst}.chunk.{os.getpid()}"
+    try:
+        with open(assembly, "wb") as out:
+            for number, want in enumerate(annex_chunk_sizes(size, chunk_size), start=1):
+                try:
+                    download_blob(base + annex_chunk_key(key, chunk_size, number), piece, want)
+                except S3ObjectAbsent as exc:
+                    exc.chunk = number
+                    raise
+                with open(piece, "rb") as fh:
+                    shutil.copyfileobj(fh, out, _CHUNK_COPY_BUFFER)
+                os.remove(piece)
+        got = os.path.getsize(assembly)
+        if got != size:
+            # Unreachable by construction: every chunk was size-checked against
+            # `annex_chunk_sizes`, which sums to `size`. Reaching it is a bug in
+            # THIS code, not a fact about the bucket, so it must not carry the
+            # permanent `annex_object_missing` verdict: uncoded, it stays infra.
+            raise RuntimeError(
+                f"{key}: its {chunk_size}-byte chunks reassembled to {got} bytes, the "
+                f"key declares {size} (internal error: each chunk passed its size check)"
+            )
+        os.replace(assembly, dst)
+    finally:
+        for path in (piece, assembly):
+            with contextlib.suppress(OSError):
+                if os.path.exists(path):
+                    os.remove(path)
+
+
+def fetch_annex_object(bucket: str, dataset_id: str, key: str, dst: str) -> None:
+    """Download annex `key` of `dataset_id` to `dst`, plain or chunked.
+
+    The plain object ``s3://<bucket>/<id>/objects/<key>`` is tried first, so a
+    dataset stored without chunking costs exactly what it did before: one
+    request. Only when that answers 404 is a chunked copy looked for: with the
+    dataset's cached chunk size directly, otherwise (or when chunk 1 is not
+    there under the cached size, or a chunk keeps arriving at the wrong size)
+    through one listing, whose answer is cached.
+
+    Raises `AnnexObjectMissing` (typed, not retried) when the bucket definitely
+    holds no complete copy; any other failure propagates as-is."""
+    base = f"s3://{bucket}/{dataset_id}/objects/"
+    size = annex_key_size(key)
+    try:
+        download_blob(base + key, dst, size)
+        return
+    except S3ObjectAbsent as exc:
+        if size is None or "--" not in key:
+            # Without a declared size the chunk names cannot be derived, so the
+            # plain object was the only place this content could be.
+            raise AnnexObjectMissing(key, f"no object at the plain key ({exc})") from exc
+    cache = (bucket, dataset_id)
+    cached = _ANNEX_CHUNK_SIZE.get(cache)
+    if cached is not None:
+        try:
+            _download_chunks(base, key, size, cached, dst)
+            return
+        except S3ObjectAbsent as exc:
+            if exc.chunk != 1:
+                raise AnnexObjectMissing(
+                    key, f"chunk C{exc.chunk} of its {cached}-byte chunking is absent"
+                ) from exc
+            # Not stored under the cached size at all: this key may have been
+            # uploaded with another chunking. Its own listing decides.
+        except S3SizeMismatch:
+            # A chunk kept arriving at the wrong size. Uncoded, that would be
+            # retried as infra on every run for a chunk that is simply stored
+            # wrong; the listing reports each chunk's STORED size, so it types a
+            # stored-wrong chunk as `annex_object_missing`, and a transfer that
+            # was merely short is fetched again below.
+            pass
+    chunk_size, problem = _complete_chunk_size(
+        _list_annex_chunks(bucket, dataset_id, key), size, cached
+    )
+    if chunk_size is None:
+        raise AnnexObjectMissing(key, problem)
+    _ANNEX_CHUNK_SIZE[cache] = chunk_size
+    try:
+        _download_chunks(base, key, size, chunk_size, dst)
+    except S3ObjectAbsent as exc:
+        # Listed a moment ago and gone now: a deletion, which is still an answer.
+        raise AnnexObjectMissing(
+            key, f"chunk C{exc.chunk} of its {chunk_size}-byte chunking is absent"
+        ) from exc
 
 
 def s3_read_json(bucket: str, key: str) -> dict | None:
@@ -4778,7 +5559,7 @@ def _fetch_blob(
         key = parse_annex_key(blob.decode("utf-8", "replace"))
     os.makedirs(os.path.dirname(local) or ".", exist_ok=True)
     if key:
-        download_blob(f"s3://{bucket}/{dataset_id}/objects/{key}", local, annex_key_size(key))
+        fetch_annex_object(bucket, dataset_id, key, local)
     else:
         with open(local, "wb") as fh:
             fh.write(blob)
@@ -5058,7 +5839,10 @@ def store_metadata(store_path: str) -> dict:
             rec_meta.get("channels_tsv_units") if isinstance(rec_meta, dict) else None,
         ):
             if isinstance(candidate, dict):
-                result["units_report"] = candidate
+                # Republished bounded: biosigIO's per-channel case-match map
+                # becomes a count and a few examples (`bound_units_report`).
+                # The full map rides along as a diagnostic for the join report.
+                result["units_report"], result["_case_matches"] = bound_units_report(candidate)
                 break
         # Diagnostics for the sidecar join (`sidecar_join_report`), `_`-prefixed
         # so they never reach the published entry. `channel_labels_deduplicated`
@@ -6433,10 +7217,9 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             # report cannot say: it counts only what matched rows did.
             names = channels_tsv_names(channels_text) if channels_text is not None else None
             if names is not None:
-                by_case = entry["units_report"].get("matched_case_insensitive")
                 join = sidecar_join_report(
                     meta.get("_channel_labels") or [], names, meta.get("_label_renames") or {},
-                    by_case if isinstance(by_case, dict) else None,
+                    meta.get("_case_matches") or None,
                 )
                 entry["units_report"].update(join)
                 if join.get("unmatched_channels"):
@@ -6540,6 +7323,9 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             # is the only way an uncoded failure says anything at all from
             # outside the conversion node. #1197
             "detail": failure_detail(exc),
+            # The object storage lacks, so the driver can name it (see
+            # `annex_missing_summary`).
+            "annex_key": exc.key if isinstance(exc, AnnexObjectMissing) else None,
         }
     finally:
         # Parallel workers share the NVMe scratch; reclaim each recording's copy
@@ -7062,6 +7848,9 @@ def main() -> int:
     # what derives `zarr` and the attempt count and produces the published
     # entries -- see `_pending_entry`.
     pending_entries: list[dict] = []
+    # (path, annex key) of each recording refused as `annex_object_missing`; the
+    # callback names the first so the queue's error can (`annex_missing_summary`).
+    annex_missing: list[tuple[str, str | None]] = []
     # Event rows go to disk as each recording finishes, never into a list that
     # grows with the dataset: nm000281 is ~25k stores (#1060).
     events_staging = EventsStaging()
@@ -7132,6 +7921,8 @@ def main() -> int:
             # list and were indistinguishable from "still generating" forever.
             code = r.get("code")
             detail = r.get("detail") or failure_detail(r.get("error"))
+            if code == AnnexObjectMissing.code:
+                annex_missing.append((r["primary"], r.get("annex_key")))
             if code and code not in RETRYABLE_CODES:
                 failure_entries.append(_failure_entry(r["primary"], code, detail))
             else:
@@ -7300,17 +8091,19 @@ def main() -> int:
         print(f"[zarr] removed store {rel_store}", flush=True)
 
     # `deterministic` = every failure is a typed DATA failure (biosigIO carries a
-    # `.code`); none are infra (crashed worker / transient S3). The driver uses
-    # this to mark a total failure terminal (`data_failed`, no retry) vs infra
-    # (bounded retry) — and the backend records it for the failures dashboard.
-    # See nemarOrg/nemar-cli#774.
+    # `.code`); none are infra (crashed worker / transient S3), and not all of
+    # them are a storage-state code like `annex_object_missing`. The driver uses
+    # this to mark a total failure terminal (`data_failed`, no retry) vs
+    # retryable (bounded retry) — and the backend records it for the failures
+    # dashboard. See nemarOrg/nemar-cli#774 and `dataset_failure_is_deterministic`.
     infra_failures = count_infra_failures(failures, failure_entries)
     # Recordings that failed for a reason that is NOT a property of the data. On a
     # run where anything converted, `main` returns 0 and the driver marks the
     # dataset `done`, so these are not retried by the queue on their own -- say so
     # loudly rather than let the index carry a failure nobody revisits. #1113
     retryable_failures = infra_failures
-    deterministic = bool(failures) and infra_failures == 0
+    deterministic = dataset_failure_is_deterministic(failures, failure_entries)
+    annex_missing_fields = annex_missing_summary(annex_missing)
 
     # Set by the events.parquet step below. Bound HERE, before
     # `write_failed_callback` closes over them, because the total-failure exit
@@ -7348,6 +8141,7 @@ def main() -> int:
                     "failure_count": len(failure_entries),
                     "data_failures": failure_entries,
                     "deterministic": deterministic,
+                    **annex_missing_fields,
                     "pool_breaks": pool_breaks,
                     # Coverage (#1197). Reported even here, where the index was
                     # NOT rewritten: the queue's pending-driven requeue needs to
@@ -7391,6 +8185,14 @@ def main() -> int:
     # `failed` instead of backing off.
     if convert and not converted_entries and not remove and retry_paths is None:
         print(f"::error::all {len(convert)} conversion(s) failed; index left untouched", flush=True)
+        if annex_missing and not deterministic:
+            print(
+                f"::error::storage lacks the annex object(s) of {len(annex_missing)} "
+                f"recording(s) (first: {annex_missing_fields['annex_missing_first_key']} "
+                f"for {annex_missing_fields['annex_missing_first_path']}); the dataset "
+                "is retryable, not data_failed, in case an upload is still landing",
+                flush=True,
+            )
         write_failed_callback()
         return 1
 
@@ -7645,6 +8447,10 @@ def main() -> int:
         # converted); `deterministic` only tells the backend whether the skipped
         # recordings are data (won't retry) vs infra. See #774.
         "deterministic": deterministic,
+        # Recordings refused because storage lacks their object; the count and
+        # the first one, by path. Reported here too, where the dataset is `done`,
+        # so a partial run's missing objects are visible without the index.
+        **annex_missing_fields,
         # Worker-pool breaks recovered during this run. Zero is the healthy
         # value; a non-zero trend means the node is under memory pressure and
         # is only visible here -- the log is far too large to watch. #1110.

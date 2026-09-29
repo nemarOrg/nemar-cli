@@ -384,6 +384,7 @@ export async function refreshMetadataAfterVersionDoi(
   }
 }
 
+import type { DoiResolutionSummary } from "./doi-metadata.js";
 import type { LlmUsageTotals } from "./llm-enrich.js";
 
 export interface EnrichmentRunResult {
@@ -400,6 +401,12 @@ export interface EnrichmentRunResult {
   /** Token usage + estimated USD cost of this run's LLM calls, when the
    *  pipeline completed and reported it. */
   llm_usage?: LlmUsageTotals;
+  /** Stage 1d DOI lookup counts (#1549). `failed > 0` means a registry did
+   *  not answer, so the relation labels were chosen without some DOIs'
+   *  metadata. Nothing here retries: the result carries a warning (see
+   *  doiLookupWarnings), and re-running the reindex is up to the operator or
+   *  the sweep script in the description of nemarOrg/nemar-cli#1550. */
+  doi_resolution?: DoiResolutionSummary;
 }
 
 /**
@@ -465,6 +472,21 @@ export function extractEnrichmentSkips(body: unknown): string[] {
 }
 
 /**
+ * Warnings for DOI lookups that got no registry answer (429, 5xx, timeout, or
+ * the stage deadline). Such a run still succeeds, so this is a warning on the
+ * same list as a deliberate skip, never a failure; it tells the operator the
+ * relation labels were chosen without some DOIs' metadata and that
+ * reindexing the dataset again is worthwhile.
+ */
+export function doiLookupWarnings(summary: DoiResolutionSummary | undefined): string[] {
+  if (!summary || summary.failed <= 0) return [];
+  const asked = summary.resolved + summary.unresolved + summary.failed;
+  return [
+    `doi_resolution: ${summary.failed} of ${asked} DOI lookup(s) got no registry answer; reindex this dataset again to label them with registry metadata`,
+  ];
+}
+
+/**
  * Heuristic: does the given ref look like a version tag (immutable)?
  * Matches `v` followed by a digit, the conventional shape for semver-style
  * release tags produced by pr-merge.yml. Tag refs must use client_commits=true
@@ -520,17 +542,23 @@ export async function runEnrichmentForDataset(
         ref,
       };
     }
-    const llmUsage = "llm_usage" in outcome.body ? outcome.body.llm_usage : undefined;
+    // Carried on both branches: a run that fails after its LLM calls still
+    // spent the tokens and made the DOI lookups.
+    const reported = {
+      llm_usage: "llm_usage" in outcome.body ? outcome.body.llm_usage : undefined,
+      doi_resolution: "doi_resolution" in outcome.body ? outcome.body.doi_resolution : undefined,
+    };
     const subErrors = extractEnrichmentSubErrors(outcome.body);
     if (subErrors.length > 0) {
-      return { ok: false, error: subErrors.join("; "), ref, llm_usage: llmUsage };
+      return { ok: false, error: subErrors.join("; "), ref, ...reported };
     }
     const skips = extractEnrichmentSkips(outcome.body);
+    const warnings = [...skips, ...doiLookupWarnings(reported.doi_resolution)];
     return {
       ok: true,
       ref,
-      llm_usage: llmUsage,
-      ...(skips.length > 0 && { warnings: skips }),
+      ...reported,
+      ...(warnings.length > 0 && { warnings }),
     };
   } catch (err) {
     return { ok: false, error: errorMessage(err), ref };

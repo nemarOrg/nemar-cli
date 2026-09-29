@@ -62,13 +62,25 @@ export const zarrUnitsReportSchema = z
     units_column_present: z.boolean().optional(),
     sidecar: z.string().optional(),
     sidecar_supplied: z.boolean().optional(),
-    /** Store channels no channels.tsv row names exactly; the sidecar's type
-     *  and unit never reached them. 0 means every channel met a row. Absent
-     *  when there was no join: the store records no labels, the sidecar has
-     *  no `name` column, or there is no `units_report` at all. */
+    /** Store channels no channels.tsv row reached; the sidecar's type and
+     *  unit never reached them. A row reaches the channel it names exactly
+     *  and, from biosigio 1.2.10, the one channel it names in another letter
+     *  case when that is unambiguous (`matched_case_only`). 0 means every
+     *  channel met a row. Absent when there was no join: the store records no
+     *  labels, the sidecar has no `name` column, or there is no
+     *  `units_report` at all. */
     unmatched_channels: z.number().int().nonnegative().optional(),
-    /** Of those, a row names them in another letter case (biosigio#136). */
+    /** Of those, a row names them in another letter case but did not match:
+     *  converted before biosigio 1.2.10 (exact matching), or the
+     *  case-insensitive match was ambiguous (biosigio#136). */
     unmatched_case_only: z.number().int().positive().optional(),
+    /** Store channels a row reached only by ignoring letter case (biosigio
+     *  >= 1.2.10); the sidecar's type and unit WERE applied. The bounded
+     *  republication of biosigio's per-channel `matched_case_insensitive`
+     *  map, which the index never carries. */
+    matched_case_only: z.number().int().positive().optional(),
+    /** Up to five of those, as `"<channels.tsv name> -> <store label>"`. */
+    matched_case_only_examples: z.array(z.string()).max(5).optional(),
     /** Of those, the file repeated the label, the store de-duplicated it
      *  (`T8-P8` -> `T8-P8-0`), and the sidecar names the repeated one. */
     unmatched_raw_label: z.number().int().positive().optional(),

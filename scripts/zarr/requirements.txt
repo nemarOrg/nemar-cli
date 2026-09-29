@@ -123,21 +123,47 @@
 # reconverted, and `recording_metadata` gains `channel_labels_deduplicated`,
 # `brainvision_header_recovered` and `eeglab_fdt_recovered`, each only when it
 # applies.
-# <1.2.10 is a CAP, not a floor. biosigio 1.2.10 (biosigio#140, closing #136)
-# matches a channels.tsv row to the one channel whose label differs from it only
-# in case, and reports each match under `channels_tsv_units["matched_case_insensitive"]`.
-# Everything this repo publishes about the join was written against 1.2.9's exact
-# match: the schema, zod and MCP texts for `unmatched_channels` and
-# `unmatched_case_only` say matching is exact. `sidecar_join_report` already reads
-# biosigio's map, and the canary
-# `test_a_case_only_row_is_reported_per_biosigios_join` has a 1.2.10 branch (run
-# against biosigio's `main` when this cap was set, not in CI), so the join report
-# stays true on 1.2.10. What adopting it still needs: reword those three texts,
-# and declare or bound `matched_case_insensitive`, which `units_report` republishes
-# verbatim, one entry per matched channel in every store's index entry. Then raise
-# the cap in three places at once: here, `BIOSIGIO_SPEC` in hallu-zarr.sh, and
-# test_hallu_zarr_config.py.
-biosigio[zarr,meg,mef3,hdf5]>=1.2.9,<1.2.10
+# >=1.2.10: a channels.tsv row that matches no channel exactly is applied to
+# the one channel whose label differs from it only in case (biosigio#140,
+# closing #136; CHB-MIT's `Fp1-F7` against the EDF header's `FP1-F7`), when
+# that is unambiguous. Its type and unit are now APPLIED, so a unit that
+# differs from the file's CONVERTS the samples: a store regenerated from such a
+# dataset (nm000110) can differ in channel types, units and values from the
+# one published before. biosigIO lists each such match in its own report as
+# `matched_case_insensitive`, `{sidecar_name: channel_label}`; the converter
+# republishes that bounded, as `units_report.matched_case_only` (a count) and
+# `matched_case_only_examples` (at most CASE_MATCH_EXAMPLES_MAX), never as the
+# per-channel map, and the schema refuses the map. `unmatched_case_only` stays
+# declared for stores converted before 1.2.10 and for ambiguous rows. The
+# schema, zod and MCP texts for the join were reworded with this bump, and the
+# canary `test_a_case_only_row_is_applied_and_reported_per_biosigios_join` now
+# runs against this pin in CI. Also in 1.2.10: the XDF, EEGLAB, neo and Trigno
+# importers record `channel_labels_deduplicated` too, and their repeat suffixes
+# never take a label the file really uses (so `Fz, Fz, Fz_2` is `Fz, Fz_3,
+# Fz_2`, where 1.2.9 gave the second `Fz` the label `Fz_2`); Trigno keeps
+# repeated columns; `select_channels` raises on a repeated name; EDF export
+# numbers labels that collide once truncated. No nemar-cli code calls
+# `select_channels`, `add_channel` or the EDF exporter.
+# ZARR_ENGINE_VERSION is again NOT bumped (ADR 0033): the stamp records a
+# widening of discovery, and 1.2.10 discovers exactly what 1.2.9 did. Stores
+# already published stay served until their dataset is requeued (ADR 0005).
+# 1.2.10 changes a store's bytes only for a sidecar that differs from the file
+# only in case, or for an XDF/EEGLAB/neo/Trigno file whose repeats collide with
+# a label it really uses. Stores converted since the join report was added
+# (0.10.9) show the first as `unmatched_case_only`, and
+# `find_collapsed_channel_stores.py --case-only` lists them from the published
+# index.json (read-only); it also counts, as unverifiable, the entries with no
+# join report, which the index cannot answer for (older stores: compare their
+# channels.tsv with the store's labels). The XDF/EEGLAB/neo/Trigno collision
+# has no detector. Either way the fix is a targeted `--dataset` or requeue
+# run, one dataset at a time, not the stamp.
+# <1.2.11 is a CAP, not a floor, raised deliberately per release: a biosigIO
+# patch release has changed what a store contains twice in a row (1.2.9,
+# 1.2.10), so the next one is read before the converter takes it. Raise it in
+# three places at once: here, `BIOSIGIO_SPEC`, `BIOSIGIO_FLOOR` and `BIOSIGIO_CAP`
+# in hallu-zarr.sh (setup() refuses an installed biosigIO outside [floor, cap)
+# after install, and any pre-release), and test_hallu_zarr_config.py.
+biosigio[zarr,meg,mef3,hdf5]>=1.2.10,<1.2.11
 
 # Draft 2020-12 validator for the converter's own pre-upload self-check: the index
 # it is about to publish is validated against `shared/zarr-index.schema.json` (and

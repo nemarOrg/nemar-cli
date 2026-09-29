@@ -231,45 +231,81 @@ export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 DRIVER_REPO="${ZARR_DRIVER_REPO:-${STATE_DIR}/nemar-cli}"   # clone of nemarOrg/nemar-cli
 DRIVER_REF="${ZARR_DRIVER_REF:-main}"
 VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
-# The floor half of BIOSIGIO_SPEC below, as a bare version for setup()'s post-install
-# check (test_hallu_zarr_config.py holds the two together). The probe prints the installed
-# version and exits non-zero when it is below the floor. Versions are compared AS
-# versions: `packaging` when the venv has it, else the leading numeric fields as a
-# tuple, because as strings "1.2.10" sorts below "1.2.9". An unreadable or
-# unparseable version fails closed.
-BIOSIGIO_FLOOR="1.2.9"
+# The two halves of BIOSIGIO_SPEC below, as bare versions for setup()'s
+# post-install check (test_hallu_zarr_config.py holds all three together). The
+# check is TWO-SIDED: the installed biosigIO must be a final release in
+# [BIOSIGIO_FLOOR, BIOSIGIO_CAP). Below the floor is a failed upgrade; at or above
+# the cap is a release nobody has read yet (the cap exists because a biosigIO
+# patch release changed what a store contains twice in a row), which an install
+# that went wrong can also leave behind; a pre-release or dev build satisfies
+# neither pin. None of them may convert.
+#
+# The probe prints the installed version and exits 0 when it is in range, 3 when
+# it is below the floor or cannot be read, 4 when it is at or above the cap, 5 when
+# it is a pre-release or dev build. Versions are compared AS versions: with
+# `packaging` when the venv has it, else by a fallback that accepts only a
+# canonical final release (`N(.N)*`, optionally `.postN` and a `+local` label) and
+# compares its numeric fields as a tuple, because as strings "1.2.10" sorts below
+# "1.2.9". The two paths agree on every canonical spelling: both refuse
+# `1.2.10rc1` and `1.2.10.dev0` as pre-releases, which a bare tuple of leading
+# digits would read as 1.2.10 and accept. Anything the fallback cannot parse fails
+# closed.
+BIOSIGIO_FLOOR="1.2.10"
+BIOSIGIO_CAP="1.2.11"
 BIOSIGIO_FLOOR_PROBE='
+import re
 import sys
 import biosigio
 
 have = getattr(biosigio, "__version__", "<unknown>")
-floor = sys.argv[1]
+floor, cap = sys.argv[1], sys.argv[2]
+BELOW, ABOVE, PRE = 3, 4, 5
+
+FINAL = re.compile(r"(\d+(?:\.\d+)*)(?:\.post\d+)?(?:\+[a-z0-9]+(?:\.[a-z0-9]+)*)?")
+PRE_RELEASE = re.compile(
+    r"\d+(?:\.\d+)*(?:[-_.]?post\d+)?[-_.]?(?:a|b|c|rc|alpha|beta|pre|preview|dev)", re.I
+)
 
 
-def fields(text):
-    out = []
-    for piece in text.split("."):
-        digits = ""
-        for ch in piece:
-            if not ch.isdigit():
-                break
-            digits += ch
-        if not digits:
-            break
-        out.append(int(digits))
-    return tuple(out)
+def release(text):
+    match = FINAL.fullmatch(text)
+    if match is None:
+        return None
+    fields = [int(p) for p in match.group(1).split(".")]
+    while len(fields) > 1 and fields[-1] == 0:
+        fields.pop()
+    return tuple(fields)
+
+
+def verdict():
+    try:
+        from packaging.version import InvalidVersion, Version
+    except ImportError:
+        Version = None
+    if Version is not None:
+        try:
+            v = Version(have)
+        except InvalidVersion:
+            return BELOW
+        if v.is_prerelease:
+            return PRE
+        if v < Version(floor):
+            return BELOW
+        return ABOVE if v >= Version(cap) else 0
+    v = release(have)
+    if v is None:
+        return PRE if PRE_RELEASE.match(have) else BELOW
+    if v < release(floor):
+        return BELOW
+    return ABOVE if v >= release(cap) else 0
 
 
 try:
-    from packaging.version import Version as parse
-except ImportError:
-    parse = fields
-try:
-    ok = parse(have) >= parse(floor)
+    code = verdict()
 except Exception:
-    ok = False
+    code = BELOW
 print(have)
-sys.exit(0 if ok else 3)
+sys.exit(code)
 '
 # Fallback only (used when the clone predates scripts/zarr/requirements.txt, which
 # is the real pin). Floor is 1.2.6: 1.2.3 added MEF3 .mefd / 4D-BTi import (so a
@@ -287,16 +323,19 @@ sys.exit(0 if ok else 3)
 # files that failed before (EEGLAB v7.3 flat root and empty fields, BrainVision
 # stale DataFile/MarkerFile names, repeated EDF/BDF/WFDB labels that used to lose
 # channels) and raises host I/O errors as the OSError itself, which is retried,
-# instead of a typed file failure. The engine stamp did not move (see
-# requirements.txt).
-# The `<1.2.10` half is a CAP, not a floor: biosigio 1.2.10 matches channels.tsv
-# names case-insensitively, and the schema, zod and MCP texts for the join report
-# still say matching is exact. requirements.txt lists what adopting it needs; raise
-# the cap in all three places (that file, this default, test_hallu_zarr_config.py).
+# instead of a typed file failure, and 1.2.10 applies a channels.tsv row to the
+# one channel whose label differs from it only in case (biosigio#140), which can
+# convert that channel's unit; the converter publishes those matches bounded
+# (`units_report.matched_case_only`), and the join texts in the schema, zod and
+# MCP mirrors were reworded with this bump. The engine stamp did not move for
+# either (see requirements.txt).
+# The `<1.2.11` half is a CAP, not a floor, raised deliberately per release; raise
+# it in all three places at once (requirements.txt, this default and
+# BIOSIGIO_FLOOR/BIOSIGIO_CAP, test_hallu_zarr_config.py).
 # Extras are not optional here: [mef3] carries pymef and [hdf5] carries h5py, and
 # without either the matching recordings raise ImportError at convert time even
 # though discovery finds them.
-BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.9,<1.2.10}"
+BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.10,<1.2.11}"
 API_BASE="${API_BASE:-https://api.nemar.org}"
 # The STABLE base published in each index as `contract_base` and in each store's
 # `nemar.contract_url` (#1059/#1064). Distinct from S3_BUCKET/AWS_REGION, which
@@ -310,6 +349,13 @@ S3_BUCKET="${S3_BUCKET:-nemar}"
 AWS_REGION="${AWS_DEFAULT_REGION:-us-east-2}"
 # Scoped service profile (IAM user nemar-hallu-zarr; s3:Get/Put/Delete on
 # nemar/*/zarr/* + ListBucket). The driver's `aws s3 ...` calls inherit it.
+# Reading annex content needs s3:GetObject on nemar/<id>/objects/* AND
+# s3:ListBucket for the <id>/objects/ prefixes: a git-annex chunked upload
+# stores only `<key-fields>-S<chunk>-C<n>--...` objects, and the chunk size is
+# discovered by listing them. Without ListBucket, S3 answers the missing plain
+# key with 403 instead of 404, a 403 is never read as absence, so the chunked
+# fallback never runs and every chunked recording fails uncoded and retries.
+# Safe, but the chunked fetch silently does nothing.
 export AWS_PROFILE="${ZARR_AWS_PROFILE:-nemar-zarr}"
 export AWS_DEFAULT_REGION="$AWS_REGION"
 QUEUE_DB="${ZARR_QUEUE_DB:-${STATE_DIR}/zarr-queue.db}"
@@ -722,13 +768,30 @@ setup() {
   # wheel and passes the import guard. On 1.2.8 a streaming EDF that repeats a
   # channel label still publishes, with the repeated label as is, and the header
   # gate in generate_zarr.py cannot catch it: every channel is there, only the
-  # names collapse for a consumer that keys by label.
-  local installed
-  if ! installed="$(VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" -c "$BIOSIGIO_FLOOR_PROBE" "$BIOSIGIO_FLOOR" 2>&1)"; then
-    echo "[setup] FATAL: biosigio ${installed:-<unreadable>} is below the ${BIOSIGIO_FLOOR} floor after install ($BIOSIGIO_SPEC)." >&2
-    echo "[setup] The upgrade did not take effect; refusing to convert on a stale library." >&2
-    exit 1
-  fi
+  # names collapse for a consumer that keys by label. On 1.2.9 a channels.tsv row
+  # that differs from its channel only in case is silently not applied, so the
+  # store serves the importer's unit where the sidecar declares another.
+  # And it must be BELOW the cap, and a final release: see BIOSIGIO_FLOOR_PROBE.
+  local installed probe_rc=0
+  installed="$(VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" -c "$BIOSIGIO_FLOOR_PROBE" "$BIOSIGIO_FLOOR" "$BIOSIGIO_CAP" 2>&1)" || probe_rc=$?
+  case "$probe_rc" in
+    0) ;;
+    4)
+      echo "[setup] FATAL: biosigio ${installed} is at or above the ${BIOSIGIO_CAP} cap after install ($BIOSIGIO_SPEC)." >&2
+      echo "[setup] The pin says <${BIOSIGIO_CAP}: a biosigIO release is reviewed before the converter takes it; refusing to convert on one that was not." >&2
+      exit 1
+      ;;
+    5)
+      echo "[setup] FATAL: biosigio ${installed} is a pre-release or development build ($BIOSIGIO_SPEC)." >&2
+      echo "[setup] The converter runs only a final release in [${BIOSIGIO_FLOOR}, ${BIOSIGIO_CAP}); refusing to convert." >&2
+      exit 1
+      ;;
+    *)
+      echo "[setup] FATAL: biosigio ${installed:-<unreadable>} is below the ${BIOSIGIO_FLOOR} floor after install ($BIOSIGIO_SPEC)." >&2
+      echo "[setup] The upgrade did not take effect; refusing to convert on a stale library." >&2
+      exit 1
+      ;;
+  esac
   echo "[setup] biosigio ${installed}"
 }
 
@@ -758,6 +821,11 @@ convert_dataset() {
   # row into a retry loop it never earned.
   LAST_PENDING_COUNT=0
   LAST_NOT_ATTEMPTED=0
+  # Same again: whether every failure was storage lacking an annex object, and
+  # the first such key, for record_conversion_failure's queue message.
+  LAST_STORAGE_MISSING=false
+  LAST_ANNEX_MISSING_COUNT=0
+  LAST_ANNEX_MISSING_KEY=""
   log "[$id] start (version=${version:-?})"
 
   # In-progress signal so the observability dashboard's "Processing" tile reflects
@@ -818,6 +886,17 @@ convert_dataset() {
     # round, since nothing has actually failed for those recordings.
     LAST_NOT_ATTEMPTED="$(jq -r '.not_attempted_count // 0' "$cb" 2>/dev/null || echo 0)"
     [[ "$LAST_NOT_ATTEMPTED" =~ ^[0-9]+$ ]] || LAST_NOT_ATTEMPTED=0
+    # Every failed recording refused because storage lacks its annex object
+    # (`annex_object_missing`), and the run failed for no other reason (no
+    # producer `error`). The driver already keeps such a run non-deterministic,
+    # so it is retried with backoff; this only chooses the message.
+    LAST_STORAGE_MISSING="$(jq -r '
+      (.annex_missing_count // 0) as $n
+      | if .error == null and $n > 0 and $n == (.errors // -1) then "true" else "false" end
+    ' "$cb" 2>/dev/null || echo false)"
+    LAST_ANNEX_MISSING_COUNT="$(jq -r '.annex_missing_count // 0' "$cb" 2>/dev/null || echo 0)"
+    [[ "$LAST_ANNEX_MISSING_COUNT" =~ ^[0-9]+$ ]] || LAST_ANNEX_MISSING_COUNT=0
+    LAST_ANNEX_MISSING_KEY="$(jq -r '.annex_missing_first_key // ""' "$cb" 2>/dev/null || echo "")"
     retryable="$(jq -r '.retryable_failures // 0' "$cb" 2>/dev/null || echo 0)"
     if [[ "$retryable" =~ ^[0-9]+$ && "$retryable" -gt 0 ]]; then
       err "[$id] $retryable recording(s) failed for a RETRYABLE reason; they are listed as pending in index.json and the dataset will be re-queued automatically after a backoff. To retry now: $0 --dataset $id --requeue done --execute"
@@ -835,6 +914,29 @@ convert_dataset() {
   safe_rm "$dir"; rm -f "$cb"
   if [[ "$rc" -eq 0 ]]; then log "[$id] done"; else err "[$id] driver rc=$rc"; fi
   return "$rc"
+}
+
+# --- Queue verdict for a failed conversion ------------------------------------
+# Reads the LAST_* values convert_dataset set from the driver's callback.
+#   deterministic       -> `data_failed` now, never retried (#774)
+#   storage lacks the   -> the queue's bounded backoff, then `failed`: every
+#   annex object(s)        recording missing its object at once is what an
+#                          upload still landing looks like, so it must not be
+#                          buried as data_failed on the first run
+#   anything else       -> the same bounded backoff, generic message
+record_conversion_failure() {
+  local id="$1"
+  if [[ "$LAST_DETERMINISTIC" == "true" ]]; then
+    # Every recording is an unreadable DATA failure -- terminal, no retry (#774).
+    qpy fail "$id" "all recordings failed to convert (typed data failures; see ${LOG_FILE})" --deterministic ||
+      err "[$id] marking the deterministic failure FAILED; the row stays inprogress and will be retried despite being terminal"
+  elif [[ "$LAST_STORAGE_MISSING" == "true" ]]; then
+    qpy fail "$id" "storage lacks the annex object(s) of all ${LAST_ANNEX_MISSING_COUNT} failed recording(s); first missing: s3://${S3_BUCKET}/${id}/objects/${LAST_ANNEX_MISSING_KEY}. Retrying with backoff in case an upload is still landing; if the objects never arrive this ends failed. Remedy: fix the upload, then requeue: $0 --dataset ${id} --requeue failed --execute (see ${LOG_FILE})" ||
+      err "[$id] marking the missing-object failure FAILED; the row stays inprogress until the stale sweep reclaims it"
+  else
+    qpy fail "$id" "conversion failed (see ${LOG_FILE})" ||
+      err "[$id] marking the failure FAILED; the row stays inprogress until the stale sweep reclaims it"
+  fi
 }
 
 # --- Single-instance lock -----------------------------------------------------
@@ -1108,13 +1210,8 @@ while :; do
     qpy done "$id" "$version" --pending-count "${LAST_PENDING_COUNT:-0}" \
       --not-attempted-count "${LAST_NOT_ATTEMPTED:-0}" ||
       err "[$id] converted, but marking it done FAILED; the row stays inprogress until the stale sweep reclaims it (~6h) and it will be converted again"
-  elif [[ "$LAST_DETERMINISTIC" == "true" ]]; then
-    # Every recording is an unreadable DATA failure -- terminal, no retry (#774).
-    qpy fail "$id" "all recordings failed to convert (typed data failures; see ${LOG_FILE})" --deterministic ||
-      err "[$id] marking the deterministic failure FAILED; the row stays inprogress and will be retried despite being terminal"
   else
-    qpy fail "$id" "conversion failed (see ${LOG_FILE})" ||
-      err "[$id] marking the failure FAILED; the row stays inprogress until the stale sweep reclaims it"
+    record_conversion_failure "$id"
   fi
   n=$((n + 1))
   if [[ "$LIMIT" -gt 0 && "$n" -ge "$LIMIT" ]]; then

@@ -127,6 +127,15 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /notices": 2,
   "DELETE /notices/:id": 1,
 
+  // News posts and their images (#1551). zValidator + handler on the two
+  // writes that take a NewsInput body; the image upload reads a raw body.
+  "GET /news": 1,
+  "GET /news/:id": 1,
+  "POST /news": 2,
+  "PUT /news/:id": 2,
+  "DELETE /news/:id": 1,
+  "POST /news/media": 1,
+
   // Withdrawal / restore (epic #967 phase 4, #971)
   "POST /datasets/:id/withdraw": 2,
   "POST /datasets/:id/restore": 2,
@@ -175,7 +184,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(117);
+    expect(adminRoutes.routes.length).toBe(125);
   });
 
   // The count pin above can't see a SWAP of the two router-level middleware

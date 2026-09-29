@@ -518,6 +518,83 @@ describe("runZarrFidelitySweep: per-dataset verdicts", () => {
     ]);
   });
 
+  describe("a store short of channels.tsv that discloses the sidecar overcount", () => {
+    // on003645: EEG `.set` recordings holding 75 channels under a
+    // subject-level channels.tsv listing the dataset's 404 MEG channels. The
+    // converter serves them, proven complete against the file header, and
+    // says so in `channels_tsv_count_mismatch`; the sweep must read that.
+    const path = "sub-01/eeg/sub-01_task-rest_eeg.set";
+
+    async function sweep(
+      id: string,
+      disclosure: Record<string, number> | undefined,
+      nChannels = 75,
+    ) {
+      seedDataset(id, id);
+      indexFixtures.set(id, {
+        source_commit: COMMIT_A,
+        store_count: 1,
+        stores: [
+          {
+            path,
+            zarr: "z",
+            groups: [{ modality: "eeg", n_channels: nChannels, duration_s: 120, rate: 250 }],
+            ...(disclosure ? { channels_tsv_count_mismatch: disclosure } : {}),
+          },
+        ],
+      });
+      sidecarFixtures.set(`${id}/${COMMIT_A}/sub-01/sub-01_channels.tsv`, channelsTsv(404));
+      sidecarFixtures.set(
+        `${id}/${COMMIT_A}/sub-01/eeg/sub-01_task-rest_eeg.json`,
+        eegJson(250, 120),
+      );
+      return runZarrFidelitySweep(env(), runOpts());
+    }
+
+    test("VERIFIED: in_store equals in_file and the store's total", async () => {
+      const id = "on800300";
+      const result = await sweep(id, { channels_tsv: 404, in_file: 75, in_store: 75 });
+      expect(result.errors).toEqual([]);
+      expect(result.verified).toBe(1);
+      expect(result.results[0].verdict).toBe("verified");
+      expect(result.results[0].checked_channels).toBe(1);
+      expect(result.results[0].mismatch_count).toBe(0);
+      expect(row(id).zarr_verify_status).toBe("verified");
+    });
+
+    test("FAILED: no disclosure, the store is short of the sidecar", async () => {
+      const id = "on800301";
+      const result = await sweep(id, undefined);
+      expect(result.failed).toBe(1);
+      expect(result.results[0].examples).toEqual([{ path, code: "channel_count_mismatch" }]);
+      expect(row(id).zarr_verify_status).toBe("failed");
+    });
+
+    test("FAILED: the disclosure itself says the store is short of the file", async () => {
+      const id = "on800302";
+      const result = await sweep(id, { channels_tsv: 404, in_file: 80, in_store: 75 });
+      expect(result.failed).toBe(1);
+      expect(result.results[0].examples).toEqual([{ path, code: "channel_count_mismatch" }]);
+      expect(row(id).zarr_verify_status).toBe("failed");
+    });
+
+    test("FAILED: a disclosure that does not describe the store as served", async () => {
+      // in_store == in_file, but the groups sum to 70: the disclosure is not
+      // about this store, so it proves nothing.
+      const id = "on800303";
+      const result = await sweep(id, { channels_tsv: 404, in_file: 75, in_store: 75 }, 70);
+      expect(result.failed).toBe(1);
+      expect(result.results[0].examples).toEqual([{ path, code: "channel_count_mismatch" }]);
+    });
+
+    test("FAILED: a malformed disclosure is no disclosure", async () => {
+      const id = "on800304";
+      const result = await sweep(id, { channels_tsv: 404, in_file: 75 });
+      expect(result.failed).toBe(1);
+      expect(result.results[0].examples).toEqual([{ path, code: "channel_count_mismatch" }]);
+    });
+  });
+
   test("FAILED (duration_mismatch): store duration disagrees with RecordingDuration by more than 1s", async () => {
     const id = "on800003";
     seedDataset(id, id);

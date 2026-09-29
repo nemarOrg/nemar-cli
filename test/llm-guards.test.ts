@@ -1,10 +1,34 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  EMPTY_DOI_RESOLUTION,
+  datasetDoisOf,
+  parseDataCiteJson,
+} from "../backend/src/services/doi-metadata.js";
 import {
   estimateUsageCostUsd,
   mergeWithExisting,
   pruneUnsourcedDois,
+  seedFromBids,
 } from "../backend/src/services/llm-enrich.js";
 import { buildLlmUsageDataPoint } from "../backend/src/services/llm-metrics.js";
+
+// Real DataCite content-negotiation responses recorded 2026-09-29 (see
+// test/doi-metadata.test.ts): nm000275's pre-processed figshare deposit
+// (resourceTypeGeneral Dataset) and its Scientific Data descriptor (Text).
+const recorded = (name: string): unknown =>
+  JSON.parse(readFileSync(join(import.meta.dir, "fixtures/doi-registry", name), "utf-8"));
+const NM000275_DERIVABLE = datasetDoisOf({
+  ...EMPTY_DOI_RESOLUTION,
+  resolved: [
+    parseDataCiteJson(
+      "10.6084/m9.figshare.7666055.v3",
+      recorded("datacite-figshare-7666055-v3.json"),
+    ),
+    parseDataCiteJson("10.1038/s41597-019-0027-4", recorded("datacite-s41597-019-0027-4.json")),
+  ].filter((r) => r !== null),
+});
 
 describe("pruneUnsourcedDois", () => {
   const readme = `Cited works:
@@ -183,6 +207,139 @@ describe("mergeWithExisting relation locks", () => {
     expect(merged.related_identifiers?.[0].relation_type).toBe("IsDescribedBy");
   });
 
+  test("re-enrichment relabels nm000275's data paper and deposits (#1549)", () => {
+    // nm000275's real BIDS description: its Scientific Data descriptor and
+    // both figshare deposits sit in ReferencesAndLinks (seeded References),
+    // and the raw deposit is also a SourceDataset (seeded IsDerivedFrom).
+    const seeded = seedFromBids(
+      {
+        Name: "Multi-channel EEG recordings during a sustained-attention driving task",
+        ReferencesAndLinks: [
+          "https://doi.org/10.1038/s41597-019-0027-4",
+          "https://doi.org/10.6084/m9.figshare.6427334.v5",
+          "https://doi.org/10.6084/m9.figshare.7666055.v3",
+          "https://doi.org/10.1109/TBCAS.2014.2316224",
+        ],
+        SourceDatasets: [{ URL: "https://doi.org/10.6084/m9.figshare.6427334.v5" }],
+      },
+      null,
+    );
+    const merged = mergeWithExisting(
+      seeded,
+      {
+        related_identifiers: [
+          // Upper case in the LLM echo must still match the seeded entry.
+          {
+            identifier: "10.1038/S41597-019-0027-4",
+            identifier_type: "DOI",
+            relation_type: "IsDescribedBy",
+          },
+          // References -> IsDerivedFrom: the pre-processed deposit of the same data.
+          {
+            identifier: "10.6084/m9.figshare.7666055.v3",
+            identifier_type: "DOI",
+            relation_type: "IsDerivedFrom",
+          },
+          // IsDerivedFrom (SourceDatasets) is locked against a downgrade.
+          {
+            identifier: "10.6084/m9.figshare.6427334.v5",
+            identifier_type: "DOI",
+            relation_type: "References",
+          },
+          // Lower case echo of a seeded upper-case DOI: reclassified, not appended.
+          {
+            identifier: "10.1109/tbcas.2014.2316224",
+            identifier_type: "DOI",
+            relation_type: "References",
+          },
+        ],
+      },
+      NM000275_DERIVABLE,
+    );
+    expect(NM000275_DERIVABLE).toEqual(new Set(["10.6084/m9.figshare.7666055.v3"]));
+    expect(merged.related_identifiers?.map((r) => [r.identifier, r.relation_type])).toEqual([
+      ["10.6084/m9.figshare.6427334.v5", "IsDerivedFrom"],
+      ["10.1038/s41597-019-0027-4", "IsDescribedBy"],
+      ["10.6084/m9.figshare.7666055.v3", "IsDerivedFrom"],
+      ["10.1109/TBCAS.2014.2316224", "References"],
+    ]);
+  });
+
+  test("IsDerivedFrom needs a DataCite Dataset, for a promotion and for a new entry", () => {
+    const seeded = seedFromBids(
+      {
+        Name: "Test",
+        ReferencesAndLinks: [
+          "https://doi.org/10.1016/j.neuroimage.2014.01.015",
+          "https://doi.org/10.6084/m9.figshare.7666055.v3",
+        ],
+      },
+      null,
+    );
+    const claims = {
+      related_identifiers: [
+        // A journal paper claimed as a source: not a Dataset, stays References.
+        {
+          identifier: "10.1016/j.neuroimage.2014.01.015",
+          identifier_type: "DOI" as const,
+          relation_type: "IsDerivedFrom",
+        },
+        // The deposit, without resolved metadata to prove it: stays References.
+        {
+          identifier: "10.6084/m9.figshare.7666055.v3",
+          identifier_type: "DOI" as const,
+          relation_type: "IsDerivedFrom",
+        },
+        // New entries: an unproven claim lands as References, a proven one as claimed.
+        {
+          identifier: "10.1038/srep21353",
+          identifier_type: "DOI" as const,
+          relation_type: "IsDerivedFrom",
+        },
+      ],
+    };
+    expect(
+      mergeWithExisting(seeded, claims).related_identifiers?.map((r) => r.relation_type),
+    ).toEqual(["References", "References", "References"]);
+    const withEvidence = mergeWithExisting(
+      seeded,
+      claims,
+      new Set(["10.6084/m9.figshare.7666055.v3", "10.1038/srep21353"]),
+    );
+    expect(withEvidence.related_identifiers?.map((r) => r.relation_type)).toEqual([
+      "References",
+      "IsDerivedFrom",
+      "IsDerivedFrom",
+    ]);
+  });
+
+  test("only References may move to IsDerivedFrom", () => {
+    const merged = mergeWithExisting(
+      {
+        version: "2.0" as const,
+        related_identifiers: [
+          {
+            identifier: "10.1038/s41597-019-0027-4",
+            identifier_type: "DOI" as const,
+            relation_type: "IsDescribedBy",
+          },
+        ],
+      },
+      {
+        related_identifiers: [
+          {
+            identifier: "10.1038/s41597-019-0027-4",
+            identifier_type: "DOI",
+            relation_type: "IsDerivedFrom",
+          },
+        ],
+      },
+      // Even with Dataset evidence, the lock on IsDescribedBy holds.
+      new Set(["10.1038/s41597-019-0027-4"]),
+    );
+    expect(merged.related_identifiers?.[0].relation_type).toBe("IsDescribedBy");
+  });
+
   test("duplicate-identifier entries are all updated consistently", () => {
     const existing = {
       version: "2.0" as const,
@@ -218,11 +375,11 @@ describe("mergeWithExisting relation locks", () => {
 });
 
 describe("estimateUsageCostUsd", () => {
-  test("applies sonnet-5 standard rates", () => {
-    // 1M input at $3 + 100k output at $15/M = 3 + 1.5
+  test("applies sonnet-5-5 standard rates", () => {
+    // 1M input at $2 + 100k output at $10/M = 2 + 1
     expect(
       estimateUsageCostUsd({ calls: 2, input_tokens: 1_000_000, output_tokens: 100_000 }),
-    ).toBe(4.5);
+    ).toBe(3);
   });
 });
 

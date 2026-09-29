@@ -31,8 +31,12 @@ import type { AdminRouter } from "./shared";
  *
  * Real offsets run -12:00 to +14:00. A `Z` suffix (or no offset) has none to
  * check and passes.
+ *
+ * Also applied to news posts' `published_at` (routes/admin/news.ts), where
+ * the column is NOT NULL, so the same input would otherwise surface as a 500
+ * from the failed insert rather than a 400 naming the field.
  */
-function hasRealUtcOffset(value: string): boolean {
+export function hasRealUtcOffset(value: string): boolean {
   const match = /([+-])(\d{2}):(\d{2})$/.exec(value);
   if (!match) return true;
   const [, sign, hours, minutes] = match;

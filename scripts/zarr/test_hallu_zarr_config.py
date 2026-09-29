@@ -60,6 +60,7 @@ Run:
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
@@ -193,10 +194,11 @@ def test_test_mode_print_config_defaults(dirs: tuple[Path, Path]) -> None:
     # channels.tsv units, which is what gates the engine bump, and below 1.2.8
     # the streaming export rewrites every shard once per channel (#1483), and
     # below 1.2.9 real EEGLAB v7.3 and BrainVision files fail to convert and
-    # EDF files that repeat a channel label lose channels. The upper bound is a
-    # cap, not a floor: 1.2.10 matches channels.tsv names case-insensitively,
-    # which the published join report was not written for (requirements.txt).
-    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.9,<1.2.10"
+    # EDF files that repeat a channel label lose channels, and below 1.2.10 a
+    # channels.tsv row that differs from its channel only in case is not
+    # applied. The upper bound is a cap, not a floor, raised deliberately per
+    # biosigIO release (requirements.txt).
+    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.10,<1.2.11"
     assert cfg["S3_BUCKET"] == "nemar-dev"
     assert cfg["AWS_PROFILE"] == "nemar-zarr-dev"
     assert cfg["STATE_DIR"] == state_dir
@@ -263,7 +265,7 @@ def test_print_config_without_test_uses_prod_defaults(dirs: tuple[Path, Path]) -
     assert cfg["TEST_API_URL"] == ""
     assert cfg["CALLBACK_URL"] == "https://api.nemar.org/webhooks/zarr-ready"
     assert cfg["CONTRACT_BASE"] == "https://zarr.nemar.org"
-    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.9,<1.2.10"
+    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.10,<1.2.11"
     assert cfg["S3_BUCKET"] == "nemar"
     assert cfg["AWS_PROFILE"] == "nemar-zarr"
     assert cfg["STATE_DIR"] == f"{zarr_base}/zarr-state"
@@ -810,7 +812,8 @@ def ack_run(tmp_path: Path):
         reconcile_out: str = "queued=0 parked=0",
         extra_env: dict[str, str] | None = None,
         args: list[str] | None = None,
-        biosigio_version: str = "9.9.9",
+        # In range for the two-sided check in setup(): [BIOSIGIO_FLOOR, BIOSIGIO_CAP).
+        biosigio_version: str = "1.2.10",
         packaging_importable: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         # The venv's `biosigio`: a package that is only a version, which is all
@@ -920,7 +923,7 @@ def test_the_env_var_form_arms_a_run_without_touching_the_file(ack_run) -> None:
 
 
 @pytest.mark.parametrize("packaging_importable", [True, False], ids=["packaging", "tuple"])
-@pytest.mark.parametrize("stale", ["1.2.8", "1.2.0", "0.9.9"])
+@pytest.mark.parametrize("stale", ["1.2.9", "1.2.8", "1.2.0", "0.9.9"])
 def test_setup_refuses_a_biosigio_below_the_floor(
     ack_run, stale: str, packaging_importable: bool
 ) -> None:
@@ -930,7 +933,8 @@ def test_setup_refuses_a_biosigio_below_the_floor(
     converter's header gate cannot catch it (every channel is present, only the
     names collapse), so setup has to stop the run before it converts anything.
     Both comparison paths are driven: `packaging` when the venv has it, the
-    numeric-tuple fallback when it does not."""
+    numeric-tuple fallback when it does not. "1.2.9" is the case a string
+    comparison gets wrong against the 1.2.10 floor: as strings it sorts above."""
     run, qpy_calls, _ack_file, _log = ack_run
 
     proc = run(biosigio_version=stale, packaging_importable=packaging_importable)
@@ -938,18 +942,18 @@ def test_setup_refuses_a_biosigio_below_the_floor(
     assert proc.returncode != 0, proc.stdout
     assert "FATAL" in proc.stderr
     assert stale in proc.stderr
-    assert "1.2.9" in proc.stderr
+    assert "1.2.10" in proc.stderr
     assert qpy_calls() == [], "setup must stop before the queue is touched"
 
 
 @pytest.mark.parametrize("packaging_importable", [True, False], ids=["packaging", "tuple"])
-@pytest.mark.parametrize("version", ["1.2.9", "1.2.10", "1.10.0", "2.0.0"])
-def test_setup_accepts_a_biosigio_at_or_above_the_floor(
+@pytest.mark.parametrize("version", ["1.2.10", "1.2.10.post1", "1.2.10+local.1"])
+def test_setup_accepts_a_final_biosigio_between_the_floor_and_the_cap(
     ack_run, version: str, packaging_importable: bool
 ) -> None:
     """Compared AS versions: as strings "1.2.10" sorts below "1.2.9", which
-    would refuse a node that is above the floor. (The floor check does not
-    enforce the cap; that is the resolver's job at install time.)"""
+    would refuse a node that is at the floor. A post release and a local label
+    satisfy `>=1.2.10,<1.2.11` for the resolver, so they satisfy the check."""
     run, qpy_calls, _ack_file, _log = ack_run
 
     proc = run(biosigio_version=version, packaging_importable=packaging_importable)
@@ -957,6 +961,48 @@ def test_setup_accepts_a_biosigio_at_or_above_the_floor(
     assert proc.returncode == 0, proc.stderr
     assert f"[setup] biosigio {version}" in proc.stdout
     assert any("reconcile" in c for c in qpy_calls()), qpy_calls()
+
+
+@pytest.mark.parametrize("packaging_importable", [True, False], ids=["packaging", "tuple"])
+@pytest.mark.parametrize("version", ["1.2.11", "1.2.11.post1", "1.10.0", "2.0.0"])
+def test_setup_refuses_a_biosigio_at_or_above_the_cap(
+    ack_run, version: str, packaging_importable: bool
+) -> None:
+    """The pin is `<1.2.11` because a biosigIO release is read before the
+    converter takes it. An install that went wrong (a resolver conflict, a
+    venv someone upgraded by hand) can leave a newer one behind, and the
+    install line hides it (`| tail -2 || true`), so setup refuses it. "1.10.0"
+    is the case a string comparison gets wrong: as strings it sorts below."""
+    run, qpy_calls, _ack_file, _log = ack_run
+
+    proc = run(biosigio_version=version, packaging_importable=packaging_importable)
+
+    assert proc.returncode != 0, proc.stdout
+    assert "FATAL" in proc.stderr
+    assert version in proc.stderr
+    assert "1.2.11 cap" in proc.stderr
+    assert qpy_calls() == [], "setup must stop before the queue is touched"
+
+
+@pytest.mark.parametrize("packaging_importable", [True, False], ids=["packaging", "tuple"])
+@pytest.mark.parametrize(
+    "version", ["1.2.10rc1", "1.2.10.dev0", "1.2.10a1", "1.2.11.dev0", "1.2.10.post1.dev0"]
+)
+def test_setup_refuses_a_pre_release_on_both_paths(
+    ack_run, version: str, packaging_importable: bool
+) -> None:
+    """`1.2.10rc1` and `1.2.10.dev0` sort BELOW 1.2.10, and a tuple of leading
+    digits reads both as (1, 2, 10) and would accept them: the two paths used to
+    disagree. Both now refuse every pre-release and dev build."""
+    run, qpy_calls, _ack_file, _log = ack_run
+
+    proc = run(biosigio_version=version, packaging_importable=packaging_importable)
+
+    assert proc.returncode != 0, proc.stdout
+    assert "FATAL" in proc.stderr
+    assert version in proc.stderr
+    assert "pre-release" in proc.stderr
+    assert qpy_calls() == []
 
 
 @pytest.mark.parametrize("packaging_importable", [True, False], ids=["packaging", "tuple"])
@@ -989,6 +1035,75 @@ def test_the_floor_variable_is_the_floor_of_the_spec() -> None:
         if line.startswith("BIOSIGIO_SPEC=")
     )
     assert f">={floor}," in spec + ",", f"floor {floor!r} is not the >= bound of {spec!r}"
+
+
+def _script_assignment(name: str) -> str:
+    text = SCRIPT.read_text()
+    return next(
+        line.split("=", 1)[1].strip('"')
+        for line in text.splitlines()
+        if line.startswith(f"{name}=")
+    )
+
+
+def test_the_cap_variable_is_the_cap_of_the_spec() -> None:
+    """`BIOSIGIO_CAP` (what setup() refuses at or above) and the `<` half of
+    `BIOSIGIO_SPEC` are one number: a bump that raised only the spec would
+    install the new release and then refuse to run on it."""
+    cap = _script_assignment("BIOSIGIO_CAP")
+    spec = _script_assignment("BIOSIGIO_SPEC").split(":-", 1)[1].rstrip('}"')
+    assert spec.endswith(f",<{cap}"), f"cap {cap!r} is not the < bound of {spec!r}"
+
+
+def _floor_probe() -> str:
+    """The probe exactly as setup() runs it: the body of the single-quoted
+    `BIOSIGIO_FLOOR_PROBE='...'` assignment, which bash passes through as is."""
+    text = SCRIPT.read_text()
+    start = text.index("BIOSIGIO_FLOOR_PROBE='") + len("BIOSIGIO_FLOOR_PROBE='")
+    return text[start : text.index("\n'\n", start)]
+
+
+def _run_probe(tmp_path: Path, version: str, packaging_importable: bool) -> int:
+    """The probe under THIS interpreter (no bash involved, so it runs on any
+    host), with a `biosigio` that is only a version and, for the fallback,
+    a `packaging` that fails to import."""
+    stubs = tmp_path / f"stubs-{packaging_importable}"
+    shutil.rmtree(stubs, ignore_errors=True)
+    (stubs / "biosigio").mkdir(parents=True)
+    (stubs / "biosigio" / "__init__.py").write_text(f'__version__ = "{version}"\n')
+    if not packaging_importable:
+        (stubs / "packaging").mkdir()
+        (stubs / "packaging" / "__init__.py").write_text('raise ImportError("absent")\n')
+    proc = subprocess.run(
+        [sys.executable, "-c", _floor_probe(),
+         _script_assignment("BIOSIGIO_FLOOR"), _script_assignment("BIOSIGIO_CAP")],
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PYTHONPATH": str(stubs)},
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert proc.stdout.strip() == version, proc.stderr
+    return proc.returncode
+
+
+# The probe's verdict per version, which BOTH comparison paths must reach:
+# 0 in range, 3 below the floor or unreadable, 4 at or above the cap, 5 a
+# pre-release or dev build.
+PROBE_VERDICTS = {
+    "1.2.10": 0, "1.2.10.0": 0, "1.2.10.post1": 0, "1.2.10+local.1": 0,
+    "1.2.9": 3, "1.2.8": 3, "0.9.9": 3, "not-a-version": 3,
+    "1.2.11": 4, "1.2.11.0": 4, "1.2.11.post1": 4, "1.10.0": 4, "2.0.0": 4,
+    "1.2.10rc1": 5, "1.2.10.dev0": 5, "1.2.10a1": 5, "1.2.10b2": 5,
+    "1.2.11.dev0": 5, "1.2.11rc1": 5, "1.2.10.post1.dev0": 5, "1.2.9rc1": 5,
+}
+
+
+@pytest.mark.parametrize("packaging_importable", [True, False], ids=["packaging", "tuple"])
+@pytest.mark.parametrize("version", sorted(PROBE_VERDICTS))
+def test_both_probe_paths_reach_the_same_verdict(
+    tmp_path: Path, version: str, packaging_importable: bool
+) -> None:
+    if packaging_importable:
+        pytest.importorskip("packaging")
+    assert _run_probe(tmp_path, version, packaging_importable) == PROBE_VERDICTS[version]
 
 
 def _calls_for(qpy_calls, subcommand: str) -> list[str]:
@@ -1130,3 +1245,122 @@ def test_only_the_drain_loop_passes_the_retry_scope():
     assert 'if convert_dataset "$id" "$version" retry-pending; then' in calls
     assert 'convert_dataset "$ONLY_DATASET" "$v"' in calls
     assert len(calls) == 2, calls
+
+
+# -- the queue verdict for a failed conversion (annex_object_missing, PR #1563) --
+
+
+def _failure_verdict(tmp_path: Path, callback: dict, rc: int = 1) -> list[str]:
+    """Run the REAL `convert_dataset` and `record_conversion_failure`, in that
+    order, over a driver that writes `callback` and exits `rc`, and return the
+    argv each `qpy` call received (one line per call, arguments tab-joined).
+
+    The driver, `qpy`, `nemar` and the logging helpers are stand-ins; the two
+    functions, the jq reads of the callback, and the choice of queue call are the
+    script's own, extracted verbatim.
+    """
+    record = tmp_path / "qpy.txt"
+    cb_src = tmp_path / "callback.json"
+    cb_src.write_text(json.dumps(callback))
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    python = venv / "bin" / "python"
+    python.write_text(
+        "#!/bin/sh\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        f'  if [ "$1" = "--callback-out" ]; then cp {shlex.quote(str(cb_src))} "$2"; fi\n'
+        "  shift\n"
+        "done\n"
+        f"exit {rc}\n"
+    )
+    python.chmod(0o755)
+    work = tmp_path / "work"
+    work.mkdir()
+    harness = "\n".join(
+        [
+            "set -uo pipefail",
+            f"WORK_DIR={shlex.quote(str(work))}",
+            f"LOG_FILE={shlex.quote(str(tmp_path / 'log.txt'))}",
+            f"VENV_DIR={shlex.quote(str(venv))}",
+            "DRIVER=generate_zarr.py S3_BUCKET=nemar AWS_REGION=us-east-2",
+            "CONTRACT_BASE=https://data.example CALLBACK_URL= NEMAR_WEBHOOK_TOKEN=",
+            "API_BASE=https://api.example JOBS=2",
+            "log() { :; }; err() { :; }",
+            'safe_rm() { rm -rf "$1"; }',
+            'nemar() { mkdir -p "${@: -1}"; }',
+            f'qpy() {{ local IFS=$\'\\t\'; printf "%s\\n" "$*" >> {shlex.quote(str(record))}; }}',
+            _function_source("convert_dataset"),
+            _function_source("record_conversion_failure"),
+            'convert_dataset nm000276 v1.0.0 retry-pending || record_conversion_failure nm000276',
+        ]
+    )
+    proc = subprocess.run(
+        ["bash", "-c", harness], capture_output=True, text=True, timeout=30, check=False
+    )
+    assert proc.returncode == 0, proc.stderr
+    return record.read_text().splitlines() if record.exists() else []
+
+
+_KEY = "SHA256E-s982--" + "ab" * 32 + ".vhdr"
+
+
+def _missing(n: int, *, errors: int | None = None, deterministic: bool = False, **extra) -> dict:
+    return {
+        "dataset_id": "nm000276",
+        "status": "failed",
+        "errors": n if errors is None else errors,
+        "deterministic": deterministic,
+        "annex_missing_count": n,
+        "annex_missing_first_path": "sub-01/eeg/sub-01_task-rest_eeg.vhdr",
+        "annex_missing_first_key": _KEY,
+        **extra,
+    }
+
+
+def test_every_recording_missing_its_object_is_a_retryable_fail(tmp_path):
+    (call,) = _failure_verdict(tmp_path, _missing(3))
+    argv = call.split("\t")
+    assert argv[:2] == ["fail", "nm000276"]
+    assert "--deterministic" not in argv, "must take the bounded backoff, not data_failed"
+    message = argv[2]
+    assert "storage lacks the annex object(s) of all 3 failed recording(s)" in message
+    assert f"s3://nemar/nm000276/objects/{_KEY}" in message
+    assert "--dataset nm000276 --requeue failed --execute" in message
+    assert "fix the upload" in message
+
+
+def test_a_deterministic_verdict_is_still_terminal(tmp_path):
+    # A genuine data failure alongside missing objects: the driver says
+    # deterministic, and that wins over the storage message.
+    (call,) = _failure_verdict(tmp_path, _missing(1, errors=2, deterministic=True))
+    argv = call.split("\t")
+    assert argv[-1] == "--deterministic"
+    assert "typed data failures" in argv[2]
+
+
+def test_missing_objects_alongside_infra_failures_get_the_generic_message(tmp_path):
+    (call,) = _failure_verdict(tmp_path, _missing(1, errors=2))
+    argv = call.split("\t")
+    assert "--deterministic" not in argv
+    assert argv[2].startswith("conversion failed (see ")
+
+
+def test_a_producer_error_is_not_blamed_on_storage(tmp_path):
+    (call,) = _failure_verdict(tmp_path, _missing(2, error="index failed schema validation"))
+    assert call.split("\t")[2].startswith("conversion failed (see ")
+
+
+def test_a_run_without_a_callback_gets_the_generic_retryable_fail(tmp_path):
+    # A crashed driver writes nothing; the verdict must not inherit anything.
+    (call,) = _failure_verdict(tmp_path, {"dataset_id": "nm000276", "status": "failed"})
+    argv = call.split("\t")
+    assert "--deterministic" not in argv
+    assert argv[2].startswith("conversion failed (see ")
+
+
+def test_the_drain_loop_routes_every_failure_through_the_verdict():
+    text = SCRIPT.read_text()
+    drain = text[text.index('if convert_dataset "$id" "$version" retry-pending; then') :]
+    drain = drain[: drain.index("\n  fi\n")]
+    assert 'record_conversion_failure "$id"' in drain
+    assert "qpy fail" not in drain

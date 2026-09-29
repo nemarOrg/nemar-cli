@@ -113,6 +113,7 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     channel_gate_verdict,
     channels_tsv_names,
     sidecar_join_report,
+    bound_units_report,
     store_total_channels,
     store_metadata,
     embed_attr,
@@ -2256,6 +2257,18 @@ class TestAnnexKeySize(unittest.TestCase):
         self.assertIsNone(annex_key_size(None))
         self.assertIsNone(annex_key_size(""))
 
+    def test_a_size_like_run_in_the_name_is_not_a_size(self):
+        # WORM and URL keys carry the file name (or URL) after `--`, and BIDS
+        # names are full of `-s<digits>`-shaped runs. Unanchored, these read as
+        # a 5-byte file, and every chunk name and size check derived from it
+        # would be wrong.
+        self.assertIsNone(annex_key_size("WORM-m1700000000--sub-01-s5_eeg.edf"))
+        self.assertIsNone(annex_key_size("URL--https&c%%example.org%run-s5.edf"))
+        # A sized WORM key keeps its own size, not the name's.
+        self.assertEqual(annex_key_size("WORM-s100-m1700000000--sub-01-s5.edf"), 100)
+        # The chunk fields that follow the size do not bleed into it.
+        self.assertEqual(annex_key_size("SHA256E-s12-S1024-C1--abc.edf"), 12)
+
 
 class TestMaxShieldCalibrationResolution(unittest.TestCase):
     """ADR 0028: Signal-Space Separation runs only with the recording's OWN
@@ -3167,10 +3180,12 @@ class TestFileDeclaredChannelCount(unittest.TestCase):
 
     def test_a_format_with_no_cheap_header_is_unknown_without_a_warning(self):
         # Nothing here was expected to have a header to read, so nothing is
-        # unreadable: the quiet None is the whole answer.
-        p = self.path("r_eeg.set")
+        # unreadable: the quiet None is the whole answer. (A `.set` used to be
+        # the example here; it has a header count now, and an unreadable one
+        # warns, see TestEeglabDeclaredChannelCount.)
+        p = self.path("r_meg.con")
         with open(p, "wb") as fh:
-            fh.write(b"MATLAB 5.0")
+            fh.write(b"KIT header bytes")
         self.assertEqual(self.count_and_log(p), (None, ""))
 
     def test_brainvision_reads_its_count_key_without_regard_to_case(self):
@@ -3270,6 +3285,672 @@ class TestFifDeclaredChannelCount(unittest.TestCase):
         self.assertEqual(channel_gate_verdict(in_file - 1, in_file + 9, in_file), "truncated")
         self.assertEqual(channel_gate_verdict(in_file - 1, in_file, in_file), "truncated")
         self.assertEqual(channel_gate_verdict(in_file, in_file + 9, in_file), "sidecar_overcount")
+
+
+def build_eeglab_set(
+    path: str, nbchan: int = 3, *, rows: int | None = None, pnts: int = 500,
+    trials: int = 1, fdt: bool = False, v73: bool = False, wrapped: bool = True,
+    compress: bool = True, labels: list[str] | None = None, dtype: str = "float64",
+) -> str:
+    """Write a REAL EEGLAB `.set` the way biosigIO reads it, and return `path`.
+
+    Classic (MAT v5/v7) files are written with `scipy.io.savemat`, v7.3 files
+    with h5py under the MATLAB 7.3 header text in a 512-byte user block, which
+    is what MATLAB writes and what biosigIO's `_is_matlab_v73` sniffs.
+    `wrapped` puts every field in one `EEG` struct (classic EEGLAB) or an `EEG`
+    group (v7.3); otherwise they are saved flat. `rows` is the data matrix's row
+    count when it should disagree with `nbchan`. `fdt=True` writes the samples
+    to a float32 `.fdt` beside the `.set`, column-major, and stores its name in
+    `data`. `labels` becomes a classic `chanlocs` struct array (it may be shorter
+    than `nbchan`: chanlocs only names rows)."""
+    import numpy as np
+
+    rows = nbchan if rows is None else rows
+    rng = np.random.default_rng(3)
+    data = (rng.standard_normal((rows, pnts * trials)) * 1e-5).astype(np.float32)
+    fdt_name = os.path.splitext(os.path.basename(path))[0] + ".fdt"
+    if fdt:
+        data.flatten(order="F").tofile(os.path.splitext(path)[0] + ".fdt")
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    header = {"nbchan": nbchan, "trials": trials, "pnts": pnts, "srate": 250.0}
+    if v73:
+        import h5py
+
+        with h5py.File(path, "w", userblock_size=512) as f:
+            eeg = f.create_group("EEG") if wrapped else f
+            for key, value in header.items():
+                eeg.create_dataset(key, data=np.array([[float(value)]]))
+            if fdt:
+                codes = np.array([[ord(ch)] for ch in fdt_name], dtype=np.uint16)
+                eeg.create_dataset("data", data=codes)
+            else:
+                # h5py sees MATLAB's (nbchan, pnts) transposed.
+                eeg.create_dataset("data", data=data.T.astype(dtype))
+        with open(path, "r+b") as fh:
+            fh.write(b"MATLAB 7.3 MAT-file, Platform: GLNXA64, Created by: test".ljust(116))
+        return path
+    import scipy.io
+
+    fields: dict[str, object] = {"setname": "eeglab_fixture"}
+    fields.update({k: np.array([[float(v)]]) for k, v in header.items()})
+    if fdt:
+        fields["data"] = fdt_name
+    elif trials > 1:
+        fields["data"] = data.reshape((rows, pnts, trials), order="F").astype(dtype)
+    else:
+        fields["data"] = data.astype(dtype)
+    if labels is not None:
+        locs = np.zeros((1, len(labels)), dtype=[("labels", "O"), ("type", "O")])
+        for i, label in enumerate(labels):
+            locs[0, i] = (label, "EEG")
+        fields["chanlocs"] = locs
+    scipy.io.savemat(path, {"EEG": fields} if wrapped else fields, do_compression=compress)
+    return path
+
+
+class Mat5:
+    """A minimal MAT v5 writer, byte for byte per MathWorks' "MAT-File Format",
+    for the layouts `scipy.io.savemat` cannot produce: big-endian files, a 1xN
+    `EEG` struct array, fields in an arbitrary order, several top-level
+    variables. Every file it writes is also checked by `scipy.io.loadmat` in the
+    tests that use it, so the writer is not trusted on its own word.
+
+    `end` is the struct byte order, "<" or ">". A matrix is returned as the
+    bytes of one whole miMATRIX element; `file` wraps variables in the 128-byte
+    header, each optionally in its own miCOMPRESSED element."""
+
+    def __init__(self, end: str = "<") -> None:
+        self.end = end
+
+    def elem(self, mtype: int, data: bytes) -> bytes:
+        import struct
+
+        n = len(data)
+        if 0 < n <= 4:  # small data element: packed into the tag
+            return struct.pack(self.end + "I", (n << 16) | mtype) + data.ljust(4, b"\0")
+        return struct.pack(self.end + "II", mtype, n) + data + b"\0" * (-n % 8)
+
+    def matrix(
+        self, name: str, mclass: int, dims: list[int], body: bytes = b"",
+    ) -> bytes:
+        import struct
+
+        payload = (
+            self.elem(6, struct.pack(self.end + "II", mclass, 0))
+            + self.elem(5, struct.pack(self.end + f"{len(dims)}i", *dims))
+            + self.elem(1, name.encode())
+            + body
+        )
+        return struct.pack(self.end + "II", 14, len(payload)) + payload
+
+    def scalar(self, name: str, value: float, kind: str = "double") -> bytes:
+        """A 1x1 numeric matrix; `uint8` and `int32` store their value in a
+        small data element (the tag's own 8 bytes)."""
+        import struct
+
+        mclass, mtype, fmt = {
+            "double": (6, 9, "d"), "uint8": (9, 2, "B"), "int32": (12, 5, "i"),
+        }[kind]
+        value_bytes = struct.pack(self.end + fmt, int(value) if fmt != "d" else value)
+        return self.matrix(name, mclass, [1, 1], self.elem(mtype, value_bytes))
+
+    def chars(self, name: str, text: str) -> bytes:
+        import struct
+
+        body = self.elem(4, struct.pack(self.end + f"{len(text)}H", *map(ord, text)))
+        return self.matrix(name, 4, [1, len(text)], body)
+
+    def doubles(self, name: str, rows: int, cols: int, seed: int = 0) -> bytes:
+        import numpy as np
+
+        arr = np.random.default_rng(seed).standard_normal((rows, cols)).astype(self.end + "f8")
+        return self.matrix(name, 6, [rows, cols], self.elem(9, arr.tobytes(order="F")))
+
+    def struct(self, name: str, elements: list[list[tuple[str, bytes]]]) -> bytes:
+        """A 1xN struct array; every element lists the same fields in the same
+        order, each field a matrix (its own name is ignored, as MATLAB's is)."""
+        import struct
+
+        width = 32
+        names = [field for field, _ in elements[0]]
+        body = self.elem(5, struct.pack(self.end + "i", width)) + self.elem(
+            1, b"".join(n.encode().ljust(width, b"\0") for n in names)
+        )
+        for element in elements:
+            assert [field for field, _ in element] == names
+            body += b"".join(matrix for _, matrix in element)
+        return self.matrix(name, 2, [1, len(elements)], body)
+
+    def eeg_fields(
+        self, nbchan: float, rows: int, pnts: int = 20, *, nbchan_kind: str = "double",
+        nbchan_after_data: bool = False, flat: bool = False,
+    ) -> list[tuple[str, bytes]]:
+        """The fields biosigIO's importer needs, in EEGLAB's order unless
+        `nbchan_after_data` moves `nbchan` past `data`. Struct fields carry no
+        name of their own, as MATLAB writes them; `flat` names each matrix, to
+        be saved as top-level variables."""
+
+        def name(field: str) -> str:
+            return field if flat else ""
+
+        fields = [
+            ("setname", self.chars(name("setname"), "fixture")),
+            ("nbchan", self.scalar(name("nbchan"), nbchan, nbchan_kind)),
+            ("trials", self.scalar(name("trials"), 1)),
+            ("pnts", self.scalar(name("pnts"), pnts)),
+            ("srate", self.scalar(name("srate"), 100.0)),
+            ("data", self.doubles(name("data"), rows, pnts)),
+        ]
+        if nbchan_after_data:
+            fields.append(fields.pop(1))
+        return fields
+
+    def file(self, path: str, variables: list[bytes], compress: bool = False) -> str:
+        import struct
+        import zlib
+
+        head = b"MATLAB 5.0 MAT-file, written by the test suite".ljust(116)
+        out = head + b"\0" * 8 + struct.pack(self.end + "H", 0x0100)
+        out += b"IM" if self.end == "<" else b"MI"
+        for variable in variables:
+            if compress:
+                blob = zlib.compress(variable)
+                out += struct.pack(self.end + "II", 15, len(blob)) + blob
+            else:
+                out += variable
+        with open(path, "wb") as fh:
+            fh.write(out)
+        return path
+
+
+class TestEeglabDeclaredChannelCount(unittest.TestCase):
+    """The EEGLAB branch of the header count (on003645: EEG `.set` recordings
+    holding 75 channels under a subject-level channels.tsv listing its 404 MEG
+    channels, refused as truncations because `.set` had no header count).
+
+    Every file is real, written by scipy or h5py, and wherever the count is
+    returned it is checked against the channels biosigIO actually imports from
+    the same file: the header may only vouch for what the importer serves."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import h5py  # noqa: F401
+            import scipy.io  # noqa: F401
+            from biosigio import Recording  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"EEGLAB deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+
+    def path(self, name: str) -> str:
+        return os.path.join(self.dir, f"sub-01_task-{name}_eeg.set")
+
+    def imported(self, p: str) -> int:
+        import warnings
+
+        from biosigio import Recording
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # the importer warns on a short chanlocs
+            signals = Recording.from_file(p).signals
+        assert signals is not None
+        return signals.shape[1]
+
+    def assert_counts(self, p: str, expected: int) -> None:
+        self.assertEqual(file_declared_channel_count(p), expected)
+        self.assertEqual(self.imported(p), expected)
+
+    def quiet_none(self, p: str) -> str:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertIsNone(file_declared_channel_count(p))
+        self.assertIn("could not read the EEGLAB header", out.getvalue())
+        self.assertIn(p, out.getvalue())
+        return out.getvalue()
+
+    def test_a_classic_set_in_every_layout(self):
+        for wrapped in (True, False):
+            for compress in (True, False):
+                with self.subTest(wrapped=wrapped, compress=compress):
+                    p = build_eeglab_set(
+                        self.path(f"c{int(wrapped)}{int(compress)}"), 5,
+                        wrapped=wrapped, compress=compress,
+                    )
+                    self.assert_counts(p, 5)
+
+    def test_integer_and_single_precision_matrices(self):
+        # MATLAB stores what it saves in the narrowest type that holds it; the
+        # header read must not care which numeric class `data` or `nbchan` has.
+        for dtype in ("float32", "int16"):
+            with self.subTest(dtype=dtype):
+                p = build_eeglab_set(self.path(dtype), 6, dtype=dtype)
+                self.assertEqual(file_declared_channel_count(p), 6)
+
+    def test_a_classic_set_with_its_samples_in_a_fdt(self):
+        for wrapped in (True, False):
+            with self.subTest(wrapped=wrapped):
+                p = build_eeglab_set(self.path(f"fdt{int(wrapped)}"), 7, fdt=True, wrapped=wrapped)
+                self.assert_counts(p, 7)
+
+    def test_a_v73_set_nested_and_flat(self):
+        for wrapped in (True, False):
+            with self.subTest(wrapped=wrapped):
+                p = build_eeglab_set(self.path(f"h{int(wrapped)}"), 4, v73=True, wrapped=wrapped)
+                self.assert_counts(p, 4)
+
+    def test_a_v73_set_with_its_samples_in_a_fdt(self):
+        p = build_eeglab_set(self.path("hfdt"), 4, v73=True, fdt=True)
+        self.assert_counts(p, 4)
+
+    def test_a_v73_matrix_as_wide_as_it_is_long(self):
+        # biosigIO transposes unless axis 0 alone matches nbchan; a square matrix
+        # is transposed, and either way has nbchan rows.
+        p = build_eeglab_set(self.path("sq"), 4, pnts=4, v73=True)
+        self.assert_counts(p, 4)
+
+    def test_an_epoched_set_still_counts_nbchan(self):
+        # A `.fdt`-backed epoched classic set converts, flattened to nbchan rows.
+        p = build_eeglab_set(self.path("epfdt"), 3, trials=4, fdt=True)
+        self.assert_counts(p, 3)
+        # An inline 3-D matrix and a v7.3 epoched file are refused by the
+        # importer before any gate runs; the header count is still nbchan.
+        self.assertEqual(
+            file_declared_channel_count(build_eeglab_set(self.path("ep"), 3, trials=4)), 3
+        )
+        self.assertEqual(
+            file_declared_channel_count(build_eeglab_set(self.path("hep"), 3, trials=4, v73=True)),
+            3,
+        )
+
+    def test_a_short_chanlocs_changes_nothing(self):
+        # chanlocs only names rows: biosigIO pads the labels and keeps every row.
+        p = build_eeglab_set(self.path("locs"), 4, labels=["Fz", "Cz"])
+        self.assert_counts(p, 4)
+
+    def test_an_eeg_struct_wins_over_flat_variables(self):
+        # biosigIO's `_normalize_eeglab_dict`: the struct's fields, then any
+        # top-level variable the struct does not have.
+        import numpy as np
+        import scipy.io
+
+        p = self.path("both")
+        rows = np.zeros((4, 50))
+        scipy.io.savemat(p, {
+            "nbchan": np.array([[9.0]]), "data": np.zeros((9, 50)),
+            "EEG": {"nbchan": np.array([[4.0]]), "trials": np.array([[1.0]]),
+                    "pnts": np.array([[50.0]]), "srate": np.array([[250.0]]), "data": rows},
+        })
+        self.assert_counts(p, 4)
+
+    def test_nbchan_disagreeing_with_the_matrix_is_not_a_count(self):
+        # biosigIO serves the matrix's rows whatever nbchan says. An nbchan
+        # ABOVE them would refuse a faithful store; one BELOW them is not taken
+        # as a lower bound either, since the count is published as `in_file`
+        # and a header its own matrix contradicts proves nothing. Neither
+        # direction vouches.
+        for label, nbchan, v73 in (
+            ("classicover", 5, False), ("classicunder", 3, False),
+            ("v73over", 5, True), ("v73under", 3, True),
+        ):
+            with self.subTest(label):
+                p = build_eeglab_set(self.path(label), nbchan, rows=4, v73=v73)
+                self.assertIn("disagrees with the 4-row data matrix", self.quiet_none(p))
+                self.assertEqual(self.imported(p), 4)
+
+    def test_a_fractional_nbchan_is_unknown_whatever_biosigio_makes_of_it(self):
+        # biosigIO truncates a classic file's nbchan and rounds a v7.3 file's,
+        # so 3.6 is 3 channels to one importer path and 4 to the other. The
+        # header read vouches for neither: None, never a count.
+        import h5py
+        import numpy as np
+        import scipy.io
+
+        p = build_eeglab_set(self.path("fracclassic"), 3, fdt=True)
+        mat = scipy.io.loadmat(p)["EEG"][0, 0]
+        fields = {name: mat[name] for name in mat.dtype.names}
+        fields["nbchan"] = np.array([[3.6]])
+        scipy.io.savemat(p, {"EEG": fields})
+        self.assertIn("nbchan is 3.6", self.quiet_none(p))
+        self.assertEqual(self.imported(p), 3)  # int(3.6)
+
+        q = build_eeglab_set(self.path("fracv73"), 4, v73=True)
+        with h5py.File(q, "r+") as f:
+            f["EEG"]["nbchan"][...] = 3.6
+        self.assertIn("nbchan is 3.6", self.quiet_none(q))
+        self.assertEqual(self.imported(q), 4)  # int(round(3.6))
+
+    def test_an_unusable_nbchan_is_unknown(self):
+        for label, value in {"zero": 0, "negative": -3, "fraction": 3.5, "absurd": 10**7}.items():
+            with self.subTest(label):
+                # `.fdt`-backed, so nbchan is the only count the header has:
+                # no inline matrix can disagree with it and mask the check.
+                p = build_eeglab_set(self.path(label), 3, fdt=True)
+                # Rewrite nbchan in place.
+                import numpy as np
+                import scipy.io
+
+                mat = scipy.io.loadmat(p)["EEG"][0, 0]
+                fields = {name: mat[name] for name in mat.dtype.names}
+                fields["nbchan"] = np.array([[float(value)]])
+                scipy.io.savemat(p, {"EEG": fields})
+                self.quiet_none(p)
+
+    def test_a_set_with_no_nbchan_or_no_data_is_unknown(self):
+        import numpy as np
+        import scipy.io
+
+        p = self.path("nonb")
+        scipy.io.savemat(p, {"EEG": {"pnts": np.array([[50.0]]), "data": np.zeros((3, 50))}})
+        self.quiet_none(p)
+        q = self.path("nodata")
+        scipy.io.savemat(q, {"EEG": {"nbchan": np.array([[3.0]]), "pnts": np.array([[50.0]])}})
+        self.assertIn("no readable data matrix", self.quiet_none(q))
+
+    def test_an_unreadable_set_is_unknown_and_says_so(self):
+        good = build_eeglab_set(self.path("good"), 3, compress=True)
+        with open(good, "rb") as fh:
+            original = fh.read()
+        hgood = build_eeglab_set(self.path("hgood"), 3, v73=True)
+        with open(hgood, "rb") as fh:
+            h_original = fh.read()
+        cases = {
+            "garbage": b"not a MAT file at all",
+            "empty": b"",
+            "header only": original[:128],
+            "cut mid-variable": original[: len(original) // 2],
+            "compressed stream corrupted": original[:200] + b"\xff" * 64 + original[264:],
+            "v7.3 cut short": h_original[:600],
+        }
+        for name, content in cases.items():
+            with self.subTest(name):
+                p = self.path(name.replace(" ", "").replace(".", ""))
+                with open(p, "wb") as fh:
+                    fh.write(content)
+                self.quiet_none(p)
+        self.assertIsNone(file_declared_channel_count(self.path("absent")))
+
+    def test_a_v73_file_that_is_not_an_eeglab_set_is_unknown(self):
+        import h5py
+
+        p = self.path("otherh5")
+        with h5py.File(p, "w", userblock_size=512) as f:
+            f.create_dataset("something_else", data=[1.0])
+        with open(p, "r+b") as fh:
+            fh.write(b"MATLAB 7.3 MAT-file".ljust(116))
+        self.quiet_none(p)
+
+    def loadmat_nbchan(self, p: str) -> float:
+        """nbchan as scipy reads the same file: the hand-built writer's check."""
+        import scipy.io
+
+        mat = scipy.io.loadmat(p)
+        eeg = mat["EEG"][0, 0] if "EEG" in mat else mat
+        return float(eeg["nbchan"].ravel()[0])
+
+    def test_hand_built_layouts(self):
+        """Layouts scipy's writer cannot produce, each read three ways: by the
+        header read, by scipy, and by biosigIO's importer (the count must be
+        the rows it serves)."""
+        for end, compress, nbchan_kind, nbchan_after_data in itertools.product(
+            "<>", (False, True), ("double", "uint8", "int32"), (False, True),
+        ):
+            # uint8/int32 nbchan sit in a small data element, whose tag a
+            # big-endian file stores with its halves swapped.
+            m = Mat5(end)
+            label = f"{'be' if end == '>' else 'le'}{int(compress)}{nbchan_kind}{int(nbchan_after_data)}"
+            with self.subTest(label):
+                fields = m.eeg_fields(7, 7, nbchan_kind=nbchan_kind,
+                                      nbchan_after_data=nbchan_after_data)
+                p = m.file(self.path(label), [m.struct("EEG", [fields])], compress=compress)
+                self.assertEqual(self.loadmat_nbchan(p), 7)
+                self.assert_counts(p, 7)
+
+    def test_hand_built_flat_big_endian(self):
+        for compress in (False, True):
+            with self.subTest(compress=compress):
+                m = Mat5(">")
+                fields = m.eeg_fields(5, 5, flat=True)
+                p = m.file(self.path(f"beflat{int(compress)}"),
+                           [matrix for _, matrix in fields], compress=compress)
+                self.assertEqual(self.loadmat_nbchan(p), 5)
+                self.assert_counts(p, 5)
+
+    def test_the_first_element_of_an_eeg_struct_array_wins(self):
+        # biosigIO takes EEG(1); MAT v5 stores a struct array element by element.
+        for compress in (False, True):
+            with self.subTest(compress=compress):
+                m = Mat5("<")
+                elements = [m.eeg_fields(3, 3), m.eeg_fields(9, 9)]
+                p = m.file(self.path(f"sarr{int(compress)}"), [m.struct("EEG", elements)],
+                           compress=compress)
+                self.assertEqual(self.loadmat_nbchan(p), 3)
+                self.assert_counts(p, 3)
+                # And a first element that disagrees with itself is not rescued
+                # by a consistent second one.
+                elements = [m.eeg_fields(5, 3), m.eeg_fields(9, 9)]
+                q = m.file(self.path(f"sarrbad{int(compress)}"), [m.struct("EEG", elements)],
+                           compress=compress)
+                self.quiet_none(q)
+
+    def test_other_top_level_variables_around_eeg(self):
+        # An EEGLAB workspace save: variables before and after `EEG`, one of
+        # them a large matrix skipped unread, and flat nbchan/data decoys the
+        # `EEG` struct outranks.
+        for compress in (False, True):
+            with self.subTest(compress=compress):
+                m = Mat5("<")
+                p = m.file(self.path(f"multi{int(compress)}"), [
+                    m.chars("LASTCOM", "pop_loadset();"),
+                    m.doubles("ALLCOM", 50, 2000, seed=1),
+                    m.scalar("nbchan", 9),
+                    m.struct("EEG", [m.eeg_fields(6, 6)]),
+                    m.doubles("data", 9, 20, seed=2),
+                    m.scalar("CURRENTSET", 1, "int32"),
+                ], compress=compress)
+                self.assertEqual(self.loadmat_nbchan(p), 6)
+                self.assert_counts(p, 6)
+
+    def test_a_file_cut_anywhere_is_unknown_or_right(self):
+        """Truncated at every 2% (and at every byte of the first 512) of a real
+        compressed, uncompressed and big-endian file: each read returns None
+        or the true count, never raises, and ends promptly."""
+        import signal
+
+        files = {
+            "scipyc": (build_eeglab_set(self.path("cutc"), 5, pnts=4000, compress=True), 5),
+            "scipyu": (build_eeglab_set(self.path("cutu"), 5, pnts=4000, compress=False), 5),
+            "be": (Mat5(">").file(self.path("cutbe"), [
+                Mat5(">").struct("EEG", [Mat5(">").eeg_fields(7, 7, pnts=4000)])
+            ], compress=True), 7),
+        }
+        guard = hasattr(signal, "SIGALRM")
+
+        def timeout(*_):
+            raise TimeoutError("header read did not return within 5 s")
+
+        previous = signal.signal(signal.SIGALRM, timeout) if guard else None
+        self.addCleanup(lambda: guard and signal.signal(signal.SIGALRM, previous))
+        for name, (src, truth) in files.items():
+            with open(src, "rb") as fh:
+                raw = fh.read()
+            cuts = sorted({len(raw) * pct // 100 for pct in range(0, 101, 2)} | set(range(512)))
+            cut_path = self.path(f"{name}cut")
+            for cut in cuts:
+                with self.subTest(name, cut=cut):
+                    with open(cut_path, "wb") as fh:
+                        fh.write(raw[:cut])
+                    if guard:
+                        signal.alarm(5)
+                    try:
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            got = file_declared_channel_count(cut_path)
+                    finally:
+                        if guard:
+                            signal.alarm(0)
+                    self.assertIn(got, (None, truth))
+                    if cut == len(raw):
+                        self.assertEqual(got, truth)
+
+    def test_a_compressed_data_matrix_is_never_inflated(self):
+        """The walk stops at `data`'s dimensions instead of skipping to its
+        end, which inside a compressed `EEG` would inflate every sample (CPU
+        linear in the file, for nothing). Here the deflate stream is real for
+        the header and the first 64 KiB of samples and garbage after, so a
+        read that inflates any further fails and returns None. The same file
+        with `nbchan` moved past `data`, where skipping `data` is unavoidable,
+        shows the garbage is reached when it is read."""
+        import struct
+        import zlib
+
+        m = Mat5("<")
+        for nbchan_after_data, expected in ((False, 4), (True, None)):
+            with self.subTest(nbchan_after_data=nbchan_after_data):
+                fields = m.eeg_fields(4, 4, pnts=200_000, nbchan_after_data=nbchan_after_data)
+                eeg = m.struct("EEG", [fields])
+                data = dict(fields)["data"]
+                cut = eeg.index(data) + 64 * 1024
+                co = zlib.compressobj()
+                head = co.compress(eeg[:cut]) + co.flush(zlib.Z_SYNC_FLUSH)
+                blob = head + b"\xff" * (len(zlib.compress(eeg)) - len(head))
+                with self.assertRaises(zlib.error):
+                    zlib.decompress(blob)
+                p = m.file(self.path(f"garbled{int(nbchan_after_data)}"), [])
+                with open(p, "ab") as fh:
+                    fh.write(struct.pack("<II", 15, len(blob)) + blob)
+                if expected is None:
+                    self.assertIn("decompressing", self.quiet_none(p))
+                else:
+                    self.assertEqual(file_declared_channel_count(p), expected)
+
+    def test_a_zlib_bomb_ahead_of_nbchan_is_cut_off(self):
+        """A compressed `EEG` whose first field declares more zeros than
+        `EEGLAB_MAX_HEADER_READ_BYTES` (a few hundred KB on disk) is given up
+        on after the cap, not inflated to its end: None, one warning, quickly.
+        Just under the cap the same shape is read through and counted, so the
+        cap is what stops it."""
+        import struct
+        import zlib
+
+        cap = generate_zarr.EEGLAB_MAX_HEADER_READ_BYTES
+        m = Mat5("<")
+        chunk = b"\0" * (1 << 20)
+
+        def bomb(p: str, zeros: int) -> str:
+            # EEG = struct(comments=<`zeros` bytes of char>, nbchan, ..., data),
+            # compressed as one stream without ever holding `zeros` in memory.
+            fields = m.eeg_fields(4, 4)
+            comments_head = (
+                m.elem(6, struct.pack("<II", 4, 0))
+                + m.elem(5, struct.pack("<2i", 1, zeros // 2))
+                + m.elem(1, b"")
+            )
+            comments_len = len(comments_head) + 8 + zeros + (-zeros % 8)
+            names = ["comments"] + [name for name, _ in fields]
+            body_head = (
+                m.elem(6, struct.pack("<II", 2, 0)) + m.elem(5, struct.pack("<2i", 1, 1))
+                + m.elem(1, b"EEG") + m.elem(5, struct.pack("<i", 32))
+                + m.elem(1, b"".join(n.encode().ljust(32, b"\0") for n in names))
+            )
+            rest = b"".join(matrix for _, matrix in fields)
+            total = len(body_head) + 8 + comments_len + len(rest)
+            co = zlib.compressobj(1)
+            blob = co.compress(
+                struct.pack("<II", 14, total) + body_head
+                + struct.pack("<II", 14, comments_len) + comments_head
+                + struct.pack("<II", 4, zeros)
+            )
+            for _ in range(zeros // len(chunk)):
+                blob += co.compress(chunk)
+            blob += co.compress(b"\0" * (zeros % len(chunk) + (-zeros % 8)) + rest) + co.flush()
+            m.file(p, [])
+            with open(p, "ab") as fh:
+                fh.write(struct.pack("<II", 15, len(blob)) + blob)
+            return p
+
+        under = bomb(self.path("undercap"), cap - (1 << 20))
+        self.assertEqual(file_declared_channel_count(under), 4)
+        over = bomb(self.path("overcap"), cap + (1 << 20))
+        self.assertLess(os.path.getsize(over), 2 << 20)
+        started = time.monotonic()
+        log = self.quiet_none(over)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertIn(f"more than {cap} bytes", log)
+        self.assertEqual(log.count("::warning::"), 1)
+
+    def test_the_sample_matrix_is_never_loaded(self):
+        """The whole point of reading nbchan by hand: `loadmat(variable_names=
+        ["EEG"])` still materializes every sample, because a classic export is
+        ONE variable, `EEG`, with `data` inside. Measured here against the same
+        file, so the bound is shown to separate the two reads.
+
+        With `nbchan` stored after `data` the walk has to skip the whole matrix,
+        inflating it when compressed; memory must stay flat through that too.
+        The bound (a sixteenth of the samples, 3.2 MB) sits far above the
+        parser's measured peak (under 0.4 MB) and far below loadmat's."""
+        import tracemalloc
+
+        import numpy as np
+        import scipy.io
+
+        nbchan, pnts = 32, 400_000
+        data_bytes = nbchan * pnts * 4  # 51.2 MB of float32 samples, inline
+        block = np.random.default_rng(3).standard_normal((nbchan, 1000)).astype(np.float32)
+        samples = np.tile(block, (1, pnts // 1000))  # tiled: quick to compress
+        for compress, nbchan_after_data in itertools.product((False, True), repeat=2):
+            with self.subTest(compress=compress, nbchan_after_data=nbchan_after_data):
+                p = self.path(f"big{int(compress)}{int(nbchan_after_data)}")
+                fields: dict[str, object] = {
+                    "setname": "big", "trials": np.array([[1.0]]),
+                    "pnts": np.array([[float(pnts)]]), "srate": np.array([[250.0]]),
+                }
+                if not nbchan_after_data:
+                    fields["nbchan"] = np.array([[float(nbchan)]])
+                fields["data"] = samples
+                fields["nbchan"] = np.array([[float(nbchan)]])
+                scipy.io.savemat(p, {"EEG": fields}, do_compression=compress)
+                tracemalloc.start()
+                try:
+                    self.assertEqual(file_declared_channel_count(p), 32)
+                    header_peak = tracemalloc.get_traced_memory()[1]
+                    tracemalloc.reset_peak()
+                    scipy.io.loadmat(p, variable_names=["EEG"])
+                    loadmat_peak = tracemalloc.get_traced_memory()[1]
+                finally:
+                    tracemalloc.stop()
+                self.assertGreater(loadmat_peak, data_bytes * 0.9)
+                self.assertLess(header_peak, data_bytes / 16)
+
+    def test_a_store_short_of_the_set_header_is_still_truncated(self):
+        # biosigIO keeps every row, so a short store cannot be produced through
+        # the importer; the gate is driven with a real store built from fewer
+        # channels and the real header of a file that holds more, as the FIF
+        # and EDF tests do.
+        from biosigio import Recording
+
+        p = build_eeglab_set(self.path("full"), 5)
+        short = build_eeglab_set(self.path("short"), 3)
+        store = os.path.join(self.dir, "short.zarr")
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            Recording.from_file(short).to_zarr(store, dtype="int16")
+        in_store = store_total_channels(store_metadata(store))
+        self.assertEqual(in_store, 3)
+        in_file = file_declared_channel_count(p)
+        self.assertEqual(in_file, 5)
+        for tsv in (None, 3, 5, 404):
+            with self.subTest(channels_tsv=tsv):
+                self.assertEqual(channel_gate_verdict(in_store, tsv, in_file), "truncated")
+                with self.assertRaises(ChannelCountMismatch) as cm:
+                    generate_zarr.enforce_channel_gate(
+                        "sub-01/eeg/x_eeg.set", in_store, tsv, in_file
+                    )
+                self.assertIn("header declares 5", str(cm.exception))
 
 
 class TestChannelGateVerdict(unittest.TestCase):
@@ -6675,6 +7356,56 @@ class TestIndexSchemaSelfCheck(unittest.TestCase):
         check_index_invariant(index)
         validate_document(index, INDEX_SCHEMA_PATH, "index")
 
+    def test_a_carried_entry_with_the_raw_case_match_map_heals_on_merge(self):
+        """An entry published by a 1.2.10 run before the converter bounded the
+        map carries biosigIO's per-channel `matched_case_insensitive`. It is
+        carried verbatim by every incremental run, so without healing each run
+        would fail validation until a `--clean` rebuild."""
+        import jsonschema
+
+        n = 40
+        raw = {f"Fp{i}-F{i}": f"FP{i}-F{i}" for i in range(n)}
+        prior = self.index()
+        old = prior["stores"][0]
+        old["units_report"] = {
+            "converted": n, "relabelled": 0, "kept_importer_unit": 0,
+            "units_column_present": True, "unmatched_channels": 0,
+            "matched_case_insensitive": raw,
+        }
+        # The premise: as published, that prior index is refused.
+        with self.assertRaises(jsonschema.ValidationError):
+            validate_document(prior, INDEX_SCHEMA_PATH, "index")
+        prior_before = json.loads(json.dumps(prior))
+
+        new_store = {**old, "zarr": "sub-02/eeg/b_eeg.zarr", "path": "sub-02/eeg/b_eeg.edf",
+                     "units_report": {"converted": 1, "relabelled": 0,
+                                      "kept_importer_unit": 0, "units_column_present": True}}
+        merged = merge_index(
+            prior, "on007763", "f" * 40, [new_store], [], "2026-09-03T00:00:00Z", [],
+            [{"path": "sub-03/eeg/c_eeg.edf", "reason": "infra_failure", "last_error": "boom"}],
+            discovered=["sub-01/eeg/a_eeg.edf", "sub-02/eeg/b_eeg.edf",
+                        "sub-03/eeg/c_eeg.edf"],
+            biosigio_version="1.2.10",
+            prior_pending=prior["pending"],
+        )
+        validate_document(merged, INDEX_SCHEMA_PATH, "index")
+        by_zarr = {e["zarr"]: e for e in merged["stores"]}
+        healed = by_zarr["sub-01/eeg/a_eeg.zarr"]["units_report"]
+        self.assertNotIn("matched_case_insensitive", healed)
+        self.assertEqual(healed["matched_case_only"], n)
+        self.assertEqual(
+            healed["matched_case_only_examples"],
+            [f"Fp{i}-F{i} -> FP{i}-F{i}" for i in range(generate_zarr.CASE_MATCH_EXAMPLES_MAX)],
+        )
+        # Everything else the old report said is carried as it was.
+        for key in ("converted", "relabelled", "kept_importer_unit",
+                    "units_column_present", "unmatched_channels"):
+            self.assertEqual(healed[key], old["units_report"][key], key)
+        self.assertEqual(by_zarr["sub-02/eeg/b_eeg.zarr"]["units_report"],
+                         new_store["units_report"])
+        # merge_index is pure: the prior document is left as it was read.
+        self.assertEqual(prior, prior_before)
+
     def test_a_mutated_index_is_rejected(self):
         import jsonschema
 
@@ -8414,6 +9145,139 @@ class TestConvertOneFifSidecarOvercount(unittest.TestCase):
         self.assertNotIn("channels_tsv_count_mismatch", result["entry"])
 
 
+class TestConvertOneEeglabSidecarOvercount(unittest.TestCase):
+    """on003645 through `convert_one`: a dataset mixing MEG `.fif` and EEG
+    `.set`, whose subject-level channels.tsv lists the 404 MEG channels and is
+    inherited by the EEG recordings. Their `.set` files hold 75 channels, and
+    with no header count for `.set` all 108 were refused as
+    `channel_count_mismatch`. Real `.set` files, a real conversion; only
+    `aws s3 sync` is absorbed, and logged so a test can tell whether a store
+    was pushed."""
+
+    PRIMARY = "sub-01/eeg/sub-01_task-rest_eeg.set"
+    TSV = "sub-01/sub-01_task-rest_channels.tsv"  # subject level: inherited
+    N = 3
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import h5py  # noqa: F401
+            import scipy.io  # noqa: F401
+            import zarr  # noqa: F401
+            from biosigio import Recording  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = os.path.join(self._tmp.name, "repo")
+        bindir = os.path.join(self._tmp.name, "bin")
+        os.makedirs(bindir)
+        self.aws_log = os.path.join(self._tmp.name, "aws.log")
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write(f'#!/bin/sh\necho "$*" >> "{self.aws_log}"\nexit 0\n')
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        path = os.environ["PATH"]
+        os.environ["PATH"] = bindir + os.pathsep + path
+        self.addCleanup(os.environ.__setitem__, "PATH", path)
+
+    def synced(self) -> bool:
+        if not os.path.exists(self.aws_log):
+            return False
+        with open(self.aws_log) as fh:
+            return any(line.startswith("s3 sync") for line in fh)
+
+    def write_set(self, **kwargs) -> str:
+        kwargs.setdefault("nbchan", self.N)
+        return build_eeglab_set(os.path.join(self.repo, self.PRIMARY), **kwargs)
+
+    def convert(self, tsv_rows: int):
+        os.makedirs(os.path.join(self.repo, "sub-01"), exist_ok=True)
+        with open(os.path.join(self.repo, self.TSV), "w") as fh:
+            fh.writelines(
+                ["name\ttype\tunits\n"] + [f"MEG{i:04d}\tMEGMAG\tT\n" for i in range(tsv_rows)]
+            )
+        work = os.path.join(self._tmp.name, "work")
+        os.makedirs(work, exist_ok=True)
+        generate_zarr._init_worker({
+            "repo": self.repo, "bucket": "nemar-test", "dataset_id": "on003645",
+            "head": "b" * 40, "head_files": {self.PRIMARY, self.TSV}, "local": True,
+            "tmp": work, "updated": "2026-09-29T00:00:00Z",
+            "contract_base": "https://zarr.nemar.org", "engine_version": "3",
+            "dataset_row": None, "provenance_fetch_failed": False,
+            "mem_budget": None, "hard_ceiling": None, "projections": {},
+        })
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = convert_one(self.PRIMARY)
+        result["_log"] = out.getvalue()
+        return result
+
+    def assert_published_with_note(self, result, tsv_rows: int):
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertTrue(self.synced())
+        entry = result["entry"]
+        self.assertEqual(
+            entry["channels_tsv_count_mismatch"],
+            {"channels_tsv": tsv_rows, "in_file": self.N, "in_store": self.N},
+        )
+        index = merge_index(
+            None, "on003645", "b" * 40, [entry], [], "2026-09-29T00:00:00Z",
+            [], [], discovered=[self.PRIMARY],
+        )
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_an_over_declaring_inherited_sidecar_publishes_and_discloses(self):
+        cases = {
+            "classic, samples inline": {},
+            "classic, samples in a .fdt": {"fdt": True},
+            "classic, fields flat": {"wrapped": False},
+            "v7.3, samples inline": {"v73": True},
+            "v7.3, samples in a .fdt": {"v73": True, "fdt": True},
+        }
+        for name, kwargs in cases.items():
+            for tsv_rows in (404, 9):
+                with self.subTest(name, channels_tsv=tsv_rows):
+                    self.write_set(**kwargs)
+                    if os.path.exists(self.aws_log):
+                        os.remove(self.aws_log)
+                    self.assert_published_with_note(self.convert(tsv_rows), tsv_rows)
+
+    def test_a_matching_sidecar_adds_no_note(self):
+        for kwargs in ({}, {"fdt": True}, {"v73": True}):
+            with self.subTest(**kwargs):
+                self.write_set(**kwargs)
+                result = self.convert(self.N)
+                self.assertTrue(result["ok"], result.get("error"))
+                self.assertNotIn("channels_tsv_count_mismatch", result["entry"])
+
+    def test_without_a_usable_header_the_strict_gate_still_refuses(self):
+        # nbchan 5 over a 3-row matrix: biosigIO serves the 3 rows, and the
+        # header vouches for nothing, so the gate is channels.tsv alone again,
+        # exactly as for every `.set` before the header count existed.
+        self.write_set(nbchan=5, rows=self.N)
+        result = self.convert(404)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "channel_count_mismatch")
+        self.assertIn("channels.tsv declares 404", result["error"])
+        self.assertNotIn("header declares", result["error"])
+        self.assertIn("could not read the EEGLAB header", result["_log"])
+        self.assertFalse(self.synced())
+
+    def test_a_corrupt_set_is_refused_before_any_store_exists(self):
+        p = self.write_set()
+        with open(p, "rb") as fh:
+            original = fh.read()
+        with open(p, "wb") as fh:
+            fh.write(original[: len(original) // 2])
+        result = self.convert(404)
+        self.assertFalse(result["ok"])
+        self.assertNotIn("entry", result)
+        self.assertFalse(self.synced())
+
+
 class TestSidecarJoinReport(unittest.TestCase):
     """`channels_tsv_names` + `sidecar_join_report`, the pure half of what
     `convert_one` adds to `units_report`. `TestDuplicateLabelsThroughConvertOne`
@@ -8481,9 +9345,8 @@ class TestSidecarJoinReport(unittest.TestCase):
         # and still case-only. The map is biosigIO's own
         # `matched_case_insensitive`, `{sidecar_name: channel_label}`.
         #
-        # The end-to-end proof is the canary in TestDuplicateLabelsThroughConvertOne,
-        # but biosigio 1.2.9 (the cap in requirements.txt) never emits that key, so
-        # in CI only this pure case reaches the arithmetic.
+        # The end-to-end proof, on the real biosigIO requirements.txt installs,
+        # is the canary in TestDuplicateLabelsThroughConvertOne.
         report = sidecar_join_report(
             ["FP1-F7", "F7-T7", "T8"],
             ["Fp1-F7", "F7-T7", "t8"],
@@ -8524,6 +9387,52 @@ class TestSidecarJoinReport(unittest.TestCase):
         units = schema["$defs"]["store"]["properties"]["units_report"]["properties"]
         self.assertEqual(
             units["unmatched_examples"]["maxItems"], generate_zarr.UNMATCHED_EXAMPLES_MAX
+        )
+
+    def test_the_case_match_map_is_published_as_a_count_and_examples(self):
+        # biosigio >= 1.2.10's `matched_case_insensitive` is one entry per
+        # matched channel; the index carries a count and a bounded sample,
+        # and the full map comes back for the join report.
+        n = 300
+        full = {f"ch{i:03d}": f"CH{i:03d}" for i in range(n)}
+        biosigio_report = {
+            "converted": n, "relabelled": 0, "kept_importer_unit": 0,
+            "units_column_present": True, "matched_case_insensitive": full,
+        }
+        published, matches = bound_units_report(biosigio_report)
+        self.assertEqual(matches, full)
+        self.assertNotIn("matched_case_insensitive", published)
+        self.assertEqual(published["matched_case_only"], n)
+        self.assertEqual(
+            published["matched_case_only_examples"],
+            [f"ch{i:03d} -> CH{i:03d}" for i in range(generate_zarr.CASE_MATCH_EXAMPLES_MAX)],
+        )
+        # Every other key biosigIO reported is republished as it was.
+        for key in ("converted", "relabelled", "kept_importer_unit", "units_column_present"):
+            self.assertEqual(published[key], biosigio_report[key])
+        # The input is not mutated: it is the store's own attribute.
+        self.assertIs(biosigio_report["matched_case_insensitive"], full)
+
+    def test_no_case_match_leaves_the_report_as_biosigio_wrote_it(self):
+        report = {"converted": 2, "relabelled": 0, "kept_importer_unit": 0,
+                  "units_column_present": True}
+        self.assertEqual(bound_units_report(report), (report, {}))
+
+    def test_a_case_match_value_of_an_unknown_shape_is_dropped(self):
+        # Never republished as is, and it matched nothing this code can name.
+        published, matches = bound_units_report(
+            {"converted": 1, "matched_case_insensitive": ["Fp1-F7"]}
+        )
+        self.assertEqual(published, {"converted": 1})
+        self.assertEqual(matches, {})
+
+    def test_the_case_match_example_bound_is_the_published_schema_bound(self):
+        with open(INDEX_SCHEMA_PATH, encoding="utf-8") as fh:
+            schema = json.load(fh)
+        units = schema["$defs"]["store"]["properties"]["units_report"]["properties"]
+        self.assertEqual(
+            units["matched_case_only_examples"]["maxItems"],
+            generate_zarr.CASE_MATCH_EXAMPLES_MAX,
         )
 
     def test_examples_are_bounded(self):
@@ -8725,55 +9634,118 @@ class TestDuplicateLabelsThroughConvertOne(unittest.TestCase):
         self.assertEqual(positions["F7"], [-0.07, 0.04, 0.0])
         self.assertIn("Fp1", positions)  # the sidecar's own key is kept
 
-    def test_a_case_only_row_is_reported_per_biosigios_join(self):
+    def entry_is_published(self, result: dict) -> None:
+        """The entry validates inside a real merged index, the way `main`
+        publishes it, against the served schema."""
+        index = merge_index(
+            None, "nm000110", "c" * 40, [result["entry"]], [], "2026-09-28T00:00:00Z",
+            [], [], discovered=[self.PRIMARY],
+        )
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_a_case_only_row_is_applied_and_reported_per_biosigios_join(self):
         # biosigio#136: EDF header `FP1-F7`, channels.tsv `Fp1-F7`.
         #
-        # CANARY for biosigIO's channels.tsv join, and it must pass on either
-        # side of that change without skipping (a skip counts toward the CI
-        # gate). Which side this run is on is decided by asking biosigIO
-        # directly (`biosigio_matches_case_only_rows`), not by a version number
-        # and not by the outcome under test:
+        # CANARY for biosigIO's channels.tsv join. biosigio >= 1.2.10 (the floor
+        # in requirements.txt) matches a row to the one channel that differs
+        # from it only in case, APPLIES its type and unit, and reports the match
+        # as `matched_case_insensitive`, `{sidecar_name: channel_label}`. So the
+        # index must not claim the row went unmatched, and must carry the
+        # bounded count and example rather than biosigIO's map.
         #
-        # * biosigio 1.2.9 joins by exact label. The row is not applied, so the
-        #   channel keeps the importer's unit and the index says why
-        #   (`unmatched_case_only`).
-        # * biosigio 1.2.10 also matches the row to the one channel that differs
-        #   from it only in case, and reports it as `matched_case_insensitive`.
-        #   The row IS applied, so the index must not claim otherwise: nothing
-        #   unmatched, no `unmatched_case_only`, no warning.
-        #
-        # The second branch cannot run in CI while requirements.txt caps
-        # biosigio below 1.2.10; it was run against biosigio's `main` when the
-        # cap was set. The branch whose assertion fails on the wrong side is the
-        # point: a stale probe (biosigIO renames its report key) lands in the
-        # 1.2.9 branch and fails on the unit that was in fact converted.
-        matches = biosigio_matches_case_only_rows()
+        # The probe asks biosigIO directly, on a real EDF, whether it matches
+        # that way; it is asserted rather than branched on. A biosigIO that
+        # renamed its report key, or stopped matching by case, fails here by
+        # name instead of passing on a join report that is no longer true.
+        self.assertTrue(
+            biosigio_matches_case_only_rows(),
+            "the installed biosigIO does not report a case-only channels.tsv match "
+            "as `matched_case_insensitive`; requirements.txt's floor (1.2.10) says it must",
+        )
         names = ["Fp1-F7", *CHB_MIT_SUFFIXED[1:]]
         saved = generate_zarr.STREAM_EDF_MIN_BYTES
         self.addCleanup(setattr, generate_zarr, "STREAM_EDF_MIN_BYTES", saved)
         for path_name, threshold in (("in-memory", saved), ("streaming", 1)):
-            with self.subTest(path_name, biosigio_matches_case_only_rows=matches):
+            with self.subTest(path_name):
                 generate_zarr.STREAM_EDF_MIN_BYTES = threshold
                 shutil.rmtree(self.synced_dir, ignore_errors=True)
                 result, out = self.convert(names)
                 self.assertTrue(result["ok"], result.get("error"))
-                report = result["entry"]["units_report"]
-                unit = self.store_units(result["entry"])["FP1-F7"]
-                if matches:
-                    self.assertEqual(unit, "V")  # the sidecar's, so the row was applied
-                    self.assertEqual(report["matched_case_insensitive"], {"Fp1-F7": "FP1-F7"})
-                    self.assertEqual(report["unmatched_channels"], 0)
-                    self.assertNotIn("unmatched_case_only", report)
-                    self.assertNotIn("unmatched_examples", report)
-                    self.assertNotIn("names no row", out)
-                    self.assertNotIn("differ only in case", out)
-                else:
-                    self.assertEqual(unit, "uV")  # the importer's: the row was not applied
-                    self.assertNotIn("matched_case_insensitive", report)
-                    self.assertEqual(report["unmatched_channels"], 1)
-                    self.assertEqual(report["unmatched_case_only"], 1)
-                    self.assertEqual(report["unmatched_examples"], ["FP1-F7"])
-                    self.assertIn("differ only in case", out)
+                entry = result["entry"]
+                report = entry["units_report"]
+                # The sidecar's V, not the file's uV: the row was applied, and
+                # the samples converted with it (every channel is V now).
+                self.assertEqual(set(self.store_units(entry).values()), {"V"})
+                self.assertEqual(report["converted"], len(CHB_MIT_LABELS))
+                # Reported truthfully, and bounded.
+                self.assertEqual(report["unmatched_channels"], 0)
+                self.assertNotIn("unmatched_case_only", report)
+                self.assertNotIn("unmatched_examples", report)
+                self.assertEqual(report["matched_case_only"], 1)
+                self.assertEqual(report["matched_case_only_examples"], ["Fp1-F7 -> FP1-F7"])
+                self.assertNotIn("matched_case_insensitive", report)
+                self.assertNotIn("names no row", out)
+                self.assertNotIn("differ only in case", out)
+                # The store keeps biosigIO's own full account; only the index
+                # entry is bounded.
+                root = self.synced_store(entry)
+                units_attr = root.attrs.get("channels_tsv_units") or root.attrs[
+                    "recording_metadata"
+                ]["channels_tsv_units"]
+                self.assertEqual(units_attr["matched_case_insensitive"], {"Fp1-F7": "FP1-F7"})
+                self.entry_is_published(result)
+
+    def test_an_ambiguous_case_only_row_stays_unmatched(self):
+        # Two store channels fold to the row's name (`FZ` and `Fz`, the row
+        # `fz`): biosigIO cannot tell which one the row meant, applies it to
+        # neither, and the index says so under `unmatched_case_only`.
+        build_labeled_edf(os.path.join(self.repo, self.PRIMARY), ["FZ", "Fz", "Cz"])
+        result, out = self.convert(["fz", "Cz"])
+        self.assertTrue(result["ok"], result.get("error"))
+        report = result["entry"]["units_report"]
+        self.assertEqual(report["unmatched_channels"], 2)
+        self.assertEqual(report["unmatched_case_only"], 2)
+        self.assertEqual(report["unmatched_examples"], ["FZ", "Fz"])
+        self.assertNotIn("matched_case_only", report)
+        units = self.store_units(result["entry"])
+        self.assertEqual((units["FZ"], units["Fz"], units["Cz"]), ("uV", "uV", "V"))
+        self.assertIn("differ only in case", out)
+        self.entry_is_published(result)
+
+    def test_a_300_channel_case_differing_sidecar_keeps_the_entry_small(self):
+        # Every one of 300 channels is named in another case by the sidecar,
+        # so biosigIO's map has 300 entries. The index entry must not grow
+        # with it: the case-differing entry is compared with the SAME
+        # recording under an exactly-matching sidecar, so the channel-count
+        # parts of the entry (groups) cancel out and only the join report is
+        # measured.
+        labels = [f"CH{i:03d}-REF" for i in range(300)]
+        build_labeled_edf(os.path.join(self.repo, self.PRIMARY), labels, seconds=2)
+        exact, _ = self.convert(labels)
+        self.assertTrue(exact["ok"], exact.get("error"))
+        shutil.rmtree(self.synced_dir, ignore_errors=True)
+        folded, out = self.convert([label.lower() for label in labels])
+        self.assertTrue(folded["ok"], folded.get("error"))
+
+        report = folded["entry"]["units_report"]
+        self.assertEqual(report["converted"], 300)
+        self.assertEqual(report["unmatched_channels"], 0)
+        self.assertEqual(report["matched_case_only"], 300)
+        self.assertEqual(
+            len(report["matched_case_only_examples"]), generate_zarr.CASE_MATCH_EXAMPLES_MAX
+        )
+        self.assertNotIn("matched_case_insensitive", report)
+        self.assertNotIn("names no row", out)
+        self.assertEqual(set(self.store_units(folded["entry"]).values()), {"V"})
+
+        size = len(json.dumps(folded["entry"]["units_report"]))
+        growth = len(json.dumps(folded["entry"])) - len(json.dumps(exact["entry"]))
+        # A count and five ~30-byte examples. biosigIO's map alone would be
+        # ~9 KB here (300 x `"ch000-ref": "CH000-REF", `).
+        self.assertLess(size, 600, report)
+        self.assertLess(growth, 400)
+        self.entry_is_published(folded)
 
 
 def build_edf_family(
@@ -9962,6 +10934,20 @@ class TestDeclaredFdtConvertOne(unittest.TestCase):
         # The working tree is untouched: nothing was written beside the .set.
         self.assertFalse(os.path.exists(os.path.join(self.repo, "sub-01/eeg/sub-01_task-x_eeg.fdt")))
 
+    def test_the_header_gate_reads_the_staged_set(self):
+        # The gate reads the header of the `.set` actually converted, here the
+        # staged one beside its declared `.fdt`: an inherited channels.tsv that
+        # over-declares is disclosed, not refused.
+        tsv = "sub-01/sub-01_task-x_channels.tsv"
+        with open(os.path.join(self.repo, tsv), "w") as fh:
+            fh.writelines(["name\ttype\tunits\n"] + [f"M{i}\tMEGMAG\tT\n" for i in range(9)])
+        result = self.convert({self.SET: self.decl()}, extra_files=(tsv,))
+        self.assert_converted(result)
+        self.assertEqual(
+            result["entry"]["channels_tsv_count_mismatch"],
+            {"channels_tsv": 9, "in_file": self.NBCHAN, "in_store": self.NBCHAN},
+        )
+
     def test_a_declared_fdt_converts_through_the_blob_fetch(self):
         head = self.commit()
         self.assert_converted(self.convert({self.SET: self.decl()}, local=False, head=head))
@@ -10351,6 +11337,750 @@ class TestMainConvertsADeclaredFdt(unittest.TestCase):
         _, log, _ = self.run_main(1)
         self.assertNotIn(f"converted {self.SET}", log)
         self.assertIn("none was found", log)
+
+
+# A stand-in `aws` that serves a local directory laid out EXACTLY like the bucket:
+# `<root>/<bucket>/<id>/objects/<key>` holds the object `s3://<bucket>/<id>/objects/<key>`.
+# It answers the calls the annex fetch, the store upload and `main()`'s index
+# round trip make, with the real CLI's shapes: `s3 cp` (a missing key prints the
+# CLI's own 404 line and exits 1; `-` streams to stdout; a local source uploads),
+# `s3api list-objects-v2` (prefix match: `Contents[].[Key,Size]` as JSON,
+# `null` when nothing matches; `Contents[0].Key` and `CommonPrefixes[].Prefix`
+# as text, `None` when empty), `s3api get-object`/`put-object` with the ETag
+# and the conditional-write refusal, `s3 sync` and `s3 rm`. Every call is
+# logged, so a test can count requests.
+BUCKET_AWS = r"""#!/usr/bin/env python3
+import hashlib
+import json
+import os
+import shutil
+import sys
+
+ROOT = os.environ["ZARR_TEST_BUCKET_ROOT"]
+args = [a for a in sys.argv[1:] if a != "--only-show-errors"]
+clean, skip = [], False
+for a in args:
+    if skip:
+        skip = False
+        continue
+    if a.startswith("--cli-"):
+        skip = True
+        continue
+    clean.append(a)
+args = clean
+with open(os.environ["ZARR_TEST_BUCKET_LOG"], "a") as fh:
+    fh.write(" ".join(args) + "\n")
+
+
+def opt(name):
+    return args[args.index(name) + 1]
+
+
+def split(uri):
+    bucket, _, key = uri[len("s3://"):].partition("/")
+    return bucket, key
+
+
+def etag(path):
+    with open(path, "rb") as fh:
+        return chr(34) + hashlib.md5(fh.read()).hexdigest() + chr(34)
+
+
+def keys_under(bucket, prefix):
+    top = os.path.join(ROOT, bucket)
+    out = []
+    for d, _, files in os.walk(top):
+        for f in files:
+            key = os.path.relpath(os.path.join(d, f), top).replace(os.sep, "/")
+            if key.startswith(prefix):
+                out.append([key, os.path.getsize(os.path.join(d, f))])
+    return sorted(out)
+
+
+fail = os.environ.get("ZARR_TEST_BUCKET_FAIL")
+if fail and any(fail in a for a in args):
+    # The CLI's own shape for a transfer that failed part-way: it quotes the
+    # source, and so the key, whose hash digits can contain "404".
+    where = f"download failed: {args[2]} to {args[3]} " if args[:2] == ["s3", "cp"] else ""
+    sys.stderr.write(where + "An error occurred (InternalError) when calling the GetObject "
+                     "operation (reached max retries: 9): We encountered an internal error.\n")
+    sys.exit(1)
+# A caller without s3:ListBucket, the way `s3://nemar` treats anonymous callers
+# (.memory/s3-403-is-not-absence.md): "all" -- S3 will not say whether a key
+# exists, so a missing key answers 403 rather than 404, and a listing is
+# AccessDenied; "list" -- only the listing is denied.
+no_list = os.environ.get("ZARR_TEST_BUCKET_NO_LIST")
+if no_list and args[:2] == ["s3api", "list-objects-v2"]:
+    sys.stderr.write("An error occurred (AccessDenied) when calling the ListObjectsV2 "
+                     "operation: Access Denied\n")
+    sys.exit(254)
+if args[:2] == ["s3", "cp"] and args[2].startswith("s3://"):
+    bucket, key = split(args[2])
+    path = os.path.join(ROOT, bucket, key)
+    if not os.path.isfile(path):
+        if no_list == "all":
+            sys.stderr.write("fatal error: An error occurred (403) when calling the "
+                             "HeadObject operation: Forbidden\n")
+            sys.exit(1)
+        sys.stderr.write("fatal error: An error occurred (404) when calling the HeadObject "
+                         f'operation: Key "{key}" does not exist\n')
+        sys.exit(1)
+    if args[3] == "-":
+        with open(path, "rb") as fh:
+            sys.stdout.buffer.write(fh.read())
+        sys.exit(0)
+    shutil.copyfile(path, args[3])
+    short = os.environ.get("ZARR_TEST_BUCKET_SHORT_ONCE")
+    marker = os.path.join(ROOT, ".short-once-done")
+    if short and short in args[2] and not os.path.exists(marker):
+        # A transfer that "succeeds" but lands short, once: the transient
+        # shape `download_blob`'s size check exists for.
+        open(marker, "w").close()
+        with open(args[3], "r+b") as fh:
+            fh.truncate(max(0, os.path.getsize(path) - 1))
+    sys.exit(0)
+if args[:2] == ["s3", "cp"] and args[3].startswith("s3://"):
+    bucket, key = split(args[3])
+    os.makedirs(os.path.dirname(os.path.join(ROOT, bucket, key)), exist_ok=True)
+    shutil.copyfile(args[2], os.path.join(ROOT, bucket, key))
+    sys.exit(0)
+if args[:2] == ["s3api", "list-objects-v2"]:
+    bucket, prefix = opt("--bucket"), opt("--prefix")
+    rows = keys_under(bucket, prefix)
+    query = opt("--query")
+    if query == "Contents[0].Key":
+        print(rows[0][0] if rows else "None")
+    elif query == "CommonPrefixes[].Prefix":
+        subs = sorted({prefix + k[len(prefix):].split("/", 1)[0] + "/"
+                       for k, _ in rows if "/" in k[len(prefix):]})
+        print("\t".join(subs) if subs else "None")
+    else:
+        print(json.dumps(rows or None))
+    sys.exit(0)
+if args[:2] == ["s3api", "get-object"]:
+    path = os.path.join(ROOT, opt("--bucket"), opt("--key"))
+    if not os.path.isfile(path):
+        sys.stderr.write("An error occurred (NoSuchKey) when calling the GetObject "
+                         "operation: The specified key does not exist.\n")
+        sys.exit(254)
+    shutil.copyfile(path, args[args.index("--key") + 2])
+    print(etag(path))
+    sys.exit(0)
+if args[:2] == ["s3api", "put-object"]:
+    path = os.path.join(ROOT, opt("--bucket"), opt("--key"))
+    exists = os.path.isfile(path)
+    if ("--if-match" in args and (not exists or etag(path) != opt("--if-match"))) or (
+        "--if-none-match" in args and exists
+    ):
+        sys.stderr.write("An error occurred (PreconditionFailed) when calling the "
+                         "PutObject operation\n")
+        sys.exit(254)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    shutil.copyfile(opt("--body"), path)
+    print(json.dumps({"ETag": etag(path)}))
+    sys.exit(0)
+if args[:2] == ["s3", "sync"]:
+    bucket, key = split(args[3])
+    shutil.copytree(args[2], os.path.join(ROOT, bucket, key), dirs_exist_ok=True)
+    sys.exit(0)
+if args[:2] == ["s3", "rm"]:
+    bucket, key = split(args[2])
+    target = os.path.join(ROOT, bucket, key)
+    if os.path.isdir(target):
+        shutil.rmtree(target)
+    elif os.path.isfile(target):
+        os.remove(target)
+    sys.exit(0)
+sys.stderr.write("unexpected aws call: " + " ".join(args) + "\n")
+sys.exit(2)
+"""
+
+
+def sha256e(data: bytes, ext: str) -> str:
+    """The SHA256E git-annex key of `data`, as a pointer file names it."""
+    return f"SHA256E-s{len(data)}--{hashlib.sha256(data).hexdigest()}{ext}"
+
+
+class BucketStandIn:
+    """A file-backed bucket with a real `aws` executable in front of it."""
+
+    BUCKET = "nemar"
+    DATASET = "nm000276"
+
+    def __init__(self, test: unittest.TestCase, root: str) -> None:
+        self.root = os.path.join(root, "s3")
+        self.objects = os.path.join(self.root, self.BUCKET, self.DATASET, "objects")
+        os.makedirs(self.objects)
+        bindir = os.path.join(root, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write(BUCKET_AWS)
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        self.log = os.path.join(root, "aws.log")
+        saved = {k: os.environ.get(k) for k in
+                 ("PATH", "ZARR_TEST_BUCKET_ROOT", "ZARR_TEST_BUCKET_LOG", "ZARR_TEST_BUCKET_FAIL",
+                  "ZARR_TEST_BUCKET_SHORT_ONCE", "ZARR_TEST_BUCKET_NO_LIST")}
+        os.environ["PATH"] = bindir + os.pathsep + (saved["PATH"] or "")
+        os.environ["ZARR_TEST_BUCKET_ROOT"] = self.root
+        os.environ["ZARR_TEST_BUCKET_LOG"] = self.log
+        os.environ.pop("ZARR_TEST_BUCKET_FAIL", None)
+        os.environ.pop("ZARR_TEST_BUCKET_SHORT_ONCE", None)
+        os.environ.pop("ZARR_TEST_BUCKET_NO_LIST", None)
+
+        def restore():
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+        test.addCleanup(restore)
+        # The chunk-size cache is per process and per dataset; every test starts
+        # from a process that has discovered nothing.
+        generate_zarr._ANNEX_CHUNK_SIZE.clear()
+        test.addCleanup(generate_zarr._ANNEX_CHUNK_SIZE.clear)
+
+    def put_plain(self, key: str, data: bytes) -> None:
+        with open(os.path.join(self.objects, key), "wb") as fh:
+            fh.write(data)
+
+    def put_chunked(self, key: str, data: bytes, chunk_size: int) -> int:
+        """Store `data` the way git-annex `chunk=<chunk_size>` does; returns the
+        number of chunks."""
+        pieces = [data[i:i + chunk_size] for i in range(0, len(data), chunk_size)] or [b""]
+        for n, piece in enumerate(pieces, start=1):
+            with open(os.path.join(self.objects, generate_zarr.annex_chunk_key(key, chunk_size, n)), "wb") as fh:
+                fh.write(piece)
+        return len(pieces)
+
+    def calls(self, verb: str | None = None) -> list[str]:
+        if not os.path.exists(self.log):
+            return []
+        with open(self.log) as fh:
+            lines = [ln.strip() for ln in fh if ln.strip()]
+        return [ln for ln in lines if verb is None or ln.startswith(verb)]
+
+
+class TestChunkedAnnexFetch(unittest.TestCase):
+    """`fetch_annex_object` against a bucket laid out like nm000276, which was
+    uploaded with git-annex chunking: the pointer names
+    `SHA256E-s<size>--<hash>.<ext>` and the bucket holds only
+    `SHA256E-s<size>-S<chunk>-C<n>--<hash>.<ext>`. The chunk size here is 1024
+    bytes, not the production 1 GiB, and the code must learn it from the listing.
+    Real `aws` subprocesses over real files; nothing in the fetch is replaced."""
+
+    CHUNK = 1024
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.s3 = BucketStandIn(self, tmp.name)
+        self.scratch = os.path.join(tmp.name, "scratch")
+        os.makedirs(self.scratch)
+        saved = generate_zarr._AWS_RETRIES
+        self.addCleanup(setattr, generate_zarr, "_AWS_RETRIES", saved)
+
+    def fetch(self, key: str, name: str = "out") -> str:
+        dst = os.path.join(self.scratch, name)
+        generate_zarr.fetch_annex_object(self.s3.BUCKET, self.s3.DATASET, key, dst)
+        return dst
+
+    def assert_bytes(self, path: str, data: bytes) -> None:
+        with open(path, "rb") as fh:
+            self.assertEqual(hashlib.sha256(fh.read()).hexdigest(), hashlib.sha256(data).hexdigest())
+
+    def test_a_plain_key_costs_one_request_as_before(self):
+        data = os.urandom(5000)
+        key = sha256e(data, ".edf")
+        self.s3.put_plain(key, data)
+        self.assert_bytes(self.fetch(key), data)
+        (call,) = self.s3.calls()
+        self.assertEqual(call.split()[:3], ["s3", "cp", f"s3://nemar/nm000276/objects/{key}"])
+
+    def test_a_small_file_stored_as_one_chunk(self):
+        # The nm000276 `.vhdr`: 982 bytes, stored only as `-S<chunk>-C1`.
+        data = b"Brain Vision Data Exchange Header File Version 1.0\n".ljust(982, b";")
+        key = sha256e(data, ".vhdr")
+        self.assertEqual(self.s3.put_chunked(key, data, self.CHUNK), 1)
+        self.assert_bytes(self.fetch(key), data)
+        calls = self.s3.calls()
+        self.assertEqual(len(calls), 3, calls)  # plain 404, one listing, C1
+        self.assertIn(f"{key.split('--')[0]}-S{self.CHUNK}-C1--", calls[2])
+
+    def test_a_multi_chunk_file_reassembles_byte_identically(self):
+        data = os.urandom(self.CHUNK * 4 + 321)
+        key = sha256e(data, ".eeg")
+        self.assertEqual(self.s3.put_chunked(key, data, self.CHUNK), 5)
+        self.assert_bytes(self.fetch(key), data)
+        fetched = [c.split()[2] for c in self.s3.calls("s3 cp")][1:]
+        self.assertEqual(
+            fetched,
+            [f"s3://nemar/nm000276/objects/{generate_zarr.annex_chunk_key(key, self.CHUNK, n)}"
+             for n in range(1, 6)],
+            "chunks are fetched in order, each once",
+        )
+        self.assertEqual(os.listdir(self.scratch), ["out"], "no chunk or assembly file left")
+
+    def test_an_exact_multiple_has_no_empty_trailing_chunk(self):
+        data = os.urandom(self.CHUNK * 3)
+        key = sha256e(data, ".eeg")
+        self.assertEqual(self.s3.put_chunked(key, data, self.CHUNK), 3)
+        self.assert_bytes(self.fetch(key), data)
+        self.assertEqual(generate_zarr.annex_chunk_sizes(len(data), self.CHUNK), [self.CHUNK] * 3)
+        self.assertEqual(generate_zarr.annex_chunk_sizes(0, self.CHUNK), [0])
+
+    def assert_refused(self, key: str, *needles: str) -> str:
+        with self.assertRaises(generate_zarr.AnnexObjectMissing) as cm:
+            self.fetch(key)
+        for needle in needles:
+            self.assertIn(needle, str(cm.exception))
+        self.assertEqual(os.listdir(self.scratch), [], "nothing partial left in scratch")
+        self.assertEqual(cm.exception.code, "annex_object_missing")
+        return str(cm.exception)
+
+    def test_a_missing_middle_chunk_is_refused_and_leaves_nothing(self):
+        data = os.urandom(self.CHUNK * 2 + 10)
+        key = sha256e(data, ".eeg")
+        self.s3.put_chunked(key, data, self.CHUNK)
+        os.remove(os.path.join(self.s3.objects, generate_zarr.annex_chunk_key(key, self.CHUNK, 2)))
+        self.assert_refused(key, "chunk C2", "absent")
+        # Decided from the listing: no chunk download was started for a copy
+        # the listing already showed to be incomplete.
+        self.assertEqual(len(self.s3.calls("s3 cp")), 1)
+
+    def test_a_chunk_of_the_wrong_size_is_refused(self):
+        data = os.urandom(self.CHUNK * 2 + 10)
+        key = sha256e(data, ".eeg")
+        self.s3.put_chunked(key, data, self.CHUNK)
+        with open(os.path.join(self.s3.objects, generate_zarr.annex_chunk_key(key, self.CHUNK, 2)), "wb") as fh:
+            fh.write(b"\0" * 1000)
+        self.assert_refused(key, "chunk C2", "1000 bytes", f"expected {self.CHUNK}")
+
+    def test_an_object_stored_in_no_form_is_refused(self):
+        self.assert_refused(sha256e(b"never uploaded", ".edf"), "no chunked copy")
+        self.assertEqual(len(self.s3.calls()), 2)  # the plain 404 and one listing, no retries
+
+    def test_chunks_of_another_key_with_the_same_size_are_not_mistaken_for_it(self):
+        # The listing prefix is `<backend>-s<size>-S`, which every chunked key of
+        # the same size shares; only the exact name may match.
+        other = os.urandom(700)
+        self.s3.put_chunked(sha256e(other, ".vhdr"), other, self.CHUNK)
+        mine = os.urandom(700)
+        self.assert_refused(sha256e(mine, ".vhdr"), "no chunked copy")
+
+    def test_a_transient_failure_stays_retryable_and_never_lists(self):
+        generate_zarr._AWS_RETRIES = 1
+        data = os.urandom(100)
+        # A key whose digits contain "404", quoted in the CLI's error line: a
+        # dropped transfer must not be read as an absent object.
+        key = f"SHA256E-s{len(data)}--4040{hashlib.sha256(data).hexdigest()[4:]}.edf"
+        self.s3.put_plain(key, data)
+        os.environ["ZARR_TEST_BUCKET_FAIL"] = key
+        with self.assertRaises(RuntimeError) as cm:
+            self.fetch(key)
+        self.assertNotIsInstance(cm.exception, generate_zarr.AnnexObjectMissing)
+        self.assertIsNone(getattr(cm.exception, "code", None))
+        self.assertIn("InternalError", str(cm.exception))
+        self.assertEqual(self.s3.calls("s3api"), [], "a 5xx is not a 404; no chunk discovery")
+
+    def test_a_failed_listing_is_an_error_not_an_absence(self):
+        generate_zarr._AWS_RETRIES = 1
+        key = sha256e(b"x" * 50, ".edf")
+        os.environ["ZARR_TEST_BUCKET_FAIL"] = "list-objects-v2"
+        with self.assertRaises(RuntimeError) as cm:
+            self.fetch(key)
+        self.assertNotIsInstance(cm.exception, generate_zarr.AnnexObjectMissing)
+        self.assertIn("listing chunked copies", str(cm.exception))
+
+    def test_a_403_on_the_plain_key_is_retried_uncoded_and_never_looks_for_chunks(self):
+        # Without s3:ListBucket, S3 answers a MISSING key with 403, not 404, and
+        # a 403 has other causes too: expired credentials, a private dataset, a
+        # signature without its session token. None of them is evidence of
+        # absence, so the copy is retried like any other failure, ends uncoded
+        # (infra, the recording stays pending), and the chunk fallback -- which
+        # a 404 alone unlocks -- is never tried. For a chunked dataset that
+        # means every recording fails this way: safe, but the feature does
+        # nothing until the profile can list `<id>/objects/`.
+        generate_zarr._AWS_RETRIES = 2
+        data = os.urandom(2500)
+        key = sha256e(data, ".eeg")
+        self.s3.put_chunked(key, data, self.CHUNK)
+        os.environ["ZARR_TEST_BUCKET_NO_LIST"] = "all"
+        with self.assertRaises(RuntimeError) as cm:
+            self.fetch(key)
+        self.assertNotIsInstance(cm.exception, generate_zarr.AnnexObjectMissing)
+        self.assertIsNone(getattr(cm.exception, "code", None))
+        self.assertIn("(403)", str(cm.exception))
+        plain = f"s3://nemar/nm000276/objects/{key}"
+        self.assertEqual([c.split()[2] for c in self.s3.calls("s3 cp")], [plain, plain],
+                         "the plain key, retried; no chunk fetched")
+        self.assertEqual(self.s3.calls("s3api"), [], "a 403 is not a 404; no chunk discovery")
+        self.assertEqual(os.listdir(self.scratch), [])
+
+    def test_an_access_denied_listing_is_retried_uncoded(self):
+        # The plain key is a definite 404, so the listing runs, and is refused.
+        # Refused is not empty: an empty listing would type the recording as
+        # missing, a refused one says nothing about what is stored.
+        generate_zarr._AWS_RETRIES = 2
+        data = os.urandom(2500)
+        key = sha256e(data, ".eeg")
+        self.s3.put_chunked(key, data, self.CHUNK)
+        os.environ["ZARR_TEST_BUCKET_NO_LIST"] = "list"
+        with self.assertRaises(RuntimeError) as cm:
+            self.fetch(key)
+        self.assertNotIsInstance(cm.exception, generate_zarr.AnnexObjectMissing)
+        self.assertIsNone(getattr(cm.exception, "code", None))
+        self.assertIn("listing chunked copies", str(cm.exception))
+        self.assertIn("AccessDenied", str(cm.exception))
+        self.assertEqual(len(self.s3.calls("s3api list-objects-v2")), 2, "retried")
+        self.assertEqual(len(self.s3.calls("s3 cp")), 1, "the plain 404 only; no chunk fetched")
+        self.assertNotIn(("nemar", "nm000276"), generate_zarr._ANNEX_CHUNK_SIZE)
+
+    def test_the_chunk_size_is_discovered_once_per_dataset(self):
+        blobs = [os.urandom(n) for n in (3000, 982, 2500)]
+        keys = [sha256e(b, ".eeg") for b in blobs]
+        for key, data in zip(keys, blobs):
+            self.s3.put_chunked(key, data, self.CHUNK)
+        for i, (key, data) in enumerate(zip(keys, blobs)):
+            self.assert_bytes(self.fetch(key, f"f{i}"), data)
+        self.assertEqual(len(self.s3.calls("s3api list-objects-v2")), 1)
+        self.assertEqual(generate_zarr._ANNEX_CHUNK_SIZE[("nemar", "nm000276")], self.CHUNK)
+
+    def test_a_key_stored_under_another_chunk_size_is_still_found(self):
+        a, b = os.urandom(3000), os.urandom(3000)
+        ka, kb = sha256e(a, ".eeg"), sha256e(b, ".eeg")
+        self.s3.put_chunked(ka, a, self.CHUNK)
+        self.s3.put_chunked(kb, b, 2048)
+        self.assert_bytes(self.fetch(ka, "a"), a)
+        self.assert_bytes(self.fetch(kb, "b"), b)
+        self.assertEqual(len(self.s3.calls("s3api list-objects-v2")), 2)
+
+    def test_a_missing_chunk_under_the_cached_size_is_refused(self):
+        a, b = os.urandom(3000), os.urandom(3000)
+        ka, kb = sha256e(a, ".eeg"), sha256e(b, ".eeg")
+        self.s3.put_chunked(ka, a, self.CHUNK)
+        self.s3.put_chunked(kb, b, self.CHUNK)
+        self.fetch(ka, "a")
+        os.remove(os.path.join(self.scratch, "a"))
+        os.remove(os.path.join(self.s3.objects, generate_zarr.annex_chunk_key(kb, self.CHUNK, 3)))
+        self.assert_refused(kb, "chunk C3", "absent")
+
+    def test_a_chunk_stored_at_the_wrong_size_under_the_cached_size_is_typed(self):
+        # With the chunk size cached, the chunks are fetched without a listing,
+        # so the only thing that sees a wrong-sized chunk is `download_blob`'s
+        # size check. That used to end uncoded after every retry, on every run,
+        # for a chunk that is simply stored wrong. It now hands over to the
+        # listing, which reads the STORED size and types the refusal.
+        generate_zarr._AWS_RETRIES = 2
+        a, b = os.urandom(3000), os.urandom(3000)
+        ka, kb = sha256e(a, ".eeg"), sha256e(b, ".eeg")
+        self.s3.put_chunked(ka, a, self.CHUNK)
+        self.s3.put_chunked(kb, b, self.CHUNK)
+        self.fetch(ka, "a")
+        os.remove(os.path.join(self.scratch, "a"))
+        bad = generate_zarr.annex_chunk_key(kb, self.CHUNK, 2)
+        with open(os.path.join(self.s3.objects, bad), "wb") as fh:
+            fh.write(b"\0" * 1000)
+        self.assert_refused(kb, "chunk C2", "1000 bytes", f"expected {self.CHUNK}")
+        # The bad chunk was retried as a possibly short transfer, then the
+        # listing decided: a second listing, for this key alone.
+        self.assertEqual(len([c for c in self.s3.calls("s3 cp") if bad in c]), 2)
+        self.assertEqual(len(self.s3.calls("s3api list-objects-v2")), 2)
+
+    def test_a_short_transfer_under_the_cached_size_is_fetched_again(self):
+        # The other half: the stored chunk is right and the copy was short.
+        # The listing agrees with the key, so the fetch goes ahead and succeeds.
+        generate_zarr._AWS_RETRIES = 1
+        a, b = os.urandom(3000), os.urandom(3000)
+        ka, kb = sha256e(a, ".eeg"), sha256e(b, ".eeg")
+        self.s3.put_chunked(ka, a, self.CHUNK)
+        self.s3.put_chunked(kb, b, self.CHUNK)
+        self.fetch(ka, "a")
+        os.environ["ZARR_TEST_BUCKET_SHORT_ONCE"] = generate_zarr.annex_chunk_key(kb, self.CHUNK, 2)
+        self.assert_bytes(self.fetch(kb, "b"), b)
+        self.assertEqual(len(self.s3.calls("s3api list-objects-v2")), 2)
+
+
+class TestChunkedAnnexConvertOne(unittest.TestCase):
+    """`convert_one` in remote mode over real EDF recordings whose annex objects
+    are stored chunked, as nm000276's are: the pointer in the tree holds the
+    plain key, the bucket holds only `-S<chunk>-C<n>` objects, and the store is
+    published back into the same (file-backed) bucket."""
+
+    CHUNK = 1024
+    RECS = ("sub-01/ieeg/sub-01_task-rest_ieeg.edf", "sub-02/ieeg/sub-02_task-rest_ieeg.edf")
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+            from biosigio import Recording  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        self.s3 = BucketStandIn(self, self.dir)
+        self.repo = os.path.join(self.dir, "repo")
+
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=self.repo, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+
+        os.makedirs(self.repo)
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.org")
+        git("config", "user.name", "t")
+        self.keys = {}
+        for rec in self.RECS:
+            content = build_labeled_edf(os.path.join(self.dir, os.path.basename(rec)),
+                                        ["C1", "C2", "C3"])
+            with open(content, "rb") as fh:
+                data = fh.read()
+            key = sha256e(data, ".edf")
+            self.assertGreater(self.s3.put_chunked(key, data, self.CHUNK), 3)
+            link = os.path.join(self.repo, rec)
+            os.makedirs(os.path.dirname(link), exist_ok=True)
+            target = os.path.join(self.repo, ".git", "annex", "objects", "Xx", "Yy", key, key)
+            os.symlink(os.path.relpath(target, os.path.dirname(link)), link)
+            self.keys[rec] = key
+        git("add", "-A")
+        git("commit", "-q", "-m", "chunked fixture")
+        self.head = git("rev-parse", "HEAD")
+        self.work = os.path.join(self.dir, "work")
+        generate_zarr._init_worker({
+            "repo": self.repo, "bucket": self.s3.BUCKET, "dataset_id": self.s3.DATASET,
+            "head": self.head, "head_files": set(self.RECS), "local": False,
+            "tmp": self.work, "updated": "2026-09-29T00:00:00Z",
+            "contract_base": "https://zarr.nemar.org", "engine_version": "3",
+            "dataset_row": None, "provenance_fetch_failed": False,
+            "mem_budget": None, "hard_ceiling": None, "projections": {},
+            "fdt_declarations": {},
+        })
+
+    def test_chunked_recordings_convert_and_publish(self):
+        for rec in self.RECS:
+            with self.subTest(rec):
+                result = convert_one(rec)
+                self.assertTrue(result["ok"], result.get("error"))
+                (group,) = result["entry"]["groups"]
+                self.assertEqual(group["n_channels"], 3)
+                # Provenance names the key the pointer holds, not a chunk.
+                self.assertEqual(result["manifest"]["source_key"], self.keys[rec])
+                store = os.path.join(self.s3.root, self.s3.BUCKET, self.s3.DATASET, "zarr",
+                                     store_rel_for(rec), "zarr.json")
+                self.assertTrue(os.path.isfile(store), "store published to the bucket")
+        # One listing for the whole dataset: the second recording reuses the
+        # discovered chunk size.
+        self.assertEqual(len(self.s3.calls("s3api list-objects-v2")), 1)
+        self.assertFalse(os.listdir(os.path.join(self.work, "work")), "scratch reclaimed")
+
+    def test_a_missing_chunk_refuses_the_recording_as_data(self):
+        rec = self.RECS[0]
+        os.remove(os.path.join(self.s3.objects,
+                               generate_zarr.annex_chunk_key(self.keys[rec], self.CHUNK, 2)))
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = convert_one(rec)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "annex_object_missing")
+        self.assertIn("chunk C2", result["detail"])
+        self.assertNotIn(result["code"], RETRYABLE_CODES)
+        entry = _failure_entry(rec, result["code"], result["detail"])
+        self.assertEqual(count_infra_failures([rec], [entry]), 0)
+        self.assertIn("missing or incomplete", generate_zarr.reason_for_code(result["code"]))
+        self.assertFalse(os.path.exists(os.path.join(self.s3.root, self.s3.BUCKET, self.s3.DATASET, "zarr")),
+                         "nothing published for a refused recording")
+
+
+
+class TestAnnexMissingDatasetVerdict(unittest.TestCase):
+    """`dataset_failure_is_deterministic`, the rule behind the callback's
+    `deterministic`, which `hallu-zarr.sh` turns into a terminal `data_failed`
+    for a run that converted nothing. `annex_object_missing` is permanent for
+    its recording but must not, on its own, make the DATASET terminal."""
+
+    @staticmethod
+    def entry(path: str, code: str) -> generate_zarr.FailureEntry:
+        return _failure_entry(path, code, f"{code} detail")
+
+    def verdict(self, *codes: str | None) -> bool:
+        paths = [f"sub-{i:02d}/eeg/r.edf" for i in range(len(codes))]
+        entries = [self.entry(p, c) for p, c in zip(paths, codes) if c]
+        return generate_zarr.dataset_failure_is_deterministic(paths, entries)
+
+    def test_the_code_is_a_storage_state_code_and_not_a_retryable_one(self):
+        code = generate_zarr.AnnexObjectMissing.code
+        self.assertIn(code, generate_zarr.STORAGE_STATE_CODES)
+        self.assertNotIn(code, RETRYABLE_CODES)
+
+    def test_every_recording_missing_its_object_is_not_deterministic(self):
+        self.assertFalse(self.verdict("annex_object_missing"))
+        self.assertFalse(self.verdict("annex_object_missing", "annex_object_missing"))
+
+    def test_a_genuine_data_failure_among_missing_objects_is_deterministic(self):
+        self.assertTrue(self.verdict("annex_object_missing", "corrupt_or_truncated"))
+        self.assertTrue(self.verdict("channel_count_mismatch", "annex_object_missing"))
+
+    def test_the_existing_rule_is_unchanged_for_every_other_code(self):
+        self.assertFalse(self.verdict())  # nothing failed
+        self.assertTrue(self.verdict("corrupt_or_truncated"))
+        self.assertTrue(self.verdict("corrupt_or_truncated", "maxshield_uncalibrated"))
+        # Any infra failure keeps the run retryable, with or without the code.
+        self.assertFalse(self.verdict("corrupt_or_truncated", None))
+        self.assertFalse(self.verdict("annex_object_missing", None))
+        self.assertFalse(self.verdict("recording_memory_exceeded", "corrupt_or_truncated"))
+
+    def test_the_summary_names_the_first_missing_object_by_path(self):
+        summary = generate_zarr.annex_missing_summary(
+            [("sub-02/eeg/b.edf", "KEY-B"), ("sub-01/eeg/a.edf", "KEY-A")]
+        )
+        self.assertEqual(summary, {
+            "annex_missing_count": 2,
+            "annex_missing_first_path": "sub-01/eeg/a.edf",
+            "annex_missing_first_key": "KEY-A",
+        })
+        self.assertEqual(generate_zarr.annex_missing_summary([]), {
+            "annex_missing_count": 0,
+            "annex_missing_first_path": None,
+            "annex_missing_first_key": None,
+        })
+
+    def test_the_exception_keeps_its_key_across_a_pickle(self):
+        import pickle
+
+        exc = generate_zarr.AnnexObjectMissing("SHA256E-s5--ab.edf", "no chunked copy")
+        back = pickle.loads(pickle.dumps(exc))
+        self.assertEqual((back.key, str(back)), (exc.key, "SHA256E-s5--ab.edf: no chunked copy"))
+
+
+class TestMainAnnexMissingVerdict(unittest.TestCase):
+    """`main()` end to end in remote mode, over real EDF recordings whose annex
+    objects are served by the stand-in `aws` from a file-backed bucket: what the
+    callback tells `hallu-zarr.sh` when storage lacks some or all of them."""
+
+    CHUNK = 1024
+    RECS = ("sub-01/ieeg/sub-01_task-rest_ieeg.edf", "sub-02/ieeg/sub-02_task-rest_ieeg.edf")
+
+    @classmethod
+    def setUpClass(cls):
+        TestChunkedAnnexConvertOne.setUpClass()
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        self.s3 = BucketStandIn(self, self.dir)
+        self.repo = os.path.join(self.dir, "repo")
+        os.makedirs(self.repo)
+        saved_ctx = dict(generate_zarr._CTX)
+        self.addCleanup(lambda: (generate_zarr._CTX.clear(), generate_zarr._CTX.update(saved_ctx)))
+
+    def build(self, stored: dict[str, str]) -> dict[str, str]:
+        """One real EDF per recording, committed as an annex pointer; `stored`
+        says what the bucket holds for it: "chunked", "missing" (nothing), or
+        "truncated" (the plain object, cut short INSIDE the file, so the size
+        in the key matches and biosigIO is what refuses it)."""
+
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=self.repo, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.org")
+        git("config", "user.name", "t")
+        keys = {}
+        for i, (rec, how) in enumerate(stored.items()):
+            # Distinct labels per recording: identical files would share one
+            # annex key, and storing one would store the other.
+            content = build_labeled_edf(os.path.join(self.dir, os.path.basename(rec)),
+                                        [f"R{i}C{n}" for n in (1, 2, 3)])
+            with open(content, "rb") as fh:
+                data = fh.read()
+            if how == "truncated":
+                # Same length, garbage after the fixed header: a file the key
+                # vouches for and no reader can decode.
+                data = data[:256] + b"\xff" * (len(data) - 256)
+            key = sha256e(data, ".edf")
+            if how == "chunked":
+                self.s3.put_chunked(key, data, self.CHUNK)
+            elif how == "truncated":
+                self.s3.put_plain(key, data)
+            link = os.path.join(self.repo, rec)
+            os.makedirs(os.path.dirname(link), exist_ok=True)
+            target = os.path.join(self.repo, ".git", "annex", "objects", "Xx", "Yy", key, key)
+            os.symlink(os.path.relpath(target, os.path.dirname(link)), link)
+            keys[rec] = key
+        git("add", "-A")
+        git("commit", "-q", "-m", "fixture")
+        return keys
+
+    def run_main(self) -> tuple[int, str, dict]:
+        callback = os.path.join(self.dir, "cb.json")
+        argv = [
+            "generate_zarr.py", "--dataset-id", self.s3.DATASET, "--repo-dir", self.repo,
+            "--bucket", self.s3.BUCKET, "--callback-out", callback,
+            "--clean", "--jobs", "1", "--api-base", "http://127.0.0.1:9",
+        ]
+        saved, sys.argv = sys.argv, argv
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = generate_zarr.main()
+        finally:
+            sys.argv = saved
+        with open(callback) as fh:
+            return rc, out.getvalue(), json.load(fh)
+
+    def published_index(self) -> dict | None:
+        path = os.path.join(self.s3.root, self.s3.BUCKET, self.s3.DATASET, "zarr", "index.json")
+        if not os.path.exists(path):
+            return None
+        with open(path) as fh:
+            return json.load(fh)
+
+    def test_every_recording_missing_is_a_retryable_total_failure(self):
+        keys = self.build({rec: "missing" for rec in self.RECS})
+        rc, log, cb = self.run_main()
+        self.assertEqual(rc, 1, log)
+        self.assertEqual(cb["status"], "failed")
+        self.assertEqual([e["code"] for e in cb["data_failures"]], ["annex_object_missing"] * 2)
+        self.assertFalse(cb["deterministic"], "all missing must not be data_failed")
+        self.assertEqual(cb["annex_missing_count"], 2)
+        self.assertEqual(cb["annex_missing_first_path"], self.RECS[0])
+        self.assertEqual(cb["annex_missing_first_key"], keys[self.RECS[0]])
+        self.assertIn("storage lacks the annex object(s) of 2 recording(s)", log)
+        self.assertIsNone(self.published_index(), "a total failure publishes nothing")
+
+    def test_a_genuine_data_failure_alongside_a_missing_object_is_deterministic(self):
+        self.build({self.RECS[0]: "missing", self.RECS[1]: "truncated"})
+        rc, log, cb = self.run_main()
+        self.assertEqual(rc, 1, log)
+        codes = sorted(e["code"] for e in cb["data_failures"])
+        self.assertEqual(len(codes), 2, log)
+        self.assertIn("annex_object_missing", codes)
+        other = next(c for c in codes if c != "annex_object_missing")
+        self.assertNotIn(other, RETRYABLE_CODES)
+        self.assertTrue(cb["deterministic"], log)
+        self.assertEqual(cb["annex_missing_count"], 1)
+        self.assertNotIn("storage lacks the annex object", log)
+
+    def test_a_partial_run_still_serves_and_lists_the_missing_recording(self):
+        keys = self.build({self.RECS[0]: "chunked", self.RECS[1]: "missing"})
+        rc, log, cb = self.run_main()
+        self.assertEqual(rc, 0, log)
+        self.assertEqual(cb["status"], "ready")
+        self.assertEqual(cb["converted"], [store_rel_for(self.RECS[0])])
+        self.assertFalse(cb["deterministic"])
+        self.assertEqual(cb["annex_missing_first_key"], keys[self.RECS[1]])
+        index = self.published_index()
+        if index is None:
+            self.fail("a partial run publishes its index")
+        self.assertEqual([e["path"] for e in index["stores"]], [self.RECS[0]])
+        (failure,) = index["failures"]
+        self.assertEqual((failure["path"], failure["code"]), (self.RECS[1], "annex_object_missing"))
+        self.assertEqual(index["pending"], [], "typed, so not pending")
 
 
 if __name__ == "__main__":

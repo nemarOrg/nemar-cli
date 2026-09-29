@@ -38,6 +38,7 @@ import { reembedDatasetVector } from "../../services/dataset-search";
 import { ProdRepoFenceError, deleteDatasetCascade } from "../../services/deletion";
 import { DOCTOR_CHECKS, getCheck, listChecks } from "../../services/doctor/registry";
 import type { CheckContext, Finding } from "../../services/doctor/types";
+import type { DoiResolutionSummary } from "../../services/doi-metadata";
 import { exemplarOrFragment } from "../../services/exemplar";
 import {
   addCollaborator,
@@ -1761,6 +1762,8 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
         error?: string;
         /** Deliberate skips on an otherwise successful run (#1255). */
         warnings?: string[];
+        /** Stage 1d DOI lookup counts (#1549); `failed > 0` warrants a retry. */
+        doi_resolution?: DoiResolutionSummary;
       };
       sync: {
         status: "ok" | "failed" | "skipped";
@@ -1785,12 +1788,14 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
             // A deliberate skip keeps the run "ok" and rides along as a
             // warning; "failed" stays reserved for real errors (#1255).
             ...(enr.warnings && { warnings: enr.warnings }),
+            ...(enr.doi_resolution && { doi_resolution: enr.doi_resolution }),
           }
         : {
             status: "failed",
             ref: enr.ref,
             error: enr.error,
             ...(enr.llm_usage && { llm_usage: enr.llm_usage }),
+            ...(enr.doi_resolution && { doi_resolution: enr.doi_resolution }),
           };
     }
 
@@ -1913,6 +1918,8 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
         /** Deliberate skips on an otherwise successful run (#1255). */
         warnings?: string[];
         llm_usage?: LlmUsageTotals;
+        /** Stage 1d DOI lookup counts (#1549); `failed > 0` warrants a retry. */
+        doi_resolution?: DoiResolutionSummary;
       };
       sync: {
         status: "ok" | "failed" | "skipped";
@@ -1946,11 +1953,13 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
               status: "ok",
               ...(enr.llm_usage && { llm_usage: enr.llm_usage }),
               ...(enr.warnings && { warnings: enr.warnings }),
+              ...(enr.doi_resolution && { doi_resolution: enr.doi_resolution }),
             }
           : {
               status: "failed",
               error: enr.error,
               ...(enr.llm_usage && { llm_usage: enr.llm_usage }),
+              ...(enr.doi_resolution && { doi_resolution: enr.doi_resolution }),
             };
         if (enr.llm_usage) {
           usageTotal.calls += enr.llm_usage.calls;
