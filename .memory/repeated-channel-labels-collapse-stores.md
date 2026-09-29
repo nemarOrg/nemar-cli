@@ -20,10 +20,9 @@ raises on a duplicate. Its EEGLAB importer uses a different scheme: the FIRST
 occurrence keeps its label and the second becomes `<label>_2`, then `_3`, ... (never
 `_1`); it does NOT record that map (verified in `importers/eeglab.py` of 1.2.9 on
 2026-09-28). biosigio PR #140, merged and shipping as 1.2.10, records the EEGLAB, XDF
-and neo renames under `channel_labels_deduplicated` too; once a release carrying it is
-the floor, `positions_for_renamed_labels` and `units_report.unmatched_raw_label` cover
-EEGLAB renames with no change here, since both read only that map. That release is
-capped out for now (`>=1.2.9,<1.2.10`, see the sidecar join below).
+and neo renames under `channel_labels_deduplicated` too; with 1.2.10 as the floor
+(`>=1.2.10,<1.2.11`), `positions_for_renamed_labels` and `units_report.unmatched_raw_label`
+cover EEGLAB renames with no change here, since both read only that map.
 
 **Why it matters:** the fidelity gate used to consult the file header only when a store
 fell short of channels.tsv. A dataset with no channels.tsv, or one written by a tool
@@ -48,4 +47,10 @@ or the case match was ambiguous.
 **What to do:** never key a channel structure by label (a set or dict of labels drops
 the repeat); count from a list. To find stores published before the fix, run
 `scripts/zarr/find_collapsed_channel_stores.py --dataset <id>` (read-only), then requeue
-what it flags on the conversion host.
+what it flags on the conversion host. For the case-only sidecar miss, run it with
+`--case-only` (`--all` for the archive): it lists the stores whose index entry reports
+`unmatched_case_only`, reading index.json alone, and counts separately as unverifiable
+the entries with no join report (converted before 0.10.9), which the index cannot
+enumerate; those are found only by comparing their channels.tsv with the store's
+labels. The other 1.2.10 byte change, an XDF, EEGLAB, neo or Trigno repeat whose suffix
+collided with a label the file really uses, has no detector at all.
