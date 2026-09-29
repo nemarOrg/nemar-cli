@@ -6676,6 +6676,56 @@ class TestIndexSchemaSelfCheck(unittest.TestCase):
         check_index_invariant(index)
         validate_document(index, INDEX_SCHEMA_PATH, "index")
 
+    def test_a_carried_entry_with_the_raw_case_match_map_heals_on_merge(self):
+        """An entry published by a 1.2.10 run before the converter bounded the
+        map carries biosigIO's per-channel `matched_case_insensitive`. It is
+        carried verbatim by every incremental run, so without healing each run
+        would fail validation until a `--clean` rebuild."""
+        import jsonschema
+
+        n = 40
+        raw = {f"Fp{i}-F{i}": f"FP{i}-F{i}" for i in range(n)}
+        prior = self.index()
+        old = prior["stores"][0]
+        old["units_report"] = {
+            "converted": n, "relabelled": 0, "kept_importer_unit": 0,
+            "units_column_present": True, "unmatched_channels": 0,
+            "matched_case_insensitive": raw,
+        }
+        # The premise: as published, that prior index is refused.
+        with self.assertRaises(jsonschema.ValidationError):
+            validate_document(prior, INDEX_SCHEMA_PATH, "index")
+        prior_before = json.loads(json.dumps(prior))
+
+        new_store = {**old, "zarr": "sub-02/eeg/b_eeg.zarr", "path": "sub-02/eeg/b_eeg.edf",
+                     "units_report": {"converted": 1, "relabelled": 0,
+                                      "kept_importer_unit": 0, "units_column_present": True}}
+        merged = merge_index(
+            prior, "on007763", "f" * 40, [new_store], [], "2026-09-03T00:00:00Z", [],
+            [{"path": "sub-03/eeg/c_eeg.edf", "reason": "infra_failure", "last_error": "boom"}],
+            discovered=["sub-01/eeg/a_eeg.edf", "sub-02/eeg/b_eeg.edf",
+                        "sub-03/eeg/c_eeg.edf"],
+            biosigio_version="1.2.10",
+            prior_pending=prior["pending"],
+        )
+        validate_document(merged, INDEX_SCHEMA_PATH, "index")
+        by_zarr = {e["zarr"]: e for e in merged["stores"]}
+        healed = by_zarr["sub-01/eeg/a_eeg.zarr"]["units_report"]
+        self.assertNotIn("matched_case_insensitive", healed)
+        self.assertEqual(healed["matched_case_only"], n)
+        self.assertEqual(
+            healed["matched_case_only_examples"],
+            [f"Fp{i}-F{i} -> FP{i}-F{i}" for i in range(generate_zarr.CASE_MATCH_EXAMPLES_MAX)],
+        )
+        # Everything else the old report said is carried as it was.
+        for key in ("converted", "relabelled", "kept_importer_unit",
+                    "units_column_present", "unmatched_channels"):
+            self.assertEqual(healed[key], old["units_report"][key], key)
+        self.assertEqual(by_zarr["sub-02/eeg/b_eeg.zarr"]["units_report"],
+                         new_store["units_report"])
+        # merge_index is pure: the prior document is left as it was read.
+        self.assertEqual(prior, prior_before)
+
     def test_a_mutated_index_is_rejected(self):
         import jsonschema
 
