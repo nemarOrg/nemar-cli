@@ -496,12 +496,19 @@ describe("datalad commands - get --no-verify (#1523)", () => {
     await makeWritable(objectPath);
     writeFileSync(objectPath, "C".repeat(1000));
 
-    const { stdout, exitCode } = await runCli(["dataset", "get", "data.bin", "--no-verify"], {
-      cwd: repoDir,
-    });
+    const { stdout, stderr, exitCode } = await runCli(
+      ["dataset", "get", "data.bin", "--no-verify"],
+      { cwd: repoDir },
+    );
     expect(exitCode).toBe(1);
     // Pins that the CLI's OWN size check caught it, not some unrelated failure.
     expect(stdout).toContain("--no-verify accepted");
+    // Review round 3: the failure branch calls printNoVerifyMismatches
+    // BEFORE process.exit(1), so the mismatch's reason and recovery command
+    // reach stderr too, not only the capped error text on stdout -- the same
+    // guarantee docs#48 makes for every outcome, this one included.
+    expect(stderr).toContain("--no-verify accepted");
+    expect(stderr).toContain("Recover with: rm --");
   }, 60_000);
 
   test("--no-verify never writes annex.verify to the repo's git config", async () => {

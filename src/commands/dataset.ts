@@ -1722,6 +1722,9 @@ Examples:
           console.log(
             chalk.dim(`You can try again with: cd ${absoluteOutput} && nemar dataset get`),
           );
+          // Print before exiting: a no-verify mismatch is carried on every
+          // outcome arm (#1525 review round 3), and this is the failure arm.
+          printNoVerifyMismatches(getResult.noVerifyMismatches);
           if (s3Creds) {
             await clearAnnexCredentials(absoluteOutput);
           }
@@ -4620,6 +4623,9 @@ Examples:
       // a run that still landed files, and the tracker should say so.
       tracker.finish(result.filesDownloaded);
       console.log(chalk.red(`  ${result.error}`));
+      // Print before exiting: a no-verify mismatch is carried on every
+      // outcome arm (#1525 review round 3), and this is the failure arm.
+      printNoVerifyMismatches(result.noVerifyMismatches);
       if (getCreds) {
         await clearAnnexCredentials(cwd);
       }
