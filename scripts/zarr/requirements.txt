@@ -150,8 +150,13 @@
 # 1.2.10 changes a store's bytes only for a sidecar that differs from the file
 # only in case, or for an XDF/EEGLAB/neo/Trigno file whose repeats collide with
 # a label it really uses. Stores converted since the join report was added
-# (0.10.9) show the first as `unmatched_case_only`; older ones do not show it.
-# Either way the fix is a targeted `--dataset` or requeue run, not the stamp.
+# (0.10.9) show the first as `unmatched_case_only`, and
+# `find_collapsed_channel_stores.py --case-only` lists them from the published
+# index.json (read-only); it also counts, as unverifiable, the entries with no
+# join report, which the index cannot answer for (older stores: compare their
+# channels.tsv with the store's labels). The XDF/EEGLAB/neo/Trigno collision
+# has no detector. Either way the fix is a targeted `--dataset` or requeue
+# run, one dataset at a time, not the stamp.
 # <1.2.11 is a CAP, not a floor, raised deliberately per release: a biosigIO
 # patch release has changed what a store contains twice in a row (1.2.9,
 # 1.2.10), so the next one is read before the converter takes it. Raise it in
