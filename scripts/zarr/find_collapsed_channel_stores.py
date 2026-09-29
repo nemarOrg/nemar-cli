@@ -20,21 +20,32 @@ What it flags, per store in a dataset's published `index.json`:
   carries `channels_tsv_count_mismatch` is NOT flagged: the gate compared it
   to the file's own header and found the SIDECAR over-declares, so the store
   is faithful. It is counted as ``sidecar_overcount`` instead.
+* ``short_of_file_header``: the store's channel count is below
+  ``recording_metadata.number_of_signals`` in the store's root `zarr.json`,
+  the signal count the importer read from the file header BEFORE its
+  label-keyed collapse (verified on a biosigio 1.2.8 store built from a
+  CHB-MIT-shaped EDF: `number_of_signals` 6, four channels served). It is
+  independent of channels.tsv, so it finds a collapsed store that shipped
+  with no sidecar, or with a sidecar that collapsed the same way. It is a
+  WHERE-PRESENT check: the EDF/BDF, MNE (BrainVision, FIF, ...), neo and
+  streaming paths record the key, while the EEGLAB importer does not, and a
+  store without it is counted under ``no_header_count``.
 * ``repeated_labels``: the channel labels the store's groups record repeat a
   label (read from each group's `zarr.json`). Only checked for EDF/BDF
   sources by default (`--labels`), the formats that can carry a repeated
   label into the store; every other importer either rejects a repeat or
   renames it.
 
-A store short of the file's own header cannot be found without downloading
-the data file, which this script never does; a dataset that ships no
-channels.tsv is therefore reported as ``no_channels_tsv`` for its stores
-rather than as clean.
+The data file itself is never downloaded. A store with neither witness (no
+channels.tsv and no `number_of_signals`) cannot be checked for a short count
+at all; it is reported as ``unwitnessed``, never as clean, and makes the run
+exit 2 if nothing else is flagged.
 
 Safety
 ------
 * Reads only, over public HTTPS: `<zarr-base>/<id>/zarr/index.json`, each
-  store's group `zarr.json` for the label check, and each recording's
+  store's root `zarr.json` (one GET per store, for `number_of_signals`) and
+  its group `zarr.json` files for the label check, and each recording's
   channels.tsv from `raw.githubusercontent.com/nemarDatasets/<id>/<commit>/`
   at the commit the index was BUILT from (`source_commit`). No S3
   credentials, no GitHub token, no writes anywhere, no queue access.
@@ -43,7 +54,8 @@ Safety
   over the tree at `source_commit`. Without it the sidecar is resolved
   nearest-first over the four placements real datasets use (the same bounded
   list the backend's fidelity sweep uses), which can miss an unusual one; a
-  miss is reported as ``no_channels_tsv``, never as clean.
+  miss is counted under ``no_channels_tsv``, and a store with no header count
+  either is ``unwitnessed``, never clean.
 * Never run it from CI against production. It is for a maintainer, by hand.
 
 Usage
@@ -53,8 +65,9 @@ Usage
         --repo-dir ~/datasets/nm000110
     python3 scripts/zarr/find_collapsed_channel_stores.py --all --out report.json
 
-Exit status: 0 nothing flagged and every dataset checked, 1 something
-flagged, 2 nothing flagged but at least one dataset could not be checked. A
+Exit status: 0 nothing flagged and every dataset and store checked, 1
+something flagged, 2 nothing flagged but at least one dataset could not be
+checked or at least one store had no witness to check it against. A
 dataset is unchecked when its index could not be read OR when any one of its
 stores could not be (a 429 or 5xx that outlived the retries, a malformed
 group): unchecked is never reported as clean.
@@ -113,6 +126,7 @@ class Finding(TypedDict, total=False):
     recording: str
     zarr: str
     store_channels: int
+    header_channels: int | None
     tsv_channels: int | None
     channels_tsv: str | None
     reasons: list[str]
@@ -174,22 +188,37 @@ def wants_label_check(recording_path: str, mode: str) -> bool:
     return recording_path.lower().endswith(REPEATABLE_LABEL_EXTS)
 
 
+def header_signal_count(root_attrs: dict) -> int | None:
+    """``recording_metadata.number_of_signals`` from a store's root attributes:
+    the file header's signal count as the importer read it, before anything
+    was keyed by label. None when the store does not record it."""
+    meta = root_attrs.get("recording_metadata")
+    count = meta.get("number_of_signals") if isinstance(meta, dict) else None
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        return None
+    return count
+
+
 def classify_store(
     dataset_id: str,
     entry: dict,
     tsv_channels: int | None,
     channels_tsv: str | None,
     labels: list[str] | None,
+    header_channels: int | None = None,
 ) -> tuple[str, Finding | None]:
     """One store's verdict and, when flagged, its finding.
 
     Verdicts: ``flagged``, ``sidecar_overcount`` (short of channels.tsv but
-    the converter's gate matched it to the file header), ``no_channels_tsv``
-    (nothing to count against and no repeated label seen), ``ok``.
+    the converter's gate matched it to the file header), ``unwitnessed``
+    (neither a channels.tsv nor a header count to compare against, and no
+    repeated label seen), ``ok``.
     """
     store_channels = store_total_channels(entry)
     reasons: list[str] = []
     overcount = False
+    if header_channels and store_channels < header_channels:
+        reasons.append("short_of_file_header")
     if tsv_channels and store_channels < tsv_channels:
         if isinstance(entry.get("channels_tsv_count_mismatch"), dict):
             overcount = True
@@ -204,6 +233,7 @@ def classify_store(
             "recording": str(entry.get("path", "")),
             "zarr": str(entry.get("zarr", "")),
             "store_channels": store_channels,
+            "header_channels": header_channels,
             "tsv_channels": tsv_channels,
             "channels_tsv": channels_tsv,
             "reasons": reasons,
@@ -213,8 +243,8 @@ def classify_store(
         return "flagged", finding
     if overcount:
         return "sidecar_overcount", None
-    if not tsv_channels:
-        return "no_channels_tsv", None
+    if not tsv_channels and not header_channels:
+        return "unwitnessed", None
     return "ok", None
 
 
@@ -252,14 +282,17 @@ def summarize(results: list[dict]) -> dict:
         "stores_flagged": sum(len(r.get("findings", [])) for r in results),
         "stores_sidecar_overcount": sum(r.get("sidecar_overcount", 0) for r in results),
         "stores_without_channels_tsv": sum(r.get("no_channels_tsv", 0) for r in results),
+        "stores_without_header_count": sum(r.get("no_header_count", 0) for r in results),
+        "stores_unwitnessed": sum(r.get("unwitnessed", 0) for r in results),
     }
 
 
 def exit_status(summary: dict) -> int:
-    """1 when anything is flagged; else 2 when anything went unchecked; else 0."""
+    """1 when anything is flagged; else 2 when any dataset went unchecked or
+    any store had no witness; else 0."""
     if summary["stores_flagged"]:
         return 1
-    return 2 if summary["datasets_unchecked"] else 0
+    return 2 if summary["datasets_unchecked"] or summary["stores_unwitnessed"] else 0
 
 
 # --- I/O ---------------------------------------------------------------------
@@ -296,6 +329,13 @@ def http_get_json(url: str) -> dict:
     if not isinstance(doc, dict):
         raise TypeError(f"{url} is not a JSON object")
     return doc
+
+
+def store_root_attrs(zarr_base: str, dataset_id: str, entry: dict) -> dict:
+    """A published store's root `zarr.json` attributes."""
+    url = _join(zarr_base, dataset_id, "zarr", entry["zarr"], "zarr.json")
+    attrs = http_get_json(url).get("attributes")
+    return attrs if isinstance(attrs, dict) else {}
 
 
 def store_labels(zarr_base: str, dataset_id: str, entry: dict) -> list[str]:
@@ -400,6 +440,7 @@ def check_dataset(
         recording = str(entry.get("path", ""))
         try:
             path, rows = tsv.rows(recording)
+            header = header_signal_count(store_root_attrs(zarr_base, dataset_id, entry))
             labels = (
                 store_labels(zarr_base, dataset_id, entry)
                 if wants_label_check(recording, labels_mode)
@@ -411,12 +452,16 @@ def check_dataset(
                 {"recording": recording, "error": f"{type(exc).__name__}: {exc}"}
             )
             continue
-        verdict, finding = classify_store(dataset_id, entry, rows, path, labels)
+        verdict, finding = classify_store(dataset_id, entry, rows, path, labels, header)
         counts[verdict] += 1
+        counts["no_channels_tsv"] += 0 if rows else 1
+        counts["no_header_count"] += 0 if header else 1
         if finding is not None:
             result["findings"].append(finding)
     result["sidecar_overcount"] = counts["sidecar_overcount"]
     result["no_channels_tsv"] = counts["no_channels_tsv"]
+    result["no_header_count"] = counts["no_header_count"]
+    result["unwitnessed"] = counts["unwitnessed"]
     result["unreadable_stores"] = counts["unreadable"]
     if result["findings"]:
         result["requeue"] = requeue_commands(dataset_id)

@@ -95,14 +95,29 @@ class Site:
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(content)
 
-    def publish(self, dataset: str, stores: list[dict], labels: dict[str, list[str]]) -> None:
-        """An index listing `stores`, and a group zarr.json per store whose
-        `channels` carry `labels[zarr]`."""
+    def publish(
+        self, dataset: str, stores: list[dict], labels: dict[str, list[str]],
+        header_counts: dict[str, int] | None = None, commit: str = COMMIT,
+    ) -> None:
+        """An index listing `stores`; per store a root zarr.json, whose
+        `recording_metadata` carries `number_of_signals` only where
+        `header_counts[zarr]` gives one (an EEGLAB-built store records none),
+        and a group zarr.json whose `channels` carry `labels[zarr]`."""
         self.write(f"zarr/{dataset}/zarr/index.json", json.dumps({
             "dataset_id": dataset, "format": "nemar-zarr-index", "format_version": 3,
-            "source_commit": COMMIT, "stores": stores,
+            "source_commit": commit, "stores": stores,
         }))
         for store in stores:
+            meta: dict = {"source_format": store["path"].rsplit(".", 1)[-1]}
+            if header_counts and store["zarr"] in header_counts:
+                meta["number_of_signals"] = header_counts[store["zarr"]]
+            self.write(
+                f"zarr/{dataset}/zarr/{store['zarr']}/zarr.json",
+                json.dumps({"attributes": {
+                    "channel_groups": [g["name"] for g in store["groups"]],
+                    "recording_metadata": meta,
+                }}),
+            )
             for group in store["groups"]:
                 self.write(
                     f"zarr/{dataset}/zarr/{store['zarr']}/{group['name']}/zarr.json",
@@ -160,9 +175,32 @@ class TestPure(unittest.TestCase):
         })
         self.assertEqual(fc.classify_store(DATASET, entry, 6, "t", None), ("sidecar_overcount", None))
 
-    def test_no_sidecar_is_not_clean(self):
+    def test_no_witness_is_not_clean(self):
         self.assertEqual(fc.classify_store(DATASET, store(1, 4), None, None, None),
-                         ("no_channels_tsv", None))
+                         ("unwitnessed", None))
+
+    def test_a_store_short_of_its_header_count_is_flagged(self):
+        # The collapse channels.tsv cannot see: no sidecar at all, and the
+        # labels already unique because the importer collapsed them.
+        verdict, finding = fc.classify_store(
+            DATASET, store(1, 4), None, None, ["FP1-F7", "F7-T7", "-", "T8-P8"], 6
+        )
+        self.assertEqual(verdict, "flagged")
+        assert finding is not None
+        self.assertEqual(finding["reasons"], ["short_of_file_header"])
+        self.assertEqual((finding["store_channels"], finding["header_channels"]), (4, 6))
+
+    def test_a_header_count_alone_is_a_witness(self):
+        self.assertEqual(fc.classify_store(DATASET, store(1, 6), None, None, None, 6),
+                         ("ok", None))
+
+    def test_header_signal_count_reads_only_a_positive_integer(self):
+        self.assertEqual(fc.header_signal_count({"recording_metadata": {"number_of_signals": 23}}), 23)
+        for bad in ({}, {"recording_metadata": {}}, {"recording_metadata": "x"},
+                    {"recording_metadata": {"number_of_signals": True}},
+                    {"recording_metadata": {"number_of_signals": "23"}},
+                    {"recording_metadata": {"number_of_signals": 0}}):
+            self.assertIsNone(fc.header_signal_count(bad), bad)
 
     def test_repeated_labels_flag_a_store_with_the_right_count(self):
         verdict, finding = fc.classify_store(DATASET, store(1, 6), 6, "t", CHB_LABELS)
@@ -239,11 +277,43 @@ class TestOverHttp(unittest.TestCase):
         rc, report = self.run_main("--dataset", DATASET)
         self.assertEqual((rc, report["findings"]), (0, []))
 
-    def test_no_sidecar_is_reported_not_passed(self):
+    def test_no_witness_is_reported_not_passed(self):
+        # No channels.tsv and no number_of_signals (an EEGLAB-built store):
+        # nothing to count against, so the run cannot call it clean.
         self.site.publish(DATASET, [store(1, 4, ext="set")], {})
         rc, report = self.run_main("--dataset", DATASET)
-        self.assertEqual(rc, 0)
-        self.assertEqual(report["summary"]["stores_without_channels_tsv"], 1)
+        self.assertEqual((rc, report["findings"]), (2, []))
+        summary = report["summary"]
+        self.assertEqual(summary["stores_without_channels_tsv"], 1)
+        self.assertEqual(summary["stores_without_header_count"], 1)
+        self.assertEqual(summary["stores_unwitnessed"], 1)
+
+    def test_a_pre_129_collapse_with_no_sidecar_is_found_by_its_header_count(self):
+        # The shape a biosigio 1.2.8 store has, verified by building one from
+        # a CHB-MIT-shaped EDF: `number_of_signals` 6 at the root, the four
+        # surviving (unique) labels in the group. No channels.tsv anywhere.
+        entry = store(1, 4)
+        self.site.publish(
+            DATASET, [entry], {entry["zarr"]: ["FP1-F7", "F7-T7", "-", "T8-P8"]},
+            header_counts={entry["zarr"]: 6},
+        )
+        rc, report = self.run_main("--dataset", DATASET)
+        self.assertEqual(rc, 1)
+        finding = report["findings"][0]
+        self.assertEqual(finding["reasons"], ["short_of_file_header"])
+        self.assertEqual((finding["store_channels"], finding["header_channels"]), (4, 6))
+        self.assertIsNone(finding["tsv_channels"])
+        self.assertEqual(report["summary"]["stores_without_header_count"], 0)
+
+    def test_a_complete_store_with_a_header_count_and_no_sidecar_is_clean(self):
+        entry = store(1, 6)
+        self.site.publish(
+            DATASET, [entry], {entry["zarr"]: [f"C{i}" for i in range(6)]},
+            header_counts={entry["zarr"]: 6},
+        )
+        rc, report = self.run_main("--dataset", DATASET)
+        self.assertEqual((rc, report["findings"]), (0, []))
+        self.assertEqual(report["summary"]["stores_unwitnessed"], 0)
 
     def test_a_missing_index_is_unchecked_not_clean(self):
         rc, report = self.run_main("--dataset", "nm999998")
@@ -376,6 +446,9 @@ class TestOverHttp(unittest.TestCase):
         labels = fc.store_labels(self.site.zarr_base, DATASET, entry)
         self.assertEqual(len(labels), len(CHB_LABELS))
         self.assertIn("T8-P8-0", labels)
+        # And the root carries the header witness, equal to what is served.
+        root = fc.store_root_attrs(self.site.zarr_base, DATASET, entry)
+        self.assertEqual(fc.header_signal_count(root), len(CHB_LABELS))
 
 
 class TestRepoDir(unittest.TestCase):
@@ -407,9 +480,7 @@ class TestRepoDir(unittest.TestCase):
         commit = self.git("rev-parse", "HEAD")
         with open(path, "w") as fh:  # the working tree moves on; the store did not
             fh.write(tsv(CHB_LABELS[:4]))
-        self.site.write(f"zarr/{DATASET}/zarr/index.json", json.dumps({
-            "source_commit": commit, "stores": [store(1, 4, ext="set")],
-        }))
+        self.site.publish(DATASET, [store(1, 4, ext="set")], {}, commit=commit)
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
             rc = fc.main([
