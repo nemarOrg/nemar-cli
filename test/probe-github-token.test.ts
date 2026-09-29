@@ -28,6 +28,25 @@ interface RunResult {
   stderr: string;
 }
 
+/**
+ * GitHub's real `github-authentication-token-expiration` header is
+ * space-separated ("2026-10-01 12:00:00 UTC"), not the ISO 8601 format
+ * `toISOString()` produces. `Date` parses both, but the header value is
+ * echoed verbatim into the probe's output, so this locks in that the day
+ * count is still computed correctly against the format GitHub actually
+ * sends.
+ */
+function formatGithubExpiry(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const y = date.getUTCFullYear();
+  const mo = pad(date.getUTCMonth() + 1);
+  const d = pad(date.getUTCDate());
+  const h = pad(date.getUTCHours());
+  const mi = pad(date.getUTCMinutes());
+  const s = pad(date.getUTCSeconds());
+  return `${y}-${mo}-${d} ${h}:${mi}:${s} UTC`;
+}
+
 async function runProbe(
   args: string[],
   env: Record<string, string | undefined>,
@@ -175,6 +194,34 @@ describe("probe-github-token", () => {
       expect(result.stdout.toLowerCase()).toContain("could not verify");
       expect(result.stdout.toLowerCase()).toContain("http 500");
       expect(result.exitCode).toBe(1);
+    } finally {
+      fake.stop();
+    }
+  });
+
+  test("expiry header in GitHub's real space-separated UTC format computes the correct day count", async () => {
+    const days = 40; // well clear of the default --warn-days 30, so this test is not also exercising the warning path
+    const expiryHeader = formatGithubExpiry(new Date(Date.now() + days * 24 * 60 * 60 * 1000));
+    const fake = startFakeGithub({
+      "GET /user": () =>
+        new Response(JSON.stringify({ login: "nemarAdmin" }), {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+            "x-oauth-scopes": "repo",
+            "github-authentication-token-expiration": expiryHeader,
+          },
+        }),
+    });
+    try {
+      const result = await runProbe(["GH_TOKEN"], {
+        GH_TOKEN: "fake-token",
+        GITHUB_API_BASE_URL: fake.url,
+      });
+      expect(result.stdout).toContain(`expires ${expiryHeader} (${days}.0 day(s) from now)`);
+      expect(result.stdout).not.toContain("::error::");
+      expect(result.stdout).not.toContain("::warning::");
+      expect(result.exitCode).toBe(0);
     } finally {
       fake.stop();
     }
