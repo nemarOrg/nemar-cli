@@ -4958,10 +4958,7 @@ def store_metadata(store_path: str) -> dict:
         # is biosigIO's (>= 1.2.9) record of the labels it renamed because the
         # file repeated them, `{new_label: file_label}`.
         result["_channel_labels"] = labels
-        renames = rec_meta.get("channel_labels_deduplicated") if isinstance(rec_meta, dict) else None
-        result["_label_renames"] = (
-            {str(k): str(v) for k, v in renames.items()} if isinstance(renames, dict) else {}
-        )
+        result["_label_renames"] = label_renames(ra)
         return result
     except Exception as exc:  # noqa: BLE001 - best-effort metadata, never fatal
         print(f"::warning::store_metadata failed for {store_path}: {exc}", flush=True)
@@ -5357,20 +5354,28 @@ def embed_root_attr(store_path: str, key: str, value: object) -> None:
     embed_attr(os.path.join(store_path, "zarr.json"), key, value)
 
 
+def label_renames(root_attrs: dict) -> dict[str, str]:
+    """biosigIO's `channel_labels_deduplicated` map from a store's root
+    attributes' `recording_metadata`, `{new_label: file_label}`, or {} when it
+    renamed nothing (or predates 1.2.9, which is when it started recording
+    this). The one reader of that key: `store_metadata` hands it the attrs it
+    already opened, `store_label_renames` the ones it reads from disk."""
+    rec_meta = root_attrs.get("recording_metadata")
+    renames = rec_meta.get("channel_labels_deduplicated") if isinstance(rec_meta, dict) else None
+    if not isinstance(renames, dict):
+        return {}
+    return {str(k): str(v) for k, v in renames.items()}
+
+
 def store_label_renames(store_path: str) -> dict[str, str]:
-    """biosigIO's `channel_labels_deduplicated` map from a written store's
-    `recording_metadata`, `{new_label: file_label}`, or {} when it renamed
-    nothing (or predates 1.2.9, which is when it started recording this)."""
+    """`label_renames` of a written store, read from its root `zarr.json`; {}
+    when that cannot be read."""
     try:
         with open(os.path.join(store_path, "zarr.json"), encoding="utf-8") as fh:
             attrs = json.load(fh).get("attributes") or {}
     except (OSError, ValueError):
         return {}
-    rec_meta = attrs.get("recording_metadata")
-    renames = rec_meta.get("channel_labels_deduplicated") if isinstance(rec_meta, dict) else None
-    if not isinstance(renames, dict):
-        return {}
-    return {str(k): str(v) for k, v in renames.items()}
+    return label_renames(attrs) if isinstance(attrs, dict) else {}
 
 
 def positions_for_renamed_labels(
