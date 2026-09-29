@@ -47,11 +47,17 @@ rewritten deterministically except for a listed DOI; nemar-citations' judge deci
   registry outage or the deadline does not fail the run: the lookup is reported as
   `failed` in `doi_resolution` and as a warning on the reindex result, and the labels fall
   back to the unresolved behavior. Nothing in the backend retries; re-running the reindex
-  is the operator's (or the sweep script's) call.
+  is the operator's (or the sweep script's) call. The warning exists only on the reindex
+  path: an enrichment triggered by a push (the `/webhooks/llm-enrich` callback) reports the
+  same counts in its body and logs the failed lookups to the Worker log, but raises no
+  warning anyone sees, so a registry outage during a push goes unnoticed until the next
+  reindex. For citation counts, nemar-citations' anchor judge and never-anchor list are the
+  backstop for labels chosen without registry metadata.
 - The bulk reindex route has no per-request dataset cap, and the DOI lookups make each
   dataset more expensive in subrequests; #1555 tracks paging it.
-- Existing metadata picks up the corrected labels only when re-enriched, so a sweep is
-  part of rolling this out.
+- Existing metadata picks up the corrected labels only when re-enriched (a reindex, or a
+  push that changes `README.md` or `dataset_description.json`), so a sweep is part of
+  rolling this out.
 - `URL` entries (the GitHub repo and NEMAR landing page `IsDescribedBy` links) are
   untouched; the rules apply to DOI entries only.
 

@@ -405,7 +405,7 @@ export interface EnrichmentRunResult {
    *  not answer, so the relation labels were chosen without some DOIs'
    *  metadata. Nothing here retries: the result carries a warning (see
    *  doiLookupWarnings), and re-running the reindex is up to the operator or
-   *  the sweep script in the #1550 runbook. */
+   *  the sweep script in the description of nemarOrg/nemar-cli#1550. */
   doi_resolution?: DoiResolutionSummary;
 }
 

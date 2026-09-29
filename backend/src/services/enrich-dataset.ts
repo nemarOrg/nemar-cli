@@ -165,8 +165,9 @@ export interface EnrichmentSuccessBody {
    *  (see enforceNeverDataPaper, #1549). */
   self_dois_dropped?: string[];
   /** Stage 1d DOI lookups (#1549). `failed` counts DOIs no registry answered
-   *  for (429, 5xx, timeout), so a sweep can retry the dataset; `unresolved`
-   *  counts DOIs the registries say do not exist. */
+   *  for (429, 5xx, timeout, the stage deadline); only reindexing the dataset
+   *  again recovers them. `unresolved` counts DOIs the registries say do not
+   *  exist. */
   doi_resolution: DoiResolutionSummary;
 }
 
