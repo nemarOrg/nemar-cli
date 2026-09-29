@@ -42,10 +42,14 @@ rewritten deterministically except for a listed DOI; nemar-citations' judge deci
   blocked: it is `nm000153`'s own descriptor. Only papers that describe no single dataset
   belong here.
 - Enrichment resolves up to 15 DOIs per run through one per-run registry cache shared with
-  ORCID discovery, so a DOI costs at most one request per registry. A registry outage does
-  not fail the run: the lookup is reported as `failed` in `doi_resolution` on the reindex
-  response, the labels fall back to the unresolved behavior, and the sweep retries the
-  dataset.
+  ORCID discovery, so a DOI costs at most one request per registry, and the whole stage
+  has a 25 s deadline. DOIs past the cap are listed in the prompt as not looked up. A
+  registry outage or the deadline does not fail the run: the lookup is reported as
+  `failed` in `doi_resolution` and as a warning on the reindex result, and the labels fall
+  back to the unresolved behavior. Nothing in the backend retries; re-running the reindex
+  is the operator's (or the sweep script's) call.
+- The bulk reindex route has no per-request dataset cap, and the DOI lookups make each
+  dataset more expensive in subrequests; #1555 tracks paging it.
 - Existing metadata picks up the corrected labels only when re-enriched, so a sweep is
   part of rolling this out.
 - `URL` entries (the GitHub repo and NEMAR landing page `IsDescribedBy` links) are
