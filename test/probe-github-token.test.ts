@@ -221,4 +221,33 @@ describe("probe-github-token", () => {
       caseOnlyDifference.stop();
     }
   });
+
+  test("a connection that never answers times out, fails, and never leaks the token", async () => {
+    const hung = Bun.serve({
+      port: 0,
+      // Well above the script's 10s fetch timeout: this test exists to prove
+      // the SCRIPT's own AbortSignal ends the hang, so the server's idle
+      // connection must outlive it. Bun.serve's default idleTimeout is only
+      // 10s, which would otherwise cut the connection first and mask a
+      // regression that dropped the script's timeout entirely.
+      idleTimeout: 60,
+      // The "stand-in that never answers": accepts the connection but the
+      // handler's promise never resolves, so the client is left hanging
+      // until its own timeout fires.
+      fetch: () => new Promise(() => {}),
+    });
+    try {
+      const result = await runProbe(["GH_TOKEN"], {
+        GH_TOKEN: "fake-token-should-never-appear",
+        GITHUB_API_BASE_URL: `http://localhost:${hung.port}`,
+      });
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toContain("::error::");
+      expect(result.stdout.toLowerCase()).toContain("network error");
+      expect(result.stdout).not.toContain("fake-token-should-never-appear");
+      expect(result.stderr).not.toContain("fake-token-should-never-appear");
+    } finally {
+      hung.stop(true);
+    }
+  }, 15_000);
 });
