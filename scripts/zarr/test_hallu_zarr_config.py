@@ -60,6 +60,7 @@ Run:
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
@@ -1244,3 +1245,122 @@ def test_only_the_drain_loop_passes_the_retry_scope():
     assert 'if convert_dataset "$id" "$version" retry-pending; then' in calls
     assert 'convert_dataset "$ONLY_DATASET" "$v"' in calls
     assert len(calls) == 2, calls
+
+
+# -- the queue verdict for a failed conversion (annex_object_missing, PR #1563) --
+
+
+def _failure_verdict(tmp_path: Path, callback: dict, rc: int = 1) -> list[str]:
+    """Run the REAL `convert_dataset` and `record_conversion_failure`, in that
+    order, over a driver that writes `callback` and exits `rc`, and return the
+    argv each `qpy` call received (one line per call, arguments tab-joined).
+
+    The driver, `qpy`, `nemar` and the logging helpers are stand-ins; the two
+    functions, the jq reads of the callback, and the choice of queue call are the
+    script's own, extracted verbatim.
+    """
+    record = tmp_path / "qpy.txt"
+    cb_src = tmp_path / "callback.json"
+    cb_src.write_text(json.dumps(callback))
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    python = venv / "bin" / "python"
+    python.write_text(
+        "#!/bin/sh\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        f'  if [ "$1" = "--callback-out" ]; then cp {shlex.quote(str(cb_src))} "$2"; fi\n'
+        "  shift\n"
+        "done\n"
+        f"exit {rc}\n"
+    )
+    python.chmod(0o755)
+    work = tmp_path / "work"
+    work.mkdir()
+    harness = "\n".join(
+        [
+            "set -uo pipefail",
+            f"WORK_DIR={shlex.quote(str(work))}",
+            f"LOG_FILE={shlex.quote(str(tmp_path / 'log.txt'))}",
+            f"VENV_DIR={shlex.quote(str(venv))}",
+            "DRIVER=generate_zarr.py S3_BUCKET=nemar AWS_REGION=us-east-2",
+            "CONTRACT_BASE=https://data.example CALLBACK_URL= NEMAR_WEBHOOK_TOKEN=",
+            "API_BASE=https://api.example JOBS=2",
+            "log() { :; }; err() { :; }",
+            'safe_rm() { rm -rf "$1"; }',
+            'nemar() { mkdir -p "${@: -1}"; }',
+            f'qpy() {{ local IFS=$\'\\t\'; printf "%s\\n" "$*" >> {shlex.quote(str(record))}; }}',
+            _function_source("convert_dataset"),
+            _function_source("record_conversion_failure"),
+            'convert_dataset nm000276 v1.0.0 retry-pending || record_conversion_failure nm000276',
+        ]
+    )
+    proc = subprocess.run(
+        ["bash", "-c", harness], capture_output=True, text=True, timeout=30, check=False
+    )
+    assert proc.returncode == 0, proc.stderr
+    return record.read_text().splitlines() if record.exists() else []
+
+
+_KEY = "SHA256E-s982--" + "ab" * 32 + ".vhdr"
+
+
+def _missing(n: int, *, errors: int | None = None, deterministic: bool = False, **extra) -> dict:
+    return {
+        "dataset_id": "nm000276",
+        "status": "failed",
+        "errors": n if errors is None else errors,
+        "deterministic": deterministic,
+        "annex_missing_count": n,
+        "annex_missing_first_path": "sub-01/eeg/sub-01_task-rest_eeg.vhdr",
+        "annex_missing_first_key": _KEY,
+        **extra,
+    }
+
+
+def test_every_recording_missing_its_object_is_a_retryable_fail(tmp_path):
+    (call,) = _failure_verdict(tmp_path, _missing(3))
+    argv = call.split("\t")
+    assert argv[:2] == ["fail", "nm000276"]
+    assert "--deterministic" not in argv, "must take the bounded backoff, not data_failed"
+    message = argv[2]
+    assert "storage lacks the annex object(s) of all 3 failed recording(s)" in message
+    assert f"s3://nemar/nm000276/objects/{_KEY}" in message
+    assert "--dataset nm000276 --requeue failed --execute" in message
+    assert "fix the upload" in message
+
+
+def test_a_deterministic_verdict_is_still_terminal(tmp_path):
+    # A genuine data failure alongside missing objects: the driver says
+    # deterministic, and that wins over the storage message.
+    (call,) = _failure_verdict(tmp_path, _missing(1, errors=2, deterministic=True))
+    argv = call.split("\t")
+    assert argv[-1] == "--deterministic"
+    assert "typed data failures" in argv[2]
+
+
+def test_missing_objects_alongside_infra_failures_get_the_generic_message(tmp_path):
+    (call,) = _failure_verdict(tmp_path, _missing(1, errors=2))
+    argv = call.split("\t")
+    assert "--deterministic" not in argv
+    assert argv[2].startswith("conversion failed (see ")
+
+
+def test_a_producer_error_is_not_blamed_on_storage(tmp_path):
+    (call,) = _failure_verdict(tmp_path, _missing(2, error="index failed schema validation"))
+    assert call.split("\t")[2].startswith("conversion failed (see ")
+
+
+def test_a_run_without_a_callback_gets_the_generic_retryable_fail(tmp_path):
+    # A crashed driver writes nothing; the verdict must not inherit anything.
+    (call,) = _failure_verdict(tmp_path, {"dataset_id": "nm000276", "status": "failed"})
+    argv = call.split("\t")
+    assert "--deterministic" not in argv
+    assert argv[2].startswith("conversion failed (see ")
+
+
+def test_the_drain_loop_routes_every_failure_through_the_verdict():
+    text = SCRIPT.read_text()
+    drain = text[text.index('if convert_dataset "$id" "$version" retry-pending; then') :]
+    drain = drain[: drain.index("\n  fi\n")]
+    assert 'record_conversion_failure "$id"' in drain
+    assert "qpy fail" not in drain
