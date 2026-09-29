@@ -8795,14 +8795,45 @@ class TestFdtDeclarationFile(unittest.TestCase):
             "path escapes the repo": {"sub-01/eeg/sub-01_eeg.set": {
                 **self.ENTRY, "fdt": "../elsewhere/a.fdt"}},
             "a boolean count": {"sub-01/eeg/sub-01_eeg.set": {**self.ENTRY, "trials": True}},
+            "an entry that is not an object": {"sub-01/eeg/sub-01_eeg.set": ["x.fdt"]},
         }
+        # Paths the loader must refuse whichever side of the pairing they are on.
+        unsafe = {
+            "empty segment": "derivatives//a.fdt",
+            "dot segment": "derivatives/./a.fdt",
+            "leading dot segment": "./derivatives/a.fdt",
+            "bare extension": ".fdt",
+            "bare extension in a folder": "derivatives/.fdt",
+            "NUL": "derivatives/a\0.fdt",
+            "absolute": "/derivatives/a.fdt",
+            "backslash": "derivatives\\a.fdt",
+            "wrong extension": "derivatives/a.set",
+            "not a string": 7,
+        }
+        for name, fdt in unsafe.items():
+            cases[f"fdt: {name}"] = {"sub-01/eeg/sub-01_eeg.set": {**self.ENTRY, "fdt": fdt}}
+        cases["set: dot segment"] = {"sub-01/./eeg/sub-01_eeg.set": dict(self.ENTRY)}
         for name, recordings in cases.items():
             with self.subTest(name), self.assertRaises(ValueError):
                 generate_zarr.load_fdt_declarations(self.write(self.doc(recordings)))
-        with self.assertRaises(ValueError):
-            generate_zarr.load_fdt_declarations(
-                self.write({"datasets": {"on000001": {"recordings": {}}}})  # no `reviewed`
-            )
+        shapes = {
+            "no `reviewed`": {"datasets": {"on000001": {"recordings": {}}}},
+            "recordings is not an object": {
+                "datasets": {"on000001": {"reviewed": "2026-09-28", "recordings": []}}},
+            "a dataset that is not an object": {"datasets": {"on000001": "x"}},
+            "datasets is not an object": {"datasets": []},
+            "unknown top-level key": {"datasets": {}, "extra": 1},
+            "unknown dataset key": {"datasets": {"on000001": {
+                "reviewed": "2026-09-28", "recordings": {}, "notes": "x"}}},
+            # fullmatch: a prefix match would accept a trailing suffix.
+            "dataset id with a suffix": {"datasets": {"on000001x": {
+                "reviewed": "2026-09-28", "recordings": {}}}},
+            "dataset id with a newline": {"datasets": {"on000001\n": {
+                "reviewed": "2026-09-28", "recordings": {}}}},
+        }
+        for name, doc in shapes.items():
+            with self.subTest(name), self.assertRaises(ValueError):
+                generate_zarr.load_fdt_declarations(self.write(doc))
 
 
 class TestDeclaredFdtConvertOne(unittest.TestCase):

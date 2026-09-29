@@ -57,6 +57,7 @@ import json
 import math
 import os
 import pickle
+import posixpath
 import re
 import shutil
 import subprocess
@@ -4835,7 +4836,7 @@ def materialize_local(
 FDT_DECLARATIONS_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "eeglab-fdt-declarations.json"
 )
-_FDT_DATASET_ID_RE = re.compile(r"^[a-z]{2}\d{6}$")
+_FDT_DATASET_ID_RE = re.compile(r"[a-z]{2}\d{6}")
 _FDT_DATASET_KEYS = frozenset({"reviewed", "note", "recordings"})
 _FDT_RECORDING_KEYS = frozenset({"fdt", "nbchan", "pnts", "trials", "fdt_bytes", "evidence"})
 
@@ -4865,12 +4866,18 @@ def _fdt_positive_int(value: object, where: str) -> int:
 
 
 def _fdt_safe_rel(value: object, ext: str, where: str) -> str:
+    # `normpath(value) == value` refuses empty and `.` segments and a trailing
+    # slash; the explicit terms refuse what normpath leaves alone (`..`, an
+    # absolute path, a backslash, NUL) and a bare extension with no stem.
     if (
         not isinstance(value, str)
         or not value.endswith(ext)
+        or posixpath.basename(value) == ext
+        or posixpath.normpath(value) != value
         or value.startswith("/")
         or ".." in value.split("/")
         or "\\" in value
+        or "\0" in value
     ):
         raise ValueError(f"{where} must be a repository-relative {ext} path, got {value!r}")
     return value
@@ -4886,8 +4893,8 @@ def load_fdt_declarations(
     otherwise be dropped and the entry read as something nobody reviewed), the
     declared byte count must equal ``nbchan * pnts * trials * 4`` (EEGLAB writes
     `.fdt` as float32), and one `.fdt` may back only one `.set`. A malformed
-    file raises (ValueError, or TypeError for a wrongly shaped value) and so
-    fails the run loudly rather than converting against a half-read
+    file raises ValueError (json.JSONDecodeError, a ValueError subclass, for
+    invalid JSON) and so fails the run loudly rather than converting against a half-read
     declaration. A missing file means no declarations."""
     try:
         with open(path, encoding="utf-8") as fh:
@@ -4902,10 +4909,10 @@ def load_fdt_declarations(
         raise ValueError(f"{path}: expected an object with 'description' and a 'datasets' object")
     out: dict[str, dict[str, FdtDeclaration]] = {}
     for dataset_id, ds in doc["datasets"].items():
-        if not _FDT_DATASET_ID_RE.match(dataset_id):
+        if not _FDT_DATASET_ID_RE.fullmatch(dataset_id):
             raise ValueError(f"{path}: {dataset_id!r} is not a dataset id")
         if not isinstance(ds, dict) or not isinstance(ds.get("recordings"), dict):
-            raise TypeError(f"{path}: {dataset_id} needs a 'recordings' object")
+            raise ValueError(f"{path}: {dataset_id} needs a 'recordings' object")
         unknown = set(ds) - _FDT_DATASET_KEYS
         if unknown:
             raise ValueError(f"{path}: {dataset_id} has unknown key(s) {sorted(unknown)}")
@@ -4919,7 +4926,7 @@ def load_fdt_declarations(
             if is_excluded_from_discovery(set_path):
                 raise ValueError(f"{where}: only a raw recording can be declared (ADR 0027)")
             if not isinstance(entry, dict):
-                raise TypeError(f"{where}: expected an object")
+                raise ValueError(f"{where}: expected an object")
             unknown = set(entry) - _FDT_RECORDING_KEYS
             missing = (_FDT_RECORDING_KEYS - {"evidence"}) - set(entry)
             if unknown or missing:
