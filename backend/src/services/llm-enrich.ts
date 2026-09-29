@@ -24,6 +24,11 @@ import {
 } from "../../../shared/never-data-paper.js";
 
 import { detectModalitiesFromTree, mapModalityToResourceType } from "./datacite.js";
+import {
+  type DoiResolution,
+  EMPTY_DOI_RESOLUTION,
+  formatResolvedDoiBlock,
+} from "./doi-metadata.js";
 
 /** Result of LLM enrichment (v2 format fields only). */
 export interface LlmEnrichmentResultV2 {
@@ -209,17 +214,32 @@ export async function enrichFromReadme(
   readmeContent: string,
   bidsDescription: Record<string, unknown>,
   config: LlmClientConfig,
+  doiResolution: DoiResolution = EMPTY_DOI_RESOLUTION,
 ): Promise<LlmEnrichmentResultV2> {
-  const userPrompt = `## BIDS dataset_description.json
+  const userPrompt = buildSourcesPrompt(readmeContent, bidsDescription, doiResolution);
+  const parsed = await callClaude(SYSTEM_PROMPT, userPrompt, config);
+  return validateLlmResultV2(parsed);
+}
+
+/**
+ * The source-material section shared by the enrichment, validation, and
+ * correction prompts: the BIDS description (dataset name and authors), then
+ * what each candidate DOI resolves to (#1549), then the README. The resolved
+ * block sits next to the name and authors so the model can compare them.
+ */
+export function buildSourcesPrompt(
+  readmeContent: string,
+  bidsDescription: Record<string, unknown>,
+  doiResolution: DoiResolution = EMPTY_DOI_RESOLUTION,
+): string {
+  const resolvedBlock = formatResolvedDoiBlock(doiResolution);
+  return `## BIDS dataset_description.json
 \`\`\`json
 ${JSON.stringify(bidsDescription, null, 2)}
 \`\`\`
-
+${resolvedBlock ? `\n${resolvedBlock}\n` : ""}
 ## README.md
 ${truncateReadme(readmeContent)}`;
-
-  const parsed = await callClaude(SYSTEM_PROMPT, userPrompt, config);
-  return validateLlmResultV2(parsed);
 }
 
 /**
@@ -948,19 +968,14 @@ export async function validateMetadata(
   readmeContent: string,
   bidsDescription: Record<string, unknown>,
   config: LlmClientConfig,
+  doiResolution: DoiResolution = EMPTY_DOI_RESOLUTION,
 ): Promise<{ metadata: NemarMetadataV2; validation: ValidationResult }> {
   const userPrompt = `## .nemar/metadata.json
 \`\`\`json
 ${JSON.stringify(metadata, null, 2)}
 \`\`\`
 
-## BIDS dataset_description.json
-\`\`\`json
-${JSON.stringify(bidsDescription, null, 2)}
-\`\`\`
-
-## README.md
-${truncateReadme(readmeContent)}`;
+${buildSourcesPrompt(readmeContent, bidsDescription, doiResolution)}`;
 
   const parsed = await callClaude(VALIDATION_PROMPT, userPrompt, config, 6000);
   const validation = parseValidationResult(parsed);
@@ -986,6 +1001,7 @@ export async function correctFromFeedback(
   readmeContent: string,
   bidsDescription: Record<string, unknown>,
   config: LlmClientConfig,
+  doiResolution: DoiResolution = EMPTY_DOI_RESOLUTION,
 ): Promise<LlmEnrichmentResultV2> {
   const correctionPrompt = `You are a metadata correction assistant for neuroimaging datasets.
 A validation judge has reviewed the metadata and found issues that need to be fixed.
@@ -1023,13 +1039,7 @@ ${numberedList(blockingIssues)}
 ## WARNINGS (optional to fix)
 ${numberedList(warnings)}
 
-## BIDS dataset_description.json
-\`\`\`json
-${JSON.stringify(bidsDescription, null, 2)}
-\`\`\`
-
-## README.md
-${truncateReadme(readmeContent)}`;
+${buildSourcesPrompt(readmeContent, bidsDescription, doiResolution)}`;
 
   const parsed = await callClaude(correctionPrompt, userPrompt, config, 6000);
   return validateLlmResultV2(parsed);

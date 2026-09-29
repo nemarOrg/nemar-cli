@@ -34,6 +34,13 @@ import {
 } from "./dataset-metadata-columns.js";
 import { reembedDatasetVector } from "./dataset-search.js";
 import {
+  type DoiResolution,
+  EMPTY_DOI_RESOLUTION,
+  collectCandidateDois,
+  resolveDoisForEnrichment,
+  titlesByDoi,
+} from "./doi-metadata.js";
+import {
   discoverOrcidsFromReferencedDois,
   extractDoisFromBids,
   extractDoisFromRelatedIdentifiers,
@@ -718,15 +725,50 @@ export async function enrichDataset(
       );
     }
 
+    // Stage 1d: look up what each candidate DOI actually is (#1549), so the
+    // LLM stages compare real titles/authors/years against this dataset
+    // instead of guessing from bare DOI strings, and so the never-data-paper
+    // guard can match BIDS-spec titles that are not on its DOI list.
+    // Non-fatal: an empty resolution reproduces the pre-#1549 behavior.
+    let doiResolution: DoiResolution = EMPTY_DOI_RESOLUTION;
+    try {
+      doiResolution = await resolveDoisForEnrichment(
+        collectCandidateDois(
+          readmeContent,
+          bidsDescription,
+          seededWithOrcids.related_identifiers,
+          datasetId,
+        ),
+      );
+      const { resolved, unresolved, skipped } = doiResolution;
+      const unresolvedNote = unresolved.length > 0 ? `, unresolved: ${unresolved.join(", ")}` : "";
+      const skippedNote =
+        skipped.length > 0 ? `, ${skipped.length} over the cap not looked up` : "";
+      console.log(
+        `[llm-enrich] Stage 1d (DOI metadata): ${datasetId} - resolved ${resolved.length}/${resolved.length + unresolved.length}${unresolvedNote}${skippedNote}`,
+      );
+    } catch (resolveErr) {
+      console.warn(
+        `[llm-enrich] Stage 1d (DOI metadata) failed for ${datasetId}, continuing without it: ${errorMessage(resolveErr)}`,
+      );
+    }
+    const resolvedTitles = titlesByDoi(doiResolution);
+    const resolveDemote = enforceNeverDataPaper(seededWithOrcids, resolvedTitles);
+    logDemote("resolve", resolveDemote);
+    seededWithOrcids = resolveDemote.result;
+
     // Stage 2: LLM enrichment (adds description, keywords, methods, etc.)
     const llmPrune = pruneUnsourcedDois(
-      await enrichFromReadme(readmeContent, bidsDescription, llmConfig),
+      await enrichFromReadme(readmeContent, bidsDescription, llmConfig, doiResolution),
       readmeContent,
       bidsDescription,
     );
     logPrune("enrich", llmPrune);
     const llmResult = llmPrune.result;
-    const enrichDemote = enforceNeverDataPaper(mergeWithExisting(seededWithOrcids, llmResult));
+    const enrichDemote = enforceNeverDataPaper(
+      mergeWithExisting(seededWithOrcids, llmResult),
+      resolvedTitles,
+    );
     logDemote("enrich", enrichDemote);
     const enriched = enrichDemote.result;
     const enrichedFields = Object.keys(llmResult).filter(
@@ -815,6 +857,7 @@ export async function enrichDataset(
           readmeContent,
           bidsDescription,
           llmConfig,
+          doiResolution,
         );
         validationResult = validated.validation;
         finalMetadata = validated.metadata;
@@ -839,6 +882,7 @@ export async function enrichDataset(
               readmeContent,
               bidsDescription,
               llmConfig,
+              doiResolution,
             ),
             readmeContent,
             bidsDescription,
@@ -846,6 +890,7 @@ export async function enrichDataset(
           logPrune(`correction-${correctionAttempts}`, correctionPrune);
           const correctionDemote = enforceNeverDataPaper(
             mergeWithExisting(currentMetadata, correctionPrune.result),
+            resolvedTitles,
           );
           logDemote(`correction-${correctionAttempts}`, correctionDemote);
           currentMetadata = correctionDemote.result;
@@ -956,7 +1001,7 @@ export async function enrichDataset(
 
     // Last word on relation types: whatever the stages above did, a
     // never-data-paper DOI leaves this function as References.
-    const finalDemote = enforceNeverDataPaper(finalMetadata);
+    const finalDemote = enforceNeverDataPaper(finalMetadata, resolvedTitles);
     logDemote("final", finalDemote);
     finalMetadata = finalDemote.result;
 
