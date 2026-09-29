@@ -8,6 +8,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildReindexFilterQuery,
+  doiLookupWarnings,
   extractEnrichmentSubErrors,
   looksLikeTagRef,
 } from "../backend/src/services/dataset-reindex";
@@ -218,6 +219,21 @@ describe("extractEnrichmentSubErrors", () => {
         issue_creation_error: "no perms",
       }),
     ).toEqual(["metadata_columns_error: d1 down", "issue_creation_error: no perms"]);
+  });
+});
+
+describe("doiLookupWarnings (#1549 follow-up)", () => {
+  test("a failed lookup becomes one warning with the count and the remedy", () => {
+    expect(doiLookupWarnings({ resolved: 9, unresolved: 1, failed: 2, skipped: 3 })).toEqual([
+      "doi_resolution: 2 of 12 DOI lookup(s) got no registry answer; reindex this dataset again to label them with registry metadata",
+    ]);
+  });
+
+  test("nothing to warn about without a failed lookup", () => {
+    // Unresolved (the registries said no such DOI) and skipped (over the cap)
+    // are not retryable, so they are not warnings.
+    expect(doiLookupWarnings({ resolved: 3, unresolved: 2, failed: 0, skipped: 4 })).toEqual([]);
+    expect(doiLookupWarnings(undefined)).toEqual([]);
   });
 });
 

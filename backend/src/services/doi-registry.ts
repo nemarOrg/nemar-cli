@@ -52,12 +52,17 @@ function isNetworkError(err: unknown): boolean {
   return /AbortError|TimeoutError|timeout|fetch|network/i.test(msg);
 }
 
-async function fetchOnce(registry: RegistryName, doiKey: string): Promise<RegistryRecord> {
+async function fetchOnce(
+  registry: RegistryName,
+  doiKey: string,
+  deadline?: AbortSignal,
+): Promise<RegistryRecord> {
   const { base, accept } = REGISTRY_ENDPOINTS[registry];
+  const perRequest = AbortSignal.timeout(REGISTRY_TIMEOUT_MS);
   try {
     const response = await fetch(`${base}/${encodeURIComponent(doiKey)}`, {
       headers: { Accept: accept, "User-Agent": USER_AGENT },
-      signal: AbortSignal.timeout(REGISTRY_TIMEOUT_MS),
+      signal: deadline ? AbortSignal.any([perRequest, deadline]) : perRequest,
     });
     const verdict = classifyRegistryStatus(response.status);
     if (verdict === "absent") return { outcome: "absent" };
@@ -68,6 +73,9 @@ async function fetchOnce(registry: RegistryName, doiKey: string): Promise<Regist
     }
     return { outcome: "found", body: await response.json() };
   } catch (err) {
+    // The caller's deadline, not the registry: one summary line is logged
+    // by the caller rather than a warning per request.
+    if (deadline?.aborted) return { outcome: "failed", detail: "deadline reached" };
     const detail = err instanceof Error ? err.message : String(err);
     if (isNetworkError(err)) {
       console.warn(`[doi-registry] ${registry} lookup failed for ${doiKey}: ${detail}`);
@@ -79,17 +87,33 @@ async function fetchOnce(registry: RegistryName, doiKey: string): Promise<Regist
 }
 
 /** Fetch one registry's record for `doi`, through `cache` when given. Never
- *  rejects: every failure comes back as `{ outcome: "failed" }`, logged. */
+ *  rejects: every failure comes back as `{ outcome: "failed" }`, logged.
+ *
+ *  `deadline` aborts the request when the caller's overall budget runs out
+ *  (it composes with the per-request timeout). A cached answer is returned
+ *  even after the deadline, since it costs nothing; a lookup the deadline cut
+ *  short is evicted from the cache once it settles, because it says nothing
+ *  about the registry and a later stage should be free to ask again. */
 export function fetchRegistryRecord(
   registry: RegistryName,
   doi: string,
   cache?: RegistryCache,
+  deadline?: AbortSignal,
 ): Promise<RegistryRecord> {
   const doiKey = normalizeDoiKey(doi);
   const cacheKey = `${registry}:${doiKey}`;
   const hit = cache?.get(cacheKey);
   if (hit) return hit;
-  const pending = fetchOnce(registry, doiKey);
-  cache?.set(cacheKey, pending);
+  const pending = fetchOnce(registry, doiKey, deadline);
+  if (cache) {
+    cache.set(cacheKey, pending);
+    if (deadline) {
+      void pending.then((record) => {
+        if (record.outcome === "failed" && deadline.aborted && cache.get(cacheKey) === pending) {
+          cache.delete(cacheKey);
+        }
+      });
+    }
+  }
   return pending;
 }

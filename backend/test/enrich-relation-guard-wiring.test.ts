@@ -127,4 +127,14 @@ describe("the DOI lookup counts reach the reindex response", () => {
     );
     expect(okBranch.slice(0, okBranch.indexOf("} catch"))).toContain("...reported,");
   });
+
+  test("failed lookups become a warning on the ok branch, never a failure", () => {
+    const source = read("dataset-reindex.ts");
+    const skipsAt = source.indexOf("const skips = extractEnrichmentSkips(outcome.body);");
+    const okBranch = source.slice(skipsAt, source.indexOf("} catch", skipsAt));
+    expect(okBranch).toContain("...doiLookupWarnings(reported.doi_resolution)");
+    expect(okBranch).toContain("ok: true");
+    const failBranch = source.slice(source.indexOf("if (subErrors.length > 0) {"), skipsAt);
+    expect(failBranch).not.toContain("doiLookupWarnings");
+  });
 });

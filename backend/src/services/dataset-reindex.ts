@@ -403,7 +403,9 @@ export interface EnrichmentRunResult {
   llm_usage?: LlmUsageTotals;
   /** Stage 1d DOI lookup counts (#1549). `failed > 0` means a registry did
    *  not answer, so the relation labels were chosen without some DOIs'
-   *  metadata; the enrichment sweep retries such a dataset. */
+   *  metadata. Nothing here retries: the result carries a warning (see
+   *  doiLookupWarnings), and re-running the reindex is up to the operator or
+   *  the sweep script in the #1550 runbook. */
   doi_resolution?: DoiResolutionSummary;
 }
 
@@ -467,6 +469,21 @@ export function extractEnrichmentSkips(body: unknown): string[] {
   const reason = typeof s.reason === "string" ? s.reason : "unknown";
   const message = typeof s.message === "string" ? s.message : "";
   return [`doi_sync: skipped (${reason})${message ? ` — ${message}` : ""}`];
+}
+
+/**
+ * Warnings for DOI lookups that got no registry answer (429, 5xx, timeout, or
+ * the stage deadline). Such a run still succeeds, so this is a warning on the
+ * same list as a deliberate skip, never a failure; it tells the operator the
+ * relation labels were chosen without some DOIs' metadata and that
+ * reindexing the dataset again is worthwhile.
+ */
+export function doiLookupWarnings(summary: DoiResolutionSummary | undefined): string[] {
+  if (!summary || summary.failed <= 0) return [];
+  const asked = summary.resolved + summary.unresolved + summary.failed;
+  return [
+    `doi_resolution: ${summary.failed} of ${asked} DOI lookup(s) got no registry answer; reindex this dataset again to label them with registry metadata`,
+  ];
 }
 
 /**
@@ -536,11 +553,12 @@ export async function runEnrichmentForDataset(
       return { ok: false, error: subErrors.join("; "), ref, ...reported };
     }
     const skips = extractEnrichmentSkips(outcome.body);
+    const warnings = [...skips, ...doiLookupWarnings(reported.doi_resolution)];
     return {
       ok: true,
       ref,
       ...reported,
-      ...(skips.length > 0 && { warnings: skips }),
+      ...(warnings.length > 0 && { warnings }),
     };
   } catch (err) {
     return { ok: false, error: errorMessage(err), ref };
