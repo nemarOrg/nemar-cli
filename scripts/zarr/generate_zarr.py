@@ -4528,7 +4528,7 @@ def download_blob(src: str, dst: str, expected_size: int | None) -> None:
                 raise RuntimeError(f"aws s3 cp exited {res.returncode}: {stderr}")
             got = os.path.getsize(tmp)
             if expected_size is not None and got != expected_size:
-                raise RuntimeError(
+                raise S3SizeMismatch(
                     f"truncated download: got {got} of {expected_size} bytes"
                 )
             os.replace(tmp, dst)
@@ -4542,7 +4542,12 @@ def download_blob(src: str, dst: str, expected_size: int | None) -> None:
                 raise
             if attempt < _AWS_RETRIES:
                 time.sleep(min(2**attempt, 30))
-    raise RuntimeError(f"download {src} -> {dst} failed after {_AWS_RETRIES} attempts: {last}")
+    # Still a RuntimeError either way, so every caller that treats this as an
+    # uncoded infra failure keeps doing so. The subclass only lets the chunk
+    # fetch tell "the copy kept arriving at the wrong size" apart, see
+    # `fetch_annex_object`.
+    failed = S3SizeMismatch if isinstance(last, S3SizeMismatch) else RuntimeError
+    raise failed(f"download {src} -> {dst} failed after {_AWS_RETRIES} attempts: {last}")
 
 
 def _s3_not_found(stderr: str) -> bool:
@@ -4556,6 +4561,14 @@ def _s3_not_found(stderr: str) -> bool:
     enough that the loose test would read a dropped connection as an absence."""
     err = stderr.lower()
     return "(404)" in err or "nosuchkey" in err
+
+
+class S3SizeMismatch(RuntimeError):
+    """`download_blob` copied the object, but not the byte count it expected, on
+    its last attempt. Uncoded like any RuntimeError; a distinct class only so a
+    chunk fetched under a CACHED chunk size can hand the question to the
+    listing, which can tell a short transfer from a chunk stored at the wrong
+    size."""
 
 
 class S3ObjectAbsent(Exception):
@@ -4751,7 +4764,8 @@ def fetch_annex_object(bucket: str, dataset_id: str, key: str, dst: str) -> None
     dataset stored without chunking costs exactly what it did before: one
     request. Only when that answers 404 is a chunked copy looked for: with the
     dataset's cached chunk size directly, otherwise (or when chunk 1 is not
-    there under the cached size) through one listing, whose answer is cached.
+    there under the cached size, or a chunk keeps arriving at the wrong size)
+    through one listing, whose answer is cached.
 
     Raises `AnnexObjectMissing` (typed, not retried) when the bucket definitely
     holds no complete copy; any other failure propagates as-is."""
@@ -4778,6 +4792,13 @@ def fetch_annex_object(bucket: str, dataset_id: str, key: str, dst: str) -> None
                 ) from exc
             # Not stored under the cached size at all: this key may have been
             # uploaded with another chunking. Its own listing decides.
+        except S3SizeMismatch:
+            # A chunk kept arriving at the wrong size. Uncoded, that would be
+            # retried as infra on every run for a chunk that is simply stored
+            # wrong; the listing reports each chunk's STORED size, so it types a
+            # stored-wrong chunk as `annex_object_missing`, and a transfer that
+            # was merely short is fetched again below.
+            pass
     chunk_size, problem = _complete_chunk_size(
         _list_annex_chunks(bucket, dataset_id, key), size, cached
     )
