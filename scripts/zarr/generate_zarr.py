@@ -4873,6 +4873,12 @@ class FdtDeclarationRefused(Exception):
     code = "fdt_declaration_refused"
 
 
+class FdtDeclarationFileError(ValueError):
+    """`eeglab-fdt-declarations.json` is malformed. One type for every refusal
+    the loader makes, wrong shape or wrong value alike, so a caller never has to
+    know which check fired; it fails the whole run, never one recording."""
+
+
 class FdtDeclaration(TypedDict):
     fdt: str
     nbchan: int
@@ -4885,7 +4891,7 @@ class FdtDeclaration(TypedDict):
 def _fdt_positive_int(value: object, where: str) -> int:
     # bool is an int subclass; `true` is never a channel count.
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-        raise ValueError(f"{where} must be a positive integer, got {value!r}")
+        raise FdtDeclarationFileError(f"{where} must be a positive integer, got {value!r}")
     return value
 
 
@@ -4903,7 +4909,7 @@ def _fdt_safe_rel(value: object, ext: str, where: str) -> str:
         or "\\" in value
         or "\0" in value
     ):
-        raise ValueError(f"{where} must be a repository-relative {ext} path, got {value!r}")
+        raise FdtDeclarationFileError(f"{where} must be a repository-relative {ext} path, got {value!r}")
     return value
 
 
@@ -4917,11 +4923,12 @@ def load_fdt_declarations(
     otherwise be dropped and the entry read as something nobody reviewed), the
     declared byte count must equal ``nbchan * pnts * trials * 4`` (EEGLAB writes
     `.fdt` as float32), ``annex_key`` must be a SHA256E key whose size field is
-    ``fdt_bytes``, and one `.fdt` (by path or by key) may back only one `.set`. A malformed
-    file raises ValueError (json.JSONDecodeError, a ValueError subclass, for
-    invalid JSON) and so fails the run loudly rather than converting against a half-read
-    declaration. A missing file means no declarations. ``path`` defaults to
-    ``FDT_DECLARATIONS_PATH``, read at call time."""
+    ``fdt_bytes``, and one `.fdt` (by path or by key) may back only one `.set`.
+    A malformed file raises FdtDeclarationFileError (a ValueError; invalid JSON
+    raises json.JSONDecodeError, also a ValueError) and so fails the run loudly
+    rather than converting against a half-read declaration. A missing file
+    means no declarations. ``path`` defaults to ``FDT_DECLARATIONS_PATH``, read
+    at call time."""
     path = path or FDT_DECLARATIONS_PATH
     try:
         with open(path, encoding="utf-8") as fh:
@@ -4933,18 +4940,18 @@ def load_fdt_declarations(
         or not isinstance(doc.get("datasets"), dict)
         or set(doc) - {"description", "datasets"}
     ):
-        raise ValueError(f"{path}: expected an object with 'description' and a 'datasets' object")
+        raise FdtDeclarationFileError(f"{path}: expected an object with 'description' and a 'datasets' object")
     out: dict[str, dict[str, FdtDeclaration]] = {}
     for dataset_id, ds in doc["datasets"].items():
         if not _FDT_DATASET_ID_RE.fullmatch(dataset_id):
-            raise ValueError(f"{path}: {dataset_id!r} is not a dataset id")
+            raise FdtDeclarationFileError(f"{path}: {dataset_id!r} is not a dataset id")
         if not isinstance(ds, dict) or not isinstance(ds.get("recordings"), dict):
-            raise ValueError(f"{path}: {dataset_id} needs a 'recordings' object")
+            raise FdtDeclarationFileError(f"{path}: {dataset_id} needs a 'recordings' object")
         unknown = set(ds) - _FDT_DATASET_KEYS
         if unknown:
-            raise ValueError(f"{path}: {dataset_id} has unknown key(s) {sorted(unknown)}")
+            raise FdtDeclarationFileError(f"{path}: {dataset_id} has unknown key(s) {sorted(unknown)}")
         if not isinstance(ds.get("reviewed"), str) or not ds["reviewed"]:
-            raise ValueError(f"{path}: {dataset_id} must record when it was 'reviewed'")
+            raise FdtDeclarationFileError(f"{path}: {dataset_id} must record when it was 'reviewed'")
         recs: dict[str, FdtDeclaration] = {}
         claimed: dict[str, str] = {}
         pinned_keys: dict[str, str] = {}
@@ -4952,28 +4959,28 @@ def load_fdt_declarations(
             where = f"{path}: {dataset_id} {set_path!r}"
             _fdt_safe_rel(set_path, ".set", where)
             if is_excluded_from_discovery(set_path):
-                raise ValueError(f"{where}: only a raw recording can be declared (ADR 0027)")
+                raise FdtDeclarationFileError(f"{where}: only a raw recording can be declared (ADR 0027)")
             if not isinstance(entry, dict):
-                raise ValueError(f"{where}: expected an object")
+                raise FdtDeclarationFileError(f"{where}: expected an object")
             unknown = set(entry) - _FDT_RECORDING_KEYS
             missing = (_FDT_RECORDING_KEYS - {"evidence"}) - set(entry)
             if unknown or missing:
-                raise ValueError(
+                raise FdtDeclarationFileError(
                     f"{where}: unknown key(s) {sorted(unknown)}, missing key(s) {sorted(missing)}"
                 )
             fdt = _fdt_safe_rel(entry["fdt"], ".fdt", f"{where} fdt")
             if fdt in claimed:
-                raise ValueError(f"{where}: {fdt!r} is already declared for {claimed[fdt]!r}")
+                raise FdtDeclarationFileError(f"{where}: {fdt!r} is already declared for {claimed[fdt]!r}")
             claimed[fdt] = set_path
             fdt_bytes = _fdt_positive_int(entry["fdt_bytes"], f"{where} fdt_bytes")
             key = entry["annex_key"]
             m = _FDT_ANNEX_KEY_RE.fullmatch(key) if isinstance(key, str) else None
             if m is None:
-                raise ValueError(f"{where}: annex_key must be a SHA256E git-annex key, got {key!r}")
+                raise FdtDeclarationFileError(f"{where}: annex_key must be a SHA256E git-annex key, got {key!r}")
             if int(m[1]) != fdt_bytes:
-                raise ValueError(f"{where}: annex_key size {m[1]} != fdt_bytes {fdt_bytes}")
+                raise FdtDeclarationFileError(f"{where}: annex_key size {m[1]} != fdt_bytes {fdt_bytes}")
             if key in pinned_keys:
-                raise ValueError(f"{where}: {key} is already declared for {pinned_keys[key]!r}")
+                raise FdtDeclarationFileError(f"{where}: {key} is already declared for {pinned_keys[key]!r}")
             pinned_keys[key] = set_path
             decl: FdtDeclaration = {
                 "fdt": fdt,
@@ -4985,7 +4992,7 @@ def load_fdt_declarations(
             }
             implied = decl["nbchan"] * decl["pnts"] * decl["trials"] * 4
             if decl["fdt_bytes"] != implied:
-                raise ValueError(
+                raise FdtDeclarationFileError(
                     f"{where}: fdt_bytes {decl['fdt_bytes']} != nbchan x pnts x trials x 4 "
                     f"= {implied}"
                 )

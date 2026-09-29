@@ -8826,6 +8826,13 @@ class TestFdtDeclarationFile(unittest.TestCase):
             "derivatives/fdt_files/sub13_sess-01/sub12_sess01.fdt",
         )
 
+    def test_invalid_json_is_a_value_error(self):
+        path = self.write({})
+        with open(path, "w") as fh:
+            fh.write("{not json")
+        with self.assertRaises(ValueError):
+            generate_zarr.load_fdt_declarations(path)
+
     def test_a_missing_file_declares_nothing(self):
         self.assertEqual(generate_zarr.load_fdt_declarations("/nonexistent/decl.json"), {})
 
@@ -8882,7 +8889,7 @@ class TestFdtDeclarationFile(unittest.TestCase):
             cases[f"fdt: {name}"] = {"sub-01/eeg/sub-01_eeg.set": {**self.ENTRY, "fdt": fdt}}
         cases["set: dot segment"] = {"sub-01/./eeg/sub-01_eeg.set": dict(self.ENTRY)}
         for name, recordings in cases.items():
-            with self.subTest(name), self.assertRaises(ValueError):
+            with self.subTest(name), self.assertRaises(generate_zarr.FdtDeclarationFileError):
                 generate_zarr.load_fdt_declarations(self.write(self.doc(recordings)))
         shapes = {
             "no `reviewed`": {"datasets": {"on000001": {"recordings": {}}}},
@@ -8900,7 +8907,7 @@ class TestFdtDeclarationFile(unittest.TestCase):
                 "reviewed": "2026-09-28", "recordings": {}}}},
         }
         for name, doc in shapes.items():
-            with self.subTest(name), self.assertRaises(ValueError):
+            with self.subTest(name), self.assertRaises(generate_zarr.FdtDeclarationFileError):
                 generate_zarr.load_fdt_declarations(self.write(doc))
 
 
