@@ -28,12 +28,25 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { Ajv2020 } from "ajv/dist/2020";
 import { zarrIndexSchema } from "../shared/contract/zarr-index.js";
 import indexSchema from "../shared/zarr-index.schema.json";
 import manifestSchema from "../shared/zarr-manifest.schema.json";
 import indexFixture from "./fixtures/zarr-index-v3.json";
 import manifestFixture from "./fixtures/zarr-manifest-v1.json";
+
+/** The converter's own bound on `units_report.unmatched_examples`, read from
+ *  its source so the schemas below are checked against the producer rather
+ *  than against a number restated here. */
+const UNMATCHED_EXAMPLES_MAX = (() => {
+  const source = readFileSync(new URL("../scripts/zarr/generate_zarr.py", import.meta.url), "utf8");
+  const match = /^UNMATCHED_EXAMPLES_MAX = (\d+)$/m.exec(source);
+  if (!match) throw new Error("UNMATCHED_EXAMPLES_MAX not found in generate_zarr.py");
+  return Number(match[1]);
+})();
+
+const examples = (n: number) => Array.from({ length: n }, (_, i) => `X${i}`);
 
 /** A fresh compiler per test: Ajv caches by `$id`, and the mutation tests
  *  deliberately compile altered copies of the same documents. */
@@ -120,12 +133,43 @@ describe("shared/zarr-index.schema.json", () => {
       { unmatched_channels: -1 },
       { unmatched_case_only: 0 },
       { unmatched_raw_label: 0 },
-      { unmatched_examples: ["a", "b", "c", "d", "e", "f"] },
+      { unmatched_examples: examples(UNMATCHED_EXAMPLES_MAX + 1) },
     ]) {
       const doc = withReport(bad);
       expect(validate(doc)).toBe(false);
       expect(zarrIndexSchema.safeParse(doc).success).toBe(false);
     }
+  });
+
+  test("unmatched_examples is bounded where the converter bounds it", () => {
+    // `UNMATCHED_EXAMPLES_MAX` in generate_zarr.py is the producer's bound;
+    // the JSON Schema's `maxItems` and zod's `.max()` restate it. Exactly the
+    // bound passes both validators and one more fails both, so neither copy
+    // can drift from the constant without this failing.
+    const units = (
+      indexSchema as {
+        $defs: {
+          store: { properties: { units_report: { properties: Record<string, unknown> } } };
+        };
+      }
+    ).$defs.store.properties.units_report.properties;
+    expect((units.unmatched_examples as { maxItems: number }).maxItems).toBe(
+      UNMATCHED_EXAMPLES_MAX,
+    );
+    const validate = compile(indexSchema);
+    const doc = (n: number) => {
+      const d = structuredClone(indexFixture) as { stores: Record<string, unknown>[] };
+      d.stores[0].units_report = {
+        converted: 0,
+        unmatched_channels: n,
+        unmatched_examples: examples(n),
+      };
+      return d;
+    };
+    expect(validate(doc(UNMATCHED_EXAMPLES_MAX))).toBe(true);
+    expect(zarrIndexSchema.safeParse(doc(UNMATCHED_EXAMPLES_MAX)).success).toBe(true);
+    expect(validate(doc(UNMATCHED_EXAMPLES_MAX + 1))).toBe(false);
+    expect(zarrIndexSchema.safeParse(doc(UNMATCHED_EXAMPLES_MAX + 1)).success).toBe(false);
   });
 
   test("a schema whose $ref dangles fails to compile, not to validate", () => {
