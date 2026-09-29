@@ -10,16 +10,20 @@
  * the fallback) and renders a compact "Resolved DOI metadata" block for the
  * enrichment, validation, and correction prompts.
  *
- * Bounded by design: at most {@link MAX_RESOLVED_DOIS} lookups per run, a
- * short per-request timeout, and a small concurrency window, so a slow
- * registry cannot stall enrichment or exhaust the Worker's subrequest budget.
- * A failed lookup degrades to "unresolved": the LLM then labels that DOI the
- * way it did before this module existed.
+ * Bounded by design: at most {@link MAX_RESOLVED_DOIS} lookups per run and a
+ * small concurrency window, so a slow registry cannot stall enrichment or
+ * exhaust the Worker's subrequest budget. Lookups go through the run's
+ * registry cache (doi-registry.ts), so a DOI that ORCID discovery already
+ * fetched costs nothing here. A lookup that got no answer is `failed`, not
+ * `unresolved`: the run still completes, labeling that DOI the way it did
+ * before this module existed, and the reindex response reports the count so
+ * the sweep can retry the dataset.
  */
 
 import type { RelatedIdentifierEntry } from "../../../shared/datacite-constants.js";
-import { normalizeDoiKey } from "../../../shared/never-data-paper.js";
+import { isOwnNemarDoi, normalizeDoiKey } from "../../../shared/never-data-paper.js";
 import { extractDoisFromBids } from "./doi-orcid-discovery.js";
+import { type RegistryCache, type RegistryRecord, fetchRegistryRecord } from "./doi-registry.js";
 
 export interface ResolvedDoi {
   /** Normalized DOI (see normalizeDoiKey). */
@@ -29,29 +33,48 @@ export interface ResolvedDoi {
   year?: number;
   /** Journal, proceedings, or repository name. */
   container?: string;
-  /** DataCite resourceTypeGeneral / resourceType, or the Crossref `type`. */
+  /** DataCite resourceType (else resourceTypeGeneral), or the Crossref `type`. */
   type?: string;
+  /** DataCite resourceTypeGeneral only; never set from Crossref. `Dataset`
+   *  is what licenses a References -> IsDerivedFrom promotion. */
+  resource_type_general?: string;
 }
 
 export interface DoiResolution {
   resolved: ResolvedDoi[];
-  /** Looked up, but neither registry answered. */
+  /** Every registry asked answered that it has no usable record. */
   unresolved: string[];
+  /** At least one registry gave no answer (429, 5xx, timeout, network) and
+   *  none resolved the DOI. Worth retrying; says nothing about the DOI. */
+  failed: string[];
   /** Not looked up because the candidate list exceeded the cap. */
   skipped: string[];
 }
 
-export const EMPTY_DOI_RESOLUTION: DoiResolution = { resolved: [], unresolved: [], skipped: [] };
+/** Counts only, for the enrichment and reindex response bodies. */
+export interface DoiResolutionSummary {
+  resolved: number;
+  unresolved: number;
+  failed: number;
+  skipped: number;
+}
+
+export const EMPTY_DOI_RESOLUTION: DoiResolution = {
+  resolved: [],
+  unresolved: [],
+  failed: [],
+  skipped: [],
+};
 
 export const MAX_RESOLVED_DOIS = 15;
-const RESOLVE_TIMEOUT_MS = 8_000;
 const RESOLVE_CONCURRENCY = 5;
-// Polite pool: identify ourselves per Crossref etiquette (same identity as
-// the ORCID-discovery client in doi-orcid-discovery.ts).
-const USER_AGENT = "NEMAR/1.0 (https://nemar.org; mailto:nemar@ucsd.edu)";
-const DATACITE_CN = "https://api.datacite.org/application/vnd.datacite.datacite+json";
+const MAX_TITLE_CHARS = 300;
+const MAX_FIELD_CHARS = 120;
 
-const DOI_IN_TEXT = /\b10\.\d{4,9}\/[^\s"'<>()[\]{},;]+/g;
+// Same character class as nemar-citations' `_DOI_BARE`: parentheses are kept
+// so `10.1016/S0006-3223(99)00000-0` survives, and normalizeDoiKey trims the
+// unmatched `)` of a DOI captured from `(see 10.x/y)` or a Markdown link.
+const DOI_IN_TEXT = /\b10\.\d{4,9}\/[-._;()/:\w]+/gi;
 const DOI_SHAPE = /^10\.\d{4,9}\/\S+$/;
 
 /**
@@ -68,13 +91,11 @@ export function collectCandidateDois(
   relatedIdentifiers: RelatedIdentifierEntry[] = [],
   datasetId?: string,
 ): string[] {
-  const ownPrefix = datasetId ? `10.82901/nemar.${datasetId.toLowerCase()}` : undefined;
   const seen = new Set<string>();
   const out: string[] = [];
   const add = (raw: string) => {
-    // Prose often ends a DOI with sentence punctuation.
-    const key = normalizeDoiKey(raw).replace(/[.:]+$/, "");
-    if (ownPrefix && (key === ownPrefix || key.startsWith(`${ownPrefix}.`))) return;
+    const key = normalizeDoiKey(raw);
+    if (isOwnNemarDoi(key, datasetId)) return;
     if (DOI_SHAPE.test(key) && !seen.has(key)) {
       seen.add(key);
       out.push(key);
@@ -88,8 +109,26 @@ export function collectCandidateDois(
   return out;
 }
 
-function firstString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+/**
+ * Registry text is untrusted: it lands in an LLM prompt. Strip markup
+ * (Crossref titles carry `<i>`, `<scp>`, `<sub>`), control characters, and
+ * line breaks, so a title cannot open a new prompt section; swap double
+ * quotes for single ones, since titles are shown quoted; and cap the length.
+ */
+export function sanitizeRegistryText(value: string, maxChars: number): string {
+  const flat = value
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\p{Cc}/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/"/g, "'");
+  return flat.length > maxChars ? `${flat.slice(0, maxChars - 3).trimEnd()}...` : flat;
+}
+
+function cleanString(value: unknown, maxChars = MAX_FIELD_CHARS): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const clean = sanitizeRegistryText(value, maxChars);
+  return clean || undefined;
 }
 
 function toYear(value: unknown): number | undefined {
@@ -97,115 +136,126 @@ function toYear(value: unknown): number | undefined {
   return Number.isInteger(n) && n > 1000 && n < 3000 ? n : undefined;
 }
 
-/** Map a DataCite content-negotiation JSON document onto ResolvedDoi. */
+/** Map a DataCite content-negotiation JSON document onto ResolvedDoi. Null
+ *  when the document has no usable title. */
 export function parseDataCiteJson(doi: string, raw: unknown): ResolvedDoi | null {
   if (!raw || typeof raw !== "object") return null;
   const d = raw as Record<string, unknown>;
-  const titles = Array.isArray(d.titles) ? (d.titles as Array<{ title?: unknown }>) : [];
+  const titles = Array.isArray(d.titles) ? (d.titles as Array<{ title?: unknown } | null>) : [];
   const creators = Array.isArray(d.creators)
-    ? (d.creators as Array<{ name?: unknown; familyName?: unknown }>)
+    ? (d.creators as Array<{ name?: unknown; familyName?: unknown } | null>)
     : [];
   const types = (d.types ?? {}) as { resourceTypeGeneral?: unknown; resourceType?: unknown };
   const container = (d.container ?? {}) as { title?: unknown };
-  const publisher = d.publisher as { name?: unknown } | string | undefined;
-  const title = firstString(titles[0]?.title);
+  const publisher = d.publisher as { name?: unknown } | string | null | undefined;
+  const title = cleanString(titles[0]?.title, MAX_TITLE_CHARS);
   if (!title) return null;
   return {
     doi,
     title,
-    first_author: firstString(creators[0]?.familyName) ?? firstString(creators[0]?.name),
+    first_author: cleanString(creators[0]?.familyName) ?? cleanString(creators[0]?.name),
     year: toYear(d.publicationYear),
     container:
-      firstString(container.title) ??
-      (typeof publisher === "string" ? firstString(publisher) : firstString(publisher?.name)),
-    type: firstString(types.resourceType) ?? firstString(types.resourceTypeGeneral),
+      cleanString(container.title) ??
+      (typeof publisher === "string" ? cleanString(publisher) : cleanString(publisher?.name)),
+    type: cleanString(types.resourceType) ?? cleanString(types.resourceTypeGeneral),
+    resource_type_general: cleanString(types.resourceTypeGeneral),
   };
 }
 
-/** Map a Crossref `/works/{doi}` response onto ResolvedDoi. */
+/** Map a Crossref `/works/{doi}` response onto ResolvedDoi. Null when the
+ *  response has no usable title. */
 export function parseCrossrefWork(doi: string, raw: unknown): ResolvedDoi | null {
   if (!raw || typeof raw !== "object") return null;
-  const m = (raw as { message?: Record<string, unknown> }).message;
-  if (!m) return null;
-  const title = firstString(Array.isArray(m.title) ? m.title[0] : undefined);
+  const m = (raw as { message?: Record<string, unknown> | null }).message;
+  if (!m || typeof m !== "object") return null;
+  const title = cleanString(Array.isArray(m.title) ? m.title[0] : undefined, MAX_TITLE_CHARS);
   if (!title) return null;
   const authors = Array.isArray(m.author)
-    ? (m.author as Array<{ family?: unknown; name?: unknown }>)
+    ? (m.author as Array<{ family?: unknown; name?: unknown } | null>)
     : [];
-  const issued = m.issued as { "date-parts"?: unknown[][] } | undefined;
+  const issued = m.issued as { "date-parts"?: unknown } | null | undefined;
+  const dateParts = issued?.["date-parts"];
+  const firstPart = Array.isArray(dateParts) && Array.isArray(dateParts[0]) ? dateParts[0] : [];
   return {
     doi,
     title,
-    first_author: firstString(authors[0]?.family) ?? firstString(authors[0]?.name),
-    year: toYear(issued?.["date-parts"]?.[0]?.[0]),
+    first_author: cleanString(authors[0]?.family) ?? cleanString(authors[0]?.name),
+    year: toYear(firstPart[0]),
     container:
-      firstString(Array.isArray(m["container-title"]) ? m["container-title"][0] : undefined) ??
-      firstString(m.publisher),
-    type: firstString(m.type),
+      cleanString(Array.isArray(m["container-title"]) ? m["container-title"][0] : undefined) ??
+      cleanString(m.publisher),
+    type: cleanString(m.type),
   };
 }
 
-async function fetchJson(url: string, accept: string, label: string): Promise<unknown | null> {
-  try {
-    const response = await fetch(url, {
-      headers: { Accept: accept, "User-Agent": USER_AGENT },
-      signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS),
-    });
-    if (!response.ok) {
-      // 404 is the ordinary "this registry does not know the DOI" answer.
-      if (response.status !== 404) {
-        console.warn(`[doi-metadata] ${label} returned HTTP ${response.status} for ${url}`);
-      }
-      return null;
-    }
-    return await response.json();
-  } catch (err) {
-    console.warn(
-      `[doi-metadata] ${label} lookup failed for ${url}: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return null;
-  }
+export type DoiLookup =
+  | { status: "resolved"; record: ResolvedDoi }
+  | { status: "unresolved" }
+  | { status: "failed" };
+
+/**
+ * What the registry answers for one DOI add up to. `dataCite` is always
+ * asked; `crossref` only when DataCite gave no usable record (undefined when
+ * it was not asked). `unresolved` only when every registry asked answered
+ * definitively without a usable record; `failed` when any of them gave no
+ * answer at all, since the missing answer might have resolved it.
+ */
+export function interpretRegistryRecords(
+  doi: string,
+  dataCite: RegistryRecord,
+  crossref?: RegistryRecord,
+): DoiLookup {
+  const fromDataCite = dataCite.outcome === "found" ? parseDataCiteJson(doi, dataCite.body) : null;
+  if (fromDataCite) return { status: "resolved", record: fromDataCite };
+  const fromCrossref = crossref?.outcome === "found" ? parseCrossrefWork(doi, crossref.body) : null;
+  if (fromCrossref) return { status: "resolved", record: fromCrossref };
+  const anyFailed = dataCite.outcome === "failed" || crossref?.outcome === "failed";
+  return anyFailed ? { status: "failed" } : { status: "unresolved" };
 }
 
 /** Look one DOI up in DataCite (content negotiation covers Crossref DOIs
- *  too), then Crossref. Null when neither registry has a title for it.
- *  The Crossref leg only runs when DataCite errors or lacks a title; live
- *  registries cannot force that, so the integration suite covers the parser
- *  (parseCrossrefWork) on a live Crossref response rather than the branch. */
-export async function resolveDoi(doi: string): Promise<ResolvedDoi | null> {
+ *  too), then, only when DataCite has no usable record, in Crossref. */
+export async function resolveDoi(doi: string, cache?: RegistryCache): Promise<DoiLookup> {
   const key = normalizeDoiKey(doi);
-  const dc = await fetchJson(
-    `${DATACITE_CN}/${encodeURIComponent(key)}`,
-    "application/vnd.datacite.datacite+json",
-    "DataCite",
-  );
-  const fromDataCite = parseDataCiteJson(key, dc);
-  if (fromDataCite) return fromDataCite;
-  const cr = await fetchJson(
-    `https://api.crossref.org/works/${encodeURIComponent(key)}`,
-    "application/json",
-    "Crossref",
-  );
-  return parseCrossrefWork(key, cr);
+  const dataCite = await fetchRegistryRecord("DataCite", key, cache);
+  const first = interpretRegistryRecords(key, dataCite);
+  if (first.status === "resolved") return first;
+  const crossref = await fetchRegistryRecord("Crossref", key, cache);
+  return interpretRegistryRecords(key, dataCite, crossref);
 }
 
-/** Resolve up to {@link MAX_RESOLVED_DOIS} candidates, a few at a time. */
+/** Resolve up to `cap` candidates, a few at a time. */
 export async function resolveDoisForEnrichment(
   dois: string[],
+  cache?: RegistryCache,
   cap: number = MAX_RESOLVED_DOIS,
 ): Promise<DoiResolution> {
   const toResolve = dois.slice(0, cap);
-  const resolved: ResolvedDoi[] = [];
-  const unresolved: string[] = [];
+  const resolution: DoiResolution = {
+    resolved: [],
+    unresolved: [],
+    failed: [],
+    skipped: dois.slice(cap),
+  };
   for (let i = 0; i < toResolve.length; i += RESOLVE_CONCURRENCY) {
     const chunk = toResolve.slice(i, i + RESOLVE_CONCURRENCY);
-    const results = await Promise.all(chunk.map((doi) => resolveDoi(doi)));
-    results.forEach((result, j) => {
-      if (result) resolved.push(result);
-      else unresolved.push(chunk[j]);
+    const lookups = await Promise.all(chunk.map((doi) => resolveDoi(doi, cache)));
+    lookups.forEach((lookup, j) => {
+      if (lookup.status === "resolved") resolution.resolved.push(lookup.record);
+      else resolution[lookup.status].push(chunk[j]);
     });
   }
-  return { resolved, unresolved, skipped: dois.slice(cap) };
+  return resolution;
+}
+
+export function summarizeDoiResolution(resolution: DoiResolution): DoiResolutionSummary {
+  return {
+    resolved: resolution.resolved.length,
+    unresolved: resolution.unresolved.length,
+    failed: resolution.failed.length,
+    skipped: resolution.skipped.length,
+  };
 }
 
 /** Normalized DOI -> resolved title, for the title rule of the
@@ -216,11 +266,22 @@ export function titlesByDoi(resolution: DoiResolution): Map<string, string> {
   return titles;
 }
 
+/** Normalized DOIs whose DataCite resourceTypeGeneral is `Dataset`: the only
+ *  DOIs mergeWithExisting lets the LLM mark IsDerivedFrom. */
+export function datasetDoisOf(resolution: DoiResolution): Set<string> {
+  const dois = new Set<string>();
+  for (const r of resolution.resolved) {
+    if (r.resource_type_general?.toLowerCase() === "dataset") dois.add(r.doi);
+  }
+  return dois;
+}
+
 /** Prompt block listing what each candidate DOI is. Empty string when there
- *  is nothing to show, so callers can append it unconditionally. */
+ *  is nothing to show, so callers can append it unconditionally. All text
+ *  from the registries was sanitized when it was parsed. */
 export function formatResolvedDoiBlock(resolution: DoiResolution): string {
-  const { resolved, unresolved } = resolution;
-  if (resolved.length === 0 && unresolved.length === 0) return "";
+  const { resolved, unresolved, failed } = resolution;
+  if (resolved.length === 0 && unresolved.length === 0 && failed.length === 0) return "";
   const lines = resolved.map((r) => {
     const fields = [
       `title: "${r.title}"`,
@@ -228,10 +289,14 @@ export function formatResolvedDoiBlock(resolution: DoiResolution): string {
       r.year && `year: ${r.year}`,
       r.container && `venue: ${r.container}`,
       r.type && `type: ${r.type}`,
+      r.resource_type_general &&
+        r.resource_type_general !== r.type &&
+        `DataCite class: ${r.resource_type_general}`,
     ].filter(Boolean);
     return `- ${r.doi} | ${fields.join(" | ")}`;
   });
   for (const doi of unresolved) lines.push(`- ${doi} | unresolved (no registry record found)`);
+  for (const doi of failed) lines.push(`- ${doi} | lookup failed (registry did not answer)`);
   return `## Resolved DOI metadata
 What each DOI in the sources actually is, looked up in DataCite / Crossref. Compare titles,
 authors, and years with the dataset's own name and authors when choosing relation types.
