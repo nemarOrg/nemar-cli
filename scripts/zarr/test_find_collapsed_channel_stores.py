@@ -232,7 +232,9 @@ class TestRetryAfter(unittest.TestCase):
         self.assertEqual(fc.retry_after_seconds(" 0 "), 0.0)
         now = 1_800_000_000.0
         date = email.utils.formatdate(now + 30, usegmt=True)
-        self.assertAlmostEqual(fc.retry_after_seconds(date, now=now), 30.0)
+        seconds = fc.retry_after_seconds(date, now=now)
+        assert seconds is not None
+        self.assertAlmostEqual(seconds, 30.0)
         past = email.utils.formatdate(now - 30, usegmt=True)
         self.assertEqual(fc.retry_after_seconds(past, now=now), 0.0)
 
