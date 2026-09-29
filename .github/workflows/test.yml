@@ -723,15 +723,23 @@ jobs:
   # so a dead GH_TOKEN or a broken upload path is caught before the merge
   # that deploys it, not only after (issue #1321). `pull_request` events
   # targeting `main` already trigger this workflow (see the `on:` block
-  # above), and a same-repo PR (never a fork) still gets secrets, so no
-  # separate wiring is needed to reach this job.
+  # above); a same-repo PR still gets secrets, but a fork PR does not, which
+  # is why the `pull_request` branch below also checks `head.repo.full_name`
+  # (same guard the "Check out the docs content tree" step above uses): a
+  # fork PR targeting main would otherwise run this job, fail on the missing
+  # GH_TOKEN, and turn an outside contributor's unrelated PR red for a
+  # reason they cannot fix. Skipping is the correct outcome there.
   e2e-upload:
     runs-on: ubuntu-latest
     needs: changes
     if: |
       (
         (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-        (github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main')
+        (
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.base.ref == 'main' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        )
       ) &&
       (needs.changes.outputs.backend == 'true' || needs.changes.outputs.tests == 'true' || needs.changes.outputs.cli == 'true')
     steps:
