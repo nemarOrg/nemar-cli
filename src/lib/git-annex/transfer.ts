@@ -9,6 +9,7 @@
 import { statSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { annexKeyDeclaredSize } from "../s3-server-copy.js";
 import { chunkAddTargets } from "./init.js";
 import { shouldAnnex } from "./policy.js";
 import { runCommand } from "./run-command.js";
@@ -297,6 +298,24 @@ export async function getDatasetData(
     onProgress?: DownloadProgressCallback;
     /** Treat any unavailable file as a failure (CLI --require-complete). */
     requireComplete?: boolean;
+    /**
+     * Run this invocation with `-c annex.verify=false`: git-annex skips
+     * hashing each file against its key on receipt. Passed as a one-off `-c`
+     * override, never written to repo or global git config (#1523).
+     *
+     * **Measured on git-annex 10.20260901: with verify off, `get` does not
+     * even enforce the declared SIZE.** A remote object truncated to half its
+     * key's `-s<bytes>` length, or swapped for different same-size content,
+     * both come back `"success":true`. So when this is set, every file this
+     * call reports as newly retrieved is re-checked here against the size
+     * encoded in its key (the same size-only guarantee ADR 0062 gives the
+     * HTTP path), and a mismatch is downgraded to a failure rather than
+     * trusted. A mismatching file is also hunted with a local `fsck --fast`
+     * (a stat, not a re-hash) so git-annex's own location log stops
+     * claiming "here" holds good content -- the same reasoning ADR 0063
+     * gives for never keeping an unproven copy.
+     */
+    noVerify?: boolean;
   } = {},
 ): Promise<GetDataResult> {
   const jobs = options.jobs || 4;
@@ -310,9 +329,13 @@ export async function getDatasetData(
   );
 
   try {
-    // Streaming mode: parse --json-progress lines as they arrive
+    // Streaming mode: parse --json-progress lines as they arrive.
+    // `-c annex.verify=false` (a git global option) must precede `annex`, not
+    // follow it -- git-annex has no such flag of its own, and it is never
+    // written to config (see the option doc above).
     const args = [
       "git",
+      ...(options.noVerify ? ["-c", "annex.verify=false"] : []),
       "annex",
       "get",
       "--json",
@@ -338,6 +361,9 @@ export async function getDatasetData(
     const failureNotes: string[] = [];
     let stderrOutput = "";
     const stderrChunks: Uint8Array[] = [];
+    // Files this run reported as retrieved, kept only to re-check their size
+    // when `noVerify` is set (see the option doc above); unused otherwise.
+    const retrievedThisRun: Array<{ file: string; key: string }> = [];
 
     // Tally a completion line. Byte-progress lines carry neither `ok` nor
     // `success`, so they fall through both branches and are only forwarded to
@@ -347,6 +373,10 @@ export async function getDatasetData(
       options.onProgress?.(parsed);
       if (parsed.ok === true || parsed.success === true) {
         filesDownloaded++;
+        if (options.noVerify) {
+          const file = parsed.file ?? parsed.action?.file;
+          if (file && parsed.key) retrievedThisRun.push({ file, key: parsed.key });
+        }
       } else if (parsed.ok === false || parsed.success === false) {
         filesUnavailable++;
         const file = parsed.file ?? parsed.action?.file;
@@ -432,6 +462,47 @@ export async function getDatasetData(
       };
     }
 
+    // Re-check size for everything this run retrieved, when verification was
+    // skipped. Deliberately AFTER the whole-run-error return above (that one
+    // reads git-annex's own exit code and tally, untouched by this) and
+    // AFTER `proc.exited` (running `fsck` while `get` is still writing to the
+    // shared git-annex branch journal risks the two racing on it). A mismatch
+    // downgrades the file from downloaded to unavailable, which is exactly
+    // what an absent file looks like to `classifyGetOutcome` below -- a
+    // corrupted no-verify fetch is reported the same way a genuinely missing
+    // file is, not silently kept as a success.
+    if (options.noVerify && retrievedThisRun.length > 0) {
+      const badPaths: string[] = [];
+      for (const { file, key } of retrievedThisRun) {
+        const declaredSize = annexKeyDeclaredSize(key);
+        if (declaredSize === null) continue; // key does not embed a size to check
+        let actualSize: number | null;
+        try {
+          actualSize = statSync(join(datasetPath, file)).size;
+        } catch {
+          actualSize = null;
+        }
+        if (actualSize === declaredSize) continue;
+        filesDownloaded--;
+        filesUnavailable++;
+        badPaths.push(file);
+        if (unavailablePaths.length < MAX_UNAVAILABLE_SAMPLE) unavailablePaths.push(file);
+        failureNotes.push(
+          `${file}: --no-verify accepted ${actualSize === null ? "a file that is no longer readable" : `${actualSize} byte(s)`}, but the key declares ${declaredSize}`,
+        );
+      }
+      // Best-effort quarantine through git-annex's own fsck, so the location
+      // log stops claiming "here" holds good content. `--fast` is a stat, not
+      // a re-hash of every good file too, so it costs nothing this run has
+      // not already paid; its own success or failure does not change the
+      // result already computed above.
+      if (badPaths.length > 0) {
+        await runCommand(["git", "annex", "fsck", "--fast", "--", ...badPaths], {
+          cwd: datasetPath,
+        });
+      }
+    }
+
     const failureText = `${stderrOutput}\n${failureNotes.join("\n")}`;
     const outcome = classifyGetOutcome({
       retrieved: filesDownloaded,
@@ -442,7 +513,11 @@ export async function getDatasetData(
     return toGetDataResult(
       outcome,
       { filesDownloaded, filesUnavailable, unavailablePaths },
-      stderrOutput,
+      // `failureText` (stderr plus per-file notes), not bare stderr: a
+      // no-verify size mismatch has nothing in git-annex's own stderr --
+      // git-annex thought the transfer succeeded -- so the only place the
+      // reason lives is the note this function pushed above.
+      failureText,
     );
   } catch (e) {
     return {
