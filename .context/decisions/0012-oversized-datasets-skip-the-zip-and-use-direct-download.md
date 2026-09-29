@@ -27,7 +27,7 @@ Datasets over `ARCHIVE_MAX_BYTES` (100 GiB) **or** `ARCHIVE_MAX_FILES` (200,000)
 
 ## Amendment 2026-09-28 (#1514): the manifest was never the only source, and readiness has a version
 
-nm000284 (512.4 GiB, 14,922 files, five times over `ARCHIVE_MAX_BYTES`) got a zip built for v1.0.0 and a second build dispatched for v1.0.1, both bypassing the policy this ADR describes. Two independent gaps, found together:
+nm000284 (512.5 GiB, 14,922 files, five times over `ARCHIVE_MAX_BYTES`) got a zip built for v1.0.0 and a second build dispatched for v1.0.1, both bypassing the policy this ADR describes. Two independent gaps, found together:
 
 - **The preflight's one size source has a hole exactly where the incident needed it not to.** `run-generate-archive.yml` read the version manifest from `https://data.nemar.org/<id>/v<version>/manifest.json`, which the data plane serves only for a published, PUBLIC version (`loadPublishedDataset`). That 404s for a private dataset, an anonymous deposit before release, or -- nm000284's case -- a version whose `dataset_versions` row hasn't been written yet. The preflight's only response to a 404 was "proceed to build (size guard skipped)": a deliberate fail-open per this ADR's Decision, but one this ADR never anticipated would be the ONLY path for a dataset that is *always* in that window at dispatch time.
 - **The Worker-side dispatcher never asked the policy at all.** `services/github/dispatch.ts`'s `triggerArchiveGeneration` had no call to `shouldSkipArchive`, even on the RETRY paths (`archive-ready.ts`'s auto-retry, `archiveRetrySweep`) where the row's `file_size`/`total_files` are already in hand. Retrying a known-oversized dataset cost a wasted dispatch even before the preflight got a chance to catch it.

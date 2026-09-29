@@ -13,6 +13,28 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## 0.10.9 - 2026-09-29
+
+### Fixed
+
+- **An archive request gives an honest answer for every version (#1539).**
+  `GET /<id>/<version>.zip` now applies the size policy (ADR 0012) before anything else.
+  A dataset over 100 GiB or 200,000 files answers 404 with `reason: "archive_skipped"` and
+  the skip reason for every version, and a zip left in storage from before the policy is
+  never served; two such zips, of 120 GiB and 109 GiB, were still downloadable in 0.10.8.
+  A version that was never published answers "Version not found" instead of "not the
+  latest version", and a catalog read failure answers 503 instead of 500. A `ready`
+  callback that carries no size no longer erases the recorded archive size.
+- **Zarr: a store with fewer channels than its source file is refused (#1535, #1538).**
+  Before biosigio 1.2.9, a channel label a recording repeats (CHB-MIT's `T8-P8`)
+  overwrote the earlier channel, so nm000110's store held 22 of its 23 channels. The
+  converter now requires biosigio 1.2.9, which renames repeats the way MNE does, and
+  compares every store with the channel count in the file header, not only when
+  `channels.tsv` disagrees. Channels a sidecar row did not match are listed in
+  `units_report` instead of looking clean, renamed channels keep their electrode
+  positions, and `scripts/zarr/find_collapsed_channel_stores.py` finds stores published
+  before the fix.
+
 ## 0.10.8 - 2026-09-29
 
 ### Changed
