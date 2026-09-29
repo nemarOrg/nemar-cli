@@ -4101,6 +4101,12 @@ def _blob_key_and_size(repo_dir: str, path: str, head: str) -> tuple[str | None,
         return None, 0
     mode, _, rest = meta.split(" ", 2)
     sha = rest.split("\t", 1)[0].strip()
+    # Only a symlink or a small blob can be a pointer, so ask git for the size
+    # first: a multi-GB in-git blob is sized without being read into memory.
+    if mode != "120000":
+        size = int(_run(["git", "-C", repo_dir, "cat-file", "-s", sha]).strip())
+        if size >= 1024:
+            return None, size
     blob = subprocess.check_output(["git", "-C", repo_dir, "cat-file", "blob", sha])
     if mode == "120000" or len(blob) < 1024:
         key = parse_annex_key(blob.decode("utf-8", "replace"))
@@ -5056,6 +5062,8 @@ def stage_declared_fdt(
         src = os.path.join(repo, fdt)
         if not os.path.exists(src):
             raise FdtDeclarationRefused(f"declared .fdt {fdt!r} has no local content (run `git annex get`)")
+        # The working tree, not HEAD: local mode converts what is checked out
+        # (annex content present), so the size that matters is that file's.
         known: int | None = os.path.getsize(src)
     else:
         key, blob_size = _blob_key_and_size(repo, fdt, head)
