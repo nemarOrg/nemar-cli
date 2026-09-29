@@ -10512,5 +10512,397 @@ class TestMainConvertsADeclaredFdt(unittest.TestCase):
         self.assertIn("none was found", log)
 
 
+# A stand-in `aws` that serves a local directory laid out EXACTLY like the bucket:
+# `<root>/<bucket>/<id>/objects/<key>` holds the object `s3://<bucket>/<id>/objects/<key>`.
+# It answers the three calls the annex fetch and the store upload make, with the
+# real CLI's shapes: `s3 cp` (a missing key prints the CLI's own 404 line and
+# exits 1), `s3api list-objects-v2 --query Contents[].[Key,Size] --output json`
+# (prefix match, `null` when nothing matches) and `s3 sync` (a copy into the
+# tree). Every call is logged, so a test can count requests.
+BUCKET_AWS = r"""#!/usr/bin/env python3
+import json
+import os
+import shutil
+import sys
+
+ROOT = os.environ["ZARR_TEST_BUCKET_ROOT"]
+args = [a for a in sys.argv[1:] if a != "--only-show-errors"]
+clean, skip = [], False
+for a in args:
+    if skip:
+        skip = False
+        continue
+    if a.startswith("--cli-"):
+        skip = True
+        continue
+    clean.append(a)
+args = clean
+with open(os.environ["ZARR_TEST_BUCKET_LOG"], "a") as fh:
+    fh.write(" ".join(args) + "\n")
+
+
+def opt(name):
+    return args[args.index(name) + 1]
+
+
+def split(uri):
+    bucket, _, key = uri[len("s3://"):].partition("/")
+    return bucket, key
+
+
+fail = os.environ.get("ZARR_TEST_BUCKET_FAIL")
+if fail and any(fail in a for a in args):
+    # The CLI's own shape for a transfer that failed part-way: it quotes the
+    # source, and so the key, whose hash digits can contain "404".
+    where = f"download failed: {args[2]} to {args[3]} " if args[:2] == ["s3", "cp"] else ""
+    sys.stderr.write(where + "An error occurred (InternalError) when calling the GetObject "
+                     "operation (reached max retries: 9): We encountered an internal error.\n")
+    sys.exit(1)
+if args[:2] == ["s3", "cp"] and args[2].startswith("s3://"):
+    bucket, key = split(args[2])
+    path = os.path.join(ROOT, bucket, key)
+    if not os.path.isfile(path):
+        sys.stderr.write("fatal error: An error occurred (404) when calling the HeadObject "
+                         f'operation: Key "{key}" does not exist\n')
+        sys.exit(1)
+    shutil.copyfile(path, args[3])
+    sys.exit(0)
+if args[:2] == ["s3api", "list-objects-v2"]:
+    bucket, prefix = opt("--bucket"), opt("--prefix")
+    top = os.path.join(ROOT, bucket)
+    rows = []
+    for d, _, files in os.walk(top):
+        for f in files:
+            key = os.path.relpath(os.path.join(d, f), top).replace(os.sep, "/")
+            if key.startswith(prefix):
+                rows.append([key, os.path.getsize(os.path.join(d, f))])
+    print(json.dumps(sorted(rows) or None))
+    sys.exit(0)
+if args[:2] == ["s3", "sync"]:
+    bucket, key = split(args[3])
+    shutil.copytree(args[2], os.path.join(ROOT, bucket, key), dirs_exist_ok=True)
+    sys.exit(0)
+sys.stderr.write("unexpected aws call: " + " ".join(args) + "\n")
+sys.exit(2)
+"""
+
+
+def sha256e(data: bytes, ext: str) -> str:
+    """The SHA256E git-annex key of `data`, as a pointer file names it."""
+    return f"SHA256E-s{len(data)}--{hashlib.sha256(data).hexdigest()}{ext}"
+
+
+class BucketStandIn:
+    """A file-backed bucket with a real `aws` executable in front of it."""
+
+    BUCKET = "nemar"
+    DATASET = "nm000276"
+
+    def __init__(self, test: unittest.TestCase, root: str) -> None:
+        self.root = os.path.join(root, "s3")
+        self.objects = os.path.join(self.root, self.BUCKET, self.DATASET, "objects")
+        os.makedirs(self.objects)
+        bindir = os.path.join(root, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write(BUCKET_AWS)
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        self.log = os.path.join(root, "aws.log")
+        saved = {k: os.environ.get(k) for k in
+                 ("PATH", "ZARR_TEST_BUCKET_ROOT", "ZARR_TEST_BUCKET_LOG", "ZARR_TEST_BUCKET_FAIL")}
+        os.environ["PATH"] = bindir + os.pathsep + (saved["PATH"] or "")
+        os.environ["ZARR_TEST_BUCKET_ROOT"] = self.root
+        os.environ["ZARR_TEST_BUCKET_LOG"] = self.log
+        os.environ.pop("ZARR_TEST_BUCKET_FAIL", None)
+
+        def restore():
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+        test.addCleanup(restore)
+        # The chunk-size cache is per process and per dataset; every test starts
+        # from a process that has discovered nothing.
+        generate_zarr._ANNEX_CHUNK_SIZE.clear()
+        test.addCleanup(generate_zarr._ANNEX_CHUNK_SIZE.clear)
+
+    def put_plain(self, key: str, data: bytes) -> None:
+        with open(os.path.join(self.objects, key), "wb") as fh:
+            fh.write(data)
+
+    def put_chunked(self, key: str, data: bytes, chunk_size: int) -> int:
+        """Store `data` the way git-annex `chunk=<chunk_size>` does; returns the
+        number of chunks."""
+        pieces = [data[i:i + chunk_size] for i in range(0, len(data), chunk_size)] or [b""]
+        for n, piece in enumerate(pieces, start=1):
+            with open(os.path.join(self.objects, generate_zarr.annex_chunk_key(key, chunk_size, n)), "wb") as fh:
+                fh.write(piece)
+        return len(pieces)
+
+    def calls(self, verb: str | None = None) -> list[str]:
+        if not os.path.exists(self.log):
+            return []
+        with open(self.log) as fh:
+            lines = [ln.strip() for ln in fh if ln.strip()]
+        return [ln for ln in lines if verb is None or ln.startswith(verb)]
+
+
+class TestChunkedAnnexFetch(unittest.TestCase):
+    """`fetch_annex_object` against a bucket laid out like nm000276, which was
+    uploaded with git-annex chunking: the pointer names
+    `SHA256E-s<size>--<hash>.<ext>` and the bucket holds only
+    `SHA256E-s<size>-S<chunk>-C<n>--<hash>.<ext>`. The chunk size here is 1024
+    bytes, not the production 1 GiB, and the code must learn it from the listing.
+    Real `aws` subprocesses over real files; nothing in the fetch is replaced."""
+
+    CHUNK = 1024
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.s3 = BucketStandIn(self, tmp.name)
+        self.scratch = os.path.join(tmp.name, "scratch")
+        os.makedirs(self.scratch)
+        saved = generate_zarr._AWS_RETRIES
+        self.addCleanup(setattr, generate_zarr, "_AWS_RETRIES", saved)
+
+    def fetch(self, key: str, name: str = "out") -> str:
+        dst = os.path.join(self.scratch, name)
+        generate_zarr.fetch_annex_object(self.s3.BUCKET, self.s3.DATASET, key, dst)
+        return dst
+
+    def assert_bytes(self, path: str, data: bytes) -> None:
+        with open(path, "rb") as fh:
+            self.assertEqual(hashlib.sha256(fh.read()).hexdigest(), hashlib.sha256(data).hexdigest())
+
+    def test_a_plain_key_costs_one_request_as_before(self):
+        data = os.urandom(5000)
+        key = sha256e(data, ".edf")
+        self.s3.put_plain(key, data)
+        self.assert_bytes(self.fetch(key), data)
+        (call,) = self.s3.calls()
+        self.assertEqual(call.split()[:3], ["s3", "cp", f"s3://nemar/nm000276/objects/{key}"])
+
+    def test_a_small_file_stored_as_one_chunk(self):
+        # The nm000276 `.vhdr`: 982 bytes, stored only as `-S<chunk>-C1`.
+        data = b"Brain Vision Data Exchange Header File Version 1.0\n".ljust(982, b";")
+        key = sha256e(data, ".vhdr")
+        self.assertEqual(self.s3.put_chunked(key, data, self.CHUNK), 1)
+        self.assert_bytes(self.fetch(key), data)
+        calls = self.s3.calls()
+        self.assertEqual(len(calls), 3, calls)  # plain 404, one listing, C1
+        self.assertIn(f"{key.split('--')[0]}-S{self.CHUNK}-C1--", calls[2])
+
+    def test_a_multi_chunk_file_reassembles_byte_identically(self):
+        data = os.urandom(self.CHUNK * 4 + 321)
+        key = sha256e(data, ".eeg")
+        self.assertEqual(self.s3.put_chunked(key, data, self.CHUNK), 5)
+        self.assert_bytes(self.fetch(key), data)
+        fetched = [c.split()[2] for c in self.s3.calls("s3 cp")][1:]
+        self.assertEqual(
+            fetched,
+            [f"s3://nemar/nm000276/objects/{generate_zarr.annex_chunk_key(key, self.CHUNK, n)}"
+             for n in range(1, 6)],
+            "chunks are fetched in order, each once",
+        )
+        self.assertEqual(os.listdir(self.scratch), ["out"], "no chunk or assembly file left")
+
+    def test_an_exact_multiple_has_no_empty_trailing_chunk(self):
+        data = os.urandom(self.CHUNK * 3)
+        key = sha256e(data, ".eeg")
+        self.assertEqual(self.s3.put_chunked(key, data, self.CHUNK), 3)
+        self.assert_bytes(self.fetch(key), data)
+        self.assertEqual(generate_zarr.annex_chunk_sizes(len(data), self.CHUNK), [self.CHUNK] * 3)
+        self.assertEqual(generate_zarr.annex_chunk_sizes(0, self.CHUNK), [0])
+
+    def assert_refused(self, key: str, *needles: str) -> str:
+        with self.assertRaises(generate_zarr.AnnexObjectMissing) as cm:
+            self.fetch(key)
+        for needle in needles:
+            self.assertIn(needle, str(cm.exception))
+        self.assertEqual(os.listdir(self.scratch), [], "nothing partial left in scratch")
+        self.assertEqual(cm.exception.code, "annex_object_missing")
+        return str(cm.exception)
+
+    def test_a_missing_middle_chunk_is_refused_and_leaves_nothing(self):
+        data = os.urandom(self.CHUNK * 2 + 10)
+        key = sha256e(data, ".eeg")
+        self.s3.put_chunked(key, data, self.CHUNK)
+        os.remove(os.path.join(self.s3.objects, generate_zarr.annex_chunk_key(key, self.CHUNK, 2)))
+        self.assert_refused(key, "chunk C2", "absent")
+        # Decided from the listing: no chunk download was started for a copy
+        # the listing already showed to be incomplete.
+        self.assertEqual(len(self.s3.calls("s3 cp")), 1)
+
+    def test_a_chunk_of_the_wrong_size_is_refused(self):
+        data = os.urandom(self.CHUNK * 2 + 10)
+        key = sha256e(data, ".eeg")
+        self.s3.put_chunked(key, data, self.CHUNK)
+        with open(os.path.join(self.s3.objects, generate_zarr.annex_chunk_key(key, self.CHUNK, 2)), "wb") as fh:
+            fh.write(b"\0" * 1000)
+        self.assert_refused(key, "chunk C2", "1000 bytes", f"expected {self.CHUNK}")
+
+    def test_an_object_stored_in_no_form_is_refused(self):
+        self.assert_refused(sha256e(b"never uploaded", ".edf"), "no chunked copy")
+        self.assertEqual(len(self.s3.calls()), 2)  # the plain 404 and one listing, no retries
+
+    def test_chunks_of_another_key_with_the_same_size_are_not_mistaken_for_it(self):
+        # The listing prefix is `<backend>-s<size>-S`, which every chunked key of
+        # the same size shares; only the exact name may match.
+        other = os.urandom(700)
+        self.s3.put_chunked(sha256e(other, ".vhdr"), other, self.CHUNK)
+        mine = os.urandom(700)
+        self.assert_refused(sha256e(mine, ".vhdr"), "no chunked copy")
+
+    def test_a_transient_failure_stays_retryable_and_never_lists(self):
+        generate_zarr._AWS_RETRIES = 1
+        data = os.urandom(100)
+        # A key whose digits contain "404", quoted in the CLI's error line: a
+        # dropped transfer must not be read as an absent object.
+        key = f"SHA256E-s{len(data)}--4040{hashlib.sha256(data).hexdigest()[4:]}.edf"
+        self.s3.put_plain(key, data)
+        os.environ["ZARR_TEST_BUCKET_FAIL"] = key
+        with self.assertRaises(RuntimeError) as cm:
+            self.fetch(key)
+        self.assertNotIsInstance(cm.exception, generate_zarr.AnnexObjectMissing)
+        self.assertIsNone(getattr(cm.exception, "code", None))
+        self.assertIn("InternalError", str(cm.exception))
+        self.assertEqual(self.s3.calls("s3api"), [], "a 5xx is not a 404; no chunk discovery")
+
+    def test_a_failed_listing_is_an_error_not_an_absence(self):
+        generate_zarr._AWS_RETRIES = 1
+        key = sha256e(b"x" * 50, ".edf")
+        os.environ["ZARR_TEST_BUCKET_FAIL"] = "list-objects-v2"
+        with self.assertRaises(RuntimeError) as cm:
+            self.fetch(key)
+        self.assertNotIsInstance(cm.exception, generate_zarr.AnnexObjectMissing)
+        self.assertIn("listing chunked copies", str(cm.exception))
+
+    def test_the_chunk_size_is_discovered_once_per_dataset(self):
+        blobs = [os.urandom(n) for n in (3000, 982, 2500)]
+        keys = [sha256e(b, ".eeg") for b in blobs]
+        for key, data in zip(keys, blobs):
+            self.s3.put_chunked(key, data, self.CHUNK)
+        for i, (key, data) in enumerate(zip(keys, blobs)):
+            self.assert_bytes(self.fetch(key, f"f{i}"), data)
+        self.assertEqual(len(self.s3.calls("s3api list-objects-v2")), 1)
+        self.assertEqual(generate_zarr._ANNEX_CHUNK_SIZE[("nemar", "nm000276")], self.CHUNK)
+
+    def test_a_key_stored_under_another_chunk_size_is_still_found(self):
+        a, b = os.urandom(3000), os.urandom(3000)
+        ka, kb = sha256e(a, ".eeg"), sha256e(b, ".eeg")
+        self.s3.put_chunked(ka, a, self.CHUNK)
+        self.s3.put_chunked(kb, b, 2048)
+        self.assert_bytes(self.fetch(ka, "a"), a)
+        self.assert_bytes(self.fetch(kb, "b"), b)
+        self.assertEqual(len(self.s3.calls("s3api list-objects-v2")), 2)
+
+    def test_a_missing_chunk_under_the_cached_size_is_refused(self):
+        a, b = os.urandom(3000), os.urandom(3000)
+        ka, kb = sha256e(a, ".eeg"), sha256e(b, ".eeg")
+        self.s3.put_chunked(ka, a, self.CHUNK)
+        self.s3.put_chunked(kb, b, self.CHUNK)
+        self.fetch(ka, "a")
+        os.remove(os.path.join(self.scratch, "a"))
+        os.remove(os.path.join(self.s3.objects, generate_zarr.annex_chunk_key(kb, self.CHUNK, 3)))
+        self.assert_refused(kb, "chunk C3", "absent")
+
+
+class TestChunkedAnnexConvertOne(unittest.TestCase):
+    """`convert_one` in remote mode over real EDF recordings whose annex objects
+    are stored chunked, as nm000276's are: the pointer in the tree holds the
+    plain key, the bucket holds only `-S<chunk>-C<n>` objects, and the store is
+    published back into the same (file-backed) bucket."""
+
+    CHUNK = 1024
+    RECS = ("sub-01/ieeg/sub-01_task-rest_ieeg.edf", "sub-02/ieeg/sub-02_task-rest_ieeg.edf")
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pyedflib  # noqa: F401
+            import zarr  # noqa: F401
+            from biosigio import Recording  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        self.s3 = BucketStandIn(self, self.dir)
+        self.repo = os.path.join(self.dir, "repo")
+
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=self.repo, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+
+        os.makedirs(self.repo)
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.org")
+        git("config", "user.name", "t")
+        self.keys = {}
+        for rec in self.RECS:
+            content = build_labeled_edf(os.path.join(self.dir, os.path.basename(rec)),
+                                        ["C1", "C2", "C3"])
+            with open(content, "rb") as fh:
+                data = fh.read()
+            key = sha256e(data, ".edf")
+            self.assertGreater(self.s3.put_chunked(key, data, self.CHUNK), 3)
+            link = os.path.join(self.repo, rec)
+            os.makedirs(os.path.dirname(link), exist_ok=True)
+            target = os.path.join(self.repo, ".git", "annex", "objects", "Xx", "Yy", key, key)
+            os.symlink(os.path.relpath(target, os.path.dirname(link)), link)
+            self.keys[rec] = key
+        git("add", "-A")
+        git("commit", "-q", "-m", "chunked fixture")
+        self.head = git("rev-parse", "HEAD")
+        self.work = os.path.join(self.dir, "work")
+        generate_zarr._init_worker({
+            "repo": self.repo, "bucket": self.s3.BUCKET, "dataset_id": self.s3.DATASET,
+            "head": self.head, "head_files": set(self.RECS), "local": False,
+            "tmp": self.work, "updated": "2026-09-29T00:00:00Z",
+            "contract_base": "https://zarr.nemar.org", "engine_version": "3",
+            "dataset_row": None, "provenance_fetch_failed": False,
+            "mem_budget": None, "hard_ceiling": None, "projections": {},
+            "fdt_declarations": {},
+        })
+
+    def test_chunked_recordings_convert_and_publish(self):
+        for rec in self.RECS:
+            with self.subTest(rec):
+                result = convert_one(rec)
+                self.assertTrue(result["ok"], result.get("error"))
+                (group,) = result["entry"]["groups"]
+                self.assertEqual(group["n_channels"], 3)
+                # Provenance names the key the pointer holds, not a chunk.
+                self.assertEqual(result["manifest"]["source_key"], self.keys[rec])
+                store = os.path.join(self.s3.root, self.s3.BUCKET, self.s3.DATASET, "zarr",
+                                     store_rel_for(rec), "zarr.json")
+                self.assertTrue(os.path.isfile(store), "store published to the bucket")
+        # One listing for the whole dataset: the second recording reuses the
+        # discovered chunk size.
+        self.assertEqual(len(self.s3.calls("s3api list-objects-v2")), 1)
+        self.assertFalse(os.listdir(os.path.join(self.work, "work")), "scratch reclaimed")
+
+    def test_a_missing_chunk_refuses_the_recording_as_data(self):
+        rec = self.RECS[0]
+        os.remove(os.path.join(self.s3.objects,
+                               generate_zarr.annex_chunk_key(self.keys[rec], self.CHUNK, 2)))
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = convert_one(rec)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "annex_object_missing")
+        self.assertIn("chunk C2", result["detail"])
+        self.assertNotIn(result["code"], RETRYABLE_CODES)
+        entry = _failure_entry(rec, result["code"], result["detail"])
+        self.assertEqual(count_infra_failures([rec], [entry]), 0)
+        self.assertIn("missing or incomplete", generate_zarr.reason_for_code(result["code"]))
+        self.assertFalse(os.path.exists(os.path.join(self.s3.root, self.s3.BUCKET, self.s3.DATASET, "zarr")),
+                         "nothing published for a refused recording")
+
+
 if __name__ == "__main__":
     unittest.main()

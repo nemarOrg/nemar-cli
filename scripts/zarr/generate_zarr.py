@@ -20,7 +20,9 @@ Design notes
   this script reads the tree with git plumbing (``ls-tree``/``cat-file``/``diff``)
   exactly like ``emit_manifest.py``, and pulls annex *content* from
   ``s3://<bucket>/<id>/objects/<key>`` with authenticated ``aws s3 cp`` (works for
-  private datasets, unlike the archive workflow's public-HTTP fetch).
+  private datasets, unlike the archive workflow's public-HTTP fetch), or from
+  that key's git-annex chunks when the dataset was uploaded with chunking
+  (``fetch_annex_object``).
 * Incremental: the prior ``index.json`` records the commit it was built from;
   we ``git diff <prior>..HEAD`` and convert only the affected recordings, mapping
   a changed companion (``.fdt``/``.eeg``/``.vmrk``) or ``*_events.tsv`` back to its
@@ -1337,6 +1339,13 @@ _FALLBACK_REASONS = {
         "This recording's data file is stored elsewhere in the dataset, and the "
         "file declared for it did not match the recording's header, so no viewer "
         "copy is offered."
+    ),
+    # NEMAR-side (not a biosigIO code): the archive's storage holds no complete
+    # copy of a file this recording needs, plain or git-annex chunked. See
+    # AnnexObjectMissing.
+    "annex_object_missing": (
+        "A data file this recording needs is missing or incomplete in the "
+        "archive's storage, so the viewer could not be generated."
     ),
     # NEMAR-side (not a biosigIO code): the producer gave up retrying. A recording
     # that fails for an INFRA reason is listed in the index's `pending` with an
@@ -4483,18 +4492,34 @@ def download_blob(src: str, dst: str, expected_size: int | None) -> None:
     that can't read its next file. A short/zero copy must never reach the reader:
     verify the byte count, and on any mismatch/transfer error drop the temp and
     retry rather than convert a corrupt file into a wrong store.
+
+    A 404 is the one failure that is NOT retried: it raises `S3ObjectAbsent` on
+    the first answer. S3 is strongly consistent, so asking again gets the same
+    answer, and the caller has something better to do with it (look for a
+    git-annex chunked copy, see `fetch_annex_object`). Everything else -- a
+    throttle, a 5xx, a wedge past the timeout, a short copy -- is retried as
+    before and ends in an uncoded RuntimeError, which the run treats as infra.
     """
     os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
     last: Exception | None = None
     for attempt in range(1, _AWS_RETRIES + 1):
         tmp = f"{dst}.part.{os.getpid()}.{attempt}"
         try:
-            subprocess.run(
+            # stderr is captured, not inherited, because it is how a 404 is told
+            # apart from a transient failure; it is carried in the exception.
+            res = subprocess.run(
                 ["aws", "s3", "cp", src, tmp, "--only-show-errors", *_AWS_TIMEOUTS],
-                check=True,
+                capture_output=True,
+                text=True,
                 timeout=_AWS_OP_TIMEOUT,
                 env=_aws_env(),
+                check=False,  # the return code is inspected below
             )
+            if res.returncode != 0:
+                stderr = res.stderr.strip()
+                if _s3_not_found(stderr):
+                    raise S3ObjectAbsent(src, stderr)
+                raise RuntimeError(f"aws s3 cp exited {res.returncode}: {stderr}")
             got = os.path.getsize(tmp)
             if expected_size is not None and got != expected_size:
                 raise RuntimeError(
@@ -4502,16 +4527,250 @@ def download_blob(src: str, dst: str, expected_size: int | None) -> None:
                 )
             os.replace(tmp, dst)
             return
-        except Exception as exc:  # noqa: BLE001 - any failure -> drop temp + retry
+        except Exception as exc:  # any failure -> drop temp + retry (a 404 re-raises)
             last = exc
-            try:
+            with contextlib.suppress(OSError):
                 if os.path.exists(tmp):
                     os.remove(tmp)
-            except OSError:
-                pass
+            if isinstance(exc, S3ObjectAbsent):
+                raise
             if attempt < _AWS_RETRIES:
                 time.sleep(min(2**attempt, 30))
     raise RuntimeError(f"download {src} -> {dst} failed after {_AWS_RETRIES} attempts: {last}")
+
+
+def _s3_not_found(stderr: str) -> bool:
+    """Whether an `aws s3 cp` error says the object is absent, as opposed to any
+    other failure: the CLI's ``An error occurred (404) when calling the
+    HeadObject operation: Key "..." does not exist``, or ``NoSuchKey``.
+
+    Deliberately narrower than `s3_read_json`'s bare ``"404"`` test. A transfer
+    failure prints ``download failed: s3://.../<key> to ...``, and an annex key
+    is a 64-digit hex hash plus a byte count: ``404`` turns up inside one often
+    enough that the loose test would read a dropped connection as an absence."""
+    err = stderr.lower()
+    return "(404)" in err or "nosuchkey" in err
+
+
+class S3ObjectAbsent(Exception):
+    """`download_blob`'s source answered 404. Internal to the annex fetch: it is
+    either answered by a chunked copy or turned into `AnnexObjectMissing`, and is
+    never what a recording fails with. `chunk` names the chunk number when the
+    absent object was one chunk of a chunked key."""
+
+    def __init__(self, src: str, stderr: str, chunk: int | None = None) -> None:
+        super().__init__(f"{src} does not exist ({stderr})" if stderr else f"{src} does not exist")
+        self.src = src
+        self.chunk = chunk
+
+
+class AnnexObjectMissing(Exception):
+    """The S3 bucket does not hold this annex key's content intact: no object at
+    the plain key and no complete git-annex chunked copy (a chunk absent, or a
+    chunk whose stored size is not the size its key implies).
+
+    A property of what the archive holds, not of this run, so it is typed and
+    NOT in `RETRYABLE_CODES`: the recording is refused (ADR 0005, the rest of the
+    dataset still serves) instead of being retried as infra five times and then
+    promoted to an unexplained `retry_exhausted`. Only a definite answer from S3
+    reaches this class -- a 404, or a successful listing that lacks the chunk.
+    A throttle, a 5xx, a timeout or a listing that errored stays an uncoded
+    RuntimeError and is retried. Recovery once the content is uploaded is a
+    requeue of the dataset."""
+
+    code = "annex_object_missing"
+
+
+# --- git-annex chunked storage ---------------------------------------------
+#
+# A special remote configured with `chunk=<size>` never stores the key a
+# pointer names. The content of `SHA256E-s<size>--<hash>.<ext>` is stored as
+# `SHA256E-s<size>-S<chunksize>-C<n>--<hash>.<ext>` for n = 1..ceil(size /
+# chunksize), every chunk `chunksize` bytes except the last (nm000276 was
+# uploaded this way with 1 GiB chunks, so even a 982-byte `.vhdr` exists only as
+# `...-S1073741824-C1--...`). The chunk size is not in the pointer, so it is
+# discovered by listing `objects/<fields>-S` once and then cached per dataset:
+# a dataset is uploaded with one chunk configuration, and a key that does not
+# match the cached size falls back to its own listing.
+_ANNEX_CHUNK_SIZE: dict[tuple[str, str], int] = {}
+# Bounded copy buffer for appending a downloaded chunk to the assembled file.
+_CHUNK_COPY_BUFFER = 8 * 1024 * 1024
+
+
+def annex_chunk_sizes(size: int, chunk_size: int) -> list[int]:
+    """Byte size of each chunk, in order, of a `size`-byte key stored in
+    `chunk_size` chunks. An empty key is one empty chunk."""
+    if chunk_size <= 0:
+        raise ValueError(f"chunk size must be positive, got {chunk_size}")
+    n = max(1, -(-size // chunk_size))
+    return [chunk_size] * (n - 1) + [size - chunk_size * (n - 1)]
+
+
+def annex_chunk_key(key: str, chunk_size: int, number: int) -> str:
+    """The object name git-annex stores chunk `number` of `key` under."""
+    fields, sep, name = key.partition("--")
+    if not sep:
+        raise ValueError(f"not a git-annex key: {key!r}")
+    return f"{fields}-S{chunk_size}-C{number}--{name}"
+
+
+def _list_annex_chunks(bucket: str, dataset_id: str, key: str) -> dict[int, dict[int, int]]:
+    """Every chunked copy of `key` in the bucket, as ``{chunk_size: {chunk_number:
+    stored_bytes}}``; ``{}`` when there is none.
+
+    One LIST of ``<id>/objects/<fields>-S``: it can also return chunks of other
+    keys with the same backend and size, which the exact-name match drops. A
+    failed listing RAISES (after retries) rather than returning ``{}``: an
+    empty answer means "not stored", and an error is not that answer."""
+    fields, _, name = key.partition("--")
+    prefix = f"{dataset_id}/objects/{fields}-S"
+    pattern = re.compile(
+        rf"{re.escape(prefix)}(\d+)-C(\d+)--{re.escape(name)}"
+    )
+    last = ""
+    for attempt in range(1, _AWS_RETRIES + 1):
+        try:
+            res = subprocess.run(
+                [
+                    "aws", "s3api", "list-objects-v2", "--bucket", bucket,
+                    "--prefix", prefix,
+                    "--query", "Contents[].[Key,Size]", "--output", "json",
+                    *_AWS_TIMEOUTS,
+                ],
+                capture_output=True, text=True, timeout=_AWS_OP_TIMEOUT, env=_aws_env(),
+                check=False,  # the return code is inspected below
+            )
+        except subprocess.TimeoutExpired as exc:
+            last = str(exc)
+        else:
+            if res.returncode == 0:
+                rows = json.loads(res.stdout or "null") or []
+                found: dict[int, dict[int, int]] = {}
+                for obj_key, obj_size in rows:
+                    m = pattern.fullmatch(obj_key)
+                    if m:
+                        found.setdefault(int(m[1]), {})[int(m[2])] = int(obj_size)
+                return found
+            last = f"exited {res.returncode}: {res.stderr.strip()}"
+        if attempt < _AWS_RETRIES:
+            time.sleep(min(2**attempt, 30))
+    raise RuntimeError(
+        f"listing chunked copies of {key} under s3://{bucket}/{prefix} failed after "
+        f"{_AWS_RETRIES} attempts: {last}"
+    )
+
+
+def _complete_chunk_size(
+    variants: dict[int, dict[int, int]], size: int, prefer: int | None
+) -> tuple[int | None, str]:
+    """The chunk size whose chunks are all present at their expected sizes, and
+    otherwise ``None`` with what is wrong, for the error. ``prefer`` (the cached
+    size) is tried first; the rest in ascending order."""
+    if not variants:
+        return None, "no object at the plain key and no chunked copy"
+    problems = []
+    order = sorted(variants, key=lambda s: (s != prefer, s))
+    for chunk_size in order:
+        stored = variants[chunk_size]
+        for number, want in enumerate(annex_chunk_sizes(size, chunk_size), start=1):
+            got = stored.get(number)
+            if got is None:
+                problems.append(f"chunk C{number} of the {chunk_size}-byte chunking is absent")
+                break
+            if got != want:
+                problems.append(
+                    f"chunk C{number} of the {chunk_size}-byte chunking is {got} bytes, "
+                    f"expected {want}"
+                )
+                break
+        else:
+            return chunk_size, ""
+    return None, "; ".join(problems)
+
+
+def _download_chunks(base: str, key: str, size: int, chunk_size: int, dst: str) -> None:
+    """Download every chunk of `key` in order and append each to `dst`.
+
+    Each chunk goes through `download_blob`, so it keeps that function's
+    timeout, retry and per-chunk size check. Memory stays bounded (one copy
+    buffer) and scratch holds at most the assembled file plus one chunk. `dst`
+    appears only complete (atomic rename after the total is checked); on any
+    failure nothing is left behind. A 404 raises `S3ObjectAbsent` with `chunk`
+    set to the absent chunk's number."""
+    os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+    assembly = f"{dst}.chunked.{os.getpid()}"
+    piece = f"{dst}.chunk.{os.getpid()}"
+    try:
+        with open(assembly, "wb") as out:
+            for number, want in enumerate(annex_chunk_sizes(size, chunk_size), start=1):
+                try:
+                    download_blob(base + annex_chunk_key(key, chunk_size, number), piece, want)
+                except S3ObjectAbsent as exc:
+                    exc.chunk = number
+                    raise
+                with open(piece, "rb") as fh:
+                    shutil.copyfileobj(fh, out, _CHUNK_COPY_BUFFER)
+                os.remove(piece)
+        got = os.path.getsize(assembly)
+        if got != size:
+            raise AnnexObjectMissing(
+                f"{key}: its {chunk_size}-byte chunks reassemble to {got} bytes, the key declares {size}"
+            )
+        os.replace(assembly, dst)
+    finally:
+        for path in (piece, assembly):
+            with contextlib.suppress(OSError):
+                if os.path.exists(path):
+                    os.remove(path)
+
+
+def fetch_annex_object(bucket: str, dataset_id: str, key: str, dst: str) -> None:
+    """Download annex `key` of `dataset_id` to `dst`, plain or chunked.
+
+    The plain object ``s3://<bucket>/<id>/objects/<key>`` is tried first, so a
+    dataset stored without chunking costs exactly what it did before: one
+    request. Only when that answers 404 is a chunked copy looked for: with the
+    dataset's cached chunk size directly, otherwise (or when chunk 1 is not
+    there under the cached size) through one listing, whose answer is cached.
+
+    Raises `AnnexObjectMissing` (typed, not retried) when the bucket definitely
+    holds no complete copy; any other failure propagates as-is."""
+    base = f"s3://{bucket}/{dataset_id}/objects/"
+    size = annex_key_size(key)
+    try:
+        download_blob(base + key, dst, size)
+        return
+    except S3ObjectAbsent as exc:
+        if size is None or "--" not in key:
+            # Without a declared size the chunk names cannot be derived, so the
+            # plain object was the only place this content could be.
+            raise AnnexObjectMissing(f"{key}: no object at the plain key ({exc})") from exc
+    cache = (bucket, dataset_id)
+    cached = _ANNEX_CHUNK_SIZE.get(cache)
+    if cached is not None:
+        try:
+            _download_chunks(base, key, size, cached, dst)
+            return
+        except S3ObjectAbsent as exc:
+            if exc.chunk != 1:
+                raise AnnexObjectMissing(
+                    f"{key}: chunk C{exc.chunk} of its {cached}-byte chunking is absent"
+                ) from exc
+            # Not stored under the cached size at all: this key may have been
+            # uploaded with another chunking. Its own listing decides.
+    chunk_size, problem = _complete_chunk_size(
+        _list_annex_chunks(bucket, dataset_id, key), size, cached
+    )
+    if chunk_size is None:
+        raise AnnexObjectMissing(f"{key}: {problem}")
+    _ANNEX_CHUNK_SIZE[cache] = chunk_size
+    try:
+        _download_chunks(base, key, size, chunk_size, dst)
+    except S3ObjectAbsent as exc:
+        # Listed a moment ago and gone now: a deletion, which is still an answer.
+        raise AnnexObjectMissing(
+            f"{key}: chunk C{exc.chunk} of its {chunk_size}-byte chunking is absent"
+        ) from exc
 
 
 def s3_read_json(bucket: str, key: str) -> dict | None:
@@ -4845,7 +5104,7 @@ def _fetch_blob(
         key = parse_annex_key(blob.decode("utf-8", "replace"))
     os.makedirs(os.path.dirname(local) or ".", exist_ok=True)
     if key:
-        download_blob(f"s3://{bucket}/{dataset_id}/objects/{key}", local, annex_key_size(key))
+        fetch_annex_object(bucket, dataset_id, key, local)
     else:
         with open(local, "wb") as fh:
             fh.write(blob)
