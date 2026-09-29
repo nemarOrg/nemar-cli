@@ -122,16 +122,17 @@ describe("formatResolvedDoiBlock / buildSourcesPrompt", () => {
     ],
     unresolved: ["10.1101/2022.08.12.503778v3.abstract"],
     failed: ["10.1016/j.neuroimage.2014.01.015"],
-    skipped: [],
+    skipped: ["10.1109/tbcas.2014.2316224"],
   };
 
-  test("lists resolved, unresolved, and failed DOIs", () => {
+  test("lists resolved, unresolved, failed, and skipped DOIs", () => {
     expect(formatResolvedDoiBlock(resolution)).toBe(`## Resolved DOI metadata
 What each DOI in the sources actually is, looked up in DataCite / Crossref. Compare titles,
 authors, and years with the dataset's own name and authors when choosing relation types.
 - 10.1038/s41597-019-0027-4 | title: "Multi-channel EEG recordings during a sustained-attention driving task" | first author: Cao | year: 2019 | venue: Scientific Data | type: JournalArticle
 - 10.1101/2022.08.12.503778v3.abstract | unresolved (no registry record found)
-- 10.1016/j.neuroimage.2014.01.015 | lookup failed (registry did not answer)`);
+- 10.1016/j.neuroimage.2014.01.015 | lookup failed (registry did not answer)
+- 10.1109/tbcas.2014.2316224 | not looked up (over the per-run cap)`);
   });
 
   test("places the block between the BIDS description and the README", () => {

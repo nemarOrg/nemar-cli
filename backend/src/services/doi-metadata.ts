@@ -276,12 +276,14 @@ export function datasetDoisOf(resolution: DoiResolution): Set<string> {
   return dois;
 }
 
-/** Prompt block listing what each candidate DOI is. Empty string when there
- *  is nothing to show, so callers can append it unconditionally. All text
- *  from the registries was sanitized when it was parsed. */
+/** Prompt block listing what each candidate DOI is, including the ones that
+ *  were not resolved and why. Empty string when there is nothing to show, so
+ *  callers can append it unconditionally. All text from the registries was
+ *  sanitized when it was parsed. */
 export function formatResolvedDoiBlock(resolution: DoiResolution): string {
-  const { resolved, unresolved, failed } = resolution;
-  if (resolved.length === 0 && unresolved.length === 0 && failed.length === 0) return "";
+  const { resolved, unresolved, failed, skipped } = resolution;
+  const total = resolved.length + unresolved.length + failed.length + skipped.length;
+  if (total === 0) return "";
   const lines = resolved.map((r) => {
     const fields = [
       `title: "${r.title}"`,
@@ -297,6 +299,9 @@ export function formatResolvedDoiBlock(resolution: DoiResolution): string {
   });
   for (const doi of unresolved) lines.push(`- ${doi} | unresolved (no registry record found)`);
   for (const doi of failed) lines.push(`- ${doi} | lookup failed (registry did not answer)`);
+  // Past the cap: said explicitly, so a data paper listed after the 15th DOI
+  // is not labeled as though its metadata had been checked.
+  for (const doi of skipped) lines.push(`- ${doi} | not looked up (over the per-run cap)`);
   return `## Resolved DOI metadata
 What each DOI in the sources actually is, looked up in DataCite / Crossref. Compare titles,
 authors, and years with the dataset's own name and authors when choosing relation types.
