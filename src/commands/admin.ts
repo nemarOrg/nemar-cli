@@ -5148,6 +5148,11 @@ function printReindexLine(r: ReindexResponse, opts?: { showRef?: boolean }): voi
   const ref = opts?.showRef && r.enrichment.ref ? chalk.dim(`@${r.enrichment.ref}`) : "";
   console.log(`  ${r.dataset_id.padEnd(12)} ${enr}${ref}  ${sync}  ${cols}`);
   if (r.enrichment.error) console.log(chalk.red(`    enrichment: ${r.enrichment.error}`));
+  const doi = r.enrichment.doi_resolution;
+  if (doi) {
+    const line = `    DOI lookups: ${doi.resolved} resolved, ${doi.unresolved} unresolved, ${doi.failed} failed, ${doi.skipped} over cap`;
+    console.log(doi.failed > 0 ? chalk.yellow(`${line} (retry this dataset)`) : chalk.dim(line));
+  }
   if (r.sync.metadata_columns_error) {
     console.log(chalk.red(`    metadata columns: ${r.sync.metadata_columns_error}`));
   }
@@ -6229,6 +6234,7 @@ reindexCommand
   .option("--skip-sync", "Skip the D1 metadata-column refresh step")
   .option("--ref <ref>", "Ref to enrich from (single-dataset only; default: main)")
   .option("--dry-run", "List matched datasets without firing the reindex (bulk only)")
+  .option("--json", "Print the raw JSON response instead of the summary")
   .action(
     async (
       datasetIdArg: string | undefined,
@@ -6241,6 +6247,7 @@ reindexCommand
         skipSync?: boolean;
         ref?: string;
         dryRun?: boolean;
+        json?: boolean;
       },
     ) => {
       if (!requireAuth()) return;
@@ -6282,6 +6289,12 @@ reindexCommand
           };
           const result = await reindexDataset(datasetIdArg, reindexOpts);
           const ok = result.enrichment.status !== "failed" && result.sync.status !== "failed";
+          if (options.json) {
+            spinner.stop();
+            console.log(JSON.stringify(result, null, 2));
+            if (!ok) process.exit(1);
+            return;
+          }
           if (ok) {
             spinner.succeed(`${datasetIdArg} reindexed`);
           } else {
@@ -6340,6 +6353,16 @@ reindexCommand
         spinner.fail("Bulk reindex failed");
         console.error(chalk.red(errorDetail(err)));
         process.exit(1);
+      }
+
+      if (options.json) {
+        spinner.stop();
+        console.log(JSON.stringify(response, null, 2));
+        const anyFailed = (response.results ?? []).some(
+          (r) => r.enrichment.status === "failed" || r.sync.status === "failed",
+        );
+        if (anyFailed) process.exit(1);
+        return;
       }
 
       if (response.dry_run) {

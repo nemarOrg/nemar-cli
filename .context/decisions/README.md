@@ -113,6 +113,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0072](0072-the-data-plane-streams-a-manifest-and-revalidates-its-edge-copy.md) - The data plane streams a manifest, answers one question per read, and trusts its edge copy for 60 seconds before revalidating it against S3 again
 - [ADR 0073](0073-a-declared-fdt-outside-the-raw-tree-is-fetched-never-discovered.md) - A declared `.fdt` outside the raw tree is fetched for its `.set`, verified by header, size and annex key, and never discovered (refines 0027)
 - [ADR 0074](0074-manifest-json-emits-unsigned-public-urls.md) - `manifest.json` emits unsigned public URLs, presigned only for a bucket-policy exclusion
+- [ADR 0075](0075-standards-papers-are-never-a-data-paper.md) - Standards, software, platform, and umbrella papers are never a dataset's data paper; relation types are chosen from resolved DOIs
 
 ## Backfill note (2026-07-31)
 

@@ -40,7 +40,7 @@ import type { WebhookRouter } from "./shared.js";
  *  non-deterministic prose ensured the file always looked "changed" to the
  *  push filter, so the pipeline self-fired forever (#643, observed on
  *  on007827: ~60 runs/hr at ~$0.01 each on the then-current OpenRouter/Haiku
- *  backend — the pipeline now runs claude-sonnet-5 on Claude Platform on AWS
+ *  backend; the pipeline now runs claude-sonnet-5-5 on Claude Platform on AWS
  *  at a higher per-run cost, so the guard matters even more).
  *  Manual recovery / re-enrichment is still available via
  *  `workflow_dispatch` on `nemarDatasets/.github/run-enrichment.yml`. */

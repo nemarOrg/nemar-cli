@@ -1,0 +1,115 @@
+{
+  "id": "https://doi.org/10.6084/m9.figshare.6427334.v5",
+  "doi": "10.6084/M9.FIGSHARE.6427334.V5",
+  "url": "https://figshare.com/articles/Multi-channel_EEG_recordings_during_a_sustained-attention_driving_task/6427334/5",
+  "types": {
+    "ris": "DATA",
+    "bibtex": "misc",
+    "citeproc": "dataset",
+    "schemaOrg": "Dataset",
+    "resourceType": "Dataset",
+    "resourceTypeGeneral": "Dataset"
+  },
+  "creators": [
+    {
+      "name": "Zehong Cao",
+      "affiliation": [],
+      "nameIdentifiers": []
+    },
+    {
+      "name": "Chuang, Michael",
+      "nameType": "Personal",
+      "givenName": "Michael",
+      "familyName": "Chuang",
+      "affiliation": [],
+      "nameIdentifiers": []
+    },
+    {
+      "name": "J.T. King",
+      "affiliation": [],
+      "nameIdentifiers": []
+    },
+    {
+      "name": "Chin-Teng Lin",
+      "affiliation": [],
+      "nameIdentifiers": []
+    }
+  ],
+  "titles": [
+    {
+      "title": "Multi-channel EEG recordings during a sustained-attention driving task (raw dataset)"
+    }
+  ],
+  "publisher": {
+    "name": "figshare"
+  },
+  "container": {},
+  "subjects": [
+    {
+      "subject": "Neuroscience"
+    },
+    {
+      "subject": "90399 Biomedical Engineering not elsewhere classified",
+      "subjectScheme": "FOR"
+    },
+    {
+      "subject": "FOS: Medical engineering",
+      "schemeUri": "http://www.oecd.org/science/inno/38235147.pdf",
+      "subjectScheme": "Fields of Science and Technology (FOS)"
+    },
+    {
+      "subject": "FOS: Medical engineering",
+      "subjectScheme": "Fields of Science and Technology (FOS)"
+    }
+  ],
+  "contributors": [],
+  "dates": [
+    {
+      "date": "2019-02-05",
+      "dateType": "Created"
+    },
+    {
+      "date": "2019-02-05",
+      "dateType": "Updated"
+    },
+    {
+      "date": "2019",
+      "dateType": "Issued"
+    }
+  ],
+  "publicationYear": 2019,
+  "identifiers": [],
+  "sizes": [
+    "19555039027 Bytes"
+  ],
+  "formats": [],
+  "rightsList": [
+    {
+      "rights": "Creative Commons Attribution 4.0 International",
+      "rightsUri": "https://creativecommons.org/licenses/by/4.0/legalcode",
+      "schemeUri": "https://spdx.org/licenses/",
+      "rightsIdentifier": "cc-by-4.0",
+      "rightsIdentifierScheme": "SPDX"
+    }
+  ],
+  "descriptions": [
+    {
+      "description": "This project adopted an event-related lane-departure paradigm in a virtual-reality (VR) dynamic driving simulator to quantitatively measure brain EEG dynamics along with the fluctuation of task performance throughout the experiment.All subjects were required to have driving license. None of the participants had a history of psychological disorders. All participants were instructed to sustain their attention to perform the task during the experiment, and the 32-ch EEG signals and the vehicle position were recorded simultaneously.Prior to the experiment, all participants completed a consent form stating their clear understanding of the experimental protocol which had been approved by Institutional Review Broad of Taipei Veterans General Hospital, Taiwan.<b><br></b><b>Experiment:</b> <br>All subjects participated in the sustained-attention driving experiment for 1.5 hours in the afternoon (13:00-14:00) after lunch, and all of them were asked to keep their attention focused on driving during the entire period. There was no break or resting session. At the beginning of the experiment (without any recordings), a five-minute pre-test was performed to ensure that every subject understood the instructions and they did not suffer from simulator-induced nausea. To investigate the effect of kinesthesia on brain activity in the sustained-attention driving task, each subject was asked to participate at least two driving sessions on different days. Each session lasted for about 90 min. One was the driving session with a fixed-based simulator but with no kinesthetic feedback, so subject had to monitor the vehicle deviation visually from the virtual scene.The other driving session involved a motion-based simulator with a six degree-of-freedom Stewart platform to simulate the dynamic response of the vehicle to the deviation event or steering. The visual and kinesthetic inputs together aroused the subject to attend to the deviation event and take action to correct the driving trajectory Data Requirement.<br>A wired EEG cap with 32 Ag/AgCl electrodes, including 30 EEG electrodes and two reference electrodes (opposite lateral mastoids) was used to record the electrical activity of the brain from the scalp during the driving task. The EEG electrodes were placed according to a modified international 10-20 system. The contact impedance between all electrodes and the skin was kept &lt;5kΩ. The EEG recordings and the vehicle trajectory amplified by Scan SynAmps2 Express system (Compumedics Ltd., VIC, Australia) were digitized at 500 Hz (resolution: 16 bits) simultaneously.",
+      "descriptionType": "Abstract"
+    }
+  ],
+  "geoLocations": [],
+  "fundingReferences": [],
+  "relatedIdentifiers": [
+    {
+      "relationType": "IsIdenticalTo",
+      "relatedIdentifier": "10.6084/m9.figshare.6427334",
+      "relatedIdentifierType": "DOI"
+    }
+  ],
+  "schemaVersion": "http://datacite.org/schema/kernel-4",
+  "providerId": "otjm",
+  "clientId": "figshare.ars",
+  "agency": "datacite",
+  "state": "findable"
+}

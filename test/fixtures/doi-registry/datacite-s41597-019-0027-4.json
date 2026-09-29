@@ -1,0 +1,223 @@
+{
+  "id": "https://doi.org/10.1038/s41597-019-0027-4",
+  "doi": "10.1038/S41597-019-0027-4",
+  "url": "http://www.nature.com/articles/s41597-019-0027-4",
+  "types": {
+    "ris": "JOUR",
+    "bibtex": "article",
+    "citeproc": "article-journal",
+    "schemaOrg": "ScholarlyArticle",
+    "resourceType": "JournalArticle",
+    "resourceTypeGeneral": "Text"
+  },
+  "creators": [
+    {
+      "name": "Cao, Zehong",
+      "nameType": "Personal",
+      "givenName": "Zehong",
+      "familyName": "Cao",
+      "affiliation": [],
+      "nameIdentifiers": [
+        {
+          "schemeUri": "https://orcid.org",
+          "nameIdentifier": "https://orcid.org/0000-0003-3656-0328",
+          "nameIdentifierScheme": "ORCID"
+        }
+      ]
+    },
+    {
+      "name": "Chuang, Chun-Hsiang",
+      "nameType": "Personal",
+      "givenName": "Chun-Hsiang",
+      "familyName": "Chuang",
+      "affiliation": []
+    },
+    {
+      "name": "King, Jung-Kai",
+      "nameType": "Personal",
+      "givenName": "Jung-Kai",
+      "familyName": "King",
+      "affiliation": []
+    },
+    {
+      "name": "Lin, Chin-Teng",
+      "nameType": "Personal",
+      "givenName": "Chin-Teng",
+      "familyName": "Lin",
+      "affiliation": []
+    }
+  ],
+  "titles": [
+    {
+      "title": "Multi-channel EEG recordings during a sustained-attention driving task"
+    }
+  ],
+  "publisher": {
+    "name": "Springer Science and Business Media LLC"
+  },
+  "container": {
+    "type": "Journal",
+    "issue": "1",
+    "title": "Scientific Data",
+    "volume": "6",
+    "identifier": "2052-4463",
+    "identifierType": "ISSN"
+  },
+  "subjects": [],
+  "contributors": [],
+  "dates": [
+    {
+      "date": "2019-04-05",
+      "dateType": "Issued"
+    },
+    {
+      "date": "2019-04-05T10:12:46Z",
+      "dateType": "Updated"
+    }
+  ],
+  "publicationYear": 2019,
+  "identifiers": [
+    {
+      "identifier": "19",
+      "identifierType": "Publisher ID"
+    }
+  ],
+  "rightsList": [
+    {
+      "rightsUri": "https://creativecommons.org/licenses/by/4.0"
+    }
+  ],
+  "descriptions": [],
+  "fundingReferences": [],
+  "relatedIdentifiers": [
+    {
+      "relationType": "IsPartOf",
+      "relatedIdentifier": "2052-4463",
+      "resourceTypeGeneral": "Collection",
+      "relatedIdentifierType": "ISSN"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.1518/001872008x288376",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.1016/s0301-0511(00)00085-5",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.1007/978-3-642-02812-0_47",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.1109/jproc.2012.2184829",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.1109/tbme.2006.889197",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.1016/j.neuroimage.2010.04.250",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.1016/s1053-8119(09)71196-6",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.1016/s1053-8119(09)70336-2",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.3389/fnins.2018.00181",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.1109/mci.2009.934559",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.1109/msmc.2017.2702378",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.1016/j.neuroimage.2014.01.015",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.1038/srep21353",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.1109/tbcas.2014.2316224",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.1109/tnnls.2013.2275003",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.1016/j.knosys.2015.01.007",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.1109/tnnls.2015.2496330",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.1109/tfuzz.2016.2633379",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.6084/m9.figshare.6427334.v5",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.6084/m9.figshare.7666055.v3",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.1038/sdata.2018.133",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.1038/sdata.2018.3",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.1109/tnsre.2018.2790359",
+      "relatedIdentifierType": "DOI"
+    },
+    {
+      "relationType": "References",
+      "relatedIdentifier": "10.1088/1741-2552/aa7a25",
+      "relatedIdentifierType": "DOI"
+    }
+  ],
+  "schemaVersion": "http://datacite.org/schema/kernel-4",
+  "agency": "crossref",
+  "state": "findable"
+}
