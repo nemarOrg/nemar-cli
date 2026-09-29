@@ -136,6 +136,11 @@ export type ManifestReadSource = "memo" | "fresh" | "revalidated" | "rewrite";
  * every other source allows `etag: string | null` and `memoKey: string | null`.
  * A construction site that gets this wrong fails to compile rather than
  * relying on a reader having noticed the comment.
+ *
+ * A caller that needs the non-null `etag` must narrow on `source === "memo"`
+ * specifically: narrowing on `kind === "ok"` alone only picks the `ok`
+ * variant as a whole, which is still the union of both branches above, so
+ * `etag` stays widened back to `string | null` there.
  */
 export type ManifestRead<T> =
   | {
