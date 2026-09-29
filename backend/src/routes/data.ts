@@ -370,11 +370,14 @@ function parseChecksum(checksum: string): { algorithm: string; value: string } {
 }
 
 /**
- * The most entries `manifest.json` will list (#1502, re-measured for #1522).
+ * The most entries `manifest.json` will list for a PUBLIC (non-excluded)
+ * dataset, whose annexed entries are unsigned (#1502, re-measured for
+ * #1522). See {@link MAX_MANIFEST_JSON_ENTRIES_PRESIGNED} for the other
+ * branch's bound, which is a DIFFERENT number on purpose.
  *
  * `manifest.json` names every entry in one JSON document, so no scan can
- * bound it: the entries and the serialized response are held at once
- * (excluded datasets also hold a presigned URL per entry while building it).
+ * bound it: the entries and the serialized response are held at once (the
+ * presigned branch also holds a presigned URL per entry while building it).
  * Original (#1505) measurement, under Bun on nm000281-shaped entries with
  * every annexed URL presigned: about 1.7 KB of live memory per entry at the
  * moment the response is serialized, so 30,000 entries was sized to about
@@ -382,43 +385,76 @@ function parseChecksum(checksum: string): { algorithm: string; value: string } {
  * requests share.
  *
  * Re-measured for #1522 with the SAME generator (`test/helpers/large-manifest.ts`)
- * and the ACTUAL production URL builders (`buildRedirectUrl` for the old
- * shape, `buildAnnexPublicUrl` for the new one), heap sampled the same way
- * (`bun:jsc`'s `heapStats`, entries array plus its `JSON.stringify` both
- * live): presigned entries cost about 1.03 KB each under this methodology
- * (30.17 MB at 30,000, 99.67 MB at 100,000 -- a different absolute number
- * from the original 1.7 KB estimate, most likely a different accounting of
- * concurrent `Promise.all` overhead, but flat and reproducible); unsigned
- * entries cost about 0.80 KB each (23.48 MB at 30,000, 78.17 MB at 100,000),
- * a consistent 22% less, since a public URL carries no signature, expiry or
- * `response-content-disposition` query parameters. 38,000 unsigned entries
- * cost about 29.6 MB under this same methodology -- within the same budget
- * the existing 30,000-entry presigned bound already spends (30.17 MB) -- so
- * the bound is raised to 38,000, the same memory ceiling covering more
- * entries because each one got cheaper, not a new ceiling.
+ * and the ACTUAL production URL builders (`buildRedirectUrl` for the
+ * presigned shape, `buildAnnexPublicUrl` for the unsigned one), heap
+ * sampled the same way (`bun:jsc`'s `heapStats`, entries array plus its
+ * `JSON.stringify` both live): presigned entries cost about 1.03 KB each
+ * under this methodology (30.17 MB at 30,000, 99.67 MB at 100,000 -- a
+ * different absolute number from the original 1.7 KB estimate, most likely
+ * a different accounting of concurrent `Promise.all` overhead, but flat and
+ * reproducible); unsigned entries cost about 0.80 KB each (23.48 MB at
+ * 30,000, 78.17 MB at 100,000), a consistent 22% less, since a public URL
+ * carries no signature, expiry or `response-content-disposition` query
+ * parameters.
  *
- * Against the catalog on 2026-09-24 (the public `total_files` column): every
- * dataset up to 26,410 files was already under the old 30,000 bound, and the
- * seven above it start at 45,424 (on002814) and run to nm000281's 102,532.
- * Raising to 38,000 does not move any of those seven under the bound; it
- * gives the datasets already served more headroom to grow before they would.
+ * PER-BRANCH ARITHMETIC (review finding on #1529: one bound applied to both
+ * branches let the presigned one grow past the budget it was ever measured
+ * against). The two branches cost different amounts per entry, so each
+ * keeps the bound its OWN measurement supports:
+ *
+ *   - Presigned (`MAX_MANIFEST_JSON_ENTRIES_PRESIGNED`): stays at the
+ *     original 30,000. At 1.03 KB/entry that is about 30.2 MB -- the same
+ *     figure #1505 sized 30,000 against, unchanged because #1522 did not
+ *     make presigning any cheaper. Raising this branch to 38,000 would cost
+ *     about 38.3 MB, ~27% over that budget, for entries whose cost this
+ *     change never reduced -- that was the bug this bound previously had.
+ *   - Unsigned (`MAX_MANIFEST_JSON_ENTRIES`): raised to 38,000. At 0.80
+ *     KB/entry that is about 29.7 MB, UNDER the 30.2 MB the presigned
+ *     branch already spends at its own bound -- so 38,000 unsigned entries
+ *     fit inside the same ceiling that always applied, because each entry
+ *     got cheaper, not because the ceiling moved.
+ *
+ * Against the catalog on 2026-09-24 (the public `total_files` column):
+ * every dataset up to 26,410 files was already under 30,000, and the seven
+ * above it start at 45,424 (on002814) and run to nm000281's 102,532.
+ * Neither bound moves any of those seven under it. The intended asymmetry:
+ * a PUBLIC dataset between 30,000 and 38,000 files now gets `manifest.json`
+ * where it did not before; a dataset the bucket policy EXCLUDES in that
+ * same range still does not, because its entries never got cheaper.
  */
 export const MAX_MANIFEST_JSON_ENTRIES = 38_000;
 
 /**
- * The refusal for a manifest over {@link MAX_MANIFEST_JSON_ENTRIES}. 413
- * because the refusal is about size and is permanent for this version; a
- * client should not retry it. It names the way to enumerate the files that
- * does scale: the per-directory JSON listing, one directory per request.
+ * The bound for a dataset the bucket policy excludes from public read
+ * (`manifestJsonHandler`'s presigned branch). Kept at the ORIGINAL #1505
+ * value -- see {@link MAX_MANIFEST_JSON_ENTRIES}'s per-branch arithmetic for
+ * why this one did not move.
  */
-function manifestJsonTooLarge(request: Request, datasetId: string, version: string): Response {
+export const MAX_MANIFEST_JSON_ENTRIES_PRESIGNED = 30_000;
+
+/**
+ * The refusal for a manifest over `limit` (the bound of whichever branch
+ * `manifestJsonHandler` already chose for this request --
+ * {@link MAX_MANIFEST_JSON_ENTRIES} for a public dataset,
+ * {@link MAX_MANIFEST_JSON_ENTRIES_PRESIGNED} for one the bucket policy
+ * excludes). 413 because the refusal is about size and is permanent for
+ * this version; a client should not retry it. It names the way to
+ * enumerate the files that does scale: the per-directory JSON listing, one
+ * directory per request.
+ */
+function manifestJsonTooLarge(
+  request: Request,
+  datasetId: string,
+  version: string,
+  limit: number,
+): Response {
   const listing = new URL(`../${encodeURIComponent(version)}/?format=json`, request.url).toString();
   return new Response(
     JSON.stringify({
-      error: `This version has more than ${MAX_MANIFEST_JSON_ENTRIES} files, which is more than manifest.json can list and presign in one response. Enumerate it one directory at a time instead: ${listing} lists the top level, and each directory's URL with ?format=json lists that directory's own files and subdirectories.`,
+      error: `This version has more than ${limit} files, which is more than manifest.json can list in one response. Enumerate it one directory at a time instead: ${listing} lists the top level, and each directory's URL with ?format=json lists that directory's own files and subdirectories.`,
       dataset_id: datasetId,
       version,
-      limit: MAX_MANIFEST_JSON_ENTRIES,
+      limit,
       listing_url: listing,
     }),
     {
@@ -632,6 +668,13 @@ async function manifestJsonHandler(
     }
   }
 
+  // The bound is per branch: excluded (presigned) entries cost more live
+  // memory than unsigned ones, so each branch is measured and bounded
+  // separately (see MAX_MANIFEST_JSON_ENTRIES's per-branch arithmetic).
+  // `excluded` is already known above, so the right bound applies to both
+  // the count check and the read that follows it -- never a mix of the two.
+  const bound = excluded ? MAX_MANIFEST_JSON_ENTRIES_PRESIGNED : MAX_MANIFEST_JSON_ENTRIES;
+
   // Count first, keeping nothing, so the refusal for an oversized manifest
   // costs what any other lookup costs. The second read is the one that
   // answers, and it enforces the bound itself, so a manifest rewritten
@@ -647,20 +690,20 @@ async function manifestJsonHandler(
     defer,
   );
   if (!counted) return notFound("Version not published");
-  if (counted.answer.kind === "count" && counted.answer.count > MAX_MANIFEST_JSON_ENTRIES) {
-    return manifestJsonTooLarge(request, datasetId, resolved.version);
+  if (counted.answer.kind === "count" && counted.answer.count > bound) {
+    return manifestJsonTooLarge(request, datasetId, resolved.version, bound);
   }
   const read = await queryManifest(
     env,
     request,
     datasetId,
     resolved.version,
-    () => new EntriesQuery(MAX_MANIFEST_JSON_ENTRIES),
+    () => new EntriesQuery(bound),
     defer,
   );
   if (!read) return notFound("Version not published");
   if (read.answer.kind === "over_limit") {
-    return manifestJsonTooLarge(request, datasetId, resolved.version);
+    return manifestJsonTooLarge(request, datasetId, resolved.version, bound);
   }
 
   const entries = excluded
@@ -1606,8 +1649,12 @@ dataRoutes.get("/:datasetId/:version/manifest.json", (c) => {
  * long s-maxage: every byte is deterministic from the published version.
  *
  * Cache policy diverges intentionally from manifest.json:
- *  - manifest.json embeds per-request presigned URLs (1h S3 expiry) so it
- *    must stay short-lived (max-age=60).
+ *  - manifest.json's Cache-Control now tracks an authorization decision
+ *    rather than a signature (#1522): max-age=300 for a public dataset's
+ *    unsigned URLs, max-age=60 for a bucket-policy-excluded dataset's
+ *    presigned ones (still 1h S3 expiry there). Either way it stays far
+ *    shorter than summary.json's, because a manifest can be rewritten in
+ *    place and a dataset's visibility or exclusion can change.
  *  - summary.json is path-only and immutable for the (datasetId, version)
  *    pair, so it gets s-maxage=86400 with stale-while-revalidate.
  */
