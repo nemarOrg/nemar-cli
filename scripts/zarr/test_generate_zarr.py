@@ -2837,6 +2837,9 @@ class TestReadRepoTextEncodings(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.src = os.path.join(self._tmp.name, "src")
+        # The non-UTF-8 warning is once per path per process; every test here
+        # reads the same path and asserts on the warning.
+        generate_zarr._NON_UTF8_WARNED.clear()
         self.env = {
             **os.environ,
             "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
@@ -2869,6 +2872,7 @@ class TestReadRepoTextEncodings(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(clone, self.TSV)))
         for repo in (self.src, clone):
             with self.subTest(repo=os.path.basename(repo)):
+                generate_zarr._NON_UTF8_WARNED.clear()  # same path, both reads warn
                 text, log = self._read(repo)
                 self.assertIsNotNone(text)
                 self.assertIn("Cz\tEEG\tµV", text or "")
@@ -2903,12 +2907,30 @@ class TestReadRepoTextEncodings(unittest.TestCase):
         self.assertEqual(text, "name\tunits\nCz\t\x81µV\n")
         self.assertIn("as latin-1", log)
 
+    def test_the_warning_is_once_per_path(self):
+        # An inherited sidecar is re-read for every recording it applies to;
+        # one line per path, not one per read.
+        clone = self._commit(self.LATIN1)
+        _, first = self._read(clone)
+        _, second = self._read(clone)
+        self.assertEqual(first.count("::warning::"), 1)
+        self.assertEqual(second, "")
+        other = "sub-01/eeg/sub-01_task-other_channels.tsv"
+        with open(os.path.join(self.src, other), "wb") as fh:
+            fh.write(self.LATIN1)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            text = generate_zarr._read_repo_text(self.src, "HEAD", other)
+        self.assertIn("Cz\tEEG\tµV", text or "")
+        self.assertIn(other, out.getvalue())
+
     def test_a_utf16_bom_decodes_as_utf16_not_cp1252(self):
         # Windows "Unicode" text: without the BOM check cp1252 accepts these
         # bytes and every character comes back followed by a NUL.
         body = "name\ttype\tunits\r\nCz\tEEG\tµV\r\n"
         for codec, bom in (("utf-16-le", b"\xff\xfe"), ("utf-16-be", b"\xfe\xff")):
             with self.subTest(codec=codec):
+                generate_zarr._NON_UTF8_WARNED.clear()
                 clone = self._commit(bom + body.encode(codec))
                 text, log = self._read(clone)
                 self.assertEqual(text, "name\ttype\tunits\nCz\tEEG\tµV\n")
@@ -7970,6 +7992,7 @@ class TestConvertOneEndToEnd(unittest.TestCase):
     def test_a_latin1_channels_tsv_converts_instead_of_retrying_forever(self):
         """on005691: `µV` written as the Latin-1 byte 0xb5. The strict UTF-8
         read raised uncoded from convert_one, so the job retried forever."""
+        generate_zarr._NON_UTF8_WARNED.clear()  # the warning is once per path
         with open(os.path.join(self.eeg, "sub-01_task-rest_channels.tsv"), "wb") as fh:
             fh.write(
                 ("name\ttype\tunits\n" + "".join(f"E{i + 1}\tEEG\tµV\n" for i in range(4)))

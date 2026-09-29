@@ -2013,6 +2013,9 @@ def _bids_entities(stem: str) -> dict[str, str]:
 
 _UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
 
+# Sidecar paths already warned about as non-UTF-8 in this process.
+_NON_UTF8_WARNED: set[str] = set()
+
 
 def _decode_sidecar_bytes(raw: bytes) -> tuple[str, str]:
     """`(text, encoding)` for a sidecar's bytes; see `_decode_sidecar_text`."""
@@ -2044,12 +2047,17 @@ def _decode_sidecar_text(raw: bytes, path: str) -> str:
     tools actually write (and a superset of latin-1's printable range);
     latin-1 maps every byte, so this always returns.
 
+    The warning is issued once per path per process: an inherited sidecar
+    (a top-level `eeg.json`, say) is re-read for every recording it applies
+    to, and thousands of identical lines would bury the rest of the log.
+
     Newlines are normalized to `\\n`, as the text-mode reads this replaced did,
     so a CRLF sidecar reaches every caller (and the copy staged for biosigIO)
     exactly as before.
     """
     text, encoding = _decode_sidecar_bytes(raw)
-    if encoding != "utf-8-sig":
+    if encoding != "utf-8-sig" and path not in _NON_UTF8_WARNED:
+        _NON_UTF8_WARNED.add(path)
         print(
             f"::warning::{path} is not valid UTF-8 (BIDS requires it); "
             f"read it as {encoding}",
