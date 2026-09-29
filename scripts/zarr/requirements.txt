@@ -64,7 +64,7 @@
 #     `shard_seconds`, level-0 `source_rate_hz` / `chunk_samples` / `shard_samples`,
 #     view-array `chunk_columns`, root `view_chunk_columns`.
 #   - Adopting a channels.tsv `units` value CONVERTS the channel's samples into
-#     that unit rather than only relabelling them, exempts the discrete channel
+#     that unit rather than only relabeling them, exempts the discrete channel
 #     types, and reports what it did per file in
 #     `rec.metadata["channels_tsv_units"]` (biosigio#125, closing #122), which
 #     the converter republishes as the index's per-store `units_report` -- so a
@@ -92,7 +92,7 @@
 #     probe that saves you from that; only the floor does.
 # The converter passes the sidecar EXPLICITLY on both paths (`bids_channels_arg`)
 # and never uses "auto": the file handed to an exporter is a scratch
-# materialisation, and on the ADR 0028 MaxShield path it is the filtered copy at
+# materialization, and on the ADR 0028 MaxShield path it is the filtered copy at
 # `work/sss_<basename>`, so sibling detection is the wrong question -- and BIDS
 # inheritance means the applicable sidecar may live in an ancestor directory
 # rather than beside the recording at all.

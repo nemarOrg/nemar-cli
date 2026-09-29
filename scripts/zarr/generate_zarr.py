@@ -12,7 +12,7 @@ callback body the driver script POSTs to ``/webhooks/zarr-ready``.
 
 The conversion itself is biosigIO (``Recording.from_file -> bids.apply_events_tsv
 -> rec.to_zarr``); this driver owns the BIDS-tree orchestration: change
-detection, annex-content materialisation, S3 sync, and the index.
+detection, annex-content materialization, S3 sync, and the index.
 
 Design notes
 ------------
@@ -308,7 +308,7 @@ def should_stream(primary_local: str, size_bytes: int) -> bool:
     2. For a classic `.set` whose samples are embedded in the MAT struct rather
        than a sibling `.fdt`, `preload=False` is a fiction: MNE's
        `_read_segment_file` detects `is_embedded` and calls `_readmat(preload=True)`,
-       materialising the whole recording and caching it. Streaming such a file
+       materializing the whole recording and caching it. Streaming such a file
        would load everything anyway AND add the scratch memmap on top -- strictly
        worse than the in-memory path it replaced.
 
@@ -740,7 +740,7 @@ def projection_factor_hint(primary_local: str, streaming: bool) -> str:
 #     on006012 sub-01    438 MiB -> 1.87 GiB   4.4x
 #     on006720 sub-155   716 MiB -> 2.95 GiB   4.2x
 #
-# The ratio FALLS with size as fixed overhead amortises, so the worst ratio sits where
+# The ratio FALLS with size as fixed overhead amortizes, so the worst ratio sits where
 # the absolute number is trivial and the largest recordings -- the ones that can
 # actually exhaust the node -- are the cheapest per byte. 6x clears every observed
 # point, and clears the largest by 43%.
@@ -903,7 +903,7 @@ class MaxShieldUncalibrated(Exception):
 
     MEGIN's position, which MNE enforces by refusing to read these files at all, is
     that raw Internal Active Shielding data is not fit for analysis until the
-    shielding's effect has been modelled out. ADR 0028 decides we correct it with
+    shielding's effect has been modeled out. ADR 0028 decides we correct it with
     Signal-Space Separation and serve the result -- but ONLY with the recording's own
     fine-calibration and cross-talk files, because uncalibrated Signal-Space
     Separation is a weaker correction whose quality varies by site and hardware, and
@@ -1018,7 +1018,7 @@ class ChannelCountMismatch(Exception):
 
 
 # Pass 2 of the streaming exporter does, per channel,
-# `x = np.asarray(mm[i], dtype=np.float64)` -- it materialises ONE WHOLE CHANNEL
+# `x = np.asarray(mm[i], dtype=np.float64)` -- it materializes ONE WHOLE CHANNEL
 # at native rate as anonymous float64. That term is `n_samples * 8` bytes: it
 # scales with duration and sample rate and is INDEPENDENT of channel count, so
 # STREAM_PEAK_BYTES is not the guaranteed bound it looks like. A many-channel
@@ -1094,7 +1094,7 @@ def usable_ram_bytes(meminfo_path: str = "/proc/meminfo") -> int:
     try:
         # Median of three samples. MemAvailable is a live number on a shared box,
         # and this is read ONCE for a run that lasts hours -- so a single unlucky
-        # instant (a neighbouring job's page-cache spike) would otherwise set an
+        # instant (a neighboring job's page-cache spike) would otherwise set an
         # absurdly low ceiling for everything that follows. `is not None` rather
         # than `or`: a genuine 0 must not silently fall through to MemTotal.
         samples = []
@@ -1774,7 +1774,7 @@ def entities_base(stem: str) -> str:
 # the chain and returns the WHOLE recording. The other splits are not standalone
 # recordings -- reading one in isolation yields only its segment. So a split group
 # is ONE logical recording: the lowest-index split is the chain head (the only
-# buildable primary), every split must be materialised together for MNE to follow
+# buildable primary), every split must be materialized together for MNE to follow
 # the chain, and exactly one store is written (keyed at the head split's path).
 _SPLIT_RE = re.compile(r"_split-(\d+)")
 
@@ -1834,7 +1834,7 @@ def split_heads_and_members(primaries: list[str]) -> tuple[set[str], dict[str, s
 def split_members_for(primary_path: str, head_files: set[str]) -> list[str]:
     """Every FIF split that shares `primary_path`'s split group, sorted by index
     (includes the head). `[]` when `primary_path` is not a split file. Used to (a)
-    materialise the whole chain and (b) record the member list on the index entry so
+    materialize the whole chain and (b) record the member list on the index entry so
     the browser can resolve any split file to the one store."""
     if not is_split_fif(primary_path):
         return []
@@ -2064,7 +2064,7 @@ def _decode_sidecar_text(raw: bytes, path: str) -> str:
     tools actually write (and a superset of latin-1's printable range);
     latin-1 maps every byte, so this always returns.
 
-    Behaviour change for UTF-8 files with a BOM: the strict text-mode read
+    Behavior change for UTF-8 files with a BOM: the strict text-mode read
     kept the BOM as U+FEFF, so `json.loads` raised ValueError and the JSON
     callers (PowerLineFrequency, coordsystem, event descriptions) swallowed
     it and ignored the sidecar. The BOM is now dropped and those sidecars
@@ -3573,7 +3573,7 @@ def merge_index(
         wanted = set(discovered)
         # A carried-over store whose path is EXCLUDED from discovery goes, and
         # goes NOISILY. ADR 0027 made discovery raw-only and
-        # `purge_non_raw_stores.py` is the authorised deletion of what it stopped
+        # `purge_non_raw_stores.py` is the authorized deletion of what it stopped
         # producing, so a non-raw store is not something the archive serves -- an
         # index that kept describing one would advertise bytes that are being
         # removed. But dropping a store silently is how a real orphan bug would
@@ -5079,7 +5079,7 @@ def store_metadata(store_path: str) -> dict:
 def materialize_local(
     repo_dir: str, primary_path: str, head_files: set[str]
 ) -> tuple[str, str | None, str | None]:
-    """Local-mode materialisation (e.g. Hallu after `nemar dataset download`).
+    """Local-mode materialization (e.g. Hallu after `nemar dataset download`).
 
     The dataset working tree already holds the annex content (the data files are
     symlinks resolving to local annex objects), so biosigIO reads the
@@ -5512,7 +5512,7 @@ def fix_source_file_attr(store_path: str, bids_relpath: str) -> None:
 
     Every biosigIO importer calls ``rec.set_metadata("source_file", filepath)``
     with whatever path this driver handed it -- the conversion host's scratch
-    materialisation (``.../zarr-scratch/tmpXXXXXXXX/work/...``), a fresh
+    materialization (``.../zarr-scratch/tmpXXXXXXXX/work/...``), a fresh
     ``mkdtemp`` name every run. Left as-is, re-converting the same recording at
     the same source commit produces byte-different store metadata (defeating
     reproducibility), needlessly publishes the conversion host's internal
@@ -5830,7 +5830,7 @@ def event_descriptions_for(
 
     Sidecars are small JSON files tracked in git (not annexed); read via the working
     tree when present and ``git cat-file`` otherwise, matching the no-checkout
-    workflow clone behaviour.
+    workflow clone behavior.
     """
     stem = filename_stem(primary_path)
     rec_dir = os.path.dirname(primary_path)
@@ -5955,7 +5955,7 @@ def bids_channels_arg(channels_local: str | None) -> str:
     wrong question twice over:
 
     * The file this driver hands the exporter is not the recording's own path. It
-      is a scratch materialisation in `work/`, and on the ADR 0028 MaxShield path
+      is a scratch materialization in `work/`, and on the ADR 0028 MaxShield path
       it is the Signal-Space-Separated copy at `work/sss_<basename>`. Sibling
       detection there finds whatever this driver happened to stage, or nothing.
     * BIDS inheritance is not siblinghood. The sidecar that applies to
@@ -6054,7 +6054,7 @@ def convert_recording(
         # (requires biosigio>=1.1.4; ignored for non-EDF formats). See nemar-cli#737.
         # `bids_channels` is the resolved sidecar path or "off", never "auto" --
         # see `bids_channels_arg` for why sibling auto-detection is the wrong
-        # question for a scratch materialisation. The importer applies it before
+        # question for a scratch materialization. The importer applies it before
         # the suffix override below, which deliberately has the last word on
         # modality (see its comment), and records what the `units` column did in
         # `rec.metadata["channels_tsv_units"]` -> the store's `recording_metadata`
@@ -6243,7 +6243,7 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
                 cal_local = os.path.join(c["repo"], cal_rel)
                 ctc_local = os.path.join(c["repo"], ctc_rel)
                 # The remote branch below decides cleanly when a tracked file cannot
-                # be materialised; local mode has to check for itself. A working tree
+                # be materialized; local mode has to check for itself. A working tree
                 # can hold a git-annex POINTER whose content was never fetched, and
                 # `os.path.exists` is False for a dangling symlink -- so this catches
                 # the realistic case rather than letting apply_sss fail uncoded and
@@ -6415,7 +6415,7 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         # and the rows `main` stages for events.parquet (#1060). The parsed rows
         # travel back with the result rather than being re-read there: the events
         # sidecar may be annexed, and this worker is the only place it is
-        # materialised.
+        # materialized.
         parsed_events = parse_events_tsv(events_text)
         entry.update(events_summary_of(parsed_events))
         # Which channels.tsv shaped this store, and that the converter chose it
@@ -6462,7 +6462,7 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         if members:
             entry["split_members"] = members
         # ADR 0028 requires this to be DISCLOSED, not merely auditable. Every other
-        # store is the source signal quantised and rate-capped and nothing more; this
+        # store is the source signal quantized and rate-capped and nothing more; this
         # one has been processed. A model training across datasets would otherwise
         # silently mix filtered and unfiltered MEG with no signal that it was doing
         # so. MNE writes the parameters into the recording's own proc_history, but
@@ -7022,7 +7022,7 @@ def main() -> int:
     # never an orphan, so it keeps its previous store (ADR 0005: partial data
     # still serves) instead of being deleted by a wipe that ran before we knew.
     #
-    # `--wipe` keeps the old behaviour for recovery (a corrupt prefix, an index
+    # `--wipe` keeps the old behavior for recovery (a corrupt prefix, an index
     # that no longer describes what is on S3).
     if clean:
         # `compute_clean_orphans` also protects already-published stores under

@@ -641,7 +641,7 @@ load_secrets() {
   NEMAR_WEBHOOK_TOKEN="${NEMAR_WEBHOOK_TOKEN:-}"
   [[ -n "$NEMAR_WEBHOOK_TOKEN" ]] && return 0
   # Report what actually happened. Naming the search paths when a file WAS sourced
-  # would repeat the original mistake in this PR -- a message describing behaviour
+  # would repeat the original mistake in this PR -- a message describing behavior
   # that did not occur -- and this is the message read during a live outage.
   if [[ -n "$sourced" ]]; then
     err "sourced $sourced but it did not set NEMAR_WEBHOOK_TOKEN."
@@ -1083,7 +1083,7 @@ log "reconcile: $reconcile_out"
 # reading to the end of a reconcile summary.
 case "$reconcile_out" in
   *"ENGINE BUMP PENDING ACK"*)
-    err "an engine bump is waiting for acknowledgement; nothing was requeued for the stamp."
+    err "an engine bump is waiting for acknowledgment; nothing was requeued for the stamp."
     err "Preview: $0 --preview-engine-bump   Apply: touch $ENGINE_ACK_FILE (arms the next run)"
     ;;
 esac

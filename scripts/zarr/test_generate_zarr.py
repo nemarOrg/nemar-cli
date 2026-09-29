@@ -790,7 +790,7 @@ class TestPowerLineFrequencyFor(unittest.TestCase):
             self.assertIsNone(power_line_frequency_for(d, rec, head, "HEAD"))
 
     def test_a_utf8_bom_sidecar_is_honored(self):
-        # Behaviour change (#1527): the strict UTF-8 read kept the BOM, so
+        # Behavior change (#1527): the strict UTF-8 read kept the BOM, so
         # json.loads raised and this sidecar was silently skipped (PLF None).
         # It now parses, and quietly: a UTF-8 BOM is still UTF-8.
         with tempfile.TemporaryDirectory() as d:
@@ -1919,7 +1919,7 @@ class TestMemoryGuard(unittest.TestCase):
         )
         self.assertGreater(STREAM_MEM_FACTOR_BY_EXT[".mefd"], 10)
         # Other streamed formats keep the flat bound: nothing measured says
-        # otherwise, and charging them 12x would serialise the archive.
+        # otherwise, and charging them 12x would serialize the archive.
         self.assertEqual(projected_peak_bytes("sub-01/meg/sub-01_meg.fif", size, 306), STREAM_PEAK_BYTES)
         self.assertEqual(projected_peak_bytes("sub-01/meg/sub-01_meg.ds", size, 275), STREAM_PEAK_BYTES)
         self.assertEqual(stream_factor_for("sub-01/meg/sub-01_meg.fif"), 0.0)
@@ -4639,7 +4639,7 @@ class TestStreamingAdmissionThroughput(unittest.TestCase):
             projected_peak_bytes(name, size), ceiling, streamed=True
         )
         self.assertGreater(
-            ceiling // reserve, 1, "streaming the default must not serialise the queue"
+            ceiling // reserve, 1, "streaming the default must not serialize the queue"
         )
 
     def test_in_memory_recordings_still_carry_slack(self):
@@ -4759,7 +4759,7 @@ class TestOn004917BatchAdmission(unittest.TestCase):
 
 
 class TestMneEmbeddedSetCanary(unittest.TestCase):
-    """ADR 0030 rests on MNE eagerly materialising an EEGLAB `.set` whose samples
+    """ADR 0030 rests on MNE eagerly materializing an EEGLAB `.set` whose samples
     are embedded in the MAT struct rather than a sibling `.fdt`. That is a claim
     about a third-party library, verified once by hand; if a future MNE gains real
     lazy support the `.set` exclusion goes stale silently. This is the canary."""
@@ -4783,7 +4783,7 @@ class TestMneEmbeddedSetCanary(unittest.TestCase):
 class TestStreamingPeakIsChannelAware(unittest.TestCase):
     """#1112: STREAM_PEAK_BYTES is a FLOOR, not a bound.
 
-    Pass 2 of the streaming exporter materialises one whole channel at native
+    Pass 2 of the streaming exporter materializes one whole channel at native
     rate as anonymous float64 (`n_samples * 8`). That term scales with duration
     and sample rate and is independent of channel count, so a few-channel, long,
     high-rate recording can have a single channel that alone exceeds the flat
@@ -6329,7 +6329,7 @@ class TestCoverageInvariant(unittest.TestCase):
         """A carried-over store under `derivatives/` must NOT be republished.
 
         ADR 0027 made discovery raw-only and `purge_non_raw_stores.py` is the
-        authorised deletion of what it stopped producing, so those stores are not
+        authorized deletion of what it stopped producing, so those stores are not
         hosted -- an index that kept describing one would advertise bytes that are
         being removed. The drop is deliberate, but it is LOUD: `merge_index` logs
         each one with the tree that excluded it, and `main` reports the count as
@@ -6915,7 +6915,7 @@ class TestRealRecordingV3Fields(unittest.TestCase):
         Without this, the SSS test above could pass for the wrong reason on some
         future release whose auto-detection searches more widely -- and a staged
         sidecar would be at risk of being applied twice, which matters because
-        adopting a unit CONVERTS samples rather than relabelling them.
+        adopting a unit CONVERTS samples rather than relabeling them.
         """
         with tempfile.TemporaryDirectory() as d:
             recording = os.path.join(d, "sub-01_task-rest_eeg.edf")
@@ -6931,7 +6931,7 @@ class TestRealRecordingV3Fields(unittest.TestCase):
     def test_bids_channels_arg_is_the_path_or_off_never_auto(self):
         """"auto" is biosigIO's default and is always wrong here: it resolves the
         sidecar as a SIBLING of the file the exporter was handed, which is a
-        scratch materialisation (and, on the MaxShield path, a filtered copy).
+        scratch materialization (and, on the MaxShield path, a filtered copy).
         The driver therefore passes the resolved path, or "off" when no sidecar
         applies -- an explicit "there is none" rather than a guess."""
         self.assertEqual(generate_zarr.bids_channels_arg(self.channels), self.channels)
@@ -7161,7 +7161,7 @@ class TestMainRefusesToPublish(unittest.TestCase):
 # included.
 #
 # `s3api get-object`/`put-object` carry GENUINE ETag semantics -- an object's
-# ETag is the md5 of its bytes, and put-object honours `--if-match` /
+# ETag is the md5 of its bytes, and put-object honors `--if-match` /
 # `--if-none-match` the way S3 does (412 on a mismatch). That is the same
 # stand-in test_purge_non_raw_stores.py uses, and it has to be: the two scripts
 # now share one conditional write (`generate_zarr.write_index`), so a stub that
@@ -7269,7 +7269,7 @@ class TestMainCleanRunAgainstPriorIndexes(unittest.TestCase):
     """A `--clean` run over a REAL prior index, v1 and v3, through `main()`.
 
     This is the production path (hallu-zarr.sh always passes `--clean`) and no
-    test reached it: every prior-index behaviour was exercised through
+    test reached it: every prior-index behavior was exercised through
     `merge_index` directly, which `--clean` hands `prior=None` -- so the facts
     that must survive a clean rebuild travel a route nothing covered. They come
     from the PUBLISHED document rather than from what the merge is given:
@@ -7439,7 +7439,7 @@ class TestMainCleanRunAgainstPriorIndexes(unittest.TestCase):
         ))
         self.assertEqual(self.run_main(), 0)
         # The recording is not at HEAD any more, so the entry drops rather than
-        # ageing -- what is asserted here is that `main` READ it: the attempt
+        # aging -- what is asserted here is that `main` READ it: the attempt
         # history reached the merge, which is the wiring `--clean` breaks.
         self.assertEqual(self.published("index.json")["pending_count"], 0)
         # And the merge does age it when the recording IS still discovered,
@@ -9878,7 +9878,7 @@ class TestFdtDeclarationFile(unittest.TestCase):
 
 class TestDeclaredFdtConvertOne(unittest.TestCase):
     """`convert_one` over a real EEGLAB `.set` whose `.fdt` lives under
-    `derivatives/`, as on004306 ships it. Both materialisation paths are driven:
+    `derivatives/`, as on004306 ships it. Both materialization paths are driven:
     local mode (the working tree) and the remote path, whose blob fetch reads a
     real git repository (in-git blobs, so no S3 read is needed). `aws s3 sync`
     is the only external call and a no-op executable absorbs it, as in

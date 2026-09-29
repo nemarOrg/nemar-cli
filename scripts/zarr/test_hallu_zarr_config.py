@@ -861,7 +861,7 @@ def test_ack_file_is_consumed_by_exactly_one_run(ack_run) -> None:
     touches the ack file -- and that file arms exactly ONE run.
 
     Untested in bash until now, and the failure modes are both bad and silent:
-    an ack that is not consumed re-queues the whole back catalogue on every
+    an ack that is not consumed re-queues the whole back catalog on every
     hourly tick, and one consumed without being passed on leaves an operator
     who did the two-step procedure with nothing to show for it.
     """
@@ -895,7 +895,7 @@ def test_a_pending_bump_is_re_raised_as_its_own_error_line(ack_run) -> None:
     result = run(reconcile_out="queued=0 ENGINE BUMP PENDING ACK (312 rows)")
     assert result.returncode == 0, result.stderr
     assert "--engine-requeue-ack" not in " ".join(qpy_calls())
-    assert "waiting for acknowledgement" in result.stderr
+    assert "waiting for acknowledgment" in result.stderr
     # And it names both halves of the procedure.
     assert "--preview-engine-bump" in result.stderr
     assert str(ack_file) in result.stderr
