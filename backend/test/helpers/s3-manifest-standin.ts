@@ -3,8 +3,8 @@
  * (#1502), reached through `S3_ENDPOINT_URL` / `PresignedUrlOptions.endpointUrl`,
  * the origin override the git-broker and zarr suites already use.
  *
- * It implements the three S3 behaviors the manifest source depends on, and
- * nothing else:
+ * It implements the S3 behaviors the manifest source, the bucket-policy
+ * reader and the public-object URL builder depend on, and nothing else:
  *
  *  - a content-derived `ETag` on every object (S3's is an MD5; this is a
  *    SHA-256, which is just as content-derived and needs no extra import),
@@ -12,7 +12,15 @@
  *  - `If-None-Match` answered with a bodiless 304 when the ETag matches;
  *  - a "private" object refused with 403 unless the request is signed
  *    (carries an `Authorization` header), which is the shape that sends
- *    `fetchManifestObject` to its signed fallback.
+ *    `fetchManifestObject` to its signed fallback;
+ *  - a single `Range: bytes=a-b` / `bytes=a-` / `bytes=-N` request answered
+ *    with a real `206` + `Content-Range` (#1522's public-URL compatibility
+ *    test needs this; the manifest reads never send Range, so this is inert
+ *    for every existing use of this stand-in);
+ *  - `GET /?policy` answers whatever `setBucketPolicy` last set, mirroring
+ *    `getBucketPolicy`'s target (`?policy` on the bucket root, not a keyed
+ *    object) -- `null` (the default) answers 404, the same as an S3 bucket
+ *    with no policy attached.
  *
  * Every request is logged with the headers that matter, so a test asserts
  * on what was actually sent and answered rather than on what the code under
@@ -20,6 +28,26 @@
  */
 
 import type { Server } from "bun";
+
+function parseSingleRange(header: string, length: number): { start: number; end: number } | null {
+  const single = /^bytes=(?:(\d+)-(\d+)|(\d+)-|-(\d+))$/.exec(header);
+  if (!single) return null;
+  let start: number;
+  let end: number;
+  if (single[4] !== undefined) {
+    const n = Number(single[4]);
+    start = Math.max(0, length - n);
+    end = length - 1;
+  } else if (single[3] !== undefined) {
+    start = Number(single[3]);
+    end = length - 1;
+  } else {
+    start = Number(single[1]);
+    end = Number(single[2]);
+  }
+  if (start >= length || start > end) return null;
+  return { start, end: Math.min(end, length - 1) };
+}
 
 export interface StandinObject {
   body: Uint8Array;
@@ -50,6 +78,12 @@ export interface S3ManifestStandin {
   ): string;
   remove(path: string): void;
   objects: Map<string, StandinObject>;
+  /** Set (or, with `null`, clear) the document `GET /?policy` answers.
+   *  Cleared (the default) answers 404, mirroring a bucket with no policy
+   *  attached. Takes the parsed object, not a JSON string, so a test builds
+   *  it with `buildPublicAccessPolicy`/`addPrivateDataset` the same way
+   *  production code does. */
+  setBucketPolicy(policy: unknown | null): void;
   stop(): void;
 }
 
@@ -62,11 +96,13 @@ function etagFor(body: Uint8Array): string {
 export function startS3ManifestStandin(): S3ManifestStandin {
   const objects = new Map<string, StandinObject>();
   const log: StandinRequest[] = [];
+  let bucketPolicy: string | null = null;
 
   const server: Server = Bun.serve({
     port: 0,
     fetch(req) {
-      const path = decodeURIComponent(new URL(req.url).pathname);
+      const url = new URL(req.url);
+      const path = decodeURIComponent(url.pathname);
       const ifNoneMatch = req.headers.get("if-none-match");
       const signed = req.headers.has("authorization");
       const entry: StandinRequest = {
@@ -78,6 +114,22 @@ export function startS3ManifestStandin(): S3ManifestStandin {
         bytesSent: 0,
       };
       log.push(entry);
+
+      // GET /?policy is not a keyed object: `getBucketPolicy` always reads
+      // the bucket root's policy sub-resource, never a path under it.
+      if (path === "/" && url.searchParams.has("policy")) {
+        if (bucketPolicy === null) {
+          entry.status = 404;
+          return new Response("<Error><Code>NoSuchBucketPolicy</Code></Error>", { status: 404 });
+        }
+        entry.status = 200;
+        entry.bytesSent = bucketPolicy.length;
+        return new Response(bucketPolicy, {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
       const obj = objects.get(path);
       if (!obj) {
         entry.status = 404;
@@ -90,6 +142,40 @@ export function startS3ManifestStandin(): S3ManifestStandin {
       if (ifNoneMatch !== null && ifNoneMatch === obj.etag) {
         entry.status = 304;
         return new Response(null, { status: 304, headers: { ETag: obj.etag } });
+      }
+      const range = req.headers.get("range");
+      if (range && obj.breakAfter === undefined) {
+        const parsed = parseSingleRange(range, obj.body.length);
+        if (!parsed) {
+          entry.status = 416;
+          return new Response(null, {
+            status: 416,
+            headers: { "Content-Range": `bytes */${obj.body.length}` },
+          });
+        }
+        const { start, end } = parsed;
+        const slice = obj.body.slice(start, end + 1);
+        entry.status = 206;
+        entry.bytesSent = slice.length;
+        if (req.method === "HEAD") {
+          return new Response(null, {
+            status: 206,
+            headers: {
+              ETag: obj.etag,
+              "Content-Length": String(slice.length),
+              "Content-Range": `bytes ${start}-${end}/${obj.body.length}`,
+            },
+          });
+        }
+        return new Response(slice, {
+          status: 206,
+          headers: {
+            ETag: obj.etag,
+            "Content-Length": String(slice.length),
+            "Content-Range": `bytes ${start}-${end}/${obj.body.length}`,
+            "Content-Type": "application/octet-stream",
+          },
+        });
       }
       entry.status = 200;
       const headers = { ETag: obj.etag, "Content-Type": "application/json" };
@@ -120,6 +206,9 @@ export function startS3ManifestStandin(): S3ManifestStandin {
     url: `http://127.0.0.1:${server.port}`,
     log,
     objects,
+    setBucketPolicy(policy) {
+      bucketPolicy = policy === null ? null : JSON.stringify(policy);
+    },
     put(path, body, opts) {
       const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body;
       const etag = etagFor(bytes);

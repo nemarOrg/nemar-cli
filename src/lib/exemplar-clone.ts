@@ -94,6 +94,32 @@ export function rewriteObjectKeyPrefix(srcKey: string, sourceId: string, xxId: s
   return `${xxId}/${srcKey.slice(prefix.length)}`;
 }
 
+/**
+ * Same rewrite as {@link rewriteObjectKeyPrefix}, plus the archive file name
+ * itself (#1491): since the rename, an archive's file name embeds its own
+ * dataset id (`<id>/archives/<id>_v<version>.zip`), which the generic
+ * leading-segment rewrite above does not touch. Left alone, a copied
+ * exemplar archive would keep the SOURCE dataset's id baked into its file
+ * name (`xx099902/archives/nm000104_v1.0.0.zip`), which is neither the new
+ * key `resolveArchiveKey` looks for at the destination
+ * (`xx099902/archives/xx099902_v1.0.0.zip`) nor the pre-#1491 fallback (no
+ * dataset id in the name at all) -- readers would find nothing.
+ *
+ * Only rewrites a name that actually starts with `<sourceId>_`; a
+ * pre-#1491 source archive (bare `v<version>.zip`) has no such prefix and
+ * passes through unchanged, matching {@link rewriteObjectKeyPrefix}'s
+ * existing behavior for it.
+ */
+export function rewriteArchiveKeyPrefix(srcKey: string, sourceId: string, xxId: string): string {
+  const rewritten = rewriteObjectKeyPrefix(srcKey, sourceId, xxId);
+  const lastSlash = rewritten.lastIndexOf("/");
+  const dir = rewritten.slice(0, lastSlash + 1);
+  const filename = rewritten.slice(lastSlash + 1);
+  const sourceFilePrefix = `${sourceId}_`;
+  if (!filename.startsWith(sourceFilePrefix)) return rewritten;
+  return `${dir}${xxId}_${filename.slice(sourceFilePrefix.length)}`;
+}
+
 /** One curated fleet entry (`scripts/exemplar-fleet.json`). */
 export interface ExemplarFleetEntry {
   xx_id: string;
@@ -239,12 +265,17 @@ async function buildExemplarCopyItems(
   sourceId: string,
   xxId: string,
   subPrefix: string,
+  // #1491: archives/ needs the file-name-aware rewrite (see
+  // rewriteArchiveKeyPrefix's docstring); every other sub-prefix's relative
+  // keys don't embed the source dataset id, so the plain rewrite is correct
+  // for them.
+  rewriteKey: (srcKey: string, sourceId: string, xxId: string) => string = rewriteObjectKeyPrefix,
 ): Promise<CopyItem[]> {
   const sourcePrefix = `${sourceId}/${subPrefix}`;
   const existing = await listExistingObjects(SOURCE_BUCKET, sourcePrefix, S3_REGION);
   return [...existing.keys()].filter(isAnnexContentKey).map((relKey) => {
     const srcKey = `${sourcePrefix}${relKey}`;
-    const destKey = rewriteObjectKeyPrefix(srcKey, sourceId, xxId);
+    const destKey = rewriteKey(srcKey, sourceId, xxId);
     return {
       key: relKey,
       source: { bucket: SOURCE_BUCKET, key: srcKey, region: S3_REGION },
@@ -279,8 +310,16 @@ async function copySubPrefix(
   xxId: string,
   subPrefix: string,
   label: string,
+  // #1491: pass rewriteArchiveKeyPrefix for "archives/" so the copied file
+  // carries the DESTINATION dataset's id, not the source's. Note this does
+  // NOT change what `filterAlreadyCopied` compares below -- it still checks
+  // the SOURCE-relative key against the destination listing, so a renamed
+  // archive that is already present at the destination is not recognized as
+  // "already copied" and gets re-copied (idempotent, just not skipped) on a
+  // re-run. Harmless for this best-effort, single-file-per-dataset prefix.
+  rewriteKey: (srcKey: string, sourceId: string, xxId: string) => string = rewriteObjectKeyPrefix,
 ): Promise<string[]> {
-  const items = await buildExemplarCopyItems(sourceId, xxId, subPrefix);
+  const items = await buildExemplarCopyItems(sourceId, xxId, subPrefix, rewriteKey);
   if (items.length === 0) {
     console.log(chalk.dim(`  [${label}] nothing to copy`));
     return [];
@@ -541,7 +580,7 @@ export async function copyExemplarData(
     // records.json lives under version/ (`version/v<X>-records.json`); only
     // that file, not the version manifests alongside it, is copied.
     await copySubPrefix(sourceId, xxId, "zarr/", "zarr");
-    await copySubPrefix(sourceId, xxId, "archives/", "archives");
+    await copySubPrefix(sourceId, xxId, "archives/", "archives", rewriteArchiveKeyPrefix);
     const versionItems = await buildExemplarCopyItems(sourceId, xxId, "version/");
     const recordsItems = versionItems.filter((i) => i.key.endsWith("-records.json"));
     if (recordsItems.length > 0) {

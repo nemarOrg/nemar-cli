@@ -8,7 +8,12 @@
  */
 
 import { timingSafeEqual } from "../../lib/constant-time.js";
-import { MAX_ARCHIVE_RETRIES, decideArchiveRetry } from "../../services/archive-retry.js";
+import { ARCHIVE_SKIP_UPDATE_SQL, shouldSkipArchive } from "../../services/archive-policy.js";
+import {
+  MAX_ARCHIVE_RETRIES,
+  decideArchiveRetry,
+  normalizeVersion,
+} from "../../services/archive-retry.js";
 import { isValidDatasetId } from "../../services/datasetId.js";
 import { getDatasetsToken } from "../../services/github-auth.js";
 import { triggerArchiveGeneration } from "../../services/github.js";
@@ -17,8 +22,11 @@ import type { WebhookRouter } from "../webhooks/shared.js";
 /**
  * POST /webhooks/archive-ready — callback from nemarDatasets/.github
  * `run-generate-archive.yml` once a dataset's downloadable zip archive has been
- * (re)built and uploaded to `s3://nemar/<id>/archives/v<version>.zip`
- * (epic #695, dashboard.nemar.org/observability).
+ * (re)built and uploaded to `s3://nemar/<id>/archives/<id>_v<version>.zip`
+ * (#1491; older uploads used `<id>/archives/v<version>.zip`)
+ * (epic #695, dashboard.nemar.org/observability). The workflow also deletes
+ * every other object version under `<id>/archives/` after this callback
+ * succeeds (#1518), so at most one archive exists per dataset going forward.
  *
  * Mirror of /zarr-ready: same shared `X-Webhook-Token` (NEMAR_WEBHOOK_TOKEN)
  * auth, records the latest-only archive state on the `datasets` row. No cache
@@ -187,6 +195,17 @@ export const ARCHIVE_READY_UPDATE_SQL = `UPDATE datasets
                )
            WHERE dataset_id = ?`;
 
+/**
+ * The dataset's most recently minted version, by the same "latest" rule
+ * `PUBLIC_DATASET_VERSIONS_SQL` (data-router.ts) uses: `ORDER BY created_at
+ * DESC`. Exported so the 'ready' guard below and its test run the identical
+ * query rather than a second copy of the ordering rule.
+ */
+export const LATEST_DATASET_VERSION_SQL = `SELECT version FROM dataset_versions
+    WHERE dataset_id = ?
+ ORDER BY created_at DESC
+    LIMIT 1`;
+
 export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
   webhooks.post("/archive-ready", async (c) => {
     const token = c.req.header("X-Webhook-Token");
@@ -229,41 +248,89 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
     // daily archiveRetrySweep is the backstop. See services/archive-retry.ts.
     let changed = 0;
     let retry: ReturnType<typeof decideArchiveRetry> | null = null;
+    // The row's declared totals, carried from the 'failed' branch's read to the
+    // retry dispatch below (#1514) so the workflow's preflight has a fallback
+    // when the version manifest isn't publicly fetchable yet.
+    let retryTotalBytes: number | null = null;
+    let retryTotalFiles: number | null = null;
+    // Set when a 'ready' callback names a version that is NOT the dataset's
+    // latest (#1514 review): surfaced in the response body so the caller
+    // (and anyone reading the workflow log) can tell a stale callback was
+    // acknowledged but deliberately not applied, rather than silently
+    // treated the same as a normal write.
+    let notLatestVersion = false;
     try {
       if (status === "ready") {
-        const { complete, absent, declared, unreadable, malformed } =
-          deriveArchiveCompleteness(body);
-        // A real build whose tally arrived unparseable is NOT the same event as
-        // the skip path that sends no tally, but the persisted row cannot tell
-        // you apart: both leave the completeness columns COALESCE-preserved
-        // while archive_size and archive_checked_at are overwritten
-        // unconditionally. So the row ends up advertising a brand-new
-        // "checked just now" timestamp beside a verdict from an older build.
-        // Nothing else would ever surface that, so say it here.
-        if (malformed.length > 0) {
-          console.error(
-            `[archive-ready] ANOMALY dataset=${body.dataset_id}: completeness tally violates the all-or-nothing contract (${malformed.join(", ")}); columns keep the PREVIOUS build's verdict while archive_size/archive_checked_at advance`,
-          );
+        // Guard against a callback for an OLDER version clobbering the
+        // latest version's numbers: a retry or re-dispatch that finishes
+        // AFTER a newer build has already gone 'ready' must not overwrite
+        // it with the older zip's size/completeness. Same "latest" rule
+        // PUBLIC_DATASET_VERSIONS_SQL uses (ORDER BY created_at DESC). No
+        // version on the callback, or no dataset_versions row yet for this
+        // dataset, means there is nothing to contradict -> apply as before
+        // (ADR 0012's fail-open: unknown means write, not withhold).
+        //
+        // Normalize both sides with the same `v`/`V`-stripping
+        // version-doi.ts applies before storing/comparing a version
+        // (#1514 review): a caller that sends "v1.0.0" must compare equal
+        // to a stored bare "1.0.0", not be treated as a different, older
+        // version.
+        let isStaleVersion = false;
+        if (body.version) {
+          const reportedVersion = normalizeVersion(body.version);
+          const latest = await c.env.DB.prepare(LATEST_DATASET_VERSION_SQL)
+            .bind(body.dataset_id)
+            .first<{ version: string }>();
+          isStaleVersion = !!latest && normalizeVersion(latest.version) !== reportedVersion;
         }
-        // A 'ready' callback carrying unreadable>0 should be impossible: the
-        // build exits non-zero and the wrapper deletes the zip in that case. If
-        // it happens the classification logic has drifted, so say so loudly
-        // rather than silently recording the archive as merely partial.
-        if (unreadable !== null && unreadable > 0) {
-          console.error(
-            `[archive-ready] ANOMALY dataset=${body.dataset_id}: status=ready with unreadable=${unreadable}; the build should have failed and deleted the zip`,
+
+        if (isStaleVersion) {
+          notLatestVersion = true;
+          // The UPDATE above is what normally tells us the dataset exists
+          // (its affected-row count); skip it here, so check directly --
+          // still needed to answer 404 vs. 200-not-applied correctly.
+          const exists = await c.env.DB.prepare("SELECT 1 FROM datasets WHERE dataset_id = ?")
+            .bind(body.dataset_id)
+            .first();
+          changed = exists ? 1 : 0;
+          console.log(
+            `[archive-ready] dataset=${body.dataset_id} 'ready' callback for version=${body.version} not applied: not the dataset's latest version`,
           );
+        } else {
+          const { complete, absent, declared, unreadable, malformed } =
+            deriveArchiveCompleteness(body);
+          // A real build whose tally arrived unparseable is NOT the same event as
+          // the skip path that sends no tally, but the persisted row cannot tell
+          // you apart: both leave the completeness columns COALESCE-preserved
+          // while archive_size and archive_checked_at are overwritten
+          // unconditionally. So the row ends up advertising a brand-new
+          // "checked just now" timestamp beside a verdict from an older build.
+          // Nothing else would ever surface that, so say it here.
+          if (malformed.length > 0) {
+            console.error(
+              `[archive-ready] ANOMALY dataset=${body.dataset_id}: completeness tally violates the all-or-nothing contract (${malformed.join(", ")}); columns keep the PREVIOUS build's verdict while archive_size/archive_checked_at advance`,
+            );
+          }
+          // A 'ready' callback carrying unreadable>0 should be impossible: the
+          // build exits non-zero and the wrapper deletes the zip in that case. If
+          // it happens the classification logic has drifted, so say so loudly
+          // rather than silently recording the archive as merely partial.
+          if (unreadable !== null && unreadable > 0) {
+            console.error(
+              `[archive-ready] ANOMALY dataset=${body.dataset_id}: status=ready with unreadable=${unreadable}; the build should have failed and deleted the zip`,
+            );
+          }
+          const result = await c.env.DB.prepare(ARCHIVE_READY_UPDATE_SQL)
+            .bind(
+              typeof body.size === "number" ? body.size : null,
+              complete,
+              absent,
+              declared,
+              body.dataset_id,
+            )
+            .run();
+          changed = result.meta.changes ?? 0;
         }
-        const result = await c.env.DB.prepare(ARCHIVE_READY_UPDATE_SQL)
-          .bind(
-            typeof body.size === "number" ? body.size : null,
-            complete,
-            absent,
-            declared,
-            body.dataset_id,
-          )
-          .run();
-        changed = result.meta.changes ?? 0;
       } else if (status === "skipped") {
         // Over the size/file-count policy (#752): the workflow built no zip and
         // steers users to direct download. Record the reason; leave archive_status
@@ -271,37 +338,60 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
         // Reset archive_retry_count too (cross-epic with #736): a skip is a clean
         // state transition, so a prior failed-retry history must not block a future
         // auto-retry if the dataset later shrinks and a `failed` arrives.
-        const result = await c.env.DB.prepare(
-          `UPDATE datasets
-           SET archive_skip_reason = ?,
-               archive_status = NULL,
-               archive_retry_count = 0,
-               sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now'))
-           WHERE dataset_id = ?`,
-        )
+        const result = await c.env.DB.prepare(ARCHIVE_SKIP_UPDATE_SQL)
           .bind(body.reason ?? "archive skipped (size policy)", body.dataset_id)
           .run();
         changed = result.meta.changes ?? 0;
       } else {
-        // Read the current dispatch count to decide whether to re-dispatch. The
-        // count is NOT advanced here -- it is incremented only after a successful
-        // dispatch (in the waitUntil below), so a failed dispatch can't consume a
-        // retry slot. Matches archiveRetrySweep's dispatch-then-increment order.
+        // status === "failed". Read the current dispatch count AND the row's
+        // declared size (#1514): a dataset that has grown past the archive
+        // policy since its last good build must not auto-retry into another
+        // doomed, oversized run just because this callback says 'failed' --
+        // the dispatcher applies the same policy the workflow's own preflight
+        // would, and skips instead.
         const row = await c.env.DB.prepare(
-          "SELECT archive_retry_count FROM datasets WHERE dataset_id = ?",
+          "SELECT archive_retry_count, file_size, total_files FROM datasets WHERE dataset_id = ?",
         )
           .bind(body.dataset_id)
-          .first<{ archive_retry_count: number }>();
-        retry = decideArchiveRetry("failed", row?.archive_retry_count ?? 0, body.version);
-        const result = await c.env.DB.prepare(
-          `UPDATE datasets
-           SET archive_status = 'failed',
-               sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now'))
-           WHERE dataset_id = ?`,
-        )
-          .bind(body.dataset_id)
-          .run();
-        changed = result.meta.changes ?? 0;
+          .first<{
+            archive_retry_count: number;
+            file_size: number | null;
+            total_files: number | null;
+          }>();
+        const sizePolicy = shouldSkipArchive({
+          totalBytes: row?.file_size,
+          totalFiles: row?.total_files,
+        });
+        if (sizePolicy.skip) {
+          // Over policy right now: record the skip with the exact statement
+          // the 'skipped' branch above runs, and leave `retry` null so the
+          // dispatch block below is a no-op. A dataset in this state is
+          // never both 'failed' and over-policy at once -- skip supersedes.
+          const result = await c.env.DB.prepare(ARCHIVE_SKIP_UPDATE_SQL)
+            .bind(sizePolicy.reason ?? "archive skipped (size policy)", body.dataset_id)
+            .run();
+          changed = result.meta.changes ?? 0;
+          console.log(
+            `[archive-ready] dataset=${body.dataset_id} 'failed' callback superseded by size policy: ${sizePolicy.reason}`,
+          );
+        } else {
+          // The count is NOT advanced here -- it is incremented only after a
+          // successful dispatch (in the waitUntil below), so a failed dispatch
+          // can't consume a retry slot. Matches archiveRetrySweep's
+          // dispatch-then-increment order.
+          retry = decideArchiveRetry("failed", row?.archive_retry_count ?? 0, body.version);
+          retryTotalBytes = row?.file_size ?? null;
+          retryTotalFiles = row?.total_files ?? null;
+          const result = await c.env.DB.prepare(
+            `UPDATE datasets
+             SET archive_status = 'failed',
+                 sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'), '$.archive_checked_at', datetime('now'))
+             WHERE dataset_id = ?`,
+          )
+            .bind(body.dataset_id)
+            .run();
+          changed = result.meta.changes ?? 0;
+        }
       }
     } catch (err) {
       console.error(
@@ -340,6 +430,8 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
             await triggerArchiveGeneration(retryDatasetId, retryDatasetId, retryVersion, pat, {
               s3Bucket: c.env.S3_BUCKET,
               callbackBaseUrl: c.env.API_BASE_URL,
+              totalBytes: retryTotalBytes,
+              totalFiles: retryTotalFiles,
             });
             await c.env.DB.prepare(
               "UPDATE datasets SET archive_retry_count = ? WHERE dataset_id = ?",
@@ -360,9 +452,16 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
     }
 
     console.log(
-      `[archive-ready] dataset=${body.dataset_id} status=${status} size=${body.size ?? "?"} version=${body.version ?? "?"} complete=${body.complete ?? "?"} absent=${body.absent ?? "?"}${retry ? ` retry=${retry.reason} count=${retry.nextCount}` : ""}`,
+      `[archive-ready] dataset=${body.dataset_id} status=${status} size=${body.size ?? "?"} version=${body.version ?? "?"} complete=${body.complete ?? "?"} absent=${body.absent ?? "?"}${retry ? ` retry=${retry.reason} count=${retry.nextCount}` : ""}${notLatestVersion ? " applied=false (not latest version)" : ""}`,
     );
 
-    return c.json({ ok: true, dataset_id: body.dataset_id, status });
+    return c.json({
+      ok: true,
+      dataset_id: body.dataset_id,
+      status,
+      ...(notLatestVersion
+        ? { applied: false, reason: "version is not the dataset's latest" }
+        : {}),
+    });
   });
 }

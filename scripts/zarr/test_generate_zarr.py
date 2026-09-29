@@ -29,7 +29,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -786,6 +786,21 @@ class TestPowerLineFrequencyFor(unittest.TestCase):
             self._write(d, "sub-01/eeg/sub-01_task-rest_eeg.json", {"PowerLineFrequency": "n/a"})
             head = {"sub-01/eeg/sub-01_task-rest_eeg.json"}
             self.assertIsNone(power_line_frequency_for(d, rec, head, "HEAD"))
+
+    def test_a_utf8_bom_sidecar_is_honored(self):
+        # Behaviour change (#1527): the strict UTF-8 read kept the BOM, so
+        # json.loads raised and this sidecar was silently skipped (PLF None).
+        # It now parses, and quietly: a UTF-8 BOM is still UTF-8.
+        with tempfile.TemporaryDirectory() as d:
+            rec = "sub-01/eeg/sub-01_task-rest_eeg.set"
+            sidecar = "sub-01/eeg/sub-01_task-rest_eeg.json"
+            os.makedirs(os.path.join(d, "sub-01", "eeg"))
+            with open(os.path.join(d, sidecar), "wb") as fh:
+                fh.write(b"\xef\xbb\xbf" + json.dumps({"PowerLineFrequency": 50}).encode())
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(power_line_frequency_for(d, rec, {sidecar}, "HEAD"), 50.0)
+            self.assertEqual(out.getvalue(), "")
 
     def test_reads_via_git_when_no_working_tree(self):
         # The workflow clones --no-checkout, so the sidecar is only in the git
@@ -2822,6 +2837,132 @@ class TestExpectedChannelCountFor(unittest.TestCase):
             self.assertEqual(expected_channel_count_for(clone, rec, {tsv}, "HEAD"), 2)
 
 
+class TestReadRepoTextEncodings(unittest.TestCase):
+    """on005691: a Latin-1 channels.tsv (`µV` as the byte 0xb5) raised
+    UnicodeDecodeError out of `_read_repo_text`. It is not an OSError, so it
+    escaped uncoded and the job retried forever. Both read paths (working tree
+    and the `--no-checkout` clone's `git cat-file`) are exercised in a real
+    repository."""
+
+    TSV = "sub-01/eeg/sub-01_task-rest_channels.tsv"
+    REC = "sub-01/eeg/sub-01_task-rest_eeg.set"
+    LATIN1 = "name\ttype\tunits\nCz\tEEG\tµV\nPz\tEEG\tµV\nEOG\tEOG\tµV\n".encode("latin-1")
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.src = os.path.join(self._tmp.name, "src")
+        # The non-UTF-8 warning is once per path per process; every test here
+        # reads the same path and asserts on the warning.
+        generate_zarr._NON_UTF8_WARNED.clear()
+        self.env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+        }
+
+    def _git(self, *args: str) -> None:
+        subprocess.run(["git", *args], check=True, env=self.env, capture_output=True)
+
+    def _commit(self, data: bytes) -> str:
+        p = os.path.join(self.src, self.TSV)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as fh:
+            fh.write(data)
+        self._git("-C", self.src, "init", "-q", "-b", "main")
+        self._git("-C", self.src, "add", "-A")
+        self._git("-C", self.src, "commit", "-qm", "fixture")
+        clone = os.path.join(self._tmp.name, "clone")
+        self._git("clone", "--no-checkout", "-q", self.src, clone)
+        return clone
+
+    def _read(self, repo: str) -> tuple[str | None, str]:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            text = generate_zarr._read_repo_text(repo, "HEAD", self.TSV)
+        return text, out.getvalue()
+
+    def test_latin1_is_read_with_a_warning_on_both_paths(self):
+        clone = self._commit(self.LATIN1)
+        self.assertFalse(os.path.exists(os.path.join(clone, self.TSV)))
+        for repo in (self.src, clone):
+            with self.subTest(repo=os.path.basename(repo)):
+                generate_zarr._NON_UTF8_WARNED.clear()  # same path, both reads warn
+                text, log = self._read(repo)
+                self.assertIsNotNone(text)
+                self.assertIn("Cz\tEEG\tµV", text or "")
+                self.assertIn("::warning::", log)
+                self.assertIn(self.TSV, log)
+
+    def test_the_fidelity_gate_counts_a_latin1_sidecar(self):
+        # The caller the job died in: the gate's ground truth, not a helper.
+        clone = self._commit(self.LATIN1)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(expected_channel_count_for(clone, self.REC, {self.TSV}, "HEAD"), 3)
+        self.assertIn("not valid UTF-8", out.getvalue())
+
+    def test_utf8_with_a_bom_is_utf8_and_quiet(self):
+        clone = self._commit(b"\xef\xbb\xbf" + "name\ttype\tunits\nCz\tEEG\tµV\n".encode())
+        text, log = self._read(clone)
+        self.assertEqual(text, "name\ttype\tunits\nCz\tEEG\tµV\n")
+        self.assertEqual(log, "")
+
+    def test_cp1252_only_bytes_decode_as_cp1252(self):
+        # 0x80 is the euro sign in cp1252 and a C1 control in latin-1.
+        clone = self._commit(b"name\tdescription\nCz\tgain \x80 note\n")
+        text, log = self._read(clone)
+        self.assertIn("gain € note", text or "")
+        self.assertIn("as cp1252", log)
+
+    def test_bytes_cp1252_leaves_undefined_fall_back_to_latin1(self):
+        # 0x81 is undefined in cp1252, so only latin-1 can take it.
+        clone = self._commit(b"name\tunits\nCz\t\x81\xb5V\n")
+        text, log = self._read(clone)
+        self.assertEqual(text, "name\tunits\nCz\t\x81µV\n")
+        self.assertIn("as latin-1", log)
+
+    def test_the_warning_is_once_per_path(self):
+        # An inherited sidecar is re-read for every recording it applies to;
+        # one line per path, not one per read.
+        clone = self._commit(self.LATIN1)
+        _, first = self._read(clone)
+        _, second = self._read(clone)
+        self.assertEqual(first.count("::warning::"), 1)
+        self.assertEqual(second, "")
+        other = "sub-01/eeg/sub-01_task-other_channels.tsv"
+        with open(os.path.join(self.src, other), "wb") as fh:
+            fh.write(self.LATIN1)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            text = generate_zarr._read_repo_text(self.src, "HEAD", other)
+        self.assertIn("Cz\tEEG\tµV", text or "")
+        self.assertIn(other, out.getvalue())
+
+    def test_a_utf16_bom_decodes_as_utf16_not_cp1252(self):
+        # Windows "Unicode" text: without the BOM check cp1252 accepts these
+        # bytes and every character comes back followed by a NUL.
+        body = "name\ttype\tunits\r\nCz\tEEG\tµV\r\n"
+        for codec, bom in (("utf-16-le", b"\xff\xfe"), ("utf-16-be", b"\xfe\xff")):
+            with self.subTest(codec=codec):
+                generate_zarr._NON_UTF8_WARNED.clear()
+                clone = self._commit(bom + body.encode(codec))
+                text, log = self._read(clone)
+                self.assertEqual(text, "name\ttype\tunits\nCz\tEEG\tµV\n")
+                self.assertIn("read it as utf-16", log)
+                shutil.rmtree(self.src)
+                shutil.rmtree(clone)
+
+    def test_crlf_is_normalized_as_the_text_mode_read_did(self):
+        clone = self._commit(b"name\ttype\r\nCz\tEEG\r\n")
+        text, _ = self._read(clone)
+        self.assertEqual(text, "name\ttype\nCz\tEEG\n")
+
+    def test_a_missing_file_is_still_none(self):
+        clone = self._commit(self.LATIN1)
+        self.assertIsNone(generate_zarr._read_repo_text(clone, "HEAD", "absent.tsv"))
+
+
 class TestStoreTotalChannels(unittest.TestCase):
     def test_sums_across_groups(self):
         meta = {"groups": [{"n_channels": 70}, {"n_channels": 4}]}
@@ -2934,6 +3075,83 @@ class TestFileDeclaredChannelCount(unittest.TestCase):
             self.skipTest("pyedflib not installed")
         p = build_real_edf(self.dir, "real_eeg", n_channels=4, seconds=2)
         self.assertEqual(file_declared_channel_count(p), 4)
+
+
+class TestFifDeclaredChannelCountWithoutMne(unittest.TestCase):
+    """No MNE means no header count, and the log says so. Run in a real
+    interpreter without site-packages (`-S`), so MNE is genuinely absent
+    whether or not this suite's environment has it."""
+
+    def test_a_missing_mne_is_unknown_and_says_so(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        code = (
+            "import sys; sys.path.insert(0, sys.argv[1]); import generate_zarr as g; "
+            "print('RESULT', g.file_declared_channel_count(sys.argv[2]))"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-S", "-c", code, here, "sub-01_task-rest_meg.fif"],
+            capture_output=True, text=True, check=True,
+        )
+        self.assertIn("RESULT None", proc.stdout)
+        self.assertIn("MNE is not importable", proc.stdout)
+        self.assertIn("sub-01_task-rest_meg.fif", proc.stdout)
+
+
+class TestFifDeclaredChannelCount(unittest.TestCase):
+    """The FIF branch of the header count (on000117: an MEG sidecar declaring
+    404 channels over a FIF that holds 395, refused as a truncation because no
+    header count existed for FIF)."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not _have_mne():
+            raise unittest.SkipTest("mne not installed")
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+
+    def test_a_real_fif_reports_every_channel_in_its_info(self):
+        p = build_real_fif(os.path.join(self.dir, "sub-01_task-rest_meg.fif"))
+        self.assertEqual(file_declared_channel_count(p), len(FIF_CHANNELS))
+
+    def test_a_gzipped_fif_is_read_too(self):
+        p = build_real_fif(os.path.join(self.dir, "sub-01_task-rest_meg.fif.gz"))
+        self.assertEqual(file_declared_channel_count(p), len(FIF_CHANNELS))
+
+    def test_a_split_recording_is_counted_from_its_head(self):
+        # The converter hands the gate the chain head. Cost: MNE reserves a 1 MB
+        # cushion per split, so a "2MB" split holds ~1 MB of samples; 120 s at
+        # 1 kHz x 5 float32 channels (~2.4 MB) is the least that yields three
+        # `split-NN` files, written to a tmpdir in well under a second.
+        build_real_fif(
+            os.path.join(self.dir, "sub-01_task-rest_meg.fif"),
+            rate=1000.0, seconds=120, split_size="2MB", split_naming="bids",
+        )
+        head = os.path.join(self.dir, "sub-01_task-rest_split-01_meg.fif")
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "sub-01_task-rest_split-02_meg.fif")))
+        self.assertEqual(file_declared_channel_count(head), len(FIF_CHANNELS))
+
+    def test_an_unreadable_fif_is_unknown_and_says_so(self):
+        p = os.path.join(self.dir, "broken_meg.fif")
+        with open(p, "wb") as fh:
+            fh.write(b"not a fif header at all")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertIsNone(file_declared_channel_count(p))
+        self.assertIn("could not read the FIF header", out.getvalue())
+        self.assertIsNone(file_declared_channel_count(os.path.join(self.dir, "absent_meg.fif")))
+
+    def test_a_store_short_of_the_fif_header_is_still_truncated(self):
+        # The header count loosens nothing for a real truncation: a store
+        # missing a channel the FIF declares is withheld, sidecar or not.
+        p = build_real_fif(os.path.join(self.dir, "sub-01_task-rest_meg.fif"))
+        in_file = file_declared_channel_count(p)
+        assert in_file is not None
+        self.assertEqual(channel_gate_verdict(in_file - 1, in_file + 9, in_file), "truncated")
+        self.assertEqual(channel_gate_verdict(in_file - 1, in_file, in_file), "truncated")
+        self.assertEqual(channel_gate_verdict(in_file, in_file + 9, in_file), "sidecar_overcount")
 
 
 class TestChannelGateVerdict(unittest.TestCase):
@@ -4416,6 +4634,37 @@ def build_real_edf(directory: str, stem: str, n_channels: int = 4,
     writer.writeSamples([rng.normal(0, 20, rate * seconds) for _ in range(n_channels)])
     writer.close()
     return path
+
+
+# A small Neuromag-shaped channel set: MEG sensors, one EEG, one trigger line.
+FIF_CHANNELS = (
+    ("MEG0111", "mag"), ("MEG0112", "grad"), ("MEG0113", "grad"),
+    ("EEG001", "eeg"), ("STI101", "stim"),
+)
+
+
+def build_real_fif(path: str, rate: float = 250.0, seconds: int = 10, **save_kwargs) -> str:
+    """Write a REAL FIF with MNE (`RawArray(...).save`) and return its path.
+
+    MNE is the reader biosigIO uses for FIF, so the header written here is the
+    header both the converter and `file_declared_channel_count` read back."""
+    import mne
+    import numpy as np
+
+    names = [n for n, _ in FIF_CHANNELS]
+    types = [t for _, t in FIF_CHANNELS]
+    info = mne.create_info(names, rate, types)
+    data = np.random.default_rng(0).normal(0, 1e-12, (len(names), int(rate * seconds)))
+    mne.io.RawArray(data, info, verbose="ERROR").save(path, verbose="ERROR", **save_kwargs)
+    return path
+
+
+def _have_mne() -> bool:
+    try:
+        import mne  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 # --- real recordings ----------------------------------------------------------
@@ -7777,6 +8026,25 @@ class TestConvertOneEndToEnd(unittest.TestCase):
     def test_agreeing_counts_add_no_mismatch_note(self):
         self.assertNotIn("channels_tsv_count_mismatch", self.convert()["entry"])
 
+    def test_a_latin1_channels_tsv_converts_instead_of_retrying_forever(self):
+        """on005691: `µV` written as the Latin-1 byte 0xb5. The strict UTF-8
+        read raised uncoded from convert_one, so the job retried forever."""
+        generate_zarr._NON_UTF8_WARNED.clear()  # the warning is once per path
+        with open(os.path.join(self.eeg, "sub-01_task-rest_channels.tsv"), "wb") as fh:
+            fh.write(
+                ("name\ttype\tunits\n" + "".join(f"E{i + 1}\tEEG\tµV\n" for i in range(4)))
+                .encode("latin-1")
+            )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = self.convert()
+        self.assertTrue(result["ok"], result.get("error"))
+        entry = result["entry"]
+        self.assertNotIn("channels_tsv_count_mismatch", entry)
+        self.assertNotIn("channels_tsv_read_error", entry)
+        self.assertIs(entry["units_report"]["sidecar_supplied"], True)
+        self.assertIn("sub-01_task-rest_channels.tsv is not valid UTF-8", out.getvalue())
+
     def test_an_unreadable_sidecar_is_recorded_not_collapsed(self):
         """A channels.tsv that APPLIES but cannot be read must not look like a
         dataset that ships none: both leave `units_report` absent, and only one
@@ -7803,8 +8071,118 @@ class TestConvertOneEndToEnd(unittest.TestCase):
         self.assertEqual(result["entry"]["path"], self.primary)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestConvertOneFifSidecarOvercount(unittest.TestCase):
+    """on000117 through `convert_one`: an MEG channels.tsv listing channels its
+    FIF never had (CHPI coils, EEG inherited from another run) was refused as
+    `channel_count_mismatch` because FIF had no header count. A real FIF, a
+    real conversion; only `aws s3 sync` is absorbed, as in
+    TestConvertOneEndToEnd."""
+
+    PRIMARY = "sub-01/meg/sub-01_task-rest_meg.fif"
+    TSV = "sub-01/meg/sub-01_task-rest_channels.tsv"
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import mne  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = os.path.join(self._tmp.name, "repo")
+        meg = os.path.join(self.repo, "sub-01", "meg")
+        os.makedirs(meg)
+        build_real_fif(os.path.join(self.repo, self.PRIMARY))
+        bindir = os.path.join(self._tmp.name, "bin")
+        os.makedirs(bindir)
+        # The aws stand-in records its argv, so a test can tell whether a store
+        # was ever pushed.
+        self.aws_log = os.path.join(self._tmp.name, "aws.log")
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write(f'#!/bin/sh\necho "$*" >> "{self.aws_log}"\nexit 0\n')
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        path = os.environ["PATH"]
+        os.environ["PATH"] = bindir + os.pathsep + path
+        self.addCleanup(os.environ.__setitem__, "PATH", path)
+
+    def synced(self) -> bool:
+        if not os.path.exists(self.aws_log):
+            return False
+        with open(self.aws_log) as fh:
+            return any(line.startswith("s3 sync") for line in fh)
+
+    def convert(self, tsv_rows: int):
+        with open(os.path.join(self.repo, self.TSV), "w") as fh:
+            fh.writelines(
+                ["name\ttype\tunits\n"] + [f"CH{i:03d}\tMISC\tV\n" for i in range(tsv_rows)]
+            )
+        work = os.path.join(self._tmp.name, "work")
+        os.makedirs(work, exist_ok=True)
+        generate_zarr._init_worker({
+            "repo": self.repo, "bucket": "nemar-test", "dataset_id": "on000117",
+            "head": "b" * 40, "head_files": {self.PRIMARY, self.TSV}, "local": True,
+            "tmp": work, "updated": "2026-09-28T00:00:00Z",
+            "contract_base": "https://zarr.nemar.org", "engine_version": "3",
+            "dataset_row": None, "provenance_fetch_failed": False,
+            "mem_budget": None, "hard_ceiling": None, "projections": {},
+        })
+        return convert_one(self.PRIMARY)
+
+    def test_an_over_declaring_sidecar_publishes_and_discloses(self):
+        n = len(FIF_CHANNELS)
+        result = self.convert(n + 9)  # nine phantom channels, as on000117's CHPI00x
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertTrue(self.synced())
+        entry = result["entry"]
+        self.assertEqual(
+            entry["channels_tsv_count_mismatch"],
+            {"channels_tsv": n + 9, "in_file": n, "in_store": n},
+        )
+        index = merge_index(
+            None, "on000117", "b" * 40, [entry], [], "2026-09-28T00:00:00Z",
+            [], [], discovered=[self.PRIMARY],
+        )
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_the_overcount_exemption_never_launders_an_unreadable_fif(self):
+        # The load-bearing guarantee is that a store SHORT of the file is still
+        # withheld. It cannot be driven end to end with a real FIF: MNE refuses
+        # a FIF whose nchan disagrees with its channel definitions ("Incorrect
+        # number of channel definitions found"), and biosigIO maps every MNE
+        # channel type (unknown ones to MISC/OTHER), so a readable FIF always
+        # converts to exactly its header's channels. `channel_gate_verdict`
+        # covers the `truncated` branch directly. What CAN be driven is the
+        # other way the header count goes missing, a FIF MNE cannot parse:
+        # with a sidecar over-declaring it, it must be refused before any
+        # store exists, never reach the gate's "header unknown" path and publish.
+        cases = {
+            "garbage header": lambda data: b"not a fif header at all",
+            "header cut short": lambda data: data[:600],
+            "data cut short": lambda data: data[: len(data) // 2],
+        }
+        path = os.path.join(self.repo, self.PRIMARY)
+        with open(path, "rb") as fh:
+            original = fh.read()
+        for name, corrupt in cases.items():
+            with self.subTest(name):
+                with open(path, "wb") as fh:
+                    fh.write(corrupt(original))
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    result = self.convert(len(FIF_CHANNELS) + 9)
+                self.assertFalse(result["ok"])
+                self.assertIn(result["code"], ("maxshield_probe_failed", "file_read_error"))
+                self.assertNotIn("entry", result)
+                self.assertFalse(self.synced())
+
+    def test_a_matching_sidecar_adds_no_note(self):
+        result = self.convert(len(FIF_CHANNELS))
+        self.assertTrue(result["ok"], result.get("error"))
+        self.assertNotIn("channels_tsv_count_mismatch", result["entry"])
 
 
 class TestMainRoutesSingleRecordingsThroughThePool(unittest.TestCase):
@@ -8327,3 +8705,692 @@ class TestAdmissionFollowsTheCeiling(unittest.TestCase):
         first_end = spans[0][1]
         self.assertLess(spans[1][0], first_end)
         self.assertLess(spans[2][0], first_end)
+
+
+def write_eeglab_set(set_path: str, fdt_path: str | None, *, nbchan: int = 4,
+                     pnts: int = 1000, srate: float = 250.0,
+                     embedded: str = "orig_name.fdt") -> None:
+    """A real classic EEGLAB `.set` (fields saved flat, as EEGLAB's own
+    `pop_saveset` does) whose samples are a float32 `.fdt` written column-major
+    at `fdt_path`, which need NOT sit beside the `.set`. `fdt_path=None` embeds
+    the matrix inline instead. Skips the calling test when numpy or scipy is
+    missing (the CI fast tier installs neither)."""
+    try:
+        import numpy as np
+        import scipy.io
+    except ImportError as exc:
+        raise unittest.SkipTest(f"{exc.name} not installed") from exc
+
+    rng = np.random.default_rng(7)
+    data = (rng.standard_normal((nbchan, pnts)) * 1e-5).astype(np.float32)
+    fields = {
+        "setname": np.array(["fdt_declaration_fixture"]),
+        "nbchan": np.array([[nbchan]]),
+        "trials": np.array([[1]]),
+        "pnts": np.array([[pnts]]),
+        "srate": np.array([[srate]]),
+        "xmin": np.array([[0.0]]),
+        "xmax": np.array([[(pnts - 1) / srate]]),
+    }
+    if fdt_path is None:
+        fields["data"] = data.astype(np.float64)
+    else:
+        os.makedirs(os.path.dirname(fdt_path), exist_ok=True)
+        data.flatten(order="F").tofile(fdt_path)
+        fields["data"] = np.array([embedded])
+    os.makedirs(os.path.dirname(set_path), exist_ok=True)
+    scipy.io.savemat(set_path, fields)
+
+
+class TestBlobKeyAndSize(unittest.TestCase):
+    """`_blob_key_and_size` over a real git repository: every tracked shape it
+    has to tell apart, including an in-git blob too large to be a pointer (sized
+    by `git cat-file -s`, never read)."""
+
+    KEY = "SHA256E-s2048--" + "a" * 64 + ".fdt"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = tmp.name
+
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=self.repo, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.org")
+        git("config", "user.name", "t")
+        with open(os.path.join(self.repo, "big.fdt"), "wb") as fh:
+            fh.write(b"\x01" * 5000)
+        with open(os.path.join(self.repo, "small.fdt"), "wb") as fh:
+            fh.write(b"\x01" * 10)
+        with open(os.path.join(self.repo, "unlocked.fdt"), "w") as fh:
+            fh.write(f"/annex/objects/{self.KEY}\n")
+        os.symlink(f".git/annex/objects/Xx/Yy/{self.KEY}/{self.KEY}",
+                   os.path.join(self.repo, "locked.fdt"))
+        git("add", "-A")
+        git("commit", "-q", "-m", "fixture")
+        self.head = git("rev-parse", "HEAD")
+
+    def test_each_shape(self):
+        cases = {
+            "big.fdt": (None, 5000),
+            "small.fdt": (None, 10),
+            "unlocked.fdt": (self.KEY, 0),
+            "locked.fdt": (self.KEY, 0),
+            "absent.fdt": (None, 0),
+        }
+        for path, want in cases.items():
+            with self.subTest(path):
+                self.assertEqual(generate_zarr._blob_key_and_size(self.repo, path, self.head), want)
+
+
+def sha256e_key(path: str) -> str:
+    """The git-annex SHA256E key of a file's bytes, as a declaration pins it."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    return f"SHA256E-s{len(data)}--{hashlib.sha256(data).hexdigest()}.fdt"
+
+
+class TestFdtDeclarationFile(unittest.TestCase):
+    """The committed declaration file, and the loader's refusals."""
+
+    def write(self, doc) -> str:
+        fd, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as fh:
+            json.dump(doc, fh)
+        self.addCleanup(os.remove, path)
+        return path
+
+    @staticmethod
+    def doc(recordings):
+        return {"datasets": {"on000001": {"reviewed": "2026-09-28", "recordings": recordings}}}
+
+    ENTRY: ClassVar[dict] = {
+        "fdt": "derivatives/fdt/a.fdt", "nbchan": 2, "pnts": 10, "trials": 1, "fdt_bytes": 80,
+        "annex_key": "SHA256E-s80--" + "0" * 64 + ".fdt",
+    }
+
+    def test_the_committed_file_loads_and_names_only_raw_recordings(self):
+        decls = generate_zarr.load_fdt_declarations()
+        self.assertEqual(set(decls), {"on004306"})
+        recs = decls["on004306"]
+        self.assertEqual(len(recs), 15)
+        for set_path, d in recs.items():
+            self.assertFalse(generate_zarr.is_excluded_from_discovery(set_path))
+            self.assertEqual(d["fdt_bytes"], d["nbchan"] * d["pnts"] * d["trials"] * 4)
+            # Every entry is pinned to content whose size is the declared size.
+            self.assertEqual(generate_zarr.annex_key_size(d["annex_key"]), d["fdt_bytes"])
+            self.assertTrue(d["annex_key"].endswith(".fdt"))
+        self.assertEqual(len({d["annex_key"] for d in recs.values()}), len(recs))
+        # The misnamed file is paired by size and folder, not by its name.
+        self.assertEqual(
+            recs["sub-013/ses-01/eeg/sub-013_ses-01_task-experiment_run-01_eeg.set"]["fdt"],
+            "derivatives/fdt_files/sub13_sess-01/sub12_sess01.fdt",
+        )
+
+    def test_invalid_json_is_a_value_error(self):
+        path = self.write({})
+        with open(path, "w") as fh:
+            fh.write("{not json")
+        with self.assertRaises(ValueError):
+            generate_zarr.load_fdt_declarations(path)
+
+    def test_a_missing_file_declares_nothing(self):
+        self.assertEqual(generate_zarr.load_fdt_declarations("/nonexistent/decl.json"), {})
+
+    def test_a_valid_entry_loads(self):
+        path = self.write(self.doc({"sub-01/eeg/sub-01_eeg.set": dict(self.ENTRY)}))
+        self.assertEqual(
+            generate_zarr.load_fdt_declarations(path)["on000001"]["sub-01/eeg/sub-01_eeg.set"]["fdt"],
+            "derivatives/fdt/a.fdt",
+        )
+
+    def test_refusals(self):
+        cases = {
+            "bytes disagree with the dimensions":
+                {"sub-01/eeg/sub-01_eeg.set": {**self.ENTRY, "fdt_bytes": 84}},
+            "unknown key": {"sub-01/eeg/sub-01_eeg.set": {**self.ENTRY, "fdt_path": "x.fdt"}},
+            "missing key": {"sub-01/eeg/sub-01_eeg.set": {
+                k: v for k, v in self.ENTRY.items() if k != "pnts"}},
+            "one fdt for two sets": {
+                "sub-01/eeg/sub-01_eeg.set": dict(self.ENTRY),
+                "sub-02/eeg/sub-02_eeg.set": dict(self.ENTRY),
+            },
+            "a non-raw recording": {"derivatives/x/sub-01_eeg.set": dict(self.ENTRY)},
+            "path escapes the repo": {"sub-01/eeg/sub-01_eeg.set": {
+                **self.ENTRY, "fdt": "../elsewhere/a.fdt"}},
+            "a boolean count": {"sub-01/eeg/sub-01_eeg.set": {**self.ENTRY, "trials": True}},
+            "an entry that is not an object": {"sub-01/eeg/sub-01_eeg.set": ["x.fdt"]},
+            "no annex_key": {"sub-01/eeg/sub-01_eeg.set": {
+                k: v for k, v in self.ENTRY.items() if k != "annex_key"}},
+            "annex_key size disagrees": {"sub-01/eeg/sub-01_eeg.set": {
+                **self.ENTRY, "annex_key": "SHA256E-s84--" + "0" * 64 + ".fdt"}},
+            "annex_key is not SHA-256": {"sub-01/eeg/sub-01_eeg.set": {
+                **self.ENTRY, "annex_key": "MD5E-s80--" + "0" * 32 + ".fdt"}},
+            "annex_key is not a string": {"sub-01/eeg/sub-01_eeg.set": {
+                **self.ENTRY, "annex_key": 80}},
+            "one content for two sets": {
+                "sub-01/eeg/sub-01_eeg.set": dict(self.ENTRY),
+                "sub-02/eeg/sub-02_eeg.set": {**self.ENTRY, "fdt": "derivatives/fdt/b.fdt"},
+            },
+        }
+        # Paths the loader must refuse whichever side of the pairing they are on.
+        unsafe = {
+            "empty segment": "derivatives//a.fdt",
+            "dot segment": "derivatives/./a.fdt",
+            "leading dot segment": "./derivatives/a.fdt",
+            "bare extension": ".fdt",
+            "bare extension in a folder": "derivatives/.fdt",
+            "NUL": "derivatives/a\0.fdt",
+            "absolute": "/derivatives/a.fdt",
+            "backslash": "derivatives\\a.fdt",
+            "wrong extension": "derivatives/a.set",
+            "not a string": 7,
+        }
+        for name, fdt in unsafe.items():
+            cases[f"fdt: {name}"] = {"sub-01/eeg/sub-01_eeg.set": {**self.ENTRY, "fdt": fdt}}
+        cases["set: dot segment"] = {"sub-01/./eeg/sub-01_eeg.set": dict(self.ENTRY)}
+        for name, recordings in cases.items():
+            with self.subTest(name), self.assertRaises(generate_zarr.FdtDeclarationFileError):
+                generate_zarr.load_fdt_declarations(self.write(self.doc(recordings)))
+        shapes = {
+            "no `reviewed`": {"datasets": {"on000001": {"recordings": {}}}},
+            "recordings is not an object": {
+                "datasets": {"on000001": {"reviewed": "2026-09-28", "recordings": []}}},
+            "a dataset that is not an object": {"datasets": {"on000001": "x"}},
+            "datasets is not an object": {"datasets": []},
+            "unknown top-level key": {"datasets": {}, "extra": 1},
+            "unknown dataset key": {"datasets": {"on000001": {
+                "reviewed": "2026-09-28", "recordings": {}, "notes": "x"}}},
+            # fullmatch: a prefix match would accept a trailing suffix.
+            "dataset id with a suffix": {"datasets": {"on000001x": {
+                "reviewed": "2026-09-28", "recordings": {}}}},
+            "dataset id with a newline": {"datasets": {"on000001\n": {
+                "reviewed": "2026-09-28", "recordings": {}}}},
+        }
+        for name, doc in shapes.items():
+            with self.subTest(name), self.assertRaises(generate_zarr.FdtDeclarationFileError):
+                generate_zarr.load_fdt_declarations(self.write(doc))
+
+
+class TestDeclaredFdtConvertOne(unittest.TestCase):
+    """`convert_one` over a real EEGLAB `.set` whose `.fdt` lives under
+    `derivatives/`, as on004306 ships it. Both materialisation paths are driven:
+    local mode (the working tree) and the remote path, whose blob fetch reads a
+    real git repository (in-git blobs, so no S3 read is needed). `aws s3 sync`
+    is the only external call and a no-op executable absorbs it, as in
+    TestConvertOneEndToEnd."""
+
+    SET = "sub-01/eeg/sub-01_task-x_eeg.set"
+    FDT = "derivatives/fdt_files/sub1_sess-01/sub1_sess1.fdt"
+    NBCHAN, PNTS = 4, 1000
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import scipy.io  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = os.path.join(self._tmp.name, "repo")
+        write_eeglab_set(os.path.join(self.repo, self.SET), os.path.join(self.repo, self.FDT),
+                         nbchan=self.NBCHAN, pnts=self.PNTS)
+        # The reviewed content, pinned before any test alters the file.
+        self.key = sha256e_key(os.path.join(self.repo, self.FDT))
+        bindir = os.path.join(self._tmp.name, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        path = os.environ["PATH"]
+        os.environ["PATH"] = bindir + os.pathsep + path
+        self.addCleanup(os.environ.__setitem__, "PATH", path)
+
+    def commit(self) -> str:
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=self.repo, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.org")
+        git("config", "user.name", "t")
+        git("add", "-A")
+        git("commit", "-q", "-m", "fixture")
+        return git("rev-parse", "HEAD")
+
+    def decl(self, **over) -> dict:
+        d = {"fdt": self.FDT, "nbchan": self.NBCHAN, "pnts": self.PNTS, "trials": 1,
+             "fdt_bytes": self.NBCHAN * self.PNTS * 4, "annex_key": self.key}
+        d.update(over)
+        return d
+
+    def convert(self, declarations, *, local=True, head="b" * 40, extra_files=()):
+        work = tempfile.TemporaryDirectory()
+        self.addCleanup(work.cleanup)
+        generate_zarr._init_worker({
+            "repo": self.repo, "bucket": "nemar-test", "dataset_id": "on000001",
+            "head": head, "head_files": {self.SET, self.FDT, *extra_files}, "local": local,
+            "tmp": work.name, "updated": "2026-09-28T00:00:00Z",
+            "contract_base": "https://zarr.nemar.org", "engine_version": "3",
+            "dataset_row": None, "provenance_fetch_failed": False,
+            "mem_budget": None, "hard_ceiling": None, "projections": {},
+            "fdt_declarations": declarations,
+        })
+        return convert_one(self.SET)
+
+    def assert_converted(self, result):
+        self.assertTrue(result["ok"], result.get("error"))
+        (group,) = result["entry"]["groups"]
+        self.assertEqual(group["n_channels"], self.NBCHAN)
+        self.assertEqual(group["n_samples"], self.PNTS)
+
+    def test_an_undeclared_dataset_fails_exactly_as_before(self):
+        result = self.convert({})
+        self.assertFalse(result["ok"])
+        self.assertIn("none was found", result["error"])
+        self.assertNotEqual(result["code"], "fdt_declaration_refused")
+
+    def test_a_declared_fdt_converts_in_local_mode(self):
+        self.assert_converted(self.convert({self.SET: self.decl()}))
+        # The working tree is untouched: nothing was written beside the .set.
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "sub-01/eeg/sub-01_task-x_eeg.fdt")))
+
+    def test_a_declared_fdt_converts_through_the_blob_fetch(self):
+        head = self.commit()
+        self.assert_converted(self.convert({self.SET: self.decl()}, local=False, head=head))
+
+    def test_a_size_mismatch_is_refused_before_conversion(self):
+        # The declaration agrees with itself and with the header; the FILE is short.
+        with open(os.path.join(self.repo, self.FDT), "r+b") as fh:
+            fh.truncate(self.NBCHAN * self.PNTS * 4 - 4)
+        for local in (True, False):
+            with self.subTest(local=local):
+                head = "b" * 40 if local else self.commit()
+                result = self.convert({self.SET: self.decl()}, local=local, head=head)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["code"], "fdt_declaration_refused")
+                self.assertIn("bytes", result["error"])
+
+    def test_same_size_different_content_is_refused(self):
+        # Right name, right size, wrong bytes: only the content pin can tell.
+        path = os.path.join(self.repo, self.FDT)
+        with open(path, "r+b") as fh:
+            fh.write(b"\x00\x00\x00\x00")
+        for local in (True, False):
+            with self.subTest(local=local):
+                head = "b" * 40 if local else self.commit()
+                result = self.convert({self.SET: self.decl()}, local=local, head=head)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["code"], "fdt_declaration_refused")
+                self.assertIn("not the reviewed content", result["error"])
+
+    def test_a_declaration_the_header_contradicts_is_refused(self):
+        wrong = self.decl(nbchan=8, fdt_bytes=8 * self.PNTS * 4)
+        result = self.convert({self.SET: wrong})
+        self.assertEqual(result["code"], "fdt_declaration_refused")
+        self.assertIn("header", result["error"])
+
+    def test_an_fdt_absent_at_head_is_refused(self):
+        result = self.convert({self.SET: self.decl(fdt="derivatives/fdt_files/other.fdt")})
+        self.assertEqual(result["code"], "fdt_declaration_refused")
+
+    def test_a_corrupt_set_is_refused_typed_not_retried(self):
+        set_path = os.path.join(self.repo, self.SET)
+        with open(set_path, "rb") as fh:
+            raw = fh.read()
+        for name, content in {
+            "truncated": raw[: len(raw) // 2],
+            "not a MAT file": b"\x99" * 500,
+            "empty": b"",
+        }.items():
+            with self.subTest(name):
+                with open(set_path, "wb") as fh:
+                    fh.write(content)
+                with self.assertRaises(generate_zarr.FdtDeclarationRefused):
+                    generate_zarr.eeglab_fdt_layout(set_path)
+                result = self.convert({self.SET: self.decl()})
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["code"], "fdt_declaration_refused")
+                self.assertIn("could not be read", result["error"])
+
+    def test_the_remote_path_requires_bucket_and_dataset_id(self):
+        head = self.commit()
+        for missing in ("bucket", "dataset_id"):
+            with self.subTest(missing), tempfile.TemporaryDirectory() as work:
+                kwargs = {"bucket": "nemar-test", "dataset_id": "on000001", missing: None}
+                with self.assertRaises(ValueError):
+                    generate_zarr.stage_declared_fdt(
+                        cast("generate_zarr.FdtDeclaration", self.decl()), self.SET, os.path.join(self.repo, self.SET), work,
+                        repo=self.repo, head_files={self.SET, self.FDT}, head=head,
+                        local=False, **kwargs,
+                    )
+                self.assertEqual(os.listdir(work), [], "nothing staged")
+
+    def test_a_set_with_inline_samples_is_refused(self):
+        write_eeglab_set(os.path.join(self.repo, self.SET), None,
+                         nbchan=self.NBCHAN, pnts=self.PNTS)
+        result = self.convert({self.SET: self.decl()})
+        self.assertEqual(result["code"], "fdt_declaration_refused")
+        self.assertIn("inline", result["error"])
+
+    def test_a_set_that_already_has_a_sibling_fdt_is_refused(self):
+        sibling = "sub-01/eeg/sub-01_task-x_eeg.fdt"
+        result = self.convert({self.SET: self.decl()}, extra_files=(sibling,))
+        self.assertEqual(result["code"], "fdt_declaration_refused")
+        self.assertIn("sibling", result["error"])
+
+    def test_a_v73_set_is_refused(self):
+        # A v7.3 MAT-file is an HDF5 container behind this 128-byte text header;
+        # the header alone is what the refusal reads.
+        with open(os.path.join(self.repo, self.SET), "wb") as fh:
+            fh.write(b"MATLAB 7.3 MAT-file, Platform: GLNXA64".ljust(128, b" "))
+            fh.write(b"\x89HDF\r\n\x1a\n" + b"\x00" * 512)
+        result = self.convert({self.SET: self.decl()})
+        self.assertEqual(result["code"], "fdt_declaration_refused")
+        self.assertIn("v7.3", result["error"])
+
+    def test_an_fdt_listed_but_absent_from_the_tree_is_refused(self):
+        # The remote path fetches against the pinned head: a path head_files
+        # names but the tree at that commit lacks is refused, never fetched.
+        ghost = "derivatives/fdt_files/ghost.fdt"
+        head = self.commit()
+        result = self.convert({self.SET: self.decl(fdt=ghost)}, local=False, head=head,
+                              extra_files=(ghost,))
+        self.assertEqual(result["code"], "fdt_declaration_refused")
+        self.assertIn("not in the tree", result["error"])
+
+
+class TestDeclaredFdtAnnexed(unittest.TestCase):
+    """The remote path over an ANNEXED `.fdt`, as on004306 ships it: the tree
+    holds a git-annex symlink whose key is compared with the declaration's pin
+    and whose `-s` field is the size, both BEFORE any download; the bytes then
+    come from the (stubbed, file-backed) bucket's `objects/<key>`."""
+
+    SET = TestDeclaredFdtConvertOne.SET
+    FDT = TestDeclaredFdtConvertOne.FDT
+    NBCHAN, PNTS = 4, 1000
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import scipy.io  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        self.s3 = os.path.join(self.dir, "s3")
+        os.makedirs(self.s3)
+        content = os.path.join(self.dir, "content.fdt")
+        write_eeglab_set(os.path.join(self.repo, self.SET), content,
+                         nbchan=self.NBCHAN, pnts=self.PNTS)
+        self.key = sha256e_key(content)
+        shutil.copyfile(content, os.path.join(self.s3, f"on000001_objects_{self.key}"))
+
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=self.repo, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+
+        self.git = git
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.org")
+        git("config", "user.name", "t")
+        self.point_fdt_at(self.key)
+
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write(STUB_AWS)
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        self.log = os.path.join(self.dir, "aws.log")
+        saved = {k: os.environ.get(k) for k in ("PATH", "ZARR_TEST_S3_ROOT", "ZARR_TEST_S3_LOG")}
+        os.environ["PATH"] = bindir + os.pathsep + (saved["PATH"] or "")
+        os.environ["ZARR_TEST_S3_ROOT"] = self.s3
+        os.environ["ZARR_TEST_S3_LOG"] = self.log
+        self.addCleanup(self._restore_env, saved)
+
+    @staticmethod
+    def _restore_env(saved):
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def point_fdt_at(self, key: str) -> None:
+        """Commit the `.fdt` as a locked git-annex symlink to `key` (content
+        absent locally, exactly as a metadata clone has it)."""
+        link = os.path.join(self.repo, self.FDT)
+        os.makedirs(os.path.dirname(link), exist_ok=True)
+        if os.path.lexists(link):
+            os.remove(link)
+        target = os.path.join(self.repo, ".git", "annex", "objects", "Xx", "Yy", key, key)
+        os.symlink(os.path.relpath(target, os.path.dirname(link)), link)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", f"point at {key[:20]}")
+        self.head = self.git("rev-parse", "HEAD")
+
+    def decl(self) -> dict:
+        return {"fdt": self.FDT, "nbchan": self.NBCHAN, "pnts": self.PNTS, "trials": 1,
+                "fdt_bytes": self.NBCHAN * self.PNTS * 4, "annex_key": self.key}
+
+    def convert(self) -> dict:
+        work = tempfile.TemporaryDirectory()
+        self.addCleanup(work.cleanup)
+        generate_zarr._init_worker({
+            "repo": self.repo, "bucket": "nemar-test", "dataset_id": "on000001",
+            "head": self.head, "head_files": {self.SET, self.FDT}, "local": False,
+            "tmp": work.name, "updated": "2026-09-28T00:00:00Z",
+            "contract_base": "https://zarr.nemar.org", "engine_version": "3",
+            "dataset_row": None, "provenance_fetch_failed": False,
+            "mem_budget": None, "hard_ceiling": None, "projections": {},
+            "fdt_declarations": {self.SET: self.decl()},
+        })
+        return convert_one(self.SET)
+
+    def fetched_objects(self) -> list[str]:
+        if not os.path.exists(self.log):
+            return []
+        with open(self.log) as fh:
+            return [line for line in fh if "/objects/" in line]
+
+    def test_the_pinned_annex_object_is_downloaded_and_converts(self):
+        result = self.convert()
+        self.assertTrue(result["ok"], result.get("error"))
+        (group,) = result["entry"]["groups"]
+        self.assertEqual((group["n_channels"], group["n_samples"]), (self.NBCHAN, self.PNTS))
+        (fetch,) = self.fetched_objects()
+        self.assertIn(self.key, fetch)
+
+    def test_a_different_key_is_refused_before_download(self):
+        # Same declared size, different content: the key in the tree is not the pin.
+        other = self.key.replace(self.key.split("--")[1][:8], "00000000", 1)
+        self.point_fdt_at(other)
+        result = self.convert()
+        self.assertEqual(result["code"], "fdt_declaration_refused")
+        self.assertIn("not the reviewed content", result["error"])
+        self.assertEqual(self.fetched_objects(), [])
+
+    def test_a_key_of_another_size_is_refused_before_download(self):
+        # The annex key's `-s` field is the size seen before fetching; a key
+        # declaring any other size never reaches the multi-GB download.
+        want = self.NBCHAN * self.PNTS * 4
+        self.point_fdt_at(self.key.replace(f"-s{want}--", f"-s{want * 2}--"))
+        result = self.convert()
+        self.assertEqual(result["code"], "fdt_declaration_refused")
+        self.assertIn(f"-s{want * 2}--", result["error"])
+        self.assertEqual(self.fetched_objects(), [])
+
+
+class TestDeclaredFdtWiring(unittest.TestCase):
+    """What connects a declaration to a run: `main()` loads it and hands it to
+    the worker context on both conversion paths, admission counts the declared
+    bytes, the serial memory retry keeps it, and the refusal is classified as
+    data rather than infrastructure."""
+
+    SET = TestDeclaredFdtConvertOne.SET
+    FDT = TestDeclaredFdtConvertOne.FDT
+
+    def test_the_refusal_is_a_data_failure_with_its_own_reason(self):
+        code = generate_zarr.FdtDeclarationRefused.code
+        self.assertEqual(code, "fdt_declaration_refused")
+        self.assertNotIn(code, generate_zarr.RETRYABLE_CODES)
+        entry = generate_zarr._failure_entry(self.SET, code, "detail")
+        self.assertEqual(generate_zarr.count_infra_failures([self.SET], [entry]), 0)
+        self.assertIn("did not match the recording's header",
+                      generate_zarr.reason_for_code(code))
+        self.assertNotEqual(generate_zarr.reason_for_code(code),
+                            generate_zarr.reason_for_code("an_unknown_code"))
+
+    def test_admission_counts_the_declared_fdt(self):
+        with tempfile.TemporaryDirectory() as repo:
+            write_eeglab_set(os.path.join(repo, self.SET), os.path.join(repo, self.FDT))
+
+            def git(*args):
+                return subprocess.run(["git", *args], cwd=repo, check=True,
+                                      capture_output=True, text=True).stdout.strip()
+
+            git("init", "-q", "-b", "main")
+            git("config", "user.email", "t@example.org")
+            git("config", "user.name", "t")
+            git("add", "-A")
+            git("commit", "-q", "-m", "fixture")
+            head = git("rev-parse", "HEAD")
+            head_set = set(generate_zarr.git_ls_files(repo, head))
+            decl: generate_zarr.FdtDeclaration = {
+                "fdt": self.FDT, "nbchan": 4, "pnts": 1000, "trials": 1,
+                "fdt_bytes": 16000, "annex_key": "SHA256E-s16000--" + "0" * 64 + ".fdt",
+            }
+            bare = generate_zarr.admission_sizes(repo, [self.SET], head_set, head, {})
+            declared = generate_zarr.admission_sizes(
+                repo, [self.SET], head_set, head, {self.SET: decl}
+            )
+        self.assertGreater(bare[self.SET], 0)
+        self.assertEqual(declared[self.SET], bare[self.SET] + 16000)
+
+    def test_the_memory_retry_context_keeps_the_declarations(self):
+        decls = {self.SET: {"fdt": self.FDT}}
+        ctx = {"hard_ceiling": None, "mem_budget": 1, "fdt_declarations": decls, "repo": "r"}
+        retry_ctx, budget = generate_zarr.memory_retry_context(ctx)
+        self.assertIs(retry_ctx["fdt_declarations"], decls)
+        self.assertEqual(retry_ctx["mem_budget"], budget)
+        self.assertEqual(retry_ctx["repo"], "r")
+        capped, capped_budget = generate_zarr.memory_retry_context({**ctx, "hard_ceiling": 5})
+        self.assertLessEqual(capped_budget, 5)
+        self.assertEqual(capped["mem_budget"], capped_budget)
+
+
+class TestMainConvertsADeclaredFdt(unittest.TestCase):
+    """`main()` end to end over a dataset whose `.fdt` sits under
+    `derivatives/`, with the declaration read from a real file. The recording
+    converts only if the declaration reached the worker context, so a run with
+    `--jobs 1` (in-process) and one with `--jobs 2` (a pool worker, whose context
+    travels through the pool initializer) each prove one wiring; the same run
+    with the declaration file empty fails as it did before this feature."""
+
+    SET = TestDeclaredFdtConvertOne.SET
+    FDT = TestDeclaredFdtConvertOne.FDT
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import scipy.io  # noqa: F401
+            import zarr  # noqa: F401
+        except Exception as exc:
+            raise unittest.SkipTest(f"conversion deps unavailable: {exc}") from exc
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        self.repo = os.path.join(self.dir, "repo")
+        self.s3 = os.path.join(self.dir, "s3")
+        os.makedirs(self.s3)
+        write_eeglab_set(os.path.join(self.repo, self.SET), os.path.join(self.repo, self.FDT))
+        for args in (("init", "-q", "-b", "main"), ("config", "user.email", "t@example.org"),
+                     ("config", "user.name", "t"), ("add", "-A"),
+                     ("commit", "-q", "-m", "fixture")):
+            subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True)
+        self.decl_path = os.path.join(self.dir, "decl.json")
+        saved_path = generate_zarr.FDT_DECLARATIONS_PATH
+        generate_zarr.FDT_DECLARATIONS_PATH = self.decl_path
+        self.addCleanup(setattr, generate_zarr, "FDT_DECLARATIONS_PATH", saved_path)
+
+        bindir = os.path.join(self.dir, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write(STUB_AWS)
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        saved = {k: os.environ.get(k) for k in ("PATH", "ZARR_TEST_S3_ROOT")}
+        os.environ["PATH"] = bindir + os.pathsep + (saved["PATH"] or "")
+        os.environ["ZARR_TEST_S3_ROOT"] = self.s3
+        self.addCleanup(self._restore_env, saved)
+        saved_ctx = dict(generate_zarr._CTX)
+        self.addCleanup(lambda: (generate_zarr._CTX.clear(), generate_zarr._CTX.update(saved_ctx)))
+
+    @staticmethod
+    def _restore_env(saved):
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def declare(self, recordings: dict) -> None:
+        with open(self.decl_path, "w") as fh:
+            json.dump({"description": "test", "datasets": {"on000001": {
+                "reviewed": "2026-09-28", "recordings": recordings}}}, fh)
+
+    def run_main(self, jobs: int) -> tuple[int, str, dict]:
+        callback = os.path.join(self.dir, f"cb{jobs}.json")
+        argv = [
+            "generate_zarr.py", "--dataset-id", "on000001", "--repo-dir", self.repo,
+            "--bucket", "nemar-test", "--callback-out", callback,
+            "--local", "--clean", "--jobs", str(jobs), "--api-base", "http://127.0.0.1:9",
+        ]
+        saved, sys.argv = sys.argv, argv
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = generate_zarr.main()
+        finally:
+            sys.argv = saved
+        with open(callback) as fh:
+            return rc, out.getvalue(), json.load(fh)
+
+    def test_a_declared_fdt_converts_in_process_and_in_a_pool_worker(self):
+        self.declare({self.SET: {
+            "fdt": self.FDT, "nbchan": 4, "pnts": 1000, "trials": 1, "fdt_bytes": 16000,
+            "annex_key": sha256e_key(os.path.join(self.repo, self.FDT)),
+        }})
+        # --jobs 2 first, from an empty context: it must convert while leaving
+        # this process's context untouched, i.e. in a pool worker.
+        generate_zarr._CTX.clear()
+        rc, log, _ = self.run_main(2)
+        self.assertEqual(rc, 0, log)
+        self.assertIn(f"converted {self.SET}", log)
+        self.assertEqual(generate_zarr._CTX, {}, "converted in-process, not in the pool")
+        rc, log, _ = self.run_main(1)
+        self.assertEqual(rc, 0, log)
+        self.assertIn(f"converted {self.SET}", log)
+        self.assertIn(f"using declared .fdt {self.FDT!r}", log)
+        self.assertEqual(generate_zarr._CTX["fdt_declarations"][self.SET]["fdt"], self.FDT)
+
+    def test_without_a_declaration_the_recording_still_fails(self):
+        self.declare({})
+        _, log, _ = self.run_main(1)
+        self.assertNotIn(f"converted {self.SET}", log)
+        self.assertIn("none was found", log)
+
+
+if __name__ == "__main__":
+    unittest.main()

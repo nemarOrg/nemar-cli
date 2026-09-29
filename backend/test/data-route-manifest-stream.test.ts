@@ -27,8 +27,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Hono } from "hono";
-import { MAX_MANIFEST_JSON_ENTRIES, dataRoutes } from "../src/routes/data";
 import {
+  MAX_MANIFEST_JSON_ENTRIES,
+  MAX_MANIFEST_JSON_ENTRIES_PRESIGNED,
+  dataRoutes,
+} from "../src/routes/data";
+import { addPrivateDataset, buildPublicAccessPolicy } from "../src/services/bucket-policy";
+import {
+  buildAnnexPublicUrl,
   buildBytesUrl,
   contentTypeForBidsPath,
   diffRemovedSince,
@@ -38,13 +44,20 @@ import {
   resolveFile,
   toHttpDate,
 } from "../src/services/data-router";
-import type { VersionManifest } from "../src/services/manifest";
-import { manifestCacheKey } from "../src/services/manifest-source";
+import type { ManifestFile, VersionManifest } from "../src/services/manifest";
+import { manifestJsonCacheKey } from "../src/services/manifest-json-cache";
+import {
+  MANIFEST_TRUST_WINDOW_MS,
+  manifestCacheKey,
+  resetManifestAnswerMemo,
+} from "../src/services/manifest-source";
+import { __resetPublicReadCacheForTests } from "../src/services/public-read-cache";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { DrainingCache, StalledCache } from "./helpers/cache";
 import { freshDb, realD1 } from "./helpers/d1";
 import {
   LARGE_MANIFEST_TEST_TIMEOUT_MS,
+  largeManifestEntryCount,
   largeManifestPaths,
   largeManifestText,
 } from "./helpers/large-manifest";
@@ -78,6 +91,11 @@ const SMALL = "nm000132";
 const SMALL_OBJECT = `/${SMALL}/version/v1.1.1.json`;
 const LARGE_ID = "nm000281";
 const LARGE_OPTS = { subjects: 374, runsPerSession: 50, datasetId: LARGE_ID };
+// Sized strictly between the two per-branch bounds (30,000 presigned,
+// 38,000 unsigned): 88 subjects * 401 entries/subject + 5 root entries =
+// 35,293, per largeManifestEntryCount's formula.
+const MID_ID = "nm000283";
+const MID_OPTS = { subjects: 88, runsPerSession: 50, datasetId: MID_ID };
 
 let s3: S3ManifestStandin;
 let db: Database;
@@ -102,6 +120,7 @@ beforeAll(() => {
   largeText = largeManifestText(LARGE_OPTS);
   large = JSON.parse(largeText);
   s3.put(`/${LARGE_ID}/version/v1.0.3.json`, largeText);
+  s3.put(`/${MID_ID}/version/v1.0.0.json`, largeManifestText(MID_OPTS));
 });
 
 afterAll(() => {
@@ -118,6 +137,21 @@ beforeEach(() => {
   s3.put(`/${SMALL}/version/v1.1.1.json`, CURRENT_TEXT);
   s3.put(`/${SMALL}/version/v1.0.0.json`, PRIOR_TEXT);
   s3.log.length = 0;
+  // The bucket-policy exclusion decision is cached per isolate for 60s
+  // (public-read-cache.ts); `bun test` runs the whole file in one process, so
+  // without this a policy set by one test would still answer a later test's
+  // request within that window. No policy set is the default: no dataset is
+  // excluded, matching a bucket with only the public-by-default statement.
+  s3.setBucketPolicy(null);
+  __resetPublicReadCacheForTests();
+  // The per-isolate answer memo (#1494 amendment) is a module-level
+  // singleton, and `bun test` at the repo root runs every test file in ONE
+  // process (.memory/bun-test-shared-process-root-and-backend.md) -- without
+  // this, a memo entry from one test (or another test FILE, since nm000132's
+  // fixture and its ETag are shared across suites) could answer a later
+  // test's request instead of the fresh D1 row and S3 object that test just
+  // set up.
+  resetManifestAnswerMemo();
 });
 
 function app(): Hono<{ Bindings: Bindings; Variables: Variables }> {
@@ -154,6 +188,26 @@ function readsOf(datasetId: string): string[] {
   return s3.log
     .filter((r) => r.path.startsWith(`/${datasetId}/`))
     .map((r) => `${r.method} ${r.ifNoneMatch ? "INM " : ""}${r.status} ${r.path}`);
+}
+
+/**
+ * Monkey-patches `Date.now` forward by `ms` for the duration of `fn`, so a
+ * route-level test can push a cached manifest copy outside the trust window
+ * (#1494 amendment) without a real sleep. The route builds its own
+ * `ManifestSource` from scratch per request (`queryManifest` in
+ * `routes/data.ts`) with no clock seam exposed to a caller -- unlike
+ * `manifest-source.test.ts`'s direct `ManifestSource.now`, which is the seam
+ * to prefer when a test does not need a real HTTP round trip -- so this is
+ * the one place in this suite that reaches for the global clock directly.
+ */
+async function withClockAdvanced<T>(ms: number, fn: () => Promise<T>): Promise<T> {
+  const real = Date.now;
+  Date.now = () => real() + ms;
+  try {
+    return await fn();
+  } finally {
+    Date.now = real;
+  }
 }
 
 const JSON_ACCEPT = { headers: { Accept: "application/json" } };
@@ -311,10 +365,10 @@ describe("file and directory requests answer what the whole parse answered", () 
 });
 
 describe("manifest.json", () => {
-  test("below the bound, every entry in Object.entries order, presigned or brokered", async () => {
+  test("below the bound, every entry in Object.entries order, public or brokered", async () => {
     const res = await get(`/${SMALL}/v1.1.1/manifest.json`);
     expect(res.status).toBe(200);
-    expect(res.headers.get("Cache-Control")).toBe("public, max-age=60");
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=300");
     const entries = (await res.json()) as {
       path: string;
       size: number;
@@ -337,9 +391,96 @@ describe("manifest.json", () => {
           origin: "https://data.nemar.org",
         }),
       );
-      if (file.key.startsWith("git:")) expect(e.url).toBe(e.bytes_url);
-      else expect(e.url).toStartWith(`https://nemar.s3.us-east-2.amazonaws.com/${SMALL}/objects/`);
+      if (file.key.startsWith("git:")) {
+        expect(e.url).toBe(e.bytes_url);
+      } else {
+        // The plain public S3 URL (#1522): same object path a presigned URL
+        // would use, no query string at all. env() below points S3 at the
+        // local stand-in via S3_ENDPOINT_URL, so the comparison does too --
+        // production leaves endpointUrl unset and gets the real AWS host.
+        expect(e.url).toBe(
+          buildAnnexPublicUrl({
+            datasetId: SMALL,
+            file,
+            s3Options: {
+              bucket: "nemar",
+              region: "us-east-2",
+              accessKeyId: "x",
+              secretAccessKey: "y",
+              endpointUrl: s3.url,
+            },
+          }),
+        );
+        expect(e.url).not.toContain("?");
+        expect(e.url).toStartWith(`${s3.url}/${SMALL}/objects/`);
+      }
     }
+  });
+
+  test("the field set and order are pinned against today's contract", async () => {
+    const res = await get(`/${SMALL}/v1.1.1/manifest.json`);
+    const entries = (await res.json()) as Record<string, unknown>[];
+    expect(entries.length).toBeGreaterThan(0);
+    const annex = entries.find((e) => !(e.url === undefined) && e.url !== e.bytes_url);
+    const git = entries.find((e) => e.url === e.bytes_url);
+    expect(annex).toBeDefined();
+    expect(git).toBeDefined();
+    // Object.keys reflects INSERTION order, which is what JSON.stringify
+    // serializes -- this is the same order external consumers (the eegdash
+    // viewer, third-party downloaders, nemar-py) see on the wire. Neither
+    // row carries `error`: both URLs build successfully today.
+    const expectedOrder = ["path", "size", "checksum_algorithm", "checksum", "bytes_url", "url"];
+    expect(Object.keys(annex as Record<string, unknown>)).toEqual(expectedOrder);
+    expect(Object.keys(git as Record<string, unknown>)).toEqual(expectedOrder);
+  });
+
+  test("a dataset the bucket policy excludes from public read keeps presigned URLs", async () => {
+    s3.setBucketPolicy(addPrivateDataset(buildPublicAccessPolicy("nemar", []), "nemar", SMALL));
+    __resetPublicReadCacheForTests();
+    const res = await get(`/${SMALL}/v1.1.1/manifest.json`);
+    expect(res.status).toBe(200);
+    // Unchanged from before #1522: the response still tracks a signature
+    // lifetime, so the short client cache stays.
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=60");
+    const entries = (await res.json()) as { url: string | null; bytes_url: string }[];
+    const annexEntry = entries.find((e) => e.url !== e.bytes_url);
+    expect(annexEntry).toBeDefined();
+    expect(annexEntry?.url).toStartWith(
+      `https://nemar.s3.us-east-2.amazonaws.com/${SMALL}/objects/`,
+    );
+    expect(annexEntry?.url).toContain("X-Amz-Signature=");
+  });
+
+  test("the unsigned url actually serves the object, GET and Range", async () => {
+    const annexPath = Object.keys(CURRENT.files).find(
+      (p) => !CURRENT.files[p].key.startsWith("git:"),
+    );
+    if (!annexPath) throw new Error("fixture has no annexed file");
+    const file = CURRENT.files[annexPath];
+    const bytes = new TextEncoder().encode("nemar-1522-object-bytes");
+    s3.put(`/${SMALL}/objects/${file.key}`, bytes);
+
+    const url = buildAnnexPublicUrl({
+      datasetId: SMALL,
+      file,
+      s3Options: {
+        bucket: "nemar",
+        region: "us-east-2",
+        accessKeyId: "x",
+        secretAccessKey: "y",
+        endpointUrl: s3.url,
+      },
+    });
+    expect(url).not.toContain("?");
+
+    const full = await fetch(url);
+    expect(full.status).toBe(200);
+    expect(new Uint8Array(await full.arrayBuffer())).toEqual(bytes);
+
+    const ranged = await fetch(url, { headers: { Range: "bytes=0-4" } });
+    expect(ranged.status).toBe(206);
+    expect(ranged.headers.get("Content-Range")).toBe(`bytes 0-4/${bytes.length}`);
+    expect(new Uint8Array(await ranged.arrayBuffer())).toEqual(bytes.slice(0, 5));
   });
 
   test(
@@ -364,6 +505,36 @@ describe("manifest.json", () => {
   );
 
   test(
+    "the per-branch bound: presigned refuses at 30,000, unsigned serves up to 38,000",
+    async () => {
+      const midCount = largeManifestEntryCount(MID_OPTS);
+      expect(midCount).toBeGreaterThan(MAX_MANIFEST_JSON_ENTRIES_PRESIGNED);
+      expect(midCount).toBeLessThan(MAX_MANIFEST_JSON_ENTRIES);
+      seed(MID_ID, "public", [["1.0.0", "2026-09-01 00:00:00"]]);
+
+      // Excluded (presigned) branch: the SAME manifest, refused at the
+      // unraised 30,000 bound -- it never got cheaper, so it never moved.
+      s3.setBucketPolicy(addPrivateDataset(buildPublicAccessPolicy("nemar", []), "nemar", MID_ID));
+      __resetPublicReadCacheForTests();
+      const presigned = await get(`/${MID_ID}/v1.0.0/manifest.json`);
+      expect(presigned.status).toBe(413);
+      const presignedBody = (await presigned.json()) as Record<string, unknown>;
+      expect(presignedBody.limit).toBe(MAX_MANIFEST_JSON_ENTRIES_PRESIGNED);
+      expect(String(presignedBody.error)).toContain(`${MAX_MANIFEST_JSON_ENTRIES_PRESIGNED} files`);
+
+      // Not excluded (unsigned) branch: same manifest, same dataset, served
+      // under the raised 38,000 bound.
+      s3.setBucketPolicy(null);
+      __resetPublicReadCacheForTests();
+      const unsigned = await get(`/${MID_ID}/v1.0.0/manifest.json`);
+      expect(unsigned.status).toBe(200);
+      const entries = (await unsigned.json()) as unknown[];
+      expect(entries.length).toBe(midCount);
+    },
+    LARGE_MANIFEST_TEST_TIMEOUT_MS,
+  );
+
+  test(
     "through the /data mount, the listing URL keeps the mount",
     async () => {
       const mounted = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -380,6 +551,122 @@ describe("manifest.json", () => {
     },
     LARGE_MANIFEST_TEST_TIMEOUT_MS,
   );
+});
+
+describe("the manifest.json response cache sits behind the visibility gate", () => {
+  let cache: DrainingCache;
+  let original: unknown;
+
+  beforeAll(() => {
+    original = (globalThis as { caches?: unknown }).caches;
+  });
+
+  beforeEach(() => {
+    cache = new DrainingCache();
+    (globalThis as { caches?: unknown }).caches = { default: cache };
+  });
+
+  afterAll(() => {
+    (globalThis as { caches?: unknown }).caches = original;
+  });
+
+  test("a hit within the window makes zero S3 calls (#1494 amendment)", async () => {
+    const first = await get(`/${SMALL}/v1.1.1/manifest.json`);
+    expect(first.status).toBe(200);
+    const key = manifestJsonCacheKey("https://data.nemar.org", SMALL, "v1.1.1");
+    expect(cache.store.has(key)).toBe(true);
+    s3.log.length = 0;
+    const second = await get(`/${SMALL}/v1.1.1/manifest.json`);
+    expect(second.status).toBe(200);
+    expect(await second.text()).toBe(await first.clone().text());
+    expect(second.headers.get("Cache-Control")).toBe("public, max-age=300");
+    // The freshness check rides the entry-count query's own ETag rather than
+    // a conditional GET of its own; that query goes through the manifest
+    // trust window (manifest-source.ts) exactly like any other query, so a
+    // hit confirmed within the window costs no S3 call at all -- not even
+    // the single conditional GET a rebuilt-from-scratch response would have
+    // needed.
+    expect(readsOf(SMALL)).toEqual([]);
+  });
+
+  test("a hit past the window still costs exactly one conditional GET", async () => {
+    const first = await get(`/${SMALL}/v1.1.1/manifest.json`);
+    expect(first.status).toBe(200);
+    const key = manifestJsonCacheKey("https://data.nemar.org", SMALL, "v1.1.1");
+    expect(cache.store.has(key)).toBe(true);
+    s3.log.length = 0;
+    const second = await withClockAdvanced(MANIFEST_TRUST_WINDOW_MS + 1_000, () =>
+      get(`/${SMALL}/v1.1.1/manifest.json`),
+    );
+    expect(second.status).toBe(200);
+    expect(await second.text()).toBe(await first.clone().text());
+    expect(second.headers.get("Cache-Control")).toBe("public, max-age=300");
+    // Once the window has passed, the count query pays one conditional GET
+    // to confirm the ETag (and restamp the copy's window) -- and nothing
+    // else: no second, uncached read of the raw manifest object.
+    expect(readsOf(SMALL)).toEqual([`GET INM 304 ${SMALL_OBJECT}`]);
+  });
+
+  test("a manifest rewrite invalidates the cached document only once the window passes", async () => {
+    const first = await get(`/${SMALL}/v1.1.1/manifest.json`);
+    const firstText = await first.text();
+    const key = manifestJsonCacheKey("https://data.nemar.org", SMALL, "v1.1.1");
+    expect(cache.store.has(key)).toBe(true);
+    const rewritten: VersionManifest = {
+      ...CURRENT,
+      files: {
+        ...CURRENT.files,
+        "NEW-FILE.txt": {
+          key: "git:cafefacecafeface00000000000000000000ff",
+          size: 1,
+          checksum: "git:cafe",
+        },
+      },
+    };
+    s3.put(`/${SMALL}/version/v1.1.1.json`, JSON.stringify(rewritten, null, 2));
+
+    // Still inside the trust window: the count query answers from the
+    // now-stale-but-still-trusted edge copy (or its own memo entry keyed
+    // under the old ETag) without asking S3, so the rewrite is invisible and
+    // the response cache still serves the OLD document -- the same bounded
+    // staleness every other reader of this manifest already accepts
+    // (manifest-source.ts), never later than the window.
+    const stillCached = await get(`/${SMALL}/v1.1.1/manifest.json`);
+    expect(await stillCached.text()).toBe(firstText);
+
+    // Past the window: the count query's own conditional GET sees the new
+    // ETag, the response cache is rejected, and the document is rebuilt from
+    // the rewrite.
+    const second = await withClockAdvanced(MANIFEST_TRUST_WINDOW_MS + 1_000, () =>
+      get(`/${SMALL}/v1.1.1/manifest.json`),
+    );
+    const secondText = await second.text();
+    expect(secondText).not.toBe(firstText);
+    const entries = JSON.parse(secondText) as { path: string }[];
+    expect(entries.some((e) => e.path === "NEW-FILE.txt")).toBe(true);
+  });
+
+  test("a dataset gone private is refused before the cache or S3 is touched", async () => {
+    await get(`/${SMALL}/v1.1.1/manifest.json`);
+    expect(cache.store.size).toBeGreaterThan(0);
+    db.prepare("UPDATE datasets SET visibility = 'private' WHERE dataset_id = ?").run(SMALL);
+    const matchesBefore = cache.matches;
+    s3.log.length = 0;
+    const res = await get(`/${SMALL}/v1.1.1/manifest.json`);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "Dataset not found" });
+    expect(cache.matches).toBe(matchesBefore);
+    expect(readsOf(SMALL)).toEqual([]);
+  });
+
+  test("an excluded dataset's document is never written to this cache", async () => {
+    s3.setBucketPolicy(addPrivateDataset(buildPublicAccessPolicy("nemar", []), "nemar", SMALL));
+    __resetPublicReadCacheForTests();
+    const res = await get(`/${SMALL}/v1.1.1/manifest.json`);
+    expect(res.status).toBe(200);
+    const key = manifestJsonCacheKey("https://data.nemar.org", SMALL, "v1.1.1");
+    expect(cache.store.has(key)).toBe(false);
+  });
 });
 
 describe("metadata.json", () => {
@@ -579,7 +866,13 @@ describe("the edge cache sits behind the visibility gate", () => {
     expect(first.status).toBe(200);
     expect(cache.store.has(manifestCacheKey("https://data.nemar.org", SMALL, "v1.1.1"))).toBe(true);
     s3.log.length = 0;
-    const second = await get(`/${SMALL}/v1.1.1/sub-001/`, JSON_ACCEPT);
+    // Past the trust window (#1494 amendment): otherwise this second request,
+    // happening microseconds after the first, would be answered from the
+    // copy without asking S3 at all -- see the "within the trust window"
+    // describe block below for that behavior.
+    const second = await withClockAdvanced(MANIFEST_TRUST_WINDOW_MS + 1_000, () =>
+      get(`/${SMALL}/v1.1.1/sub-001/`, JSON_ACCEPT),
+    );
     expect(await second.text()).toBe(await first.clone().text());
     // Every nm000132 read, not only this manifest's: a JSON listing has no
     // reason to touch any other object of the dataset (the prior version is
@@ -604,7 +897,10 @@ describe("the edge cache sits behind the visibility gate", () => {
       expect(copy && decoder.decode(copy.body)).toBe(text);
     }
     s3.log.length = 0;
-    const second = await Promise.all(paths.map((p) => get(p, JSON_ACCEPT)));
+    // Past the trust window: see the equivalent comment above.
+    const second = await withClockAdvanced(MANIFEST_TRUST_WINDOW_MS + 1_000, () =>
+      Promise.all(paths.map((p) => get(p, JSON_ACCEPT))),
+    );
     for (const [i, res] of second.entries()) {
       expect(await res.text()).toBe(await first[i].text());
     }
@@ -637,6 +933,107 @@ describe("the edge cache sits behind the visibility gate", () => {
     await get(`/${SMALL}/v1.1.1/participants.tsv`, { method: "HEAD" });
     expect(cache.matches).toBeGreaterThan(matchesBefore);
     expect(readsOf(SMALL)).toEqual([`GET 200 ${SMALL_OBJECT}`]);
+  });
+});
+
+describe("the trust window and answer memo at the route (#1494 amendment)", () => {
+  let cache: DrainingCache;
+  let original: unknown;
+
+  beforeAll(() => {
+    original = (globalThis as { caches?: unknown }).caches;
+  });
+
+  beforeEach(() => {
+    cache = new DrainingCache();
+    (globalThis as { caches?: unknown }).caches = { default: cache };
+  });
+
+  afterAll(() => {
+    (globalThis as { caches?: unknown }).caches = original;
+  });
+
+  test("within the window, a repeat request for a different file costs no manifest S3 traffic", async () => {
+    const first = await get(`/${SMALL}/v1.1.1/participants.tsv`, { method: "HEAD" });
+    expect(first.status).toBe(200);
+    s3.log.length = 0;
+    const second = await get(`/${SMALL}/v1.1.1/sub-001/`, JSON_ACCEPT);
+    expect(second.status).toBe(200);
+    expect(readsOf(SMALL)).toEqual([]);
+  });
+
+  test("Server-Timing names which tier answered the manifest read", async () => {
+    // HEAD on a FILE goes through `applyServerTiming`; HEAD on a directory
+    // does not (rclone-style HEAD probes never render HTML chrome, so the
+    // route skips it there) -- these probe two distinct files for exactly
+    // that reason.
+    const cold = await get(`/${SMALL}/v1.1.1/participants.tsv`, { method: "HEAD" });
+    expect(cold.headers.get("Server-Timing")).toMatch(/manifest;dur=[\d.]+;desc="rewrite"/);
+
+    const warm = await get(`/${SMALL}/v1.1.1/sub-001/eeg/sub-001_coordsystem.json`, {
+      method: "HEAD",
+    });
+    expect(warm.headers.get("Server-Timing")).toMatch(/manifest;dur=[\d.]+;desc="fresh"/);
+
+    // Same path again: now the per-isolate memo answers it, not just the
+    // trust window.
+    const memoed = await get(`/${SMALL}/v1.1.1/sub-001/eeg/sub-001_coordsystem.json`, {
+      method: "HEAD",
+    });
+    expect(memoed.headers.get("Server-Timing")).toMatch(/manifest;dur=[\d.]+;desc="memo"/);
+
+    // A THIRD, never-before-queried file: past the window, so this still
+    // costs a conditional GET, but the review's fix means a 304 now checks
+    // the memo first too (see the "a 304 at a window boundary..." test in
+    // manifest-source.test.ts). A path with no memo entry yet is what
+    // actually exercises "revalidated" now -- `participants.tsv` itself
+    // would answer from its own now-confirmed-current memo entry instead.
+    const revalidated = await withClockAdvanced(MANIFEST_TRUST_WINDOW_MS + 1_000, () =>
+      get(`/${SMALL}/v1.1.1/dataset_description.json`, { method: "HEAD" }),
+    );
+    expect(revalidated.headers.get("Server-Timing")).toMatch(
+      /manifest;dur=[\d.]+;desc="revalidated"/,
+    );
+  });
+
+  test("a 304 right at the window boundary answers from the memo, at the route (review, #1526)", async () => {
+    const first = await get(`/${SMALL}/v1.1.1/participants.tsv`, { method: "HEAD" });
+    expect(first.status).toBe(200);
+    expect(first.headers.get("Server-Timing")).toMatch(/manifest;dur=[\d.]+;desc="rewrite"/);
+
+    s3.log.length = 0;
+    // Past the window: a conditional GET must still happen (an S3 read), but
+    // the memo -- keyed by the now-304-confirmed ETag -- must answer this
+    // exact query without a second scan, not just without a second S3 body
+    // transfer.
+    const second = await withClockAdvanced(MANIFEST_TRUST_WINDOW_MS + 1_000, () =>
+      get(`/${SMALL}/v1.1.1/participants.tsv`, { method: "HEAD" }),
+    );
+    expect(second.status).toBe(200);
+    expect(second.headers.get("Server-Timing")).toMatch(/manifest;dur=[\d.]+;desc="memo"/);
+    expect(readsOf(SMALL)).toEqual([`GET INM 304 ${SMALL_OBJECT}`]);
+  });
+
+  test("a dataset flipped private is refused even with a warm memo and a fresh trust window", async () => {
+    // Warm the trust window AND the per-isolate answer memo for this exact
+    // path while the dataset is still public.
+    const before = await get(`/${SMALL}/v1.1.1/participants.tsv`, JSON_ACCEPT);
+    expect(before.status).toBe(200);
+    const again = await get(`/${SMALL}/v1.1.1/participants.tsv`, JSON_ACCEPT);
+    expect(again.headers.get("Server-Timing")).toMatch(/manifest;dur=[\d.]+;desc="memo"/);
+
+    db.prepare("UPDATE datasets SET visibility = 'private' WHERE dataset_id = ?").run(SMALL);
+    const matchesBefore = cache.matches;
+    s3.log.length = 0;
+
+    // Still well inside the trust window, and the memo still holds this
+    // exact answer -- neither matters, because `loadPublishedDataset` runs
+    // before either is ever consulted (ADR 0066, ADR 0072).
+    const after = await get(`/${SMALL}/v1.1.1/participants.tsv`, JSON_ACCEPT);
+    expect(after.status).toBe(404);
+    expect(await after.json()).toEqual({ error: "Dataset not found" });
+    expect(cache.matches).toBe(matchesBefore);
+    expect(readsOf(SMALL)).toEqual([]);
   });
 });
 

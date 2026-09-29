@@ -202,6 +202,90 @@ the engine stamp is archive-wide, so NULL there would re-convert everything
 (hence the seeding in `migrate_schema`),
 while this one is per-dataset and its blast radius is the one dataset that was asked for.
 
+## Amendment 2026-09-28 (#1515): the deposit-file matcher gets its own predicate
+
+`scanDepositFile`'s loop over `Authors`, `Funding` and `Acknowledgements` reused
+`isPlaceholderAuthor`, which `submission-minimums.ts` wrote for the publication gate's own
+`Authors` check.
+That predicate recognizes the classic sentinels (`n/a`, `none`, bracketed placeholders, a
+leading `anonymous`) and nothing else, so a `Funding` entry blinded in ordinary prose --
+"Redacted for double-blind review", "Funding information removed for review", "Withheld" --
+was reported as `description_funding_named`, naming someone it did not name.
+
+**The fix is a new predicate, `isBlindedEntry`, shared by all three fields, that does not call
+`isPlaceholderAuthor`.**
+Two kinds of match: the classic sentinels, unchanged in spirit, plus a whole-entry vocabulary
+test over anything else.
+Every token in the trimmed entry, with brackets and punctuation stripped, must be either a
+redaction verb (`anonymous`, `anonymized`/`anonymised`, `redacted`, `withheld`, `blinded`,
+`concealed`, `removed`, `omitted`, `hidden`, `available`) or an ordinary connector word ("for",
+"review", "double-blind", "until", "publication", "information", and the like), and at least
+one token must be a redaction verb.
+
+**Why not just widen `isPlaceholderAuthor` itself.**
+Its `^anonymous\b` branch matches any entry that merely OPENS with the word, which is correct
+for `Authors` -- an author entry starting with "Anonymous" is asserting anonymity, and NEMAR's
+own blinded label does exactly this -- and wrong for `Funding`: "Anonymous Donor Foundation" is
+a real funder, and the leading-word rule would have blinded it away.
+`isBlindedEntry` treats "anonymous" as one token among others, subject to the whole-entry test,
+so it recognizes "Anonymous" alone or "Anonymous (withheld until publication)" but not a name
+that merely starts with the word and carries other content: "Donor", "Foundation", "Veterans",
+"Association".
+The same reasoning covers "Blinded Veterans Association".
+`isPlaceholderAuthor` itself is unchanged and still governs the publication gate, which asks a
+different question at a different moment; the two are allowed to diverge.
+
+**The finding text is now field-specific.**
+"Funding ... has N entries that name someone" misdescribed an organization; it now reads
+"names a funder or a grant".
+`Acknowledgements` reads "names a person or a group".
+`Authors` keeps its original "names someone".
+Pluralization now agrees with the count ("1 entry ... names", "2 entries ... name") rather than
+the literal "entry/entries" the message printed regardless of count.
+
+**What this does not change.**
+The check codes (`description_authors_named`, `description_funding_named`,
+`description_acknowledgements_named`) are unchanged, since `sweep_stamps` and the CLI key on
+them.
+`isPlaceholderAuthor` and `submission-minimums.ts`'s own `Authors` rule are untouched.
+
+**Follow-up from PR review (#1517), same day.**
+Three more refinements to `isBlindedEntry`, all in `backend/src/services/anonymity-sweep.ts`.
+
+`unspecified` and `placeholder` moved OUT of a free substring match and INTO the whole-entry
+vocabulary test, as ordinary core words.
+`isPlaceholderAuthor` matches those two words anywhere in the entry, and the first cut of
+`isBlindedEntry` copied that, which fires on "National Institutes of Health Unspecified
+Program" and "Placeholderville Foundation" -- real funders that merely CONTAIN the word, the
+same class of bug #1515 itself was.
+Folded into the vocabulary, "Unspecified" and "Placeholder" alone (or bracketed) still blind a
+field, but a real name carrying the word alongside other content does not.
+
+An entry built ENTIRELY from vocabulary words -- "Funding details available after acceptance",
+"Grant Information Not Available", "Grant Award Not Yet Available" -- is blinded even though it
+names no specific redaction reason.
+This is accepted, not fixed: an entry made of nothing but stock words has no identifying
+content left to leak, by construction, and the test suite pins these three examples so a future
+vocabulary addition has to keep proving that.
+
+A narrow, explicit list of "no funding received" and "not applicable" declarations
+(`NO_FUNDING_DECLARATION`) is recognized as naming nobody -- "None declared", "No funding was
+received for this work", "Not applicable" -- which closes a false positive of the same class as
+#1515 in the opposite direction (a legitimate non-answer reported as naming a funder). It is a
+whole-entry anchor, not a token-vocabulary rule, specifically so "No funding from NIH" and "Not
+funded by the Wellcome Trust" keep failing it: the declaration has to be the entire entry, and a
+funder named after it is exactly the content this predicate exists to still report.
+
+**A known, accepted limitation: the vocabulary is English-only.**
+`BLINDED_CORE_WORDS`, `BLINDED_CONNECTOR_WORDS` and `NO_FUNDING_DECLARATION` all match English
+words and phrases.
+A depositor who blinds a field in another language -- "Anonymisiert", "Anónimo" -- is not
+recognized, and the entry is reported as naming someone even though it does not.
+That is the SAFE direction for a check whose job is to never assume clean (ADR 0005, ADR 0054):
+an over-reported finding costs a depositor a look at a sentence that was already fine, while an
+under-reported one is the disclosure this sweep exists to catch.
+Extending the vocabulary to other languages is future work, not a defect in this one.
+
 ## Consequences
 
 - The sweep is PRODUCTION-ONLY on the cron and deliberately absent from
@@ -263,3 +347,15 @@ while this one is per-dataset and its blast radius is the one dataset that was a
   `backend/test/anonymity-sweep.test.ts`: appending the matched file body to a `detail`
   pasted the concealed depositor's name into `sweep_stamps`, the `audit_log` row and
   forwardable mail at once, and left every other test green.
+- The 2026-09-28 amendment (#1515): `isBlindedEntry` and its tests live in
+  `backend/src/services/anonymity-sweep.ts` and `backend/test/anonymity-sweep.test.ts`, with
+  both directions covered -- every listed redaction phrasing recognized, and "Anonymous Donor
+  Foundation" / "Blinded Veterans Association" / real grant numbers still reported -- driven
+  both at the `isBlindedEntry`/`scanDepositFile` unit level and end to end through
+  `runAnonymitySweep`.
+- The same-day PR-review follow-up (#1517) added its own tests to
+  `backend/test/anonymity-sweep.test.ts`: "unspecified"/"placeholder" as a whole token rather
+  than a substring (both directions), the three vocabulary-only entries pinned as intentionally
+  blinded, and the no-funding/not-applicable declarations (both directions, including "No
+  funding from NIH" and "Not funded by the Wellcome Trust" still reported). All four were
+  confirmed to fail when the corresponding code was disabled, then restored.

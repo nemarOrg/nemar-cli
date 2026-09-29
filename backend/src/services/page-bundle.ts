@@ -30,6 +30,7 @@ import type { Bindings } from "../types/bindings";
 import { withheldWhileAnonymous } from "./anonymity";
 import {
   type DatasetVersionRow,
+  type LandingArchive,
   type LandingPayload,
   type NeuroschemaDataset,
   PUBLIC_DATASET_VERSIONS_SQL,
@@ -300,6 +301,33 @@ export function pickVersion(
   return versionRows[0].version;
 }
 
+/**
+ * #1518: only the latest version's zip is retained -- an older-version
+ * rebuild is deleted once the newer one's upload is confirmed (going
+ * forward), and the one-time sweep already removed what existed before
+ * that shipped. `landingPayload.archive` is dataset-scoped (built from the
+ * `datasets` row, which only ever describes the LATEST build), so handing
+ * it back unchanged for a bundle request scoped to an older version would
+ * advertise a working download for a zip that was never built for that
+ * version and will not exist under any name.
+ *
+ * Reuses the existing `skip_reason` contract (ADR 0012's oversized-dataset
+ * skip) instead of adding a new field: the website already renders
+ * "no zip -> use direct download" from a null `status` + non-null
+ * `skip_reason`, so this needs no website change to take effect.
+ */
+export function archiveForRequestedVersion(
+  landingPayload: LandingPayload,
+  isLatestVersion: boolean,
+): LandingArchive {
+  if (isLatestVersion) return landingPayload.archive;
+  return {
+    status: null,
+    size: null,
+    skip_reason: `Only the latest version (${landingPayload.latest ?? "unknown"}) has a downloadable archive; download files directly.`,
+  };
+}
+
 export function settled<T>(result: PromiseSettledResult<T>, label: string): PageBundleComponent<T> {
   if (result.status === "fulfilled") {
     return { ok: true, data: result.value };
@@ -372,14 +400,20 @@ export async function buildPageBundle(
   const versionRows = await loadVersionRowsForBundle(env, datasetId);
   // Latest-only archive state (#752) so the bundle's landing payload carries the
   // skip/ready signal, matching the /<id>/ landing route (data.ts).
+  // archive_checked_at (#1514) lets buildLandingPayload tell a
+  // latest-version-current 'ready' from one that predates a newer published
+  // version -- see its own comment for the nm000284 incident this guards.
   const archiveRow = await env.DB.prepare(
-    "SELECT archive_status, archive_size, archive_skip_reason FROM datasets WHERE dataset_id = ?",
+    `SELECT archive_status, archive_size, archive_skip_reason,
+            json_extract(sweep_stamps, '$.archive_checked_at') AS archive_checked_at
+       FROM datasets WHERE dataset_id = ?`,
   )
     .bind(datasetId)
     .first<{
       archive_status: string | null;
       archive_size: number | null;
       archive_skip_reason: string | null;
+      archive_checked_at: string | null;
     }>();
   const landingPayload = buildLandingPayload({
     datasetId,
@@ -389,6 +423,7 @@ export async function buildPageBundle(
           status: archiveRow.archive_status,
           size: archiveRow.archive_size,
           skip_reason: archiveRow.archive_skip_reason,
+          checked_at: archiveRow.archive_checked_at,
         }
       : undefined,
   });
@@ -433,7 +468,18 @@ export async function buildPageBundle(
     : metadataComponent;
   const enrichmentDegraded = metadataComponent.ok && metadataComponent.data.enrichment_degraded;
 
-  const landing: PageBundleComponent<LandingPayload> = { ok: true, data: landingPayload };
+  // #1518: versionRows is ordered newest-first (pickVersion's own "fall
+  // through to latest" default relies on the same assumption), so the
+  // requested version is latest exactly when it matches the first row.
+  const isLatestVersion =
+    resolvedVersion === null || resolvedVersion === (versionRows[0]?.version ?? null);
+  const landing: PageBundleComponent<LandingPayload> = {
+    ok: true,
+    data: {
+      ...landingPayload,
+      archive: archiveForRequestedVersion(landingPayload, isLatestVersion),
+    },
+  };
 
   return {
     dataset_id: datasetId,

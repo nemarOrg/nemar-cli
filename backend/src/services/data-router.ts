@@ -26,11 +26,13 @@ import type {
 } from "../../../shared/datacite-constants.js";
 import { escapeHtml } from "../lib/escape";
 import { VERSION_DOI_SQL } from "./anonymity";
+import { isArchiveStaleForLatestVersion } from "./archive-policy";
 import { isValidDatasetId } from "./datasetId";
 import type { ManifestFile, VersionManifest } from "./manifest";
 import {
   type PresignedUrlOptions,
   type S3ListResult,
+  buildPublicObjectUrl,
   generatePresignedGetUrl,
   listObjectsWithDelimiter,
 } from "./s3";
@@ -61,12 +63,17 @@ export interface PublicManifestEntry {
   size: number;
   checksum_algorithm: string;
   checksum: string;
+  // For an annex-backed entry: the plain, never-expiring public S3 URL
+  // (#1522) when the bucket policy does not exclude the dataset from public
+  // read, or the legacy 1h-presigned S3 GET when it does
+  // (`services/public-read-cache.ts` decides which, per request). For a
+  // git-tracked entry, the same value as `bytes_url`.
   url: string | null;
-  // Stable, same-origin contract URL for the bytes (#615). Unlike `url`
-  // (a 1h-presigned S3 GET for annex files), `bytes_url` is durable: a
+  // Stable, same-origin contract URL for the bytes (#615), durable: a
   // consumer can persist it and re-fetch later. annex -> the per-file
-  // data-plane route (302s to freshly-presigned bytes); git -> the same
-  // raw.githubusercontent URL as `url`. Always present; never expires.
+  // data-plane route (302s to a fresh `url`, whichever form that request
+  // gets); git -> the same raw.githubusercontent URL as `url`. Always
+  // present; never expires.
   bytes_url: string;
   // Populated when url could not be built for this row; lets clients
   // download the rest of the dataset instead of failing the whole listing.
@@ -238,6 +245,38 @@ export async function buildRedirectUrl(args: {
     expiresIn ?? 3600,
     buildContentDisposition(basename),
   );
+}
+
+/**
+ * Build the plain public S3 URL for an annex-backed manifest entry (#1522),
+ * for a dataset `services/public-read-cache.ts` confirms the bucket policy
+ * does NOT exclude from public read. Same key shape and the same
+ * git/annex-format validation as {@link buildRedirectUrl} -- a git-tracked
+ * file never reaches this (the caller routes it to `bytes_url` instead, the
+ * same as the presigned path), and an unrecognized key throws the same way.
+ *
+ * Unlike `buildRedirectUrl` this never expires and carries no
+ * `response-content-disposition`: an unsigned GET cannot force S3 to rewrite
+ * the response's filename the way a signed query parameter can, so a
+ * download of this URL keeps the content-addressed object name rather than
+ * the BIDS-shaped one. `bytes_url` (the data-plane route, which still 302s
+ * through `buildRedirectUrl` for an annexed file) is the durable link that
+ * keeps the BIDS filename; this one is for a client that wants to read the
+ * object directly, forever, with no round trip through the Worker at all.
+ */
+export function buildAnnexPublicUrl(args: {
+  datasetId: string;
+  file: ManifestFile;
+  s3Options: PresignedUrlOptions;
+}): string {
+  const { datasetId, file, s3Options } = args;
+  if (file.key.startsWith("git:")) {
+    throw new Error(`git-tracked files are streamed by the Worker, not linked to S3: ${datasetId}`);
+  }
+  if (!ANNEX_KEY_RE.test(file.key)) {
+    throw new Error(`Unrecognized manifest key format: ${file.key}`);
+  }
+  return buildPublicObjectUrl(s3Options, `${datasetId}/objects/${file.key}`);
 }
 
 /**
@@ -1602,7 +1641,15 @@ export interface LandingPayload {
 export function buildLandingPayload(args: {
   datasetId: string;
   versionRows: DatasetVersionRow[];
-  archive?: { status?: string | null; size?: number | null; skip_reason?: string | null };
+  archive?: {
+    status?: string | null;
+    size?: number | null;
+    skip_reason?: string | null;
+    /** `sweep_stamps.archive_checked_at` (#1514): when the ready webhook or
+     *  the backfill sweep last confirmed a zip. Used only to tell a
+     *  latest-version-current 'ready' from a stale one -- see below. */
+    checked_at?: string | null;
+  };
 }): LandingPayload {
   const { datasetId, versionRows } = args;
   const versions: LandingVersion[] = versionRows.map((row) => {
@@ -1615,15 +1662,29 @@ export function buildLandingPayload(args: {
       browse_url: `/${datasetId}/${tag}/`,
     };
   });
+  const rawArchive = args.archive;
+  // Archive readiness is tracked latest-only (#752) with no notion of which
+  // version a 'ready' zip was built for beyond "whatever was newest at the
+  // time". A dataset that publishes a NEWER version after that build
+  // completed has a zip on record for a version that no longer exists at
+  // this URL (#1514, the nm000284 incident: v1.0.0's zip marked ready, then
+  // v1.0.1 published, and the page kept advertising a "ready" download that
+  // 404'd on click). Downgrade a stale 'ready' to "unknown" (null status,
+  // null size) rather than advertise it; `skip_reason` carries no
+  // per-version claim (it always describes the row's CURRENT size
+  // classification) and passes through unchanged either way.
+  const archiveIsStale =
+    rawArchive?.status === "ready" &&
+    isArchiveStaleForLatestVersion(rawArchive.checked_at, versionRows[0]?.created_at ?? null);
   return {
     dataset_id: datasetId,
     latest: versions.length > 0 ? versions[0].version : null,
     metadata_url: `/${datasetId}/metadata.json`,
     versions,
     archive: {
-      status: args.archive?.status ?? null,
-      size: args.archive?.size ?? null,
-      skip_reason: args.archive?.skip_reason ?? null,
+      status: archiveIsStale ? null : (rawArchive?.status ?? null),
+      size: archiveIsStale ? null : (rawArchive?.size ?? null),
+      skip_reason: rawArchive?.skip_reason ?? null,
     },
   };
 }

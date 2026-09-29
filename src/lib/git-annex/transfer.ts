@@ -6,9 +6,10 @@
  * verbatim.
  */
 
-import { statSync } from "node:fs";
+import { lstatSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { annexKeyDeclaredSize } from "../s3-server-copy.js";
 import { chunkAddTargets } from "./init.js";
 import { shouldAnnex } from "./policy.js";
 import { runCommand } from "./run-command.js";
@@ -144,6 +145,27 @@ interface GetDataCounts {
   filesUnavailable: number;
   /** Bounded sample of unavailable paths, for user-facing reporting. */
   unavailablePaths: string[];
+  /**
+   * Among this run's retrieved files, how many had a key declaring no size
+   * (a `URL--` key from `addurl --relaxed`, a WORM key, ...) and so could be
+   * checked by NEITHER hash NOR size under `--no-verify` -- the same gap
+   * `import-openneuro.ts`'s tree gate counts and reports rather than folding
+   * into a reassuring total. Always 0 when `noVerify` was not requested.
+   */
+  unsizedFiles: number;
+  /**
+   * Print-ready lines for every `--no-verify` size mismatch this run found,
+   * each ending in the manual recovery command -- present on EVERY arm
+   * (`success: true` included), because the common shape is a `"partial"`
+   * outcome (most files fine, one corrupt), and `failureText`/`error` is
+   * only carried on `success: false`. `printPartialRetrieval`'s own text
+   * points at a report this local check never writes, so the caller must
+   * print these itself rather than relying on that generic path. A file
+   * whose removal could not be confirmed gets a line here too, worded as an
+   * unresolved warning rather than a completed reset (see the option doc on
+   * `noVerify` above). Always `[]` when `noVerify` was not requested.
+   */
+  noVerifyMismatches: string[];
 }
 
 /**
@@ -267,6 +289,45 @@ export function classifyGetOutcome(input: {
 }
 
 /**
+ * Whether the location log currently claims `file`'s content is present
+ * "here" (this clone), read directly from `whereis --json` rather than
+ * trusted from another command's exit code -- an exit code is not evidence
+ * (`.memory/git-annex-flag-and-log-truths.md`). Returns null when the
+ * answer could not be read at all, which callers must treat as NOT
+ * confirmed absent, the same fail-closed rule `batchSetKeyPresence` uses
+ * for a retraction.
+ */
+async function isRecordedHere(datasetPath: string, file: string): Promise<boolean | null> {
+  const { stdout } = await runCommand(["git", "annex", "whereis", "--json", "--", file], {
+    cwd: datasetPath,
+  });
+  const line = stdout.split("\n").find((candidate) => candidate.trim().startsWith("{"));
+  if (!line) return null;
+  try {
+    const parsed = JSON.parse(line) as { whereis?: Array<{ here?: boolean }> };
+    if (!Array.isArray(parsed.whereis)) return null;
+    return parsed.whereis.some((location) => location.here === true);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * POSIX single-quoted, safe to paste into any shell: spaces, parentheses, a
+ * leading dash, and an embedded quote all survive (review of #1523: a bare
+ * `rm <file>` breaks on the first three).
+ */
+function shQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** The one manual-recovery line for a no-verify mismatch, `--`-guarded and quoted. */
+function recoveryCommand(file: string): string {
+  const quoted = shQuote(file);
+  return `rm -- ${quoted} && git checkout -- ${quoted} && git annex get -- ${quoted}`;
+}
+
+/**
  * Get data files from remote (S3) for a cloned dataset.
  *
  * Always runs with `--json --json-progress` and tallies the per-file completion
@@ -297,6 +358,24 @@ export async function getDatasetData(
     onProgress?: DownloadProgressCallback;
     /** Treat any unavailable file as a failure (CLI --require-complete). */
     requireComplete?: boolean;
+    /**
+     * Run this invocation with `-c annex.verify=false`: git-annex skips
+     * hashing each file against its key on receipt. Passed as a one-off `-c`
+     * override, never written to repo or global git config (#1523).
+     *
+     * **Measured on git-annex 10.20260901: with verify off, `get` does not
+     * even enforce the declared SIZE.** A remote object truncated to half its
+     * key's `-s<bytes>` length, or swapped for different same-size content,
+     * both come back `"success":true`. So when this is set, every file this
+     * call reports as newly retrieved is re-checked here against the size
+     * encoded in its key (the same size-only guarantee ADR 0062 gives the
+     * HTTP path), and a mismatch is downgraded to a failure rather than
+     * trusted. A mismatching file is also hunted with a local `fsck --fast`
+     * (a stat, not a re-hash) so git-annex's own location log stops
+     * claiming "here" holds good content -- the same reasoning ADR 0063
+     * gives for never keeping an unproven copy.
+     */
+    noVerify?: boolean;
   } = {},
 ): Promise<GetDataResult> {
   const jobs = options.jobs || 4;
@@ -310,9 +389,13 @@ export async function getDatasetData(
   );
 
   try {
-    // Streaming mode: parse --json-progress lines as they arrive
+    // Streaming mode: parse --json-progress lines as they arrive.
+    // `-c annex.verify=false` (a git global option) must precede `annex`, not
+    // follow it -- git-annex has no such flag of its own, and it is never
+    // written to config (see the option doc above).
     const args = [
       "git",
+      ...(options.noVerify ? ["-c", "annex.verify=false"] : []),
       "annex",
       "get",
       "--json",
@@ -333,11 +416,32 @@ export async function getDatasetData(
 
     let filesDownloaded = 0;
     let filesUnavailable = 0;
+    let unsizedFiles = 0;
+    // Print-ready per-mismatch lines (see the field doc on GetDataCounts).
+    // Not capped like unavailablePaths/failureNotes: this only ever holds
+    // entries for a run's own `--no-verify` corruption, which -- unlike a
+    // dataset with thousands of legitimately-missing upstream files -- is
+    // rare by construction (it requires a bad transfer, not just an absent
+    // file), so there is no realistic unbounded-growth case to guard here.
+    const noVerifyMismatches: string[] = [];
     const unavailablePaths: string[] = [];
     // Per-file failure notes, joined with stderr for the classifier tie-break.
+    // Capped like unavailablePaths: a many-file failure must not build an
+    // unbounded string, and the "X more omitted" line still says the total.
     const failureNotes: string[] = [];
+    let failureNotesOmitted = 0;
+    const addFailureNote = (note: string): void => {
+      if (failureNotes.length < MAX_UNAVAILABLE_SAMPLE) {
+        failureNotes.push(note);
+      } else {
+        failureNotesOmitted++;
+      }
+    };
     let stderrOutput = "";
     const stderrChunks: Uint8Array[] = [];
+    // Files this run reported as retrieved, kept only to re-check their size
+    // when `noVerify` is set (see the option doc above); unused otherwise.
+    const retrievedThisRun: Array<{ file: string; key: string }> = [];
 
     // Tally a completion line. Byte-progress lines carry neither `ok` nor
     // `success`, so they fall through both branches and are only forwarded to
@@ -347,6 +451,10 @@ export async function getDatasetData(
       options.onProgress?.(parsed);
       if (parsed.ok === true || parsed.success === true) {
         filesDownloaded++;
+        if (options.noVerify) {
+          const file = parsed.file ?? parsed.action?.file;
+          if (file && parsed.key) retrievedThisRun.push({ file, key: parsed.key });
+        }
       } else if (parsed.ok === false || parsed.success === false) {
         filesUnavailable++;
         const file = parsed.file ?? parsed.action?.file;
@@ -356,9 +464,9 @@ export async function getDatasetData(
         // Real `-J --json-progress` failure events carry the cause in `note`
         // ("from s3-PUBLIC...\nUnable to access these remotes: ...") alongside
         // an `error-messages` array; the scalar `error` is belt-and-braces.
-        if (parsed.note) failureNotes.push(parsed.note);
-        if (parsed["error-messages"]?.length) failureNotes.push(...parsed["error-messages"]);
-        if (parsed.error) failureNotes.push(parsed.error);
+        if (parsed.note) addFailureNote(parsed.note);
+        for (const message of parsed["error-messages"] ?? []) addFailureNote(message);
+        if (parsed.error) addFailureNote(parsed.error);
       }
     };
 
@@ -429,9 +537,138 @@ export async function getDatasetData(
         filesDownloaded,
         filesUnavailable,
         unavailablePaths,
+        unsizedFiles: 0,
+        noVerifyMismatches: [],
       };
     }
 
+    // Re-check size for everything this run retrieved, when verification was
+    // skipped. Deliberately AFTER the whole-run-error return above (that one
+    // reads git-annex's own exit code and tally, untouched by this) and
+    // AFTER `proc.exited` (running `fsck` while `get` is still writing to the
+    // shared git-annex branch journal risks the two racing on it). A mismatch
+    // downgrades the file from downloaded to unavailable, which is exactly
+    // what an absent file looks like to `classifyGetOutcome` below -- a
+    // corrupted no-verify fetch is reported the same way a genuinely missing
+    // file is, not silently kept as a success.
+    if (options.noVerify && retrievedThisRun.length > 0) {
+      interface Mismatch {
+        file: string;
+        /** A locked tree's entry is a symlink into `.git/annex/objects/`. */
+        isSymlink: boolean;
+        reason: string;
+      }
+      const mismatches: Mismatch[] = [];
+      for (const { file, key } of retrievedThisRun) {
+        const declaredSize = annexKeyDeclaredSize(key);
+        if (declaredSize === null) {
+          // No embedded length to check against (a URL key from `addurl
+          // --relaxed`, a WORM key, ...): accepted on the key's name alone,
+          // same as import-openneuro.ts's tree gate. Counted, not silently
+          // folded into a success this run cannot actually back up.
+          unsizedFiles++;
+          continue;
+        }
+        const fullPath = join(datasetPath, file);
+        let actualSize: number | null;
+        try {
+          actualSize = statSync(fullPath).size;
+        } catch {
+          actualSize = null;
+        }
+        if (actualSize === declaredSize) continue;
+        filesDownloaded--;
+        // Counted here (the totals `classifyGetOutcome` and the CLI's
+        // summary line report stay correct) but deliberately NOT added to
+        // `unavailablePaths`: that list backs `printPartialRetrieval`'s
+        // generic "not available from the archive" text, which points at a
+        // server-side report this local check never wrote. A no-verify
+        // mismatch gets its own reason and recovery command from
+        // `noVerifyMismatches` instead, so it must not also show up in the
+        // generic list meant for genuinely-missing-upstream files.
+        filesUnavailable++;
+        let isSymlink = false;
+        try {
+          isSymlink = lstatSync(fullPath).isSymbolicLink();
+        } catch {
+          // Already gone -- treated as unlocked below; there is no symlink
+          // left to leave alone, and the cleanup step is a safe no-op on an
+          // absent path either way.
+        }
+        mismatches.push({
+          file,
+          isSymlink,
+          reason: `--no-verify accepted ${actualSize === null ? "a file that is no longer readable" : `${actualSize} byte(s)`}, but the key declares ${declaredSize}`,
+        });
+      }
+
+      if (mismatches.length > 0) {
+        // Best-effort quarantine through git-annex's own fsck. ITS EXIT CODE
+        // IS NOT TRUSTED (an exit code is not evidence -- .memory/git-annex-
+        // flag-and-log-truths.md): every path below is confirmed directly
+        // against the location log, with `drop --force` as the fallback when
+        // fsck did not manage to retract the claim. Measured: a `.git/annex
+        // /bad` that fsck cannot create (a permissions issue, or something
+        // already at that path) fails fsck's quarantine for that key while
+        // leaving the rest of the repository -- and `drop --force`, whose
+        // only job is making the log agree, not verifying content -- fully
+        // writable.
+        await runCommand(
+          ["git", "annex", "fsck", "--fast", "--", ...mismatches.map((m) => m.file)],
+          { cwd: datasetPath },
+        );
+
+        for (const { file, isSymlink, reason } of mismatches) {
+          let confirmedGone = (await isRecordedHere(datasetPath, file)) === false;
+          if (!confirmedGone) {
+            await runCommand(["git", "annex", "drop", "--force", "--", file], {
+              cwd: datasetPath,
+            });
+            confirmedGone = (await isRecordedHere(datasetPath, file)) === false;
+          }
+
+          if (!confirmedGone) {
+            // Neither fsck nor a forced drop got the location log to agree
+            // the content is gone. Do not touch the working tree, and do not
+            // claim this file was cleaned: silently resetting a file the log
+            // still calls present risks losing the only signal that
+            // something here is still wrong.
+            const warning = `${file}: ${reason}. Could not confirm this file was removed after a failed --no-verify fetch -- it may still hold corrupted content. Recover by hand: ${recoveryCommand(file)}`;
+            addFailureNote(warning);
+            noVerifyMismatches.push(warning);
+            continue;
+          }
+
+          if (!isSymlink) {
+            // A confirmed retraction already leaves a LOCKED tree's symlink
+            // correctly dangling -- nothing further needed there. An
+            // unlocked/adjusted tree's entry is an INDEPENDENT regular-file
+            // copy, not a hardlink (measured: a distinct inode from the
+            // object store even with `annex.thin` unset, which is NEMAR's
+            // default), and neither fsck nor `drop --force` reliably resets
+            // it once the location log already agrees content is gone
+            // (measured in both orders). Removing it and letting `git
+            // checkout --` restore whatever git-annex now legitimately has
+            // for that path -- a pointer, since no copy is recorded here --
+            // is the one mechanism that was reliable in every case tried.
+            try {
+              rmSync(join(datasetPath, file), { force: true });
+            } catch {
+              // Best effort; the recovery note below still covers it by hand.
+            }
+            await runCommand(["git", "checkout", "--", file], { cwd: datasetPath });
+          }
+
+          const message = `${file}: ${reason}. Recover with: ${recoveryCommand(file)}`;
+          addFailureNote(message);
+          noVerifyMismatches.push(message);
+        }
+      }
+    }
+
+    if (failureNotesOmitted > 0) {
+      failureNotes.push(`...(${failureNotesOmitted} more failure note(s) omitted)`);
+    }
     const failureText = `${stderrOutput}\n${failureNotes.join("\n")}`;
     const outcome = classifyGetOutcome({
       retrieved: filesDownloaded,
@@ -441,8 +678,12 @@ export async function getDatasetData(
     });
     return toGetDataResult(
       outcome,
-      { filesDownloaded, filesUnavailable, unavailablePaths },
-      stderrOutput,
+      { filesDownloaded, filesUnavailable, unavailablePaths, unsizedFiles, noVerifyMismatches },
+      // `failureText` (stderr plus per-file notes), not bare stderr: a
+      // no-verify size mismatch has nothing in git-annex's own stderr --
+      // git-annex thought the transfer succeeded -- so the only place the
+      // reason lives is the note this function pushed above.
+      failureText,
     );
   } catch (e) {
     return {
@@ -452,6 +693,8 @@ export async function getDatasetData(
       filesDownloaded: 0,
       filesUnavailable: 0,
       unavailablePaths: [],
+      unsizedFiles: 0,
+      noVerifyMismatches: [],
     };
   }
 }
