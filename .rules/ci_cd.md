@@ -52,10 +52,11 @@ jobs:
 
 ## nemar-cli: long-lived GitHub-token secrets
 
-This repo's CI holds three long-lived GitHub PAT secrets, and each has expired at least once
-without warning (issue #1321, and #1022 before it): **`GH_TOKEN`** backs the `e2e-upload` job's
-real upload flow (accepting collaborator invitations, pushing, opening PRs) as the user, so it
-has to stay a classic PAT owned by the `nemarAdmin` GitHub account with `repo` and `workflow`
+This repo's CI holds three long-lived GitHub personal access token (PAT) secrets. Only
+`GH_TOKEN` is known to have expired without warning (issues #1321 and #1022); neither of the
+other two has expired so far, and the daily probe below watches all three. **`GH_TOKEN`**
+backs the `e2e-upload` job's real upload flow (accepting collaborator invitations, pushing,
+opening PRs) as the user, so it has to stay a classic PAT owned by the `nemarAdmin` GitHub account with `repo` and `workflow`
 scopes -- a GitHub App installation token cannot substitute, because `gh api user` 403s for one.
 **`AUTO_TAG_PAT`** lets the release automation (`auto-tag.yml`, `auto-bump-dev.yml`,
 `sync-dev.yml`) push bump/release commits to protected `main`/`dev` and create GitHub Releases.
