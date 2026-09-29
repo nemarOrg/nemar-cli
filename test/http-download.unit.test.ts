@@ -416,7 +416,10 @@ describe("a refusal from the data plane reaches the user with its reason", () =>
 
   beforeAll(() => {
     s3 = startS3ManifestStandin();
-    const opts = { subjects: 75, runsPerSession: 50, datasetId: "nm000281" };
+    // #1522 raised MAX_MANIFEST_JSON_ENTRIES 30,000 -> 38,000; 95 subjects
+    // (38,100 entries) clears it with margin the way 75 (30,080) cleared the
+    // old bound.
+    const opts = { subjects: 95, runsPerSession: 50, datasetId: "nm000281" };
     expect(largeManifestEntryCount(opts)).toBeGreaterThan(MAX_MANIFEST_JSON_ENTRIES);
     s3.put("/nm000281/version/v1.0.3.json", largeManifestText(opts));
     const db = freshDb();
