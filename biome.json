@@ -42,6 +42,9 @@
       "D1PreparedStatement",
       "D1Result",
       "ExecutionContext",
+      "R2Bucket",
+      "R2Object",
+      "R2ObjectBody",
       "ScheduledEvent",
       "VectorizeIndex"
     ]
