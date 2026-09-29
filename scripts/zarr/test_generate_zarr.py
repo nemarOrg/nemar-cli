@@ -8550,6 +8550,15 @@ class TestDuplicateLabelsThroughConvertOne(unittest.TestCase):
 
     def test_a_case_only_difference_is_disclosed(self):
         # biosigio#136: EDF header `FP1-F7`, channels.tsv `Fp1-F7`.
+        #
+        # CANARY. This pins biosigio 1.2.9's EXACT-match join: the row is not
+        # applied, so the channel keeps the importer's unit and the index says
+        # why. biosigio#136 is fixed in open biosigio PR #140; once a release
+        # carrying it is the floor in requirements.txt, this test fails
+        # (the row now matches), and that failure is the signal to delete
+        # `unmatched_case_only` from `sidecar_join_report`, the JSON Schema
+        # and both zod mirrors, and to rewrite this test to expect a match.
+        # `unmatched_case_only` stays declared until then on purpose.
         names = ["Fp1-F7", *CHB_MIT_SUFFIXED[1:]]
         result, out = self.convert(names)
         self.assertTrue(result["ok"], result.get("error"))
