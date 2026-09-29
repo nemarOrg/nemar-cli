@@ -2011,29 +2011,45 @@ def _bids_entities(stem: str) -> dict[str, str]:
     return ents
 
 
+_UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
+
+
+def _decode_sidecar_bytes(raw: bytes) -> tuple[str, str]:
+    """`(text, encoding)` for a sidecar's bytes; see `_decode_sidecar_text`."""
+    if raw.startswith(_UTF16_BOMS):
+        try:
+            return raw.decode("utf-16"), "utf-16"
+        except UnicodeDecodeError:
+            pass  # a BOM-shaped prefix on bytes that are not UTF-16 after all
+    for encoding in ("utf-8-sig", "cp1252"):
+        try:
+            return raw.decode(encoding), encoding
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("latin-1"), "latin-1"  # maps every byte, never raises
+
+
 def _decode_sidecar_text(raw: bytes, path: str) -> str:
-    """Decode a sidecar's bytes: UTF-8 (a leading BOM dropped), else a legacy
-    single-byte encoding, with a warning naming the file.
+    """Decode a sidecar's bytes: UTF-8 (a leading BOM dropped), else UTF-16
+    when the file opens with a UTF-16 BOM, else a legacy single-byte encoding;
+    anything but UTF-8 draws a warning naming the file.
 
     BIDS requires UTF-8, but real datasets ship Latin-1/Windows-1252 sidecars
     (on005691's channels.tsv spells microvolts `µV` as the single byte 0xb5).
     A strict decode raised UnicodeDecodeError, which is not an OSError, so it
-    escaped every caller uncoded and the job retried forever. cp1252 is tried
-    before latin-1 because it is what Windows tools actually write (and a
-    superset of latin-1's printable range); latin-1 maps every byte, so this
-    always returns.
+    escaped every caller uncoded and the job retried forever. A UTF-16 BOM
+    (Windows "Unicode" text, `FF FE`/`FE FF`) is honored first: cp1252 would
+    otherwise accept those bytes and hand every caller text with a NUL between
+    each character. cp1252 is tried before latin-1 because it is what Windows
+    tools actually write (and a superset of latin-1's printable range);
+    latin-1 maps every byte, so this always returns.
 
     Newlines are normalized to `\\n`, as the text-mode reads this replaced did,
     so a CRLF sidecar reaches every caller (and the copy staged for biosigIO)
     exactly as before.
     """
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        try:
-            text, encoding = raw.decode("cp1252"), "cp1252"
-        except UnicodeDecodeError:
-            text, encoding = raw.decode("latin-1"), "latin-1"
+    text, encoding = _decode_sidecar_bytes(raw)
+    if encoding != "utf-8-sig":
         print(
             f"::warning::{path} is not valid UTF-8 (BIDS requires it); "
             f"read it as {encoding}",
