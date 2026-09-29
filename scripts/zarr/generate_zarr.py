@@ -2938,7 +2938,7 @@ EEGLAB_MAX_NBCHAN = 100_000
 # it gives up (None, with the usual warning). Only the fields ahead of `nbchan`
 # and `data` are ever inflated; in EEGLAB's order the largest is `times`, one
 # double per sample. A MAT v5/v7 variable cannot exceed 2 GiB, so with inline
-# single-precision samples `times` stays under this cap from 15 channels up;
+# single-precision samples `times` stays under this cap from 16 channels up;
 # a header read that does reach it (say a very long `.fdt`-backed recording)
 # is only unknown, the gate it had before the header count existed. What the
 # cap bounds is a crafted stream (a zlib bomb declaring gigabytes of zeros
