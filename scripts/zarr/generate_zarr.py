@@ -2661,8 +2661,14 @@ def expected_channel_count_for(
             flush=True,
         )
         return None
-    rows = [line for line in text.splitlines()[1:] if line.strip()]
-    return len(rows) or None
+    return channels_tsv_row_count(text) or None
+
+
+def channels_tsv_row_count(text: str) -> int:
+    """Data rows in a channels.tsv: every non-blank line after the header. The
+    one counting rule the fidelity gate and `find_collapsed_channel_stores.py`
+    share, so the detector flags exactly what the gate would have refused."""
+    return sum(1 for line in text.splitlines()[1:] if line.strip())
 
 
 # EDF+/BDF+ carry their annotations as a pseudo-signal with this label; it is

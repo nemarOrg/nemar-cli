@@ -221,6 +221,9 @@ jobs:
       - name: Non-raw store purge tests
         run: python scripts/zarr/test_purge_non_raw_stores.py
 
+      - name: Collapsed-channel detector tests
+        run: python scripts/zarr/test_find_collapsed_channel_stores.py
+
       - name: Power-line-frequency patch tests
         run: python scripts/zarr/test_patch_power_line_frequency.py
 
@@ -294,7 +297,8 @@ jobs:
           cd scripts/zarr
           pytest -q -rs --junit-xml=/tmp/zarr-tests.xml \
             test_generate_zarr.py test_zarr_queue.py \
-            test_purge_non_raw_stores.py test_hallu_zarr_config.py
+            test_purge_non_raw_stores.py test_hallu_zarr_config.py \
+            test_find_collapsed_channel_stores.py
 
       # A skip is invisible in a green job, and that is exactly how 43 tests
       # went unrun for the life of this epic. TWO are expected here and no
