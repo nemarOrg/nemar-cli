@@ -118,6 +118,13 @@ describe("the DOI lookup counts reach the reindex response", () => {
   test("runEnrichmentForDataset carries them on both of its result branches", () => {
     const source = read("dataset-reindex.ts");
     expect(source).toContain('"doi_resolution" in outcome.body ? outcome.body.doi_resolution');
-    expect(source.match(/doi_resolution: doiResolution,/g)).toHaveLength(2);
+    // Both returns spread `reported`: the sub-error branch and the ok branch.
+    expect(source).toContain(
+      'return { ok: false, error: subErrors.join("; "), ref, ...reported };',
+    );
+    const okBranch = source.slice(
+      source.indexOf("const skips = extractEnrichmentSkips(outcome.body);"),
+    );
+    expect(okBranch.slice(0, okBranch.indexOf("} catch"))).toContain("...reported,");
   });
 });
