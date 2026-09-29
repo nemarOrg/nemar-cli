@@ -103,3 +103,23 @@ export function printNoVerifyNotice(unsizedFiles = 0): void {
     ),
   );
 }
+
+/**
+ * The per-file detail for every `--no-verify` size mismatch this run found,
+ * each already ending in its manual recovery command (`GetDataResult
+ * .noVerifyMismatches`). On stderr, same reasoning as `printNoVerifyNotice`.
+ *
+ * This exists because `printPartialRetrieval`'s generic text -- correct for
+ * a file genuinely missing upstream -- points at
+ * `.nemar/availability-report.json`, a SERVER-SIDE report this local check
+ * never writes. `GetDataResult.error` (the `success: false` arm only) is the
+ * other place a mismatch reason can surface, so without this call the common
+ * "partial" outcome (most files fine, one corrupted) never shows the reason
+ * or the recovery command at all. Call unconditionally after the normal
+ * outcome print; it is a no-op when the array is empty.
+ */
+export function printNoVerifyMismatches(mismatches: string[]): void {
+  for (const mismatch of mismatches) {
+    console.error(chalk.red(`  ${mismatch}`));
+  }
+}

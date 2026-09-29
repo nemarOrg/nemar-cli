@@ -78,7 +78,12 @@ import {
   updateValidatorCache,
   validateBidsDataset,
 } from "../lib/bids-validator.js";
-import { printNoVerifyNotice, printPartialRetrieval, requireAuth } from "../lib/cli-output.js";
+import {
+  printNoVerifyMismatches,
+  printNoVerifyNotice,
+  printPartialRetrieval,
+  requireAuth,
+} from "../lib/cli-output.js";
 import { triggerOpportunisticRefresh } from "../lib/completion/refresh.js";
 import { getConfig, isAuthenticated } from "../lib/config.js";
 import { NO_DESCRIPTION, YES_DESCRIPTION, YES_OPTION, confirm } from "../lib/confirm.js";
@@ -1729,6 +1734,7 @@ Examples:
         } else {
           console.log(chalk.green(`Data downloaded (${getResult.filesDownloaded} files)`));
         }
+        printNoVerifyMismatches(getResult.noVerifyMismatches);
         if (noVerify) printNoVerifyNotice(getResult.unsizedFiles);
       }
 
@@ -4634,6 +4640,7 @@ Examples:
     } else {
       console.log(chalk.green(`Downloaded ${result.filesDownloaded} file(s)`));
     }
+    printNoVerifyMismatches(result.noVerifyMismatches);
     if (noVerify) printNoVerifyNotice(result.unsizedFiles);
   });
 
