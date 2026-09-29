@@ -77,6 +77,19 @@ export function versionFromDoi(latestVersionDoi: string | null | undefined): str
 }
 
 /**
+ * Strip a leading `v`/`V` prefix, same normalization `routes/callbacks/
+ * version-doi.ts` applies to an inbound version before using it. Two
+ * sources compare a caller-supplied version against a stored one (that
+ * file's own DOI-minting guard, and archive-ready.ts's latest-version
+ * check, #1514 review) and both must agree on what "the same version"
+ * means -- an unnormalized `"v1.0.0"` must not compare unequal to a stored
+ * bare `"1.0.0"`.
+ */
+export function normalizeVersion(version: string): string {
+  return version.replace(/^[vV]/, "");
+}
+
+/**
  * The two places a dataset's current version is recorded, resolved in one rule.
  *
  * `datasets.latest_version_doi` is the older of the two and was the only one

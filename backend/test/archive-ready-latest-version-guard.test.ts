@@ -161,6 +161,27 @@ describe("POST /archive-ready: 'ready' for the dataset's latest version", () => 
     expect(row.archive_status).toBe("ready");
     expect(row.archive_size).toBe(777);
   });
+
+  test("a leading-v callback version applies against a bare stored latest (#1514 review)", async () => {
+    const db = freshDb();
+    seedUser(db);
+    insertDataset(db, "nm000287");
+    // Stored bare, as version-doi.ts normalizes before writing.
+    insertVersion(db, "nm000287", "1.0.0", "2026-01-01 00:00:00");
+
+    const answer = await postArchiveReady(db, {
+      dataset_id: "nm000287",
+      status: "ready",
+      version: "v1.0.0",
+      size: 4242,
+    });
+
+    expect(answer.httpStatus).toBe(200);
+    expect(answer.applied).toBeUndefined();
+    const row = readArchiveRow(db, "nm000287");
+    expect(row.archive_status).toBe("ready");
+    expect(row.archive_size).toBe(4242);
+  });
 });
 
 describe("POST /archive-ready: 'ready' for an OLDER version, after the latest is already ready", () => {

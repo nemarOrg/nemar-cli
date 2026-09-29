@@ -9,7 +9,11 @@
 
 import { timingSafeEqual } from "../../lib/constant-time.js";
 import { ARCHIVE_SKIP_UPDATE_SQL, shouldSkipArchive } from "../../services/archive-policy.js";
-import { MAX_ARCHIVE_RETRIES, decideArchiveRetry } from "../../services/archive-retry.js";
+import {
+  MAX_ARCHIVE_RETRIES,
+  decideArchiveRetry,
+  normalizeVersion,
+} from "../../services/archive-retry.js";
 import { isValidDatasetId } from "../../services/datasetId.js";
 import { getDatasetsToken } from "../../services/github-auth.js";
 import { triggerArchiveGeneration } from "../../services/github.js";
@@ -262,12 +266,19 @@ export function registerArchiveReadyRoutes(webhooks: WebhookRouter): void {
         // version on the callback, or no dataset_versions row yet for this
         // dataset, means there is nothing to contradict -> apply as before
         // (ADR 0012's fail-open: unknown means write, not withhold).
+        //
+        // Normalize both sides with the same `v`/`V`-stripping
+        // version-doi.ts applies before storing/comparing a version
+        // (#1514 review): a caller that sends "v1.0.0" must compare equal
+        // to a stored bare "1.0.0", not be treated as a different, older
+        // version.
         let isStaleVersion = false;
         if (body.version) {
+          const reportedVersion = normalizeVersion(body.version);
           const latest = await c.env.DB.prepare(LATEST_DATASET_VERSION_SQL)
             .bind(body.dataset_id)
             .first<{ version: string }>();
-          isStaleVersion = !!latest && latest.version !== body.version;
+          isStaleVersion = !!latest && normalizeVersion(latest.version) !== reportedVersion;
         }
 
         if (isStaleVersion) {
