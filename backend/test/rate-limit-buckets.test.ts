@@ -14,12 +14,13 @@
  *     unauthenticated client still 429s at the IP cap.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { Hono } from "hono";
 import {
   __limits,
   __normalizeMountPath,
   __readBearerTokenFromHeader,
+  __resetCacheFaultLogForTests,
   __selectBucket,
   rateLimiter,
 } from "../src/middleware/rateLimit";
@@ -597,6 +598,84 @@ describe("the data-ip bucket after #1516", () => {
     } finally {
       // biome-ignore lint/suspicious/noExplicitAny: test-only runtime restore
       (globalThis as any).caches = saved as CacheStorage;
+    }
+  });
+});
+
+// --------------------------------------------------------------------------
+// logCacheFaultOnce dedup (review: no test previously covered this -- a
+// reviewer removed the dedup outright and all other tests in this file
+// still passed).
+// --------------------------------------------------------------------------
+
+describe("logCacheFaultOnce dedup", () => {
+  // A full `Cache`, matching the `StalledPutCache` pattern above: `match`
+  // rejects, standing in for a real Cache API outage (the platform failing,
+  // not business logic under test). `rateLimiter` fails open on this --
+  // every request still 200s -- but must log the fault at most once per
+  // window per isolate rather than once per request.
+  class FaultingCache implements Cache {
+    async match(): Promise<Response | undefined> {
+      throw new Error("simulated cache outage");
+    }
+    async put(): Promise<void> {
+      throw new Error("simulated cache outage");
+    }
+    async add(): Promise<void> {
+      throw new Error("not implemented");
+    }
+    async addAll(): Promise<void> {
+      throw new Error("not implemented");
+    }
+    async delete(): Promise<boolean> {
+      return false;
+    }
+    async keys(): Promise<readonly Request[]> {
+      return [];
+    }
+    async matchAll(): Promise<readonly Response[]> {
+      return [];
+    }
+  }
+
+  test("two faults inside one window log once; a third after the window resets logs again", async () => {
+    // Module-level state (`lastCacheFaultLoggedAt`), and this file shares a
+    // process with the rest of the suite -- start from a known-clean slate
+    // rather than trusting nothing else tripped it first.
+    __resetCacheFaultLogForTests();
+    const saved = (globalThis as { caches?: CacheStorage }).caches;
+    // biome-ignore lint/suspicious/noExplicitAny: test-only runtime patch
+    (globalThis as any).caches = { default: new FaultingCache() } as unknown as CacheStorage;
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { app, env } = buildApp(PROD_ENV);
+      const headers = { "CF-Connecting-IP": "10.99.3.1" };
+
+      const first = await hit(app, env, "/datasets", headers);
+      const second = await hit(app, env, "/datasets", headers);
+      // Fails open: the cache outage never blocks the request itself.
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+
+      const faultLines = errorSpy.mock.calls.filter((c) => c[0] === "[rate-limit] cache failure");
+      expect(faultLines.length).toBe(1);
+
+      // Advancing the real 60s window is not worth a real sleep; the reset
+      // hook exists for exactly this ("let a test see the very next fault
+      // log again rather than waiting out a real window").
+      __resetCacheFaultLogForTests();
+
+      const third = await hit(app, env, "/datasets", headers);
+      expect(third.status).toBe(200);
+      const faultLinesAfterReset = errorSpy.mock.calls.filter(
+        (c) => c[0] === "[rate-limit] cache failure",
+      );
+      expect(faultLinesAfterReset.length).toBe(2);
+    } finally {
+      errorSpy.mockRestore();
+      // biome-ignore lint/suspicious/noExplicitAny: test-only runtime restore
+      (globalThis as any).caches = saved as CacheStorage;
+      __resetCacheFaultLogForTests();
     }
   });
 });
