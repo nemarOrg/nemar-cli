@@ -57,6 +57,29 @@ function createS3Client(options: PresignedUrlOptions): AwsClient {
 /**
  * Generate presigned PUT URLs for uploading files
  */
+/**
+ * Reject a traversal, an absolute path, a backslash or a NUL byte in an S3
+ * key, checking both the raw string and its URL-decoded form so a
+ * double-encoded traversal (`%252e%252e`) cannot slip past the raw check.
+ * Shared by {@link generatePresignedGetUrl} and {@link buildPublicObjectUrl}:
+ * both build the same `<datasetId>/objects/<annexKey>` shape of key, one
+ * signed and one not, and both must refuse the same malformed input.
+ */
+function assertValidS3Key(key: string): void {
+  const decoded = decodeURIComponent(key);
+  if (
+    decoded.includes("..") ||
+    decoded.startsWith("/") ||
+    decoded.includes("\\") ||
+    decoded.includes("\0") ||
+    key.includes("..") ||
+    key.startsWith("/") ||
+    key.includes("\\")
+  ) {
+    throw new Error(`Invalid S3 key: ${key}`);
+  }
+}
+
 export async function generatePresignedPutUrls(
   options: PresignedUrlOptions,
   params: GenerateUrlsParams,
@@ -112,19 +135,7 @@ export async function generatePresignedGetUrl(
   expiresIn = 3600,
   responseContentDisposition?: string,
 ): Promise<string> {
-  // Check both raw and URL-decoded forms to catch double-encoded traversal
-  const decoded = decodeURIComponent(key);
-  if (
-    decoded.includes("..") ||
-    decoded.startsWith("/") ||
-    decoded.includes("\\") ||
-    decoded.includes("\0") ||
-    key.includes("..") ||
-    key.startsWith("/") ||
-    key.includes("\\")
-  ) {
-    throw new Error(`Invalid S3 key: ${key}`);
-  }
+  assertValidS3Key(key);
   const { bucket, region } = options;
   const aws = createS3Client(options);
 
@@ -152,6 +163,41 @@ export async function generatePresignedGetUrl(
   });
 
   return signedRequest.url;
+}
+
+/**
+ * Build the plain, query-string-free public URL for an S3 object (#1522).
+ *
+ * Used by `manifest.json` for a dataset the bucket policy has NOT carved out
+ * of `PublicReadExceptPrivate` (`services/public-read-cache.ts` decides
+ * which): the object is already anonymously readable, so a signature buys
+ * nothing but an expiry the manifest then has to track. An excluded dataset
+ * keeps calling {@link generatePresignedGetUrl} instead.
+ *
+ * SAME ENCODING AS THE PRESIGNER, ON PURPOSE. `generatePresignedGetUrl`
+ * builds its pre-signature URL the same way: a bare string-concatenated key,
+ * no manual percent-encoding, fed to `new URL(...)` (inside aws4fetch's
+ * signer, which parses the URL before it ever adds a query parameter). This
+ * function does the identical concatenation and `new URL(...)` parse, with no
+ * signing step after it, so a key that produces one path here produces the
+ * SAME path there -- verified for real, not just by inspection, in
+ * `s3-public-url.test.ts`'s comparison against a signed URL for the same key.
+ *
+ * `endpointUrl` is honored (unlike `generatePresignedGetUrl`, which hardcodes
+ * the production host) because this function's whole compatibility claim --
+ * "the URL this emits actually serves the object, GET and Range" -- has to be
+ * checked against a real HTTP server in a test, not just read off the string.
+ * Unset in every deployment, exactly as every other `endpointUrl` use in this
+ * file already documents.
+ */
+export function buildPublicObjectUrl(options: PresignedUrlOptions, key: string): string {
+  assertValidS3Key(key);
+  const { bucket, region, endpointUrl } = options;
+  const origin = (endpointUrl ?? `https://${bucket}.s3.${region}.amazonaws.com`).replace(
+    /\/+$/,
+    "",
+  );
+  return new URL(`${origin}/${key}`).toString();
 }
 
 /**
@@ -1261,9 +1307,16 @@ export async function applyObjectLockBatch(
  * Returns null if no policy is set
  */
 export async function getBucketPolicy(options: PresignedUrlOptions): Promise<BucketPolicy | null> {
-  const { bucket, region } = options;
+  const { bucket, region, endpointUrl } = options;
   const aws = createS3Client(options);
-  const url = `https://${bucket}.s3.${region}.amazonaws.com/?policy`;
+  // Honors the test-only endpoint override (#1522), the same idiom
+  // `fetchManifestObject` already uses: unset in every deployment, so
+  // production always signs against the real bucket host.
+  const origin = (endpointUrl ?? `https://${bucket}.s3.${region}.amazonaws.com`).replace(
+    /\/+$/,
+    "",
+  );
+  const url = `${origin}/?policy`;
 
   const signed = await aws.sign(url, { method: "GET" });
   const response = await fetch(signed);

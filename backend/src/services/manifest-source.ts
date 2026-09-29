@@ -71,9 +71,17 @@ export interface ManifestSource {
  * `finish` itself, outside whatever it wraps this in, so an exception from
  * answering (the `TypeError` a `null` entry has always produced) keeps its
  * old meaning instead of being mistaken for a failed read.
+ *
+ * `etag` is the manifest object's CURRENT S3 ETag -- the one the edge copy
+ * either just confirmed with a 304 or just stored fresh from a 200 -- so a
+ * caller that wants to key its own cache off "this exact manifest" (#1522's
+ * manifest.json response cache) never has to fetch the object a second time
+ * to learn it. `null` only when S3 answered without one, which `settle`
+ * cannot recover from; a caller that needs the etag treats `null` as "do not
+ * cache this answer" rather than a fault.
  */
 export type ManifestRead<T> =
-  | { kind: "ok"; header: ManifestHeader; query: ManifestQuery<T> }
+  | { kind: "ok"; header: ManifestHeader; query: ManifestQuery<T>; etag: string | null }
   /** 404, or a 403 the signed fallback could not get past (both logged by s3.ts). */
   | { kind: "absent" }
   | { kind: "malformed"; message: string }
@@ -163,7 +171,7 @@ export async function readManifest<T>(
           "answered",
           `[manifest-cache] edge copy answered after a 304 (first in this isolate) dataset=${datasetId} version=${version}`,
         );
-        return settle(fromCopy, query);
+        return settle(fromCopy, query, cached.etag);
       }
       // The copy could not be read back whole, so S3 answers instead, exactly
       // as if there had been no copy. It is re-stored from that read.
@@ -193,9 +201,13 @@ export async function readManifest<T>(
   return fromS3(source, key, await fetchManifestObject(source.s3, datasetId, version), makeQuery);
 }
 
-function settle<T>(result: ScanResult, query: ManifestQuery<T>): ManifestRead<T> {
+function settle<T>(
+  result: ScanResult,
+  query: ManifestQuery<T>,
+  etag: string | null,
+): ManifestRead<T> {
   if (result.kind !== "ok") return result;
-  return { kind: "ok", header: result.header, query };
+  return { kind: "ok", header: result.header, query, etag };
 }
 
 async function matchEdgeCopy(
@@ -291,7 +303,7 @@ async function fromS3<T>(
   }
   if (result.kind === "ok") await sink?.commit();
   else await sink?.discard(`the document did not scan: ${result.kind}`);
-  return settle(result, query);
+  return settle(result, query, etag);
 }
 
 /**

@@ -43,11 +43,14 @@ export const dataPlaneManifestEntrySchema = z
     /** Durable, storable contract URL for the bytes. Always present (#615). */
     bytes_url: z.string().min(1),
     /**
-     * Immediately-fetchable URL. For an annex-backed file a presigned S3 GET
-     * that expires in about an hour; for a git-tracked one the same durable
-     * data-plane URL as `bytes_url`, because the Worker serves those bytes
-     * itself rather than handing out a third-party link (#1403). Prefer
-     * `bytes_url` for anything you store.
+     * Immediately-fetchable URL. For an annex-backed file this is usually the
+     * plain, never-expiring public S3 URL (nemarOrg/nemar-cli#1522); a
+     * dataset the bucket policy excludes from public read still gets a
+     * presigned S3 GET that expires in about an hour. For a git-tracked file
+     * it is the same durable data-plane URL as `bytes_url`, because the
+     * Worker serves those bytes itself rather than handing out a third-party
+     * link (#1403). Prefer `bytes_url` for anything you store: it is durable
+     * either way, and does not require knowing which case applies.
      */
     url: z.string().nullish(),
     /**

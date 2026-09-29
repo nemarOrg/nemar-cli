@@ -24,6 +24,7 @@ import {
   PUBLIC_DATASET_VERSIONS_SQL,
   type PublicManifestEntry,
   type VersionPickerEntry,
+  buildAnnexPublicUrl,
   buildBytesUrl,
   buildCatalogIndexPayload,
   buildDatasetMetadataFromDigest,
@@ -55,6 +56,12 @@ import { getDatasetsToken } from "../services/github-auth";
 import { fetchGitTrackedFile } from "../services/github/git-file-broker";
 import type { ManifestFile } from "../services/manifest";
 import {
+  type ManifestJsonCacheHit,
+  manifestJsonCacheKey,
+  matchManifestJsonCache,
+  scheduleManifestJsonCacheWrite,
+} from "../services/manifest-json-cache";
+import {
   ContainsPathQuery,
   DigestQuery,
   EntriesQuery,
@@ -65,8 +72,11 @@ import {
 import type { ManifestHeader } from "../services/manifest-scan";
 import { type ManifestCache, type ManifestRead, readManifest } from "../services/manifest-source";
 import { buildPageBundle } from "../services/page-bundle";
+import { isDatasetExcludedFromPublicRead } from "../services/public-read-cache";
 import {
+  type ManifestObjectFetch,
   type PresignedUrlOptions,
+  fetchManifestObject,
   generatePresignedGetUrl,
   loadRecords,
   loadSummary,
@@ -214,7 +224,7 @@ async function queryManifest<T>(
   version: string,
   makeQuery: () => ManifestQuery<T>,
   defer: Defer | undefined,
-): Promise<{ header: ManifestHeader; answer: T } | null> {
+): Promise<{ header: ManifestHeader; answer: T; etag: string | null } | null> {
   let read: ManifestRead<T>;
   try {
     read = await readManifest(
@@ -251,7 +261,7 @@ async function queryManifest<T>(
   // that is `null`, say) is not a failed read, and it reaches the app's error
   // handler exactly as it did when the answer was computed from a parsed
   // manifest after loadManifest returned.
-  return { header: read.header, answer: read.query.finish(read.header) };
+  return { header: read.header, answer: read.query.finish(read.header), etag: read.etag };
 }
 
 /**
@@ -371,40 +381,91 @@ function parseChecksum(checksum: string): { algorithm: string; value: string } {
 }
 
 /**
- * The most entries `manifest.json` will list (#1502).
+ * The most entries `manifest.json` will list for a PUBLIC (non-excluded)
+ * dataset, whose annexed entries are unsigned (#1502, re-measured for
+ * #1522). See {@link MAX_MANIFEST_JSON_ENTRIES_PRESIGNED} for the other
+ * branch's bound, which is a DIFFERENT number on purpose.
  *
- * `manifest.json` names and presigns EVERY entry in one JSON document, so no
- * scan can bound it: the entries, their presigned URLs and the serialized
- * response are all held at once. Measured under Bun on nm000281-shaped
- * entries (a path, an annex key or git SHA, a checksum and a bytes_url): about
- * 1.7 KB of live memory per entry at the moment the response is serialized,
- * 34.5 MB at 20,000 entries and 84 MB at 50,000, before the isolate's own
- * baseline and before the manifest string the old path also held (20 MB at
- * 50,000). 30,000 entries is about 52 MB, the most one response can take out
- * of a 128 MB isolate that other requests share.
+ * `manifest.json` names every entry in one JSON document, so no scan can
+ * bound it: the entries and the serialized response are held at once (the
+ * presigned branch also holds a presigned URL per entry while building it).
+ * Original (#1505) measurement, under Bun on nm000281-shaped entries with
+ * every annexed URL presigned: about 1.7 KB of live memory per entry at the
+ * moment the response is serialized, so 30,000 entries was sized to about
+ * 52 MB, the most one response could take out of a 128 MB isolate other
+ * requests share.
  *
- * Against the catalog on 2026-09-24 (the public `total_files` column): every
- * dataset up to 26,410 files is under it, and the seven above it start at
- * 45,424 (on002814) and run to nm000281's 102,532, where the old path already
- * needed about 90 MB and more. So the bound refuses what could not be served
- * reliably and nothing that could.
+ * Re-measured for #1522 with the SAME generator (`test/helpers/large-manifest.ts`)
+ * and the ACTUAL production URL builders (`buildRedirectUrl` for the
+ * presigned shape, `buildAnnexPublicUrl` for the unsigned one), heap
+ * sampled the same way (`bun:jsc`'s `heapStats`, entries array plus its
+ * `JSON.stringify` both live): presigned entries cost about 1.03 KB each
+ * under this methodology (30.17 MB at 30,000, 99.67 MB at 100,000 -- a
+ * different absolute number from the original 1.7 KB estimate, most likely
+ * a different accounting of concurrent `Promise.all` overhead, but flat and
+ * reproducible); unsigned entries cost about 0.80 KB each (23.48 MB at
+ * 30,000, 78.17 MB at 100,000), a consistent 22% less, since a public URL
+ * carries no signature, expiry or `response-content-disposition` query
+ * parameters.
+ *
+ * PER-BRANCH ARITHMETIC (review finding on #1529: one bound applied to both
+ * branches let the presigned one grow past the budget it was ever measured
+ * against). The two branches cost different amounts per entry, so each
+ * keeps the bound its OWN measurement supports:
+ *
+ *   - Presigned (`MAX_MANIFEST_JSON_ENTRIES_PRESIGNED`): stays at the
+ *     original 30,000. At 1.03 KB/entry that is about 30.2 MB -- the same
+ *     figure #1505 sized 30,000 against, unchanged because #1522 did not
+ *     make presigning any cheaper. Raising this branch to 38,000 would cost
+ *     about 38.3 MB, ~27% over that budget, for entries whose cost this
+ *     change never reduced -- that was the bug this bound previously had.
+ *   - Unsigned (`MAX_MANIFEST_JSON_ENTRIES`): raised to 38,000. At 0.80
+ *     KB/entry that is about 29.7 MB, UNDER the 30.2 MB the presigned
+ *     branch already spends at its own bound -- so 38,000 unsigned entries
+ *     fit inside the same ceiling that always applied, because each entry
+ *     got cheaper, not because the ceiling moved.
+ *
+ * Against the catalog on 2026-09-24 (the public `total_files` column):
+ * every dataset up to 26,410 files was already under 30,000, and the seven
+ * above it start at 45,424 (on002814) and run to nm000281's 102,532.
+ * Neither bound moves any of those seven under it. The intended asymmetry:
+ * a PUBLIC dataset between 30,000 and 38,000 files now gets `manifest.json`
+ * where it did not before; a dataset the bucket policy EXCLUDES in that
+ * same range still does not, because its entries never got cheaper.
  */
-export const MAX_MANIFEST_JSON_ENTRIES = 30_000;
+export const MAX_MANIFEST_JSON_ENTRIES = 38_000;
 
 /**
- * The refusal for a manifest over {@link MAX_MANIFEST_JSON_ENTRIES}. 413
- * because the refusal is about size and is permanent for this version; a
- * client should not retry it. It names the way to enumerate the files that
- * does scale: the per-directory JSON listing, one directory per request.
+ * The bound for a dataset the bucket policy excludes from public read
+ * (`manifestJsonHandler`'s presigned branch). Kept at the ORIGINAL #1505
+ * value -- see {@link MAX_MANIFEST_JSON_ENTRIES}'s per-branch arithmetic for
+ * why this one did not move.
  */
-function manifestJsonTooLarge(request: Request, datasetId: string, version: string): Response {
+export const MAX_MANIFEST_JSON_ENTRIES_PRESIGNED = 30_000;
+
+/**
+ * The refusal for a manifest over `limit` (the bound of whichever branch
+ * `manifestJsonHandler` already chose for this request --
+ * {@link MAX_MANIFEST_JSON_ENTRIES} for a public dataset,
+ * {@link MAX_MANIFEST_JSON_ENTRIES_PRESIGNED} for one the bucket policy
+ * excludes). 413 because the refusal is about size and is permanent for
+ * this version; a client should not retry it. It names the way to
+ * enumerate the files that does scale: the per-directory JSON listing, one
+ * directory per request.
+ */
+function manifestJsonTooLarge(
+  request: Request,
+  datasetId: string,
+  version: string,
+  limit: number,
+): Response {
   const listing = new URL(`../${encodeURIComponent(version)}/?format=json`, request.url).toString();
   return new Response(
     JSON.stringify({
-      error: `This version has more than ${MAX_MANIFEST_JSON_ENTRIES} files, which is more than manifest.json can list and presign in one response. Enumerate it one directory at a time instead: ${listing} lists the top level, and each directory's URL with ?format=json lists that directory's own files and subdirectories.`,
+      error: `This version has more than ${limit} files, which is more than manifest.json can list in one response. Enumerate it one directory at a time instead: ${listing} lists the top level, and each directory's URL with ?format=json lists that directory's own files and subdirectories.`,
       dataset_id: datasetId,
       version,
-      limit: MAX_MANIFEST_JSON_ENTRIES,
+      limit,
       listing_url: listing,
     }),
     {
@@ -415,7 +476,166 @@ function manifestJsonTooLarge(request: Request, datasetId: string, version: stri
 }
 
 /**
- * GET /<id>/<version>/manifest.json -> public file index with presigned URLs.
+ * Client-facing `Cache-Control` when every annexed `url` in the document is
+ * the plain, never-expiring public S3 URL (#1522). There is no signature to
+ * go stale, so this number answers a different question than the old
+ * `max-age=60` did: how long a downstream cache may keep answering for a
+ * dataset whose visibility just flipped. That is the same question ADR 0066
+ * already answered for a brokered git-tracked file's bytes
+ * (`public, max-age=300`), so manifest.json reuses its answer rather than
+ * inventing a third number for one data plane.
+ */
+const MANIFEST_JSON_PUBLIC_CACHE_CONTROL = "public, max-age=300";
+
+/**
+ * Client-facing `Cache-Control` when the dataset is excluded from public
+ * read and every annexed `url` is still presigned (unchanged from before
+ * #1522). The URLs expire in an hour and cost real CPU to mint, so a short
+ * client cache remains the right call for the reasons it always was.
+ */
+const MANIFEST_JSON_PRESIGNED_CACHE_CONTROL = "public, max-age=60";
+
+/** One manifest entry's fields shared by every branch: computed once so the
+ *  annex and git-tracked cases, and the presigned and public URL builders,
+ *  never restate them. */
+function manifestEntryBase(
+  env: Bindings,
+  datasetId: string,
+  version: string,
+  path: string,
+  file: ManifestFile,
+): Omit<PublicManifestEntry, "url"> {
+  const checksum = parseChecksum(file.checksum);
+  return {
+    path,
+    size: file.size,
+    checksum_algorithm: checksum.algorithm,
+    checksum: checksum.value,
+    bytes_url: buildBytesUrl({
+      datasetId,
+      version,
+      bidsPath: path,
+      origin: resolveDataBaseOrigin(env),
+    }),
+  };
+}
+
+/** An entry whose URL builder threw: logged, and reported as a per-row
+ *  `error` so the rest of the listing still serves. */
+function manifestEntryError(
+  base: Omit<PublicManifestEntry, "url">,
+  datasetId: string,
+  version: string,
+  path: string,
+  builder: string,
+  err: unknown,
+): PublicManifestEntry {
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(
+    `[data] manifest.json ${builder} failed dataset=${datasetId} version=${version} path=${path}:`,
+    message,
+  );
+  return { ...base, url: null, error: message };
+}
+
+/**
+ * Build every entry with a presigned annex URL, for a dataset the bucket
+ * policy excludes from public read. Unchanged behavior from before #1522.
+ */
+async function buildPresignedManifestEntries(
+  env: Bindings,
+  datasetId: string,
+  version: string,
+  files: Record<string, ManifestFile>,
+  s3Options: PresignedUrlOptions,
+): Promise<PublicManifestEntry[]> {
+  return Promise.all(
+    Object.entries(files).map(async ([path, file]): Promise<PublicManifestEntry> => {
+      const base = manifestEntryBase(env, datasetId, version, path, file);
+      // A git-tracked file has no presigned form: the Worker streams it from
+      // the data plane, so the immediate URL and the durable one are the
+      // same route.
+      if (isGitTrackedFile(file)) return { ...base, url: base.bytes_url };
+      try {
+        const url = await buildRedirectUrl({ datasetId, version, bidsPath: path, file, s3Options });
+        return { ...base, url };
+      } catch (err) {
+        return manifestEntryError(base, datasetId, version, path, "buildRedirectUrl", err);
+      }
+    }),
+  );
+}
+
+/**
+ * Build every entry with the plain public S3 URL, for a dataset the bucket
+ * policy does not exclude from public read (#1522). Synchronous end to end
+ * (no signature to await), unlike the presigned builder above.
+ */
+function buildPublicManifestEntries(
+  env: Bindings,
+  datasetId: string,
+  version: string,
+  files: Record<string, ManifestFile>,
+  s3Options: PresignedUrlOptions,
+): PublicManifestEntry[] {
+  return Object.entries(files).map(([path, file]): PublicManifestEntry => {
+    const base = manifestEntryBase(env, datasetId, version, path, file);
+    if (isGitTrackedFile(file)) return { ...base, url: base.bytes_url };
+    try {
+      const url = buildAnnexPublicUrl({ datasetId, file, s3Options });
+      return { ...base, url };
+    } catch (err) {
+      return manifestEntryError(base, datasetId, version, path, "buildAnnexPublicUrl", err);
+    }
+  });
+}
+
+/**
+ * Is a manifest.json document stored under `hit.etag` still the current
+ * manifest? A cheap conditional GET against S3 (no body on a match), the
+ * same idiom `manifest-source.ts` uses to revalidate its own copy. `found`
+ * means the manifest changed since the copy was stored: its body is
+ * released unread, because the caller re-reads it through the normal
+ * streaming path rather than from this probe.
+ */
+async function manifestJsonCacheStillFresh(
+  s3Options: PresignedUrlOptions,
+  datasetId: string,
+  version: string,
+  etag: string,
+): Promise<boolean> {
+  let fetched: ManifestObjectFetch;
+  try {
+    fetched = await fetchManifestObject(s3Options, datasetId, version, { ifNoneMatch: etag });
+  } catch (err) {
+    console.error(
+      `[data] manifest.json cache revalidation failed dataset=${datasetId} version=${version}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return false;
+  }
+  if (fetched.kind === "found") {
+    await fetched.response.body?.cancel().catch(() => {});
+  }
+  return fetched.kind === "not_modified";
+}
+
+/**
+ * GET /<id>/<version>/manifest.json -> public file index.
+ *
+ * Annex-backed entries carry the plain public S3 URL for a dataset the
+ * bucket policy does not exclude from public read; a dataset it does
+ * exclude keeps the legacy presigned URL, so correctness never depends on
+ * the catalog and the bucket policy agreeing (#1522, #1524 is about them
+ * disagreeing). `isDatasetExcludedFromPublicRead` caches that decision
+ * briefly per isolate; the visibility gate below still runs on every
+ * request regardless of what it answers.
+ *
+ * The built document is now a pure function of the manifest's own bytes for
+ * a public (non-excluded) dataset, so it is cached behind that same gate and
+ * revalidated against the manifest's ETag before ever answering from the
+ * cache (`manifest-json-cache.ts`); an excluded dataset's presigned document
+ * is never cached.
  */
 async function manifestJsonHandler(
   env: Bindings,
@@ -429,6 +649,42 @@ async function manifestJsonHandler(
 
   const resolved = await resolveVersion(env.DB, datasetId, versionParam);
   if (!resolved.ok) return notFound("Version not found");
+
+  const s3Options = s3OptionsFromEnv(env);
+  const excluded = await isDatasetExcludedFromPublicRead(s3Options, datasetId);
+  const clientCacheControl = excluded
+    ? MANIFEST_JSON_PRESIGNED_CACHE_CONTROL
+    : MANIFEST_JSON_PUBLIC_CACHE_CONTROL;
+
+  // Excluded datasets never reach this cache (see manifest-json-cache.ts):
+  // their documents carry a presigned URL that only this request's caller
+  // should ever see.
+  const cache = excluded ? null : edgeCache();
+  const cacheKey = cache
+    ? manifestJsonCacheKey(new URL(request.url).origin, datasetId, resolved.version)
+    : null;
+
+  if (cache && cacheKey) {
+    const hit = await matchManifestJsonCache(cache, cacheKey);
+    if (
+      hit &&
+      (await manifestJsonCacheStillFresh(s3Options, datasetId, resolved.version, hit.etag))
+    ) {
+      return new Response(hit.body, {
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": hit.clientCacheControl ?? clientCacheControl,
+        },
+      });
+    }
+  }
+
+  // The bound is per branch: excluded (presigned) entries cost more live
+  // memory than unsigned ones, so each branch is measured and bounded
+  // separately (see MAX_MANIFEST_JSON_ENTRIES's per-branch arithmetic).
+  // `excluded` is already known above, so the right bound applies to both
+  // the count check and the read that follows it -- never a mix of the two.
+  const bound = excluded ? MAX_MANIFEST_JSON_ENTRIES_PRESIGNED : MAX_MANIFEST_JSON_ENTRIES;
 
   // Count first, keeping nothing, so the refusal for an oversized manifest
   // costs what any other lookup costs. The second read is the one that
@@ -445,68 +701,45 @@ async function manifestJsonHandler(
     defer,
   );
   if (!counted) return notFound("Version not published");
-  if (counted.answer.kind === "count" && counted.answer.count > MAX_MANIFEST_JSON_ENTRIES) {
-    return manifestJsonTooLarge(request, datasetId, resolved.version);
+  if (counted.answer.kind === "count" && counted.answer.count > bound) {
+    return manifestJsonTooLarge(request, datasetId, resolved.version, bound);
   }
   const read = await queryManifest(
     env,
     request,
     datasetId,
     resolved.version,
-    () => new EntriesQuery(MAX_MANIFEST_JSON_ENTRIES),
+    () => new EntriesQuery(bound),
     defer,
   );
   if (!read) return notFound("Version not published");
   if (read.answer.kind === "over_limit") {
-    return manifestJsonTooLarge(request, datasetId, resolved.version);
+    return manifestJsonTooLarge(request, datasetId, resolved.version, bound);
   }
 
-  const s3Options = s3OptionsFromEnv(env);
-  const entries: PublicManifestEntry[] = await Promise.all(
-    Object.entries(read.answer.files).map(async ([path, file]): Promise<PublicManifestEntry> => {
-      const checksum = parseChecksum(file.checksum);
-      const base = {
-        path,
-        size: file.size,
-        checksum_algorithm: checksum.algorithm,
-        checksum: checksum.value,
-        bytes_url: buildBytesUrl({
-          datasetId,
-          version: resolved.version,
-          bidsPath: path,
-          origin: resolveDataBaseOrigin(env),
-        }),
-      };
-      // A git-tracked file has no presigned form: the Worker streams it from
-      // the data plane, so the immediate URL and the durable one are the same
-      // route. Annex files keep the 1h presigned S3 URL in `url`.
-      if (isGitTrackedFile(file)) {
-        return { ...base, url: base.bytes_url };
-      }
-      try {
-        const url = await buildRedirectUrl({
-          datasetId,
-          version: resolved.version,
-          bidsPath: path,
-          file,
-          s3Options,
-        });
-        return { ...base, url };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(
-          `[data] manifest.json buildRedirectUrl failed dataset=${datasetId} version=${resolved.version} path=${path}:`,
-          message,
-        );
-        return { ...base, url: null, error: message };
-      }
-    }),
-  );
+  const entries = excluded
+    ? await buildPresignedManifestEntries(
+        env,
+        datasetId,
+        resolved.version,
+        read.answer.files,
+        s3Options,
+      )
+    : buildPublicManifestEntries(env, datasetId, resolved.version, read.answer.files, s3Options);
 
-  return new Response(JSON.stringify(entries), {
+  const body = JSON.stringify(entries);
+
+  if (cache && cacheKey && read.etag) {
+    await scheduleManifestJsonCacheWrite(
+      { cache, key: cacheKey, etag: read.etag, body, clientCacheControl },
+      defer,
+    );
+  }
+
+  return new Response(body, {
     headers: {
       "Content-Type": "application/json",
-      "Cache-Control": "public, max-age=60",
+      "Cache-Control": clientCacheControl,
     },
   });
 }
@@ -1427,8 +1660,12 @@ dataRoutes.get("/:datasetId/:version/manifest.json", (c) => {
  * long s-maxage: every byte is deterministic from the published version.
  *
  * Cache policy diverges intentionally from manifest.json:
- *  - manifest.json embeds per-request presigned URLs (1h S3 expiry) so it
- *    must stay short-lived (max-age=60).
+ *  - manifest.json's Cache-Control now tracks an authorization decision
+ *    rather than a signature (#1522): max-age=300 for a public dataset's
+ *    unsigned URLs, max-age=60 for a bucket-policy-excluded dataset's
+ *    presigned ones (still 1h S3 expiry there). Either way it stays far
+ *    shorter than summary.json's, because a manifest can be rewritten in
+ *    place and a dataset's visibility or exclusion can change.
  *  - summary.json is path-only and immutable for the (datasetId, version)
  *    pair, so it gets s-maxage=86400 with stale-while-revalidate.
  */
