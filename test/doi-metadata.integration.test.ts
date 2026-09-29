@@ -15,25 +15,25 @@ describe("resolveDoi", () => {
     // nm000275's data descriptor, labeled `References` in its metadata (#1549).
     const r = await resolveDoi("https://doi.org/10.1038/S41597-019-0027-4");
     expect(r).not.toBeNull();
-    expect(r!.doi).toBe("10.1038/s41597-019-0027-4");
-    expect(r!.title).toBe("Multi-channel EEG recordings during a sustained-attention driving task");
-    expect(r!.year).toBe(2019);
-    expect(r!.container).toBe("Scientific Data");
-    expect(r!.first_author).toBe("Cao");
+    expect(r?.doi).toBe("10.1038/s41597-019-0027-4");
+    expect(r?.title).toBe("Multi-channel EEG recordings during a sustained-attention driving task");
+    expect(r?.year).toBe(2019);
+    expect(r?.container).toBe("Scientific Data");
+    expect(r?.first_author).toBe("Cao");
   });
 
   test("resolves a DataCite repository deposit as a dataset", async () => {
     const r = await resolveDoi("10.6084/m9.figshare.6427334.v5");
     expect(r).not.toBeNull();
-    expect(r!.title).toContain("sustained-attention driving task (raw dataset)");
-    expect(r!.type).toBe("Dataset");
-    expect(r!.container).toBe("figshare");
+    expect(r?.title).toContain("sustained-attention driving task (raw dataset)");
+    expect(r?.type).toBe("Dataset");
+    expect(r?.container).toBe("figshare");
   });
 
   test("exposes a typo'd DOI's unrelated title so the LLM can reject it", async () => {
     // Cited as a dataset descriptor by on002721-on002724; it is not one.
     const r = await resolveDoi("10.1038/sdata.2018.203");
-    expect(r!.title).toContain("National Electricity Market");
+    expect(r?.title).toContain("National Electricity Market");
   });
 
   test("returns null for a DOI no registry knows", async () => {
