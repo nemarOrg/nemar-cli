@@ -300,6 +300,29 @@
             "sidecar_supplied": {
               "type": "boolean",
               "description": "True when the converter passed that sidecar to the exporter explicitly rather than relying on sibling auto-detection. Load-bearing for the ADR 0028 MaxShield path, where the exporter is handed a filtered copy in a scratch directory with no sidecar beside it."
+            },
+            "unmatched_channels": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Store channels whose label no channels.tsv row names exactly, so the sidecar's type and unit were NOT applied to them and they carry the importer's. The counts above cover only matched rows, which is why this is reported separately. 0 means every channel met a row. Absent on stores converted before the converter reported it."
+            },
+            "unmatched_case_only": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Of unmatched_channels, those a row names in a different letter case (EDF header FP1-F7, channels.tsv Fp1-F7). Matching is exact, so these were not applied. Absent when there are none."
+            },
+            "unmatched_raw_label": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Of unmatched_channels, those whose file label was repeated and so de-duplicated in the store (T8-P8 twice becomes T8-P8-0 and T8-P8-1), while channels.tsv names the repeated label. Absent when there are none."
+            },
+            "unmatched_examples": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 5,
+              "description": "Up to five store labels among unmatched_channels, in store order. Present exactly when unmatched_channels is non-zero."
             }
           }
         },

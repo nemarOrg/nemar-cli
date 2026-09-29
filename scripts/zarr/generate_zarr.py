@@ -2210,6 +2210,88 @@ def channels_tsv_for(primary_path: str, head_files) -> str | None:
     return candidates[-1][2]  # most specific
 
 
+def channels_tsv_names(text: str) -> list[str] | None:
+    """The `name` column of a channels.tsv, in file order and with repeats
+    kept, or None when the header has no `name` column (biosigIO then applies
+    nothing, so there is no join to report on).
+
+    Read the way biosigIO reads it (`bids._read_channels_tsv`): tab-separated,
+    the header matched exactly, each name stripped. The two must agree, or
+    `sidecar_join_report` would describe a join biosigIO never made.
+    """
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return None
+    header = lines[0].split("\t")
+    if "name" not in header:
+        return None
+    col = header.index("name")
+    return [
+        cols[col].strip()
+        for cols in (line.split("\t") for line in lines[1:])
+        if len(cols) > col and cols[col].strip()
+    ]
+
+
+# How many unmatched labels an index entry names. Enough to recognise the
+# pattern (a case difference, a suffix), small enough that a dataset with
+# thousands of stores does not pay for it in index bytes (#1178).
+UNMATCHED_EXAMPLES_MAX = 5
+
+
+class SidecarJoinReport(TypedDict, total=False):
+    """What `sidecar_join_report` adds to an index entry's `units_report`."""
+
+    unmatched_channels: int
+    unmatched_case_only: int
+    unmatched_raw_label: int
+    unmatched_examples: list[str]
+
+
+def sidecar_join_report(
+    store_labels: list[str], sidecar_names: list[str], renames: dict[str, str]
+) -> SidecarJoinReport:
+    """Account for the store channels channels.tsv did NOT reach.
+
+    biosigIO applies a sidecar row to the channel whose label equals the row's
+    `name` exactly, and says nothing (a DEBUG log line) about a channel no row
+    names: its `units_report` counts only what the rows it matched did. So a
+    channel the sidecar misses keeps the importer's type and unit while the
+    report looks clean. Two ways that happens are worth naming, because each
+    looks like a match to a person reading the sidecar:
+
+    - ``unmatched_raw_label``: the sidecar names the label the FILE carries,
+      but the store holds biosigIO's de-duplicated one (``T8-P8`` in the
+      sidecar, ``T8-P8-0``/``T8-P8-1`` in the store). `renames` is the store's
+      ``channel_labels_deduplicated`` map, ``{new_label: file_label}``.
+    - ``unmatched_case_only``: the names differ only in case (EDF header
+      ``FP1-F7``, sidecar ``Fp1-F7``; biosigio#136).
+
+    ``unmatched_channels`` is always present, so 0 is a positive statement
+    that every store channel met a row; the rest appear only when non-zero.
+    Exact-match semantics mirror biosigio 1.2.9. If biosigIO starts matching
+    case-insensitively (biosigio#136), ``unmatched_case_only`` must go.
+    """
+    exact = set(sidecar_names)
+    folded = {name.casefold() for name in sidecar_names}
+    unmatched = [label for label in store_labels if label not in exact]
+    report: SidecarJoinReport = {"unmatched_channels": len(unmatched)}
+    if not unmatched:
+        return report
+    raw = [label for label in unmatched if renames.get(label) in exact]
+    case_only = [
+        label for label in unmatched
+        if label not in raw
+        and (label.casefold() in folded or renames.get(label, "").casefold() in folded)
+    ]
+    if raw:
+        report["unmatched_raw_label"] = len(raw)
+    if case_only:
+        report["unmatched_case_only"] = len(case_only)
+    report["unmatched_examples"] = unmatched[:UNMATCHED_EXAMPLES_MAX]
+    return report
+
+
 # --- events -------------------------------------------------------------------
 # ONE parse of the events.tsv a store was built from feeds BOTH the per-store
 # `n_events`/`trial_types` in index.json (#1059) and the rows of
@@ -4782,8 +4864,17 @@ def store_metadata(store_path: str) -> dict:
         ra = dict(root.attrs)
         groups = []
         modalities: set[str] = set()
+        # Every channel's label in store order, across groups. A LIST, never a
+        # set or a dict key: the point of reading it is to see each channel,
+        # and a repeated label must not collapse here the way it once did in
+        # the importer.
+        labels: list[str] = []
         for gname in ra.get("channel_groups", []):
             ga = dict(root[gname].attrs)
+            labels.extend(
+                str(ch.get("label", "")) for ch in ga.get("channels") or []
+                if isinstance(ch, dict)
+            )
             rate = ga.get("rate")
             nsamp = ga.get("n_samples")
             mod = ga.get("modality")
@@ -4852,6 +4943,15 @@ def store_metadata(store_path: str) -> dict:
             if isinstance(candidate, dict):
                 result["units_report"] = candidate
                 break
+        # Diagnostics for the sidecar join (`sidecar_join_report`), `_`-prefixed
+        # so they never reach the published entry. `channel_labels_deduplicated`
+        # is biosigIO's (>= 1.2.9) record of the labels it renamed because the
+        # file repeated them, `{new_label: file_label}`.
+        result["_channel_labels"] = labels
+        renames = rec_meta.get("channel_labels_deduplicated") if isinstance(rec_meta, dict) else None
+        result["_label_renames"] = (
+            {str(k): str(v) for k, v in renames.items()} if isinstance(renames, dict) else {}
+        )
         return result
     except Exception as exc:  # noqa: BLE001 - best-effort metadata, never fatal
         print(f"::warning::store_metadata failed for {store_path}: {exc}", flush=True)
@@ -6014,6 +6114,7 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
         # handed to biosigIO so the served samples carry the sidecar's units
         # (biosigio#125); the same resolution already feeds the fidelity gate.
         channels_local = None
+        channels_text: str | None = None
         channels_read_failed = False
         channels_rel = channels_tsv_for(primary, c["head_files"])
         if channels_rel:
@@ -6162,6 +6263,27 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
                 "sidecar": channels_rel,
                 "sidecar_supplied": True,
             }
+            # Which store channels the sidecar never reached. biosigIO's own
+            # report cannot say: it counts only what matched rows did.
+            names = channels_tsv_names(channels_text) if channels_text is not None else None
+            if names is not None:
+                join = sidecar_join_report(
+                    meta.get("_channel_labels") or [], names, meta.get("_label_renames") or {}
+                )
+                entry["units_report"].update(join)
+                if join["unmatched_channels"]:
+                    print(
+                        f"::warning::{primary}: {channels_rel} names no row for "
+                        f"{join['unmatched_channels']} store channel(s) "
+                        f"(e.g. {', '.join(join.get('unmatched_examples', []))}), so their "
+                        "type and unit are the importer's"
+                        + (f"; {join['unmatched_case_only']} differ only in case"
+                           if join.get("unmatched_case_only") else "")
+                        + (f"; {join['unmatched_raw_label']} are named by the file's "
+                           "repeated label rather than the de-duplicated one"
+                           if join.get("unmatched_raw_label") else ""),
+                        flush=True,
+                    )
         if channels_read_failed:
             entry["channels_tsv_read_error"] = True
         if channel_count_note:

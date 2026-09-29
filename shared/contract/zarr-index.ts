@@ -62,6 +62,15 @@ export const zarrUnitsReportSchema = z
     units_column_present: z.boolean().optional(),
     sidecar: z.string().optional(),
     sidecar_supplied: z.boolean().optional(),
+    /** Store channels no channels.tsv row names exactly; the sidecar's type
+     *  and unit never reached them. 0 means every channel met a row. */
+    unmatched_channels: z.number().int().nonnegative().optional(),
+    /** Of those, a row names them in another letter case (biosigio#136). */
+    unmatched_case_only: z.number().int().positive().optional(),
+    /** Of those, the file repeated the label, the store de-duplicated it
+     *  (`T8-P8` -> `T8-P8-0`), and the sidecar names the repeated one. */
+    unmatched_raw_label: z.number().int().positive().optional(),
+    unmatched_examples: z.array(z.string()).max(5).optional(),
   })
   .passthrough();
 export type ZarrUnitsReport = z.infer<typeof zarrUnitsReportSchema>;

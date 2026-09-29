@@ -323,6 +323,10 @@ const zarrUnitsReportSchema4 = z4
     units_column_present: z4.boolean().optional(),
     sidecar: z4.string().optional(),
     sidecar_supplied: z4.boolean().optional(),
+    unmatched_channels: z4.number().int().nonnegative().optional(),
+    unmatched_case_only: z4.number().int().positive().optional(),
+    unmatched_raw_label: z4.number().int().positive().optional(),
+    unmatched_examples: z4.array(z4.string()).max(5).optional(),
   })
   .passthrough();
 
