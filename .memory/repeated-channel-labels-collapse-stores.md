@@ -37,10 +37,13 @@ A second trap sits in biosigIO's sidecar join: on 1.2.9 a channels.tsv row appli
 to the channel whose label matches exactly, case included (biosigio#136), and the
 `units_report` counts only matched rows, so a missed channel keeps the importer's unit
 behind a clean report. `units_report.unmatched_channels` (and `unmatched_raw_label`,
-`unmatched_case_only`) now says which. biosigio 1.2.10 matches a case-only difference
-when exactly one channel folds to the row, and reports it as
-`matched_case_insensitive`; `sidecar_join_report` reads that map, but the schema, zod and
-MCP texts still say matching is exact, which is why requirements.txt caps below it.
+`unmatched_case_only`) now says which. biosigio 1.2.10 (the converter's floor since
+this was written) matches a case-only difference when exactly one channel folds to the
+row, applies it (converting the unit), and reports it as `matched_case_insensitive`, a
+per-channel map. `sidecar_join_report` reads that map; the index republishes it only
+bounded, as `units_report.matched_case_only` plus at most five examples, and the schema
+refuses the raw map. `unmatched_case_only` on a store means it was converted before 1.2.10
+or the case match was ambiguous.
 
 **What to do:** never key a channel structure by label (a set or dict of labels drops
 the repeat); count from a list. To find stores published before the fix, run
