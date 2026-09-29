@@ -21,11 +21,16 @@ A fixed list of standards, software, platform, and umbrella-initiative papers
 stored under a data-describing relation (`IsDescribedBy`, `IsSupplementTo`,
 `IsDerivedFrom`, `IsIdenticalTo`, `IsVersionOf`); `enforceNeverDataPaper` demotes such an
 entry to `References` after every enrichment stage and once more on the final document,
-so no LLM output, seed, or carried-forward metadata can override it. Before the LLM
-stages run, every candidate DOI is resolved (DataCite content negotiation, Crossref
-fallback) and its title, first author, year, venue, and type are put in the enrichment,
-validation, and correction prompts; the data paper is `IsDescribedBy`, a deposit of the
-same data elsewhere is `IsDerivedFrom`, and everything else is `References`.
+so no LLM output, seed, or carried-forward metadata can override it. The same guard drops
+the dataset's own NEMAR DOI (concept or version) from `related_identifiers`. The DOI key
+and the title rule match nemar-citations' `normalize_doi` and `is_spec_title`.
+Before the LLM stages run, every candidate DOI is resolved (DataCite content
+negotiation, Crossref fallback) and its title, first author, year, venue, and type are put
+in the enrichment, validation, and correction prompts; the data paper is `IsDescribedBy`,
+a deposit of the same data elsewhere is `IsDerivedFrom`, and everything else is
+`References`. Because `IsDerivedFrom` is locked once written, the LLM may write it only
+for a DOI whose DataCite `resourceTypeGeneral` is `Dataset`. `IsSupplementTo` is never
+rewritten deterministically except for a listed DOI; nemar-citations' judge decides it.
 
 ## Consequences
 
@@ -33,10 +38,14 @@ same data elsewhere is `IsDerivedFrom`, and everything else is `References`.
   starts leaking is fixed by adding its DOI here AND to nemar-citations' never-anchor
   list; the two repositories must stay in step.
 - A dataset whose genuine data paper is on the list cannot be expressed. That is why the
-  HBN EEG resource paper (`10.1038/sdata.2017.40`) is NOT listed: it is `nm000153`'s own
-  descriptor (MIPDB). Only papers that describe no single dataset belong here.
-- Enrichment makes up to 15 extra registry lookups per run (at most 30 subrequests), and
-  a registry outage degrades to the old, unresolved behavior instead of failing the run.
+  MIPDB resource paper (`10.1038/sdata.2017.40`, Langer et al. 2017) is deliberately NOT
+  blocked: it is `nm000153`'s own descriptor. Only papers that describe no single dataset
+  belong here.
+- Enrichment resolves up to 15 DOIs per run through one per-run registry cache shared with
+  ORCID discovery, so a DOI costs at most one request per registry. A registry outage does
+  not fail the run: the lookup is reported as `failed` in `doi_resolution` on the reindex
+  response, the labels fall back to the unresolved behavior, and the sweep retries the
+  dataset.
 - Existing metadata picks up the corrected labels only when re-enriched, so a sweep is
   part of rolling this out.
 - `URL` entries (the GitHub repo and NEMAR landing page `IsDescribedBy` links) are
