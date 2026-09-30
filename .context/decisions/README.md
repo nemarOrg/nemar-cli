@@ -115,6 +115,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0074](0074-manifest-json-emits-unsigned-public-urls.md) - `manifest.json` emits unsigned public URLs, presigned only for a bucket-policy exclusion
 - [ADR 0075](0075-standards-papers-are-never-a-data-paper.md) - Standards, software, platform, and umbrella papers are never a dataset's data paper; relation types are chosen from resolved DOIs
 - [ADR 0076](0076-news-images-live-in-their-own-r2-bucket.md) - News images live in their own R2 bucket and are served by the Worker; dataset bytes stay in S3
+- [ADR 0077](0077-data-papers-in-metadata-json.md) - `metadata.json` serves `data_papers`, the citations judge's verdict, pulled from the dashboard into one D1 column
 
 ## Backfill note (2026-07-31)
 

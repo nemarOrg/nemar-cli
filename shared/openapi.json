@@ -219,6 +219,12 @@
                   ],
                   "pattern": "^v?\\d+\\.\\d+\\.\\d+(?:-(?:rc|alpha|beta)\\d*)?$"
                 },
+                "latest_version_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "subject_count": {
                   "type": [
                     "integer",
@@ -682,6 +688,12 @@
                   "null"
                 ],
                 "pattern": "^v?\\d+\\.\\d+\\.\\d+(?:-(?:rc|alpha|beta)\\d*)?$"
+              },
+              "latest_version_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "subject_count": {
                 "type": [

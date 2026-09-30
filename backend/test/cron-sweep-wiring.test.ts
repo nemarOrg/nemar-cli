@@ -478,3 +478,77 @@ describe("the weekly summary's UNGUARDED entry point is never called from schedu
     expect(before).toContain("shouldRunWeeklySummary(");
   });
 });
+
+/**
+ * `fetchAndSyncDataPapers` (ADR 0077) pulls the citations dashboard's
+ * data-papers manifest into `datasets.data_papers`. It is not sweep-shaped
+ * either, so it gets the same targeted assertions `publishZarrCatalog` gets.
+ * It is allowed on the dev cron because it only GETs a public manifest and
+ * writes the calling env's own D1.
+ */
+describe("fetchAndSyncDataPapers is wired into the daily cron (outside the sweep framework)", () => {
+  const NAME = "fetchAndSyncDataPapers";
+
+  test("is declared in the DEV_CRON_ALLOWLIST named constant in index.ts", () => {
+    const allowlist = /DEV_CRON_ALLOWLIST[^;]*;/s.exec(allCode)?.[0] ?? "";
+    expect(allowlist).toContain(`"${NAME}"`);
+  });
+
+  test("is called at least once in scheduled()", () => {
+    expect(callCount(allCode, NAME)).toBeGreaterThanOrEqual(1);
+  });
+
+  test("is wrapped in ctx.waitUntil", () => {
+    expect(isScheduled(allCode, NAME)).toBe(true);
+  });
+
+  test("is called OUTSIDE the prod-only block, so it also runs on the dev cron", () => {
+    expect(callCount(prodOnlyCode, NAME)).toBe(0);
+    expect(callCount(allCode, NAME)).toBeGreaterThan(callCount(prodOnlyCode, NAME));
+  });
+
+  test("its own ctx.waitUntil call contains its own .catch, so a rejection can neither crash nor block the counts sync", () => {
+    const body = waitUntilBody(allCode, `${NAME}(env)`);
+    expect(body).toContain(`${NAME}(env)`);
+    // Inside THIS call: the next job's .catch sits just past its closing paren
+    // and must not be able to satisfy this.
+    expect(body).toContain(".catch(");
+  });
+
+  test("the counts sync and this one are separate scheduled calls", () => {
+    // One waitUntil each: a shared chain would let one failure skip the other.
+    const counts = waitUntilBody(allCode, "fetchAndSyncCitationCounts(env.DB)");
+    const papers = waitUntilBody(allCode, `${NAME}(env)`);
+    expect(counts).not.toContain(NAME);
+    expect(papers).not.toContain("fetchAndSyncCitationCounts");
+    expect(counts).toContain(".catch(");
+  });
+});
+
+/**
+ * The text inside the `ctx.waitUntil( ... )` call that directly wraps `call`,
+ * found by matching parentheses (string and template literals skipped), so an
+ * assertion about a chain cannot be satisfied by code that belongs to the next
+ * job. Throws if `call` is not the direct argument of a `ctx.waitUntil(`.
+ */
+function waitUntilBody(code: string, call: string): string {
+  const idx = code.indexOf(call);
+  if (idx < 0) throw new Error(`${call} not found`);
+  const opener = "ctx.waitUntil(";
+  const start = code.lastIndexOf(opener, idx);
+  if (start < 0 || code.slice(start + opener.length, idx).trim() !== "") {
+    throw new Error(`${call} is not the direct argument of ctx.waitUntil(`);
+  }
+  const open = start + opener.length - 1;
+  let depth = 0;
+  for (let i = open; i < code.length; i++) {
+    const c = code[i];
+    if (c === '"' || c === "'" || c === "`") {
+      for (i++; i < code.length && code[i] !== c; i++) if (code[i] === "\\") i++;
+      continue;
+    }
+    if (c === "(") depth++;
+    else if (c === ")" && --depth === 0) return code.slice(open + 1, i);
+  }
+  throw new Error(`unbalanced parentheses after ${call}`);
+}

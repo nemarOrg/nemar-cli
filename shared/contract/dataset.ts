@@ -6,7 +6,7 @@
  *  - catalogItemSchema  : api.nemar.org GET /datasets list/search rows
  *  - datasetDetailSchema: api.nemar.org GET /datasets/:id (superset of the item)
  *  - neuroschemaDatasetSchema: data.nemar.org landing payload, which conforms to
- *    the neuroschema v0.4.0 `core/dataset.schema.json` (the canonical, language-
+ *    the neuroschema v0.4.1 `core/dataset.schema.json` (the canonical, language-
  *    agnostic dataset-metadata schema; enforced against the vendored JSON Schema
  *    in test/contract/neuroschema-conformance.test.ts).
  *
@@ -25,7 +25,7 @@ import { versionTagSchema } from "./version.js";
  * neuroschema version this contract's dataset shape conforms to. Single source;
  * backend services/data-router.ts imports this instead of a hardcoded literal.
  */
-export const NEUROSCHEMA_VERSION = "0.4.0";
+export const NEUROSCHEMA_VERSION = "0.4.1";
 
 /** neuroschema `source` enum. */
 export const datasetSourceSchema = z.enum(["openneuro", "nemar", "gin", "other"]);
@@ -107,6 +107,14 @@ const catalogItemObjectSchema = z
     // Canonical output is the vX.Y.Z tag; coercing schema keeps today's bare
     // rows valid. null when the dataset has no published version yet.
     latest_version: versionTagSchema.nullable().optional(),
+    // When `latest_version` was released: the `created_at` of its
+    // `dataset_versions` row, as SQLite UTC (`YYYY-MM-DD HH:MM:SS`, the same
+    // form as `created_at`). `updated_at` is bumped by any row write
+    // (enrichment reindex, finalize, DOI callbacks), so it says when the row
+    // was last touched, not when the data last changed; this moves only when a
+    // new version is released. null when the dataset has no version yet.
+    // Absent on older backends.
+    latest_version_at: z.string().nullable().optional(),
     // Epic #1144 phase 3 (#1147), D7: every column the facet filter table
     // (shared/facets.ts + backend/src/services/dataset-facets.ts) can filter
     // on is also projected here, raw and nullable -- a facet a caller can
@@ -472,7 +480,7 @@ export const datasetFacetsEnvelopeSchema = z
 export type DatasetFacetsEnvelope = z.infer<typeof datasetFacetsEnvelopeSchema>;
 
 /**
- * data.nemar.org landing payload — conforms to neuroschema v0.4.0
+ * data.nemar.org landing payload — conforms to neuroschema v0.4.1
  * core/dataset.schema.json. Passthrough + optional on the deep nested blocks
  * (demographics/data_summary/provenance/extensions) which neuroschema fully
  * specifies and the JSON-Schema conformance test enforces; here we pin the

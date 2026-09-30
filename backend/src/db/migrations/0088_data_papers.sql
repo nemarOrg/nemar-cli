@@ -1,0 +1,41 @@
+-- Data papers (nemarOrg/nemar-citations#250, ADR 0077): the papers the
+-- citations judge confirmed as a dataset's data paper, served in
+-- `metadata.json` as `data_papers`.
+--
+-- ONE column, spending budget deliberately (ADR 0034 pins the count at
+-- `backend/test/datasets-column-budget.test.ts`; 83 -> 84 against a 97
+-- ceiling). It is not derivable at read time, which is ADR 0034's own test for
+-- when a column is the right answer: the verdict is an LLM judgment made by an
+-- external pipeline (nemar-citations), then filtered by its fail-closed anchor
+-- gate, so nothing in this database can recompute it.
+--
+-- Why not the obvious homes:
+--
+--   enrichment_json   Rewritten wholesale by every enrichment run and committed
+--                     to the dataset repo as public `.nemar/metadata.json`,
+--                     which is nemar-citations' own input. A verdict stored
+--                     there would be erased by the next reindex and would feed
+--                     back into the judge.
+--   sweep_stamps      Bookkeeping about when a sweep last ran (ADR 0035). Its
+--                     convention is that a missing key means "not yet swept";
+--                     this column needs the same absent-versus-empty
+--                     distinction but it is served content, not a stamp.
+--   a side table      ADR 0034 rejects side tables for catalog facts, and a
+--                     fourth FK child of `datasets` makes any future rebuild of
+--                     it harder (migration 0071 documents that dance).
+--
+-- NULL means "not judged, or not yet processed by the gate"; the JSON text
+-- '[]' means "gated, and no data paper". The served document keeps that
+-- distinction: NULL omits the key, '[]' serves an empty list.
+--
+-- The JSON is a list of `{ doi, title, year, venue, judge_model }` objects,
+-- bounded at write time by `validateDataPapers` in services/data-papers.ts
+-- (called from services/data-papers-sync.ts): at most 10 papers and 4096 bytes
+-- per dataset, refused whole rather than truncated. The bound exists because
+-- D1 statements over about 100 KB break backup restore (ADR 0036). The CHECK
+-- only guarantees the text parses; the shape is validated by the writer and
+-- re-normalized, defensively, by the reader.
+--
+-- No index: nothing filters or sorts by it.
+
+ALTER TABLE datasets ADD COLUMN data_papers TEXT CHECK (data_papers IS NULL OR json_valid(data_papers));

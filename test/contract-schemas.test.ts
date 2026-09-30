@@ -91,6 +91,18 @@ describe("catalog item schema", () => {
     ).not.toThrow();
   });
 
+  test("latest_version_at is an optional nullable string, never a number", () => {
+    expect(catalogItemSchema.parse(row).latest_version_at).toBeUndefined();
+    expect(
+      catalogItemSchema.parse({ ...row, latest_version_at: null }).latest_version_at,
+    ).toBeNull();
+    expect(
+      catalogItemSchema.parse({ ...row, latest_version_at: "2026-09-16 17:22:05" })
+        .latest_version_at,
+    ).toBe("2026-09-16 17:22:05");
+    expect(() => catalogItemSchema.parse({ ...row, latest_version_at: 1790000000 })).toThrow();
+  });
+
   test("accepts the #970 honest-size fields (total_files, data_complete, bytes_present)", () => {
     const parsed = catalogItemSchema.parse({
       ...row,
@@ -619,10 +631,10 @@ describe("old-CLI compatibility: no schema in the contract is strict", () => {
 });
 
 describe("neuroschema dataset schema", () => {
-  test("pins the v0.4.0 envelope + required identity fields", () => {
-    expect(NEUROSCHEMA_VERSION).toBe("0.4.0");
+  test("pins the v0.4.1 envelope + required identity fields", () => {
+    expect(NEUROSCHEMA_VERSION).toBe("0.4.1");
     const ds = {
-      schema_version: "0.4.0",
+      schema_version: "0.4.1",
       doc_type: "dataset",
       dataset_id: "nm000108",
       name: "Test",
@@ -634,7 +646,7 @@ describe("neuroschema dataset schema", () => {
 
   test("rejects a wrong schema_version or empty modality", () => {
     const base = {
-      schema_version: "0.4.0",
+      schema_version: "0.4.1",
       doc_type: "dataset",
       dataset_id: "nm000108",
       name: "T",
@@ -642,6 +654,8 @@ describe("neuroschema dataset schema", () => {
       recording_modality: ["EEG"],
     };
     expect(() => neuroschemaDatasetSchema.parse({ ...base, schema_version: "0.2.0" })).toThrow();
+    // The previous release: the literal moved with the vendored bundle.
+    expect(() => neuroschemaDatasetSchema.parse({ ...base, schema_version: "0.4.0" })).toThrow();
     expect(() => neuroschemaDatasetSchema.parse({ ...base, recording_modality: [] })).toThrow();
   });
 });

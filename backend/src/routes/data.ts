@@ -1759,7 +1759,7 @@ dataRoutes.get("/:datasetId/:version/summary.json", (c) => {
  *
  * Sibling to summary.json. Emitted by the central generate-records workflow
  * on `nemarDatasets/.github` at S3 key `<id>/version/v<X.Y.Z>-records.json`
- * (an array of neuroschema v0.4.0 `record` docs, one per primary signal
+ * (an array of neuroschema v0.4.1 `record` docs, one per primary signal
  * file). The emitter owns the shape contract; this handler serves the bytes
  * verbatim. Same cache policy as summary.json: immutable per (id, version),
  * so a long s-maxage; a missing artifact is `no-store` 404 (no negative
@@ -1821,7 +1821,7 @@ dataRoutes.get("/:datasetId/:version/records.json", (c) => {
 });
 
 /**
- * GET /<id>/metadata.json -> dataset-level neuroschema v0.4.0 document.
+ * GET /<id>/metadata.json -> dataset-level neuroschema v0.4.1 document.
  *
  * Combines the D1 catalog row, the parsed nemar_metadata.json enrichment
  * payload, and (when at least one version exists) a derived BIDS index from
@@ -1850,7 +1850,7 @@ async function metadataJsonHandler(
             recording_count, recordings_unavailable, recordings_measured,
             channel_count_min, channel_count_max,
             sampling_frequency, power_line_frequency, eeg_reference,
-            placement_scheme, electrode_system
+            placement_scheme, electrode_system, data_papers
      FROM datasets
      WHERE dataset_id = ?`,
   )
@@ -1929,6 +1929,7 @@ async function metadataJsonHandler(
       eeg_reference: row.eeg_reference,
       placement_scheme: row.placement_scheme,
       electrode_system: row.electrode_system,
+      data_papers: row.data_papers,
     },
     parsedEnrichment,
     versions,

@@ -13,6 +13,71 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## 0.10.11 - 2026-09-30
+
+### Added
+
+- **`data_papers` in `metadata.json` (#1572, ADR 0077).** The served
+  `data.nemar.org/<id>/metadata.json` (and the `metadata` block of `page-bundle.json`)
+  gains a top-level `data_papers` array: the papers the citation pipeline's judge
+  confirmed as the dataset's own data paper, each `{ doi, title, year, venue,
+  judge_model }`. `related_identifiers[].relation_type` is still only a hint; this key
+  is the verdict, and it is the same one that decides whose citations count toward the
+  dataset (nemarOrg/nemar-citations#250 and #251). An absent key means no statement
+  (not judged yet); `[]` means judged, with no data paper. An entry can be a deposit of
+  the same data (a figshare or Zenodo record), so there is no type field. Datasets
+  deposited anonymously are served like any other (ADR 0077 records that decision). The
+  daily Worker cron pulls `dashboard.nemar.org/citations/api/data-papers.json` into a
+  new `datasets.data_papers` column. The writer is strict: a list over 10 papers or
+  4096 bytes, or an invalid DOI, is refused whole, and a refused row clears that
+  dataset's stored value rather than leaving a stale claim. A paper ADR 0075 never
+  allows as a data paper (a standard, software or umbrella paper) is dropped from its
+  list, and a non-empty list that empties this way is refused like any other. A
+  duplicated dataset id in the manifest writes nothing, the fetched body is capped at 1 MiB and 5000 rows, and an
+  unreachable or malformed manifest is logged and leaves every stored value untouched.
+  The raw column is not exposed by `GET /datasets/:id`. A malformed stored value is
+  omitted from the served document and logged, never a 500.
+- **`latest_version_at` in the catalog (#1571).** The public list, `?mine=true`, the
+  degraded fallback list and `GET /datasets/:id` serve the `created_at` of the newest
+  `dataset_versions` row (SQLite UTC, `YYYY-MM-DD HH:MM:SS`), or `null` when a dataset has
+  no version. It moves only when a version is released (or when an admin repair backfills
+  a missing version row), unlike `updated_at`, which every reindex, finalize and DOI
+  callback bumps: the 0.10.10 re-enrichment sweep made every
+  swept dataset look freshly updated on the website. The website reads it from
+  nemarOrg/website#384.
+
+### Changed
+
+- **`metadata.json` reports neuroschema 0.4.1.** The vendored bundle is updated and
+  `schema_version` is `"0.4.1"` (was `"0.4.0"`). Consumers that compare the string
+  exactly should accept the patch bump. Under the pre-1.0 policy from
+  nemarOrg/neuroschema#14, additive optional fields such as `data_papers` are PATCH
+  releases and breaking changes are MINOR. The schema sets `additionalProperties: false`,
+  so a validator holding a 0.4.0 copy rejects documents that carry `data_papers`; refresh
+  the copy. The live contract checks accept a deployed backend one PATCH behind the
+  source; the pure tests still pin the exact version.
+
+### Migrations
+
+- `0088_data_papers.sql` adds one nullable column, `datasets.data_papers TEXT`, with
+  `CHECK (data_papers IS NULL OR json_valid(data_papers))`. It is additive, so rolling the
+  Worker back is enough: the 0.10.10 Worker ignores the column, except that
+  `GET /datasets/:id` echoes it as a raw string (`null` until the first cron fills it,
+  which is also what the old Worker serves there between the migration and the deploy). It brings the `datasets` column count to 84 of the
+  97 ceiling that ADR 0034's budget test pins.
+
+### Deploy coupling
+
+- No dataset serves `data_papers` until the first daily cron after this deploy (03:00 UTC
+  in production) has pulled the manifest. The dashboard already publishes it, so the
+  first pull fills about 730 datasets, about 340 of them with at least one paper and the
+  rest with `[]`. After that the key trails the citation pipeline's nightly run by about
+  15 to 17 hours, and `page-bundle.json` can trail longer because its cache may be served
+  stale for up to a day.
+- The website's "Updated" badge reads `latest_version_at` and deliberately has no
+  `updated_at` fallback. Promote website `staging` to `main` only after this release is
+  live, or production cards lose the date.
+
 ## 0.10.10 - 2026-09-29
 
 ### Added
@@ -77,6 +142,27 @@ earlier releases are described only by their generated notes.
   requeued, and `find_collapsed_channel_stores.py --case-only` lists the datasets whose
   index reports `unmatched_case_only`.
 
+- **Zarr: recordings stored as git-annex chunks convert (#1563).** A dataset uploaded with
+  git-annex chunking keeps only chunked object names in the bucket (nm000276 stores a
+  100 GB `.eeg` as 94 objects), so every recording failed as an unexplained infra error
+  and was retried until `retry_exhausted`. The converter now asks for the plain object
+  first, and on a 404 lists the key's chunks, downloads them in order, checks the total
+  against the key's size and assembles the file. A bucket with no complete copy is
+  reported as `annex_object_missing` for that recording, so the rest of the dataset still
+  serves; a dataset whose every recording is missing stays retryable. A 404 is no longer
+  retried four times; throttles, 5xx answers and timeouts are retried as before. The data
+  plane still builds plain object URLs, so a chunked dataset's files do not download
+  through `data.nemar.org` yet (#1565).
+- **Zarr: EEGLAB `.set` headers count toward the channel-count gate (#1564).** For `.set`
+  recordings the gate had only channels.tsv to compare a store with, so a subject-level
+  channels.tsv inherited from MEG recordings (on003645: 404 MEG channels over 75-channel
+  `.set` files) refused all 108 EEG recordings. The converter now reads `nbchan` from the
+  header of classic MAT and MATLAB v7.3 files without reading the data, and trusts it only
+  where it matches what the importer serves; an over-declaring channels.tsv is then
+  disclosed as `channels_tsv_count_mismatch` and the store is published. An unreadable
+  header falls back to the old, stricter check. The Zarr fidelity sweep accepts a short
+  store that carries that disclosure.
+
 ### Migrations
 
 - `0087_news_posts.sql` adds the `news_posts` table and an index on
@@ -90,6 +176,11 @@ earlier releases are described only by their generated notes.
   buckets were created before this release.
 - Merging to `main` makes the Hallu converter use biosigio 1.2.10 on its next run. Stores
   already published are replaced only when requeued.
+- The chunked-object fetch (#1563) lists `<id>/objects/` in the bucket, so the Hallu
+  profile needs `s3:ListBucket` on those prefixes; without it a missing plain key answers
+  403 and the dataset still ends `retry_exhausted`. nm000276 and on003645 convert only
+  when requeued; requeue nm000276 on its own with a low `--jobs`, since its largest file
+  is reassembled on the scratch disk (#1568).
 - The re-enrichment sweep described in #1550 runs against production after this release,
   one dataset at a time.
 

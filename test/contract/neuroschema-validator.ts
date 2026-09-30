@@ -13,6 +13,7 @@ import { join } from "node:path";
 import type { ValidateFunction } from "ajv";
 import addFormats from "ajv-formats";
 import Ajv2020 from "ajv/dist/2020";
+import { NEUROSCHEMA_VERSION } from "../../shared/contract/index.js";
 
 interface Bundle {
   root: string;
@@ -39,3 +40,21 @@ export function compileNeuroschemaDatasetValidator(): ValidateFunction {
 export function formatAjvErrors(validate: ValidateFunction): string {
   return (validate.errors ?? []).map((e) => `${e.instancePath || "/"} ${e.message}`).join("; ");
 }
+
+/**
+ * The `schema_version` a LIVE response may carry: the same MAJOR.MINOR as
+ * `NEUROSCHEMA_VERSION`, any PATCH.
+ *
+ * The live checks run against a deployed backend, and a pull request that bumps
+ * `NEUROSCHEMA_VERSION` (a PATCH, since neuroschema 0.x treats additive fields
+ * as patches) cannot be deployed before its own CI runs. Pinning the exact
+ * string there turns every such release red until the deploy lands, for a
+ * difference that is harmless by definition. A different MINOR still fails: that
+ * is a breaking change or a new extension namespace, and the live backend must
+ * agree on it. The exact
+ * version is pinned by the pure tests (`test/contract-schemas.test.ts` and the
+ * bundle stamp check in `test/contract-neuroschema.test.ts`).
+ */
+export const NEUROSCHEMA_LINE_RE = new RegExp(
+  `^${NEUROSCHEMA_VERSION.split(".").slice(0, 2).join(".").replace(/\./g, "\\.")}\\.\\d+$`,
+);

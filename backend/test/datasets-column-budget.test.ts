@@ -26,16 +26,35 @@ beforeAll(() => {
 });
 
 describe("datasets column budget", () => {
-  test("exactly 83 columns after all migrations", () => {
+  test("exactly 84 columns after all migrations", () => {
     // 92 after 0072; 0073 collapses the 12 sweep stamps into one
     // sweep_stamps JSON column (#1183): 92 + 1 - 12 = 81. 0085 adds
     // first_published_at and anonymous (#1407): 81 + 2 = 83. Neither is
     // derivable at read time -- see the migration header for why the
-    // obvious substitute (concept_doi IS NULL) is unsound.
+    // obvious substitute (concept_doi IS NULL) is unsound. 0088 adds
+    // data_papers (ADR 0077): 83 + 1 = 84, a judge verdict from an external
+    // pipeline that nothing in this database can recompute.
     const count = db.query("SELECT COUNT(*) AS n FROM pragma_table_info('datasets')").get() as {
       n: number;
     };
-    expect(count.n).toBe(83);
+    expect(count.n).toBe(84);
+  });
+
+  test("data_papers is a nullable TEXT column that only accepts valid JSON", () => {
+    const col = db
+      .query(
+        "SELECT type, \"notnull\" AS required FROM pragma_table_info('datasets') WHERE name = 'data_papers'",
+      )
+      .get() as { type: string; required: number } | null;
+    expect(col).toEqual({ type: "TEXT", required: 0 });
+    db.run(
+      "INSERT INTO datasets (dataset_id, owner_user_id, name, data_papers) VALUES ('nm088001', -1, 'ok', '[]')",
+    );
+    expect(() =>
+      db.run(
+        "INSERT INTO datasets (dataset_id, owner_user_id, name, data_papers) VALUES ('nm088002', -1, 'bad', 'not json')",
+      ),
+    ).toThrow();
   });
 
   test("stays under the 97-column ceiling (D1 hard cap is 100)", () => {
