@@ -29,10 +29,12 @@
 -- distinction: NULL omits the key, '[]' serves an empty list.
 --
 -- The JSON is a list of `{ doi, title, year, venue, judge_model }` objects,
--- bounded by the writer (services/data-papers-sync.ts: at most 10 papers and
--- about 4 KB per dataset), because D1 statements over about 100 KB break
--- backup restore (ADR 0036). The CHECK only guarantees the text parses; the
--- shape is validated by the writer and again, defensively, by the reader.
+-- bounded at write time by `validateDataPapers` in services/data-papers.ts
+-- (called from services/data-papers-sync.ts): at most 10 papers and 4096 bytes
+-- per dataset, refused whole rather than truncated. The bound exists because
+-- D1 statements over about 100 KB break backup restore (ADR 0036). The CHECK
+-- only guarantees the text parses; the shape is validated by the writer and
+-- re-normalized, defensively, by the reader.
 --
 -- No index: nothing filters or sorts by it.
 

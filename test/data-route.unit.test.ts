@@ -681,6 +681,7 @@ function emptyRow(): DatasetRowForMetadata {
     eeg_reference: null,
     placement_scheme: null,
     electrode_system: null,
+    data_papers: null,
   };
 }
 
