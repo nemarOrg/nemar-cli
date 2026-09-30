@@ -301,11 +301,14 @@ authKeysRoutes.delete("/keys/:id", webSessionMiddleware, async (c) => {
   }
 
   const result = await db.prepare(KEY_REVOKE_BY_ID_SQL).bind(id, actor.id).run();
+  // The docs credential is minted FROM an API key, so revoking the key has to
+  // end it too. Run on BOTH branches: when the UPDATE changed nothing, a
+  // concurrent revoke of the same key won the race, and its cascade may be the
+  // one that failed; the cascade is idempotent.
+  await revokeDocsCredentials(db, actor.id);
   if ((result.meta?.changes ?? 0) === 0) {
     return keyNotFound(c);
   }
-
-  await revokeDocsCredentials(db, actor.id);
 
   const self = currentHash !== null && preRow.api_key_hash === currentHash;
   await auditLogStatement(db, {

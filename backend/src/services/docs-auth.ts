@@ -255,9 +255,10 @@ export const DOCS_REVOKE_ALL_SQL = `UPDATE web_sessions
  * FIVE CALLERS, and the count is the point: every path that ends or downgrades
  * this credential runs this statement -- `/auth/logout`, `finalizeRevocation`, a
  * role demotion, the owner-only soft delete, and {@link revokeDocsCredentials}
- * (every path that revokes an API key; it lists them). The FK's
- * `ON DELETE CASCADE` covers none of them, because none of them deletes the
- * `users` row. A sixth path that ends a credential needs this line too.
+ * (every route that revokes keys without ending every session; it lists them).
+ * The FK's `ON DELETE CASCADE` covers none of them, because none of them
+ * deletes the `users` row. A sixth path that ends a credential needs this line
+ * too.
  * The private site's grants have their own table and their own count
  * (`PRIVATE_GRANTS_PURGE_SQL` in `services/private-auth.ts`).
  */
@@ -273,12 +274,18 @@ export const DOCS_GRANTS_PURGE_SQL = "DELETE FROM docs_grants WHERE user_id = ?"
  * first of those paths shipped without them, and revoking the key left the
  * docs session reading `/admin/*` for the rest of its fifteen minutes.
  *
- * ITS CALLERS, which are every route that revokes an API key: self-service
- * `DELETE /auth/keys/:id` and `/auth/keys/current` (`routes/auth-keys.ts`),
- * the owner's `DELETE /admin/users/:username/keys/:id`
+ * ITS CALLERS: every route that revokes keys WITHOUT ending every session --
+ * self-service `DELETE /auth/keys/:id` and `/auth/keys/current`
+ * (`routes/auth-keys.ts`), the owner's `DELETE /admin/users/:username/keys/:id`
  * (`routes/admin/user-keys.ts`), and the emailed
  * `GET /auth/confirm-key-regeneration` (`routes/auth.ts`), which revokes every
- * key on the account. A new route that revokes a key calls this too.
+ * key on the account. A new route of that kind calls this too. The three paths
+ * that revoke keys and ALSO end the docs credential in their own batch do not
+ * need it: a role demotion, `finalizeRevocation` and the owner-only soft delete.
+ *
+ * The by-id routes also run it when their revoke changed nothing (a
+ * concurrent revoke of the same key won the race), because it is idempotent
+ * and the other request's cascade may have been the one that failed.
  *
  * WHY IT REVOKES ALL OF THEM rather than the one that key minted: the session
  * row records no minting token, so there is nothing to revoke precisely. Adding
@@ -303,6 +310,10 @@ export async function revokeDocsCredentials(db: D1Database, userId: number): Pro
       db.prepare(DOCS_GRANTS_PURGE_SQL).bind(userId),
     ]);
   } catch (err) {
-    console.error("[docs-auth] failed to cascade key revocation into docs sessions", err);
+    // The account id is what an operator needs to finish the job by hand.
+    console.error(
+      `[docs-auth] failed to cascade key revocation into docs sessions for user ${userId}`,
+      err,
+    );
   }
 }

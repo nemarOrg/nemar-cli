@@ -474,3 +474,89 @@ describe("revoking an API key ends the docs credential and leaves the private on
     );
   });
 });
+
+describe("a failed docs cascade never fails the key revocation", () => {
+  // `revokeDocsCredentials` is best effort by design: the key is already
+  // revoked when it runs, and an error there must not tell the caller the key
+  // still works. The fault is real rather than injected: `docs_grants` is
+  // renamed out from under the cascade, the way `docs-auth-routes.test.ts`
+  // breaks the sign-out batch.
+  function liveTargetKeys(): number {
+    return (
+      db
+        .query<{ n: number }, [number]>(
+          "SELECT COUNT(*) AS n FROM tokens WHERE user_id = ? AND revoked_at IS NULL AND api_key_hash = ?",
+        )
+        .get(targetId, targetKeyHash) ?? { n: -1 }
+    ).n;
+  }
+
+  let targetKeyHash = "";
+
+  async function failingCascadeCase(revoke: () => Promise<Response>): Promise<void> {
+    targetKeyHash = await hashApiKey(TARGET_KEY);
+    expect(liveTargetKeys()).toBe(1);
+    db.run("ALTER TABLE docs_grants RENAME TO docs_grants_broken");
+    const errors = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect((await revoke()).status).toBe(200);
+      expect(liveTargetKeys()).toBe(0);
+      const lines = errors.mock.calls.map((args) => String(args[0]));
+      expect(
+        lines.some((line) => line.includes("[docs-auth]") && line.includes(`for user ${targetId}`)),
+      ).toBe(true);
+    } finally {
+      errors.mockRestore();
+      db.run("ALTER TABLE docs_grants_broken RENAME TO docs_grants");
+    }
+  }
+
+  function targetKeyId(): number {
+    const row = db
+      .query<{ id: number }, [number]>("SELECT id FROM tokens WHERE user_id = ?")
+      .get(targetId);
+    if (!row) throw new Error("no target key");
+    return row.id;
+  }
+
+  test("self-service, by id", async () => {
+    await failingCascadeCase(() =>
+      app.request(
+        `/auth/keys/${targetKeyId()}`,
+        { method: "DELETE", headers: { Authorization: `Bearer ${TARGET_KEY}` } },
+        env(),
+      ),
+    );
+  });
+
+  test("self-service, the presenting key", async () => {
+    await failingCascadeCase(() =>
+      app.request(
+        "/auth/keys/current",
+        { method: "DELETE", headers: { Authorization: `Bearer ${TARGET_KEY}` } },
+        env(),
+      ),
+    );
+  });
+
+  test("by the owner", async () => {
+    await failingCascadeCase(() =>
+      ownerRequest("DELETE", `/admin/users/scopetarget/keys/${targetKeyId()}`),
+    );
+  });
+
+  test("by the key-regeneration link", async () => {
+    db.run("UPDATE users SET verification_token = ?, verification_expires_at = ? WHERE id = ?", [
+      "scope-cascade-failing-regeneration",
+      new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      targetId,
+    ]);
+    await failingCascadeCase(() =>
+      app.request(
+        "/auth/confirm-key-regeneration?token=scope-cascade-failing-regeneration",
+        {},
+        env(),
+      ),
+    );
+  });
+});

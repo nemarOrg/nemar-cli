@@ -230,14 +230,15 @@ export function registerUserKeyRoutes(admin: AdminRouter): void {
     }
 
     const result = await db.prepare(KEY_REVOKE_BY_ID_SQL).bind(id, target.id).run();
+    // A docs session can be minted FROM an API key, so revoking one of the
+    // target's keys has to end the target's docs credential too, the same
+    // best-effort cascade self-service revocation runs, and on both branches
+    // for the same reason: a concurrent revoke that won the race may be the
+    // one whose cascade failed.
+    await revokeDocsCredentials(db, target.id);
     if ((result.meta?.changes ?? 0) === 0) {
       return keyNotFound(c);
     }
-
-    // A docs session can be minted FROM an API key, so revoking one of the
-    // target's keys has to end the target's docs credential too, the same
-    // best-effort cascade self-service revocation runs.
-    await revokeDocsCredentials(db, target.id);
 
     await auditLogStatement(db, {
       userId: adminUser.id,
