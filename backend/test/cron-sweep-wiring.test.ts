@@ -478,3 +478,50 @@ describe("the weekly summary's UNGUARDED entry point is never called from schedu
     expect(before).toContain("shouldRunWeeklySummary(");
   });
 });
+
+/**
+ * `fetchAndSyncDataPapers` (ADR 0077) pulls the citations dashboard's
+ * data-papers manifest into `datasets.data_papers`. It is not sweep-shaped
+ * either, so it gets the same targeted assertions `publishZarrCatalog` gets.
+ * It is allowed on the dev cron because it only GETs a public manifest and
+ * writes the calling env's own D1.
+ */
+describe("fetchAndSyncDataPapers is wired into the daily cron (outside the sweep framework)", () => {
+  const NAME = "fetchAndSyncDataPapers";
+
+  test("is declared in the DEV_CRON_ALLOWLIST named constant in index.ts", () => {
+    const allowlist = /DEV_CRON_ALLOWLIST[^;]*;/s.exec(allCode)?.[0] ?? "";
+    expect(allowlist).toContain(`"${NAME}"`);
+  });
+
+  test("is called at least once in scheduled()", () => {
+    expect(callCount(allCode, NAME)).toBeGreaterThanOrEqual(1);
+  });
+
+  test("is wrapped in ctx.waitUntil", () => {
+    expect(isScheduled(allCode, NAME)).toBe(true);
+  });
+
+  test("is called OUTSIDE the prod-only block -- it also runs on the dev cron", () => {
+    expect(callCount(prodOnlyCode, NAME)).toBe(0);
+    expect(callCount(allCode, NAME)).toBeGreaterThan(callCount(prodOnlyCode, NAME));
+  });
+
+  test("its own ctx.waitUntil chain has a .catch, so it can neither crash nor block the counts sync", () => {
+    const idx = allCode.indexOf(`${NAME}(env)`);
+    expect(idx).toBeGreaterThanOrEqual(0);
+    const window = allCode.slice(idx, idx + 700);
+    expect(window).toContain(".catch(");
+  });
+
+  test("the counts sync and this one are separate scheduled calls", () => {
+    // One waitUntil each: a shared chain would let one failure skip the other.
+    expect(isScheduled(allCode, "fetchAndSyncCitationCounts")).toBe(false); // takes env.DB, not env
+    expect(allCode).toContain("fetchAndSyncCitationCounts(env.DB)");
+    const counts = allCode.indexOf("fetchAndSyncCitationCounts(env.DB)");
+    const papers = allCode.indexOf(`${NAME}(env)`);
+    expect(papers).toBeGreaterThan(counts);
+    const between = allCode.slice(counts, papers);
+    expect(between).toContain("ctx.waitUntil(");
+  });
+});

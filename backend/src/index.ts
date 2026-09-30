@@ -47,6 +47,7 @@ import { runAvailabilityReportSweepCron } from "./services/availability-report";
 import { fetchAndSyncCitationCounts } from "./services/citation-counts-sync";
 import { isNemarWebOrigin, isOscOrigin } from "./services/cors-origins";
 import { sweepLogLines } from "./services/cron-sweep-log";
+import { fetchAndSyncDataPapers } from "./services/data-papers-sync";
 import { drainEmbeddingDirty } from "./services/dataset-search";
 import { DEV_EPHEMERAL_BAND_END, DEV_EPHEMERAL_BAND_START } from "./services/datasetId";
 import { deleteDatasetCascade } from "./services/deletion";
@@ -378,10 +379,19 @@ export const PROD_SANDBOX_CLEANUP_QUERY =
  * see that module's doc comment for why that is a materially different,
  * dev-safe exposure from `signal-defaults-sweep.ts`'s GitHub-API-based
  * `getBidsTreeStats` (which IS prod-only, in the guarded block below).
+ * `fetchAndSyncDataPapers` (services/data-papers-sync.ts, ADR 0077) qualifies
+ * because it only GETs a public manifest from the citations dashboard and
+ * UPDATEs the CALLING env's own D1: no email, no GitHub, no DOI, no bucket.
+ * (`fetchAndSyncCitationCounts`, which it mirrors, is also driven outside the
+ * guarded block but was never named here; it is not in this list.)
  * `backend/test/cron-sweep-wiring.test.ts` pins that every name here is
  * both actually called and called outside the guarded block.
  */
-export const DEV_CRON_ALLOWLIST = ["publishZarrCatalog", "runZarrFidelitySweep"] as const;
+export const DEV_CRON_ALLOWLIST = [
+  "publishZarrCatalog",
+  "runZarrFidelitySweep",
+  "fetchAndSyncDataPapers",
+] as const;
 
 async function scheduledCleanup(env: Bindings): Promise<void> {
   const db = env.DB;
@@ -1229,6 +1239,26 @@ export default {
         .catch((err) =>
           console.error(
             "[citation-sync] failed:",
+            err instanceof Error ? (err.stack ?? err.message) : err,
+          ),
+        ),
+    );
+    // ADR 0077: refresh each dataset's judge-confirmed data papers from the
+    // citations dashboard's second manifest, so metadata.json serves
+    // `data_papers`. A separate waitUntil with its own .catch: a failure here
+    // must never block the counts sync above or the jobs below, and the reverse.
+    // ALLOWED ON THE NON-PROD CRON (see DEV_CRON_ALLOWLIST): it reads a public
+    // manifest and writes only this env's own D1.
+    ctx.waitUntil(
+      fetchAndSyncDataPapers(env)
+        .then((r) =>
+          console.log(
+            `[data-papers-sync] fetched ${r.fetched}, rejected ${r.rejected}, updated ${r.updated}, unchanged ${r.unchanged}, unknown ${r.unknown}`,
+          ),
+        )
+        .catch((err) =>
+          console.error(
+            "[data-papers-sync] failed:",
             err instanceof Error ? (err.stack ?? err.message) : err,
           ),
         ),
