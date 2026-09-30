@@ -132,11 +132,14 @@ export { buildDatasetFilterClauses, escapeLikePattern };
 
 /**
  * `latest_version_at`: when the dataset's newest version was released, read
- * from the same `dataset_versions` row the `latest_version` subqueries name
- * (newest `created_at`), so the two always agree. `datasets.updated_at` cannot
- * stand in for it: enrichment reindex, finalize and the DOI callbacks all bump
- * it, so a catalog-wide sweep made every dataset look freshly updated. Expects
- * the `datasets` table aliased as `d`. NULL when the dataset has no version row.
+ * from the newest `dataset_versions` row by `created_at`, the same ordering the
+ * `latest_version` subqueries use (two rows minted in the same second share the
+ * date either way). The row is written when the version's DOI is minted at
+ * publish time; only the admin manifest-regen repair path backfills one later.
+ * `datasets.updated_at` cannot stand in for it: enrichment reindex, finalize
+ * and the DOI callbacks all bump it, so a catalog-wide sweep made every
+ * dataset look freshly updated. Expects the `datasets` table aliased as `d`.
+ * NULL when the dataset has no version row.
  */
 const LATEST_VERSION_AT_SQL = `(
   SELECT dv.created_at FROM dataset_versions dv
