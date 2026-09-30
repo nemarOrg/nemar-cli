@@ -40,6 +40,7 @@ import { authPrivateRoutes } from "../src/routes/auth-private";
 import { authWebRoutes } from "../src/routes/auth-web";
 import { resolvePrincipal } from "../src/rpc/principal";
 import { exchangePrivateGrant } from "../src/rpc/private-session";
+import { KEY_REVOKE_BY_ID_SQL } from "../src/services/device-auth";
 import { hashApiKey } from "../src/services/token";
 import { issueSession } from "../src/services/web-session";
 import type { Bindings, Variables } from "../src/types/bindings";
@@ -558,5 +559,79 @@ describe("a failed docs cascade never fails the key revocation", () => {
         env(),
       ),
     );
+  });
+});
+
+describe("a by-id key revoke that loses a race still runs the docs cascade", () => {
+  // The by-id routes read the key, then revoke it. A concurrent revoke of the
+  // same key can land in between, leaving the route's UPDATE with nothing to
+  // change; the other request's cascade may be the one that failed, so the
+  // route runs the (idempotent) cascade on that branch too.
+  //
+  // bun:sqlite cannot interleave two requests, so the race is produced the
+  // way the renamed-table tests produce a fault: at the database. This is the
+  // same real-engine passthrough as `realD1`, except that running the revoke
+  // statement first lands the competing revoke on the same row, exactly
+  // between the route's pre-read and its UPDATE.
+  function racingEnv(): Bindings {
+    const inner = realD1(db);
+    const DB = {
+      batch: inner.batch.bind(inner),
+      prepare(sql: string) {
+        const statement = inner.prepare(sql);
+        if (sql !== KEY_REVOKE_BY_ID_SQL) return statement;
+        let keyId: unknown;
+        const racing = {
+          bind(...params: unknown[]) {
+            keyId = params[0];
+            statement.bind(...params);
+            return racing;
+          },
+          run() {
+            db.run("UPDATE tokens SET revoked_at = datetime('now') WHERE id = ?", [
+              keyId as number,
+            ]);
+            return statement.run();
+          },
+        };
+        return racing;
+      },
+    } as unknown as D1Database;
+    return { ...env(), DB } as Bindings;
+  }
+
+  function targetKeyId(): number {
+    const row = db
+      .query<{ id: number }, [number]>("SELECT id FROM tokens WHERE user_id = ?")
+      .get(targetId);
+    if (!row) throw new Error("no target key");
+    return row.id;
+  }
+
+  async function lostRaceCase(path: string, authorization: string): Promise<void> {
+    const appCookie = await appSession();
+    const docs = await signIn("docs", appCookie);
+    const priv = await signIn("private", appCookie);
+
+    const res = await app.request(
+      path,
+      { method: "DELETE", headers: { Authorization: authorization } },
+      racingEnv(),
+    );
+    // The route's own UPDATE changed nothing, so it answers as a repeat would.
+    expect(res.status).toBe(404);
+    // ...and the docs credential is gone anyway.
+    expect(await works("docs", docs.session)).toBe(false);
+    expect(grantRows("docs")).toBe(0);
+    // The private scope is outside the key cascade, race or not.
+    expect(await works("private", priv.session)).toBe(true);
+  }
+
+  test("self-service, by id", async () => {
+    await lostRaceCase(`/auth/keys/${targetKeyId()}`, `Bearer ${TARGET_KEY}`);
+  });
+
+  test("by the owner", async () => {
+    await lostRaceCase(`/admin/users/scopetarget/keys/${targetKeyId()}`, `Bearer ${OWNER_KEY}`);
   });
 });
