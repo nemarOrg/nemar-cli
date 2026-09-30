@@ -502,26 +502,53 @@ describe("fetchAndSyncDataPapers is wired into the daily cron (outside the sweep
     expect(isScheduled(allCode, NAME)).toBe(true);
   });
 
-  test("is called OUTSIDE the prod-only block -- it also runs on the dev cron", () => {
+  test("is called OUTSIDE the prod-only block, so it also runs on the dev cron", () => {
     expect(callCount(prodOnlyCode, NAME)).toBe(0);
     expect(callCount(allCode, NAME)).toBeGreaterThan(callCount(prodOnlyCode, NAME));
   });
 
-  test("its own ctx.waitUntil chain has a .catch, so it can neither crash nor block the counts sync", () => {
-    const idx = allCode.indexOf(`${NAME}(env)`);
-    expect(idx).toBeGreaterThanOrEqual(0);
-    const window = allCode.slice(idx, idx + 700);
-    expect(window).toContain(".catch(");
+  test("its own ctx.waitUntil call contains its own .catch, so a rejection can neither crash nor block the counts sync", () => {
+    const body = waitUntilBody(allCode, `${NAME}(env)`);
+    expect(body).toContain(`${NAME}(env)`);
+    // Inside THIS call: the next job's .catch sits just past its closing paren
+    // and must not be able to satisfy this.
+    expect(body).toContain(".catch(");
   });
 
   test("the counts sync and this one are separate scheduled calls", () => {
     // One waitUntil each: a shared chain would let one failure skip the other.
-    expect(isScheduled(allCode, "fetchAndSyncCitationCounts")).toBe(false); // takes env.DB, not env
-    expect(allCode).toContain("fetchAndSyncCitationCounts(env.DB)");
-    const counts = allCode.indexOf("fetchAndSyncCitationCounts(env.DB)");
-    const papers = allCode.indexOf(`${NAME}(env)`);
-    expect(papers).toBeGreaterThan(counts);
-    const between = allCode.slice(counts, papers);
-    expect(between).toContain("ctx.waitUntil(");
+    const counts = waitUntilBody(allCode, "fetchAndSyncCitationCounts(env.DB)");
+    const papers = waitUntilBody(allCode, `${NAME}(env)`);
+    expect(counts).not.toContain(NAME);
+    expect(papers).not.toContain("fetchAndSyncCitationCounts");
+    expect(counts).toContain(".catch(");
   });
 });
+
+/**
+ * The text inside the `ctx.waitUntil( ... )` call that directly wraps `call`,
+ * found by matching parentheses (string and template literals skipped), so an
+ * assertion about a chain cannot be satisfied by code that belongs to the next
+ * job. Throws if `call` is not the direct argument of a `ctx.waitUntil(`.
+ */
+function waitUntilBody(code: string, call: string): string {
+  const idx = code.indexOf(call);
+  if (idx < 0) throw new Error(`${call} not found`);
+  const opener = "ctx.waitUntil(";
+  const start = code.lastIndexOf(opener, idx);
+  if (start < 0 || code.slice(start + opener.length, idx).trim() !== "") {
+    throw new Error(`${call} is not the direct argument of ctx.waitUntil(`);
+  }
+  const open = start + opener.length - 1;
+  let depth = 0;
+  for (let i = open; i < code.length; i++) {
+    const c = code[i];
+    if (c === '"' || c === "'" || c === "`") {
+      for (i++; i < code.length && code[i] !== c; i++) if (code[i] === "\\") i++;
+      continue;
+    }
+    if (c === "(") depth++;
+    else if (c === ")" && --depth === 0) return code.slice(open + 1, i);
+  }
+  throw new Error(`unbalanced parentheses after ${call}`);
+}
