@@ -13,6 +13,8 @@ import {
   DATA_PAPER_STRING_CAPS,
   MAX_DATA_PAPERS,
   MAX_DATA_PAPERS_BYTES,
+  MAX_DATA_PAPER_YEAR,
+  MIN_DATA_PAPER_YEAR,
   normalizeDataPaper,
   parseStoredDataPapers,
   serializeDataPapers,
@@ -79,6 +81,40 @@ describe("normalizeDataPaper", () => {
   });
 });
 
+describe("normalizeDataPaper: the published limits, exactly at and just past each", () => {
+  const base = { doi: "10.5524/100542" };
+
+  test("year: 1000 and 2999 are accepted, 999 and 3000 are refused", () => {
+    expect(MIN_DATA_PAPER_YEAR).toBe(1000);
+    expect(MAX_DATA_PAPER_YEAR).toBe(2999);
+    expect(normalizeDataPaper({ ...base, year: 1000 })?.year).toBe(1000);
+    expect(normalizeDataPaper({ ...base, year: 2999 })?.year).toBe(2999);
+    expect(normalizeDataPaper({ ...base, year: 999 })).toBeNull();
+    expect(normalizeDataPaper({ ...base, year: 3000 })).toBeNull();
+  });
+
+  test("doi: 255 characters is accepted, 256 is refused rather than cut", () => {
+    const prefix = "10.1000/";
+    const at = prefix + "a".repeat(DATA_PAPER_STRING_CAPS.doi - prefix.length);
+    expect([...at]).toHaveLength(255);
+    expect(normalizeDataPaper({ doi: at })?.doi).toBe(at);
+    expect(normalizeDataPaper({ doi: `${at}a` })).toBeNull();
+  });
+
+  test.each([
+    ["title", 500],
+    ["venue", 200],
+    ["judge_model", 100],
+  ] as const)("%s: %i characters are kept, one more is truncated to the cap", (field, cap) => {
+    expect(DATA_PAPER_STRING_CAPS[field]).toBe(cap);
+    const atCap = "a".repeat(cap);
+    expect(normalizeDataPaper({ ...base, [field]: atCap })?.[field]).toBe(atCap);
+    const over = normalizeDataPaper({ ...base, [field]: `${atCap}b` })?.[field];
+    expect(over).toBe(atCap);
+    expect([...(over ?? "")]).toHaveLength(cap);
+  });
+});
+
 describe("validateDataPapers (the writer's check)", () => {
   test("an empty list is valid and serializes to []", () => {
     const res = validateDataPapers([]);
@@ -137,6 +173,60 @@ describe("validateDataPapers (the writer's check)", () => {
     expect(validateDataPapers({ doi: "10.5524/100542" }).ok).toBe(false);
     expect(validateDataPapers(null).ok).toBe(false);
     expect(validateDataPapers(undefined).ok).toBe(false);
+  });
+});
+
+describe("validateDataPapers: ADR 0075's guard", () => {
+  let errors: string[];
+  const originalError = console.error;
+  beforeEach(() => {
+    errors = [];
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+  });
+  afterEach(() => {
+    console.error = originalError;
+  });
+
+  const BIDS = { doi: "10.1038/sdata.2016.44", title: "The BIDS specification" };
+  const SPEC_TITLED = {
+    doi: "10.1000/not-on-the-list.1",
+    title: "EEG-BIDS, an extension to the brain imaging data structure",
+  };
+
+  test("drops a never-data-paper DOI and a spec-titled entry, names the dataset, keeps the rest", () => {
+    const res = validateDataPapers([BIDS, SCI_DATA, SPEC_TITLED], "nm000275");
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.papers.map((p) => p.doi)).toEqual([SCI_DATA.doi]);
+    expect(errors).toHaveLength(2);
+    expect(errors.every((e) => e.includes("nm000275"))).toBe(true);
+  });
+
+  test("the DOI match ignores case", () => {
+    const res = validateDataPapers([{ doi: "10.1038/SDATA.2016.44" }, SCI_DATA], "nm000275");
+    expect(res.ok && res.papers.map((p) => p.doi)).toEqual([SCI_DATA.doi]);
+  });
+
+  test("a non-empty list the guard empties is refused, not stored as []", () => {
+    const res = validateDataPapers([BIDS, SPEC_TITLED], "nm000275");
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.reason).toContain("ADR 0075");
+  });
+
+  test("an empty list stays valid and is stored as [], the guard or not", () => {
+    const res = validateDataPapers([], "nm000275");
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.json).toBe("[]");
+    expect(errors).toHaveLength(0);
+  });
+
+  test("a title that merely mentions BIDS is a legitimate data paper", () => {
+    const res = validateDataPapers(
+      [{ doi: "10.1000/ok.1", title: "BIDS-formatted EEG recordings during reading" }],
+      "nm000275",
+    );
+    expect(res.ok).toBe(true);
   });
 });
 
