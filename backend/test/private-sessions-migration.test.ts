@@ -55,6 +55,10 @@ function statements(sql: string): string[] {
     .filter((s) => s.length > 0);
 }
 
+/** A row the old table never had, slipped into the copy. */
+const EXTRA_ROW =
+  "INSERT INTO web_sessions_new (user_id, cookie_id_hash, expires_at) VALUES ((SELECT id FROM users ORDER BY id LIMIT 1), 'h-extra', '2099-01-01 00:00:00');";
+
 /** Insert `extra` immediately before the first guard statement. */
 function withInjection(sql: string, extra: string): string {
   const marker = "INSERT INTO _rebuild_guard";
@@ -326,6 +330,9 @@ describe("migration 0089: the guard stops the DROP on its own", () => {
       "altered (same count, one value changed)",
       "UPDATE web_sessions_new SET revoked_at = NULL WHERE cookie_id_hash = 'h-app-revoked';",
     ],
+    // The third direction: a row the old table never had. Only the count and
+    // the new-EXCEPT-old row see it, so this is what keeps those two honest.
+    ["padded (an extra row)", EXTRA_ROW],
   ] as const) {
     test(`a copy that is ${what} fails the guard before the DROP`, () => {
       const db = seeded();
@@ -458,7 +465,8 @@ describe("migration 0089 on Miniflare D1", () => {
       modules: true,
       script: "export default { fetch() { return new Response(null, { status: 204 }); } };",
       compatibilityDate: "2024-12-01",
-      d1Databases: ["DB1", "DB2", "DB3"],
+      // One fresh database per test below.
+      d1Databases: ["DB1", "DB2", "DB3", "DB4"],
     });
   });
 
@@ -472,6 +480,7 @@ describe("migration 0089 on Miniflare D1", () => {
       "an altered",
       "UPDATE web_sessions_new SET revoked_at = NULL WHERE cookie_id_hash = 'h-app-revoked';",
     ],
+    ["a padded", EXTRA_ROW],
   ] as const) {
     test(`${what} copy fails the file with the guard's CHECK, and web_sessions is untouched`, async () => {
       const d1 = await seededD1();
