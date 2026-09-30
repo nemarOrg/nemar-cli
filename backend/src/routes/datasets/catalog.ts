@@ -131,6 +131,21 @@ const FACET_PROJECTION_COLUMNS = `d.subject_count,
 export { buildDatasetFilterClauses, escapeLikePattern };
 
 /**
+ * `latest_version_at`: when the dataset's newest version was released, read
+ * from the same `dataset_versions` row the `latest_version` subqueries name
+ * (newest `created_at`), so the two always agree. `datasets.updated_at` cannot
+ * stand in for it: enrichment reindex, finalize and the DOI callbacks all bump
+ * it, so a catalog-wide sweep made every dataset look freshly updated. Expects
+ * the `datasets` table aliased as `d`. NULL when the dataset has no version row.
+ */
+const LATEST_VERSION_AT_SQL = `(
+  SELECT dv.created_at FROM dataset_versions dv
+  WHERE dv.dataset_id = d.dataset_id
+  ORDER BY dv.created_at DESC
+  LIMIT 1
+) AS latest_version_at`;
+
+/**
  * Emit `latest_version` in the canonical `vX.Y.Z` tag form (epic #896 #899).
  * D1's `dataset_versions.version` stores a mix of bare (`1.0.0`) and tagged
  * (`v1.0.0`) rows; the catalog plane historically forwarded them raw while the
@@ -838,7 +853,8 @@ async function executeAndReturn(
                       WHERE dv.dataset_id = d.dataset_id
                       ORDER BY created_at DESC
                       LIMIT 1
-                    ) AS latest_version
+                    ) AS latest_version,
+                    ${LATEST_VERSION_AT_SQL}
              FROM datasets d
              JOIN users u ON d.owner_user_id = u.id
              WHERE d.status = 'active' AND (d.is_sandbox = 0 OR d.is_sandbox IS NULL OR d.is_exemplar = 1)
@@ -1020,7 +1036,8 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
                  WHERE dv.dataset_id = d.dataset_id
                  ORDER BY created_at DESC
                  LIMIT 1
-               ) AS latest_version
+               ) AS latest_version,
+               ${LATEST_VERSION_AT_SQL}
         ${mineBase}
       `;
       const params: (string | number)[] = [status, user.id];
@@ -1143,7 +1160,8 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
                WHERE dv.dataset_id = d.dataset_id
                ORDER BY created_at DESC
                LIMIT 1
-             ) AS latest_version
+             ) AS latest_version,
+             ${LATEST_VERSION_AT_SQL}
       ${from}
     `;
       return { sql, params: prefixParams };
@@ -1434,6 +1452,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
           ORDER BY created_at DESC
           LIMIT 1
         ) AS latest_version,
+        ${LATEST_VERSION_AT_SQL},
         -- Issue #1068 (epic #1181 phase 8): same derivation as the list
         -- projection above (FACET_PROJECTION_COLUMNS) -- d.* alone does not
         -- surface a json_extract expression.
