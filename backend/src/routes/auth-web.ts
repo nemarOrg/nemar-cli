@@ -85,6 +85,7 @@ import {
   identityRefusal,
   isUniqueViolationOn,
 } from "../services/identity";
+import { PRIVATE_GRANTS_PURGE_SQL, PRIVATE_REVOKE_ALL_SQL } from "../services/private-auth";
 import {
   type ProfilePatchInput,
   githubHandleChanged,
@@ -794,10 +795,21 @@ authWebRoutes.post("/logout", webSessionMiddleware, async (c) => {
       // out has to end the thing that can still create access, not only the
       // access that already exists.
       statements.push(c.env.DB.prepare(DOCS_GRANTS_PURGE_SQL).bind(userId));
+      // The private site's sessions and grants, for the same two reasons and in
+      // the same transaction (ADR 0079): that host's cookie cannot be cleared
+      // from here either, and a captured private-site code is the same
+      // sixty-second licence a docs code is.
+      statements.push(c.env.DB.prepare(PRIVATE_REVOKE_ALL_SQL).bind(userId));
+      statements.push(c.env.DB.prepare(PRIVATE_GRANTS_PURGE_SQL).bind(userId));
     }
     if (statements.length > 0) await c.env.DB.batch(statements);
   } catch (err) {
-    console.error("[auth-web] /logout: revoke failed; clearing cookie anyway", err);
+    // The account id is what an operator needs to finish the job by hand:
+    // the batch is all-or-nothing, so nothing of it landed.
+    console.error(
+      `[auth-web] /logout: revoke failed for user ${userId ?? "unresolved"}; clearing cookie anyway`,
+      err,
+    );
   }
 
   c.header("Set-Cookie", buildClearedSessionCookie(c.env.WEB_SESSION_COOKIE_DOMAIN || undefined));

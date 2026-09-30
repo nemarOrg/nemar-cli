@@ -228,13 +228,16 @@ authKeysRoutes.post(
  * End every docs session this account holds, after one of its API keys is
  * revoked.
  *
- * WHY THIS IS HERE. `services/docs-auth.ts` says of `DOCS_REVOKE_ALL_SQL`:
- * "FOUR CALLERS, and the count is the point: every path that ends or downgrades
- * this credential runs this statement ... A fifth path that ends a credential
- * needs this line too." Epic #1336 phase 3 added exactly that fifth path --
- * `POST /auth/docs/cli-session` mints a docs credential FROM an API key -- and
- * did not add the line, so revoking the key left the docs session reading
- * `/admin/*` for the rest of its fifteen minutes.
+ * WHY THIS IS HERE. `services/docs-auth.ts` names every caller of
+ * `DOCS_GRANTS_PURGE_SQL` and says a new path that ends a credential needs the
+ * line too. Epic #1336 phase 3 added such a path -- `POST
+ * /auth/docs/cli-session` mints a docs credential FROM an API key -- and did
+ * not add it, so revoking the key left the docs session reading `/admin/*` for
+ * the rest of its fifteen minutes.
+ *
+ * The private site's sessions are deliberately NOT ended here: one is never
+ * minted from a key, so a key's end has nothing of that scope to reach (ADR
+ * 0079, `PRIVATE_REVOKE_ALL_SQL`).
  *
  * WHY IT REVOKES ALL OF THEM rather than the one that key minted: the session
  * row records no minting token, so there is nothing to revoke precisely. Adding

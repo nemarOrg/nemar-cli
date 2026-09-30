@@ -223,15 +223,17 @@ export const DOCS_MINT_CONSUME_SQL = `DELETE FROM docs_grants
 /**
  * Revoke every docs session belonging to one account. Binds: userId.
  *
- * Called by `/auth/logout` and by an admin role demotion. Without it, signing
- * out of nemar.org would leave docs access live for up to eight hours, which is
- * not what anyone means by signing out, and it is the specific failure the core
- * principle about revocation cascading to linked credentials is meant to
- * prevent.
+ * THREE CALLERS: `/auth/logout`, an admin role demotion, and
+ * `revokeDocsCredentials` in `routes/auth-keys.ts`, which runs after a
+ * self-service API key revocation because a docs session can be minted from a
+ * key (`POST /auth/docs/cli-session`). Without it, signing out of nemar.org
+ * would leave docs access live for up to eight hours, which is not what anyone
+ * means by signing out, and it is the specific failure the core principle
+ * about revocation cascading to linked credentials is meant to prevent.
  *
- * The other two callers that end a credential do NOT use this one, and should
- * not: `finalizeRevocation` and the owner-only soft delete revoke every session
- * of every scope for the account, which is a superset. This statement is for the
+ * The two paths that end EVERY credential do NOT use this one, and should not:
+ * `finalizeRevocation` and the owner-only soft delete revoke every session of
+ * every scope for the account, which is a superset. This statement is for the
  * cases where the app session legitimately survives.
  */
 export const DOCS_REVOKE_ALL_SQL = `UPDATE web_sessions
@@ -250,10 +252,13 @@ export const DOCS_REVOKE_ALL_SQL = `UPDATE web_sessions
  * survived sign-out and could still be spent. Ending access has to end what can
  * still create access, not only the access that exists.
  *
- * FOUR CALLERS, and the count is the point: every path that ends or downgrades
+ * FIVE CALLERS, and the count is the point: every path that ends or downgrades
  * this credential runs this statement -- `/auth/logout`, `finalizeRevocation`, a
- * role demotion, and the owner-only soft delete. The FK's `ON DELETE CASCADE`
- * covers none of them, because none of them deletes the `users` row. A fifth
- * path that ends a credential needs this line too.
+ * role demotion, the owner-only soft delete, and `revokeDocsCredentials` in
+ * `routes/auth-keys.ts` (self-service API key revocation). The FK's
+ * `ON DELETE CASCADE` covers none of them, because none of them deletes the
+ * `users` row. A sixth path that ends a credential needs this line too.
+ * The private site's grants have their own table and their own count
+ * (`PRIVATE_GRANTS_PURGE_SQL` in `services/private-auth.ts`).
  */
 export const DOCS_GRANTS_PURGE_SQL = "DELETE FROM docs_grants WHERE user_id = ?";

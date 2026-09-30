@@ -122,3 +122,50 @@ export const PRIVATE_REVOKE_ONE_SQL = `UPDATE web_sessions
     WHERE cookie_id_hash = ?
       AND scope = 'private'
       AND revoked_at IS NULL`;
+
+/**
+ * Revoke every private session belonging to one account. Binds: userId.
+ *
+ * ONE CALLER: `/auth/logout`, in the same `db.batch` as the app-session revoke
+ * and the docs cascade. Signing out of nemar.org signs the account out of the
+ * private site too; that host's cookie cannot be cleared from here, so revoking
+ * the rows is what makes its next request refuse.
+ *
+ * `finalizeRevocation` and the owner-only soft delete do not use this: they
+ * revoke every session of every scope for the account, which is a superset.
+ *
+ * DELIBERATELY NOT CALLED, and a later reader should not "fix" either:
+ *   - A role demotion. Nothing about a private session depends on the role: it
+ *     was not minted because of one, and `resolvePrincipal` reports the live
+ *     role on every call, so a demoted account is seen as demoted at its next
+ *     request. (The docs session IS revoked on demotion, because it exists
+ *     only for admins.)
+ *   - Revoking an API key. A private session is never minted from a key (there
+ *     is no counterpart to `POST /auth/docs/cli-session`), so ending a key has
+ *     nothing of this scope to reach. If a key-based path to a private session
+ *     is ever added, the key-revoke paths need this line and
+ *     {@link PRIVATE_GRANTS_PURGE_SQL}.
+ */
+export const PRIVATE_REVOKE_ALL_SQL = `UPDATE web_sessions
+      SET revoked_at = datetime('now')
+    WHERE user_id = ?
+      AND scope = 'private'
+      AND revoked_at IS NULL`;
+
+/**
+ * Delete every outstanding private grant for one account. Binds: userId.
+ *
+ * A grant is a sixty-second licence to create a new eight-hour session, held
+ * by whoever has the code, and the mint checks the ACCOUNT rather than the app
+ * session that authorized it. So ending access has to end what can still
+ * create access, not only the sessions that exist.
+ *
+ * THREE CALLERS, and the count is the point: every path that ends this
+ * account's credentials runs this statement -- `/auth/logout`,
+ * `finalizeRevocation` (admin revoke, by username and by id) and the
+ * owner-only soft delete. The foreign key's `ON DELETE CASCADE` covers none of
+ * them, because none of them deletes the `users` row. A fourth path that ends
+ * a credential needs this line too. Role demotion and API key revocation are
+ * outside the set on purpose; see {@link PRIVATE_REVOKE_ALL_SQL}.
+ */
+export const PRIVATE_GRANTS_PURGE_SQL = "DELETE FROM private_grants WHERE user_id = ?";
