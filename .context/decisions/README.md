@@ -116,6 +116,8 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0075](0075-standards-papers-are-never-a-data-paper.md) - Standards, software, platform, and umbrella papers are never a dataset's data paper; relation types are chosen from resolved DOIs
 - [ADR 0076](0076-news-images-live-in-their-own-r2-bucket.md) - News images live in their own R2 bucket and are served by the Worker; dataset bytes stay in S3
 - [ADR 0077](0077-data-papers-in-metadata-json.md) - `metadata.json` serves `data_papers`, the citations judge's verdict, pulled from the dashboard into one D1 column
+- [ADR 0078](0078-the-api-exposes-a-service-binding-entrypoint.md) - The API exposes the `NemarApiRpc` service-binding entrypoint; no method acts without the user's credential or a one-time grant, and the Cloudflare account is the trust boundary
+- [ADR 0079](0079-the-private-site-holds-a-session-scope-of-its-own.md) - The private site holds a `private` session scope of its own, minted for any active account through a grant bound to the browser's `state`, ended by sign-out, revoke and delete but not by demotion or key revocation
 
 ## Backfill note (2026-07-31)
 

@@ -7,9 +7,11 @@
  * file, and the tests drive those functions. This module is the only one that
  * imports `cloudflare:workers`, which bun cannot resolve; keeping every rule
  * out of it is what keeps every rule testable under bun, and keeping it out of
- * `index.ts` is what keeps the eight test files that import `index.ts` loading.
- * Its own wiring is proven in workerd, by
- * `backend/test/private-site-rpc-entry.test.ts`.
+ * `index.ts` is what keeps the test files that import `index.ts` loading.
+ * `backend/test/private-site-rpc-entry.test.ts` exercises its export and each
+ * method in workerd. That the class hands `this.ctx` to the session read is
+ * proven only one level down, by the bun test of the function it calls: local
+ * workerd finishes the floating write with or without it.
  *
  * What a caller must know is in ADR 0078 and `shared/contract/private-site.ts`:
  * refusals are values and faults throw; the HTTP middleware (CORS, rate limit,

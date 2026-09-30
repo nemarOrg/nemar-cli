@@ -68,6 +68,18 @@ the pages themselves, in a public repository.
 > No behavior changed; the description was wrong, in a file whose job is to be
 > the record.
 
+> **Correction (2026-09-30).** Decision 5 lists the paths that end the docs
+> credential as sign-out, admin revoke, role demotion and the owner-only soft
+> delete. The list was already longer than that and is longer again since the
+> change that ADR 0079 records: because a docs session can be minted from an API
+> key (`POST /auth/docs/cli-session`), every route that revokes keys without
+> ending every session also ends the account's docs sessions and grants,
+> through `revokeDocsCredentials` in `services/docs-auth.ts`. That is
+> self-service key revocation (which already did), the owner's
+> `DELETE /admin/users/:username/keys/:id` and the emailed
+> `GET /auth/confirm-key-regeneration` (both added then). The verdict is
+> unchanged; the list of paths that carry it out is longer.
+
 ## Consequences
 
 - The admin section is served only to admins, and an admin's access ends when their role,
