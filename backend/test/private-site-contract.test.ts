@@ -35,6 +35,7 @@ describe("the contract as text", () => {
       PRIVATE_GRANT_TTL_SECONDS: 60,
       PRIVATE_SESSION_TTL_SECONDS: 28800,
       PRIVATE_AUTHORIZE_PATH: "/auth/private/authorize",
+      PRIVATE_AUTHORIZE_STATE_PARAM: "state",
       PRIVATE_CALLBACK_PATH: "/__auth/callback",
     });
   });

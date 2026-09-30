@@ -108,13 +108,21 @@ async function appSession(userId: number): Promise<string> {
   return cookieIdRaw;
 }
 
-/** A one-time code from the real grant route. */
-async function privateCode(userId: number, cookie?: string): Promise<string> {
+/** The browser's `state`: 43 base64url characters, as 256 random bits make. */
+const STATE = "BrowserStateForTests-0123456789_abcdefghijk";
+
+/** A one-time code from the real grant route, bound to `state`. */
+async function privateCode(userId: number, state = STATE): Promise<string> {
   const res = await app.request(
     "/auth/private/grant",
     {
       method: "POST",
-      headers: { Cookie: `nemar_session=${cookie ?? (await appSession(userId))}`, Origin: APP },
+      headers: {
+        Cookie: `nemar_session=${await appSession(userId)}`,
+        Origin: APP,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ state }),
     },
     env(),
   );
@@ -122,9 +130,13 @@ async function privateCode(userId: number, cookie?: string): Promise<string> {
   return ((await res.json()) as { code: string }).code;
 }
 
-function exchange(code: unknown, extra: Partial<Bindings> = {}) {
+/** Leave the `state` field out of the request entirely. */
+const NO_STATE = Symbol("no state");
+
+function exchange(code: unknown, extra: Partial<Bindings> = {}, state: unknown = STATE) {
   return exchangePrivateGrant(env(extra), {
     code,
+    ...(state === NO_STATE ? {} : { state }),
     userAgent: "private-site-visitor",
     clientIp: "198.51.100.23",
   });
@@ -250,6 +262,42 @@ describe("exchangePrivateGrant", () => {
     expect(await exchangePrivateGrant(env(), null)).toEqual({ ok: false, error: "invalid_grant" });
   });
 
+  test("the state the grant was minted with is the one that spends it", async () => {
+    const userId = seedUser("state-match@nemar.test");
+    expect((await exchange(await privateCode(userId, STATE), {}, STATE)).ok).toBe(true);
+  });
+
+  test("a grant minted with state A cannot be spent with state B, and survives for A", async () => {
+    // The login-CSRF case: the code reached a browser that did not start the
+    // sign-in, and that browser's cookie holds a different state (or none).
+    const userId = seedUser("state-swap@nemar.test");
+    const stateA = "A".repeat(43);
+    const stateB = "B".repeat(43);
+    const code = await privateCode(userId, stateA);
+    expect(await exchange(code, {}, stateB)).toEqual({ ok: false, error: "invalid_grant" });
+    expect(privateRows(userId)).toHaveLength(0);
+    expect(grantCount()).toBe(1);
+    expect((await exchange(code, {}, stateA)).ok).toBe(true);
+  });
+
+  for (const [what, state] of [
+    ["missing", NO_STATE],
+    ["empty", ""],
+    ["31 characters long", "s".repeat(31)],
+    ["257 characters long", "s".repeat(257)],
+    ["outside the base64url alphabet", `${"s".repeat(42)}/`],
+    ["not a string", 42],
+  ] as const) {
+    test(`a state that is ${what} is invalid_grant, and the grant is not consumed`, async () => {
+      const userId = seedUser(`state-bad-${what.replace(/\W+/g, "-")}@nemar.test`);
+      const code = await privateCode(userId);
+      expect(await exchange(code, {}, state)).toEqual({ ok: false, error: "invalid_grant" });
+      expect(privateRows(userId)).toHaveLength(0);
+      // Still spendable by the browser that holds the right state.
+      expect((await exchange(code)).ok).toBe(true);
+    });
+  }
+
   test("an expired code is invalid_grant", async () => {
     const userId = seedUser("expired-code@nemar.test");
     const code = await privateCode(userId);
@@ -334,6 +382,7 @@ describe("exchangePrivateGrant", () => {
     const userId = seedUser("long-ua@nemar.test");
     const result = await exchangePrivateGrant(env(), {
       code: await privateCode(userId),
+      state: STATE,
       userAgent: "u".repeat(600),
       clientIp: null,
     });
@@ -349,6 +398,7 @@ describe("exchangePrivateGrant", () => {
       const userId = seedUser(`ip-${what}@nemar.test`);
       const result = await exchangePrivateGrant(env(), {
         code: await privateCode(userId),
+        state: STATE,
         userAgent: null,
         clientIp,
       });
@@ -359,6 +409,7 @@ describe("exchangePrivateGrant", () => {
     const userId = seedUser("ip-edge@nemar.test");
     await exchangePrivateGrant(env(), {
       code: await privateCode(userId),
+      state: STATE,
       userAgent: null,
       clientIp: "2".repeat(64),
     });
@@ -371,8 +422,8 @@ describe("exchangePrivateGrant", () => {
     const userId = seedUser("long-code@nemar.test");
     const code = "c".repeat(257);
     db.run(
-      "INSERT INTO private_grants (code_hash, user_id, expires_at) VALUES (?, ?, datetime('now', '+60 seconds'))",
-      [await hashGrantCode(code), userId],
+      "INSERT INTO private_grants (code_hash, state_hash, user_id, expires_at) VALUES (?, ?, ?, datetime('now', '+60 seconds'))",
+      [await hashGrantCode(code), await hashGrantCode(STATE), userId],
     );
     expect(await exchange(code)).toEqual({ ok: false, error: "invalid_grant" });
     expect(privateRows(userId)).toHaveLength(0);
@@ -383,7 +434,7 @@ describe("exchangePrivateGrant", () => {
     const pending: Promise<unknown>[] = [];
     const result = await exchangePrivateGrant(
       env(),
-      { code: await privateCode(userId), userAgent: null, clientIp: null },
+      { code: await privateCode(userId), state: STATE, userAgent: null, clientIp: null },
       { waitUntil: (p) => pending.push(p) },
     );
     expect(result.ok).toBe(true);
@@ -903,7 +954,9 @@ describe("maintenance mode on every method", () => {
       session,
       resolveSession: outcome(await resolvePrincipal(e, { kind: "session", value: session })),
       resolveKey: outcome(await resolvePrincipal(e, { kind: "api_key", value: key })),
-      exchange: outcome(await exchangePrivateGrant(e, { code, userAgent: null, clientIp: null })),
+      exchange: outcome(
+        await exchangePrivateGrant(e, { code, state: STATE, userAgent: null, clientIp: null }),
+      ),
       revoke: outcome(await revokePrivateSession(e, { value: session })),
     };
   }

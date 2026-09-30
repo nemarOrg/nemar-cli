@@ -77,17 +77,44 @@ async function appSession(userId: number, authMethod: AuthMethod = "orcid"): Pro
   return cookieIdRaw;
 }
 
-function grant(cookie?: string, origin: string | null = APP): Promise<Response> {
-  const headers: Record<string, string> = {};
+/** A valid `state`: 43 base64url characters, the length 256 random bits make. */
+const STATE = "StateForTests_0123456789-abcdefghijklmnopqr";
+
+/** Send the request with no body at all. */
+const NO_BODY = Symbol("no body");
+
+function grant(
+  cookie?: string,
+  origin: string | null = APP,
+  body: unknown = { state: STATE },
+): Promise<Response> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (cookie) headers.Cookie = `nemar_session=${cookie}`;
   if (origin) headers.Origin = origin;
-  return app.request("/auth/private/grant", { method: "POST", headers }, env());
+  return app.request(
+    "/auth/private/grant",
+    {
+      method: "POST",
+      headers,
+      ...(body === NO_BODY ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }),
+    },
+    env(),
+  );
 }
 
 function grantRow(codeHash: string) {
   return db
-    .query<{ user_id: number; auth_method: string | null; ttl: number; live: number }, [string]>(
-      `SELECT user_id, auth_method,
+    .query<
+      {
+        user_id: number;
+        auth_method: string | null;
+        state_hash: string;
+        ttl: number;
+        live: number;
+      },
+      [string]
+    >(
+      `SELECT user_id, auth_method, state_hash,
               CAST(ROUND((julianday(expires_at) - julianday('now')) * 86400) AS INTEGER) AS ttl,
               expires_at > datetime('now') AS live
          FROM private_grants WHERE code_hash = ?`,
@@ -174,6 +201,34 @@ describe("POST /auth/private/grant: refusals", () => {
     expect(grantCount()).toBe(0);
   });
 
+  for (const [what, body] of [
+    ["no body", NO_BODY],
+    ["a body that is not JSON", "state=abc"],
+    ["no state field", {}],
+    ["a state that is not a string", { state: 1234567890 }],
+    ["a 31-character state", { state: "a".repeat(31) }],
+    ["a 257-character state", { state: "a".repeat(257) }],
+    ["a state with a padding character", { state: `${"a".repeat(42)}=` }],
+    ["a state with a standard-base64 character", { state: `${"a".repeat(42)}+` }],
+    ["a state with a space", { state: `${"a".repeat(21)} ${"a".repeat(21)}` }],
+  ] as const) {
+    test(`${what} is 400 invalid_request, and mints nothing`, async () => {
+      const userId = seedUser(`state-${what.replace(/\W+/g, "-")}@nemar.test`);
+      const res = await grant(await appSession(userId), APP, body);
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe("invalid_request");
+      expect(res.headers.get("Cache-Control")).toBe("no-store");
+      expect(grantCount()).toBe(0);
+    });
+  }
+
+  test("the shortest and longest accepted states mint", async () => {
+    for (const state of ["a".repeat(32), "Z-_9".repeat(64)]) {
+      const userId = seedUser(`state-edge-${state.length}@nemar.test`);
+      expect((await grant(await appSession(userId), APP, { state })).status).toBe(200);
+    }
+  });
+
   test("a docs session presented as the app cookie is no session", async () => {
     const userId = seedUser("docsholder@nemar.test", "admin");
     const docs = await docsSession(userId);
@@ -209,6 +264,14 @@ describe("POST /auth/private/grant: success", () => {
     const row = grantRow(await hashGrantCode(code));
     expect(row?.user_id).toBe(userId);
     expect(row?.auth_method).toBe("email_code");
+    // The browser's state is kept only as its hash.
+    expect(row?.state_hash).toBe(await hashGrantCode(STATE));
+    const stateInClear = db
+      .query<{ n: number }, [string]>(
+        "SELECT COUNT(*) AS n FROM private_grants WHERE state_hash = ?",
+      )
+      .get(STATE);
+    expect(stateInClear?.n).toBe(0);
     expect(row?.live).toBe(1);
     // SQL-side TTL, measured by the database's own clock.
     expect(row?.ttl).toBeGreaterThan(PRIVATE_GRANT_TTL_SECONDS - 5);
@@ -232,9 +295,9 @@ describe("POST /auth/private/grant: success", () => {
   test("prunes grants more than an hour past expiry, and only those", async () => {
     const userId = seedUser("prune@nemar.test");
     db.run(
-      `INSERT INTO private_grants (code_hash, user_id, expires_at) VALUES
-         ('stale', ?, datetime('now', '-2 hours')),
-         ('recent', ?, datetime('now', '-10 minutes'))`,
+      `INSERT INTO private_grants (code_hash, state_hash, user_id, expires_at) VALUES
+         ('stale', 's', ?, datetime('now', '-2 hours')),
+         ('recent', 's', ?, datetime('now', '-10 minutes'))`,
       [userId, userId],
     );
     expect((await grant(await appSession(userId))).status).toBe(200);
@@ -252,7 +315,7 @@ describe("PRIVATE_GRANT_INSERT_SQL on its own", () => {
   async function mintFrom(sessionId: number): Promise<number> {
     const result = await realD1(db)
       .prepare(PRIVATE_GRANT_INSERT_SQL)
-      .bind("statement-code", PRIVATE_GRANT_TTL_SECONDS, sessionId)
+      .bind("statement-code", "statement-state", PRIVATE_GRANT_TTL_SECONDS, sessionId)
       .run();
     return result.meta.changes;
   }

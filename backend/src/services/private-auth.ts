@@ -22,6 +22,18 @@
 import { ACTIVE_ACCOUNT_STATUS_SQL_LIST } from "./account-tier";
 
 /**
+ * A `state` the private site generated for one browser's sign-in: 32 to 256
+ * characters of the base64url alphabet. 32 is a floor on the shape, not the
+ * strength; the contract requires 256 random bits, which is 43 characters.
+ * Anything else is refused before it is hashed.
+ */
+const GRANT_STATE_PATTERN = /^[A-Za-z0-9_-]{32,256}$/;
+
+export function grantState(value: unknown): string | null {
+  return typeof value === "string" && GRANT_STATE_PATTERN.test(value) ? value : null;
+}
+
+/**
  * Delete grants more than an hour past expiry. Run opportunistically by the
  * grant route in the same batch as the insert, to save a round trip; the two
  * share one transaction, so a failed prune fails that grant too. Same idea,
@@ -32,7 +44,11 @@ export const PRIVATE_GRANT_PRUNE_SQL = `DELETE FROM private_grants
 
 /**
  * Mint a grant from a live APP session, or insert nothing.
- * Binds: codeHash, ttlSeconds, appSessionId.
+ * Binds: codeHash, stateHash, ttlSeconds, appSessionId.
+ *
+ * `state_hash` is the SHA-256 of the `state` the private site gave this
+ * browser, forwarded by the website. Only the hash is stored, and the mint
+ * below requires the same value back.
  *
  * `INSERT ... SELECT` off `web_sessions` rather than binding the user id the
  * route already has: it re-proves the app session inside the statement that
@@ -47,8 +63,8 @@ export const PRIVATE_GRANT_PRUNE_SQL = `DELETE FROM private_grants
  * private session could renew itself every eight hours without ever revisiting
  * the app host, which is where sign-out, revocation and the status checks live.
  */
-export const PRIVATE_GRANT_INSERT_SQL = `INSERT INTO private_grants (code_hash, user_id, auth_method, expires_at)
-   SELECT ?, ws.user_id, ws.auth_method, datetime('now', '+' || ? || ' seconds')
+export const PRIVATE_GRANT_INSERT_SQL = `INSERT INTO private_grants (code_hash, state_hash, user_id, auth_method, expires_at)
+   SELECT ?, ?, ws.user_id, ws.auth_method, datetime('now', '+' || ? || ' seconds')
      FROM web_sessions ws
     WHERE ws.id = ?
       AND ws.scope = 'app'
@@ -57,12 +73,15 @@ export const PRIVATE_GRANT_INSERT_SQL = `INSERT INTO private_grants (code_hash, 
 
 /**
  * Mint the private session from a live grant, or insert nothing.
- * Binds: cookieIdHash, ttlSeconds, userAgent, ipHash, codeHash.
+ * Binds: cookieIdHash, ttlSeconds, userAgent, ipHash, codeHash, stateHash.
  *
  * `INSERT ... SELECT`, so the gates and the write are one statement with no
  * window between checking and creating; zero rows inserted IS the refusal.
  * The gates:
  *   - `pg.expires_at > datetime('now')` - the grant is still claimable.
+ *   - `pg.state_hash = ?` - the browser finishing the sign-in is the one that
+ *     started it. A different or missing `state` mints nothing, and the grant
+ *     is left for its own browser (the consume below is gated on a mint).
  *   - `u.status IN ${ACTIVE_ACCOUNT_STATUS_SQL_LIST}` and `deleted_at IS NULL`
  *     - re-read from `users` at mint, not trusted from the grant, and the SAME
  *     status rule the API's credential checks apply (`isActiveAccountStatus`).
@@ -90,6 +109,7 @@ export const PRIVATE_MINT_INSERT_SQL = `INSERT INTO web_sessions
      FROM private_grants pg
      JOIN users u ON u.id = pg.user_id
     WHERE pg.code_hash = ?
+      AND pg.state_hash = ?
       AND pg.expires_at > datetime('now')
       AND u.status IN ${ACTIVE_ACCOUNT_STATUS_SQL_LIST}
       AND u.deleted_at IS NULL`;

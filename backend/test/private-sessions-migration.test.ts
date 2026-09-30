@@ -380,12 +380,30 @@ describe("migration 0089: the new scope", () => {
 });
 
 describe("migration 0089: private_grants", () => {
-  test("is shaped like docs_grants", () => {
+  test("is shaped like docs_grants, plus a required state_hash", () => {
     const { db } = migrated();
-    expect(columns(db, "private_grants")).toEqual(columns(db, "docs_grants"));
+    const docs = columns(db, "docs_grants") as { name: string; cid: number }[];
+    const priv = columns(db, "private_grants") as { name: string; cid: number }[];
+    const strip = ({ cid: _cid, ...rest }: { cid: number }) => rest;
+    expect(priv.filter((c) => c.name !== "state_hash").map(strip)).toEqual(docs.map(strip));
+    expect(priv.find((c) => c.name === "state_hash")).toMatchObject({
+      type: "TEXT",
+      notnull: 1,
+      dflt_value: null,
+    });
     expect(db.query("PRAGMA foreign_key_list(private_grants)").all()).toEqual(
       db.query("PRAGMA foreign_key_list(docs_grants)").all(),
     );
+  });
+
+  test("a grant without a state_hash is refused", () => {
+    const { db } = migrated();
+    expect(() =>
+      db.run(
+        "INSERT INTO private_grants (code_hash, user_id, expires_at) VALUES ('c0', ?, '2099-01-01 00:00:00')",
+        [firstUserId(db)],
+      ),
+    ).toThrow(/NOT NULL/);
   });
 
   test("has its expiry index for the prune, exactly as declared", () => {
@@ -405,7 +423,7 @@ describe("migration 0089: private_grants", () => {
       db.query<{ id: number }, []>("SELECT id FROM users WHERE username = 'mig-grant'").get()?.id ??
       0;
     db.run(
-      "INSERT INTO private_grants (code_hash, user_id, expires_at) VALUES ('c1', ?, '2099-01-01 00:00:00')",
+      "INSERT INTO private_grants (code_hash, state_hash, user_id, expires_at) VALUES ('c1', 's1', ?, '2099-01-01 00:00:00')",
       [id],
     );
     db.run("DELETE FROM users WHERE id = ?", [id]);

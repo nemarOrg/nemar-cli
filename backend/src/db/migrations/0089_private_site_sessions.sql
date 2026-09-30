@@ -164,8 +164,8 @@ CREATE INDEX idx_web_sessions_private_scope
 
 DROP TABLE _rebuild_guard;
 
--- Shaped exactly like `docs_grants` (0083), and a SEPARATE table rather than a
--- scope column on that one, for two reasons. The statements the live docs gate
+-- Shaped like `docs_grants` (0083) plus one column, `state_hash`, and a
+-- SEPARATE table rather than a scope column on that one, for two reasons. The statements the live docs gate
 -- runs stay untouched. And a docs code can never be spent at the private site,
 -- or the reverse, by construction: the two exchanges read different tables, so
 -- keeping them apart depends on no predicate anyone could drop.
@@ -183,6 +183,13 @@ CREATE TABLE private_grants (
   -- Copied from the app session that authorized the grant, and onto the
   -- private session the exchange mints.
   auth_method TEXT,
+  -- SHA-256 of the `state` the private site generated for the browser that
+  -- started the sign-in, and holds in a host-only cookie there. The exchange
+  -- mints only when the same value comes back, so a code cannot finish a
+  -- sign-in in a DIFFERENT browser: without it, an attacker could complete
+  -- their own grant in a victim's browser (login CSRF) and receive whatever
+  -- the victim then uploads. The docs gate needs none, being read-only.
+  state_hash TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   expires_at TEXT NOT NULL
 );

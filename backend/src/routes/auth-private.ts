@@ -30,7 +30,11 @@ import {
 import { webSessionMiddleware } from "../middleware/webSession";
 import { inactiveAccountBody, isActiveAccountStatus } from "../services/account-tier";
 import { generateGrantCode, hashGrantCode } from "../services/docs-auth";
-import { PRIVATE_GRANT_INSERT_SQL, PRIVATE_GRANT_PRUNE_SQL } from "../services/private-auth";
+import {
+  PRIVATE_GRANT_INSERT_SQL,
+  PRIVATE_GRANT_PRUNE_SQL,
+  grantState,
+} from "../services/private-auth";
 import { isAllowedOrigin } from "../services/web-session";
 import type { Bindings, Variables } from "../types/bindings";
 
@@ -47,8 +51,15 @@ const UNAUTHENTICATED = {
   message: "Sign in to nemar.org first, then open the link again.",
 } as const satisfies { error: PrivateGrantRefusal; message: string };
 
+const INVALID_REQUEST = {
+  error: "invalid_request",
+  message: "The sign-in link is incomplete. Open the page on the private site again.",
+} as const satisfies { error: PrivateGrantRefusal; message: string };
+
 /**
- * Mint a one-time code for the caller's own account.
+ * Mint a one-time code for the caller's own account, bound to the `state` the
+ * private site gave the browser (JSON body `{ state }`, forwarded by the
+ * website). Only the state's hash is stored.
  */
 authPrivateRoutes.post("/private/grant", webSessionMiddleware, async (c) => {
   // Origin first, before authentication, as `/auth/docs/grant` and every other
@@ -74,6 +85,13 @@ authPrivateRoutes.post("/private/grant", webSessionMiddleware, async (c) => {
     return c.json(inactiveAccountBody(user.status), 403, NO_STORE);
   }
 
+  // After authentication, so an anonymous caller learns nothing from a 400.
+  const body = (await c.req.json().catch(() => null)) as { state?: unknown } | null;
+  const state = grantState(body?.state);
+  if (state === null) {
+    return c.json(INVALID_REQUEST, 400, NO_STORE);
+  }
+
   const code = generateGrantCode();
   const codeHash = await hashGrantCode(code);
 
@@ -84,6 +102,7 @@ authPrivateRoutes.post("/private/grant", webSessionMiddleware, async (c) => {
     c.env.DB.prepare(PRIVATE_GRANT_PRUNE_SQL),
     c.env.DB.prepare(PRIVATE_GRANT_INSERT_SQL).bind(
       codeHash,
+      await hashGrantCode(state),
       PRIVATE_GRANT_TTL_SECONDS,
       session.id,
     ),
@@ -96,6 +115,6 @@ authPrivateRoutes.post("/private/grant", webSessionMiddleware, async (c) => {
     return c.json(UNAUTHENTICATED, 401, NO_STORE);
   }
 
-  const body: PrivateGrantResponse = { code, expires_in: PRIVATE_GRANT_TTL_SECONDS };
-  return c.json(body, 200, NO_STORE);
+  const granted: PrivateGrantResponse = { code, expires_in: PRIVATE_GRANT_TTL_SECONDS };
+  return c.json(granted, 200, NO_STORE);
 });

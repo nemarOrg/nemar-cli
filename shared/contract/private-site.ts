@@ -17,11 +17,27 @@
  *
  * The flow, and which party does what:
  *
- *   1. private site  - no session of its own, so 302 to the APP authorize path
- *   2. website (SSR) - proves an app session, POST /auth/private/grant
+ *   1. private site  - no session of its own: generate a `state`, set it in a
+ *                      host-only cookie, 302 to the APP authorize path with it
+ *   2. website (SSR) - proves an app session, POST /auth/private/grant with it
  *   3. website       - 302 to the private site's callback path with the code
- *   4. private site  - trades the code for a session, and sets its cookie
+ *   4. private site  - trades the code AND its cookie's `state` for a session,
+ *                      and sets its session cookie
  *   5. private site  - resolves that session on every later request
+ *
+ * THE STATE BINDS THE BROWSER THAT STARTS A SIGN-IN TO THE ONE THAT FINISHES
+ * IT. The private site is a write surface, so login CSRF (an attacker
+ * completing their own grant in a victim's browser, then receiving the
+ * victim's uploads) is a real harm there, which is why this handoff carries a
+ * `state` the docs gate does not. The mint refuses unless the same value comes
+ * back (ADR 0079). The private site MUST:
+ *   - generate at least 256 bits of random `state` per sign-in;
+ *   - keep it in a `__Host-` cookie: HttpOnly, Secure, SameSite=Lax, and a
+ *     short Max-Age (minutes, not hours);
+ *   - send it to the authorize page as the `PRIVATE_AUTHORIZE_STATE_PARAM`
+ *     query parameter, which the website forwards to the grant unchanged;
+ *   - present its cookie's value, never the one in the callback URL, at
+ *     exchange.
  *
  * The code is one-time and short-lived because it travels in a URL, where it
  * lands in history, logs and any `Referer` a page later sends. The session
@@ -64,16 +80,28 @@ export const PRIVATE_SESSION_TTL_SECONDS = 28800;
  *  on the APP host; the website owns the page. */
 export const PRIVATE_AUTHORIZE_PATH = "/auth/private/authorize";
 
+/** The query parameter the private site puts its `state` in on the authorize
+ *  URL, and the website reads it from. */
+export const PRIVATE_AUTHORIZE_STATE_PARAM = "state";
+
 /** Where the website sends the visitor back to, on the private site, carrying
  *  the one-time code. Under a double-underscore prefix so it cannot collide
  *  with a page route. */
 export const PRIVATE_CALLBACK_PATH = "/__auth/callback";
 
-/** `POST /auth/private/grant` refusals carrying an `error` code. A missing or
- *  foreign `Origin` is 403 `Origin not allowed`, and an inactive account is 403
- *  with the API's usual inactive-account body (`status` names why), neither of
- *  which uses this code. */
-export type PrivateGrantRefusal = "unauthenticated";
+/** `POST /auth/private/grant` refusals carrying an `error` code:
+ *  `unauthenticated` (401, no live app session) and `invalid_request` (400, a
+ *  missing or malformed `state`). A missing or foreign `Origin` is 403
+ *  `Origin not allowed`, and an inactive account is 403 with the API's usual
+ *  inactive-account body (`status` names why), neither of which uses this
+ *  code. */
+export type PrivateGrantRefusal = "unauthenticated" | "invalid_request";
+
+/** The JSON body of `POST /auth/private/grant`. `state` is 32 to 256
+ *  characters of the base64url alphabet (`A-Z a-z 0-9 - _`). */
+export interface PrivateGrantRequest {
+  readonly state: string;
+}
 
 /** What `POST /auth/private/grant` returns. */
 export interface PrivateGrantResponse {
@@ -171,13 +199,17 @@ export type ResolvePrincipalResult =
  */
 export interface ExchangePrivateGrantRequest {
   readonly code: string;
+  /** The value of the private site's own `state` cookie for this browser. */
+  readonly state: string;
   readonly userAgent: string | null;
   readonly clientIp: string | null;
 }
 
 /**
  * `invalid_grant` is one answer for a code that never existed, one already
- * spent, one expired, and one whose account stopped qualifying since the grant:
+ * spent, one expired, one presented with a missing or different `state` (the
+ * grant is then NOT consumed), and one whose account stopped qualifying since
+ * the grant:
  * splitting them would tell a caller holding a stolen code which dead end it
  * is. `unavailable` is this API in maintenance mode (`read-only` or `full`),
  * refusing writes.

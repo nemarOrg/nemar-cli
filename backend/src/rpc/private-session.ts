@@ -23,6 +23,7 @@ import {
   PRIVATE_MINT_CONSUME_SQL,
   PRIVATE_MINT_INSERT_SQL,
   PRIVATE_REVOKE_ONE_SQL,
+  grantState,
 } from "../services/private-auth";
 import {
   type BackgroundContext,
@@ -45,11 +46,11 @@ const MAX_CLIENT_IP_LENGTH = 64;
 /**
  * Trade a one-time grant code for a private-site session.
  *
- * Unauthenticated by design, like the docs exchange: whoever holds the code is
- * the only party that can spend it, and it lives sixty seconds. The mint
- * re-checks the account inside the inserting statement, so this function's own
- * job is small: hash the code, run the batch, report whether anything was
- * created.
+ * Unauthenticated by design, like the docs exchange: only the holder of the
+ * code can spend it, it lives sixty seconds, and it mints only with the
+ * `state` of the browser that asked for it. The mint re-checks the account
+ * inside the inserting statement, so this function's own job is small: hash
+ * the code and the state, run the batch, report whether anything was created.
  *
  * Every refusal is a value. The one throw is after the grant is spent: a
  * session that was minted and then does not resolve is a fault, not a refusal
@@ -64,11 +65,16 @@ export async function exchangePrivateGrant(
 
   const fields = (typeof request === "object" && request !== null ? request : {}) as {
     code?: unknown;
+    state?: unknown;
     userAgent?: unknown;
     clientIp?: unknown;
   };
   const code = boundedString(fields.code, MAX_CODE_LENGTH);
-  if (code === null) return { ok: false, error: "invalid_grant" };
+  // A missing or malformed state is the same answer as a mismatched one: the
+  // mint below requires the hash to match, and a caller holding a stolen code
+  // learns nothing from which of the two it got wrong.
+  const state = grantState(fields.state);
+  if (code === null || state === null) return { ok: false, error: "invalid_grant" };
 
   const codeHash = await hashGrantCode(code);
   const sessionValue = generateCookieId();
@@ -89,6 +95,7 @@ export async function exchangePrivateGrant(
       userAgent,
       ipHash,
       codeHash,
+      await hashGrantCode(state),
     ),
     env.DB.prepare(PRIVATE_MINT_CONSUME_SQL).bind(codeHash, cookieIdHash),
   ]);

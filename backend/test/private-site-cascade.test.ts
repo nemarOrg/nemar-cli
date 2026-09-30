@@ -115,10 +115,21 @@ async function appSession(): Promise<string> {
   return cookieIdRaw;
 }
 
+/** The private site's browser `state` (the docs grant takes none). */
+const STATE = "CascadeBrowserState-0123456789_abcdefghijk";
+
 async function grant(scope: Scope, appCookie: string): Promise<string> {
   const res = await app.request(
     `/auth/${scope}/grant`,
-    { method: "POST", headers: { Cookie: `nemar_session=${appCookie}`, Origin: APP } },
+    {
+      method: "POST",
+      headers: {
+        Cookie: `nemar_session=${appCookie}`,
+        Origin: APP,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(scope === "private" ? { state: STATE } : {}),
+    },
     env(),
   );
   expect(res.status).toBe(200);
@@ -128,7 +139,12 @@ async function grant(scope: Scope, appCookie: string): Promise<string> {
 /** Spend a code; the session value on success, null on refusal. */
 async function spend(scope: Scope, code: string): Promise<string | null> {
   if (scope === "private") {
-    const result = await exchangePrivateGrant(env(), { code, userAgent: null, clientIp: null });
+    const result = await exchangePrivateGrant(env(), {
+      code,
+      state: STATE,
+      userAgent: null,
+      clientIp: null,
+    });
     return result.ok ? result.session : null;
   }
   const res = await app.request(

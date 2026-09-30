@@ -114,6 +114,18 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   return (await mf.dispatchFetch(`http://localhost${path}`, init as never)) as unknown as Response;
 }
 
+/** The browser's `state` and the grant request that carries it. */
+const STATE = "EntryTestBrowserState-0123456789_abcdefghi";
+const GRANT_REQUEST = {
+  method: "POST",
+  headers: {
+    Cookie: `nemar_session=${APP_COOKIE}`,
+    Origin: "https://app.nemar.org",
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({ state: STATE }),
+};
+
 let userId: number;
 
 beforeAll(async () => {
@@ -191,15 +203,13 @@ describe("src/worker.ts in workerd", () => {
   });
 
   test("the whole handoff: HTTP grant, then exchange, resolve and sign-out over the binding", async () => {
-    const granted = await apiFetch("/auth/private/grant", {
-      method: "POST",
-      headers: { Cookie: `nemar_session=${APP_COOKIE}`, Origin: "https://app.nemar.org" },
-    });
+    const granted = await apiFetch("/auth/private/grant", GRANT_REQUEST);
     expect(granted.status).toBe(200);
     const { code } = (await granted.json()) as { code: string };
 
     const exchanged = (await call("exchangePrivateGrant", {
       code,
+      state: STATE,
       userAgent: "entry-test",
       clientIp: "192.0.2.1",
     })) as { ok: boolean; session: string; principal: { userId: number } };
@@ -225,13 +235,11 @@ describe("src/worker.ts in workerd", () => {
     // (the function passes its touch to the context it is given), and the
     // class passing `this.ctx` along is guarded by reading it. Wound back
     // first, so only the touch can move the value forward.
-    const granted = await apiFetch("/auth/private/grant", {
-      method: "POST",
-      headers: { Cookie: `nemar_session=${APP_COOKIE}`, Origin: "https://app.nemar.org" },
-    });
+    const granted = await apiFetch("/auth/private/grant", GRANT_REQUEST);
     const { code } = (await granted.json()) as { code: string };
     const { session } = (await call("exchangePrivateGrant", {
       code,
+      state: STATE,
       userAgent: null,
       clientIp: null,
     })) as { session: string };
