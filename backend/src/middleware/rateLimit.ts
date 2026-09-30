@@ -288,6 +288,12 @@ const AUTH_PATHS = [
   "/auth/docs/grant",
   "/auth/docs/exchange",
   "/auth/docs/cli-session",
+  // The private site's grant (ADR 0079): the docs grant's twin, reached the
+  // same way (the website's server-side render) and passed through once per
+  // eight-hour private-site session, so it belongs where `/auth/docs/grant`
+  // does, with the same shared-egress caveat. Its exchange has no entry
+  // because it is not a route: it is a service-binding method (ADR 0078).
+  "/auth/private/grant",
   // NOT an /auth path, and deliberately in this list anyway (ADR 0042, #1253):
   // POST /users/me/upload-access/request spends a live GitHub API call on the
   // shared installation token for every attempt, and a refused one writes
