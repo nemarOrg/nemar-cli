@@ -14,6 +14,7 @@ import {
 } from "../../../shared/contract/publication.js";
 import { escapeHtml } from "../lib/escape";
 import { inactiveAccountBody, isActiveAccountStatus } from "../services/account-tier";
+import { revokeDocsCredentials } from "../services/docs-auth";
 import {
   getAdminEmailsForCategory,
   resolveEmailConfig,
@@ -1191,6 +1192,11 @@ authRoutes.get("/confirm-key-regeneration", async (c) => {
     )
     .bind(user.id)
     .run();
+
+  // Every key just died, and a docs session can be minted from any of them,
+  // so the account's docs credential goes too (the same best-effort cascade
+  // every key revocation runs; see revokeDocsCredentials).
+  await revokeDocsCredentials(db, user.id);
 
   // Generate new API key
   const { apiKey, apiKeyPrefix } = generateApiKey();

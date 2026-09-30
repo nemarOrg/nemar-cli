@@ -148,10 +148,9 @@ authDocsRoutes.post("/docs/grant", webSessionMiddleware, async (c) => {
   const code = generateGrantCode();
   const codeHash = await hashGrantCode(code);
 
-  // The prune rides along on the same batch rather than getting its own round
-  // trip. It is opportunistic housekeeping, so it must never be the reason this
-  // route fails: if it were separate and threw, an admin would be locked out by
-  // a cleanup problem.
+  // The prune rides along on the same batch to save a round trip. A batch is
+  // one transaction, so a failed prune fails the grant with it: this is one
+  // indexed DELETE, and the admin can simply ask again.
   const results = await c.env.DB.batch([
     c.env.DB.prepare(DOCS_GRANT_PRUNE_SQL),
     c.env.DB.prepare(DOCS_GRANT_INSERT_SQL).bind(codeHash, DOCS_GRANT_TTL_SECONDS, session.id),

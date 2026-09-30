@@ -172,6 +172,43 @@ jobs:
           echo "::error::Dev deploy smoke FAILED - /health never reported $EXPECTED (last '${GOT:-<none>}'). The deploy likely silently failed; do NOT assume dev is current."
           exit 1
 
+      # The private site's grant route (ADR 0079) must be routed on the build
+      # that just went live: an anonymous POST with an allowed Origin answers
+      # 401. A 404 means the route is missing from what deployed, which the
+      # /health check above cannot see. Runs after it, so the new version is
+      # already the one serving. Retries only a network failure or a 5xx.
+      #
+      # ONE EXCEPTION: in maintenance mode (backend/src/middleware/maintenance.ts)
+      # every POST answers 503 with `error: "Service Unavailable"` and `mode`
+      # `read-only` or `full`, so the route cannot be verified at all. That is
+      # a warning, not a failed deploy. Any other 503 is still a failure.
+      - name: Smoke test dev worker (/auth/private/grant must answer 401)
+        run: |
+          URL="https://nemar-api-dev.sccn-org.workers.dev/auth/private/grant"
+          BODY_FILE="$(mktemp)"
+          CODE=""
+          for i in $(seq 1 3); do
+            CODE="$(curl -sS -o "$BODY_FILE" -w '%{http_code}' --max-time 15 -X POST \
+              -H 'Origin: https://app.nemar.org' -H 'Content-Type: application/json' \
+              "$URL" 2>/dev/null || true)"
+            echo "attempt $i: POST $URL -> ${CODE:-<none>}"
+            case "$CODE" in
+              401) echo "::notice::Dev private grant route is live (401 to an anonymous caller)"; exit 0 ;;
+              404) echo "::error::Dev deploy smoke FAILED - POST $URL answered 404: the private grant route is not in the deployed build."; exit 1 ;;
+              503)
+                if jq -e '.error == "Service Unavailable" and (.mode == "read-only" or .mode == "full")' "$BODY_FILE" >/dev/null 2>&1; then
+                  MODE="$(jq -r .mode "$BODY_FILE")"
+                  echo "::warning::Dev private grant route is unverifiable: the API is in maintenance mode ($MODE), which refuses every POST. Re-check it once maintenance ends."
+                  exit 0
+                fi
+                sleep 10 ;;
+              ""|000|5*) sleep 10 ;;
+              *) break ;;
+            esac
+          done
+          echo "::error::Dev deploy smoke FAILED - POST $URL answered ${CODE:-<none>}, want 401."
+          exit 1
+
   deploy-production:
     needs: [detect-environment, test-gate]
     # Explicit test-gate.result check (see deploy-dev): a custom `if:` drops the
@@ -244,6 +281,43 @@ jobs:
             sleep 10
           done
           echo "::error::PRODUCTION deploy smoke FAILED - /health never reported $EXPECTED (last '${GOT:-<none>}'). Prod may be running old code; investigate and roll back immediately."
+          exit 1
+
+      # The private site's grant route (ADR 0079) must be routed on the build
+      # that just went live: an anonymous POST with an allowed Origin answers
+      # 401. A 404 means the route is missing from what deployed, which the
+      # /health check above cannot see. Runs after it, so the new version is
+      # already the one serving. Retries only a network failure or a 5xx.
+      #
+      # ONE EXCEPTION: in maintenance mode (backend/src/middleware/maintenance.ts)
+      # every POST answers 503 with `error: "Service Unavailable"` and `mode`
+      # `read-only` or `full`, so the route cannot be verified at all. That is
+      # a warning, not a failed deploy. Any other 503 is still a failure.
+      - name: Smoke test production worker (/auth/private/grant must answer 401)
+        run: |
+          URL="https://api.nemar.org/auth/private/grant"
+          BODY_FILE="$(mktemp)"
+          CODE=""
+          for i in $(seq 1 3); do
+            CODE="$(curl -sS -o "$BODY_FILE" -w '%{http_code}' --max-time 15 -X POST \
+              -H 'Origin: https://app.nemar.org' -H 'Content-Type: application/json' \
+              "$URL" 2>/dev/null || true)"
+            echo "attempt $i: POST $URL -> ${CODE:-<none>}"
+            case "$CODE" in
+              401) echo "::notice::PRODUCTION private grant route is live (401 to an anonymous caller)"; exit 0 ;;
+              404) echo "::error::PRODUCTION deploy smoke FAILED - POST $URL answered 404: the private grant route is not in the deployed build."; exit 1 ;;
+              503)
+                if jq -e '.error == "Service Unavailable" and (.mode == "read-only" or .mode == "full")' "$BODY_FILE" >/dev/null 2>&1; then
+                  MODE="$(jq -r .mode "$BODY_FILE")"
+                  echo "::warning::PRODUCTION private grant route is unverifiable: the API is in maintenance mode ($MODE), which refuses every POST. Re-check it once maintenance ends."
+                  exit 0
+                fi
+                sleep 10 ;;
+              ""|000|5*) sleep 10 ;;
+              *) break ;;
+            esac
+          done
+          echo "::error::PRODUCTION deploy smoke FAILED - POST $URL answered ${CODE:-<none>}, want 401."
           exit 1
 
       - name: Check release-tag drift (informational)

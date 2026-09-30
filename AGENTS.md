@@ -216,10 +216,17 @@ either is wrong.
 ### Revocation cascades, always
 
 Ending a credential has to end everything minted from it. API tokens are tied to a GitHub PAT
-and per-user S3 credentials, and an API key can now also mint a docs session
-(`POST /auth/docs/cli-session`). `services/docs-auth.ts` names the callers of
-`DOCS_REVOKE_ALL_SQL` and says a new path that ends a credential needs the line too; that count
-is load-bearing, so add yourself to it rather than assuming someone else did.
+and per-user S3 credentials, and an API key can also mint a docs session
+(`POST /auth/docs/cli-session`), so every route that revokes keys without ending every session
+calls `revokeDocsCredentials`; the three that revoke keys and end the docs credential in their
+own batch (a role demotion, `finalizeRevocation`, the owner-only soft delete) do not need it.
+Two host-scoped session kinds hang off the app session: `docs` (ADR 0056) and `private`, held by
+the private site (`private.nemar.org`, ADR 0079) and reached only through the `NemarApiRpc`
+service-binding entrypoint (ADR 0078). `services/docs-auth.ts` and `services/private-auth.ts`
+each name the callers of their revoke and grants-purge statements and say a new path that ends a
+credential needs the lines too; those counts are load-bearing, so add yourself to them rather
+than assuming someone else did. A role demotion and an API key revocation deliberately leave
+`private` sessions alone; `PRIVATE_REVOKE_ALL_SQL` says why.
 
 ### Never hand-bump the version
 

@@ -46,6 +46,7 @@ import { removeCollaborator } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
 import { revokeUserIamAccess } from "../../services/iam";
 import { emailFieldSchema, normalizeGithubHandle, normalizeOrcid } from "../../services/identity";
+import { PRIVATE_GRANTS_PURGE_SQL } from "../../services/private-auth";
 import { errorMessage } from "../../services/repo-metadata";
 import { type Bindings, type Variables, isDemotion, parseRole } from "../../types/bindings";
 import type { AdminRouter } from "./shared";
@@ -465,8 +466,8 @@ async function finalizeRevocation(
     .bind(user.id)
     .run();
 
-  // Browser credentials go with the API keys, both scopes, plus any
-  // outstanding docs grant.
+  // Browser credentials go with the API keys, every scope, plus any
+  // outstanding docs or private-site grant.
   //
   // This step did not exist before the docs gate did, and its absence was
   // survivable only by accident: `status = 'revoked'` blocks an app session at
@@ -498,6 +499,11 @@ async function finalizeRevocation(
       )
       .bind(user.id),
     db.prepare(DOCS_GRANTS_PURGE_SQL).bind(user.id),
+    // The private site's grants are a separate table (ADR 0079) and the same
+    // kind of licence; the scope-free UPDATE above already ends its sessions.
+    db
+      .prepare(PRIVATE_GRANTS_PURGE_SQL)
+      .bind(user.id),
   ]);
 
   // Update user status
@@ -953,7 +959,9 @@ export function registerUsersRoutes(admin: AdminRouter): void {
           // is checked against the account, so it becomes spendable again the
           // moment the role does. App sessions are deliberately left alone; a
           // demoted account is still a legitimate user, and `resolveCookieUser`
-          // re-reads its role per request.
+          // re-reads its role per request. Private-site sessions are left alone
+          // for the same reason: `resolvePrincipal` reports the live role on
+          // every call (ADR 0079, `PRIVATE_REVOKE_ALL_SQL`).
           const result = await db.batch([
             db
               .prepare(
@@ -1461,13 +1469,18 @@ export function registerUsersRoutes(admin: AdminRouter): void {
             "UPDATE web_sessions SET revoked_at = datetime('now') WHERE user_id = ? AND revoked_at IS NULL",
           )
           .bind(id),
-        // The session revoke above covers both scopes (no `scope` predicate, on
+        // The session revoke above covers every scope (no `scope` predicate, on
         // purpose), but a docs GRANT is a separate row and a separate 60-second
         // licence to mint a new session. `docs_grants.user_id` cascades on
         // DELETE, and this is a tombstone rather than a delete, so nothing else
         // reaches it.
         db
           .prepare(DOCS_GRANTS_PURGE_SQL)
+          .bind(id),
+        // Likewise the private site's grants, which live in their own table
+        // (ADR 0079); the session revoke above already covers that scope.
+        db
+          .prepare(PRIVATE_GRANTS_PURGE_SQL)
           .bind(id),
         db.prepare("DELETE FROM dataset_collaborators WHERE user_id = ?").bind(id),
         db.prepare("DELETE FROM user_s3_permissions WHERE user_id = ?").bind(id),
