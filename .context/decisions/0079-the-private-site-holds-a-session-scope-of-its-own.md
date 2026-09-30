@@ -52,11 +52,17 @@ Where it deliberately differs:
    The docs host is read-only, so ADR 0056 did not need this; the private site is a write surface.
    Without it, login CSRF works: an attacker starts a sign-in to their own account, stops at the callback,
    and lures a victim's browser there, which is then signed in as the attacker, and the victim's uploads land in the attacker's account.
-   So the private site generates at least 256 bits of random `state` per sign-in and keeps it in a host-only `__Host-` cookie
-   (HttpOnly, Secure, SameSite=Lax, a short Max-Age);
+   So the private site generates at least 256 bits of random `state` per sign-in and keeps it in a cookie
+   whose name starts `__Host-`, set with `Path=/` and no `Domain` (host-only), `HttpOnly`, `Secure`, `SameSite=Lax`,
+   and a `Max-Age` of at most 10 minutes;
    it sends the value to the website's authorize page as `PRIVATE_AUTHORIZE_STATE_PARAM`, and the website forwards it to the grant.
+   The callback URL carries only the code, never the state;
+   the private site reads the state at exchange only from its cookie, and clears the cookie when it handles the callback,
+   whatever the outcome.
+   The website must not log the authorize page's query string and serves that page with `Referrer-Policy: no-referrer`,
+   so the state does not travel onward in a log or a `Referer`.
    `private_grants.state_hash` holds only its SHA-256.
-   The exchange takes the value from the private site's own cookie, and the mint requires it to match:
+   The mint requires the presented value to match:
    a missing or different `state` is `invalid_grant` (one answer), and the grant is not consumed,
    so it stays spendable by the browser that asked for it.
 4. **Limited per account, not per address.**

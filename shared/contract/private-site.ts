@@ -21,6 +21,7 @@
  *                      host-only cookie, 302 to the APP authorize path with it
  *   2. website (SSR) - proves an app session, POST /auth/private/grant with it
  *   3. website       - 302 to the private site's callback path with the code
+ *                      (the code only, never the state)
  *   4. private site  - trades the code AND its cookie's `state` for a session,
  *                      and sets its session cookie
  *   5. private site  - resolves that session on every later request
@@ -32,12 +33,18 @@
  * `state` the docs gate does not. The mint refuses unless the same value comes
  * back (ADR 0079). The private site MUST:
  *   - generate at least 256 bits of random `state` per sign-in;
- *   - keep it in a `__Host-` cookie: HttpOnly, Secure, SameSite=Lax, and a
- *     short Max-Age (minutes, not hours);
+ *   - keep it in a cookie whose name starts `__Host-`, set with `Path=/` and
+ *     no `Domain` attribute (host-only), `HttpOnly`, `Secure`,
+ *     `SameSite=Lax`, and a `Max-Age` of at most 10 minutes;
  *   - send it to the authorize page as the `PRIVATE_AUTHORIZE_STATE_PARAM`
- *     query parameter, which the website forwards to the grant unchanged;
- *   - present its cookie's value, never the one in the callback URL, at
- *     exchange.
+ *     query parameter;
+ *   - read the state at exchange ONLY from that cookie: the callback URL
+ *     carries the code alone, never the state;
+ *   - clear the cookie when it handles the callback, whatever the outcome.
+ * The website MUST forward the state to the grant unchanged and keep it out
+ * of the callback URL, MUST NOT log the authorize page's query string, and
+ * MUST serve the authorize page with `Referrer-Policy: no-referrer`, so the
+ * state does not leave in a `Referer`.
  *
  * The code is one-time and short-lived because it travels in a URL, where it
  * lands in history, logs and any `Referer` a page later sends. The session
