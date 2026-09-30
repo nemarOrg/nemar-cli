@@ -134,8 +134,10 @@ export { buildDatasetFilterClauses, escapeLikePattern };
  * `latest_version_at`: when the dataset's newest version was released, read
  * from the newest `dataset_versions` row by `created_at`, the same ordering the
  * `latest_version` subqueries use (two rows minted in the same second share the
- * date either way). The row is written when the version's DOI is minted at
- * publish time; only the admin manifest-regen repair path backfills one later.
+ * date either way). The row is recorded when the version's DOI is minted on the
+ * inline publish paths, and when the manifest-ready callback arrives under the
+ * central manifest flow (after the manifest is built); the admin repair path
+ * backfills a missing one and stamps the repair time.
  * `datasets.updated_at` cannot stand in for it: enrichment reindex, finalize
  * and the DOI callbacks all bump it, so a catalog-wide sweep made every
  * dataset look freshly updated. Expects the `datasets` table aliased as `d`.
@@ -981,7 +983,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
         return c.json({ error: "Authentication required to view your datasets" }, 401);
       }
 
-      // Read managed facts from the `datasets` source of truth (#646). 45-column
+      // Read managed facts from the `datasets` source of truth (#646). 46-column
       // ?mine wire shape (+ #869 HED has_hed/hed_version + #970 total_files/
       // data_complete/bytes_present + #1147 citations/facet columns).
       // latest_version is the most recently minted DOI version (null when
@@ -1100,7 +1102,7 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
     // Single-table read from the `datasets` source of truth (#646). Folded legacy
     // catalog rows are first-class here, discriminated by the sentinel owner
     // (source_type='catalog'); managed datasets are source_type='managed'.
-    // 49-column wire shape: the pre-consolidation UNION path + #653 `license` +
+    // 50-column wire shape: the pre-consolidation UNION path + #653 `license` +
     // the #804 citation counts (num_citations / num_dataset_citations /
     // num_datapaper_citations) + #854 channel/montage (n_channels,
     // electrode_system) + #869 HED (has_hed, hed_version) + #970 honest size
