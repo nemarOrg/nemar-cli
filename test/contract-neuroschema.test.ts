@@ -15,6 +15,7 @@ import {
 } from "../backend/src/services/data-papers";
 import { NEUROSCHEMA_VERSION } from "../shared/contract/index.js";
 import {
+  NEUROSCHEMA_LINE_RE,
   compileNeuroschemaDatasetValidator,
   formatAjvErrors,
 } from "./contract/neuroschema-validator.js";
@@ -312,6 +313,33 @@ describe("data_papers field (v0.4.1, ADR 0077)", () => {
       const ok = validate(withPapers(res.papers));
       if (!ok)
         throw new Error(`schema refused what the writer accepted: ${formatAjvErrors(validate)}`);
+    }
+  });
+});
+
+// The live checks (test/contract-live.test.ts, test/data-route.test.ts) accept a
+// deployed backend one PATCH behind the source, and nothing else.
+describe("the live schema_version pin (NEUROSCHEMA_LINE_RE)", () => {
+  const [major, minor, patch] = NEUROSCHEMA_VERSION.split(".").map(Number);
+
+  test("accepts the same MAJOR.MINOR with the current, an earlier or a later PATCH", () => {
+    for (const p of [0, patch, patch + 1, 12]) {
+      expect(NEUROSCHEMA_LINE_RE.test(`${major}.${minor}.${p}`)).toBe(true);
+    }
+  });
+
+  test("rejects another MINOR or MAJOR, and anything that is not a plain x.y.z", () => {
+    for (const v of [
+      `${major}.${minor + 1}.0`,
+      `${major}.${minor - 1}.9`,
+      `${major + 1}.${minor}.${patch}`,
+      `${major}.${minor}`,
+      `${major}.${minor}0.0`,
+      `${major}.${minor}.${patch}-rc1`,
+      `v${major}.${minor}.${patch}`,
+      "",
+    ]) {
+      expect(NEUROSCHEMA_LINE_RE.test(v)).toBe(false);
     }
   });
 });

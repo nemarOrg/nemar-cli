@@ -19,6 +19,7 @@
 
 import { describe, expect, test } from "bun:test";
 import "./setup";
+import { NEUROSCHEMA_LINE_RE } from "./contract/neuroschema-validator.js";
 import { EXEMPLAR_ID_RE, IS_PRODUCTION_TARGET, LIVE_TARGET_BLOCKED, TEST_CONFIG } from "./setup";
 
 const TEST_DATASET = process.env.TEST_DATA_DATASET ?? "nm099999";
@@ -213,7 +214,9 @@ describe("data.nemar.org route (epic #449, phase 1)", async () => {
       };
     };
 
-    expect(body.schema_version).toBe("0.4.0");
+    // Same MAJOR.MINOR as NEUROSCHEMA_VERSION, any PATCH: the deployed backend
+    // may lag the source by a deploy (see NEUROSCHEMA_LINE_RE).
+    expect(body.schema_version).toMatch(NEUROSCHEMA_LINE_RE);
     expect(body.doc_type).toBe("dataset");
     expect(body.dataset_id).toBe(TEST_DATASET);
     expect(body.source).toBe("nemar");

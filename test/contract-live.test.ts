@@ -23,6 +23,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { z } from "zod";
 import "./setup";
 import {
   datasetDetailEnvelopeSchema,
@@ -35,6 +36,7 @@ import {
 import { getCurrentUser } from "../src/lib/api/auth.js";
 import { setConfig } from "../src/lib/config.js";
 import {
+  NEUROSCHEMA_LINE_RE,
   compileNeuroschemaDatasetValidator,
   formatAjvErrors,
 } from "./contract/neuroschema-validator.js";
@@ -175,7 +177,13 @@ d("live wire contract", () => {
     // dataset the deployed dev backend serves (measured 2026-09-03 on
     // api-test.nemar.org across xx099900/901/903/905), so a failure here is a
     // real regression rather than known drift.
-    const r = neuroschemaDatasetSchema.safeParse(body);
+    // The envelope pins `schema_version` to the exact NEUROSCHEMA_VERSION; the
+    // live backend may be one PATCH behind the source until this change deploys,
+    // so the live check accepts the same MAJOR.MINOR (see NEUROSCHEMA_LINE_RE).
+    const liveEnvelope = neuroschemaDatasetSchema.extend({
+      schema_version: z.string().regex(NEUROSCHEMA_LINE_RE),
+    });
+    const r = liveEnvelope.safeParse(body);
     if (!r.success)
       throw new Error(`data-plane metadata drift: ${JSON.stringify(r.error.issues.slice(0, 6))}`);
     expect(r.success).toBe(true);
