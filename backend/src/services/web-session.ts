@@ -26,9 +26,11 @@ export const COOKIE_NAME = "nemar_session";
 
 /** Which host's credential a `web_sessions` row is. `app` is every session the
  *  dashboard issues; `docs` is the short-lived admin credential the docs host
- *  holds (epic #1336 phase 0, migration 0083).
+ *  holds (epic #1336 phase 0, migration 0083); `private` is the session the
+ *  private site (`private.nemar.org`) holds for any active account (migration
+ *  0089, ADR 0079).
  *
- *  One table, two scopes, and the scope is a REQUIRED argument to every lookup
+ *  One table, three scopes, and the scope is a REQUIRED argument to every lookup
  *  rather than an optional filter, defaulted to `app` so existing callers keep
  *  their exact behaviour. That default is the safe direction: a caller that
  *  forgets the argument authenticates app sessions only, which is what every
@@ -40,7 +42,7 @@ export const COOKIE_NAME = "nemar_session";
  *  missing there after this one had it, and the docs credential authenticated
  *  `/admin/*` as a result. Prefer routing a new reader through this function over
  *  writing a third copy. */
-export type SessionScope = "app" | "docs";
+export type SessionScope = "app" | "docs" | "private";
 
 /** Server-side cap on non-remember-me sessions. Browser drops session
  *  cookies on close already; the cap keeps the DB row from outliving any
