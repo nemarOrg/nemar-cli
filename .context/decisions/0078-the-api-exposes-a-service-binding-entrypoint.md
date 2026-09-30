@@ -118,7 +118,10 @@ Seven rules bind every method, now and later:
   so the entrypoint and the HTTP API cannot disagree about which keys are live.
   `optionalAuthMiddleware`'s old copy lacked the `expires_at` predicate, so an expired key identified its account
   on every route behind it; that is fixed in the same change.
-  It also means a live key presented to one of those routes now has its `last_used_at` touched, as every other key read does.
+  The optional path passes `touch: false` and stays a pure read, as it was before:
+  an awaited `last_used_at` write would turn a failed UPDATE into a 500 on routes that have an anonymous answer,
+  and `/notices` is served even in `full` maintenance mode.
+  The strict bearer path and the entrypoint keep the awaited touch.
 
 ## Alternatives considered
 

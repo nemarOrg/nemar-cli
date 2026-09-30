@@ -204,6 +204,15 @@ const API_KEY_PROFILE_COLUMNS = `,
         u.account_kind`;
 
 /**
+ * `touch: false` skips the `last_used_at` write, for a caller that must stay a
+ * pure read (`optionalAuthMiddleware`). Every other caller keeps the awaited
+ * touch.
+ */
+export interface ApiKeyLookupOptions {
+  touch?: boolean;
+}
+
+/**
  * Resolve a raw API key to its account: the ONE API-key lookup.
  *
  * Extracted from `resolveBearerUser` so a caller that is not an HTTP route
@@ -214,18 +223,23 @@ const API_KEY_PROFILE_COLUMNS = `,
  * response it has always sent.
  *
  * `optionalAuthMiddleware` reads keys through it too, so there is no second
- * copy of this SELECT left to drift.
+ * copy of this SELECT left to drift; it passes `touch: false`, because a
+ * public read must not write (see there).
  */
-export async function resolveApiKeyUser(env: Bindings, apiKey: string): Promise<ApiKeyResolution>;
 export async function resolveApiKeyUser(
   env: Bindings,
   apiKey: string,
-  opts: { withProfile: true },
+  opts?: ApiKeyLookupOptions,
+): Promise<ApiKeyResolution>;
+export async function resolveApiKeyUser(
+  env: Bindings,
+  apiKey: string,
+  opts: ApiKeyLookupOptions & { withProfile: true },
 ): Promise<ApiKeyResolution<ApiKeyProfile>>;
 export async function resolveApiKeyUser(
   env: Bindings,
   apiKey: string,
-  opts?: { withProfile: true },
+  opts?: ApiKeyLookupOptions & { withProfile?: true },
 ): Promise<ApiKeyResolution<ApiKeyProfile | undefined>> {
   if (!apiKey || apiKey.length < 32) return { kind: "malformed" };
 
@@ -283,10 +297,12 @@ export async function resolveApiKeyUser(
   const role = parseRole(result.role, result.username);
   if (role === null) return { kind: "misconfigured" };
 
-  // Update last_used_at for the token
-  await env.DB.prepare("UPDATE tokens SET last_used_at = datetime('now') WHERE id = ?")
-    .bind(result.token_id)
-    .run();
+  // Update last_used_at for the token, unless the caller must not write.
+  if (opts?.touch !== false) {
+    await env.DB.prepare("UPDATE tokens SET last_used_at = datetime('now') WHERE id = ?")
+      .bind(result.token_id)
+      .run();
+  }
 
   return {
     kind: "user",
@@ -575,7 +591,12 @@ export async function optionalAuthMiddleware(c: AuthContext, next: Next) {
   // carry its own copy of that SELECT, and the copy had no `expires_at`
   // predicate, so an expired key still identified its account on every route
   // behind it. It never refuses: anything but a user is the anonymous branch.
-  const resolved = await resolveApiKeyUser(c.env, authHeader.substring(7));
+  //
+  // `touch: false`, as the old copy never wrote either. These are public
+  // reads: an awaited write would turn a failed UPDATE into a 500 on a route
+  // that has an anonymous answer, and `/notices` is served even in `full`
+  // maintenance mode, when nothing should write.
+  const resolved = await resolveApiKeyUser(c.env, authHeader.substring(7), { touch: false });
   if (resolved.kind === "user") {
     c.set("user", resolved.user);
   }
