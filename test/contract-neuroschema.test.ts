@@ -5,6 +5,14 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  DATA_PAPER_STRING_CAPS,
+  MAX_DATA_PAPER_YEAR,
+  MIN_DATA_PAPER_YEAR,
+  validateDataPapers,
+} from "../backend/src/services/data-papers";
 import { NEUROSCHEMA_VERSION } from "../shared/contract/index.js";
 import {
   compileNeuroschemaDatasetValidator,
@@ -24,7 +32,7 @@ const goodDataset = {
 };
 
 describe("vendored neuroschema dataset bundle", () => {
-  test("compiles (all 20 transitive $refs resolve)", () => {
+  test("compiles (every bundled schema and $ref resolves)", () => {
     expect(typeof validate).toBe("function");
   });
 
@@ -192,5 +200,118 @@ describe("signal_defaults field (v0.4.0, epic #1144 Phase 2b #1153)", () => {
       signal_defaults: { sampling_frequency: 500, extra_field: true },
     };
     expect(validate(ds)).toBe(false);
+  });
+});
+
+// Neuroschema v0.4.1 (nemarOrg/neuroschema#17): the optional top-level
+// `data_papers` key (ADR 0077). The documents below run through the REAL vendored
+// schema, and the writer's own output is checked against it too, so the writer
+// and the schema cannot drift apart unnoticed.
+describe("data_papers field (v0.4.1, ADR 0077)", () => {
+  const SCI_DATA = {
+    doi: "10.1038/s41597-019-0027-4",
+    title: "Multi-channel EEG recordings during a sustained-attention driving task",
+    year: 2019,
+    venue: "Scientific Data",
+    judge_model: "claude-sonnet-5-5",
+  };
+  const withPapers = (data_papers: unknown) => ({ ...goodDataset, data_papers });
+
+  test("the vendored bundle is stamped with the version NEUROSCHEMA_VERSION names", () => {
+    // NEUROSCHEMA_VERSION is hand-set; the bundle stamp is machine-written. They
+    // must move together.
+    const bundle = JSON.parse(
+      readFileSync(
+        join(import.meta.dir, "../shared/contract/neuroschema/dataset.bundle.json"),
+        "utf8",
+      ),
+    ) as { _provenance: { neuroschema_version: string }; schemas: { $id: string }[] };
+    expect(bundle._provenance.neuroschema_version).toBe(NEUROSCHEMA_VERSION);
+    expect(bundle.schemas.map((x) => x.$id)).toContain("nsc:/definitions/dataPaper.schema.json");
+  });
+
+  test("a document without the key still validates (it is optional)", () => {
+    expect(validate(goodDataset)).toBe(true);
+  });
+
+  test("accepts a full item", () => {
+    const ok = validate(withPapers([SCI_DATA]));
+    if (!ok) throw new Error(`expected valid, got: ${formatAjvErrors(validate)}`);
+    expect(ok).toBe(true);
+  });
+
+  test("accepts an item with only a doi, and one with every detail null", () => {
+    expect(validate(withPapers([{ doi: "10.5524/100542" }]))).toBe(true);
+    expect(
+      validate(
+        withPapers([
+          { doi: "10.5524/100542", title: null, year: null, venue: null, judge_model: null },
+        ]),
+      ),
+    ).toBe(true);
+  });
+
+  test("accepts an empty list (judged, and no data paper)", () => {
+    expect(validate(withPapers([]))).toBe(true);
+  });
+
+  test("accepts more than one paper", () => {
+    expect(validate(withPapers([SCI_DATA, { doi: "10.6084/m9.figshare.6427334.v5" }]))).toBe(true);
+  });
+
+  test("rejects an item with no doi", () => {
+    expect(validate(withPapers([{ title: "no doi" }]))).toBe(false);
+    expect(validate(withPapers([{ ...SCI_DATA, doi: undefined }]))).toBe(false);
+  });
+
+  test("rejects an item carrying a key the schema does not declare", () => {
+    expect(validate(withPapers([{ ...SCI_DATA, relation_type: "IsDescribedBy" }]))).toBe(false);
+  });
+
+  test.each([
+    ["a resolver URL", "https://doi.org/10.1038/s41597-019-0027-4"],
+    ["a doi: prefix", "doi:10.1038/s41597-019-0027-4"],
+    ["no suffix", "10.1038"],
+    ["a registrant that is too short", "10.12/abc"],
+    ["whitespace in the suffix", "10.1038/has space"],
+    ["an empty string", ""],
+  ])("rejects a malformed doi: %s", (_label, doi) => {
+    expect(validate(withPapers([{ ...SCI_DATA, doi }]))).toBe(false);
+  });
+
+  test("rejects a wrong-typed detail", () => {
+    expect(validate(withPapers([{ ...SCI_DATA, year: "2019" }]))).toBe(false);
+    expect(validate(withPapers([{ ...SCI_DATA, year: 2019.5 }]))).toBe(false);
+    expect(validate(withPapers([{ ...SCI_DATA, title: 12 }]))).toBe(false);
+  });
+
+  test("rejects data_papers that is not a list of objects", () => {
+    expect(validate(withPapers({ doi: SCI_DATA.doi }))).toBe(false);
+    expect(validate(withPapers(["10.1038/s41597-019-0027-4"]))).toBe(false);
+    expect(validate(withPapers(null))).toBe(false);
+  });
+
+  test("whatever the writer accepts, the schema accepts (including at every limit)", () => {
+    const prefix = "10.1000/";
+    const atLimits = {
+      doi: prefix + "a".repeat(DATA_PAPER_STRING_CAPS.doi - prefix.length),
+      title: "t".repeat(DATA_PAPER_STRING_CAPS.title),
+      year: MAX_DATA_PAPER_YEAR,
+      venue: "v".repeat(DATA_PAPER_STRING_CAPS.venue),
+      judge_model: "m".repeat(DATA_PAPER_STRING_CAPS.judge_model),
+    };
+    for (const input of [
+      [SCI_DATA],
+      [],
+      [{ doi: "10.5524/100542" }],
+      [{ ...SCI_DATA, year: MIN_DATA_PAPER_YEAR }],
+      [atLimits],
+    ]) {
+      const res = validateDataPapers(input, "nm000275");
+      if (!res.ok) throw new Error(`writer refused ${JSON.stringify(input)}: ${res.reason}`);
+      const ok = validate(withPapers(res.papers));
+      if (!ok)
+        throw new Error(`schema refused what the writer accepted: ${formatAjvErrors(validate)}`);
+    }
   });
 });
