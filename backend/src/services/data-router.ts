@@ -31,6 +31,7 @@ import type {
 import { escapeHtml } from "../lib/escape";
 import { VERSION_DOI_SQL } from "./anonymity";
 import { isArchiveStaleForLatestVersion } from "./archive-policy";
+import { type DataPaperEntry, parseStoredDataPapers } from "./data-papers";
 import { isValidDatasetId } from "./datasetId";
 import type { ManifestFile, VersionManifest } from "./manifest";
 import {
@@ -786,6 +787,14 @@ export interface NeuroschemaDataset {
   anonymous: boolean;
   keywords: StructuredKeyword[];
   related_identifiers: RelatedIdentifierEntry[];
+  /**
+   * ADR 0077: the papers the citations judge confirmed as this dataset's data
+   * paper, pulled from the citations dashboard. The key is OMITTED when the
+   * dataset has not been judged yet (or the gate has not processed it); an
+   * empty array means it was gated and has no data paper. A reader can tell
+   * "unknown yet" from "none".
+   */
+  data_papers?: DataPaperEntry[];
   contributors: ContributorEntry[];
   dates: StructuredDate[];
   rights: Array<{
@@ -854,6 +863,11 @@ export interface DatasetRowForMetadata {
   eeg_reference: string | null;
   placement_scheme: string | null;
   electrode_system: string | null;
+  /** `datasets.data_papers` (migration 0088, ADR 0077): JSON text or null.
+   *  REQUIRED, not optional, on purpose: both handlers copy this row field by
+   *  field into the builder, and an optional field let a forgotten copy compile
+   *  and silently drop the key from the served document. */
+  data_papers: string | null;
 }
 
 /**
@@ -1251,6 +1265,9 @@ export function buildDatasetMetadataFromDigest(input: {
     row.placement_scheme !== null ||
     row.electrode_system !== null;
 
+  // ADR 0077: NULL or malformed -> null -> the key is omitted (never a 500).
+  const dataPapers = parseStoredDataPapers(row.data_papers, row.dataset_id);
+
   return {
     schema_version: NEUROSCHEMA_VERSION,
     doc_type: "dataset",
@@ -1265,6 +1282,7 @@ export function buildDatasetMetadataFromDigest(input: {
     anonymous: row.anonymous === 1,
     keywords,
     related_identifiers: related,
+    ...(dataPapers !== null ? { data_papers: dataPapers } : {}),
     contributors,
     dates,
     rights: license

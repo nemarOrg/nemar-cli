@@ -1570,6 +1570,12 @@ export function registerCatalogRoutes(datasetRoutes: DatasetsRouter): void {
       // `shared/openapi.json`), the flat fields are the declared surface, and
       // an operator who needs the stamps reads them through the admin routes.
       sweep_stamps: undefined,
+      // ADR 0077: the same `SELECT d.*` trap again. `data_papers` is served
+      // parsed, as a key of `data.nemar.org/<id>/metadata.json`; the raw JSON
+      // text is not in the contract (`shared/contract/dataset.ts`, zero hits in
+      // `shared/openapi.json`), so it is withheld here rather than leaked as a
+      // string beside the declared fields.
+      data_papers: undefined,
       // #1207 review: `SELECT d.*` serves the raw numeric primary key here,
       // but the contract (shared/contract/dataset.ts) declares `id: string`
       // -- the list route's `id` is `d.dataset_id AS id`, already a string

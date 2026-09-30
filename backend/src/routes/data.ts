@@ -1850,7 +1850,7 @@ async function metadataJsonHandler(
             recording_count, recordings_unavailable, recordings_measured,
             channel_count_min, channel_count_max,
             sampling_frequency, power_line_frequency, eeg_reference,
-            placement_scheme, electrode_system
+            placement_scheme, electrode_system, data_papers
      FROM datasets
      WHERE dataset_id = ?`,
   )
@@ -1929,6 +1929,7 @@ async function metadataJsonHandler(
       eeg_reference: row.eeg_reference,
       placement_scheme: row.placement_scheme,
       electrode_system: row.electrode_system,
+      data_papers: row.data_papers,
     },
     parsedEnrichment,
     versions,
