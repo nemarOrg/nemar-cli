@@ -104,8 +104,7 @@ export async function resolveSessionPrincipal(
   const { status, role } = found.user;
   if (!isActiveAccountStatus(status)) return { ok: false, error: "inactive_account" };
   if (role === null) return { ok: false, error: "unresolved_account" };
-  // Checked active just above; `isActiveAccountStatus` is a boolean check.
-  return { ok: true, principal: toPrincipal(found.user, role, status as ActiveAccountStatus) };
+  return { ok: true, principal: toPrincipal(found.user, role, status) };
 }
 
 /**

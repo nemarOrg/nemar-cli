@@ -300,9 +300,8 @@ export async function resolveApiKeyUser(
     },
     profile: opts?.withProfile
       ? {
-          // Narrowed by the `isActiveAccountStatus` check above, which is a
-          // boolean rather than a type guard.
-          status: result.status as ActiveAccountStatus,
+          // Narrowed by the `isActiveAccountStatus` check above.
+          status: result.status,
           username: result.username ?? null,
           orcid: result.orcid,
           given_name: result.given_name ?? null,
