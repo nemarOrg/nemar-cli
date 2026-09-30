@@ -134,6 +134,7 @@ It is named in `DEV_CRON_ALLOWLIST` so that decision is greppable.
 - **DOIs are served as the producer emits them,** in lowercase canonical form.
   Consumers must compare them case-insensitively.
   Consumers must also escape a DOI when rendering it, because the accepted pattern (`10.<registrant>/<non-whitespace>`) admits characters such as `<` and `>`.
+  The same holds for `title` and `venue`: they are upstream free text (up to 500 and 200 characters), and Crossref titles often carry markup such as `<i>` or MathML.
 - **There is no freshness guard.**
   `last_updated` is ignored, so a rolled-back dashboard deploy overwrites newer verdicts with older ones.
   This is accepted and worth revisiting if it happens.
