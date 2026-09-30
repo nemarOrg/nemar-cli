@@ -1253,7 +1253,7 @@ export default {
       fetchAndSyncDataPapers(env)
         .then((r) =>
           console.log(
-            `[data-papers-sync] fetched ${r.fetched}, rejected ${r.rejected}, updated ${r.updated}, unchanged ${r.unchanged}, unknown ${r.unknown}`,
+            `[data-papers-sync] fetched ${r.fetched}, rejected ${r.rejected}, cleared ${r.cleared}, updated ${r.updated}, unchanged ${r.unchanged}, unknown ${r.unknown}, failed chunks ${r.failedChunks}`,
           ),
         )
         .catch((err) =>
