@@ -107,6 +107,14 @@ const catalogItemObjectSchema = z
     // Canonical output is the vX.Y.Z tag; coercing schema keeps today's bare
     // rows valid. null when the dataset has no published version yet.
     latest_version: versionTagSchema.nullable().optional(),
+    // When `latest_version` was released: the `created_at` of its
+    // `dataset_versions` row, as SQLite UTC (`YYYY-MM-DD HH:MM:SS`, the same
+    // form as `created_at`). `updated_at` is bumped by any row write
+    // (enrichment reindex, finalize, DOI callbacks), so it says when the row
+    // was last touched, not when the data last changed; this moves only when a
+    // new version is released. null when the dataset has no version yet.
+    // Absent on older backends.
+    latest_version_at: z.string().nullable().optional(),
     // Epic #1144 phase 3 (#1147), D7: every column the facet filter table
     // (shared/facets.ts + backend/src/services/dataset-facets.ts) can filter
     // on is also projected here, raw and nullable -- a facet a caller can

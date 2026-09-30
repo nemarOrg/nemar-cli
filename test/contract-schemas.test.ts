@@ -91,6 +91,18 @@ describe("catalog item schema", () => {
     ).not.toThrow();
   });
 
+  test("latest_version_at is an optional nullable string, never a number", () => {
+    expect(catalogItemSchema.parse(row).latest_version_at).toBeUndefined();
+    expect(
+      catalogItemSchema.parse({ ...row, latest_version_at: null }).latest_version_at,
+    ).toBeNull();
+    expect(
+      catalogItemSchema.parse({ ...row, latest_version_at: "2026-09-16 17:22:05" })
+        .latest_version_at,
+    ).toBe("2026-09-16 17:22:05");
+    expect(() => catalogItemSchema.parse({ ...row, latest_version_at: 1790000000 })).toThrow();
+  });
+
   test("accepts the #970 honest-size fields (total_files, data_complete, bytes_present)", () => {
     const parsed = catalogItemSchema.parse({
       ...row,
