@@ -153,40 +153,42 @@ export type BearerAuthResult =
   | { kind: "user"; user: AuthUser };
 
 /**
- * Resolve `Authorization: Bearer <api_key>` to a full AuthUser.
+ * What an API key resolved to, before any HTTP response is built around it.
  *
- * Extracted from `authMiddleware` for #1266 so the CLI-facing self-service
- * routes in auth-web.ts / auth-orcid.ts accept a token through the SAME
- * lookup the rest of the API uses — same key hashing, same revoked/expired
- * filter, same active-account rule, same `last_used_at` touch. A second copy
- * of this SELECT is how a route ends up honouring a token the middleware
- * would have refused.
+ * `malformed` is a value too short to be a key, `unknown` is no live token
+ * (never issued, revoked, expired, or its account deleted), `inactive` is a
+ * live token whose account may not authenticate, and `misconfigured` is an
+ * account whose `role` column holds a value `parseRole` rejects.
  */
-export async function resolveBearerUser(c: AuthContext): Promise<BearerAuthResult> {
-  const authHeader = c.req.header("Authorization");
-  if (!authHeader) return { kind: "absent" };
+export type ApiKeyResolution =
+  | { kind: "malformed" }
+  | { kind: "unknown" }
+  | { kind: "inactive"; status: string }
+  | { kind: "misconfigured" }
+  | { kind: "user"; user: AuthUser };
 
-  if (!authHeader.startsWith("Bearer ")) {
-    return {
-      kind: "refused",
-      response: c.json(
-        { error: "Invalid Authorization header format. Use: Bearer <api_key>" },
-        401,
-      ),
-    };
-  }
-
-  const apiKey = authHeader.substring(7);
-
-  if (!apiKey || apiKey.length < 32) {
-    return { kind: "refused", response: c.json({ error: "Invalid API key format" }, 401) };
-  }
+/**
+ * Resolve a raw API key to its account: the ONE API-key lookup.
+ *
+ * Extracted from `resolveBearerUser` so a caller that is not an HTTP route
+ * gets exactly the rule the API applies -- same length floor, same hashing,
+ * same revoked / `expires_at` / `deleted_at` filter, same active-account
+ * rule, same awaited `last_used_at` touch -- without an `Authorization`
+ * header or a Hono context. `resolveBearerUser` maps each outcome onto the
+ * response it has always sent.
+ *
+ * `optionalAuthMiddleware` below still carries its own copy of this SELECT,
+ * and that copy lacks the `expires_at` predicate. Do not model a new reader
+ * on it.
+ */
+export async function resolveApiKeyUser(env: Bindings, apiKey: string): Promise<ApiKeyResolution> {
+  if (!apiKey || apiKey.length < 32) return { kind: "malformed" };
 
   // Hash the key for lookup
   const hashedKey = await hashApiKey(apiKey);
 
   // Find token and associated user
-  const result = await c.env.DB.prepare(
+  const result = await env.DB.prepare(
     `
       SELECT
         u.id,
@@ -217,28 +219,19 @@ export async function resolveBearerUser(c: AuthContext): Promise<BearerAuthResul
       token_id: number;
     }>();
 
-  if (!result) {
-    return { kind: "refused", response: c.json({ error: "Invalid or expired API key" }, 401) };
-  }
+  if (!result) return { kind: "unknown" };
 
   // ADR 0040 phase 2: `verified` is the base tier and holds a usable API
   // key, so the token is accepted here and the upload gate — not this
   // middleware — is what a base-tier account runs into.
-  if (!isActiveAccountStatus(result.status)) {
-    return { kind: "refused", response: c.json(inactiveAccountBody(result.status), 403) };
-  }
+  if (!isActiveAccountStatus(result.status)) return { kind: "inactive", status: result.status };
 
   // Validate role from DB
   const role = parseRole(result.role, result.username);
-  if (role === null) {
-    return {
-      kind: "refused",
-      response: c.json({ error: "Account configuration error. Contact an administrator." }, 500),
-    };
-  }
+  if (role === null) return { kind: "misconfigured" };
 
   // Update last_used_at for the token
-  await c.env.DB.prepare("UPDATE tokens SET last_used_at = datetime('now') WHERE id = ?")
+  await env.DB.prepare("UPDATE tokens SET last_used_at = datetime('now') WHERE id = ?")
     .bind(result.token_id)
     .run();
 
@@ -253,6 +246,48 @@ export async function resolveBearerUser(c: AuthContext): Promise<BearerAuthResul
       orcid: result.orcid || undefined,
     },
   };
+}
+
+/**
+ * Resolve `Authorization: Bearer <api_key>` to a full AuthUser.
+ *
+ * Extracted from `authMiddleware` for #1266 so the CLI-facing self-service
+ * routes in auth-web.ts / auth-orcid.ts accept a token through the SAME
+ * lookup the rest of the API uses. That lookup is {@link resolveApiKeyUser};
+ * this function owns only the header parsing and the HTTP shape of each
+ * refusal. A second copy of the SELECT is how a route ends up honouring a
+ * token the middleware would have refused.
+ */
+export async function resolveBearerUser(c: AuthContext): Promise<BearerAuthResult> {
+  const authHeader = c.req.header("Authorization");
+  if (!authHeader) return { kind: "absent" };
+
+  if (!authHeader.startsWith("Bearer ")) {
+    return {
+      kind: "refused",
+      response: c.json(
+        { error: "Invalid Authorization header format. Use: Bearer <api_key>" },
+        401,
+      ),
+    };
+  }
+
+  const resolved = await resolveApiKeyUser(c.env, authHeader.substring(7));
+  switch (resolved.kind) {
+    case "malformed":
+      return { kind: "refused", response: c.json({ error: "Invalid API key format" }, 401) };
+    case "unknown":
+      return { kind: "refused", response: c.json({ error: "Invalid or expired API key" }, 401) };
+    case "inactive":
+      return { kind: "refused", response: c.json(inactiveAccountBody(resolved.status), 403) };
+    case "misconfigured":
+      return {
+        kind: "refused",
+        response: c.json({ error: "Account configuration error. Contact an administrator." }, 500),
+      };
+    case "user":
+      return { kind: "user", user: resolved.user };
+  }
 }
 
 /**
