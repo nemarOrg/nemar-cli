@@ -18,16 +18,19 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { beforeEach, describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { Hono } from "hono";
+import { logger } from "hono/logger";
 import { DOCS_SESSION_HEADER } from "../../shared/contract/docs-auth.js";
 import {
   type ExchangePrivateGrantResult,
   PRIVATE_SESSION_TTL_SECONDS,
   type Principal,
 } from "../../shared/contract/private-site.js";
+import worker from "../src/index";
 import { authMiddleware } from "../src/middleware/auth";
 import { maintenanceMode } from "../src/middleware/maintenance";
+import { __resetCacheFaultLogForTests } from "../src/middleware/rateLimit";
 import { authDocsRoutes } from "../src/routes/auth-docs";
 import { authPrivateRoutes } from "../src/routes/auth-private";
 import { authWebRoutes } from "../src/routes/auth-web";
@@ -1024,6 +1027,109 @@ describe("maintenance mode on every method", () => {
       }).toEqual({ mode, read: getRefused, write: postRefused });
       expect(got.resolveSession === "unavailable").toBe(getRefused);
       expect(got.revoke === "unavailable").toBe(postRefused);
+    }
+  });
+});
+
+// --------------------------------------------------------------------------
+// Secrets stay out of the logs
+// --------------------------------------------------------------------------
+
+describe("no log line carries the state, the code or the session value", () => {
+  test("across a grant through the real worker, an exchange, a resolve and a sign-out", async () => {
+    // Everything printed through every console method is captured and
+    // searched for the three values that must never be written down. The
+    // grant goes through `worker.fetch` in a non-development environment, so
+    // the rate limiters run (and, with no Cache API under bun, log their fault
+    // line: the dedupe is reset so that line is printed here). Hono's request
+    // logger holds its own reference to `console.log`, taken when the app was
+    // built, so it is captured separately below.
+    const methods = ["log", "info", "warn", "error", "debug"] as const;
+    const lines: string[] = [];
+    const spies = methods.map((method) =>
+      spyOn(console, method).mockImplementation((...args: unknown[]) => {
+        lines.push(
+          args.map((a) => (typeof a === "string" ? a : (JSON.stringify(a) ?? String(a)))).join(" "),
+        );
+      }),
+    );
+    __resetCacheFaultLogForTests();
+    let code = "";
+    let session = "";
+    try {
+      console.error("capture-canary");
+      const userId = seedUser("no-logs@nemar.test");
+      const ctx = {
+        waitUntil: (p: Promise<unknown>) => {
+          p.catch(() => {});
+        },
+        passThroughOnException: () => {},
+      } as unknown as ExecutionContext;
+      const granted = await worker.fetch(
+        new Request("https://api.nemar.org/auth/private/grant", {
+          method: "POST",
+          headers: {
+            Cookie: `nemar_session=${await appSession(userId)}`,
+            Origin: APP,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ state: STATE }),
+        }),
+        env(),
+        ctx,
+      );
+      expect(granted.status).toBe(200);
+      code = ((await granted.json()) as { code: string }).code;
+
+      // A refused exchange first (wrong state), then the real one.
+      expect((await exchange(code, {}, "W".repeat(43))).ok).toBe(false);
+      const exchanged = await exchange(code);
+      if (!exchanged.ok) throw new Error(exchanged.error);
+      session = exchanged.session;
+      expect((await resolvePrincipal(env(), { kind: "session", value: session })).ok).toBe(true);
+      expect(await revokePrivateSession(env(), { value: session })).toEqual({ ok: true });
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+    // The capture works, and saw the limiter's own line, so an empty search
+    // below is a real result and not a broken spy.
+    expect(lines).toContain("capture-canary");
+    expect(lines.some((line) => line.includes("[rate-limit]"))).toBe(true);
+    for (const secret of [STATE, code, session]) {
+      expect(secret.length).toBeGreaterThan(20);
+      expect(lines.filter((line) => line.includes(secret))).toEqual([]);
+    }
+  });
+
+  test("the request logger the app mounts first prints neither the state nor the code", async () => {
+    // Hono's `logger()` is the first middleware in `index.ts`; built here with
+    // a capturing print function in front of the same grant route.
+    const printed: string[] = [];
+    const logged = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+    logged.use(
+      "*",
+      logger((line: string) => printed.push(line)),
+    );
+    logged.route("/auth", authPrivateRoutes);
+    const userId = seedUser("no-logs-logger@nemar.test");
+    const res = await logged.request(
+      "/auth/private/grant",
+      {
+        method: "POST",
+        headers: {
+          Cookie: `nemar_session=${await appSession(userId)}`,
+          Origin: APP,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ state: STATE }),
+      },
+      env(),
+    );
+    expect(res.status).toBe(200);
+    const { code } = (await res.json()) as { code: string };
+    expect(printed.some((line) => line.includes("/auth/private/grant"))).toBe(true);
+    for (const secret of [STATE, code]) {
+      expect(printed.filter((line) => line.includes(secret))).toEqual([]);
     }
   });
 });
