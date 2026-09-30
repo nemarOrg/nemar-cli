@@ -33,6 +33,7 @@ import { beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { Hono } from "hono";
 import { DOCS_SESSION_HEADER } from "../../shared/contract/docs-auth.js";
 import { adminRoutes } from "../src/routes/admin";
+import { authRoutes } from "../src/routes/auth";
 import { authDocsRoutes } from "../src/routes/auth-docs";
 import { authKeysRoutes } from "../src/routes/auth-keys";
 import { authPrivateRoutes } from "../src/routes/auth-private";
@@ -93,6 +94,7 @@ async function seedUser(
 beforeEach(async () => {
   db = freshDb();
   app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+  app.route("/auth", authRoutes);
   app.route("/auth", authWebRoutes);
   app.route("/auth", authDocsRoutes);
   app.route("/auth", authPrivateRoutes);
@@ -418,6 +420,32 @@ describe("revoking an API key ends the docs credential and leaves the private on
     await keyRevokeCase(() =>
       ownerRequest("DELETE", `/admin/users/scopetarget/keys/${targetKeyId()}`),
     );
+  });
+
+  test("by key regeneration (GET /auth/confirm-key-regeneration)", async () => {
+    // The emailed link revokes EVERY key on the account and issues a new one,
+    // and used to leave any docs session minted from the old keys readable.
+    // The token and its expiry are what `POST /auth/request-key-regeneration`
+    // writes; the expiry is a JS timestamp because the route compares it in JS.
+    db.run("UPDATE users SET verification_token = ?, verification_expires_at = ? WHERE id = ?", [
+      "scope-cascade-regeneration-token",
+      new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      targetId,
+    ]);
+    await keyRevokeCase(() =>
+      app.request(
+        "/auth/confirm-key-regeneration?token=scope-cascade-regeneration-token",
+        {},
+        env(),
+      ),
+    );
+    const live = db
+      .query<{ n: number }, [number]>(
+        "SELECT COUNT(*) AS n FROM tokens WHERE user_id = ? AND revoked_at IS NULL",
+      )
+      .get(targetId);
+    // Only the regenerated key is left.
+    expect(live?.n).toBe(1);
   });
 
   test("self-service, the presenting key (DELETE /auth/keys/current)", async () => {

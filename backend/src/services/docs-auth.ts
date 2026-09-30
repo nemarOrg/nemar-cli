@@ -275,9 +275,10 @@ export const DOCS_GRANTS_PURGE_SQL = "DELETE FROM docs_grants WHERE user_id = ?"
  *
  * ITS CALLERS, which are every route that revokes an API key: self-service
  * `DELETE /auth/keys/:id` and `/auth/keys/current` (`routes/auth-keys.ts`),
- * and the owner's `DELETE /admin/users/:username/keys/:id`
- * (`routes/admin/user-keys.ts`). A new route that revokes a key calls this
- * too.
+ * the owner's `DELETE /admin/users/:username/keys/:id`
+ * (`routes/admin/user-keys.ts`), and the emailed
+ * `GET /auth/confirm-key-regeneration` (`routes/auth.ts`), which revokes every
+ * key on the account. A new route that revokes a key calls this too.
  *
  * WHY IT REVOKES ALL OF THEM rather than the one that key minted: the session
  * row records no minting token, so there is nothing to revoke precisely. Adding
