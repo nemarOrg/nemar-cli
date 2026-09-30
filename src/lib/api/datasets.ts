@@ -149,6 +149,10 @@ export interface Dataset {
   /** Latest published version DOI tag (e.g. "1.0.0"), or null when no
       version has been minted yet. Added in v0.8.9; older backends omit it. */
   latest_version?: string | null;
+  /** When `latest_version` was released, as SQLite UTC ("YYYY-MM-DD HH:MM:SS"),
+      or null when no version exists. Unlike `updated_at` it is not bumped by
+      enrichment or other row writes. Older backends omit it. */
+  latest_version_at?: string | null;
   /** HED presence of the latest version (#869): 1 = has HED, 0 = checked/none,
       null = not classified yet. Older backends omit it. */
   has_hed?: number | null;
