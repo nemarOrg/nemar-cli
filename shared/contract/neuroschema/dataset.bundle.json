@@ -3,8 +3,8 @@
     "source": "https://github.com/nemarOrg/neuroschema",
     "generated_by": "shared/contract/neuroschema/build-vendor.mjs",
     "note": "Do not hand-edit; regenerate from the neuroschema repo.",
-    "neuroschema_version": "0.4.0",
-    "source_commit": "d920ad01f01220ae1edbc6a5000f1ac4504198ae"
+    "neuroschema_version": "0.4.1",
+    "source_commit": "062a988cc539e2b8fdedcc53286a7b6fd46848be"
   },
   "root": "nsc:/core/dataset.schema.json",
   "schemas": [
@@ -232,6 +232,13 @@
           "description": "Related resources: associated papers, source datasets, code repositories, prior versions. These links feed into scholarly knowledge graphs and citation indices. Aligns with DataCite RelatedIdentifier (property 12).",
           "items": {
             "$ref": "nsc:/definitions/relatedIdentifier.schema.json"
+          }
+        },
+        "data_papers": {
+          "type": "array",
+          "description": "Papers, or deposits of the same data, that a trusted judgment classified as this dataset's own data paper. More reliable than the relation type on related_identifiers, which is only a hint. Key absent means the dataset has not been judged yet; an empty array means it was judged and has no data paper. The dataset's own DOI is not listed here (see external_links).",
+          "items": {
+            "$ref": "nsc:/definitions/dataPaper.schema.json"
           }
         },
         "contributors": {
@@ -850,6 +857,52 @@
     },
     {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "nsc:/definitions/dataPaper.schema.json",
+      "title": "Data Paper",
+      "description": "A paper, or a deposit of the same data, that a trusted judgment classified as this dataset's own data paper: it introduces, describes, or releases the data in this specific dataset. Unlike the relation type on a related identifier, which is only a hint, membership here is a judged verdict.",
+      "type": "object",
+      "required": [
+        "doi"
+      ],
+      "properties": {
+        "doi": {
+          "type": "string",
+          "description": "DOI of the data paper, without a resolver prefix (e.g., '10.1038/s41597-019-0027-4'). DOIs are case-insensitive; the producer serves them in canonical lowercase, so consumers must compare case-insensitively (for example against related_identifiers[].identifier).",
+          "pattern": "^10\\.\\d{4,9}/\\S+$"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Title of the paper as resolved from the DOI registry. Null when it could not be resolved."
+        },
+        "year": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Publication year. Null when unknown."
+        },
+        "venue": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Journal, preprint server, or repository that published it (e.g., 'Scientific Data', 'bioRxiv'). Null when unknown."
+        },
+        "judge_model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Identifier of the model that made the data-paper judgment (e.g., 'claude-sonnet-5-5'), as recorded by the pipeline in its judgment_model field. Null when not recorded."
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "$id": "nsc:/definitions/contributor.schema.json",
       "title": "Contributor",
       "description": "A contributor with a typed role, beyond the primary authors/creators. Aligns with DataCite Contributor (property 7). Common roles for neuroimaging datasets include DataCollector, ProjectLeader, and HostingInstitution.",
@@ -1105,7 +1158,7 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "$id": "nsc:/extensions/extensionsContainer.schema.json",
       "title": "Extensions Container",
-      "description": "Container for domain-specific extensions using reserved namespaces. Each project or domain gets its own namespace. Adding new top-level namespaces requires a schema version bump. Follows the pattern established by signalJourney's extension system.",
+      "description": "Container for domain-specific extensions using reserved namespaces. Each project or domain gets its own namespace. Adding new top-level namespaces requires a MINOR schema version bump. Follows the pattern established by signalJourney's extension system.",
       "type": "object",
       "properties": {
         "eegdash": {
