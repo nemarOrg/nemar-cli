@@ -6,11 +6,13 @@
  * every dataset's `updated_at` read "just now" while its release had not
  * moved; the website's "Updated" badge needs the release date instead.
  * Driven through the registered Hono routes against a real bun:sqlite-backed
- * D1, like catalog-sort-published.test.ts -- no mocks.
+ * D1, like catalog-sort-published.test.ts, with no mocks.
  *
- * The rows mirror production on 2026-09-30: nm000279 was released 2026-09-16
- * and re-enriched 2026-09-29; nm000284 released v1.0.0 on 2026-09-24 and
- * v1.0.1 on 2026-09-28.
+ * The rows are modeled on datasets seen in production on 2026-09-30, with
+ * dates rounded to plausible values rather than copied: nm000279 was released
+ * 2026-09-16 and re-enriched 2026-09-29; nm000284 released a second version
+ * after its first. nm000291 is an anonymous deposit, whose release date is not
+ * withheld (only identifiers are).
  */
 
 import type { Database } from "bun:sqlite";
@@ -108,6 +110,14 @@ describe("latest_version_at is the newest version's release date", () => {
       created_at: "2026-09-10 12:00:00",
       updated_at: "2026-09-29 23:41:00",
     });
+
+    // An anonymous deposit: identifiers are withheld, the release date is not.
+    insertDataset(db, "nm000291", {
+      created_at: "2026-09-20 10:00:00",
+      updated_at: "2026-09-29 23:42:00",
+      anonymous: 1,
+    });
+    insertVersion(db, "nm000291", "v1.0.0", "2026-09-28 19:43:14");
   });
 
   async function list(qs = ""): Promise<Row[]> {
@@ -179,6 +189,54 @@ describe("latest_version_at is the newest version's release date", () => {
     const rows = ((await res.json()) as { datasets: Row[] }).datasets;
     expect(byId(rows, "nm000284").latest_version_at).toBe("2026-09-28 17:57:21");
     expect(byId(rows, "nm000300").latest_version_at).toBeNull();
+  });
+
+  test("an anonymous deposit still serves its release date", async () => {
+    const row = byId(await list(), "nm000291");
+    expect(row.latest_version_at).toBe("2026-09-28 19:43:14");
+
+    const res = await app.request("/nm000291", {}, env(db));
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { dataset: Row }).dataset.latest_version_at).toBe(
+      "2026-09-28 19:43:14",
+    );
+  });
+
+  test("the degraded fallback list serves it too", async () => {
+    // The fallback joins users, so the fixtures need a real owner.
+    db.run(
+      "INSERT INTO users (id, username, email, password_hash, status, role, email_verified) VALUES (42, 'lvafallback', 'lvafallback@example.org', 'x', 'approved', 'member', 1)",
+    );
+    db.run("UPDATE datasets SET owner_user_id = 42");
+
+    // A "no such column" failure from the public prefix query is what sends the
+    // handler into the fallback; every other statement runs on the real D1.
+    // `d.dataset_id AS id` appears in the prefix query and not in the fallback.
+    const base = realD1(db);
+    const degraded = {
+      DB: {
+        prepare(sql: string) {
+          if (sql.includes("d.dataset_id AS id")) {
+            const failing = {
+              bind: () => failing,
+              all: () => {
+                throw new Error("no such column: d.fake_consolidation_column");
+              },
+            };
+            return failing;
+          }
+          return base.prepare(sql);
+        },
+      } as unknown as D1Database,
+      ENVIRONMENT: "development",
+    } as Bindings;
+
+    const res = await app.request("/", {}, degraded);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { datasets: Row[]; fallback?: boolean };
+    expect(body.fallback).toBe(true);
+    expect(byId(body.datasets, "nm000284").latest_version_at).toBe("2026-09-28 17:57:21");
+    expect(byId(body.datasets, "nm000300").latest_version_at).toBeNull();
   });
 
   test("list and detail responses still satisfy the shared contract", async () => {
