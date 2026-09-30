@@ -14,7 +14,6 @@
 import type { Context, Next } from "hono";
 import type { AccountKind } from "../../../shared/contract/user.js";
 import {
-  ACTIVE_ACCOUNT_STATUS_SQL_LIST,
   type ActiveAccountStatus,
   inactiveAccountBody,
   isActiveAccountStatus,
@@ -214,9 +213,8 @@ const API_KEY_PROFILE_COLUMNS = `,
  * header or a Hono context. `resolveBearerUser` maps each outcome onto the
  * response it has always sent.
  *
- * `optionalAuthMiddleware` below still carries its own copy of this SELECT,
- * and that copy lacks the `expires_at` predicate. Do not model a new reader
- * on it.
+ * `optionalAuthMiddleware` reads keys through it too, so there is no second
+ * copy of this SELECT left to drift.
  */
 export async function resolveApiKeyUser(env: Bindings, apiKey: string): Promise<ApiKeyResolution>;
 export async function resolveApiKeyUser(
@@ -567,59 +565,20 @@ export async function optionalAuthMiddleware(c: AuthContext, next: Next) {
     return;
   }
 
-  const apiKey = authHeader.substring(7);
-  if (!apiKey || apiKey.length < 32) {
-    // Malformed token — caller clearly intended to authenticate.
-    c.set("authAttempted", true);
-    await next();
-    return;
-  }
-
+  // The caller clearly intended to authenticate, whatever the key turns out
+  // to be, so a route can answer "your key is invalid or expired" rather
+  // than the anonymous branch's "sign in".
   c.set("authAttempted", true);
 
-  const hashedKey = await hashApiKey(apiKey);
-
-  const result = await c.env.DB.prepare(
-    `
-    SELECT
-      u.id,
-      u.username,
-      u.email,
-      u.github_username,
-      u.role,
-      u.orcid,
-      u.status
-    FROM tokens t
-    JOIN users u ON t.user_id = u.id
-    WHERE t.api_key_hash = ?
-      AND t.revoked_at IS NULL
-      AND u.status IN ${ACTIVE_ACCOUNT_STATUS_SQL_LIST}
-      AND u.deleted_at IS NULL
-  `,
-  )
-    .bind(hashedKey)
-    .first<{
-      id: number;
-      username: string;
-      email: string;
-      github_username: string;
-      role: string | null;
-      orcid: string | null;
-      status: string;
-    }>();
-
-  if (result) {
-    const role = parseRole(result.role, result.username);
-    if (role !== null) {
-      c.set("user", {
-        id: result.id,
-        username: result.username,
-        email: result.email,
-        github_username: result.github_username,
-        role,
-        orcid: result.orcid || undefined,
-      });
-    }
+  // The ONE API-key lookup, the same `resolveBearerUser` uses, so a key the
+  // API refuses (revoked, EXPIRED, on an inactive or deleted account, or with
+  // an unrecognised role) is no identity here either. This middleware used to
+  // carry its own copy of that SELECT, and the copy had no `expires_at`
+  // predicate, so an expired key still identified its account on every route
+  // behind it. It never refuses: anything but a user is the anonymous branch.
+  const resolved = await resolveApiKeyUser(c.env, authHeader.substring(7));
+  if (resolved.kind === "user") {
+    c.set("user", resolved.user);
   }
 
   await next();
