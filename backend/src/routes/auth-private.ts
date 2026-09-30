@@ -76,7 +76,8 @@ function backgroundOf(c: {
  * website). Only the state's hash is stored.
  */
 authPrivateRoutes.post("/private/grant", webSessionMiddleware, async (c) => {
-  // Origin first, before authentication, as `/auth/docs/grant` and every other
+  // Origin is checked before anything acts on the session (the middleware has
+  // only looked the cookie up), as `/auth/docs/grant` and every other
   // cookie-authenticated mutation here does. A MISSING Origin is refused too:
   // the website's server-side fetch sends none of its own, so its authorize
   // page pins one. Without this check the route is a cross-site POST that

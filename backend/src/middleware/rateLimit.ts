@@ -792,9 +792,10 @@ export type DataMissBudgetOutcome =
  * listing, or the "not in the manifest at all" 404 (none of those go through
  * this path either).
  *
- * Mirrors `rateLimiter`'s own mechanics exactly: the same Cache API counter
- * shape (`{count, warned}` under `max-age=<WINDOW_SIZE>`), the same
- * dev-environment and `X-Test-Bypass` exemptions, and the same
+ * Mirrors `rateLimiter`'s own mechanics: a Cache API counter (`{count}`
+ * under `max-age=<WINDOW_SIZE>`; it needs no `warned` flag, having no
+ * observe-only mode), the same dev-environment and `X-Test-Bypass`
+ * exemptions, and the same
  * `waitUntil`-deferred write with the bounded no-context fallback (so a
  * route-suite call with no execution context cannot hang on a stalled test
  * cache). Kept as a standalone function rather than folded into the
@@ -857,9 +858,10 @@ export async function checkPrivateGrantBudget(
 /**
  * The shared core of the keyed budgets a route checks itself, because the
  * key is something only the route knows (whether a request missed the cache,
- * which account a session names). Mirrors `rateLimiter`'s own mechanics
- * exactly: the same Cache API counter shape (`{count}` under
- * `max-age=<WINDOW_SIZE>`), the same dev-environment and `X-Test-Bypass`
+ * which account a session names). Mirrors `rateLimiter`'s own mechanics: a
+ * Cache API counter (`{count}` under `max-age=<WINDOW_SIZE>`, with no
+ * `warned` flag because there is no observe-only mode), the same
+ * dev-environment and `X-Test-Bypass`
  * exemptions, the same fail-open on a cache outage, and the same
  * `waitUntil`-deferred write with the bounded no-context fallback.
  */

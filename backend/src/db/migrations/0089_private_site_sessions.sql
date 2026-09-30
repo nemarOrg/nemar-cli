@@ -165,10 +165,11 @@ CREATE INDEX idx_web_sessions_private_scope
 DROP TABLE _rebuild_guard;
 
 -- Shaped like `docs_grants` (0083) plus one column, `state_hash`, and a
--- SEPARATE table rather than a scope column on that one, for two reasons. The statements the live docs gate
--- runs stay untouched. And a docs code can never be spent at the private site,
--- or the reverse, by construction: the two exchanges read different tables, so
--- keeping them apart depends on no predicate anyone could drop.
+-- SEPARATE table rather than a scope column on that one, for two reasons. The
+-- statements the live docs gate runs stay untouched. And a docs code can never
+-- be spent at the private site, or the reverse, by construction: the two
+-- exchanges read different tables, so keeping them apart depends on no
+-- predicate anyone could drop.
 --
 -- Nothing secret lives here either (ADR 0047): `code_hash` is the SHA-256 of
 -- the one-time code, and the session is minted by the exchange, never by the
