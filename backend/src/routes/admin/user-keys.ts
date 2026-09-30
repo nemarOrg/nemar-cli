@@ -40,6 +40,7 @@ import {
   deviceRefusal,
   normalizeMachineName,
 } from "../../services/device-auth";
+import { revokeDocsCredentials } from "../../services/docs-auth";
 import { generateApiKey, hashApiKey } from "../../services/token";
 import type { AdminRouter } from "./shared";
 
@@ -232,6 +233,11 @@ export function registerUserKeyRoutes(admin: AdminRouter): void {
     if ((result.meta?.changes ?? 0) === 0) {
       return keyNotFound(c);
     }
+
+    // A docs session can be minted FROM an API key, so revoking one of the
+    // target's keys has to end the target's docs credential too, the same
+    // best-effort cascade self-service revocation runs.
+    await revokeDocsCredentials(db, target.id);
 
     await auditLogStatement(db, {
       userId: adminUser.id,

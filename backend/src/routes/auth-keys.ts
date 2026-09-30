@@ -48,7 +48,7 @@ import {
   normalizeMachineName,
   readDeviceAuthAccount,
 } from "../services/device-auth";
-import { DOCS_GRANTS_PURGE_SQL, DOCS_REVOKE_ALL_SQL } from "../services/docs-auth";
+import { revokeDocsCredentials } from "../services/docs-auth";
 import { generateApiKey, hashApiKey } from "../services/token";
 import type { Bindings, Variables } from "../types/bindings";
 
@@ -223,44 +223,6 @@ authKeysRoutes.post(
 // --------------------------------------------------------------------------
 // revoke
 // --------------------------------------------------------------------------
-
-/**
- * End every docs session this account holds, after one of its API keys is
- * revoked.
- *
- * WHY THIS IS HERE. `services/docs-auth.ts` names every caller of
- * `DOCS_GRANTS_PURGE_SQL` and says a new path that ends a credential needs the
- * line too. Epic #1336 phase 3 added such a path -- `POST
- * /auth/docs/cli-session` mints a docs credential FROM an API key -- and did
- * not add it, so revoking the key left the docs session reading `/admin/*` for
- * the rest of its fifteen minutes.
- *
- * The private site's sessions are deliberately NOT ended here: one is never
- * minted from a key, so a key's end has nothing of that scope to reach (ADR
- * 0079, `PRIVATE_REVOKE_ALL_SQL`).
- *
- * WHY IT REVOKES ALL OF THEM rather than the one that key minted: the session
- * row records no minting token, so there is nothing to revoke precisely. Adding
- * a column to make this surgical would buy very little -- a docs session is
- * read-only and short-lived, and the CLI silently mints another on the next
- * command -- so the blunt version is the right trade. The grants purge rides
- * along for the same reason it does elsewhere: a grant is a licence to create a
- * new session, and ending access has to end what can still create access.
- *
- * BEST EFFORT, DELIBERATELY. The key is already revoked by the time this runs;
- * a failure here must not turn a successful revocation into an error, which
- * would leave the caller believing the key still works. It is logged instead.
- */
-async function revokeDocsCredentials(db: D1Database, userId: number): Promise<void> {
-  try {
-    await db.batch([
-      db.prepare(DOCS_REVOKE_ALL_SQL).bind(userId),
-      db.prepare(DOCS_GRANTS_PURGE_SQL).bind(userId),
-    ]);
-  } catch (err) {
-    console.error("[auth-keys] failed to cascade revocation into docs sessions", err);
-  }
-}
 
 authKeysRoutes.delete("/keys/:id", webSessionMiddleware, async (c) => {
   const resolved = await resolveKeysActor(c);

@@ -412,6 +412,14 @@ describe("revoking an API key ends the docs credential and leaves the private on
     );
   });
 
+  test("by the owner (DELETE /admin/users/:username/keys/:id)", async () => {
+    // The route that revoked only the key row: an owner cleaning up a leaked
+    // key left the docs session it had minted reading the gated pages.
+    await keyRevokeCase(() =>
+      ownerRequest("DELETE", `/admin/users/scopetarget/keys/${targetKeyId()}`),
+    );
+  });
+
   test("self-service, the presenting key (DELETE /auth/keys/current)", async () => {
     await keyRevokeCase(() =>
       app.request(
