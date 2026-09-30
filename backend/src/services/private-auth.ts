@@ -1,7 +1,8 @@
 /**
  * SQL for the private site's session handoff (ADR 0079). The grant route is
- * `routes/auth-private.ts`; the shared literals are in
- * `shared/contract/private-site.ts`.
+ * `routes/auth-private.ts`; the exchange and sign-out are methods on the
+ * `NemarApiRpc` service-binding entrypoint (`rpc/private-session.ts`, ADR
+ * 0078); the shared literals are in `shared/contract/private-site.ts`.
  *
  * MODELED ON `services/docs-auth.ts`, AND ITS TWO RULES HOLD HERE. Every gate
  * is re-checked at mint time, in the statement that mints, because state can
@@ -17,6 +18,8 @@
  *     statements stay untouched and a code minted for one host can never be
  *     spent at the other.
  */
+
+import { ACTIVE_ACCOUNT_STATUS_SQL_LIST } from "./account-tier";
 
 /**
  * Delete grants more than an hour past expiry. Run opportunistically by the
@@ -51,3 +54,71 @@ export const PRIVATE_GRANT_INSERT_SQL = `INSERT INTO private_grants (code_hash, 
       AND ws.scope = 'app'
       AND ws.revoked_at IS NULL
       AND ws.expires_at > datetime('now')`;
+
+/**
+ * Mint the private session from a live grant, or insert nothing.
+ * Binds: cookieIdHash, ttlSeconds, userAgent, ipHash, codeHash.
+ *
+ * `INSERT ... SELECT`, so the gates and the write are one statement with no
+ * window between checking and creating; zero rows inserted IS the refusal.
+ * The gates:
+ *   - `pg.expires_at > datetime('now')` - the grant is still claimable.
+ *   - `u.status IN ${ACTIVE_ACCOUNT_STATUS_SQL_LIST}` and `deleted_at IS NULL`
+ *     - re-read from `users` at mint, not trusted from the grant, and the SAME
+ *     status rule the API's credential checks apply (`isActiveAccountStatus`).
+ *     An account revoked, left pending or deleted inside the grant's sixty
+ *     seconds gets nothing.
+ *
+ * THERE IS NO ROLE GATE, and that is the difference from
+ * `DOCS_MINT_INSERT_SQL` rather than an omission: the private site serves every
+ * active account, and reads the live role from `resolvePrincipal` on each
+ * request instead of trusting one stamped at mint.
+ *
+ * `remember` is the literal 0 and `scope` the literal 'private', so a bindings
+ * mistake cannot turn this into a remember-me or an app session.
+ */
+export const PRIVATE_MINT_INSERT_SQL = `INSERT INTO web_sessions
+     (user_id, cookie_id_hash, remember, expires_at, user_agent, ip_hash, auth_method, scope)
+   SELECT pg.user_id,
+          ?,
+          0,
+          datetime('now', '+' || ? || ' seconds'),
+          ?,
+          ?,
+          pg.auth_method,
+          'private'
+     FROM private_grants pg
+     JOIN users u ON u.id = pg.user_id
+    WHERE pg.code_hash = ?
+      AND pg.expires_at > datetime('now')
+      AND u.status IN ${ACTIVE_ACCOUNT_STATUS_SQL_LIST}
+      AND u.deleted_at IS NULL`;
+
+/**
+ * Consume the grant, in the same `db.batch()` as
+ * {@link PRIVATE_MINT_INSERT_SQL}. Binds: codeHash, cookieIdHash.
+ *
+ * Gated on `EXISTS` against the cookie hash the INSERT just wrote, and NEVER
+ * on `last_insert_rowid()`, which is stale after a zero-row `INSERT ... SELECT`
+ * on both D1 and bun:sqlite (the lesson `DOCS_MINT_CONSUME_SQL` and
+ * `DEVICE_MINT_CONSUME_SQL` carry). A refused mint leaves the grant to expire
+ * on its own, harmless because it can never mint anything, and a successful
+ * one removes it before a second exchange can see it.
+ */
+export const PRIVATE_MINT_CONSUME_SQL = `DELETE FROM private_grants
+   WHERE code_hash = ?
+     AND EXISTS (SELECT 1 FROM web_sessions WHERE cookie_id_hash = ? AND scope = 'private')`;
+
+/**
+ * Revoke ONE private session by the hash of its value. Binds: cookieIdHash.
+ *
+ * `scope = 'private'` is the point of this statement: the private site's
+ * sign-out must never be able to end an app or docs session, whatever value it
+ * is handed. Idempotent: a revoked, unknown or non-private value changes
+ * nothing.
+ */
+export const PRIVATE_REVOKE_ONE_SQL = `UPDATE web_sessions
+      SET revoked_at = datetime('now')
+    WHERE cookie_id_hash = ?
+      AND scope = 'private'
+      AND revoked_at IS NULL`;

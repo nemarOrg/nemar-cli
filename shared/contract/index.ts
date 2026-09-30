@@ -25,6 +25,6 @@ export * from "./profile-gaps.js";
 // #1293, phase 1 of epic #1065; ADR 0049).
 export * from "./zarr-index.js";
 export * from "./mcp.js";
-// Zero-dep literals and types for the private site's session handoff
-// (ADR 0079).
+// Zero-dep literals and types for the private site's session handoff and the
+// service-binding entrypoint its Worker calls (ADR 0078, ADR 0079).
 export * from "./private-site.js";

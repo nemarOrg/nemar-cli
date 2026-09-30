@@ -12,8 +12,10 @@
  */
 
 import type { Context, Next } from "hono";
+import type { AccountKind } from "../../../shared/contract/user.js";
 import {
   ACTIVE_ACCOUNT_STATUS_SQL_LIST,
+  type ActiveAccountStatus,
   inactiveAccountBody,
   isActiveAccountStatus,
 } from "../services/account-tier";
@@ -158,14 +160,49 @@ export type BearerAuthResult =
  * `malformed` is a value too short to be a key, `unknown` is no live token
  * (never issued, revoked, expired, or its account deleted), `inactive` is a
  * live token whose account may not authenticate, and `misconfigured` is an
- * account whose `role` column holds a value `parseRole` rejects.
+ * account whose `role` column holds a value `parseRole` rejects. `profile` is
+ * present only when the caller asked for it.
  */
-export type ApiKeyResolution =
+export type ApiKeyResolution<Profile = undefined> =
   | { kind: "malformed" }
   | { kind: "unknown" }
   | { kind: "inactive"; status: string }
   | { kind: "misconfigured" }
-  | { kind: "user"; user: AuthUser };
+  | { kind: "user"; user: AuthUser; profile: Profile };
+
+/**
+ * The account fields the service-binding entrypoint's `Principal` needs
+ * beyond `AuthUser` (ADR 0078). Read in the SAME SELECT as the rest when asked
+ * for, so the two can never describe different moments.
+ */
+export interface ApiKeyProfile {
+  /** Only ever an active status: an inactive account never reaches `user`. */
+  status: ActiveAccountStatus;
+  /** Honest about NULL, unlike `AuthUser.username`, which keeps the typing
+   *  every route has always relied on. */
+  username: string | null;
+  orcid: string | null;
+  given_name: string | null;
+  family_name: string | null;
+  orcid_verified: boolean;
+  email_verified: boolean;
+  account_kind: AccountKind;
+}
+
+/**
+ * The profile columns, appended to the lookup only when a caller asks.
+ *
+ * Opt-in rather than always selected so the HTTP path's SELECT stays exactly
+ * what it was: several route tests build their schema from a prefix of the
+ * migrations, before some of these columns existed, and a lookup that named
+ * them would fail every bearer request those tests make.
+ */
+const API_KEY_PROFILE_COLUMNS = `,
+        u.given_name,
+        u.family_name,
+        u.orcid_verified,
+        u.email_verified,
+        u.account_kind`;
 
 /**
  * Resolve a raw API key to its account: the ONE API-key lookup.
@@ -181,7 +218,17 @@ export type ApiKeyResolution =
  * and that copy lacks the `expires_at` predicate. Do not model a new reader
  * on it.
  */
-export async function resolveApiKeyUser(env: Bindings, apiKey: string): Promise<ApiKeyResolution> {
+export async function resolveApiKeyUser(env: Bindings, apiKey: string): Promise<ApiKeyResolution>;
+export async function resolveApiKeyUser(
+  env: Bindings,
+  apiKey: string,
+  opts: { withProfile: true },
+): Promise<ApiKeyResolution<ApiKeyProfile>>;
+export async function resolveApiKeyUser(
+  env: Bindings,
+  apiKey: string,
+  opts?: { withProfile: true },
+): Promise<ApiKeyResolution<ApiKeyProfile | undefined>> {
   if (!apiKey || apiKey.length < 32) return { kind: "malformed" };
 
   // Hash the key for lookup
@@ -197,7 +244,7 @@ export async function resolveApiKeyUser(env: Bindings, apiKey: string): Promise<
         u.github_username,
         u.role,
         u.orcid,
-        u.status,
+        u.status${opts?.withProfile ? API_KEY_PROFILE_COLUMNS : ""},
         t.id as token_id
       FROM tokens t
       JOIN users u ON t.user_id = u.id
@@ -217,6 +264,14 @@ export async function resolveApiKeyUser(env: Bindings, apiKey: string): Promise<
       orcid: string | null;
       status: string;
       token_id: number;
+      // Present only with `withProfile`.
+      given_name?: string | null;
+      family_name?: string | null;
+      // NOT NULL DEFAULT 0 in D1 (0050 and 0001), so plain numbers.
+      orcid_verified?: number;
+      email_verified?: number;
+      // Closed by migration 0082's CHECK constraint (ADR 0048).
+      account_kind?: AccountKind;
     }>();
 
   if (!result) return { kind: "unknown" };
@@ -245,6 +300,20 @@ export async function resolveApiKeyUser(env: Bindings, apiKey: string): Promise<
       role,
       orcid: result.orcid || undefined,
     },
+    profile: opts?.withProfile
+      ? {
+          // Narrowed by the `isActiveAccountStatus` check above, which is a
+          // boolean rather than a type guard.
+          status: result.status as ActiveAccountStatus,
+          username: result.username ?? null,
+          orcid: result.orcid,
+          given_name: result.given_name ?? null,
+          family_name: result.family_name ?? null,
+          orcid_verified: result.orcid_verified === 1,
+          email_verified: result.email_verified === 1,
+          account_kind: result.account_kind as AccountKind,
+        }
+      : undefined,
   };
 }
 

@@ -233,13 +233,23 @@ export interface WebSessionUser {
   account_kind: AccountKind;
 }
 
+/** The `waitUntil` half of an `ExecutionContext`: all a caller outside the
+ *  HTTP app needs to hand over so a background write outlives it. */
+export type BackgroundContext = Pick<ExecutionContext, "waitUntil">;
+
 /** Look up an active session by cookie value, returning the joined
  *  user row. Returns null if the cookie doesn't match, is revoked,
- *  or has expired. Touches last_used_at as a side effect. */
+ *  or has expired. Touches last_used_at as a side effect.
+ *
+ *  `ctx` is optional and only changes how long that touch is kept alive. A
+ *  caller outside the HTTP app (the service-binding entrypoint, `rpc/`)
+ *  passes its `ExecutionContext` so the write is handed to `waitUntil`: a
+ *  promise left floating there may be cancelled when the method returns. */
 export async function findSessionByCookieId(
   env: Bindings,
   cookieIdRaw: string,
   scope: SessionScope = "app",
+  ctx?: BackgroundContext,
 ): Promise<{ session: WebSessionRow; user: WebSessionUser } | null> {
   if (!cookieIdRaw) return null;
   const cookieHash = await hashCookieId(cookieIdRaw);
@@ -305,10 +315,13 @@ export async function findSessionByCookieId(
   // Bump last_used_at on every hit. This is fire-and-forget — we don't
   // want to fail the request on a slow D1 write, and a stale
   // last_used_at is harmless for now (no SLA on it).
-  env.DB.prepare(`UPDATE web_sessions SET last_used_at = datetime('now') WHERE id = ?`)
+  const touch = env.DB.prepare(
+    `UPDATE web_sessions SET last_used_at = datetime('now') WHERE id = ?`,
+  )
     .bind(row.id)
     .run()
     .catch((err) => console.error("[web-session] failed to bump last_used_at", err));
+  ctx?.waitUntil(touch);
 
   return {
     session: {
