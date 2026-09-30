@@ -142,8 +142,12 @@ It is named in `DEV_CRON_ALLOWLIST` so that decision is greppable.
   Only a present-but-unstorable row clears it.
 - **The shape is a contract with nemar-citations.**
   A change to `data-papers@1` is a change to `data-papers-sync.ts`, and a manifest with an unknown schema id is never partially applied.
-- **The vendored neuroschema bundle and `NEUROSCHEMA_VERSION` must move to the release that declares `data_papers` (0.4.1) before the key is schema-valid.**
-  Until then the served document carries an undeclared key, as it already does for `anonymous`.
+- **The vendored neuroschema bundle and `NEUROSCHEMA_VERSION` are at 0.4.1, the release that declares `data_papers`.**
+  The key is therefore schema-valid, and a test checks that whatever the writer accepts conforms to the vendored schema.
+  The served document still carries the undeclared `anonymous` key, which the live conformance check only warns about (#1247).
+- **Live contract checks accept a deployed backend one PATCH behind the source.**
+  A PATCH bump cannot be deployed before its own CI runs, so the live `schema_version` pins compare MAJOR.MINOR only.
+  The exact version stays pinned by the pure tests.
 - **`citation-counts-sync.ts` has the same unbounded-body gap this ADR closes here.**
   It reads the whole response with no size limit, and nemar-cli#1573 tracks it.
 
