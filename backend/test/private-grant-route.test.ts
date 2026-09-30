@@ -15,11 +15,11 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { PRIVATE_GRANT_TTL_SECONDS } from "../../shared/contract/private-site.js";
 import worker from "../src/index";
-import { __selectBucket } from "../src/middleware/rateLimit";
+import { __limits, __selectBucket } from "../src/middleware/rateLimit";
 import { authDocsRoutes } from "../src/routes/auth-docs";
 import { authPrivateRoutes } from "../src/routes/auth-private";
 import { inactiveAccountBody } from "../src/services/account-tier";
@@ -27,6 +27,7 @@ import { hashGrantCode } from "../src/services/docs-auth";
 import { PRIVATE_GRANT_INSERT_SQL } from "../src/services/private-auth";
 import { type AuthMethod, hashCookieId, issueSession } from "../src/services/web-session";
 import type { Bindings, Variables } from "../src/types/bindings";
+import { InMemoryCache } from "./helpers/cache";
 import { freshDb, realD1 } from "./helpers/d1";
 
 const APP = "https://app.nemar.org";
@@ -88,7 +89,11 @@ function grant(
   origin: string | null = APP,
   body: unknown = { state: STATE },
 ): Promise<Response> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  // One address for every request, as the website's egress looks.
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "CF-Connecting-IP": "203.0.113.9",
+  };
   if (cookie) headers.Cookie = `nemar_session=${cookie}`;
   if (origin) headers.Origin = origin;
   return app.request(
@@ -385,10 +390,62 @@ describe("POST /auth/private/grant: wiring", () => {
     }
   });
 
-  test("it sits in the strict per-IP bucket under both mount spellings", () => {
+  test("it is NOT in the strict per-IP bucket, under either mount spelling", () => {
+    // Every caller shares the website's egress addresses (issue #1354), so the
+    // strict bucket would make strangers share ten sign-ins a minute. It rides
+    // the generic bucket; the per-account limit below is its real floor.
     for (const path of ["/auth/private/grant", "/nemar/auth/private/grant"]) {
       const sel = __selectBucket(path, undefined, "203.0.113.7");
-      expect(sel.keyKind).toBe("auth-ip");
+      expect(sel.keyKind).toBe("ip");
     }
+  });
+});
+
+describe("POST /auth/private/grant: the per-account limit", () => {
+  // The real Cache API is absent under bun; the shared in-memory double
+  // (`helpers/cache.ts`) stores and expires entries the way it does.
+  let saved: unknown;
+  beforeAll(() => {
+    saved = (globalThis as { caches?: unknown }).caches;
+  });
+  beforeEach(() => {
+    (globalThis as { caches?: unknown }).caches = { default: new InMemoryCache() };
+  });
+  afterAll(() => {
+    (globalThis as { caches?: unknown }).caches = saved;
+  });
+
+  async function grantsUntil429(userId: number): Promise<number[]> {
+    const cookie = await appSession(userId);
+    const statuses: number[] = [];
+    for (let i = 0; i <= __limits.PRIVATE_GRANT_MAX_REQUESTS; i++) {
+      statuses.push((await grant(cookie)).status);
+    }
+    return statuses;
+  }
+
+  test("the eleventh grant in a minute from one account is 429", async () => {
+    expect(__limits.PRIVATE_GRANT_MAX_REQUESTS).toBe(10);
+    const userId = seedUser("limit-one@nemar.test");
+    const statuses = await grantsUntil429(userId);
+    expect(statuses.slice(0, 10)).toEqual(Array(10).fill(200));
+    expect(statuses[10]).toBe(429);
+    const refused = await grant(await appSession(userId));
+    expect(refused.headers.get("X-RateLimit-Bucket")).toBe("private-grant-account");
+    expect(refused.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  test("two accounts from one address are limited independently", async () => {
+    const first = seedUser("limit-a@nemar.test");
+    const second = seedUser("limit-b@nemar.test");
+    expect((await grantsUntil429(first))[10]).toBe(429);
+    // Same address, a different account: its own budget is untouched.
+    expect((await grant(await appSession(second))).status).toBe(200);
+  });
+
+  test("an anonymous caller spends no account's budget", async () => {
+    const userId = seedUser("limit-anon@nemar.test");
+    for (let i = 0; i < 20; i++) expect((await grant()).status).toBe(401);
+    expect((await grant(await appSession(userId))).status).toBe(200);
   });
 });

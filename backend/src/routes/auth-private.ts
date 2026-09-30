@@ -27,6 +27,7 @@ import {
   type PrivateGrantRefusal,
   type PrivateGrantResponse,
 } from "../../../shared/contract/private-site.js";
+import { checkPrivateGrantBudget } from "../middleware/rateLimit";
 import { webSessionMiddleware } from "../middleware/webSession";
 import { inactiveAccountBody, isActiveAccountStatus } from "../services/account-tier";
 import { generateGrantCode, hashGrantCode } from "../services/docs-auth";
@@ -56,6 +57,19 @@ const INVALID_REQUEST = {
   message: "The sign-in link is incomplete. Open the page on the private site again.",
 } as const satisfies { error: PrivateGrantRefusal; message: string };
 
+/** `waitUntil`, or undefined outside a real Worker invocation, where Hono's
+ *  getter throws (a route test driving the app directly). */
+function backgroundOf(c: {
+  executionCtx: ExecutionContext;
+}): ((work: Promise<unknown>) => void) | undefined {
+  try {
+    const ctx = c.executionCtx;
+    return (work) => ctx.waitUntil(work);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Mint a one-time code for the caller's own account, bound to the `state` the
  * private site gave the browser (JSON body `{ state }`, forwarded by the
@@ -75,6 +89,16 @@ authPrivateRoutes.post("/private/grant", webSessionMiddleware, async (c) => {
   const session = c.var.webSession;
   if (!user || !session) {
     return c.json(UNAUTHENTICATED, 401, NO_STORE);
+  }
+  // Ten a minute per ACCOUNT, not per address: the website calls this
+  // server-side, so every sign-in arrives from a few Cloudflare egress
+  // addresses (issue #1354), and the global limiter keeps this path in its
+  // generic bucket for that reason.
+  const budget = await checkPrivateGrantBudget(c.env, c.req.raw, user.id, backgroundOf(c));
+  if (!budget.allowed) {
+    const refused = new Response(budget.response.body, budget.response);
+    refused.headers.set("Cache-Control", "no-store");
+    return refused;
   }
   // `webSessionMiddleware` admits a `pending` account (it has to reach
   // Settings to fix the address that made it pending), so the account rule is

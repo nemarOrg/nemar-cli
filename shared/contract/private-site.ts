@@ -92,9 +92,10 @@ export const PRIVATE_CALLBACK_PATH = "/__auth/callback";
 /** `POST /auth/private/grant` refusals carrying an `error` code:
  *  `unauthenticated` (401, no live app session) and `invalid_request` (400, a
  *  missing or malformed `state`). A missing or foreign `Origin` is 403
- *  `Origin not allowed`, and an inactive account is 403 with the API's usual
- *  inactive-account body (`status` names why), neither of which uses this
- *  code. */
+ *  `Origin not allowed`, an inactive account is 403 with the API's usual
+ *  inactive-account body (`status` names why), and more than ten grants a
+ *  minute for one account is 429 with the API's usual rate-limit body; none
+ *  of those uses this code. */
 export type PrivateGrantRefusal = "unauthenticated" | "invalid_request";
 
 /** The JSON body of `POST /auth/private/grant`. `state` is 32 to 256
