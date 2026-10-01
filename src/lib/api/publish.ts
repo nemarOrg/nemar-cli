@@ -6,6 +6,7 @@
  * verbatim.
  */
 
+import { APPROVE_RETRY_DELAY_MS } from "../../../shared/publication-retry.js";
 import { PUBLICATION_STEPS } from "../../../shared/publication-steps.js";
 import { request } from "./client.js";
 import { ApiError } from "./errors.js";
@@ -315,7 +316,7 @@ export async function approvePublication(
   onProgress?: (info: PublishProgressInfo) => void,
 ): Promise<PublishApproveResponse> {
   const MAX_ATTEMPTS = 5;
-  const RETRY_DELAY_MS = 10_000;
+  const RETRY_DELAY_MS = APPROVE_RETRY_DELAY_MS;
 
   let s3_lock_continuation_token: string | undefined;
   // Total object count for s3_lock — computed by the server on the first

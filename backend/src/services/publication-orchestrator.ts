@@ -30,6 +30,12 @@ import {
   markAnonymous,
 } from "./anonymity";
 import {
+  ACTIVE_REQUEST_TAIL_SQL,
+  type Approver,
+  approvalLeaseLiveSql,
+  resolveApprover,
+} from "./approval-dispatch";
+import {
   isCentralManifestWorkflowEnabled,
   publishEzidVersionDoiViaCentral,
 } from "./central-manifest";
@@ -300,7 +306,13 @@ export interface ApproveStepContext {
   executionCtx: { waitUntil(p: Promise<unknown>): void };
   json(body: unknown, status?: number): RespondOutcome;
   datasetId: string;
+  /** The account that called `/approve`: a person at a terminal, or the
+   *  executor's service key. Not necessarily the approver; see `approver`. */
   adminUser: AuthUser;
+  /** Who the publication is recorded as approved by. The admin who clicked
+   *  Approve on the website when the run was dispatched from there, otherwise
+   *  `adminUser` (ADR 0080). Assigned once the request is found. */
+  approver: Approver;
   body: ApproveBody;
   requestId: number;
   repoName: string;
@@ -1926,7 +1938,6 @@ async function stepNotifyUser(c: ApproveStepContext): Promise<RespondOutcome | u
   const db = c.db;
   const datasetId = c.datasetId;
   const dataset = c.dataset;
-  const adminUser = c.adminUser;
   const startStep = c.recorder.startStep;
   const updateProgress = c.recorder.updateProgress;
 
@@ -1966,7 +1977,7 @@ async function stepNotifyUser(c: ApproveStepContext): Promise<RespondOutcome | u
       c.notifyUserWarning = `Notification email failed: ${msg}`;
       try {
         await auditLogStatement(db, {
-          userId: adminUser.id,
+          userId: c.approver.id,
           action: "notify_user_failed",
           resourceType: "dataset",
           resourceId: datasetId,
@@ -2377,16 +2388,40 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   }
 
   // Find the publication request
+  // The newest active request, by the same rule the dispatch route claims with
+  // (ACTIVE_REQUEST_TAIL_SQL): the two must agree on the row, or the clicking
+  // admin would be recorded on a request this run never touches.
+  //
+  // `approval_lease_live` is read HERE, with the row, because the request-start
+  // UPDATE below bumps `updated_at`: asked afterwards, every call would find a
+  // fresh heartbeat and a stale click would always look live.
   const request = await db
     .prepare(
-      "SELECT id, status, steps_completed, anonymous FROM publication_requests WHERE dataset_id = ? AND status IN ('requested', 'approving', 'blocked') ORDER BY requested_at DESC LIMIT 1",
+      `SELECT id, status, steps_completed, anonymous, approval_requested_by,
+              ${approvalLeaseLiveSql()} AS approval_lease_live ${ACTIVE_REQUEST_TAIL_SQL}`,
     )
     .bind(datasetId)
-    .first<{ id: number; status: string; steps_completed: string; anonymous: number | null }>();
+    .first<{
+      id: number;
+      status: string;
+      steps_completed: string;
+      anonymous: number | null;
+      approval_requested_by: number | null;
+      approval_lease_live: number;
+    }>();
 
   if (!request) {
     return c.json({ error: "No active publication request found" }, 404);
   }
+
+  // Attribution forks (ADR 0080): a web click records the admin who clicked,
+  // a terminal approval records its own caller. `adminUser` stays the executor.
+  c.approver = await resolveApprover(
+    db,
+    request.approval_requested_by,
+    request.approval_lease_live === 1,
+    { id: adminUser.id, username: adminUser.username },
+  );
 
   const stepsCompleted: PublicationStep[] = resume
     ? JSON.parse(request.steps_completed || "[]")
@@ -2429,9 +2464,12 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // Mark as approving
   await db
     .prepare(
-      "UPDATE publication_requests SET status = 'approving', approved_by = ?, updated_at = datetime('now') WHERE id = ?",
+      // `last_error = NULL`: a new attempt begins, so the previous attempt's
+      // error is history (the caller's own output has it), and the row reads as
+      // running, not failed, from this moment (services/approval-dispatch.ts).
+      "UPDATE publication_requests SET status = 'approving', approved_by = ?, last_error = NULL, updated_at = datetime('now') WHERE id = ?",
     )
-    .bind(adminUser.id, request.id)
+    .bind(c.approver.id, request.id)
     .run();
 
   // Get dataset info
@@ -2621,11 +2659,19 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
 
   try {
     await auditLogStatement(db, {
-      userId: adminUser.id,
+      userId: c.approver.id,
       action: "dataset_published",
       resourceType: "dataset",
       resourceId: datasetId,
-      details: JSON.stringify({ approved_by: adminUser.username, steps: allSteps }),
+      details: JSON.stringify({
+        approved_by: c.approver.username,
+        // Only when the executor is not the approver, so a terminal approval's
+        // row is byte-identical to what it always was.
+        ...(c.approver.id !== adminUser.id
+          ? { executed_by: adminUser.username || String(adminUser.id) }
+          : {}),
+        steps: allSteps,
+      }),
     }).run();
   } catch (auditError) {
     auditLogFailed = true;

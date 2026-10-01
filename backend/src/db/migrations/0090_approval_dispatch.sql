@@ -1,0 +1,31 @@
+-- A publication request remembers who launched its approval from the web, and
+-- when (ADR 0080).
+--
+-- Approval is not one request. After the irreversible DOI publish, the S3
+-- Object Lock step works in batches the CALLER must keep requesting
+-- (`hasMore` + a continuation token), so a click on the website cannot run it
+-- inside a single Worker invocation, and moving the loop into the Worker would
+-- cost more than the platform should spend on it. The website therefore asks
+-- the backend to DISPATCH a run to an executor (today a GitHub Actions workflow
+-- that drives the CLI), and these two columns are the whole state that
+-- hand-off needs.
+--
+--   * `approval_requested_by` is the admin who clicked Approve. The executor
+--     authenticates with its own service key, so without this column the
+--     recorded approver (`approved_by`, the `dataset_published` audit row)
+--     would be the bot. The orchestrator reads it as the approver when set and
+--     falls back to the calling admin when it is NULL, which is every approval
+--     driven directly from a terminal. No FOREIGN KEY, matching `approved_by`
+--     and `denied_by`: an approver's account ending must not be blocked by, or
+--     cascade into, a request that already published.
+--   * `approval_dispatched_at` is when the dispatch was claimed, SQLite
+--     `datetime('now')` (UTC, no zone marker). It is the lease the dispatch
+--     route and the list route's `approval_in_flight` read, so a second click,
+--     or a second admin, cannot start a second run beside the first.
+--
+-- Both are nullable with no backfill: every existing request predates web
+-- dispatch, and NULL is the truth for them. Nothing is indexed; a row is looked
+-- up by `id` or `dataset_id`, never by these.
+
+ALTER TABLE publication_requests ADD COLUMN approval_requested_by INTEGER;
+ALTER TABLE publication_requests ADD COLUMN approval_dispatched_at TEXT;
