@@ -114,6 +114,8 @@ interface Seed {
   dispatchedAt?: string;
   updatedAt?: string;
   requestedBy?: number;
+  /** A recorded step failure from an earlier attempt. */
+  lastError?: string;
   /** Requested time, to order several requests for one dataset. */
   requestedAt?: string;
   dataset?: string;
@@ -124,11 +126,11 @@ function seedRequest(seed: Seed = {}): number {
   db.run(
     `INSERT INTO publication_requests
        (dataset_id, status, requested_by, requested_at, updated_at,
-        approval_requested_by, approval_dispatched_at)
+        approval_requested_by, approval_dispatched_at, last_error)
      VALUES (?, ?, ?, ${seed.requestedAt ? `datetime('now', '${seed.requestedAt}')` : "datetime('now', '-3 hours')"},
              ${seed.updatedAt ? modifier(seed.updatedAt) : "datetime('now', '-3 hours')"},
-             ${seed.requestedBy ?? "NULL"}, ${modifier(seed.dispatchedAt)})`,
-    [seed.dataset ?? DATASET, seed.status ?? "requested", adminId],
+             ${seed.requestedBy ?? "NULL"}, ${modifier(seed.dispatchedAt)}, ?)`,
+    [seed.dataset ?? DATASET, seed.status ?? "requested", adminId, seed.lastError ?? null],
   );
   return db.query<{ id: number }, []>("SELECT MAX(id) AS id FROM publication_requests").get()
     ?.id as number;
@@ -142,10 +144,11 @@ function row(id: number) {
         approval_requested_by: number | null;
         approval_dispatched_at: string | null;
         updated_at: string;
+        last_error: string | null;
       },
       [number]
     >(
-      "SELECT status, approval_requested_by, approval_dispatched_at, updated_at FROM publication_requests WHERE id = ?",
+      "SELECT status, approval_requested_by, approval_dispatched_at, updated_at, last_error FROM publication_requests WHERE id = ?",
     )
     .get(id);
 }
@@ -319,6 +322,65 @@ describe("the lease: one run at a time", () => {
     expect(dispatches).toHaveLength(1);
     const winner = a.status === 202 ? adminId : secondAdminId;
     expect(row(id)?.approval_requested_by).toBe(winner);
+  });
+});
+
+describe("a run that failed", () => {
+  // The orchestrator records a failed step in last_error and answers 500. Once
+  // the grace window after that failure has passed, the run is stalled and the
+  // page can offer Resume. (Inside the window the CLI's own retry is about to
+  // start; approval-in-flight.test.ts pins that.)
+  test("is dispatchable again, resuming, and the dispatch clears the old error", async () => {
+    const id = seedRequest({
+      status: "approving",
+      lastError: "EZID 503",
+      updatedAt: "-5 minutes",
+    });
+    const res = await dispatchWith(ADMIN_KEY);
+
+    expect(res.status).toBe(202);
+    expect(((await res.json()) as { resume: boolean }).resume).toBe(true);
+    expect(dispatches[0].body.client_payload).toMatchObject({ request_id: id, resume: true });
+    // A new attempt begins: the previous attempt's error is history.
+    expect(row(id)?.last_error).toBeNull();
+  });
+
+  test("and the run it launched is then in flight, so a second click is refused", async () => {
+    // With the old error cleared and a fresh dispatch, nothing reads as failed.
+    // Left in place, the claim would make the new run look failed and let this
+    // second click start a second run.
+    seedRequest({ status: "approving", lastError: "EZID 503", updatedAt: "-5 minutes" });
+    expect((await dispatchWith(ADMIN_KEY)).status).toBe(202);
+    const again = await dispatchWith(SECOND_ADMIN_KEY);
+    expect(again.status).toBe(409);
+    expect((await errorBody(again)).error).toBe("already_in_flight");
+    expect(dispatches).toHaveLength(1);
+  });
+
+  test("a failure seconds old is not dispatchable: the CLI's retry is about to start", async () => {
+    const id = seedRequest({
+      status: "approving",
+      lastError: "EZID 503",
+      updatedAt: "-10 seconds",
+    });
+    const res = await dispatchWith(ADMIN_KEY);
+    expect(res.status).toBe(409);
+    expect((await errorBody(res)).error).toBe("already_in_flight");
+    expect(dispatches).toHaveLength(0);
+    expect(row(id)?.last_error).toBe("EZID 503");
+  });
+
+  test("a dispatch that is NOT sent puts the error back, as if nothing had happened", async () => {
+    const id = seedRequest({
+      status: "approving",
+      lastError: "EZID 503",
+      updatedAt: "-5 minutes",
+    });
+    githubStatus = 422;
+    expect((await dispatchWith(ADMIN_KEY)).status).toBe(502);
+    expect(row(id)?.last_error).toBe("EZID 503");
+    expect(row(id)?.approval_requested_by).toBeNull();
+    expect(row(id)?.approval_dispatched_at).toBeNull();
   });
 });
 

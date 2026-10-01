@@ -290,6 +290,16 @@ export function isRetryablePublishError(err: unknown): boolean {
 }
 
 /**
+ * How long `approvePublication` waits between attempts after a retryable
+ * failure. Exported because the backend's approval lease treats a failed run
+ * as still running for a grace window that must outlast this gap
+ * (`FAILED_RUN_GRACE_SECONDS` in backend/src/services/approval-dispatch.ts); a
+ * test holds the two together, so raising this without the grace is a red build
+ * rather than a second executor launched beside a retry that is about to start.
+ */
+export const APPROVE_RETRY_DELAY_MS = 10_000;
+
+/**
  * Approve publication request (admin) - runs orchestrator with
  * retry-with-delay across Worker invocations.
  *
@@ -315,7 +325,7 @@ export async function approvePublication(
   onProgress?: (info: PublishProgressInfo) => void,
 ): Promise<PublishApproveResponse> {
   const MAX_ATTEMPTS = 5;
-  const RETRY_DELAY_MS = 10_000;
+  const RETRY_DELAY_MS = APPROVE_RETRY_DELAY_MS;
 
   let s3_lock_continuation_token: string | undefined;
   // Total object count for s3_lock — computed by the server on the first

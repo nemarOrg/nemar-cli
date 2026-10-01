@@ -225,9 +225,9 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     const db = c.env.DB;
 
     const request = await db
-      .prepare(`SELECT id, status ${ACTIVE_REQUEST_TAIL_SQL}`)
+      .prepare(`SELECT id, status, last_error ${ACTIVE_REQUEST_TAIL_SQL}`)
       .bind(datasetId)
-      .first<{ id: number; status: string }>();
+      .first<{ id: number; status: string; last_error: string | null }>();
 
     if (!request) {
       return c.json({ error: "not_found", message: "No active publication request found" }, 404);
@@ -248,10 +248,18 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     // alone on purpose. It is the orchestrator's progress heartbeat, and
     // bumping it here would make a failed dispatch read as a live run for the
     // whole lease on an `approving` row.
+    //
+    // `last_error` is cleared: a new attempt begins, and the previous attempt's
+    // error is history. It has to be cleared HERE and not only when `/approve`
+    // starts, because a failed run's error would otherwise sit on the row
+    // between the claim and the executor's first call, and the predicate would
+    // read the freshly dispatched run as failed and let a second click through.
+    // The release below puts it back if nothing was sent.
     const claim = await db
       .prepare(
         `UPDATE publication_requests
-           SET approval_requested_by = ?, approval_dispatched_at = datetime('now')
+           SET approval_requested_by = ?, approval_dispatched_at = datetime('now'),
+               last_error = NULL
          WHERE id = ? AND status IN ('requested', 'approving') AND NOT ${approvalInFlightSql()}`,
       )
       .bind(adminUser.id, request.id)
@@ -296,19 +304,21 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     const environment = approvalDispatchEnvironment(c.env);
 
     // Release the claim so the admin can try again at once rather than wait out
-    // the lease. Only ever done for a failure that is DEFINITELY "not sent".
-    // `AND approval_requested_by = ?` makes it clear only a claim this click
-    // made. If even the release fails the lease lapses by itself, which errs
+    // the lease. Only ever done for a failure that is DEFINITELY "not sent", so
+    // the row goes back to how it was: the error the claim cleared is restored
+    // (unless something wrote a newer one meanwhile). `AND approval_requested_by
+    // = ?` makes it clear only a claim this click made. If even the release fails the lease lapses by itself, which errs
     // toward refusing a retry, never toward a second run.
     const releaseClaim = async (): Promise<void> => {
       try {
         await db
           .prepare(
             `UPDATE publication_requests
-               SET approval_requested_by = NULL, approval_dispatched_at = NULL
+               SET approval_requested_by = NULL, approval_dispatched_at = NULL,
+                   last_error = COALESCE(last_error, ?)
              WHERE id = ? AND approval_requested_by = ?`,
           )
-          .bind(request.id, adminUser.id)
+          .bind(request.last_error, request.id, adminUser.id)
           .run();
       } catch (releaseErr) {
         console.error(

@@ -23,34 +23,67 @@
  *   1. dispatched within the lease. The executor may not have made its first
  *      `/approve` call yet (a queued runner), so `updated_at` alone would call
  *      a freshly dispatched run idle.
- *   2. `approving` with a fresh `updated_at`. A terminal-driven approval never
- *      sets `approval_dispatched_at`, so without this clause the web could start
- *      a second run beside a person's own.
+ *   2. `approving` with a fresh `updated_at`. A terminal approval never sets
+ *      `approval_dispatched_at`, so without this clause the web could start a
+ *      second run beside a person's own.
  *
- * Both are limited to a request that can still run (`requested` or
- * `approving`): a `published`, `denied` or `blocked` row has no run to protect,
- * and a row published a minute after its dispatch must not read as in flight.
+ * Both are limited to a request that can still run (`requested` or `approving`):
+ * a `published`, `denied` or `blocked` row has no run to protect, and a row
+ * published a minute after its dispatch must not read as in flight.
  *
- * Known limit: a run that FAILS keeps the lease until it lapses, because
- * nothing in the schema says an executor has stopped. An admin who wants to
- * retry sooner approves from a terminal, which this lease does not gate.
+ * A FAILED run is the exception to "live for the whole lease". The orchestrator
+ * records a step's failure in `last_error` and answers 500; the caller then
+ * either gives up or retries. Treating the failure as "still running" for the
+ * rest of the lease would hold a dead run for up to fifteen minutes. But
+ * treating it as stopped AT ONCE would be wrong too: the CLI retries a failed
+ * step after a fixed wait (`APPROVE_RETRY_DELAY_MS`, 10 seconds, up to five
+ * times), and an executor launched in that wait would run beside the retry that
+ * is about to start. So a failed run stays in flight for
+ * {@link FAILED_RUN_GRACE_SECONDS}, comfortably longer than that wait, and is
+ * stalled after it. A retry clears `last_error` as it starts (the orchestrator's
+ * request-start UPDATE) and so is in flight again at once, and so is a fresh
+ * dispatch (the claim clears it): the previous attempt's error is history.
  */
 
 /** How long a run stays "in flight" after its last sign of life. */
 export const APPROVAL_LEASE_MINUTES = 15;
 
 /**
- * SQL boolean expression: this `publication_requests` row has a live approval
- * run. `columnPrefix` qualifies the columns (`"pr."` in a join, `""` in an
- * UPDATE's WHERE). The interpolated value is a module constant, never input.
+ * How long a run that recorded an error stays in flight after recording it.
+ * Must outlast the CLI's wait between attempts; a test binds it to
+ * `APPROVE_RETRY_DELAY_MS` so the two cannot drift apart.
  */
-export function approvalInFlightSql(columnPrefix = ""): string {
+export const FAILED_RUN_GRACE_SECONDS = 60;
+
+/**
+ * SQL boolean expression: this `publication_requests` row's lease is live, by
+ * time alone (the two clauses above), ignoring whether the run has failed.
+ * `columnPrefix` qualifies the columns (`"pr."` in a join, `""` in an UPDATE's
+ * WHERE). The interpolated value is a module constant, never input.
+ *
+ * Used where "is anything still associated with this request" is the question
+ * rather than "is it running right now": attribution, which must keep naming
+ * the admin who clicked across a failed step's retries.
+ */
+export function approvalLeaseLiveSql(columnPrefix = ""): string {
   const p = columnPrefix;
   const since = `datetime('now', '-${APPROVAL_LEASE_MINUTES} minutes')`;
   return `(${p}status IN ('requested', 'approving') AND (
       (${p}approval_dispatched_at IS NOT NULL AND ${p}approval_dispatched_at >= ${since})
       OR (${p}status = 'approving' AND ${p}updated_at >= ${since})
     ))`;
+}
+
+/**
+ * SQL boolean expression: this row has a live approval run RIGHT NOW. The
+ * lease is live, and the run has not failed more than
+ * {@link FAILED_RUN_GRACE_SECONDS} ago. This is what the dispatch claim and the
+ * list route's `approval_in_flight` read.
+ */
+export function approvalInFlightSql(columnPrefix = ""): string {
+  const p = columnPrefix;
+  const failedBefore = `datetime('now', '-${FAILED_RUN_GRACE_SECONDS} seconds')`;
+  return `(${approvalLeaseLiveSql(p)} AND (${p}last_error IS NULL OR ${p}updated_at >= ${failedBefore}))`;
 }
 
 /**

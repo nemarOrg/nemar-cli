@@ -32,6 +32,8 @@ let adminId: number;
 
 interface Seed {
   status: string;
+  /** A recorded step failure. Null/omitted means the run has not failed. */
+  lastError?: string;
   /** SQLite modifier such as "-20 minutes", or null for NULL. */
   dispatchedAt?: string | null;
   updatedAt?: string;
@@ -45,10 +47,11 @@ function seedRequest(seed: Seed): string {
   db.run(
     `INSERT INTO publication_requests
        (dataset_id, status, requested_by, requested_at, updated_at,
-        approval_requested_by, approval_dispatched_at)
+        approval_requested_by, approval_dispatched_at, last_error)
      VALUES ('${datasetId}', '${seed.status}', ${adminId}, datetime('now', '-3 hours'),
              ${seed.updatedAt ? modifier(seed.updatedAt) : "datetime('now', '-3 hours')"},
-             ${seed.requestedBy ?? "NULL"}, ${modifier(seed.dispatchedAt)})`,
+             ${seed.requestedBy ?? "NULL"}, ${modifier(seed.dispatchedAt)},
+             ${seed.lastError ? `'${seed.lastError}'` : "NULL"})`,
   );
   return datasetId;
 }
@@ -140,6 +143,45 @@ describe("approval_in_flight: a terminal-driven run", () => {
     // `approving` is evidence of a run. A fresh `requested` row is just a
     // request that was filed (or edited) a moment ago.
     const id = seedRequest({ status: "requested", dispatchedAt: null, updatedAt: "-1 minutes" });
+    expect((await list())[id].approval_in_flight).toBe(false);
+  });
+});
+
+describe("approval_in_flight: a run that failed", () => {
+  // The orchestrator records a step failure in last_error (and bumps updated_at)
+  // and answers 500. The CLI then retries after a fixed 10 second wait, so a
+  // failure cannot read as "stopped" at once: a second executor launched in that
+  // wait would run beside the retry. After the grace window it is stalled, not
+  // held for the whole 15 minute lease.
+  test("a failure recorded seconds ago is still in flight: its retry is about to start", async () => {
+    const id = seedRequest({
+      status: "approving",
+      lastError: "EZID 503",
+      updatedAt: "-10 seconds",
+    });
+    expect((await list())[id].approval_in_flight).toBe(true);
+  });
+
+  test("a failure recorded a few minutes ago is stalled, though the lease has not lapsed", async () => {
+    const id = seedRequest({
+      status: "approving",
+      lastError: "EZID 503",
+      updatedAt: "-5 minutes",
+    });
+    expect((await list())[id].approval_in_flight).toBe(false);
+  });
+
+  test("the same row with no error recorded is still running", async () => {
+    const id = seedRequest({ status: "approving", updatedAt: "-5 minutes" });
+    expect((await list())[id].approval_in_flight).toBe(true);
+  });
+
+  test("an old error left beside a fresh dispatch reads as failed, which is why the dispatch claim clears it", async () => {
+    // Nothing clears the error but the claim and the orchestrator's start. If a
+    // dispatch left one in place, the run it just launched would read as failed
+    // and a second click would be let through. approve-dispatch-route.test.ts
+    // pins that the claim clears it.
+    const id = seedRequest({ status: "approving", dispatchedAt: "-1 minutes", lastError: "old" });
     expect((await list())[id].approval_in_flight).toBe(false);
   });
 });

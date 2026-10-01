@@ -2451,7 +2451,10 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // Mark as approving
   await db
     .prepare(
-      "UPDATE publication_requests SET status = 'approving', approved_by = ?, updated_at = datetime('now') WHERE id = ?",
+      // `last_error = NULL`: a new attempt begins, so the previous attempt's
+      // error is history (the caller's own output has it), and the row reads as
+      // running, not failed, from this moment (services/approval-dispatch.ts).
+      "UPDATE publication_requests SET status = 'approving', approved_by = ?, last_error = NULL, updated_at = datetime('now') WHERE id = ?",
     )
     .bind(c.approver.id, request.id)
     .run();
