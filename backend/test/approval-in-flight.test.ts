@@ -147,6 +147,46 @@ describe("approval_in_flight: a terminal-driven run", () => {
   });
 });
 
+describe("approval_in_flight: the edge of the lease", () => {
+  // A lease runs for 15 minutes AFTER the last sign of life, and the sign of life
+  // at exactly 15 minutes still counts (>=, not >). SQLite's clock moves a whole
+  // second at a time, so a timestamp seeded "exactly 15 minutes ago" is exactly
+  // that only if the second did not tick before the route read it. Each case
+  // seeds, checks the threshold the route compares against is still the seeded
+  // value, and only then asserts; if the second ticked it discards that row and
+  // tries again, so the assertion is never made on a row that was not on the edge.
+  async function onTheEdge(seed: Seed, column: "approval_dispatched_at" | "updated_at") {
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const id = seedRequest({
+        ...seed,
+        ...(column === "approval_dispatched_at"
+          ? { dispatchedAt: "-15 minutes" }
+          : { updatedAt: "-15 minutes" }),
+      });
+      const seeded = db
+        .query<{ v: string }, [string]>(
+          `SELECT ${column} AS v FROM publication_requests WHERE dataset_id = ?`,
+        )
+        .get(id)?.v;
+      const inFlight = (await list())[id].approval_in_flight;
+      const threshold = db
+        .query<{ t: string }, []>("SELECT datetime('now', '-15 minutes') AS t")
+        .get()?.t;
+      if (seeded === threshold) return inFlight;
+      db.run("DELETE FROM publication_requests WHERE dataset_id = ?", [id]);
+    }
+    throw new Error("the clock ticked on every attempt; cannot place a row on the edge");
+  }
+
+  test("a dispatch exactly 15 minutes old is still in flight (>=, not >)", async () => {
+    expect(await onTheEdge({ status: "requested" }, "approval_dispatched_at")).toBe(true);
+  });
+
+  test("an approving run whose last sign of life was exactly 15 minutes ago is still in flight", async () => {
+    expect(await onTheEdge({ status: "approving" }, "updated_at")).toBe(true);
+  });
+});
+
 describe("approval_in_flight: a run that failed", () => {
   // The orchestrator records a step failure in last_error (and bumps updated_at)
   // and answers 500. The CLI then retries after a fixed 10 second wait, so a

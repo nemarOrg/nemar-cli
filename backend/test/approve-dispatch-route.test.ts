@@ -325,6 +325,37 @@ describe("the lease: one run at a time", () => {
   });
 });
 
+describe("releasing a claim", () => {
+  test("clears only a claim this click made", async () => {
+    // The release is conditional on `approval_requested_by` still being the
+    // clicker, so a claim some other click made in the meantime is never undone
+    // by this click's failure. Another admin's claim is landed on the real row
+    // exactly between this click's claim and its release.
+    const id = seedRequest();
+    githubStatus = 422;
+    let landed = false;
+    const bindings = {
+      ...env(),
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (!landed && sql.includes("SET approval_requested_by = NULL")) {
+          landed = true;
+          db.run("UPDATE publication_requests SET approval_requested_by = ? WHERE id = ?", [
+            secondAdminId,
+            id,
+          ]);
+        }
+      }),
+    } as Bindings;
+
+    const res = await dispatchWith(ADMIN_KEY, DATASET, bindings);
+    expect(res.status).toBe(502);
+    expect(landed).toBe(true);
+    // The other admin's claim stands; this click's failure did not undo it.
+    expect(row(id)?.approval_requested_by).toBe(secondAdminId);
+    expect(row(id)?.approval_dispatched_at).not.toBeNull();
+  });
+});
+
 describe("a run that failed", () => {
   // The orchestrator records a failed step in last_error and answers 500. Once
   // the grace window after that failure has passed, the run is stalled and the
