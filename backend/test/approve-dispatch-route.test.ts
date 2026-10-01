@@ -27,7 +27,7 @@ import { adminRoutes } from "../src/routes/admin";
 import { hashApiKey } from "../src/services/token";
 import { issueSession } from "../src/services/web-session";
 import type { Bindings, Variables } from "../src/types/bindings";
-import { freshDb, realD1, yieldingD1 } from "./helpers/d1";
+import { freshDb, interceptingD1, realD1, yieldingD1 } from "./helpers/d1";
 
 const ADMIN_KEY = "dispatch-admin-key-0123456789abcdef0123456789abcdef";
 const SECOND_ADMIN_KEY = "dispatch-admin2-key-0123456789abcdef0123456789abcdef";
@@ -365,6 +365,74 @@ describe("a request that cannot be dispatched", () => {
     const res = await dispatchWith(ADMIN_KEY);
     expect(res.status).toBe(202);
     expect(((await res.json()) as { request_id: number }).request_id).toBe(newer);
+  });
+});
+
+describe("a request that changes between the route's read and its claim", () => {
+  // The route reads the request, then claims it with a conditional UPDATE. Land
+  // another writer exactly between the two (through the real database, so the
+  // interleaving is real and only deterministic) and check the answer reflects
+  // what the request is NOW, not a blanket "already running".
+  function bindingsThatChangeTheRequestBeforeTheClaim(newStatus: string): Bindings {
+    let done = false;
+    return {
+      ...env(),
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (!done && sql.includes("SET approval_requested_by = ?")) {
+          done = true;
+          db.run("UPDATE publication_requests SET status = ? WHERE dataset_id = ?", [
+            newStatus,
+            DATASET,
+          ]);
+        }
+      }),
+    } as Bindings;
+  }
+
+  test("published in between: 404 not_found, not a run that does not exist", async () => {
+    const id = seedRequest();
+    const res = await dispatchWith(
+      ADMIN_KEY,
+      DATASET,
+      bindingsThatChangeTheRequestBeforeTheClaim("published"),
+    );
+    expect(res.status).toBe(404);
+    expect((await errorBody(res)).error).toBe("not_found");
+    expect(dispatches).toHaveLength(0);
+    expect(row(id)?.approval_requested_by).toBeNull();
+  });
+
+  test("denied in between: 404 not_found", async () => {
+    seedRequest();
+    const res = await dispatchWith(
+      ADMIN_KEY,
+      DATASET,
+      bindingsThatChangeTheRequestBeforeTheClaim("denied"),
+    );
+    expect(res.status).toBe(404);
+    expect((await errorBody(res)).error).toBe("not_found");
+  });
+
+  test("blocked in between: 409 not_dispatchable", async () => {
+    const id = seedRequest();
+    const res = await dispatchWith(
+      ADMIN_KEY,
+      DATASET,
+      bindingsThatChangeTheRequestBeforeTheClaim("blocked"),
+    );
+    expect(res.status).toBe(409);
+    expect((await errorBody(res)).error).toBe("not_dispatchable");
+    expect(dispatches).toHaveLength(0);
+    expect(row(id)?.approval_requested_by).toBeNull();
+  });
+
+  test("still requested and genuinely in flight: 409 already_in_flight", async () => {
+    // The ordinary refusal is unchanged: the re-read finds a request that can
+    // still run, so the answer is the lease's.
+    seedRequest({ dispatchedAt: "-1 minutes", requestedBy: secondAdminId });
+    const res = await dispatchWith(ADMIN_KEY);
+    expect(res.status).toBe(409);
+    expect((await errorBody(res)).error).toBe("already_in_flight");
   });
 });
 

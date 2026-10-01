@@ -258,6 +258,29 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       .run();
 
     if (claim.meta.changes !== 1) {
+      // The claim refuses for two different reasons, and the page must be told
+      // the true one. A run may be live (the lease), or the request may have
+      // stopped being one that can run in the moments since it was read here:
+      // approved by someone else, denied, or blocked. "Already running" for a
+      // request that is already published would send the admin looking for a
+      // run that does not exist.
+      const now = await db
+        .prepare("SELECT status FROM publication_requests WHERE id = ?")
+        .bind(request.id)
+        .first<{ status: string }>();
+      if (!now || now.status === "published" || now.status === "denied") {
+        return c.json({ error: "not_found", message: "No active publication request found" }, 404);
+      }
+      if (now.status === "blocked") {
+        return c.json(
+          {
+            error: "not_dispatchable",
+            message:
+              "This request is blocked. Resolve the block before dispatching an approval, or approve it from a terminal.",
+          },
+          409,
+        );
+      }
       return c.json(
         {
           error: "already_in_flight",
