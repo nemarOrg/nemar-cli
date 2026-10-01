@@ -6,6 +6,7 @@
  * verbatim.
  */
 
+import { APPROVE_RETRY_DELAY_MS } from "../../../shared/publication-retry.js";
 import { PUBLICATION_STEPS } from "../../../shared/publication-steps.js";
 import { request } from "./client.js";
 import { ApiError } from "./errors.js";
@@ -288,16 +289,6 @@ export function isRetryablePublishError(err: unknown): boolean {
   if (err.statusCode === 403 && /repository has been locked/i.test(err.message)) return true;
   return false;
 }
-
-/**
- * How long `approvePublication` waits between attempts after a retryable
- * failure. Exported because the backend's approval lease treats a failed run
- * as still running for a grace window that must outlast this gap
- * (`FAILED_RUN_GRACE_SECONDS` in backend/src/services/approval-dispatch.ts); a
- * test holds the two together, so raising this without the grace is a red build
- * rather than a second executor launched beside a retry that is about to start.
- */
-export const APPROVE_RETRY_DELAY_MS = 10_000;
 
 /**
  * Approve publication request (admin) - runs orchestrator with

@@ -23,7 +23,7 @@
 import type { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
-import { APPROVE_RETRY_DELAY_MS } from "../../src/lib/api/publish";
+import { APPROVE_RETRY_DELAY_MS } from "../../shared/publication-retry.js";
 import { adminRoutes } from "../src/routes/admin";
 import { FAILED_RUN_GRACE_SECONDS } from "../src/services/approval-dispatch";
 import { hashApiKey } from "../src/services/token";
