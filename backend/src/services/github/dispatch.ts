@@ -447,6 +447,31 @@ export function approvalDispatchEnvironment(env: {
 }
 
 /**
+ * How long the approve dispatch waits for GitHub before giving up. Under the
+ * website's 15 second deadline on this call, so the Worker answers the page
+ * itself ("unconfirmed") rather than the page timing out first and showing a
+ * bare network error for a request that may have been accepted.
+ */
+export const APPROVE_DISPATCH_TIMEOUT_MS = 10_000;
+
+/**
+ * GitHub ANSWERED the dispatch with a non-2xx, so the event was not created.
+ * That is the one failure of the call that is definitely "not sent": a thrown
+ * fetch or a timeout is different, because GitHub may have accepted the
+ * request and lost only the answer. Callers branch on this class to decide
+ * whether it is safe to release the claim they made before dispatching.
+ */
+export class DispatchRejectedError extends Error {
+  constructor(
+    readonly httpStatus: number,
+    detail: string,
+  ) {
+    super(`Failed to trigger approve-publication: HTTP ${httpStatus} - ${detail}`);
+    this.name = "DispatchRejectedError";
+  }
+}
+
+/**
  * Hand a publication approval to the central workflow via
  * `repository_dispatch[approve-publication]` (ADR 0080).
  *
@@ -457,9 +482,15 @@ export function approvalDispatchEnvironment(env: {
  * names the dataset, the request it was claimed for, whether to resume, and the
  * environment. It carries no credential and no URL.
  *
- * Throws on any non-2xx so the caller can release its claim; the error text
- * names GitHub's status and body, never the token. `pat` must carry write
- * access on the central repo's dispatch endpoint -- use `getDatasetsToken()`.
+ * Failure has two meanings, and the difference matters to the caller:
+ *   - {@link DispatchRejectedError}: GitHub answered non-2xx. Nothing was sent.
+ *   - anything else a rejected promise carries (a dropped connection, a
+ *     `TimeoutError` after `timeoutMs`): UNKNOWN. GitHub may have accepted the
+ *     dispatch and lost only the reply, so a caller must not assume nothing
+ *     started.
+ * The error text names GitHub's status and body, never the token. `pat` must
+ * carry write access on the central repo's dispatch endpoint -- use
+ * `getDatasetsToken()`.
  */
 export async function triggerApprovePublication(
   datasetId: string,
@@ -467,6 +498,7 @@ export async function triggerApprovePublication(
   resume: boolean,
   environment: ApprovalDispatchEnvironment,
   pat: string,
+  timeoutMs: number = APPROVE_DISPATCH_TIMEOUT_MS,
 ): Promise<void> {
   const response = await fetch(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
     method: "POST",
@@ -485,10 +517,10 @@ export async function triggerApprovePublication(
         environment,
       },
     }),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Failed to trigger approve-publication: HTTP ${response.status} - ${error}`);
+    throw new DispatchRejectedError(response.status, await response.text());
   }
 }

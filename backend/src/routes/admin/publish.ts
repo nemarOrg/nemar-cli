@@ -11,8 +11,9 @@ import { z } from "zod";
 import { auditLogStatement } from "../../db/audit-log";
 import { ACTIVE_REQUEST_TAIL_SQL, approvalInFlightSql } from "../../services/approval-dispatch";
 import { resolveEmailConfig, sendPublicationDeniedEmail } from "../../services/email";
-import { getDatasetsToken } from "../../services/github-auth";
+import { getDatasetsAuth } from "../../services/github-auth";
 import {
+  DispatchRejectedError,
   approvalDispatchEnvironment,
   triggerApprovePublication,
 } from "../../services/github/dispatch";
@@ -191,7 +192,13 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *   404 not_found         no active request for the dataset
    *   409 not_dispatchable  the newest active request is `blocked`
    *   409 already_in_flight a run is live (services/approval-dispatch.ts)
-   *   502 dispatch_failed   GitHub refused the dispatch; the claim is released
+   *   502 dispatch_failed   GitHub answered non-2xx, or a token could not be
+   *                         minted: nothing was sent, the claim is released
+   *   502 dispatch_unconfigured  the Worker has no GitHub credential; retrying
+   *                         cannot help; the claim is released
+   *   502 dispatch_unconfirmed   the call to GitHub dropped or timed out: it MAY
+   *                         have started, so the lease is KEPT (a retry is a
+   *                         409 until it lapses)
    */
   admin.post("/publish/:id/approve-dispatch", async (c) => {
     const datasetId = c.req.param("id");
@@ -246,14 +253,12 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     const resume = request.status === "approving";
     const environment = approvalDispatchEnvironment(c.env);
 
-    try {
-      const pat = await getDatasetsToken(c.env);
-      await triggerApprovePublication(datasetId, request.id, resume, environment, pat);
-    } catch (err) {
-      console.error(`[approve-dispatch] dispatch failed for ${datasetId}:`, errorMessage(err));
-      // Release the claim so the admin can try again at once rather than wait
-      // out the lease. If even this fails the lease lapses by itself, which
-      // errs toward refusing a retry, never toward a second run.
+    // Release the claim so the admin can try again at once rather than wait out
+    // the lease. Only ever done for a failure that is DEFINITELY "not sent".
+    // `AND approval_requested_by = ?` makes it clear only a claim this click
+    // made. If even the release fails the lease lapses by itself, which errs
+    // toward refusing a retry, never toward a second run.
+    const releaseClaim = async (): Promise<void> => {
       try {
         await db
           .prepare(
@@ -269,10 +274,69 @@ export function registerPublishRoutes(admin: AdminRouter): void {
           errorMessage(releaseErr),
         );
       }
+    };
+
+    // 1. A credential. Absent entirely is a configuration fault that retrying
+    // cannot fix, so it has its own code; failing to MINT one (an App token
+    // request GitHub refused) is transient and is an ordinary failed dispatch.
+    // Neither sent anything, so both release.
+    let auth: ReturnType<typeof getDatasetsAuth>;
+    try {
+      auth = getDatasetsAuth(c.env);
+    } catch (err) {
+      console.error(`[approve-dispatch] no GitHub credential for ${datasetId}:`, errorMessage(err));
+      await releaseClaim();
+      return c.json(
+        {
+          error: "dispatch_unconfigured",
+          message:
+            "This server has no GitHub credential configured, so an approval cannot be dispatched from the web. Retrying will not help. Approve from a terminal, and ask an administrator to fix the configuration.",
+        },
+        502,
+      );
+    }
+    let pat: string;
+    try {
+      pat = auth.kind === "app" ? await auth.getToken() : auth.token;
+    } catch (err) {
+      console.error(
+        `[approve-dispatch] could not obtain a GitHub token for ${datasetId}:`,
+        errorMessage(err),
+      );
+      await releaseClaim();
       return c.json(
         {
           error: "dispatch_failed",
           message: "The approval could not be started. Nothing was changed; try again.",
+        },
+        502,
+      );
+    }
+
+    // 2. The dispatch itself. GitHub answering non-2xx means nothing was sent:
+    // release. A dropped connection or a timeout means UNKNOWN: GitHub may have
+    // accepted the event and lost only the reply, and releasing then would let
+    // the next click start a second run beside it. KEEP the lease; it lapses on
+    // its own if nothing started.
+    try {
+      await triggerApprovePublication(datasetId, request.id, resume, environment, pat);
+    } catch (err) {
+      console.error(`[approve-dispatch] dispatch failed for ${datasetId}:`, errorMessage(err));
+      if (err instanceof DispatchRejectedError) {
+        await releaseClaim();
+        return c.json(
+          {
+            error: "dispatch_failed",
+            message: "The approval could not be started. Nothing was changed; try again.",
+          },
+          502,
+        );
+      }
+      return c.json(
+        {
+          error: "dispatch_unconfirmed",
+          message:
+            "GitHub did not confirm the request. It may have started; check again in a few minutes before trying again.",
         },
         502,
       );

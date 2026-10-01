@@ -13,7 +13,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
 import {
+  APPROVE_DISPATCH_TIMEOUT_MS,
   CENTRAL_WORKFLOW_REPO,
+  DispatchRejectedError,
   approvalDispatchEnvironment,
   triggerApprovePublication,
 } from "../src/services/github/dispatch";
@@ -107,6 +109,51 @@ describe("triggerApprovePublication", () => {
     expect(err?.message).toContain("HTTP 404");
     expect(err?.message).toContain("Not Found");
     expect(err?.message).not.toContain("ghp_tok");
+  });
+});
+
+describe("how a failed dispatch is classified", () => {
+  // The route releases its claim only for a failure that is definitely "not
+  // sent". GitHub answering non-2xx is that; a lost answer is not, because GitHub
+  // may have accepted the event and dropped only the reply.
+  test("a non-2xx is a DispatchRejectedError carrying GitHub's status", async () => {
+    nextStatus = 422;
+    nextBody = '{"message":"Unprocessable"}';
+    const err = await triggerApprovePublication("nm000288", 833, false, "production", "t").catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(DispatchRejectedError);
+    expect((err as DispatchRejectedError).httpStatus).toBe(422);
+  });
+
+  test("a GitHub that never answers times out, and a timeout is NOT a rejection", async () => {
+    const hung = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => {}) });
+    const real = (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL;
+    (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL =
+      `http://127.0.0.1:${hung.port}`;
+    try {
+      const started = Date.now();
+      const err = await triggerApprovePublication(
+        "nm000288",
+        833,
+        false,
+        "production",
+        "t",
+        50,
+      ).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).name).toBe("TimeoutError");
+      expect(err).not.toBeInstanceOf(DispatchRejectedError);
+      expect(Date.now() - started).toBeLessThan(2_000);
+    } finally {
+      (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = real;
+      hung.stop(true);
+    }
+  });
+
+  test("the default deadline is under the website's 15 second deadline on this call", () => {
+    expect(APPROVE_DISPATCH_TIMEOUT_MS).toBe(10_000);
+    expect(APPROVE_DISPATCH_TIMEOUT_MS).toBeLessThan(15_000);
   });
 });
 

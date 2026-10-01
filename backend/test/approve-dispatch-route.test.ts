@@ -400,9 +400,30 @@ describe("when GitHub refuses the dispatch", () => {
     expect((await dispatchWith(ADMIN_KEY)).status).toBe(202);
   });
 
-  test("no GitHub credential configured is the same refusal, with the claim released", async () => {
+  test("no GitHub credential configured: 502 dispatch_unconfigured, retrying will not help, claim released", async () => {
     const id = seedRequest();
     envOverrides = { GITHUB_ADMIN_PAT: undefined };
+    const res = await dispatchWith(ADMIN_KEY);
+    expect(res.status).toBe(502);
+    const body = await errorBody(res);
+    expect(body.error).toBe("dispatch_unconfigured");
+    // The admin must be told not to retry: the fault is the server's, not theirs.
+    expect(body.message).toContain("Retrying will not help");
+    expect(dispatches).toHaveLength(0);
+    expect(row(id)?.approval_requested_by).toBeNull();
+    expect(row(id)?.approval_dispatched_at).toBeNull();
+  });
+
+  test("a GitHub App token that cannot be minted is an ordinary failed dispatch, claim released", async () => {
+    // Credentials ARE configured (so not dispatch_unconfigured), but minting the
+    // installation token fails before anything is sent.
+    const id = seedRequest();
+    envOverrides = {
+      GITHUB_ADMIN_PAT: undefined,
+      GITHUB_APP_ID: "12345",
+      GITHUB_APP_PRIVATE_KEY: "not a private key",
+      GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: "42",
+    };
     const res = await dispatchWith(ADMIN_KEY);
     expect(res.status).toBe(502);
     expect((await errorBody(res)).error).toBe("dispatch_failed");
@@ -418,6 +439,66 @@ describe("when GitHub refuses the dispatch", () => {
     const res = await dispatchWith(ADMIN_KEY);
     expect(res.status).toBe(202);
     expect(dispatches).toHaveLength(1);
+    expect(row(id)?.approval_requested_by).toBe(adminId);
+  });
+});
+
+describe("when GitHub's answer is lost", () => {
+  // GitHub may have ACCEPTED the dispatch and lost only the reply. Releasing the
+  // claim then would let the next click start a second run beside the first, so
+  // an unknown outcome keeps the lease. It lapses on its own if nothing started.
+  let dropper: ReturnType<typeof Bun.listen>;
+
+  beforeAll(() => {
+    // Accepts the TCP connection and closes it without a response.
+    dropper = Bun.listen({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: {
+        open(socket) {
+          socket.end();
+        },
+        data() {},
+      },
+    });
+  });
+
+  afterAll(() => {
+    dropper.stop(true);
+  });
+
+  function pointGithubAt(port: number): void {
+    (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL =
+      `http://127.0.0.1:${port}`;
+  }
+
+  afterEach(() => {
+    (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL =
+      `http://127.0.0.1:${server.port}`;
+  });
+
+  test("a dropped connection: 502 dispatch_unconfirmed, the lease kept, and a second click is refused", async () => {
+    const id = seedRequest();
+    pointGithubAt(dropper.port);
+
+    const res = await dispatchWith(ADMIN_KEY);
+    expect(res.status).toBe(502);
+    const body = await errorBody(res);
+    expect(body.error).toBe("dispatch_unconfirmed");
+    expect(body.message).toBe(
+      "GitHub did not confirm the request. It may have started; check again in a few minutes before trying again.",
+    );
+
+    // The claim stands: it may be the only record that a run started.
+    expect(row(id)?.approval_requested_by).toBe(adminId);
+    expect(row(id)?.approval_dispatched_at).not.toBeNull();
+
+    // So a second click is held off by the lease, not allowed to start a second run.
+    pointGithubAt(server.port);
+    const again = await dispatchWith(SECOND_ADMIN_KEY);
+    expect(again.status).toBe(409);
+    expect((await errorBody(again)).error).toBe("already_in_flight");
+    expect(dispatches).toHaveLength(0);
     expect(row(id)?.approval_requested_by).toBe(adminId);
   });
 });
