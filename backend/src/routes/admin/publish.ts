@@ -8,6 +8,7 @@
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 
+import { approvalInFlightSql } from "../../services/approval-dispatch";
 import { resolveEmailConfig, sendPublicationDeniedEmail } from "../../services/email";
 import { approveSchema, runPublicationApproval } from "../../services/publication-orchestrator";
 import { errorMessage } from "../../services/repo-metadata";
@@ -22,13 +23,20 @@ export function registerPublishRoutes(admin: AdminRouter): void {
 
   /**
    * GET /admin/publish/requests - List publication requests
+   *
+   * `approval_in_flight` is computed per row from the same predicate the
+   * dispatch route claims with (services/approval-dispatch.ts), so a client
+   * never offers an action the route would refuse and never hard-codes the
+   * lease. The new columns `approval_requested_by` and `approval_dispatched_at`
+   * ride along in `pr.*`.
    */
   admin.get("/publish/requests", async (c) => {
     const db = c.env.DB;
     const status = c.req.query("status");
 
     let query = `
-    SELECT pr.*, u.username as requested_by_username, u.email as requested_by_email
+    SELECT pr.*, u.username as requested_by_username, u.email as requested_by_email,
+           ${approvalInFlightSql("pr.")} AS approval_in_flight
     FROM publication_requests pr
     JOIN users u ON pr.requested_by = u.id
   `;
@@ -57,12 +65,16 @@ export function registerPublishRoutes(admin: AdminRouter): void {
         prescreen_status: string | null;
         prescreen_reasons: string | null;
         prescreen_issue_url: string | null;
+        approval_requested_by: number | null;
+        approval_dispatched_at: string | null;
+        approval_in_flight: number;
       }>();
 
     return c.json({
       requests: requests.results.map((r) => ({
         ...r,
         steps_completed: JSON.parse(r.steps_completed || "[]"),
+        approval_in_flight: r.approval_in_flight === 1,
       })),
       count: requests.results.length,
     });
