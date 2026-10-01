@@ -20,6 +20,7 @@ import {
 import { approveSchema, runPublicationApproval } from "../../services/publication-orchestrator";
 import { errorMessage } from "../../services/repo-metadata";
 import { applyObjectLockBatch } from "../../services/s3";
+import { isAllowedOrigin } from "../../services/web-session";
 import { getS3Config } from "./shared";
 import type { AdminRouter } from "./shared";
 
@@ -189,6 +190,7 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    * untouched and stays the contract for every executor, a terminal included.
    *
    * Errors carry a stable code in `error` and a sentence in `message`:
+   *   403 origin_not_allowed  a cookie request from a non-NEMAR origin
    *   404 not_found         no active request for the dataset
    *   409 not_dispatchable  the newest active request is `blocked`
    *   409 already_in_flight a run is live (services/approval-dispatch.ts)
@@ -201,6 +203,23 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *                         409 until it lapses)
    */
   admin.post("/publish/:id/approve-dispatch", async (c) => {
+    // A session cookie rides along with any cross-site request a browser can be
+    // tricked into making, and this route launches an irreversible publication,
+    // so the cookie path must come from a NEMAR origin. A bearer key cannot be
+    // forged cross-site and a terminal sends no Origin, so it is not asked for
+    // one. This is the cookie-only rule `resolveActingAccount` and
+    // `/auth/orcid/cli-start` apply; the admin router does not apply it to its
+    // routes in general, and this one should not wait for that to change.
+    if (c.get("authMethod") === "cookie" && !isAllowedOrigin(c.req.header("Origin"))) {
+      return c.json(
+        {
+          error: "origin_not_allowed",
+          message: "This request did not come from a NEMAR page, so it was not accepted.",
+        },
+        403,
+      );
+    }
+
     const datasetId = c.req.param("id");
     const adminUser = c.get("user");
     const db = c.env.DB;

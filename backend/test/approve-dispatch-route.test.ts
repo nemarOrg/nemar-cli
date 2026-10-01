@@ -49,6 +49,7 @@ let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
 let adminId: number;
 let secondAdminId: number;
+let memberId: number;
 let envOverrides: Partial<Bindings> = {};
 
 beforeAll(() => {
@@ -174,7 +175,7 @@ beforeEach(async () => {
   app.route("/admin", adminRoutes);
   adminId = await seedUser("dispatchadmin", "admin", ADMIN_KEY);
   secondAdminId = await seedUser("dispatchadmin2", "admin", SECOND_ADMIN_KEY);
-  await seedUser("dispatchmember", "member", MEMBER_KEY);
+  memberId = await seedUser("dispatchmember", "member", MEMBER_KEY);
 });
 
 describe("a pending request", () => {
@@ -546,5 +547,70 @@ describe("who may dispatch", () => {
     );
     expect(res.status).toBe(202);
     expect(row(id)?.approval_requested_by).toBe(secondAdminId);
+  });
+
+  async function cookieFor(userId: number): Promise<string> {
+    const { cookieIdRaw } = await issueSession(
+      env(),
+      userId,
+      false,
+      "test-agent",
+      "127.0.0.1",
+      "orcid",
+    );
+    return `nemar_session=${cookieIdRaw}`;
+  }
+
+  function dispatchWithCookie(cookie: string, origin?: string): Promise<Response> {
+    return app.request(
+      `/admin/publish/${DATASET}/approve-dispatch`,
+      {
+        method: "POST",
+        headers: { Cookie: cookie, ...(origin ? { Origin: origin } : {}) },
+      },
+      env(),
+    );
+  }
+
+  test("a cookie request from a foreign origin is refused 403 origin_not_allowed, and nothing is claimed", async () => {
+    // A cookie rides along with any cross-site request a browser can be tricked
+    // into making, and this route launches an irreversible publication.
+    const id = seedRequest();
+    const res = await dispatchWithCookie(await cookieFor(adminId), "https://evil.example");
+    expect(res.status).toBe(403);
+    expect((await errorBody(res)).error).toBe("origin_not_allowed");
+    expect(dispatches).toHaveLength(0);
+    expect(row(id)?.approval_requested_by).toBeNull();
+    expect(row(id)?.approval_dispatched_at).toBeNull();
+  });
+
+  test("a cookie request with no Origin at all is refused too", async () => {
+    const id = seedRequest();
+    const res = await dispatchWithCookie(await cookieFor(adminId));
+    expect(res.status).toBe(403);
+    expect((await errorBody(res)).error).toBe("origin_not_allowed");
+    expect(row(id)?.approval_requested_by).toBeNull();
+  });
+
+  test("a cookie request from the app origin is accepted", async () => {
+    const id = seedRequest();
+    const res = await dispatchWithCookie(await cookieFor(adminId), APP_ORIGIN);
+    expect(res.status).toBe(202);
+    expect(row(id)?.approval_requested_by).toBe(adminId);
+  });
+
+  test("a bearer key with no Origin is unaffected: a terminal and a workflow send none", async () => {
+    seedRequest();
+    const res = await dispatchWith(ADMIN_KEY);
+    expect(res.headers.get("content-type")).toContain("json");
+    expect(res.status).toBe(202);
+  });
+
+  test("a member's cookie from the app origin is 403 (admin only), with nothing claimed", async () => {
+    const id = seedRequest();
+    const res = await dispatchWithCookie(await cookieFor(memberId), APP_ORIGIN);
+    expect(res.status).toBe(403);
+    expect(dispatches).toHaveLength(0);
+    expect(row(id)?.approval_requested_by).toBeNull();
   });
 });
