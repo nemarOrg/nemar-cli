@@ -106,8 +106,8 @@ export interface Approver {
 }
 
 /**
- * The approver of a run: the admin who clicked Approve on the website when the
- * request was dispatched from there, otherwise the account calling `/approve`.
+ * The approver of a run: the admin who clicked Approve on the website while that
+ * click's run is still live, otherwise the account calling `/approve`.
  *
  * Attribution forks on purpose (ADR 0080). An executor authenticates with its
  * own service key, so without this the `approved_by` column and the
@@ -115,17 +115,32 @@ export interface Approver {
  * terminal approval never sets `approval_requested_by`, so it falls through to
  * the caller and behaves exactly as it always has; the caller is the person.
  *
+ * `approval_requested_by` is honored only while the lease is live
+ * (`approvalLeaseLiveSql`, by time alone). The column is never cleared, so
+ * without this a run that lapsed and was later resumed by a different admin at a
+ * terminal would be recorded as the original clicker's approval, naming someone
+ * who never saw that run finish. The caller evaluates `leaseLive` at the TOP of
+ * `/approve`, before the request-start UPDATE bumps the heartbeat: every batch
+ * call of a long web run arrives with a fresh `updated_at` and so still resolves
+ * to the clicker, and so does the retry of a failed step (which is why this
+ * reads the time-only lease and not the failure-aware in-flight predicate: a
+ * failure must not strip the attribution from the retry that finishes the run).
+ *
+ * The cost, stated in the ADR: a web run that sat quiet for longer than the
+ * lease before its first `/approve` call is recorded under the executing key,
+ * with `executed_by` still in the audit details.
+ *
  * A clicker whose account row is gone falls back to the caller rather than
- * failing a publication that is already underway; the audit details still
- * carry the executing account, and the dispatch left its own audit row naming
- * the clicker by id.
+ * failing a publication that is already underway; the dispatch left its own
+ * audit row naming the clicker by id.
  */
 export async function resolveApprover(
   db: D1Database,
   approvalRequestedBy: number | null,
+  leaseLive: boolean,
   caller: Approver,
 ): Promise<Approver> {
-  if (approvalRequestedBy === null) return caller;
+  if (approvalRequestedBy === null || !leaseLive) return caller;
   const clicker = await db
     .prepare("SELECT id, username, email FROM users WHERE id = ?")
     .bind(approvalRequestedBy)

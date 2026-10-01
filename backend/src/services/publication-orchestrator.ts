@@ -29,7 +29,12 @@ import {
   isAnonymous,
   markAnonymous,
 } from "./anonymity";
-import { ACTIVE_REQUEST_TAIL_SQL, type Approver, resolveApprover } from "./approval-dispatch";
+import {
+  ACTIVE_REQUEST_TAIL_SQL,
+  type Approver,
+  approvalLeaseLiveSql,
+  resolveApprover,
+} from "./approval-dispatch";
 import {
   isCentralManifestWorkflowEnabled,
   publishEzidVersionDoiViaCentral,
@@ -2386,9 +2391,14 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
   // The newest active request, by the same rule the dispatch route claims with
   // (ACTIVE_REQUEST_TAIL_SQL): the two must agree on the row, or the clicking
   // admin would be recorded on a request this run never touches.
+  //
+  // `approval_lease_live` is read HERE, with the row, because the request-start
+  // UPDATE below bumps `updated_at`: asked afterwards, every call would find a
+  // fresh heartbeat and a stale click would always look live.
   const request = await db
     .prepare(
-      `SELECT id, status, steps_completed, anonymous, approval_requested_by ${ACTIVE_REQUEST_TAIL_SQL}`,
+      `SELECT id, status, steps_completed, anonymous, approval_requested_by,
+              ${approvalLeaseLiveSql()} AS approval_lease_live ${ACTIVE_REQUEST_TAIL_SQL}`,
     )
     .bind(datasetId)
     .first<{
@@ -2397,6 +2407,7 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
       steps_completed: string;
       anonymous: number | null;
       approval_requested_by: number | null;
+      approval_lease_live: number;
     }>();
 
   if (!request) {
@@ -2405,10 +2416,12 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
 
   // Attribution forks (ADR 0080): a web click records the admin who clicked,
   // a terminal approval records its own caller. `adminUser` stays the executor.
-  c.approver = await resolveApprover(db, request.approval_requested_by, {
-    id: adminUser.id,
-    username: adminUser.username,
-  });
+  c.approver = await resolveApprover(
+    db,
+    request.approval_requested_by,
+    request.approval_lease_live === 1,
+    { id: adminUser.id, username: adminUser.username },
+  );
 
   const stepsCompleted: PublicationStep[] = resume
     ? JSON.parse(request.steps_completed || "[]")

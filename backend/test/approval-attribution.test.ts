@@ -84,11 +84,21 @@ async function seedAdmin(
   return u.id;
 }
 
+interface RequestSeed {
+  /** The admin who clicked Approve on the website, if the approval was queued there. */
+  clickedBy?: number | null;
+  stepsDone?: readonly string[];
+  /** SQLite modifier such as "-1 minutes" for when the dispatch was claimed. A web
+   *  approval is live when this is within the 15 minute lease. */
+  dispatchedAt?: string;
+  status?: string;
+  updatedAt?: string;
+  lastError?: string;
+}
+
 /** A pending request whose approval was (or was not) queued from the web. */
-function seedRequest(
-  approvalRequestedBy: number | null,
-  stepsDone: readonly string[] = DONE,
-): void {
+function seedRequest(seed: RequestSeed = {}): void {
+  const modifier = (m: string | undefined) => (m ? `datetime('now', '${m}')` : "NULL");
   db.run(
     `INSERT INTO datasets (dataset_id, name, owner_user_id, github_repo, visibility)
      VALUES (?, 'Attribution Dataset', ?, ?, 'private')`,
@@ -96,11 +106,24 @@ function seedRequest(
   );
   db.run(
     `INSERT INTO publication_requests
-       (dataset_id, status, requested_by, requested_at, steps_completed, approval_requested_by)
-     VALUES (?, 'requested', ?, datetime('now'), ?, ?)`,
-    [DATASET, ownerId, JSON.stringify(stepsDone), approvalRequestedBy],
+       (dataset_id, status, requested_by, requested_at, updated_at, steps_completed,
+        approval_requested_by, approval_dispatched_at, last_error)
+     VALUES (?, ?, ?, datetime('now', '-3 hours'),
+             ${seed.updatedAt ? modifier(seed.updatedAt) : "datetime('now')"},
+             ?, ?, ${modifier(seed.dispatchedAt)}, ?)`,
+    [
+      DATASET,
+      seed.status ?? "requested",
+      ownerId,
+      JSON.stringify(seed.stepsDone ?? DONE),
+      seed.clickedBy ?? null,
+      seed.lastError ?? null,
+    ],
   );
 }
+
+/** A web approval that was dispatched a minute ago: the clicker's lease is live. */
+const LIVE = "-1 minutes";
 
 function approveAs(key: string): Promise<Response> {
   return app.request(
@@ -156,7 +179,7 @@ beforeEach(async () => {
 
 describe("a terminal approval", () => {
   test("is recorded as approved by the account that called /approve, with the audit row unchanged", async () => {
-    seedRequest(null);
+    seedRequest();
     const res = await approveAs(EXECUTOR_KEY);
     expect(res.status).toBe(200);
 
@@ -170,7 +193,7 @@ describe("a terminal approval", () => {
 
 describe("a web-queued approval", () => {
   test("is recorded as approved by the admin who clicked, not the executing key", async () => {
-    seedRequest(clickerId);
+    seedRequest({ clickedBy: clickerId, dispatchedAt: LIVE });
     const res = await approveAs(EXECUTOR_KEY);
     expect(res.status).toBe(200);
 
@@ -185,7 +208,7 @@ describe("a web-queued approval", () => {
   });
 
   test("end to end: the real dispatch route queues it, the real /approve run records the clicker", async () => {
-    seedRequest(null);
+    seedRequest();
     const dispatch = await app.request(
       `/admin/publish/${DATASET}/approve-dispatch`,
       { method: "POST", headers: { Authorization: `Bearer ${CLICKER_KEY}` } },
@@ -202,7 +225,7 @@ describe("a web-queued approval", () => {
   });
 
   test("a clicker who is also the caller has no separate executor to record", async () => {
-    seedRequest(clickerId);
+    seedRequest({ clickedBy: clickerId, dispatchedAt: LIVE });
     const res = await approveAs(CLICKER_KEY);
     expect(res.status).toBe(200);
     expect(approvedBy()).toBe(clickerId);
@@ -215,7 +238,7 @@ describe("a web-queued approval", () => {
   test("a clicker with no username is named by email", async () => {
     // Web-only accounts may have no username until onboarded.
     const nameless = await seedAdmin(null, "nameless@example.org", null);
-    seedRequest(nameless);
+    seedRequest({ clickedBy: nameless, dispatchedAt: LIVE });
     const res = await approveAs(EXECUTOR_KEY);
     expect(res.status).toBe(200);
     expect(approvedBy()).toBe(nameless);
@@ -224,7 +247,7 @@ describe("a web-queued approval", () => {
 
   test("a clicker whose account is gone does not fail the publication: the caller stands in", async () => {
     const gone = await seedAdmin("vanished", "vanished@example.org", null);
-    seedRequest(gone);
+    seedRequest({ clickedBy: gone, dispatchedAt: LIVE });
     db.run("DELETE FROM users WHERE id = ?", [gone]);
 
     const res = await approveAs(EXECUTOR_KEY);
@@ -234,16 +257,116 @@ describe("a web-queued approval", () => {
   });
 });
 
+describe("the clicker is honored only while their run is live", () => {
+  // `approval_requested_by` is never cleared, so without this a run that lapsed
+  // and was later resumed by a different admin at a terminal would be recorded
+  // as the original clicker's approval.
+  test("a lapsed lease: the admin who actually runs it at a terminal is recorded, not the stale clicker", async () => {
+    // Dispatched 20 minutes ago, quiet since: the executor never ran, or died.
+    seedRequest({ clickedBy: clickerId, dispatchedAt: "-20 minutes", updatedAt: "-20 minutes" });
+    const res = await approveAs(EXECUTOR_KEY);
+    expect(res.status).toBe(200);
+
+    expect(approvedBy()).toBe(executorId);
+    expect(publishedAudit()?.userId).toBe(executorId);
+    // The ordinary terminal shape: no executed_by, because there is no fork.
+    expect(publishedAudit()?.details).toEqual({
+      approved_by: "approvebot",
+      steps: [...PUBLICATION_STEPS],
+    });
+  });
+
+  test("a run that died partway and is resumed by another admin at a terminal records that admin", async () => {
+    // The scenario the rule exists for: approving, quiet for 20 minutes, a stale
+    // click on the row. The lease is read BEFORE this call's heartbeat bump; read
+    // after it, the bump itself would make the run look live and hand the
+    // approval to someone who never saw it finish.
+    seedRequest({
+      clickedBy: clickerId,
+      dispatchedAt: "-2 hours",
+      status: "approving",
+      updatedAt: "-20 minutes",
+    });
+    const res = await approveAs(EXECUTOR_KEY);
+    expect(res.status).toBe(200);
+    expect(approvedBy()).toBe(executorId);
+    expect(publishedAudit()?.userId).toBe(executorId);
+  });
+
+  test("a live lease: the clicker is recorded", async () => {
+    seedRequest({ clickedBy: clickerId, dispatchedAt: "-14 minutes" });
+    expect((await approveAs(EXECUTOR_KEY)).status).toBe(200);
+    expect(approvedBy()).toBe(clickerId);
+  });
+
+  test("a later batch of a long web run still resolves to the clicker", async () => {
+    // Dispatched two hours ago, but every batch of the S3 lock loop bumps
+    // updated_at, so the call arrives with a fresh heartbeat. The lease is read
+    // BEFORE this call's own bump; a stale click would look live after it.
+    seedRequest({
+      clickedBy: clickerId,
+      dispatchedAt: "-2 hours",
+      status: "approving",
+      updatedAt: "-1 minutes",
+    });
+    expect((await approveAs(EXECUTOR_KEY)).status).toBe(200);
+    expect(approvedBy()).toBe(clickerId);
+  });
+
+  test("the retry of a failed step still resolves to the clicker", async () => {
+    // The CLI retries ten seconds after a failure. The failure-aware in-flight
+    // predicate would call this row stalled once its grace passes, but the
+    // retry that finishes the run is still the clicker's, so attribution reads
+    // the time-only lease.
+    seedRequest({
+      clickedBy: clickerId,
+      dispatchedAt: "-2 hours",
+      status: "approving",
+      updatedAt: "-10 seconds",
+      lastError: "EZID 503",
+    });
+    expect((await approveAs(EXECUTOR_KEY)).status).toBe(200);
+    expect(approvedBy()).toBe(clickerId);
+  });
+
+  test("a resume minutes after a failure, past the grace but inside the lease, is still the clicker's", async () => {
+    // Past FAILED_RUN_GRACE_SECONDS the failure-aware in-flight predicate calls
+    // this run stalled, and a web Resume would be allowed. A rerun of the
+    // workflow's job, or a retry after a long rate-limit wait, then resumes it:
+    // that is still the clicker's run, which is why attribution reads the
+    // time-only lease and not the failure-aware one.
+    seedRequest({
+      clickedBy: clickerId,
+      dispatchedAt: "-2 hours",
+      status: "approving",
+      updatedAt: "-5 minutes",
+      lastError: "EZID 503",
+    });
+    expect((await approveAs(EXECUTOR_KEY)).status).toBe(200);
+    expect(approvedBy()).toBe(clickerId);
+  });
+
+  test("a web run that sat quiet past the lease before its first call is recorded under the executing key", async () => {
+    // The cost of the rule, pinned so it stays a stated one: the clicker is lost
+    // when the executor starts more than 15 minutes after the dispatch, and
+    // executed_by is absent only because there is then nothing to fork.
+    seedRequest({ clickedBy: clickerId, dispatchedAt: "-16 minutes", updatedAt: "-16 minutes" });
+    expect((await approveAs(EXECUTOR_KEY)).status).toBe(200);
+    expect(approvedBy()).toBe(executorId);
+  });
+});
+
 describe("a failed owner notification", () => {
   // notify_user is non-fatal: the DOI is already minted, so an email failure is
   // audited and the publication stands. A non-production Worker refuses mail to
   // a recipient off its allow-list, and the step treats that refusal as a
   // failure, which reaches the audit row with nothing faked.
   test("is audited under the approver, not the executing key", async () => {
-    seedRequest(
-      clickerId,
-      DONE.filter((s) => s !== "notify_user"),
-    );
+    seedRequest({
+      clickedBy: clickerId,
+      dispatchedAt: LIVE,
+      stepsDone: DONE.filter((s) => s !== "notify_user"),
+    });
     const res = await approveAs(EXECUTOR_KEY);
     expect(res.status).toBe(200);
 
