@@ -95,3 +95,72 @@ export function realD1(db: Database): D1Database {
     },
   } as unknown as D1Database;
 }
+
+/**
+ * Wrap a D1 so `before(sql)` runs, and is awaited, ahead of every statement
+ * executes. Statements built by the wrapper keep `__execForBatch`, so
+ * `batch()` still works through it.
+ */
+export function wrapD1(d1: D1Database, before: (sql: string) => void | Promise<void>): D1Database {
+  return {
+    prepare(sql: string) {
+      const inner = d1.prepare(sql) as unknown as {
+        bind(...p: unknown[]): unknown;
+        run(): Promise<unknown>;
+        first(): Promise<unknown>;
+        all(): Promise<unknown>;
+        __execForBatch(): unknown;
+      };
+      const api = {
+        bind(...p: unknown[]) {
+          inner.bind(...p);
+          return api;
+        },
+        async run() {
+          await before(sql);
+          return inner.run();
+        },
+        async first() {
+          await before(sql);
+          return inner.first();
+        },
+        async all() {
+          await before(sql);
+          return inner.all();
+        },
+        __execForBatch() {
+          return inner.__execForBatch();
+        },
+      };
+      return api;
+    },
+    batch: (stmts: unknown[]) => (d1 as unknown as { batch(s: unknown[]): unknown }).batch(stmts),
+  } as unknown as D1Database;
+}
+
+/**
+ * A D1 whose every statement waits a macrotask before it runs.
+ *
+ * `realD1` executes each statement synchronously, so two requests started
+ * together run one after the other and a read-then-write that is NOT atomic
+ * still appears to be. Real D1 is a network round trip per statement, so
+ * concurrent requests interleave BETWEEN a route's statements. Yielding here
+ * puts that gap back: a test that races two requests through this wrapper
+ * fails for a non-atomic claim, which the synchronous shim cannot show.
+ */
+export function yieldingD1(d1: D1Database): D1Database {
+  return wrapD1(d1, () => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+}
+
+/**
+ * A D1 that runs `hook(sql)` before each statement, to land another writer
+ * exactly between a route's read and its write (a request that gets published
+ * after the route read it, or a claim another clicker takes). The hook writes
+ * through the real database, so the interleaving is real, only deterministic.
+ */
+export function interceptingD1(
+  d1: D1Database,
+  hook: (sql: string) => void | Promise<void>,
+): D1Database {
+  return wrapD1(d1, hook);
+}

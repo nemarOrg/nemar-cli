@@ -27,7 +27,7 @@ import { adminRoutes } from "../src/routes/admin";
 import { hashApiKey } from "../src/services/token";
 import { issueSession } from "../src/services/web-session";
 import type { Bindings, Variables } from "../src/types/bindings";
-import { freshDb, realD1 } from "./helpers/d1";
+import { freshDb, realD1, yieldingD1 } from "./helpers/d1";
 
 const ADMIN_KEY = "dispatch-admin-key-0123456789abcdef0123456789abcdef";
 const SECOND_ADMIN_KEY = "dispatch-admin2-key-0123456789abcdef0123456789abcdef";
@@ -149,14 +149,18 @@ function row(id: number) {
     .get(id);
 }
 
-function dispatchWith(key: string, dataset = DATASET): Promise<Response> {
+function dispatchWith(
+  key: string,
+  dataset = DATASET,
+  bindings: Bindings = env(),
+): Promise<Response> {
   return app.request(
     `/admin/publish/${dataset}/approve-dispatch`,
     {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "X-CLI-Version": "99.0.0" },
     },
-    env(),
+    bindings,
   );
 }
 
@@ -297,8 +301,18 @@ describe("the lease: one run at a time", () => {
   test("two simultaneous clicks dispatch exactly once", async () => {
     // The claim is one conditional UPDATE, so it is atomic where a read-then-
     // write would let both through. Different admins, so the winner is visible.
+    //
+    // `realD1` runs each statement synchronously, so on its own the two requests
+    // would simply run one after the other and a NON-atomic claim would pass.
+    // Real D1 is a network round trip per statement, so concurrent requests
+    // interleave between a route's statements; `yieldingD1` puts that gap back
+    // and is what makes this test able to fail.
     const id = seedRequest();
-    const [a, b] = await Promise.all([dispatchWith(ADMIN_KEY), dispatchWith(SECOND_ADMIN_KEY)]);
+    const bindings = { ...env(), DB: yieldingD1(realD1(db)) } as Bindings;
+    const [a, b] = await Promise.all([
+      dispatchWith(ADMIN_KEY, DATASET, bindings),
+      dispatchWith(SECOND_ADMIN_KEY, DATASET, bindings),
+    ]);
 
     expect([a.status, b.status].sort()).toEqual([202, 409]);
     expect(dispatches).toHaveLength(1);
