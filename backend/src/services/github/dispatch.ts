@@ -421,3 +421,74 @@ export async function triggerPrescreenRun(
     throw new Error(`Failed to trigger prescreen run: HTTP ${response.status} - ${error}`);
   }
 }
+
+/**
+ * Which backend the approval workflow should talk to. The central repo is
+ * shared by every environment, so the dispatch has to say; and it says it as a
+ * NAME, never a URL or a credential, so the workflow maps the name to an API
+ * origin and a secret from a fixed table of its own and an admin key can never
+ * be steered to a host the payload chose.
+ */
+export type ApprovalDispatchEnvironment = "production" | "dev";
+
+/**
+ * `production` only for the production Worker, exactly. Every other value,
+ * including an unset or misspelled ENVIRONMENT, answers `dev`: the failure
+ * direction that matters here is a non-production Worker driving a PRODUCTION
+ * approval, which would run with the production admin key, so the fallback has
+ * to be the harmless side (a dev key against a dev API simply finds no such
+ * request). That is the opposite of `isNonProductionEnv`'s fail-closed answer,
+ * which protects disclosure and is right for that purpose.
+ */
+export function approvalDispatchEnvironment(env: {
+  ENVIRONMENT?: string;
+}): ApprovalDispatchEnvironment {
+  return env.ENVIRONMENT === "production" ? "production" : "dev";
+}
+
+/**
+ * Hand a publication approval to the central workflow via
+ * `repository_dispatch[approve-publication]` (ADR 0080).
+ *
+ * The workflow runs `nemar admin publish approve <dataset_id>` on a runner and
+ * drives the same caller-side loop (S3 Object Lock batches, retries,
+ * `--resume`) a terminal does, which is why the approval does not run inside
+ * the Worker: that loop is long and its cost belongs on the runner. The payload
+ * names the dataset, the request it was claimed for, whether to resume, and the
+ * environment. It carries no credential and no URL.
+ *
+ * Throws on any non-2xx so the caller can release its claim; the error text
+ * names GitHub's status and body, never the token. `pat` must carry write
+ * access on the central repo's dispatch endpoint -- use `getDatasetsToken()`.
+ */
+export async function triggerApprovePublication(
+  datasetId: string,
+  requestId: number,
+  resume: boolean,
+  environment: ApprovalDispatchEnvironment,
+  pat: string,
+): Promise<void> {
+  const response = await fetch(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      event_type: "approve-publication",
+      client_payload: {
+        dataset_id: datasetId,
+        request_id: requestId,
+        resume,
+        environment,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to trigger approve-publication: HTTP ${response.status} - ${error}`);
+  }
+}
