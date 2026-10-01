@@ -52,3 +52,16 @@ export function approvalInFlightSql(columnPrefix = ""): string {
       OR (${p}status = 'approving' AND ${p}updated_at >= ${since})
     ))`;
 }
+
+/**
+ * The newest request an approval could act on, for one dataset. The orchestrator
+ * (`runPublicationApproval`) and the dispatch route both read it, and it must be
+ * the SAME row: the executor's `/approve` call picks its request with this, so a
+ * dispatch that claimed a different row would put the clicking admin on a
+ * request the run never touches. `blocked` is included because `/approve` acts
+ * on it; the dispatch route then refuses it separately. Selected columns are the
+ * caller's: this is only the WHERE / ORDER tail, bound with the dataset id.
+ */
+export const ACTIVE_REQUEST_TAIL_SQL = `FROM publication_requests
+   WHERE dataset_id = ? AND status IN ('requested', 'approving', 'blocked')
+   ORDER BY requested_at DESC LIMIT 1`;

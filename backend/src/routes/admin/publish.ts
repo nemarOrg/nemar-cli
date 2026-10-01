@@ -8,8 +8,14 @@
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 
-import { approvalInFlightSql } from "../../services/approval-dispatch";
+import { auditLogStatement } from "../../db/audit-log";
+import { ACTIVE_REQUEST_TAIL_SQL, approvalInFlightSql } from "../../services/approval-dispatch";
 import { resolveEmailConfig, sendPublicationDeniedEmail } from "../../services/email";
+import { getDatasetsToken } from "../../services/github-auth";
+import {
+  approvalDispatchEnvironment,
+  triggerApprovePublication,
+} from "../../services/github/dispatch";
 import { approveSchema, runPublicationApproval } from "../../services/publication-orchestrator";
 import { errorMessage } from "../../services/repo-metadata";
 import { applyObjectLockBatch } from "../../services/s3";
@@ -162,6 +168,137 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       body: c.req.valid("json"),
     });
     return c.json(result.body as never, (result.status ?? 200) as never);
+  });
+
+  /**
+   * POST /admin/publish/:id/approve-dispatch - Launch an approval from the web
+   * (ADR 0080).
+   *
+   * Approval is not one request: after the irreversible DOI publish, S3 Object
+   * Lock runs in batches the CALLER must keep requesting, so a click cannot run
+   * it inside one Worker invocation and the loop is deliberately not moved into
+   * the Worker. This route claims the request, records WHO clicked, and hands
+   * the run to an executor (a GitHub Actions workflow that drives the CLI)
+   * through `repository_dispatch`, then answers 202 straight away. Closing the
+   * page cannot matter: the state lives in `publication_requests`.
+   *
+   * The executor calls `POST /publish/:id/approve` with its own service key; the
+   * orchestrator reads `approval_requested_by` as the approver, so the record
+   * names the admin who clicked rather than the bot. `/approve` itself is
+   * untouched and stays the contract for every executor, a terminal included.
+   *
+   * Errors carry a stable code in `error` and a sentence in `message`:
+   *   404 not_found         no active request for the dataset
+   *   409 not_dispatchable  the newest active request is `blocked`
+   *   409 already_in_flight a run is live (services/approval-dispatch.ts)
+   *   502 dispatch_failed   GitHub refused the dispatch; the claim is released
+   */
+  admin.post("/publish/:id/approve-dispatch", async (c) => {
+    const datasetId = c.req.param("id");
+    const adminUser = c.get("user");
+    const db = c.env.DB;
+
+    const request = await db
+      .prepare(`SELECT id, status ${ACTIVE_REQUEST_TAIL_SQL}`)
+      .bind(datasetId)
+      .first<{ id: number; status: string }>();
+
+    if (!request) {
+      return c.json({ error: "not_found", message: "No active publication request found" }, 404);
+    }
+    if (request.status === "blocked") {
+      return c.json(
+        {
+          error: "not_dispatchable",
+          message:
+            "This request is blocked. Resolve the block before dispatching an approval, or approve it from a terminal.",
+        },
+        409,
+      );
+    }
+
+    // One conditional UPDATE is the claim: D1 runs it atomically, so two
+    // simultaneous clicks cannot both see the row idle. `updated_at` is left
+    // alone on purpose. It is the orchestrator's progress heartbeat, and
+    // bumping it here would make a failed dispatch read as a live run for the
+    // whole lease on an `approving` row.
+    const claim = await db
+      .prepare(
+        `UPDATE publication_requests
+           SET approval_requested_by = ?, approval_dispatched_at = datetime('now')
+         WHERE id = ? AND status IN ('requested', 'approving') AND NOT ${approvalInFlightSql()}`,
+      )
+      .bind(adminUser.id, request.id)
+      .run();
+
+    if (claim.meta.changes !== 1) {
+      return c.json(
+        {
+          error: "already_in_flight",
+          message: "An approval is already running for this dataset.",
+        },
+        409,
+      );
+    }
+
+    // A request already `approving` has done part of the work, and some of it
+    // cannot be undone: it resumes, it does not start over.
+    const resume = request.status === "approving";
+    const environment = approvalDispatchEnvironment(c.env);
+
+    try {
+      const pat = await getDatasetsToken(c.env);
+      await triggerApprovePublication(datasetId, request.id, resume, environment, pat);
+    } catch (err) {
+      console.error(`[approve-dispatch] dispatch failed for ${datasetId}:`, errorMessage(err));
+      // Release the claim so the admin can try again at once rather than wait
+      // out the lease. If even this fails the lease lapses by itself, which
+      // errs toward refusing a retry, never toward a second run.
+      try {
+        await db
+          .prepare(
+            `UPDATE publication_requests
+               SET approval_requested_by = NULL, approval_dispatched_at = NULL
+             WHERE id = ? AND approval_requested_by = ?`,
+          )
+          .bind(request.id, adminUser.id)
+          .run();
+      } catch (releaseErr) {
+        console.error(
+          `[approve-dispatch] could not release the claim on request ${request.id}:`,
+          errorMessage(releaseErr),
+        );
+      }
+      return c.json(
+        {
+          error: "dispatch_failed",
+          message: "The approval could not be started. Nothing was changed; try again.",
+        },
+        502,
+      );
+    }
+
+    try {
+      await auditLogStatement(db, {
+        userId: adminUser.id,
+        action: "approval_dispatched",
+        resourceType: "dataset",
+        resourceId: datasetId,
+        details: JSON.stringify({ request_id: request.id, resume, environment }),
+      }).run();
+    } catch (auditErr) {
+      // The run is already launched; a missing audit row must not report the
+      // launch as failed.
+      console.error(
+        `[approve-dispatch] audit write failed for ${datasetId}:`,
+        errorMessage(auditErr),
+      );
+    }
+
+    return c.json(
+      { status: "dispatched", dataset_id: datasetId, request_id: request.id, resume },
+      202,
+    );
   });
 
   /**
