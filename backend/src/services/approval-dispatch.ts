@@ -65,3 +65,39 @@ export function approvalInFlightSql(columnPrefix = ""): string {
 export const ACTIVE_REQUEST_TAIL_SQL = `FROM publication_requests
    WHERE dataset_id = ? AND status IN ('requested', 'approving', 'blocked')
    ORDER BY requested_at DESC LIMIT 1`;
+
+/** Who a publication is recorded as approved by. */
+export interface Approver {
+  id: number;
+  username: string;
+}
+
+/**
+ * The approver of a run: the admin who clicked Approve on the website when the
+ * request was dispatched from there, otherwise the account calling `/approve`.
+ *
+ * Attribution forks on purpose (ADR 0080). An executor authenticates with its
+ * own service key, so without this the `approved_by` column and the
+ * `dataset_published` audit row would name the bot for every web approval. A
+ * terminal approval never sets `approval_requested_by`, so it falls through to
+ * the caller and behaves exactly as it always has; the caller is the person.
+ *
+ * A clicker whose account row is gone falls back to the caller rather than
+ * failing a publication that is already underway; the audit details still
+ * carry the executing account, and the dispatch left its own audit row naming
+ * the clicker by id.
+ */
+export async function resolveApprover(
+  db: D1Database,
+  approvalRequestedBy: number | null,
+  caller: Approver,
+): Promise<Approver> {
+  if (approvalRequestedBy === null) return caller;
+  const clicker = await db
+    .prepare("SELECT id, username, email FROM users WHERE id = ?")
+    .bind(approvalRequestedBy)
+    .first<{ id: number; username: string | null; email: string }>();
+  if (!clicker) return caller;
+  // Web-only accounts may have no username yet; the address still names them.
+  return { id: clicker.id, username: clicker.username || clicker.email };
+}
