@@ -36,7 +36,9 @@ The website does not run an approval. It asks the backend to dispatch one.
 
 1. **`/approve` stays the contract, and the loop stays on the caller's side.**
    An executor is anything that drives `/approve` to completion: a person's terminal,
-   or a runner. Nothing about `/approve` changes.
+   or a runner. Its request and response contract is unchanged.
+   (The orchestrator now reads `approval_requested_by` from the request it acts on,
+   and starts each attempt by clearing `last_error`; neither is visible to a caller.)
 2. **`POST /admin/publish/:id/approve-dispatch` is the web entry.**
    It claims the request with one conditional UPDATE, records the clicking admin,
    dispatches `repository_dispatch[approve-publication]` to `nemarDatasets/.github`,
@@ -46,45 +48,75 @@ The website does not run an approval. It asks the backend to dispatch one.
    `nemaring.ucsd.edu` is not an executor: it hosts other services and stays that way.
    The only code that knows GitHub is `triggerApprovePublication`; the route, the claim and the
    lease are executor-agnostic, so a second executor changes the dispatch and nothing else.
+   A cookie request needs a NEMAR `Origin` (`origin_not_allowed`), because the route launches an
+   irreversible publication; a bearer key, which a terminal and the workflow use, is not asked for one.
 3. **The payload names an environment, never a URL or a credential.**
    `{ dataset_id, request_id, resume, environment }`, where `environment` is `production`
    only for the production Worker and `dev` for everything else, including an unset value.
    The central repository is shared by every environment, so the workflow maps the name to an API
    origin and a secret from a table of its own, and an admin key cannot be steered to a host the payload chose.
 4. **A lease keeps it to one run at a time.**
-   A request is in flight when it was dispatched within 15 minutes, or is `approving`
-   with an `updated_at` within 15 minutes, and can still run (`requested` or `approving`).
+   A request is in flight when it can still run (`requested` or `approving`) and either it was
+   dispatched within 15 minutes, or it is `approving` with an `updated_at` within 15 minutes.
    The second clause is what lets a person's terminal run block a web launch,
    since a terminal approval never sets `approval_dispatched_at`.
    One SQL expression (`approvalInFlightSql`) is both the claim's WHERE clause and the list route's
    `approval_in_flight` field, so a page never offers a button the route would refuse
    and no client hard-codes the minutes.
-5. **Attribution forks.**
+   **A run that failed stalls after a grace window, not at once.**
+   The orchestrator records a failed step in `last_error`; the run then counts as in flight for 60 seconds
+   and as stalled after that, so the page can offer Resume without waiting out the lease.
+   Not at once, because the CLI retries a failed step after 10 seconds (up to five times), and an executor
+   launched in that wait would run beside the retry about to start; a test holds the grace above the CLI's
+   exported retry delay. The dispatch claim and the start of every `/approve` attempt clear `last_error`
+   (the previous attempt's error is history), so a restart or a fresh dispatch is in flight again at once,
+   and a dispatch that is not sent puts the error back.
+5. **Attribution forks, and a click is honored only while its run is live.**
    The orchestrator reads `approval_requested_by` from the request it acts on.
-   When it is set, that admin is the approver: `approved_by`, the `dataset_published` audit row and the
+   While the lease is live (the time-only lease, read at the top of `/approve`, before that call's own
+   heartbeat bump), that admin is the approver: `approved_by`, the `dataset_published` audit row and the
    `notify_user_failed` audit row name them, and the executing account is kept as `executed_by` in the
-   details. When it is null, which is every terminal approval, the caller is the approver and the
+   details. Otherwise, which includes every terminal approval, the caller is the approver and the
    audit row is byte-identical to what it was.
+   The column is never cleared, so without the lease a run that lapsed and was resumed by a different admin
+   at a terminal would be recorded as the original clicker's. Attribution reads the time-only lease rather
+   than the failure-aware predicate above, so a failure does not strip the clicker from the retry that
+   finishes the run.
+6. **A dispatch whose answer is lost keeps the lease.**
+   GitHub may have accepted the event and lost only the reply, and releasing the claim then would let the next
+   click start a second run. The claim is released only for a failure that is definitely not sent: no
+   credential (`dispatch_unconfigured`, and retrying will not help), a token that cannot be minted, or
+   GitHub answering non-2xx (`dispatch_failed`). A dropped connection or the 10 second timeout answers
+   `dispatch_unconfirmed` and the lease stands until it lapses.
 
 ## Consequences
 
 Closing the page no longer matters: the state is in `publication_requests`,
 and `current_step` / `last_error` already say where a run is.
 The Worker spends one GitHub call per approval; the loop's cost is on the runner.
-The CLI is unaffected.
+The CLI's behavior is unchanged.
 
 Harder, and honest about it:
 
-- **A failed run keeps its lease until it lapses.** Nothing in the schema says an executor stopped,
-  so a run that dies at minute 3 blocks a web retry until minute 15.
-  A terminal approval is not gated by the lease, so an admin in a hurry uses that.
-- **A refusal before the step loop leaves no trace on the row.**
-  The pre-loop gates (sandbox dataset, an owner with no real name, an outdated client) answer an error
-  but write no `last_error`, so a dispatch the workflow's CLI run refuses reads as "queued, then stalled",
-  and the reason is in the workflow's log.
-- **The latest dispatch owns the attribution.** Each dispatch records who launched it.
-  If a web run crashes and a person later resumes it from a terminal, `approval_requested_by` still names
-  the original clicker, who did authorize it; `executed_by` names the person who finished it.
+- **A web run that sat quiet longer than the lease before its first `/approve` call is recorded under the
+  executing key.** A runner queued for more than 15 minutes, or a dispatch that only starts after a long
+  outage, loses the clicker: attribution is honored only while the lease is live. `executed_by` is then
+  absent because there is nothing to fork, and the dispatch's own `approval_dispatched` audit row still
+  names the clicker by id.
+- **A refusal before the step loop does not read as a failure.** The gates after the request flips to
+  `approving` behave differently, and only some leave a trace:
+  an owner with no real name walks the row back to `blocked` with a `block_reason`;
+  the sandbox, no-repository, dataset-not-found and invalid-repository answers (400, 404, 500) return with the
+  row left at `approving`, a fresh `updated_at` and no `last_error`, so the page reads "running" for the lease
+  although nothing is running; only the 426 outdated-client answer returns before the row is touched.
+  The reason is in the workflow's log.
+- **A workflow failure the backend cannot see stays invisible.** A missing secret or an install failure means
+  `/approve` is never called, so nothing is written and the lease lapses on its own. Closing that needs a
+  release or callback endpoint the workflow reports to, the way the pre-screen workflow reports through a
+  callback token. This is a follow-up, not part of this change.
+- **A dispatch that GitHub never confirmed holds the lease for up to 15 minutes**, so a retry is a 409 until
+  it lapses, even when the event was in fact never created. A terminal approval is not gated by the lease,
+  so an admin in a hurry uses that.
 - **The web path depends on GitHub being able to start a workflow.**
   A refused dispatch releases the claim and answers 502, and the terminal path is the fallback.
 

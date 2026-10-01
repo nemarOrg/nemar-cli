@@ -185,15 +185,20 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    * page cannot matter: the state lives in `publication_requests`.
    *
    * The executor calls `POST /publish/:id/approve` with its own service key; the
-   * orchestrator reads `approval_requested_by` as the approver, so the record
-   * names the admin who clicked rather than the bot. `/approve` itself is
-   * untouched and stays the contract for every executor, a terminal included.
+   * orchestrator reads `approval_requested_by` as the approver while the run is
+   * live, so the record names the admin who clicked rather than the bot.
+   * `/approve`'s request and response contract is unchanged and stays the
+   * contract for every executor, a terminal included.
+   *
+   * A cookie request must come from a NEMAR origin; a bearer key is not asked.
    *
    * Errors carry a stable code in `error` and a sentence in `message`:
    *   403 origin_not_allowed  a cookie request from a non-NEMAR origin
-   *   404 not_found         no active request for the dataset
+   *   404 not_found         no active request for the dataset, or it stopped
+   *                         being one (published or denied) before the claim
    *   409 not_dispatchable  the newest active request is `blocked`
-   *   409 already_in_flight a run is live (services/approval-dispatch.ts)
+   *   409 already_in_flight a run is live (services/approval-dispatch.ts), a
+   *                         failed run inside its short grace window included
    *   502 dispatch_failed   GitHub answered non-2xx, or a token could not be
    *                         minted: nothing was sent, the claim is released
    *   502 dispatch_unconfigured  the Worker has no GitHub credential; retrying
