@@ -249,11 +249,20 @@ export async function neurobagelStatus(
   return status;
 }
 
-const DATASET_ID_IN_TEXT = /\b(?:nm|on)\d{6}\b/g;
+/**
+ * A dataset id inside a longer string: not preceded by a letter or digit, and not followed by
+ * another digit. NOT bounded by `\b`: the store's real names are `<id>_annotated.json` and
+ * `<id>_dataset_description.json`, and an underscore is a word character, so `\b` after the id
+ * never matches there and a deposit's unstamped copy under such a name read as a clean store.
+ * A seventh digit still excludes a longer number (`nm0009100`), and a letter before excludes a
+ * longer word.
+ */
+const DATASET_ID_IN_TEXT = /(?<![A-Za-z0-9])(?:nm|on)\d{6}(?!\d)/g;
 
 /**
  * Every dataset id the store holds ANYTHING for, for the anonymity sweep (ADR 0067's
- * amendment): an id named by any object key, and any id written anywhere in the index, so an
+ * amendment): an id named by any object key (whatever follows it: `.jsonld`, `_annotated.json`,
+ * `_dataset_description.json`), and any id written anywhere in the index, so an
  * entry the writer did not stamp, an object it does not recognise and an index it cannot parse
  * are all found. Null when no bucket is bound, which means there is no store to hold a deposit.
  * READ-ONLY, and a failed read THROWS: "could not look" must never read as "nothing there".

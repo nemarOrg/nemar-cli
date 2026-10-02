@@ -28,6 +28,7 @@ import {
 } from "../src/services/anonymity-sweep";
 import {
   ARTIFACT_KINDS,
+  ARTIFACT_SUFFIX,
   META,
   NEUROBAGEL_INDEX_KEY,
   artifactName,
@@ -190,22 +191,61 @@ describe("the Neurobagel store invariant", () => {
     expect(github.some((g) => /issues|dispatches|pulls/.test(g.url))).toBe(false);
   });
 
-  test("any one of the three artifacts, an unrecognised object, or the id anywhere in the index is enough", async () => {
-    for (const [label, plant] of [
-      ["only the description", () => plantArtifact(DEPOSIT, "description")],
-      ["an object with no writer metadata", () => h.bucket.put(`${DEPOSIT}.jsonld`, "{}")],
+  /**
+   * EVERY name shape the writer produces (`ARTIFACT_SUFFIX`), and not only the one that happens to
+   * end the id: the first version of the id scan used a `\b` after the id, an underscore is a word
+   * character, and `<id>_annotated.json` and `<id>_dataset_description.json` never matched, so an
+   * unstamped copy of a deposit under either name read as a clean store.
+   */
+  const WRITER_NAMES = [
+    (id: string) => `${id}${ARTIFACT_SUFFIX.jsonld}`,
+    (id: string) => `${id}${ARTIFACT_SUFFIX.dictionary}`,
+    (id: string) => `${id}${ARTIFACT_SUFFIX.description}`,
+  ];
+
+  test("each real name the writer produces is found, stamped or not, as the only object of the deposit", async () => {
+    expect(WRITER_NAMES.map((n) => n(DEPOSIT))).toEqual([
+      "nm000910.jsonld",
+      "nm000910_annotated.json",
+      "nm000910_dataset_description.json",
+    ]);
+    for (const name of WRITER_NAMES) {
+      // Unstamped: no writer metadata, so the listing files it as an object it does not recognise.
+      await h.reset();
+      seedDeposit();
+      await h.bucket.put(name(DEPOSIT), "{}");
+      const unstamped = await runAnonymitySweep(env(), { seams: seams() });
+      expect(
+        unstamped.results[0]?.findings.map((f) => f.check),
+        name(DEPOSIT),
+      ).toContain(NEUROBAGEL_STORE_CHECK);
+    }
+    for (const kind of ARTIFACT_KINDS) {
+      // Stamped, alone: a partial set the writer would have written.
+      await h.reset();
+      seedDeposit();
+      await plantArtifact(DEPOSIT, kind);
+      const stamped = await runAnonymitySweep(env(), { seams: seams() });
+      expect(
+        stamped.results[0]?.findings.map((f) => f.check),
+        kind,
+      ).toContain(NEUROBAGEL_STORE_CHECK);
+    }
+  });
+
+  test("the id anywhere in the index is enough, whatever follows it", async () => {
+    for (const [label, body] of [
+      ["an index that names it and nothing else", JSON.stringify({ note: `see ${DEPOSIT}` })],
       [
-        "an index that names it and nothing else",
-        () => h.bucket.put(NEUROBAGEL_INDEX_KEY, JSON.stringify({ note: `see ${DEPOSIT}` })),
+        "an index that names an artifact file",
+        JSON.stringify({ name: `${DEPOSIT}_annotated.json` }),
       ],
-      [
-        "an index that is not JSON at all",
-        () => h.bucket.put(NEUROBAGEL_INDEX_KEY, `broken ${DEPOSIT} {`),
-      ],
+      ["an index that is not JSON at all", `broken ${DEPOSIT} {`],
+      ["an index with the id before an underscore", `{"x": "${DEPOSIT}_dataset_description.json"}`],
     ] as const) {
       await h.reset();
       seedDeposit();
-      await plant();
+      await h.bucket.put(NEUROBAGEL_INDEX_KEY, body);
       const res = await runAnonymitySweep(env(), { seams: seams() });
       expect(
         res.results[0]?.findings.map((f) => f.check),
@@ -214,9 +254,17 @@ describe("the Neurobagel store invariant", () => {
     }
   });
 
-  test("an id that merely begins with the deposit's does not count: the whole id is matched", async () => {
+  test("an id that merely contains the deposit's does not count: a seventh digit or a letter before is another name", async () => {
     seedDeposit("nm000910");
     for (const kind of ARTIFACT_KINDS) await plantArtifact("nm000911", kind);
+    for (const key of [
+      "nm0009100_annotated.json",
+      "nm0009100.jsonld",
+      "xnm000910.jsonld",
+      "onnm000910_annotated.json",
+    ]) {
+      await h.bucket.put(key, "{}");
+    }
     await h.bucket.put(NEUROBAGEL_INDEX_KEY, JSON.stringify({ datasets: [{ id: "nm0009100" }] }));
     const res = await runAnonymitySweep(env(), { seams: seams() });
     expect(res.results[0]?.findings).toEqual([]);
