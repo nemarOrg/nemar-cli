@@ -1020,8 +1020,7 @@ async function handleZenodoVersionDoi(
     // non-fatal. Under centralFlow the dataset_versions row doesn't exist yet
     // here -- manifest-ready triggers the refresh after the row insert lands.
     if (!centralFlow) {
-      const refreshed = refreshMetadataAfterVersionDoi(c.env, dataset.dataset_id, version);
-      c.executionCtx.waitUntil(refreshed);
+      c.executionCtx.waitUntil(refreshMetadataAfterVersionDoi(c.env, dataset.dataset_id, version));
     }
 
     return c.json({
