@@ -1,0 +1,382 @@
+{
+  "age_formats": {
+    "FromBounded": {
+      "identifier": "nb:FromBounded",
+      "label": "lower-bounded"
+    },
+    "FromEuro": {
+      "identifier": "nb:FromEuro",
+      "label": "European decimal"
+    },
+    "FromFloat": {
+      "identifier": "nb:FromFloat",
+      "label": "decimal"
+    },
+    "FromISO8601": {
+      "identifier": "nb:FromISO8601",
+      "label": "ISO 8601"
+    },
+    "FromRange": {
+      "identifier": "nb:FromRange",
+      "label": "range"
+    }
+  },
+  "bagel_version": "0.11.6",
+  "context": {
+    "Acquisition": "nb:Acquisition",
+    "Assessment": "nb:Assessment",
+    "Bagel": "nb:Bagel",
+    "BaseModel": "nb:BaseModel",
+    "CompletedPipeline": "nb:CompletedPipeline",
+    "ControlledTerm": "nb:ControlledTerm",
+    "Dataset": "nb:Dataset",
+    "Diagnosis": "nb:Diagnosis",
+    "Image": "nb:Image",
+    "ImagingSession": "nb:ImagingSession",
+    "PhenotypicSession": "nb:PhenotypicSession",
+    "Pipeline": "nb:Pipeline",
+    "Session": "nb:Session",
+    "Sex": "nb:Sex",
+    "Subject": "nb:Subject",
+    "SubjectGroup": "nb:SubjectGroup",
+    "hasAccessEmail": {
+      "@id": "nb:hasAccessEmail"
+    },
+    "hasAccessInstructions": {
+      "@id": "nb:hasAccessInstructions"
+    },
+    "hasAccessLink": {
+      "@id": "nb:hasAccessLink"
+    },
+    "hasAccessType": {
+      "@id": "nb:hasAccessType"
+    },
+    "hasAcquisition": {
+      "@id": "nb:hasAcquisition"
+    },
+    "hasAge": {
+      "@id": "nb:hasAge"
+    },
+    "hasAssessment": {
+      "@id": "nb:hasAssessment"
+    },
+    "hasAuthors": {
+      "@id": "nb:hasAuthors"
+    },
+    "hasCompletedPipeline": {
+      "@id": "nb:hasCompletedPipeline"
+    },
+    "hasContrastType": {
+      "@id": "nb:hasContrastType"
+    },
+    "hasDiagnosis": {
+      "@id": "nb:hasDiagnosis"
+    },
+    "hasFilePath": {
+      "@id": "nb:hasFilePath"
+    },
+    "hasKeywords": {
+      "@id": "nb:hasKeywords"
+    },
+    "hasLabel": {
+      "@id": "nb:hasLabel"
+    },
+    "hasPipelineName": {
+      "@id": "nb:hasPipelineName"
+    },
+    "hasPipelineVersion": {
+      "@id": "nb:hasPipelineVersion"
+    },
+    "hasReferencesAndLinks": {
+      "@id": "nb:hasReferencesAndLinks"
+    },
+    "hasRepositoryURL": {
+      "@id": "nb:hasRepositoryURL"
+    },
+    "hasSamples": {
+      "@id": "nb:hasSamples"
+    },
+    "hasSession": {
+      "@id": "nb:hasSession"
+    },
+    "hasSex": {
+      "@id": "nb:hasSex"
+    },
+    "identifier": "@id",
+    "isSubjectGroup": {
+      "@id": "nb:isSubjectGroup"
+    },
+    "nb": "http://neurobagel.org/vocab/",
+    "ncit": "http://ncicb.nci.nih.gov/xml/owl/EVS/Thesaurus.owl#",
+    "nidm": "http://purl.org/nidash/nidm#",
+    "np": "https://github.com/nipoppy/pipeline-catalog/tree/main/processing/",
+    "schemaKey": "@type",
+    "snomed": "http://purl.bioontology.org/ontology/SNOMEDCT/"
+  },
+  "healthy_control": {
+    "identifier": "ncit:C94342",
+    "label": "Healthy Control"
+  },
+  "imaging_modalities": {
+    "T1w": {
+      "abbreviation": "T1w",
+      "data_type": "anat",
+      "identifier": "nidm:T1Weighted",
+      "label": "T1-weighted image"
+    },
+    "T2w": {
+      "abbreviation": "T2w",
+      "data_type": "anat",
+      "identifier": "nidm:T2Weighted",
+      "label": "T2-weighted image"
+    },
+    "asl": {
+      "abbreviation": "asl",
+      "data_type": "perf",
+      "identifier": "nidm:ArterialSpinLabeling",
+      "label": "Arterial Spin Labeling"
+    },
+    "bold": {
+      "abbreviation": "bold",
+      "data_type": "func",
+      "identifier": "nidm:FlowWeighted",
+      "label": "Blood-Oxygen-Level Dependent image"
+    },
+    "dwi": {
+      "abbreviation": "dwi",
+      "data_type": "anat",
+      "identifier": "nidm:DiffusionWeighted",
+      "label": "Diffusion-weighted image"
+    },
+    "eeg": {
+      "abbreviation": "eeg",
+      "data_type": "eeg",
+      "identifier": "nidm:Electroencephalography",
+      "label": "Electroencephalography"
+    },
+    "meg": {
+      "abbreviation": "meg",
+      "data_type": "meg",
+      "identifier": "nidm:Magnetoencephalography",
+      "label": "Magnetoencephalography"
+    },
+    "pet": {
+      "abbreviation": "pet",
+      "data_type": "pet",
+      "identifier": "nidm:PositronEmissionTomography",
+      "label": "Positron Emission Tomography"
+    }
+  },
+  "namespaces": {
+    "nb": "http://neurobagel.org/vocab/",
+    "ncit": "http://ncicb.nci.nih.gov/xml/owl/EVS/Thesaurus.owl#",
+    "nidm": "http://purl.org/nidash/nidm#",
+    "np": "https://github.com/nipoppy/pipeline-catalog/tree/main/processing/",
+    "snomed": "http://purl.bioontology.org/ontology/SNOMEDCT/"
+  },
+  "pins": {
+    "api": {
+      "commit": "2395a650e90c8e62d5211232945ecc4117407094",
+      "files": {
+        "app/api/env_settings.py": {
+          "blob_sha": "f8cb0522ee9621f4ae1e9217a4948b8accc30466",
+          "bytes": 3282,
+          "sha256": "4a29970d2e2e6a012756be3466492764ee60eea20e32e398d329d7b33ead5545"
+        },
+        "app/api/logger.py": {
+          "blob_sha": "acc9566d69235611e6cbd0e9dd0591a900002901",
+          "bytes": 519,
+          "sha256": "c9170af1b82e76b5022c2f1dbc42d99bc6bb3c2336676a42e6daa07929766684"
+        },
+        "app/api/models.py": {
+          "blob_sha": "24518ff7cbf60860f455b6c83e4e544030d2843a",
+          "bytes": 7190,
+          "sha256": "763dd3d487fb747e2fa408c15844ee1db3ebe6db2372778e6f153bb58472ecd0"
+        },
+        "app/api/sparql_models.py": {
+          "blob_sha": "22c835abf661fa5627eb921162d1acdff0047bcb",
+          "bytes": 6606,
+          "sha256": "3c171b289c63cfe8264d6202bcd7a055ce6509d7428519d30097eec9e3007420"
+        },
+        "app/api/utility.py": {
+          "blob_sha": "2bf53b14a61d4a261f415854882f76584be89a18",
+          "bytes": 29502,
+          "sha256": "407b20ee396429fa6428b88daab4d406f2b7f7a8b78924bfc1134105c26be4da"
+        }
+      },
+      "repo": "neurobagel/api",
+      "tag": "v0.11.0"
+    },
+    "bagel": {
+      "commit": "505838159e273f5feb03d117bff454c27932728e",
+      "files": {
+        "bagel/cli.py": {
+          "blob_sha": "97e3b3dc29ef040576c1094252f7bdf47f68d8f9",
+          "bytes": 35929,
+          "sha256": "2a53d3a1b65a96d1abebf3d6e628471ee5eb2793fb447a1e4e1f60eaac559cae"
+        },
+        "bagel/dataset_description_model.py": {
+          "blob_sha": "1f6d2af4753b141af936529814498e604b6b017e",
+          "bytes": 4551,
+          "sha256": "89e4cb28a12cfe4730cf5fe9d7127a131980acdd8ebe7003bf759ca09a0dc7f7"
+        },
+        "bagel/dictionary_models.py": {
+          "blob_sha": "7d3868916934eae583e5e33735a4c485e8e7f5d2",
+          "bytes": 6908,
+          "sha256": "111a26762667317cd76fc5e3c6e5556917fb89cd4875847287d1f329c6376d50"
+        },
+        "bagel/mappings.py": {
+          "blob_sha": "9b4a67c51baac58f23e3050e559430302b53fbb2",
+          "bytes": 2433,
+          "sha256": "42936f46d34fb34c9f230d7e1d2e73c1aee672d1573dfaa2fb39ef22837d6e26"
+        },
+        "bagel/models.py": {
+          "blob_sha": "481d3896448daf836d1e324f4f257df1c5d6d064",
+          "bytes": 3235,
+          "sha256": "74b526cd7c3c81ebdf1f45fa98445d81c93f832bf21c0a5a4e499a1fe5afac61"
+        },
+        "bagel/utilities/bids_utils.py": {
+          "blob_sha": "28351990858737f8f301be33981aab988ba15ce9",
+          "bytes": 6971,
+          "sha256": "140fc9995d472739888cf483346d725bf474ffd8ce5897a10943888a96a37bec"
+        },
+        "bagel/utilities/model_utils.py": {
+          "blob_sha": "df8044e08221b816594023869676434018f58a3e",
+          "bytes": 4429,
+          "sha256": "b5d2fd51afc2ea7310789cad679a368d873a902b89e5063673b9f041d7aa5f1d"
+        },
+        "bagel/utilities/pheno_utils.py": {
+          "blob_sha": "3369ad2d4fa55b9e6236ae92fd2719c9944aac8c",
+          "bytes": 34634,
+          "sha256": "26c01e69867523852968b687b27d69e5594345c8b9ae2cd3f056489beb0722ad"
+        }
+      },
+      "pypi": "bagel==0.11.6",
+      "repo": "neurobagel/bagel-cli",
+      "tag": "v0.11.6"
+    },
+    "communities": {
+      "commit": "0cbf82a4777a10e984253dac2b134902963c4095",
+      "files": {
+        "config_metadata/config_namespace_map.json": {
+          "blob_sha": "2b665aa29c191de59af920f6acbfd8b8ca51067a",
+          "bytes": 4514,
+          "sha256": "c482e52a63d1e799155a7f9076d9e4bd5b83320d99c4c4c51d8c8fc88c35f74a"
+        },
+        "configs/Neurobagel/assessment.json": {
+          "blob_sha": "7f945e3591d88f94af7f5581aebaefd8ed95a643",
+          "bytes": 230910,
+          "sha256": "185ba79016d65493a067f5c8c4e8235f2fad211280849e5e0504fccb7546e265"
+        },
+        "configs/Neurobagel/config.json": {
+          "blob_sha": "e8fde10c2dcce3d60748bf68461136103aefe2de",
+          "bytes": 3206,
+          "sha256": "8cefcf9d2b09cff2d0064bb6bc73b945bf084dd0195e3688e0450b529d8b15a0"
+        },
+        "configs/Neurobagel/diagnosis.json": {
+          "blob_sha": "e21a7e8c74d88eb31702cf97ec79ccb422860260",
+          "bytes": 1114415,
+          "sha256": "f32866e589783a25067310bf04ed87acabc9e88dbe63bd4c0822cf4a2e84b87e"
+        },
+        "configs/Neurobagel/imaging_modalities.json": {
+          "blob_sha": "95c4207b2573ce0c1bc62ad1565e88257f31e547",
+          "bytes": 1450,
+          "sha256": "cde78014f2ede6c4c607aaad9209d861c6e9080485e5d0e50d5c1e2ba3799a53"
+        },
+        "configs/Neurobagel/sex.json": {
+          "blob_sha": "2991ccfc84e1783cfeeae78cfeb6005c0d43c48f",
+          "bytes": 434,
+          "sha256": "54852200f50dba0803234a3e6f03f6152d6ec8fcd51e9ca1ed1a781bd30e858d"
+        }
+      },
+      "repo": "neurobagel/communities"
+    },
+    "recipes": {
+      "commit": "389d0b719ebc641e3a329112b64305fa7889023f",
+      "files": {
+        "docker-compose.yml": {
+          "blob_sha": "ff8f28ac062dd7104c73717c42ecec573b1a2531",
+          "bytes": 3227,
+          "sha256": "52c1ec74b7a89707f6d8138c7e8a97ecd5f5eea0129f93f004eaed69e508dc6f"
+        },
+        "init_data/process_jsonld.py": {
+          "blob_sha": "ac189b7378c40a3f4b94b1cc4ce68cda8c1eea3e",
+          "bytes": 18599,
+          "sha256": "97688d9bd4201135b80e1ab34eeaace4032e08c78d86a95367da47f6872aa04e"
+        },
+        "init_data/utils/dataset_description_model.py": {
+          "blob_sha": "b412c34988c8bd4db2d27d9862613c8e14f86de3",
+          "bytes": 5192,
+          "sha256": "f880cb263636da41d9472c0aaf032f85cc12668e2bc7d05c558a378e264b56b1"
+        },
+        "init_data/utils/dictionary_models.py": {
+          "blob_sha": "226e1fb39c0026070beda5701e4f2d7ce6818232",
+          "bytes": 7310,
+          "sha256": "692342e6fe0602c8cf9b29a78fdc3143f6534fdea7553cf5fe81768853783000"
+        },
+        "init_data/utils/models.py": {
+          "blob_sha": "5caeaf4f0751e81a93663be203ba5e79658fb169",
+          "bytes": 3942,
+          "sha256": "196d9fafa19be89bc550c1fb14667f16ce9cb553bff41798aedcae9d020768f2"
+        },
+        "scripts/add_data_to_graph.sh": {
+          "blob_sha": "869d13b4b0a01623e4e30e4d975feac652f84ef9",
+          "bytes": 8783,
+          "sha256": "7b1934a2d333e13aba78a09a2369749929eef5d008fcaeef6dca755146f3af4b"
+        }
+      },
+      "repo": "neurobagel/recipes"
+    }
+  },
+  "sex": {
+    "female": {
+      "identifier": "snomed:248152002",
+      "label": "Female"
+    },
+    "male": {
+      "identifier": "snomed:248153007",
+      "label": "Male"
+    },
+    "other": {
+      "identifier": "snomed:32570681000036106",
+      "label": "Other"
+    }
+  },
+  "snapshot_version": 1,
+  "term_files": {
+    "assessment": {
+      "file": "assessment-terms.json",
+      "terms": 2081
+    },
+    "diagnosis": {
+      "file": "diagnosis-terms.json",
+      "terms": 10853
+    }
+  },
+  "variables": {
+    "Age": {
+      "identifier": "nb:Age",
+      "label": "Age"
+    },
+    "Assessment": {
+      "identifier": "nb:Assessment",
+      "label": "Assessment Tool"
+    },
+    "Diagnosis": {
+      "identifier": "nb:Diagnosis",
+      "label": "Diagnosis"
+    },
+    "ParticipantID": {
+      "identifier": "nb:ParticipantID",
+      "label": "Participant ID"
+    },
+    "SessionID": {
+      "identifier": "nb:SessionID",
+      "label": "Session ID"
+    },
+    "Sex": {
+      "identifier": "nb:Sex",
+      "label": "Sex"
+    }
+  }
+}
