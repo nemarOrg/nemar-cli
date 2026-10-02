@@ -2170,6 +2170,38 @@ describe("an interrupted run never leaves artifacts newer than the index", () =>
     ]);
   });
 
+  test("a patch that THROWS is a patch that failed: the run stops there and the closing sync heals the index", async () => {
+    await seededAndWritten();
+    // The first write of the index (dataset 1's patch) throws outright; later ones are fine.
+    let thrown = 0;
+    const flaky = new Proxy(h.bucket, {
+      get(target, prop, receiver) {
+        if (prop === "put") {
+          return async (key: string, ...rest: unknown[]) => {
+            if (key === NEUROBAGEL_INDEX_KEY && thrown === 0) {
+              thrown++;
+              throw new Error("R2 put refused");
+            }
+            return (target.put as (...a: unknown[]) => unknown)(key, ...rest);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as R2Bucket;
+    const result = await run({}, h.env({ NEUROBAGEL: flaky }));
+    expect(thrown).toBe(1);
+    expect(result.status).toBe("ok");
+    expect(result.stopped).toBe("index_patch");
+    expect(result.examined).toBe(1);
+    expect(result.unexamined).toBe(3);
+    expect(result.warnings.join(" ")).toContain("index patch for nm000720 threw: R2 put refused");
+    // Not a word more was written, and the closing sync left the index true to the store.
+    expect(await indexMismatches()).toEqual([]);
+    expect(await text("nm000720.jsonld")).toContain("(revised)");
+    expect(await text("nm000721.jsonld")).not.toContain("(revised)");
+  });
+
   test("an index that cannot be patched stops the run there, and the closing sync rebuilds it", async () => {
     await seededAndWritten();
     // Every write of the index that carries a CHANGED entry for nm000721 loses its race.

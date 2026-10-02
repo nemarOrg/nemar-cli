@@ -703,7 +703,17 @@ async function processDataset(rc: RunContext, row: PlanRow): Promise<DatasetResu
     [META.flags]: flags.join(","),
     [META.generatedAt]: rc.now.toISOString(),
   });
-  const patch = await patchIndexEntry(rc, written);
+  // A patch that THROWS (R2 down, a network error) is a patch that failed: the run stops
+  // here and the closing sync, which rebuilds the index from the listing, heals what it can.
+  let patch: PatchOutcome;
+  try {
+    patch = await patchIndexEntry(rc, written);
+  } catch (err) {
+    patch = "failed";
+    rc.result.warnings.push(
+      `index patch for ${id} threw: ${clip(err instanceof Error ? err.message : String(err))}`,
+    );
+  }
   if (patch === "patched") rc.result.index.patched = (rc.result.index.patched ?? 0) + 1;
   if (patch === "failed") rc.indexPatchFailed = true;
   await ledgerNote(rc, id, { state: "clear" });
