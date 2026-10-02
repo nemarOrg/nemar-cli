@@ -115,6 +115,14 @@ export interface StoreListing {
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
+/**
+ * The most list calls one listing may make. At the 100 objects a call returns in the
+ * simulator (see LIST_PAGE_OBJECTS in the writer) that bounds the store at about 10,000
+ * objects: roughly 3,300 datasets of three artifacts and the index. Past it the listing
+ * FAILS, loudly, rather than returning part of the store.
+ */
+export const LIST_MAX_PAGES = 100;
+
 /** R2's `include` option, which the installed Workers typings do not declare. */
 type ListOptionsWithInclude = NonNullable<Parameters<R2Bucket["list"]>[0]> & {
   include: ("httpMetadata" | "customMetadata")[];
@@ -126,13 +134,16 @@ type ListOptionsWithInclude = NonNullable<Parameters<R2Bucket["list"]>[0]> & {
  * Throws on any R2 failure: an incomplete listing must never be read as "these
  * datasets are absent", which would delete them or drop them from the index.
  */
-export async function listStore(bucket: R2Bucket): Promise<StoreListing> {
+export async function listStore(
+  bucket: R2Bucket,
+  maxPages: number = LIST_MAX_PAGES,
+): Promise<StoreListing> {
   const datasets = new Map<string, StoredDataset>();
   const unexpected: string[] = [];
   let index: StoreListing["index"] = null;
   let objects = 0;
   let cursor: string | undefined;
-  for (let page = 0; page < 100; page++) {
+  for (let page = 0; page < maxPages; page++) {
     // `include` is a runtime option the installed Workers typings do not declare yet;
     // without it R2 returns no custom metadata and no artifact would be recognized.
     const listed = await bucket.list({
@@ -175,7 +186,12 @@ export async function listStore(bucket: R2Bucket): Promise<StoreListing> {
     if (!listed.truncated) return { datasets, unexpected, index, objects };
     cursor = listed.cursor;
   }
-  throw new Error("neurobagel store listing did not finish within 100 pages");
+  // Never a truncated listing handed back as if it were whole: that would read as "these
+  // datasets are absent" and delete them, or drop them from the index. The run fails loudly
+  // instead (its status is `error`, and `status` reports the store as unreadable).
+  throw new Error(
+    `the Neurobagel store listing did not finish within ${maxPages} pages (${objects} objects so far): the store is larger than this writer can list`,
+  );
 }
 
 /** The one SHA-256 of this feature: lower-case hex of the digest of `bytes`. */

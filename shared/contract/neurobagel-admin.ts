@@ -57,8 +57,12 @@ export interface NeurobagelRunResult {
   unexamined: number;
   /** Set when the run stopped early; null when it did everything it planned. */
   stopped: NeurobagelStopReason | null;
-  /** Operations this run spent against its budget. HTTP is the writer's own calls plus an estimate for the data plane's. */
-  ops: { spent: number; budget: number; d1: number; r2: number; http: number };
+  /**
+   * Operations this run spent against its budget, and the part of it held back for the
+   * closing steps (it grows with the store). HTTP is the writer's own calls plus an estimate
+   * for the data plane's.
+   */
+  ops: { spent: number; budget: number; reserved: number; d1: number; r2: number; http: number };
   results: NeurobagelDatasetResult[];
   removed: string[];
   removals_pending: number;

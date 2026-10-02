@@ -127,16 +127,40 @@ export const REMOVAL_LIMIT = 50;
  *
  * What a dataset costs, measured by difference over runs of 1, 3 and 7 datasets (ADR 0084,
  * "What a run costs"): a REWRITTEN dataset about 22 operations (9 D1 statements, 4 R2
- * calls, the manifest HEAD and the allowance for the data plane's requests), an UNCHANGED
- * one 3 (two D1 reads and the HEAD), and a run about 7 more besides (the plan, the listing,
- * the ledger, and the index sync). A test fails if a dataset ever costs more than
- * {@link DATASET_OPS_WORST}, so the numbers here cannot go stale unnoticed.
+ * calls, the manifest HEAD and the allowance for the data plane's requests) and an
+ * UNCHANGED one 3 (two D1 reads and the HEAD). What a run costs besides depends on the SIZE
+ * OF THE STORE, because every listing is one call per page (see {@link closingReserve}).
+ * A test fails if a dataset ever costs more than {@link DATASET_OPS_WORST}, so the numbers
+ * here cannot go stale unnoticed.
  */
 export const OP_BUDGET = 400;
 /** The most one dataset may cost: its measured 22, with a margin for a ledger row and a retried index patch. */
 export const DATASET_OPS_WORST = 30;
-/** Held back for the closing index sync (list, read, decide, write, up to three attempts) and the run record. */
-export const CLOSING_OPS = 30;
+/**
+ * What the closing steps cost besides listing the store: the index read, the eligibility
+ * check and the conditional write of two attempts, and the run record.
+ */
+export const CLOSING_FIXED_OPS = 10;
+/**
+ * Objects one `list` call returns. 100 is what Miniflare's R2 returns when custom metadata
+ * is asked for (the writer always asks), and it is the number the budget plans with; real R2
+ * may return more and cost fewer calls, which this does not rely on.
+ */
+export const LIST_PAGE_OBJECTS = 100;
+/** The fewest list calls that read `objects` objects. */
+export function listingPages(objects: number): number {
+  return Math.max(1, Math.ceil(objects / LIST_PAGE_OBJECTS));
+}
+/**
+ * What a run holds back to finish with: the closing sync lists the WHOLE store again (one
+ * call per page) and may do it twice if it loses a race, then one delete for each dataset
+ * leaving. It grows with the store (about 800 datasets are 2,400 objects and 24 pages), so
+ * a constant would be right for a small store and short for the real one. A third attempt
+ * may spend past the run's budget, but not past the Worker's own 1000.
+ */
+export function closingReserve(objects: number, leaving: number): number {
+  return CLOSING_FIXED_OPS + 2 * listingPages(objects) + Math.min(leaving, REMOVAL_LIMIT);
+}
 /** What a gather is charged for the HTTP requests the data plane makes inside it (S3 manifest, the git broker's token and blobs, an annexed file's redirect). Measured: 3 in the test environment, more in production. */
 export const GATHER_HTTP_OPS = 8;
 
@@ -227,7 +251,7 @@ function emptyResult(options: RunOptions, limit: number, mode: WriterMode): RunR
     limit,
     unexamined: 0,
     stopped: null,
-    ops: { spent: 0, budget: options.opBudget ?? OP_BUDGET, d1: 0, r2: 0, http: 0 },
+    ops: { spent: 0, budget: options.opBudget ?? OP_BUDGET, reserved: 0, d1: 0, r2: 0, http: 0 },
     results: [],
     removed: [],
     removals_pending: 0,
@@ -848,7 +872,14 @@ export async function runNeurobagelWriter(
   const bucket = env.NEUROBAGEL as R2Bucket;
   const budget = options.opBudget ?? OP_BUDGET;
   const finishOps = () => {
-    result.ops = { spent: ops.total, budget, d1: ops.d1, r2: ops.r2, http: ops.http };
+    result.ops = {
+      spent: ops.total,
+      budget,
+      reserved: result.ops.reserved,
+      d1: ops.d1,
+      r2: ops.r2,
+      http: ops.http,
+    };
   };
 
   try {
@@ -925,7 +956,8 @@ export async function runNeurobagelWriter(
     const leavingEstimate = [...listing.datasets.keys()].filter(
       (id) => !eligibleIds.has(id) && (only === undefined || only.includes(id)),
     ).length;
-    const reserve = CLOSING_OPS + Math.min(leavingEstimate, REMOVAL_LIMIT);
+    const reserve = closingReserve(listing.objects, leavingEstimate);
+    result.ops.reserved = reserve;
     for (const item of plan.work) {
       // The first dataset is always examined, so a run makes progress however small the
       // budget; after it, a dataset is begun only if its worst case still leaves the reserve.

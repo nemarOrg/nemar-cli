@@ -40,6 +40,7 @@ import {
   ARTIFACT_KINDS,
   ARTIFACT_SUFFIX,
   type IndexDocument,
+  LIST_MAX_PAGES,
   META,
   NEUROBAGEL_INDEX_KEY,
   NEUROBAGEL_INDEX_SCHEMA,
@@ -48,15 +49,18 @@ import {
   parseStoredIndex,
 } from "../src/services/neurobagel-store";
 import {
-  CLOSING_OPS,
+  CLOSING_FIXED_OPS,
   DATASET_OPS_WORST,
+  LIST_PAGE_OBJECTS,
   MAX_ARTIFACT_BYTES,
   OP_BUDGET,
   R2_METADATA_BUDGET,
   REMOVAL_LIMIT,
   type RunResult,
   TRANSIENT_CODES,
+  closingReserve,
   fitMetadata,
+  listingPages,
   neurobagelWriterMode,
   reconcileLimit,
   runNeurobagelWriter,
@@ -1826,11 +1830,11 @@ describe("a run counts what it spends and stops with headroom to finish", () => 
     expect(perRewritten).toBeGreaterThan(5);
     expect(perRewritten).toBeLessThanOrEqual(DATASET_OPS_WORST);
     // A run's fixed overhead (the plan, the listing, the ledger, the index sync) fits its reserve.
-    expect(small.ops.spent - 2 * perRewritten).toBeLessThanOrEqual(CLOSING_OPS);
+    expect(small.ops.spent - 2 * perRewritten).toBeLessThanOrEqual(closingReserve(7, 0));
 
     const unchanged = await run({ limit: 50 });
     expect(unchanged.results.every((r) => r.outcome === "unchanged")).toBe(true);
-    expect(unchanged.ops.spent).toBeLessThan(CLOSING_OPS + 6 * 6);
+    expect(unchanged.ops.spent).toBeLessThan(closingReserve(19, 0) + 6 * 6);
   });
 
   test("a run that spends its budget stops, says so, and still brings the index up to date", async () => {
@@ -1882,6 +1886,43 @@ describe("a run counts what it spends and stops with headroom to finish", () => 
     expect(result.ops.spent).toBeLessThanOrEqual(budget);
   });
 
+  test("the reserve grows with the store: one list call a page, twice, plus a delete for each dataset leaving", () => {
+    expect(listingPages(0)).toBe(1);
+    expect(listingPages(LIST_PAGE_OBJECTS)).toBe(1);
+    expect(listingPages(LIST_PAGE_OBJECTS + 1)).toBe(2);
+    expect(listingPages(2400)).toBe(24);
+    expect(closingReserve(0, 0)).toBe(CLOSING_FIXED_OPS + 2);
+    // About 800 datasets: three artifacts each and the index.
+    expect(closingReserve(2401, 0)).toBe(CLOSING_FIXED_OPS + 2 * 25);
+    expect(closingReserve(2401, 12)).toBe(CLOSING_FIXED_OPS + 2 * 25 + 12);
+    // A delete a dataset, up to the most one run removes.
+    expect(closingReserve(2401, 5000)).toBe(CLOSING_FIXED_OPS + 2 * 25 + REMOVAL_LIMIT);
+    // A bigger store holds back more, whatever else is the same.
+    expect(closingReserve(2401, 0)).toBeGreaterThan(closingReserve(30, 0));
+  });
+
+  test("a run reports the reserve it held back, sized by the store it found", async () => {
+    const small = await run({ execute: false });
+    expect(small.ops.reserved).toBe(closingReserve(0, 0));
+    // 150 datasets' objects, none eligible: 450 objects (5 pages) and 150 leaving (50 counted).
+    const stamp = (kind: string) => ({ sha256: "0".repeat(64), kind });
+    for (let i = 0; i < 150; i++) {
+      const id = `nm${String(2000 + i).padStart(6, "0")}`;
+      await h.bucket.put(`${id}.jsonld`, "{}", {
+        customMetadata: { ...stamp("jsonld"), [META.fingerprint]: "sha256:x" },
+      });
+      await h.bucket.put(`${id}_annotated.json`, "{}", { customMetadata: stamp("dictionary") });
+      await h.bucket.put(`${id}_dataset_description.json`, "{}", {
+        customMetadata: stamp("description"),
+      });
+    }
+    const large = await run({ execute: false });
+    expect(large.ops.reserved).toBe(closingReserve(450, 150));
+    expect(large.ops.reserved).toBeGreaterThan(small.ops.reserved + 50);
+    // And what the listing itself cost is counted: a call a page (a dry run lists once).
+    expect(large.ops.r2).toBeGreaterThanOrEqual(listingPages(450));
+  });
+
   test("the first dataset is always examined, so a tiny budget still makes progress", async () => {
     for (const id of ids(3)) seedSynthetic(h, id);
     const result = await run({ opBudget: 1 });
@@ -1897,6 +1938,51 @@ describe("a run counts what it spends and stops with headroom to finish", () => 
     expect(rec.log).toEqual([]);
     expect(result.ops.spent).toBeGreaterThan(0);
     expect(result.stopped).toBeNull();
+  });
+});
+
+describe("the store listing never returns part of the store", () => {
+  test("past its page cap it FAILS, naming the cap, instead of handing back a truncated listing", async () => {
+    const stamp = (kind: string) => ({ sha256: "0".repeat(64), kind });
+    for (let i = 0; i < 70; i++) {
+      const id = `nm${String(3000 + i).padStart(6, "0")}`;
+      await h.bucket.put(`${id}.jsonld`, "{}", {
+        customMetadata: { ...stamp("jsonld"), [META.fingerprint]: "sha256:x" },
+      });
+      await h.bucket.put(`${id}_annotated.json`, "{}", { customMetadata: stamp("dictionary") });
+      await h.bucket.put(`${id}_dataset_description.json`, "{}", {
+        customMetadata: stamp("description"),
+      });
+    }
+    // 210 objects at 100 a page: three pages. Two are not enough, and say so.
+    await expect(listStore(h.bucket, 2)).rejects.toThrow(
+      /did not finish within 2 pages \(\d+ objects so far\): the store is larger than this writer can list/,
+    );
+    const whole = await listStore(h.bucket, 3);
+    expect(whole.datasets.size).toBe(70);
+    expect(whole.objects).toBe(210);
+    // And the default is a hundred pages, which is what bounds the store.
+    expect(LIST_MAX_PAGES).toBe(100);
+  });
+
+  test("a run whose listing fails is an error, writes nothing, and deletes nothing", async () => {
+    seedSynthetic(h, "nm000870");
+    await run();
+    const rec = recordWrites(h.bucket);
+    const failing = recordOps(rec.bucket, undefined);
+    const broken = new Proxy(failing.bucket, {
+      get(target, prop, receiver) {
+        if (prop === "list") return () => Promise.reject(new Error("listing failed part way"));
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as R2Bucket;
+    console.error = () => {};
+    const result = await run({}, h.env({ NEUROBAGEL: broken }));
+    console.error = quiet.error;
+    expect(result.status).toBe("error");
+    expect(result.error).toContain("listing failed part way");
+    expect(rec.log).toEqual([]);
   });
 });
 
