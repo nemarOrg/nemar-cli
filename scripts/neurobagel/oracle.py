@@ -96,11 +96,17 @@ def fetch_recipes(dest: Path) -> None:
         "init_data/utils/dataset_description_model.py": "init_data/utils/dataset_description_model.py",
     }
     for source, target in layout.items():
-        url = f"https://raw.githubusercontent.com/{pin['repo']}/{pin['commit']}/{source}"
-        request = urllib.request.Request(url, headers={"User-Agent": "nemar-neurobagel-dev/1.0"})
+        url = (
+            f"https://raw.githubusercontent.com/{pin['repo']}/{pin['commit']}/{source}"
+        )
+        request = urllib.request.Request(
+            url, headers={"User-Agent": "nemar-neurobagel-dev/1.0"}
+        )
         data = urllib.request.urlopen(request, timeout=60).read()
         if git_blob_sha(data) != pin["files"][source]["blob_sha"]:
-            raise SystemExit(f"{source} does not match the pinned blob sha; regenerate the vocabulary snapshot")
+            raise SystemExit(
+                f"{source} does not match the pinned blob sha; regenerate the vocabulary snapshot"
+            )
         path = dest / target
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
@@ -108,7 +114,9 @@ def fetch_recipes(dest: Path) -> None:
     (dest / "init_data" / "utils" / "__init__.py").write_text("")
 
 
-def run_recipes_loader(recipes: Path, input_dir: Path, catalog_mode: bool) -> tuple[int, int, str]:
+def run_recipes_loader(
+    recipes: Path, input_dir: Path, catalog_mode: bool
+) -> tuple[int, int, str]:
     """Run the recipes loader; return (datasets accepted, files skipped, log text)."""
     output = input_dir.parent / ("out-catalog" if catalog_mode else "out-graph")
     output.mkdir(exist_ok=True)
@@ -119,14 +127,24 @@ def run_recipes_loader(recipes: Path, input_dir: Path, catalog_mode: bool) -> tu
         "d = extract_datasets_metadata_to_dict(Path(sys.argv[1]), Path(sys.argv[2]))\n"
         "print('ACCEPTED', len(d))\n"
     )
-    env = {**os.environ, "NB_CATALOG_MODE": "true" if catalog_mode else "false", "PYTHONPATH": str(recipes)}
+    env = {
+        **os.environ,
+        "NB_CATALOG_MODE": "true" if catalog_mode else "false",
+        "PYTHONPATH": str(recipes),
+    }
     proc = subprocess.run(
         [sys.executable, "-c", code, str(input_dir), str(output)],
-        capture_output=True, text=True, env=env, cwd=recipes,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=recipes,
+        check=False,
     )
     log = proc.stdout + proc.stderr
     accepted = re.search(r"ACCEPTED (\d+)", log)
-    skipped = len(re.findall(r"Skipping (?:file|dataset)|failed validation|is not a valid", log))
+    skipped = len(
+        re.findall(r"Skipping (?:file|dataset)|failed validation|is not a valid", log)
+    )
     if proc.returncode != 0 or accepted is None:
         return 0, -1, log
     return int(accepted.group(1)), skipped, log
@@ -138,7 +156,9 @@ def run_recipes_loader(recipes: Path, input_dir: Path, catalog_mode: bool) -> tu
 def bagel(args: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-c", "from bagel.cli import bagel; bagel()", *args],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
 
@@ -146,14 +166,20 @@ def phenotype_view(dataset: dict) -> dict[str, dict]:
     """Per normalized subject label: the phenotype of its phenotypic session."""
     view: dict[str, dict] = {}
     for subject in dataset["hasSamples"]:
-        phenotypic = [s for s in subject["hasSession"] if s["schemaKey"] == "PhenotypicSession"]
+        phenotypic = [
+            s for s in subject["hasSession"] if s["schemaKey"] == "PhenotypicSession"
+        ]
         if len(phenotypic) != 1:
-            raise AssertionError(f"{subject['hasLabel']} has {len(phenotypic)} phenotypic sessions")
+            raise AssertionError(
+                f"{subject['hasLabel']} has {len(phenotypic)} phenotypic sessions"
+            )
         session = phenotypic[0]
         view[normalize_label(subject["hasLabel"])] = {
             "age": session.get("hasAge"),
             "sex": session.get("hasSex", {}).get("identifier"),
-            "diagnoses": sorted(d["identifier"] for d in session.get("hasDiagnosis", [])),
+            "diagnoses": sorted(
+                d["identifier"] for d in session.get("hasDiagnosis", [])
+            ),
         }
     return view
 
@@ -163,7 +189,8 @@ def modality_view(dataset: dict) -> dict[str, list[str]]:
     for subject in dataset["hasSamples"]:
         found = {
             a["hasContrastType"]["identifier"]
-            for s in subject["hasSession"] if s["schemaKey"] == "ImagingSession"
+            for s in subject["hasSession"]
+            if s["schemaKey"] == "ImagingSession"
             for a in s["hasAcquisition"]
         }
         view[normalize_label(subject["hasLabel"])] = sorted(found)
@@ -171,8 +198,14 @@ def modality_view(dataset: dict) -> dict[str, list[str]]:
 
 
 DATASET_KEYS = [
-    "hasLabel", "hasAuthors", "hasKeywords", "hasReferencesAndLinks", "hasRepositoryURL",
-    "hasAccessInstructions", "hasAccessType", "hasAccessLink",
+    "hasLabel",
+    "hasAuthors",
+    "hasKeywords",
+    "hasReferencesAndLinks",
+    "hasRepositoryURL",
+    "hasAccessInstructions",
+    "hasAccessType",
+    "hasAccessLink",
 ]
 
 
@@ -189,7 +222,10 @@ def refusal_reason(raw_log: str) -> str | None:
 def run_pheno(fixture: Path, golden: Path, work: Path, id_: str, report: dict) -> dict:
     tsv_path = fixture / "participants.tsv"
     if not tsv_path.exists() or report["participants_tsv"]["status"] != "ok":
-        return {"status": "skipped", "reason": f"table_{report['participants_tsv']['status']}"}
+        return {
+            "status": "skipped",
+            "reason": f"table_{report['participants_tsv']['status']}",
+        }
     data = tsv_path.read_bytes()
     if data.startswith(b"\xef\xbb\xbf"):
         # The transform strips a byte order mark (pandas would keep it and rename the first
@@ -201,27 +237,41 @@ def run_pheno(fixture: Path, golden: Path, work: Path, id_: str, report: dict) -
     tsv = work / "participants.tsv"
     tsv.write_bytes(data)
     out = work / "bagel-pheno.jsonld"
-    proc = bagel([
-        "pheno", "--pheno", str(tsv),
-        "--dictionary", str(golden / f"{id_}_annotated.json"),
-        "--dataset-description", str(golden / f"{id_}_dataset_description.json"),
-        "--output", str(out), "--overwrite",
-    ])
+    proc = bagel(
+        [
+            "pheno",
+            "--pheno",
+            str(tsv),
+            "--dictionary",
+            str(golden / f"{id_}_annotated.json"),
+            "--dataset-description",
+            str(golden / f"{id_}_dataset_description.json"),
+            "--output",
+            str(out),
+            "--overwrite",
+        ]
+    )
     log = proc.stdout + proc.stderr
     recorded_inputs = {
         "participants.tsv": sha256(data),
         "annotated.json": sha256((golden / f"{id_}_annotated.json").read_bytes()),
-        "dataset_description.json": sha256((golden / f"{id_}_dataset_description.json").read_bytes()),
+        "dataset_description.json": sha256(
+            (golden / f"{id_}_dataset_description.json").read_bytes()
+        ),
     }
     if proc.returncode != 0:
         reason = refusal_reason(log)
         if reason is None:
-            raise SystemExit(f"bagel pheno failed for {id_} for an undocumented reason:\n{log[-2000:]}")
+            raise SystemExit(
+                f"bagel pheno failed for {id_} for an undocumented reason:\n{log[-2000:]}"
+            )
         return {"status": "refused", "reason": reason, "inputs": recorded_inputs}
     oracle = json.loads(out.read_text())
     oracle.pop("@context")
     return {
-        "status": "compared", "reason": None, "inputs": recorded_inputs,
+        "status": "compared",
+        "reason": None,
+        "inputs": recorded_inputs,
         "dataset": {k: oracle.get(k) for k in DATASET_KEYS},
         "subjects": phenotype_view(oracle),
         "_oracle_jsonld": str(out),
@@ -232,7 +282,12 @@ def run_bids(metadata: dict, pheno: dict, work: Path, id_: str) -> dict | None:
     """Attach imaging from a table built from the bids index; return modalities per subject."""
     if pheno["status"] != "compared":
         return None
-    index = (metadata.get("extensions") or {}).get("nemar", {}).get("bids_index", {}).get("subjects", {})
+    index = (
+        (metadata.get("extensions") or {})
+        .get("nemar", {})
+        .get("bids_index", {})
+        .get("subjects", {})
+    )
     rows = ["sub\tses\tsuffix\tpath"]
     attachable = 0
     for sub, node in sorted(index.items()):
@@ -244,7 +299,8 @@ def run_bids(metadata: dict, pheno: dict, work: Path, id_: str) -> dict | None:
             pairs = [
                 ("" if key == "no-session" else key, datatype)
                 for key, datatypes in sorted(recorded.items())
-                for datatype in sorted(datatypes) if datatype in MAPPED_SUFFIXES
+                for datatype in sorted(datatypes)
+                if datatype in MAPPED_SUFFIXES
             ]
         else:
             # It does not: the table claims every datatype in every session, which is only
@@ -252,25 +308,38 @@ def run_bids(metadata: dict, pheno: dict, work: Path, id_: str) -> dict | None:
             sessions = node.get("sessions") or [""]
             pairs = [
                 (ses, datatype)
-                for datatype in sorted(node.get("modalities", {})) if datatype in MAPPED_SUFFIXES
+                for datatype in sorted(node.get("modalities", {}))
+                if datatype in MAPPED_SUFFIXES
                 for ses in sessions
             ]
         if pairs:
             attachable += 1
         for ses, datatype in pairs:
-            path = f"{sub}/{'ses-' + ses + '/' if ses else ''}{datatype}/{sub}_{datatype}"
+            path = (
+                f"{sub}/{'ses-' + ses + '/' if ses else ''}{datatype}/{sub}_{datatype}"
+            )
             rows.append(f"{sub}\t{'ses-' + ses if ses else ''}\t{datatype}\t{path}")
     if attachable == 0:
         return {"modalities": {}, "attachable_subjects": 0}
     table = work / "bids.tsv"
     table.write_text("\n".join(rows) + "\n")
     out = work / "bagel-bids.jsonld"
-    proc = bagel([
-        "bids", "--jsonld-path", pheno["_oracle_jsonld"], "--bids-table", str(table),
-        "--output", str(out), "--overwrite",
-    ])
+    proc = bagel(
+        [
+            "bids",
+            "--jsonld-path",
+            pheno["_oracle_jsonld"],
+            "--bids-table",
+            str(table),
+            "--output",
+            str(out),
+            "--overwrite",
+        ]
+    )
     if proc.returncode != 0:
-        raise SystemExit(f"bagel bids failed for {id_}:\n{(proc.stdout + proc.stderr)[-2000:]}")
+        raise SystemExit(
+            f"bagel bids failed for {id_}:\n{(proc.stdout + proc.stderr)[-2000:]}"
+        )
     oracle = json.loads(out.read_text())
     oracle.pop("@context")
     view = {k: v for k, v in modality_view(oracle).items() if v}
@@ -309,25 +378,37 @@ def check_dataset(id_: str, recipes: Path, record: bool) -> dict:
         mine = phenotype_view(jsonld)
         if pheno["status"] == "compared":
             for label, view in pheno["subjects"].items():
-                assert label in mine, f"{id_}: {label} is in bagel's graph but not in the transform's"
-                assert mine[label] == view, f"{id_}: {label} differs: transform {mine[label]} bagel {view}"
+                assert label in mine, (
+                    f"{id_}: {label} is in bagel's graph but not in the transform's"
+                )
+                assert mine[label] == view, (
+                    f"{id_}: {label} differs: transform {mine[label]} bagel {view}"
+                )
             empty = {"age": None, "sex": None, "diagnoses": []}
             extra = [label for label in mine if label not in pheno["subjects"]]
-            assert all(mine[label] == empty for label in extra), f"{id_}: transform-only subjects carry phenotype"
+            assert all(mine[label] == empty for label in extra), (
+                f"{id_}: transform-only subjects carry phenotype"
+            )
             for key in DATASET_KEYS:
-                assert pheno["dataset"][key] == jsonld.get(key), f"{id_}: dataset field {key} differs"
+                assert pheno["dataset"][key] == jsonld.get(key), (
+                    f"{id_}: dataset field {key} differs"
+                )
             result["transform_only_subjects"] = len(extra)
         # 4. bagel bids
         bids = run_bids(metadata, pheno, work, id_)
         if bids is not None:
             mine_img = {k: v for k, v in modality_view(jsonld).items() if v}
             for label, found in bids["modalities"].items():
-                assert mine_img.get(label) == found, f"{id_}: {label} modalities differ: {mine_img.get(label)} vs {found}"
+                assert mine_img.get(label) == found, (
+                    f"{id_}: {label} modalities differ: {mine_img.get(label)} vs {found}"
+                )
         result.update({k: v for k, v in pheno.items() if not k.startswith("_")})
         result["imaging"] = bids
     if record:
         ORACLE.mkdir(exist_ok=True)
-        (ORACLE / f"{id_}.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+        (ORACLE / f"{id_}.json").write_text(
+            json.dumps(result, indent=2, sort_keys=True) + "\n"
+        )
     return result
 
 
@@ -335,11 +416,17 @@ def fetch_napi(dest: Path) -> None:
     """Lay the node API's query generator out under dest, verified against the pinned blob shas."""
     pin = SNAPSHOT["pins"]["api"]
     for source in pin["files"]:
-        url = f"https://raw.githubusercontent.com/{pin['repo']}/{pin['commit']}/{source}"
-        request = urllib.request.Request(url, headers={"User-Agent": "nemar-neurobagel-dev/1.0"})
+        url = (
+            f"https://raw.githubusercontent.com/{pin['repo']}/{pin['commit']}/{source}"
+        )
+        request = urllib.request.Request(
+            url, headers={"User-Agent": "nemar-neurobagel-dev/1.0"}
+        )
         data = urllib.request.urlopen(request, timeout=60).read()
         if git_blob_sha(data) != pin["files"][source]["blob_sha"]:
-            raise SystemExit(f"{source} does not match the pinned blob sha; regenerate the vocabulary snapshot")
+            raise SystemExit(
+                f"{source} does not match the pinned blob sha; regenerate the vocabulary snapshot"
+            )
         path = dest / source
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
@@ -351,16 +438,28 @@ def walk(dataset: dict) -> list[dict]:
     """Each subject of a golden with the facts a query filters on, read straight from the JSON-LD."""
     subjects = []
     for subject in dataset["hasSamples"]:
-        phenotypic = next(s for s in subject["hasSession"] if s["schemaKey"] == "PhenotypicSession")
-        imaging = [s for s in subject["hasSession"] if s["schemaKey"] == "ImagingSession"]
-        subjects.append({
-            "label": subject["hasLabel"],
-            "age": phenotypic.get("hasAge"),
-            "sex": phenotypic.get("hasSex", {}).get("identifier"),
-            "diagnoses": {d["identifier"] for d in phenotypic.get("hasDiagnosis", [])},
-            "modalities": {a["hasContrastType"]["identifier"] for s in imaging for a in s["hasAcquisition"]},
-            "imaging_sessions": len(imaging),
-        })
+        phenotypic = next(
+            s for s in subject["hasSession"] if s["schemaKey"] == "PhenotypicSession"
+        )
+        imaging = [
+            s for s in subject["hasSession"] if s["schemaKey"] == "ImagingSession"
+        ]
+        subjects.append(
+            {
+                "label": subject["hasLabel"],
+                "age": phenotypic.get("hasAge"),
+                "sex": phenotypic.get("hasSex", {}).get("identifier"),
+                "diagnoses": {
+                    d["identifier"] for d in phenotypic.get("hasDiagnosis", [])
+                },
+                "modalities": {
+                    a["hasContrastType"]["identifier"]
+                    for s in imaging
+                    for a in s["hasAcquisition"]
+                },
+                "imaging_sessions": len(imaging),
+            }
+        )
     return subjects
 
 
@@ -374,7 +473,8 @@ def check_node_queries(ids: list[str], napi: Path) -> None:
     from rdflib import Graph
 
     sys.path.insert(0, str(napi))
-    from app.api.utility import create_query
+    # Fetched at the pinned commit by fetch_napi() just before this runs, so no checker can see it.
+    from app.api.utility import create_query  # ty: ignore[unresolved-import]
 
     namespaces = dict(SNAPSHOT["namespaces"])
 
@@ -398,23 +498,62 @@ def check_node_queries(ids: list[str], napi: Path) -> None:
         ("unfiltered", {}, lambda s: True, True),
         ("EEG", {"image_modal": [eeg]}, lambda s: eeg in s["modalities"], True),
         ("MEG", {"image_modal": [meg]}, lambda s: meg in s["modalities"], False),
-        ("female", {"sex": "snomed:248152002"}, lambda s: s["sex"] == "snomed:248152002", False),
-        ("male", {"sex": "snomed:248153007"}, lambda s: s["sex"] == "snomed:248153007", False),
-        ("healthy control", {"diagnosis": ["ncit:C94342"]}, lambda s: "ncit:C94342" in s["diagnoses"], False),
-        ("age 25 to 40", {"min_age": 25, "max_age": 40}, lambda s: s["age"] is not None and 25 <= s["age"] <= 40, False),
-        ("age at least 30", {"min_age": 30}, lambda s: s["age"] is not None and s["age"] >= 30, False),
-        ("at least 1 imaging session", {"min_imaging": 1}, lambda s: s["imaging_sessions"] >= 1, False),
-        ("EEG, female, age at least 20",
-         {"image_modal": [eeg], "sex": "snomed:248152002", "min_age": 20},
-         lambda s: eeg in s["modalities"] and s["sex"] == "snomed:248152002" and s["age"] is not None and s["age"] >= 20,
-         True),
+        (
+            "female",
+            {"sex": "snomed:248152002"},
+            lambda s: s["sex"] == "snomed:248152002",
+            False,
+        ),
+        (
+            "male",
+            {"sex": "snomed:248153007"},
+            lambda s: s["sex"] == "snomed:248153007",
+            False,
+        ),
+        (
+            "healthy control",
+            {"diagnosis": ["ncit:C94342"]},
+            lambda s: "ncit:C94342" in s["diagnoses"],
+            False,
+        ),
+        (
+            "age 25 to 40",
+            {"min_age": 25, "max_age": 40},
+            lambda s: s["age"] is not None and 25 <= s["age"] <= 40,
+            False,
+        ),
+        (
+            "age at least 30",
+            {"min_age": 30},
+            lambda s: s["age"] is not None and s["age"] >= 30,
+            False,
+        ),
+        (
+            "at least 1 imaging session",
+            {"min_imaging": 1},
+            lambda s: s["imaging_sessions"] >= 1,
+            False,
+        ),
+        (
+            "EEG, female, age at least 20",
+            {"image_modal": [eeg], "sex": "snomed:248152002", "min_age": 20},
+            lambda s: (
+                eeg in s["modalities"]
+                and s["sex"] == "snomed:248152002"
+                and s["age"] is not None
+                and s["age"] >= 20
+            ),
+            True,
+        ),
     ]
     checked = 0
     nonempty = 0
     skipped_empty = 0
     for id_ in ids:
         dataset = json.loads((GOLDEN / id_ / f"{id_}.jsonld").read_text())
-        graph = Graph().parse(data=(GOLDEN / id_ / f"{id_}.jsonld").read_text(), format="json-ld")
+        graph = Graph().parse(
+            data=(GOLDEN / id_ / f"{id_}.jsonld").read_text(), format="json-ld"
+        )
         iri = SNAPSHOT["namespaces"]["nb"] + dataset["identifier"].removeprefix("nb:")
         subjects = walk(dataset)
         for label, filters, predicate, in_large in cases:
@@ -428,7 +567,9 @@ def check_node_queries(ids: list[str], napi: Path) -> None:
                 skipped_empty += 1
                 continue
             found = matching(graph, iri, **filters)
-            assert found == expected, f"{id_}: {label}: node query found {len(found)} subjects, the graph holds {len(expected)}"
+            assert found == expected, (
+                f"{id_}: {label}: node query found {len(found)} subjects, the graph holds {len(expected)}"
+            )
             checked += 1
             nonempty += bool(expected)
     print(
@@ -446,14 +587,27 @@ def check_loaders(ids: list[str], recipes: Path) -> None:
         graph_in.mkdir()
         catalog_in.mkdir()
         for id_ in ids:
-            for src, dst in ((f"{id_}.jsonld", graph_in), (f"{id_}_annotated.json", catalog_in),
-                             (f"{id_}_dataset_description.json", catalog_in)):
+            for src, dst in (
+                (f"{id_}.jsonld", graph_in),
+                (f"{id_}_annotated.json", catalog_in),
+                (f"{id_}_dataset_description.json", catalog_in),
+            ):
                 (dst / src).write_bytes((GOLDEN / id_ / src).read_bytes())
-        accepted, skipped, log = run_recipes_loader(recipes, graph_in, catalog_mode=False)
-        assert accepted == len(ids) and skipped == 0, f"recipes graph mode accepted {accepted}/{len(ids)}, skipped {skipped}:\n{log[-3000:]}"
-        accepted, skipped, log = run_recipes_loader(recipes, catalog_in, catalog_mode=True)
-        assert accepted == len(ids) and skipped == 0, f"recipes catalog mode accepted {accepted}/{len(ids)}, skipped {skipped}:\n{log[-3000:]}"
-        print(f"recipes loaders: graph mode {len(ids)}/{len(ids)} accepted, catalog mode {len(ids)}/{len(ids)} accepted, 0 skipped")
+        accepted, skipped, log = run_recipes_loader(
+            recipes, graph_in, catalog_mode=False
+        )
+        assert accepted == len(ids) and skipped == 0, (
+            f"recipes graph mode accepted {accepted}/{len(ids)}, skipped {skipped}:\n{log[-3000:]}"
+        )
+        accepted, skipped, log = run_recipes_loader(
+            recipes, catalog_in, catalog_mode=True
+        )
+        assert accepted == len(ids) and skipped == 0, (
+            f"recipes catalog mode accepted {accepted}/{len(ids)}, skipped {skipped}:\n{log[-3000:]}"
+        )
+        print(
+            f"recipes loaders: graph mode {len(ids)}/{len(ids)} accepted, catalog mode {len(ids)}/{len(ids)} accepted, 0 skipped"
+        )
 
 
 def check_rdf(ids: list[str]) -> None:
@@ -470,32 +624,46 @@ def check_rdf(ids: list[str]) -> None:
         for s, p, o in graph:
             for term in (s, p, o):
                 if isinstance(term, URIRef):
-                    assert re.match(r"^[a-z][a-z0-9+.-]*:", str(term)), f"{id_}: relative identifier {term}"
+                    assert re.match(r"^[a-z][a-z0-9+.-]*:", str(term)), (
+                        f"{id_}: relative identifier {term}"
+                    )
         report = json.loads((GOLDEN / id_ / f"{id_}.report.json").read_text())["graph"]
         types = defaultdict(int)
         for s, o in graph.subject_objects(RDF.type):
             types[str(o)] += 1
-        assert types[nb + "Subject"] == report["subjects"], f"{id_}: subject nodes {types[nb + 'Subject']} != {report['subjects']}"
+        assert types[nb + "Subject"] == report["subjects"], (
+            f"{id_}: subject nodes {types[nb + 'Subject']} != {report['subjects']}"
+        )
         assert types[nb + "PhenotypicSession"] == report["phenotypic_sessions"]
         assert types[nb + "ImagingSession"] == report["imaging_sessions"]
         assert types[nb + "Acquisition"] == report["acquisitions"]
         assert types[nb + "Dataset"] == 1
         for _, _, age in graph.triples((None, URIRef(nb + "hasAge"), None)):
-            assert isinstance(age, Literal) and age.datatype == XSD.double, f"{id_}: hasAge is not xsd:double"
-    print(f"rdflib: {len(ids)} JSON-LD documents expand to RDF with the expected node counts")
+            assert isinstance(age, Literal) and age.datatype == XSD.double, (
+                f"{id_}: hasAge is not xsd:double"
+            )
+    print(
+        f"rdflib: {len(ids)} JSON-LD documents expand to RDF with the expected node counts"
+    )
 
 
 def main() -> None:
     args = sys.argv[1:]
     record = "--check" not in args
-    ids = [a for a in args if not a.startswith("--")] or sorted(p.name for p in GOLDEN.iterdir() if p.is_dir())
+    ids = [a for a in args if not a.startswith("--")] or sorted(
+        p.name for p in GOLDEN.iterdir() if p.is_dir()
+    )
     with tempfile.TemporaryDirectory() as tmp:
         recipes = Path(tmp)
         fetch_recipes(recipes)
         for id_ in ids:
             result = check_dataset(id_, recipes, record)
-            note = result["status"] + (f" ({result['reason']})" if result.get("reason") else "")
-            print(f"ok {id_}: bagel pheno {note}; bagel bids {'compared' if result['imaging'] else 'n/a'}")
+            note = result["status"] + (
+                f" ({result['reason']})" if result.get("reason") else ""
+            )
+            print(
+                f"ok {id_}: bagel pheno {note}; bagel bids {'compared' if result['imaging'] else 'n/a'}"
+            )
         check_loaders(ids, recipes)
     check_rdf(ids)
     with tempfile.TemporaryDirectory() as tmp:
