@@ -1,0 +1,427 @@
+{
+  "bagel": "0.11.6",
+  "bagel_only_subjects": 0,
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on004635 (latest version v1.0.0).",
+    "hasAccessLink": "https://nemar.org/dataset/on004635",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Armen Bagdasarov",
+      "Michael S. Gaffrey"
+    ],
+    "hasKeywords": [
+      "EEG",
+      "EEG microstates",
+      "infant",
+      "reliability",
+      "high-density EEG",
+      "Electroencephalography"
+    ],
+    "hasLabel": "Gaffrey Lab Infant Microstates Reliability",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/on004635",
+      "https://doi.org/10.82901/nemar.on004635"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/on004635/"
+  },
+  "dataset_id": "on004635",
+  "imaging": {
+    "attachable_subjects": 48,
+    "modalities": {
+      "sub-S1": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S10": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S11": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S12": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S13": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S14": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S15": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S16": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S17": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S18": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S19": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S2": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S20": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S21": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S22": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S23": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S24": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S25": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S26": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S27": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S28": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S29": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S3": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S30": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S31": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S32": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S33": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S34": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S35": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S36": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S37": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S38": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S39": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S4": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S40": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S41": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S42": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S43": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S44": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S45": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S46": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S47": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S48": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S5": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S6": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S7": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S8": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-S9": [
+        "nidm:Electroencephalography"
+      ]
+    }
+  },
+  "inputs": {
+    "annotated.json": "757d1f51d9aeeb18a12f9ea0f0292591ee5a06f411c677eb0db2d0e4c80662f2",
+    "dataset_description.json": "3ea6d38ff460b2f6c6cfd5ae0da88811335ab5704975cf1d68502b61f64a96ac",
+    "participants.tsv": "9f1f4852f4dc7202a1f26603aaaeb78cedaf1e5b1abf0b9d4846c163eb3c591f"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-S1": {
+      "age": 9.44,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S10": {
+      "age": 7.17,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S11": {
+      "age": 9.86,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-S12": {
+      "age": 8.98,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S13": {
+      "age": 6.18,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S14": {
+      "age": 9.67,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S15": {
+      "age": 9.73,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-S16": {
+      "age": 6.77,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S17": {
+      "age": 9.27,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-S18": {
+      "age": 9.63,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S19": {
+      "age": 6.44,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S2": {
+      "age": 6.12,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-S20": {
+      "age": 9.17,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S21": {
+      "age": 9.34,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-S22": {
+      "age": 6.12,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S23": {
+      "age": 9.11,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-S24": {
+      "age": 10.16,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S25": {
+      "age": 6.21,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S26": {
+      "age": 10.42,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-S27": {
+      "age": 6.12,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-S28": {
+      "age": 9.17,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-S29": {
+      "age": 9.01,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-S3": {
+      "age": 6.74,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S30": {
+      "age": 6.61,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S31": {
+      "age": 9.37,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-S32": {
+      "age": 6.28,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-S33": {
+      "age": 6.87,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S34": {
+      "age": 9.17,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S35": {
+      "age": 9.76,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S36": {
+      "age": 6.18,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-S37": {
+      "age": 9.07,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S38": {
+      "age": 9.07,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-S39": {
+      "age": 9.6,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-S4": {
+      "age": 5.98,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S40": {
+      "age": 6.58,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-S41": {
+      "age": 9.63,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S42": {
+      "age": 6.12,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S43": {
+      "age": 9.47,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S44": {
+      "age": 9.24,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S45": {
+      "age": 6.54,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S46": {
+      "age": 9.86,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-S47": {
+      "age": 6.12,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S48": {
+      "age": 7.27,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S5": {
+      "age": 6.21,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-S6": {
+      "age": 6.9,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-S7": {
+      "age": 6.48,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-S8": {
+      "age": 9.04,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-S9": {
+      "age": 6.08,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    }
+  },
+  "transform_only_subjects": 0
+}

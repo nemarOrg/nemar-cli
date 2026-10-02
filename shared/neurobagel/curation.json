@@ -143,6 +143,386 @@
         "participants_json": "66276855a370067ffecf07f735d0cd6b7a362263",
         "participants_tsv": "212dee19cb4c1ffd1d31432b7031700f4b6456a8"
       }
+    },
+    "on001787": {
+      "columns": {
+        "gender": {
+          "IsAbout": {
+            "Label": "Sex",
+            "TermURL": "nb:Sex"
+          },
+          "Levels": {
+            "F": {
+              "Label": "Female",
+              "TermURL": "snomed:248152002"
+            },
+            "M": {
+              "Label": "Male",
+              "TermURL": "snomed:248153007"
+            }
+          },
+          "MissingValues": [],
+          "VariableType": "Categorical"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "upstream_community",
+        "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
+        "source": "neurobagel/openneuro-annotations@116676d:ds001787.json (git blob cf03faf), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed"
+      },
+      "pins": {
+        "participants_json": "941c1cb3010a6516b0336e3d97073a48146b0df5",
+        "participants_tsv": "ed6bc01071b75371d741593b4d8808c3168a55c0"
+      }
+    },
+    "on003474": {
+      "columns": {
+        "BDI": {
+          "IsAbout": {
+            "Label": "Assessment Tool",
+            "TermURL": "nb:Assessment"
+          },
+          "IsPartOf": {
+            "Label": "Beck depression inventory",
+            "TermURL": "snomed:273306008"
+          },
+          "MissingValues": [
+            "n/a",
+            "N/A",
+            "na",
+            "NA",
+            "nan",
+            "NaN",
+            ""
+          ],
+          "VariableType": "Collection"
+        },
+        "STAI": {
+          "IsAbout": {
+            "Label": "Assessment Tool",
+            "TermURL": "nb:Assessment"
+          },
+          "IsPartOf": {
+            "Label": "Spielberger state-trait anxiety inventory",
+            "TermURL": "snomed:273830002"
+          },
+          "MissingValues": [
+            "n/a",
+            "N/A",
+            "na",
+            "NA",
+            "nan",
+            "NaN",
+            ""
+          ],
+          "VariableType": "Collection"
+        },
+        "sex": {
+          "IsAbout": {
+            "Label": "Sex",
+            "TermURL": "nb:Sex"
+          },
+          "Levels": {
+            "1": {
+              "Label": "Female",
+              "TermURL": "snomed:248152002"
+            },
+            "2": {
+              "Label": "Male",
+              "TermURL": "snomed:248153007"
+            }
+          },
+          "MissingValues": [
+            "NaN"
+          ],
+          "VariableType": "Categorical"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "upstream_community",
+        "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
+        "source": "neurobagel/openneuro-annotations@116676d:ds003474.json (git blob 7fd184e), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed"
+      },
+      "pins": {
+        "participants_json": "e80c29cd06b0415881023b57c7a7538b176d152e",
+        "participants_tsv": "233a36ffddce67d8596f958b3bf8aefc54ab8ad6"
+      }
+    },
+    "on003505": {
+      "columns": {
+        "age": {
+          "Format": {
+            "Label": "decimal",
+            "TermURL": "nb:FromFloat"
+          },
+          "IsAbout": {
+            "Label": "Age",
+            "TermURL": "nb:Age"
+          },
+          "MissingValues": [
+            "",
+            "n/a",
+            " "
+          ],
+          "VariableType": "Continuous"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "upstream_community",
+        "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
+        "source": "neurobagel/openneuro-annotations@116676d:ds003505.json (git blob 1e15497), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed"
+      },
+      "pins": {
+        "participants_json": "bdb2a22604766adf35236f269aa91960f5be9fab",
+        "participants_tsv": "144afa3e0bb8e6ab0d5cdc2112a0c7180fa59b03"
+      }
+    },
+    "on003568": {
+      "columns": {
+        "group": {
+          "IsAbout": {
+            "Label": "Diagnosis",
+            "TermURL": "nb:Diagnosis"
+          },
+          "Levels": {
+            "HV": {
+              "Label": "Healthy Control",
+              "TermURL": "ncit:C94342"
+            },
+            "MDD": {
+              "Label": "Major depressive disorder",
+              "TermURL": "snomed:370143000"
+            }
+          },
+          "MissingValues": [],
+          "VariableType": "Categorical"
+        },
+        "participant_age": {
+          "Format": {
+            "Label": "decimal",
+            "TermURL": "nb:FromFloat"
+          },
+          "IsAbout": {
+            "Label": "Age",
+            "TermURL": "nb:Age"
+          },
+          "MissingValues": [
+            "",
+            "n/a",
+            " "
+          ],
+          "VariableType": "Continuous"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "upstream_community",
+        "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
+        "source": "neurobagel/openneuro-annotations@116676d:ds003568.json (git blob 5bd83c1), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed"
+      },
+      "pins": {
+        "participants_json": null,
+        "participants_tsv": "535d4ea0fba8f1f0ebd11f5c0999d16ca2f073af"
+      }
+    },
+    "on004574": {
+      "columns": {
+        "GENDER": {
+          "IsAbout": {
+            "Label": "Sex",
+            "TermURL": "nb:Sex"
+          },
+          "Levels": {
+            "F": {
+              "Label": "Female",
+              "TermURL": "snomed:248152002"
+            },
+            "M": {
+              "Label": "Male",
+              "TermURL": "snomed:248153007"
+            }
+          },
+          "MissingValues": [],
+          "VariableType": "Categorical"
+        },
+        "MOCA": {
+          "IsAbout": {
+            "Label": "Assessment Tool",
+            "TermURL": "nb:Assessment"
+          },
+          "IsPartOf": {
+            "Label": "Montreal cognitive assessment",
+            "TermURL": "snomed:859351000000102"
+          },
+          "MissingValues": [
+            "n/a",
+            "N/A",
+            "na",
+            "NA",
+            "nan",
+            "NaN",
+            ""
+          ],
+          "VariableType": "Collection"
+        },
+        "UPDRS": {
+          "IsAbout": {
+            "Label": "Assessment Tool",
+            "TermURL": "nb:Assessment"
+          },
+          "IsPartOf": {
+            "Label": "Unified Parkinsons disease rating scale score",
+            "TermURL": "snomed:342061000000106"
+          },
+          "MissingValues": [
+            "n/a",
+            "N/A",
+            "na",
+            "NA",
+            "nan",
+            "NaN",
+            ""
+          ],
+          "VariableType": "Collection"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "upstream_community",
+        "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
+        "source": "neurobagel/openneuro-annotations@116676d:ds004574.json (git blob de41b26), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed"
+      },
+      "pins": {
+        "participants_json": "5573c4a26fc1b69e687bcd35b6691f8ae4aab8a1",
+        "participants_tsv": "4c4eef0832eff4e96c1f20c84b1fc74ef908e946"
+      }
+    },
+    "on004635": {
+      "columns": {
+        "Age": {
+          "Format": {
+            "Label": "decimal",
+            "TermURL": "nb:FromFloat"
+          },
+          "IsAbout": {
+            "Label": "Age",
+            "TermURL": "nb:Age"
+          },
+          "MissingValues": [
+            "n/a",
+            "N/A",
+            "na",
+            "NA",
+            "nan",
+            "NaN",
+            ""
+          ],
+          "VariableType": "Continuous"
+        },
+        "Gender": {
+          "IsAbout": {
+            "Label": "Sex",
+            "TermURL": "nb:Sex"
+          },
+          "Levels": {
+            "F": {
+              "Label": "Female",
+              "TermURL": "snomed:248152002"
+            },
+            "M": {
+              "Label": "Male",
+              "TermURL": "snomed:248153007"
+            }
+          },
+          "MissingValues": [],
+          "VariableType": "Categorical"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "upstream_community",
+        "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
+        "source": "neurobagel/openneuro-annotations@116676d:ds004635.json (git blob fcf5dd9), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed"
+      },
+      "pins": {
+        "participants_json": "f539786e1a83d3a7b1267975833b26a56c155c9f",
+        "participants_tsv": "1ff7790d63daffa2cf697d35d9e8ab5b5b1b76b6"
+      }
+    },
+    "on006861": {
+      "columns": {
+        "Gender": {
+          "IsAbout": {
+            "Label": "Sex",
+            "TermURL": "nb:Sex"
+          },
+          "Levels": {
+            "Female": {
+              "Label": "Female",
+              "TermURL": "snomed:248152002"
+            },
+            "Male": {
+              "Label": "Male",
+              "TermURL": "snomed:248153007"
+            }
+          },
+          "MissingValues": [],
+          "VariableType": "Categorical"
+        },
+        "UCLA_R": {
+          "IsAbout": {
+            "Label": "Assessment Tool",
+            "TermURL": "nb:Assessment"
+          },
+          "IsPartOf": {
+            "Label": "Revised UCLA (University of California Los Angeles) Loneliness scale",
+            "TermURL": "snomed:1103791000000109"
+          },
+          "MissingValues": [
+            "n/a",
+            "N/A",
+            "na",
+            "NA",
+            "nan",
+            "NaN",
+            ""
+          ],
+          "VariableType": "Collection"
+        },
+        "UCLA_R_screening": {
+          "IsAbout": {
+            "Label": "Assessment Tool",
+            "TermURL": "nb:Assessment"
+          },
+          "IsPartOf": {
+            "Label": "Revised UCLA (University of California Los Angeles) Loneliness scale",
+            "TermURL": "snomed:1103791000000109"
+          },
+          "MissingValues": [
+            "n/a",
+            "N/A",
+            "na",
+            "NA",
+            "nan",
+            "NaN",
+            ""
+          ],
+          "VariableType": "Collection"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "upstream_community",
+        "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
+        "source": "neurobagel/openneuro-annotations@116676d:ds006861.json (git blob 63d93fc), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed"
+      },
+      "pins": {
+        "participants_json": "16c18ebbefcdd669a33207068a2c870e4ce42533",
+        "participants_tsv": "ea8b51c8a511676a91c078f5dfc34c419552ef42"
+      }
     }
   },
   "format": 1

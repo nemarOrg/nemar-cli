@@ -2,9 +2,9 @@
   "columns": {
     "age": {
       "counts": {
-        "cells": 24,
-        "mapped": 23,
-        "missing": 1,
+        "cells": 120,
+        "mapped": 120,
+        "missing": 0,
         "unmappable": 0,
         "zero_ages": 0
       },
@@ -12,18 +12,18 @@
     },
     "group": {
       "counts": {
-        "cells": 24,
+        "cells": 120,
         "mapped": 0,
         "missing": 0,
-        "unmappable": 24
+        "unmappable": 120
       },
       "reason": "group_has_no_control_value",
       "status": "needs_curation"
     },
     "sex": {
       "counts": {
-        "cells": 24,
-        "mapped": 24,
+        "cells": 120,
+        "mapped": 120,
         "missing": 0,
         "unmappable": 0
       },
@@ -31,56 +31,57 @@
     }
   },
   "curation": {
-    "columns_applied": 1,
+    "columns_applied": 3,
     "columns_skipped": 0,
     "declared": {
       "age": 0,
-      "assessment": 0,
+      "assessment": 2,
       "diagnosis": 0,
       "sex": 1
     },
     "participants_with": {
       "age": 0,
-      "assessment": 0,
+      "assessment": 120,
       "diagnosis": 0,
-      "sex": 24
+      "sex": 120
     },
     "problems": 0,
     "review": "upstream_community",
     "stale_files": [],
     "status": "applied"
   },
-  "dataset_id": "on001787",
+  "dataset_id": "on006861",
   "flags": [
+    "age_units_assumed_years",
     "group_column_needs_curation",
     "session_pairing_unknown"
   ],
   "graph": {
-    "acquisitions": 24,
-    "imaging_sessions": 24,
-    "phenotypic_sessions": 24,
-    "subjects": 24
+    "acquisitions": 120,
+    "imaging_sessions": 120,
+    "phenotypic_sessions": 120,
+    "subjects": 120
   },
   "imaging": {
     "datatypes_dropped_subjects": {},
     "datatypes_mapped_subjects": {
-      "eeg": 24
+      "eeg": 120
     },
     "mapped_datatypes_supported": [
       "eeg",
       "meg"
     ],
     "session_pairing_subjects": {
-      "single_session": 9,
-      "unknown": 15
+      "single_session": 1,
+      "unknown": 119
     }
   },
   "participant_count": {
-    "bids_index": 24,
-    "declared": 24,
-    "graph": 24,
-    "participants_tsv": 24,
-    "used": 24,
+    "bids_index": 120,
+    "declared": 120,
+    "graph": 120,
+    "participants_tsv": 120,
+    "used": 120,
     "used_from": "demographics"
   },
   "participants_json": {
@@ -91,16 +92,16 @@
     "conflicting_ids": 0,
     "duplicate_ids": 0,
     "ids_prefixed": 0,
-    "rows": 24,
+    "rows": 120,
     "rows_without_id": 0,
     "status": "ok"
   },
   "report_version": 1,
   "session_label_used_for_phenotype": "ses-unnamed",
   "subjects": {
-    "graph": 24,
+    "graph": 120,
     "index_without_row": 0,
-    "joined": 24,
+    "joined": 120,
     "source": "bids_index",
     "table_only": 0
   },

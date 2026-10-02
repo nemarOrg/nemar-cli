@@ -265,7 +265,7 @@ describe("recordings of the real bagel CLI", () => {
     }
     // nm000149, nm000158 and nm000210 alone have 75 participants with a curated diagnosis.
     expect(diagnosed).toBeGreaterThanOrEqual(75);
-    // Set when a reviewed OpenNeuro annotation with assessment items is among the goldens.
-    expect(assessed).toBeGreaterThanOrEqual(0);
+    // on003474, on004574 and on006861 carry reused assessment items: 122, 146 and 120 participants.
+    expect(assessed).toBeGreaterThan(300);
   });
 });

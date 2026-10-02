@@ -137,7 +137,7 @@ async function readCapped(
   return out;
 }
 
-async function get(url: string, headers: Record<string, string> = {}): Promise<Response> {
+export async function get(url: string, headers: Record<string, string> = {}): Promise<Response> {
   let lastError: unknown = null;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
@@ -163,7 +163,7 @@ async function get(url: string, headers: Record<string, string> = {}): Promise<R
   throw lastError instanceof Error ? lastError : new GatherError(`GET ${url} failed`, url, null);
 }
 
-async function fetchDocument(
+export async function fetchDocument(
   name: DocumentName,
   url: string,
   cap: number,

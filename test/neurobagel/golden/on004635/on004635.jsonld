@@ -1,0 +1,1654 @@
+{
+  "@context": {
+    "Acquisition": "nb:Acquisition",
+    "Assessment": "nb:Assessment",
+    "Bagel": "nb:Bagel",
+    "BaseModel": "nb:BaseModel",
+    "CompletedPipeline": "nb:CompletedPipeline",
+    "ControlledTerm": "nb:ControlledTerm",
+    "Dataset": "nb:Dataset",
+    "Diagnosis": "nb:Diagnosis",
+    "Image": "nb:Image",
+    "ImagingSession": "nb:ImagingSession",
+    "PhenotypicSession": "nb:PhenotypicSession",
+    "Pipeline": "nb:Pipeline",
+    "Session": "nb:Session",
+    "Sex": "nb:Sex",
+    "Subject": "nb:Subject",
+    "SubjectGroup": "nb:SubjectGroup",
+    "hasAccessEmail": {
+      "@id": "nb:hasAccessEmail"
+    },
+    "hasAccessInstructions": {
+      "@id": "nb:hasAccessInstructions"
+    },
+    "hasAccessLink": {
+      "@id": "nb:hasAccessLink"
+    },
+    "hasAccessType": {
+      "@id": "nb:hasAccessType"
+    },
+    "hasAcquisition": {
+      "@id": "nb:hasAcquisition"
+    },
+    "hasAge": {
+      "@id": "nb:hasAge"
+    },
+    "hasAssessment": {
+      "@id": "nb:hasAssessment"
+    },
+    "hasAuthors": {
+      "@id": "nb:hasAuthors"
+    },
+    "hasCompletedPipeline": {
+      "@id": "nb:hasCompletedPipeline"
+    },
+    "hasContrastType": {
+      "@id": "nb:hasContrastType"
+    },
+    "hasDiagnosis": {
+      "@id": "nb:hasDiagnosis"
+    },
+    "hasFilePath": {
+      "@id": "nb:hasFilePath"
+    },
+    "hasKeywords": {
+      "@id": "nb:hasKeywords"
+    },
+    "hasLabel": {
+      "@id": "nb:hasLabel"
+    },
+    "hasPipelineName": {
+      "@id": "nb:hasPipelineName"
+    },
+    "hasPipelineVersion": {
+      "@id": "nb:hasPipelineVersion"
+    },
+    "hasReferencesAndLinks": {
+      "@id": "nb:hasReferencesAndLinks"
+    },
+    "hasRepositoryURL": {
+      "@id": "nb:hasRepositoryURL"
+    },
+    "hasSamples": {
+      "@id": "nb:hasSamples"
+    },
+    "hasSession": {
+      "@id": "nb:hasSession"
+    },
+    "hasSex": {
+      "@id": "nb:hasSex"
+    },
+    "identifier": "@id",
+    "isSubjectGroup": {
+      "@id": "nb:isSubjectGroup"
+    },
+    "nb": "http://neurobagel.org/vocab/",
+    "ncit": "http://ncicb.nci.nih.gov/xml/owl/EVS/Thesaurus.owl#",
+    "nidm": "http://purl.org/nidash/nidm#",
+    "np": "https://github.com/nipoppy/pipeline-catalog/tree/main/processing/",
+    "schemaKey": "@type",
+    "snomed": "http://purl.bioontology.org/ontology/SNOMEDCT/"
+  },
+  "hasAccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on004635 (latest version v1.0.0).",
+  "hasAccessLink": "https://nemar.org/dataset/on004635",
+  "hasAccessType": "public",
+  "hasAuthors": [
+    "Armen Bagdasarov",
+    "Michael S. Gaffrey"
+  ],
+  "hasKeywords": [
+    "EEG",
+    "EEG microstates",
+    "infant",
+    "reliability",
+    "high-density EEG",
+    "Electroencephalography"
+  ],
+  "hasLabel": "Gaffrey Lab Infant Microstates Reliability",
+  "hasReferencesAndLinks": [
+    "https://nemar.org/dataset/on004635",
+    "https://doi.org/10.82901/nemar.on004635"
+  ],
+  "hasRepositoryURL": "https://data.nemar.org/on004635/",
+  "hasSamples": [
+    {
+      "hasLabel": "sub-S1",
+      "hasSession": [
+        {
+          "hasAge": 9.44,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:8a80b6af-634e-52b5-83e3-b2892df3ec74",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:faacf8b6-3c4f-5e76-b5ff-bac7510ff60c",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:98ab00cf-e06f-5e50-be7e-dfe83afb0270",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:474b009b-09b8-538c-afc7-2e93ee4d6f19",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S10",
+      "hasSession": [
+        {
+          "hasAge": 7.17,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:f3ed9042-9096-59df-8f7b-ae474bb6a7bd",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:0674873b-7673-5565-9906-d27b983a6f92",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:a445dec3-fb74-5228-9408-01aa7b373b17",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:57fc382b-bc79-5073-87ba-4b98f46d4ddd",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S11",
+      "hasSession": [
+        {
+          "hasAge": 9.86,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248152002",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:9abc66d4-69c6-556f-b640-5267830e5e6e",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:9e8d7aa3-31f7-5ca7-92c3-d16f0b458aab",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:3f7f6c1e-ca34-5dc9-8810-feb2e1da25b1",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:08e5c412-e2c8-56e1-a9dd-6ca822adda70",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S12",
+      "hasSession": [
+        {
+          "hasAge": 8.98,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:d5011ad7-6124-541a-964c-867b4ed6a93d",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:b2741fcc-b837-51ec-8f59-6de75aa7e916",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:80ae4f2b-b86b-5a0e-8251-3e953b18a05b",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:03adb885-2ae7-5540-bc1e-a34c88f043a8",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S13",
+      "hasSession": [
+        {
+          "hasAge": 6.18,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:274e1448-f056-574d-b1f6-e2959b483ed1",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:0a018e48-49a5-521b-a798-97b55b95d111",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:8cce3dd4-f8a4-58a9-9bde-51ddf59b0706",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:a1d18aef-dd37-5260-be48-f324e7d7100e",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S14",
+      "hasSession": [
+        {
+          "hasAge": 9.67,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:31827a7f-6e21-552c-a1e5-b2ae185e467f",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:fb8d0581-1724-570d-8106-c5704387b0b3",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:006eb059-a105-518f-95e4-837830471226",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:de177f25-cdaf-5329-9cdf-47852d0390dc",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S15",
+      "hasSession": [
+        {
+          "hasAge": 9.73,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248152002",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:d0e4ae2d-6b70-54ab-8091-a6eb04e13ded",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:2d48a951-b7bc-5eb2-8999-2f44517108ed",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:ada2a31b-dde1-5548-b8c5-3f8a239a5521",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:f041e01b-397c-5218-acfa-bd207f2b4590",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S16",
+      "hasSession": [
+        {
+          "hasAge": 6.77,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:fad4dde2-ec7f-555b-bb3d-41e1ae08a2c3",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:dfd75790-3055-5a37-9a68-0c45c5a64700",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:02861bc5-6f46-5324-8494-f4186c9d3ffb",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:0c64e2af-fbe6-5f20-a455-8d143cd06cbf",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S17",
+      "hasSession": [
+        {
+          "hasAge": 9.27,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248152002",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:aabdcbea-caf4-5976-a893-d510209a7c38",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:e14a4983-cb2c-5343-a7a1-5ab5e801f8a6",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:b167236c-cc6b-5a28-9ec6-9d5628786cf5",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:72613d49-f9d6-5490-8e95-e2d59f00867e",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S18",
+      "hasSession": [
+        {
+          "hasAge": 9.63,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:e0b0b968-206f-52df-9638-666656ef0fa6",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:c538100a-a2c0-560f-9678-0c4734e0d7f9",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:c03beaba-9183-59ba-a5e2-1d97db2ea3ea",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:aa6af9ff-b321-5000-ab59-4b107e8a2a22",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S19",
+      "hasSession": [
+        {
+          "hasAge": 6.44,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:be3f2db1-4cb1-5685-8009-7f2755f4aec4",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:bd2ae90f-890e-51ae-8cfb-a82e2befa87b",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:4eac7398-6013-5180-ae72-b9c599b271d9",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:ee9ac641-71ae-569d-beff-fc7aeeffcbc6",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S2",
+      "hasSession": [
+        {
+          "hasAge": 6.12,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248152002",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:314995ec-c6a2-5be1-bc8b-c8f9a4ef33e6",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:b62ce48d-7130-5a62-938a-a579434cbfc9",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:78c287bb-33d7-5ed4-969c-a923913e645e",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:3b1bdb16-5d67-59de-99f5-ebeda5a90575",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S20",
+      "hasSession": [
+        {
+          "hasAge": 9.17,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:bb2a110a-49b4-5bc1-bb98-7174e0624a9f",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:74d10357-6265-5c34-9003-7596afa963ed",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:80f5c305-bf42-5d1b-8ad5-36bcbb871bc2",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:20fe6e94-38c8-555c-9f84-0182007749c3",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S21",
+      "hasSession": [
+        {
+          "hasAge": 9.34,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248152002",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:fa0ca305-ee53-53f2-94c6-9a616242eb6d",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:37fb658a-dae1-5bd6-956e-1098e20b790c",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:cba53508-70e8-53b3-b0c2-17961cb08231",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:8299a010-2bce-5c44-bb9d-204e84b812ff",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S22",
+      "hasSession": [
+        {
+          "hasAge": 6.12,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:062345c4-5ede-5e0e-a24a-d6e9d7d2512d",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:4da568e7-2652-5232-88b7-30efce6d5c10",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:f83965bf-d807-5161-857e-9b38d5e2360d",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:bab286c5-1748-5173-b64f-6a48ef621ba2",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S23",
+      "hasSession": [
+        {
+          "hasAge": 9.11,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248152002",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:e61f55e6-db27-53e4-9e6e-1ca7dc011a78",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:8259d9c6-b923-5a1f-a556-4cdae4a55537",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:226c7d47-8bfd-578a-af7a-0c604e50b31d",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:46c742e0-0b9d-5c37-8a57-3b9cf9d39194",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S24",
+      "hasSession": [
+        {
+          "hasAge": 10.16,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:c2e19fb1-297e-5cb7-aee6-a815249a2c1f",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:3197af64-db9a-5bae-a8d9-9b2dc8a24b8e",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:8d42a1e1-b05a-5d6c-81b9-b34701bffaff",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:b1e4bdde-9c18-54c3-81f4-f147ad854b4a",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S25",
+      "hasSession": [
+        {
+          "hasAge": 6.21,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:8e7046c1-1720-5a71-833c-9200df22c90e",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:87d5f8c6-20de-5977-847d-a4cc8061afe7",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:f81e5c60-6286-54f7-8d60-220f47439872",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:06da176b-41c7-5f43-a7d1-4093b57317fa",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S26",
+      "hasSession": [
+        {
+          "hasAge": 10.42,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248152002",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:836d53bb-dd27-558b-8bde-d6397bb9c614",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:6085ccc0-d85a-5cb0-88c7-a46802ba5dc8",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:b2b8ac50-db13-53da-b10e-e8afa2a25eda",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:95f14f34-c040-5939-88c5-17ade2c8a34a",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S27",
+      "hasSession": [
+        {
+          "hasAge": 6.12,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248152002",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:111644a1-1e16-5f6c-baa8-a49c795d8972",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:62cbabae-3872-5c3b-b21a-aac0aba54254",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:94f508c0-6d82-5b7c-a0f2-439a781dc79d",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:53793767-bfb6-59a4-bd22-f87dee1e900c",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S28",
+      "hasSession": [
+        {
+          "hasAge": 9.17,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248152002",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:351502a1-78e9-5976-965a-855007ac04af",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:eb06305d-f0cd-5d70-9723-3fe81f925cb0",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:e65b4c33-aff7-5fed-a46b-327bb0418632",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:9273051e-d5d8-5193-be7a-d87c99fb5e57",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S29",
+      "hasSession": [
+        {
+          "hasAge": 9.01,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248152002",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:1abddeb5-de70-5e72-8810-6bde6afde667",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:1feab546-115e-59d7-a73b-448fbcec3c8d",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:e556e56a-6a8a-5917-acbf-171dd764e27e",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:6915da2d-6765-591f-8721-8b3204de2ff9",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S3",
+      "hasSession": [
+        {
+          "hasAge": 6.74,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:bca7690b-0baa-552c-8a4b-20f561d1262c",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:c498f680-7b4a-5fef-8607-2afca5d0168f",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:864737c9-632c-52cb-989e-596c4d48aa03",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:2ca94b0e-6b73-5c9a-a389-07b9d2f286f5",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S30",
+      "hasSession": [
+        {
+          "hasAge": 6.61,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:55fd6a85-ba62-5a2b-b6d0-323babea1e6a",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:54202b8a-6319-5b16-a5fa-942824ead846",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:80cfabfc-20ca-5f1a-ab15-d97c8ae60c94",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:28a383f9-c071-5ef6-a651-c40bc349c64f",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S31",
+      "hasSession": [
+        {
+          "hasAge": 9.37,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248152002",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:679fed45-c779-5b32-8be2-e36e9042c7d5",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:46f334f5-4dd8-5e27-84a1-b797a2901ff0",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:25ed9ad9-73a6-50c4-a614-d6782ca8fe04",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:a296ab83-d886-5268-a20c-37989a9f49ad",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S32",
+      "hasSession": [
+        {
+          "hasAge": 6.28,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248152002",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:1fbb82d0-a84f-5836-bf5b-b33fc6da7131",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:e61b600f-bde1-579a-92b6-ee7964de060c",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:fe729e76-39b3-5490-910d-5aeecb09546a",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:df70db23-95ca-54bf-9370-be413607ff5c",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S33",
+      "hasSession": [
+        {
+          "hasAge": 6.87,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:9e50132a-26ca-56d8-99a7-94bf6f36ddf9",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:f3e2759d-d959-57a6-a50d-433e8975a8e1",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:8a419e81-1bd5-5d8a-8dc4-aa2a9c805ef8",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:d5813648-1eaa-5292-ba0c-7797f2f25768",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S34",
+      "hasSession": [
+        {
+          "hasAge": 9.17,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:2c5100e1-b6f1-59bb-b413-5127611b6bbe",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:f958934f-cc0e-53b4-899d-06dc95decf5c",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:0a75b63a-c4ad-5114-9f8b-d142bfda585d",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:0f01067c-1a89-51da-9291-1bff2ddd7305",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S35",
+      "hasSession": [
+        {
+          "hasAge": 9.76,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:43bef24b-3692-5889-9ef8-395ceff252e3",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:5e997963-a82f-5db0-a5aa-e719f4ffad88",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:6bf377f5-e954-5158-b481-0857cb20b4f5",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:09d9300d-46ae-59c9-9097-efb9ae1a64f5",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S36",
+      "hasSession": [
+        {
+          "hasAge": 6.18,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248152002",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:355005a3-493c-5efa-b35f-3624fe35f32a",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:1e7c25ab-d53b-5481-9a91-66e4ab2f3140",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:66e5f000-23b9-52eb-8fb5-e349af38e3db",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:b4cc56dc-9bd3-5618-ad67-73a413a021a6",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S37",
+      "hasSession": [
+        {
+          "hasAge": 9.07,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:ab0a8966-3fc1-5d2a-90eb-016331b0ef90",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:353d546e-13c9-5bdd-ad77-e73807dbe4bf",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:3131cb61-53f1-552e-a606-abae6017663d",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:bab970d1-06aa-5733-8927-081e0f7b345d",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S38",
+      "hasSession": [
+        {
+          "hasAge": 9.07,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248152002",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:009a7750-269b-57f0-911c-4aedc09f9c82",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:201a5f6a-70e2-5d62-8c86-7856045d5a09",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:e92417ca-5a75-5dd7-b076-59d861072f8b",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:2be5db45-b73a-5231-acc7-dfe3a16e3aeb",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S39",
+      "hasSession": [
+        {
+          "hasAge": 9.6,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248152002",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:9bfe4157-b0af-5010-8e40-667019e0b3f9",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:b14ce221-ba3d-5821-8738-eec26a80bebe",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:dac4adea-2180-5942-b532-47b539986ebe",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:9acd6511-cbf3-5371-a6ac-2625465f3da1",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S4",
+      "hasSession": [
+        {
+          "hasAge": 5.98,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:55542d27-04cd-5ba5-8028-6ec6f7b43097",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:d27f4c99-e2ec-5c25-94b8-2709cdc0dbf2",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:e02a8934-3120-5491-acf7-98cbd0eac306",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:fda363cf-cba1-59d6-bdd9-1d5258be90ea",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S40",
+      "hasSession": [
+        {
+          "hasAge": 6.58,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248152002",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:bc9ca155-6023-52f8-be5e-d904b8a32716",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:15603d59-9058-524a-a39a-06cacf639f1a",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:fbcf46f3-4c04-59b8-a7a3-45528608b3e0",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:e0a8ff8d-6daf-5ea7-bc28-f70c7c5fd200",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S41",
+      "hasSession": [
+        {
+          "hasAge": 9.63,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:5adb5bdb-9034-5772-8efd-1e12ead33de1",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:bf1a4e6c-4c33-52db-ad9b-b24373719fc8",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:9f017075-180c-5001-826c-144c9017b0c0",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:5d5ce6c5-4137-5107-aa41-522bdc4290db",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S42",
+      "hasSession": [
+        {
+          "hasAge": 6.12,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:06f00a86-957c-5f41-a533-e479740a916f",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:f942ba02-9f1a-5b1a-b271-0bb61d4897a7",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:a7c1db9f-df89-598b-af2b-3116b231a3bc",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:531ce3e2-49c9-53e6-973c-db714ccffcb3",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S43",
+      "hasSession": [
+        {
+          "hasAge": 9.47,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:6e33175a-530c-52c0-bf8b-31cbe3e25d39",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:ce6bc187-ced6-54fc-acbd-96672e9005a3",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:2bbe1fc1-4ff5-5f55-b19f-e72aa247b679",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:55542b6f-05f0-59d0-a1b4-5fd509296c4d",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S44",
+      "hasSession": [
+        {
+          "hasAge": 9.24,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:cd23f25c-17b3-5bff-9f94-80942e004b56",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:22ecad5c-6245-53d7-bf37-4610eb239ef6",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:7e453005-82f9-5cd6-81be-07f58b09867e",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:230a6e31-3c02-50ba-8fe1-60dae27dd1a7",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S45",
+      "hasSession": [
+        {
+          "hasAge": 6.54,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:765a5d03-51fc-5cbe-8608-46a2f0e88226",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:214595b6-e812-532d-927d-1bb86fb2033f",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:f417b5cc-9db8-5119-9ae8-7ad6d53566b7",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:a756a047-9278-52c7-bcda-93c17c92c3b5",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S46",
+      "hasSession": [
+        {
+          "hasAge": 9.86,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248152002",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:38158f38-1f0f-562f-b199-e8192b10fc3e",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:1a1e0cc6-be64-5a0f-bb33-066d39ad465a",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:23881089-6013-51e0-a215-46b9fc1a9e91",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:df79bc2f-cd65-55a4-a320-67a817d8cd87",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S47",
+      "hasSession": [
+        {
+          "hasAge": 6.12,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:6ac4fb4f-2066-5811-8986-a324d18509c9",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:87966ec8-4943-54b6-b5ea-d12e103eef47",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:9f6954da-a3bf-5bb1-a60a-8e6a507b21b4",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:f30a7965-c152-5e19-84fb-265eba6e5c10",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S48",
+      "hasSession": [
+        {
+          "hasAge": 7.27,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:a8339316-2e29-5de1-b6be-2e980d49deae",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:54766bf0-266b-576a-8417-d7eba37c5ea2",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:bc42533b-ae66-56bd-8959-72e0caa00415",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:1a645e3d-17a7-5d71-90f4-7633bc09d78f",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S5",
+      "hasSession": [
+        {
+          "hasAge": 6.21,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:987c62a2-6a03-586b-8348-7ffc12c292e9",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:0ef80b92-db36-56d1-844d-ef54c9964f7e",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:6d573bc2-3e0b-5d05-a906-7d322be8bb5a",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:a6494692-4e07-5047-879c-1914d34c9391",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S6",
+      "hasSession": [
+        {
+          "hasAge": 6.9,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248152002",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:fba808cc-ba49-54eb-8526-2263ddf20ada",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:960d7261-7916-5b6e-972e-ab3af911e200",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:f601b804-effe-5b6f-9444-66a6b99ac8e1",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:f95bd104-d31a-582d-8e0d-4519b4190a1b",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S7",
+      "hasSession": [
+        {
+          "hasAge": 6.48,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248152002",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:ff731c93-a6a0-5e95-9ed1-75f34ad0dda5",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:716099d4-472a-58ff-a84f-bc58f40c1b4a",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:53a66308-60e5-5c05-91bc-ceeb8a58a74a",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:19b37a9e-7b94-532b-a1da-45feca5984b6",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S8",
+      "hasSession": [
+        {
+          "hasAge": 9.04,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248152002",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:0093e5a1-e63f-59c2-92f7-7c44ad35df9f",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:7bd65970-3a82-59aa-92c5-923c1800b9bf",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:910a449e-2cad-55cb-b55f-17930d3344f0",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:8b0d69d5-85dc-5c33-98b0-4b6dd9fe7dec",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-S9",
+      "hasSession": [
+        {
+          "hasAge": 6.08,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248152002",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:daa637e5-42ee-58ae-9237-9e5680a87481",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Electroencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:7bc22ac0-84bf-5a99-9769-dad7752bbdd4",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:cb83a8ba-3481-5d00-9d49-63b896650035",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:d1cece63-1b1e-54ef-96b1-f6a7509504be",
+      "schemaKey": "Subject"
+    }
+  ],
+  "identifier": "nb:5a6c7393-a2e5-5166-9422-205e11afb75e",
+  "schemaKey": "Dataset"
+}

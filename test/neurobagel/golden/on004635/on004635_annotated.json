@@ -1,5 +1,5 @@
 {
-  "age": {
+  "Age": {
     "Annotations": {
       "Format": {
         "Label": "decimal",
@@ -11,20 +11,23 @@
       },
       "MissingValues": [
         "",
-        "n/a",
         "N/A",
-        "NA"
+        "NA",
+        "NaN",
+        "n/a",
+        "na",
+        "nan"
       ],
       "ValueRange": {
-        "Max": 78,
-        "Min": 29
+        "Max": 10.42,
+        "Min": 5.98
       },
       "VariableType": "Continuous"
     },
     "Description": "Age of the participant.",
     "Units": "years"
   },
-  "gender": {
+  "Gender": {
     "Annotations": {
       "IsAbout": {
         "Label": "Sex",

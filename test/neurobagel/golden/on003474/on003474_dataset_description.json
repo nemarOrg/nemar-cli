@@ -1,0 +1,23 @@
+{
+  "AccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on003474 (latest version v1.0.0).",
+  "AccessLink": "https://nemar.org/dataset/on003474",
+  "AccessType": "public",
+  "Authors": [
+    "James F Cavanagh  jcavanagh@unm.edu"
+  ],
+  "Keywords": [
+    "EEG",
+    "Depression",
+    "probabilistic selection task",
+    "reinforcement learning",
+    "reward processing",
+    "Beck Depression Inventory"
+  ],
+  "Name": "EEG: Probabilistic Selection and Depression",
+  "ParticipantCount": 122,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/on003474",
+    "https://doi.org/10.82901/nemar.on003474"
+  ],
+  "RepositoryURL": "https://data.nemar.org/on003474/"
+}

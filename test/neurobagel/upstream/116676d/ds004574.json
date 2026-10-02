@@ -1,0 +1,121 @@
+{
+  "participant_id": {
+    "Description": "unique participant identifier",
+    "Annotations": {
+      "IsAbout": {
+        "TermURL": "nb:ParticipantID",
+        "Label": "Participant ID"
+      },
+      "VariableType": "Identifier"
+    }
+  },
+  "GROUP": {
+    "Description": "Control or PD"
+  },
+  "ID": {
+    "Description": "ID"
+  },
+  "EEG": {
+    "Description": "EEG file name"
+  },
+  "BEHAVIOR": {
+    "Description": "Behavior file name"
+  },
+  "GENDER": {
+    "Description": "Gender of the participant",
+    "Levels": {
+      "F": "Female",
+      "M": "Male"
+    },
+    "Annotations": {
+      "IsAbout": {
+        "TermURL": "nb:Sex",
+        "Label": "Sex"
+      },
+      "VariableType": "Categorical",
+      "Levels": {
+        "F": {
+          "TermURL": "snomed:248152002",
+          "Label": "Female"
+        },
+        "M": {
+          "TermURL": "snomed:248153007",
+          "Label": "Male"
+        }
+      },
+      "MissingValues": []
+    }
+  },
+  "AGE": {
+    "Description": "Age of the participant",
+    "Annotations": {
+      "IsAbout": {
+        "TermURL": "nb:Age",
+        "Label": "Age"
+      },
+      "VariableType": "Continuous",
+      "Format": {
+        "TermURL": "nb:FromFloat",
+        "Label": "float"
+      },
+      "MissingValues": [
+        "n/a",
+        "N/A",
+        "na",
+        "NA",
+        "nan",
+        "NaN",
+        ""
+      ]
+    }
+  },
+  "MOCA": {
+    "Description": "MOCA score",
+    "Annotations": {
+      "IsAbout": {
+        "TermURL": "nb:Assessment",
+        "Label": "Assessment Tool"
+      },
+      "VariableType": "Collection",
+      "IsPartOf": {
+        "TermURL": "snomed:859351000000102",
+        "Label": "Montreal cognitive assessment"
+      },
+      "MissingValues": [
+        "n/a",
+        "N/A",
+        "na",
+        "NA",
+        "nan",
+        "NaN",
+        ""
+      ]
+    }
+  },
+  "UPDRS": {
+    "Description": "UPDRS score",
+    "Annotations": {
+      "IsAbout": {
+        "TermURL": "nb:Assessment",
+        "Label": "Assessment Tool"
+      },
+      "VariableType": "Collection",
+      "IsPartOf": {
+        "TermURL": "snomed:342061000000106",
+        "Label": "Unified Parkinsons disease rating scale score"
+      },
+      "MissingValues": [
+        "n/a",
+        "N/A",
+        "na",
+        "NA",
+        "nan",
+        "NaN",
+        ""
+      ]
+    }
+  },
+  "TYPE": {
+    "Description": "numeric value of participant type (1=PD, 0=Control)"
+  }
+}
