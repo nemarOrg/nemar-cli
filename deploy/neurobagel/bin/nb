@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#
+# nb: the one command for the NEMAR Neurobagel node (epic #1586, Phase 3, #1589).
+#
+#   nb install              first-time setup (recipes checkout, .env, secrets, first release)
+#   nb up                   start the stack and wait until it is loaded and verified
+#   nb down                 stop THIS project (containers only; volumes and data are kept)
+#   nb status [--json] [--deep]   health, limits, usage, loader state; exit 0 healthy
+#   nb load [options]       pull artifacts and reload when something changed (cron runs this)
+#   nb reload [options]     deliberate reload of the live release, with timing and rollback
+#   nb rollback [RELEASE]   go back to an earlier release, reload it, and freeze the loader
+#   nb hold [reason]        incident mode: take the node out of the federation now
+#   nb unhold               end incident mode and put the node back
+#   nb guard [options]      resource guard: sample, log, and optionally stop this project
+#   nb backup [options]     back up the inputs and state (and optionally a graph export)
+#   nb restore ARCHIVE      restore from a backup, then reload
+#   nb compose ARGS...      docker compose for this project only (never another project)
+#   nb logs [SERVICE]       follow the logs of this project
+#   nb cron-line            print the crontab lines to install (does not install them)
+#
+# Every subcommand is a script in this directory (nb-<name>). `nb <name> --help` for details.
+
+set -euo pipefail
+# shellcheck source=nb-common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/nb-common.sh"
+
+cmd="${1:-help}"
+[ $# -eq 0 ] || shift
+
+case "$cmd" in
+  help | -h | --help)
+    sed -n '3,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+    ;;
+  install | load | reload | status | guard | backup | restore | rollback | hold | unhold | up)
+    exec "$NB_CODE_DIR/bin/nb-$cmd" "$@"
+    ;;
+  down)
+    nb_need docker
+    nb_check_project_name
+    # No -v: volumes (the graph store and the data volume) are never removed from here.
+    nb_compose --profile '*' down --remove-orphans "$@"
+    ;;
+  compose)
+    nb_need docker
+    nb_check_project_name
+    nb_compose "$@"
+    ;;
+  logs)
+    nb_need docker
+    nb_check_project_name
+    nb_compose logs --tail 200 --follow "$@"
+    ;;
+  cron-line)
+    exec "$NB_CODE_DIR/bin/nb-cron-line" "$@"
+    ;;
+  *)
+    nb_die "$NB_EX_USAGE" "unknown command: $cmd (try: nb help)"
+    ;;
+esac

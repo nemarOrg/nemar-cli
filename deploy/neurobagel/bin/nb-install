@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+#
+# nb-install: prepare a host to run the NEMAR Neurobagel node. Idempotent, and it never starts,
+# stops or touches a container.
+#
+#   1. checks the tools it needs
+#   2. checks out neurobagel/recipes at the tag in pins.env and verifies the commit hash
+#   3. creates the runtime directories
+#   4. creates .env from .env.example (mode 600) if it does not exist
+#   5. creates the two GraphDB passwords if they do not exist (random, host-local, mode 700 dir)
+#   6. writes recipes' local_nb_nodes.json for the local f-API
+#   7. seeds the first release with Neurobagel's own example JSON-LD if no release exists
+#
+# Existing .env, secrets and releases are never overwritten. Changing the GraphDB passwords after
+# the first start needs a hard reset of the graph volume (Neurobagel production-deployment docs).
+#
+# Usage: bin/nb-install [--check]
+#   --check   verify only; change nothing
+
+set -euo pipefail
+# shellcheck source=nb-common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/nb-common.sh"
+
+check_only=0
+case "${1:-}" in
+  "") ;;
+  --check) check_only=1 ;;
+  -h | --help)
+    sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+  *) nb_die "$NB_EX_USAGE" "usage: nb-install [--check]" ;;
+esac
+
+problems=0
+note() { nb_log "$*"; }
+fail() {
+  nb_log "PROBLEM: $*"
+  problems=$((problems + 1))
+}
+
+nb_need git jq curl perl openssl docker
+
+# Compose 2.24 added the !override tag and repeated --env-file flags that the overlay uses.
+compose_version="$(docker compose version --short 2>/dev/null || true)"
+case "$compose_version" in
+  v*) compose_version="${compose_version#v}" ;;
+esac
+major="${compose_version%%.*}"
+rest="${compose_version#*.}"
+minor="${rest%%.*}"
+if [ -z "$compose_version" ] || [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -lt 24 ]; }; then
+  fail "docker compose >= 2.24 is required (found '${compose_version:-none}')"
+else
+  note "docker compose $compose_version"
+fi
+
+pin_tag="$(nb_pin_get NB_RECIPES_TAG)"
+pin_commit="$(nb_pin_get NB_RECIPES_COMMIT)"
+pin_repo="$(nb_pin_get NB_RECIPES_REPO)"
+
+# ---- recipes checkout ------------------------------------------------------------------------
+if [ -d "$NB_RECIPES_DIR/.git" ]; then
+  head="$(git -C "$NB_RECIPES_DIR" rev-parse HEAD)"
+  if [ "$head" = "$pin_commit" ]; then
+    note "recipes already at $pin_tag ($pin_commit)"
+  elif [ "$check_only" = 1 ]; then
+    fail "recipes is at $head, pins.env wants $pin_commit ($pin_tag)"
+  else
+    note "moving recipes from $head to $pin_tag"
+    git -C "$NB_RECIPES_DIR" fetch --depth 1 origin "refs/tags/$pin_tag:refs/tags/$pin_tag"
+    git -C "$NB_RECIPES_DIR" checkout --quiet "$pin_tag"
+  fi
+elif [ "$check_only" = 1 ]; then
+  fail "recipes is not checked out at $NB_RECIPES_DIR"
+else
+  note "cloning recipes $pin_tag"
+  git clone --quiet --depth 1 --branch "$pin_tag" "$pin_repo" "$NB_RECIPES_DIR"
+fi
+if [ -d "$NB_RECIPES_DIR/.git" ]; then
+  head="$(git -C "$NB_RECIPES_DIR" rev-parse HEAD)"
+  [ "$head" = "$pin_commit" ] \
+    || fail "recipes commit is $head but pins.env pins $pin_commit; refusing to continue"
+  if [ -n "$(git -C "$NB_RECIPES_DIR" status --porcelain --untracked-files=no)" ]; then
+    fail "tracked files in the recipes checkout were modified; the overlay is the only supported customisation"
+  fi
+fi
+
+[ "$problems" -eq 0 ] || nb_die "$NB_EX_PREFLIGHT" "$problems problem(s) found; nothing further done"
+[ "$check_only" = 0 ] || {
+  [ -f "$NB_ENV_FILE" ] || fail ".env is missing"
+  [ -d "$NB_SECRETS_DIR" ] && [ -s "$NB_SECRETS_DIR/NB_GRAPH_PASSWORD.txt" ] \
+    && [ -s "$NB_SECRETS_DIR/NB_GRAPH_ADMIN_PASSWORD.txt" ] || fail "GraphDB secrets are missing"
+  [ -L "$NB_CURRENT_LINK" ] || fail "no release is live (data/current missing)"
+  [ "$problems" -eq 0 ] || nb_die "$NB_EX_PREFLIGHT" "$problems problem(s) found"
+  note "install is complete"
+  exit 0
+}
+
+# ---- directories -----------------------------------------------------------------------------
+nb_init_dirs
+mkdir -p "$NB_BACKUPS_DIR"
+chmod 700 "$NB_BACKUPS_DIR"
+
+# ---- .env ------------------------------------------------------------------------------------
+if [ -f "$NB_ENV_FILE" ]; then
+  note ".env exists; left untouched"
+else
+  umask 077
+  sed "s|@NB_HOME@|$NB_HOME|g" "$NB_CODE_DIR/.env.example" >"$NB_ENV_FILE"
+  chmod 600 "$NB_ENV_FILE"
+  note "created $NB_ENV_FILE (mode 600) from .env.example"
+fi
+nb_check_project_name
+
+# ---- GraphDB credentials ---------------------------------------------------------------------
+# Directory 700 and files 600: no other account on the host can read them. The containers run
+# as root and read them through a bind mount (verified 2026-10-01 on the pinned images). Nothing
+# here prints a value.
+mkdir -p "$NB_SECRETS_DIR"
+chmod 700 "$NB_SECRETS_DIR"
+for f in NB_GRAPH_ADMIN_PASSWORD.txt NB_GRAPH_PASSWORD.txt; do
+  if [ -s "$NB_SECRETS_DIR/$f" ]; then
+    note "$f exists; left untouched"
+  else
+    ( umask 077; openssl rand -hex 16 >"$NB_SECRETS_DIR/$f" )
+    note "generated $f"
+  fi
+done
+
+# ---- local federation config -----------------------------------------------------------------
+cp "$NB_CODE_DIR/config/local_nb_nodes.json" "$NB_RECIPES_DIR/local_nb_nodes.json"
+
+# ---- first release ---------------------------------------------------------------------------
+if [ -L "$NB_CURRENT_LINK" ]; then
+  note "a release is already live: $(nb_current_release)"
+else
+  "$NB_CODE_DIR/bin/nb-load" --seed-example
+fi
+
+note "install complete. Next: bin/nb up"
