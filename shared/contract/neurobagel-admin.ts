@@ -62,7 +62,16 @@ export interface NeurobagelRunResult {
    * closing steps (it grows with the store). HTTP is the writer's own calls plus an estimate
    * for the data plane's.
    */
-  ops: { spent: number; budget: number; reserved: number; d1: number; r2: number; http: number };
+  ops: {
+    spent: number;
+    budget: number;
+    reserved: number;
+    /** Spent when the examination loop ended, before the closing steps. A run that stopped on its budget has `loop + reserved <= budget`. */
+    loop: number;
+    d1: number;
+    r2: number;
+    http: number;
+  };
   results: NeurobagelDatasetResult[];
   removed: string[];
   removals_pending: number;

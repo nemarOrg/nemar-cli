@@ -252,7 +252,15 @@ function emptyResult(options: RunOptions, limit: number, mode: WriterMode): RunR
     limit,
     unexamined: 0,
     stopped: null,
-    ops: { spent: 0, budget: options.opBudget ?? OP_BUDGET, reserved: 0, d1: 0, r2: 0, http: 0 },
+    ops: {
+      spent: 0,
+      budget: options.opBudget ?? OP_BUDGET,
+      reserved: 0,
+      loop: 0,
+      d1: 0,
+      r2: 0,
+      http: 0,
+    },
     results: [],
     removed: [],
     removals_pending: 0,
@@ -877,6 +885,7 @@ export async function runNeurobagelWriter(
       spent: ops.total,
       budget,
       reserved: result.ops.reserved,
+      loop: result.ops.loop,
       d1: ops.d1,
       r2: ops.r2,
       http: ops.http,
@@ -991,6 +1000,9 @@ export async function runNeurobagelWriter(
         break;
       }
     }
+
+    // What the examination spent: the closing steps' share of the budget starts here.
+    result.ops.loop = ops.total;
 
     // What leaves: datasets the store holds that are not eligible NOW (decided inside the
     // index sync, after its fresh listing), that proved ineligible while being examined, or

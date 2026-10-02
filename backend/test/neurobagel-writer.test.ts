@@ -51,6 +51,7 @@ import {
 import {
   CLOSING_FIXED_OPS,
   DATASET_OPS_WORST,
+  GATHER_HTTP_OPS,
   LIST_PAGE_OBJECTS,
   MAX_ARTIFACT_BYTES,
   OP_BUDGET,
@@ -1966,6 +1967,74 @@ describe("a run counts what it spends and stops with headroom to finish", () => 
     expect(large.ops.r2).toBeGreaterThanOrEqual(listingPages(450));
   });
 
+  test("a run that stopped on its budget has left the reserve unspent: loop + reserved fits the budget", async () => {
+    // Whatever the budget, the examination ends with the closing steps' share still there:
+    // that is what the margin for one more dataset (its worst case) and the reserve buy.
+    expect(DATASET_OPS_WORST).toBe(30);
+    for (const budget of [120, 160, 200, 250, 330]) {
+      await h.reset();
+      for (const id of ids(30)) seedSynthetic(h, id);
+      const first = await run({ limit: 50, opBudget: budget });
+      expect(first.stopped, `budget ${budget}`).toBe("ops_budget");
+      expect(
+        first.ops.loop + first.ops.reserved,
+        `first writes, budget ${budget}`,
+      ).toBeLessThanOrEqual(budget);
+      expect(first.ops.spent).toBeLessThanOrEqual(budget);
+      // And the same on a run that REWRITES datasets, patching the index as it goes.
+      h.db.run("UPDATE datasets SET name = name || ' (again)'");
+      const again = await run({ limit: 50, opBudget: budget });
+      if (again.stopped === "ops_budget") {
+        expect(
+          again.ops.loop + again.ops.reserved,
+          `rewrites, budget ${budget}`,
+        ).toBeLessThanOrEqual(budget);
+      }
+    }
+  });
+
+  test("the per-dataset part of the reserve is real: many removals still all happen in the run that stopped on its budget", async () => {
+    // 40 datasets leaving and 14 to write, on a budget that a reserve of only the fixed part
+    // would let the loop spend down to nothing, leaving too little to delete with.
+    const stamp = (kind: string) => ({ sha256: "0".repeat(64), kind });
+    for (let i = 0; i < 40; i++) {
+      const id = `nm0009${String(i).padStart(2, "0")}`;
+      await h.bucket.put(`${id}.jsonld`, "{}", {
+        customMetadata: { ...stamp("jsonld"), [META.fingerprint]: "sha256:x" },
+      });
+      await h.bucket.put(`${id}_annotated.json`, "{}", { customMetadata: stamp("dictionary") });
+      await h.bucket.put(`${id}_dataset_description.json`, "{}", {
+        customMetadata: stamp("description"),
+      });
+    }
+    for (const id of ids(14)) seedSynthetic(h, id);
+    const result = await run({ limit: 50, opBudget: 220 });
+    expect(result.stopped).toBe("ops_budget");
+    expect(result.removed).toHaveLength(40);
+    expect(result.removals_pending).toBe(0);
+    expect(result.ops.reserved).toBe(closingReserve(120, 40));
+  });
+
+  test("the HTTP count is the writer's own HEAD plus the data plane's allowance, and the allowance covers what was really sent", async () => {
+    // The pins: a HEAD a dataset (1) and the allowance (8) for a gather. They are the
+    // writer's own numbers, so a change is a decision to make here and in the ADR.
+    expect(GATHER_HTTP_OPS).toBe(8);
+    for (const id of ids(3)) seedSynthetic(h, id);
+    const before = h.standin.log.length;
+    const first = await run();
+    const sent = h.standin.log.length - before;
+    expect(outcomes(first).every((o) => o.endsWith(":written"))).toBe(true);
+    // 3 rewritten datasets: 9 each.
+    expect(first.ops.http).toBe(3 * (1 + 8));
+    // What the stand-in saw (the HEAD, the manifest, the two tables) is inside that.
+    expect(sent).toBeGreaterThan(3);
+    expect(sent).toBeLessThanOrEqual(first.ops.http);
+    // Unchanged: the HEAD alone, one a dataset.
+    const quiet2 = await run();
+    expect(quiet2.results.every((r) => r.outcome === "unchanged")).toBe(true);
+    expect(quiet2.ops.http).toBe(3);
+  });
+
   test("the first dataset is always examined, so a tiny budget still makes progress", async () => {
     for (const id of ids(3)) seedSynthetic(h, id);
     const result = await run({ opBudget: 1 });
@@ -2297,6 +2366,87 @@ describe("an interrupted run never leaves artifacts newer than the index", () =>
       "nm000726",
       "nm000727",
     ]);
+  });
+
+  /**
+   * The real bucket, except that each of the first `times` writes of the index is preceded by
+   * another run's write of it (a changed document), so a write conditional on the ETag it read
+   * loses, exactly as it does when two runs overlap.
+   */
+  function contendIndexWrites(bucket: R2Bucket, times: number) {
+    let lost = 0;
+    const wrapped = new Proxy(bucket, {
+      get(target, prop, receiver) {
+        if (prop === "put") {
+          return async (key: string, ...rest: unknown[]) => {
+            if (key === NEUROBAGEL_INDEX_KEY && lost < times) {
+              lost++;
+              const current = JSON.parse((await (await target.get(key))?.text()) ?? "{}");
+              await (target.put as (...a: unknown[]) => unknown)(
+                key,
+                `${JSON.stringify({ ...current, bump: lost })}\n`,
+              );
+            }
+            return (target.put as (...a: unknown[]) => unknown)(key, ...rest);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as R2Bucket;
+    return { bucket: wrapped, lost: () => lost };
+  }
+
+  test("a patch that loses its race twice is retried and wins on the third attempt", async () => {
+    await seededAndWritten();
+    const race = contendIndexWrites(h.bucket, 2);
+    const result = await run({}, h.env({ NEUROBAGEL: race.bucket }));
+    expect(race.lost()).toBe(2);
+    expect(result.stopped).toBeNull();
+    expect(result.examined).toBe(4);
+    expect(result.index.patched).toBe(4);
+    expect(await indexMismatches()).toEqual([]);
+  });
+
+  test("a patch that loses all three attempts stops the run there, and the closing sync still settles the index", async () => {
+    await seededAndWritten();
+    const race = contendIndexWrites(h.bucket, 3);
+    console.warn = () => {};
+    const result = await run({}, h.env({ NEUROBAGEL: race.bucket }));
+    console.warn = quiet.warn;
+    expect(race.lost()).toBe(3);
+    expect(result.stopped).toBe("index_patch");
+    expect(result.examined).toBe(1);
+    expect(await indexMismatches()).toEqual([]);
+  });
+
+  test("the closing sync loses its race twice and still wins on the third attempt, so a removal is not held back", async () => {
+    seedSynthetic(h, "nm000728");
+    seedSynthetic(h, "nm000729");
+    await run();
+    h.db.run("UPDATE datasets SET visibility = 'private' WHERE dataset_id = 'nm000728'");
+    const race = contendIndexWrites(h.bucket, 2);
+    const result = await run({}, h.env({ NEUROBAGEL: race.bucket }));
+    expect(race.lost()).toBe(2);
+    expect(result.index.written).toBe(true);
+    expect(result.index.contended).toBeUndefined();
+    expect(result.removed).toEqual(["nm000728"]);
+    expect((await storedIndex()).datasets.map((d) => d.id)).toEqual(["nm000729"]);
+  });
+
+  test("the closing sync that loses all three attempts reports it, and keeps the artifacts of what is leaving", async () => {
+    seedSynthetic(h, "nm000728");
+    seedSynthetic(h, "nm000729");
+    await run();
+    h.db.run("UPDATE datasets SET visibility = 'private' WHERE dataset_id = 'nm000728'");
+    const race = contendIndexWrites(h.bucket, 3);
+    console.warn = () => {};
+    const result = await run({}, h.env({ NEUROBAGEL: race.bucket }));
+    console.warn = quiet.warn;
+    expect(race.lost()).toBe(3);
+    expect(result.index.contended).toBe(true);
+    expect(result.removed).toEqual([]);
+    expect(await storeKeys(h.bucket)).toContain("nm000728.jsonld");
   });
 
   test("a patch that THROWS is a patch that failed: the run stops there and the closing sync heals the index", async () => {
