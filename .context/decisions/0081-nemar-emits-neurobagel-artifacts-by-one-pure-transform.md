@@ -34,7 +34,7 @@ Seven rules bind it:
 3. **The vocabulary is a pinned snapshot, generated and never edited by hand.**
    `shared/neurobagel/vocab/` is built by `scripts/neurobagel/generate-vocab.ts` from commit-pinned `neurobagel/communities`, `bagel`, `api` and `recipes`, and every term the transform may emit is looked up there.
 4. **A fact the rules cannot establish is left out and counted, never guessed.**
-   Only `eeg` and `meg` map to an imaging modality; intracranial EEG (iEEG), electromyography (EMG), near-infrared spectroscopy (NIRS), motion and the rest get no term, and an EMG recording is never mapped to EEG.
+   Only `eeg` and `meg` map to an imaging modality (electroencephalography, EEG, and magnetoencephalography, MEG); intracranial EEG (iEEG), electromyography (EMG), near-infrared spectroscopy (NIRS), motion and the rest get no term, and an EMG recording is never mapped to EEG.
    Age, sex and healthy-control group map mechanically; every other column, and every value the rules do not recognise, is a declared missing value or is left to curation.
    An age column of which zeros are at least half the parsed ages is a placeholder and is left to curation.
    A participant listed twice with identical rows is one participant; with rows that disagree, no row is taken and the participant carries no phenotype.

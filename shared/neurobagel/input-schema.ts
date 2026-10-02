@@ -23,7 +23,7 @@
  */
 
 import { z } from "zod";
-import type { BidsIndexSubjectWire } from "../contract/dataset.js";
+import type { BidsIndexSubjectWire, BidsIndexWire } from "../contract/dataset.js";
 
 const authorSchema = z.object({ name: z.string() }).passthrough();
 const keywordSchema = z.object({ term: z.string() }).passthrough();
@@ -56,16 +56,26 @@ const bidsIndexSubjectSchema = z
   })
   .passthrough();
 
+/** `extensions.nemar.bids_index`: the version it was built from and its subjects by id. */
+const bidsIndexReadSchema = z
+  .object({
+    version: z.string().nullable().optional(),
+    subjects: z.record(z.string(), bidsIndexSubjectSchema).default({}),
+  })
+  .passthrough();
+
 /**
- * The contract's wire type must stay readable by this lenient schema: if the data
- * plane's `BidsIndexSubjectWire` ever stops being assignable to what the transform
- * parses, this stops compiling.
+ * The contract's wire types must stay readable by these lenient schemas: if the data
+ * plane's `BidsIndexSubjectWire` or `BidsIndexWire` ever stops being assignable to what
+ * the transform parses, this stops compiling.
  */
-export type WireIndexSubjectIsReadable = BidsIndexSubjectWire extends z.input<
-  typeof bidsIndexSubjectSchema
->
-  ? true
-  : never;
+type MustBeTrue<T extends true> = T;
+export type WireIndexSubjectIsReadable = MustBeTrue<
+  BidsIndexSubjectWire extends z.input<typeof bidsIndexSubjectSchema> ? true : false
+>;
+export type WireIndexIsReadable = MustBeTrue<
+  BidsIndexWire extends z.input<typeof bidsIndexReadSchema> ? true : false
+>;
 
 export const metadataSchema = z
   .object({
@@ -96,14 +106,7 @@ export const metadataSchema = z
       .object({
         nemar: z
           .object({
-            bids_index: z
-              .object({
-                version: z.string().nullable().optional(),
-                subjects: z.record(z.string(), bidsIndexSubjectSchema).default({}),
-              })
-              .passthrough()
-              .nullable()
-              .optional(),
+            bids_index: bidsIndexReadSchema.nullable().optional(),
           })
           .passthrough()
           .nullable()
