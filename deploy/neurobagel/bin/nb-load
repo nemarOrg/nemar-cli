@@ -33,9 +33,11 @@
 # Environment (defaults in brackets): NB_SOURCE; NB_ALLOW_HTTP (unset; plain http is refused
 # unless this is 1, for tests and local development); NB_SOURCE_AUTH_HEADER_FILE; NB_VALIDATE
 # (docker, jq or none; docker when the stack is installed, else jq); the caps NB_MAX_INDEX_BYTES
-# [8 MiB], NB_MAX_ARTIFACT_BYTES [32 MiB], NB_MAX_TOTAL_BYTES [512 MiB], NB_MIN_FREE_DISK_MB
-# [2048] (the dataset cap comes from index.schema.json); NB_FETCH_TIMEOUT_S [300]; NB_KEEP_RELEASES
-# [4]; NB_RELOAD [1]; NB_KNOWN_BAD_TTL_S [21600].
+# [8 MiB], NB_MAX_ARTIFACT_BYTES [6 MiB], NB_MAX_TOTAL_BYTES [192 MiB], NB_MIN_FREE_DISK_MB
+# [2048] (the dataset cap comes from index.schema.json); NB_FETCH_TIMEOUT_S [300] for one request
+# and NB_LOAD_BUDGET_S [900] for the whole run, retries included; NB_INIT_MEM_LIMIT [160m] for the
+# validator container; NB_KEEP_RELEASES [4]; NB_RELOAD [1]; NB_KNOWN_BAD_TTL_S [21600].
+# A redirect from the source is refused: the index and every artifact must be served directly.
 #
 # Exit codes: 0 ok or nothing to do; 3 source unreadable, invalid or over a cap; 4 validation
 # failed; 5 reload failed and was rolled back; 6 reload failed and rollback failed; 7 node on hold;
@@ -89,14 +91,24 @@ fi
 nb_rotate_log "$NB_LOGS_DIR/load.log"
 
 max_index_bytes="$(nb_env_get NB_MAX_INDEX_BYTES 8388608)"
-max_artifact_bytes="$(nb_env_get NB_MAX_ARTIFACT_BYTES 33554432)"
-max_total_bytes="$(nb_env_get NB_MAX_TOTAL_BYTES 536870912)"
+# 6 MiB per artifact: the largest real dataset document measured is 0.44 MB (14 times under the cap),
+# and the stock validator holds a document in memory at 12 to 14 times its size (measured: 8.06 MB
+# needs 104 MiB and 10.9 MB needs 160 MiB), so 6 MiB needs about 90 MiB of the 160 MiB validator
+# limit (NB_INIT_MEM_LIMIT). Raise the two together.
+max_artifact_bytes="$(nb_env_get NB_MAX_ARTIFACT_BYTES 6291456)"
+# 192 MiB in all: the largest release the 2 GiB graph container was measured to load is 172 MB of
+# JSON-LD (3.56 million statements, 1.57 GiB peak); the planned scale is about 70 MB.
+max_total_bytes="$(nb_env_get NB_MAX_TOTAL_BYTES 201326592)"
 min_free_disk_mb="$(nb_env_get NB_MIN_FREE_DISK_MB 2048)"
 fetch_timeout="$(nb_env_get NB_FETCH_TIMEOUT_S 300)"
+# The whole run, retries included, ends by this many seconds after it began. Without it, 3 retries of
+# a 300 s timeout per artifact is no bound at all.
+load_budget_s="$(nb_env_get NB_LOAD_BUDGET_S 900)"
 keep_releases="$(nb_env_get NB_KEEP_RELEASES 4)"
 auth_file="$(nb_env_get NB_SOURCE_AUTH_HEADER_FILE "")"
 user_agent="nemar-neurobagel-loader/1.0"
 started_epoch="$(nb_epoch)"
+load_deadline=$((started_epoch + load_budget_s))
 
 if [ "$dry_run" = 0 ]; then
   nb_lock_or_exit "nb-load"
@@ -115,8 +127,11 @@ trap cleanup EXIT
 if [ "$dry_run" = 0 ]; then
   # Under the lock nobody else is staging, so anything left behind by a run that was killed (a
   # SIGKILL runs no trap) is garbage.
-  rm -rf "$NB_DATA_DIR"/.stage.* 2>/dev/null || true
-  rm -f "$NB_STATE_DIR"/.warnings.* "$NB_STATE_DIR"/*.tmp.* 2>/dev/null || true
+  rm -rf "${NB_DATA_DIR:?}"/.stage.* 2>/dev/null || true
+  rm -f "${NB_STATE_DIR:?}"/.warnings.* 2>/dev/null || true
+  # Temp files of the writers that take no lock (nb hold, the guard) are only swept once a minute
+  # old: a younger one may be mid-write, and removing it would abort that write.
+  find "$NB_STATE_DIR" -maxdepth 1 -name '*.tmp.*' -mmin +1 -exec rm -f {} + 2>/dev/null || true
 fi
 
 warnings_file="$NB_STATE_DIR/.warnings.$$"
@@ -186,24 +201,53 @@ write_last_load() { # outcome release extra-json
 # Fetching. Both source kinds hand back a file at DEST or fail; nothing else is promised.
 # ---------------------------------------------------------------------------------------------
 fetch() { # base rel dest max_bytes
-  local base="$1" rel="$2" dest="$3" max="$4" url
+  local base="$1" rel="$2" dest="$3" max="$4" url remaining timeout_s budget_bound code rc=0
+  local -a hdr=()
   case "$base" in
     http://* | https://*)
       url="${base%/}/$rel"
+      remaining=$((load_deadline - $(nb_epoch)))
+      if [ "$remaining" -le 0 ]; then
+        nb_log "the loader's time budget (NB_LOAD_BUDGET_S=$load_budget_s) ran out before $rel was fetched"
+        return 1
+      fi
+      timeout_s="$fetch_timeout"
+      budget_bound=0
+      if [ "$remaining" -lt "$timeout_s" ]; then
+        timeout_s="$remaining"
+        budget_bound=1
+      fi
       if [ -n "$auth_file" ]; then
         [ -r "$auth_file" ] || { nb_log "auth header file is not readable: $auth_file"; return 1; }
-        curl --fail --silent --show-error --location --max-redirs 3 \
-          --proto '=http,https' --proto-redir '=https' \
-          --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 15 \
-          --max-time "$fetch_timeout" --max-filesize "$max" \
-          -A "$user_agent" -H "@$auth_file" -o "$dest" "$url"
-      else
-        curl --fail --silent --show-error --location --max-redirs 3 \
-          --proto '=http,https' --proto-redir '=https' \
-          --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 15 \
-          --max-time "$fetch_timeout" --max-filesize "$max" \
-          -A "$user_agent" -o "$dest" "$url"
+        hdr=(-H "@$auth_file")
       fi
+      # No --location: a redirect is never followed. curl would send a non-Authorization credential
+      # header on to the redirect target, and an index or artifact URL is ours to name, so it must
+      # answer directly. --fail makes 4xx and 5xx failures; a 3xx is checked by hand below.
+      code="$(curl --fail --silent --show-error --proto '=http,https' \
+        --retry 3 --retry-delay 2 --retry-connrefused --retry-max-time "$remaining" --connect-timeout 15 \
+        --max-time "$timeout_s" --max-filesize "$max" \
+        -A "$user_agent" ${hdr[@]+"${hdr[@]}"} -o "$dest" -w '%{http_code}' "$url")" || rc=$?
+      if [ "$rc" -ne 0 ]; then
+        if [ "$budget_bound" = 1 ] || [ "$(nb_epoch)" -ge "$load_deadline" ]; then
+          nb_log "the request for $rel failed within the loader's time budget (NB_LOAD_BUDGET_S=$load_budget_s), which cut it short"
+        fi
+        rm -f "$dest"
+        return 1
+      fi
+      case "$code" in
+        200) ;;
+        3??)
+          nb_log "refused a redirect (HTTP $code) for $rel: the index and every artifact must be served directly"
+          rm -f "$dest"
+          return 1
+          ;;
+        *)
+          nb_log "unexpected HTTP $code for $rel"
+          rm -f "$dest"
+          return 1
+          ;;
+      esac
       ;;
     *)
       [ -f "$base/$rel" ] || { nb_log "not found in source directory: $rel"; return 1; }
@@ -219,29 +263,66 @@ file_bytes() { wc -c <"$1" | tr -d ' '; }
 # what a JSON Schema cannot say (name equals id plus a per-kind suffix, one JSON-LD per dataset,
 # uniqueness) is written here and tested against the schema for drift.
 # ---------------------------------------------------------------------------------------------
+# The program prints a JSON array of what is wrong, one sentence each, empty when nothing is. Every
+# rule has its own sentence, so a test can show each one firing on its own and the operator can see
+# which rule an index broke. A newline is refused in every string because jq's `$` also matches
+# before a trailing newline.
 # shellcheck disable=SC2016  # the $-names below are jq variables, not shell expansions
-INDEX_CHECK='
-  def okid: type == "string" and test($c.idpat) and (contains("..") | not);
-  def okname: type == "string" and test($c.namepat) and (contains("..") | not);
-  (type == "object")
-  and (.schema == $c.schema)
-  and (.generated_at | type == "string" and test($c.gatpat))
-  and (.datasets | type == "array" and length <= $c.maxdatasets)
-  and all(.datasets[];
-        (type == "object")
-        and (.id | okid)
-        and (.fingerprint | type == "string" and test($c.fppat))
-        and (.artifacts | type == "array" and length >= 1 and length <= $c.maxartifacts)
-        and all(.artifacts[];
-              (type == "object")
-              and (.name | okname)
-              and (((.kind as $k | $c.kinds | index($k)) != null))
-              and (.sha256 | type == "string" and test($c.shapat))
-              and ((.bytes // 1) | type == "number" and . >= 1 and floor == .))
-        and (.id as $id | all(.artifacts[]; .name == ($id + $c.suffix[.kind])))
-        and ([.artifacts[] | select(.kind == "jsonld")] | length == 1))
-  and ([.datasets[].id] | length == (unique | length))
-  and ([.datasets[].artifacts[].name] | length == (unique | length))
+INDEX_PROBLEMS='
+  def full($p): type == "string" and test($p) and (contains("\n") | not);
+  def q: tostring | .[0:60] | @json;
+  def okid: full($c.idpat) and (contains("..") | not);
+  def okname: full($c.namepat) and (contains("..") | not);
+  if type != "object" then ["the index is not a JSON object"] else
+  . as $r
+  | [
+      (if $r.schema == $c.schema then empty else "schema is not \($c.schema | @json)" end),
+      (if ($r.generated_at | full($c.gatpat)) then empty else "generated_at is missing or not a UTC timestamp" end),
+      (if ($r.datasets | type) != "array" then "datasets is not a list"
+       elif ($r.datasets | length) > $c.maxdatasets then "more than \($c.maxdatasets) datasets"
+       else empty end),
+      (if ($r.datasets | type) == "array" then
+         ($r.datasets | to_entries[] | .key as $i | .value as $d
+          | if ($d | type) != "object" then "dataset #\($i) is not an object"
+            else
+              (if ($d.id | okid) then empty else "dataset #\($i): id \($d.id | q) is not allowed" end),
+              (if ($d.fingerprint | full($c.fppat)) then empty
+               else "dataset \($d.id | q): fingerprint is not sha256: and 64 hex digits" end),
+              (if ($d.artifacts | type) != "array" then "dataset \($d.id | q): artifacts is not a list"
+               else
+                 (if ($d.artifacts | length) < 1 then "dataset \($d.id | q): no artifacts" else empty end),
+                 (if ($d.artifacts | length) > $c.maxartifacts
+                  then "dataset \($d.id | q): more than \($c.maxartifacts) artifacts" else empty end),
+                 ($d.artifacts | to_entries[] | .key as $j | .value as $a
+                  | if ($a | type) != "object" then "dataset \($d.id | q): artifact #\($j) is not an object"
+                    else
+                      (if ($a.name | okname) then empty
+                       else "dataset \($d.id | q): artifact name \($a.name | q) is not allowed" end),
+                      (if (($a.kind as $k | $c.kinds | index($k)) != null) then empty
+                       else "dataset \($d.id | q): artifact kind \($a.kind | q) is unknown" end),
+                      (if ($a.sha256 | full($c.shapat)) then empty
+                       else "dataset \($d.id | q): artifact \($a.name | q) has no valid sha256" end),
+                      (if (($a.bytes // 1) | type == "number" and . >= 1 and floor == .) then empty
+                       else "dataset \($d.id | q): artifact \($a.name | q) bytes is not a whole number of at least 1" end),
+                      (if ($d.id | type) == "string" and ($a.kind | type) == "string" and ($c.suffix[$a.kind] != null)
+                          and $a.name == ($d.id + $c.suffix[$a.kind]) then empty
+                       else "dataset \($d.id | q): artifact \($a.name | q) is not the id plus the suffix of its kind" end)
+                    end),
+                 (if ([$d.artifacts[] | select(type == "object" and .kind == "jsonld")] | length) == 1 then empty
+                  else "dataset \($d.id | q): needs exactly one jsonld artifact" end)
+               end)
+            end)
+       else empty end),
+      (if ($r.datasets | type) == "array" then
+         ([$r.datasets[] | select(type == "object") | .id | tostring] as $ids
+          | if ($ids | length) == ($ids | unique | length) then empty else "dataset ids are not unique" end)
+       else empty end),
+      (if ($r.datasets | type) == "array" then
+         ([$r.datasets[] | select(type == "object") | .artifacts | select(type == "array") | .[] | select(type == "object") | .name | tostring] as $ns
+          | if ($ns | length) == ($ns | unique | length) then empty else "artifact names are not unique across the index" end)
+       else empty end)
+    ]
+  end
 '
 
 # shellcheck disable=SC2016
@@ -312,13 +393,10 @@ validate_candidate() { # dir expected_jsonld_count
   mkdir -p "$out"
   img="$NB_PROJECT-init_data"
   # The stock validator, on the candidate, in a throwaway container with no network.
-  if ! docker run --rm --network none \
-    --memory "$(nb_env_get NB_INIT_MEM_LIMIT 256m)" --memory-swap "$(nb_env_get NB_INIT_MEM_LIMIT 256m)" \
-    --cpus "$(nb_env_get NB_INIT_CPUS 1.0)" --pids-limit 128 \
-    --security-opt no-new-privileges:true --user "$(id -u):$(id -g)" \
-    -e NB_CATALOG_MODE=false -e PYTHONDONTWRITEBYTECODE=1 \
-    -v "$dir:/input_data:ro" -v "$out:/data" \
-    "$img" python -m init_data.process_jsonld /input_data /data >"$log" 2>&1; then
+  local -a vargs=()
+  while IFS= read -r a; do vargs+=("$a"); done < <(nb_validator_args "$img" "$(nb_env_get NB_INIT_MEM_LIMIT 160m)" \
+    "$(nb_env_get NB_INIT_CPUS 1.0)" "$(id -u):$(id -g)" "$dir" "$out" "$NB_PROJECT-validate-$$")
+  if ! docker "${vargs[@]}" python -m init_data.process_jsonld /input_data /data >"$log" 2>&1; then
     nb_log "the stock validator failed; last lines:"
     tail -n 15 "$log" >&2
     return 1
@@ -474,7 +552,11 @@ if [ "$(file_bytes "$stage/index.json")" -gt "$max_index_bytes" ]; then
   nb_die "$NB_EX_SOURCE" "index.json is larger than NB_MAX_INDEX_BYTES ($max_index_bytes)"
 fi
 contract="$(jq -c "$CONTRACT_PROGRAM" "$NB_SCHEMA_FILE")" || nb_die "$NB_EX_CONFIG" "index.schema.json is unreadable"
-if ! jq -e --argjson c "$contract" "$INDEX_CHECK" "$stage/index.json" >/dev/null 2>&1; then
+if ! index_problems="$(bounded_jq -r --argjson c "$contract" "$INDEX_PROBLEMS | .[]" "$stage/index.json" 2>/dev/null)" \
+  || [ -n "$index_problems" ]; then
+  [ -n "$index_problems" ] || index_problems="index.json is not valid JSON"
+  # sed, not head: head closes the pipe early and printf would die of SIGPIPE under pipefail.
+  printf '%s\n' "$index_problems" | sed -n '1,10p' | while IFS= read -r line; do nb_log "index: $line"; done
   write_last_load source-failed "" '{"reason":"index invalid"}'
   nb_die "$NB_EX_SOURCE" "index.json does not satisfy the interface (index.schema.json; README, \"Artifact store interface\")"
 fi
