@@ -2536,10 +2536,16 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     // precisely the unreachable state this code exists to prevent. If it
     // fails, the operator still gets the reason and the marker below tells
     // them the row needs unsticking by hand.
+    //
+    // A web run's claim (`approval_requested_by`, `approval_dispatched_at`,
+    // ADR 0080) is cleared with it: this run is over, and a claim left on the
+    // blocked row would read as live for the rest of the lease once the owner
+    // re-requests and the row is `requested` again, showing "running" with
+    // nothing running and attributing a terminal approval to the stale clicker.
     try {
       await db
         .prepare(
-          "UPDATE publication_requests SET status = 'blocked', block_reason = ?, updated_at = datetime('now') WHERE id = ?",
+          "UPDATE publication_requests SET status = 'blocked', block_reason = ?, approval_requested_by = NULL, approval_dispatched_at = NULL, updated_at = datetime('now') WHERE id = ?",
         )
         .bind(OWNER_NAME_MISSING_REASON, request.id)
         .run();
