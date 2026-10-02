@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 #
-# nb-guard: the resource guard for a node that shares a host with the secrets store.
+# nb-guard: the resource guard for a node that shares its host with other long-lived services.
 #
 # One sample = host memory available, load average, the usage of THIS project's containers, and
 # the state of every other container on the host (name, start time, restart count, health: state
 # only, never their data or environment). A breach is reported and, if asked, answered by
 # stopping THIS project. Nothing else on the host is ever stopped, restarted or modified.
 #
-# Usage: bin/nb-guard [--watch SECONDS] [--abort-on LIST] [--baseline] [--quiet]
-#   --watch SECONDS   keep sampling every SECONDS until a breach or interrupt
+# Usage: bin/nb-guard [--watch SECONDS] [--abort-on LIST] [--baseline] [--quiet] [--check]
+#   --watch SECONDS   keep sampling every SECONDS until a breach or interrupt. Start the watcher with
+#                     setsid nohup bin/nb-guard --watch 10 --abort-on mem,load,neighbor --quiet \
+#                       >> logs/guard-watch.out 2>&1 < /dev/null &
+#                     (bin/nb cron-line prints it as an @reboot entry). It writes state/guard-heartbeat
+#                     every sample, and `nb status` raises a problem when that goes stale.
+#   --check           exit 21 and say so if the heartbeat is missing or older than NB_GUARD_STALE_S
 #   --abort-on LIST   comma list of mem, load, neighbor: breaches that stop this project.
 #                     Default: mem. Without the flag a breach is reported (exit 20) and nothing
 #                     is stopped.
@@ -31,6 +36,7 @@ watch=0
 abort_on="mem"
 do_baseline=0
 quiet=0
+check_only=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --watch)
@@ -45,8 +51,9 @@ while [ $# -gt 0 ]; do
       ;;
     --baseline) do_baseline=1; shift ;;
     --quiet) quiet=1; shift ;;
+    --check) check_only=1; shift ;;
     -h | --help)
-      sed -n '3,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+      nb_usage "$0"
       exit 0
       ;;
     *) nb_die "$NB_EX_USAGE" "unknown argument: $1" ;;
@@ -56,6 +63,21 @@ done
 nb_need docker
 nb_check_project_name
 nb_init_dirs
+
+if [ "$check_only" = 1 ]; then
+  hb=""
+  [ ! -f "$NB_STATE_DIR/guard-heartbeat" ] || hb="$(cat "$NB_STATE_DIR/guard-heartbeat" 2>/dev/null || true)"
+  if [ -z "$hb" ]; then
+    echo "the resource guard has never sampled (no heartbeat)"
+    exit 21
+  fi
+  msg="$(nb_guard_heartbeat_problem "$hb" "$(nb_epoch)" "$(nb_env_get NB_GUARD_STALE_S 1200)")"
+  if [ -n "$msg" ]; then
+    echo "$msg"
+    exit 21
+  fi
+  exit 0
+fi
 
 abort_mb="$(nb_env_get NB_ABORT_AVAILABLE_MB 1536)"
 abort_load="$(nb_env_get NB_ABORT_LOAD 6)"
@@ -97,40 +119,27 @@ breach_list=""
 add_breach() { breach_list="${breach_list:+$breach_list,}$1"; }
 
 sample() {
-  local avail load usage neighbor_bad="" now_neighbors n s r h
+  local avail load usage neighbors_bad now_neighbors rule
   breach_list=""
   avail="$(nb_mem_available_mb)"
   load="$(nb_load1)"
   usage="$(project_usage)"
 
-  if [ -n "$avail" ] && [ "$avail" -lt "$abort_mb" ]; then
+  if nb_decide_mem_breach "$avail" "$abort_mb"; then
     add_breach "mem(${avail}MiB<${abort_mb}MiB)"
   fi
-  if [ -n "$load" ] && awk -v l="$load" -v t="$abort_load" 'BEGIN{exit !(l>t)}'; then
-    high_load_streak=$((high_load_streak + 1))
-    if [ "$high_load_streak" -ge "$abort_load_samples" ]; then
-      add_breach "load(${load}>${abort_load} for ${high_load_streak} samples)"
-    fi
-  else
-    high_load_streak=0
+  rule="$(nb_guard_load_rule "$load" "$high_load_streak" "$abort_load" "$abort_load_samples")"
+  high_load_streak="${rule%% *}"
+  if [ "${rule##* }" = breach ]; then
+    add_breach "load(${load}>${abort_load} for ${high_load_streak} samples)"
   fi
 
   if [ ! -f "$baseline_file" ]; then
     record_baseline
   fi
   now_neighbors="$(neighbors)"
-  while IFS=$'\t' read -r n s r h _; do
-    [ -n "$n" ] || continue
-    # A container the baseline has never seen is new, not restarted: ignore it.
-    grep -q "^$n	" "$baseline_file" || continue
-    grep -qF "$n	$s	$r" "$baseline_file" || neighbor_bad="$neighbor_bad $n(restarted)"
-    [ "$h" != unhealthy ] || neighbor_bad="$neighbor_bad $n(unhealthy)"
-  done <<<"$now_neighbors"
-  while IFS=$'\t' read -r n _; do
-    [ -n "$n" ] || continue
-    printf '%s\n' "$now_neighbors" | cut -f1 | grep -qxF "$n" || neighbor_bad="$neighbor_bad $n(gone)"
-  done <"$baseline_file"
-  [ -z "$neighbor_bad" ] || add_breach "neighbor($(echo "$neighbor_bad" | sed 's/^ //; s/ /;/g'))"
+  neighbors_bad="$(printf '%s\n' "$now_neighbors" | nb_guard_neighbor_breaches "$baseline_file")"
+  [ -z "$neighbors_bad" ] || add_breach "neighbor($neighbors_bad)"
 
   printf '%s\t%s\t%s\t%s\t%s\n' "$(nb_ts)" "${avail:-?}" "${load:-?}" "${usage:-none}" "${breach_list:-ok}" >>"$log_file"
   if [ -f "$log_file" ] && [ "$(wc -c <"$log_file" | tr -d ' ')" -gt 5242880 ]; then
@@ -149,8 +158,11 @@ respond() {
   done
   if [ "$acted" = 1 ]; then
     nb_log "BREACH ($kinds): stopping project $NB_PROJECT and nothing else"
-    jq -n --arg at "$(nb_ts)" --arg why "$kinds" '{at:$at, reason:$why}' | nb_write_atomic "$NB_STATE_DIR/guard-abort.json"
+    # The stop comes first: a full disk must not be able to stop the stop. The marker that tells
+    # `nb status` why the node is down is best effort, written afterwards.
     nb_compose --profile '*' down --remove-orphans >&2 || nb_log "compose down failed"
+    jq -n --arg at "$(nb_ts)" --arg why "$kinds" '{at:$at, reason:$why}' \
+      | nb_write_atomic "$NB_STATE_DIR/guard-abort.json" || nb_log "could not write the abort marker"
   else
     nb_log "BREACH ($kinds): reported only, no abort configured for it"
   fi

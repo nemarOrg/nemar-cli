@@ -3,16 +3,36 @@
 # nb-cron-line: print the crontab entries for this node. It installs nothing: the crontab belongs
 # to the account that owns it, and adding a line is a decision for a person.
 #
+# The entries, and why each exists:
+#   load        pulls artifacts and reloads when something changed (a no-change run is one small
+#               request); the 2 hour loader-stale alarm in `nb status` assumes it runs
+#   guard       the resource guard watcher, started at boot and supervised by the heartbeat check
+#   heartbeat   `nb guard --check` prints (so cron mails) when the watcher has stopped sampling
+#   status      `nb status --quiet` prints nothing when healthy; any output means a problem, so cron
+#               mails it. Set MAILTO at the top of the crontab to wire an alert. Wire it to a real
+#               notifier before relying on it: a status that is only ever read by a person is not
+#               an alarm.
+#   adopt       after a reboot the stock graph clears and reloads itself, while its healthcheck can
+#               already report healthy; `nb reload --adopt` holds the API down until the load is done
+#               and then verifies it
+#   backup      nightly, on the same disk (see NB_BACKUP_HOOK for an off-host copy)
+#
 # Usage: bin/nb-cron-line
 set -euo pipefail
 # shellcheck source=nb-common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/nb-common.sh"
+case "${1:-}" in
+  -h | --help)
+    nb_usage "$0"
+    exit 0
+    ;;
+esac
 cat <<LINES
-# NEMAR Neurobagel node (crontab -e). Host local time.
-# Pull artifacts and reload ONLY when something changed. Cheap when nothing did: one small index fetch.
+# NEMAR Neurobagel node (crontab -e). Host local time. Set MAILTO=<address> above to receive alerts.
 */20 * * * * $NB_CODE_DIR/bin/nb load >> $NB_LOGS_DIR/load.log 2>&1
-# Resource guard: log a sample and stop this project (only) if host memory available falls below the threshold.
-*/5 * * * * $NB_CODE_DIR/bin/nb guard --quiet --abort-on mem >> $NB_LOGS_DIR/guard-cron.log 2>&1
-# Nightly backup of inputs and state, 14 kept.
+@reboot sleep 30 && cd $NB_CODE_DIR && setsid nohup bin/nb guard --watch 10 --abort-on mem,load,neighbor --quiet >> $NB_LOGS_DIR/guard-watch.out 2>&1 < /dev/null &
+*/10 * * * * $NB_CODE_DIR/bin/nb guard --check
+*/10 * * * * $NB_CODE_DIR/bin/nb status --quiet
+@reboot sleep 90 && $NB_CODE_DIR/bin/nb reload --adopt >> $NB_LOGS_DIR/adopt.log 2>&1
 17 3 * * * $NB_CODE_DIR/bin/nb backup >> $NB_LOGS_DIR/backup.log 2>&1
 LINES
