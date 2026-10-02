@@ -829,6 +829,15 @@ describe("the run and its heartbeat", () => {
     expect(r.checks.drift.verdict).toBe("healthy");
   });
 
+  test("a run that names no trigger is an on-demand one: it is never the daily job's evidence of being alive", async () => {
+    // The weekly report counts only `cron` rows, so the default must fail toward "admin".
+    const r = await runNeurobagelVerificationSweep(h.env(), { timeoutMs: 4000 });
+    expect(r.trigger).toBe("admin");
+    expect(JSON.parse(auditRows("neurobagel_verification")[0]?.details ?? "{}").trigger).toBe(
+      "admin",
+    );
+  });
+
   test("every run writes one heartbeat, with its trigger, whatever the verdicts", async () => {
     await sweep();
     await sweep({}, { trigger: "cron" });

@@ -418,6 +418,21 @@ describe("nemar admin neurobagel status prints the verification", () => {
   });
 });
 
+describe("nemar admin neurobagel status exit code for an unanswerable verification", () => {
+  test("an unknown verdict makes the exit code non-zero, as an alarm does: unknown is not healthy", async () => {
+    const node = Bun.serve({ port: 0, fetch: () => new Response("{}", { status: 500 }) });
+    try {
+      envOverrides = { NEUROBAGEL_NODE_URL: `http://127.0.0.1:${node.port}` };
+      await runCli(["admin", "neurobagel", "verify"]);
+      const status = await runCli(["admin", "neurobagel", "status"]);
+      expect(status.all).toMatch(/Verification\s+unknown/);
+      expect(status.exitCode).toBe(1);
+    } finally {
+      node.stop(true);
+    }
+  });
+});
+
 describe("the command group", () => {
   test("is listed under admin, with every subcommand", async () => {
     const result = await runCli(["admin", "neurobagel", "--help"]);
