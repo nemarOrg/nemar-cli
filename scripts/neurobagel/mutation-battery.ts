@@ -768,8 +768,8 @@ export const MUTANTS: Mutant[] = [
     id: "U20-sex-rule-dropped",
     layer: "upstream",
     file: `${SCRIPTS}/upstream-annotations.ts`,
-    find: 'if (kind === "sex") {\n      const refusal',
-    replace: "if (false as boolean) {\n      const refusal",
+    find: 'if (kind === "sex") {\n      const description',
+    replace: "if (false as boolean) {\n      const description",
     note: "upstream's reading of every gender column as sex is carried, as before the rule",
   },
   {
@@ -821,6 +821,22 @@ export const MUTANTS: Mutant[] = [
     find: 'return isRecord(entry) && typeof entry.Description === "string" ? entry.Description : null;',
     replace: "return isRecord(entry) ? JSON.stringify(entry) : null;",
     note: "any text of the column's entry, a Levels text included, counts as its description",
+  },
+  {
+    id: "U27-audit-lists-a-kept-column-with-no-entry",
+    layer: "upstream",
+    file: `${SCRIPTS}/reuse-openneuro-annotations.ts`,
+    find: '.filter((r) => r.decision !== "kept" || inEntry(conversion, r.column))',
+    replace: ".filter(() => true)",
+    note: "the audit lists a column as read as sex that no entry carries",
+  },
+  {
+    id: "U28-audit-file-read-as-a-dataset",
+    layer: "upstream",
+    file: `${SCRIPTS}/reuse-openneuro-annotations.ts`,
+    find: '    "--audit-sex",\n',
+    replace: "",
+    note: "the file named after --audit-sex is taken for a dataset id",
   },
 ];
 

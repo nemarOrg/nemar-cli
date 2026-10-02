@@ -22,7 +22,7 @@ import {
   NEUROBAGEL_TEST_ROOT,
   loadCuration,
 } from "../scripts/neurobagel/fixtures-io";
-import { parseArgs, planMerge } from "../scripts/neurobagel/reuse-openneuro-annotations";
+import { parseArgs, planMerge, sexAudit } from "../scripts/neurobagel/reuse-openneuro-annotations";
 import {
   type Conversion,
   MergeRefusal,
@@ -675,6 +675,78 @@ describe("a sex column not named sex is read as sex only when its own descriptio
       const out = await bothColumns("");
       expect(columnsOf(out)).toEqual(["BDI", "STAI", "sex"]);
       expect(out.dropped).toEqual({ sex_not_described_as_sex: 1 });
+    });
+  });
+
+  describe("the audit trail shows what decided each column", () => {
+    test("a conversion records each sex column not named sex with the description that decided it, and none for a column named sex", async () => {
+      expect((await convert("on004574")).sexReadings).toEqual([
+        {
+          column: "GENDER",
+          decision: "sex_described_as_gender",
+          description: "Gender of the participant",
+          participantsJson: true,
+        },
+      ]);
+      expect((await convert("on001787")).sexReadings).toEqual([
+        {
+          column: "gender",
+          decision: "kept",
+          description: "sex of the participant",
+          participantsJson: true,
+        },
+      ]);
+      expect((await convert("on003474")).sexReadings).toEqual([]);
+      const absent = await mirrorOf("on004574", (tsv) => [tsv, null]);
+      expect((await convert("on004574", {}, undefined, absent)).sexReadings).toEqual([
+        {
+          column: "GENDER",
+          decision: "sex_not_described_as_sex",
+          description: null,
+          participantsJson: false,
+        },
+      ]);
+    });
+
+    test("the audit lists kept and left-out columns by dataset, and counts the left-out ones by reason", async () => {
+      const ids = ["on001787", "on003474", "on004574", "on004635", "on006861"];
+      const rows = await Promise.all(
+        ids.map(async (id) => ({ id, conversion: await convert(id) })),
+      );
+      const audit = sexAudit(rows);
+      expect(audit.kept).toBe(2);
+      expect(audit.left_out_by_reason).toEqual({ sex_described_as_gender: 2 });
+      expect(audit.columns.map((c) => `${c.dataset_id} ${c.column} ${c.decision}`)).toEqual([
+        "on001787 gender kept",
+        "on004574 GENDER sex_described_as_gender",
+        "on004635 Gender kept",
+        "on006861 Gender sex_described_as_gender",
+      ]);
+      expect(audit.columns.every((c) => c.participants_json)).toBe(true);
+      expect(audit.columns.find((c) => c.dataset_id === "on006861")?.description).toBe(
+        "Participant gender. Values: Female or Male.",
+      );
+    });
+
+    test("a column that was kept but whose dataset got no entry is not listed as kept", async () => {
+      const mirror = await mirrorOf("on004635");
+      const wrong: MirrorDocuments = {
+        ...mirror,
+        pins: { ...mirror.pins, participantsTsv: "0".repeat(40) },
+      };
+      const out = await convert("on004635", {}, undefined, wrong);
+      expect(out.entry).toBeNull();
+      expect(out.sexReadings.map((r) => r.decision)).toEqual(["kept"]);
+      expect(sexAudit([{ id: "on004635", conversion: out }]).columns).toEqual([]);
+    });
+
+    test("the command line takes --audit-sex with a file, and the file name is not read as a dataset", () => {
+      expect(parseArgs(["on004574"]).auditSex).toBeUndefined();
+      const args = parseArgs(["--audit-sex", "audit.json", "on004574"]);
+      expect(args.auditSex).toBe("audit.json");
+      expect(args.ids).toEqual(["on004574"]);
+      // A file named like a dataset id is still the flag's value, never a dataset.
+      expect(parseArgs(["--audit-sex", "on000001", "on004574"]).ids).toEqual(["on004574"]);
     });
   });
 

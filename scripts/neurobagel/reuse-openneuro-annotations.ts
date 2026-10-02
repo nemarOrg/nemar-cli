@@ -27,6 +27,9 @@
  *   --out <file>          write the generated entries, as a curation file
  *   --merge-into <file>   merge them into this curation file instead
  *   --report <file>       write the counts as JSON (always printed too)
+ *   --audit-sex <file>    write, as JSON, every column read as Sex whose name is not `sex`, kept or
+ *                         left out, with the participants.json description that decided it
+ *                         (a column is read as sex only when its own description says sex)
  *   --cache <dir>         keep fetched documents here and reuse them on the next run
  *   --save-upstream <dir> keep the upstream files the entries came from, with the licence and
  *                         a provenance.json, under <dir>/<short commit>/ (the test fixtures)
@@ -68,6 +71,7 @@ export function parseArgs(argv: string[]) {
     "--out",
     "--merge-into",
     "--report",
+    "--audit-sex",
     "--cache",
     "--save-upstream",
     "--date",
@@ -77,6 +81,7 @@ export function parseArgs(argv: string[]) {
     out: flag("--out"),
     mergeInto: flag("--merge-into"),
     report: flag("--report"),
+    auditSex: flag("--audit-sex"),
     cache: flag("--cache"),
     saveUpstream: flag("--save-upstream"),
     date: flag("--date") ?? new Date().toISOString().slice(0, 10),
@@ -84,6 +89,40 @@ export function parseArgs(argv: string[]) {
     keepRedundant: argv.includes("--keep-redundant"),
     skipAuthored: argv.includes("--skip-authored"),
     ids: argv.filter((a, i) => /^on\d{6}$/.test(a) && !valueFlags.has(argv[i - 1] ?? "")),
+  };
+}
+
+/** Whether `column` is one of the columns of the dataset's entry. */
+const inEntry = (conversion: Conversion | null, column: string): boolean => {
+  const columns = conversion?.entry?.columns;
+  return typeof columns === "object" && columns !== null && column in columns;
+};
+
+/**
+ * Every column read as Sex whose name is not `sex`, with what decided it: the audit trail of the
+ * description rule (`sexReadingDrop`), so a person can read each description that kept a column or
+ * left one out.
+ * A kept column is listed only if it is in the dataset's entry; a left-out one always is.
+ */
+export function sexAudit(rows: { id: string; conversion: Conversion | null }[]) {
+  const columns = rows.flatMap(({ id, conversion }) =>
+    (conversion?.sexReadings ?? [])
+      .filter((r) => r.decision !== "kept" || inEntry(conversion, r.column))
+      .map((r) => ({
+        dataset_id: id,
+        column: r.column,
+        decision: r.decision,
+        description: r.description,
+        participants_json: r.participantsJson,
+      })),
+  );
+  const leftOut: Record<string, number> = {};
+  for (const c of columns)
+    if (c.decision !== "kept") leftOut[c.decision] = (leftOut[c.decision] ?? 0) + 1;
+  return {
+    kept: columns.filter((c) => c.decision === "kept").length,
+    left_out_by_reason: Object.fromEntries(Object.entries(leftOut).sort()),
+    columns,
   };
 }
 
@@ -378,6 +417,9 @@ async function main(): Promise<void> {
   };
   console.log(JSON.stringify(report, null, 2));
   if (args.report !== undefined) writeFileSync(args.report, `${JSON.stringify(report, null, 2)}\n`);
+  if (args.auditSex !== undefined) {
+    writeFileSync(args.auditSex, `${JSON.stringify(sexAudit(rows), null, 2)}\n`);
+  }
 
   if (args.saveUpstream !== undefined) await saveUpstream(args, rows, tree);
   if (args.out !== undefined) {

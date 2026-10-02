@@ -95,6 +95,17 @@ export type DatasetSkip =
   | "only_redundant_columns"
   | "entry_failed_final_check";
 
+/** One column upstream annotates as Sex whose name is not `sex`, and what `sexReadingDrop` decided. */
+export interface SexReading {
+  column: string;
+  /** `kept` when the description says sex; otherwise the reason the column was left out. */
+  decision: "kept" | SexReadingDrop;
+  /** What participants.json says of the column (its Description), or null when it says nothing. */
+  description: string | null;
+  /** Whether the mirror has a participants.json at all. */
+  participantsJson: boolean;
+}
+
 export interface Conversion {
   /** The entry for curation.json, or null when `skip` says why there is none. */
   entry: Record<string, unknown> | null;
@@ -109,6 +120,8 @@ export interface Conversion {
   dropped: Record<string, number>;
   /** Things done to a kept column, by name: `age_format_int_as_float`, `missing_values_deduped`. */
   notes: Record<string, number>;
+  /** Every sex column not named `sex` that reached the description rule, for an audit. */
+  sexReadings: SexReading[];
 }
 
 const SEX_BY_IDENTIFIER = new Map(Object.values(VOCAB.sex).map((t) => [t.identifier, t]));
@@ -398,6 +411,7 @@ export async function convertUpstream(
     redundant: 0,
     dropped: {},
     notes: {},
+    sexReadings: [],
   };
   const skip = (reason: DatasetSkip): Conversion => ({ ...result, skip: reason });
   if (!isRecord(upstream)) return skip("upstream_not_a_dictionary");
@@ -450,7 +464,16 @@ export async function convertUpstream(
     // that reason and only a column that would otherwise be kept is counted here; and before the
     // kind is claimed, so a column left out here does not take the dataset's one sex slot.
     if (kind === "sex") {
-      const refusal = sexReadingDrop(name, descriptionOf(participantsJson, name));
+      const description = descriptionOf(participantsJson, name);
+      const refusal = sexReadingDrop(name, description);
+      if (!isNamedSex(name)) {
+        result.sexReadings.push({
+          column: name,
+          decision: refusal ?? "kept",
+          description,
+          participantsJson: participantsJson !== null,
+        });
+      }
       if (refusal !== null) {
         bump(result.dropped, refusal);
         continue;
