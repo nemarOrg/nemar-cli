@@ -43,6 +43,7 @@ import {
   type Harness,
   gitBlobSha,
   golden,
+  recordOps,
   recordWrites,
   seedDatasetRow,
   seedFromFixture,
@@ -696,6 +697,41 @@ describe("write order", () => {
     const result = await run({}, h.env({ NEUROBAGEL: racing }));
     expect(result.index.written).toBe(true);
     expect((await storedIndex()).datasets.map((d) => d.id)).toEqual(["nm000629", "nm000630"]);
+  });
+
+  test("the previous index is read BEFORE the listing it is rebuilt from", async () => {
+    seedSynthetic(h, "nm000633");
+    await run();
+    const rec = recordOps(h.bucket);
+    await run({}, h.env({ NEUROBAGEL: rec.bucket }));
+    // The first listing is the run's own, at the start. The sync that follows reads the
+    // index and only then lists: a write conditional on the index it read cannot be
+    // clobbered by a listing taken before another run's writes.
+    const firstList = rec.log.indexOf("list");
+    const indexRead = rec.log.indexOf("get:index.json");
+    const secondList = rec.log.indexOf("list", firstList + 1);
+    expect(indexRead).toBeGreaterThan(firstList);
+    expect(secondList).toBeGreaterThan(indexRead);
+  });
+
+  test("a dataset another run publishes while this one works is kept: eligibility is decided after the listing", async () => {
+    seedSynthetic(h, "nm000634");
+    await run();
+    // Another writer (a hook) publishes nm000635 at the moment this run lists the bucket for
+    // its index. The catalog this run read at its start has never heard of it.
+    let published = false;
+    const rec = recordOps(h.bucket, async (op, count) => {
+      if (op === "list" && count === 2 && !published) {
+        published = true;
+        seedSynthetic(h, "nm000635");
+        await syncNeurobagelDataset(h.env(), "nm000635", "hook:version");
+      }
+    });
+    const result = await run({}, h.env({ NEUROBAGEL: rec.bucket }));
+    expect(published).toBe(true);
+    expect(result.removed).toEqual([]);
+    expect(await storeKeys(h.bucket)).toContain("nm000635.jsonld");
+    expect((await storedIndex()).datasets.map((d) => d.id)).toEqual(["nm000634", "nm000635"]);
   });
 
   test("two hooks for two datasets at once leave an index naming both", async () => {

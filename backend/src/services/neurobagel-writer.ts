@@ -614,23 +614,42 @@ async function processDataset(rc: RunContext, row: PlanRow): Promise<DatasetResu
 // The index, and removal
 // ----------------------------------------------------------------------------
 
+/** What {@link syncIndex} settled on: the index summary, and what it judged against. */
+interface IndexOutcome {
+  summary: RunResult["index"];
+  /** The listing the index was built from (a fresh one on a real run). */
+  listing: StoreListing;
+  /** The datasets that may be in the index: eligible NOW, and not refused by this run. */
+  indexable: ReadonlySet<string>;
+}
+
 /**
  * Bring `index.json` to what the listing says, for the datasets eligible now.
  * Conditional on the index not having changed since it was read; a run that loses
- * rebuilds from a fresh listing, up to a few attempts.
+ * rebuilds from a fresh read, up to a few attempts.
+ *
+ * Two orders matter. The previous index is read BEFORE the listing: the conditional write
+ * is conditional on that read, so a run that replaced the index after it makes this write
+ * lose, instead of a listing taken before that run's writes overwriting them. And
+ * eligibility is decided AFTER the listing, inside every attempt (`decide`): a dataset
+ * another run published since this one started is in the listing and must not be judged
+ * against a catalog read minutes ago, which would drop it from the index and, on the next
+ * line, delete its artifacts.
  */
 async function syncIndex(
   rc: RunContext,
-  eligibleIds: ReadonlySet<string>,
-): Promise<RunResult["index"]> {
+  decide: (listing: StoreListing) => Promise<ReadonlySet<string>>,
+): Promise<IndexOutcome> {
   const { bucket, options } = rc;
   let listing = rc.listing;
+  let indexable: ReadonlySet<string> = new Set();
   for (let attempt = 1; attempt <= INDEX_ATTEMPTS; attempt++) {
-    if (attempt > 1 || options.execute) listing = await listStore(bucket);
     const previous = await readStoredIndex(bucket);
+    if (attempt > 1 || options.execute) listing = await listStore(bucket);
+    indexable = await decide(listing);
     const built = await buildIndexDocument(
       listing,
-      eligibleIds,
+      indexable,
       previous.document,
       rc.now.toISOString(),
     );
@@ -642,31 +661,34 @@ async function syncIndex(
         ? { skipped_incomplete: built.skippedIncomplete }
         : {}),
     };
-    if (!built.changed) return summary;
+    if (!built.changed) return { summary, listing, indexable };
     const problems = indexProblems(built.document);
-    if (problems.length > 0) return { ...summary, problems };
-    if (!options.execute) return summary;
+    if (problems.length > 0) return { summary: { ...summary, problems }, listing, indexable };
+    if (!options.execute) return { summary, listing, indexable };
     // No index yet: a plain write. Two runs creating the first index each build it
     // from the same bucket, and either result is the right one.
     const written = await bucket.put(NEUROBAGEL_INDEX_KEY, serializeIndex(built.document), {
       httpMetadata: { contentType: "application/json" },
       ...(previous.etag ? { onlyIf: { etagMatches: previous.etag } } : {}),
     });
-    if (written) return { ...summary, written: true };
+    if (written) return { summary: { ...summary, written: true }, listing, indexable };
     // Another run replaced the index between our read and our write.
   }
   return {
-    changed: true,
-    written: false,
-    entries: null,
-    contended: true,
+    summary: { changed: true, written: false, entries: null, contended: true },
+    listing,
+    indexable,
   };
 }
 
-async function removeArtifacts(rc: RunContext, ids: readonly string[]): Promise<string[]> {
+async function removeArtifacts(
+  rc: RunContext,
+  listing: StoreListing,
+  ids: readonly string[],
+): Promise<string[]> {
   const removed: string[] = [];
   for (const id of ids) {
-    const stored = rc.listing.datasets.get(id);
+    const stored = listing.datasets.get(id);
     if (!stored) continue;
     const keys = (["jsonld", "dictionary", "description"] as const)
       .map((k) => stored[k]?.key)
@@ -717,12 +739,6 @@ export async function runNeurobagelWriter(env: Bindings, options: RunOptions): P
     const listing = await listStore(bucket);
     // `eligible` is the catalog's count, which a scoped run does not read: null, not zero.
     result.eligible = only === undefined ? rows.length : null;
-    // Who is eligible among everything this run may touch: the whole catalog when unscoped,
-    // else what the store holds plus what was named. The index is judged against this.
-    const eligibleIds =
-      only === undefined
-        ? new Set(rows.map((r) => r.dataset_id))
-        : await eligibleAmong(env.DB, [...new Set([...listing.datasets.keys(), ...only])]);
     const ledger = options.execute ? await readLedger(env.DB) : new Map<string, LedgerEntry>();
 
     const resolver = options.deps?.curation ?? defaultCurationResolver;
@@ -791,30 +807,39 @@ export async function runNeurobagelWriter(env: Bindings, options: RunOptions): P
       result.results.push(outcome);
     }
 
-    // What leaves: datasets the store holds that are not eligible now, that proved
-    // ineligible while being examined, or whose data said anonymous. Scoped to the
-    // requested ids when there are some. Computed from the LISTING, not from memory.
+    // What leaves: datasets the store holds that are not eligible NOW (decided inside the
+    // index sync, after its fresh listing), that proved ineligible while being examined, or
+    // whose data said anonymous. Scoped to the requested ids when there are some. Computed
+    // from the LISTING, not from memory.
     const droppedWhileExamining = new Set(
       result.results
         .filter((r) => r.outcome === "refused" && r.code === "no_longer_eligible")
         .map((r) => r.id),
     );
-    const notIndexable = (id: string): boolean =>
-      !eligibleIds.has(id) || rc.anonymityRefused.has(id) || droppedWhileExamining.has(id);
-    const leaving = [...listing.datasets.keys()]
-      .filter((id) => notIndexable(id) && (only === undefined || only.includes(id)))
-      .sort();
-    const indexable = new Set([...eligibleIds].filter((id) => !notIndexable(id)));
 
     // Index first (it omits what leaves); artifacts of what leaves go after.
-    const index = await syncIndex(rc, indexable);
+    const {
+      summary: index,
+      listing: indexed,
+      indexable,
+    } = await syncIndex(rc, async (fresh) => {
+      const eligibleNow = await eligibleAmong(env.DB, [...fresh.datasets.keys()]);
+      return new Set(
+        [...eligibleNow].filter(
+          (id) => !rc.anonymityRefused.has(id) && !droppedWhileExamining.has(id),
+        ),
+      );
+    });
     result.index = index;
+    const leaving = [...indexed.datasets.keys()]
+      .filter((id) => !indexable.has(id) && (only === undefined || only.includes(id)))
+      .sort();
 
     const batch = leaving.slice(0, REMOVAL_LIMIT);
     result.removals_pending = leaving.length - batch.length;
     if (options.execute) {
       if (index.written || !index.changed) {
-        result.removed = await removeArtifacts(rc, batch);
+        result.removed = await removeArtifacts(rc, indexed, batch);
         for (const id of result.removed) result.results.push({ id, outcome: "removed" });
       } else {
         result.warnings.push(

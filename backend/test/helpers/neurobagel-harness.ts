@@ -444,3 +444,46 @@ export function recordWrites(bucket: R2Bucket): {
   });
   return { bucket: wrapped as R2Bucket, log };
 }
+
+/**
+ * A transparent wrapper around the real bucket that records EVERY call in order
+ * (`get:<key>`, `head:<key>`, `list`, `put:<key>`, `delete:<key>`) and runs an optional
+ * async `after` hook once the call has returned, so a test can land another writer at an
+ * exact point in a run. Every call still reaches Miniflare's R2.
+ */
+export function recordOps(
+  bucket: R2Bucket,
+  after?: (op: string, count: number) => void | Promise<void>,
+): { bucket: R2Bucket; log: string[] } {
+  const log: string[] = [];
+  const counts = new Map<string, number>();
+  const wrapped = new Proxy(bucket, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (
+        typeof value === "function" &&
+        (prop === "get" ||
+          prop === "head" ||
+          prop === "list" ||
+          prop === "put" ||
+          prop === "delete")
+      ) {
+        return async (...args: unknown[]) => {
+          const first = args[0];
+          const keys =
+            prop === "list" ? [""] : Array.isArray(first) ? (first as string[]) : [first as string];
+          const names = keys.map((k) => (prop === "list" ? "list" : `${String(prop)}:${k}`));
+          log.push(...names);
+          const result = await (value as (...a: unknown[]) => unknown).apply(target, args);
+          for (const name of names) {
+            counts.set(name, (counts.get(name) ?? 0) + 1);
+            await after?.(name, counts.get(name) as number);
+          }
+          return result;
+        };
+      }
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { bucket: wrapped as R2Bucket, log };
+}
