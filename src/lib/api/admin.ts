@@ -26,6 +26,7 @@ import type {
   NeurobagelRegenerateRequest,
   NeurobagelRunResult,
   NeurobagelStatus,
+  NeurobagelVerifyResult,
 } from "../../../shared/contract/neurobagel-admin.js";
 import type { BackfillNameOutcome } from "../../../shared/contract/publication.js";
 import { request } from "./client.js";
@@ -1554,6 +1555,8 @@ export type {
   NeurobagelRunResult,
   NeurobagelRunSummary,
   NeurobagelStatus,
+  NeurobagelVerification,
+  NeurobagelVerifyResult,
 } from "../../../shared/contract/neurobagel-admin.js";
 
 /**
@@ -1573,6 +1576,18 @@ export async function neurobagelRegenerate(
 
 export async function getNeurobagelStatus(): Promise<NeurobagelStatus> {
   return request<NeurobagelStatus>("/admin/neurobagel/status", { method: "GET" }, true);
+}
+
+/**
+ * Run the Neurobagel verification sweep now (epic #1586 phase 6). It reports and never
+ * repairs; it works on staging and writes only its own heartbeat.
+ */
+export async function neurobagelVerify(): Promise<NeurobagelVerifyResult> {
+  return request<NeurobagelVerifyResult>(
+    "/admin/neurobagel/verify",
+    { method: "POST", body: "{}" },
+    true,
+  );
 }
 
 // ============================================================================

@@ -24,7 +24,14 @@ import {
   loadPlanRows,
   readLedger,
 } from "./neurobagel-plan.js";
-import { META, buildIndexDocument, listStore, readStoredIndex } from "./neurobagel-store.js";
+import {
+  META,
+  NEUROBAGEL_INDEX_KEY,
+  buildIndexDocument,
+  listStore,
+  readStoredIndex,
+} from "./neurobagel-store.js";
+import { readLatestVerification } from "./neurobagel-verify.js";
 import {
   LOADER_TOTAL_CAP_BYTES,
   RECONCILE_HARD_LIMIT,
@@ -98,6 +105,7 @@ export async function neurobagelStatus(
     last_reconcile: null,
     needs_review: [],
     anonymity_findings: null,
+    verification: null,
     warnings,
   };
 
@@ -131,6 +139,20 @@ export async function neurobagelStatus(
     status.last_reconcile = runs.reconcile;
   } catch (err) {
     warnings.push(`the run history could not be read: ${err instanceof Error ? err.message : err}`);
+  }
+
+  // The latest verification sweep. No row is "never ran", which the CLI says plainly; an
+  // unreadable row is a warning, not a healthy one.
+  try {
+    const latest = await readLatestVerification(env.DB);
+    if (latest.kind === "ok") status.verification = latest.verification;
+    else if (latest.kind === "unreadable") {
+      warnings.push("the latest verification heartbeat could not be read as one");
+    }
+  } catch (err) {
+    warnings.push(
+      `the verification record could not be read: ${err instanceof Error ? err.message : err}`,
+    );
   }
 
   // The store.
@@ -225,4 +247,29 @@ export async function neurobagelStatus(
     );
   }
   return status;
+}
+
+const DATASET_ID_IN_TEXT = /\b(?:nm|on)\d{6}\b/g;
+
+/**
+ * Every dataset id the store holds ANYTHING for, for the anonymity sweep (ADR 0067's
+ * amendment): an id named by any object key, and any id written anywhere in the index, so an
+ * entry the writer did not stamp, an object it does not recognise and an index it cannot parse
+ * are all found. Null when no bucket is bound, which means there is no store to hold a deposit.
+ * READ-ONLY, and a failed read THROWS: "could not look" must never read as "nothing there".
+ */
+export async function readStoreDatasetIds(
+  env: Pick<Bindings, "NEUROBAGEL">,
+): Promise<Set<string> | null> {
+  if (!env.NEUROBAGEL) return null;
+  const listing = await listStore(env.NEUROBAGEL);
+  const ids = new Set(listing.datasets.keys());
+  for (const key of listing.unexpected) {
+    for (const m of key.matchAll(DATASET_ID_IN_TEXT)) ids.add(m[0]);
+  }
+  const index = await env.NEUROBAGEL.get(NEUROBAGEL_INDEX_KEY);
+  if (index) {
+    for (const m of (await index.text()).matchAll(DATASET_ID_IN_TEXT)) ids.add(m[0]);
+  }
+  return ids;
 }

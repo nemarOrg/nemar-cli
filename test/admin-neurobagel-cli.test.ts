@@ -31,6 +31,11 @@ import {
   startHarness,
   storeKeys,
 } from "../backend/test/helpers/neurobagel-harness";
+import {
+  RECORDED,
+  type UpstreamStandin,
+  startUpstreamStandin,
+} from "../backend/test/helpers/neurobagel-upstream";
 import { NEUROBAGEL_REGENERATE_MAX } from "../shared/contract/neurobagel-admin";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
@@ -47,11 +52,15 @@ let h: Harness;
 let configDir: string;
 let server: ReturnType<typeof Bun.serve>;
 let envOverrides: Partial<Bindings> = {};
+// The verification sweep reads upstream's public API: a local server with the real recorded
+// answers, so the command line is driven end to end without reaching the internet.
+let upstream: UpstreamStandin;
 /** Every request the server received, `METHOD /path`, so a test can say what was NOT sent. */
 let requests: string[] = [];
 
 beforeAll(async () => {
   h = await startHarness();
+  upstream = startUpstreamStandin();
   server = Bun.serve({
     port: 0,
     fetch: (req) => {
@@ -62,6 +71,7 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   server.stop(true);
+  upstream.stop();
   await h.dispose();
 });
 
@@ -69,6 +79,8 @@ beforeEach(async () => {
   await h.reset();
   envOverrides = {};
   requests = [];
+  upstream.answers = { ...RECORDED };
+  upstream.requests.length = 0;
   configDir = mkdtempSync(join(tmpdir(), "nemar-admin-neurobagel-cli-"));
   writeFileSync(
     join(configDir, "config.json"),
@@ -316,11 +328,102 @@ describe("nemar admin neurobagel status", () => {
   });
 });
 
+describe("nemar admin neurobagel verify", () => {
+  const movedUpstream = () => {
+    upstream.answers = {
+      ...upstream.answers,
+      "/repos/neurobagel/api/releases/latest": {
+        ...(upstream.answers["/repos/neurobagel/api/releases/latest"] as object),
+        tag_name: "v0.12.0",
+      },
+    };
+  };
+
+  test("prints each check's verdict as itself, and an unconfigured check as unchecked, with exit 0", async () => {
+    seedSynthetic(h, "nm000950");
+    const result = await runCli(["admin", "neurobagel", "verify"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.all).toMatch(/Verification\s+healthy/);
+    expect(result.all).toMatch(/store\s+healthy/);
+    expect(result.all).toMatch(/node\s+unchecked\s+NEUROBAGEL_NODE_URL is not set/);
+    expect(result.all).toMatch(/registration\s+unchecked/);
+    expect(result.all).toMatch(/drift\s+healthy/);
+    expect(requests).toContain("POST /admin/neurobagel/verify");
+  });
+
+  test("an alarm exits 1 and says what moved", async () => {
+    movedUpstream();
+    const result = await runCli(["admin", "neurobagel", "verify"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.all).toMatch(/Verification\s+alarm/);
+    expect(result.all).toContain("node API v0.11.0 -> v0.12.0");
+  });
+
+  test("a check that could not be answered exits 2, printed as unknown and never as healthy", async () => {
+    const node = Bun.serve({ port: 0, fetch: () => new Response("{}", { status: 500 }) });
+    try {
+      envOverrides = { NEUROBAGEL_NODE_URL: `http://127.0.0.1:${node.port}` };
+      const result = await runCli(["admin", "neurobagel", "verify"]);
+      expect(result.exitCode).toBe(2);
+      expect(result.all).toMatch(/Verification\s+unknown/);
+      expect(result.all).toMatch(
+        /node\s+unknown\s+The node did not answer the datasets query \(HTTP 500\)/,
+      );
+    } finally {
+      node.stop(true);
+    }
+  });
+
+  test("--json is the server's document", async () => {
+    const result = await runCli(["admin", "neurobagel", "verify", "--json"]);
+    const parsed = JSON.parse(result.stdout) as {
+      overall: string;
+      heartbeat_written: boolean;
+      checks: Record<string, { verdict: string }>;
+    };
+    expect(parsed.heartbeat_written).toBe(true);
+    expect(parsed.checks.node?.verdict).toBe("unchecked");
+  });
+
+  test("a member's key is refused with the server's own answer", async () => {
+    h.db.run("UPDATE users SET role = 'member' WHERE username = 'nbcliadmin'");
+    const result = await runCli(["admin", "neurobagel", "verify"]);
+    expect(result.exitCode).not.toBe(0);
+    expect(upstream.requests).toEqual([]);
+  });
+});
+
+describe("nemar admin neurobagel status prints the verification", () => {
+  test("before any run it says none is recorded, which is unknown and not healthy", async () => {
+    const result = await runCli(["admin", "neurobagel", "status"]);
+    expect(result.all).toMatch(/Verification\s+none recorded/);
+    expect(result.all).toContain("unknown and not healthy");
+    expect(result.all).not.toMatch(/Verification\s+healthy/);
+  });
+
+  test("after a run it prints the latest verdicts, and an alarm makes the exit code non-zero", async () => {
+    await runCli(["admin", "neurobagel", "verify"]);
+    const ok = await runCli(["admin", "neurobagel", "status"]);
+    expect(ok.all).toMatch(/Verification\s+healthy/);
+    expect(ok.all).toMatch(/registration\s+unchecked/);
+
+    upstream.answers = {
+      ...upstream.answers,
+      "/repos/neurobagel/query-tool/releases/latest": { tag_name: "v1.0.0" },
+    };
+    await runCli(["admin", "neurobagel", "verify"]);
+    const alarming = await runCli(["admin", "neurobagel", "status"]);
+    expect(alarming.all).toMatch(/Verification\s+alarm/);
+    expect(alarming.exitCode).toBe(1);
+  });
+});
+
 describe("the command group", () => {
-  test("is listed under admin, with both subcommands", async () => {
+  test("is listed under admin, with every subcommand", async () => {
     const result = await runCli(["admin", "neurobagel", "--help"]);
     expect(result.exitCode).toBe(0);
     expect(result.all).toContain("regenerate");
     expect(result.all).toContain("status");
+    expect(result.all).toContain("verify");
   });
 });

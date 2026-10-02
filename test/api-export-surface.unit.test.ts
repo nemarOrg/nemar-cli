@@ -147,6 +147,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "listKeysFor",
     "listUsers",
     "neurobagelRegenerate",
+    "neurobagelVerify",
     "publishDataset",
     "publishVersionDoi",
     "publishZarrCatalog",
@@ -242,6 +243,7 @@ const POST_SPLIT_ADDITIONS = [
   "anonymitySweepReset", // the same route with ?reset=1
   "getNeurobagelStatus", // epic #1586 phase 4, ADR 0084: GET /admin/neurobagel/status
   "neurobagelRegenerate", // epic #1586 phase 4, ADR 0084: POST /admin/neurobagel/regenerate (dry run by default)
+  "neurobagelVerify", // epic #1586 phase 6, ADR 0067 amendment: POST /admin/neurobagel/verify (reports only)
 ];
 
 /** The api.ts monolith's runtime surface, captured at #908 commit 1. */

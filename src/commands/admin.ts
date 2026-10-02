@@ -35,7 +35,10 @@ import {
   OPERATIONAL_ACCOUNT_KINDS,
   isAccountKind,
 } from "../../shared/contract/index.js";
-import { NEUROBAGEL_REGENERATE_MAX } from "../../shared/contract/neurobagel-admin.js";
+import {
+  NEUROBAGEL_CHECKS,
+  NEUROBAGEL_REGENERATE_MAX,
+} from "../../shared/contract/neurobagel-admin.js";
 import {
   PUBLICATION_STEPS,
   PUBLICATION_STEP_LABELS,
@@ -59,6 +62,8 @@ import {
   type ImportIssueTriageResponse,
   type NeurobagelRunResult,
   type NeurobagelStatus,
+  type NeurobagelVerification,
+  type NeurobagelVerifyResult,
   type RecordingStatsSweepBatchResponse,
   type ReindexBulkOptions,
   type ReindexBulkResponse,
@@ -112,6 +117,7 @@ import {
   listKeysFor,
   listUsers,
   neurobagelRegenerate,
+  neurobagelVerify,
   publishDataset,
   publishZarrCatalog,
   recordingStatsSweep,
@@ -9270,6 +9276,30 @@ const neurobagelCommand = new Command("neurobagel").description(
 const neurobagelNum = (n: number | null): string =>
   n === null ? chalk.yellow("unknown") : String(n);
 
+const neurobagelVerdict = (v: NeurobagelVerification["overall"]): string =>
+  v === "healthy"
+    ? chalk.green(v)
+    : v === "alarm"
+      ? chalk.red(v)
+      : v === "unknown"
+        ? chalk.yellow(v)
+        : chalk.dim(v);
+
+/**
+ * The verification sweep's verdicts, one line each. `unchecked` (not configured here) and
+ * `unknown` (could not be answered) are printed as themselves: neither is healthy.
+ */
+function printNeurobagelVerification(v: NeurobagelVerification): void {
+  console.log(
+    `${chalk.bold("Verification")}  ${neurobagelVerdict(v.overall)}  ${v.at} (${v.trigger})${v.failed ? chalk.red(`  the sweep itself failed: ${v.error ?? "no reason recorded"}`) : ""}`,
+  );
+  for (const name of NEUROBAGEL_CHECKS) {
+    const c = v.checks[name];
+    console.log(`  ${name.padEnd(13)}${neurobagelVerdict(c.verdict)}  ${c.reason}`);
+  }
+  for (const w of v.warnings) console.log(chalk.yellow(`  warning: ${w}`));
+}
+
 function printNeurobagelRun(res: NeurobagelRunResult): void {
   console.log();
   if (res.dry_run) {
@@ -9501,6 +9531,12 @@ neurobagelCommand
     console.log(
       `${chalk.bold("Anonymity")}     ${s.anonymity_findings === null ? chalk.yellow("unknown") : s.anonymity_findings === 0 ? "no findings" : chalk.red(`${s.anonymity_findings} finding(s): see the audit log (neurobagel_anonymity_finding); ids are not shown here`)}`,
     );
+    if (s.verification) printNeurobagelVerification(s.verification);
+    else {
+      console.log(
+        `${chalk.bold("Verification")}  ${chalk.yellow("none recorded")}: the daily verification sweep has not run, which is unknown and not healthy`,
+      );
+    }
     if (s.needs_review.length > 0) {
       console.log();
       console.log(chalk.bold(`Needs review (${s.needs_review.length})`));
@@ -9515,10 +9551,46 @@ neurobagelCommand
     if (
       s.writer.mode === "store_unconfigured" ||
       (s.anonymity_findings ?? 0) > 0 ||
-      s.counts.eligible === null
+      s.counts.eligible === null ||
+      s.verification?.overall === "alarm" ||
+      s.verification?.overall === "unknown"
     ) {
       process.exitCode = 1;
     }
+  });
+
+neurobagelCommand
+  .command("verify")
+  .description(
+    "Run the verification sweep now: the store against eligibility, the node, registration and upstream drift (reports only)",
+  )
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(async (options: { json?: boolean }) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora("Verifying the Neurobagel federation...").start();
+    let res: NeurobagelVerifyResult;
+    try {
+      res = await neurobagelVerify();
+      spinner.stop();
+    } catch (err) {
+      handleCommandError(err, spinner, "Neurobagel verify failed");
+      process.exit(1);
+      return;
+    }
+
+    if (options.json) console.log(JSON.stringify(res, null, 2));
+    else {
+      console.log();
+      printNeurobagelVerification(res);
+      if (!res.heartbeat_written) {
+        console.log(chalk.yellow("The heartbeat could not be written: this run is not recorded."));
+      }
+    }
+    // The family's exit codes (import-coverage, import-weekly): 0 healthy or nothing to check,
+    // 1 an alarm, 2 could not be determined. An unchecked check never makes a run healthy,
+    // but it is not a failure either.
+    process.exitCode = res.overall === "alarm" ? 1 : res.overall === "unknown" ? 2 : 0;
   });
 
 adminCommand.addCommand(neurobagelCommand);
