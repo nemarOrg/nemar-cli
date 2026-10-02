@@ -87,6 +87,20 @@ for _ in $(seq 1 60); do
 done
 rel="$(nb_current_release)"
 if nb_verify_node "$rel"; then
+  # A reload that a hold interrupted is on record as failed. Putting the node back is a successful
+  # verification of the same release, so it is recorded too, or nb status would go on reporting the
+  # interrupted reload as the last word.
+  jq -cn --arg at "$(nb_ts)" --arg release "$rel" \
+    --argjson expected "$NB_VERIFY_EXPECTED" --argjson served "$NB_VERIFY_SERVED" \
+    '{at:$at, kind:"unhold", release:$release, ok:true, reason:"",
+      seconds:{init:0, graph:0, api:0, verify:0, total:0},
+      datasets_expected:$expected, datasets_served:$served}' >>"$NB_STATE_DIR/reload-history.jsonl"
+  # The graph may have restarted for a reload the hold interrupted; it holds this release, so the
+  # restart count that nb status compares against is brought up to date.
+  if [ -f "$NB_STATE_DIR/applied.json" ]; then
+    jq --argjson r "$(docker inspect -f '{{.RestartCount}}' "$(nb_container_id graph)" 2>/dev/null || echo 0)" \
+      '.graph_restarts = $r' "$NB_STATE_DIR/applied.json" | nb_write_atomic "$NB_STATE_DIR/applied.json" || true
+  fi
   rm -f "$NB_STATE_DIR/hold"
   nb_log "node is back in the federation: $NB_VERIFY_SERVED dataset(s) served"
 else

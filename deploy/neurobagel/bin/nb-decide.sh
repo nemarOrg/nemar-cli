@@ -35,6 +35,12 @@ nb_decide_hold_stop() { # hold_present(0|1) from_unhold(0|1) -> prints stop or g
   if [ "$1" = 1 ] && [ "$2" = 0 ]; then echo stop; else echo go; fi
 }
 
+# A failed reload is held against the CONTENT (and not retried for a while) only when the content
+# can be at fault. A hold, or a host that ran short of memory, says nothing about it.
+nb_decide_blame_content() { # held(0|1) mem_breach(0|1) -> prints yes or no
+  if [ "$1" = 1 ] || [ "$2" = 1 ]; then echo no; else echo yes; fi
+}
+
 # ---------------------------------------------------------------------------------------------
 # Releases
 # ---------------------------------------------------------------------------------------------

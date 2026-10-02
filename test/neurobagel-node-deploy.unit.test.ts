@@ -1666,6 +1666,14 @@ describe("the decisions, as pure functions over real text", () => {
       expect(d("0", "0")).toBe("go");
       expect(d("0", "1")).toBe("go");
     });
+
+    test("a failed reload is held against the content unless a hold or a memory abort caused it", () => {
+      const d = (held: string, mem: string) => sh(`nb_decide_blame_content ${held} ${mem}`).stdout;
+      expect(d("0", "0")).toBe("yes");
+      expect(d("1", "0")).toBe("no");
+      expect(d("0", "1")).toBe("no");
+      expect(d("1", "1")).toBe("no");
+    });
   });
 
   describe("the guard", () => {

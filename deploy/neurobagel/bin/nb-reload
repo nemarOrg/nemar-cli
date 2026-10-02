@@ -364,7 +364,10 @@ record reload "$cur" false
 failed_reason="$REASON"
 
 # Content that fails to reload is remembered so the scheduled loader does not retry it forever.
-nb_record_reload_failure "$cur" "$failed_reason"
+# A hold or a memory abort is not the content's fault and is not remembered against it.
+if [ "$(nb_decide_blame_content "$held" "$mem_breach")" = yes ]; then
+  nb_record_reload_failure "$cur" "$failed_reason"
+fi
 
 if [ "$held" = 1 ]; then
   nb_log "on hold: not rolling back; the staged release stays pending and the API stays down"
