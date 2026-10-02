@@ -228,6 +228,32 @@ describe("the committed curation, applied to its real fixtures", () => {
     ).toBe(true);
   });
 
+  test("on004166 and on006801: a group column that is an intervention arm is no longer read as healthy control", async () => {
+    for (const [id, controls] of [
+      ["on004166", 20],
+      ["on006801", 7],
+    ] as const) {
+      const without = await buildNeurobagelArtifacts({ ...loadFixture(id), curation: null });
+      const withEntry = await buildNeurobagelArtifacts(loadFixture(id));
+      // The mechanical rule reads every `Control` as healthy control.
+      expect(without.files[`${id}.jsonld`].match(/ncit:C94342/g)?.length).toBe(controls);
+      // The reviewed entry declares every group value missing: no participant has a diagnosis.
+      expect(withEntry.files[`${id}.jsonld`]).not.toContain("ncit:C94342");
+      expect(
+        phenotypes(golden(id, `${id}.jsonld`)).every((s) => s.hasDiagnosis === undefined),
+      ).toBe(true);
+      const report = golden(id, `${id}.report.json`);
+      expect((report.columns as Json).group).toMatchObject({
+        status: "curated",
+        counts: { mapped: 0 },
+      });
+      expect((report.curation as Json).participants_with).toMatchObject({ diagnosis: 0 });
+      const annotations = (golden(id, `${id}_annotated.json`).group as { Annotations: Json })
+        .Annotations;
+      expect(annotations.Levels).toEqual({});
+    }
+  });
+
   test("no evidence text, reviewer text or entry key reaches any output file", () => {
     for (const id of curatedIds) {
       const entry = entries.get(id) as CurationEntry;

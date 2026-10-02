@@ -328,6 +328,34 @@
         "participants_tsv": "535d4ea0fba8f1f0ebd11f5c0999d16ca2f073af"
       }
     },
+    "on004166": {
+      "columns": {
+        "group": {
+          "IsAbout": {
+            "Label": "Diagnosis",
+            "TermURL": "nb:Diagnosis"
+          },
+          "Levels": {},
+          "MissingValues": [
+            "",
+            "Backward",
+            "Control",
+            "Forward"
+          ],
+          "VariableType": "Categorical"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "author",
+        "reviewer": "pull request author; not a domain expert, so a clinical or instrument review is still required before federation",
+        "source": "The group column of participants.tsv names the arms of a working memory training trial (Forward, Backward, Control; the dataset describes a randomized controlled trial with a no-intervention control group). The mechanical rule reads Control as healthy control, which an intervention arm is not and nothing in the documents says the participants are healthy, so every value is declared missing and no diagnosis is claimed."
+      },
+      "pins": {
+        "participants_json": "af1e086ce898d8dd3197a6b44a6735e71a214913",
+        "participants_tsv": "21113fe93b6b64b297c926361a6e7ab8f99e7625"
+      }
+    },
     "on004574": {
       "columns": {
         "GENDER": {
@@ -450,6 +478,33 @@
       "pins": {
         "participants_json": "f539786e1a83d3a7b1267975833b26a56c155c9f",
         "participants_tsv": "1ff7790d63daffa2cf697d35d9e8ab5b5b1b76b6"
+      }
+    },
+    "on006801": {
+      "columns": {
+        "group": {
+          "IsAbout": {
+            "Label": "Diagnosis",
+            "TermURL": "nb:Diagnosis"
+          },
+          "Levels": {},
+          "MissingValues": [
+            "Active",
+            "Control",
+            "Passive"
+          ],
+          "VariableType": "Categorical"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "author",
+        "reviewer": "pull request author; not a domain expert, so a clinical or instrument review is still required before federation",
+        "source": "participants.json describes the group column as the experimental arm (Active, Passive, and Control: watched the lecture without a review activity). The mechanical rule reads Control as healthy control, which an intervention arm is not, so every value is declared missing and no diagnosis is claimed; all participants are described as neurotypical students, which a reviewer may prefer to map to healthy control for every arm."
+      },
+      "pins": {
+        "participants_json": "80f7037abaabb89a537636f39065d87cb82f7063",
+        "participants_tsv": "07b2755a5007b6930186dd34dd3b83069d7d9d12"
       }
     },
     "on006861": {

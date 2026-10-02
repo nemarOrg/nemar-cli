@@ -1,0 +1,26 @@
+{
+    "participant_id": {
+        "Description": "Unique participant identifier"
+    },
+   "group": {
+    "Description": "type of subject group the subject belongs to (e.g. Forward, Backward, Control...)"
+  },
+    "age": {
+        "Description": "Age of the participant at time of testing",
+        "Units": "years"
+    },
+"ED_age": {
+        "Description": "Age of the participant accept education",
+        "Units": "years"
+    },
+    "sex": {
+        "Description": "Biological sex of the participant",
+        "Levels": {
+            "F": "female",
+            "M": "male"
+        }
+    },
+      "IQ": {
+        "Description": "intelligent of the participant"
+        }
+}
