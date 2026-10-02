@@ -249,6 +249,9 @@ describe("the converter keeps only what fits, and counts what it drops", () => {
     const upstream = JSON.parse(JSON.stringify(upstreamOf("on003568")));
     upstream.participant_age.Annotations.ValueRange = { Min: 1, Max: 2 };
     const out = await convert("on003568", {}, upstream);
+    // The column is kept (upstream's range is not what the table has, and is not carried), and
+    // nothing of the range reaches the entry.
+    expect(Object.keys((out.entry?.columns as Json) ?? {})).toContain("participant_age");
     expect(JSON.stringify(out.entry?.columns)).not.toContain("ValueRange");
   });
 
@@ -332,6 +335,17 @@ describe("the converter keeps only what fits, and counts what it drops", () => {
     expect(all.kept).toBe(lean.kept + lean.redundant);
     expect(Object.keys((all.entry?.columns as Json) ?? {})).toContain("sex");
     expect(Object.keys((lean.entry?.columns as Json) ?? {})).not.toContain("sex");
+  });
+
+  test("pins that are not those of the documents handed over fail the converter's last check", async () => {
+    const mirror = await mirrorOf("on003568");
+    const wrong: MirrorDocuments = {
+      ...mirror,
+      pins: { ...mirror.pins, participantsTsv: "0".repeat(40) },
+    };
+    const out = await convert("on003568", {}, undefined, wrong);
+    expect(out.skip).toBe("entry_failed_final_check");
+    expect(out.entry).toBeNull();
   });
 
   test("a mirror whose table changed gets an entry pinned to the NEW table, so the old one is not reused for it", async () => {

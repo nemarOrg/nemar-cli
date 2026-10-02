@@ -346,6 +346,8 @@ describe("the loader rejects, and says why", () => {
       ["participants_tsv", "abc123"],
       ["participants_tsv", "EB610A87FF4DFB93EFDCBA2DA17BFEF12DCE9B82"],
       ["participants_tsv", "zb610a87ff4dfb93efdcba2da17bfef12dce9b82"],
+      ["participants_tsv", "eb610a87ff4dfb93efdcba2da17bfef12dce9b8"],
+      ["participants_tsv", "eb610a87ff4dfb93efdcba2da17bfef12dce9b820"],
       ["participants_tsv", null],
       ["participants_tsv", 7],
     ];
