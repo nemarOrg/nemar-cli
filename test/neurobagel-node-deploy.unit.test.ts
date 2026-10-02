@@ -2509,12 +2509,24 @@ describe("the decisions, as pure functions over real text", () => {
       "utf8",
     ).trim();
 
-    /** The release directory holds the real Phase 1 goldens the captured answers were produced from. */
+    /**
+     * The release directory holds the real goldens the captured answers were produced from: those
+     * whose dataset is in the captured list of served datasets. A golden added later (a curated
+     * dataset, say) is a dataset the capture never saw, and is not part of this release.
+     */
+    const captured = new Set(
+      (JSON.parse(datasets) as { dataset_uuid: string }[]).map((d) => d.dataset_uuid),
+    );
     function goldenRelease(): string {
       const dir = tmp("release");
       for (const id of readdirSync(GOLDEN)) {
         const f = join(GOLDEN, id, `${id}.jsonld`);
-        if (existsSync(f)) cpSync(f, join(dir, `${id}.jsonld`));
+        if (!existsSync(f)) continue;
+        const identifier = (JSON.parse(readFileSync(f, "utf8")) as { identifier: string })
+          .identifier;
+        if (captured.has(`http://neurobagel.org/vocab/${identifier.replace(/^nb:/, "")}`)) {
+          cpSync(f, join(dir, `${id}.jsonld`));
+        }
       }
       return dir;
     }

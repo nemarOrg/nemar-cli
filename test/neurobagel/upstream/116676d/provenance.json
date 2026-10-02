@@ -1,0 +1,50 @@
+{
+  "commit": "116676db7114b68338c48df2d6bb804c99e8c354",
+  "fetched_at": "2026-10-02T11:40:25.415Z",
+  "files": {
+    "LICENSE": {
+      "blob_sha": "fcddee3df04738a21ca807abc1928a4292c6f82e",
+      "bytes": 1110,
+      "sha256": "4c63034d5a1d8ba4b63484b982557fb149c45a3c267a39c22809824c8d7db0a9",
+      "url": "https://raw.githubusercontent.com/neurobagel/openneuro-annotations/116676db7114b68338c48df2d6bb804c99e8c354/LICENSE"
+    },
+    "ds001787.json": {
+      "blob_sha": "cf03fafa326cac67fbfcc77c3995a801969495e0",
+      "bytes": 1367,
+      "sha256": "4e0a0ca6f1e826f59026025d30f676d885929971d4d309aadbc5c1267f6a70f4",
+      "url": "https://raw.githubusercontent.com/neurobagel/openneuro-annotations/116676db7114b68338c48df2d6bb804c99e8c354/ds001787.json"
+    },
+    "ds003474.json": {
+      "blob_sha": "7fd184e43517353fb6395363e84d868a165ab581",
+      "bytes": 2263,
+      "sha256": "45fb813c9297b8b1fd998bc73f76fba4c3b86bdb9e375392058019c8375bbdc7",
+      "url": "https://raw.githubusercontent.com/neurobagel/openneuro-annotations/116676db7114b68338c48df2d6bb804c99e8c354/ds003474.json"
+    },
+    "ds003568.json": {
+      "blob_sha": "5bd83c1283e224a1c50b217b4e41b47c5d5da609",
+      "bytes": 1588,
+      "sha256": "f84217dba57718f3744d92a1ca2dc3f09ae95d5be2b02b7b726c39234c9bd4df",
+      "url": "https://raw.githubusercontent.com/neurobagel/openneuro-annotations/116676db7114b68338c48df2d6bb804c99e8c354/ds003568.json"
+    },
+    "ds004574.json": {
+      "blob_sha": "de41b265279f982260502490bf365302bcae323d",
+      "bytes": 2426,
+      "sha256": "03b73265fca6e7e6bbd66ce79c12d19d64d16f885956f07acd4c8848dda2923a",
+      "url": "https://raw.githubusercontent.com/neurobagel/openneuro-annotations/116676db7114b68338c48df2d6bb804c99e8c354/ds004574.json"
+    },
+    "ds004635.json": {
+      "blob_sha": "fcf5dd93d26938d2eb744a0e253db9e0c6194c24",
+      "bytes": 1219,
+      "sha256": "6d80ce6f5d9050cd4cca75ca3273562e46dcb9a08c3d1c2c91bc50d12b1a3bee",
+      "url": "https://raw.githubusercontent.com/neurobagel/openneuro-annotations/116676db7114b68338c48df2d6bb804c99e8c354/ds004635.json"
+    },
+    "ds006861.json": {
+      "blob_sha": "63d93fc27b616cedc8ce19a4a74d94725752c85a",
+      "bytes": 3193,
+      "sha256": "e55667eb172114290f9ccc581259dcb4400bcdc4d0002d7541bca744700d841f",
+      "url": "https://raw.githubusercontent.com/neurobagel/openneuro-annotations/116676db7114b68338c48df2d6bb804c99e8c354/ds006861.json"
+    }
+  },
+  "license": "MIT",
+  "repo": "neurobagel/openneuro-annotations"
+}

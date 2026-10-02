@@ -1,0 +1,85 @@
+{
+  "age": {
+    "Annotations": {
+      "Format": {
+        "Label": "decimal",
+        "TermURL": "nb:FromFloat"
+      },
+      "IsAbout": {
+        "Label": "Age",
+        "TermURL": "nb:Age"
+      },
+      "MissingValues": [
+        "",
+        "n/a",
+        "N/A",
+        "NA"
+      ],
+      "ValueRange": {
+        "Max": 27,
+        "Min": 18
+      },
+      "VariableType": "Continuous"
+    },
+    "Description": "Age of the participant.",
+    "Units": "years"
+  },
+  "group": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Diagnosis",
+        "TermURL": "nb:Diagnosis"
+      },
+      "Levels": {},
+      "MissingValues": [
+        "",
+        "Backward",
+        "Control",
+        "Forward"
+      ],
+      "VariableType": "Categorical"
+    },
+    "Description": "Participant group or diagnosis; values are mapped to diagnosis terms by a reviewed curation entry.",
+    "Levels": {}
+  },
+  "participant_id": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Participant ID",
+        "TermURL": "nb:ParticipantID"
+      },
+      "VariableType": "Identifier"
+    },
+    "Description": "Participant identifier, as in participants.tsv."
+  },
+  "sex": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Sex",
+        "TermURL": "nb:Sex"
+      },
+      "Levels": {
+        "F": {
+          "Label": "Female",
+          "TermURL": "snomed:248152002"
+        },
+        "M": {
+          "Label": "Male",
+          "TermURL": "snomed:248153007"
+        }
+      },
+      "MissingValues": [
+        "",
+        "n/a",
+        "N/A",
+        "NA"
+      ],
+      "VariableType": "Categorical"
+    },
+    "Description": "Sex of the participant.",
+    "Levels": {
+      "F": "Female",
+      "M": "Male"
+    }
+  }
+}

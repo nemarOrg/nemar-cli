@@ -1,0 +1,148 @@
+{
+  "bagel": "0.11.6",
+  "bagel_only_subjects": 0,
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: CC-BY-4.0. Browse and download at https://nemar.org/dataset/nm000149 (latest version v1.0.2).",
+    "hasAccessLink": "https://nemar.org/dataset/nm000149",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Patrick Ofner",
+      "Andreas Schwarz",
+      "Joana Pereira",
+      "Daniela Wyss",
+      "Renate Wildburger",
+      "Gernot R. M\u00fcller-Putz"
+    ],
+    "hasKeywords": [
+      "EEG",
+      "Spinal Cord Injuries",
+      "motor imagery",
+      "attempted movement",
+      "movement-related cortical potentials",
+      "Brain-Computer Interfaces",
+      "neuroprosthetics"
+    ],
+    "hasLabel": "BNCI 2019-001 Motor Imagery dataset for Spinal Cord Injury patients",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/nm000149",
+      "https://doi.org/10.82901/nemar.nm000149"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/nm000149/"
+  },
+  "dataset_id": "nm000149",
+  "imaging": {
+    "attachable_subjects": 10,
+    "modalities": {
+      "sub-1": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-10": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-2": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-3": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-4": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-5": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-6": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-7": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-8": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-9": [
+        "nidm:Electroencephalography"
+      ]
+    }
+  },
+  "inputs": {
+    "annotated.json": "02aa1b7da7493d9d30ae87110615dc783aba4c15a1217ec39706800fafd06a63",
+    "dataset_description.json": "c1ee98525b5717dc8de6f4d903bc054c30f9bb68d4d449ef053f50e86b856841",
+    "participants.tsv": "0e23c5b0e5bca3407fb9434d1d8c67cfc5d70261cb3815d31804a3c3d8ce6cfa"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-1": {
+      "age": null,
+      "diagnoses": [
+        "snomed:90584004"
+      ],
+      "sex": null
+    },
+    "sub-10": {
+      "age": null,
+      "diagnoses": [
+        "snomed:90584004"
+      ],
+      "sex": null
+    },
+    "sub-2": {
+      "age": null,
+      "diagnoses": [
+        "snomed:90584004"
+      ],
+      "sex": null
+    },
+    "sub-3": {
+      "age": null,
+      "diagnoses": [
+        "snomed:90584004"
+      ],
+      "sex": null
+    },
+    "sub-4": {
+      "age": null,
+      "diagnoses": [
+        "snomed:90584004"
+      ],
+      "sex": null
+    },
+    "sub-5": {
+      "age": null,
+      "diagnoses": [
+        "snomed:90584004"
+      ],
+      "sex": null
+    },
+    "sub-6": {
+      "age": null,
+      "diagnoses": [
+        "snomed:90584004"
+      ],
+      "sex": null
+    },
+    "sub-7": {
+      "age": null,
+      "diagnoses": [
+        "snomed:90584004"
+      ],
+      "sex": null
+    },
+    "sub-8": {
+      "age": null,
+      "diagnoses": [
+        "snomed:90584004"
+      ],
+      "sex": null
+    },
+    "sub-9": {
+      "age": null,
+      "diagnoses": [
+        "snomed:90584004"
+      ],
+      "sex": null
+    }
+  },
+  "transform_only_subjects": 0
+}

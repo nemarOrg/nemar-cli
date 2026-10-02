@@ -1,0 +1,32 @@
+{
+  "group": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Diagnosis",
+        "TermURL": "nb:Diagnosis"
+      },
+      "Levels": {
+        "spinal cord injury": {
+          "Label": "Spinal cord injury",
+          "TermURL": "snomed:90584004"
+        }
+      },
+      "MissingValues": [],
+      "VariableType": "Categorical"
+    },
+    "Description": "Participant group or diagnosis; values are mapped to diagnosis terms by a reviewed curation entry.",
+    "Levels": {
+      "spinal cord injury": "Spinal cord injury"
+    }
+  },
+  "participant_id": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Participant ID",
+        "TermURL": "nb:ParticipantID"
+      },
+      "VariableType": "Identifier"
+    },
+    "Description": "Participant identifier, as in participants.tsv."
+  }
+}

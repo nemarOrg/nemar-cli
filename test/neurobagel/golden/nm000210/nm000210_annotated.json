@@ -1,0 +1,82 @@
+{
+  "age": {
+    "Annotations": {
+      "Format": {
+        "Label": "decimal",
+        "TermURL": "nb:FromFloat"
+      },
+      "IsAbout": {
+        "Label": "Age",
+        "TermURL": "nb:Age"
+      },
+      "MissingValues": [
+        "",
+        "n/a",
+        "N/A",
+        "NA"
+      ],
+      "ValueRange": {
+        "Max": 22.17,
+        "Min": 22.17
+      },
+      "VariableType": "Continuous"
+    },
+    "Description": "Age of the participant.",
+    "Units": "years"
+  },
+  "group": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Diagnosis",
+        "TermURL": "nb:Diagnosis"
+      },
+      "Levels": {
+        "autism spectrum disorder (ASD)": {
+          "Label": "Autism spectrum disorder",
+          "TermURL": "snomed:35919005"
+        }
+      },
+      "MissingValues": [],
+      "VariableType": "Categorical"
+    },
+    "Description": "Participant group or diagnosis; values are mapped to diagnosis terms by a reviewed curation entry.",
+    "Levels": {
+      "autism spectrum disorder (ASD)": "Autism spectrum disorder"
+    }
+  },
+  "participant_id": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Participant ID",
+        "TermURL": "nb:ParticipantID"
+      },
+      "VariableType": "Identifier"
+    },
+    "Description": "Participant identifier, as in participants.tsv."
+  },
+  "sex": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Sex",
+        "TermURL": "nb:Sex"
+      },
+      "Levels": {
+        "M": {
+          "Label": "Male",
+          "TermURL": "snomed:248153007"
+        }
+      },
+      "MissingValues": [
+        "",
+        "n/a",
+        "N/A",
+        "NA"
+      ],
+      "VariableType": "Categorical"
+    },
+    "Description": "Sex of the participant.",
+    "Levels": {
+      "M": "Male"
+    }
+  }
+}

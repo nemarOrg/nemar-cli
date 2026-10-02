@@ -21,12 +21,35 @@
       "status": "needs_curation"
     },
     "sex": {
-      "status": "absent"
+      "counts": {
+        "cells": 24,
+        "mapped": 24,
+        "missing": 0,
+        "unmappable": 0
+      },
+      "status": "curated"
     }
+  },
+  "curation": {
+    "columns_applied": 1,
+    "columns_skipped": 0,
+    "declared": {
+      "age": 0,
+      "assessment": 0,
+      "diagnosis": 0,
+      "sex": 1
+    },
+    "participants_with": {
+      "age": 0,
+      "assessment": 0,
+      "diagnosis": 0,
+      "sex": 24
+    },
+    "review": "upstream_community",
+    "status": "applied"
   },
   "dataset_id": "on001787",
   "flags": [
-    "gender_column_needs_curation",
     "group_column_needs_curation",
     "session_pairing_unknown"
   ],

@@ -1,0 +1,12 @@
+{
+  "bagel": "0.11.6",
+  "dataset_id": "on004166",
+  "imaging": null,
+  "inputs": {
+    "annotated.json": "e52bed99bf37092881b3bc81aa50ece7e5cd075f91004c51dc020100b0d9ef32",
+    "dataset_description.json": "f72a161e4394b8db9e5f4c858d6ce57f2b83a03a0d2bb7edb961dd3c32dd6702",
+    "participants.tsv": "a42c65043851fdd5557f4dd1243b6d122ac6fc0cf48a92f1b9ee8abc8a0c42c5"
+  },
+  "reason": "empty_ids",
+  "status": "refused"
+}

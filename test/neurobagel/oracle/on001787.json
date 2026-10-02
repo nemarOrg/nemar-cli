@@ -102,7 +102,7 @@
     }
   },
   "inputs": {
-    "annotated.json": "45a5e18f6553bb8a869ad7a93a52f5381b2f66c38771631b548281fa81ae8e8b",
+    "annotated.json": "6900fd4c0d2fb1425a3e3c3741e356c8a5a340d49a14fad4ed2fc9310a57af19",
     "dataset_description.json": "bf3a13e87007b050b37648b8ba0bfd5fd73953fdf2e4c22685a428433c7cd098",
     "participants.tsv": "306d86d218197bddc0d89ed2cac78972c2114c6b77a93fa3e26bf22f64a66230"
   },
@@ -112,122 +112,122 @@
     "sub-001": {
       "age": 32.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248153007"
     },
     "sub-002": {
       "age": 35.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248153007"
     },
     "sub-003": {
       "age": 41.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248152002"
     },
     "sub-004": {
       "age": 29.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248153007"
     },
     "sub-005": {
       "age": 34.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248152002"
     },
     "sub-006": {
       "age": 32.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248153007"
     },
     "sub-007": {
       "age": 32.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248153007"
     },
     "sub-008": {
       "age": 32.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248153007"
     },
     "sub-009": {
       "age": 43.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248153007"
     },
     "sub-010": {
       "age": 33.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248153007"
     },
     "sub-011": {
       "age": 62.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248153007"
     },
     "sub-012": {
       "age": 65.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248153007"
     },
     "sub-013": {
       "age": 47.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248152002"
     },
     "sub-014": {
       "age": 52.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248152002"
     },
     "sub-015": {
       "age": 78.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248152002"
     },
     "sub-016": {
       "age": 77.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248153007"
     },
     "sub-017": {
       "age": 32.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248152002"
     },
     "sub-018": {
       "age": null,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248152002"
     },
     "sub-019": {
       "age": 42.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248152002"
     },
     "sub-020": {
       "age": 41.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248152002"
     },
     "sub-021": {
       "age": 41.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248152002"
     },
     "sub-022": {
       "age": 31.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248152002"
     },
     "sub-023": {
       "age": 50.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248153007"
     },
     "sub-024": {
       "age": 38.0,
       "diagnoses": [],
-      "sex": null
+      "sex": "snomed:248152002"
     }
   },
   "transform_only_subjects": 0

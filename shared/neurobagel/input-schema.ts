@@ -24,6 +24,7 @@
 
 import { z } from "zod";
 import type { BidsIndexSubjectWire, BidsIndexWire } from "../contract/dataset.js";
+import type { CurationEntry } from "./curation-types";
 
 const authorSchema = z.object({ name: z.string() }).passthrough();
 const keywordSchema = z.object({ term: z.string() }).passthrough();
@@ -150,4 +151,13 @@ export interface NeurobagelInput {
   metadata: unknown;
   participantsTsv: string | null;
   participantsJson: string | null;
+  /**
+   * The reviewed curation entry for this dataset, as `parseCuration` (curation.ts) returns it,
+   * or absent for a dataset with none.
+   * It is applied only if the two participants documents are the bytes it pinned, so the text of
+   * a file must reach the transform exactly as the data plane served it (a decoder that replaces
+   * invalid bytes makes the entry stale, which is the safe direction).
+   * An entry for another dataset is refused.
+   */
+  curation?: CurationEntry | null;
 }

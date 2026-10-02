@@ -1,0 +1,559 @@
+{
+  "bagel": "0.11.6",
+  "bagel_only_subjects": 0,
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on003568 (latest version v1.0.0).",
+    "hasAccessLink": "https://nemar.org/dataset/on003568",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Lucrezia Liuzzi",
+      "Katharine Chang",
+      "Hanna Keren",
+      "Charles Zheng",
+      "Dipta Saha",
+      "Dylan Nielson",
+      "Argyris Stringaris"
+    ],
+    "hasKeywords": [
+      "Magnetoencephalography",
+      "Adolescent",
+      "Depressive Disorder, Major",
+      "Reward",
+      "mood induction",
+      "MEG",
+      "resting state"
+    ],
+    "hasLabel": "Mood induction in MDD and healthy adolescents",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/on003568",
+      "https://doi.org/10.82901/nemar.on003568"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/on003568/"
+  },
+  "dataset_id": "on003568",
+  "imaging": {
+    "attachable_subjects": 51,
+    "modalities": {
+      "sub-21111": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-22658": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-22694": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-22695": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-22812": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-23490": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-23520": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-23540": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-23550": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-23593": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-23607": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-23641": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-23656": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-23672": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-23693": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-23732": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-23757": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-23777": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-23780": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-23809": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-23911": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-23927": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-23951": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24071": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24085": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24103": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24138": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24169": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24172": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24175": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24185": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24199": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24201": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24208": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24213": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24216": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24225": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24227": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24229": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24232": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24235": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24238": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24247": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24252": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24259": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24263": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24267": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24281": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24286": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24287": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24295": [
+        "nidm:Magnetoencephalography"
+      ]
+    }
+  },
+  "inputs": {
+    "annotated.json": "bce1067a2a000e4ec08a831d0c04a7138ac462e8f6f7253a0ad0ba684a01bf02",
+    "dataset_description.json": "543b9dd3936cc3c3b22c77cfb21ab0fb746fa102212833ecde37caed0bfbe7ee",
+    "participants.tsv": "301ca86918af5958911c258268b1aa7581bd8a13744e8911a8b8fce06cbeedce"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-21111": {
+      "age": 18.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-22658": {
+      "age": 14.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-22694": {
+      "age": 16.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-22695": {
+      "age": 14.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-22812": {
+      "age": 15.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-23490": {
+      "age": 18.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-23520": {
+      "age": 18.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-23540": {
+      "age": 17.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-23550": {
+      "age": 18.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-23593": {
+      "age": 17.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-23607": {
+      "age": 18.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-23641": {
+      "age": 17.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-23656": {
+      "age": 15.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-23672": {
+      "age": 19.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-23693": {
+      "age": 17.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-23732": {
+      "age": 18.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-23757": {
+      "age": 15.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-23777": {
+      "age": 18.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-23780": {
+      "age": 19.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-23809": {
+      "age": 14.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-23911": {
+      "age": 16.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-23927": {
+      "age": 16.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-23951": {
+      "age": 14.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-24071": {
+      "age": 17.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-24085": {
+      "age": 18.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-24103": {
+      "age": 16.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-24138": {
+      "age": 15.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-24169": {
+      "age": 16.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-24172": {
+      "age": 17.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-24175": {
+      "age": 17.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-24185": {
+      "age": 17.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-24199": {
+      "age": 15.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-24201": {
+      "age": 16.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-24208": {
+      "age": 16.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-24213": {
+      "age": 14.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-24216": {
+      "age": 15.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-24225": {
+      "age": 14.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-24227": {
+      "age": 16.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-24229": {
+      "age": 15.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-24232": {
+      "age": 15.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-24235": {
+      "age": 12.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-24238": {
+      "age": 13.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-24247": {
+      "age": 15.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-24252": {
+      "age": 16.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-24259": {
+      "age": 16.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-24263": {
+      "age": 12.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-24267": {
+      "age": 12.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-24281": {
+      "age": 14.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-24286": {
+      "age": 14.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-24287": {
+      "age": 17.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-24295": {
+      "age": 16.0,
+      "diagnoses": [
+        "snomed:370143000"
+      ],
+      "sex": "snomed:248152002"
+    }
+  },
+  "transform_only_subjects": 0
+}

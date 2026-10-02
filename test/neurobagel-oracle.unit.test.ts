@@ -42,12 +42,15 @@ interface Phenotype {
   age: number | null;
   sex: string | null;
   diagnoses: string[];
+  /** Only a curated dataset has assessments, and only then is the key present. */
+  assessments?: string[];
 }
 interface Session {
   schemaKey: string;
   hasAge?: number;
   hasSex?: { identifier: string };
   hasDiagnosis?: { identifier: string }[];
+  hasAssessment?: { identifier: string }[];
   hasAcquisition?: { hasContrastType: { identifier: string } }[];
 }
 interface Subject {
@@ -70,10 +73,14 @@ function phenotypeView(jsonld: Json): Record<string, Phenotype> {
   for (const subject of jsonld.hasSamples as Subject[]) {
     const sessions = subject.hasSession.filter((s) => s.schemaKey === "PhenotypicSession");
     expect(sessions.length).toBe(1);
+    const assessments = [
+      ...new Set((sessions[0].hasAssessment ?? []).map((a) => a.identifier)),
+    ].sort();
     view[normalizeLabel(subject.hasLabel)] = {
       age: sessions[0].hasAge ?? null,
       sex: sessions[0].hasSex?.identifier ?? null,
-      diagnoses: (sessions[0].hasDiagnosis ?? []).map((d) => d.identifier).sort(),
+      diagnoses: [...new Set((sessions[0].hasDiagnosis ?? []).map((d) => d.identifier))].sort(),
+      ...(assessments.length > 0 ? { assessments } : {}),
     };
   }
   return view;
@@ -104,7 +111,8 @@ function phenotypeDisagreements(
     else if (
       actual.age !== expected.age ||
       actual.sex !== expected.sex ||
-      actual.diagnoses.join() !== expected.diagnoses.join()
+      actual.diagnoses.join() !== expected.diagnoses.join() ||
+      (actual.assessments ?? []).join() !== (expected.assessments ?? []).join()
     ) {
       problems.push(`${label}: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
     }
@@ -242,5 +250,22 @@ describe("recordings of the real bagel CLI", () => {
     expect(withAge).toBeGreaterThan(500);
     expect(withSex).toBeGreaterThan(400);
     expect(withControl).toBeGreaterThan(5);
+  });
+
+  test("bagel pheno compared the curated phenotypes too: diagnoses other than control, and assessments", () => {
+    let diagnosed = 0;
+    let assessed = 0;
+    for (const id of built) {
+      const recording = recordingOf(id);
+      if (recording.status !== "compared") continue;
+      for (const p of Object.values(recording.subjects as Record<string, Phenotype>)) {
+        if (p.diagnoses.some((d) => d !== "ncit:C94342")) diagnosed++;
+        if ((p.assessments ?? []).length > 0) assessed++;
+      }
+    }
+    // nm000149, nm000158 and nm000210 alone have 75 participants with a curated diagnosis.
+    expect(diagnosed).toBeGreaterThanOrEqual(75);
+    // on003474, on004574 and on006861 carry reused assessment items: 122, 146 and 120 participants.
+    expect(assessed).toBeGreaterThan(300);
   });
 });

@@ -1,0 +1,158 @@
+{
+  "bagel": "0.11.6",
+  "bagel_only_subjects": 0,
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: ODC-By-1.0. Browse and download at https://nemar.org/dataset/nm000119 (latest version v1.0.2).",
+    "hasAccessLink": "https://nemar.org/dataset/nm000119",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Vangelis P. Oikonomou",
+      "Georgios Liaros",
+      "Kostantinos Georgiadis",
+      "Elisavet Chatzilari",
+      "Katerina Adam",
+      "Spiros Nikolopoulos",
+      "Ioannis Kompatsiaris"
+    ],
+    "hasKeywords": [
+      "EEG",
+      "SSVEP",
+      "brain-computer interface",
+      "visual evoked potentials",
+      "steady-state visual stimulation",
+      "algorithm benchmarking"
+    ],
+    "hasLabel": "Oikonomou2016 \u2013 SSVEP MAMEM 1 dataset",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/nm000119",
+      "https://doi.org/10.82901/nemar.nm000119"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/nm000119/"
+  },
+  "dataset_id": "nm000119",
+  "imaging": {
+    "attachable_subjects": 11,
+    "modalities": {
+      "sub-1": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-10": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-11": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-2": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-3": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-4": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-5": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-6": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-7": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-8": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-9": [
+        "nidm:Electroencephalography"
+      ]
+    }
+  },
+  "inputs": {
+    "annotated.json": "b263f462bfaacbdd3ed9ae7a8f297aad91f7c4a4c1a632d4a56641136eb10a13",
+    "dataset_description.json": "3bbef8356308ff09ca77174844e76a37ef500afcc48946fc73f540cb713f4162",
+    "participants.tsv": "96abdb0faf527ee68b97659c0d2c7b55f35ce51f84b3b29d44bff32ca090c999"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-1": {
+      "age": 24.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-10": {
+      "age": 37.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-11": {
+      "age": 25.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-2": {
+      "age": 37.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-3": {
+      "age": 39.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-4": {
+      "age": 31.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-5": {
+      "age": 27.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-6": {
+      "age": 28.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-7": {
+      "age": 26.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-8": {
+      "age": 31.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-9": {
+      "age": 29.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    }
+  },
+  "transform_only_subjects": 0
+}

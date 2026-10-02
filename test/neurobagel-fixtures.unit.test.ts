@@ -11,10 +11,16 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { FIXTURE_ROOT, NEUROBAGEL_TEST_ROOT, fixtureIds } from "../scripts/neurobagel/fixtures-io";
+import {
+  FIXTURE_ROOT,
+  NEUROBAGEL_TEST_ROOT,
+  fixtureIds,
+  loadCuration,
+} from "../scripts/neurobagel/fixtures-io";
 import { bidsIndexSchema } from "../shared/contract/dataset.js";
 
 interface DocumentProvenance {
@@ -108,8 +114,9 @@ describe("fixture provenance", () => {
           expect(bytes.length).toBe(doc.bytes as number);
           expect(sha256(bytes)).toBe(doc.sha256 as string);
           expect(doc.too_large_over_bytes).toBeNull();
-          // The data plane's ETag for a git-tracked file IS its git blob sha (ADR 0066).
-          const git = /^"git:([0-9a-f]{40})"$/.exec(doc.etag ?? "");
+          // The data plane's ETag for a git-tracked file IS its git blob sha (ADR 0066); a file that
+          // is served with a conditional-weak validator (W/"git:...") says the same thing.
+          const git = /^(?:W\/)?"git:([0-9a-f]{40})"$/.exec(doc.etag ?? "");
           if (git) expect(gitBlobSha(bytes)).toBe(git[1]);
         });
       }
@@ -152,5 +159,47 @@ describe("fixture provenance", () => {
     for (const path of files(NEUROBAGEL_TEST_ROOT)) {
       expect(statSync(path).size).toBeLessThan(1024 * 1024);
     }
+  });
+});
+
+describe("the pins of a curation entry", () => {
+  const entries = loadCuration().entries;
+  const hashObject = (path: string): string => {
+    const run = spawnSync("git", ["hash-object", "--no-filters", path], { encoding: "utf8" });
+    expect(run.status).toBe(0);
+    return run.stdout.trim();
+  };
+
+  test("are what `git hash-object` says of the fixture's bytes, and what the data plane's ETag recorded", () => {
+    for (const [id, entry] of entries) {
+      const provenance = provenanceOf(id);
+      const tsv = join(FIXTURE_ROOT, id, "participants.tsv");
+      expect(entry.pins.participantsTsv).toBe(hashObject(tsv));
+      const json = join(FIXTURE_ROOT, id, "participants.json");
+      if (entry.pins.participantsJson === null) {
+        expect(existsSync(json)).toBe(false);
+        expect(provenance.documents["participants.json"].absent).toBe(true);
+      } else {
+        expect(entry.pins.participantsJson).toBe(hashObject(json));
+      }
+      // Where the data plane recorded a git entity tag (weak or strong), it is the pin.
+      for (const [name, pin] of [
+        ["participants.tsv", entry.pins.participantsTsv],
+        ["participants.json", entry.pins.participantsJson],
+      ] as const) {
+        const git = /^(?:W\/)?"git:([0-9a-f]{40})"$/.exec(provenance.documents[name].etag ?? "");
+        if (git) expect(pin).toBe(git[1]);
+      }
+    }
+  });
+
+  test("have an ETag to be compared with for most entries, so the comparison is not vacuous", () => {
+    let compared = 0;
+    for (const [id] of entries) {
+      for (const name of ["participants.tsv", "participants.json"]) {
+        if (/^(?:W\/)?"git:/.test(provenanceOf(id).documents[name].etag ?? "")) compared++;
+      }
+    }
+    expect(compared).toBeGreaterThan(entries.size);
   });
 });

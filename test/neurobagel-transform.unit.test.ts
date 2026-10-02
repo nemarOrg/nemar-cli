@@ -543,10 +543,14 @@ describe("edge classes measured on the live catalog", () => {
   });
 
   test("on001787 (a group column with no control value): nothing is mapped from it", () => {
-    expect(flagsOf("on001787")).toEqual(
-      expect.arrayContaining(["group_column_needs_curation", "gender_column_needs_curation"]),
-    );
+    expect(flagsOf("on001787")).toContain("group_column_needs_curation");
     expect(bodyOf("on001787")).not.toContain("hasDiagnosis");
+  });
+
+  test("on001787 (gender only): the reviewed entry makes gender the sex column, so the gender flag is gone", () => {
+    // Without the entry the mechanical rules leave `gender` alone and flag it (see on004019).
+    expect(flagsOf("on001787")).not.toContain("gender_column_needs_curation");
+    expect(bodyOf("on001787")).toContain("hasSex");
   });
 
   test("nm000157 (every age is 0 beside n/a sex and weight): placeholder zeros are not ages", () => {

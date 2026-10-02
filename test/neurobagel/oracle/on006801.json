@@ -1,0 +1,213 @@
+{
+  "bagel": "0.11.6",
+  "bagel_only_subjects": 0,
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on006801 (latest version v1.0.0).",
+    "hasAccessLink": "https://nemar.org/dataset/on006801",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Paloma Victoria de Sales Alves",
+      "Antonio Sime\u00e3o Sobrinho Neto",
+      "Carla Alexandra da Silva Moita Minervino"
+    ],
+    "hasKeywords": [
+      "EEG",
+      "resting-state",
+      "retrieval practice",
+      "active learning",
+      "educational neuroscience",
+      "Learning",
+      "Electroencephalography"
+    ],
+    "hasLabel": "Resting-state EEG before and after different study methods",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/on006801",
+      "https://doi.org/10.82901/nemar.on006801"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/on006801/"
+  },
+  "dataset_id": "on006801",
+  "imaging": {
+    "attachable_subjects": 21,
+    "modalities": {
+      "sub-01": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-02": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-03": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-04": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-05": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-06": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-07": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-08": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-09": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-10": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-11": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-12": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-13": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-14": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-15": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-16": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-17": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-18": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-19": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-21": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-22": [
+        "nidm:Electroencephalography"
+      ]
+    }
+  },
+  "inputs": {
+    "annotated.json": "5f5c14d269198973b6bfe374a37f5ab5814b63fd75694a3768a3d21898ec3ffd",
+    "dataset_description.json": "79c257c6688c010a1716b0bbab741fc4e57adae7d2915ba0b8269207e882ceba",
+    "participants.tsv": "7e26c5e1aae95be0a0d2e31bde08e7ef0c886492dad28744d5d04833f6363181"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-01": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-02": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-03": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-04": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-05": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-06": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-07": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-08": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-09": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-10": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-11": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-12": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-13": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-14": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-15": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-16": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-17": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-18": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-19": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-21": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-22": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    }
+  },
+  "transform_only_subjects": 0
+}
