@@ -10,7 +10,7 @@
 3. **Scope.** OpenNeuro mirrors (`on` datasets) are INCLUDED; the plan excluded them. This was agreed with Neurobagel's PI because NEMAR adds value (Zarr serving, the viewer, richer metadata, soon data quality, HED and processed data). Anonymous, private, unpublished, sandbox and fixture datasets remain excluded.
 4. **Delivery.** nemaring pulls artifacts from a private store. No ssh push and no inbound access to nemaring.
 5. **Viewer.** Link out only; the first link on each record is the NEMAR dataset page.
-6. **nemaring is shared.** It runs Infisical (the secrets store) and Umami. Existing containers must never be stopped, restarted or reconfigured, and the node runs under hard memory and CPU limits. Read-only check on 2026-10-02: 8 CPUs, 7.7 GiB RAM (about 5.2 GiB available), 23 GB disk free, Ubuntu 24.04, Docker 29.1, Compose 2.40, loopback ports 8080 and 3000 in use.
+6. **nemaring is shared.** It also runs other long-lived services, including the secrets store. Existing services must never be stopped, restarted or reconfigured, and the node runs under hard memory and CPU limits. Host specifics (resources, ports, paths, schedules) are recorded in the gated operations documentation, not in this repository.
 
 ## Mapping from the plan's phases to the epic's
 
@@ -140,7 +140,7 @@ At epic finalization:
 
 Measured on nemaring with 800 datasets and 50,105 subjects of synthetic data plus the 18 real goldens: reload 233 s, graph peak 1.9 GiB, idle graph 1.35 GiB, host available memory never below 3.3 GiB, and GraphDB Free allows one query at a time (a throughput limit, not a size limit).
 
-- **Heap.** Keep the 1.5 GiB graph heap (limits sum to 2,880 MiB). The node must not put Infisical at risk, and a 3.3 GiB stack would. The unrestricted subject query sometimes returns HTTP 500; the federation shows that as a per-node error and normal queries are filtered, so this is accepted. Review trigger: raise the heap only if the verification sweep (Phase 6) records repeated node errors or the record count grows well past 800 datasets, and only after re-measuring host headroom.
+- **Heap.** Keep the 1.5 GiB graph heap (limits sum to 2,880 MiB). The node must not put the other services on the host at risk, and a 3.3 GiB stack would. The unrestricted subject query sometimes returns HTTP 500; the federation shows that as a per-node error and normal queries are filtered, so this is accepted. Review trigger: raise the heap only if the verification sweep (Phase 6) records repeated node errors or the record count grows well past 800 datasets, and only after re-measuring host headroom.
 - **Reload window.** A 3.5 to 4 minute reload is acceptable. Reloads are batched: one scheduled reload a day in a quiet window plus on-demand, and no reload when nothing changed. No incremental path now; revisit if daily batching proves too slow (for example a burst of imports).
 - **Cron and tunnel.** Neither is installed yet. The lead installs the cron once Phase 4 delivers a real artifact store, and the Cloudflare Tunnel hostname is created only with the owner's approval (the tunnel wiring was inferred because the neighbors' compose files were not readable, so the lead confirms it first). The public hostname is not needed until registration.
 - **Guard.** Keep `--abort-on neighbor`: failing safe toward the secrets store is correct. An abort must be visible: `bin/nb status` reports it, the Phase 6 sweep reads that status, and the runbook documents `bin/nb guard --baseline` for a deliberate restart of a neighbor.
