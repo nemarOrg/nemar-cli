@@ -348,6 +348,11 @@ describe("rules the real manifests cannot reach, on synthetic manifests", () => 
       "sub-01/ses-2/sub-01_ses-2_scans.tsv",
       "sub-02/ses-1/eeg/sub-02_ses-1_task-a_run-01_eeg.edf",
       "sub-02/ses-1/eeg/sub-02_ses-1_task-a_run-02_eeg.edf",
+      // Labels that are not integer-like keep their insertion order in a
+      // JavaScript object, so these are what notice an unsorted map.
+      "sub-03/ses-b/eeg/sub-03_ses-b_task-a_eeg.edf",
+      "sub-03/ses-a/emg/sub-03_ses-a_task-a_emg.edf",
+      "sub-03/ses-a/eeg/sub-03_ses-a_task-a_eeg.edf",
     ];
     const build = (order: string[]) => {
       const builder = new BidsIndexBuilder();
@@ -356,7 +361,19 @@ describe("rules the real manifests cannot reach, on synthetic manifests", () => 
     };
     const reference = build(paths);
     expect(build([...paths].reverse())).toBe(reference);
-    expect(build([paths[3], paths[0], paths[5], paths[1], paths[4], paths[2]])).toBe(reference);
+    expect(
+      build([
+        paths[3],
+        paths[8],
+        paths[0],
+        paths[5],
+        paths[6],
+        paths[1],
+        paths[4],
+        paths[7],
+        paths[2],
+      ]),
+    ).toBe(reference);
     expect(build([...paths, ...paths])).toBe(reference);
   });
 });
