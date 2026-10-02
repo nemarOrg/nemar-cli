@@ -13,6 +13,13 @@
  * real models and to the real `bagel`, both exercised by the tests; none of the
  * three replaces another.
  *
+ * A diagnosis or assessment term is allowed only if THIS dataset's reviewed curation entry
+ * names it (the healthy control term is always allowed, as the mechanical group rule emits it).
+ * That is a stronger rule than "the term exists in the vocabulary": a diagnosis can reach a
+ * graph only through an entry a reviewer signed.
+ * That the entry's terms are in the pinned vocabulary is the loader's check (curation.ts);
+ * this module does not import the full vocabularies.
+ *
  * Pure: no I/O.
  */
 
@@ -31,9 +38,27 @@ const modalityIdentifiers = new Set(
     (i): i is string => i !== undefined,
   ),
 );
-const diagnosisIdentifiers = new Set([VOCAB.healthy_control.identifier]);
 const ageFormatIdentifiers = new Set(Object.values(VOCAB.age_formats).map((t) => t.identifier));
 const variableIdentifiers = new Set(Object.values(VOCAB.variables).map((t) => t.identifier));
+
+/**
+ * The diagnosis and assessment terms a dataset's output may carry beyond the always-allowed
+ * healthy control: those of its curation entry, as identifiers.
+ */
+export interface CuratedTerms {
+  diagnosis: Iterable<string>;
+  assessment: Iterable<string>;
+}
+
+interface AllowedTerms {
+  diagnosis: Set<string>;
+  assessment: Set<string>;
+}
+
+const allowedFor = (curated: CuratedTerms | undefined): AllowedTerms => ({
+  diagnosis: new Set([VOCAB.healthy_control.identifier, ...(curated?.diagnosis ?? [])]),
+  assessment: new Set(curated?.assessment ?? []),
+});
 
 /** A controlled-term node: only the identifier and the schema key, identifier from a pinned set. */
 const termNode = (schemaKey: string, allowed: Set<string>) =>
@@ -53,59 +78,63 @@ const httpUrl = z.string().refine((value) => {
   }
 }, "not an http(s) URL");
 
-const phenotypicSession = z
-  .object({
-    hasAge: z.number().min(AGE_MIN_YEARS).max(AGE_MAX_YEARS).optional(),
-    hasDiagnosis: z.array(termNode("Diagnosis", diagnosisIdentifiers)).min(1).optional(),
-    hasLabel: z.string().min(1),
-    hasSex: termNode("Sex", sexIdentifiers).optional(),
-    identifier,
-    schemaKey: z.literal("PhenotypicSession"),
-  })
-  .strict();
+const graphSchemaFor = (allowed: AllowedTerms) => {
+  const phenotypicSession = z
+    .object({
+      hasAge: z.number().min(AGE_MIN_YEARS).max(AGE_MAX_YEARS).optional(),
+      hasAssessment: z.array(termNode("Assessment", allowed.assessment)).min(1).optional(),
+      hasDiagnosis: z.array(termNode("Diagnosis", allowed.diagnosis)).min(1).optional(),
+      hasLabel: z.string().min(1),
+      hasSex: termNode("Sex", sexIdentifiers).optional(),
+      identifier,
+      schemaKey: z.literal("PhenotypicSession"),
+    })
+    .strict();
 
-const acquisition = z
-  .object({
-    hasContrastType: termNode("Image", modalityIdentifiers),
-    identifier,
-    schemaKey: z.literal("Acquisition"),
-  })
-  .strict();
+  const acquisition = z
+    .object({
+      hasContrastType: termNode("Image", modalityIdentifiers),
+      identifier,
+      schemaKey: z.literal("Acquisition"),
+    })
+    .strict();
 
-const imagingSession = z
-  .object({
-    hasAcquisition: z.array(acquisition).min(1),
-    hasLabel: z.string().min(1),
-    identifier,
-    schemaKey: z.literal("ImagingSession"),
-  })
-  .strict();
+  const imagingSession = z
+    .object({
+      hasAcquisition: z.array(acquisition).min(1),
+      hasLabel: z.string().min(1),
+      identifier,
+      schemaKey: z.literal("ImagingSession"),
+    })
+    .strict();
 
-const subject = z
-  .object({
-    hasLabel: z.string().min(1),
-    hasSession: z.array(z.union([phenotypicSession, imagingSession])).min(1),
-    identifier,
-    schemaKey: z.literal("Subject"),
-  })
-  .strict();
+  const subject = z
+    .object({
+      hasLabel: z.string().min(1),
+      hasSession: z.array(z.union([phenotypicSession, imagingSession])).min(1),
+      identifier,
+      schemaKey: z.literal("Subject"),
+    })
+    .strict();
 
-const dataset = z
-  .object({
-    "@context": z.record(z.string(), z.unknown()),
-    hasAccessInstructions: z.string().min(1),
-    hasAccessLink: httpUrl,
-    hasAccessType: z.literal("public"),
-    hasAuthors: z.array(z.string().min(1)).min(1).optional(),
-    hasKeywords: z.array(z.string().min(1)).min(1).optional(),
-    hasLabel: z.string().min(1),
-    hasReferencesAndLinks: z.array(z.string().min(1)).min(1),
-    hasRepositoryURL: httpUrl,
-    hasSamples: z.array(subject).min(1),
-    identifier,
-    schemaKey: z.literal("Dataset"),
-  })
-  .strict();
+  return z
+    .object({
+      "@context": z.record(z.string(), z.unknown()),
+      hasAccessInstructions: z.string().min(1),
+      hasAccessLink: httpUrl,
+      hasAccessType: z.literal("public"),
+      hasAuthors: z.array(z.string().min(1)).min(1).optional(),
+      hasKeywords: z.array(z.string().min(1)).min(1).optional(),
+      hasLabel: z.string().min(1),
+      hasReferencesAndLinks: z.array(z.string().min(1)).min(1),
+      hasRepositoryURL: httpUrl,
+      hasSamples: z.array(subject).min(1),
+      identifier,
+      schemaKey: z.literal("Dataset"),
+    })
+    .strict();
+};
+const defaultGraphSchema = graphSchemaFor(allowedFor(undefined));
 
 function collectIdentifiers(node: unknown, into: string[]): void {
   if (Array.isArray(node)) {
@@ -119,6 +148,7 @@ function collectIdentifiers(node: unknown, into: string[]): void {
       typeof record.identifier === "string" &&
       key !== "Sex" &&
       key !== "Diagnosis" &&
+      key !== "Assessment" &&
       key !== "Image"
     ) {
       into.push(record.identifier);
@@ -131,10 +161,15 @@ const issuesOf = (error: z.ZodError): string[] =>
   error.issues.slice(0, 20).map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`);
 
 /** Problems with a graph-mode JSON-LD document (empty means valid). */
-export function validateGraphDocument(document: CanonicalJsonValue): string[] {
+export function validateGraphDocument(
+  document: CanonicalJsonValue,
+  curated?: CuratedTerms,
+): string[] {
   // Round-trip through the writer so JsonFloat becomes the number the file will hold.
   const parsed: unknown = JSON.parse(canonicalJson(document));
-  const result = dataset.safeParse(parsed);
+  const result = (
+    curated === undefined ? defaultGraphSchema : graphSchemaFor(allowedFor(curated))
+  ).safeParse(parsed);
   if (!result.success) return issuesOf(result.error);
 
   const problems: string[] = [];
@@ -193,45 +228,75 @@ const continuousAnnotations = z
   })
   .strict();
 
-const categoricalAnnotations = (allowed: Set<string>) =>
+/** A categorical column: its `IsAbout` is the variable whose terms its levels map to. */
+const categoricalAnnotations = (about: string, allowed: Set<string>) =>
   z
     .object({
-      IsAbout: dictTerm(variableIdentifiers),
+      IsAbout: dictTerm(new Set([about])),
       Levels: z.record(z.string(), dictTerm(allowed)),
       MissingValues: uniqueStrings,
       VariableType: z.literal("Categorical"),
     })
     .strict();
 
-const dictionaryColumn = z.union([
-  z.object({ Annotations: identifierAnnotations, Description: z.string() }).strict(),
+/** An item of an assessment tool: `IsAbout` is the assessment variable, `IsPartOf` the tool. */
+const collectionAnnotations = (tools: Set<string>) =>
   z
     .object({
-      Annotations: continuousAnnotations,
-      Description: z.string(),
-      Units: z.string(),
+      IsAbout: dictTerm(new Set([VOCAB.variables.Assessment.identifier])),
+      IsPartOf: dictTerm(tools),
+      MissingValues: uniqueStrings,
+      VariableType: z.literal("Collection"),
     })
-    .strict(),
-  z
-    .object({
-      Annotations: categoricalAnnotations(sexIdentifiers),
-      Description: z.string(),
-      Levels: z.record(z.string(), z.string()),
-    })
-    .strict(),
-  z
-    .object({
-      Annotations: categoricalAnnotations(diagnosisIdentifiers),
-      Description: z.string(),
-      Levels: z.record(z.string(), z.string()),
-    })
-    .strict(),
-]);
+    .strict();
+
+const dictionaryColumnFor = (allowed: AllowedTerms) =>
+  z.union([
+    z.object({ Annotations: identifierAnnotations, Description: z.string() }).strict(),
+    z
+      .object({
+        Annotations: continuousAnnotations,
+        Description: z.string(),
+        Units: z.string(),
+      })
+      .strict(),
+    z
+      .object({
+        Annotations: categoricalAnnotations(VOCAB.variables.Sex.identifier, sexIdentifiers),
+        Description: z.string(),
+        Levels: z.record(z.string(), z.string()),
+      })
+      .strict(),
+    z
+      .object({
+        Annotations: categoricalAnnotations(
+          VOCAB.variables.Diagnosis.identifier,
+          allowed.diagnosis,
+        ),
+        Description: z.string(),
+        Levels: z.record(z.string(), z.string()),
+      })
+      .strict(),
+    z
+      .object({
+        Annotations: collectionAnnotations(allowed.assessment),
+        Description: z.string(),
+      })
+      .strict(),
+  ]);
+const defaultDictionarySchema = z.record(z.string(), dictionaryColumnFor(allowedFor(undefined)));
 
 /** Problems with a data dictionary (empty means valid). */
-export function validateDictionary(dictionary: CanonicalJsonValue): string[] {
+export function validateDictionary(
+  dictionary: CanonicalJsonValue,
+  curated?: CuratedTerms,
+): string[] {
   const parsed: unknown = JSON.parse(canonicalJson(dictionary));
-  const result = z.record(z.string(), dictionaryColumn).safeParse(parsed);
+  const schema =
+    curated === undefined
+      ? defaultDictionarySchema
+      : z.record(z.string(), dictionaryColumnFor(allowedFor(curated)));
+  const result = schema.safeParse(parsed);
   if (!result.success) return issuesOf(result.error);
 
   const problems: string[] = [];

@@ -45,7 +45,20 @@ const ZERO_PLACEHOLDER_SHARE = 0.5;
 export const AGE_MIN_YEARS = 0;
 export const AGE_MAX_YEARS = 120;
 
-export type AgeFormatId = "FromFloat" | "FromRange" | "FromBounded" | "FromISO8601";
+export type AgeFormatId = "FromFloat" | "FromRange" | "FromBounded" | "FromISO8601" | "FromEuro";
+
+/**
+ * Every age format the pinned vocabulary declares.
+ * The mechanical rule detects only the first four (a column is never guessed to be European
+ * decimal); `FromEuro` is reachable through a reviewed curation entry.
+ */
+export const AGE_FORMAT_IDS: readonly AgeFormatId[] = [
+  "FromFloat",
+  "FromRange",
+  "FromBounded",
+  "FromISO8601",
+  "FromEuro",
+];
 
 // A type alias, not an interface: only an alias is assignable to canonicalJson's object type.
 export type ColumnCounts = {
@@ -96,6 +109,8 @@ const BOUNDED_RE = /^(\d+(?:\.\d+)?)\+$/;
 // ISO 8601 durations restricted to years and months: `P31Y6M`, `31Y6M`, `P6M`, `31Y`.
 // Weeks and days are not accepted: the pinned `bagel` raises on them.
 const ISO_RE = /^P?(?:(\d+)Y)?(?:(\d+)M)?$/;
+// European decimal: a comma is the decimal separator, as `float(value.replace(",", "."))` reads it.
+const EURO_RE = /^ *\d+(?:,\d+)? *$/;
 
 const inRange = (age: number): boolean => age >= AGE_MIN_YEARS && age <= AGE_MAX_YEARS;
 
@@ -104,12 +119,16 @@ const inRange = (age: number): boolean => age >= AGE_MIN_YEARS && age <= AGE_MAX
  * Mirrors `bagel.utilities.pheno_utils.transform_age` for the cells it
  * accepts, and accepts a strict subset of what that function accepts.
  */
-function parseAge(raw: string, format: AgeFormatId): number | null {
+export function parseAge(raw: string, format: AgeFormatId): number | null {
   let age: number | null = null;
   switch (format) {
     case "FromFloat": {
       // Python's float() tolerates surrounding spaces, so `float("        10")` is 10.0.
       if (FLOAT_RE.test(raw)) age = Number(raw.trim());
+      break;
+    }
+    case "FromEuro": {
+      if (EURO_RE.test(raw)) age = Number(raw.trim().replace(",", "."));
       break;
     }
     case "FromRange": {

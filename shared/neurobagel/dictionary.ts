@@ -24,22 +24,43 @@
  */
 
 import { type CanonicalJsonValue, byCodeUnit } from "./canonical-json";
-import {
-  type AgeMapping,
-  type ColumnOutcome,
-  type GroupMapping,
-  HEALTHY_CONTROL,
-  type SexMapping,
-} from "./participants";
-import { variableTerm } from "./vocab";
+import type { AgeMapping, ColumnOutcome, SexMapping } from "./participants";
+import { type VocabTerm, variableTerm } from "./vocab";
+
+/** A column whose values mean diagnoses: the mechanical group column, or a curated column. */
+export interface DiagnosisColumn {
+  column: string;
+  /** Raw cell value to the diagnosis term it means. */
+  levels: Map<string, VocabTerm>;
+  missingValues: string[];
+  description: string;
+}
+
+/** A column that is an item of an assessment tool (curated only). */
+export interface AssessmentColumn {
+  column: string;
+  tool: VocabTerm;
+  missingValues: string[];
+}
 
 export interface DictionaryColumns {
   /** The participants.tsv column holding participant ids (always `participant_id`). */
   participantColumn: string;
   age: ColumnOutcome<AgeMapping>;
   sex: ColumnOutcome<SexMapping>;
-  group: ColumnOutcome<GroupMapping>;
+  /** Every column about Diagnosis; a participant's diagnoses are the terms of all of them. */
+  diagnoses: DiagnosisColumn[];
+  assessments: AssessmentColumn[];
 }
+
+/** The description of the mechanical group column: only healthy control is mapped. */
+export const GROUP_DESCRIPTION =
+  "Participant group; only healthy control values are mapped to a diagnosis term.";
+/** The description of a diagnosis column a reviewed curation entry maps. */
+export const CURATED_DIAGNOSIS_DESCRIPTION =
+  "Participant group or diagnosis; values are mapped to diagnosis terms by a reviewed curation entry.";
+const ASSESSMENT_DESCRIPTION =
+  "Item of an assessment tool; only whether it was recorded is used, as mapped by a reviewed curation entry.";
 
 const term = (id: string): CanonicalJsonValue => {
   const t = variableTerm(id);
@@ -91,23 +112,31 @@ export function buildDictionary(columns: DictionaryColumns): Record<string, Cano
     };
   }
 
-  const group = columns.group;
-  if (group.status === "mapped") {
-    const levels = [...group.levels].sort(byCodeUnit);
-    dictionary[group.column] = {
+  for (const diagnosis of columns.diagnoses) {
+    const levels = [...diagnosis.levels.entries()].sort(([a], [b]) => byCodeUnit(a, b));
+    dictionary[diagnosis.column] = {
       Annotations: {
         IsAbout: term("Diagnosis"),
         Levels: Object.fromEntries(
-          levels.map((raw) => [
-            raw,
-            { Label: HEALTHY_CONTROL.label, TermURL: HEALTHY_CONTROL.identifier },
-          ]),
+          levels.map(([raw, t]) => [raw, { Label: t.label, TermURL: t.identifier }]),
         ),
-        MissingValues: group.missingValues,
+        MissingValues: diagnosis.missingValues,
         VariableType: "Categorical",
       },
-      Description: "Participant group; only healthy control values are mapped to a diagnosis term.",
-      Levels: Object.fromEntries(levels.map((raw) => [raw, HEALTHY_CONTROL.label])),
+      Description: diagnosis.description,
+      Levels: Object.fromEntries(levels.map(([raw, t]) => [raw, t.label])),
+    };
+  }
+
+  for (const assessment of columns.assessments) {
+    dictionary[assessment.column] = {
+      Annotations: {
+        IsAbout: term("Assessment"),
+        IsPartOf: { Label: assessment.tool.label, TermURL: assessment.tool.identifier },
+        MissingValues: assessment.missingValues,
+        VariableType: "Collection",
+      },
+      Description: ASSESSMENT_DESCRIPTION,
     };
   }
   return dictionary;

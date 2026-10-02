@@ -29,7 +29,15 @@
  */
 
 import { type CanonicalJsonValue, byCodeUnit, canonicalJson } from "./canonical-json";
-import { type DictionaryColumns, buildDatasetDescription, buildDictionary } from "./dictionary";
+import { type BoundCuration, bindCuration } from "./curation-bind";
+import type { CurationKind } from "./curation-types";
+import {
+  CURATED_DIAGNOSIS_DESCRIPTION,
+  type DiagnosisColumn,
+  GROUP_DESCRIPTION,
+  buildDatasetDescription,
+  buildDictionary,
+} from "./dictionary";
 import {
   type NemarMetadata,
   type NeurobagelInput,
@@ -45,14 +53,17 @@ import {
   imagingSessionsFor,
 } from "./jsonld";
 import {
+  type AgeMapping,
+  type ColumnCounts,
   type ColumnOutcome,
   HEALTHY_CONTROL,
   STANDARD_MISSING_VALUES,
+  type SexMapping,
   mapAgeColumn,
   mapGroupColumn,
   mapSexColumn,
 } from "./participants";
-import type { ColumnReport, NeurobagelReport, TableStatus } from "./report";
+import type { ColumnReport, CurationReport, NeurobagelReport, TableStatus } from "./report";
 import { parseTsv } from "./tsv";
 import {
   validateDatasetDescription,
@@ -60,13 +71,14 @@ import {
   validateGraphDocument,
 } from "./validate-output";
 import { NEUROBAGEL_TRANSFORM_VERSION } from "./version";
-import { MAPPED_DATATYPES, VOCAB, modalityTermForDatatype } from "./vocab";
+import { MAPPED_DATATYPES, VOCAB, type VocabTerm, modalityTermForDatatype } from "./vocab";
 
 export type RefusalCode =
   | "anonymous_not_false"
   | "invalid_metadata"
   | "dataset_id_mismatch"
   | "no_subjects"
+  | "curation_dataset_mismatch"
   | "output_invalid";
 
 /** The transform declined to produce artifacts. `code` is stable; `message` is for a person. */
@@ -160,6 +172,8 @@ interface TableRead {
   rows: Map<string, string[]>;
   /** Every participant the table names, including those whose duplicate rows disagree. */
   ids: Set<string>;
+  /** Every data row as parsed, in file order, for the checks that read the whole table. */
+  allRows: string[][];
   rowCount: number;
   rowsWithoutId: number;
   /** Rows that repeat an id already seen. */
@@ -191,6 +205,7 @@ function readTable(text: string | null, flags: Set<string>): TableRead {
     idColumn: -1,
     rows: new Map(),
     ids: new Set(),
+    allRows: [],
     rowCount: 0,
     rowsWithoutId: 0,
     duplicates: 0,
@@ -218,6 +233,7 @@ function readTable(text: string | null, flags: Set<string>): TableRead {
     return { ...read, status: "no_participant_id" };
   }
   read.status = "ok";
+  read.allRows = parsed.table.rows;
   read.rowCount = parsed.table.rows.length;
   const first = new Map<string, string[]>();
   const conflicting = new Set<string>();
@@ -387,34 +403,184 @@ export async function buildNeurobagelArtifacts(
     sex: phenotypeUsable ? findColumn(table.header, "sex") : -1,
     group: phenotypeUsable ? findColumn(table.header, "group") : -1,
   };
-  const outcomes: DictionaryColumns = {
-    participantColumn: PARTICIPANT_COLUMN,
-    age:
-      columnIndex.age === -1
-        ? { status: "absent" }
-        : mapAgeColumn(
-            table.header[columnIndex.age],
-            cellsOf(columnIndex.age),
-            ageUnitsOf(participantsJson.value, table.header[columnIndex.age]),
-          ),
-    sex:
-      columnIndex.sex === -1
-        ? { status: "absent" }
-        : mapSexColumn(table.header[columnIndex.sex], cellsOf(columnIndex.sex)),
-    group:
-      columnIndex.group === -1
-        ? { status: "absent" }
-        : mapGroupColumn(table.header[columnIndex.group], cellsOf(columnIndex.group)),
-  };
-  for (const key of ["age", "sex", "group"] as const) {
-    if (outcomes[key].status === "curation") flags.add(`${key}_column_needs_curation`);
+  const mechanicalAge: ColumnOutcome<AgeMapping> =
+    columnIndex.age === -1
+      ? { status: "absent" }
+      : mapAgeColumn(
+          table.header[columnIndex.age],
+          cellsOf(columnIndex.age),
+          ageUnitsOf(participantsJson.value, table.header[columnIndex.age]),
+        );
+  const mechanicalSex: ColumnOutcome<SexMapping> =
+    columnIndex.sex === -1
+      ? { status: "absent" }
+      : mapSexColumn(table.header[columnIndex.sex], cellsOf(columnIndex.sex));
+  const mechanicalGroup =
+    columnIndex.group === -1
+      ? ({ status: "absent" } as const)
+      : mapGroupColumn(table.header[columnIndex.group], cellsOf(columnIndex.group));
+
+  // 5b. A reviewed curation entry, if the caller has one for this dataset.
+  // It replaces the mechanical rule for the variables it curates, applies only to the participants
+  // of the graph, and is skipped whole when it does not fit the documents in hand.
+  const curationEntry = input.curation ?? null;
+  if (curationEntry !== null && curationEntry.datasetId !== datasetId) {
+    throw new NeurobagelRefusal(
+      "curation_dataset_mismatch",
+      `the curation entry is for ${curationEntry.datasetId} but this is ${datasetId}`,
+    );
   }
-  if (outcomes.age.status === "mapped" && outcomes.age.unitsAssumed) {
+  let applied: BoundCuration | null = null;
+  let curationReport: CurationReport | undefined;
+  if (curationEntry !== null) {
+    const bound = await bindCuration(
+      curationEntry,
+      { participantsTsv: input.participantsTsv, participantsJson: input.participantsJson },
+      table.status === "ok" ? { header: table.header, rows: table.allRows } : null,
+    );
+    const none: Record<CurationKind, number> = { age: 0, assessment: 0, diagnosis: 0, sex: 0 };
+    const declared: Record<CurationKind, number> = { ...none };
+    for (const column of curationEntry.columns) declared[column.kind]++;
+    const base = {
+      review: curationEntry.evidence.review,
+      declared,
+      participants_with: none,
+      stale_files: [] as string[],
+      problems: 0,
+    };
+    const skipped = { columns_applied: 0, columns_skipped: curationEntry.columns.length };
+    if (bound.status === "stale") {
+      flags.add("curation_stale");
+      curationReport = { ...base, ...skipped, status: "stale", stale_files: bound.staleFiles };
+    } else if (bound.status === "invalid") {
+      flags.add("curation_invalid");
+      curationReport = { ...base, ...skipped, status: "invalid", problems: bound.problems.length };
+    } else if (!phenotypeUsable) {
+      // The table fits, but none of its participants are the graph's: nothing to attach it to.
+      flags.add("curation_unused");
+      curationReport = { ...base, ...skipped, status: "unused" };
+    } else {
+      applied = bound.bound;
+      curationReport = {
+        ...base,
+        status: "applied",
+        columns_applied: curationEntry.columns.length,
+        columns_skipped: 0,
+        participants_with: { ...none },
+      };
+    }
+  }
+
+  const curatedCounts = (column: number, mapped: (cell: string) => boolean, missing: string[]) => {
+    const cells = cellsOf(column);
+    const counts: ColumnCounts = {
+      cells: cells.length,
+      missing: cells.filter((c) => missing.includes(c)).length,
+      unmappable: 0,
+      mapped: cells.filter(mapped).length,
+    };
+    return counts;
+  };
+
+  // The variable's final outcome: the curated column where there is one, else the mechanical rule.
+  let ageColumn = columnIndex.age;
+  let ageOutcome = mechanicalAge;
+  if (applied?.age) {
+    const { index, name, mapping } = applied.age;
+    ageColumn = index;
+    ageOutcome = {
+      ...mapping,
+      status: "mapped",
+      column: name,
+      counts: curatedCounts(index, (c) => mapping.ageOf(c) !== null, mapping.missingValues),
+    };
+  }
+  let sexColumn = columnIndex.sex;
+  let sexOutcome = mechanicalSex;
+  if (applied?.sex) {
+    const { index, name, mapping } = applied.sex;
+    sexColumn = index;
+    sexOutcome = {
+      ...mapping,
+      status: "mapped",
+      column: name,
+      counts: curatedCounts(index, (c) => mapping.levels.has(c), mapping.missingValues),
+    };
+  }
+
+  // Every column about Diagnosis: the mechanical group column (unless a curated column is that
+  // column, which replaces it) and the curated ones.
+  const curatedDiagnoses = applied?.diagnoses ?? [];
+  const groupIsCurated = curatedDiagnoses.some((d) => d.index === columnIndex.group);
+  const diagnosisColumns: (DiagnosisColumn & { index: number; curated: boolean })[] = [];
+  if (mechanicalGroup.status === "mapped" && !groupIsCurated) {
+    diagnosisColumns.push({
+      column: mechanicalGroup.column,
+      curated: false,
+      description: GROUP_DESCRIPTION,
+      index: columnIndex.group,
+      levels: new Map([...mechanicalGroup.levels].map((raw) => [raw, HEALTHY_CONTROL])),
+      missingValues: mechanicalGroup.missingValues,
+    });
+  }
+  for (const d of curatedDiagnoses) {
+    diagnosisColumns.push({
+      column: d.name,
+      curated: true,
+      description: CURATED_DIAGNOSIS_DESCRIPTION,
+      index: d.index,
+      levels: d.levels,
+      missingValues: d.missingValues,
+    });
+  }
+  diagnosisColumns.sort((a, b) => byCodeUnit(a.column, b.column));
+  const assessmentColumns = [...(applied?.assessments ?? [])].sort((a, b) =>
+    byCodeUnit(a.name, b.name),
+  );
+
+  const ageReport: ColumnReport = applied?.age
+    ? { status: "curated", counts: (ageOutcome as { counts: ColumnCounts }).counts }
+    : columnReport(mechanicalAge);
+  const sexReport: ColumnReport = applied?.sex
+    ? { status: "curated", counts: (sexOutcome as { counts: ColumnCounts }).counts }
+    : columnReport(mechanicalSex);
+  const groupReport: ColumnReport = groupIsCurated
+    ? {
+        status: "curated",
+        counts: curatedCounts(
+          columnIndex.group,
+          (c) =>
+            curatedDiagnoses.find((d) => d.index === columnIndex.group)?.levels.has(c) ?? false,
+          curatedDiagnoses.find((d) => d.index === columnIndex.group)?.missingValues ?? [],
+        ),
+      }
+    : columnReport(mechanicalGroup);
+
+  const dictionaryColumns = {
+    participantColumn: PARTICIPANT_COLUMN,
+    age: ageOutcome,
+    sex: sexOutcome,
+    diagnoses: diagnosisColumns,
+    assessments: assessmentColumns.map((a) => ({
+      column: a.name,
+      tool: a.tool,
+      missingValues: a.missingValues,
+    })),
+  };
+
+  if (ageReport.status === "needs_curation") flags.add("age_column_needs_curation");
+  if (sexReport.status === "needs_curation") flags.add("sex_column_needs_curation");
+  if (groupReport.status === "needs_curation") flags.add("group_column_needs_curation");
+  if (ageOutcome.status === "mapped" && ageOutcome.unitsAssumed) {
     flags.add("age_units_assumed_years");
   }
-  // `gender` is not `sex`: left alone and reported so a curator can see it exists.
+  // `gender` is not `sex`: left alone and reported so a curator can see it exists, unless a
+  // reviewed entry already says which column holds sex.
   const genderOnly =
-    phenotypeUsable && findColumn(table.header, "gender") !== -1 && columnIndex.sex === -1;
+    phenotypeUsable &&
+    findColumn(table.header, "gender") !== -1 &&
+    columnIndex.sex === -1 &&
+    sexOutcome.status !== "mapped";
   if (genderOnly) flags.add("gender_column_needs_curation");
 
   const dataColumns = table.header
@@ -433,18 +599,42 @@ export async function buildNeurobagelArtifacts(
   const mappedDatatypeSubjects = new Map<string, number>();
   const droppedDatatypeSubjects = new Map<string, number>();
   const pairingBasis = new Map<string, number>();
+  const curatedWith = { age: 0, assessment: 0, diagnosis: 0, sex: 0 };
   const subjects: SubjectModel[] = graphIds.map((label) => {
     const row = phenotypeUsable ? table.rows.get(label) : undefined;
-    const phenotype: SubjectModel["phenotype"] = { age: null, sex: null, diagnoses: [] };
+    const phenotype: SubjectModel["phenotype"] = {
+      age: null,
+      sex: null,
+      diagnoses: [],
+      assessments: [],
+    };
     if (row !== undefined) {
-      if (outcomes.age.status === "mapped")
-        phenotype.age = outcomes.age.ageOf(row[columnIndex.age]);
-      if (outcomes.sex.status === "mapped") {
-        phenotype.sex = outcomes.sex.levels.get(row[columnIndex.sex]) ?? null;
+      if (ageOutcome.status === "mapped") phenotype.age = ageOutcome.ageOf(row[ageColumn]);
+      if (sexOutcome.status === "mapped") {
+        phenotype.sex = sexOutcome.levels.get(row[sexColumn]) ?? null;
       }
-      if (outcomes.group.status === "mapped" && outcomes.group.levels.has(row[columnIndex.group])) {
-        phenotype.diagnoses = [HEALTHY_CONTROL];
+      const seen = new Set<string>();
+      let curatedDiagnosis = false;
+      for (const column of diagnosisColumns) {
+        const t = column.levels.get(row[column.index]);
+        if (t === undefined || seen.has(t.identifier)) continue;
+        seen.add(t.identifier);
+        phenotype.diagnoses.push(t);
+        if (column.curated) curatedDiagnosis = true;
       }
+      const tools = new Map<string, VocabTerm>();
+      for (const column of assessmentColumns) {
+        if (!column.missingValues.includes(row[column.index])) {
+          tools.set(column.tool.identifier, column.tool);
+        }
+      }
+      phenotype.assessments = [...tools.values()].sort((a, b) =>
+        byCodeUnit(a.identifier, b.identifier),
+      );
+      if (applied?.age && phenotype.age !== null) curatedWith.age++;
+      if (applied?.sex && phenotype.sex !== null) curatedWith.sex++;
+      if (curatedDiagnosis) curatedWith.diagnosis++;
+      if (phenotype.assessments.length > 0) curatedWith.assessment++;
     }
 
     const node = index[label];
@@ -466,6 +656,9 @@ export async function buildNeurobagelArtifacts(
     }
     return { label, phenotype, imaging };
   });
+  if (curationReport !== undefined && curationReport.status === "applied") {
+    curationReport.participants_with = curatedWith;
+  }
   if (pairingBasis.get("unknown")) flags.add("session_pairing_unknown");
   if (pairingBasis.get("unreadable")) flags.add("session_modalities_unreadable");
   if (pairingBasis.get("inconsistent")) flags.add("session_modalities_inconsistent");
@@ -492,7 +685,7 @@ export async function buildNeurobagelArtifacts(
     subjects,
   };
   const graph = await buildJsonLd(model);
-  const dictionary = buildDictionary(outcomes);
+  const dictionary = buildDictionary(dictionaryColumns);
   const description = buildDatasetDescription({
     name,
     authors,
@@ -504,9 +697,15 @@ export async function buildNeurobagelArtifacts(
     participantCount,
   });
 
+  // The terms a reviewed entry adds are the only diagnosis and assessment terms beyond healthy
+  // control that this dataset's output may carry.
+  const curated = {
+    diagnosis: curatedDiagnoses.flatMap((d) => [...d.levels.values()].map((t) => t.identifier)),
+    assessment: assessmentColumns.map((a) => a.tool.identifier),
+  };
   const problems = [
-    ...validateGraphDocument(graph.document).map((p) => `jsonld ${p}`),
-    ...validateDictionary(dictionary).map((p) => `dictionary ${p}`),
+    ...validateGraphDocument(graph.document, curated).map((p) => `jsonld ${p}`),
+    ...validateDictionary(dictionary, curated).map((p) => `dictionary ${p}`),
     ...validateDatasetDescription(description).map((p) => `dataset description ${p}`),
   ];
   if (problems.length > 0) {
@@ -517,11 +716,8 @@ export async function buildNeurobagelArtifacts(
   }
 
   const report: NeurobagelReport = {
-    columns: {
-      age: columnReport(outcomes.age),
-      group: columnReport(outcomes.group),
-      sex: columnReport(outcomes.sex),
-    },
+    columns: { age: ageReport, group: groupReport, sex: sexReport },
+    ...(curationReport === undefined ? {} : { curation: curationReport }),
     dataset_id: datasetId,
     flags: [...flags].sort(byCodeUnit),
     graph: {

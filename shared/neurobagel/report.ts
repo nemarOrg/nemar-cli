@@ -10,6 +10,7 @@
  * Types only: no code, no I/O.
  */
 
+import type { CurationKind, CurationReview } from "./curation-types";
 import type { ColumnCounts } from "./participants";
 
 /**
@@ -21,7 +22,35 @@ export type ColumnReport =
   | { status: "absent" }
   | { status: "all_missing" }
   | { status: "needs_curation"; reason: string; counts: ColumnCounts }
-  | { status: "mapped"; counts: ColumnCounts };
+  | { status: "mapped"; counts: ColumnCounts }
+  /** A reviewed curation entry maps this variable, replacing the mechanical rule. */
+  | { status: "curated"; counts: ColumnCounts };
+
+/**
+ * What became of a reviewed curation entry (shared/neurobagel/curation.ts).
+ *   applied  the entry's columns are in the dictionary and the graph
+ *   stale    the participants.tsv or participants.json is not the file the entry pinned, so none of it is applied
+ *   invalid  the pinned files are in hand and the entry does not fit them, so none of it is applied
+ *   unused   the entry fits, but the table's participants are not the graph's, so nothing in it can be attached
+ */
+export type CurationStatus = "applied" | "stale" | "invalid" | "unused";
+
+/** Counts and enumerated values only: no column name, no cell value, no reviewer text. */
+export type CurationReport = {
+  status: CurationStatus;
+  review: CurationReview;
+  /** Columns the entry declares, by kind. */
+  declared: Record<CurationKind, number>;
+  /** Of those, how many are in the output; all of them or none. */
+  columns_applied: number;
+  columns_skipped: number;
+  /** Graph participants that received a value from the entry, by kind (zero unless applied). */
+  participants_with: Record<CurationKind, number>;
+  /** `stale` only: which pinned files differ, `participants_json` and `participants_tsv`. */
+  stale_files: string[];
+  /** `invalid` only: how many things were wrong. The wording quotes cells, so it stays out of the report. */
+  problems: number;
+};
 
 /** `ids_do_not_join`: the table and the bids index share no participant id, so the table is not used. */
 export type TableStatus = "ok" | "absent" | "malformed" | "no_participant_id" | "ids_do_not_join";
@@ -31,6 +60,12 @@ export type NeurobagelReport = {
   transform_version: number;
   dataset_id: string;
   columns: { age: ColumnReport; group: ColumnReport; sex: ColumnReport };
+  /**
+   * Present only when the caller passed a curation entry for the dataset.
+   * The writer surfaces `curation_stale` and `curation_invalid`: a reviewed entry that did not
+   * apply is work somebody did that is not reaching the index.
+   */
+  curation?: CurationReport;
   /** Sorted. The writer surfaces `partial_join` and `bids_index_empty_fell_back_to_table`. */
   flags: string[];
   graph: {
