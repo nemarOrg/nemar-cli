@@ -8,16 +8,31 @@
  * What it proves that the fixtures cannot: the gatherer still reads what the
  * server serves today, treats a 404 as an absent file and anything else as an
  * error, follows the redirect an annexed file answers with, and hands the
- * transform a document the transform accepts (or, for the anonymous control,
+ * transform documents the transform accepts (or, for the anonymous control,
  * refuses).
  * It asserts structure, not bytes: a live dataset may publish a new version.
+ * Without NEUROBAGEL_LIVE=1 every test below is reported as skipped, not passed.
  */
 
 import { describe, expect, test } from "bun:test";
-import { GatherError, gatherDataset, listDatasetIds } from "../scripts/neurobagel/gather";
-import { NeurobagelRefusal, buildNeurobagelArtifacts } from "../shared/neurobagel";
+import {
+  ANONYMOUS_CONTROL,
+  GatherError,
+  gatherDataset,
+  listDatasetIds,
+} from "../scripts/neurobagel/gather";
+import {
+  NeurobagelRefusal,
+  artifactFileNames,
+  buildNeurobagelArtifacts,
+} from "../shared/neurobagel";
 
 const live = process.env.NEUROBAGEL_LIVE === "1";
+if (!live) {
+  console.warn(
+    "neurobagel-gather.integration: skipped (set NEUROBAGEL_LIVE=1 to read the live data plane)",
+  );
+}
 const text = (bytes: Uint8Array | null): string | null =>
   bytes === null ? null : new TextDecoder().decode(bytes);
 
@@ -28,15 +43,14 @@ describe.skipIf(!live)("gatherer against data.nemar.org", () => {
     expect(g.participantsTsv.status).toBe(200);
     expect(g.participantsJson.status).toBe(200);
     expect(g.latestVersion).toMatch(/^v\d+\.\d+\.\d+$/);
-    const artifacts = await buildNeurobagelArtifacts(
-      {
-        metadata: JSON.parse(text(g.metadata.bytes) as string),
-        participantsTsv: text(g.participantsTsv.bytes),
-        participantsJson: JSON.parse(text(g.participantsJson.bytes) as string),
-      },
-      { expectedDatasetId: "nm000132" },
-    );
-    expect(JSON.parse(artifacts.report).graph.subjects).toBeGreaterThan(0);
+    const artifacts = await buildNeurobagelArtifacts({
+      expectedDatasetId: "nm000132",
+      metadata: JSON.parse(text(g.metadata.bytes) as string),
+      participantsTsv: text(g.participantsTsv.bytes),
+      participantsJson: text(g.participantsJson.bytes),
+    });
+    expect(artifacts.report.graph.subjects).toBeGreaterThan(0);
+    expect(Object.keys(artifacts.files)).toContain(artifactFileNames("nm000132").jsonld);
   });
 
   test("a dataset with no participants.tsv answers 404, which is an absent file and not an error", async () => {
@@ -70,24 +84,21 @@ describe.skipIf(!live)("gatherer against data.nemar.org", () => {
   });
 });
 
-describe.skipIf(!live)("gatherer against data-test.nemar.org", () => {
-  test("the anonymous negative control is gathered and then refused by the transform", async () => {
-    const g = await gatherDataset("nm099998", "https://data-test.nemar.org");
+describe.skipIf(!live)("gatherer against the dev data host", () => {
+  test("the anonymous negative control is gathered as metadata only, and the transform refuses it", async () => {
+    const g = await gatherDataset(ANONYMOUS_CONTROL.datasetId, ANONYMOUS_CONTROL.base, {
+      metadataOnly: true,
+    });
+    expect(g.participantsTsv.skipped).toBe(true);
+    expect(g.participantsJson.skipped).toBe(true);
     const metadata = JSON.parse(text(g.metadata.bytes) as string);
     expect(metadata.anonymous).toBe(true);
     const error = await buildNeurobagelArtifacts({
+      expectedDatasetId: ANONYMOUS_CONTROL.datasetId,
       metadata,
-      participantsTsv: text(g.participantsTsv.bytes),
+      participantsTsv: null,
       participantsJson: null,
     }).catch((e) => e);
     expect(error).toBeInstanceOf(NeurobagelRefusal);
   });
-});
-
-test("when live tests are not enabled, say so rather than pass silently", () => {
-  if (!live)
-    console.warn(
-      "neurobagel-gather.integration: skipped (set NEUROBAGEL_LIVE=1 to read the live data plane)",
-    );
-  expect(true).toBe(true);
 });

@@ -8,31 +8,34 @@
       "etag": null,
       "redirected": false,
       "sha256": "aea4f00bb03c7febd3e7d776dd06bcc9ca1c4f82668fefb02357609fb864b111",
+      "skipped": false,
       "status": 200,
       "too_large_over_bytes": null,
       "url": "https://data-test.nemar.org/nm099998/metadata.json"
     },
     "participants.json": {
       "absent": false,
-      "bytes": 966,
-      "etag": "W/\"git:85c03fca6738b1ba9113f78a3db1f2c88e7c9f8a\"",
+      "bytes": null,
+      "etag": null,
       "redirected": false,
-      "sha256": "e87ca8a873230edb413e2019a7097e905f23f6f037a0891fd7137907dba9dda2",
-      "status": 200,
+      "sha256": null,
+      "skipped": true,
+      "status": 0,
       "too_large_over_bytes": null,
       "url": "https://data-test.nemar.org/nm099998/v1.0.0/participants.json"
     },
     "participants.tsv": {
       "absent": false,
-      "bytes": 1520,
-      "etag": "\"git:391d7a3db219f3d3338e72ca062e7c85f389dfa7\"",
+      "bytes": null,
+      "etag": null,
       "redirected": false,
-      "sha256": "b2af896642b9a17e6095cec39b04730afa90e7578d9bdb5ca51a05cf87e35e35",
-      "status": 200,
+      "sha256": null,
+      "skipped": true,
+      "status": 0,
       "too_large_over_bytes": null,
       "url": "https://data-test.nemar.org/nm099998/v1.0.0/participants.tsv"
     }
   },
-  "fetched_at": "2026-10-02T05:11:44.648Z",
+  "fetched_at": "2026-10-02T06:18:25.820Z",
   "latest_version": "v1.0.0"
 }

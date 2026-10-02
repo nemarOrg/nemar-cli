@@ -3,7 +3,7 @@
  * dataset and hands them to the Neurobagel transform.
  *
  *   bun run scripts/neurobagel/gather.ts --out <dir> <dataset-id>...
- *   bun run scripts/neurobagel/gather.ts --out <dir> --base https://data-test.nemar.org nm099998
+ *   bun run scripts/neurobagel/gather.ts --out <dir> --base https://data-test.nemar.org --metadata-only nm099998
  *   bun run scripts/neurobagel/gather.ts --list            # ids in the public catalog
  *
  * This is the ONLY place in the Neurobagel pipeline that does I/O.
@@ -21,6 +21,10 @@
  * the presigned URL carries a credential identifier and a signature and must
  * never reach a fixture, a log or a commit.
  * Every body is size-capped; a larger one is reported, not truncated.
+ *
+ * Nothing whose metadata is not `anonymous: false` is ever written to disk
+ * (see {@link refusalToWrite}); the one exception is the declared anonymous control
+ * on the dev data host, metadata only.
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -38,6 +42,17 @@ export const MAX_TABLE_BYTES = 8 * 1024 * 1024;
 
 export type DocumentName = "metadata.json" | "participants.tsv" | "participants.json";
 
+/**
+ * The one anonymous deposit this repository may hold, and only its public blinded
+ * `metadata.json`: the standing negative control on the dev data host (ADR 0068;
+ * AGENTS.md).
+ * The live anonymous deposit, nm000284, is never fetched into a fixture.
+ */
+export const ANONYMOUS_CONTROL = {
+  base: "https://data-test.nemar.org",
+  datasetId: "nm099998",
+} as const;
+
 export interface GatheredDocument {
   name: DocumentName;
   /** The data-plane URL requested, never a redirect target. */
@@ -51,6 +66,17 @@ export interface GatheredDocument {
   redirected: boolean;
   /** Set instead of `bytes` when the body exceeded its cap. */
   tooLargeOver: number | null;
+  /** True when the document was deliberately not requested (see `metadataOnly`). */
+  skipped: boolean;
+}
+
+export interface GatherOptions {
+  /**
+   * Fetch metadata.json only. participants.tsv and participants.json are depositor
+   * files, which cannot be blinded (ADR 0067), so the anonymous control is gathered
+   * without them.
+   */
+  metadataOnly?: boolean;
 }
 
 export interface GatheredDataset {
@@ -152,15 +178,17 @@ async function fetchDocument(
   };
   if (response.status === 404) {
     await response.body?.cancel();
-    return { ...base, bytes: null, sha256: null, tooLargeOver: null };
+    return { ...base, bytes: null, sha256: null, tooLargeOver: null, skipped: false };
   }
   if (!response.ok) {
     await response.body?.cancel();
     throw new GatherError(`GET ${url} -> ${response.status}`, url, response.status);
   }
   const bytes = await readCapped(response, cap);
-  if (bytes === null) return { ...base, bytes: null, sha256: null, tooLargeOver: cap };
-  return { ...base, bytes, sha256: await sha256Hex(bytes), tooLargeOver: null };
+  if (bytes === null) {
+    return { ...base, bytes: null, sha256: null, tooLargeOver: cap, skipped: false };
+  }
+  return { ...base, bytes, sha256: await sha256Hex(bytes), tooLargeOver: null, skipped: false };
 }
 
 /** The ids of every dataset in the public catalog at `base`. */
@@ -172,9 +200,24 @@ export async function listDatasetIds(base: string = DEFAULT_BASE): Promise<strin
   return body.datasets.map((d) => d.id).sort();
 }
 
+function skippedDocument(name: DocumentName, url: string): GatheredDocument {
+  return {
+    name,
+    url,
+    status: 0,
+    bytes: null,
+    sha256: null,
+    etag: null,
+    redirected: false,
+    tooLargeOver: null,
+    skipped: true,
+  };
+}
+
 export async function gatherDataset(
   datasetId: string,
   base: string = DEFAULT_BASE,
+  options: GatherOptions = {},
 ): Promise<GatheredDataset> {
   if (!/^[a-z]{2}\d{6}$/.test(datasetId)) throw new Error(`not a dataset id: ${datasetId}`);
   const fetchedAt = new Date().toISOString();
@@ -193,14 +236,16 @@ export async function gatherDataset(
   }
   const latestVersion = index.latest;
   const root = `${base}/${datasetId}`;
+  const tsvUrl = `${root}/${latestVersion}/participants.tsv`;
+  const jsonUrl = `${root}/${latestVersion}/participants.json`;
   const [metadata, participantsTsv, participantsJson] = await Promise.all([
     fetchDocument("metadata.json", `${root}/metadata.json`, MAX_METADATA_BYTES),
-    fetchDocument("participants.tsv", `${root}/${latestVersion}/participants.tsv`, MAX_TABLE_BYTES),
-    fetchDocument(
-      "participants.json",
-      `${root}/${latestVersion}/participants.json`,
-      MAX_TABLE_BYTES,
-    ),
+    options.metadataOnly
+      ? skippedDocument("participants.tsv", tsvUrl)
+      : fetchDocument("participants.tsv", tsvUrl, MAX_TABLE_BYTES),
+    options.metadataOnly
+      ? skippedDocument("participants.json", jsonUrl)
+      : fetchDocument("participants.json", jsonUrl, MAX_TABLE_BYTES),
   ]);
   if (metadata.status === 404) {
     throw new GatherError(`${datasetId} has no metadata.json`, metadata.url, 404);
@@ -223,6 +268,7 @@ function documentProvenance(doc: GatheredDocument): CanonicalJsonValue {
     etag: doc.etag,
     redirected: doc.redirected,
     sha256: doc.sha256,
+    skipped: doc.skipped,
     status: doc.status,
     too_large_over_bytes: doc.tooLargeOver,
     url: doc.url,
@@ -244,8 +290,39 @@ export function provenanceOf(gathered: GatheredDataset): CanonicalJsonValue {
   };
 }
 
+/**
+ * Why a gathered document set must NOT be written to disk, or null when it may be.
+ *
+ * Anything whose metadata does not say `anonymous: false` is refused, because its
+ * depositor files cannot be blinded and a fixture is committed to a public repository.
+ * The single exception is the declared control on the dev data host, and then only its
+ * metadata.json: a participants file of an anonymous deposit is never written.
+ */
+export function refusalToWrite(gathered: GatheredDataset): string | null {
+  const bytes = gathered.metadata.bytes;
+  if (bytes === null) return `${gathered.datasetId} has no metadata.json to check`;
+  let anonymous: unknown;
+  try {
+    anonymous = (JSON.parse(new TextDecoder().decode(bytes)) as { anonymous?: unknown }).anonymous;
+  } catch {
+    return `${gathered.datasetId} metadata.json is not JSON`;
+  }
+  if (anonymous === false) return null;
+  const isControl =
+    gathered.datasetId === ANONYMOUS_CONTROL.datasetId && gathered.base === ANONYMOUS_CONTROL.base;
+  if (!isControl) {
+    return `${gathered.datasetId} at ${gathered.base} is not anonymous: false, so no document of it is written`;
+  }
+  if (gathered.participantsTsv.bytes !== null || gathered.participantsJson.bytes !== null) {
+    return `${gathered.datasetId} is anonymous: only its metadata.json may be written, not its participants files`;
+  }
+  return null;
+}
+
 /** Write the documents exactly as served, plus provenance.json, into `<outDir>/<id>/`. */
 export function writeFixture(gathered: GatheredDataset, outDir: string): string {
+  const refusal = refusalToWrite(gathered);
+  if (refusal !== null) throw new GatherError(refusal, gathered.metadata.url, null);
   const dir = join(outDir, gathered.datasetId);
   mkdirSync(dir, { recursive: true });
   for (const doc of [gathered.metadata, gathered.participantsTsv, gathered.participantsJson]) {
@@ -267,15 +344,18 @@ async function main(): Promise<void> {
     return;
   }
   const out = flag("--out");
-  const ids = args.filter((a, i) => /^[a-z]{2}\d{6}$/.test(a) && args[i - 1] !== "--out");
+  const ids = args.filter(
+    (a, i) => /^[a-z]{2}\d{6}$/.test(a) && args[i - 1] !== "--out" && args[i - 1] !== "--base",
+  );
+  const metadataOnly = args.includes("--metadata-only");
   if (!out || ids.length === 0) {
     console.error(
-      "usage: gather.ts --out <dir> [--base <url>] <dataset-id>... | --list [--base <url>]",
+      "usage: gather.ts --out <dir> [--base <url>] [--metadata-only] <dataset-id>... | --list [--base <url>]",
     );
     process.exit(2);
   }
   for (const id of ids) {
-    const gathered = await gatherDataset(id, base);
+    const gathered = await gatherDataset(id, base, { metadataOnly });
     const dir = writeFixture(gathered, out);
     const sizes = [gathered.metadata, gathered.participantsTsv, gathered.participantsJson]
       .map((d) => `${d.name}=${d.bytes?.length ?? d.status}`)

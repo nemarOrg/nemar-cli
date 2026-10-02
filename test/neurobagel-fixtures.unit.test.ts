@@ -6,7 +6,7 @@
  * the data plane served them plus provenance.json (URL, fetch time, version,
  * sha256, size, ETag).
  * Refresh one with `bun run scripts/neurobagel/gather.ts --out test/neurobagel/fixtures <id>`
- * (add `--base https://data-test.nemar.org` for nm099998), then regenerate the
+ * (add `--base https://data-test.nemar.org --metadata-only` for nm099998), then regenerate the
  * goldens and the oracle recordings (see shared/neurobagel/README.md).
  */
 
@@ -23,6 +23,8 @@ interface DocumentProvenance {
   etag: string | null;
   redirected: boolean;
   sha256: string | null;
+  /** Present only on documents captured after the gatherer learned `--metadata-only`. */
+  skipped?: boolean;
   status: number;
   too_large_over_bytes: number | null;
   url: string;
@@ -89,6 +91,13 @@ describe("fixture provenance", () => {
         test(`${name}: the file on disk is the file that was served (sha256, size, and the git blob where the server says so)`, () => {
           const path = join(FIXTURE_ROOT, id, name);
           expect(doc.url.startsWith(`${provenance.base}/${id}/`)).toBe(true);
+          if (doc.skipped) {
+            // Only the anonymous control is gathered without its depositor files.
+            expect(id).toBe("nm099998");
+            expect(name).not.toBe("metadata.json");
+            expect(existsSync(path)).toBe(false);
+            return;
+          }
           if (doc.absent) {
             expect(doc.status).toBe(404);
             expect(existsSync(path)).toBe(false);
