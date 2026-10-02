@@ -907,6 +907,34 @@ describe("anonymity: two independent guards", () => {
     expect((await storedIndex()).datasets.map((d) => d.id)).toEqual(["nm000645"]);
   });
 
+  test("a data plane that says anonymous, over a row that still says eligible, removes what the store held: the finding alone is enough", async () => {
+    // The row is NOT touched, so the end-of-run check against D1 would keep the dataset: only
+    // the anonymity finding of this run can take it out of the index and delete its artifacts.
+    seedSynthetic(h, "nm000649");
+    seedSynthetic(h, "nm000659");
+    await run();
+    h.db.run("UPDATE datasets SET name = 'Touched' WHERE dataset_id = 'nm000649'");
+    const env = h.env();
+    const dataPlane = dataPlaneWith(env, async (path, real) => {
+      if (!path.startsWith("/nm000649/metadata.json")) return null;
+      const doc = (await real.json()) as Record<string, unknown>;
+      doc.anonymous = true;
+      return new Response(JSON.stringify(doc), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    const result = await run({ only: ["nm000649"], deps: { dataPlane } }, env);
+    expect(result.results.find((r) => r.id === "nm000649")).toMatchObject({
+      outcome: "refused",
+      code: "anonymity_disagreement",
+    });
+    expect(result.removed).toEqual(["nm000649"]);
+    expect((await storeKeys(h.bucket)).filter((k) => k.startsWith("nm000649"))).toEqual([]);
+    expect((await storedIndex()).datasets.map((d) => d.id)).toEqual(["nm000659"]);
+    expect((await loadEligibleRow(realD1(h.db), "nm000649")).eligible).toBe(true);
+  });
+
   test("the guard's contract, as a pure function: exactly false passes, everything else is refused", () => {
     expect(saysNotAnonymous(false)).toBe(true);
     for (const value of [true, null, undefined, "false", "true", "", 0, 1, {}, [], Number.NaN]) {
@@ -1823,6 +1851,32 @@ describe("a run counts what it spends and stops with headroom to finish", () => 
       if (next.stopped === null) break;
     }
     for (const id of ids(8)) expect(await text(`${id}.jsonld`)).toContain("(revised)");
+  });
+
+  test("the reserve is real: a run that has many removals to make still makes all of them", async () => {
+    // 20 datasets leaving (objects the writer stamped, in no catalog) and 14 to write for the
+    // first time, on a budget the loop could spend entirely if it kept nothing back.
+    const stamp = (kind: string) => ({ sha256: "0".repeat(64), kind });
+    const leaving = Array.from({ length: 20 }, (_, i) => `nm0009${String(i).padStart(2, "0")}`);
+    for (const id of leaving) {
+      await h.bucket.put(`${id}.jsonld`, "{}", {
+        customMetadata: { ...stamp("jsonld"), [META.fingerprint]: "sha256:x" },
+      });
+      await h.bucket.put(`${id}_annotated.json`, "{}", { customMetadata: stamp("dictionary") });
+      await h.bucket.put(`${id}_dataset_description.json`, "{}", {
+        customMetadata: stamp("description"),
+      });
+    }
+    for (const id of ids(14)) seedSynthetic(h, id);
+    const budget = 220;
+    const result = await run({ limit: 50, opBudget: budget });
+    expect(result.stopped).toBe("ops_budget");
+    expect(result.examined).toBeGreaterThan(0);
+    expect(result.examined).toBeLessThan(14);
+    // Every removal was made in this run: the loop left room for them.
+    expect(result.removed).toHaveLength(20);
+    expect(result.removals_pending).toBe(0);
+    expect(result.ops.spent).toBeLessThanOrEqual(budget);
   });
 
   test("the first dataset is always examined, so a tiny budget still makes progress", async () => {
