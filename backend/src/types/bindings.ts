@@ -50,6 +50,12 @@ export interface Bindings {
   /** Worker SECRET: the bearer the node's loader sends to GET /neurobagel/*. A deployment
    *  secret, not an account credential (ADR 0084); unset means the read route is off. */
   NEUROBAGEL_READ_TOKEN?: string;
+  /** The private node's network address (epic #1586, phase 6). Optional: the verification
+   *  sweep's node probe reports `unchecked`, never healthy, while it is unset. */
+  NEUROBAGEL_NODE_URL?: string;
+  /** The public federation's address (its node directory). Optional: the registration check
+   *  reports `unchecked`, never healthy, while it is unset. */
+  NEUROBAGEL_FEDERATION_URL?: string;
 
   // Environment variables
   ENVIRONMENT: "production" | "development" | "staging" | "test";

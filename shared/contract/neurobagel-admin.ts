@@ -138,5 +138,53 @@ export interface NeurobagelStatus {
   }[];
   /** A count, never an identifier. */
   anonymity_findings: number | null;
+  /**
+   * The latest verification sweep's verdicts (epic #1586, phase 6; ADR 0067's amendment).
+   * Null means NO run has been recorded, which is unknown: it is never read as healthy.
+   */
+  verification: NeurobagelVerification | null;
   warnings: string[];
+}
+
+/**
+ * One check's verdict (ADR 0053, ADR 0054). `unchecked` means the check is not configured
+ * here (no node URL, no federation URL, no store): it is shown as such and is never healthy.
+ * `unknown` means the check was configured and could not be answered: never zero, never healthy.
+ */
+export type NeurobagelVerdict = "healthy" | "alarm" | "unknown" | "unchecked";
+
+/** The verification sweep's four checks, in the order they are reported. */
+export const NEUROBAGEL_CHECKS = ["store", "node", "registration", "drift"] as const;
+export type NeurobagelCheckName = (typeof NEUROBAGEL_CHECKS)[number];
+
+export interface NeurobagelCheckResult {
+  verdict: NeurobagelVerdict;
+  /** One sentence. Counts and public upstream tags only: never a dataset id, never participant data. */
+  reason: string;
+  /** Named counts; a null is unknown, never zero. */
+  counts: Record<string, number | null>;
+}
+
+/** What one run of the verification sweep concluded. It reports and never repairs. */
+export interface NeurobagelVerification {
+  /** UTC, ISO 8601. */
+  at: string;
+  /** `cron` (the daily run) or `admin` (on demand). */
+  trigger: string;
+  /** True when the sweep itself threw: every check is then `unknown` and `error` says why. */
+  failed: boolean;
+  error?: string;
+  /**
+   * The worst verdict among the checks that ran (alarm, then unknown, then healthy), or
+   * `unchecked` when none ran. A healthy overall with an unchecked check is a statement
+   * about the checks that ran only; read `checks`.
+   */
+  overall: NeurobagelVerdict;
+  checks: Record<NeurobagelCheckName, NeurobagelCheckResult>;
+  warnings: string[];
+}
+
+/** `POST /admin/neurobagel/verify`: a run, recorded like the daily one, whose heartbeat may not have been written. */
+export interface NeurobagelVerifyResult extends NeurobagelVerification {
+  heartbeat_written: boolean;
 }
