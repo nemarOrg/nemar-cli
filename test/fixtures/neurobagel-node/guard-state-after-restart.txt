@@ -1,0 +1,4 @@
+svc-api	2026-10-02T08:48:06.578886928Z	0	healthy	running
+svc-federation	2026-10-02T08:46:04.538685942Z	0	healthy	running
+svc-graph	2026-10-02T08:47:23.858329221Z	1	healthy	running
+svc-query_federation	2026-10-02T08:49:10.126387767Z	0	healthy	running

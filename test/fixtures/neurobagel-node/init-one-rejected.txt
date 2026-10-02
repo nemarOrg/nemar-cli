@@ -1,0 +1,17 @@
+2026-10-02 07:15:20 INFO Initializing node data in subject-level mode.
+2026-10-02 07:15:20 INFO (1/4) Processing file: nm000132.jsonld
+2026-10-02 07:15:20 INFO File validated: nm000132.jsonld
+2026-10-02 07:15:20 INFO (2/4) Processing file: nm000103.jsonld
+2026-10-02 07:15:20 INFO File validated: nm000103.jsonld
+2026-10-02 07:15:20 INFO (3/4) Processing file: on003194.jsonld
+2026-10-02 07:15:20 INFO File validated: on003194.jsonld
+2026-10-02 07:15:20 INFO (4/4) Processing file: nm000104.jsonld
+2026-10-02 07:15:20 WARNING nm000104.jsonld is not a valid Neurobagel dataset JSONLD. Skipping file.
+Validation errors: 1 validation error for Dataset
+hasAccessType
+  Input should be 'public', 'registered' or 'restricted' [type=enum, input_value='not-a-valid-access-type', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/enum
+2026-10-02 07:15:20 INFO Dataset metadata successfully extracted from 3/4 JSONLD file(s); will upload the file(s) to the graph store.
+2026-10-02 07:15:20 WARNING The following 1 JSONLD file(s) failed validation and will not be uploaded:
+nm000104.jsonld
+exit status: 0
