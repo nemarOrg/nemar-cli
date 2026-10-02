@@ -33,6 +33,14 @@ export const STANDARD_MISSING_VALUES: readonly string[] = ["", "n/a", "N/A", "NA
  */
 export const UNMAPPABLE_SHARE_LIMIT = 0.1;
 
+/**
+ * An age column in which zeros are at least this share of the parsed ages is not
+ * mapped: a column of zeros is a placeholder for "not recorded", and a graph that
+ * answered "age 0" for a participant of unknown age would match every infant query.
+ * A few zeros among real ages (newborns recorded in years) stay ages.
+ */
+export const ZERO_PLACEHOLDER_SHARE = 0.5;
+
 /** Plausible ages in years. A cell outside it is unparseable, which also catches months and days. */
 export const AGE_MIN_YEARS = 0;
 export const AGE_MAX_YEARS = 120;
@@ -49,6 +57,8 @@ export type ColumnCounts = {
   unmappable: number;
   /** Cells that became a value in the graph. */
   mapped: number;
+  /** Age columns only: parsed ages equal to 0 (see {@link ZERO_PLACEHOLDER_SHARE}). */
+  zero_ages?: number;
 };
 
 export type ColumnOutcome<T> =
@@ -204,16 +214,34 @@ export function mapAgeColumn(
     };
   }
 
+  // Plain loops: `Math.min(...ages)` throws a RangeError once a column has about 125,000 cells.
+  let zeros = 0;
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  for (const age of ages) {
+    if (age === 0) zeros++;
+    if (age < min) min = age;
+    if (age > max) max = age;
+  }
+  if (zeros / ages.length >= ZERO_PLACEHOLDER_SHARE) {
+    return {
+      status: "curation",
+      column,
+      reason: "age_zero_placeholder",
+      counts: { ...counts(cells, unmappable, 0), zero_ages: zeros },
+    };
+  }
+
   const bad = present.filter((c) => parseAge(c, format) === null);
   const missingValues = missingValuesWith(bad);
   return {
     status: "mapped",
     column,
-    counts: counts(cells, unmappable, ages.length),
+    counts: { ...counts(cells, unmappable, ages.length), zero_ages: zeros },
     format,
     formatTerm: ageFormatTerm(format),
     missingValues,
-    valueRange: { min: Math.min(...ages), max: Math.max(...ages) },
+    valueRange: { min, max },
     unitsAssumed: declared === undefined,
     ageOf: (raw) => (missingValues.includes(raw) ? null : parseAge(raw, format)),
   };

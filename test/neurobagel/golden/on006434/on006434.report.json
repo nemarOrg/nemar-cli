@@ -2,11 +2,11 @@
   "columns": {
     "age": {
       "counts": {
-        "cells": 40,
-        "mapped": 40,
+        "cells": 66,
+        "mapped": 66,
         "missing": 0,
         "unmappable": 0,
-        "zero_ages": 0
+        "zero_ages": 24
       },
       "status": "mapped"
     },
@@ -15,43 +15,44 @@
     },
     "sex": {
       "counts": {
-        "cells": 40,
-        "mapped": 40,
+        "cells": 66,
+        "mapped": 41,
         "missing": 0,
-        "unmappable": 0
+        "unmappable": 25
       },
-      "status": "mapped"
+      "reason": "sex_unmappable",
+      "status": "needs_curation"
     }
   },
-  "dataset_id": "nm000132",
+  "dataset_id": "on006434",
   "flags": [
-    "age_units_assumed_years"
+    "sex_column_needs_curation"
   ],
   "graph": {
-    "acquisitions": 40,
-    "imaging_sessions": 40,
-    "phenotypic_sessions": 40,
-    "subjects": 40
+    "acquisitions": 66,
+    "imaging_sessions": 66,
+    "phenotypic_sessions": 66,
+    "subjects": 66
   },
   "imaging": {
     "datatypes_dropped_subjects": {},
     "datatypes_mapped_subjects": {
-      "eeg": 40
+      "eeg": 66
     },
     "mapped_datatypes_supported": [
       "eeg",
       "meg"
     ],
     "session_pairing_subjects": {
-      "single_session": 40
+      "single_session": 66
     }
   },
   "participant_count": {
-    "bids_index": 40,
-    "declared": 40,
-    "graph": 40,
-    "participants_tsv": 40,
-    "used": 40,
+    "bids_index": 66,
+    "declared": 66,
+    "graph": 66,
+    "participants_tsv": 66,
+    "used": 66,
     "used_from": "demographics"
   },
   "participants_json": {
@@ -62,16 +63,16 @@
     "conflicting_ids": 0,
     "duplicate_ids": 0,
     "ids_prefixed": 0,
-    "rows": 40,
+    "rows": 66,
     "rows_without_id": 0,
     "status": "ok"
   },
   "report_version": 1,
   "session_label_used_for_phenotype": "ses-unnamed",
   "subjects": {
-    "graph": 40,
+    "graph": 66,
     "index_without_row": 0,
-    "joined": 40,
+    "joined": 66,
     "source": "bids_index",
     "table_only": 0
   },

@@ -1,0 +1,176 @@
+{
+  "bagel": "0.11.6",
+  "bagel_only_subjects": 0,
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: CC-BY-4.0. Browse and download at https://nemar.org/dataset/nm000200 (latest version v1.0.2).",
+    "hasAccessLink": "https://nemar.org/dataset/nm000200",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Boyla Mainsah",
+      "Chance Fleeting",
+      "Thomas Balmat",
+      "Eric Sellers",
+      "Leslie Collins"
+    ],
+    "hasKeywords": [
+      "EEG",
+      "P300",
+      "brain-computer interface",
+      "speller",
+      "event-related potentials",
+      "visual perception"
+    ],
+    "hasLabel": "BigP3BCI Study I \u2014 9x8 checkerboard/performance-based (13 healthy subjects)",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/nm000200",
+      "https://doi.org/10.82901/nemar.nm000200"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/nm000200/"
+  },
+  "dataset_id": "nm000200",
+  "imaging": {
+    "attachable_subjects": 13,
+    "modalities": {
+      "sub-1": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-10": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-11": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-12": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-13": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-2": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-3": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-4": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-5": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-6": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-7": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-8": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-9": [
+        "nidm:Electroencephalography"
+      ]
+    }
+  },
+  "inputs": {
+    "annotated.json": "8d7a7a7c036a2344091d3c48c32f26b954da77c70969438da4a3451bf2cc1e88",
+    "dataset_description.json": "172a6e5341ff714cd8943615870099f168650ca5e51b3cb91a3edc17bdfad30d",
+    "participants.tsv": "1c1a0cb186c665defa9def14b8da76844328c972be182962ef8feb342e242967"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-1": {
+      "age": null,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-10": {
+      "age": null,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-11": {
+      "age": null,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-12": {
+      "age": null,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-13": {
+      "age": null,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-2": {
+      "age": null,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-3": {
+      "age": null,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-4": {
+      "age": null,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-5": {
+      "age": null,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-6": {
+      "age": null,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-7": {
+      "age": null,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248152002"
+    },
+    "sub-8": {
+      "age": null,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-9": {
+      "age": null,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": "snomed:248152002"
+    }
+  },
+  "transform_only_subjects": 0
+}

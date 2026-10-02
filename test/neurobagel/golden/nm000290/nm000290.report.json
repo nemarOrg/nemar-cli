@@ -5,7 +5,8 @@
         "cells": 10,
         "mapped": 10,
         "missing": 0,
-        "unmappable": 0
+        "unmappable": 0,
+        "zero_ages": 0
       },
       "status": "mapped"
     },

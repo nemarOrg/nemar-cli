@@ -2,56 +2,63 @@
   "columns": {
     "age": {
       "counts": {
-        "cells": 40,
-        "mapped": 40,
+        "cells": 13,
+        "mapped": 0,
         "missing": 0,
         "unmappable": 0,
-        "zero_ages": 0
+        "zero_ages": 12
+      },
+      "reason": "age_zero_placeholder",
+      "status": "needs_curation"
+    },
+    "group": {
+      "counts": {
+        "cells": 13,
+        "mapped": 13,
+        "missing": 0,
+        "unmappable": 0
       },
       "status": "mapped"
     },
-    "group": {
-      "status": "absent"
-    },
     "sex": {
       "counts": {
-        "cells": 40,
-        "mapped": 40,
+        "cells": 13,
+        "mapped": 13,
         "missing": 0,
         "unmappable": 0
       },
       "status": "mapped"
     }
   },
-  "dataset_id": "nm000132",
+  "dataset_id": "nm000200",
   "flags": [
-    "age_units_assumed_years"
+    "age_column_needs_curation"
   ],
   "graph": {
-    "acquisitions": 40,
-    "imaging_sessions": 40,
-    "phenotypic_sessions": 40,
-    "subjects": 40
+    "acquisitions": 13,
+    "imaging_sessions": 13,
+    "phenotypic_sessions": 13,
+    "subjects": 13
   },
   "imaging": {
     "datatypes_dropped_subjects": {},
     "datatypes_mapped_subjects": {
-      "eeg": 40
+      "eeg": 13
     },
     "mapped_datatypes_supported": [
       "eeg",
       "meg"
     ],
     "session_pairing_subjects": {
-      "single_session": 40
+      "single_session": 13
     }
   },
   "participant_count": {
-    "bids_index": 40,
-    "declared": 40,
-    "graph": 40,
-    "participants_tsv": 40,
-    "used": 40,
+    "bids_index": 13,
+    "declared": 13,
+    "graph": 13,
+    "participants_tsv": 13,
+    "used": 13,
     "used_from": "demographics"
   },
   "participants_json": {
@@ -62,16 +69,16 @@
     "conflicting_ids": 0,
     "duplicate_ids": 0,
     "ids_prefixed": 0,
-    "rows": 40,
+    "rows": 13,
     "rows_without_id": 0,
     "status": "ok"
   },
   "report_version": 1,
   "session_label_used_for_phenotype": "ses-unnamed",
   "subjects": {
-    "graph": 40,
+    "graph": 13,
     "index_without_row": 0,
-    "joined": 40,
+    "joined": 13,
     "source": "bids_index",
     "table_only": 0
   },

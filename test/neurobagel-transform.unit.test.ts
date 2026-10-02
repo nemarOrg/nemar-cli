@@ -534,6 +534,33 @@ describe("edge classes measured on the live catalog", () => {
     expect(bodyOf("on001787")).not.toContain("hasDiagnosis");
   });
 
+  test("nm000157 (every age is 0 beside n/a sex and weight): placeholder zeros are not ages", () => {
+    expect(rawTsv("nm000157")).toMatch(/sub-1\t0\tn\/a/);
+    expect(bodyOf("nm000157")).not.toContain("hasAge");
+    expect(reportOf("nm000157").columns).toMatchObject({
+      age: { status: "needs_curation", reason: "age_zero_placeholder", counts: { zero_ages: 19 } },
+    });
+    expect(Object.keys(dictionaryOf("nm000157"))).not.toContain("age");
+    expect(flagsOf("nm000157")).toContain("age_column_needs_curation");
+  });
+
+  test("nm000200 (12 of 13 ages are 0): the majority rule sends the column to curation", () => {
+    expect(bodyOf("nm000200")).not.toContain("hasAge");
+    expect(reportOf("nm000200").columns).toMatchObject({
+      age: { status: "needs_curation", reason: "age_zero_placeholder", counts: { zero_ages: 12 } },
+    });
+  });
+
+  test("on006434 (24 of 66 ages are 0, sex U): below half, so the ages are kept, and the report counts the zeros", () => {
+    // Known limit of the 50 percent rule, recorded rather than hidden: these zeros look like
+    // placeholders but are not a majority. A curator, not the rule, can tell them apart.
+    const ages = subjectsOf("on006434").map((s) => phenotypic(s).hasAge);
+    expect(ages.filter((a) => a === 0).length).toBe(24);
+    expect(reportOf("on006434").columns).toMatchObject({
+      age: { status: "mapped", counts: { zero_ages: 24 } },
+    });
+  });
+
   test("on003751 (a participant listed twice, identically; 14 rows for participants with no data): one subject, and the table-only rows are counted, not graphed", () => {
     const tsv = reportOf("on003751").participants_tsv as Json;
     expect(tsv.duplicate_ids).toBe(1);
@@ -762,9 +789,58 @@ describe("SYNTHETIC tables over real metadata: rules no public dataset reaches",
     expect(ages.slice(0, 4)).toEqual([undefined, undefined, undefined, undefined]);
   });
 
-  test("an age equal to 0 is an age, not a missing value", async () => {
-    const { ages } = await ageOf(["0", "1.5", "2"]);
-    expect(ages).toEqual([0, 1.5, 2]);
+  test("a few zero ages among real ages (newborns recorded in years) stay ages", async () => {
+    const { ages, report } = await ageOf(["0", "0", "0", "1", "1", "2", "2", "3", "3", "4"]);
+    expect(ages).toEqual([0, 0, 0, 1, 1, 2, 2, 3, 3, 4]);
+    const age = (report.columns as Json).age as { status: string; counts: Json };
+    expect(age.status).toBe("mapped");
+    expect(age.counts.zero_ages).toBe(3);
+  });
+
+  test("zeros that are at least half of the parsed ages are a placeholder: the column goes to curation, with the zero count", async () => {
+    // Exactly 50 percent (2 of 4) is already a placeholder; just under it (2 of 5, 1 of 4) is not.
+    const exactly = await ageOf(["0", "0", "30", "40"]);
+    const column = (exactly.report.columns as Json).age as Json;
+    expect(column).toMatchObject({ status: "needs_curation", reason: "age_zero_placeholder" });
+    expect((column.counts as Json).zero_ages).toBe(2);
+    expect(exactly.ages.every((a) => a === undefined)).toBe(true);
+    expect(Object.keys(exactly.dictionary)).toEqual(["participant_id"]);
+    expect(exactly.report.flags).toContain("age_column_needs_curation");
+
+    for (const cells of [
+      ["0", "0", "30", "40", "50"],
+      ["0", "30", "40", "50"],
+    ]) {
+      const under = await ageOf(cells);
+      expect(((under.report.columns as Json).age as Json).status).toBe("mapped");
+      expect(under.ages.filter((a) => a === 0).length).toBe(cells.filter((c) => c === "0").length);
+    }
+    const majority = await ageOf(["0", "0", "0", "30", "40"]);
+    expect(((majority.report.columns as Json).age as Json).status).toBe("needs_curation");
+  });
+
+  test("a column that is entirely zeros is a placeholder, however the zero is written", async () => {
+    for (const cells of [
+      ["0", "0", "0"],
+      ["0.0", "00", "0"],
+      [" 0", "0 ", "0"],
+    ]) {
+      const { report, ages } = await ageOf(cells);
+      expect(((report.columns as Json).age as Json).reason).toBe("age_zero_placeholder");
+      expect(ages.every((a) => a === undefined)).toBe(true);
+    }
+    // A range of 0-0 is zero as well.
+    const range = await ageOf(["0-0", "0-0", "20-30"]);
+    expect(((range.report.columns as Json).age as Json).reason).toBe("age_zero_placeholder");
+  });
+
+  test("the zero rule counts parsed ages only: missing and unparseable cells are not in the denominator", async () => {
+    // 2 zeros, 2 real ages, 3 n/a: half of the 4 parsed ages, so a placeholder.
+    const { report } = await ageOf(["0", "0", "30", "40", "n/a", "n/a", "n/a"]);
+    expect(((report.columns as Json).age as Json).reason).toBe("age_zero_placeholder");
+    // 1 zero, 2 real ages, 4 n/a: a third, so real.
+    const real = await ageOf(["0", "30", "40", "n/a", "n/a", "n/a", "n/a"]);
+    expect(((real.report.columns as Json).age as Json).status).toBe("mapped");
   });
 
   test("sex: m, f, male, female, o, other in any case map; codes and unknowns do not", async () => {
