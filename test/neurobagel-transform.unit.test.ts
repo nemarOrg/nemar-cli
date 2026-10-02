@@ -1545,3 +1545,116 @@ describe("SYNTHETIC boundaries of the age, group and identity rules", () => {
     );
   });
 });
+
+describe("SYNTHETIC remaining guards: counts, empty tables, id spellings and the zero share", () => {
+  const tsv = (...lines: string[]): string => `${lines.join("\n")}\n`;
+  const idOf = (i: number): string => `sub-${String(i + 1).padStart(3, "0")}`;
+  const build = async (participantsTsv: string, edit?: (metadata: Json) => void) => {
+    const input = loadFixture("nm000132");
+    const metadata = JSON.parse(JSON.stringify(input.metadata)) as Json;
+    edit?.(metadata);
+    return docs(await buildNeurobagelArtifacts({ ...input, metadata, participantsTsv }));
+  };
+  const ageOfSubject = (d: ReturnType<typeof docs>, label: string): number | undefined =>
+    (
+      (d.jsonld.hasSamples as Subject[]).find((s) => s.hasLabel === label) as Subject
+    ).hasSession.find((x) => x.schemaKey === "PhenotypicSession")?.hasAge;
+
+  test("ParticipantCount without a declared count is the number of graph subjects, not the number of table rows", async () => {
+    // 40 subjects have data; the table names 50 participants. The graph and the count say 40.
+    const rows = Array.from({ length: 50 }, (_, i) => `${idOf(i)}\t30`);
+    const d = await build(tsv("participant_id\tage", ...rows), (m) => {
+      m.demographics = null;
+    });
+    expect(d.report.participants_tsv).toMatchObject({ status: "ok" });
+    expect(d.report.participant_count).toEqual({
+      bids_index: 40,
+      declared: null,
+      graph: 40,
+      participants_tsv: 50,
+      used: 40,
+      used_from: "bids_index",
+    });
+    expect(d.description.ParticipantCount).toBe(40);
+    expect(d.report.flags).not.toContain("participant_count_disagrees");
+  });
+
+  test("a table with a header and no rows is a table with no participants: it is not 'ids that do not join'", async () => {
+    const d = await build(tsv("participant_id\tage"));
+    expect(d.report.participants_tsv).toMatchObject({ status: "ok", rows: 0 });
+    expect(d.report.flags).not.toContain("participant_ids_do_not_join_bids_index");
+    expect(d.report.subjects).toEqual({
+      graph: 40,
+      index_without_row: 40,
+      joined: 0,
+      source: "bids_index",
+      table_only: 0,
+    });
+    expect((d.jsonld.hasSamples as Subject[]).length).toBe(40);
+  });
+
+  test("rows with no participant id are counted and not graphed", async () => {
+    const rows = [
+      ...Array.from({ length: 5 }, (_, i) => `${idOf(i)}\t30`),
+      "\t31",
+      "   \t32",
+      "\t33",
+    ];
+    const d = await build(tsv("participant_id\tage", ...rows));
+    expect(d.report.participants_tsv).toMatchObject({ rows: 8, rows_without_id: 3, status: "ok" });
+    expect(d.report.subjects).toMatchObject({ joined: 5, table_only: 0 });
+    expect((d.jsonld.hasSamples as Subject[]).length).toBe(40);
+  });
+
+  test("the zero share counts parsed ages, not present cells: an unparseable cell is in neither the zeros nor the denominator", async () => {
+    const build18 = async (zeros: number, others: number) => {
+      const cells = [
+        ...Array.from({ length: zeros }, () => "0"),
+        ...Array.from({ length: others }, (_, i) => String(30 + i)),
+        "x",
+      ];
+      const d = await build(tsv("participant_id\tage", ...cells.map((c, i) => `${idOf(i)}\t${c}`)));
+      return (d.report.columns as Json).age as Json;
+    };
+    // 9 zeros among 18 parsed ages is exactly half, so a placeholder; as a share of the 19
+    // non-missing cells it would be 47% and the zeros would stay ages.
+    const half = await build18(9, 9);
+    expect(half).toMatchObject({ status: "needs_curation", reason: "age_zero_placeholder" });
+    expect((half.counts as Json).zero_ages).toBe(9);
+    // 8 of 18 is below half either way.
+    const under = await build18(8, 10);
+    expect(under.status).toBe("mapped");
+  });
+
+  test("rows that differ only in how the id is spelled (sub-001 and 001) and agree on the data are one participant", async () => {
+    const d = await build(
+      tsv("participant_id\tage\tsex", "sub-001\t20\tM", "001\t20\tM", "sub-002\t30\tF"),
+    );
+    expect(d.report.participants_tsv).toMatchObject({
+      conflicting_ids: 0,
+      duplicate_ids: 1,
+      ids_prefixed: 0,
+    });
+    expect(d.report.flags).toContain("duplicate_participant_ids");
+    expect(d.report.flags).not.toContain("conflicting_duplicate_participant_ids");
+    expect(ageOfSubject(d, "sub-001")).toBe(20);
+    // The same duplicate written the other way round (the unprefixed spelling first).
+    const reversed = await build(
+      tsv("participant_id\tage\tsex", "001\t20\tM", "sub-001\t20\tM", "sub-002\t30\tF"),
+    );
+    expect(reversed.report.participants_tsv).toMatchObject({
+      conflicting_ids: 0,
+      duplicate_ids: 1,
+      ids_prefixed: 1,
+    });
+    expect(ageOfSubject(reversed, "sub-001")).toBe(20);
+  });
+
+  test("rows under different spellings of one id that disagree on the data carry no phenotype", async () => {
+    const d = await build(tsv("participant_id\tage", "sub-001\t20", "001\t99", "sub-002\t30"));
+    expect(d.report.participants_tsv).toMatchObject({ conflicting_ids: 1, duplicate_ids: 1 });
+    expect(d.report.flags).toContain("conflicting_duplicate_participant_ids");
+    expect(ageOfSubject(d, "sub-001")).toBeUndefined();
+    expect(ageOfSubject(d, "sub-002")).toBe(30);
+  });
+});

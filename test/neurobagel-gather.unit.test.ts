@@ -143,6 +143,21 @@ describe("writeFixture refuses what must never reach a public repository", () =>
     });
   });
 
+  test("another dataset id on the control's host, even as metadata only, is refused by the id", () => {
+    // Metadata only, so the participants-file rule cannot be what refuses it: only the
+    // condition that the dataset IS the declared control can.
+    const metadata = { ...metadataOf("nm000132"), anonymous: true };
+    const g = gathered("nm000132", ANONYMOUS_CONTROL.base, { metadata, withParticipants: false });
+    expect(g.participantsTsv.bytes).toBeNull();
+    expect(g.participantsJson.bytes).toBeNull();
+    const refusal = refusalToWrite(g);
+    expect(refusal).toContain("so no document of it is written");
+    withTempDir((dir) => {
+      expect(() => writeFixture(g, dir)).toThrow(GatherError);
+      expect(readdirSync(dir)).toEqual([]);
+    });
+  });
+
   test("the declared control is written as metadata only", () => {
     withTempDir((dir) => {
       const g = gathered(ANONYMOUS_CONTROL.datasetId, ANONYMOUS_CONTROL.base, {
