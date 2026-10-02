@@ -1508,6 +1508,32 @@ describe("removals are bounded per run", () => {
   });
 });
 
+describe("removals spend only what the budget has left", () => {
+  test("with little budget left the run removes fewer than are leaving, says so, and the next run finishes", async () => {
+    const total = 20;
+    const stamp = (kind: string) => ({ sha256: "0".repeat(64), kind });
+    const ids = Array.from({ length: total }, (_, i) => `nm0009${String(i).padStart(2, "0")}`);
+    for (const id of ids) {
+      await h.bucket.put(`${id}.jsonld`, "{}", {
+        customMetadata: { ...stamp("jsonld"), [META.fingerprint]: "sha256:x" },
+      });
+      await h.bucket.put(`${id}_annotated.json`, "{}", { customMetadata: stamp("dictionary") });
+      await h.bucket.put(`${id}_dataset_description.json`, "{}", {
+        customMetadata: stamp("description"),
+      });
+    }
+    // The run's own setup spends a handful of operations; each removal is one more.
+    const first = await run({ opBudget: 20 });
+    expect(first.removed.length).toBeGreaterThan(0);
+    expect(first.removed.length).toBeLessThan(total);
+    expect(first.removals_pending).toBe(total - first.removed.length);
+    expect(first.ops.spent).toBeLessThanOrEqual(20);
+    const second = await run();
+    expect(second.removed.length).toBe(total - first.removed.length);
+    expect(await storeKeys(h.bucket)).toEqual([]);
+  });
+});
+
 describe("a dry run writes no ledger row and no audit row, whatever it finds", () => {
   const auditCount = () =>
     (h.db.query("SELECT COUNT(*) AS n FROM audit_log").get() as { n: number }).n;

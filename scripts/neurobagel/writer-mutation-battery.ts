@@ -1059,7 +1059,13 @@ export function readTestLog(text: string, exitCode: number): TestRun {
     }
     const failed = status[1] === "fail" || status[2] === "✗";
     if (failed) {
-      failures.push({ name: status[3] as string, infra: INFRASTRUCTURE.test(pending.join("\n")) });
+      const name = status[3] as string;
+      // `(unnamed)` is a hook that timed out or an error between tests: not an assertion in
+      // the area the mutant changed, so it can never be the evidence of a kill.
+      failures.push({
+        name,
+        infra: name === "(unnamed)" || INFRASTRUCTURE.test(pending.join("\n")),
+      });
     }
     pending = [];
   }
@@ -1070,8 +1076,8 @@ export function readTestLog(text: string, exitCode: number): TestRun {
   };
 }
 
-async function runTestsOnce(files: string[]): Promise<TestRun> {
-  const proc = Bun.spawn(["bun", "test", "--timeout", "60000", ...files], {
+async function runFile(file: string): Promise<TestRun> {
+  const proc = Bun.spawn(["bun", "test", "--timeout", "60000", file], {
     cwd: ROOT,
     stdout: "pipe",
     stderr: "pipe",
@@ -1084,6 +1090,24 @@ async function runTestsOnce(files: string[]): Promise<TestRun> {
   // biome-ignore lint/suspicious/noControlCharactersInRegex: the escape character IS what is stripped
   const text = `${out}\n${err}`.replace(/\u001b\[[0-9;]*m/g, "");
   return readTestLog(text, code);
+}
+
+/**
+ * Every file in its OWN process, in turn, stopping at the first failing assertion.
+ * Several Miniflare instances in one bun process have been found to break one another's
+ * connection to workerd (an unnamed hook timeout, `Failed to connect`), which in a battery
+ * is a mutant that cannot be judged; one file at a time is slower and answers.
+ */
+async function runTestsOnce(files: string[]): Promise<TestRun> {
+  const all: TestRun = { passed: true, failures: [], asserted: [] };
+  for (const file of files) {
+    const run = await runFile(file);
+    all.passed &&= run.passed;
+    all.failures.push(...run.failures);
+    all.asserted.push(...run.asserted);
+    if (run.asserted.length > 0) break;
+  }
+  return all;
 }
 
 /**

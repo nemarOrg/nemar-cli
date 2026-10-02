@@ -78,6 +78,12 @@ describe("reading a test log: a kill needs a failing assertion", () => {
     expect(run.asserted).toEqual([]);
   });
 
+  test("an unnamed failure (a hook that timed out, an error between tests) is not an assertion", () => {
+    const run = readTestLog("error: a beforeEach hook timed out\n✗ (unnamed) [5001ms]", 1);
+    expect(run.failures).toHaveLength(1);
+    expect(run.asserted).toEqual([]);
+  });
+
   test("an error printed before an EARLIER test is not blamed on a later one", () => {
     const log = [
       "error: ConnectionRefused",
