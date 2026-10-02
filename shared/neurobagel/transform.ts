@@ -36,9 +36,9 @@
  */
 
 import { type CanonicalJsonValue, byCodeUnit, canonicalJson } from "./canonical-json";
-import { type BoundCuration, type StaleFile, bindCuration, kindsOf } from "./curation-bind";
-import { isLoaded } from "./curation-loaded";
-import { type CurationEntry, type CurationKind, kindCounts } from "./curation-types";
+import type { BoundCuration } from "./curation-bind";
+import { curationRefusal, curationReportFor, resolveCuration } from "./curation-resolve";
+import { type CurationKind, kindCounts } from "./curation-types";
 import {
   CURATED_DIAGNOSIS_DESCRIPTION,
   type DiagnosisColumn,
@@ -290,46 +290,6 @@ function readParticipantsJson(
   return { status: "present", value: checked.data };
 }
 
-/** What became of an entry, before the counts the report adds to it. */
-type CurationOutcome =
-  | { status: "applied" }
-  | { status: "stale"; stale_files: StaleFile[] }
-  | { status: "invalid"; problems: number }
-  | { status: "unused" };
-
-/** The report's account of an entry: counts and enumerated values only, never a name or a cell. */
-function curationReportFor(
-  entry: CurationEntry,
-  outcome: CurationOutcome,
-  participantsWith: Record<CurationKind, number>,
-  withheld: WithheldCounts,
-): CurationReport {
-  const declared = kindCounts();
-  for (const column of entry.columns) declared[column.kind]++;
-  const common = { review: entry.evidence.review, declared };
-  const notApplied = {
-    columns_applied: 0 as const,
-    columns_skipped: entry.columns.length,
-    withheld,
-  };
-  switch (outcome.status) {
-    case "applied":
-      return {
-        ...common,
-        status: "applied",
-        columns_applied: entry.columns.length,
-        columns_skipped: 0,
-        participants_with: participantsWith,
-      };
-    case "stale":
-      return { ...common, ...notApplied, status: "stale", stale_files: outcome.stale_files };
-    case "invalid":
-      return { ...common, ...notApplied, status: "invalid", problems: outcome.problems };
-    case "unused":
-      return { ...common, ...notApplied, status: "unused" };
-  }
-}
-
 export async function buildNeurobagelArtifacts(
   input: NeurobagelInput,
 ): Promise<NeurobagelArtifacts> {
@@ -473,42 +433,20 @@ export async function buildNeurobagelArtifacts(
   // control): for those variables the mechanical mapping is withheld too, so that an entry that
   // goes stale loses claims and never makes a false one.
   const curationEntry = input.curation ?? null;
-  if (curationEntry !== null && !isLoaded(curationEntry)) {
-    throw new NeurobagelRefusal(
-      "curation_not_loaded",
-      "the curation entry did not come from parseCuration, so its terms were never checked",
-    );
-  }
-  if (curationEntry !== null && curationEntry.datasetId !== datasetId) {
-    throw new NeurobagelRefusal(
-      "curation_dataset_mismatch",
-      `the curation entry is for ${curationEntry.datasetId} but this is ${datasetId}`,
-    );
-  }
-  let applied: BoundCuration | null = null;
-  let curationOutcome: CurationOutcome | null = null;
-  let namedByUnappliedEntry: ReadonlySet<CurationKind> = new Set();
-  if (curationEntry !== null) {
-    const bound = await bindCuration(curationEntry, {
-      participantsTsv: input.participantsTsv,
-      participantsJson: input.participantsJson,
-    });
-    if (bound.status === "stale") {
-      flags.add("curation_stale");
-      curationOutcome = { status: "stale", stale_files: bound.staleFiles };
-    } else if (bound.status === "invalid") {
-      flags.add("curation_invalid");
-      curationOutcome = { status: "invalid", problems: bound.problems.length };
-    } else if (!phenotypeUsable) {
-      // The table fits, but none of its participants are the graph's: nothing to attach it to.
-      flags.add("curation_unused");
-      curationOutcome = { status: "unused" };
-    } else {
-      applied = bound.bound;
-      curationOutcome = { status: "applied" };
-    }
-    if (applied === null) namedByUnappliedEntry = new Set(kindsOf(curationEntry));
-  }
+  const refusal = curationEntry === null ? null : curationRefusal(curationEntry, datasetId);
+  if (refusal !== null) throw new NeurobagelRefusal(refusal.code, refusal.message);
+  const resolved =
+    curationEntry === null
+      ? null
+      : await resolveCuration(
+          curationEntry,
+          { participantsTsv: input.participantsTsv, participantsJson: input.participantsJson },
+          phenotypeUsable,
+        );
+  if (resolved?.flag) flags.add(resolved.flag);
+  const applied: BoundCuration | null = resolved?.applied ?? null;
+  const curationOutcome = resolved?.outcome ?? null;
+  const namedByUnappliedEntry: ReadonlySet<CurationKind> = resolved?.namedByUnapplied ?? new Set();
 
   const curatedCounts = (
     column: number,
