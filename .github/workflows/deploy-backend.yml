@@ -176,7 +176,11 @@ jobs:
       # that just went live: an anonymous POST with an allowed Origin answers
       # 401. A 404 means the route is missing from what deployed, which the
       # /health check above cannot see. Runs after it, so the new version is
-      # already the one serving. Retries only a network failure or a 5xx.
+      # already the one serving, but not necessarily at every edge: a request
+      # can land on one that still serves the previous version for a few
+      # seconds after `wrangler deploy`. So a network failure, a 5xx and a 404
+      # are retried, and a 404 fails the job only when the last attempt still
+      # answers it.
       #
       # ONE EXCEPTION: in maintenance mode (backend/src/middleware/maintenance.ts)
       # every POST answers 503 with `error: "Service Unavailable"` and `mode`
@@ -186,15 +190,32 @@ jobs:
         run: |
           URL="https://nemar-api-dev.sccn-org.workers.dev/auth/private/grant"
           BODY_FILE="$(mktemp)"
+          HEADER_FILE="$(mktemp)"
           CODE=""
+          # What the last attempt got back, so a failure does not read as a bare
+          # status code (a zone bot or WAF challenge shows as `cf-mitigated`).
+          show_last() {
+            echo "::group::last response (status ${CODE:-<none>})"
+            head -c 2000 "$HEADER_FILE" 2>/dev/null || true
+            echo
+            head -c 2000 "$BODY_FILE" 2>/dev/null || true
+            echo
+            echo "::endgroup::"
+          }
           for i in $(seq 1 3); do
-            CODE="$(curl -sS -o "$BODY_FILE" -w '%{http_code}' --max-time 15 -X POST \
+            CODE="$(curl -sS -D "$HEADER_FILE" -o "$BODY_FILE" -w '%{http_code}' --max-time 15 -X POST \
               -H 'Origin: https://app.nemar.org' -H 'Content-Type: application/json' \
-              "$URL" 2>/dev/null || true)"
+              "$URL" || true)"
             echo "attempt $i: POST $URL -> ${CODE:-<none>}"
             case "$CODE" in
               401) echo "::notice::Dev private grant route is live (401 to an anonymous caller)"; exit 0 ;;
-              404) echo "::error::Dev deploy smoke FAILED - POST $URL answered 404: the private grant route is not in the deployed build."; exit 1 ;;
+              404)
+                if [ "$i" -eq 3 ]; then
+                  show_last
+                  echo "::error::Dev deploy smoke FAILED - POST $URL answered 404 on every attempt: the private grant route is not in the deployed build."
+                  exit 1
+                fi
+                sleep 10 ;;
               503)
                 if jq -e '.error == "Service Unavailable" and (.mode == "read-only" or .mode == "full")' "$BODY_FILE" >/dev/null 2>&1; then
                   MODE="$(jq -r .mode "$BODY_FILE")"
@@ -206,6 +227,7 @@ jobs:
               *) break ;;
             esac
           done
+          show_last
           echo "::error::Dev deploy smoke FAILED - POST $URL answered ${CODE:-<none>}, want 401."
           exit 1
 
@@ -287,7 +309,11 @@ jobs:
       # that just went live: an anonymous POST with an allowed Origin answers
       # 401. A 404 means the route is missing from what deployed, which the
       # /health check above cannot see. Runs after it, so the new version is
-      # already the one serving. Retries only a network failure or a 5xx.
+      # already the one serving, but not necessarily at every edge: a request
+      # can land on one that still serves the previous version for a few
+      # seconds after `wrangler deploy`. So a network failure, a 5xx and a 404
+      # are retried, and a 404 fails the job only when the last attempt still
+      # answers it.
       #
       # ONE EXCEPTION: in maintenance mode (backend/src/middleware/maintenance.ts)
       # every POST answers 503 with `error: "Service Unavailable"` and `mode`
@@ -297,15 +323,34 @@ jobs:
         run: |
           URL="https://api.nemar.org/auth/private/grant"
           BODY_FILE="$(mktemp)"
+          HEADER_FILE="$(mktemp)"
           CODE=""
+          # What the last attempt got back, so a failure does not read as a bare
+          # status code. Production goes through the api.nemar.org custom domain,
+          # which the dev check never exercises, so a zone bot or WAF challenge
+          # on this POST would show here as `cf-mitigated`.
+          show_last() {
+            echo "::group::last response (status ${CODE:-<none>})"
+            head -c 2000 "$HEADER_FILE" 2>/dev/null || true
+            echo
+            head -c 2000 "$BODY_FILE" 2>/dev/null || true
+            echo
+            echo "::endgroup::"
+          }
           for i in $(seq 1 3); do
-            CODE="$(curl -sS -o "$BODY_FILE" -w '%{http_code}' --max-time 15 -X POST \
+            CODE="$(curl -sS -D "$HEADER_FILE" -o "$BODY_FILE" -w '%{http_code}' --max-time 15 -X POST \
               -H 'Origin: https://app.nemar.org' -H 'Content-Type: application/json' \
-              "$URL" 2>/dev/null || true)"
+              "$URL" || true)"
             echo "attempt $i: POST $URL -> ${CODE:-<none>}"
             case "$CODE" in
               401) echo "::notice::PRODUCTION private grant route is live (401 to an anonymous caller)"; exit 0 ;;
-              404) echo "::error::PRODUCTION deploy smoke FAILED - POST $URL answered 404: the private grant route is not in the deployed build."; exit 1 ;;
+              404)
+                if [ "$i" -eq 3 ]; then
+                  show_last
+                  echo "::error::PRODUCTION deploy smoke FAILED - POST $URL answered 404 on every attempt: the private grant route is not in the deployed build."
+                  exit 1
+                fi
+                sleep 10 ;;
               503)
                 if jq -e '.error == "Service Unavailable" and (.mode == "read-only" or .mode == "full")' "$BODY_FILE" >/dev/null 2>&1; then
                   MODE="$(jq -r .mode "$BODY_FILE")"
@@ -317,6 +362,7 @@ jobs:
               *) break ;;
             esac
           done
+          show_last
           echo "::error::PRODUCTION deploy smoke FAILED - POST $URL answered ${CODE:-<none>}, want 401."
           exit 1
 
