@@ -444,9 +444,9 @@ export async function issueSession(
  * The account an UNREVOKED session cookie belongs to, whether or not that
  * session is still otherwise usable.
  *
- * One caller: `/auth/logout`'s cascade into the docs credential. Which
- * predicates are dropped and which are kept is the whole design here, and the
- * two halves were each found by a separate round of review:
+ * One caller: `/auth/logout`'s cascade into the docs and private-site
+ * credentials. Which predicates are dropped and which are kept is the whole
+ * design here, and the two halves were each found by a separate round of review:
  *
  * - The EXPIRY and account predicates go. A docs session runs eight hours from
  *   its mint while a non-remember app session runs 24 hours from sign-in, so the
@@ -460,10 +460,10 @@ export async function issueSession(
  *   power to revoke.
  *
  * Scope is unconstrained, which is safe rather than powerful: presenting a
- * docs-scoped value here ends that same account's docs access and nothing else
- * (the app session survives and can mint a new grant immediately), and the docs
- * cookie has a different name on a different host, so it cannot arrive by
- * accident.
+ * docs- or private-scoped value here ends that same account's docs and
+ * private-site access, which is what signing out is for, and nothing else (the
+ * app session survives and can mint a new grant immediately), and those cookies
+ * have different names on different hosts, so one cannot arrive by accident.
  *
  * NEVER use this to authenticate anything. It answers "whose unrevoked row is
  * this" and nothing about whether the row may still be used.
