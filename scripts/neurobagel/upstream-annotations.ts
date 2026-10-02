@@ -461,40 +461,70 @@ export async function convertUpstream(
   return { ...result, entry };
 }
 
-/** A merge that would replace an entry a person wrote with an upstream annotation. */
+/** An existing entry that is not a reused upstream annotation, and who reviewed it. */
+export interface AuthoredEntry {
+  datasetId: string;
+  review: string;
+}
+
+/** A merge that would replace entries a person wrote with upstream annotations. */
 export class MergeRefusal extends Error {
-  constructor(
-    readonly datasetId: string,
-    readonly review: string,
-  ) {
+  constructor(readonly entries: AuthoredEntry[]) {
     super(
-      `${datasetId} already has an entry reviewed by ${JSON.stringify(review)}; an upstream annotation never replaces it (remove that entry by hand if that is what you mean)`,
+      `${entries.length} existing ${entries.length === 1 ? "entry was" : "entries were"} not reviewed as upstream annotations and would be replaced: ${entries
+        .map((e) => `${e.datasetId} (${e.review})`)
+        .join(
+          ", ",
+        )}. An upstream annotation never replaces a person's entry: remove ${entries.length === 1 ? "it" : "them"} by hand if that is what you mean, or pass --skip-authored to leave ${entries.length === 1 ? "it" : "them"} alone`,
     );
     this.name = "MergeRefusal";
   }
 }
 
+export interface MergeResult {
+  /** The curation file with the merge applied. */
+  file: { datasets: Record<string, unknown>; format: number };
+  /** Reused upstream entries that were refreshed. */
+  replaced: string[];
+  added: string[];
+  /** Generated entries NOT merged because an entry a person reviewed is there (`skipAuthored`). */
+  skipped: AuthoredEntry[];
+}
+
 /**
  * The curation file with `generated` merged in, every other entry untouched.
  * An existing entry is replaced only if it is itself a reused upstream annotation
- * (`evidence.review` of `upstream_community`): a regeneration refreshes those, and anything a
- * person reviewed, or that cannot be read well enough to tell, stops the merge.
+ * (`evidence.review` of `upstream_community`): a regeneration refreshes those.
+ * An entry a person reviewed, or one that cannot be read well enough to tell, stops the merge
+ * with a refusal naming ALL of them, unless `skipAuthored` is set, which leaves them alone and
+ * reports them in `skipped` instead.
  */
 export function mergeEntries(
   existing: { datasets: Record<string, unknown>; format: number },
   generated: Record<string, unknown>,
-): { datasets: Record<string, unknown>; format: number } {
+  options: { skipAuthored?: boolean } = {},
+): MergeResult {
   const datasets = { ...existing.datasets };
+  const result: MergeResult = { file: existing, replaced: [], added: [], skipped: [] };
   for (const [id, entry] of Object.entries(generated)) {
     const current = datasets[id];
     if (current !== undefined) {
       const evidence = isRecord(current) ? current.evidence : undefined;
       const review = isRecord(evidence) ? evidence.review : undefined;
       if (review !== "upstream_community") {
-        throw new MergeRefusal(id, typeof review === "string" ? review : "(unreadable)");
+        result.skipped.push({
+          datasetId: id,
+          review: typeof review === "string" ? review : "(unreadable)",
+        });
+        continue;
       }
+      result.replaced.push(id);
+    } else {
+      result.added.push(id);
     }
     datasets[id] = entry;
   }
-  return { ...existing, datasets };
+  if (result.skipped.length > 0 && !options.skipAuthored) throw new MergeRefusal(result.skipped);
+  result.file = { ...existing, datasets };
+  return result;
 }

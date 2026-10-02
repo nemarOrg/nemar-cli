@@ -14,14 +14,15 @@
 
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   FIXTURE_ROOT,
   NEUROBAGEL_TEST_ROOT,
   loadCuration,
 } from "../scripts/neurobagel/fixtures-io";
-import { parseArgs } from "../scripts/neurobagel/reuse-openneuro-annotations";
+import { parseArgs, planMerge } from "../scripts/neurobagel/reuse-openneuro-annotations";
 import {
   type Conversion,
   MergeRefusal,
@@ -464,6 +465,29 @@ describe("the evidence of a reused entry carries what a spot-check needs", () =>
     expect(JSON.stringify(bare.entry)).toContain("are NOT confirmed by participants.json");
   });
 
+  test("numeric codes are confirmed only if EVERY code is: one code the Levels do not describe is not confirmed", async () => {
+    const half = await mirrorOf("on003474", (tsv, json) => [
+      tsv,
+      (json ?? "").replace('"two": "male"', '"two": "unknown"'),
+    ]);
+    const out = await convert("on003474", {}, undefined, half);
+    expect(JSON.stringify(out.entry)).toContain("are NOT confirmed by participants.json");
+    expect(JSON.stringify(out.entry)).not.toContain("are confirmed by the Levels");
+  });
+
+  test('"female" does not confirm a code mapped to Male: the sex is matched as a whole word', async () => {
+    // The dataset says one is female and two is male. Upstream maps BOTH codes to Male, so code 1
+    // contradicts its own description, and the word `male` inside `female` must not hide that.
+    const upstream = JSON.parse(JSON.stringify(upstreamOf("on003474")));
+    const male = { TermURL: "snomed:248153007", Label: "" };
+    upstream.sex.Annotations.Levels = { "1": male, "2": male };
+    const out = await convert("on003474", {}, upstream);
+    expect(JSON.stringify(out.entry)).toContain("are NOT confirmed by participants.json");
+    // The same documents with the codes mapped as the dataset describes them are confirmed.
+    const fine = await convert("on003474");
+    expect(JSON.stringify(fine.entry)).toContain("are confirmed by the Levels");
+  });
+
   test("an age column says which units participants.json declares, or that years are assumed", async () => {
     expect(sourceOfEntry("on003568")).toContain(
       "participant_age age units: none declared, years assumed",
@@ -483,16 +507,20 @@ describe("a regeneration never overwrites what a person wrote", () => {
   const committed = JSON.parse(
     readFileSync(join(NEUROBAGEL_TEST_ROOT, "../../shared/neurobagel/curation.json"), "utf8"),
   ) as { datasets: Record<string, Json>; format: number };
+  const authored = Object.entries(committed.datasets)
+    .filter(([, e]) => (e.evidence as Json).review !== "upstream_community")
+    .map(([id]) => id);
 
   test("a merge into an entry of review `author` is refused, naming the entry and the review", () => {
     expect(() => mergeEntries(committed, { on004166: { columns: {} } })).toThrow(MergeRefusal);
     try {
       mergeEntries(committed, { on004166: { columns: {} } });
     } catch (error) {
-      expect((error as MergeRefusal).datasetId).toBe("on004166");
-      expect((error as MergeRefusal).review).toBe("author");
-      expect((error as Error).message).toContain("on004166");
-      expect((error as Error).message).toContain('"author"');
+      expect((error as MergeRefusal).entries).toEqual([
+        { datasetId: "on004166", review: "author" },
+      ]);
+      expect((error as Error).message).toContain("on004166 (author)");
+      expect((error as Error).message).toContain("--skip-authored");
     }
     // domain_expert is a person's review too.
     const expert = {
@@ -505,26 +533,79 @@ describe("a regeneration never overwrites what a person wrote", () => {
     expect(() => mergeEntries(expert, { on003568: { columns: {} } })).toThrow(MergeRefusal);
   });
 
+  test("the refusal names EVERY entry in the way, not only the first", () => {
+    const generated = Object.fromEntries(authored.map((id) => [id, { marker: id }]));
+    expect(authored.length).toBeGreaterThan(5);
+    try {
+      mergeEntries(committed, generated);
+      throw new Error("the merge was not refused");
+    } catch (error) {
+      expect(error).toBeInstanceOf(MergeRefusal);
+      const message = (error as Error).message;
+      expect(message).toContain(`${authored.length} existing entries were not reviewed`);
+      for (const id of authored) expect(message).toContain(`${id} (author)`);
+    }
+  });
+
   test("an entry whose review cannot be read is refused, not overwritten", () => {
     const odd = { ...committed, datasets: { ...committed.datasets, on003568: "not an entry" } };
-    expect(() => mergeEntries(odd, { on003568: {} })).toThrow('"(unreadable)"');
+    expect(() => mergeEntries(odd, { on003568: {} })).toThrow("on003568 ((unreadable))");
+  });
+
+  test("--skip-authored leaves every authored entry alone, merges the rest, and says what it skipped", () => {
+    const fresh = { marker: "fresh" };
+    const generated: Record<string, unknown> = { on003568: fresh, on009999: fresh };
+    for (const id of authored) generated[id] = { marker: "would overwrite" };
+    const result = mergeEntries(committed, generated, { skipAuthored: true });
+    expect(result.skipped.map((e) => e.datasetId).sort()).toEqual([...authored].sort());
+    expect(result.replaced).toEqual(["on003568"]);
+    expect(result.added).toEqual(["on009999"]);
+    for (const id of authored) expect(result.file.datasets[id]).toBe(committed.datasets[id]);
+    expect(result.file.datasets.on003568).toBe(fresh);
+    expect(result.file.datasets.on009999).toBe(fresh);
   });
 
   test("a reused entry is refreshed, a new id is added, and every other entry is left exactly as it is", () => {
     const fresh = { marker: "fresh" };
     const merged = mergeEntries(committed, { on003568: fresh, on009999: fresh });
-    expect(merged.datasets.on003568).toBe(fresh);
-    expect(merged.datasets.on009999).toBe(fresh);
+    expect(merged.skipped).toEqual([]);
+    expect(merged.file.datasets.on003568).toBe(fresh);
+    expect(merged.file.datasets.on009999).toBe(fresh);
     for (const id of Object.keys(committed.datasets)) {
-      if (id !== "on003568") expect(merged.datasets[id]).toBe(committed.datasets[id]);
+      if (id !== "on003568") expect(merged.file.datasets[id]).toBe(committed.datasets[id]);
     }
     expect(committed.datasets.on003568).not.toBe(fresh);
-    expect(merged.format).toBe(1);
+    expect(merged.file.format).toBe(1);
+  });
+
+  test("planMerge reads the real file and writes nothing; the refusal and the skip both hold there", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nemar-merge-"));
+    try {
+      const path = join(dir, "curation.json");
+      const text = readFileSync(
+        join(NEUROBAGEL_TEST_ROOT, "../../shared/neurobagel/curation.json"),
+        "utf8",
+      );
+      writeFileSync(path, text);
+      const generated = { on004166: { marker: "x" }, on003568: { marker: "y" } };
+      expect(() => planMerge(path, generated)).toThrow(MergeRefusal);
+      const planned = planMerge(path, generated, { skipAuthored: true });
+      expect(planned.skipped).toEqual([{ datasetId: "on004166", review: "author" }]);
+      expect(planned.replaced).toEqual(["on003568"]);
+      // Planning never writes.
+      expect(readFileSync(path, "utf8")).toBe(text);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("the command line leaves redundant columns out by default, and --keep-redundant opts out", () => {
     expect(parseArgs(["on003568"]).keepRedundant).toBe(false);
     expect(parseArgs(["--keep-redundant", "on003568"]).keepRedundant).toBe(true);
+    expect(parseArgs(["on003568"]).skipAuthored).toBe(false);
+    expect(parseArgs(["--skip-authored", "--merge-into", "x.json", "on003568"]).skipAuthored).toBe(
+      true,
+    );
     expect(parseArgs(["--merge-into", "x.json", "on003568"]).ids).toEqual(["on003568"]);
   });
 });

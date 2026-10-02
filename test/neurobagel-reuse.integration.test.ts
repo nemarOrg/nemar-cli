@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadCuration } from "../scripts/neurobagel/fixtures-io";
@@ -63,6 +63,55 @@ describe.skipIf(!live)("reuse of upstream annotations, live", () => {
         expect(canonicalJson(written.datasets[id] as never)).toBe(
           canonicalJson(file.datasets[id] as never),
         );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    LIVE_TIMEOUT,
+  );
+
+  test(
+    "a merge that would overwrite a person's entry exits 1 with a clear message, and --skip-authored leaves it alone",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "nemar-reuse-"));
+      try {
+        const path = join(dir, "curation.json");
+        const original = readFileSync(
+          join(import.meta.dir, "../shared/neurobagel/curation.json"),
+          "utf8",
+        );
+        writeFileSync(path, original);
+        const run = async (...extra: string[]) => {
+          const proc = Bun.spawn(
+            [
+              "bun",
+              "run",
+              "scripts/neurobagel/reuse-openneuro-annotations.ts",
+              "--keep-redundant",
+              "--merge-into",
+              path,
+              ...extra,
+              "on004166",
+            ],
+            { cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" },
+          );
+          const [out, err] = await Promise.all([
+            new Response(proc.stdout).text(),
+            new Response(proc.stderr).text(),
+          ]);
+          return { code: await proc.exited, out, err };
+        };
+        const refused = await run();
+        expect(refused.code).toBe(1);
+        expect(refused.err).toContain("on004166 (author)");
+        expect(refused.err).toContain("--skip-authored");
+        expect(refused.err).not.toContain("    at ");
+        expect(readFileSync(path, "utf8")).toBe(original);
+        const skipped = await run("--skip-authored");
+        expect(skipped.code).toBe(0);
+        expect(skipped.out).toContain('"skipped_authored"');
+        expect(skipped.out).toContain('"dataset_id": "on004166"');
+        expect(readFileSync(path, "utf8")).toBe(original);
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }

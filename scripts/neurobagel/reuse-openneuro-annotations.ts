@@ -31,6 +31,8 @@
  *   --save-upstream <dir> keep the upstream files the entries came from, with the licence and
  *                         a provenance.json, under <dir>/<short commit>/ (the test fixtures)
  *   --date YYYY-MM-DD     the date written into the evidence (default: today, UTC)
+ *   --skip-authored       with --merge-into: leave an existing entry a person reviewed alone,
+ *                         and report it, instead of refusing the whole merge
  *   --keep-redundant      keep a column the mechanical rules already give the same values
  *                         (by default such a column is left out and counted)
  *   --base <url>          the data plane (default https://data.nemar.org)
@@ -45,6 +47,8 @@ import { gitBlobShaOfBytes } from "../../shared/neurobagel/git-blob";
 import { DEFAULT_BASE, MAX_TABLE_BYTES, fetchDocument, get, listDatasetIds } from "./gather";
 import {
   type Conversion,
+  MergeRefusal,
+  type MergeResult,
   type MirrorDocuments,
   UPSTREAM,
   type UpstreamFile,
@@ -78,6 +82,7 @@ export function parseArgs(argv: string[]) {
     date: flag("--date") ?? new Date().toISOString().slice(0, 10),
     base: flag("--base") ?? DEFAULT_BASE,
     keepRedundant: argv.includes("--keep-redundant"),
+    skipAuthored: argv.includes("--skip-authored"),
     ids: argv.filter((a, i) => /^on\d{6}$/.test(a) && !valueFlags.has(argv[i - 1] ?? "")),
   };
 }
@@ -173,6 +178,22 @@ interface Row {
   conversion: Conversion | null;
   /** The upstream file as fetched, once it was. */
   upstream?: { file: string; blobSha: string; bytes: Uint8Array };
+}
+
+/**
+ * What merging `entries` into the curation file at `path` would do, without writing it.
+ * Throws `MergeRefusal` (naming every entry in the way) unless `skipAuthored` is set.
+ */
+export function planMerge(
+  path: string,
+  entries: Record<string, unknown>,
+  options: { skipAuthored?: boolean } = {},
+): MergeResult {
+  const existing = JSON.parse(readFileSync(path, "utf8")) as {
+    datasets: Record<string, unknown>;
+    format: number;
+  };
+  return mergeEntries(existing, entries, options);
 }
 
 const sha256Hex = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
@@ -308,6 +329,17 @@ async function main(): Promise<void> {
     kept += conversion.kept;
     sizes.push(canonicalJson({ [id]: conversion.entry } as never).length);
   }
+  // Decide the merge before anything is written, so a refusal leaves no half-done run behind.
+  let merge: MergeResult | null = null;
+  if (args.mergeInto !== undefined) {
+    try {
+      merge = planMerge(args.mergeInto, entries, { skipAuthored: args.skipAuthored });
+    } catch (error) {
+      if (!(error instanceof MergeRefusal)) throw error;
+      console.error(`error: ${error.message}`);
+      process.exit(1);
+    }
+  }
   const total = sizes.reduce((a, b) => a + b, 0);
   const report = {
     upstream: { commit: UPSTREAM.commit, license: UPSTREAM.license, repo: UPSTREAM.repo },
@@ -326,6 +358,18 @@ async function main(): Promise<void> {
       ),
     },
     notes: Object.fromEntries(Object.entries(notes).sort()),
+    ...(merge === null
+      ? {}
+      : {
+          merge: {
+            added: merge.added,
+            replaced: merge.replaced,
+            skipped_authored: merge.skipped.map((e) => ({
+              dataset_id: e.datasetId,
+              review: e.review,
+            })),
+          },
+        }),
     size_bytes: {
       all_entries: total,
       mean_entry: sizes.length === 0 ? 0 : Math.round(total / sizes.length),
@@ -339,12 +383,8 @@ async function main(): Promise<void> {
   if (args.out !== undefined) {
     writeFileSync(args.out, canonicalJson({ datasets: entries, format: 1 } as never));
   }
-  if (args.mergeInto !== undefined) {
-    const existing = JSON.parse(readFileSync(args.mergeInto, "utf8")) as {
-      datasets: Record<string, unknown>;
-      format: number;
-    };
-    writeFileSync(args.mergeInto, canonicalJson(mergeEntries(existing, entries) as never));
+  if (args.mergeInto !== undefined && merge !== null) {
+    writeFileSync(args.mergeInto, canonicalJson(merge.file as never));
   }
 }
 
