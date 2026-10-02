@@ -14,6 +14,9 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   NEUROSCHEMA_VERSION,
+  NO_SESSION_KEY,
+  bidsIndexSchema,
+  bidsIndexSubjectSchema,
   catalogItemSchema,
   datasetDetailSchema,
   datasetListEnvelopeSchema,
@@ -657,5 +660,79 @@ describe("neuroschema dataset schema", () => {
     // The previous release: the literal moved with the vendored bundle.
     expect(() => neuroschemaDatasetSchema.parse({ ...base, schema_version: "0.4.0" })).toThrow();
     expect(() => neuroschemaDatasetSchema.parse({ ...base, recording_modality: [] })).toThrow();
+  });
+});
+
+// Epic #1586 Phase 2 (#1588): the BIDS index's per-session datatype pairing.
+// The schemas end in `.passthrough()`, so "parse an object and read the value
+// back" would pass with the declaration deleted; every assertion here is on
+// the DECLARED shape (`.shape` keys) or on a rejection.
+describe("bids_index wire contract: session_modalities (#1588)", () => {
+  const subject = {
+    sessions: ["01", "02"],
+    modalities: { anat: { tasks: {} }, eeg: { tasks: { rest: { runs: ["1"] } } } },
+    session_modalities: { "01": ["anat"], "02": ["eeg"] },
+  };
+
+  test("declares exactly the keys a consumer is promised", () => {
+    expect(Object.keys(bidsIndexSubjectSchema.shape)).toEqual([
+      "sessions",
+      "modalities",
+      "session_modalities",
+    ]);
+    expect(Object.keys(bidsIndexSchema.shape)).toEqual(["version", "subjects"]);
+  });
+
+  test("the no-session key is the declared literal and can never be a session label", () => {
+    expect(NO_SESSION_KEY).toBe("no-session");
+    // Session labels are alphanumeric; this contains a hyphen.
+    expect(NO_SESSION_KEY).not.toMatch(/^[A-Za-z0-9]+$/);
+  });
+
+  test("accepts a subject that has it, including the no-session bucket and an empty session", () => {
+    const withBucket = {
+      ...subject,
+      session_modalities: { ...subject.session_modalities, [NO_SESSION_KEY]: ["beh"], "03": [] },
+    };
+    expect(bidsIndexSubjectSchema.parse(withBucket).session_modalities).toEqual(
+      withBucket.session_modalities,
+    );
+    expect(bidsIndexSubjectSchema.parse({ ...subject, session_modalities: {} })).toBeDefined();
+  });
+
+  // Not decoration: a data plane that predates the field, and a response
+  // cached for up to a minute before it deployed, both omit it. Making it
+  // required here would turn a rolling deploy into a contract failure.
+  test("accepts a subject without it, which is how an older data plane serves it", () => {
+    const { session_modalities, ...older } = subject;
+    void session_modalities;
+    expect(bidsIndexSubjectSchema.safeParse(older).success).toBe(true);
+    expect(
+      bidsIndexSchema.safeParse({ version: "v1.0.0", subjects: { "sub-01": older } }).success,
+    ).toBe(true);
+  });
+
+  test("rejects a value that is not a list of datatype names per session", () => {
+    expect(
+      bidsIndexSubjectSchema.safeParse({ ...subject, session_modalities: { "01": "eeg" } }).success,
+    ).toBe(false);
+    expect(
+      bidsIndexSubjectSchema.safeParse({ ...subject, session_modalities: { "01": [1] } }).success,
+    ).toBe(false);
+    expect(
+      bidsIndexSubjectSchema.safeParse({ ...subject, session_modalities: ["eeg"] }).success,
+    ).toBe(false);
+    // Absent or an object: null is neither, and would read as "unknown" to one
+    // consumer and "none" to another.
+    expect(bidsIndexSubjectSchema.safeParse({ ...subject, session_modalities: null }).success).toBe(
+      false,
+    );
+  });
+
+  test("the whole index parses, and is null-able the way the wire sends it", () => {
+    const index = { version: "v1.0.0", subjects: { "sub-01": subject } };
+    expect(bidsIndexSchema.safeParse(index).success).toBe(true);
+    expect(bidsIndexSchema.nullable().safeParse(null).success).toBe(true);
+    expect(bidsIndexSchema.safeParse({ subjects: index.subjects }).success).toBe(false);
   });
 });

@@ -13,7 +13,9 @@ import {
   MIN_DATA_PAPER_YEAR,
   validateDataPapers,
 } from "../backend/src/services/data-papers";
-import { NEUROSCHEMA_VERSION } from "../shared/contract/index.js";
+import { digestManifest } from "../backend/src/services/data-router";
+import type { VersionManifest } from "../backend/src/services/manifest";
+import { NEUROSCHEMA_VERSION, bidsIndexSchema } from "../shared/contract/index.js";
 import {
   NEUROSCHEMA_LINE_RE,
   compileNeuroschemaDatasetValidator,
@@ -341,5 +343,46 @@ describe("the live schema_version pin (NEUROSCHEMA_LINE_RE)", () => {
     ]) {
       expect(NEUROSCHEMA_LINE_RE.test(v)).toBe(false);
     }
+  });
+});
+
+// Epic #1586 Phase 2 (#1588): `extensions.nemar.bids_index.subjects.*.session_modalities`.
+// neuroschema declares `extensions.nemar` with additionalProperties: true and
+// does not describe `bids_index` at all, so the vendored bundle neither needs
+// regenerating for the new key nor guards it. These tests pin both halves of
+// that claim, so the day neuroschema does describe `bids_index` this fails and
+// the bundle and `bidsIndexSchema` get updated together instead of drifting.
+describe("extensions.nemar.bids_index carries session_modalities (#1588)", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      join(
+        import.meta.dir,
+        "../backend/test/fixtures/bids-index-sessions/manifest-on007347-v1.0.0.json",
+      ),
+      "utf8",
+    ),
+  ) as VersionManifest;
+  const subjects = digestManifest(manifest).subjects;
+  const withIndex = (bidsIndex: unknown) => ({
+    ...goodDataset,
+    extensions: { nemar: { bids_index: bidsIndex } },
+  });
+
+  test("the vendored schema accepts a dataset whose real index carries the field", () => {
+    const ds = withIndex({ version: "v1.0.0", subjects });
+    // Guards the guard: the index under test really has the new key.
+    expect(subjects["sub-004"].session_modalities).toBeDefined();
+    const ok = validate(ds);
+    if (!ok) throw new Error(`expected valid, got: ${formatAjvErrors(validate)}`);
+    expect(ok).toBe(true);
+  });
+
+  test("the vendored schema does not constrain the block; bidsIndexSchema is the guard", () => {
+    const nonsense = {
+      version: "v1.0.0",
+      subjects: { "sub-01": { sessions: [], modalities: {}, session_modalities: "eeg" } },
+    };
+    expect(validate(withIndex(nonsense))).toBe(true);
+    expect(bidsIndexSchema.safeParse(nonsense).success).toBe(false);
   });
 });

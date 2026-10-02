@@ -1,0 +1,1405 @@
+{
+  "_what": "The BIDS index each fixture produced BEFORE session_modalities existed: digest is digestManifest(manifest).{sessions,subjects}, metadata_json is the exact GET /<id>/metadata.json body through the real route. The test strips session_modalities from today's output and compares for byte equality, so an existing key that moves, reorders or disappears fails.",
+  "_captured_from": "git 216e81a7 (nemar-cli, epic branch base, backend code identical to dev ae60b9ab), 2026-10-01, with backend/test/helpers/bids-index-fixtures.ts",
+  "_do_not_regenerate": "Never re-capture this from code that already emits session_modalities: it would make the comparison compare the change with itself.",
+  "digest": {
+    "nm000132": {
+      "sessions": [],
+      "subjects": {
+        "sub-001": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-002": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-003": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-004": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-005": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-006": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-007": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-008": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-009": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-010": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-011": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-012": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-013": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-014": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-015": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-016": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-017": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-018": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-019": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-020": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-021": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-022": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-023": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-024": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-025": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-026": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-027": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-028": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-029": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-030": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-031": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-032": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-033": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-034": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-035": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-036": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-037": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-038": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-039": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-040": {
+          "sessions": [],
+          "modalities": {
+            "eeg": {
+              "tasks": {
+                "MMN": {
+                  "runs": []
+                },
+                "N170": {
+                  "runs": []
+                },
+                "N2pc": {
+                  "runs": []
+                },
+                "N400": {
+                  "runs": []
+                },
+                "P3": {
+                  "runs": []
+                },
+                "flankers": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "on004196": {
+      "sessions": [
+        "01",
+        "02",
+        "EEG"
+      ],
+      "subjects": {
+        "sub-01": {
+          "sessions": [
+            "01",
+            "02",
+            "EEG"
+          ],
+          "modalities": {
+            "anat": {
+              "tasks": {}
+            },
+            "eeg": {
+              "tasks": {
+                "inner": {
+                  "runs": []
+                }
+              }
+            },
+            "fmap": {
+              "tasks": {}
+            },
+            "func": {
+              "tasks": {
+                "inner": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-02": {
+          "sessions": [
+            "01",
+            "02",
+            "EEG"
+          ],
+          "modalities": {
+            "anat": {
+              "tasks": {}
+            },
+            "eeg": {
+              "tasks": {
+                "inner": {
+                  "runs": []
+                }
+              }
+            },
+            "fmap": {
+              "tasks": {}
+            },
+            "func": {
+              "tasks": {
+                "inner": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-03": {
+          "sessions": [
+            "01",
+            "02",
+            "EEG"
+          ],
+          "modalities": {
+            "anat": {
+              "tasks": {}
+            },
+            "eeg": {
+              "tasks": {
+                "inner": {
+                  "runs": []
+                }
+              }
+            },
+            "fmap": {
+              "tasks": {}
+            },
+            "func": {
+              "tasks": {
+                "inner": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-05": {
+          "sessions": [
+            "01",
+            "02",
+            "EEG"
+          ],
+          "modalities": {
+            "anat": {
+              "tasks": {}
+            },
+            "eeg": {
+              "tasks": {
+                "inner": {
+                  "runs": []
+                }
+              }
+            },
+            "fmap": {
+              "tasks": {}
+            },
+            "func": {
+              "tasks": {
+                "inner": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "on006033": {
+      "sessions": [
+        "01",
+        "02"
+      ],
+      "subjects": {
+        "sub-01": {
+          "sessions": [
+            "01",
+            "02"
+          ],
+          "modalities": {
+            "anat": {
+              "tasks": {}
+            },
+            "eeg": {
+              "tasks": {
+                "innerspeech": {
+                  "runs": []
+                }
+              }
+            },
+            "func": {
+              "tasks": {
+                "innerspeech": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-02": {
+          "sessions": [
+            "01",
+            "02"
+          ],
+          "modalities": {
+            "anat": {
+              "tasks": {}
+            },
+            "eeg": {
+              "tasks": {
+                "innerspeech": {
+                  "runs": []
+                }
+              }
+            },
+            "func": {
+              "tasks": {
+                "innerspeech": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-03": {
+          "sessions": [
+            "01",
+            "02"
+          ],
+          "modalities": {
+            "anat": {
+              "tasks": {}
+            },
+            "eeg": {
+              "tasks": {
+                "innerspeech": {
+                  "runs": []
+                }
+              }
+            },
+            "func": {
+              "tasks": {
+                "innerspeech": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "on007347": {
+      "sessions": [
+        "1",
+        "2",
+        "3"
+      ],
+      "subjects": {
+        "sub-001": {
+          "sessions": [
+            "1",
+            "2"
+          ],
+          "modalities": {
+            "anat": {
+              "tasks": {}
+            },
+            "eeg": {
+              "tasks": {
+                "resting": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-002": {
+          "sessions": [
+            "1",
+            "2"
+          ],
+          "modalities": {
+            "anat": {
+              "tasks": {}
+            },
+            "eeg": {
+              "tasks": {
+                "resting": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-003": {
+          "sessions": [
+            "1",
+            "2"
+          ],
+          "modalities": {
+            "anat": {
+              "tasks": {}
+            },
+            "eeg": {
+              "tasks": {
+                "resting": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-004": {
+          "sessions": [
+            "1",
+            "2",
+            "3"
+          ],
+          "modalities": {
+            "anat": {
+              "tasks": {}
+            },
+            "eeg": {
+              "tasks": {
+                "resting": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        },
+        "sub-005": {
+          "sessions": [
+            "1"
+          ],
+          "modalities": {
+            "anat": {
+              "tasks": {}
+            },
+            "eeg": {
+              "tasks": {
+                "resting": {
+                  "runs": []
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "metadata_json": {
+    "nm000132": "{\"schema_version\":\"0.4.1\",\"doc_type\":\"dataset\",\"dataset_id\":\"nm000132\",\"name\":\"nm000132\",\"description\":null,\"source\":\"nemar\",\"recording_modality\":[],\"bids_version\":null,\"license\":null,\"authors\":[],\"anonymous\":false,\"keywords\":[],\"related_identifiers\":[],\"contributors\":[],\"dates\":[],\"rights\":[],\"language\":null,\"funding\":[],\"tasks\":[],\"datatypes\":[],\"sessions\":[],\"sessions_count\":null,\"demographics\":null,\"data_summary\":{\"total_files\":1462,\"size_bytes\":18807300296,\"size_human\":\"17.5 GB\",\"recording_count\":null,\"recordings_unavailable\":null,\"total_recording_duration\":null},\"signal_defaults\":null,\"provenance\":{\"latest_snapshot\":\"v1.1.1\",\"publish_date\":\"2026-04-04 06:05:15\"},\"external_links\":{\"dataset_doi\":null,\"github_url\":null},\"extensions\":{\"nemar\":{\"versions\":[{\"version\":\"v1.1.1\",\"doi\":\"10.5072/FK2nm000132\",\"created_at\":\"2026-04-04 06:05:15\",\"manifest_url\":\"/nm000132/v1.1.1/manifest.json\"}],\"bids_index\":{\"version\":\"v1.1.1\",\"subjects\":{\"sub-001\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-002\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-003\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-004\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-005\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-006\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-007\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-008\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-009\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-010\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-011\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-012\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-013\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-014\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-015\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-016\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-017\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-018\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-019\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-020\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-021\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-022\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-023\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-024\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-025\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-026\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-027\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-028\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-029\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-030\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-031\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-032\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-033\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-034\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-035\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-036\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-037\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-038\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-039\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}},\"sub-040\":{\"sessions\":[],\"modalities\":{\"eeg\":{\"tasks\":{\"MMN\":{\"runs\":[]},\"N170\":{\"runs\":[]},\"N2pc\":{\"runs\":[]},\"N400\":{\"runs\":[]},\"P3\":{\"runs\":[]},\"flankers\":{\"runs\":[]}}}}}}},\"pipeline_stage\":null,\"data_complete\":null,\"bytes_present\":null,\"recordings_measured\":null}}}",
+    "on004196": "{\"schema_version\":\"0.4.1\",\"doc_type\":\"dataset\",\"dataset_id\":\"on004196\",\"name\":\"on004196\",\"description\":null,\"source\":\"nemar\",\"recording_modality\":[],\"bids_version\":null,\"license\":null,\"authors\":[],\"anonymous\":false,\"keywords\":[],\"related_identifiers\":[],\"contributors\":[],\"dates\":[],\"rights\":[],\"language\":null,\"funding\":[],\"tasks\":[],\"datatypes\":[],\"sessions\":[\"01\",\"02\",\"EEG\"],\"sessions_count\":3,\"demographics\":null,\"data_summary\":{\"total_files\":113,\"size_bytes\":10022901529,\"size_human\":\"9.33 GB\",\"recording_count\":null,\"recordings_unavailable\":null,\"total_recording_duration\":null},\"signal_defaults\":null,\"provenance\":{\"latest_snapshot\":\"v1.0.0\",\"publish_date\":\"2026-04-04 06:05:15\"},\"external_links\":{\"dataset_doi\":null,\"github_url\":null},\"extensions\":{\"nemar\":{\"versions\":[{\"version\":\"v1.0.0\",\"doi\":\"10.5072/FK2on004196\",\"created_at\":\"2026-04-04 06:05:15\",\"manifest_url\":\"/on004196/v1.0.0/manifest.json\"}],\"bids_index\":{\"version\":\"v1.0.0\",\"subjects\":{\"sub-01\":{\"sessions\":[\"01\",\"02\",\"EEG\"],\"modalities\":{\"anat\":{\"tasks\":{}},\"eeg\":{\"tasks\":{\"inner\":{\"runs\":[]}}},\"fmap\":{\"tasks\":{}},\"func\":{\"tasks\":{\"inner\":{\"runs\":[]}}}}},\"sub-02\":{\"sessions\":[\"01\",\"02\",\"EEG\"],\"modalities\":{\"anat\":{\"tasks\":{}},\"eeg\":{\"tasks\":{\"inner\":{\"runs\":[]}}},\"fmap\":{\"tasks\":{}},\"func\":{\"tasks\":{\"inner\":{\"runs\":[]}}}}},\"sub-03\":{\"sessions\":[\"01\",\"02\",\"EEG\"],\"modalities\":{\"anat\":{\"tasks\":{}},\"eeg\":{\"tasks\":{\"inner\":{\"runs\":[]}}},\"fmap\":{\"tasks\":{}},\"func\":{\"tasks\":{\"inner\":{\"runs\":[]}}}}},\"sub-05\":{\"sessions\":[\"01\",\"02\",\"EEG\"],\"modalities\":{\"anat\":{\"tasks\":{}},\"eeg\":{\"tasks\":{\"inner\":{\"runs\":[]}}},\"fmap\":{\"tasks\":{}},\"func\":{\"tasks\":{\"inner\":{\"runs\":[]}}}}}}},\"pipeline_stage\":null,\"data_complete\":null,\"bytes_present\":null,\"recordings_measured\":null}}}",
+    "on006033": "{\"schema_version\":\"0.4.1\",\"doc_type\":\"dataset\",\"dataset_id\":\"on006033\",\"name\":\"on006033\",\"description\":null,\"source\":\"nemar\",\"recording_modality\":[],\"bids_version\":null,\"license\":null,\"authors\":[],\"anonymous\":false,\"keywords\":[],\"related_identifiers\":[],\"contributors\":[],\"dates\":[],\"rights\":[],\"language\":null,\"funding\":[],\"tasks\":[],\"datatypes\":[],\"sessions\":[\"01\",\"02\"],\"sessions_count\":2,\"demographics\":null,\"data_summary\":{\"total_files\":67,\"size_bytes\":16449274784,\"size_human\":\"15.3 GB\",\"recording_count\":null,\"recordings_unavailable\":null,\"total_recording_duration\":null},\"signal_defaults\":null,\"provenance\":{\"latest_snapshot\":\"v1.0.0\",\"publish_date\":\"2026-04-04 06:05:15\"},\"external_links\":{\"dataset_doi\":null,\"github_url\":null},\"extensions\":{\"nemar\":{\"versions\":[{\"version\":\"v1.0.0\",\"doi\":\"10.5072/FK2on006033\",\"created_at\":\"2026-04-04 06:05:15\",\"manifest_url\":\"/on006033/v1.0.0/manifest.json\"}],\"bids_index\":{\"version\":\"v1.0.0\",\"subjects\":{\"sub-01\":{\"sessions\":[\"01\",\"02\"],\"modalities\":{\"anat\":{\"tasks\":{}},\"eeg\":{\"tasks\":{\"innerspeech\":{\"runs\":[]}}},\"func\":{\"tasks\":{\"innerspeech\":{\"runs\":[]}}}}},\"sub-02\":{\"sessions\":[\"01\",\"02\"],\"modalities\":{\"anat\":{\"tasks\":{}},\"eeg\":{\"tasks\":{\"innerspeech\":{\"runs\":[]}}},\"func\":{\"tasks\":{\"innerspeech\":{\"runs\":[]}}}}},\"sub-03\":{\"sessions\":[\"01\",\"02\"],\"modalities\":{\"anat\":{\"tasks\":{}},\"eeg\":{\"tasks\":{\"innerspeech\":{\"runs\":[]}}},\"func\":{\"tasks\":{\"innerspeech\":{\"runs\":[]}}}}}}},\"pipeline_stage\":null,\"data_complete\":null,\"bytes_present\":null,\"recordings_measured\":null}}}",
+    "on007347": "{\"schema_version\":\"0.4.1\",\"doc_type\":\"dataset\",\"dataset_id\":\"on007347\",\"name\":\"on007347\",\"description\":null,\"source\":\"nemar\",\"recording_modality\":[],\"bids_version\":null,\"license\":null,\"authors\":[],\"anonymous\":false,\"keywords\":[],\"related_identifiers\":[],\"contributors\":[],\"dates\":[],\"rights\":[],\"language\":null,\"funding\":[],\"tasks\":[],\"datatypes\":[],\"sessions\":[\"1\",\"2\",\"3\"],\"sessions_count\":3,\"demographics\":null,\"data_summary\":{\"total_files\":70,\"size_bytes\":1767381637,\"size_human\":\"1.65 GB\",\"recording_count\":null,\"recordings_unavailable\":null,\"total_recording_duration\":null},\"signal_defaults\":null,\"provenance\":{\"latest_snapshot\":\"v1.0.0\",\"publish_date\":\"2026-04-04 06:05:15\"},\"external_links\":{\"dataset_doi\":null,\"github_url\":null},\"extensions\":{\"nemar\":{\"versions\":[{\"version\":\"v1.0.0\",\"doi\":\"10.5072/FK2on007347\",\"created_at\":\"2026-04-04 06:05:15\",\"manifest_url\":\"/on007347/v1.0.0/manifest.json\"}],\"bids_index\":{\"version\":\"v1.0.0\",\"subjects\":{\"sub-001\":{\"sessions\":[\"1\",\"2\"],\"modalities\":{\"anat\":{\"tasks\":{}},\"eeg\":{\"tasks\":{\"resting\":{\"runs\":[]}}}}},\"sub-002\":{\"sessions\":[\"1\",\"2\"],\"modalities\":{\"anat\":{\"tasks\":{}},\"eeg\":{\"tasks\":{\"resting\":{\"runs\":[]}}}}},\"sub-003\":{\"sessions\":[\"1\",\"2\"],\"modalities\":{\"anat\":{\"tasks\":{}},\"eeg\":{\"tasks\":{\"resting\":{\"runs\":[]}}}}},\"sub-004\":{\"sessions\":[\"1\",\"2\",\"3\"],\"modalities\":{\"anat\":{\"tasks\":{}},\"eeg\":{\"tasks\":{\"resting\":{\"runs\":[]}}}}},\"sub-005\":{\"sessions\":[\"1\"],\"modalities\":{\"anat\":{\"tasks\":{}},\"eeg\":{\"tasks\":{\"resting\":{\"runs\":[]}}}}}}},\"pipeline_stage\":null,\"data_complete\":null,\"bytes_present\":null,\"recordings_measured\":null}}}"
+  }
+}

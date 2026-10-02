@@ -42,6 +42,7 @@ import {
 } from "../backend/src/services/data-router";
 import type { ManifestFile, VersionManifest } from "../backend/src/services/manifest";
 import { formatBytesCompact, formatBytesDetailed } from "../shared/bytes";
+import { NO_SESSION_KEY } from "../shared/contract/index.js";
 import type { NemarMetadataV1, NemarMetadataV2 } from "../shared/datacite-constants";
 
 function fixture(): VersionManifest {
@@ -793,6 +794,7 @@ describe("buildBidsIndex", () => {
       "sub-01": {
         sessions: [],
         modalities: { eeg: { tasks: { rest: { runs: [] } } } },
+        session_modalities: { [NO_SESSION_KEY]: ["eeg"] },
       },
     });
   });
