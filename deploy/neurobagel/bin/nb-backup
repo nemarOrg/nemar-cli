@@ -19,7 +19,8 @@
 # The archive lives in backups/, on the SAME disk as the node. That protects against a bad release
 # or an operator error, not against losing the disk. Set NB_BACKUP_HOOK in .env to copy each archive
 # off the host: it is run through `sh -c` with the archive path as its first argument, after the
-# archive is written (for example: NB_BACKUP_HOOK='rclone copyto "$1" remote:nb-backups/"$(basename "$1")"').
+# archive is written (for example, in .env: NB_BACKUP_HOOK=rclone copy "$1" remote:nb-backups/ ; the value
+# is read literally, so it is written without quotes around the whole command).
 # A failing hook makes the backup exit 9 and is logged; the local archive is kept either way.
 #
 # Takes the shared lock so a release cannot change under the tar; waits up to 15 minutes.

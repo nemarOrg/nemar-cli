@@ -7,8 +7,8 @@
 # memory and load, and whether the other containers on the host are still up.
 #
 # Anything that needs a person is a PROBLEM and makes the exit code non-zero: a container that is
-# not running or not healthy, a failed reload or a failed load, a frozen or stale loader, a dead or
-# stale guard, a guard abort, a node on hold whose API still answers. Warnings are notes (a staged
+# not running or not healthy, a failed reload or a failed load, a frozen or stale loader, a guard
+# that has never started (NB_GUARD_EXPECTED, default 1) or has gone stale, a guard abort, a node on hold whose API still answers. Warnings are notes (a staged
 # release waiting, a graph restart since the last reload, host memory below the reload minimum).
 #
 # Usage: bin/nb-status [--json] [--deep] [--quiet]
@@ -146,7 +146,9 @@ pending=""
 # A guard that was running and has gone quiet is itself a finding, and so is one that stopped us.
 hb=""
 [ ! -f "$NB_STATE_DIR/guard-heartbeat" ] || hb="$(cat "$NB_STATE_DIR/guard-heartbeat" 2>/dev/null || true)"
-hb_problem="$(nb_guard_heartbeat_problem "$hb" "$(nb_epoch)" "$(nb_env_get NB_GUARD_STALE_S 1200)")"
+# NB_GUARD_EXPECTED=1 (the default) means a guard that has never started is a problem too; set it to
+# 0 in .env only for a node that is deliberately run without one.
+hb_problem="$(nb_guard_heartbeat_problem "$hb" "$(nb_epoch)" "$(nb_env_get NB_GUARD_STALE_S 1200)" "$(nb_env_get NB_GUARD_EXPECTED 1)")"
 [ -z "$hb_problem" ] || problem "$hb_problem"
 [ ! -f "$NB_STATE_DIR/guard-abort.json" ] || problem "the guard stopped the project: $(jq -r '.at + " " + .reason' "$NB_STATE_DIR/guard-abort.json")"
 if [ -n "$cur" ] && [ -n "$(printf '%s' "$applied" | jq -r 'select(. != null) | .release')" ] \
