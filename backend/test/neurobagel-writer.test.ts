@@ -17,6 +17,18 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import Ajv from "ajv";
 import schema from "../../deploy/neurobagel/index.schema.json";
+import { type CurationResolver, createCurationResolver } from "../src/services/neurobagel-curation";
+import {
+  ARTIFACT_KINDS,
+  ARTIFACT_SUFFIX,
+  type IndexDocument,
+  META,
+  NEUROBAGEL_INDEX_KEY,
+  NEUROBAGEL_INDEX_SCHEMA,
+  indexProblems,
+  listStore,
+  parseStoredIndex,
+} from "../src/services/neurobagel-store";
 import {
   type RunResult,
   neurobagelWriterMode,
@@ -24,21 +36,11 @@ import {
   runNeurobagelWriter,
   syncNeurobagelDataset,
 } from "../src/services/neurobagel-writer";
-import {
-  ARTIFACT_KINDS,
-  ARTIFACT_SUFFIX,
-  META,
-  NEUROBAGEL_INDEX_KEY,
-  NEUROBAGEL_INDEX_SCHEMA,
-  type IndexDocument,
-  indexProblems,
-  listStore,
-  parseStoredIndex,
-} from "../src/services/neurobagel-store";
 import type { Bindings } from "../src/types/bindings";
 import { wrapD1 } from "./helpers/d1";
 import {
   type Harness,
+  gitBlobSha,
   golden,
   recordWrites,
   seedDatasetRow,
@@ -78,6 +80,50 @@ function run(over: Partial<Parameters<typeof runNeurobagelWriter>[1]> = {}, env?
 }
 
 const outcomes = (r: RunResult) => r.results.map((x) => `${x.id}:${x.outcome}`);
+
+/**
+ * A dataset whose table has a `group` column and a REAL curation entry for it, written
+ * in the file's format and loaded by the real `lookupCuration` (the vocabulary is the
+ * pinned one: `snomed:230690007` is "Cerebrovascular accident"). The pins are the git
+ * blob hashes of the very bytes served, so the entry is current, unless `stalePin`.
+ */
+function curatedDataset(
+  id: string,
+  groupValue: string,
+  options: { stalePin?: boolean } = {},
+): { tsv: string; pjson: string; resolver: CurationResolver } {
+  const tsv = `participant_id\tage\tgroup\nsub-01\t30\t${groupValue}\nsub-02\t31\t${groupValue}\nsub-03\t32\tpatient\n`;
+  const pjson = JSON.stringify({ age: { Units: "years" } });
+  const bytes = (t: string) => new TextEncoder().encode(t);
+  const file = {
+    format: 1,
+    datasets: {
+      [id]: {
+        columns: {
+          group: {
+            IsAbout: { TermURL: "nb:Diagnosis", Label: "Diagnosis" },
+            Levels: { patient: { TermURL: "snomed:230690007", Label: "Cerebrovascular accident" } },
+            MissingValues: groupValue === "patient" ? [] : [groupValue],
+            VariableType: "Categorical",
+          },
+        },
+        evidence: { source: "a test", reviewer: "a test", review: "author", date: "2026-10-02" },
+        pins: {
+          participants_tsv: options.stalePin ? "0".repeat(40) : gitBlobSha(bytes(tsv)),
+          participants_json: gitBlobSha(bytes(pjson)),
+        },
+      },
+    },
+  };
+  const resolver = createCurationResolver({
+    load: async () => ({
+      file,
+      lookupCuration: (await import("../../shared/neurobagel/curation")).lookupCuration,
+    }),
+    clock: () => new Date("2026-10-02T12:00:00Z"),
+  });
+  return { tsv, pjson, resolver };
+}
 
 // ----------------------------------------------------------------------------
 // The anchor: real data through the real data plane
@@ -291,12 +337,16 @@ describe("a second run with nothing changed writes nothing", () => {
     const result = await run({}, h.env({ NEUROBAGEL: rec.bucket }));
     expect(outcomes(result).sort()).toEqual(["nm000602:written", "nm000603:unchanged"]);
     const puts = rec.log.map((e) => e.key).sort();
-    expect(puts).toEqual([
-      "index.json",
-      "nm000602.jsonld",
-      "nm000602_annotated.json",
-      "nm000602_dataset_description.json",
-    ].sort().filter((k) => puts.includes(k)));
+    expect(puts).toEqual(
+      [
+        "index.json",
+        "nm000602.jsonld",
+        "nm000602_annotated.json",
+        "nm000602_dataset_description.json",
+      ]
+        .sort()
+        .filter((k) => puts.includes(k)),
+    );
     // Only the JSON-LD is certain to change with a name; every key written is this dataset's or the index.
     expect(puts.every((k) => k === "index.json" || k.startsWith("nm000602"))).toBe(true);
     expect(puts).toContain("nm000602.jsonld");
@@ -372,7 +422,10 @@ describe("a dataset that stops being eligible leaves the store", () => {
       "becomes anonymous",
       "UPDATE datasets SET anonymous = 1, first_published_at = NULL WHERE dataset_id = 'nm000610'",
     ],
-    ["loses its first publication", "UPDATE datasets SET first_published_at = NULL WHERE dataset_id = 'nm000610'"],
+    [
+      "loses its first publication",
+      "UPDATE datasets SET first_published_at = NULL WHERE dataset_id = 'nm000610'",
+    ],
     ["loses its versions", "DELETE FROM dataset_versions WHERE dataset_id = 'nm000610'"],
     ["becomes a sandbox row", "UPDATE datasets SET is_sandbox = 1 WHERE dataset_id = 'nm000610'"],
   ];
@@ -441,7 +494,9 @@ describe("a dataset that stops being eligible leaves the store", () => {
     seedSynthetic(h, "nm000616");
     seedSynthetic(h, "nm000617");
     await run();
-    h.db.run("UPDATE datasets SET visibility = 'private' WHERE dataset_id IN ('nm000616','nm000617')");
+    h.db.run(
+      "UPDATE datasets SET visibility = 'private' WHERE dataset_id IN ('nm000616','nm000617')",
+    );
     const result = await run({ only: ["nm000616"] });
     expect(result.removed).toEqual(["nm000616"]);
     // 617 is out of the index (removal is by omission, always) but its objects wait for their run.
@@ -502,7 +557,9 @@ describe("write order", () => {
     await run({}, h.env({ NEUROBAGEL: rec.bucket }));
     const ops = rec.log.map((e) => `${e.op}:${e.key}`);
     const indexAt = ops.indexOf("put:index.json");
-    const lastPut = ops.map((o, i) => (o.startsWith("put:nm") ? i : -1)).reduce((a, b) => Math.max(a, b));
+    const lastPut = ops
+      .map((o, i) => (o.startsWith("put:nm") ? i : -1))
+      .reduce((a, b) => Math.max(a, b));
     const firstDelete = ops.findIndex((o) => o.startsWith("delete:"));
     expect(lastPut).toBeLessThan(indexAt);
     expect(indexAt).toBeLessThan(firstDelete);
@@ -610,7 +667,9 @@ describe("anonymity: two independent guards", () => {
     seedSynthetic(h, "nm099998", { anonymous: 1, firstPublishedAt: null, isSandbox: 1 });
     const result = await run();
     expect(result.eligible).toBe(0);
-    expect(await storeKeys(h.bucket)).toEqual(["index.json"].filter(() => (result.index.entries ?? 0) > 0));
+    expect(await storeKeys(h.bucket)).toEqual(
+      ["index.json"].filter(() => (result.index.entries ?? 0) > 0),
+    );
     expect(h.standin.log.filter((r) => r.path.includes("nm099998"))).toEqual([]);
   });
 
@@ -698,11 +757,15 @@ describe("a dataset with a curation entry is never converted without it", () => 
     seedSynthetic(h, "nm000650");
     await run();
     const before = await text("nm000650.jsonld");
-    h.db.run("UPDATE datasets SET name = 'Changed after curation broke' WHERE dataset_id = 'nm000650'");
+    h.db.run(
+      "UPDATE datasets SET name = 'Changed after curation broke' WHERE dataset_id = 'nm000650'",
+    );
 
     const rec = recordWrites(h.bucket);
     const result = await run(
-      { deps: { curation: async () => ({ kind: "failed", reason: "curation.json is not valid" }) } },
+      {
+        deps: { curation: async () => ({ kind: "failed", reason: "curation.json is not valid" }) },
+      },
       h.env({ NEUROBAGEL: rec.bucket }),
     );
 
@@ -731,13 +794,45 @@ describe("a dataset with a curation entry is never converted without it", () => 
     expect(await storeKeys(h.bucket)).toEqual([]);
   });
 
-  test("an entry the transform cannot take is a stop (curation_unsupported), not a silent drop", async () => {
-    seedSynthetic(h, "nm000652");
-    const result = await run({
-      deps: { curation: async () => ({ kind: "entry", hash: "sha256:abc", entry: { columns: {} } }) },
-    });
-    expect(result.results[0]).toMatchObject({ outcome: "refused", code: "curation_unsupported" });
-    expect(await storeKeys(h.bucket)).toEqual([]);
+  test("a real entry is applied through the real loader and the real transform", async () => {
+    const { tsv, pjson, resolver } = curatedDataset("nm000652", "patient");
+    seedSynthetic(h, "nm000652", { tsv, participantsJson: pjson });
+    const result = await run({ deps: { curation: resolver } });
+    expect(result.results[0]?.outcome).toBe("written");
+    // The entry's diagnosis is in the graph, and the mechanical healthy control is too
+    // (the entry maps `patient` and declares `Control` missing: it is the entry's call).
+    const jsonld = await text("nm000652.jsonld");
+    expect(jsonld).toContain("snomed:230690007");
+    expect(result.needs_review).toEqual([]);
+    const meta = (await listStore(h.bucket)).datasets.get("nm000652")?.jsonld?.meta ?? {};
+    expect(meta[META.flags]).toBe("");
+  });
+
+  test("a stale entry federates the dataset WITHOUT a false healthy control, and says so", async () => {
+    // The table says `Control` and the entry, reviewed against other bytes, withdraws the
+    // mechanical healthy control mapping. The entry is stale (its pin is not this file),
+    // so it is skipped whole and the variable it names is WITHHELD, never fallen back to.
+    const { tsv, pjson, resolver } = curatedDataset("nm000653", "Control", { stalePin: true });
+    seedSynthetic(h, "nm000653", { tsv, participantsJson: pjson });
+    const result = await run({ deps: { curation: resolver } });
+    const written = result.results[0];
+    expect(written?.outcome).toBe("written");
+    if (written?.outcome !== "written") throw new Error("unreachable");
+    expect(written.flags).toEqual(expect.arrayContaining(["curation_stale", "curation_withheld"]));
+    expect(await text("nm000653.jsonld")).not.toContain("ncit:C94342");
+    expect(result.needs_review).toEqual([{ id: "nm000653", flags: written.flags }]);
+    // The flags ride on the stored artifact, so status can list them without re-running.
+    const meta = (await listStore(h.bucket)).datasets.get("nm000653")?.jsonld?.meta ?? {};
+    expect(meta[META.flags]).toContain("curation_stale");
+  });
+
+  test("with no entry at all the same table DOES carry the mechanical healthy control", async () => {
+    // The control for the test above: the withheld claim is real, and the entry's
+    // absence is what would have published it.
+    const { tsv, pjson } = curatedDataset("nm000654", "Control");
+    seedSynthetic(h, "nm000654", { tsv, participantsJson: pjson });
+    await run();
+    expect(await text("nm000654.jsonld")).toContain("ncit:C94342");
   });
 
   test("a failed dataset does not stop the others, and the finding clears when it recovers", async () => {
@@ -774,7 +869,10 @@ describe("a dataset with a curation entry is never converted without it", () => 
     await run({ deps: { curation: async () => ({ kind: "none" }) } });
     const rec = recordWrites(h.bucket);
     const result = await run(
-      { execute: false, deps: { curation: async () => ({ kind: "entry", hash: "sha256:new", entry: {} }) } },
+      {
+        execute: false,
+        deps: { curation: async () => ({ kind: "entry", hash: "sha256:new", entry: {} }) },
+      },
       h.env({ NEUROBAGEL: rec.bucket }),
     );
     expect(result.results[0]).toMatchObject({ outcome: "would_write", reason: "inputs changed" });
@@ -820,7 +918,9 @@ describe("failures never replace a good artifact with a worse one", () => {
     seedSynthetic(h, "nm000670");
     await run();
     const before = await text("nm000670.jsonld");
-    h.db.run("UPDATE datasets SET name = 'Renamed while S3 was failing' WHERE dataset_id = 'nm000670'");
+    h.db.run(
+      "UPDATE datasets SET name = 'Renamed while S3 was failing' WHERE dataset_id = 'nm000670'",
+    );
     const key = "/nm000670/version/v1.0.0.json";
     const manifest = JSON.parse(new TextDecoder().decode(h.standin.objects.get(key)?.body));
     // The manifest is rewritten (a new ETag), and HEAD still answers with it; but the
@@ -845,7 +945,9 @@ describe("failures never replace a good artifact with a worse one", () => {
     expect(result.results[0]?.outcome).toBe("error");
     expect(await storeKeys(h.bucket)).toEqual([]);
     const ledger = h.db
-      .query<{ n: number }, []>("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'neurobagel_refused'")
+      .query<{ n: number }, []>(
+        "SELECT COUNT(*) AS n FROM audit_log WHERE action = 'neurobagel_refused'",
+      )
       .get();
     expect(ledger?.n).toBe(0);
   });
@@ -902,13 +1004,13 @@ describe("failures never replace a good artifact with a worse one", () => {
 
 describe("off by default, and a reported no-op without a bucket", () => {
   test("the switch is exactly the string 1", () => {
-    expect(neurobagelWriterMode({ NEUROBAGEL_WRITER_ENABLED: undefined, NEUROBAGEL: undefined })).toBe(
-      "disabled",
-    );
+    expect(
+      neurobagelWriterMode({ NEUROBAGEL_WRITER_ENABLED: undefined, NEUROBAGEL: undefined }),
+    ).toBe("disabled");
     for (const value of ["0", "", "true", "yes", "1 ", " 1", "on"]) {
-      expect(
-        neurobagelWriterMode({ NEUROBAGEL_WRITER_ENABLED: value, NEUROBAGEL: h.bucket }),
-      ).toBe("disabled");
+      expect(neurobagelWriterMode({ NEUROBAGEL_WRITER_ENABLED: value, NEUROBAGEL: h.bucket })).toBe(
+        "disabled",
+      );
     }
     expect(neurobagelWriterMode({ NEUROBAGEL_WRITER_ENABLED: "1", NEUROBAGEL: undefined })).toBe(
       "store_unconfigured",
@@ -921,7 +1023,10 @@ describe("off by default, and a reported no-op without a bucket", () => {
   test("disabled: a real run does nothing and says so; no bucket call is made", async () => {
     seedSynthetic(h, "nm000680");
     const rec = recordWrites(h.bucket);
-    const result = await run({}, h.env({ NEUROBAGEL: rec.bucket, NEUROBAGEL_WRITER_ENABLED: undefined }));
+    const result = await run(
+      {},
+      h.env({ NEUROBAGEL: rec.bucket, NEUROBAGEL_WRITER_ENABLED: undefined }),
+    );
     expect(result.status).toBe("disabled");
     expect(rec.log).toEqual([]);
     expect(await storeKeys(h.bucket)).toEqual([]);
@@ -946,9 +1051,13 @@ describe("off by default, and a reported no-op without a bucket", () => {
     expect(result.status).toBe("ok");
     expect(result.dry_run).toBe(true);
     expect(result.writer_enabled).toBe(false);
-    expect(result.results).toEqual([{ id: "nm000682", outcome: "would_write", reason: "not in the store" }]);
+    expect(result.results).toEqual([
+      { id: "nm000682", outcome: "would_write", reason: "not in the store" },
+    ]);
     expect(rec.log).toEqual([]);
-    expect(h.db.query("SELECT COUNT(*) AS n FROM audit_log WHERE action LIKE 'neurobagel_%'").get()).toEqual({
+    expect(
+      h.db.query("SELECT COUNT(*) AS n FROM audit_log WHERE action LIKE 'neurobagel_%'").get(),
+    ).toEqual({
       n: 0,
     });
   });

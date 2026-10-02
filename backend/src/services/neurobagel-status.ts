@@ -11,7 +11,7 @@
 
 import type { Bindings } from "../types/bindings.js";
 import { isNonProductionEnv } from "./environment.js";
-import { defaultCurationResolver } from "./neurobagel-curation.js";
+import { type CurationResolver, defaultCurationResolver } from "./neurobagel-curation.js";
 import { federationContext } from "./neurobagel-eligibility.js";
 import {
   LEDGER_ACTIONS,
@@ -111,6 +111,7 @@ async function lastRuns(
 export async function neurobagelStatus(
   env: Bindings,
   now: Date = new Date(),
+  curation: CurationResolver = defaultCurationResolver,
 ): Promise<NeurobagelStatus> {
   const warnings: string[] = [];
   const status: NeurobagelStatus = {
@@ -210,9 +211,7 @@ export async function neurobagelStatus(
             row,
             // Curation hashes join the signature only when a resolver says so; the
             // status of a dataset whose lookup fails is "stale" (it will be examined).
-            await defaultCurationResolver(row.dataset_id).then((r) =>
-              r.kind === "entry" ? r.hash : null,
-            ),
+            await curation(row.dataset_id).then((r) => (r.kind === "entry" ? r.hash : null)),
           );
           if (stored?.jsonld?.meta[META.signature] !== sig) stale++;
           const flags = (stored?.jsonld?.meta[META.flags] ?? "").split(",").filter(Boolean);

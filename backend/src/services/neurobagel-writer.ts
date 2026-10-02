@@ -524,12 +524,11 @@ async function processDataset(rc: RunContext, row: PlanRow): Promise<DatasetResu
     return { id, outcome: "error", error: clip(err instanceof Error ? err.message : String(err)) };
   }
 
-  const applied = applyCuration(gathered.input, curation);
-  if (applied.kind === "failed") return refuse(rc, id, "curation_unsupported", applied.reason);
+  const input = applyCuration(gathered.input, curation);
 
   let built: Awaited<ReturnType<typeof buildNeurobagelArtifacts>>;
   try {
-    built = await buildNeurobagelArtifacts(applied.input);
+    built = await buildNeurobagelArtifacts(input);
   } catch (err) {
     if (err instanceof NeurobagelRefusal) {
       // The transform's own backstop saying anonymous is the same class of finding.
