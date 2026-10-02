@@ -233,13 +233,36 @@ export function planWork(args: {
 export function standingRefusals(
   ledger: ReadonlyMap<string, LedgerEntry>,
   signatures: ReadonlyMap<string, string>,
+  now: Date,
+  windowMs: number = PARK_WINDOW_MS,
 ): Set<string> {
   const parked = new Set<string>();
   for (const [id, entry] of ledger) {
     if (entry.label.state !== "refused" || !entry.label.sig) continue;
-    if (entry.label.sig === signatures.get(id)) parked.add(id);
+    if (entry.label.sig !== signatures.get(id)) continue;
+    // A refusal parks a dataset for a bounded time, not for ever: nothing may hide one
+    // for more than the window (plus the interval to the next tick), whatever the code.
+    if (ageMs(entry.at, now) >= windowMs) continue;
+    parked.add(id);
   }
   return parked;
+}
+
+/**
+ * How long a standing refusal keeps a dataset out of the first two classes. After it the
+ * dataset is examined again, and a refusal that stands is RE-RECORDED (a fresh ledger row,
+ * so the next window starts), so a dataset costs one slot a window while it stays refused.
+ * A day: a refusal that stands for more than that is a finding for a person, and the cost
+ * of examining one dataset a day is a few operations.
+ */
+export const PARK_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** Milliseconds from a ledger row's timestamp (SQLite `YYYY-MM-DD HH:MM:SS`, UTC, or ISO) to `now`. */
+export function ageMs(at: string, now: Date): number {
+  const iso = /[zZ]|[+-]\d\d:?\d\d$/.test(at) ? at : `${at.replace(" ", "T")}Z`;
+  const t = Date.parse(iso);
+  // An unreadable timestamp is as old as it can be: it parks nothing.
+  return Number.isNaN(t) ? Number.POSITIVE_INFINITY : now.getTime() - t;
 }
 
 // ----------------------------------------------------------------------------
@@ -341,8 +364,17 @@ export async function recordLedgerState(
   datasetId: string,
   label: LedgerLabel,
   detail: Record<string, string | number | boolean | null> = {},
+  reconfirm?: { now: Date; windowMs: number },
 ): Promise<boolean> {
-  if (sameLabel(ledger.get(datasetId)?.label, label)) return false;
+  const previous = ledger.get(datasetId);
+  // A refusal that stands is written AGAIN once its parking window is spent, so the next
+  // window starts from a fresh row. One row per standing refusal per window, and no more.
+  const spent =
+    reconfirm !== undefined &&
+    label.state === "refused" &&
+    previous !== undefined &&
+    ageMs(previous.at, reconfirm.now) >= reconfirm.windowMs;
+  if (sameLabel(previous?.label, label) && !spent) return false;
   const action =
     label.state === "refused"
       ? LEDGER_ACTIONS.refused

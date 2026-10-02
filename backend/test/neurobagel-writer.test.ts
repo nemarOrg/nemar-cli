@@ -15,6 +15,8 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import Ajv from "ajv";
 import schema from "../../deploy/neurobagel/index.schema.json";
 import { dataRoutes } from "../src/routes/data";
@@ -53,6 +55,7 @@ import {
   R2_METADATA_BUDGET,
   REMOVAL_LIMIT,
   type RunResult,
+  TRANSIENT_CODES,
   fitMetadata,
   neurobagelWriterMode,
   reconcileLimit,
@@ -2284,6 +2287,10 @@ describe("a tick examines at most N datasets, in a deterministic order", () => {
 
   describe("a dataset refused for ever does not take a slot of every tick", () => {
     const day = (n: number) => new Date(Date.UTC(2026, 9, 1 + n, 12));
+    // These ticks are days apart on a made-up clock while the ledger is stamped by the real one,
+    // so the parking window is switched off here; the window itself has its own tests below.
+    const runP = (over: Partial<Parameters<typeof runNeurobagelWriter>[1]> = {}, env?: Bindings) =>
+      run({ parkWindowMs: Number.POSITIVE_INFINITY, ...over }, env);
     const examined = (r: RunResult) => r.results.map((x) => x.id);
 
     function seedStarvation(): void {
@@ -2298,7 +2305,7 @@ describe("a tick examines at most N datasets, in a deterministic order", () => {
       seedStarvation();
       const perTick: string[][] = [];
       for (let n = 0; n < 6; n++) {
-        const tick = await run({ limit: 2, now: day(n) });
+        const tick = await runP({ limit: 2, now: day(n) });
         perTick.push(examined(tick));
         if (n === 0) {
           expect(outcomes(tick)).toEqual(["nm000860:refused", "nm000861:refused"]);
@@ -2325,15 +2332,15 @@ describe("a tick examines at most N datasets, in a deterministic order", () => {
           )
           .all()
           .map((r) => JSON.parse(r.details) as { code: string; sig?: string });
-      await run({ now: day(0) });
-      await run({ now: day(1) });
-      await run({ now: day(2) });
+      await runP({ now: day(0) });
+      await runP({ now: day(1) });
+      await runP({ now: day(2) });
       expect(rows()).toHaveLength(1);
       expect(rows()[0]?.code).toBe("manifest_absent");
       expect(rows()[0]?.sig).toMatch(/^sha256:[0-9a-f]{64}$/);
 
       h.db.run("UPDATE datasets SET name = 'Renamed' WHERE dataset_id = 'nm000863'");
-      await run({ now: day(3) });
+      await runP({ now: day(3) });
       const after = rows();
       expect(after).toHaveLength(2);
       expect(after[1]?.sig).not.toBe(after[0]?.sig);
@@ -2341,12 +2348,111 @@ describe("a tick examines at most N datasets, in a deterministic order", () => {
 
     test("a refused dataset whose row changes is examined first again, ahead of the rotation", async () => {
       seedStarvation();
-      await run({ limit: 2, now: day(0) });
-      await run({ limit: 2, now: day(1) });
+      await runP({ limit: 2, now: day(0) });
+      await runP({ limit: 2, now: day(1) });
       // Parked now. A change to nm000861's row un-parks it: it is missing again.
       h.db.run("UPDATE datasets SET name = 'Fixed upstream' WHERE dataset_id = 'nm000861'");
-      const plan = await run({ execute: false, limit: 1, now: day(2) });
+      const plan = await runP({ execute: false, limit: 1, now: day(2) });
       expect(examined(plan)).toEqual(["nm000861"]);
+    });
+
+    test("a manifest body that breaks mid-read is a blip: refused, never recorded, never parked, and tried again at once", async () => {
+      // The real broken-body path: the manifest the data plane scans stops after 40 bytes, so
+      // metadata.json carries no digest (`bids_index` null) and the gather refuses it as
+      // degraded. One tick later the manifest reads fine. A dataset whose FIRST attempt
+      // blipped must not wait for a window to come round to it: a hook is the first attempt.
+      seedSynthetic(h, "nm000865");
+      seedSynthetic(h, "nm000866");
+      seedSynthetic(h, "nm000867");
+      const key = "/nm000865/version/v1.0.0.json";
+      const whole = new TextDecoder().decode(h.standin.objects.get(key)?.body);
+      h.standin.put(key, whole, { breakAfter: 40 });
+      console.warn = () => {};
+      console.error = () => {};
+      const first = await runP({ limit: 1, now: day(0) });
+      expect(first.results).toEqual([
+        expect.objectContaining({ id: "nm000865", outcome: "refused", code: "metadata_degraded" }),
+      ]);
+      // Never a finding: nothing in the ledger, nothing for a person to read.
+      expect(
+        h.db.query("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'neurobagel_refused'").get(),
+      ).toEqual({ n: 0 });
+      expect((await neurobagelStatus(h.env())).needs_review).toEqual([]);
+
+      // The upstream recovers. The very next tick examines the blipped dataset FIRST again
+      // (it is not parked, so it still leads the missing class) and writes it.
+      h.standin.put(key, whole);
+      const second = await runP({ limit: 1, now: day(1) });
+      console.warn = quiet.warn;
+      console.error = quiet.error;
+      expect(outcomes(second)).toEqual(["nm000865:written"]);
+      const third = await runP({ limit: 1, now: day(2) });
+      expect(outcomes(third)).toEqual(["nm000866:written"]);
+    });
+
+    test("the codes treated as blips are exactly the ones the writer emits for a failed read", () => {
+      expect([...TRANSIENT_CODES].sort()).toEqual(["fetch_failed", "metadata_degraded"]);
+      // Both are emitted by the gather (the second only when the manifest digest was unreadable).
+      const gather = readFileSync(
+        join(import.meta.dir, "../src/services/neurobagel-gather.ts"),
+        "utf8",
+      );
+      for (const code of TRANSIENT_CODES) expect(gather, code).toContain(`"${code}"`);
+    });
+
+    test("a STALE dataset with a standing refusal is parked too, behind a stale one that is healthy", async () => {
+      // The stale half of the demotion: both datasets have a stored set whose signature the
+      // row has since left. nm000868's curation lookup fails (a standing refusal, recorded
+      // against its signature); nm000869 is healthy and sorts after it.
+      seedSynthetic(h, "nm000868");
+      seedSynthetic(h, "nm000869");
+      await runP({ now: day(0) });
+      h.db.run(
+        "UPDATE datasets SET name = name || ' (edited)' WHERE dataset_id IN ('nm000868', 'nm000869')",
+      );
+      const curation: CurationResolver = async (id) =>
+        id === "nm000868" ? { kind: "failed", reason: "the file did not load" } : { kind: "none" };
+      const first = await runP({ limit: 1, now: day(1), deps: { curation } });
+      expect(outcomes(first)).toEqual(["nm000868:refused"]);
+      // Parked now: the healthy stale dataset goes first, though it sorts later.
+      const second = await runP({ limit: 1, now: day(2), deps: { curation } });
+      expect(outcomes(second)).toEqual(["nm000869:written"]);
+      expect(await text("nm000869.jsonld")).toContain("(edited)");
+    });
+
+    test("a standing refusal parks a dataset for a day, then it is examined again and the refusal is re-recorded", async () => {
+      // No manifest: a standing `manifest_absent`. The real clock here (the ledger is stamped
+      // by it) and the DEFAULT window.
+      seedDatasetRow(h.db, "nm000860");
+      seedSynthetic(h, "nm000861");
+      const hours = (n: number) => new Date(Date.now() + n * 3_600_000);
+      const refusedRows = () =>
+        (
+          h.db
+            .query(
+              "SELECT COUNT(*) AS n FROM audit_log WHERE action = 'neurobagel_refused' AND resource_id = 'nm000860'",
+            )
+            .get() as { n: number }
+        ).n;
+
+      const t0 = await run({ limit: 1, now: hours(0) });
+      expect(outcomes(t0)).toEqual(["nm000860:refused"]);
+      expect(refusedRows()).toBe(1);
+      // Inside the window it is parked: the other dataset goes first.
+      const t1 = await run({ limit: 1, now: hours(2) });
+      expect(outcomes(t1)).toEqual(["nm000861:written"]);
+      expect(refusedRows()).toBe(1);
+      // Past the window it is examined again, refused again, and the refusal is written
+      // afresh so that the NEXT window starts from now, not from the first day.
+      const t2 = await run({ limit: 1, now: hours(25) });
+      expect(outcomes(t2)).toEqual(["nm000860:refused"]);
+      expect(refusedRows()).toBe(2);
+      // ... and inside that new window nothing is written again (the dataset may still be
+      // examined as a member of the rotation, but its refusal is not re-recorded). The
+      // ledger's rows are stamped by the real clock, so "inside the new window" is a tick
+      // half an hour after the real time of t2.
+      await run({ limit: 1, now: hours(0.5) });
+      expect(refusedRows()).toBe(2);
     });
 
     test("a transient failure is never parked: it is retried every tick", async () => {
@@ -2355,8 +2461,8 @@ describe("a tick examines at most N datasets, in a deterministic order", () => {
       h.standin.remove("/nm000864/version/v1.0.0.json");
       const failing = h.env({ S3_ENDPOINT_URL: "http://127.0.0.1:9" });
       console.error = () => {};
-      const first = await run({ limit: 1, now: day(0) }, failing);
-      const second = await run({ limit: 1, now: day(1) }, failing);
+      const first = await runP({ limit: 1, now: day(0) }, failing);
+      const second = await runP({ limit: 1, now: day(1) }, failing);
       console.error = quiet.error;
       expect(outcomes(first)).toEqual(["nm000864:error"]);
       expect(outcomes(second)).toEqual(["nm000864:error"]);
@@ -2402,29 +2508,41 @@ describe("a tick examines at most N datasets, in a deterministic order", () => {
       // The rotation window over the parked pair moves with the day.
       const lead = (d: number) => plan(3, d, parked).work[2]?.id;
       expect(new Set([lead(0), lead(1)]).size).toBe(2);
-      // A signature that no longer matches the refusal's un-parks it.
+      // A signature that no longer matches the refusal's un-parks it, and so does age.
+      const now = new Date("2026-10-02T12:00:00Z");
+      const hoursAgo = (h: number) => new Date(now.getTime() - h * 3_600_000).toISOString();
+      const refused = (id: string, sig: string | undefined, at: string): [string, LedgerEntry] => [
+        id,
+        { dataset_id: id, label: { state: "refused", code: "x", ...(sig ? { sig } : {}) }, at },
+      ];
       const ledger = new Map<string, LedgerEntry>([
-        [
-          "nm000870",
-          {
-            dataset_id: "nm000870",
-            label: { state: "refused", code: "x", sig: "sig-nm000870" },
-            at: "",
-          },
-        ],
-        [
-          "nm000871",
-          {
-            dataset_id: "nm000871",
-            label: { state: "refused", code: "x", sig: "an older one" },
-            at: "",
-          },
-        ],
+        refused("nm000870", "sig-nm000870", hoursAgo(1)),
+        refused("nm000871", "an older one", hoursAgo(1)),
         // A refusal recorded before signatures were kept names no signature and parks nothing.
-        ["nm000872", { dataset_id: "nm000872", label: { state: "refused", code: "x" }, at: "" }],
-        ["nm000873", { dataset_id: "nm000873", label: { state: "clear" }, at: "" }],
+        refused("nm000872", undefined, hoursAgo(1)),
+        ["nm000873", { dataset_id: "nm000873", label: { state: "clear" }, at: hoursAgo(1) }],
       ]);
-      expect([...standingRefusals(ledger, signatures)]).toEqual(["nm000870"]);
+      expect([...standingRefusals(ledger, signatures, now)]).toEqual(["nm000870"]);
+      // The window is bounded: a refusal older than it parks nothing, and SQLite's own
+      // timestamp format (`YYYY-MM-DD HH:MM:SS`, UTC) is read the same as an ISO one.
+      const aged = new Map<string, LedgerEntry>([
+        refused("nm000870", "sig-nm000870", hoursAgo(23)),
+        refused("nm000871", "sig-nm000871", hoursAgo(25)),
+        refused("nm000872", "sig-nm000872", "2026-10-02 11:00:00"),
+        refused("nm000873", "sig-nm000873", "2026-09-30 11:00:00"),
+      ]);
+      expect([...standingRefusals(aged, signatures, now, 24 * 3_600_000)].sort()).toEqual([
+        "nm000870",
+        "nm000872",
+      ]);
+      // Without an end to it, age never un-parks.
+      expect(standingRefusals(aged, signatures, now, Number.POSITIVE_INFINITY).size).toBe(4);
+      // A timestamp from the future (a skewed clock) parks; one that cannot be read does not.
+      const odd = new Map<string, LedgerEntry>([
+        refused("nm000870", "sig-nm000870", hoursAgo(-3)),
+        refused("nm000871", "sig-nm000871", "not a time"),
+      ]);
+      expect([...standingRefusals(odd, signatures, now)]).toEqual(["nm000870"]);
     });
   });
 

@@ -65,6 +65,7 @@ import { type OpCounter, countOps, createOpCounter } from "./neurobagel-ops.js";
 import {
   LEDGER_ACTIONS,
   type LedgerEntry,
+  PARK_WINDOW_MS,
   type PlanRow,
   currentSignature,
   loadPlanRows,
@@ -205,6 +206,8 @@ export interface RunOptions {
   now?: Date;
   /** Operations this run may spend; {@link OP_BUDGET} unless a test narrows it. */
   opBudget?: number;
+  /** How long a standing refusal parks a dataset; {@link PARK_WINDOW_MS} unless a test moves it. */
+  parkWindowMs?: number;
   /** The loader's per-artifact cap; {@link MAX_ARTIFACT_BYTES} unless a test narrows it (a real 6 MiB document is not worth building for the check). */
   maxArtifactBytes?: number;
   waitUntil?: (work: Promise<unknown>) => void;
@@ -235,8 +238,19 @@ function emptyResult(options: RunOptions, limit: number, mode: WriterMode): RunR
   };
 }
 
-/** Refusal codes that are transient: reported in the run, never recorded as a standing finding. */
-const TRANSIENT_CODES: ReadonlySet<string> = new Set(["fetch_failed", "manifest_unavailable"]);
+/**
+ * Refusal codes that are BLIPS: an upstream read that failed, not a fact about the dataset.
+ * They are reported in the run and never recorded in the ledger, so they are never parked,
+ * and the dataset is examined again on the next tick (a hook is the first attempt, so one
+ * blip must not delay federation).
+ *   - `fetch_failed`: a read the data plane could not answer (5xx, a throw, a 404 that is
+ *     not "this file is not in the manifest").
+ *   - `metadata_degraded`: `bids_index` is null exactly when the manifest digest could not
+ *     be read, which a body that breaks mid-read or an S3 blink produces.
+ * Every code NOT here is a standing finding. A failure of R2 or D1 is an `error` outcome,
+ * which is never recorded either.
+ */
+export const TRANSIENT_CODES: ReadonlySet<string> = new Set(["fetch_failed", "metadata_degraded"]);
 
 function clip(text: string, n = 300): string {
   return text.length > n ? `${text.slice(0, n)}...` : text;
@@ -439,7 +453,10 @@ async function ledgerNote(
 ): Promise<void> {
   if (!rc.options.execute) return;
   try {
-    await recordLedgerState(rc.env.DB, rc.ledger, id, label, detail);
+    await recordLedgerState(rc.env.DB, rc.ledger, id, label, detail, {
+      now: rc.now,
+      windowMs: rc.options.parkWindowMs ?? PARK_WINDOW_MS,
+    });
   } catch (err) {
     rc.result.warnings.push(
       `ledger write failed for ${id}: ${err instanceof Error ? err.message : String(err)}`,
@@ -869,7 +886,7 @@ export async function runNeurobagelWriter(
       limit,
       day: utcDay(now),
       requested: only,
-      parked: standingRefusals(ledger, signatures),
+      parked: standingRefusals(ledger, signatures, now, options.parkWindowMs ?? PARK_WINDOW_MS),
     });
     result.unexamined = plan.unexamined;
 
