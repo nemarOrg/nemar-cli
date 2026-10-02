@@ -1,0 +1,23 @@
+{
+  "participant_id": {
+    "Description": "Subject ID"
+  },
+  "age": {
+    "Description": "Age of participant in years",
+    "HED": "Age/# years"
+  },
+  "sex": {
+    "Description": "Sex of participant by self report",
+    "HED": {
+      "M": "Male",
+      "F": "Female"
+    }
+  },
+  "handedness": {
+    "Description": "Handedness of participant by self report",
+    "HED": {
+      "right": "Right-handed",
+      "left": "Left-handed"
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "site": {
+    "Description": "Recording site.",
+    "Levels": {
+      "mayo": "Mayo Clinic, Rochester MN, USA",
+      "fnusa": "St. Anne's University Hospital, Brno, Czech Republic"
+    }
+  },
+  "n_clips": {
+    "Description": "Number of labelled 3 s clips."
+  },
+  "n_source_contacts": {
+    "Description": "Number of source SEEG contacts."
+  },
+  "n_pathology_clips": {
+    "Description": "Number of clips labelled pathology."
+  }
+}
