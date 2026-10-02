@@ -10,9 +10,15 @@
  * They are also the pair a Neurobagel node in catalog mode reads, named with
  * the suffixes its loader expects (`_annotated.json`, `_dataset_description.json`).
  *
- * Column descriptions are constants written here, never depositor text:
- * nothing a depositor wrote is copied into an artifact except the cell values
- * that become graph attributes.
+ * Column descriptions are constants written here, never depositor text.
+ * The only text a depositor wrote that reaches a dictionary is a raw CELL VALUE, in
+ * two places: the keys of `Levels` (the spellings of male, female and control the
+ * rules mapped) and the `MissingValues` entries for cells the rules could not map
+ * (a stray `x` in an age column, a free-text sex).
+ * `bagel pheno` needs those values spelled exactly, so they cannot be redacted; they
+ * are values of the columns that become graph attributes, never a column name other
+ * than the one annotated, an identity field or a description.
+ * The dictionary is written to the private artifact store, not served.
  *
  * Pure: no I/O.
  */

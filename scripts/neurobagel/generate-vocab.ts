@@ -8,7 +8,7 @@
  * produces the same bytes until PINS below is edited on purpose.
  * Moving a pin is a vocabulary change: rerun this script, review the diff of
  * `shared/neurobagel/vocab/`, rerun the goldens and the bagel oracle
- * (`scripts/neurobagel/README.md`), and let the transform version in
+ * (`shared/neurobagel/README.md`), and let the transform version in
  * `shared/neurobagel/version.ts` move in the same PR when the output changes.
  *
  * Network: read-only GETs against raw.githubusercontent.com.

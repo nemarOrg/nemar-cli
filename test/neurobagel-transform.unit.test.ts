@@ -162,7 +162,7 @@ describe("goldens and determinism", () => {
           .trim()
           .split(/\r\n|\n|\r/);
         for (const row of rows.slice(0, 5)) {
-          const participant = row.split("\t")[0].replace(/^﻿/, "");
+          const participant = row.split("\t")[0].replace(/^\uFEFF/, "");
           if (participant.length > 3) expect(text).not.toContain(participant);
         }
       }

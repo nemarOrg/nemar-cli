@@ -32,7 +32,7 @@ describe("parseTsv", () => {
   });
 
   test("a byte order mark is dropped and reported", () => {
-    const result = parseTsv("﻿participant_id\tage\nsub-1\t20\n");
+    const result = parseTsv("\uFEFFparticipant_id\tage\nsub-1\t20\n");
     expect(result.ok && result.bomStripped).toBe(true);
     expect(result.ok && result.table.header).toEqual(["participant_id", "age"]);
   });

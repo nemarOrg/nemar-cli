@@ -18,6 +18,7 @@
 
 import { z } from "zod";
 import { type CanonicalJsonValue, byCodeUnit, canonicalJson } from "./canonical-json";
+import { AGE_MAX_YEARS, AGE_MIN_YEARS } from "./participants";
 import { MAPPED_DATATYPES, VOCAB } from "./vocab";
 
 const UUID_IDENTIFIER = /^nb:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -54,7 +55,7 @@ const httpUrl = z.string().refine((value) => {
 
 const phenotypicSession = z
   .object({
-    hasAge: z.number().min(0).max(120).optional(),
+    hasAge: z.number().min(AGE_MIN_YEARS).max(AGE_MAX_YEARS).optional(),
     hasDiagnosis: z.array(termNode("Diagnosis", diagnosisIdentifiers)).min(1).optional(),
     hasLabel: z.string().min(1),
     hasSex: termNode("Sex", sexIdentifiers).optional(),
