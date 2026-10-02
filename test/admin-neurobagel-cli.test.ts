@@ -288,6 +288,8 @@ describe("nemar admin neurobagel regenerate", () => {
 
 describe("nemar admin neurobagel status", () => {
   test("an empty system reads as such, with a zero where it is known", async () => {
+    // A verification record exists (the daily sweep ran), so nothing about it is unknown.
+    await runCli(["admin", "neurobagel", "verify"]);
     const result = await runCli(["admin", "neurobagel", "status"]);
     expect(result.exitCode).toBe(0);
     expect(result.all).toContain("enabled");
@@ -301,6 +303,7 @@ describe("nemar admin neurobagel status", () => {
       tsv: "participant_id\tage\nsub-01\t21\nsub-02\t22\nsub-09\t23\n",
     });
     await runCli(["admin", "neurobagel", "regenerate", "--execute"]);
+    await runCli(["admin", "neurobagel", "verify"]);
     const result = await runCli(["admin", "neurobagel", "status"]);
     expect(result.exitCode).toBe(0);
     expect(result.all).toContain("eligible=2 written=2");
@@ -374,6 +377,21 @@ describe("nemar admin neurobagel verify", () => {
     }
   });
 
+  test("a writer that is on with no bucket bound is an alarm for verify, and for status", async () => {
+    envOverrides = { NEUROBAGEL: undefined };
+    const verify = await runCli(["admin", "neurobagel", "verify"]);
+    expect(verify.exitCode).toBe(1);
+    expect(verify.all).toMatch(
+      /store\s+alarm\s+The writer is switched on but no NEUROBAGEL bucket is bound/,
+    );
+    const status = await runCli(["admin", "neurobagel", "status"]);
+    expect(status.exitCode).toBe(1);
+    expect(status.all).toContain("store_unconfigured");
+    // And the same state with the writer off is nothing to judge, for both.
+    envOverrides = { NEUROBAGEL: undefined, NEUROBAGEL_WRITER_ENABLED: undefined };
+    expect((await runCli(["admin", "neurobagel", "verify"])).exitCode).toBe(0);
+  });
+
   test("--json is the server's document", async () => {
     const result = await runCli(["admin", "neurobagel", "verify", "--json"]);
     const parsed = JSON.parse(result.stdout) as {
@@ -394,11 +412,44 @@ describe("nemar admin neurobagel verify", () => {
 });
 
 describe("nemar admin neurobagel status prints the verification", () => {
-  test("before any run it says none is recorded, which is unknown and not healthy", async () => {
+  test("before any run, with the writer on, it is unknown and exits 2: nothing proves the sweep ever ran", async () => {
     const result = await runCli(["admin", "neurobagel", "status"]);
-    expect(result.all).toMatch(/Verification\s+none recorded/);
+    expect(result.all).toMatch(/Verification\s+unknown\s+none recorded/);
     expect(result.all).toContain("unknown and not healthy");
     expect(result.all).not.toMatch(/Verification\s+healthy/);
+    expect(result.exitCode).toBe(2);
+  });
+
+  test("before any run, with the writer off, it stays quiet and exits 0: nothing here is maintained", async () => {
+    envOverrides = { NEUROBAGEL_WRITER_ENABLED: undefined };
+    const result = await runCli(["admin", "neurobagel", "status"]);
+    expect(result.all).toMatch(
+      /Verification\s+none recorded; the writer is off, so none is expected/,
+    );
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("a healthy record older than 36 hours is unknown and exits 2; a fresh one is healthy and exits 0", async () => {
+    await runCli(["admin", "neurobagel", "verify"]);
+    const fresh = await runCli(["admin", "neurobagel", "status"]);
+    expect(fresh.all).toMatch(/Verification\s+healthy/);
+    expect(fresh.exitCode).toBe(0);
+
+    const hoursAgo = (n: number) => new Date(Date.now() - n * 3_600_000).toISOString();
+    h.db.run(
+      "UPDATE audit_log SET details = json_set(details, '$.at', ?) WHERE action = 'neurobagel_verification'",
+      [hoursAgo(40)],
+    );
+    const stale = await runCli(["admin", "neurobagel", "status"]);
+    expect(stale.all).toMatch(/Verification\s+unknown\s+the last record is 4\d hours old/);
+    expect(stale.exitCode).toBe(2);
+
+    // Inside the 36 hours it is still believed.
+    h.db.run(
+      "UPDATE audit_log SET details = json_set(details, '$.at', ?) WHERE action = 'neurobagel_verification'",
+      [hoursAgo(30)],
+    );
+    expect((await runCli(["admin", "neurobagel", "status"])).exitCode).toBe(0);
   });
 
   test("after a run it prints the latest verdicts, and an alarm makes the exit code non-zero", async () => {
@@ -419,17 +470,34 @@ describe("nemar admin neurobagel status prints the verification", () => {
 });
 
 describe("nemar admin neurobagel status exit code for an unanswerable verification", () => {
-  test("an unknown verdict makes the exit code non-zero, as an alarm does: unknown is not healthy", async () => {
+  test("an unknown verdict exits 2, like `verify`: unknown is not healthy and not an alarm", async () => {
     const node = Bun.serve({ port: 0, fetch: () => new Response("{}", { status: 500 }) });
     try {
       envOverrides = { NEUROBAGEL_NODE_URL: `http://127.0.0.1:${node.port}` };
       await runCli(["admin", "neurobagel", "verify"]);
       const status = await runCli(["admin", "neurobagel", "status"]);
       expect(status.all).toMatch(/Verification\s+unknown/);
-      expect(status.exitCode).toBe(1);
+      // The same family as `verify`: 2, could not be determined.
+      expect(status.exitCode).toBe(2);
     } finally {
       node.stop(true);
     }
+  });
+});
+
+describe("the exit codes are stated in the help of both commands", () => {
+  test("status and verify say the same three codes in their ordinary help, and the long form says when", async () => {
+    for (const command of ["status", "verify"]) {
+      const help = await runCli(["admin", "neurobagel", command, "--help"]);
+      expect(help.exitCode, command).toBe(0);
+      expect(help.all, command).toMatch(/exit\s+0\s+healthy,\s+1\s+alarm,\s+2\s+unknown/);
+      const long = await runCli(["admin", "neurobagel", command, "--help-all"]);
+      expect(long.all, command).toMatch(
+        /Exit codes: 0 healthy or nothing to check, 1 an alarm, 2 could not be determined/,
+      );
+    }
+    const status = await runCli(["admin", "neurobagel", "status", "--help-all"]);
+    expect(status.all).toContain("36 hours");
   });
 });
 

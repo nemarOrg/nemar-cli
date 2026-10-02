@@ -558,9 +558,17 @@ describe("the verification sweep reports and never repairs", () => {
   const sqlWrites = (tree: Tree, file: string): string[] =>
     foldedStrings(parse(tree, file)).filter((str) => SQL_WRITE.test(str.replaceAll(HOLE, "")));
 
-  /** The option keys of every `fetch(...)` call; `<not a literal>` when they cannot be read. */
-  function fetchOptionKeys(tree: Tree, file: string): string[][] {
-    const out: string[][] = [];
+  /**
+   * Every `fetch(...)` call of a module: the option keys, and the string-literal value of each
+   * key that has one. `<not a literal>` is a call whose options cannot be read, `<spread>` a key
+   * that cannot be named; either one fails every shape below.
+   */
+  interface FetchCall {
+    keys: string[];
+    literal: Record<string, string>;
+  }
+  function fetchCalls(tree: Tree, file: string): FetchCall[] {
+    const out: FetchCall[] = [];
     const visit = (n: ts.Node): void => {
       if (
         ts.isCallExpression(n) &&
@@ -568,16 +576,21 @@ describe("the verification sweep reports and never repairs", () => {
         n.expression.text === "fetch"
       ) {
         const options = n.arguments[1];
-        if (options === undefined) out.push([]);
-        else if (!ts.isObjectLiteralExpression(options)) out.push(["<not a literal>"]);
-        else {
-          out.push(
-            options.properties.map((p) =>
-              ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)
-                ? p.name.getText()
-                : "<spread>",
-            ),
-          );
+        if (options === undefined) out.push({ keys: [], literal: {} });
+        else if (!ts.isObjectLiteralExpression(options)) {
+          out.push({ keys: ["<not a literal>"], literal: {} });
+        } else {
+          const call: FetchCall = { keys: [], literal: {} };
+          for (const p of options.properties) {
+            if (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) {
+              const key = p.name.getText();
+              call.keys.push(key);
+              if (ts.isPropertyAssignment(p) && ts.isStringLiteralLike(p.initializer)) {
+                call.literal[key] = p.initializer.text;
+              }
+            } else call.keys.push("<spread>");
+          }
+          out.push(call);
         }
       }
       ts.forEachChild(n, visit);
@@ -585,6 +598,23 @@ describe("the verification sweep reports and never repairs", () => {
     visit(parse(tree, file));
     return out;
   }
+  const sameKeys = (a: string[], b: string[]) => [...a].sort().join() === [...b].sort().join();
+  /** A plain read: headers, a signal, and a redirect that is NOT followed. No method, no body. */
+  const isPlainRead = (c: FetchCall) =>
+    sameKeys(c.keys, ["headers", "redirect", "signal"]) && c.literal.redirect === "manual";
+  /** The one question put to the node: a fixed method, a fixed body, no redirect followed. */
+  const isDatasetsQuery = (c: FetchCall) =>
+    sameKeys(c.keys, ["method", "headers", "body", "redirect", "signal"]) &&
+    c.literal.method === "POST" &&
+    c.literal.body === "{}" &&
+    c.literal.redirect === "manual";
+
+  /** String literals of a module that say what KIND of dataset something concerns. */
+  const KIND = /anonym|deposit|\bclass\b/i;
+  const kindStrings = (tree: Tree, file: string): string[] =>
+    foldedStrings(parse(tree, file))
+      .map((str) => str.replaceAll(HOLE, ""))
+      .filter((str) => KIND.test(str));
 
   test("the sweep modules write no SQL: every statement they hold is a read", () => {
     for (const file of SWEEP_MODULES) expect(sqlWrites(real, file), rel(file)).toEqual([]);
@@ -618,30 +648,31 @@ describe("the verification sweep reports and never repairs", () => {
   });
 
   describe("the upstream drift reader", () => {
-    test("every fetch is a plain GET: no method, no body, no credential", () => {
-      const calls = fetchOptionKeys(real, DRIFT);
+    test("every fetch is a plain read: no method, no body, no credential, and no redirect is followed", () => {
+      const calls = fetchCalls(real, DRIFT);
       // Not vacuous: it does fetch.
       expect(calls.length).toBeGreaterThanOrEqual(1);
-      for (const keys of calls) {
-        expect(
-          keys.every((k) => k === "headers" || k === "signal"),
-          keys.join(","),
-        ).toBe(true);
-      }
-      expect(codeOf(real, DRIFT)).not.toMatch(/authorization|token|secret|password/i);
+      for (const call of calls) expect(isPlainRead(call), call.keys.join(",")).toBe(true);
+      expect(codeOf(real, DRIFT)).not.toMatch(/authorization|cookie|bearer|token|secret|password/i);
     });
 
-    test("a fetch with a method, a body or a spread of options is found", () => {
+    test("a fetch with a method, a body, a spread, a followed redirect or none declared is found", () => {
       const bad = (code: string) =>
-        fetchOptionKeys(planted(code), SCRATCH).filter(
-          (keys) => !keys.every((k) => k === "headers" || k === "signal"),
-        );
+        fetchCalls(planted(code), SCRATCH).filter((call) => !isPlainRead(call));
       expect(bad("export const f = () => fetch('x', { method: 'POST' });")).toHaveLength(1);
-      expect(bad("export const f = () => fetch('x', { body: 'b', signal: s });")).toHaveLength(1);
+      expect(
+        bad("export const f = () => fetch('x', { body: 'b', signal: s, redirect: 'manual' });"),
+      ).toHaveLength(1);
       expect(bad("export const f = (o: RequestInit) => fetch('x', o);")).toHaveLength(1);
       expect(bad("export const f = (o: RequestInit) => fetch('x', { ...o });")).toHaveLength(1);
-      expect(bad("export const f = () => fetch('x', { headers: {}, signal: s });")).toEqual([]);
-      expect(bad("export const f = () => fetch('x');")).toEqual([]);
+      expect(bad("export const f = () => fetch('x', { headers: {}, signal: s });")).toHaveLength(1);
+      expect(
+        bad("export const f = () => fetch('x', { headers: {}, signal: s, redirect: 'follow' });"),
+      ).toHaveLength(1);
+      expect(bad("export const f = () => fetch('x');")).toHaveLength(1);
+      expect(
+        bad("export const f = () => fetch('x', { headers: {}, signal: s, redirect: 'manual' });"),
+      ).toEqual([]);
     });
 
     test("it is the only module that names the public GitHub API host, and a copy elsewhere is found", () => {
@@ -653,6 +684,71 @@ describe("the verification sweep reports and never repairs", () => {
         "services/neurobagel-plan.ts": `${readFileSync(join(SERVICES, "neurobagel-plan.ts"), "utf8")}\nexport const h = "https://api.github.com/x";`,
       });
       expect(forbiddenNames(planted2)).toHaveLength(1);
+    });
+  });
+
+  describe("the node probe and the registration reads", () => {
+    test("the verification module makes exactly two kinds of request: a plain read, and the one datasets query", () => {
+      const calls = fetchCalls(real, VERIFY);
+      expect(calls).toHaveLength(2);
+      expect(calls.filter(isPlainRead)).toHaveLength(1);
+      expect(calls.filter(isDatasetsQuery)).toHaveLength(1);
+      expect(codeOf(real, VERIFY)).not.toMatch(/authorization|cookie|bearer|credentials/i);
+    });
+
+    test("a different method, a different body, a body that is not fixed, or a followed redirect is found", () => {
+      const notDatasetsQuery = (options: string) =>
+        fetchCalls(planted(`export const f = () => fetch('x', ${options});`), SCRATCH).filter(
+          (c) => !isDatasetsQuery(c),
+        );
+      const good = "{ method: 'POST', headers: {}, body: '{}', redirect: 'manual', signal: s }";
+      expect(notDatasetsQuery(good)).toEqual([]);
+      expect(notDatasetsQuery(good.replace("'POST'", "'PUT'"))).toHaveLength(1);
+      expect(notDatasetsQuery(good.replace("'{}'", "JSON.stringify(q)"))).toHaveLength(1);
+      expect(notDatasetsQuery(good.replace("'{}'", "'{\"x\":1}'"))).toHaveLength(1);
+      expect(notDatasetsQuery(good.replace("'manual'", "'follow'"))).toHaveLength(1);
+      expect(notDatasetsQuery(good.replace(", redirect: 'manual'", ""))).toHaveLength(1);
+      expect(
+        notDatasetsQuery(good.replace("headers: {}, ", "headers: {}, credentials: 'include', ")),
+      ).toHaveLength(1);
+    });
+  });
+
+  describe("what a reason may say", () => {
+    // Behavioural twin: neurobagel-verify.test.ts collects every reason a sweep produced across
+    // its scenarios. A reason can reach the weekly report, which is filed on a public-facing
+    // repository, so it may say a record is wrong and never that it belongs to a concealed
+    // deposit: the audit log says that, and only the audit log.
+    const ALLOWED_IN_VERIFY = new Set([
+      // The audit action and the check code of the one finding that goes to the audit log, and
+      // the query that finds the rows it concerns. None of them is a reason.
+      "neurobagel_verify_anonymity_finding",
+      "node_serves_anonymous_record",
+      "SELECT dataset_id FROM datasets WHERE anonymous IS NOT 0",
+    ]);
+    const WEEKLY_TEXT = [
+      join(SRC, "../../shared/contract/weekly-attention.ts"),
+      join(SERVICES, "import-weekly-summary.ts"),
+    ];
+
+    test("no string of the sweep modules says what kind of dataset a finding concerns, but the three that are not reasons", () => {
+      expect(kindStrings(real, DRIFT)).toEqual([]);
+      expect(kindStrings(real, VERIFY).filter((str) => !ALLOWED_IN_VERIFY.has(str))).toEqual([]);
+      // Not vacuous: the three allowed strings are really there.
+      expect(new Set(kindStrings(real, VERIFY))).toEqual(ALLOWED_IN_VERIFY);
+    });
+
+    test("no string the weekly report renders, or decides its headline from, says it", () => {
+      for (const file of WEEKLY_TEXT) expect(kindStrings(real, file), file).toEqual([]);
+    });
+
+    test("a string that says it is found, however it is built; one that does not is not", () => {
+      const found = (code: string) => kindStrings(planted(code), SCRATCH);
+      expect(found("export const r = '1 anonymity-class finding';")).toHaveLength(1);
+      expect(found("export const r = 'a deposit ' + 'in the store';")).toHaveLength(1);
+      expect(found("export const r = `${n} record(s) of the Class`;")).toHaveLength(1);
+      expect(found("export const r = '3 record(s) are not protected';")).toEqual([]);
+      expect(found("export const r = 'subclass of nothing';")).toEqual([]);
     });
   });
 });
