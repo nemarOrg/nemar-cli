@@ -1,0 +1,182 @@
+# NEMAR overlay on neurobagel/recipes (epic #1586, Phase 3, #1589).
+#
+# This file is merged AFTER recipes' own docker-compose.yml, which `bin/nb-install` checks out
+# at the tag pinned in pins.env. Nothing from recipes is copied here: this overlay only adds
+# what a shared host needs (hard limits, loopback ports, health checks, log caps) and fixes
+# the settings that must not be left to a .env file. Always invoke it through `bin/nb compose`
+# (or any bin/ script), which supplies the project name, the project directory, both env files
+# and both compose files in the right order.
+#
+# Resource ceiling for the whole stack is 3 GiB (epic #1586): graph 2048 + api 512 + f-API 128
+# + query tool 64 + tunnel connector 128 = 2880 MiB. The init container (256 MiB limit) runs for
+# seconds during a reload and measured 30 MiB.
+# `mem_limit` equals `memswap_limit` everywhere, so a container is killed at its limit instead
+# of swapping or growing into the memory Infisical and Umami need.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+
+services:
+
+  # One-shot: validates the *.jsonld files and rebuilds the shared data volume. Stock behaviour,
+  # kept: it wipes /data and repopulates it on every `up`. The deliberate reload (bin/nb-reload)
+  # runs it explicitly, under a lock, and checks its result before anything else is touched.
+  init_data:
+    <<: *hardening
+    restart: "no"
+    logging: *logging
+    mem_limit: ${NB_INIT_MEM_LIMIT:-256m}
+    memswap_limit: ${NB_INIT_MEM_LIMIT:-256m}
+    cpus: ${NB_INIT_CPUS:-1.0}
+    pids_limit: 128
+    volumes:
+      # Same target as recipes' mount, now read-only: the init container can read the release
+      # but can never modify it.
+      - type: bind
+        source: ${LOCAL_GRAPH_DATA:?set LOCAL_GRAPH_DATA in .env}
+        target: /input_data
+        read_only: true
+
+  graph:
+    <<: *hardening
+    image: ${NB_GRAPHDB_IMAGE:?set NB_GRAPHDB_IMAGE in pins.env}
+    restart: unless-stopped
+    logging: *logging
+    # PID 1 is the stock setup script, which ignores SIGTERM, so this is how long a plain
+    # `docker stop` waits before it kills GraphDB. bin/nb-reload stops the JVM itself instead.
+    stop_grace_period: 30s
+    # No published port: GraphDB is reachable only from the api container over the project network.
+    ports: !override []
+    mem_limit: ${NB_GRAPH_MEM_LIMIT:-2048m}
+    memswap_limit: ${NB_GRAPH_MEM_LIMIT:-2048m}
+    cpus: ${NB_GRAPH_CPUS:-2.0}
+    pids_limit: 512
+    # Healthy means: the configured repository answers a SPARQL ASK. The credential is read from
+    # the Docker secret inside the container and handed to curl on stdin, never on a command line.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          printf 'user = "%s:%s"\n' "$$NB_GRAPH_USERNAME" "$$(cat /run/secrets/db_user_password)"
+          | curl -fsS -K - -G --data-urlencode 'query=ASK {}'
+          -H 'Accept: application/sparql-results+json'
+          "http://localhost:7200/$$NB_GRAPH_DB" | grep -q boolean
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+      start_interval: 5s
+
+  api:
+    <<: *hardening
+    restart: unless-stopped
+    logging: *logging
+    # Stateless, and the stock entrypoint script ignores SIGTERM: do not wait out the default.
+    stop_grace_period: 5s
+    # Loopback only. The tunnel reaches it over the project network at http://api:8000, so the
+    # published port exists for local checks and the f-API-free smoke tests.
+    ports: !override
+      - "127.0.0.1:${NB_NAPI_PORT_HOST:-18000}:8000"
+    environment:
+      # Fixed here, not in .env: this node never returns participant-level records.
+      NB_RETURN_AGG: "true"
+    mem_limit: ${NB_API_MEM_LIMIT:-512m}
+    memswap_limit: ${NB_API_MEM_LIMIT:-512m}
+    cpus: ${NB_API_CPUS:-1.0}
+    pids_limit: 256
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+      start_interval: 3s
+
+  federation:
+    <<: *hardening
+    profiles: [portal]
+    restart: unless-stopped
+    logging: *logging
+    stop_grace_period: 5s
+    ports: !override
+      - "127.0.0.1:${NB_FAPI_PORT_HOST:-18080}:8000"
+    environment:
+      # Fixed here, not in .env: this f-API is a local verification tool. It must query only the
+      # node in config (local_nb_nodes.json) and must never fan out to the public nodes.
+      NB_FEDERATE_REMOTE_PUBLIC_NODES: "False"
+    mem_limit: ${NB_FAPI_MEM_LIMIT:-128m}
+    memswap_limit: ${NB_FAPI_MEM_LIMIT:-128m}
+    cpus: ${NB_FAPI_CPUS:-0.5}
+    pids_limit: 128
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+      start_interval: 3s
+
+  query_federation:
+    <<: *hardening
+    profiles: [portal]
+    restart: unless-stopped
+    logging: *logging
+    stop_grace_period: 5s
+    ports: !override
+      - "127.0.0.1:${NB_QUERY_PORT_HOST:-13000}:5173"
+    mem_limit: ${NB_QUERY_MEM_LIMIT:-64m}
+    memswap_limit: ${NB_QUERY_MEM_LIMIT:-64m}
+    cpus: ${NB_QUERY_CPUS:-0.5}
+    pids_limit: 128
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:5173/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+      start_interval: 3s
+
+  # Tunnel connector, OFF unless the `tunnel` profile is enabled in .env. It exposes exactly one
+  # thing: the node API, as http://api:8000 inside the project network. The hostname mapping is
+  # configured in the Cloudflare dashboard (README, "Cloudflare Tunnel"); the lead approves the
+  # hostname before this profile is ever turned on.
+  cloudflared:
+    <<: *hardening
+    profiles: [tunnel]
+    image: ${NB_CLOUDFLARED_IMAGE:?set NB_CLOUDFLARED_IMAGE in pins.env}
+    restart: unless-stopped
+    logging: *logging
+    command: tunnel --no-autoupdate --metrics 127.0.0.1:2000 run
+    environment:
+      # Empty unless the profile is enabled; `bin/nb up` refuses to start the tunnel profile
+      # with an empty token.
+      TUNNEL_TOKEN: ${NB_TUNNEL_TOKEN:-}
+    depends_on:
+      api:
+        condition: service_healthy
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: 0.5
+    pids_limit: 64
+    healthcheck:
+      test: [CMD, cloudflared, tunnel, --metrics, "127.0.0.1:2000", ready]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+      start_interval: 3s
