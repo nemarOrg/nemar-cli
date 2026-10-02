@@ -328,9 +328,12 @@ describe("the public tree carries no host posture", () => {
     ["a home directory", new RegExp(["/home/", "ya", "hya"].join(""))],
     ["the ssh alias", new RegExp(["ssh -[A-Za-z0-9 :.-]* ", "nemar", "ing"].join(""))],
     ["an operating system version", new RegExp(["Ubu", "ntu 2"].join(""))],
-    ["a Docker or Compose version of the host", /Docker 29|Compose 2\.40/],
+    [
+      "a Docker or Compose version of the host",
+      /\bDocker (version )?[0-9]+\.[0-9]+\.[0-9]+|\bCompose v?2\.[0-9]+\.[0-9]+/,
+    ],
     ["a crontab listing", new RegExp(["crontab ", "-l"].join(""))],
-    ["the host's CPU and memory", /\b8 CPUs\b|7\.7 GiB/],
+    ["the host's CPU and memory", /\b[0-9]+ CPUs\b|GiB of RAM/],
   ];
   function files(dir: string): string[] {
     const out: string[] = [];
