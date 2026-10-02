@@ -107,8 +107,8 @@ A phase PR that writes an ADR uses its number and adds it to the index in `.cont
 | --- | --- | --- |
 | 0081 | NEMAR emits Neurobagel artifacts by one pure transform over data-plane documents | Phase 1 |
 | 0082 | The Neurobagel node runs stock on nemaring under hard resource limits and is fed by pull | Phase 3 |
-| 0083 | Federation eligibility is one predicate decided from the row and re-checked at read time | Phase 4 |
-| 0084 | Curated Neurobagel annotations are a reviewed, content-pinned file keyed by dataset id | Phase 5 |
+| 0083 | Curated Neurobagel annotations are a reviewed, content-pinned file keyed by dataset id | Phase 5 |
+| 0084 | Federation eligibility is one predicate decided from the row and re-checked at read time | Phase 4 |
 | amendment | ADR 0067 gains the invariant that no anonymous deposit is present in the Neurobagel store | Phase 6 |
 
 Phases 2 and 7 write no ADR.
@@ -145,3 +145,14 @@ Measured on nemaring with 800 datasets and 50,105 subjects of synthetic data plu
 - **Cron and tunnel.** Neither is installed yet. The lead installs the cron once Phase 4 delivers a real artifact store, and the Cloudflare Tunnel hostname is created only with the owner's approval (the tunnel wiring was inferred because the neighbors' compose files were not readable, so the lead confirms it first). The public hostname is not needed until registration.
 - **Guard.** Keep `--abort-on neighbor`: failing safe toward the secrets store is correct. An abort must be visible: `bin/nb status` reports it, the Phase 6 sweep reads that status, and the runbook documents `bin/nb guard --baseline` for a deliberate restart of a neighbor.
 - **7-day soak.** Started 2026-10-02 07:27 UTC; the exit criterion counts from there.
+
+Renumbering (2026-10-02): the ADR index test requires gapless numbering, and Phase 5 is ready before Phase 4, so Phases 4 and 5 swapped their reserved numbers (Phase 5 is 0083, Phase 4 is 0084). Merge order for the ADR-bearing phases is therefore Phase 3 (0082), Phase 5 (0083), Phase 4 (0084).
+
+## Findings from the Phase 5 implementation (2026-10-02)
+
+- Correction: on007990's participants.json says `control` is "healthy control", so the mechanical mapping is right and it needs no curation. "Control" is an intervention arm only in on004166 and on006801, which Phase 5 curates.
+- Vocabulary gaps (no pinned term, so these stay uncurated): there is no generic ALS diagnosis (nm000157, nm000169, nm000187, nm000191 and nm000248 stay as they are) and no tinnitus term; no assessment term exists for the Edinburgh Handedness Inventory, so nm000103 cannot honestly carry an assessment (its documents say only "behavioral questionnaires").
+- Age in months or days has no Neurobagel format and cannot be curated into the graph. For placeholder-zero ages the capability exists (declare `0` missing, or curate the format), but no source of real ages was found.
+- Reuse of Neurobagel's published OpenNeuro annotations (MIT licence, pinned to commit 116676d): of the 579 `on` datasets, 164 have no upstream file, 29 have only identifier columns and 34 have every curatable column dropped. Generating everything gives 350 entries (526 KB); skipping redundant ones gives 114 (160 KB; 100 are `gender`-named sex columns, 81 assessment columns, 1 diagnosis). Recommendation: commit the 114 non-redundant entries in a follow-up PR and never generate at build time. Before that, a person should spot-check the 12 numeric-coded sex columns, the single diagnosis (on003568), and upstream treating zero ages as real (for example on003844).
+- Every author-reviewed curation entry (`review: "author"`) needs a human, clinical review before federation.
+- Upstream: the BIDS-suffix vocabulary is communities PR #76 (open, branch `auto-generate-bids-vocab`, 58 terms), which would close #70 (stale) and is held by planning#377. The earlier "unmerged branch" description omitted the open PR. A draft of the courtesy proposal is in the scratchpad (not posted).
