@@ -96,6 +96,10 @@ const SWEEP_WIRING: Record<string, "prod-only" | "all-envs" | "cron-wrapped" | "
   runImportCoverageSweep: "cron-wrapped",
   runImportCoverageSweepCron: "prod-only",
   runWeeklyImportSummaryCron: "prod-only",
+  // Epic #1586 phase 4 (ADR 0084): the Neurobagel artifact reconcile reads dataset
+  // repositories through the shared nemarDatasets org and writes the store, so it is
+  // production-only by default and absent from DEV_CRON_ALLOWLIST.
+  runNeurobagelReconcileCron: "prod-only",
   sweepBlockedBidsValidationRequests: "all-envs",
   // #1440: the non-production scope clause for sweepBlockedBidsValidationRequests,
   // exported so the test imports the REAL clause rather than retyping it. Pure,

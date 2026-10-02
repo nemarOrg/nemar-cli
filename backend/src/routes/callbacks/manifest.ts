@@ -10,6 +10,7 @@
 
 import { refreshMetadataAfterVersionDoi } from "../../services/dataset-reindex.js";
 import { verifyManifestCallbackToken } from "../../services/github.js";
+import { scheduleNeurobagelSync } from "../../services/neurobagel-writer.js";
 import { errorMessage } from "../../services/repo-metadata.js";
 import { headVersionArtifact } from "../../services/s3.js";
 import type { WebhookRouter } from "../webhooks/shared.js";
@@ -244,8 +245,19 @@ export function registerManifestCallbackRoutes(webhooks: WebhookRouter): void {
     if (job.doi) {
       // Pass body.version so the per-version HED row (#869) is written for exactly
       // this just-published version, not just the latest-by-created_at fallback.
-      c.executionCtx.waitUntil(
-        refreshMetadataAfterVersionDoi(c.env, body.dataset_id, body.version),
+      const refreshed = refreshMetadataAfterVersionDoi(c.env, body.dataset_id, body.version);
+      c.executionCtx.waitUntil(refreshed);
+      // Neurobagel federation (epic #1586 phase 4, ADR 0084): the version row has
+      // landed, which is what makes a first publication eligible, and a new version is
+      // a reason to regenerate. Follows the metadata refresh so the writer reads the
+      // refreshed D1 columns. A hook: off unless the writer is enabled, never awaited,
+      // and every failure is caught.
+      scheduleNeurobagelSync(
+        c.env,
+        (work) => c.executionCtx.waitUntil(work),
+        body.dataset_id,
+        "hook:version",
+        { after: refreshed },
       );
     }
 

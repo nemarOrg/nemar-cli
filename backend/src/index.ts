@@ -77,6 +77,7 @@ import {
   weeklySummaryCronLine,
 } from "./services/import-weekly-summary-sweep";
 import { manifestIntegritySweep } from "./services/manifest-sweep";
+import { runNeurobagelReconcileCron } from "./services/neurobagel-writer";
 import { getActiveNotices } from "./services/notices";
 import { sweepBlockedBidsValidationRequests } from "./services/publication-sweep";
 import { runRecordingStatsSweepCron } from "./services/recording-stats-sweep";
@@ -174,12 +175,12 @@ api.get("/notices", optionalAuthMiddleware, async (c) => {
 // routes/admin/news.ts.
 api.route("/news", newsRoutes);
 
-// Mount route handlers
 // The Neurobagel artifact store, read side (epic #1586 phase 4, ADR 0084): the index
 // and artifacts the node's loader pulls, behind one shared bearer secret, each answer
 // re-checked against D1. Off (404) until NEUROBAGEL_READ_TOKEN and the bucket exist.
 api.route("/neurobagel", neurobagelRoutes);
 
+// Mount route handlers
 api.route("/auth", authRoutes);
 // Web-dashboard auth (#569). Mounted at the same /auth prefix as the
 // CLI flow; no path overlap with authRoutes (existing /signup, /login,
@@ -1232,6 +1233,39 @@ export default {
           .catch((err) =>
             console.error(
               "[anonymity-sweep] sweep failed:",
+              err instanceof Error ? (err.stack ?? err.message) : err,
+            ),
+          ),
+      );
+
+      // Epic #1586 phase 4 (ADR 0084): the Neurobagel artifact reconcile, the safety net
+      // behind the publication and import hooks. PRODUCTION-ONLY, and deliberately NOT
+      // in DEV_CRON_ALLOWLIST: a new daily job is production-only by default, and this
+      // one reads dataset repositories through the shared nemarDatasets org. It does
+      // nothing at all unless NEUROBAGEL_WRITER_ENABLED is "1", examines at most
+      // NEUROBAGEL_RECONCILE_MAX datasets per tick (default 25) in a deterministic
+      // order, and shares this tick's subrequest budget with every job around it
+      // (ADR 0054), which is why the bound is small. The cron wrapper carries the fence
+      // so the admin route, which calls the writer directly, still works on staging.
+      ctx.waitUntil(
+        runNeurobagelReconcileCron(env)
+          .then((r) => {
+            if (!r) return;
+            const line =
+              `[neurobagel] reconcile status=${r.status} eligible=${r.eligible ?? "?"} ` +
+              `examined=${r.examined} written=${r.results.filter((d) => d.outcome === "written").length} ` +
+              `refused=${r.results.filter((d) => d.outcome === "refused").length} ` +
+              `removed=${r.removed.length} unexamined=${r.unexamined} ` +
+              `index_written=${r.index.written} needs_review=${r.needs_review.length}`;
+            if (r.status === "ok" && r.anonymity_findings === 0) console.log(line);
+            else
+              console.error(
+                `${line} anonymity_findings=${r.anonymity_findings} error=${r.error ?? ""}`,
+              );
+          })
+          .catch((err) =>
+            console.error(
+              "[neurobagel] reconcile failed:",
               err instanceof Error ? (err.stack ?? err.message) : err,
             ),
           ),

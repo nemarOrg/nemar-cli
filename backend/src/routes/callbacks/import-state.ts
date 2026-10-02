@@ -15,6 +15,7 @@ import {
   type ImportStatus,
   runImportRecovery,
 } from "../../services/import-recovery.js";
+import { scheduleNeurobagelSync } from "../../services/neurobagel-writer.js";
 import type { WebhookRouter } from "../webhooks/shared.js";
 
 // ============================================================================
@@ -210,6 +211,21 @@ export function registerImportStateRoutes(webhooks: WebhookRouter): void {
           ),
         );
       }
+    }
+
+    // Neurobagel federation (epic #1586 phase 4, ADR 0084): an import that completed
+    // is a dataset that may now be federated (OpenNeuro mirrors are included). A hook:
+    // off unless the writer is enabled, run in `waitUntil`, never awaited, every
+    // failure caught, so it cannot fail or delay this callback, which the import
+    // workflow needs to succeed. A dataset not yet eligible (no published version yet)
+    // is left to the version hook and the daily reconcile.
+    if (status === "complete") {
+      scheduleNeurobagelSync(
+        c.env,
+        (work) => c.executionCtx.waitUntil(work),
+        body.dataset_id,
+        "hook:import",
+      );
     }
 
     console.log(
