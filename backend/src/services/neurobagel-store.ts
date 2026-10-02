@@ -105,7 +105,11 @@ export interface StoreListing {
   unexpected: string[];
   /** The index object as the listing saw it. */
   index: { etag: string; size: number } | null;
-  /** True when a listing page failed to complete. Nothing may be inferred from an incomplete listing. */
+  /**
+   * How many objects the listing held in all (the index, artifacts and anything else).
+   * A listing that fails part way throws instead of returning: nothing may be inferred
+   * from an incomplete one, so there is no flag for it.
+   */
   objects: number;
 }
 
@@ -174,13 +178,7 @@ export async function listStore(bucket: R2Bucket): Promise<StoreListing> {
   throw new Error("neurobagel store listing did not finish within 100 pages");
 }
 
-async function sha256Hex(text: string): Promise<string> {
-  const digest = new Uint8Array(
-    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)),
-  );
-  return Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
+/** The one SHA-256 of this feature: lower-case hex of the digest of `bytes`. */
 export async function sha256OfBytes(bytes: Uint8Array): Promise<string> {
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
@@ -227,7 +225,7 @@ export async function indexEntryFor(stored: StoredDataset): Promise<IndexDataset
   }
   return {
     id: stored.id,
-    fingerprint: `sha256:${await sha256Hex(hashes)}`,
+    fingerprint: `sha256:${await sha256OfBytes(new TextEncoder().encode(hashes))}`,
     input_fingerprint: jsonld.meta[META.fingerprint] as string,
     artifacts,
   };

@@ -33,6 +33,7 @@
 import { canonicalJson } from "../../../shared/neurobagel/canonical-json.js";
 import { NEUROBAGEL_TRANSFORM_VERSION } from "../../../shared/neurobagel/version.js";
 import { VOCAB } from "../../../shared/neurobagel/vocab.js";
+import { sha256OfBytes } from "./neurobagel-store.js";
 
 /**
  * Bump when HOW the writer gathers or stores changes what a dataset's artifacts
@@ -42,12 +43,14 @@ import { VOCAB } from "../../../shared/neurobagel/vocab.js";
 export const NEUROBAGEL_WRITER_REVISION = 1;
 
 /** What the transform and the pinned vocabulary contribute, the same for every dataset. */
-export function transformIdentity(): {
+export interface TransformIdentity {
   writer: number;
   transform: number;
   vocab_communities: string;
   vocab_bagel: string;
-} {
+}
+
+export function transformIdentity(): TransformIdentity {
   return {
     writer: NEUROBAGEL_WRITER_REVISION,
     transform: NEUROBAGEL_TRANSFORM_VERSION,
@@ -67,11 +70,9 @@ export interface RowFingerprintFields {
   latest_version: string | null;
 }
 
-export async function sha256Hex(text: string): Promise<string> {
-  const digest = new Uint8Array(
-    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)),
-  );
-  return Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
+/** Hex SHA-256 of a string's UTF-8 bytes: the store's one digest, over text. */
+export function sha256Hex(text: string): Promise<string> {
+  return sha256OfBytes(new TextEncoder().encode(text));
 }
 
 type Json = Parameters<typeof canonicalJson>[0];
@@ -85,13 +86,14 @@ export async function cheapSignature(
   row: RowFingerprintFields,
   enrichmentLength: number,
   curationHash: string | null,
+  identity: TransformIdentity = transformIdentity(),
 ): Promise<string> {
   return `sha256:${await sha256Hex(
     canonical({
       fields: row,
       enrichment_length: enrichmentLength,
       curation: curationHash,
-      identity: transformIdentity(),
+      identity,
     }),
   )}`;
 }
@@ -101,13 +103,14 @@ export async function rowFingerprint(
   row: RowFingerprintFields,
   enrichmentSha256: string,
   curationHash: string | null,
+  identity: TransformIdentity = transformIdentity(),
 ): Promise<string> {
   return `sha256:${await sha256Hex(
     canonical({
       fields: row,
       enrichment_sha256: enrichmentSha256,
       curation: curationHash,
-      identity: transformIdentity(),
+      identity,
     }),
   )}`;
 }
