@@ -12,7 +12,6 @@
 import type { Bindings } from "../types/bindings.js";
 import { isNonProductionEnv } from "./environment.js";
 import { type CurationResolver, defaultCurationResolver } from "./neurobagel-curation.js";
-import { federationContext } from "./neurobagel-eligibility.js";
 import {
   LEDGER_ACTIONS,
   currentSignature,
@@ -145,7 +144,7 @@ export async function neurobagelStatus(
   // D1: who is eligible.
   let rows: Awaited<ReturnType<typeof loadPlanRows>>["rows"] = [];
   try {
-    rows = (await loadPlanRows(env.DB, federationContext(env))).rows;
+    rows = (await loadPlanRows(env.DB)).rows;
     status.counts.eligible = rows.length;
   } catch (err) {
     warnings.push(

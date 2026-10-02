@@ -11,8 +11,8 @@
  *     predicate with that one term REMOVED accepts it. A term nothing depends on
  *     would leave the mutant rejecting the row too, and fail here.
  *  3. The rows the epic names come out the way the owner decided: `on` mirrors in,
- *     `xx` sandboxes and the reserved `nm0999xx` fixtures out, exemplars in only
- *     outside production, an anonymous deposit never.
+ *     `xx` ids (sandboxes and the exemplar fleet, in any environment) and the reserved
+ *     `nm0999xx` fixtures out, an anonymous deposit never.
  *
  * The predicate is imported, never retyped (.rules/testing.md).
  */
@@ -22,27 +22,20 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { RESERVED_FIXTURE_FLOOR, formatDatasetId } from "../src/services/datasetId";
 import {
   FEDERATION_TERMS,
-  type FederationContext,
   type FederationRow,
   type FederationTermId,
-  NEUROBAGEL_ELIGIBLE_ROWS_SQL,
   NEUROBAGEL_ELIGIBLE_SQL,
   NEUROBAGEL_REAL_NM_CEILING,
   NEUROBAGEL_ROW_COLUMNS,
-  allowExemplarsFor,
   couldBeFederated,
   eligibleAmong,
   failedFederationTerms,
-  federationContext,
   isFederationEligible,
   loadEligibleRow,
-  neurobagelEligibleBinds,
 } from "../src/services/neurobagel-eligibility";
+import { NEUROBAGEL_PLAN_ROWS_SQL } from "../src/services/neurobagel-plan";
 import { freshDb, realD1 } from "./helpers/d1";
 import { seedDatasetRow } from "./helpers/neurobagel-harness";
-
-const PROD: FederationContext = { allowExemplars: false };
-const STAGING: FederationContext = { allowExemplars: true };
 
 let db: Database;
 beforeEach(() => {
@@ -50,14 +43,11 @@ beforeEach(() => {
 });
 
 /** The rows the real predicate selects, by id. */
-async function selected(ctx: FederationContext, sqlOverride?: string): Promise<string[]> {
+async function selected(sqlOverride?: string): Promise<string[]> {
   const sql =
     sqlOverride ??
     `SELECT d.dataset_id FROM datasets d WHERE ${NEUROBAGEL_ELIGIBLE_SQL} ORDER BY d.dataset_id`;
-  const result = await realD1(db)
-    .prepare(sql)
-    .bind(...neurobagelEligibleBinds(ctx))
-    .all<{ dataset_id: string }>();
+  const result = await realD1(db).prepare(sql).all<{ dataset_id: string }>();
   return result.results.map((r) => r.dataset_id);
 }
 
@@ -69,10 +59,11 @@ function predicateWithout(term: FederationTermId): string {
 }
 
 describe("the predicate's shape", () => {
-  test("holds exactly one bound parameter, the exemplar flag, and the helper binds it first", () => {
-    expect(NEUROBAGEL_ELIGIBLE_SQL.match(/\?/g)).toHaveLength(1);
-    expect(neurobagelEligibleBinds(PROD)).toEqual([0]);
-    expect(neurobagelEligibleBinds(STAGING)).toEqual([1]);
+  test("binds no parameter: every id a term names is a literal, so the predicate has no environment input", () => {
+    expect(NEUROBAGEL_ELIGIBLE_SQL.match(/\?/g)).toBeNull();
+    // The pure form takes the row and nothing else.
+    expect(isFederationEligible.length).toBe(1);
+    for (const t of FEDERATION_TERMS) expect(t.holds.length).toBe(1);
   });
 
   test("names every term it ANDs, and each id once", () => {
@@ -98,7 +89,8 @@ describe("the predicate's shape", () => {
 
   test("projects no identity and no DOI column", () => {
     expect(NEUROBAGEL_ROW_COLUMNS).not.toMatch(/concept_doi|owner|authors|enrichment/);
-    expect(NEUROBAGEL_ELIGIBLE_ROWS_SQL).not.toMatch(/concept_doi/);
+    // The plan's wider projection reads the DOI only through the anonymity blind.
+    expect(NEUROBAGEL_PLAN_ROWS_SQL).not.toMatch(/\bd\.concept_doi\b(?!\s*END)/);
   });
 });
 
@@ -151,13 +143,12 @@ describe("each term is necessary (mutation-style)", () => {
       seedDatasetRow(db, id, broken.seed);
 
       // The real predicate: the control in, the broken row out.
-      expect(await selected(STAGING)).toEqual(["nm000501"]);
-      expect(await selected(PROD)).toEqual(["nm000501"]);
+      expect(await selected()).toEqual(["nm000501"]);
 
       // The mutant: the same predicate minus this one term accepts the broken row.
       // If it did not, the term would be doing nothing a test could see.
       const mutant = `SELECT d.dataset_id FROM datasets d WHERE ${predicateWithout(term.id)} ORDER BY d.dataset_id`;
-      const accepted = await selected(STAGING, mutant);
+      const accepted = await selected(mutant);
       expect(accepted).toContain(id);
 
       // And the TypeScript form says the same about the same row.
@@ -165,10 +156,10 @@ describe("each term is necessary (mutation-style)", () => {
         .prepare(`SELECT ${NEUROBAGEL_ROW_COLUMNS} FROM datasets d WHERE d.dataset_id = ?`)
         .bind(id)
         .first<FederationRow>();
-      expect(isFederationEligible(row, STAGING)).toBe(false);
-      expect(failedFederationTerms(row, STAGING)).toEqual([term.id]);
+      expect(isFederationEligible(row)).toBe(false);
+      expect(failedFederationTerms(row)).toEqual([term.id]);
       const mutantTs = FEDERATION_TERMS.filter((t) => t.id !== term.id).every((t) =>
-        t.holds(row as FederationRow, STAGING),
+        t.holds(row as FederationRow),
       );
       expect(mutantTs).toBe(true);
     });
@@ -183,15 +174,15 @@ describe("each term is necessary (mutation-style)", () => {
     expect(() =>
       db.run("UPDATE datasets SET anonymous = NULL WHERE dataset_id = 'nm000504'"),
     ).toThrow(/NOT NULL constraint failed: datasets\.anonymous/);
-    const { row } = await loadEligibleRow(realD1(db), "nm000504", PROD);
-    expect(isFederationEligible({ ...(row as FederationRow), anonymous: null }, PROD)).toBe(false);
+    const { row } = await loadEligibleRow(realD1(db), "nm000504");
+    expect(isFederationEligible({ ...(row as FederationRow), anonymous: null })).toBe(false);
   });
 
   test("with the schema's triggers in place an anonymous row fails two terms, which back each other up", async () => {
     // The row the invariant allows: anonymous and NOT first-published.
     seedDatasetRow(db, "nm000502", { anonymous: 1, firstPublishedAt: null });
-    const row = (await loadEligibleRow(realD1(db), "nm000502", PROD)).row as FederationRow;
-    expect(failedFederationTerms(row, PROD)).toEqual(["not_anonymous", "first_published"]);
+    const row = (await loadEligibleRow(realD1(db), "nm000502")).row as FederationRow;
+    expect(failedFederationTerms(row)).toEqual(["not_anonymous", "first_published"]);
     // And the schema really does refuse the row that would separate them.
     expect(() =>
       seedDatasetRow(db, "nm000503", { anonymous: 1, firstPublishedAt: "2026-01-02 03:04:05" }),
@@ -199,15 +190,15 @@ describe("each term is necessary (mutation-style)", () => {
   });
 
   test("the baseline row satisfies every term in TypeScript", () => {
-    expect(isFederationEligible(BASE, PROD)).toBe(true);
-    expect(failedFederationTerms(BASE, PROD)).toEqual([]);
+    expect(isFederationEligible(BASE)).toBe(true);
+    expect(failedFederationTerms(BASE)).toEqual([]);
   });
 
   test("a null row, and a NULL anonymous, are not eligible: unknown is not false", () => {
-    expect(isFederationEligible(null, PROD)).toBe(false);
-    expect(isFederationEligible(undefined, PROD)).toBe(false);
-    expect(isFederationEligible({ ...BASE, anonymous: null }, PROD)).toBe(false);
-    expect(isFederationEligible({ ...BASE, has_version: null }, PROD)).toBe(false);
+    expect(isFederationEligible(null)).toBe(false);
+    expect(isFederationEligible(undefined)).toBe(false);
+    expect(isFederationEligible({ ...BASE, anonymous: null })).toBe(false);
+    expect(isFederationEligible({ ...BASE, has_version: null })).toBe(false);
   });
 });
 
@@ -249,40 +240,35 @@ describe("SQL and TypeScript agree on every combination", () => {
     }
     expect(seeded).toBe(CLASSES.length * VECTORS.length);
 
-    for (const ctx of [PROD, STAGING]) {
-      const bySql = new Set(await selected(ctx));
-      const rows = await realD1(db)
-        .prepare(`SELECT ${NEUROBAGEL_ROW_COLUMNS} FROM datasets d ORDER BY d.dataset_id`)
-        .all<FederationRow>();
-      expect(rows.results).toHaveLength(seeded);
-      let accepted = 0;
-      for (const row of rows.results) {
-        const byTs = isFederationEligible(row, ctx);
-        if (byTs) accepted++;
-        expect(`${row.dataset_id}:${byTs}`).toBe(`${row.dataset_id}:${bySql.has(row.dataset_id)}`);
-      }
-      // Not vacuous: some rows accepted, most rejected.
-      expect(accepted).toBeGreaterThan(0);
-      expect(accepted).toBeLessThan(seeded / 2);
+    const bySql = new Set(await selected());
+    const rows = await realD1(db)
+      .prepare(`SELECT ${NEUROBAGEL_ROW_COLUMNS} FROM datasets d ORDER BY d.dataset_id`)
+      .all<FederationRow>();
+    expect(rows.results).toHaveLength(seeded);
+    let accepted = 0;
+    for (const row of rows.results) {
+      const byTs = isFederationEligible(row);
+      if (byTs) accepted++;
+      expect(`${row.dataset_id}:${byTs}`).toBe(`${row.dataset_id}:${bySql.has(row.dataset_id)}`);
     }
+    // Not vacuous: some rows accepted, most rejected.
+    expect(accepted).toBeGreaterThan(0);
+    expect(accepted).toBeLessThan(seeded / 2);
   });
 
-  test("exactly the baseline vector of the two real classes is accepted in production", async () => {
+  test("exactly the baseline vector of the two real classes is accepted", async () => {
     for (const klass of CLASSES) {
       for (const [i, vector] of VECTORS.entries()) {
         seedDatasetRow(db, `${klass.prefix}${String(klass.base + i).padStart(6, "0")}`, vector);
       }
     }
-    expect(await selected(PROD)).toEqual(["nm000108", "on000100"]);
-    // Outside production the exemplar band's own rows join, whatever else they carry.
-    expect(await selected(STAGING)).toEqual(
-      ["nm000108", "on000100", "xx099909", "xx099910"].sort(),
-    );
+    // Nothing in the `xx` classes, the exemplar band's included, is eligible.
+    expect(await selected()).toEqual(["nm000108", "on000100"]);
   });
 });
 
 describe("which datasets are federated", () => {
-  const rowsFor = async (ctx: FederationContext) => selected(ctx);
+  const rowsFor = async () => selected();
 
   test("`nm` below the reserved band and `on` mirrors are in; `xx` and `nm0999xx` are out", async () => {
     for (const id of ["nm000108", "nm099899", "on000117", "on099950", "nm000103"]) {
@@ -292,75 +278,70 @@ describe("which datasets are federated", () => {
       seedDatasetRow(db, id);
     }
     const expected = ["nm000103", "nm000108", "nm099899", "on000117", "on099950"];
-    expect(await rowsFor(PROD)).toEqual(expected);
-    expect(await rowsFor(STAGING)).toEqual(expected);
+    expect(await rowsFor()).toEqual(expected);
   });
 
   test("an `on` mirror is included by the owner's decision (not just tolerated)", async () => {
     seedDatasetRow(db, "on004166");
-    expect(await rowsFor(PROD)).toEqual(["on004166"]);
+    expect(await rowsFor()).toEqual(["on004166"]);
   });
 
   test("a sandbox or an exemplar flag on a real id excludes it", async () => {
     seedDatasetRow(db, "nm000200", { isSandbox: 1 });
     seedDatasetRow(db, "nm000201", { isExemplar: 1 });
     seedDatasetRow(db, "on000200", { isSandbox: 1 });
-    expect(await rowsFor(PROD)).toEqual([]);
-    expect(await rowsFor(STAGING)).toEqual([]);
+    expect(await rowsFor()).toEqual([]);
   });
 
-  test("an exemplar is admitted outside production only, and only in its own band", async () => {
+  test("an `xx` id is never eligible, in any environment, whatever else it carries", async () => {
+    // The exemplar fleet (`xx0999NN`, `is_exemplar = 1`) and a sandbox row: every other term
+    // holds for both, so only the id decides. The store and the index schema hold `nm` and
+    // `on` ids, so admitting one would rewrite it on every run and never index it.
     seedDatasetRow(db, "xx099903", { isExemplar: 1, isSandbox: 1 });
-    // The flag on an id outside the band is not enough.
-    seedDatasetRow(db, "xx000001", { isExemplar: 1, isSandbox: 1 });
+    seedDatasetRow(db, "xx099910", { isExemplar: 1 });
+    seedDatasetRow(db, "xx000001", { isSandbox: 1 });
+    seedDatasetRow(db, "xx000002", { isExemplar: 0, isSandbox: 0 });
     seedDatasetRow(db, "nm099997", { isExemplar: 1, isSandbox: 1 });
-    expect(await rowsFor(PROD)).toEqual([]);
-    expect(await rowsFor(STAGING)).toEqual(["xx099903"]);
+    expect(await rowsFor()).toEqual([]);
+    const d1 = realD1(db);
+    for (const id of ["xx099903", "xx099910", "xx000001", "xx000002", "nm099997"]) {
+      const { row, eligible } = await loadEligibleRow(d1, id);
+      expect(eligible).toBe(false);
+      expect(failedFederationTerms(row)).toEqual(["real_dataset"]);
+      expect(couldBeFederated(id)).toBe(false);
+    }
+    expect((await eligibleAmong(d1, ["xx099903", "xx000001", "xx000002"])).size).toBe(0);
+    // The predicate takes no environment, so there is no setting under which this changes.
+    expect(isFederationEligible.length).toBe(1);
   });
 
   test("the standing anonymous deposit is never eligible, on any ground", async () => {
     seedDatasetRow(db, "nm099998", { anonymous: 1, firstPublishedAt: null, isSandbox: 1 });
-    expect(await rowsFor(PROD)).toEqual([]);
-    expect(await rowsFor(STAGING)).toEqual([]);
-    const { row, eligible } = await loadEligibleRow(realD1(db), "nm099998", STAGING);
+    expect(await rowsFor()).toEqual([]);
+    const { row, eligible } = await loadEligibleRow(realD1(db), "nm099998");
     expect(eligible).toBe(false);
-    expect(failedFederationTerms(row, STAGING)).toEqual(
+    expect(failedFederationTerms(row)).toEqual(
       expect.arrayContaining(["not_anonymous", "first_published", "real_dataset"]),
     );
   });
 
   test("a withdrawn dataset is out even though a withdrawal also makes it private", async () => {
     seedDatasetRow(db, "nm000300", { withdrawnAt: "2026-02-01 00:00:00" });
-    expect(await rowsFor(PROD)).toEqual([]);
-    const row = (await loadEligibleRow(realD1(db), "nm000300", PROD)).row as FederationRow;
-    expect(failedFederationTerms(row, PROD)).toEqual(["not_withdrawn"]);
-  });
-});
-
-describe("the environment binding fails closed", () => {
-  test("only a recognized non-production environment admits exemplars", () => {
-    expect(allowExemplarsFor({ ENVIRONMENT: "production" })).toBe(false);
-    for (const env of ["development", "staging", "test"] as const) {
-      expect(allowExemplarsFor({ ENVIRONMENT: env })).toBe(true);
-    }
-    // Unset or misspelled is production, never "not production".
-    expect(allowExemplarsFor({ ENVIRONMENT: undefined as never })).toBe(false);
-    expect(allowExemplarsFor({ ENVIRONMENT: "prod" as never })).toBe(false);
-    expect(allowExemplarsFor({ ENVIRONMENT: "" as never })).toBe(false);
-    expect(federationContext({ ENVIRONMENT: "production" })).toEqual({ allowExemplars: false });
+    expect(await rowsFor()).toEqual([]);
+    const row = (await loadEligibleRow(realD1(db), "nm000300")).row as FederationRow;
+    expect(failedFederationTerms(row)).toEqual(["not_withdrawn"]);
   });
 });
 
 describe("couldBeFederated: ids that never are", () => {
   test("by id alone", () => {
-    expect(couldBeFederated("nm000108", PROD)).toBe(true);
-    expect(couldBeFederated("on000117", PROD)).toBe(true);
-    expect(couldBeFederated("nm099900", PROD)).toBe(false);
-    expect(couldBeFederated("nm099999", STAGING)).toBe(false);
-    expect(couldBeFederated("xx000042", STAGING)).toBe(false);
-    expect(couldBeFederated("xx099903", PROD)).toBe(false);
-    expect(couldBeFederated("xx099903", STAGING)).toBe(true);
-    expect(couldBeFederated("garbage", STAGING)).toBe(false);
+    expect(couldBeFederated("nm000108")).toBe(true);
+    expect(couldBeFederated("on000117")).toBe(true);
+    expect(couldBeFederated("nm099900")).toBe(false);
+    expect(couldBeFederated("nm099999")).toBe(false);
+    expect(couldBeFederated("xx000042")).toBe(false);
+    expect(couldBeFederated("xx099903")).toBe(false);
+    expect(couldBeFederated("garbage")).toBe(false);
   });
 });
 
@@ -371,8 +352,8 @@ describe("eligibleAmong re-checks every row the SQL returns", () => {
     seedDatasetRow(db, "on000117");
     const d1 = realD1(db);
     expect(
-      [...(await eligibleAmong(d1, ["nm000108", "nm000109", "on000117", "nm000999"], PROD))].sort(),
+      [...(await eligibleAmong(d1, ["nm000108", "nm000109", "on000117", "nm000999"]))].sort(),
     ).toEqual(["nm000108", "on000117"]);
-    expect((await eligibleAmong(d1, [], PROD)).size).toBe(0);
+    expect((await eligibleAmong(d1, [])).size).toBe(0);
   });
 });

@@ -24,12 +24,10 @@
 import { auditLogStatement } from "../db/audit-log.js";
 import { CONCEPT_DOI_SQL } from "./anonymity.js";
 import {
-  type FederationContext,
   type FederationRow,
   NEUROBAGEL_ELIGIBLE_SQL,
   NEUROBAGEL_ROW_COLUMNS,
   isFederationEligible,
-  neurobagelEligibleBinds,
 } from "./neurobagel-eligibility.js";
 import { cheapSignature } from "./neurobagel-fingerprint.js";
 import { META, type StoredDataset } from "./neurobagel-store.js";
@@ -53,12 +51,12 @@ const PLAN_SELECT = `SELECT ${NEUROBAGEL_ROW_COLUMNS},
       ORDER BY dv.created_at DESC, dv.id DESC LIMIT 1) AS latest_version
   FROM datasets d`;
 
-/** Every eligible dataset, in id order, with the cheap fields. Bind the eligibility flag first. */
+/** Every eligible dataset, in id order, with the cheap fields. */
 export const NEUROBAGEL_PLAN_ROWS_SQL = `${PLAN_SELECT}
  WHERE ${NEUROBAGEL_ELIGIBLE_SQL}
  ORDER BY d.dataset_id`;
 
-/** The same, for the named datasets only: the eligibility flag, then a JSON array of ids. */
+/** The same, for the named datasets only: bind a JSON array of ids. */
 export const NEUROBAGEL_PLAN_ROWS_FOR_SQL = `${PLAN_SELECT}
  WHERE ${NEUROBAGEL_ELIGIBLE_SQL}
    AND d.dataset_id IN (SELECT value FROM json_each(?))
@@ -71,23 +69,19 @@ export const NEUROBAGEL_PLAN_ROWS_FOR_SQL = `${PLAN_SELECT}
  */
 export async function loadPlanRows(
   db: D1Database,
-  ctx: FederationContext,
   ids?: readonly string[],
 ): Promise<{ rows: PlanRow[]; refusedByRecheck: number }> {
   const result =
     ids === undefined
-      ? await db
-          .prepare(NEUROBAGEL_PLAN_ROWS_SQL)
-          .bind(...neurobagelEligibleBinds(ctx))
-          .all<PlanRow>()
+      ? await db.prepare(NEUROBAGEL_PLAN_ROWS_SQL).all<PlanRow>()
       : await db
           .prepare(NEUROBAGEL_PLAN_ROWS_FOR_SQL)
-          .bind(...neurobagelEligibleBinds(ctx), JSON.stringify([...ids]))
+          .bind(JSON.stringify([...ids]))
           .all<PlanRow>();
   const rows: PlanRow[] = [];
   let refusedByRecheck = 0;
   for (const row of result.results ?? []) {
-    if (isFederationEligible(row, ctx)) rows.push(row);
+    if (isFederationEligible(row)) rows.push(row);
     else refusedByRecheck++;
   }
   return { rows, refusedByRecheck };

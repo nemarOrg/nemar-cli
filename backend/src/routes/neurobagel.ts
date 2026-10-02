@@ -27,11 +27,7 @@
 
 import { Hono } from "hono";
 import { timingSafeEqual } from "../lib/constant-time.js";
-import {
-  eligibleAmong,
-  federationContext,
-  loadEligibleRow,
-} from "../services/neurobagel-eligibility.js";
+import { eligibleAmong, loadEligibleRow } from "../services/neurobagel-eligibility.js";
 import {
   ARTIFACT_CONTENT_TYPE,
   META,
@@ -95,7 +91,6 @@ neurobagelRoutes.get("/index.json", async (c) => {
   const eligible = await eligibleAmong(
     c.env.DB,
     document.datasets.map((d) => d.id),
-    federationContext(c.env),
   );
   const served = { ...document, datasets: document.datasets.filter((d) => eligible.has(d.id)) };
   return new Response(`${JSON.stringify(served)}\n`, {
@@ -109,7 +104,7 @@ neurobagelRoutes.get("/:name", async (c) => {
   if (!parsed) return notFound();
 
   // The predicate, re-checked against D1 for THIS request.
-  const { eligible } = await loadEligibleRow(c.env.DB, parsed.datasetId, federationContext(c.env));
+  const { eligible } = await loadEligibleRow(c.env.DB, parsed.datasetId);
   if (!eligible) return notFound();
 
   const object = await (c.env.NEUROBAGEL as R2Bucket).get(c.req.param("name"));

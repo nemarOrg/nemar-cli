@@ -18,27 +18,22 @@
  *   - holding at least one `dataset_versions` row;
  *   - a real dataset: an `nm` id below the reserved fixture band (ADR 0068), or an
  *     `on` OpenNeuro mirror (INCLUDED by the owner's decision), and neither a
- *     sandbox nor an exemplar row. `xx` sandbox ids and the reserved `nm0999xx`
- *     fixtures are excluded by that term.
- *   - Exemplar datasets (`xx0999NN`, `is_exemplar = 1`) are admitted ONLY when the
- *     caller says `allowExemplars`, which is bound from the environment and fails
- *     closed: production never passes it (`allowExemplarsFor`).
+ *     sandbox nor an exemplar row. `xx` ids (sandboxes and the exemplar fleet) and the
+ *     reserved `nm0999xx` fixtures are excluded by that term, in EVERY environment:
+ *     the store and the index schema hold `nm` and `on` ids only, so an exemplar that
+ *     the predicate admitted would be rewritten on every run and never indexed.
  *
  * "Deleted" is not a separate term: deleting a dataset removes its row, and a row
  * with `status = 'deleted'` fails the `active` term.
  */
 
-import type { Bindings } from "../types/bindings.js";
 import { RESERVED_FIXTURE_FLOOR, formatDatasetId } from "./datasetId.js";
-import { isNonProductionEnv } from "./environment.js";
 
 /** The first reserved `nm` id: real datasets are strictly below it (ADR 0068). */
 export const NEUROBAGEL_REAL_NM_CEILING = formatDatasetId("nm", RESERVED_FIXTURE_FLOOR);
 
 const NM_ID = /^nm\d{6}$/;
 const ON_ID = /^on\d{6}$/;
-/** The exemplar fleet's band, `xx099900`-`xx099999` (routes/admin/exemplar.ts declares the same). */
-const EXEMPLAR_ID = /^xx0999\d{2}$/;
 
 /** A `datasets` row as the eligibility query projects it. `has_version` is 0 or 1. */
 export interface FederationRow {
@@ -53,11 +48,6 @@ export interface FederationRow {
   has_version: number | null;
 }
 
-export interface FederationContext {
-  /** Admit `is_exemplar = 1` fleet rows. Never true in production; see {@link allowExemplarsFor}. */
-  allowExemplars: boolean;
-}
-
 export type FederationTermId =
   | "active"
   | "public"
@@ -69,15 +59,14 @@ export type FederationTermId =
 
 export interface FederationTerm {
   id: FederationTermId;
-  /** SQL over the `datasets d` alias. Only `real_dataset` binds a parameter (`allowExemplars`). */
+  /** SQL over the `datasets d` alias. No term binds a parameter: every id it names is a literal. */
   sql: string;
   /** The same term over a row. */
-  holds(row: FederationRow, ctx: FederationContext): boolean;
+  holds(row: FederationRow): boolean;
 }
 
 const NM_GLOB = "nm[0-9][0-9][0-9][0-9][0-9][0-9]";
 const ON_GLOB = "on[0-9][0-9][0-9][0-9][0-9][0-9]";
-const EXEMPLAR_GLOB = "xx0999[0-9][0-9]";
 
 /** Order is the order the terms appear in {@link NEUROBAGEL_ELIGIBLE_SQL}. */
 export const FEDERATION_TERMS: readonly FederationTerm[] = [
@@ -114,28 +103,25 @@ export const FEDERATION_TERMS: readonly FederationTerm[] = [
   },
   {
     id: "real_dataset",
-    sql: `((
+    sql: `(
         ((d.dataset_id GLOB '${NM_GLOB}' AND d.dataset_id < '${NEUROBAGEL_REAL_NM_CEILING}')
           OR d.dataset_id GLOB '${ON_GLOB}')
         AND COALESCE(d.is_sandbox, 0) = 0 AND COALESCE(d.is_exemplar, 0) = 0
-      ) OR (? = 1 AND d.is_exemplar = 1 AND d.dataset_id GLOB '${EXEMPLAR_GLOB}'))`,
-    holds: (row, ctx) => {
-      const real =
-        ((NM_ID.test(row.dataset_id) && row.dataset_id < NEUROBAGEL_REAL_NM_CEILING) ||
-          ON_ID.test(row.dataset_id)) &&
-        (row.is_sandbox ?? 0) === 0 &&
-        (row.is_exemplar ?? 0) === 0;
-      const exemplar =
-        ctx.allowExemplars && row.is_exemplar === 1 && EXEMPLAR_ID.test(row.dataset_id);
-      return real || exemplar;
-    },
+      )`,
+    // An id with an embedded NUL can pass SQLite's GLOB (it stops at the NUL) while this
+    // anchored pattern refuses it. That is the fail-safe direction and unreachable: ids
+    // are validated at creation, and a disagreement is a refusal, never a dataset served.
+    holds: (row) =>
+      ((NM_ID.test(row.dataset_id) && row.dataset_id < NEUROBAGEL_REAL_NM_CEILING) ||
+        ON_ID.test(row.dataset_id)) &&
+      (row.is_sandbox ?? 0) === 0 &&
+      (row.is_exemplar ?? 0) === 0,
   },
 ];
 
 /**
  * The eligibility predicate as one SQL fragment over `datasets d`: every term,
- * ANDed. It holds exactly ONE `?`, the `allowExemplars` flag (1 or 0), which is
- * the FIRST parameter of any statement that embeds it ({@link neurobagelEligibleBinds}).
+ * ANDed. It holds NO bound parameter, so a statement that embeds it binds only its own.
  *
  * Embed it; never copy it (.rules/testing.md): a copy is a predicate that can
  * disagree with this one.
@@ -151,76 +137,45 @@ export const NEUROBAGEL_ROW_COLUMNS = `d.dataset_id, d.status, d.visibility, d.a
     d.first_published_at, d.withdrawn_at, d.is_sandbox, d.is_exemplar,
     EXISTS (SELECT 1 FROM dataset_versions dv WHERE dv.dataset_id = d.dataset_id) AS has_version`;
 
-/** The eligible rows, in a stable order. Bind {@link neurobagelEligibleBinds} first. */
-export const NEUROBAGEL_ELIGIBLE_ROWS_SQL = `SELECT ${NEUROBAGEL_ROW_COLUMNS}
-  FROM datasets d
- WHERE ${NEUROBAGEL_ELIGIBLE_SQL}
- ORDER BY d.dataset_id`;
-
 /** One dataset's row regardless of eligibility, for the re-check. */
-export const NEUROBAGEL_ROW_BY_ID_SQL = `SELECT ${NEUROBAGEL_ROW_COLUMNS}
+const NEUROBAGEL_ROW_BY_ID_SQL = `SELECT ${NEUROBAGEL_ROW_COLUMNS}
   FROM datasets d
  WHERE d.dataset_id = ?`;
 
 /**
- * Whether this environment may federate exemplar datasets.
- *
- * `!isNonProductionEnv`, not `ENVIRONMENT !== "production"`, so it FAILS CLOSED: an
- * unset or misspelled ENVIRONMENT on the production worker admits no exemplar.
+ * Could this id EVER be federated? A pure look at the id, no I/O: an `nm` id below the
+ * reserved band or an `on` mirror. The hooks use it to return before any read for an
+ * `xx` sandbox, an exemplar or a reserved fixture, which are never federated; it
+ * decides nothing about a dataset that passes, which still needs its row checked.
  */
-export function allowExemplarsFor(env: Pick<Bindings, "ENVIRONMENT">): boolean {
-  return isNonProductionEnv(env);
-}
-
-/** The context the pure check takes, from the environment. */
-export function federationContext(env: Pick<Bindings, "ENVIRONMENT">): FederationContext {
-  return { allowExemplars: allowExemplarsFor(env) };
-}
-
-/** The leading bound parameters of any statement that embeds {@link NEUROBAGEL_ELIGIBLE_SQL}. */
-export function neurobagelEligibleBinds(ctx: FederationContext): [number] {
-  return [ctx.allowExemplars ? 1 : 0];
-}
-
-/**
- * Could this id EVER be federated in this environment? A pure look at the id, no I/O:
- * an `nm` id below the reserved band, an `on` mirror, or (outside production) an
- * exemplar. The hooks use it to return before any read for an `xx` sandbox or a
- * reserved fixture, which are never federated; it decides nothing about a dataset
- * that passes, which still needs its row checked.
- */
-export function couldBeFederated(datasetId: string, ctx: FederationContext): boolean {
+export function couldBeFederated(datasetId: string): boolean {
   if (NM_ID.test(datasetId)) return datasetId < NEUROBAGEL_REAL_NM_CEILING;
-  if (ON_ID.test(datasetId)) return true;
-  return ctx.allowExemplars && EXEMPLAR_ID.test(datasetId);
+  return ON_ID.test(datasetId);
 }
 
 /** The pure re-check over a row. True only when every term holds. */
-export function isFederationEligible(
-  row: FederationRow | null | undefined,
-  ctx: FederationContext,
-): boolean {
+export function isFederationEligible(row: FederationRow | null | undefined): boolean {
   if (!row) return false;
-  return FEDERATION_TERMS.every((t) => t.holds(row, ctx));
+  return FEDERATION_TERMS.every((t) => t.holds(row));
 }
 
-/** The ids of the terms a row fails, for reports. Empty means eligible. */
-export function failedFederationTerms(
-  row: FederationRow | null | undefined,
-  ctx: FederationContext,
-): FederationTermId[] {
+/**
+ * The ids of the terms a row fails. Empty means eligible. Exported for the necessity
+ * tests (each term must be the ONLY one a crafted row fails) and for any report that
+ * has to say why a row is out; no production path calls it today.
+ */
+export function failedFederationTerms(row: FederationRow | null | undefined): FederationTermId[] {
   if (!row) return ["real_dataset"];
-  return FEDERATION_TERMS.filter((t) => !t.holds(row, ctx)).map((t) => t.id);
+  return FEDERATION_TERMS.filter((t) => !t.holds(row)).map((t) => t.id);
 }
 
 /** Load one row and re-check it: the SQL selects, the TypeScript confirms. */
 export async function loadEligibleRow(
   db: D1Database,
   datasetId: string,
-  ctx: FederationContext,
 ): Promise<{ row: FederationRow | null; eligible: boolean }> {
   const row = await db.prepare(NEUROBAGEL_ROW_BY_ID_SQL).bind(datasetId).first<FederationRow>();
-  return { row: row ?? null, eligible: isFederationEligible(row, ctx) };
+  return { row: row ?? null, eligible: isFederationEligible(row) };
 }
 
 /**
@@ -228,11 +183,7 @@ export async function loadEligibleRow(
  * re-checks every row it returns, so a drift between the two shows as a refusal
  * rather than as a dataset served.
  */
-export async function eligibleAmong(
-  db: D1Database,
-  ids: readonly string[],
-  ctx: FederationContext,
-): Promise<Set<string>> {
+export async function eligibleAmong(db: D1Database, ids: readonly string[]): Promise<Set<string>> {
   if (ids.length === 0) return new Set();
   const result = await db
     .prepare(
@@ -241,11 +192,11 @@ export async function eligibleAmong(
         WHERE ${NEUROBAGEL_ELIGIBLE_SQL}
           AND d.dataset_id IN (SELECT value FROM json_each(?))`,
     )
-    .bind(...neurobagelEligibleBinds(ctx), JSON.stringify(ids))
+    .bind(JSON.stringify(ids))
     .all<FederationRow>();
   const out = new Set<string>();
   for (const row of result.results ?? []) {
-    if (isFederationEligible(row, ctx)) out.add(row.dataset_id);
+    if (isFederationEligible(row)) out.add(row.dataset_id);
   }
   return out;
 }

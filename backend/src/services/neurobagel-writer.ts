@@ -52,12 +52,7 @@ import {
   applyCuration,
   defaultCurationResolver,
 } from "./neurobagel-curation.js";
-import {
-  couldBeFederated,
-  eligibleAmong,
-  federationContext,
-  loadEligibleRow,
-} from "./neurobagel-eligibility.js";
+import { couldBeFederated, eligibleAmong, loadEligibleRow } from "./neurobagel-eligibility.js";
 import { inputFingerprint, rowFingerprint, sha256Hex } from "./neurobagel-fingerprint.js";
 import { type GatherDeps, GatherRefusal, gatherNeurobagelInput } from "./neurobagel-gather.js";
 import {
@@ -490,11 +485,10 @@ async function evictStaleManifestCopy(
 async function processDataset(rc: RunContext, row: PlanRow): Promise<DatasetResult> {
   const { env, options } = rc;
   const id = row.dataset_id;
-  const federation = federationContext(env);
 
   // The row again, now: the bulk query was a moment ago, and eligibility is cheap to
   // ask twice. A dataset that stopped being eligible in between is a removal, not a write.
-  const fresh = await loadEligibleRow(env.DB, id, federation);
+  const fresh = await loadEligibleRow(env.DB, id);
   if (!fresh.eligible) return { id, outcome: "refused", code: "no_longer_eligible" };
 
   // A dataset with a curation entry is NEVER converted without it, and a lookup that
@@ -697,10 +691,9 @@ export async function runNeurobagelWriter(env: Bindings, options: RunOptions): P
   }
 
   try {
-    const federation = federationContext(env);
     // A run for named datasets reads only those; the whole catalog only for an unscoped run.
     const only = options.only ? [...new Set(options.only)] : undefined;
-    const { rows, refusedByRecheck } = await loadPlanRows(env.DB, federation, only);
+    const { rows, refusedByRecheck } = await loadPlanRows(env.DB, only);
     if (refusedByRecheck > 0) {
       result.warnings.push(
         `${refusedByRecheck} row(s) selected by the SQL predicate failed its TypeScript re-check`,
@@ -714,11 +707,7 @@ export async function runNeurobagelWriter(env: Bindings, options: RunOptions): P
     const eligibleIds =
       only === undefined
         ? new Set(rows.map((r) => r.dataset_id))
-        : await eligibleAmong(
-            env.DB,
-            [...new Set([...listing.datasets.keys(), ...only])],
-            federation,
-          );
+        : await eligibleAmong(env.DB, [...new Set([...listing.datasets.keys(), ...only])]);
     const ledger = options.execute ? await readLedger(env.DB) : new Map<string, LedgerEntry>();
 
     const resolver = options.deps?.curation ?? defaultCurationResolver;
@@ -913,7 +902,7 @@ export function scheduleNeurobagelSync(
   try {
     const mode = neurobagelWriterMode(env);
     if (mode === "disabled") return;
-    if (!couldBeFederated(datasetId, federationContext(env))) return;
+    if (!couldBeFederated(datasetId)) return;
     if (mode === "store_unconfigured") {
       console.warn(`[neurobagel] store_unconfigured: ${trigger} for ${datasetId} did nothing`);
       return;

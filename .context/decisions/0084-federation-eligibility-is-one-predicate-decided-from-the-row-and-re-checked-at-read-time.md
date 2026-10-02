@@ -20,7 +20,9 @@ The writer also hooks into publication and import, which are production flows th
    A dataset is eligible when it is `active`, `public`, `anonymous = 0` (NULL is unknown, and unknown is not false), first published, not withdrawn, holds a `dataset_versions` row, and is a real dataset: an `nm` id below the reserved fixture band (ADR 0068) or an `on` OpenNeuro mirror, and neither a sandbox nor an exemplar row.
    **`on` mirrors are included by the owner's decision**, agreed with Neurobagel's principal investigator because NEMAR adds value to them.
    `xx` sandboxes and the reserved `nm0999xx` fixtures are out.
-   Exemplar datasets are admitted only outside production, bound from the environment through `isNonProductionEnv`, so an unset or misspelled `ENVIRONMENT` is production and admits none.
+   **No exemplar is federated, in any environment.**
+   An earlier draft admitted the exemplar fleet outside production, but the store's object names and the index schema accept `nm` and `on` ids only, so an exemplar would have been rewritten on every run and never indexed, and no staging node exists to read one.
+   The predicate therefore takes no environment input: an `xx` id is out by its id, and a row flagged sandbox or exemplar is out by its flag.
    The `not_anonymous` term is the second line behind migration 0085's triggers (which make `anonymous = 1` imply no first publication), not a duplicate of them: a table rebuild drops triggers, and the mutation test proves the term necessary by dropping them first.
 2. **A second, independent guard at gather time.**
    The transform's inputs are obtained by calling the real data plane in process, so the transform sees what the public sees.

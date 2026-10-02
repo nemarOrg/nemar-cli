@@ -146,7 +146,15 @@ describe("scheduleNeurobagelSync", () => {
       statements.push(sql);
     });
     const c = collector();
-    for (const id of ["xx000042", "nm099900", "nm099998", "nm099999", "ds000117", "garbage"]) {
+    for (const id of [
+      "xx000042",
+      "xx099903",
+      "nm099900",
+      "nm099998",
+      "nm099999",
+      "ds000117",
+      "garbage",
+    ]) {
       scheduleNeurobagelSync(h.env({ DB: d1 }), c.waitUntil, id, "hook:import");
     }
     expect(c.count()).toBe(0);
@@ -611,7 +619,6 @@ describe("the reconcile cron wrapper", () => {
 
   test("in production it reconciles, bounded and in order, and an exemplar is never federated", async () => {
     for (const id of ["nm000995", "nm000996", "nm000997"]) seedSynthetic(h, id);
-    // An exemplar: eligible outside production, never in it.
     seedSynthetic(h, "xx099903", { isExemplar: 1, isSandbox: 1 });
     const env = h.env({ ENVIRONMENT: "production", NEUROBAGEL_RECONCILE_MAX: "2" });
     const t1 = await runNeurobagelReconcileCron(env);
@@ -626,14 +633,23 @@ describe("the reconcile cron wrapper", () => {
         .flatMap((id) => [`${id}.jsonld`, `${id}_annotated.json`, `${id}_dataset_description.json`])
         .sort(),
     );
-    // The control: outside production the same exemplar IS federated.
-    await h.reset();
+  });
+
+  test("an exemplar is not federated outside production either: nothing is written, nothing re-written each run", async () => {
+    // Staging used to admit the fleet, which the store and the index schema cannot hold, so
+    // an exemplar was rewritten on every run and never indexed. It is not eligible anywhere.
     seedSynthetic(h, "xx099903", { isExemplar: 1, isSandbox: 1 });
-    const staging = await runNeurobagelWriter(h.env({ ENVIRONMENT: "staging" }), {
-      trigger: "admin",
-      execute: true,
-    });
-    expect(staging.results.map((r) => `${r.id}:${r.outcome}`)).toEqual(["xx099903:written"]);
+    const rec = recordWrites(h.bucket);
+    for (const run of [1, 2]) {
+      const staging = await runNeurobagelWriter(
+        h.env({ ENVIRONMENT: "staging", NEUROBAGEL: rec.bucket }),
+        { trigger: "admin", execute: true },
+      );
+      expect(staging.eligible).toBe(0);
+      expect(staging.results).toEqual([]);
+      expect(rec.log, `run ${run}`).toEqual([]);
+    }
+    expect(await objectsAfter()).toEqual([]);
   });
 
   test("with the writer off it does nothing even in production", async () => {
