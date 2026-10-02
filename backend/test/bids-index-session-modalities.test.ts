@@ -31,8 +31,25 @@
  *    request, exactly as before; the field is derived from the same streamed
  *    digest and adds no second pass.
  *
- * Synthetic manifests are used only where no real one reaches the rule, and
- * each says which rule it pins.
+ * Rules that rest on SYNTHETIC paths alone, because none of the four real
+ * manifests reaches them (each such test says so where it sits):
+ *
+ *  - a session that holds only session-level files is present with `[]`;
+ *  - a subject with no session and no datatype directory has an empty map, and
+ *    a session-level file never puts a datatype in the no-session bucket;
+ *  - derivatives, sourcedata and code contribute nothing;
+ *  - the no-session key cannot be a session label, and a session directory
+ *    whose label is not alphanumeric (`ses-pre-op`) is read as a datatype
+ *    directory named after it;
+ *  - integer-like labels are looked up by name, and neither the order of paths
+ *    nor a repeated path changes a byte;
+ *  - directory names that are `Object.prototype` members (`__proto__`,
+ *    `constructor`, `toString`, `hasOwnProperty`) are datatypes like any other,
+ *    at the builder and through the route.
+ *
+ * Everything else rests on real manifests: the pairing itself, the no-session
+ * bucket, the mixed layout, a session with no eeg beside one with only eeg, and
+ * the byte-identity of the existing keys.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
