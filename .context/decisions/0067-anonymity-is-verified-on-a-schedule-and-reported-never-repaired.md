@@ -297,6 +297,7 @@ Those are claims about code that nothing re-reads, which is this ADR's premise, 
 
 **The invariant.**
 For every anonymous deposit the sweep examines, the store holds nothing for its id: no artifact, no object whose name contains its id, and no mention of its id anywhere in the index, parseable or not.
+An id is found wherever it is followed by anything that is not a digit and is not preceded by a letter or digit, which covers every name the writer produces (`<id>.jsonld`, `<id>_annotated.json`, `<id>_dataset_description.json`) as well as a name it did not.
 A deposit that fails is reported as `neurobagel_store_holds_deposit`, severity `invariant`: a NEMAR bug, and the same kind of finding as a public repository or a resolving DOI.
 It travels exactly as every other invariant finding does.
 The audit log gets the row, the depositor and the administrators get the mail under `dataset_anonymity`, and `sweep_stamps` carries the verdict.
@@ -309,9 +310,15 @@ An environment with no store bound has nothing there to find, and its verdict is
 
 **The weekly report.**
 The daily Neurobagel verification sweep (`neurobagel-verify.ts`, epic #1586) reports on the federation as a whole, and the weekly report gains a section from it.
-That section may COUNT anonymity-class findings and may not name a dataset or say which kind a finding was.
-The one anonymity-class case the verification sweep can find itself, a record the node serves for a deposit, goes to the audit log and nowhere else: that sweep loads no mail code, and a source scan holds it to that.
+That section folds findings into its generic Neurobagel attention total, with no label, kind or identifier of its own.
+It counts findings, not rows: each dataset once, from the writer's ledger (what stands), the anonymity sweep and the verification sweep, whether or not the daily sweep wrote a row that week.
+Every sentence a check can produce says that a record is wrong and never what kind of dataset it belongs to, and tests scan every reason a sweep produced and every string the report renders for that.
+The one case of this kind the verification sweep can find itself, a record the node serves for a deposit, goes to the audit log and nowhere else: that sweep loads no mail code, and a source scan holds it to that.
 The mail for a deposit in the store stays with this sweep.
+
+**Digests.**
+The verification sweep's heartbeat remembers the residue it was following as short digests of dataset ids, never as ids.
+A six-digit id can be recovered from a digest by trying every id, which is intentional and acceptable only because `audit_log` is readable by administrators alone; it is not a defect, and it is the reason the digests are not shown by the status route or the report.
 
 **What does not change.**
 The candidate predicate, the cadence, the verdict names, the declared scope limits, and the rule that a finding never quotes what it matched.

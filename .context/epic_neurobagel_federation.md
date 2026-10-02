@@ -233,3 +233,15 @@ Two independent reviews of the pull request found no anonymity, authentication o
 - Not verified: everything against the real node and the real federation, because the node is not reachable and NEMAR is not registered.
   The probe and the registration check are proven against the node's recorded answer and the federation's recorded answers (`backend/test/fixtures/neurobagel-verify/PROVENANCE.md`), with a registered state made by adding one entry to the real directory.
 - `scripts/neurobagel/verification-mutation-battery.ts` is the phase's mutation battery, in the style of the writer's.
+
+## Phase 6 review changes (2026-10-02)
+
+- The sweep's overall verdict is `unchecked` unless at least one of the store, node and registration checks ran: upstream drift always runs and can alarm, but it cannot make a sweep healthy by itself.
+  A writer switched on with no bucket bound is an `alarm` in the sweep and in `status`; a writer that is off is `unchecked` and quiet.
+- A check that did not run to completion (unchecked, unknown, a throw) no longer clears what the previous sweep remembered: one failed read of the store keeps the residue it was following and the clock it started.
+  An index that exists and cannot be read as one is `unknown`, and a node that serves fewer of the store's datasets than the store holds on two sweeps at least 20 hours apart is an `alarm` (one sweep is a note, because the node pulls and reloads once a day).
+- Requests never follow a redirect (a redirect is `unknown`) and read at most a documented cap of each answer.
+- `status` and `verify` share one exit-code family (0 healthy or nothing to check, 1 alarm, 2 could not be determined), and a record older than 36 hours, or none while the writer is on, is `unknown`.
+- The weekly report's attention rule is one function in `shared/contract/weekly-attention.ts`, called by the report's headline and by `nemar admin import-weekly`; it also flags unknown days, failed runs and missing daily runs, and its headline says which checks did not run instead of "all look normal".
+- The weekly counts findings from the writer's ledger, the anonymity sweep and the verification sweep, each dataset once, independent of the daily rows, and says nothing of their kind.
+- The id scan of the store uses a boundary an underscore does not defeat, and the test plants every real object name the writer produces.
