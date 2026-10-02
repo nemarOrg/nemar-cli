@@ -175,7 +175,9 @@ Tracked follow-up (not a Phase): split `buildNeurobagelArtifacts` (about 513 lin
 - The `not_anonymous` predicate term cannot be told apart from `first_published` while migration 0085's triggers hold, since anonymous implies unpublished.
   It is the second line, not a duplicate: a table rebuild drops triggers.
   Its mutation test drops them first and then shows the term necessary.
-- A cheap signature (the row's name, subject count, license, the length of its enrichment document, the latest version, the curation hash, the transform and vocabulary identity) lets one query find datasets that are probably stale; the daily window is the only way to find a manifest rewritten with no D1 change, so with 25 datasets a tick a full pass takes about 31 days.
+- A cheap signature (the row's name, subject count, license, the length of its enrichment document, the latest version, the curation hash, the transform and vocabulary identity) lets one query find datasets that are probably stale; the daily window is the only way to find a manifest rewritten with no D1 change.
+  With the default of 10 datasets a tick and nothing missing or stale, a full pass takes about 78 days; raising `NEUROBAGEL_RECONCILE_MAX` to its ceiling of 50 makes it about 16 (unchanged datasets cost 3 operations each, so a tick of 50 fits its budget when they are unchanged).
+  The `ceil(eligible / N)` bound holds only when no dataset is missing or stale, because those take slots first (ADR 0084, item 5).
   The hooks give immediacy for a publication, a new version and an import, and an operator can backfill or force with `nemar admin neurobagel regenerate --execute --limit 50 [--force] (run again until it reports nothing unexamined)`.
 - The loader refuses an empty index and a mass removal.
   The last dataset to leave the federation therefore cannot leave through the index; `nb hold` is the way, and the runbook says so.
@@ -183,3 +185,21 @@ Tracked follow-up (not a Phase): split `buildNeurobagelArtifacts` (about 513 lin
   `NEUROBAGEL_WRITER_REVISION` in `neurobagel-fingerprint.ts` is the manual knob and `force` is the operator's lever.
   The Phase 2 `session_modalities` change is exactly such a change: after it is deployed, run a forced regeneration.
 - `scripts/neurobagel/writer-mutation-battery.ts` is the phase's mutation battery, in the style of phase 5's.
+
+## Findings from the Phase 4 review (2026-10-02)
+
+Two independent reviews of the pull request found no anonymity, authentication or flow-safety defect and asked for these changes, all made:
+
+- The index was written once at the end of a run, so a run cut off by the Worker's limits left artifacts newer than the index, and the loader stops the whole load on one sha256 mismatch.
+  The index is now patched after each dataset's artifacts, and the closing sync reads it before listing and decides eligibility after, which also fixes a dataset another run published meanwhile being dropped and deleted.
+- The exemplar fleet was admitted outside production although the store and the index schema hold `nm` and `on` ids only, so it was rewritten on every run and never indexed.
+  No exemplar is federated anywhere now.
+- A dataset refused for ever took a slot of every tick, ahead of healthy ones.
+  A standing refusal against an unchanged signature is parked in the rotation; the rotation guarantee is restated honestly.
+- A run had no budget.
+  It counts D1, R2 and HTTP operations at the bindings, stops with headroom to finish, defaults to 10 datasets, and a call is capped at 50 in the writer, the route and the CLI.
+  Measured cost: about 22 operations a rewritten dataset, 3 an unchanged one.
+- The signature stamped on an artifact came from the plan's earlier read of the row, not the read its fingerprint used; a row edited between them was stale for ever.
+- The data plane and the writer chose the latest version by different SQL, which differs on a timestamp tie; the writer now refuses a dataset they disagree on.
+- The legacy Zenodo version handler is unreachable (nothing calls it), so it carries no hook; the one reachable legacy path does, and is now driven by a test.
+- The source scans read the syntax tree and are each proven by a planted violation; the mutation battery counts a kill only on a failing assertion and has 100 mutants.

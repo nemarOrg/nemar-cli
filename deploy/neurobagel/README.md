@@ -205,6 +205,7 @@ The token is the API's `NEUROBAGEL_READ_TOKEN` secret, held by the owner; it is 
 The route answers 401 without the right token, and 404 for any name that is not an artifact name of an eligible dataset.
 It re-checks eligibility on every request and serves `index.json` without any dataset that is no longer eligible, so a dataset that goes private is absent from the very next read, before the producer has tidied the store.
 Every answer is `no-store` and is served directly (HTTP 200), never as a redirect.
+The producer replaces a dataset's entry in `index.json` right after that dataset's artifacts, not once at the end of a run, so a run cut off part way never leaves an artifact the index describes differently (the sha256 check would stop the whole load); the one window left is that single dataset's own three writes, healed by the next run.
 The index carries one field this document does not list, `input_fingerprint` per dataset, which the loader ignores; `fingerprint` is the reference form defined above.
 
 **Removal latency.**
