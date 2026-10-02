@@ -198,6 +198,15 @@ The loader may read at any moment, so the store must never show an index that na
 - Removal is how a dataset that becomes private, withdrawn or deleted leaves the federation, so the producer must drop it from the index at once.
   An index with zero datasets is refused, and so is one that drops more than half of at least ten datasets, unless the operator passes `--allow-mass-removal`.
 
+**The NEMAR store (phase 4, ADR 0084).**
+The producer is the NEMAR API.
+Set `NB_SOURCE` to `<api origin>/neurobagel`, so the loader reads `<api origin>/neurobagel/index.json` and `<api origin>/neurobagel/<name>`, and put one header line, `Authorization: Bearer <token>`, in the mode 600 file `NB_SOURCE_AUTH_HEADER_FILE` names.
+The token is the API's `NEUROBAGEL_READ_TOKEN` secret, held by the owner; it is a deployment secret, not an account credential, and the owner rotates it by changing the secret and this file together.
+The route answers 401 without the right token, and 404 for any name that is not an artifact name of an eligible dataset.
+It re-checks eligibility on every request and serves `index.json` without any dataset that is no longer eligible, so a dataset that goes private is absent from the very next read, before the producer has tidied the store.
+Every answer is `no-store` and is served directly (HTTP 200), never as a redirect.
+The index carries one field this document does not list, `input_fingerprint` per dataset, which the loader ignores; `fingerprint` is the reference form defined above.
+
 **Removal latency.**
 From the moment the index stops naming a dataset until the node stops answering with it is the loader's poll interval plus one reload.
 With the printed cron entry (every 20 minutes) and a node of about 50,000 subjects that is at most about 25 minutes: 20 minutes of waiting, about 30 seconds of fetching and validation, and 3 to 4 minutes of reload.
