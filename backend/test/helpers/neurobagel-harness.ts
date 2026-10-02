@@ -143,6 +143,85 @@ async function startReachableStandin(): Promise<S3ManifestStandin> {
   throw new Error("could not start a stand-in server that answers");
 }
 
+/**
+ * Is this the TEST INFRASTRUCTURE failing to answer (a stand-in server, Miniflare's platform
+ * proxy that bun talks to its workerd through), and not an assertion or a bug in the code
+ * under test? Under bun, in one process after several Miniflare instances, a server created
+ * a moment ago has been found not listening. Those are the errors worth starting over for.
+ */
+export function isInfrastructureError(err: unknown): boolean {
+  const text =
+    err instanceof Error
+      ? `${err.name} ${err.message} ${String((err as { code?: unknown }).code ?? "")}`
+      : String(err);
+  return /ConnectionRefused|ECONNREFUSED|ECONNRESET|Unable to connect|platform[- ]proxy|socket hang up|fetch failed/i.test(
+    text,
+  );
+}
+
+/**
+ * Start something again when the infrastructure did not come up, and only then: an
+ * assertion failure or a bug in the code under test is thrown at once, never retried.
+ */
+export async function retryInfrastructure<T>(
+  what: string,
+  start: () => Promise<T>,
+  attempts = 6,
+): Promise<T> {
+  let last: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await start();
+    } catch (err) {
+      if (!isInfrastructureError(err)) throw err;
+      last = err;
+      await Bun.sleep(40 * attempt);
+    }
+  }
+  throw new Error(
+    `${what}: the test infrastructure did not come up after ${attempts} attempts: ${
+      last instanceof Error ? last.message : String(last)
+    }`,
+  );
+}
+
+/**
+ * Miniflare, started and PROVEN reachable: a bucket call goes through its platform proxy
+ * before anything else relies on it, and an instance whose proxy refuses is disposed and
+ * started again.
+ */
+async function startMiniflare(
+  rw?: RouteWorkerOptions,
+): Promise<{ mf: Miniflare; bucket: R2Bucket; workerD1?: D1Database }> {
+  return retryInfrastructure("miniflare", async () => {
+    const mf = new Miniflare({
+      modules: true,
+      script: rw?.script ?? "export default { fetch() { return new Response('ok') } }",
+      compatibilityDate: "2024-12-01",
+      r2Buckets: ["NEUROBAGEL"],
+      ...(rw
+        ? {
+            d1Databases: ["DB"],
+            bindings: { NEUROBAGEL_READ_TOKEN: rw.token, ENVIRONMENT: "test", ...rw.bindings },
+          }
+        : {}),
+    });
+    try {
+      const bucket = (await mf.getR2Bucket("NEUROBAGEL")) as unknown as R2Bucket;
+      await bucket.list({ limit: 1 });
+      let workerD1: D1Database | undefined;
+      if (rw) {
+        workerD1 = (await mf.getD1Database("DB")) as unknown as D1Database;
+        await applyMigrations(workerD1, migrationFiles());
+      }
+      return { mf, bucket, workerD1 };
+    } catch (err) {
+      await mf.dispose().catch(() => {});
+      throw err;
+    }
+  });
+}
+
 function installEdgeCache(): void {
   // The Workers Cache API the data plane's manifest and git-file caches and the rate
   // limiter use. A `DrainingCache`, which READS the body it is handed as the real API
@@ -178,29 +257,12 @@ export async function startHarness(
   installEdgeCache();
   const standin = await startReachableStandin();
   const rw = opts.routeWorker;
-  const mf = new Miniflare({
-    modules: true,
-    script: rw?.script ?? "export default { fetch() { return new Response('ok') } }",
-    compatibilityDate: "2024-12-01",
-    r2Buckets: ["NEUROBAGEL"],
-    ...(rw
-      ? {
-          d1Databases: ["DB"],
-          bindings: { NEUROBAGEL_READ_TOKEN: rw.token, ENVIRONMENT: "test", ...rw.bindings },
-        }
-      : {}),
-  });
-  const bucket = (await mf.getR2Bucket("NEUROBAGEL")) as unknown as R2Bucket;
-  let workerD1: D1Database | undefined;
-  if (rw) {
-    workerD1 = (await mf.getD1Database("DB")) as unknown as D1Database;
-    await applyMigrations(workerD1, migrationFiles());
-  }
+  const infra = await startMiniflare(rw);
   const harness: Harness = {
     db: freshDb(),
     standin,
-    mf,
-    bucket,
+    mf: infra.mf,
+    bucket: infra.bucket,
     env(over = {}) {
       return {
         DB: realD1(harness.db),
@@ -213,13 +275,14 @@ export async function startHarness(
         AWS_ACCESS_KEY_ID: "AKIATEST",
         AWS_SECRET_ACCESS_KEY: "secret",
         GITHUB_ADMIN_PAT: "test-pat",
-        NEUROBAGEL: bucket,
+        NEUROBAGEL: harness.bucket,
         NEUROBAGEL_WRITER_ENABLED: "1",
         ...over,
       } as Bindings;
     },
-    workerD1,
+    workerD1: infra.workerD1,
     async mirrorCatalog() {
+      const workerD1 = harness.workerD1;
       if (!workerD1) throw new Error("no route worker");
       // Whole-table copy of the two tables eligibility reads. The anonymity triggers see
       // each row as it was in the source, which already satisfied them.
@@ -244,12 +307,20 @@ export async function startHarness(
     },
     dispatch: rw
       ? async (path, init) =>
-          (await mf.dispatchFetch(
+          (await harness.mf.dispatchFetch(
             `https://api.nemar.org${path}`,
             init as never,
           )) as unknown as Response
       : undefined,
     async reset() {
+      // The platform proxy answers, or Miniflare is started again (see startMiniflare).
+      try {
+        await harness.bucket.list({ limit: 1 });
+      } catch (err) {
+        if (!isInfrastructureError(err)) throw err;
+        await harness.mf.dispose().catch(() => {});
+        Object.assign(harness, await startMiniflare(rw));
+      }
       installEdgeCache();
       harness.db.close();
       harness.db = freshDb();
@@ -264,14 +335,14 @@ export async function startHarness(
       harness.standin.log.length = 0;
       let cursor: string | undefined;
       do {
-        const listed = await bucket.list({ cursor });
-        for (const o of listed.objects) await bucket.delete(o.key);
+        const listed = await harness.bucket.list({ cursor });
+        for (const o of listed.objects) await harness.bucket.delete(o.key);
         cursor = listed.truncated ? listed.cursor : undefined;
       } while (cursor);
     },
     async dispose() {
       (globalThis as { caches?: unknown }).caches = undefined;
-      await mf.dispose();
+      await harness.mf.dispose();
       harness.standin.stop();
     },
   };
