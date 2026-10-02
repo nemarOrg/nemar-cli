@@ -91,7 +91,7 @@ A failure there is a bug and surfaces as a `NeurobagelRefusal` with code `output
 ## Curation
 
 Some annotations a table cannot yield mechanically: which diagnosis a free-text group value means, which column holds sex when it is called `gender`, which assessment tool a column is an item of, what an age column of placeholder zeros holds.
-They live in one reviewed file, `curation.json`, keyed by dataset id, and an entry applies only to the exact bytes it was reviewed against (architecture decision record, ADR, 0083).
+They live in one reviewed file, `curation.json`, keyed by dataset id, and an entry applies only to the exact bytes it was reviewed against (ADR 0083).
 
 ```json
 {
@@ -100,7 +100,7 @@ They live in one reviewed file, `curation.json`, keyed by dataset id, and an ent
     "nm000158": {
       "columns": { "group": { "IsAbout": {"TermURL": "nb:Diagnosis", "Label": "Diagnosis"}, "Levels": {"acute stroke patients (1-30 days post-stroke)": {"TermURL": "snomed:230690007", "Label": "Cerebrovascular accident"}}, "MissingValues": [], "VariableType": "Categorical" } },
       "evidence": { "source": "...", "reviewer": "...", "review": "author", "date": "2026-10-02" },
-      "pins": { "participants_tsv": "<git blob sha of the file>", "participants_json": "<sha, or null if the dataset has none>" }
+      "pins": { "participants_tsv": "<git blob hash of the file>", "participants_json": "<hash, or null if the dataset has none>" }
     }
   }
 }
@@ -111,14 +111,26 @@ Four kinds are curatable: age (`nb:Age`, a `Continuous` block with a `Format`), 
 Terms must be in the pinned vocabulary with the pinned label, a column named `age`, `sex` or `group` must be about the same thing, and a dataset has at most one sex and one age column.
 A curated column replaces the mechanical rule for its variable, so a diagnosis column with empty `Levels` and every value listed in `MissingValues` withdraws the healthy control the mechanical rule would read from a `Control` that is an intervention arm (`on004166`, `on006801`); no other kind of column may map nothing.
 
+**Obtaining a pin.**
+A pin is the git blob hash of the file's bytes: `git hash-object <file>` prints it, and for a git-tracked file it is the `git:` value of the data plane's entity tag (`"git:<40 hex digits>"`, weak or strong).
+A file that is annexed has no such tag; hash its bytes with `git hash-object`.
+Line endings and a leading byte order mark (BOM) are part of the bytes.
+`null` pins a file as absent.
+`bun run scripts/neurobagel/gather.ts` records the entity tag of every fixture it captures in `provenance.json`.
+
+**Age columns.**
+An age column is bound only if participants.json does not declare units other than years, and fewer than half of its parsed ages are 0 unless 0 is declared a missing value.
+Neurobagel has no age format for months, weeks or days, so such a column cannot be curated into the graph, and the binder refuses placeholder zeros, as the mechanical rule does, instead of publishing an age of 0 for everyone.
+
 | Step | Module | Decides |
 | --- | --- | --- |
-| `parseCuration(text)` | `curation.ts` | whether the FILE is fit to be believed; throws `CurationError` listing every problem, and never returns a half-checked file |
-| `bindCuration(entry, documents, table)` | `curation-bind.ts` | whether the entry fits THIS dataset's documents: the pins, then that every curated column exists and its level map covers every value of the table |
+| `parseCuration(text, {today})` | `curation.ts` | whether the FILE is fit to be believed; throws `CurationError`, and never returns a half-checked file. Problems are reported per stage (keys, then shape, then meaning): fix one stage to see the next. `today` (the caller's clock) makes a review dated in the future a problem |
+| `bindCuration(entry, documents)` | `curation-bind.ts` | whether the entry fits THIS dataset's documents: the pins, then that every curated column exists, its level map covers every value of the table, and an age column passes the age rules. It reads the table from the text, so the two cannot disagree |
 | `buildNeurobagelArtifacts({..., curation})` | `transform.ts` | applies a bound entry, to the graph's participants only |
 
+The entry the loader returns is opaque: the transform and the binder refuse an entry the loader did not make (`curation_not_loaded`), because the loader is where its terms were checked against the full pinned vocabulary.
 Import the loader from `curation.ts` explicitly; the transform and `index.ts` do not load the full diagnosis and assessment vocabularies.
-The text of a participants file must reach the transform exactly as the data plane served it, because the pin is the git blob SHA-1 of those bytes (a leading byte order mark may be dropped; invalid UTF-8 makes the entry stale, which is safe).
+The text of a participants file must reach the transform exactly as the data plane served it, because the pin is the hash of those bytes (a leading BOM may be dropped; text that is not valid 8-bit Unicode Transformation Format (UTF-8) makes the entry stale, which is safe).
 
 An entry that does not fit is skipped whole, never partly applied, and the report says why in `curation` (counts and enumerated values only):
 
@@ -129,9 +141,12 @@ An entry that does not fit is skipped whole, never partly applied, and the repor
 | `invalid` | the files are the pinned ones and the entry does not fit them (`problems` counts) | `curation_invalid` |
 | `unused` | the entry fits, but none of the table's participants are the graph's | `curation_unused` |
 
-Whatever the status, the mechanical columns ship as they would without an entry.
+The variables an entry that is not applied does NOT name ship as they would without an entry.
+The variables it names (age, sex, diagnosis) are withheld: the mechanical mapping of each is held back too, so an entry that exists to withdraw a claim (an intervention arm read as healthy control) cannot fail open when it goes stale.
+`curation.withheld` counts the mechanical mappings held back, the column report says `withheld`, and the flag is `curation_withheld`.
+A writer must treat all four flags as findings that need a person, never as something to publish silently.
 The `curation` key is absent from the report of a dataset with no entry, so such a dataset's output is byte-identical to before.
-`participants_with` counts the graph participants that received a value from the entry, by kind.
+`participants_with` (an applied entry) counts the graph participants that received a value from the entry, by kind.
 
 To add an entry, write it in the file with the pins of the dataset's current files, then check it:
 
@@ -142,6 +157,7 @@ bun run scripts/neurobagel/curation-check.ts --live     # every entry against da
 
 A new entry needs a captured fixture of its dataset (`gather.ts`, below) and regenerated goldens; the tests bind every committed entry to its fixture and compare the curated goldens with the real `bagel pheno`.
 `evidence.review` is `author` (written by the author of the change, not a domain expert), `domain_expert`, or `upstream_community`; registration of the node waits until the entries it serves have the review they need.
+Review checklist for an entry, beyond its terms: the age column's units (and that its zeros are real), what participants.json says about a `gender` column read as sex, and whether numeric sex codes are confirmed by participants.json.
 
 ### Reusing Neurobagel's OpenNeuro annotations
 
@@ -150,14 +166,16 @@ A new entry needs a captured fixture of its dataset (`gather.ts`, below) and reg
 
 ```bash
 # measure only: how many mirrors would be covered, how many columns dropped and why, the size
-bun run scripts/neurobagel/reuse-openneuro-annotations.ts --skip-redundant --cache <dir> --report <file>
+bun run scripts/neurobagel/reuse-openneuro-annotations.ts --cache <dir> --report <file>
 # write the entries for some mirrors into the committed file, and keep the upstream files and licence
-bun run scripts/neurobagel/reuse-openneuro-annotations.ts --skip-redundant --date 2026-10-02 \
+bun run scripts/neurobagel/reuse-openneuro-annotations.ts --date 2026-10-02 \
   --merge-into shared/neurobagel/curation.json --save-upstream test/neurobagel/upstream on003568 ...
 ```
 
-It keeps a column only if it is about one of the four curatable variables, every term is in the pinned vocabulary (upstream's blank labels are rewritten, `nb:FromInt` is read as `nb:FromFloat`), the loader accepts it, and the binder accepts it against the mirror's CURRENT table; whatever fails is dropped and counted.
-`--skip-redundant` leaves out a column the mechanical rules would already map to the same values for every row.
+It keeps a column only if it is about one of the four curatable variables, every term is in the pinned vocabulary (upstream's blank labels are rewritten, `nb:FromInt` is read as `nb:FromFloat`), the loader accepts it, and the binder accepts it against the mirror's CURRENT table (including the age rules); whatever fails is dropped and counted.
+A column the mechanical rules would already map to the same values for every row is left out too (`--keep-redundant` opts out).
+`--merge-into` REFUSES to replace an entry whose review is not `upstream_community`, naming it, so a person's entry is never overwritten by an upstream annotation.
+What a person spot-checking needs (a `gender` column read as sex and what participants.json says of it, numeric sex codes and whether participants.json confirms them, the declared age units) is written into each entry's `evidence.source`.
 `NOTICE-openneuro-annotations.txt` carries the upstream licence notice that reused entries require.
 `scripts/neurobagel/mutation-battery.ts` runs hand-written mutants over the loader, the binder, the transform's use of an entry, the output validators and the converter, and reports which survive.
 

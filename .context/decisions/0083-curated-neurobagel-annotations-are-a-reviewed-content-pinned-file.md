@@ -22,23 +22,31 @@ NEMAR mirrors about 580 OpenNeuro datasets (`on` ids) beside its own (`nm` ids),
    The participant id column is always mapped by the transform, and no other variable can be curated.
 2. **Every term comes from the pinned vocabulary.**
    The loader (`curation.ts`) rejects a term that is not in the pinned diagnosis, assessment, sex or age-format vocabulary, and a term whose label is not the pinned label.
-   The output validators then allow a diagnosis or an assessment term in a dataset's graph and dictionary only if that dataset's entry names it, which is stronger than "the term exists": a diagnosis reaches a graph only through an entry a person signed.
+   The output validators then allow a diagnosis or an assessment term in a dataset's graph and dictionary only if that dataset's entry names it (healthy control, which the mechanical group rule emits, is always allowed), so the output carries nothing an entry does not say.
+   That an entry's terms are in the vocabulary is guaranteed by the loader and by nothing else, so the entry is an opaque type: `parseCuration` registers what it returns, the type cannot be satisfied by a hand-built object, and at run time the transform and the binder refuse any entry the loader did not make (`curation_not_loaded`).
+   What is guaranteed is that an entry reached them through the loader in this process; a deliberate edit of a loaded entry's maps through a cast is outside the guarantee (the entry, its columns, pins and evidence are frozen, which stops the ordinary mutation).
 3. **The loader fails closed.**
-   One problem anywhere rejects the whole file, and the error lists every problem it found.
-   It rejects text that is not JSON, a key that appears twice (`JSON.parse` would keep the last), `__proto__`, an unknown key at any level, an empty level map, a level that is also a missing value, a second sex or age column, a column named `age`, `sex` or `group` that is about something else, a dataset id outside `nm` and `on` or inside the reserved fixture band (ADR 0068), a malformed pin, blank evidence and a date that does not exist.
-4. **A pin is the git blob SHA-1 of the bytes reviewed, computed by the transform from the text it converts.**
+   One problem anywhere rejects the whole file, and the error lists the problems of the first stage that has any: key problems first, then the shape, then the meaning.
+   It rejects text that is not JavaScript Object Notation (JSON), a key that appears twice (`JSON.parse` would keep the last), `__proto__`, an unknown key at any level, an empty level map, a level that is also a missing value, a second sex or age column, a column named `age`, `sex` or `group` that is about something else, a dataset id outside `nm` and `on` or inside the reserved fixture band (ADR 0068), a malformed pin, blank evidence, a date that does not exist, and, when the caller supplies today's date (the loader has no clock), a review dated in the future.
+4. **A pin is the git blob hash (Secure Hash Algorithm 1, SHA-1) of the bytes reviewed, computed by the transform from the text it converts.**
    Each entry pins `participants.tsv` and `participants.json` (`null` pins a file as absent).
-   For a git-tracked file this is the data plane's entity tag (ADR 0066), but the transform computes it from its own input rather than trust a hash the caller passes, so a pin says something about the bytes actually being converted, and an annexed file, which has no such tag, is pinned the same way.
-   A leading byte order mark is the one tolerance, because decoders drop it; text that is not valid UTF-8 never matches, which is the safe direction.
-5. **An entry that does not fit is skipped whole, loudly.**
+   A pin is what `git hash-object` prints for the file, or the `git:` value of the data plane's entity tag for a git-tracked file (ADR 0066); a file that is annexed has no such tag and is pinned from its bytes with `git hash-object`.
+   The transform computes the hash from its own input rather than trust one the caller passes, so a pin says something about the bytes actually being converted.
+   Line endings are part of the bytes: the same table with its line endings flipped is stale.
+   A leading byte order mark (BOM) is the one tolerance, because decoders drop it; text that is not valid 8-bit Unicode Transformation Format (UTF-8) never matches, which is the safe direction.
+5. **An entry that does not fit is skipped whole, loudly, and what it names is withheld.**
    `stale`: a pinned file is not the file in hand, so none of the entry is applied.
-   `invalid`: the files are the pinned ones and the entry still does not fit them, because a column is missing from the header, the level map misses a value the table holds, or an age is unreadable in its declared format.
+   `invalid`: the files are the pinned ones and the entry still does not fit them, because a column is missing from the header, the level map misses a value the table holds, an age is unreadable in its declared format, or an age column breaks one of the age rules of item 6.
    `unused`: the entry fits, but none of the table's participants are the graph's.
-   In each case the mechanical columns ship exactly as without an entry, the report carries a `curation` section of counts and enumerated values (never a column name, a cell or the reviewer's words), and the flags say `curation_stale`, `curation_invalid` or `curation_unused`, which the writer and the sweep surface.
+   The variables the entry does not name ship as without an entry.
+   The variables it names (age, sex, diagnosis) are WITHHELD: the mechanical mapping of each is held back too, because some entries exist only to withdraw a claim the mechanical rule would make, and an entry that goes stale must lose claims, never make a false one.
+   The report carries a `curation` section of counts and enumerated values (never a column name, a cell or the reviewer's words), including how many mechanical mappings were withheld, and the flags say `curation_stale`, `curation_invalid`, `curation_unused` and, if anything was withheld, `curation_withheld`.
+   The Phase 4 writer must treat every one of those four flags as a finding that needs a person, reported and never published silently: the dataset is federated with a different set of claims than its entry intended.
    Partial application is rejected: after a table changes nobody can say which columns still describe it.
 6. **An entry is applied to the participants of the graph, and checked against every row.**
    The graph holds the subjects that have data (ADR 0081), so a curated value is attached to those participants only.
    Coverage is checked over every row of the table, because the dictionary is also read by `bagel pheno` and by catalog-mode nodes, which refuse a table whose values the dictionary does not declare.
+   An age column is bound only if participants.json does not declare units other than years (Neurobagel has no age format for months, weeks or days, and a dictionary that says years over months would make six-month-olds match a search for ages five to ten) and fewer than half of its parsed ages are 0, unless 0 is declared a missing value: the mechanical rule's own two checks, which a reviewer who curates the column has not seen in the table.
    A curated column replaces the mechanical rule for its variable: a curated sex or age column replaces the mechanical one, a curated column that is the group column replaces the group rule, and a participant's diagnoses are the distinct terms of all diagnosis columns.
    A diagnosis column may map no value at all if it lists every value as missing, which is how a reviewer withdraws the mechanical healthy control mapping from a group column whose `Control` is an intervention arm, not a healthy participant (on004166, on006801); no other kind of column may map nothing.
    An assessment tool is on a participant when any item of it is recorded, with `bagel`'s meaning: a cell is recorded unless it is a declared missing value, so a blank that is not declared missing is rejected rather than read as an assessment nobody took.
@@ -51,12 +59,13 @@ NEMAR mirrors about 580 OpenNeuro datasets (`on` ids) beside its own (`nm` ids),
 
 ## Consequences
 
-An entry goes stale when a dataset's `participants.tsv` or `participants.json` changes, and each stale entry costs a new review, or a regeneration for an upstream-derived one, until then the dataset is federated with its mechanical columns only.
+An entry goes stale when a dataset's `participants.tsv` or `participants.json` changes, and each stale entry costs a new review, or a regeneration for an upstream-derived one; until then the dataset is federated with its mechanical columns for the variables the entry does not name, and with nothing for the ones it names.
 That is deliberate: pinning to content rather than to a version tag means a new version that leaves the table alone does not stale the entry.
 `scripts/neurobagel/curation-check.ts` lists entries that are stale against the data plane.
 The transform's report gains a `curation` key only when the caller passes an entry, so a dataset without one produces byte-identical output and `NEUROBAGEL_TRANSFORM_VERSION` does not move.
-The loader imports the full diagnosis and assessment vocabularies (about 850 KB of JSON); the transform does not, and a caller imports the loader explicitly.
-The transform trusts that an entry came from the loader.
+The loader imports the full diagnosis and assessment vocabularies (about 850 kilobytes of JSON); the transform does not, and a caller imports the loader explicitly.
+The age rules were added after review found two reused entries that broke them (on004635's ages are in months, on003505's are gestational weeks); on003505's only curated column was that age, so it has no entry.
+Age in months, weeks or days cannot be curated into the graph, and a column of placeholder zeros cannot be curated into ages either: the binder refuses both, so a reviewer who believes the zeros are real ages (infants measured in years) has no way to say so here, and can only declare 0 a missing value.
 
 Curation can say less than a reviewer would like, and the gaps are facts about the pinned vocabulary, not about the loader.
 The pinned diagnosis vocabulary has no generic amyotrophic lateral sclerosis term (only subtypes), so datasets of ALS patients stay without a diagnosis; it has no Edinburgh Handedness Inventory in the assessment vocabulary; and age in months or days has no Neurobagel format, so such a column cannot be curated into the graph.
@@ -78,6 +87,8 @@ The licence asks that its notice travel with copies, so `shared/neurobagel/NOTIC
   A tag changes with every release, whether or not the table did, so most entries would go stale for nothing; a content pin is stale exactly when the reviewed bytes are not the bytes in hand.
 - **Trust a hash the caller supplies.**
   The transform could not verify it, an annexed file has no `git:` entity tag, and a caller bug would silently apply an entry to the wrong table.
+- **Ship the mechanical mapping whenever an entry does not apply.**
+  It fails open for an entry that exists to withdraw a claim: a stale entry for a `Control` that is an intervention arm would hand the false healthy control back, which a review reproduced by appending one newline to a table.
 - **Apply the columns that still fit when the table changed.**
   A changed table can invalidate any column, and nothing says which; the entry is whole or it is skipped.
 - **Generate the reused entries at build time.**
@@ -91,5 +102,5 @@ The licence asks that its notice travel with copies, so `shared/neurobagel/NOTIC
 - Epic #1586 and phase issue #1591; design in `.context/epic_neurobagel_federation.md`.
 - ADR 0081 (the transform and its rules), ADR 0034 (no new `datasets` column), ADR 0065 (the blind), ADR 0066 (the entity tag of a git-tracked file is its blob SHA), ADR 0068 (the reserved fixture band), ADR 0073 (a reviewed declaration the code does not guess).
 - `uv run scripts/neurobagel/oracle.py` runs the real pinned `bagel pheno` over every curated golden, including Collection columns, and its recordings are in `test/neurobagel/oracle/`.
-- `bun run scripts/neurobagel/mutation-battery.ts` runs 48 hand-written mutants over the loader, the binder, the transform's use of an entry, the output validators and the upstream converter.
+- `bun run scripts/neurobagel/mutation-battery.ts` runs 71 hand-written mutants over the loader, the binder, the transform's use of an entry, the output validators and the upstream converter.
 - Upstream: `neurobagel/openneuro-annotations` at commit `116676db7114b68338c48df2d6bb804c99e8c354`, MIT licence, kept under `test/neurobagel/upstream/` with its licence and provenance.
