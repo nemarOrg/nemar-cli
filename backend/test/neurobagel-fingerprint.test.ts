@@ -14,13 +14,17 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import {
+  FINGERPRINT_INPUTS,
   NEUROBAGEL_WRITER_REVISION,
   type RowFingerprintFields,
   type TransformIdentity,
   cheapSignature,
   inputFingerprint,
+  inputFingerprintDocument,
   rowFingerprint,
+  rowFingerprintDocument,
   sha256Hex,
+  signatureDocument,
   transformIdentity,
 } from "../src/services/neurobagel-fingerprint";
 import { META, listStore } from "../src/services/neurobagel-store";
@@ -150,6 +154,42 @@ describe("the cheap signature", () => {
     const a = await rowFingerprint(BASE, "d".repeat(64), CURATION);
     const b = await rowFingerprint(BASE, "e".repeat(64), CURATION);
     expect(a).not.toBe(b);
+  });
+});
+
+describe("the inputs are pinned next to the writer revision", () => {
+  /** Every leaf path of a document, `a.b` for nested objects. */
+  function paths(value: unknown, prefix = ""): string[] {
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      return Object.entries(value).flatMap(([k, v]) => paths(v, prefix ? `${prefix}.${k}` : k));
+    }
+    return [prefix];
+  }
+
+  const identity = transformIdentity();
+
+  test("what the code hashes is what the pin lists, so changing an input fails here until the pin and the revision move", () => {
+    expect(paths(signatureDocument(BASE, 500, CURATION, identity))).toEqual([
+      ...FINGERPRINT_INPUTS.signature,
+    ]);
+    expect(paths(rowFingerprintDocument(BASE, ENRICHMENT_SHA, CURATION, identity))).toEqual([
+      ...FINGERPRINT_INPUTS.rowFingerprint,
+    ]);
+    expect(paths(inputFingerprintDocument("sha256:x", '"etag"'))).toEqual([
+      ...FINGERPRINT_INPUTS.inputFingerprint,
+    ]);
+  });
+
+  test("the pin is for THIS revision: a pin updated without a bump (or a bump without the pin) fails", () => {
+    expect(FINGERPRINT_INPUTS.revision).toBe(NEUROBAGEL_WRITER_REVISION);
+  });
+
+  test("the signature and the row fingerprint share every input but the enrichment's form (its length, its hash)", () => {
+    const shared = (list: readonly string[]) => list.filter((p) => !p.startsWith("enrichment_"));
+    expect(shared(FINGERPRINT_INPUTS.signature)).toEqual(shared(FINGERPRINT_INPUTS.rowFingerprint));
+    // So a change to one of the shared inputs moves both layers together, which is the point.
+    expect(FINGERPRINT_INPUTS.signature).toContain("enrichment_length");
+    expect(FINGERPRINT_INPUTS.rowFingerprint).toContain("enrichment_sha256");
   });
 });
 

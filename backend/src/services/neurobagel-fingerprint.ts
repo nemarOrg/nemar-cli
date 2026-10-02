@@ -42,6 +42,51 @@ import { sha256OfBytes } from "./neurobagel-store.js";
  */
 export const NEUROBAGEL_WRITER_REVISION = 1;
 
+/**
+ * PINNED NEXT TO THE REVISION: what the cheap signature and the row fingerprint are made of,
+ * as of {@link NEUROBAGEL_WRITER_REVISION}. A test compares these lists with what the code
+ * really hashes and fails when they differ.
+ *
+ * Change one of them and you must bump the revision AND update this pin. The reason is not
+ * ceremony: a stored signature that the code can no longer reproduce reads as "stale", the
+ * dataset is examined, its fingerprint (which did not change) matches, and nothing is
+ * rewritten, so the signature is never restamped and the dataset is examined again on every
+ * tick, for ever, for every dataset. The revision is in both hashes, so bumping it makes the
+ * old values mismatch at once and every dataset is rewritten once, which is the cure.
+ */
+export const FINGERPRINT_INPUTS = {
+  revision: 1,
+  signature: [
+    "fields.dataset_id",
+    "fields.name",
+    "fields.subject_count",
+    "fields.license",
+    "fields.concept_doi",
+    "fields.latest_version",
+    "enrichment_length",
+    "curation",
+    "identity.writer",
+    "identity.transform",
+    "identity.vocab_communities",
+    "identity.vocab_bagel",
+  ],
+  rowFingerprint: [
+    "fields.dataset_id",
+    "fields.name",
+    "fields.subject_count",
+    "fields.license",
+    "fields.concept_doi",
+    "fields.latest_version",
+    "enrichment_sha256",
+    "curation",
+    "identity.writer",
+    "identity.transform",
+    "identity.vocab_communities",
+    "identity.vocab_bagel",
+  ],
+  inputFingerprint: ["row", "manifest_etag"],
+} as const;
+
 /** What the transform and the pinned vocabulary contribute, the same for every dataset. */
 export interface TransformIdentity {
   writer: number;
@@ -81,7 +126,35 @@ function canonical(value: unknown): string {
   return canonicalJson(value as Json);
 }
 
-/** Cheap signature: every eligible dataset in one query, no enrichment document read. */
+/** What the signature hashes. Its keys are the `signature` list of {@link FINGERPRINT_INPUTS}. */
+export function signatureDocument(
+  row: RowFingerprintFields,
+  enrichmentLength: number,
+  curationHash: string | null,
+  identity: TransformIdentity,
+) {
+  return { fields: row, enrichment_length: enrichmentLength, curation: curationHash, identity };
+}
+
+/** What the row fingerprint hashes. Its keys are the `rowFingerprint` list of {@link FINGERPRINT_INPUTS}. */
+export function rowFingerprintDocument(
+  row: RowFingerprintFields,
+  enrichmentSha256: string,
+  curationHash: string | null,
+  identity: TransformIdentity,
+) {
+  return { fields: row, enrichment_sha256: enrichmentSha256, curation: curationHash, identity };
+}
+
+/** What the input fingerprint hashes. Its keys are the `inputFingerprint` list of {@link FINGERPRINT_INPUTS}. */
+export function inputFingerprintDocument(rowFp: string, manifestEtag: string) {
+  return { row: rowFp, manifest_etag: manifestEtag };
+}
+
+/**
+ * Cheap signature: every eligible dataset in one query, no enrichment document read.
+ * Its inputs are pinned in {@link FINGERPRINT_INPUTS}: change them and bump the revision.
+ */
 export async function cheapSignature(
   row: RowFingerprintFields,
   enrichmentLength: number,
@@ -89,12 +162,7 @@ export async function cheapSignature(
   identity: TransformIdentity = transformIdentity(),
 ): Promise<string> {
   return `sha256:${await sha256Hex(
-    canonical({
-      fields: row,
-      enrichment_length: enrichmentLength,
-      curation: curationHash,
-      identity,
-    }),
+    canonical(signatureDocument(row, enrichmentLength, curationHash, identity)),
   )}`;
 }
 
@@ -106,16 +174,11 @@ export async function rowFingerprint(
   identity: TransformIdentity = transformIdentity(),
 ): Promise<string> {
   return `sha256:${await sha256Hex(
-    canonical({
-      fields: row,
-      enrichment_sha256: enrichmentSha256,
-      curation: curationHash,
-      identity,
-    }),
+    canonical(rowFingerprintDocument(row, enrichmentSha256, curationHash, identity)),
   )}`;
 }
 
 /** The fingerprint that decides a rewrite: the row fingerprint plus the manifest's ETag. */
 export async function inputFingerprint(rowFp: string, manifestEtag: string): Promise<string> {
-  return `sha256:${await sha256Hex(canonical({ row: rowFp, manifest_etag: manifestEtag }))}`;
+  return `sha256:${await sha256Hex(canonical(inputFingerprintDocument(rowFp, manifestEtag)))}`;
 }

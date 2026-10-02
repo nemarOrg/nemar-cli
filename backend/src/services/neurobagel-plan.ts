@@ -128,6 +128,11 @@ export type SignatureSource = Pick<
  * built from the SAME read its fingerprint comes from, never from the plan's earlier row:
  * a row edited between the two would otherwise carry a signature of a state it was not
  * built from, and read as stale forever.
+ *
+ * WHAT GOES INTO IT is pinned in `FINGERPRINT_INPUTS` (neurobagel-fingerprint.ts), next to
+ * `NEUROBAGEL_WRITER_REVISION`. Add or remove an input there and in `cheapSignature`, and bump
+ * the revision in the same change: a signature that stops matching what is stored, with no
+ * bump to rewrite it, leaves every dataset stale and examined again on every tick.
  */
 export async function currentSignature(
   row: SignatureSource,

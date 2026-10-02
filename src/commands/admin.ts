@@ -9323,7 +9323,7 @@ function printNeurobagelRun(res: NeurobagelRunResult): void {
   if (res.stopped === "ops_budget") {
     console.log(
       chalk.yellow(
-        `  the run spent its operation budget (${res.ops.spent} of ${res.ops.budget}) with ${res.unexamined} dataset(s) not yet examined: run the same command again to continue`,
+        `  the run spent its operation budget (${res.ops.spent} of ${res.ops.budget}, ${res.ops.reserved} of it held back to finish) with ${res.unexamined} dataset(s) not yet examined: run the same command again to continue`,
       ),
     );
   } else if (res.unexamined > 0 && res.stopped === null) {
@@ -9506,7 +9506,7 @@ neurobagelCommand
       console.log(chalk.bold(`Needs review (${s.needs_review.length})`));
       for (const n of s.needs_review) {
         console.log(
-          `  ${n.id}  ${n.source === "refusal" ? chalk.red(`refused: ${n.code}`) : chalk.yellow((n.flags ?? []).join(", "))}`,
+          `  ${n.id}  ${n.source === "refusal" ? chalk.red(`refused: ${n.code}${n.since ? ` (last confirmed ${n.since})` : ""}`) : chalk.yellow((n.flags ?? []).join(", "))}`,
         );
       }
     }
