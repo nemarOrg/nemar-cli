@@ -33,6 +33,7 @@
  * "1", and with no `NEUROBAGEL` binding the writer is a reported no-op.
  */
 
+import { canonicalJson } from "../../../shared/neurobagel/canonical-json.js";
 import {
   NeurobagelRefusal,
   type NeurobagelReport,
@@ -68,12 +69,14 @@ import {
 import {
   ARTIFACT_CONTENT_TYPE,
   type ArtifactKind,
+  type IndexDocument,
   META,
   NEUROBAGEL_INDEX_KEY,
   type StoreListing,
   type StoredDataset,
   artifactName,
   buildIndexDocument,
+  indexEntryFor,
   indexProblems,
   listStore,
   readStoredIndex,
@@ -198,6 +201,8 @@ export interface RunResult {
   index: {
     changed: boolean;
     written: boolean;
+    /** Entries put into the index right after their artifacts, one per dataset written. */
+    patched?: number;
     entries: number | null;
     contended?: boolean;
     problems?: string[];
@@ -360,6 +365,9 @@ function fitMetadata(meta: Record<string, string>): Record<string, string> {
  * old marker and the next run redoes the set). An artifact whose bytes the store
  * already holds is not written again, except the JSON-LD, whose metadata is the
  * record of what it was built from.
+ *
+ * Returns what was written and the set as the store now holds it, which is exactly what
+ * the dataset's index entry is built from.
  */
 async function writeSet(
   bucket: R2Bucket,
@@ -367,7 +375,7 @@ async function writeSet(
   files: Record<string, string>,
   stored: StoredDataset | undefined,
   stamp: Record<string, string>,
-): Promise<string[]> {
+): Promise<{ wrote: string[]; now: StoredDataset }> {
   const names = artifactFileNames(id);
   const plan: { kind: ArtifactKind; text: string }[] = [
     { kind: "dictionary", text: files[names.dictionary] as string },
@@ -375,16 +383,24 @@ async function writeSet(
     { kind: "jsonld", text: files[names.jsonld] as string },
   ];
   const wrote: string[] = [];
+  const now: StoredDataset = { id, jsonld: null, dictionary: null, description: null };
   for (const { kind, text } of plan) {
     const bytes = new TextEncoder().encode(text);
     const sha = await sha256OfBytes(bytes);
     const existing = stored?.[kind];
-    if (kind !== "jsonld" && existing?.sha256 === sha) continue;
     const customMetadata = fitMetadata({
       [META.sha256]: sha,
       [META.kind]: kind,
       ...(kind === "jsonld" ? stamp : {}),
     });
+    now[kind] = {
+      key: artifactName(id, kind),
+      size: bytes.length,
+      sha256: sha,
+      kind,
+      meta: customMetadata,
+    };
+    if (kind !== "jsonld" && existing?.sha256 === sha) continue;
     await bucket.put(artifactName(id, kind), bytes, {
       sha256: sha,
       httpMetadata: { contentType: ARTIFACT_CONTENT_TYPE[kind] },
@@ -392,7 +408,7 @@ async function writeSet(
     });
     wrote.push(artifactName(id, kind));
   }
-  return wrote;
+  return { wrote, now };
 }
 
 interface RunContext {
@@ -407,6 +423,8 @@ interface RunContext {
   now: Date;
   /** Datasets whose data said anonymous. Treated as not eligible for the rest of the run. */
   anonymityRefused: Set<string>;
+  /** Set when an index patch failed: the run stops examining and goes to its closing sync. */
+  indexPatchFailed: boolean;
 }
 
 async function ledgerNote(
@@ -478,6 +496,55 @@ async function evictStaleManifestCopy(
   if (typeof cache.delete !== "function") return "unsupported";
   await cache.delete(request);
   return "evicted";
+}
+
+/** What became of the per-dataset index patch. `failed` stops the run. */
+type PatchOutcome = "patched" | "unchanged" | "no_index" | "failed";
+
+/**
+ * Put one dataset's NEW entry into the index, right after its artifacts.
+ *
+ * The invariant: never leave artifacts newer than the index across a run boundary. The
+ * node's loader checks every artifact's sha256 against the index and stops the WHOLE load
+ * on one mismatch, which would also block every removal. A run that is cut off (subrequests
+ * spent, CPU or wall-clock killed) after rewriting some datasets and before its closing
+ * index write would leave exactly that, so the index is patched after EACH dataset: read it
+ * with its ETag, replace this dataset's entry, write conditional on the ETag (two operations).
+ * A lost race re-reads and tries again; an index that cannot be patched stops the run
+ * (the closing sync, which rebuilds from a fresh listing, then settles what it can).
+ *
+ * With no usable index there is nothing to disagree with: the loader refuses a missing
+ * index outright, and the closing sync creates it from the listing.
+ *
+ * The window that remains is one dataset's own three writes: a cut-off between its first
+ * and its last put leaves that dataset's artifacts ahead of its entry until the next run,
+ * which redoes the set (the JSON-LD, written last, is the commit marker) and re-patches it.
+ */
+async function patchIndexEntry(rc: RunContext, now: StoredDataset): Promise<PatchOutcome> {
+  const entry = await indexEntryFor(now);
+  if (!entry) return "failed";
+  for (let attempt = 1; attempt <= INDEX_ATTEMPTS; attempt++) {
+    const previous = await readStoredIndex(rc.bucket);
+    if (!previous.document || !previous.etag) return "no_index";
+    const before = previous.document.datasets.find((d) => d.id === entry.id);
+    if (before && canonicalJson(before as never) === canonicalJson(entry as never)) {
+      return "unchanged";
+    }
+    const document: IndexDocument = {
+      schema: previous.document.schema,
+      generated_at: rc.now.toISOString(),
+      datasets: [...previous.document.datasets.filter((d) => d.id !== entry.id), entry].sort(
+        (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+      ),
+    };
+    if (indexProblems(document).length > 0) return "failed";
+    const written = await rc.bucket.put(NEUROBAGEL_INDEX_KEY, serializeIndex(document), {
+      httpMetadata: { contentType: "application/json" },
+      onlyIf: { etagMatches: previous.etag },
+    });
+    if (written) return "patched";
+  }
+  return "failed";
 }
 
 /** Examine one dataset and, on a real run, write it when it changed. */
@@ -595,7 +662,7 @@ async function processDataset(rc: RunContext, row: PlanRow): Promise<DatasetResu
     { dataset_id: id, ...prepared.detail },
     prepared.curationHash,
   );
-  const wrote = await writeSet(rc.bucket, id, built.files, stored, {
+  const { wrote, now: written } = await writeSet(rc.bucket, id, built.files, stored, {
     [META.fingerprint]: prepared.fingerprint,
     [META.rowFingerprint]: prepared.rowFp,
     [META.manifestEtag]: prepared.etag,
@@ -605,6 +672,9 @@ async function processDataset(rc: RunContext, row: PlanRow): Promise<DatasetResu
     [META.flags]: flags.join(","),
     [META.generatedAt]: rc.now.toISOString(),
   });
+  const patch = await patchIndexEntry(rc, written);
+  if (patch === "patched") rc.result.index.patched = (rc.result.index.patched ?? 0) + 1;
+  if (patch === "failed") rc.indexPatchFailed = true;
   await ledgerNote(rc, id, { state: "clear" });
   if (flags.length > 0) rc.result.needs_review.push({ id, flags });
   return { id, outcome: "written", fingerprint: prepared.fingerprint, flags, wrote };
@@ -785,6 +855,7 @@ export async function runNeurobagelWriter(env: Bindings, options: RunOptions): P
       curations,
       now,
       anonymityRefused: new Set(),
+      indexPatchFailed: false,
     };
 
     // Work. Sequential on purpose: each dataset moves a manifest digest and two small
@@ -805,6 +876,15 @@ export async function runNeurobagelWriter(env: Bindings, options: RunOptions): P
         };
       }
       result.results.push(outcome);
+      if (rc.indexPatchFailed) {
+        // Artifacts are now ahead of the index. Writing more would widen that; the closing
+        // sync rebuilds the index from a fresh listing, which is the one thing left to do.
+        result.warnings.push(
+          `the index could not be patched after ${item.id}: the run stopped there and rebuilt the index from the listing`,
+        );
+        result.unexamined += plan.work.length - result.examined;
+        break;
+      }
     }
 
     // What leaves: datasets the store holds that are not eligible NOW (decided inside the
@@ -830,7 +910,7 @@ export async function runNeurobagelWriter(env: Bindings, options: RunOptions): P
         ),
       );
     });
-    result.index = index;
+    result.index = { ...index, ...(result.index.patched ? { patched: result.index.patched } : {}) };
     const leaving = [...indexed.datasets.keys()]
       .filter((id) => !indexable.has(id) && (only === undefined || only.includes(id)))
       .sort();

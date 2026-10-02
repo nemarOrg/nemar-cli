@@ -1271,6 +1271,185 @@ describe("the index is rebuilt from the listing", () => {
 });
 
 // ----------------------------------------------------------------------------
+// An interrupted run
+// ----------------------------------------------------------------------------
+
+/**
+ * Every artifact the stored index names exists with the very bytes the index says
+ * (the loader checks each sha256 and stops the WHOLE load on one mismatch), and every
+ * entry's artifacts are complete.
+ */
+async function indexMismatches(): Promise<string[]> {
+  const problems: string[] = [];
+  const index = await storedIndex();
+  for (const entry of index.datasets) {
+    for (const artifact of entry.artifacts) {
+      const head = await h.bucket.head(artifact.name);
+      if (!head) problems.push(`${artifact.name}: absent`);
+      else if (head.customMetadata?.[META.sha256] !== artifact.sha256) {
+        problems.push(`${artifact.name}: stored sha256 is not the index's`);
+      } else if (head.size !== artifact.bytes) problems.push(`${artifact.name}: size differs`);
+    }
+  }
+  return problems;
+}
+
+/**
+ * A bucket whose put of `hangOn` never returns: the run that issued it is cut off there,
+ * exactly as a Worker killed for CPU, wall-clock or subrequests is. Nothing after that
+ * line runs, and nothing is caught or cleaned up. Resolves `killed` when it happens.
+ */
+function killOnPut(bucket: R2Bucket, hangOn: (key: string) => boolean) {
+  let kill: () => void = () => {};
+  const killed = new Promise<void>((resolve) => {
+    kill = resolve;
+  });
+  const wrapped = new Proxy(bucket, {
+    get(target, prop, receiver) {
+      if (prop === "put") {
+        return (key: string, ...rest: unknown[]) => {
+          if (hangOn(key)) {
+            kill();
+            return new Promise(() => {});
+          }
+          return (target.put as (...a: unknown[]) => unknown)(key, ...rest);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { bucket: wrapped as R2Bucket, killed };
+}
+
+describe("an interrupted run never leaves artifacts newer than the index", () => {
+  const IDS = ["nm000720", "nm000721", "nm000722", "nm000723"];
+
+  async function seededAndWritten(): Promise<void> {
+    for (const id of IDS) seedSynthetic(h, id);
+    await run();
+    expect(await indexMismatches()).toEqual([]);
+    // Every dataset's row changes, so the next run rewrites all four.
+    h.db.run("UPDATE datasets SET name = name || ' (revised)'");
+  }
+
+  test("a run cut off after two datasets leaves an index that matches every stored artifact", async () => {
+    await seededAndWritten();
+    const before = (await storedIndex()).datasets.map((d) => d.artifacts.map((a) => a.sha256));
+    // The third dataset's first write never returns: the run is gone.
+    const cut = killOnPut(h.bucket, (key) => key.startsWith("nm000722"));
+    const running = run({}, h.env({ NEUROBAGEL: cut.bucket }));
+    await Promise.race([running, cut.killed]);
+    await cut.killed;
+
+    // The first two are rewritten AND indexed; the others are as they were, and the loader,
+    // which checks every sha256, would load all four.
+    expect(await indexMismatches()).toEqual([]);
+    const index = await storedIndex();
+    expect(index.datasets).toHaveLength(4);
+    const after = index.datasets.map((d) => d.artifacts.map((a) => a.sha256));
+    expect(after[0]).not.toEqual(before[0]);
+    expect(after[1]).not.toEqual(before[1]);
+    expect(after[2]).toEqual(before[2]);
+    expect(after[3]).toEqual(before[3]);
+    expect(await text("nm000721.jsonld")).toContain("(revised)");
+    expect(await text("nm000722.jsonld")).not.toContain("(revised)");
+  });
+
+  test("the next run finishes the job and the index matches again", async () => {
+    await seededAndWritten();
+    const cut = killOnPut(h.bucket, (key) => key.startsWith("nm000722"));
+    void run({}, h.env({ NEUROBAGEL: cut.bucket }));
+    await cut.killed;
+    const result = await run();
+    expect(outcomes(result).filter((o) => o.endsWith(":written"))).toEqual([
+      "nm000722:written",
+      "nm000723:written",
+    ]);
+    expect(await indexMismatches()).toEqual([]);
+    for (const id of IDS) expect(await text(`${id}.jsonld`)).toContain("(revised)");
+  });
+
+  test("a cut-off inside one dataset's own three writes is healed by the next run", async () => {
+    // The window that remains: between a dataset's first put and its last, its artifacts can
+    // be ahead of its entry. The JSON-LD is written last and is the commit marker, so the
+    // next run sees an unfinished set and redoes it, and the index is patched again.
+    seedSynthetic(h, "nm000724");
+    await run();
+    h.db.run("UPDATE datasets SET name = 'Revised again' WHERE dataset_id = 'nm000724'");
+    const cut = killOnPut(h.bucket, (key) => key === "nm000724.jsonld");
+    void run({}, h.env({ NEUROBAGEL: cut.bucket }));
+    await cut.killed;
+    const healed = await run();
+    expect(outcomes(healed)).toEqual(["nm000724:written"]);
+    expect(await indexMismatches()).toEqual([]);
+    expect(await text("nm000724.jsonld")).toContain("Revised again");
+  });
+
+  test("each dataset is indexed right after its own artifacts, and the closing sync finds nothing left to do", async () => {
+    seedSynthetic(h, "nm000725");
+    await run();
+    seedSynthetic(h, "nm000726");
+    seedSynthetic(h, "nm000727");
+    const rec = recordWrites(h.bucket);
+    const result = await run({}, h.env({ NEUROBAGEL: rec.bucket }));
+    expect(rec.log.map((e) => e.key)).toEqual([
+      "nm000726_annotated.json",
+      "nm000726_dataset_description.json",
+      "nm000726.jsonld",
+      "index.json",
+      "nm000727_annotated.json",
+      "nm000727_dataset_description.json",
+      "nm000727.jsonld",
+      "index.json",
+    ]);
+    expect(result.index.patched).toBe(2);
+    expect(result.index.changed).toBe(false);
+    expect((await storedIndex()).datasets.map((d) => d.id)).toEqual([
+      "nm000725",
+      "nm000726",
+      "nm000727",
+    ]);
+  });
+
+  test("an index that cannot be patched stops the run there, and the closing sync rebuilds it", async () => {
+    await seededAndWritten();
+    // Every write of the index that carries a CHANGED entry for nm000721 loses its race.
+    let patches = 0;
+    const racing = new Proxy(h.bucket, {
+      get(target, prop, receiver) {
+        if (prop === "put") {
+          return async (key: string, ...rest: unknown[]) => {
+            if (key === NEUROBAGEL_INDEX_KEY && patches < 3) {
+              patches++;
+              // Another run replaces the index first, so this conditional write loses.
+              const current = JSON.parse(
+                (await (await target.get(NEUROBAGEL_INDEX_KEY))?.text()) ?? "{}",
+              );
+              await (target.put as (...a: unknown[]) => unknown)(
+                key,
+                `${JSON.stringify({ ...current, bump: patches })}\n`,
+              );
+            }
+            return (target.put as (...a: unknown[]) => unknown)(key, ...rest);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as R2Bucket;
+    console.warn = () => {};
+    const result = await run({}, h.env({ NEUROBAGEL: racing }));
+    console.warn = quiet.warn;
+    expect(result.warnings.join(" ")).toContain("the index could not be patched after nm000720");
+    expect(result.examined).toBe(1);
+    expect(result.unexamined).toBeGreaterThanOrEqual(3);
+    // The closing sync still ran and left the index consistent with the store.
+    expect(await indexMismatches()).toEqual([]);
+  });
+});
+
+// ----------------------------------------------------------------------------
 // The bound and the order of work
 // ----------------------------------------------------------------------------
 
