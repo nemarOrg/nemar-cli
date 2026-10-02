@@ -1,0 +1,28 @@
+{
+  "AccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on004019 (latest version v1.0.0).",
+  "AccessLink": "https://nemar.org/dataset/on004019",
+  "AccessType": "public",
+  "Authors": [
+    "Graciela C. Alatorre-Cruz",
+    "Heather Downs",
+    "Darcy Hagood",
+    "Seth T. Sorensen",
+    "D. Keith Williams",
+    "Linda Larson-Prior"
+  ],
+  "Keywords": [
+    "EEG",
+    "event-related potentials",
+    "obesity",
+    "arithmetic processing",
+    "mathematical skills",
+    "preteens"
+  ],
+  "Name": "Effect of obesity on arithmetic processing in preteens with high and low math skills. An event-related potentials study",
+  "ParticipantCount": 62,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/on004019",
+    "https://doi.org/10.82901/nemar.on004019"
+  ],
+  "RepositoryURL": "https://data.nemar.org/on004019/"
+}

@@ -1,0 +1,229 @@
+First time setup: off
+Setting up a Neurobagel graph backend...
+(The GraphDB server is being accessed inside the GraphDB container at http://localhost:7200.)
+GraphDB server already set up, skipping setup.
+Adding datasets to the database...
+CLEARING EXISTING DATA FROM repositories/nemar...
+UPLOADING DATA FROM /data TO repositories/nemar...
+nm000103.jsonld:
+HTTP/1.1 204 
+Vary: Accept-Encoding
+Cache-Control: no-store
+X-XSS-Protection: 1; mode=block
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Language: en-US
+Date: Fri, 02 Oct 2026 07:02:30 GMT
+Server: GraphDB/10.8.12 RDF4J/4.3.15
+
+nm000104.jsonld:
+HTTP/1.1 204 
+Vary: Accept-Encoding
+Cache-Control: no-store
+X-XSS-Protection: 1; mode=block
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Language: en-US
+Date: Fri, 02 Oct 2026 07:02:30 GMT
+Server: GraphDB/10.8.12 RDF4J/4.3.15
+
+nm000109.jsonld:
+HTTP/1.1 204 
+Vary: Accept-Encoding
+Cache-Control: no-store
+X-XSS-Protection: 1; mode=block
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Language: en-US
+Date: Fri, 02 Oct 2026 07:02:31 GMT
+Server: GraphDB/10.8.12 RDF4J/4.3.15
+
+nm000118.jsonld:
+HTTP/1.1 204 
+Vary: Accept-Encoding
+Cache-Control: no-store
+X-XSS-Protection: 1; mode=block
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Language: en-US
+Date: Fri, 02 Oct 2026 07:02:31 GMT
+Server: GraphDB/10.8.12 RDF4J/4.3.15
+
+nm000132.jsonld:
+HTTP/1.1 400 
+Vary: Accept-Encoding
+Cache-Control: no-store
+X-XSS-Protection: 1; mode=block
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Type: text/plain;charset=UTF-8
+Content-Language: en-US
+Content-Length: 39
+Date: Fri, 02 Oct 2026 07:02:31 GMT
+Connection: close
+Server: GraphDB/10.8.12 RDF4J/4.3.15
+
+MALFORMED DATA: Could not parse JSON-LD
+nm000147.jsonld:
+HTTP/1.1 204 
+Vary: Accept-Encoding
+Cache-Control: no-store
+X-XSS-Protection: 1; mode=block
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Language: en-US
+Date: Fri, 02 Oct 2026 07:02:31 GMT
+Server: GraphDB/10.8.12 RDF4J/4.3.15
+
+nm000182.jsonld:
+HTTP/1.1 204 
+Vary: Accept-Encoding
+Cache-Control: no-store
+X-XSS-Protection: 1; mode=block
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Language: en-US
+Date: Fri, 02 Oct 2026 07:02:31 GMT
+Server: GraphDB/10.8.12 RDF4J/4.3.15
+
+nm000229.jsonld:
+HTTP/1.1 204 
+Vary: Accept-Encoding
+Cache-Control: no-store
+X-XSS-Protection: 1; mode=block
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Language: en-US
+Date: Fri, 02 Oct 2026 07:02:31 GMT
+Server: GraphDB/10.8.12 RDF4J/4.3.15
+
+nm000270.jsonld:
+HTTP/1.1 204 
+Vary: Accept-Encoding
+Cache-Control: no-store
+X-XSS-Protection: 1; mode=block
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Language: en-US
+Date: Fri, 02 Oct 2026 07:02:32 GMT
+Server: GraphDB/10.8.12 RDF4J/4.3.15
+
+nm000276.jsonld:
+HTTP/1.1 204 
+Vary: Accept-Encoding
+Cache-Control: no-store
+X-XSS-Protection: 1; mode=block
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Language: en-US
+Date: Fri, 02 Oct 2026 07:02:32 GMT
+Server: GraphDB/10.8.12 RDF4J/4.3.15
+
+nm000290.jsonld:
+HTTP/1.1 204 
+Vary: Accept-Encoding
+Cache-Control: no-store
+X-XSS-Protection: 1; mode=block
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Language: en-US
+Date: Fri, 02 Oct 2026 07:02:32 GMT
+Server: GraphDB/10.8.12 RDF4J/4.3.15
+
+on000117.jsonld:
+HTTP/1.1 204 
+Vary: Accept-Encoding
+Cache-Control: no-store
+X-XSS-Protection: 1; mode=block
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Language: en-US
+Date: Fri, 02 Oct 2026 07:02:32 GMT
+Server: GraphDB/10.8.12 RDF4J/4.3.15
+
+on000246.jsonld:
+HTTP/1.1 204 
+Vary: Accept-Encoding
+Cache-Control: no-store
+X-XSS-Protection: 1; mode=block
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Language: en-US
+Date: Fri, 02 Oct 2026 07:02:32 GMT
+Server: GraphDB/10.8.12 RDF4J/4.3.15
+
+on001787.jsonld:
+HTTP/1.1 204 
+Vary: Accept-Encoding
+Cache-Control: no-store
+X-XSS-Protection: 1; mode=block
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Language: en-US
+Date: Fri, 02 Oct 2026 07:02:32 GMT
+Server: GraphDB/10.8.12 RDF4J/4.3.15
+
+on002712.jsonld:
+HTTP/1.1 204 
+Vary: Accept-Encoding
+Cache-Control: no-store
+X-XSS-Protection: 1; mode=block
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Language: en-US
+Date: Fri, 02 Oct 2026 07:02:33 GMT
+Server: GraphDB/10.8.12 RDF4J/4.3.15
+
+on003194.jsonld:
+HTTP/1.1 204 
+Vary: Accept-Encoding
+Cache-Control: no-store
+X-XSS-Protection: 1; mode=block
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Language: en-US
+Date: Fri, 02 Oct 2026 07:02:33 GMT
+Server: GraphDB/10.8.12 RDF4J/4.3.15
+
+on003751.jsonld:
+HTTP/1.1 204 
+Vary: Accept-Encoding
+Cache-Control: no-store
+X-XSS-Protection: 1; mode=block
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Language: en-US
+Date: Fri, 02 Oct 2026 07:02:33 GMT
+Server: GraphDB/10.8.12 RDF4J/4.3.15
+
+on004019.jsonld:
+HTTP/1.1 204 
+Vary: Accept-Encoding
+Cache-Control: no-store
+X-XSS-Protection: 1; mode=block
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Language: en-US
+Date: Fri, 02 Oct 2026 07:02:33 GMT
+Server: GraphDB/10.8.12 RDF4J/4.3.15
+
+FINISHED UPLOADING DATA FROM /data TO repositories/nemar.
+ERROR: Upload failed for these files:
+/data/nm000132.jsonld
+Finished adding datasets to databases.
+Adding Neurobagel vocabulary to the database
+UPLOADING DATA FROM ../vocab TO repositories/nemar...
+nb_vocab.ttl:
+HTTP/1.1 204 
+Vary: Accept-Encoding
+Cache-Control: no-store
+X-XSS-Protection: 1; mode=block
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Language: en-US
+Date: Fri, 02 Oct 2026 07:02:34 GMT
+Server: GraphDB/10.8.12 RDF4J/4.3.15
+
+FINISHED UPLOADING DATA FROM ../vocab TO repositories/nemar.
+Finished adding the Neurobagel vocabulary to the database.
+Finished setting up the Neurobagel graph backend.

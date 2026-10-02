@@ -16,6 +16,11 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  type NeurobagelWeekly,
+  type VerdictDays,
+  weeklyAttention,
+} from "../../shared/contract/weekly-attention";
+import {
   WEEKLY_MAX_LISTED_IDS,
   type WeeklySummaryFacts,
   buildWeeklyRolloverComment,
@@ -28,6 +33,34 @@ import {
   weeklyHeadline,
   weeklySummaryLogLine,
 } from "../src/services/import-weekly-summary";
+
+/** A Neurobagel week in which all four checks ran and were healthy on all seven days. */
+function neurobagelWeek(over: Partial<NeurobagelWeekly> = {}): NeurobagelWeekly {
+  const healthyDays = { healthy: 7, alarm: 0, unknown: 0, unchecked: 0 };
+  const check = (reason: string) => ({ verdict: "healthy" as const, reason });
+  return {
+    runs: 7,
+    failedRuns: 0,
+    days: { ...healthyDays },
+    checkDays: {
+      store: { ...healthyDays },
+      node: { ...healthyDays },
+      registration: { ...healthyDays },
+      drift: { ...healthyDays },
+    },
+    latest: {
+      at: "2026-09-09T03:00:05.000Z",
+      overall: "healthy",
+      checks: {
+        store: check("20 eligible dataset(s), 20 written and indexed; no residue."),
+        node: check("The node serves 20 valid, protected record(s), all for eligible datasets."),
+        registration: check("NEMAR is listed by the federation and reports no error."),
+        drift: check("11 pinned release tags and vocabulary files match upstream."),
+      },
+    },
+    ...over,
+  };
+}
 
 /** A healthy week with everything known. Overridden per test. */
 function facts(over: Partial<WeeklySummaryFacts> = {}): WeeklySummaryFacts {
@@ -50,6 +83,8 @@ function facts(over: Partial<WeeklySummaryFacts> = {}): WeeklySummaryFacts {
     parked: [],
     issuesClosed: 3,
     issuesRelabelled: 1,
+    neurobagel: neurobagelWeek(),
+    neurobagelFindings: 0,
     errors: [],
     ...over,
   };
@@ -586,4 +621,215 @@ describe("the UTC boundary holds regardless of the host timezone", () => {
       }
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// The Neurobagel section (epic #1586, phase 6)
+// ---------------------------------------------------------------------------
+
+describe("the Neurobagel section", () => {
+  const check = (verdict: "healthy" | "alarm" | "unknown" | "unchecked", reason: string) => ({
+    verdict,
+    reason,
+  });
+  /** Days by verdict for one check. */
+  const days = (over: Partial<VerdictDays>): VerdictDays => ({
+    healthy: 0,
+    alarm: 0,
+    unknown: 0,
+    unchecked: 0,
+    ...over,
+  });
+  /** A week in which only the store and drift ever ran. */
+  const unconfiguredWeek = (): NeurobagelWeekly => {
+    const base = neurobagelWeek();
+    return {
+      ...base,
+      checkDays: {
+        store: days({ healthy: 7 }),
+        node: days({ unchecked: 7 }),
+        registration: days({ unchecked: 7 }),
+        drift: days({ healthy: 7 }),
+      },
+      latest: {
+        ...base.latest,
+        checks: {
+          ...base.latest.checks,
+          node: check("unchecked", "NEUROBAGEL_NODE_URL is not set, so the node is not probed."),
+          registration: check(
+            "unchecked",
+            "NEUROBAGEL_FEDERATION_URL is not set, so registration is not checked.",
+          ),
+        },
+      },
+    };
+  };
+  const line = (f: WeeklySummaryFacts) => weeklyHeadline(f).line;
+
+  test("a week in which every check ran and was healthy needs no attention, and says all four ran", () => {
+    const f = facts();
+    expect(weeklyHeadline(f).attention).toBe(false);
+    expect(line(f)).toContain("All four Neurobagel checks ran and look normal");
+    const body = buildWeeklySummaryBody(f, "2026-09-09T03:00:00Z");
+    expect(body).toContain("## Neurobagel federation");
+    expect(body).toContain("Latest daily run (2026-09-09T03:00:05.000Z): **HEALTHY**.");
+    expect(body).toContain("Daily runs in this window: 7 of 7 expected");
+    expect(body).toContain("Every check ran on every recorded day.");
+  });
+
+  test("a check that did not run is said, never covered by 'all look normal'", () => {
+    const f = facts({ neurobagel: unconfiguredWeek() });
+    // Nothing is wrong, so no attention; but the headline says what was NOT checked.
+    expect(weeklyHeadline(f).attention).toBe(false);
+    expect(line(f)).toContain("did not run these checks on at least one day: node, registration");
+    expect(line(f)).not.toMatch(/all four Neurobagel checks/i);
+    const body = buildWeeklySummaryBody(f, "x");
+    expect(body).toContain("| node | unchecked |");
+    expect(body).toContain("| registration | unchecked |");
+    expect(body).toContain("Checks that did not run: node 7 day(s), registration 7 day(s).");
+  });
+
+  test("a single day on which one check did not run is still said", () => {
+    const week = neurobagelWeek();
+    const f = facts({
+      neurobagel: {
+        ...week,
+        checkDays: { ...week.checkDays, node: days({ healthy: 6, unchecked: 1 }) },
+      },
+    });
+    expect(line(f)).toContain("did not run these checks on at least one day: node");
+  });
+
+  test("no run at all is unknown, rendered as unknown and asking for attention, never as zero runs", () => {
+    const f = facts({ neurobagel: null });
+    const h = weeklyHeadline(f);
+    expect(h.attention).toBe(true);
+    expect(h.line).toContain("no Neurobagel verification run was recorded");
+    const body = buildWeeklySummaryBody(f, "2026-09-09T03:00:00Z");
+    expect(body).toContain("which is unknown rather than zero");
+    expect(body).not.toContain("Daily runs in this window");
+    expect(weeklySummaryLogLine(f, null)).toContain("neurobagel=unknown");
+  });
+
+  test("an alarm and an unknown each need attention, with their own words", () => {
+    const withLatest = (overall: "alarm" | "unknown" | "unchecked") =>
+      neurobagelWeek({ latest: { ...neurobagelWeek().latest, overall } });
+    expect(line(facts({ neurobagel: withLatest("alarm") }))).toContain(
+      "Neurobagel verification is alarming",
+    );
+    expect(line(facts({ neurobagel: withLatest("unknown") }))).toContain(
+      "Neurobagel verification could not be determined",
+    );
+    // The overall of an unchecked day alone is not a problem: nothing here is configured to check.
+    expect(weeklyHeadline(facts({ neurobagel: withLatest("unchecked") })).attention).toBe(false);
+  });
+
+  test("a day that alarmed, or was unknown, counts even when the latest run is healthy; the same state is not said twice", () => {
+    const early = weeklyHeadline(
+      facts({
+        neurobagel: neurobagelWeek({ days: { healthy: 5, alarm: 2, unknown: 0, unchecked: 0 } }),
+      }),
+    );
+    expect(early.line).toContain("alarmed on 2 day(s)");
+    const unknownDays = weeklyHeadline(
+      facts({
+        neurobagel: neurobagelWeek({ days: { healthy: 5, alarm: 0, unknown: 2, unchecked: 0 } }),
+      }),
+    );
+    expect(unknownDays.attention).toBe(true);
+    expect(unknownDays.line).toContain("could not be determined on 2 day(s)");
+    const latest = weeklyHeadline(
+      facts({
+        neurobagel: neurobagelWeek({
+          days: { healthy: 5, alarm: 2, unknown: 0, unchecked: 0 },
+          latest: { ...neurobagelWeek().latest, overall: "alarm" },
+        }),
+      }),
+    );
+    expect(latest.line).toContain("is alarming");
+    expect(latest.line).not.toContain("alarmed on");
+  });
+
+  test("a sweep that failed outright on any run needs attention", () => {
+    const f = facts({ neurobagel: neurobagelWeek({ failedRuns: 1 }) });
+    expect(weeklyHeadline(f).attention).toBe(true);
+    expect(line(f)).toContain("the Neurobagel sweep itself failed on 1 run(s)");
+  });
+
+  test("a daily run that is missing needs attention: a cron that died on day two is work not done", () => {
+    // One missing run is tolerated (the window ends as the day's own run starts); two are not.
+    expect(weeklyHeadline(facts({ neurobagel: neurobagelWeek({ runs: 6 }) })).attention).toBe(
+      false,
+    );
+    const dead = facts({ neurobagel: neurobagelWeek({ runs: 2 }) });
+    expect(weeklyHeadline(dead).attention).toBe(true);
+    expect(line(dead)).toContain("missing for 5 of 7 day(s)");
+    expect(buildWeeklySummaryBody(dead, "x")).toContain(
+      "Daily runs in this window: 2 of 7 expected",
+    );
+    const five = facts({ neurobagel: neurobagelWeek({ runs: 5 }) });
+    expect(line(five)).toContain("missing for 2 of 7 day(s)");
+  });
+
+  test("findings are a count with no label of their own: zero says zero, a positive one asks for the audit log, unknown says unknown", () => {
+    const zero = buildWeeklySummaryBody(facts({ neurobagelFindings: 0 }), "x");
+    expect(zero).toContain("over the window and what stands: 0.");
+    const some = facts({ neurobagelFindings: 3 });
+    expect(weeklyHeadline(some).attention).toBe(true);
+    expect(line(some)).toContain("3 Neurobagel finding(s) need attention (see the audit log)");
+    expect(buildWeeklySummaryBody(some, "x")).toContain("over the window and what stands: 3.");
+    const unknown = facts({ neurobagelFindings: null });
+    expect(buildWeeklySummaryBody(unknown, "x")).toContain(
+      "over the window and what stands: unknown.",
+    );
+    expect(line(unknown)).toContain("could not be counted");
+  });
+
+  test("findings need attention even when the daily sweep never wrote a row", () => {
+    const f = facts({ neurobagel: null, neurobagelFindings: 1 });
+    expect(line(f)).toContain("1 Neurobagel finding(s) need attention");
+    expect(buildWeeklySummaryBody(f, "x")).toContain("over the window and what stands: 1.");
+  });
+
+  test("no sentence of the section or the headline says what kind of dataset a finding concerns, for any week", () => {
+    const weeks: Partial<WeeklySummaryFacts>[] = [
+      {},
+      { neurobagel: null, neurobagelFindings: 2 },
+      { neurobagel: unconfiguredWeek(), neurobagelFindings: null },
+      { neurobagel: neurobagelWeek({ failedRuns: 2, runs: 1 }), neurobagelFindings: 5 },
+      {
+        neurobagel: neurobagelWeek({
+          days: { healthy: 1, alarm: 3, unknown: 3, unchecked: 0 },
+          latest: { ...neurobagelWeek().latest, overall: "alarm" },
+        }),
+      },
+    ];
+    for (const w of weeks) {
+      const f = facts(w);
+      const body = buildWeeklySummaryBody(f, "x");
+      const section = body.slice(
+        body.indexOf("## Neurobagel federation"),
+        body.indexOf("## Blocklisted datasets"),
+      );
+      for (const text of [section, weeklyHeadline(f).line]) {
+        expect(text).not.toMatch(/anonym|deposit|\bclass\b/i);
+        expect(text).not.toMatch(/\b(nm|on)\d{6}\b/);
+      }
+    }
+  });
+
+  test("the headline and the command's exit code are one function", () => {
+    // `nemar admin import-weekly` calls weeklyAttention itself; this holds the headline to it, so
+    // a rule changed in one place and not the other cannot pass.
+    for (const w of [
+      {},
+      { neurobagel: null },
+      { neurobagelFindings: 4 },
+      { neurobagel: neurobagelWeek({ runs: 3 }) },
+      { neurobagel: unconfiguredWeek() },
+    ] as Partial<WeeklySummaryFacts>[]) {
+      const f = facts(w);
+      expect(weeklyHeadline(f).attention).toBe(weeklyAttention(f).attention);
+    }
+  });
 });

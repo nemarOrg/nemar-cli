@@ -1,0 +1,234 @@
+{
+  "bagel": "0.11.6",
+  "bagel_only_subjects": 0,
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on001787 (latest version v1.0.0).",
+    "hasAccessLink": "https://nemar.org/dataset/on001787",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Arnaud Delorme",
+      "Tracy Brandmeyer"
+    ],
+    "hasKeywords": [
+      "EEG",
+      "Meditation",
+      "mind wandering",
+      "Attention",
+      "concentration"
+    ],
+    "hasLabel": "EEG meditation study",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/on001787",
+      "https://doi.org/10.82901/nemar.on001787"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/on001787/"
+  },
+  "dataset_id": "on001787",
+  "imaging": {
+    "attachable_subjects": 24,
+    "modalities": {
+      "sub-001": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-002": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-003": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-004": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-005": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-006": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-007": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-008": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-009": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-010": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-011": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-012": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-013": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-014": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-015": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-016": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-017": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-018": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-019": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-020": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-021": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-022": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-023": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-024": [
+        "nidm:Electroencephalography"
+      ]
+    }
+  },
+  "inputs": {
+    "annotated.json": "6900fd4c0d2fb1425a3e3c3741e356c8a5a340d49a14fad4ed2fc9310a57af19",
+    "dataset_description.json": "bf3a13e87007b050b37648b8ba0bfd5fd73953fdf2e4c22685a428433c7cd098",
+    "participants.tsv": "306d86d218197bddc0d89ed2cac78972c2114c6b77a93fa3e26bf22f64a66230"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-001": {
+      "age": 32.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-002": {
+      "age": 35.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-003": {
+      "age": 41.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-004": {
+      "age": 29.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-005": {
+      "age": 34.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-006": {
+      "age": 32.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-007": {
+      "age": 32.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-008": {
+      "age": 32.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-009": {
+      "age": 43.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-010": {
+      "age": 33.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-011": {
+      "age": 62.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-012": {
+      "age": 65.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-013": {
+      "age": 47.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-014": {
+      "age": 52.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-015": {
+      "age": 78.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-016": {
+      "age": 77.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-017": {
+      "age": 32.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-018": {
+      "age": null,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-019": {
+      "age": 42.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-020": {
+      "age": 41.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-021": {
+      "age": 41.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-022": {
+      "age": 31.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-023": {
+      "age": 50.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-024": {
+      "age": 38.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    }
+  },
+  "transform_only_subjects": 0
+}

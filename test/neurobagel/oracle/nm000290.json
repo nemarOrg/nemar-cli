@@ -1,0 +1,129 @@
+{
+  "bagel": "0.11.6",
+  "bagel_only_subjects": 0,
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: CC-BY-4.0. Browse and download at https://nemar.org/dataset/nm000290 (latest version v1.0.0).",
+    "hasAccessLink": "https://nemar.org/dataset/nm000290",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Dreyer Pauline",
+      "Bourdil Manon",
+      "Bechon Loic",
+      "Kojima Simon",
+      "Velut Sebastien",
+      "Rimbert Sebastien",
+      "Roy Rapha\u00eblle",
+      "Lotte Fabien"
+    ],
+    "hasKeywords": [
+      "EEG",
+      "Brain-Computer Interfaces",
+      "motor imagery",
+      "mental subtraction",
+      "word generation",
+      "neurofeedback"
+    ],
+    "hasLabel": "PROTEUS BCI Bordeaux \u2014 EEG/EMG Foundation Challenge 2026, Track 02",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/nm000290",
+      "https://doi.org/10.82901/nemar.nm000290"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/nm000290/"
+  },
+  "dataset_id": "nm000290",
+  "imaging": {
+    "attachable_subjects": 10,
+    "modalities": {
+      "sub-P01": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-P02": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-P03": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-P04": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-P05": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-P06": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-P07": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-P08": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-P09": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-P10": [
+        "nidm:Electroencephalography"
+      ]
+    }
+  },
+  "inputs": {
+    "annotated.json": "9f2b5af33cbb7b0d94f75bc196be11d461067de79267aed1ff4638c32f6392f3",
+    "dataset_description.json": "81388a0ee9bfbb14e3ff6a9c7b8e90fbb40e37d37fbfb622e423dc2c4f5c99eb",
+    "participants.tsv": "05c36b40c57d34f0a33d94ecebe11a770b2de825c926d0a22a54aed44916977b"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-P01": {
+      "age": 23.5,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-P02": {
+      "age": 23.5,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-P03": {
+      "age": 23.5,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-P04": {
+      "age": 37.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-P05": {
+      "age": 23.5,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-P06": {
+      "age": 37.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-P07": {
+      "age": 37.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-P08": {
+      "age": 37.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-P09": {
+      "age": 37.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-P10": {
+      "age": 23.5,
+      "diagnoses": [],
+      "sex": null
+    }
+  },
+  "transform_only_subjects": 0
+}

@@ -1,0 +1,198 @@
+{
+  "bagel": "0.11.6",
+  "bagel_only_subjects": 0,
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: CC-BY-4.0. Browse and download at https://nemar.org/dataset/nm000157 (latest version v1.0.2).",
+    "hasAccessLink": "https://nemar.org/dataset/nm000157",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Boyla Mainsah",
+      "Chance Fleeting",
+      "Thomas Balmat",
+      "Eric Sellers",
+      "Leslie Collins"
+    ],
+    "hasKeywords": [
+      "EEG",
+      "P300",
+      "Brain-Computer Interfaces",
+      "speller",
+      "event-related potentials",
+      "amyotrophic lateral sclerosis"
+    ],
+    "hasLabel": "BigP3BCI Study B \u2014 6x6 checkerboard, multi-session (19 healthy subjects)",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/nm000157",
+      "https://doi.org/10.82901/nemar.nm000157"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/nm000157/"
+  },
+  "dataset_id": "nm000157",
+  "imaging": {
+    "attachable_subjects": 19,
+    "modalities": {
+      "sub-1": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-10": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-11": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-12": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-13": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-14": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-16": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-17": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-18": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-19": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-2": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-20": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-21": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-3": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-4": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-5": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-6": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-7": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-8": [
+        "nidm:Electroencephalography"
+      ]
+    }
+  },
+  "inputs": {
+    "annotated.json": "9ea57b312318fc5e8cc8515c2f64b560cecd3797f1b758ce20122a4cd0cfe972",
+    "dataset_description.json": "4a693db0a59322fb9c547bd7d77e528c59029dff951270df7d4a6aa915e6e563",
+    "participants.tsv": "211ec0e9174a22889a65516e14fb824a07a9fb3c2db2a63510c2e6b48a63d41e"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-1": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-10": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-11": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-12": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-13": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-14": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-16": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-17": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-18": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-19": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-2": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-20": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-21": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-3": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-4": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-5": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-6": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-7": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-8": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    }
+  },
+  "transform_only_subjects": 0
+}

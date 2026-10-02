@@ -1,0 +1,38 @@
+{
+  "AccessInstructions": "Public access. License: CC-BY-NC-SA-4.0. Browse and download at https://nemar.org/dataset/nm000104 (latest version v2.0.0).",
+  "AccessLink": "https://nemar.org/dataset/nm000104",
+  "AccessType": "public",
+  "Authors": [
+    "Viswanath Sivakumar",
+    "Jeffrey Seely",
+    "Alan Du",
+    "Sean R. Bittner",
+    "Adam Berenzweig",
+    "Anuoluwapo Bolarinwa",
+    "Alexandre Gramfort",
+    "Michael I. Mandel"
+  ],
+  "Keywords": [
+    "Electromyography",
+    "motor control",
+    "sequence-to-sequence learning",
+    "domain adaptation",
+    "brain-computer interfaces",
+    "keystroke decoding",
+    "keystroke dynamics",
+    "keystroke recognition",
+    "transfer learning",
+    "sEMG",
+    "wrist-based EMG",
+    "wearable sensors",
+    "accessibility",
+    "neuromotor interfaces"
+  ],
+  "Name": "emg2qwerty: A Large Dataset with Baselines for Touch Typing using Surface Electromyography",
+  "ParticipantCount": 108,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/nm000104",
+    "https://doi.org/10.82901/nemar.nm000104"
+  ],
+  "RepositoryURL": "https://data.nemar.org/nm000104/"
+}

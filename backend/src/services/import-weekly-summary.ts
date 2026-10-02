@@ -28,6 +28,15 @@
  * said everything is fine", which is the founding failure exactly.
  */
 
+import {
+  NEUROBAGEL_EXPECTED_DAILY_RUNS,
+  type NeurobagelWeekly,
+  WEEKLY_NEUROBAGEL_CHECKS,
+  weeklyAttention,
+} from "../../../shared/contract/weekly-attention.js";
+
+export type { NeurobagelWeekly };
+
 /**
  * Rows to name before falling back to a count.
  *
@@ -204,6 +213,17 @@ export interface WeeklySummaryFacts {
   issuesClosed: number | null;
   issuesRelabelled: number | null;
 
+  /** The Neurobagel verification sweep. `null` when no daily run was recorded in the window
+   *  (it writes a heartbeat on every run, so none means it did not run: unknown, not zero). */
+  neurobagel: NeurobagelWeekly | null;
+  /**
+   * Findings in the Neurobagel feature that need a person, counted over the window and over what
+   * stands, from every place the feature records one, and independent of whether the daily sweep
+   * wrote a row. A COUNT only: it carries no kind and no identifier, because the report is filed
+   * on a public-facing repository. `null` when it could not be counted, which is unknown.
+   */
+  neurobagelFindings: number | null;
+
   /** Anything that went wrong producing this report. Listed, never swallowed. */
   errors: { stage: string; error: string }[];
 }
@@ -216,26 +236,21 @@ export interface WeeklySummaryFacts {
  * that found nothing.
  */
 export function weeklyHeadline(f: WeeklySummaryFacts): { attention: boolean; line: string } {
-  const problems: string[] = [];
-  if (f.coverageStatus === "alarm") problems.push("coverage is alarming");
-  if (f.coverageStatus === "unknown") problems.push("coverage could not be determined");
-  if (f.autoImportEnabled === false) problems.push("auto-import is OFF");
-  if (f.dispatchLost === true) problems.push("dispatches are not landing");
-  // An absence of sweep rows is an unknown that arrives WITHOUT an error entry, so it
-  // is the one null the errors check below cannot see. The crons record every run, so
-  // no rows means they did not run -- which is precisely the silence this epic is
-  // about, and an earlier version printed "Nothing needs attention" above it.
-  if (f.issuesClosed === null) {
-    problems.push("no daily sweep activity was recorded, so the daily jobs may not be running");
-  }
-  if (f.errors.length > 0) problems.push(`${f.errors.length} part(s) of this report failed`);
-  if (problems.length === 0) {
+  // ONE rule, in shared/contract: `nemar admin import-weekly` takes its exit code from the same
+  // function, so the issue and the command cannot disagree about a week.
+  const { attention, problems, notChecked } = weeklyAttention(f);
+  if (!attention) {
+    // Never "all look normal" over a check that did not run: what was not checked is said.
+    const neurobagel =
+      notChecked.length > 0
+        ? ` Neurobagel verification did not run these checks on at least one day: ${notChecked.join(", ")}.`
+        : " All four Neurobagel checks ran and look normal.";
     return {
       attention: false,
       // Names what was actually checked. It deliberately does not speak for open
       // failures or the blocklist: phases 2 and 3 own those, and a report that claimed
       // "all normal" while 40 failures sat below it would be overclaiming.
-      line: `**Nothing needs attention this week.** Auto-import, coverage, dispatch and the daily sweeps all look normal for ${f.week}.`,
+      line: `**Nothing needs attention this week.** Auto-import, coverage, dispatch and the daily sweeps look normal for ${f.week}.${neurobagel}`,
     };
   }
   return {
@@ -317,6 +332,10 @@ export function buildWeeklySummaryBody(f: WeeklySummaryFacts, nowIso: string): s
       ? "**No sweep activity was recorded at all for this window, which is unknown rather than zero.** The daily crons write a row on every run, so an absence of rows means they did not run -- not that they ran and found nothing. (In the first week after this report shipped it also just means the rows did not exist yet.)"
       : `Tracking issues closed on recovery: ${count(f.issuesClosed)}. Relabelled after a cause change: ${count(f.issuesRelabelled)}.`,
     "",
+    "## Neurobagel federation",
+    "",
+    ...neurobagelSection(f.neurobagel, f.neurobagelFindings),
+    "",
     "## Blocklisted datasets",
     "",
     f.parked === null
@@ -353,6 +372,46 @@ export function buildWeeklySummaryBody(f: WeeklySummaryFacts, nowIso: string): s
   ].join("\n");
 }
 
+/**
+ * The Neurobagel section. Counts and verdicts, and each check's own one-sentence reason (which
+ * the sweep writes generically, with counts and public upstream tags only). `unchecked` is
+ * printed as "unchecked": a check that is not configured here is neither good news nor zero.
+ *
+ * The findings line is a count with no label of its own: the report is filed on a
+ * public-facing repository, and what the findings are lives in the audit log.
+ */
+function neurobagelSection(n: NeurobagelWeekly | null, findings: number | null): string[] {
+  const findingsLine = `Findings that need a person, over the window and what stands: ${count(findings)}. A count only: the audit log holds the detail.`;
+  if (n === null) {
+    return [
+      "**No daily verification run was recorded in this window, which is unknown rather than zero.** The sweep writes a row on every run, so an absence of rows means it did not run, not that it ran and found nothing. (In the first week after this section shipped it also just means the rows did not exist yet.)",
+      "",
+      findingsLine,
+    ];
+  }
+  const verdicts = WEEKLY_NEUROBAGEL_CHECKS.map(
+    (name) => `| ${name} | ${n.latest.checks[name].verdict} | ${n.latest.checks[name].reason} |`,
+  );
+  const notRun = WEEKLY_NEUROBAGEL_CHECKS.filter((c) => n.checkDays[c].unchecked > 0).map(
+    (c) => `${c} ${n.checkDays[c].unchecked} day(s)`,
+  );
+  return [
+    `Latest daily run (${n.latest.at}): **${n.latest.overall.toUpperCase()}**.`,
+    "",
+    "| check | verdict | what it found |",
+    "|---|---|---|",
+    ...verdicts,
+    "",
+    `Daily runs in this window: ${n.runs} of ${NEUROBAGEL_EXPECTED_DAILY_RUNS} expected (healthy ${n.days.healthy}, alarm ${n.days.alarm}, unknown ${n.days.unknown}, unchecked ${n.days.unchecked}; the sweep itself failed on ${n.failedRuns}).`,
+    "",
+    notRun.length > 0
+      ? `Checks that did not run: ${notRun.join(", ")}.`
+      : "Every check ran on every recorded day.",
+    "",
+    findingsLine,
+  ];
+}
+
 /** Comment left on the previous week's issue as it is closed, so the series is
  *  navigable in both directions. */
 export function buildWeeklyRolloverComment(
@@ -380,6 +439,8 @@ export function weeklySummaryLogLine(f: WeeklySummaryFacts, issue: number | null
     `outstanding=${count(f.outstanding)} open_failures=${count(f.openFailureTotal)} ` +
     `parked=${f.parked === null ? "unknown" : f.parked.length} ` +
     `closed=${count(f.issuesClosed)} relabelled=${count(f.issuesRelabelled)} ` +
+    `neurobagel=${f.neurobagel === null ? "unknown" : f.neurobagel.latest.overall} ` +
+    `neurobagel_findings=${count(f.neurobagelFindings)} ` +
     `issue=${issue === null ? "none" : `#${issue}`} errors=${f.errors.length}`
   );
 }

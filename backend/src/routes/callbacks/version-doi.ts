@@ -24,6 +24,7 @@ import { conceptEzidIdentifier, isSandboxIdentifier } from "../../services/ezid.
 import { getDatasetsToken } from "../../services/github-auth.js";
 import { downloadReleaseArchive } from "../../services/github.js";
 import { generateManifest } from "../../services/manifest.js";
+import { scheduleNeurobagelSync } from "../../services/neurobagel-hooks.js";
 import { errorMessage, extractRepoName, readRepoMetadata } from "../../services/repo-metadata.js";
 import { uploadManifest } from "../../services/s3.js";
 import * as zenodo from "../../services/zenodo.js";
@@ -765,7 +766,18 @@ async function handleEzidVersionDoiLegacy(
     // here -- the /webhooks/manifest-ready handler triggers the refresh after
     // the row insert lands.
     if (!centralFlow) {
-      c.executionCtx.waitUntil(refreshMetadataAfterVersionDoi(c.env, dataset.dataset_id, version));
+      const refreshed = refreshMetadataAfterVersionDoi(c.env, dataset.dataset_id, version);
+      c.executionCtx.waitUntil(refreshed);
+      // Neurobagel federation (epic #1586 phase 4, ADR 0084): a new published version
+      // on the legacy path, where the version row is written inline. A hook: off unless
+      // the writer is enabled, never awaited, every failure caught.
+      scheduleNeurobagelSync(
+        c.env,
+        (work) => c.executionCtx.waitUntil(work),
+        dataset.dataset_id,
+        "hook:version",
+        { after: refreshed },
+      );
     }
 
     return c.json({

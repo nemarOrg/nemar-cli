@@ -1,0 +1,579 @@
+{
+  "$defs": {
+    "AccessType": {
+      "description": "Enum for dataset access type.",
+      "enum": [
+        "public",
+        "registered",
+        "restricted"
+      ],
+      "title": "AccessType",
+      "type": "string"
+    },
+    "Acquisition": {
+      "additionalProperties": false,
+      "properties": {
+        "hasContrastType": {
+          "$ref": "#/$defs/Image"
+        },
+        "identifier": {
+          "pattern": "^nb:[0-9a-fA-F]{8}\\b-[0-9a-fA-F]{4}\\b-[0-9a-fA-F]{4}\\b-[0-9a-fA-F]{4}\\b-[0-9a-fA-F]{12}$",
+          "title": "Identifier",
+          "type": "string"
+        },
+        "schemaKey": {
+          "const": "Acquisition",
+          "default": "Acquisition",
+          "title": "Schemakey",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hasContrastType"
+      ],
+      "title": "Acquisition",
+      "type": "object"
+    },
+    "Assessment": {
+      "properties": {
+        "identifier": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "format": "uri",
+              "maxLength": 2083,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Identifier"
+        },
+        "schemaKey": {
+          "const": "Assessment",
+          "default": "Assessment",
+          "title": "Schemakey",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identifier"
+      ],
+      "title": "Assessment",
+      "type": "object"
+    },
+    "CompletedPipeline": {
+      "additionalProperties": false,
+      "properties": {
+        "hasPipelineName": {
+          "$ref": "#/$defs/Pipeline"
+        },
+        "hasPipelineVersion": {
+          "title": "Haspipelineversion",
+          "type": "string"
+        },
+        "identifier": {
+          "pattern": "^nb:[0-9a-fA-F]{8}\\b-[0-9a-fA-F]{4}\\b-[0-9a-fA-F]{4}\\b-[0-9a-fA-F]{4}\\b-[0-9a-fA-F]{12}$",
+          "title": "Identifier",
+          "type": "string"
+        },
+        "schemaKey": {
+          "const": "CompletedPipeline",
+          "default": "CompletedPipeline",
+          "title": "Schemakey",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hasPipelineVersion",
+        "hasPipelineName"
+      ],
+      "title": "CompletedPipeline",
+      "type": "object"
+    },
+    "Diagnosis": {
+      "properties": {
+        "identifier": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "format": "uri",
+              "maxLength": 2083,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Identifier"
+        },
+        "schemaKey": {
+          "const": "Diagnosis",
+          "default": "Diagnosis",
+          "title": "Schemakey",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identifier"
+      ],
+      "title": "Diagnosis",
+      "type": "object"
+    },
+    "Image": {
+      "properties": {
+        "identifier": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "format": "uri",
+              "maxLength": 2083,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Identifier"
+        },
+        "schemaKey": {
+          "const": "Image",
+          "default": "Image",
+          "title": "Schemakey",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identifier"
+      ],
+      "title": "Image",
+      "type": "object"
+    },
+    "ImagingSession": {
+      "additionalProperties": false,
+      "properties": {
+        "hasAcquisition": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/Acquisition"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hasacquisition"
+        },
+        "hasCompletedPipeline": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/CompletedPipeline"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hascompletedpipeline"
+        },
+        "hasFilePath": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hasfilepath"
+        },
+        "hasLabel": {
+          "title": "Haslabel",
+          "type": "string"
+        },
+        "identifier": {
+          "pattern": "^nb:[0-9a-fA-F]{8}\\b-[0-9a-fA-F]{4}\\b-[0-9a-fA-F]{4}\\b-[0-9a-fA-F]{4}\\b-[0-9a-fA-F]{12}$",
+          "title": "Identifier",
+          "type": "string"
+        },
+        "schemaKey": {
+          "const": "ImagingSession",
+          "default": "ImagingSession",
+          "title": "Schemakey",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hasLabel"
+      ],
+      "title": "ImagingSession",
+      "type": "object"
+    },
+    "PhenotypicSession": {
+      "additionalProperties": false,
+      "properties": {
+        "hasAge": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hasage"
+        },
+        "hasAssessment": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/Assessment"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hasassessment"
+        },
+        "hasDiagnosis": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/Diagnosis"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hasdiagnosis"
+        },
+        "hasLabel": {
+          "title": "Haslabel",
+          "type": "string"
+        },
+        "hasSex": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sex"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "identifier": {
+          "pattern": "^nb:[0-9a-fA-F]{8}\\b-[0-9a-fA-F]{4}\\b-[0-9a-fA-F]{4}\\b-[0-9a-fA-F]{4}\\b-[0-9a-fA-F]{12}$",
+          "title": "Identifier",
+          "type": "string"
+        },
+        "isSubjectGroup": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SubjectGroup"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "schemaKey": {
+          "const": "PhenotypicSession",
+          "default": "PhenotypicSession",
+          "title": "Schemakey",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hasLabel"
+      ],
+      "title": "PhenotypicSession",
+      "type": "object"
+    },
+    "Pipeline": {
+      "properties": {
+        "identifier": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "format": "uri",
+              "maxLength": 2083,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Identifier"
+        },
+        "schemaKey": {
+          "const": "Pipeline",
+          "default": "Pipeline",
+          "title": "Schemakey",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identifier"
+      ],
+      "title": "Pipeline",
+      "type": "object"
+    },
+    "Sex": {
+      "properties": {
+        "identifier": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "format": "uri",
+              "maxLength": 2083,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Identifier"
+        },
+        "schemaKey": {
+          "const": "Sex",
+          "default": "Sex",
+          "title": "Schemakey",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identifier"
+      ],
+      "title": "Sex",
+      "type": "object"
+    },
+    "Subject": {
+      "additionalProperties": false,
+      "properties": {
+        "hasLabel": {
+          "title": "Haslabel",
+          "type": "string"
+        },
+        "hasSession": {
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PhenotypicSession"
+              },
+              {
+                "$ref": "#/$defs/ImagingSession"
+              }
+            ]
+          },
+          "title": "Hassession",
+          "type": "array"
+        },
+        "identifier": {
+          "pattern": "^nb:[0-9a-fA-F]{8}\\b-[0-9a-fA-F]{4}\\b-[0-9a-fA-F]{4}\\b-[0-9a-fA-F]{4}\\b-[0-9a-fA-F]{12}$",
+          "title": "Identifier",
+          "type": "string"
+        },
+        "schemaKey": {
+          "const": "Subject",
+          "default": "Subject",
+          "title": "Schemakey",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hasLabel",
+        "hasSession"
+      ],
+      "title": "Subject",
+      "type": "object"
+    },
+    "SubjectGroup": {
+      "properties": {
+        "identifier": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "format": "uri",
+              "maxLength": 2083,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Identifier"
+        },
+        "schemaKey": {
+          "const": "SubjectGroup",
+          "default": "SubjectGroup",
+          "title": "Schemakey",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identifier"
+      ],
+      "title": "SubjectGroup",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "hasAccessEmail": {
+      "anyOf": [
+        {
+          "format": "email",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Hasaccessemail"
+    },
+    "hasAccessInstructions": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Hasaccessinstructions"
+    },
+    "hasAccessLink": {
+      "anyOf": [
+        {
+          "format": "uri",
+          "maxLength": 2083,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Hasaccesslink"
+    },
+    "hasAccessType": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AccessType"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "hasAuthors": {
+      "anyOf": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Hasauthors"
+    },
+    "hasKeywords": {
+      "anyOf": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Haskeywords"
+    },
+    "hasLabel": {
+      "title": "Haslabel",
+      "type": "string"
+    },
+    "hasReferencesAndLinks": {
+      "anyOf": [
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Hasreferencesandlinks"
+    },
+    "hasRepositoryURL": {
+      "anyOf": [
+        {
+          "format": "uri",
+          "maxLength": 2083,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Hasrepositoryurl"
+    },
+    "hasSamples": {
+      "items": {
+        "$ref": "#/$defs/Subject"
+      },
+      "title": "Hassamples",
+      "type": "array"
+    },
+    "identifier": {
+      "pattern": "^nb:[0-9a-fA-F]{8}\\b-[0-9a-fA-F]{4}\\b-[0-9a-fA-F]{4}\\b-[0-9a-fA-F]{4}\\b-[0-9a-fA-F]{12}$",
+      "title": "Identifier",
+      "type": "string"
+    },
+    "schemaKey": {
+      "const": "Dataset",
+      "default": "Dataset",
+      "title": "Schemakey",
+      "type": "string"
+    }
+  },
+  "required": [
+    "hasLabel",
+    "hasSamples"
+  ],
+  "title": "Dataset",
+  "type": "object"
+}

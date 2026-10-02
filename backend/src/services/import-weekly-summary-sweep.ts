@@ -31,9 +31,14 @@
  * `.then()` is untestable by construction.
  */
 
+import {
+  type VerdictDays,
+  WEEKLY_NEUROBAGEL_CHECKS,
+} from "../../../shared/contract/weekly-attention.js";
 import { auditLogStatement } from "../db/audit-log.js";
 import { SYSTEM_USER_ID } from "../lib/constants.js";
 import type { Bindings } from "../types/bindings.js";
+import { NEUROBAGEL_STORE_CHECK } from "./anonymity-sweep.js";
 import { parseSqliteUtc } from "./auto-import.js";
 import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
@@ -54,6 +59,7 @@ import {
   parseWeeklySummaryIssueTitle,
 } from "./import-issue-identity.js";
 import {
+  type NeurobagelWeekly,
   type ParkedDataset,
   type WeeklySummaryFacts,
   buildWeeklyRolloverComment,
@@ -63,6 +69,8 @@ import {
   isoWeekLabel,
   weeklySummaryLogLine,
 } from "./import-weekly-summary.js";
+import { readLedger } from "./neurobagel-plan.js";
+import { VERIFY_ACTIONS, parseHeartbeat } from "./neurobagel-verify.js";
 
 /** The audit action this job writes, and reads to gate itself. */
 export const WEEKLY_SUMMARY_AUDIT_ACTION = "import_weekly_summary";
@@ -181,6 +189,25 @@ export const PARKED_QUERY = `SELECT dataset_id, blocklist_reason, first_incomple
  */
 export const SWEEP_ACTIVITY_QUERY = `SELECT details FROM audit_log
    WHERE action = 'import_issue_triage' AND timestamp >= ? AND timestamp < ?`;
+
+/**
+ * The Neurobagel verification sweep's own heartbeat rows in the window (epic #1586, phase 6).
+ * Filtered to the daily run (`trigger: "cron"`) in JS, not in SQL, for the reason the triage
+ * query above gives: one malformed `details` payload must not blind the whole section, and an
+ * on-demand run an admin made is not the daily job's evidence of being alive.
+ */
+export const NEUROBAGEL_VERIFICATION_QUERY = `SELECT details FROM audit_log
+   WHERE action = '${VERIFY_ACTIONS.heartbeat}' AND timestamp >= ? AND timestamp < ?
+   ORDER BY id`;
+
+/**
+ * The audit rows that carry a finding the feature must not publish the kind of: the anonymity
+ * sweep's rows (some of which are about other checks, read apart in JS) and the verification
+ * sweep's own. The writer's ledger rows are read through `readLedger`, for what STANDS.
+ */
+export const NEUROBAGEL_FINDINGS_QUERY = `SELECT action, resource_id, details FROM audit_log
+   WHERE action IN ('anonymity_findings', '${VERIFY_ACTIONS.nodeAnonymity}')
+     AND timestamp >= ? AND timestamp < ?`;
 
 /**
  * What happened to this week's issue.
@@ -304,6 +331,8 @@ export async function runWeeklyImportSummary(
     parked: null,
     issuesClosed: null,
     issuesRelabelled: null,
+    neurobagel: null,
+    neurobagelFindings: null,
     errors: [],
   };
 
@@ -348,6 +377,7 @@ export async function runWeeklyImportSummary(
   await gatherFailures(env, facts);
   await gatherParked(env, facts, now);
   await gatherSweepActivity(env, facts, now);
+  await gatherNeurobagel(env, facts, now);
 
   // Rendered before posting, and returned whether or not the post happens: a dry
   // run's whole value is seeing this.
@@ -567,6 +597,118 @@ async function gatherSweepActivity(
     facts.issuesRelabelled = relabelled;
   } catch (err) {
     facts.errors.push({ stage: "sweep-activity", error: errText(err) });
+  }
+}
+
+/**
+ * The Neurobagel week: the daily runs and their verdicts, and a COUNT of findings that need a
+ * person. Counts only, because a dataset behind a finding may be an anonymous deposit and the
+ * report is filed on a public-facing repository: nothing here carries a kind or an identifier.
+ *
+ * FINDINGS are counted, not rows, and from every place the feature records one, so the number
+ * agrees with `nemar admin neurobagel status`: the writer's standing refusals (its ledger, as
+ * `status` reads it), the anonymity sweep's findings and the verification sweep's, each dataset
+ * once however many daily runs repeated it. They do not depend on whether a daily row exists:
+ * a week in which the verification sweep never ran still has its findings.
+ *
+ * No daily row at all leaves `neurobagel` null: the sweep writes one on every run, so none means
+ * it did not run, which is unknown and not zero.
+ */
+async function gatherNeurobagel(
+  env: Bindings,
+  facts: WeeklySummaryFacts,
+  now: Date,
+): Promise<void> {
+  const from = toSqliteUtc(new Date(now.getTime() - WINDOW_MS));
+  const to = toSqliteUtc(now);
+
+  // ---- Findings: distinct datasets, from the three places. ----
+  try {
+    const datasets = new Set<string>();
+    const ledger = await readLedger(env.DB);
+    for (const entry of ledger.values()) {
+      if (entry.label.state === "anonymity") datasets.add(entry.dataset_id);
+    }
+    const rows = await env.DB.prepare(NEUROBAGEL_FINDINGS_QUERY)
+      .bind(from, to)
+      .all<{ action: string; resource_id: string | null; details: string | null }>();
+    if (!rows.results) throw new Error("D1 returned null results");
+    let unreadable = 0;
+    rows.results.forEach((r, i) => {
+      // A row without a dataset still counts, once, under a key no dataset can have.
+      const key = r.resource_id ?? `row-${i}`;
+      if (r.action === VERIFY_ACTIONS.nodeAnonymity) {
+        datasets.add(key);
+        return;
+      }
+      try {
+        const parsed = JSON.parse(r.details ?? "") as { findings?: { check?: unknown }[] };
+        if (parsed.findings?.some((f) => f.check === NEUROBAGEL_STORE_CHECK)) datasets.add(key);
+      } catch {
+        unreadable++;
+      }
+    });
+    // An unreadable row might have been one of ours: the count is then unknown, not low.
+    if (unreadable > 0) {
+      facts.errors.push({
+        stage: "neurobagel",
+        error: `${unreadable} audit row(s) could not be read, so the count of findings is unknown`,
+      });
+    } else facts.neurobagelFindings = datasets.size;
+  } catch (err) {
+    facts.errors.push({ stage: "neurobagel", error: errText(err) });
+  }
+
+  // ---- The daily runs. ----
+  try {
+    const rows = await env.DB.prepare(NEUROBAGEL_VERIFICATION_QUERY)
+      .bind(from, to)
+      .all<{ details: string | null }>();
+    if (!rows.results) throw new Error("D1 returned null results");
+    const zero = (): VerdictDays => ({ healthy: 0, alarm: 0, unknown: 0, unchecked: 0 });
+    const days = zero();
+    const checkDays = {
+      store: zero(),
+      node: zero(),
+      registration: zero(),
+      drift: zero(),
+    };
+    let runs = 0;
+    let failedRuns = 0;
+    let latest: NeurobagelWeekly["latest"] | null = null;
+    for (const r of rows.results) {
+      const parsed = parseHeartbeat(r.details);
+      if (parsed === null) {
+        facts.errors.push({
+          stage: "neurobagel",
+          error: "a verification heartbeat row could not be read",
+        });
+        continue;
+      }
+      const v = parsed.verification;
+      if (v.trigger !== "cron") continue;
+      runs++;
+      if (v.failed) failedRuns++;
+      days[v.overall]++;
+      for (const name of WEEKLY_NEUROBAGEL_CHECKS) checkDays[name][v.checks[name].verdict]++;
+      latest = {
+        at: v.at,
+        overall: v.overall,
+        checks: {
+          store: { verdict: v.checks.store.verdict, reason: v.checks.store.reason },
+          node: { verdict: v.checks.node.verdict, reason: v.checks.node.reason },
+          registration: {
+            verdict: v.checks.registration.verdict,
+            reason: v.checks.registration.reason,
+          },
+          drift: { verdict: v.checks.drift.verdict, reason: v.checks.drift.reason },
+        },
+      };
+    }
+    if (latest === null) return;
+    facts.neurobagel = { runs, failedRuns, days, checkDays, latest };
+  } catch (err) {
+    facts.errors.push({ stage: "neurobagel", error: errText(err) });
   }
 }
 

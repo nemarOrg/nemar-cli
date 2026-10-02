@@ -104,6 +104,38 @@ async function runCli(
   return { stdout, stderr, exitCode };
 }
 
+/**
+ * A Neurobagel week in which all four checks ran and were healthy on all seven days. The
+ * server's answer is canned here, as it is for the rest of this file; what is real is the rule the
+ * command applies to it, which is the report's own (`weeklyAttention`, shared/contract).
+ */
+function neurobagelWeek(over: Record<string, unknown> = {}) {
+  const days = { healthy: 7, alarm: 0, unknown: 0, unchecked: 0 };
+  const check = (reason: string) => ({ verdict: "healthy", reason });
+  return {
+    runs: 7,
+    failedRuns: 0,
+    days: { ...days },
+    checkDays: {
+      store: { ...days },
+      node: { ...days },
+      registration: { ...days },
+      drift: { ...days },
+    },
+    latest: {
+      at: "2026-09-09T03:00:05.000Z",
+      overall: "healthy",
+      checks: {
+        store: check("20 eligible dataset(s), 20 written and indexed; no residue."),
+        node: check("The node serves 20 valid, protected record(s), all for eligible datasets."),
+        registration: check("NEMAR is listed by the federation and reports no error."),
+        drift: check("11 pinned release tags and vocabulary files match upstream."),
+      },
+    },
+    ...over,
+  };
+}
+
 const HEALTHY = {
   applied: false,
   posted: false,
@@ -127,6 +159,8 @@ const HEALTHY = {
     parked: [{ datasetId: "on004148", reason: "upstream_403_after_window", parkedDays: 64 }],
     issuesClosed: 3,
     issuesRelabelled: 1,
+    neurobagel: neurobagelWeek(),
+    neurobagelFindings: 0,
     errors: [],
   },
   issue: null,
@@ -399,6 +433,41 @@ describe("nemar admin import-weekly: the exit code mirrors the sibling command",
     ["a coverage alarm", { coverageStatus: "alarm" }, 1],
     ["dispatches not landing", { dispatchLost: true }, 1],
     ["no recorded sweep activity", { issuesClosed: null }, 1],
+    // A week the issue flags for Neurobagel reasons alone must not exit 0 (one rule, shared).
+    ["no Neurobagel run recorded", { neurobagel: null }, 1],
+    [
+      "an alarming Neurobagel latest run",
+      { neurobagel: neurobagelWeek({ latest: { ...neurobagelWeek().latest, overall: "alarm" } }) },
+      1,
+    ],
+    [
+      "a Neurobagel alarm on an earlier day",
+      { neurobagel: neurobagelWeek({ days: { healthy: 6, alarm: 1, unknown: 0, unchecked: 0 } }) },
+      1,
+    ],
+    [
+      "a Neurobagel unknown on an earlier day",
+      { neurobagel: neurobagelWeek({ days: { healthy: 6, alarm: 0, unknown: 1, unchecked: 0 } }) },
+      1,
+    ],
+    ["a Neurobagel sweep that failed", { neurobagel: neurobagelWeek({ failedRuns: 1 }) }, 1],
+    ["a Neurobagel daily run that went missing", { neurobagel: neurobagelWeek({ runs: 3 }) }, 1],
+    ["Neurobagel findings", { neurobagelFindings: 2 }, 1],
+    ["Neurobagel findings that could not be counted", { neurobagelFindings: null }, 1],
+    // Not a problem: a week in which a check is simply not configured here.
+    [
+      "a Neurobagel week with one missed run and one unconfigured check",
+      {
+        neurobagel: neurobagelWeek({
+          runs: 6,
+          checkDays: {
+            ...neurobagelWeek().checkDays,
+            node: { healthy: 0, alarm: 0, unknown: 0, unchecked: 7 },
+          },
+        }),
+      },
+      0,
+    ],
     ["a section that could not be read", { errors: [{ stage: "parked", error: "boom" }] }, 2],
   ] as const) {
     test(`${label} exits ${code}`, async () => {
@@ -412,6 +481,38 @@ describe("nemar admin import-weekly: the exit code mirrors the sibling command",
       }
     });
   }
+});
+
+describe("nemar admin import-weekly: a week flagged for Neurobagel alone says why", () => {
+  test("the exit code is 1 and the reason is printed in the headline's own words", async () => {
+    seedAuthenticatedConfig();
+    const server = startCaptureServer({
+      ...HEALTHY,
+      facts: { ...HEALTHY.facts, neurobagelFindings: 2, neurobagel: neurobagelWeek({ runs: 3 }) },
+    });
+    try {
+      const r = await runCli(["admin", "import-weekly"], server.url);
+      expect(r.exitCode).toBe(1);
+      expect(r.stdout).toContain("Needs attention:");
+      expect(r.stdout).toContain("2 Neurobagel finding(s) need attention (see the audit log)");
+      expect(r.stdout).toContain("the daily Neurobagel verification is missing for 4 of 7 day(s)");
+      expect(r.stdout).not.toMatch(/anonym|deposit/i);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a clean week prints no such line", async () => {
+    seedAuthenticatedConfig();
+    const server = startCaptureServer(HEALTHY);
+    try {
+      const r = await runCli(["admin", "import-weekly"], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).not.toContain("Needs attention:");
+    } finally {
+      server.stop();
+    }
+  });
 });
 
 describe("nemar admin import-weekly: a gate refusal is not a blind report", () => {

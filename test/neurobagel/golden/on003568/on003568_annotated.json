@@ -1,0 +1,91 @@
+{
+  "group": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Diagnosis",
+        "TermURL": "nb:Diagnosis"
+      },
+      "Levels": {
+        "HV": {
+          "Label": "Healthy Control",
+          "TermURL": "ncit:C94342"
+        },
+        "MDD": {
+          "Label": "Major depressive disorder",
+          "TermURL": "snomed:370143000"
+        }
+      },
+      "MissingValues": [],
+      "VariableType": "Categorical"
+    },
+    "Description": "Participant group or diagnosis; values are mapped to diagnosis terms by a reviewed curation entry.",
+    "Levels": {
+      "HV": "Healthy Control",
+      "MDD": "Major depressive disorder"
+    }
+  },
+  "participant_age": {
+    "Annotations": {
+      "Format": {
+        "Label": "decimal",
+        "TermURL": "nb:FromFloat"
+      },
+      "IsAbout": {
+        "Label": "Age",
+        "TermURL": "nb:Age"
+      },
+      "MissingValues": [
+        "",
+        " ",
+        "n/a"
+      ],
+      "ValueRange": {
+        "Max": 19,
+        "Min": 12
+      },
+      "VariableType": "Continuous"
+    },
+    "Description": "Age of the participant.",
+    "Units": "years"
+  },
+  "participant_id": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Participant ID",
+        "TermURL": "nb:ParticipantID"
+      },
+      "VariableType": "Identifier"
+    },
+    "Description": "Participant identifier, as in participants.tsv."
+  },
+  "sex": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Sex",
+        "TermURL": "nb:Sex"
+      },
+      "Levels": {
+        "FEMALE": {
+          "Label": "Female",
+          "TermURL": "snomed:248152002"
+        },
+        "MALE": {
+          "Label": "Male",
+          "TermURL": "snomed:248153007"
+        }
+      },
+      "MissingValues": [
+        "",
+        "n/a",
+        "N/A",
+        "NA"
+      ],
+      "VariableType": "Categorical"
+    },
+    "Description": "Sex of the participant.",
+    "Levels": {
+      "FEMALE": "Female",
+      "MALE": "Male"
+    }
+  }
+}

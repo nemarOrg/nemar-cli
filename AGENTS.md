@@ -127,7 +127,19 @@ reviewed, verified declaration in `eeglab-fdt-declarations.json` pairs one, and 
 refuses that recording rather than guessing the pairing by name),
 0074 (`manifest.json` emits the plain public S3 URL for a dataset the bucket policy does not
 exclude from public read, and keeps the legacy presigned URL, always, for one it does -- so
-correctness never depends on the catalog and the bucket policy agreeing).
+correctness never depends on the catalog and the bucket policy agreeing),
+0081 (Neurobagel artifacts come from one pure transform over data-plane documents: identity only
+from `metadata.json`, `anonymous` must be exactly `false` or the transform refuses before reading
+anything else, ids are uuid5 under one committed namespace, and a fact the rules cannot establish
+is left out and counted),
+0082 (the Neurobagel node runs stock on a shared host under hard limits and is fed by pull, never
+push: it executes nothing for the platform, and a service that needs more is a different decision),
+0083 (curated Neurobagel annotations are a reviewed, content-pinned file: terms only from the pinned
+vocabulary, a strict loader that fails closed, and a dataset with an entry is never converted
+without it),
+0084 (federation eligibility is one predicate decided from the D1 row and re-checked at every read,
+with `anonymous: false` in the gathered metadata as a second independent guard; the writer is a hook
+that never fails or blocks a flow and is off unless `NEUROBAGEL_WRITER_ENABLED` is `1`).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and

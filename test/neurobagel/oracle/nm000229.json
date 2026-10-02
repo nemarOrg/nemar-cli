@@ -1,0 +1,263 @@
+{
+  "bagel": "0.11.6",
+  "bagel_only_subjects": 0,
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/nm000229 (latest version v1.0.1).",
+    "hasAccessLink": "https://nemar.org/dataset/nm000229",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Laura Gwilliams",
+      "Graham Flick",
+      "Alec Marantz",
+      "Liina Pylkk\u00e4nen",
+      "David Poeppel",
+      "Jean-R\u00e9mi King"
+    ],
+    "hasKeywords": [
+      "MEG",
+      "Magnetoencephalography",
+      "speech comprehension",
+      "naturalistic stories",
+      "phoneme decoding",
+      "language"
+    ],
+    "hasLabel": "Gwilliams et al. 2023 \u2014 Introducing MEG-MASC: a high-quality magneto-encephalography dataset for evaluating natural speech processing",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/nm000229",
+      "https://doi.org/10.82901/nemar.nm000229"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/nm000229/"
+  },
+  "dataset_id": "nm000229",
+  "imaging": {
+    "attachable_subjects": 27,
+    "modalities": {
+      "sub-01": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-02": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-03": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-04": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-05": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-06": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-07": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-08": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-09": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-10": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-11": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-12": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-13": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-14": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-15": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-16": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-17": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-18": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-19": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-20": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-21": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-22": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-23": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-24": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-25": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-26": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-27": [
+        "nidm:Magnetoencephalography"
+      ]
+    }
+  },
+  "inputs": {
+    "annotated.json": "b164060b85d46c2d69dde29e1a8c842b4c3c6003763cda63f5428d7fc7650838",
+    "dataset_description.json": "eccee7c8cf64010532f2bb4e628c2c3462a31e9d0d45c0d312d4cb42a880172f",
+    "participants.tsv": "37faf6af07ab4cf8d1ad9c4ce5b7c9e7d654daca157852f2740b0e380d4ef8c0"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-01": {
+      "age": 25.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-02": {
+      "age": 33.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-03": {
+      "age": 29.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-04": {
+      "age": 31.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-05": {
+      "age": 20.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-06": {
+      "age": 30.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-07": {
+      "age": 20.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-08": {
+      "age": 35.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-09": {
+      "age": 41.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-10": {
+      "age": 27.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-11": {
+      "age": 31.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-12": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-13": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-14": {
+      "age": 20.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-15": {
+      "age": 20.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-16": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-17": {
+      "age": 31.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-18": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-19": {
+      "age": 20.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-20": {
+      "age": 20.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-21": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-22": {
+      "age": 20.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-23": {
+      "age": 32.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-24": {
+      "age": 23.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-25": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-26": {
+      "age": 24.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-27": {
+      "age": 18.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    }
+  },
+  "transform_only_subjects": 0
+}

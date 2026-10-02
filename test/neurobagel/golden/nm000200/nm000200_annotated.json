@@ -1,0 +1,67 @@
+{
+  "group": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Diagnosis",
+        "TermURL": "nb:Diagnosis"
+      },
+      "Levels": {
+        "healthy": {
+          "Label": "Healthy Control",
+          "TermURL": "ncit:C94342"
+        }
+      },
+      "MissingValues": [
+        "",
+        "n/a",
+        "N/A",
+        "NA"
+      ],
+      "VariableType": "Categorical"
+    },
+    "Description": "Participant group; only healthy control values are mapped to a diagnosis term.",
+    "Levels": {
+      "healthy": "Healthy Control"
+    }
+  },
+  "participant_id": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Participant ID",
+        "TermURL": "nb:ParticipantID"
+      },
+      "VariableType": "Identifier"
+    },
+    "Description": "Participant identifier, as in participants.tsv."
+  },
+  "sex": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Sex",
+        "TermURL": "nb:Sex"
+      },
+      "Levels": {
+        "F": {
+          "Label": "Female",
+          "TermURL": "snomed:248152002"
+        },
+        "M": {
+          "Label": "Male",
+          "TermURL": "snomed:248153007"
+        }
+      },
+      "MissingValues": [
+        "",
+        "n/a",
+        "N/A",
+        "NA"
+      ],
+      "VariableType": "Categorical"
+    },
+    "Description": "Sex of the participant.",
+    "Levels": {
+      "F": "Female",
+      "M": "Male"
+    }
+  }
+}

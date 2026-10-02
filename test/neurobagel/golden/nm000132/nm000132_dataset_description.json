@@ -1,0 +1,31 @@
+{
+  "AccessInstructions": "Public access. License: CC-BY-4.0. Browse and download at https://nemar.org/dataset/nm000132 (latest version v1.1.1).",
+  "AccessLink": "https://nemar.org/dataset/nm000132",
+  "AccessType": "public",
+  "Authors": [
+    "Emily S. Kappenman",
+    "Jaclyn L. Farrens",
+    "Wendy Zhang",
+    "Andrew X. Stewart",
+    "Steven J. Luck."
+  ],
+  "Keywords": [
+    "EEG",
+    "Event-Related Potentials, P300",
+    "N170",
+    "mismatch negativity",
+    "N400",
+    "P3",
+    "error-related negativity",
+    "N2pc",
+    "lateralized readiness potential",
+    "ERP"
+  ],
+  "Name": "ERP CORE",
+  "ParticipantCount": 40,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/nm000132",
+    "https://doi.org/10.82901/nemar.nm000132"
+  ],
+  "RepositoryURL": "https://data.nemar.org/nm000132/"
+}

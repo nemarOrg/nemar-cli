@@ -1,0 +1,84 @@
+Setting up a Neurobagel graph backend...
+(The GraphDB server is being accessed inside the GraphDB container at http://localhost:7200.)
+
+Setting up GraphDB server...
+The GraphDB server is being accessed at http://localhost:7200.
+Installing jq...
+debconf: delaying package configuration, since apt-utils is not installed
+Selecting previously unselected package libonig5:amd64.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 6657 files and directories currently installed.)
+Preparing to unpack .../libonig5_6.9.9-1build1_amd64.deb ...
+Unpacking libonig5:amd64 (6.9.9-1build1) ...
+Selecting previously unselected package libjq1:amd64.
+Preparing to unpack .../libjq1_1.7.1-3ubuntu0.24.04.2_amd64.deb ...
+Unpacking libjq1:amd64 (1.7.1-3ubuntu0.24.04.2) ...
+Selecting previously unselected package jq.
+Preparing to unpack .../jq_1.7.1-3ubuntu0.24.04.2_amd64.deb ...
+Unpacking jq (1.7.1-3ubuntu0.24.04.2) ...
+Setting up libonig5:amd64 (6.9.9-1build1) ...
+Setting up libjq1:amd64 (1.7.1-3ubuntu0.24.04.2) ...
+Setting up jq (1.7.1-3ubuntu0.24.04.2) ...
+Processing triggers for libc-bin (2.39-0ubuntu8.6) ...
+First time GraphDB user setup enabled.
+Changing the admin password (note: if you have previously set the admin password, this has no effect)...
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100    52    0     0  100    52      0    227 --:--:-- --:--:-- --:--:--   228
+Enabling password-based access control to all databases ...
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100     4    0     0  100     4      0    251 --:--:-- --:--:-- --:--:--   266
+Creating a new database user nbgraph...
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100    77    0     0  100    77      0    172 --:--:-- --:--:-- --:--:--   171100    77    0     0  100    77      0    171 --:--:-- --:--:-- --:--:--   171
+Creating a GraphDB configuration file (./data-config.ttl) for the new database nemar...
+Creating the GraphDB database nemar...
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100  1855    0     0  100  1855      0   2128 --:--:-- --:--:-- --:--:--  2127100  1855    0     0  100  1855      0   2128 --:--:-- --:--:-- --:--:--  2127
+Granting user nbgraph read/write permissions to database nemar...
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0100    63    0     0  100    63      0   3069 --:--:-- --:--:-- --:--:--  3150
+Done.
+Finished server setup.export FIRST_TIME_SETUP=on
+Adding datasets to the database...
+
+CLEARING EXISTING DATA FROM repositories/nemar...
+
+UPLOADING DATA FROM /data TO repositories/nemar...
+
+recipes-example.jsonld:
+HTTP/1.1 204 
+Vary: Accept-Encoding
+Cache-Control: no-store
+X-XSS-Protection: 1; mode=block
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Language: en-US
+Date: Fri, 02 Oct 2026 05:11:54 GMT
+Server: GraphDB/10.8.12 RDF4J/4.3.15
+
+
+FINISHED UPLOADING DATA FROM /data TO repositories/nemar.
+Finished adding datasets to databases.
+Adding Neurobagel vocabulary to the database
+
+UPLOADING DATA FROM ../vocab TO repositories/nemar...
+
+nb_vocab.ttl:
+HTTP/1.1 204 
+Vary: Accept-Encoding
+Cache-Control: no-store
+X-XSS-Protection: 1; mode=block
+X-Frame-Options: SAMEORIGIN
+X-Content-Type-Options: nosniff
+Content-Language: en-US
+Date: Fri, 02 Oct 2026 05:11:54 GMT
+Server: GraphDB/10.8.12 RDF4J/4.3.15
+
+
+FINISHED UPLOADING DATA FROM ../vocab TO repositories/nemar.
+Finished adding the Neurobagel vocabulary to the database.
+Finished setting up the Neurobagel graph backend.

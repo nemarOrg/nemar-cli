@@ -1,0 +1,27 @@
+{
+  "AccessInstructions": "Public access. License: CDLA-Permissive-2.0. Browse and download at https://nemar.org/dataset/nm000276 (latest version v1.0.0).",
+  "AccessLink": "https://nemar.org/dataset/nm000276",
+  "AccessType": "public",
+  "Authors": [
+    "Francesco Carzaniga",
+    "Michael Hersche",
+    "Abu Sebastian",
+    "Kaspar Schindler",
+    "Abbas Rahimi"
+  ],
+  "Keywords": [
+    "intracranial EEG",
+    "iEEG",
+    "Epilepsy",
+    "Seizures",
+    "long-term monitoring",
+    "seizure detection"
+  ],
+  "Name": "SWEC iEEG Dataset",
+  "ParticipantCount": 40,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/nm000276",
+    "https://doi.org/10.82901/nemar.nm000276"
+  ],
+  "RepositoryURL": "https://data.nemar.org/nm000276/"
+}

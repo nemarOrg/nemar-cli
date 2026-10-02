@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+#
+# nb-up: start the stack from nothing and wait until it is loaded, healthy and verified.
+#
+# Refuses if any of the graph or API containers is already running: the stock init container
+# rewrites the shared data volume on every `up`, which on a running node could leave the API's
+# metadata and the graph out of step. Use `nb reload` to load a new release into a running node.
+# Refuses while the node is on hold, and refuses to start the tunnel profile without a token.
+#
+# Usage: bin/nb-up
+# Exit codes: 0 up and verified; 5 started but verification failed; 7 on hold; 8 pre-flight refused.
+
+set -euo pipefail
+# shellcheck source=nb-common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/nb-common.sh"
+
+case "${1:-}" in
+  "") ;;
+  -h | --help)
+    nb_usage "$0"
+    exit 0
+    ;;
+  *) nb_die "$NB_EX_USAGE" "usage: nb-up" ;;
+esac
+
+nb_need docker jq curl perl
+nb_check_project_name
+"$NB_CODE_DIR/bin/nb-install" --check
+
+nb_lock_or_exit "nb-up"
+
+if nb_hold_active; then
+  nb_log "node is on hold: $(cat "$NB_STATE_DIR/hold"); run: nb unhold"
+  exit "$NB_EX_HOLD"
+fi
+
+case ",$(nb_env_get COMPOSE_PROFILES ""),$(nb_env_get NB_PROFILES_OVERRIDE "")," in
+  *,tunnel,*)
+    [ -n "$(nb_env_get NB_TUNNEL_TOKEN "")" ] \
+      || nb_die "$NB_EX_PREFLIGHT" "the tunnel profile is enabled but NB_TUNNEL_TOKEN is empty (the lead approves the hostname first)"
+    ;;
+esac
+
+for s in graph api; do
+  if nb_container_running "$s"; then
+    nb_die "$NB_EX_PREFLIGHT" "service $s is already running; use 'nb status', or 'nb reload' to load a new release"
+  fi
+done
+
+avail="$(nb_mem_available_mb)"
+min_avail="$(nb_env_get NB_MIN_AVAILABLE_MB 1800)"
+if [ -n "$avail" ] && [ "$avail" -lt "$min_avail" ]; then
+  nb_die "$NB_EX_PREFLIGHT" "host has ${avail} MiB available, below the ${min_avail} MiB needed to start"
+fi
+
+# Starting the node is the operator's answer to a guard abort, so the marker that explained why it
+# was down is cleared (and logged, so it is not silently lost).
+if [ -f "$NB_STATE_DIR/guard-abort.json" ]; then
+  nb_log "clearing the guard's abort marker: $(jq -c . "$NB_STATE_DIR/guard-abort.json" 2>/dev/null || cat "$NB_STATE_DIR/guard-abort.json")"
+  rm -f "$NB_STATE_DIR/guard-abort.json"
+fi
+
+nb_log "starting $NB_PROJECT (release $(nb_current_release))"
+nb_compose up -d
+# Not exec: this script holds the lock and must release it when the child is done.
+rc=0
+"$NB_CODE_DIR/bin/nb-reload" --adopt || rc=$?
+exit "$rc"

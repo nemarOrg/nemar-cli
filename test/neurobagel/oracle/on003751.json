@@ -1,0 +1,12 @@
+{
+  "bagel": "0.11.6",
+  "dataset_id": "on003751",
+  "imaging": null,
+  "inputs": {
+    "annotated.json": "697c4eb53de42fb8f1a242685db20188b8f1838dbea353f9f4d6afd85f931b49",
+    "dataset_description.json": "8e160758814cc527a74fdc9ce80cd4b0e88c377342432c5d69d764c672ff8ea3",
+    "participants.tsv": "9339e6336f18a132362dbefe3b75b67751560e4b519c00715f45fec9ccfb11d1"
+  },
+  "reason": "duplicate_ids",
+  "status": "refused"
+}

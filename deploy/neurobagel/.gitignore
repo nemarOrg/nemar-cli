@@ -1,0 +1,9 @@
+# Runtime state of a deployment. None of this belongs in git.
+/.env
+/secrets/
+/recipes/
+/data/
+/state/
+/backups/
+/logs/
+/scratch/

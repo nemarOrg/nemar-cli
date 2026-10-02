@@ -1,0 +1,41 @@
+{
+  "base": "https://data-test.nemar.org",
+  "dataset_id": "nm099998",
+  "documents": {
+    "metadata.json": {
+      "absent": false,
+      "bytes": 4295,
+      "etag": null,
+      "redirected": false,
+      "sha256": "aea4f00bb03c7febd3e7d776dd06bcc9ca1c4f82668fefb02357609fb864b111",
+      "skipped": false,
+      "status": 200,
+      "too_large_over_bytes": null,
+      "url": "https://data-test.nemar.org/nm099998/metadata.json"
+    },
+    "participants.json": {
+      "absent": false,
+      "bytes": null,
+      "etag": null,
+      "redirected": false,
+      "sha256": null,
+      "skipped": true,
+      "status": 0,
+      "too_large_over_bytes": null,
+      "url": "https://data-test.nemar.org/nm099998/v1.0.0/participants.json"
+    },
+    "participants.tsv": {
+      "absent": false,
+      "bytes": null,
+      "etag": null,
+      "redirected": false,
+      "sha256": null,
+      "skipped": true,
+      "status": 0,
+      "too_large_over_bytes": null,
+      "url": "https://data-test.nemar.org/nm099998/v1.0.0/participants.tsv"
+    }
+  },
+  "fetched_at": "2026-10-02T06:18:25.820Z",
+  "latest_version": "v1.0.0"
+}

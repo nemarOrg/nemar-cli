@@ -1,0 +1,29 @@
+{
+  "group": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Diagnosis",
+        "TermURL": "nb:Diagnosis"
+      },
+      "Levels": {},
+      "MissingValues": [
+        "Active",
+        "Control",
+        "Passive"
+      ],
+      "VariableType": "Categorical"
+    },
+    "Description": "Participant group or diagnosis; values are mapped to diagnosis terms by a reviewed curation entry.",
+    "Levels": {}
+  },
+  "participant_id": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Participant ID",
+        "TermURL": "nb:ParticipantID"
+      },
+      "VariableType": "Identifier"
+    },
+    "Description": "Participant identifier, as in participants.tsv."
+  }
+}

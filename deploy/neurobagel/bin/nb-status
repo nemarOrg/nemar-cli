@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+#
+# nb-status: one read-only look at the node. Starts nothing, stops nothing.
+#
+# Reports: overall health, the live release, the loader and reload history, hold state, each
+# container's state, health, restart count and memory against its limit, the host's available
+# memory and load, and whether the other containers on the host are still up.
+#
+# Anything that needs a person is a PROBLEM and makes the exit code non-zero: a container that is
+# not running or not healthy, a failed reload or a failed load, a frozen or stale loader, a guard
+# that has never started (NB_GUARD_EXPECTED, default 1) or has gone stale, a guard abort, a node on hold whose API still answers. Warnings are notes (a staged
+# release waiting, a graph restart since the last reload, host memory below the reload minimum).
+#
+# Usage: bin/nb-status [--json] [--deep] [--quiet]
+#   --json   machine-readable output
+#   --deep   also run the full verification: the node must serve exactly the live release,
+#            protected, for the empty query (the heaviest query; do not run it every minute)
+#   --quiet  print nothing when healthy, so a cron job mails only when something is wrong
+#
+# Exit codes: 0 healthy; 1 degraded; 2 down; 3 on hold (deliberately out of the federation).
+
+set -euo pipefail
+# shellcheck source=nb-common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/nb-common.sh"
+
+as_json=0
+deep=0
+quiet=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --json) as_json=1; shift ;;
+    --deep) deep=1; shift ;;
+    --quiet) quiet=1; shift ;;
+    -h | --help)
+      nb_usage "$0"
+      exit 0
+      ;;
+    *) nb_die "$NB_EX_USAGE" "unknown argument: $1" ;;
+  esac
+done
+
+nb_need docker jq curl
+nb_check_project_name
+
+problems=""
+problem() { problems="${problems:+$problems; }$1"; }
+warnings=""
+warn() { warnings="${warnings:+$warnings; }$1"; }
+
+profiles="$(nb_env_get COMPOSE_PROFILES "")"
+required="graph api"
+case ",$profiles," in *,portal,*) required="$required federation query_federation" ;; esac
+case ",$profiles," in *,tunnel,*) required="$required cloudflared" ;; esac
+
+# ---- containers -------------------------------------------------------------------------------
+stats_file="$(mktemp)"
+trap 'rm -f "$stats_file"' EXIT
+names="$(docker ps -a --filter "label=com.docker.compose.project=$NB_PROJECT" --format '{{.Names}}')"
+if [ -n "$names" ]; then
+  # shellcheck disable=SC2086  # newline separated container names
+  docker stats --no-stream --format '{{.Name}}	{{.CPUPerc}}	{{.MemUsage}}' $names >"$stats_file" 2>/dev/null || true
+fi
+
+containers_json="[]"
+for s in $required init_data; do
+  id="$(nb_container_id "$s")"
+  if [ -z "$id" ]; then
+    [ "$s" = init_data ] || problem "service $s has no container"
+    continue
+  fi
+  line="$(docker inspect -f '{{.Name}}	{{.State.Status}}	{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}	{{.RestartCount}}	{{.State.StartedAt}}	{{.HostConfig.Memory}}	{{.State.OOMKilled}}	{{.State.ExitCode}}' "$id" | sed 's|^/||')"
+  cname="$(printf '%s' "$line" | cut -f1)"
+  state="$(printf '%s' "$line" | cut -f2)"
+  health="$(printf '%s' "$line" | cut -f3)"
+  restarts="$(printf '%s' "$line" | cut -f4)"
+  started="$(printf '%s' "$line" | cut -f5)"
+  limit="$(printf '%s' "$line" | cut -f6)"
+  oom="$(printf '%s' "$line" | cut -f7)"
+  exitcode="$(printf '%s' "$line" | cut -f8)"
+  cpu="$(grep -F "$cname	" "$stats_file" | cut -f2 || true)"
+  mem="$(grep -F "$cname	" "$stats_file" | cut -f3 | sed 's| / .*||' || true)"
+  if [ "$s" = init_data ]; then
+    # One-shot: exited 0 is its healthy end state.
+    [ "$state" = exited ] && [ "$exitcode" = 0 ] || problem "init_data ended in state $state (exit $exitcode)"
+  else
+    # A node on hold has its API stopped on purpose.
+    if [ "$state" != running ] && ! { [ "$s" = api ] && nb_hold_active; }; then problem "$s is $state"; fi
+    if [ "$state" = running ]; then
+      case "$health" in
+        healthy | none) ;;
+        *) problem "$s health is $health" ;;
+      esac
+    fi
+    [ "$oom" = false ] || problem "$s was OOM-killed"
+    expected_restarts=0
+    if [ "$s" = graph ] && [ -f "$NB_STATE_DIR/applied.json" ]; then
+      expected_restarts="$(jq -r '.graph_restarts // 0' "$NB_STATE_DIR/applied.json")"
+    fi
+    [ "$restarts" -le "$expected_restarts" ] || warn "$s restarted $((restarts - expected_restarts)) time(s) since the last reload"
+  fi
+  containers_json="$(printf '%s' "$containers_json" | jq -c \
+    --arg s "$s" --arg state "$state" --arg health "$health" --argjson restarts "$restarts" \
+    --arg started "$started" --argjson limit "$limit" --arg cpu "${cpu:-}" --arg mem "${mem:-}" \
+    '. + [{service:$s, state:$state, health:$health, restarts:$restarts, started_at:$started,
+           mem_limit_bytes:$limit, cpu:$cpu, mem:$mem}]')"
+done
+
+# ---- node probes ------------------------------------------------------------------------------
+api_port="$(nb_env_get NB_NAPI_PORT_HOST 18000)"
+api_code="$(curl -s -o /dev/null -m 10 -w '%{http_code}' "http://127.0.0.1:${api_port}/" || true)"
+hold="no"
+nb_hold_active && hold="$(cat "$NB_STATE_DIR/hold")"
+if [ "$hold" = no ]; then
+  [ "$api_code" = 200 ] || problem "node API answered HTTP ${api_code:-none} on 127.0.0.1:${api_port}"
+elif [ "$api_code" = 200 ]; then
+  problem "the node is on hold but its API still answers on 127.0.0.1:${api_port}"
+fi
+
+cur="$(nb_current_release || true)"
+manifest="null"
+[ -z "$cur" ] || [ ! -f "$NB_MANIFESTS_DIR/$cur.json" ] || manifest="$(jq -c '{name, created_at, source, counts}' "$NB_MANIFESTS_DIR/$cur.json")"
+applied="null"
+[ ! -f "$NB_STATE_DIR/applied.json" ] || applied="$(jq -c . "$NB_STATE_DIR/applied.json")"
+last_load="null"
+[ ! -f "$NB_STATE_DIR/last-load.json" ] || last_load="$(jq -c . "$NB_STATE_DIR/last-load.json")"
+last_reload="null"
+if [ -f "$NB_STATE_DIR/reload-history.jsonl" ]; then
+  last_reload="$(tail -n 1 "$NB_STATE_DIR/reload-history.jsonl" | jq -c .)"
+  [ "$(printf '%s' "$last_reload" | jq .ok)" = true ] || problem "the last reload failed: $(printf '%s' "$last_reload" | jq -r .reason)"
+fi
+# The loader's own records: failed or frozen loads, and a loader that has gone quiet.
+freeze_note=""
+[ ! -f "$NB_STATE_DIR/freeze" ] || freeze_note="$(cat "$NB_STATE_DIR/freeze")"
+source_set=0
+[ -z "$(nb_env_get NB_SOURCE "")" ] || source_set=1
+last_ok=""
+[ ! -f "$NB_STATE_DIR/last-load-ok" ] || last_ok="$(cat "$NB_STATE_DIR/last-load-ok")"
+while IFS= read -r line; do
+  [ -z "$line" ] || problem "$line"
+done < <(nb_loader_problems "$NB_STATE_DIR/last-load.json" "$last_ok" "$(nb_epoch)" "$source_set" \
+  "$(nb_env_get NB_LOADER_STALE_S 7200)" "$freeze_note")
+pending=""
+[ ! -f "$NB_STATE_DIR/pending-reload" ] || pending="$(cat "$NB_STATE_DIR/pending-reload")"
+[ -z "$pending" ] || warn "release $pending is staged and waiting for a reload"
+[ ! -f "$NB_STATE_DIR/degraded" ] || problem "degraded flag set: $(cat "$NB_STATE_DIR/degraded")"
+# A guard that was running and has gone quiet is itself a finding, and so is one that stopped us.
+hb=""
+[ ! -f "$NB_STATE_DIR/guard-heartbeat" ] || hb="$(cat "$NB_STATE_DIR/guard-heartbeat" 2>/dev/null || true)"
+# NB_GUARD_EXPECTED=1 (the default) means a guard that has never started is a problem too; set it to
+# 0 in .env only for a node that is deliberately run without one.
+hb_problem="$(nb_guard_heartbeat_problem "$hb" "$(nb_epoch)" "$(nb_env_get NB_GUARD_STALE_S 1200)" "$(nb_env_get NB_GUARD_EXPECTED 1)")"
+[ -z "$hb_problem" ] || problem "$hb_problem"
+[ ! -f "$NB_STATE_DIR/guard-abort.json" ] || problem "the guard stopped the project: $(jq -r '.at + " " + .reason' "$NB_STATE_DIR/guard-abort.json")"
+if [ -n "$cur" ] && [ -n "$(printf '%s' "$applied" | jq -r 'select(. != null) | .release')" ] \
+  && [ "$(printf '%s' "$applied" | jq -r .release)" != "$cur" ]; then
+  warn "live release $cur differs from the loaded release $(printf '%s' "$applied" | jq -r .release)"
+fi
+
+deep_result="null"
+if [ "$deep" = 1 ]; then
+  if [ -z "$cur" ]; then
+    problem "no live release to verify"
+  elif nb_verify_node "$cur"; then
+    deep_result="$(jq -cn --argjson e "$NB_VERIFY_EXPECTED" --argjson s "$NB_VERIFY_SERVED" '{ok:true, expected:$e, served:$s}')"
+  else
+    deep_result="$(jq -cn --arg r "$NB_VERIFY_REASON" '{ok:false, reason:$r}')"
+    problem "deep check failed: $NB_VERIFY_REASON"
+  fi
+fi
+
+# ---- host and neighbours ----------------------------------------------------------------------
+avail="$(nb_mem_available_mb)"
+load1="$(nb_load1)"
+min_avail="$(nb_env_get NB_MIN_AVAILABLE_MB 1800)"
+[ -z "$avail" ] || [ "$avail" -ge "$min_avail" ] || warn "host memory available ${avail} MiB is below ${min_avail} MiB"
+disk_free_gb="$(df -Pk "$NB_HOME" | awk 'NR==2 {printf "%.1f", $4/1048576}')"
+neighbor_total=0
+neighbor_bad=""
+while IFS='|' read -r n proj st; do
+  [ -n "$n" ] && [ "$proj" != "$NB_PROJECT" ] || continue
+  neighbor_total=$((neighbor_total + 1))
+  case "$st" in
+    *unhealthy* | *Restarting* | *Exited* | *Dead*) neighbor_bad="${neighbor_bad:+$neighbor_bad, }$n" ;;
+  esac
+done < <(docker ps -a --format '{{.Names}}|{{.Label "com.docker.compose.project"}}|{{.Status}}')
+[ -z "$neighbor_bad" ] || warn "other containers not up or unhealthy: $neighbor_bad"
+
+# ---- verdict ----------------------------------------------------------------------------------
+read -r verdict code <<<"$(nb_status_verdict "$problems" "$([ "$hold" = no ] || echo "$hold")")"
+
+if [ "$quiet" = 1 ] && [ "$code" -eq 0 ]; then
+  exit 0
+fi
+
+if [ "$as_json" = 1 ]; then
+  jq -n --arg at "$(nb_ts)" --arg verdict "$verdict" --arg problems "$problems" --arg warnings "$warnings" \
+    --arg hold "$hold" --arg release "$cur" --argjson release_info "$manifest" --argjson applied "$applied" \
+    --argjson last_load "$last_load" --argjson last_reload "$last_reload" --arg pending "$pending" \
+    --argjson containers "$containers_json" --arg avail "${avail:-}" --arg load1 "${load1:-}" \
+    --arg disk "$disk_free_gb" --argjson ntotal "$neighbor_total" --arg nbad "$neighbor_bad" \
+    --argjson deep "$deep_result" --arg api "$api_code" \
+    '{at:$at, verdict:$verdict, problems:$problems, warnings:$warnings, hold:(if $hold=="no" then null else $hold end),
+      release:$release, release_info:$release_info, applied:$applied, pending_reload:(if $pending=="" then null else $pending end),
+      last_load:$last_load, last_reload:$last_reload, containers:$containers, api_http:$api,
+      host:{mem_available_mb:(if $avail=="" then null else ($avail|tonumber) end),
+            load1:(if $load1=="" then null else ($load1|tonumber) end), disk_free_gb:($disk|tonumber)},
+      neighbours:{count:$ntotal, not_up:$nbad}, deep:$deep}'
+else
+  label="$(printf '%s' "$verdict" | tr '[:lower:]' '[:upper:]')"
+  printf 'NEMAR Neurobagel node: %s (%s)\n' "$label" "$(nb_ts)"
+  [ -z "$problems" ] || printf '  problems : %s\n' "$problems"
+  [ -z "$warnings" ] || printf '  warnings : %s\n' "$warnings"
+  [ "$hold" = no ] || printf '  HOLD     : %s\n' "$hold"
+  printf '  release  : %s\n' "${cur:-none}"
+  if [ "$manifest" != null ]; then
+    printf '             %s dataset(s), %s artifact(s), source %s\n' "$(printf '%s' "$manifest" | jq -r .counts.datasets)" \
+      "$(printf '%s' "$manifest" | jq -r .counts.artifacts)" "$(printf '%s' "$manifest" | jq -r .source)"
+  fi
+  [ "$applied" = null ] || printf '  loaded   : release %s at %s\n' "$(printf '%s' "$applied" | jq -r .release)" "$(printf '%s' "$applied" | jq -r .at)"
+  [ "$last_load" = null ] || printf '  loader   : %s at %s (%ss)\n' "$(printf '%s' "$last_load" | jq -r .outcome)" "$(printf '%s' "$last_load" | jq -r .at)" "$(printf '%s' "$last_load" | jq -r .seconds)"
+  if [ "$last_reload" != null ]; then
+    printf '  reload   : %s %s at %s, %ss (init %s, graph %s, api %s, verify %s), lowest host memory %s MiB\n' \
+      "$(printf '%s' "$last_reload" | jq -r .kind)" "$(printf '%s' "$last_reload" | jq -r 'if .ok then "ok" else "FAILED" end')" \
+      "$(printf '%s' "$last_reload" | jq -r .at)" "$(printf '%s' "$last_reload" | jq -r .seconds.total)" \
+      "$(printf '%s' "$last_reload" | jq -r .seconds.init)" "$(printf '%s' "$last_reload" | jq -r .seconds.graph)" \
+      "$(printf '%s' "$last_reload" | jq -r .seconds.api)" "$(printf '%s' "$last_reload" | jq -r .seconds.verify)" \
+      "$(printf '%s' "$last_reload" | jq -r '.min_available_mb // "?"')"
+  fi
+  [ "$deep_result" = null ] || printf '  deep     : %s\n' "$(printf '%s' "$deep_result" | jq -r 'if .ok then "ok, \(.served) of \(.expected) dataset(s) served, all protected" else "FAILED: \(.reason)" end')"
+  printf '  api      : HTTP %s on 127.0.0.1:%s\n' "${api_code:-none}" "$api_port"
+  printf '  services :\n'
+  printf '%s' "$containers_json" | jq -r '.[] | "    \(.service|.[0:16]) \(.state) \(.health) restarts=\(.restarts) mem=\(.mem) limit=\((.mem_limit_bytes/1048576)|floor)MiB cpu=\(.cpu)"' \
+    | sed 's/limit=0MiB/limit=none/'
+  printf '  host     : %s MiB available, load %s, %s GB disk free here\n' "${avail:-?}" "${load1:-?}" "$disk_free_gb"
+  printf '  others   : %s other container(s) on this host%s\n' "$neighbor_total" "${neighbor_bad:+; NOT UP: $neighbor_bad}"
+fi
+exit "$code"

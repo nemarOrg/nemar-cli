@@ -1,0 +1,12 @@
+{
+  "errors": [
+    {
+      "node_name": "Ontario Brain Institute",
+      "error": "Request failed due to a network error or because the node API could not be reached: All connection attempts failed"
+    },
+    {
+      "node_name": "Shanoir",
+      "error": "Request failed due to a network error or because the node API could not be reached: All connection attempts failed"
+    }
+  ]
+}

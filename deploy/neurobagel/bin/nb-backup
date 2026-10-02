@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+#
+# nb-backup: back up everything needed to rebuild this node, and nothing that can be rebuilt.
+#
+# The graph store is DERIVED data: it is rebuilt in minutes from the live release. So the backup
+# is the inputs and the state, not the store:
+#   .env, secrets/            the host-local configuration and the GraphDB credentials
+#   data/releases/<live>      the files the graph was built from, plus the rollback release
+#   data/manifests/           what each release contains (sha256 of every artifact)
+#   state/                    loader state, reload history, hold and freeze flags
+#   pins.env                  the versions that were running
+# `--graph-export` additionally writes the whole graph as gzipped N-Quads, for forensics or to
+# restore without the artifact store. It is read through GraphDB's own export, with the
+# credential read inside the container, and it needs no downtime (one read query slot is used).
+#
+# The archive CONTAINS THE GRAPHDB PASSWORDS. It is created mode 600 in a mode 700 directory;
+# treat copies of it with the same care as any other credential store.
+#
+# The archive lives in backups/, on the SAME disk as the node. That protects against a bad release
+# or an operator error, not against losing the disk. Set NB_BACKUP_HOOK in .env to copy each archive
+# off the host: it is run through `sh -c` with the archive path as its first argument, after the
+# archive is written (for example, in .env: NB_BACKUP_HOOK=rclone copy "$1" remote:nb-backups/ ; the value
+# is read literally, so it is written without quotes around the whole command).
+# A failing hook makes the backup exit 9 and is logged; the local archive is kept either way.
+#
+# Takes the shared lock so a release cannot change under the tar; waits up to 15 minutes.
+#
+# Usage: bin/nb-backup [--graph-export] [--keep N]
+#   --keep N   keep the newest N archives of each kind (default 14)
+# Exit codes: 0 done; 9 the off-host hook failed; 75 lock still busy after the wait.
+
+set -euo pipefail
+# shellcheck source=nb-common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/nb-common.sh"
+
+graph_export=0
+keep=14
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --graph-export) graph_export=1; shift ;;
+    --keep)
+      [ $# -ge 2 ] || nb_die "$NB_EX_USAGE" "--keep needs a number"
+      keep="$2"
+      shift 2
+      ;;
+    -h | --help)
+      nb_usage "$0"
+      exit 0
+      ;;
+    *) nb_die "$NB_EX_USAGE" "unknown argument: $1" ;;
+  esac
+done
+
+nb_need tar gzip jq
+nb_init_dirs
+mkdir -p "$NB_BACKUPS_DIR"
+chmod 700 "$NB_BACKUPS_DIR"
+nb_rotate_log "$NB_LOGS_DIR/backup.log"
+
+deadline=$(($(nb_epoch) + $(nb_env_get NB_BACKUP_LOCK_WAIT_S 900)))
+until nb_lock_acquire "nb-backup"; do
+  if [ "$(nb_epoch)" -ge "$deadline" ]; then
+    nb_log "the lock is still held ($(nb_lock_describe)) after the wait; no backup taken"
+    exit "$NB_EX_BUSY"
+  fi
+  sleep 10
+done
+
+cur="$(nb_current_release || true)"
+[ -n "$cur" ] || nb_die "$NB_EX_PREFLIGHT" "no live release; nothing to back up"
+rollback="$(cat "$NB_STATE_DIR/rollback-to" 2>/dev/null || true)"
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+# Two backups in one second must not overwrite each other.
+n=1
+while [ -e "$NB_BACKUPS_DIR/nb-$stamp.tar.gz" ]; do
+  n=$((n + 1))
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)-$n"
+done
+out="$NB_BACKUPS_DIR/nb-$stamp.tar.gz"
+
+work="$(mktemp -d "$NB_BACKUPS_DIR/.work.XXXXXX")"
+trap 'rm -rf "$work"; nb_lock_release' EXIT
+list="$work/files.txt"
+: >"$list"
+cd "$NB_HOME"
+for f in .env pins.env docker-compose.nemar.yml; do
+  [ -f "$f" ] && echo "$f" >>"$list"
+done
+[ -d secrets ] && find secrets -type f >>"$list"
+[ -d data/manifests ] && find data/manifests -type f >>"$list"
+for r in "$cur" "$rollback"; do
+  [ -n "$r" ] && [ -d "data/releases/$r" ] && find "data/releases/$r" -type f >>"$list"
+done
+# State, minus things that are meaningless on another host or only grow.
+[ -d state ] && find state -type f ! -path 'state/lock.d/*' ! -name 'guard.log*' ! -name '*.tmp.*' ! -name '.warnings.*' >>"$list"
+printf 'data/current -> releases/%s\n' "$cur" >"$work/CURRENT"
+echo "$work/CURRENT" >/dev/null
+
+# A manifest of what is inside, with checksums, so a restore can tell a damaged archive.
+{
+  while IFS= read -r f; do
+    printf '%s  %s\n' "$(nb_sha256 "$f")" "$f"
+  done <"$list"
+} >"$work/SHA256SUMS"
+jq -n --arg at "$(nb_ts)" --arg release "$cur" --arg rollback "$rollback" \
+  --arg host "$(hostname)" --arg compose "$(docker compose version --short 2>/dev/null || echo unknown)" \
+  '{at:$at, host:$host, live_release:$release, rollback_release:$rollback, docker_compose:$compose}' >"$work/BACKUP.json"
+
+# bsdtar and GNU tar disagree about when -C applies to a -T list, so the archive is built in two
+# plain steps: the files relative to NB_HOME, then the metadata relative to the work directory.
+( umask 077
+  tar -C "$NB_HOME" -cf "$work/archive.tar" -T "$list"
+  tar -C "$work" -rf "$work/archive.tar" BACKUP.json SHA256SUMS CURRENT
+  gzip -c "$work/archive.tar" >"$out" )
+chmod 600 "$out"
+nb_log "backup written: $out ($(wc -c <"$out" | tr -d ' ') bytes, release $cur)"
+
+if [ "$graph_export" = 1 ]; then
+  nb_need docker
+  nb_check_project_name
+  gout="$NB_BACKUPS_DIR/nb-graph-$stamp.nq.gz"
+  ( umask 077
+    # The credential is read inside the container and given to curl on stdin, never on a command line.
+    docker exec -i "$(nb_container_id graph)" sh -c '
+      printf "user = \"%s:%s\"\n" "$NB_GRAPH_USERNAME" "$(cat /run/secrets/db_user_password)" \
+        | curl -fsS -K - -H "Accept: application/n-quads" "http://localhost:7200/$NB_GRAPH_DB/statements?infer=false"
+    ' | gzip -c >"$gout.part" )
+  [ -s "$gout.part" ] || { rm -f "$gout.part"; nb_die 1 "the graph export was empty"; }
+  mv "$gout.part" "$gout"
+  chmod 600 "$gout"
+  nb_log "graph export written: $gout ($(wc -c <"$gout" | tr -d ' ') bytes)"
+fi
+
+# Retention, newest first by name (UTC stamps sort).
+for pat in 'nb-2*.tar.gz' 'nb-graph-2*.nq.gz'; do
+  n=0
+  for f in $(find "$NB_BACKUPS_DIR" -maxdepth 1 -name "$pat" | sort -r); do
+    n=$((n + 1))
+    [ "$n" -le "$keep" ] || { rm -f "$f"; nb_log "removed old backup $(basename "$f")"; }
+  done
+done
+
+# Off-host copy, if configured. Runs last so a hook that hangs or fails cannot cost the archive.
+hook="$(nb_env_get NB_BACKUP_HOOK "")"
+if [ -n "$hook" ]; then
+  for f in "$out" ${gout:+"$gout"}; do
+    if sh -c "$hook" nb-backup-hook "$f"; then
+      nb_log "off-host hook ran for $(basename "$f")"
+    else
+      nb_log "ERROR: the off-host hook failed for $(basename "$f")"
+      hook_failed=1
+    fi
+  done
+  [ "${hook_failed:-0}" = 0 ] || exit 9
+fi

@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/nemarOrg/nemar-cli/deploy/neurobagel/index.schema.json",
+  "title": "NEMAR Neurobagel artifact index, version 1",
+  "description": "The one document the loader (bin/nb-load) reads from the artifact store. This file is the single source of truth for its format: the loader's check, tools/build-index.sh, tools/gen-synthetic-jsonld.ts and the README all take their constants from here, and a test fails if any of them drifts. Rules a JSON Schema cannot express are listed under x-rules and enforced by the loader.",
+  "type": "object",
+  "required": ["schema", "generated_at", "datasets"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": { "const": "nemar-neurobagel-artifact-index/1" },
+    "generated_at": {
+      "description": "When the producer wrote this index, UTC. Informational: the loader records it and never decides from it.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
+    },
+    "datasets": {
+      "type": "array",
+      "maxItems": 5000,
+      "items": { "$ref": "#/definitions/dataset" }
+    }
+  },
+  "definitions": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$",
+      "not": { "pattern": "\\.\\." }
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "dataset": {
+      "type": "object",
+      "required": ["id", "fingerprint", "artifacts"],
+      "additionalProperties": true,
+      "properties": {
+        "id": { "$ref": "#/definitions/id" },
+        "fingerprint": {
+          "description": "Changes whenever any artifact of the dataset changes: the sha256 of the artifacts' own hashes is the reference form.",
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "artifacts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "items": { "$ref": "#/definitions/artifact" }
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["name", "kind", "sha256"],
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "not": { "pattern": "\\.\\." }
+        },
+        "kind": { "enum": ["jsonld", "dictionary", "description"] },
+        "sha256": { "$ref": "#/definitions/sha256" },
+        "bytes": { "type": "integer", "minimum": 1 }
+      }
+    }
+  },
+  "x-rules": {
+    "artifactSuffix": {
+      "jsonld": ".jsonld",
+      "dictionary": "_annotated.json",
+      "description": "_dataset_description.json"
+    },
+    "oneJsonldPerDataset": true,
+    "nameIsIdPlusSuffix": true,
+    "uniqueDatasetIds": true,
+    "uniqueArtifactNamesAcrossIndex": true
+  }
+}

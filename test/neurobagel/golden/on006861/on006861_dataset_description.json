@@ -1,0 +1,26 @@
+{
+  "AccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on006861 (latest version v1.0.0).",
+  "AccessLink": "https://nemar.org/dataset/on006861",
+  "AccessType": "public",
+  "Authors": [
+    "Szymon Mąka",
+    "Marta Chrustowicz",
+    "Łukasz Okruszek"
+  ],
+  "Keywords": [
+    "EEG",
+    "tDCS",
+    "Transcranial Direct Current Stimulation",
+    "Loneliness",
+    "Emotion regulation",
+    "Dorsolateral prefrontal cortex",
+    "Event-related potentials"
+  ],
+  "Name": "Targeted Neuromodulation of the Left Dorsolateral Prefrontal Cortex Alleviates Altered Affective Response Evaluation in Lonely Individuals",
+  "ParticipantCount": 120,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/on006861",
+    "https://doi.org/10.82901/nemar.on006861"
+  ],
+  "RepositoryURL": "https://data.nemar.org/on006861/"
+}

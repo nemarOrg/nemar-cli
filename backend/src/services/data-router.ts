@@ -13,7 +13,9 @@
 // (routes/data.ts) keep working.
 import { formatBytesCompact, formatBytesDetailed } from "../../../shared/bytes.js";
 import {
+  type BidsIndexSubjectWire,
   NEUROSCHEMA_VERSION,
+  NO_SESSION_KEY,
   toBareVersion,
   toVersionTag,
 } from "../../../shared/contract/index.js";
@@ -723,7 +725,42 @@ export interface BidsIndexModalityNode {
 export interface BidsIndexSubjectNode {
   sessions: string[];
   modalities: Record<string, BidsIndexModalityNode>;
+  /**
+   * Which datatype directories each session holds (#1588): `sessions` and
+   * `modalities` are separate sets per subject, so on their own they cannot
+   * say that `ses-01` has the anat and `ses-02` the eeg. One key per session
+   * label, plus {@link NO_SESSION_KEY} when the subject has a datatype
+   * directory outside every session directory. A session with only
+   * session-level files is present with `[]`. It is written after `sessions`
+   * and `modalities`, which keep their place in the serialized node; no reader
+   * may depend on the order of keys. The wire contract (and the reading
+   * rules) is `bidsIndexSubjectSchema` in `shared/contract/dataset.ts`.
+   */
+  session_modalities: Record<string, string[]>;
 }
+
+/**
+ * Compile-time tie between the node the builder produces and the shape the
+ * wire contract declares (`bidsIndexSubjectSchema`), so the two cannot drift
+ * apart without a typecheck failure. A key the builder drops, or one whose
+ * type changes, no longer fits the schema's inferred type and fails here
+ * rather than only in the route test. The schema's objects end in
+ * `.passthrough()`, so their inferred types carry an open `[k: string]:
+ * unknown` that an interface cannot satisfy and that says nothing about
+ * drift; `Declared` removes exactly that (an index signature whose value is
+ * `unknown`) and keeps every real one, such as `Record<string, ...>`.
+ */
+type Declared<T> = T extends readonly unknown[]
+  ? T
+  : T extends object
+    ? {
+        [K in keyof T as string extends K ? (unknown extends T[K] ? never : K) : K]: Declared<T[K]>;
+      }
+    : T;
+const _builderNodeFitsWireContract: Declared<BidsIndexSubjectNode> extends Declared<BidsIndexSubjectWire>
+  ? true
+  : never = true;
+void _builderNodeFitsWireContract;
 
 export interface BidsIndex {
   version: string;
@@ -974,6 +1011,12 @@ const BIDS_RUN_TOKEN_RE = /_run-([A-Za-z0-9]+)/;
  * tooling typically refers to sessions (the directory keeps the prefix; the
  * label does not).
  *
+ * Each subject carries `sessions` and `modalities` as two separate sets and
+ * `session_modalities` as the pairing between them (#1588): the datatype
+ * directories found in each session, or under {@link NO_SESSION_KEY} when
+ * they sit directly under the subject. It is derived in the same pass from
+ * the same paths, so it adds no read of the manifest (ADR 0072).
+ *
  * Sets are converted to deterministically sorted arrays at the end so the
  * response is byte-stable for cache-friendly clients.
  */
@@ -994,7 +1037,12 @@ export function buildBidsIndex(
 export class BidsIndexBuilder {
   private readonly acc: Record<
     string,
-    { sessions: Set<string>; modalities: Map<string, Map<string, Set<string>>> }
+    {
+      sessions: Set<string>;
+      modalities: Map<string, Map<string, Set<string>>>;
+      /** Session label (or {@link NO_SESSION_KEY}) -> datatype directories seen in it. */
+      sessionModalities: Map<string, Set<string>>;
+    }
   > = {};
 
   add(path: string): void {
@@ -1017,15 +1065,39 @@ export class BidsIndexBuilder {
     // when the filename has no `_task-` token. The modalities map for such
     // a subject can legitimately be empty.
     if (!acc[subject]) {
-      acc[subject] = { sessions: new Set(), modalities: new Map() };
+      acc[subject] = {
+        sessions: new Set(),
+        modalities: new Map(),
+        sessionModalities: new Map(),
+      };
     }
-    if (sessionLabel !== null) acc[subject].sessions.add(sessionLabel);
+    if (sessionLabel !== null) {
+      acc[subject].sessions.add(sessionLabel);
+      // A session is known the moment one path sits under it, whether or not
+      // that path is in a datatype directory: `sessions` has it, so
+      // `session_modalities` does too (empty until a datatype shows up).
+      if (!acc[subject].sessionModalities.has(sessionLabel)) {
+        acc[subject].sessionModalities.set(sessionLabel, new Set());
+      }
+    }
 
     // No modality directory after the subject (or session) prefix -> the
     // subject is registered but this path doesn't add a modality entry.
     if (modalityIdx >= parts.length - 1) return;
     const modality = parts[modalityIdx];
     const filename = parts[parts.length - 1];
+
+    // The same directory that makes `modality` a key of `modalities` makes it
+    // a member of this session's list, so the two can never disagree about
+    // which datatypes exist. Outside every session directory it lands under
+    // NO_SESSION_KEY, which exists only once a datatype is seen there.
+    const sessionKey = sessionLabel ?? NO_SESSION_KEY;
+    let inSession = acc[subject].sessionModalities.get(sessionKey);
+    if (!inSession) {
+      inSession = new Set();
+      acc[subject].sessionModalities.set(sessionKey, inSession);
+    }
+    inSession.add(modality);
 
     if (!acc[subject].modalities.has(modality)) {
       acc[subject].modalities.set(modality, new Map());
@@ -1046,7 +1118,14 @@ export class BidsIndexBuilder {
     const out: Record<string, BidsIndexSubjectNode> = {};
     for (const subject of Object.keys(acc).sort()) {
       const node = acc[subject];
-      const modalities: Record<string, BidsIndexModalityNode> = {};
+      // A datatype key is whatever directory name the manifest holds, so it
+      // can be `__proto__`, and `obj["__proto__"] = x` sets a prototype instead
+      // of an own key: the datatype would vanish from `modalities` while
+      // `session_modalities` still listed it. `Object.fromEntries` defines own
+      // properties, so the two agree for every name, and the bytes are the
+      // same as assignment for every other name. Task and session labels are
+      // alphanumeric and subjects start `sub-`, so they cannot be `__proto__`.
+      const modalityEntries: [string, BidsIndexModalityNode][] = [];
       for (const mod of [...node.modalities.keys()].sort()) {
         const tasksMap = node.modalities.get(mod);
         if (!tasksMap) continue;
@@ -1054,11 +1133,18 @@ export class BidsIndexBuilder {
         for (const task of [...tasksMap.keys()].sort()) {
           tasks[task] = { runs: [...(tasksMap.get(task) ?? [])].sort() };
         }
-        modalities[mod] = { tasks };
+        modalityEntries.push([mod, { tasks }]);
       }
+      const modalities: Record<string, BidsIndexModalityNode> = Object.fromEntries(modalityEntries);
+      const sessionModalities: Record<string, string[]> = Object.fromEntries(
+        [...node.sessionModalities.keys()]
+          .sort()
+          .map((key) => [key, [...(node.sessionModalities.get(key) ?? [])].sort()]),
+      );
       out[subject] = {
         sessions: [...node.sessions].sort(),
         modalities,
+        session_modalities: sessionModalities,
       };
     }
     return out;
