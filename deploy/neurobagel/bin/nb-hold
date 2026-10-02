@@ -39,23 +39,31 @@ case "$(basename "$0")" in
 esac
 [ "$mode" = hold ] && [ "${1:-}" = "--unhold" ] && mode=unhold
 
-if [ "$mode" = hold ]; then
-  reason="${*:-no reason given}"
-  printf '%s by %s: %s\n' "$(nb_ts)" "${SUDO_USER:-${USER:-unknown}}" "$reason" | nb_write_atomic "$NB_STATE_DIR/hold"
-  nb_log "hold flag written; stopping the node API container"
-  # kill, not stop: the API holds no state, its entrypoint script ignores SIGTERM, and in an
-  # incident every second a stop would wait is a second the node is still answering.
-  # A reload in flight can start the API between our kill and our exit, so the hold is not done
-  # until the container is seen not running.
+# kill, not stop: the API holds no state, its entrypoint script ignores SIGTERM, and in an incident
+# every second a stop would wait is a second the node is still answering. A reload in flight can
+# start the API between our kill and our exit, so this is not done until the container is seen not
+# running. Returns 1 if it is still running after 10 seconds.
+kill_api_until_down() {
+  local _ api_id
   for _ in $(seq 1 20); do
     nb_compose kill api >/dev/null 2>&1 || true
     api_id="$(nb_container_id api)"
     if [ -z "$api_id" ] || [ "$(docker inspect -f '{{.State.Running}}' "$api_id" 2>/dev/null)" != true ]; then
-      nb_log "node is OUT of the federation: $(cat "$NB_STATE_DIR/hold")"
-      exit 0
+      return 0
     fi
     sleep 0.5
   done
+  return 1
+}
+
+if [ "$mode" = hold ]; then
+  reason="${*:-no reason given}"
+  printf '%s by %s: %s\n' "$(nb_ts)" "${SUDO_USER:-${USER:-unknown}}" "$reason" | nb_write_atomic "$NB_STATE_DIR/hold"
+  nb_log "hold flag written; stopping the node API container"
+  if kill_api_until_down; then
+    nb_log "node is OUT of the federation: $(cat "$NB_STATE_DIR/hold")"
+    exit 0
+  fi
   nb_die 9 "the hold flag is written, but the API container is still running after 10 seconds; run: docker kill $(nb_container_id api)"
 fi
 
@@ -64,15 +72,45 @@ if [ ! -f "$NB_STATE_DIR/hold" ]; then
   nb_log "the node is not on hold"
   exit 0
 fi
-nb_log "ending hold: $(cat "$NB_STATE_DIR/hold")"
+held_text="$(cat "$NB_STATE_DIR/hold")"
+nb_log "ending hold: $held_text"
+
+# Takes the hold flag away only if it is still the one this unhold read. `nb hold` can run again
+# while the reload below is working (it takes no lock, on purpose), and that newer hold is not ours
+# to end. The flag is renamed away first so that nothing can be written between the look and the
+# removal; a newer one is put back (unless an even newer one has appeared).
+end_this_hold() {
+  local flag="$NB_STATE_DIR/hold" taken="$NB_STATE_DIR/hold.taken.$$" now
+  mv "$flag" "$taken" 2>/dev/null || return 0
+  now="$(cat "$taken")"
+  if [ "$(nb_decide_unhold_flag "$held_text" "$now")" = remove ]; then
+    rm -f "$taken"
+    return 0
+  fi
+  ln "$taken" "$flag" 2>/dev/null || true
+  rm -f "$taken"
+  return 1
+}
+
+# A newer hold set during the work: the API this unhold started is killed again, and the node stays
+# on hold under the newer text.
+newer_hold_wins() {
+  nb_log "a newer hold was set while the node was coming back ($(cat "$NB_STATE_DIR/hold" 2>/dev/null)); the API is stopped again and the node stays on hold"
+  kill_api_until_down || true
+}
+
 # The flag stays until the node is verified, so a failure here leaves it on hold, not half back.
 if [ -f "$NB_STATE_DIR/pending-reload" ]; then
   nb_log "a staged release is waiting; reloading it first (the API is started only once the graph holds it)"
   rc=0
-  "$NB_CODE_DIR/bin/nb-reload" --from-unhold || rc=$?
+  NB_ENDING_HOLD="$held_text" "$NB_CODE_DIR/bin/nb-reload" --from-unhold || rc=$?
   if [ "$rc" -eq 0 ]; then
-    rm -f "$NB_STATE_DIR/hold"
-    nb_log "node is back in the federation"
+    if end_this_hold; then
+      nb_log "node is back in the federation"
+    else
+      newer_hold_wins
+      exit "$NB_EX_HOLD"
+    fi
   else
     nb_log "ERROR: the reload failed (exit $rc); the node stays on hold"
   fi
@@ -101,8 +139,12 @@ if nb_verify_node "$rel"; then
     jq --argjson r "$(docker inspect -f '{{.RestartCount}}' "$(nb_container_id graph)" 2>/dev/null || echo 0)" \
       '.graph_restarts = $r' "$NB_STATE_DIR/applied.json" | nb_write_atomic "$NB_STATE_DIR/applied.json" || true
   fi
-  rm -f "$NB_STATE_DIR/hold"
-  nb_log "node is back in the federation: $NB_VERIFY_SERVED dataset(s) served"
+  if end_this_hold; then
+    nb_log "node is back in the federation: $NB_VERIFY_SERVED dataset(s) served"
+  else
+    newer_hold_wins
+    exit "$NB_EX_HOLD"
+  fi
 else
   nb_compose kill api >/dev/null 2>&1 || true
   nb_die "$NB_EX_PREFLIGHT" "the API came up but verification failed ($NB_VERIFY_REASON); it was stopped again and the node stays on hold"

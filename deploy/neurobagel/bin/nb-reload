@@ -98,8 +98,19 @@ kill_api() {
 
 # Stops (or keeps down) the API when a hold is in force. Returns 0 if it did, so the caller can
 # stop the reload. The hold flag is the operator's word and outranks everything in here.
+# `nb unhold` sets NB_ENDING_HOLD to the text of the hold it is ending; a hold with other text is a
+# newer one and wins even during an unhold's reload.
+hold_stops() {
+  local present=0 current=""
+  if nb_hold_active; then
+    present=1
+    current="$(cat "$NB_STATE_DIR/hold" 2>/dev/null || true)"
+  fi
+  [ "$(nb_decide_hold_stop "$present" "$from_unhold" "${NB_ENDING_HOLD:-}" "$current")" = stop ]
+}
+
 hold_wins() {
-  [ "$(nb_decide_hold_stop "$(nb_hold_active && echo 1 || echo 0)" "$from_unhold")" = stop ] || return 1
+  hold_stops || return 1
   REASON="the node was placed on hold during the reload; the API was killed and stays down"
   held=1
   kill_api
@@ -107,7 +118,7 @@ hold_wins() {
 }
 
 preflight() {
-  if [ "$(nb_decide_hold_stop "$(nb_hold_active && echo 1 || echo 0)" "$from_unhold")" = stop ]; then
+  if hold_stops; then
     nb_log "node is on hold: $(cat "$NB_STATE_DIR/hold"); not reloading (nb unhold first)"
     exit "$NB_EX_HOLD"
   fi
