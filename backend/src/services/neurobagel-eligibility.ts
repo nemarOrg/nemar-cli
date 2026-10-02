@@ -14,7 +14,8 @@
  * A dataset is eligible when it is:
  *   - active (`status`), public (`visibility`), and NOT anonymous (`anonymous = 0`;
  *     NULL is unknown, and unknown is not false);
- *   - first published (`first_published_at`), not withdrawn (`withdrawn_at`);
+ *   - first published (`first_published_at`), not withdrawn (`withdrawn_at`), and its
+ *     concept DOI not tombstoned (`ezid_status` is not `unavailable`);
  *   - holding at least one `dataset_versions` row;
  *   - a real dataset: an `nm` id below the reserved fixture band (ADR 0068), or an
  *     `on` OpenNeuro mirror (INCLUDED by the owner's decision), and neither a
@@ -25,6 +26,21 @@
  *
  * "Deleted" is not a separate term: deleting a dataset removes its row, and a row
  * with `status = 'deleted'` fails the `active` term.
+ *
+ * WHAT THE REAL TAKEDOWN FLOWS LEAVE BEHIND, and which term catches each (the tests
+ * drive the repository's own D1 helpers and the real cascade, not a copy):
+ *   - `nemar admin withdraw` (services/withdraw.ts): `visibility = 'private'` (the first
+ *     write), then `withdrawn_at` and `withdrawn_reason`, then the concept DOI's and
+ *     every version DOI's `ezid_status = 'unavailable'`; `status` and the version rows
+ *     are untouched. `public` and `not_withdrawn` each reject it; so does
+ *     `not_tombstoned`, and so does the state an interrupted withdrawal stops in.
+ *   - a DOI tombstoned on its own (`POST /admin/datasets/:id/doi/update`, status
+ *     `unavailable`): writes ONLY `datasets.ezid_status`, leaving a dataset public,
+ *     active and not withdrawn. Only `not_tombstoned` rejects that, which is why it is a
+ *     term: a dataset whose DOI is deliberately unavailable must not stay federated.
+ *   - `DELETE /admin/datasets/:id` (services/deletion.ts): the row, its versions and its
+ *     collaborators are removed in one batch after the repository and objects go, so the
+ *     row is simply absent.
  */
 
 import { RESERVED_FIXTURE_FLOOR, formatDatasetId } from "./datasetId.js";
@@ -43,6 +59,8 @@ export interface FederationRow {
   anonymous: number | null;
   first_published_at: string | null;
   withdrawn_at: string | null;
+  /** The concept DOI's EZID status; `unavailable` is a tombstone. */
+  ezid_status: string | null;
   is_sandbox: number | null;
   is_exemplar: number | null;
   has_version: number | null;
@@ -54,6 +72,7 @@ export type FederationTermId =
   | "not_anonymous"
   | "first_published"
   | "not_withdrawn"
+  | "not_tombstoned"
   | "has_version"
   | "real_dataset";
 
@@ -97,6 +116,12 @@ export const FEDERATION_TERMS: readonly FederationTerm[] = [
     holds: (row) => row.withdrawn_at === null || row.withdrawn_at === undefined,
   },
   {
+    id: "not_tombstoned",
+    // NULL is "never classified", which most datasets are, and is not a tombstone.
+    sql: "COALESCE(d.ezid_status, '') <> 'unavailable'",
+    holds: (row) => row.ezid_status !== "unavailable",
+  },
+  {
     id: "has_version",
     sql: "EXISTS (SELECT 1 FROM dataset_versions dv WHERE dv.dataset_id = d.dataset_id)",
     holds: (row) => row.has_version === 1,
@@ -134,7 +159,7 @@ export const NEUROBAGEL_ELIGIBLE_SQL = FEDERATION_TERMS.map((t) => t.sql).join("
  * identity column: eligibility is a decision, not a document.
  */
 export const NEUROBAGEL_ROW_COLUMNS = `d.dataset_id, d.status, d.visibility, d.anonymous,
-    d.first_published_at, d.withdrawn_at, d.is_sandbox, d.is_exemplar,
+    d.first_published_at, d.withdrawn_at, d.ezid_status, d.is_sandbox, d.is_exemplar,
     EXISTS (SELECT 1 FROM dataset_versions dv WHERE dv.dataset_id = d.dataset_id) AS has_version`;
 
 /** One dataset's row regardless of eligibility, for the re-check. */

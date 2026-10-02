@@ -52,6 +52,8 @@ export interface DatasetSeed {
   anonymous?: number;
   firstPublishedAt?: string | null;
   withdrawnAt?: string | null;
+  /** `datasets.ezid_status`: the concept DOI's EZID status (`unavailable` is a tombstone). */
+  ezidStatus?: string | null;
   isSandbox?: number;
   isExemplar?: number;
 }
@@ -60,8 +62,9 @@ export function seedDatasetRow(db: Database, id: string, seed: DatasetSeed = {})
   db.query(
     `INSERT INTO datasets
        (dataset_id, name, owner_user_id, status, visibility, is_sandbox, is_exemplar, anonymous,
-        first_published_at, withdrawn_at, license, subject_count, concept_doi, enrichment_json)
-     VALUES (?, ?, -1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        first_published_at, withdrawn_at, license, subject_count, concept_doi, enrichment_json,
+        ezid_status)
+     VALUES (?, ?, -1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     seed.name ?? `Dataset ${id}`,
@@ -76,6 +79,7 @@ export function seedDatasetRow(db: Database, id: string, seed: DatasetSeed = {})
     seed.subjectCount === undefined ? 3 : seed.subjectCount,
     seed.conceptDoi === undefined ? `10.82901/nemar.${id}` : seed.conceptDoi,
     seed.enrichmentJson === undefined ? null : seed.enrichmentJson,
+    seed.ezidStatus ?? null,
   );
   for (const [version, createdAt] of seed.versions ?? [["1.0.0", "2026-01-02 03:04:05"]]) {
     db.query(

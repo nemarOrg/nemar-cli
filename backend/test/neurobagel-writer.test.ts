@@ -18,9 +18,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import Ajv from "ajv";
 import schema from "../../deploy/neurobagel/index.schema.json";
 import { dataRoutes } from "../src/routes/data";
+import { deleteDatasetCascade } from "../src/services/deletion";
 import { type CurationResolver, createCurationResolver } from "../src/services/neurobagel-curation";
+import { failedFederationTerms, loadEligibleRow } from "../src/services/neurobagel-eligibility";
 import { saysNotAnonymous } from "../src/services/neurobagel-gather";
-import { syncNeurobagelDataset } from "../src/services/neurobagel-hooks";
+import {
+  runNeurobagelReconcileCron,
+  syncNeurobagelDataset,
+} from "../src/services/neurobagel-hooks";
 import { countOps, createOpCounter } from "../src/services/neurobagel-ops";
 import {
   type LedgerEntry,
@@ -53,6 +58,12 @@ import {
   reconcileLimit,
   runNeurobagelWriter,
 } from "../src/services/neurobagel-writer";
+import {
+  clearWithdrawalIntent,
+  markConceptEzidStatus,
+  markVersionEzidStatus,
+  markWithdrawalIntent,
+} from "../src/services/withdraw";
 import type { Bindings } from "../src/types/bindings";
 import { realD1, wrapD1 } from "./helpers/d1";
 import {
@@ -1505,6 +1516,173 @@ describe("removals are bounded per run", () => {
     expect(second.removed).toHaveLength(5);
     expect(second.removals_pending).toBe(0);
     expect(await storeKeys(h.bucket)).toEqual([]);
+  });
+});
+
+// ----------------------------------------------------------------------------
+// The owner's takedown flows
+// ----------------------------------------------------------------------------
+
+describe("every state the real takedown flows leave behind is ineligible, and the stored artifacts leave", () => {
+  // The flows are the repository's own: `nemar admin withdraw` (services/withdraw.ts: visibility
+  // private first, then the withdrawal columns, then the concept and every version DOI marked
+  // `unavailable`), a DOI tombstoned on its own (POST /admin/datasets/:id/doi/update writes only
+  // `datasets.ezid_status`), and the cascade delete (services/deletion.ts). Their D1 writes are
+  // made here by the services' own exported helpers and by the real cascade, not by a copy.
+  const ID = "nm000890";
+  const CONTROL = "nm000891";
+
+  beforeAll(() => {
+    (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = h.standin.url;
+  });
+  afterAll(() => {
+    (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = undefined;
+  });
+
+  const setPrivate = (d1: D1Database) =>
+    // The one D1 statement `applyDatasetVisibility(.., "private")` issues; the GitHub and S3
+    // halves of that service need the network.
+    d1
+      .prepare("UPDATE datasets SET visibility = ? WHERE dataset_id = ?")
+      .bind("private", ID)
+      .run();
+
+  const STATES: [string, (d1: D1Database) => Promise<void>, string[]][] = [
+    [
+      "a complete withdrawal",
+      async (d1) => {
+        await setPrivate(d1);
+        await markWithdrawalIntent(d1, ID, "upstream_403");
+        await markConceptEzidStatus(d1, ID, "unavailable");
+        await markVersionEzidStatus(d1, ID, "1.0.0", "unavailable");
+      },
+      ["public", "not_withdrawn", "not_tombstoned"],
+    ],
+    [
+      "a withdrawal interrupted right after the visibility flip",
+      async (d1) => {
+        await setPrivate(d1);
+      },
+      ["public"],
+    ],
+    [
+      "a withdrawal interrupted after its intent was stamped",
+      async (d1) => {
+        await setPrivate(d1);
+        await markWithdrawalIntent(d1, ID, "no_source");
+      },
+      ["public", "not_withdrawn"],
+    ],
+    [
+      "a withdrawal stamp on a dataset still public (a restore half done)",
+      async (d1) => {
+        await markWithdrawalIntent(d1, ID, "upstream_403");
+      },
+      ["not_withdrawn"],
+    ],
+    [
+      "a concept DOI tombstoned on its own (doi/update, status unavailable)",
+      async (d1) => {
+        await markConceptEzidStatus(d1, ID, "unavailable");
+      },
+      ["not_tombstoned"],
+    ],
+    [
+      "the cascade delete",
+      async (d1) => {
+        // A dataset a person owns: the harness's rows belong to the system catalog sentinel,
+        // which the cascade refuses by design.
+        h.db.run(
+          `INSERT INTO users (username, email, password_hash, status, role, email_verified)
+           VALUES ('takedownowner', 'takedownowner@example.org', 'x', 'approved', 'member', 1)`,
+        );
+        h.db.run(
+          "UPDATE datasets SET owner_user_id = (SELECT id FROM users WHERE username = 'takedownowner') WHERE dataset_id = 'nm000890'",
+        );
+        // Production-shaped, because a non-production worker may only cascade ids it owns;
+        // S3 is skipped, the repository delete goes to the local GitHub stand-in.
+        const result = await deleteDatasetCascade(
+          d1,
+          h.env({ ENVIRONMENT: "production", DB: d1 }),
+          ID,
+          { skipS3: true },
+        );
+        expect(result.steps.d1.success).toBe(true);
+      },
+      ["real_dataset"],
+    ],
+  ];
+
+  for (const [label, apply, terms] of STATES) {
+    test(`${label}: rejected by ${terms.join(" and ")}, removed from the store and the index by the next run`, async () => {
+      seedSynthetic(h, ID);
+      seedSynthetic(h, CONTROL);
+      await run();
+      expect(await storeKeys(h.bucket)).toContain(`${ID}.jsonld`);
+      expect((await storedIndex()).datasets.map((d) => d.id)).toEqual([ID, CONTROL]);
+
+      await apply(realD1(h.db));
+
+      // The predicate says no, and says which terms.
+      const { row, eligible } = await loadEligibleRow(realD1(h.db), ID);
+      expect(eligible).toBe(false);
+      if (terms[0] !== "real_dataset") expect(failedFederationTerms(row)).toEqual(terms);
+      else expect(row).toBeNull();
+
+      // The next run takes it out, and leaves the control alone.
+      const result = await run();
+      expect(result.removed).toEqual([ID]);
+      expect((await storeKeys(h.bucket)).filter((k) => k.startsWith(ID))).toEqual([]);
+      expect((await storedIndex()).datasets.map((d) => d.id)).toEqual([CONTROL]);
+      expect(await storeKeys(h.bucket)).toContain(`${CONTROL}.jsonld`);
+    });
+  }
+
+  test("a complete withdrawal is removed by the hook that saw it, and by the daily reconcile", async () => {
+    for (const via of ["hook", "cron"] as const) {
+      await h.reset();
+      seedSynthetic(h, ID);
+      seedSynthetic(h, CONTROL);
+      await run();
+      const d1 = realD1(h.db);
+      await setPrivate(d1);
+      await markWithdrawalIntent(d1, ID, "upstream_403");
+      await markConceptEzidStatus(d1, ID, "unavailable");
+      if (via === "hook") {
+        await syncNeurobagelDataset(h.env(), ID, "hook:publication");
+      } else {
+        const result = await runNeurobagelReconcileCron(h.env({ ENVIRONMENT: "production" }));
+        expect(result?.removed).toEqual([ID]);
+      }
+      expect(
+        (await storeKeys(h.bucket)).filter((k) => k.startsWith(ID)),
+        via,
+      ).toEqual([]);
+      expect(
+        (await storedIndex()).datasets.map((d) => d.id),
+        via,
+      ).toEqual([CONTROL]);
+    }
+  });
+
+  test("restoring the dataset (the owner reverses the takedown) makes it eligible and written again", async () => {
+    seedSynthetic(h, ID);
+    await run();
+    const d1 = realD1(h.db);
+    await setPrivate(d1);
+    await markWithdrawalIntent(d1, ID, "upstream_403");
+    await markConceptEzidStatus(d1, ID, "unavailable");
+    await run();
+    expect((await storeKeys(h.bucket)).filter((k) => k.startsWith(ID))).toEqual([]);
+    // What `restore` does to the same columns, in reverse.
+    await d1
+      .prepare("UPDATE datasets SET visibility = 'public' WHERE dataset_id = ?")
+      .bind(ID)
+      .run();
+    await clearWithdrawalIntent(d1, ID);
+    await markConceptEzidStatus(d1, ID, "public");
+    const result = await run();
+    expect(outcomes(result)).toEqual([`${ID}:written`]);
   });
 });
 

@@ -203,3 +203,7 @@ Two independent reviews of the pull request found no anonymity, authentication o
 - The data plane and the writer chose the latest version by different SQL, which differs on a timestamp tie; the writer now refuses a dataset they disagree on.
 - The legacy Zenodo version handler is unreachable (nothing calls it), so it carries no hook; the one reachable legacy path does, and is now driven by a test.
 - The source scans read the syntax tree and are each proven by a planted violation; the mutation battery counts a kill only on a failing assertion and has 100 mutants.
+- The owner will roll back dataset nm000154 altogether and tombstone it (it is a duplicate of on001787 created by a regression).
+  No exclusion list is needed: every state the real takedown flows leave is rejected by an ordinary term and the stored artifacts leave on the next run (ADR 0084, item 1).
+  Checking that turned up one state the first design did not reject: a concept DOI tombstoned on its own (`POST /admin/datasets/:id/doi/update` with status `unavailable`) writes only `datasets.ezid_status` and leaves the dataset public, active and not withdrawn, so the predicate gained a `not_tombstoned` term.
+  Its curation entry is out of scope here and is removed separately once the tombstone is confirmed.

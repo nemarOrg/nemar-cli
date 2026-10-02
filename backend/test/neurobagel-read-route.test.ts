@@ -265,6 +265,10 @@ describe("eligibility is re-checked against D1 on every request", () => {
       "UPDATE datasets SET visibility = 'private', withdrawn_at = datetime('now') WHERE dataset_id = 'nm000701'",
     ],
     ["is archived", "UPDATE datasets SET status = 'archived' WHERE dataset_id = 'nm000701'"],
+    [
+      "has its concept DOI tombstoned",
+      "UPDATE datasets SET ezid_status = 'unavailable' WHERE dataset_id = 'nm000701'",
+    ],
     ["is deleted", "DELETE FROM dataset_versions WHERE dataset_id = 'nm000701'"],
     [
       "becomes anonymous",

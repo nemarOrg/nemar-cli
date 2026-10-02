@@ -74,6 +74,7 @@ describe("the predicate's shape", () => {
       "not_anonymous",
       "first_published",
       "not_withdrawn",
+      "not_tombstoned",
       "has_version",
       "real_dataset",
     ]);
@@ -126,6 +127,7 @@ const BREAKS: Record<
   },
   first_published: { seed: { firstPublishedAt: null } },
   not_withdrawn: { seed: { withdrawnAt: "2026-02-01 00:00:00" } },
+  not_tombstoned: { seed: { ezidStatus: "unavailable" } },
   has_version: { seed: { versions: [] } },
   real_dataset: { seed: {}, id: "xx000042" },
 };
@@ -221,6 +223,9 @@ describe("SQL and TypeScript agree on every combination", () => {
     { anonymous: 1, firstPublishedAt: null },
     { firstPublishedAt: null },
     { withdrawnAt: "2026-02-01 00:00:00" },
+    { ezidStatus: "unavailable" },
+    { ezidStatus: "public" },
+    { ezidStatus: "reserved" },
     { versions: [] },
     { isSandbox: 1 },
     { isExemplar: 1 },
@@ -262,8 +267,18 @@ describe("SQL and TypeScript agree on every combination", () => {
         seedDatasetRow(db, `${klass.prefix}${String(klass.base + i).padStart(6, "0")}`, vector);
       }
     }
-    // Nothing in the `xx` classes, the exemplar band's included, is eligible.
-    expect(await selected()).toEqual(["nm000108", "on000100"]);
+    // Nothing in the `xx` classes, the exemplar band's included, is eligible. In the two real
+    // classes the vectors that break no term are accepted: the plain one, and a concept DOI
+    // that is public or reserved (only `unavailable` is a tombstone).
+    const clean = VECTORS.flatMap((v, i) =>
+      Object.keys(v).every((k) => k === "ezidStatus") && v.ezidStatus !== "unavailable" ? [i] : [],
+    );
+    expect(clean).toHaveLength(3);
+    const idOf = (prefix: string, base: number, i: number) =>
+      `${prefix}${String(base + i).padStart(6, "0")}`;
+    expect(await selected()).toEqual(
+      [...clean.map((i) => idOf("nm", 108, i)), ...clean.map((i) => idOf("on", 100, i))].sort(),
+    );
   });
 });
 
