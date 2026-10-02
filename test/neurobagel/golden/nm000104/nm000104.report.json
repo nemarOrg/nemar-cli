@@ -1,0 +1,61 @@
+{
+  "columns": {
+    "age": {
+      "status": "all_missing"
+    },
+    "group": {
+      "status": "absent"
+    },
+    "sex": {
+      "status": "all_missing"
+    }
+  },
+  "dataset_id": "nm000104",
+  "flags": [
+    "no_mapped_datatypes",
+    "participants_tsv_placeholder"
+  ],
+  "graph": {
+    "acquisitions": 0,
+    "imaging_sessions": 0,
+    "phenotypic_sessions": 108,
+    "subjects": 108
+  },
+  "imaging": {
+    "datatypes_dropped_subjects": {
+      "emg": 108
+    },
+    "datatypes_mapped_subjects": {},
+    "mapped_datatypes_supported": [
+      "eeg",
+      "meg"
+    ],
+    "session_pairing_subjects": {}
+  },
+  "participant_count": {
+    "bids_index": 108,
+    "declared": 108,
+    "graph": 108,
+    "participants_tsv": 108,
+    "used": 108,
+    "used_from": "demographics"
+  },
+  "participants_json": {
+    "status": "present"
+  },
+  "participants_tsv": {
+    "bom_stripped": false,
+    "duplicate_ids": 0,
+    "ids_prefixed": 0,
+    "rows": 108,
+    "rows_without_id": 0,
+    "status": "ok"
+  },
+  "report_version": 1,
+  "session_label_used_for_phenotype": "ses-unnamed",
+  "transform_version": 1,
+  "vocabulary": {
+    "bagel": "0.11.6",
+    "communities_commit": "0cbf82a4777a10e984253dac2b134902963c4095"
+  }
+}

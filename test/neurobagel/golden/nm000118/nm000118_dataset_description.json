@@ -1,0 +1,27 @@
+{
+  "AccessInstructions": "Public access. License: Unknown. Browse and download at https://nemar.org/dataset/nm000118 (latest version v1.0.2).",
+  "AccessLink": "https://nemar.org/dataset/nm000118",
+  "AccessType": "public",
+  "Authors": [
+    "Masaki Nakanishi",
+    "Yijun Wang",
+    "Yu-Te Wang",
+    "Tzyy-Ping Jung"
+  ],
+  "Keywords": [
+    "EEG",
+    "SSVEP",
+    "steady-state visual evoked potentials",
+    "brain-computer interface",
+    "canonical correlation analysis",
+    "frequency-phase coding",
+    "Brain-Computer Interfaces"
+  ],
+  "Name": "Nakanishi2015 – SSVEP Nakanishi 2015 dataset",
+  "ParticipantCount": 9,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/nm000118",
+    "https://doi.org/10.82901/nemar.nm000118"
+  ],
+  "RepositoryURL": "https://data.nemar.org/nm000118/"
+}

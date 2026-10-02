@@ -1,0 +1,26 @@
+{
+  "AccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on003194 (latest version v1.0.0).",
+  "AccessLink": "https://nemar.org/dataset/on003194",
+  "AccessType": "public",
+  "Authors": [
+    "Maria Luisa Bringas Vega",
+    "Lilia Morales Chacon",
+    "Ivonne Pedroso Ibanez"
+  ],
+  "Keywords": [
+    "EEG",
+    "Parkinson Disease",
+    "Erythropoietin",
+    "resting state",
+    "quantitative EEG",
+    "neuroprotection",
+    "randomized controlled trial"
+  ],
+  "Name": "Neuroepo multisession",
+  "ParticipantCount": 15,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/on003194",
+    "https://doi.org/10.82901/nemar.on003194"
+  ],
+  "RepositoryURL": "https://data.nemar.org/on003194/"
+}

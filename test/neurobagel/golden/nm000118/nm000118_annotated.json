@@ -1,0 +1,62 @@
+{
+  "age": {
+    "Annotations": {
+      "Format": {
+        "Label": "decimal",
+        "TermURL": "nb:FromFloat"
+      },
+      "IsAbout": {
+        "Label": "Age",
+        "TermURL": "nb:Age"
+      },
+      "MissingValues": [
+        "",
+        "n/a",
+        "N/A",
+        "NA"
+      ],
+      "ValueRange": {
+        "Max": 28,
+        "Min": 28
+      },
+      "VariableType": "Continuous"
+    },
+    "Description": "Age of the participant.",
+    "Units": "years"
+  },
+  "group": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Diagnosis",
+        "TermURL": "nb:Diagnosis"
+      },
+      "Levels": {
+        "healthy": {
+          "Label": "Healthy Control",
+          "TermURL": "ncit:C94342"
+        }
+      },
+      "MissingValues": [
+        "",
+        "n/a",
+        "N/A",
+        "NA"
+      ],
+      "VariableType": "Categorical"
+    },
+    "Description": "Participant group; only healthy control values are mapped to a diagnosis term.",
+    "Levels": {
+      "healthy": "Healthy Control"
+    }
+  },
+  "participant_id": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Participant ID",
+        "TermURL": "nb:ParticipantID"
+      },
+      "VariableType": "Identifier"
+    },
+    "Description": "Participant identifier, as in participants.tsv."
+  }
+}

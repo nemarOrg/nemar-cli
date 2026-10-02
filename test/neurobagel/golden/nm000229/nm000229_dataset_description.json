@@ -1,0 +1,28 @@
+{
+  "AccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/nm000229 (latest version v1.0.1).",
+  "AccessLink": "https://nemar.org/dataset/nm000229",
+  "AccessType": "public",
+  "Authors": [
+    "Laura Gwilliams",
+    "Graham Flick",
+    "Alec Marantz",
+    "Liina Pylkkänen",
+    "David Poeppel",
+    "Jean-Rémi King"
+  ],
+  "Keywords": [
+    "MEG",
+    "Magnetoencephalography",
+    "speech comprehension",
+    "naturalistic stories",
+    "phoneme decoding",
+    "language"
+  ],
+  "Name": "Gwilliams et al. 2023 — Introducing MEG-MASC: a high-quality magneto-encephalography dataset for evaluating natural speech processing",
+  "ParticipantCount": 27,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/nm000229",
+    "https://doi.org/10.82901/nemar.nm000229"
+  ],
+  "RepositoryURL": "https://data.nemar.org/nm000229/"
+}

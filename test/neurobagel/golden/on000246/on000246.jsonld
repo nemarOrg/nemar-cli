@@ -1,0 +1,180 @@
+{
+  "@context": {
+    "Acquisition": "nb:Acquisition",
+    "Assessment": "nb:Assessment",
+    "Bagel": "nb:Bagel",
+    "BaseModel": "nb:BaseModel",
+    "CompletedPipeline": "nb:CompletedPipeline",
+    "ControlledTerm": "nb:ControlledTerm",
+    "Dataset": "nb:Dataset",
+    "Diagnosis": "nb:Diagnosis",
+    "Image": "nb:Image",
+    "ImagingSession": "nb:ImagingSession",
+    "PhenotypicSession": "nb:PhenotypicSession",
+    "Pipeline": "nb:Pipeline",
+    "Session": "nb:Session",
+    "Sex": "nb:Sex",
+    "Subject": "nb:Subject",
+    "SubjectGroup": "nb:SubjectGroup",
+    "hasAccessEmail": {
+      "@id": "nb:hasAccessEmail"
+    },
+    "hasAccessInstructions": {
+      "@id": "nb:hasAccessInstructions"
+    },
+    "hasAccessLink": {
+      "@id": "nb:hasAccessLink"
+    },
+    "hasAccessType": {
+      "@id": "nb:hasAccessType"
+    },
+    "hasAcquisition": {
+      "@id": "nb:hasAcquisition"
+    },
+    "hasAge": {
+      "@id": "nb:hasAge"
+    },
+    "hasAssessment": {
+      "@id": "nb:hasAssessment"
+    },
+    "hasAuthors": {
+      "@id": "nb:hasAuthors"
+    },
+    "hasCompletedPipeline": {
+      "@id": "nb:hasCompletedPipeline"
+    },
+    "hasContrastType": {
+      "@id": "nb:hasContrastType"
+    },
+    "hasDiagnosis": {
+      "@id": "nb:hasDiagnosis"
+    },
+    "hasFilePath": {
+      "@id": "nb:hasFilePath"
+    },
+    "hasKeywords": {
+      "@id": "nb:hasKeywords"
+    },
+    "hasLabel": {
+      "@id": "nb:hasLabel"
+    },
+    "hasPipelineName": {
+      "@id": "nb:hasPipelineName"
+    },
+    "hasPipelineVersion": {
+      "@id": "nb:hasPipelineVersion"
+    },
+    "hasReferencesAndLinks": {
+      "@id": "nb:hasReferencesAndLinks"
+    },
+    "hasRepositoryURL": {
+      "@id": "nb:hasRepositoryURL"
+    },
+    "hasSamples": {
+      "@id": "nb:hasSamples"
+    },
+    "hasSession": {
+      "@id": "nb:hasSession"
+    },
+    "hasSex": {
+      "@id": "nb:hasSex"
+    },
+    "identifier": "@id",
+    "isSubjectGroup": {
+      "@id": "nb:isSubjectGroup"
+    },
+    "nb": "http://neurobagel.org/vocab/",
+    "ncit": "http://ncicb.nci.nih.gov/xml/owl/EVS/Thesaurus.owl#",
+    "nidm": "http://purl.org/nidash/nidm#",
+    "np": "https://github.com/nipoppy/pipeline-catalog/tree/main/processing/",
+    "schemaKey": "@type",
+    "snomed": "http://purl.bioontology.org/ontology/SNOMEDCT/"
+  },
+  "hasAccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on000246 (latest version v1.0.0).",
+  "hasAccessLink": "https://nemar.org/dataset/on000246",
+  "hasAccessType": "public",
+  "hasAuthors": [
+    "Elizabeth Bock",
+    "Peter Donhauser",
+    "Francois Tadel",
+    "Guiomar Niso",
+    "Sylvain Baillet"
+  ],
+  "hasKeywords": [
+    "MEG",
+    "auditory evoked fields",
+    "oddball paradigm",
+    "Brainstorm",
+    "Magnetoencephalography",
+    "tutorial dataset"
+  ],
+  "hasLabel": "MEG-BIDS Brainstorm data sample",
+  "hasReferencesAndLinks": [
+    "https://nemar.org/dataset/on000246",
+    "https://doi.org/10.82901/nemar.on000246"
+  ],
+  "hasRepositoryURL": "https://data.nemar.org/on000246/",
+  "hasSamples": [
+    {
+      "hasLabel": "sub-0001",
+      "hasSession": [
+        {
+          "hasAge": 25.0,
+          "hasLabel": "ses-unnamed",
+          "hasSex": {
+            "identifier": "snomed:248153007",
+            "schemaKey": "Sex"
+          },
+          "identifier": "nb:5bfa347e-c2fc-5f44-ad30-f6736857df4e",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Magnetoencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:69d9b9b5-98dd-5176-a357-f15a442a98a4",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:644c95e9-8031-553e-90d4-a620d8ea3408",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:8b840afc-b497-562c-bbb0-3c91db596f57",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-emptyroom",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:8539254c-630d-5a72-9524-1c90b9b9b122",
+          "schemaKey": "PhenotypicSession"
+        },
+        {
+          "hasAcquisition": [
+            {
+              "hasContrastType": {
+                "identifier": "nidm:Magnetoencephalography",
+                "schemaKey": "Image"
+              },
+              "identifier": "nb:0c693bda-5cc5-567b-9490-fa6581645b8e",
+              "schemaKey": "Acquisition"
+            }
+          ],
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:4875ac37-61b4-592e-b3aa-67e6036954c3",
+          "schemaKey": "ImagingSession"
+        }
+      ],
+      "identifier": "nb:acae6b57-be5a-5437-a325-0ff584d7f1f0",
+      "schemaKey": "Subject"
+    }
+  ],
+  "identifier": "nb:24f1b55e-0646-5ed2-b408-1d575f615e38",
+  "schemaKey": "Dataset"
+}

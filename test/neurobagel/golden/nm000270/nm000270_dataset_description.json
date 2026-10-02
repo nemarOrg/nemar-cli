@@ -1,0 +1,32 @@
+{
+  "AccessInstructions": "Public access. License: CC-BY-NC-ND-4.0. Browse and download at https://nemar.org/dataset/nm000270 (latest version v1.0.5).",
+  "AccessLink": "https://nemar.org/dataset/nm000270",
+  "AccessType": "public",
+  "Authors": [
+    "Yuan Liu",
+    "Zhuolan Gui",
+    "De Yan",
+    "Zhuang Wang",
+    "Ruisi Gao",
+    "Ningxin Han",
+    "Junying Chen",
+    "Jialing Wu",
+    "Dong Ming"
+  ],
+  "Keywords": [
+    "EEG",
+    "motor imagery",
+    "Stroke",
+    "Rehabilitation",
+    "brain-computer interface",
+    "lower limb",
+    "gait"
+  ],
+  "Name": "Liu et al. 2025 — Lower limb motor imagery EEG dataset based on the multi-paradigm and longitudinal-training of stroke patients (Tianjin University)",
+  "ParticipantCount": 27,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/nm000270",
+    "https://doi.org/10.82901/nemar.nm000270"
+  ],
+  "RepositoryURL": "https://data.nemar.org/nm000270/"
+}
