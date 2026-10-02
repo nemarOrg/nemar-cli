@@ -207,3 +207,7 @@ Two independent reviews of the pull request found no anonymity, authentication o
   No exclusion list is needed: every state the real takedown flows leave is rejected by an ordinary term and the stored artifacts leave on the next run (ADR 0084, item 1).
   Checking that turned up one state the first design did not reject: a concept DOI tombstoned on its own (`POST /admin/datasets/:id/doi/update` with status `unavailable`) writes only `datasets.ezid_status` and leaves the dataset public, active and not withdrawn, so the predicate gained a `not_tombstoned` term.
   Its curation entry is out of scope here and is removed separately once the tombstone is confirmed.
+- The delta review found that a failed read (a manifest body that broke mid-read) was recorded and parked like a standing refusal, delaying a healthy dataset by a whole window.
+  Blips (`fetch_failed`, `metadata_degraded`) are now never recorded, and parking expires after a day with the refusal re-recorded while it stands.
+- The closing reserve scales with the store (one call per listing page, twice), the listing fails loudly past 100 pages (about 3,300 datasets), and `status` shows a refusal's age: a partial cascade delete leaves the dataset federated, so a rollback must confirm `deleted: true` or withdraw first.
+  Measured at 800 datasets: a hook costs 57 to 75 operations, a tick of 10 rewritten datasets 275, a backfill 57 calls at the ceiling.
