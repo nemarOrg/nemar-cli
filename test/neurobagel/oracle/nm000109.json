@@ -1,0 +1,336 @@
+{
+  "bagel": "0.11.6",
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: ODC-By-1.0. Browse and download at https://nemar.org/dataset/nm000109 (latest version v1.0.0).",
+    "hasAccessLink": "https://nemar.org/dataset/nm000109",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Igor Zyma",
+      "Sergii Tukaev",
+      "Ivan Seleznov",
+      "Ken Kiyono",
+      "Anton Popov",
+      "Mariia Chernykh",
+      "Oleksii Shpenkov"
+    ],
+    "hasKeywords": [
+      "EEG",
+      "mental arithmetic",
+      "mental workload",
+      "cognitive stress",
+      "resting state",
+      "Electroencephalography",
+      "Mathematics"
+    ],
+    "hasLabel": "EEG During Mental Arithmetic Tasks",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/nm000109",
+      "https://doi.org/10.82901/nemar.nm000109"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/nm000109/"
+  },
+  "dataset_id": "nm000109",
+  "imaging": {
+    "attachable_subjects": 36,
+    "modalities": {
+      "sub-00": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-01": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-02": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-03": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-04": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-05": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-06": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-07": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-08": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-09": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-10": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-11": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-12": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-13": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-14": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-15": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-16": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-17": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-18": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-19": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-20": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-21": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-22": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-23": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-24": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-25": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-26": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-27": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-28": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-29": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-30": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-31": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-32": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-33": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-34": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-35": [
+        "nidm:Electroencephalography"
+      ]
+    }
+  },
+  "inputs": {
+    "annotated.json": "9116e77c30cef1788013d34a2362b781018e20c20762deb7150fe381974fc8f0",
+    "dataset_description.json": "f8268f817a8ee8e63e0393ef597b5d04f4a5091f1a9968c0c0b821f9b1c27326",
+    "participants.tsv": "8fee84d090ba6176b8b20623297071ca332600e3c0e262ea1583a63ca0c28bca"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-00": {
+      "age": 21.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-01": {
+      "age": 18.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-02": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-03": {
+      "age": 17.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-04": {
+      "age": 17.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-05": {
+      "age": 16.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-06": {
+      "age": 18.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-07": {
+      "age": 18.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-08": {
+      "age": 26.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-09": {
+      "age": 16.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-10": {
+      "age": 17.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-11": {
+      "age": 18.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-12": {
+      "age": 17.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-13": {
+      "age": 24.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-14": {
+      "age": 17.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-15": {
+      "age": 17.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-16": {
+      "age": 17.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-17": {
+      "age": 17.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-18": {
+      "age": 17.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-19": {
+      "age": 22.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-20": {
+      "age": 17.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-21": {
+      "age": 20.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-22": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-23": {
+      "age": 16.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-24": {
+      "age": 17.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-25": {
+      "age": 17.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-26": {
+      "age": 17.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-27": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-28": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-29": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-30": {
+      "age": 17.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-31": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-32": {
+      "age": 20.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-33": {
+      "age": 17.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-34": {
+      "age": 18.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-35": {
+      "age": 17.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    }
+  },
+  "transform_only_subjects": 0
+}

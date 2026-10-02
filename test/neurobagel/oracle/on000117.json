@@ -1,0 +1,179 @@
+{
+  "bagel": "0.11.6",
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on000117 (latest version v1.0.0).",
+    "hasAccessLink": "https://nemar.org/dataset/on000117",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Wakeman, DG",
+      "Henson, RN"
+    ],
+    "hasKeywords": [
+      "MEG",
+      "EEG",
+      "fMRI",
+      "structural MRI",
+      "face processing",
+      "multimodal integration",
+      "Face"
+    ],
+    "hasLabel": "Multisubject, multimodal face processing",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/on000117",
+      "https://doi.org/10.82901/nemar.on000117"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/on000117/"
+  },
+  "dataset_id": "on000117",
+  "imaging": {
+    "attachable_subjects": 17,
+    "modalities": {
+      "sub-01": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-02": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-03": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-04": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-05": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-06": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-07": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-08": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-09": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-10": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-11": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-12": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-13": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-14": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-15": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-16": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-emptyroom": [
+        "nidm:Magnetoencephalography"
+      ]
+    }
+  },
+  "inputs": {
+    "annotated.json": "9650103483f34404af9b1ab6880133d91c977359c1ef629d9e71dd724f983e6c",
+    "dataset_description.json": "dfaf294534a14b1fb4465403e97a47c871085b72cabf3dd7793699d1ac0b491c",
+    "participants.tsv": "f94c2010dba7e648473e476ae26b1259bbeb0b2e1e830236b78168a95832d659"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-01": {
+      "age": 31.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-02": {
+      "age": 25.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-03": {
+      "age": 30.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-04": {
+      "age": 26.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-05": {
+      "age": 23.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-06": {
+      "age": 26.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-07": {
+      "age": 31.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-08": {
+      "age": 26.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-09": {
+      "age": 29.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-10": {
+      "age": 23.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-11": {
+      "age": 24.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-12": {
+      "age": 24.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-13": {
+      "age": 25.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-14": {
+      "age": 24.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-15": {
+      "age": 30.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-16": {
+      "age": 25.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-emptyroom": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    }
+  },
+  "transform_only_subjects": 0
+}

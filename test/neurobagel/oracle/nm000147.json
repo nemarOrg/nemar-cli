@@ -1,0 +1,391 @@
+{
+  "bagel": "0.11.6",
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: CC BY 4.0. Browse and download at https://nemar.org/dataset/nm000147 (latest version v1.0.0).",
+    "hasAccessLink": "https://nemar.org/dataset/nm000147",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Jens Madsen",
+      "Nikhil Kuppa",
+      "Lucas Parra"
+    ],
+    "hasKeywords": [
+      "EEG",
+      "Electrocardiography",
+      "Eye Movements",
+      "Attention",
+      "educational videos",
+      "multimodal physiology",
+      "EOG",
+      "respiration",
+      "pupillometry",
+      "ADHD"
+    ],
+    "hasLabel": "The Brain, Body, and Behaviour Dataset (1.0.0) - Experiment 4",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/nm000147",
+      "https://doi.org/10.82901/nemar.nm000147"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/nm000147/"
+  },
+  "dataset_id": "nm000147",
+  "imaging": {
+    "attachable_subjects": 43,
+    "modalities": {
+      "sub-01": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-02": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-03": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-04": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-05": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-06": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-07": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-08": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-09": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-10": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-11": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-12": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-13": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-14": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-15": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-16": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-17": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-18": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-19": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-20": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-21": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-22": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-23": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-24": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-25": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-26": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-27": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-28": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-29": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-30": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-31": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-32": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-33": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-34": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-35": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-36": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-37": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-38": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-39": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-40": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-41": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-42": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-43": [
+        "nidm:Electroencephalography"
+      ]
+    }
+  },
+  "inputs": {
+    "annotated.json": "de620d065fb2a5e9002ee14faa5cfea167a73547d4ccbc680e3e8e8ef9355450",
+    "dataset_description.json": "e900fee891a34c92c42d630b019f4f96921d264b7f951849f44e1d1c3d675cfd",
+    "participants.tsv": "0fbf928de1ff38e38c351602df3e32c60bfff79ed61313bb464bf625b0dc7067"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-01": {
+      "age": 20.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-02": {
+      "age": 18.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-03": {
+      "age": 32.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-04": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-05": {
+      "age": 24.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-06": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-07": {
+      "age": 20.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-08": {
+      "age": 23.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-09": {
+      "age": 21.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-10": {
+      "age": 21.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-11": {
+      "age": 21.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-12": {
+      "age": 21.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-13": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-14": {
+      "age": 23.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-15": {
+      "age": 18.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-16": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-17": {
+      "age": 24.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-18": {
+      "age": 21.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-19": {
+      "age": 25.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-20": {
+      "age": 21.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-21": {
+      "age": 27.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-22": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-23": {
+      "age": 30.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-24": {
+      "age": 30.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-25": {
+      "age": 29.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-26": {
+      "age": 23.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-27": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-28": {
+      "age": 18.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-29": {
+      "age": 23.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-30": {
+      "age": 31.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-31": {
+      "age": 38.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-32": {
+      "age": 28.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-33": {
+      "age": 23.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-34": {
+      "age": 26.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-35": {
+      "age": 34.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-36": {
+      "age": 26.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-37": {
+      "age": 25.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-38": {
+      "age": 25.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-39": {
+      "age": 26.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-40": {
+      "age": 39.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-41": {
+      "age": 26.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-42": {
+      "age": 40.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-43": {
+      "age": 45.0,
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    }
+  },
+  "transform_only_subjects": 0
+}

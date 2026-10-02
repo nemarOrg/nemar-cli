@@ -1,0 +1,595 @@
+{
+  "bagel": "0.11.6",
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: CC-BY-NC-SA-4.0. Browse and download at https://nemar.org/dataset/nm000104 (latest version v2.0.0).",
+    "hasAccessLink": "https://nemar.org/dataset/nm000104",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Viswanath Sivakumar",
+      "Jeffrey Seely",
+      "Alan Du",
+      "Sean R. Bittner",
+      "Adam Berenzweig",
+      "Anuoluwapo Bolarinwa",
+      "Alexandre Gramfort",
+      "Michael I. Mandel"
+    ],
+    "hasKeywords": [
+      "Electromyography",
+      "motor control",
+      "sequence-to-sequence learning",
+      "domain adaptation",
+      "brain-computer interfaces",
+      "keystroke decoding",
+      "keystroke dynamics",
+      "keystroke recognition",
+      "transfer learning",
+      "sEMG",
+      "wrist-based EMG",
+      "wearable sensors",
+      "accessibility",
+      "neuromotor interfaces"
+    ],
+    "hasLabel": "emg2qwerty: A Large Dataset with Baselines for Touch Typing using Surface Electromyography",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/nm000104",
+      "https://doi.org/10.82901/nemar.nm000104"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/nm000104/"
+  },
+  "dataset_id": "nm000104",
+  "imaging": {
+    "attachable_subjects": 0,
+    "modalities": {}
+  },
+  "inputs": {
+    "annotated.json": "9ea57b312318fc5e8cc8515c2f64b560cecd3797f1b758ce20122a4cd0cfe972",
+    "dataset_description.json": "107e2ccee054a4bdc8055ad477122ac02e95f318e016172753db7b6ee597746f",
+    "participants.tsv": "0fa8e4b809541798c26f8e9552e6c959ba9adcdd67015205712d1babc73b1bc6"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-01438774": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-02396581": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-03432025": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-03537794": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-03734552": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-04162929": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-04809769": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-05344357": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-05681256": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-05775561": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-06526339": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-06564851": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-06950380": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-07746087": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-09456349": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-11372316": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-11944098": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-12565339": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-13321435": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-14312238": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-14989984": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-18200807": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-18243794": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-20676876": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-25847138": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-25915650": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-26940776": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-29502646": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-30481951": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-30807164": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-33259248": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-33505485": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-34527640": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-37398304": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-39024419": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-41222064": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-41530403": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-41556660": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-42383274": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-42408607": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-43037958": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-43359267": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-45200932": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-45828573": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-46697259": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-47005474": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-47919028": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-47926770": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-53845929": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-53853064": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-54043950": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-54618645": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-56837824": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-57024413": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-59627171": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-60557560": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-60709537": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-60776453": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-61792419": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-61833540": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-62172970": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-62451416": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-63959856": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-64036820": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-65027280": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-65383704": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-66161848": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-66483889": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-66727638": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-66778805": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-67011593": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-68186383": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-68324575": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-68884018": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-70495563": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-71409769": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-71786456": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-72389321": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-74403863": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-75228805": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-76521819": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-76574170": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-80214583": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-80587505": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-80745050": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-80815303": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-81522433": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-81695116": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-83774284": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-84958031": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-85881224": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-86629437": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-87998384": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-89335547": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-89415164": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-90443344": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-92249581": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-92418081": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-92903591": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-93203007": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-94305460": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-94998811": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-95396398": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-97165588": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-97336339": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-97890030": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-97946571": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-99192446": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    }
+  },
+  "transform_only_subjects": 0
+}

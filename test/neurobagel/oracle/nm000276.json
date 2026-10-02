@@ -1,0 +1,244 @@
+{
+  "bagel": "0.11.6",
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: CDLA-Permissive-2.0. Browse and download at https://nemar.org/dataset/nm000276 (latest version v1.0.0).",
+    "hasAccessLink": "https://nemar.org/dataset/nm000276",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Francesco Carzaniga",
+      "Michael Hersche",
+      "Abu Sebastian",
+      "Kaspar Schindler",
+      "Abbas Rahimi"
+    ],
+    "hasKeywords": [
+      "intracranial EEG",
+      "iEEG",
+      "Epilepsy",
+      "Seizures",
+      "long-term monitoring",
+      "seizure detection"
+    ],
+    "hasLabel": "SWEC iEEG Dataset",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/nm000276",
+      "https://doi.org/10.82901/nemar.nm000276"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/nm000276/"
+  },
+  "dataset_id": "nm000276",
+  "imaging": {
+    "attachable_subjects": 0,
+    "modalities": {}
+  },
+  "inputs": {
+    "annotated.json": "9ea57b312318fc5e8cc8515c2f64b560cecd3797f1b758ce20122a4cd0cfe972",
+    "dataset_description.json": "e39e16a46abfaf84009d22ce7a0603eafca3ec2ccda2c3b3c102bbb616756575",
+    "participants.tsv": "9c2f3ad3bd31d0fc3563b121ed7a1f664d51d1e3d57b2e7eeed21d95e459d137"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-01": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-02": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-03": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-04": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-05": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-06": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-08": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-09": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-10": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-11": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-12": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-15": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-16": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-18": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-19": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-20": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-22": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-23": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-24": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-27": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-28": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-29": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-30": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-31": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-32": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-33": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-34": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-35": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-36": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-37": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-38": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-39": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-41": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-42": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-43": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-45": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-46": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-47": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-48": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-50": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    }
+  },
+  "transform_only_subjects": 0
+}

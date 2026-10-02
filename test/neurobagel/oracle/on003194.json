@@ -1,0 +1,164 @@
+{
+  "bagel": "0.11.6",
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on003194 (latest version v1.0.0).",
+    "hasAccessLink": "https://nemar.org/dataset/on003194",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Maria Luisa Bringas Vega",
+      "Lilia Morales Chacon",
+      "Ivonne Pedroso Ibanez"
+    ],
+    "hasKeywords": [
+      "EEG",
+      "Parkinson Disease",
+      "Erythropoietin",
+      "resting state",
+      "quantitative EEG",
+      "neuroprotection",
+      "randomized controlled trial"
+    ],
+    "hasLabel": "Neuroepo multisession",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/on003194",
+      "https://doi.org/10.82901/nemar.on003194"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/on003194/"
+  },
+  "dataset_id": "on003194",
+  "imaging": {
+    "attachable_subjects": 15,
+    "modalities": {
+      "sub-NEPO01": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-NEPO03": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-NEPO04": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-NEPO06": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-NEPO07": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-NEPO09": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-NEPO12": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-NEPO15": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-NEPO16": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-NEPO18": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-NEPO20": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-NEPO21": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-NEPO22": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-NEPO25": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-NEPO26": [
+        "nidm:Electroencephalography"
+      ]
+    }
+  },
+  "inputs": {
+    "annotated.json": "9ea57b312318fc5e8cc8515c2f64b560cecd3797f1b758ce20122a4cd0cfe972",
+    "dataset_description.json": "a23eb1e0b723cb8d7b17f728a4d2116e31239ed13f9407ef4d52200b975e448e",
+    "participants.tsv": "421e533ff911381837eec0065a4c22425ef8568f99330f9a457e3a70b04ae6b7"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-NEPO01": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-NEPO03": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-NEPO04": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-NEPO06": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-NEPO07": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-NEPO09": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-NEPO12": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-NEPO15": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-NEPO16": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-NEPO18": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-NEPO20": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-NEPO21": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-NEPO22": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-NEPO25": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-NEPO26": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    }
+  },
+  "transform_only_subjects": 0
+}

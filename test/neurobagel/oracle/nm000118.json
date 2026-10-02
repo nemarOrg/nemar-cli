@@ -1,0 +1,135 @@
+{
+  "bagel": "0.11.6",
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: Unknown. Browse and download at https://nemar.org/dataset/nm000118 (latest version v1.0.2).",
+    "hasAccessLink": "https://nemar.org/dataset/nm000118",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Masaki Nakanishi",
+      "Yijun Wang",
+      "Yu-Te Wang",
+      "Tzyy-Ping Jung"
+    ],
+    "hasKeywords": [
+      "EEG",
+      "SSVEP",
+      "steady-state visual evoked potentials",
+      "brain-computer interface",
+      "canonical correlation analysis",
+      "frequency-phase coding",
+      "Brain-Computer Interfaces"
+    ],
+    "hasLabel": "Nakanishi2015 \u2013 SSVEP Nakanishi 2015 dataset",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/nm000118",
+      "https://doi.org/10.82901/nemar.nm000118"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/nm000118/"
+  },
+  "dataset_id": "nm000118",
+  "imaging": {
+    "attachable_subjects": 9,
+    "modalities": {
+      "sub-1": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-2": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-3": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-4": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-5": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-6": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-7": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-8": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-9": [
+        "nidm:Electroencephalography"
+      ]
+    }
+  },
+  "inputs": {
+    "annotated.json": "cc99acaf2d5b3f0a83f51a8bf434a723106daad26bb8d03be9baf73ed6b92757",
+    "dataset_description.json": "36d2f29d9d35df3a4acc83a46c36efece8a7622d0e3de5abbb5bbd53b06f3171",
+    "participants.tsv": "9713922123556fc2386505915d09ed793bb6abc59fb4ea275c7a4a150935e9dc"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-1": {
+      "age": 28.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-2": {
+      "age": 28.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-3": {
+      "age": 28.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-4": {
+      "age": 28.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-5": {
+      "age": 28.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-6": {
+      "age": 28.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-7": {
+      "age": 28.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-8": {
+      "age": 28.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-9": {
+      "age": 28.0,
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    }
+  },
+  "transform_only_subjects": 0
+}
