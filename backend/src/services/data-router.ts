@@ -14,6 +14,7 @@
 import { formatBytesCompact, formatBytesDetailed } from "../../../shared/bytes.js";
 import {
   NEUROSCHEMA_VERSION,
+  NO_SESSION_KEY,
   toBareVersion,
   toVersionTag,
 } from "../../../shared/contract/index.js";
@@ -723,6 +724,18 @@ export interface BidsIndexModalityNode {
 export interface BidsIndexSubjectNode {
   sessions: string[];
   modalities: Record<string, BidsIndexModalityNode>;
+  /**
+   * Which datatype directories each session holds (#1588): `sessions` and
+   * `modalities` are separate sets per subject, so on their own they cannot
+   * say that `ses-01` has the anat and `ses-02` the eeg. One key per session
+   * label, plus {@link NO_SESSION_KEY} when the subject has a datatype
+   * directory outside every session directory. A session with only
+   * session-level files is present with `[]`. Always LAST in the node, so a
+   * reader that ignores it sees the bytes this node had before it existed.
+   * The wire contract (and the reading rules) is `bidsIndexSubjectSchema` in
+   * `shared/contract/dataset.ts`.
+   */
+  session_modalities: Record<string, string[]>;
 }
 
 export interface BidsIndex {
@@ -974,6 +987,12 @@ const BIDS_RUN_TOKEN_RE = /_run-([A-Za-z0-9]+)/;
  * tooling typically refers to sessions (the directory keeps the prefix; the
  * label does not).
  *
+ * Each subject carries `sessions` and `modalities` as two separate sets and
+ * `session_modalities` as the pairing between them (#1588): the datatype
+ * directories found in each session, or under {@link NO_SESSION_KEY} when
+ * they sit directly under the subject. It is derived in the same pass from
+ * the same paths, so it adds no read of the manifest (ADR 0072).
+ *
  * Sets are converted to deterministically sorted arrays at the end so the
  * response is byte-stable for cache-friendly clients.
  */
@@ -994,7 +1013,12 @@ export function buildBidsIndex(
 export class BidsIndexBuilder {
   private readonly acc: Record<
     string,
-    { sessions: Set<string>; modalities: Map<string, Map<string, Set<string>>> }
+    {
+      sessions: Set<string>;
+      modalities: Map<string, Map<string, Set<string>>>;
+      /** Session label (or {@link NO_SESSION_KEY}) -> datatype directories seen in it. */
+      sessionModalities: Map<string, Set<string>>;
+    }
   > = {};
 
   add(path: string): void {
@@ -1017,15 +1041,39 @@ export class BidsIndexBuilder {
     // when the filename has no `_task-` token. The modalities map for such
     // a subject can legitimately be empty.
     if (!acc[subject]) {
-      acc[subject] = { sessions: new Set(), modalities: new Map() };
+      acc[subject] = {
+        sessions: new Set(),
+        modalities: new Map(),
+        sessionModalities: new Map(),
+      };
     }
-    if (sessionLabel !== null) acc[subject].sessions.add(sessionLabel);
+    if (sessionLabel !== null) {
+      acc[subject].sessions.add(sessionLabel);
+      // A session is known the moment one path sits under it, whether or not
+      // that path is in a datatype directory: `sessions` has it, so
+      // `session_modalities` does too (empty until a datatype shows up).
+      if (!acc[subject].sessionModalities.has(sessionLabel)) {
+        acc[subject].sessionModalities.set(sessionLabel, new Set());
+      }
+    }
 
     // No modality directory after the subject (or session) prefix -> the
     // subject is registered but this path doesn't add a modality entry.
     if (modalityIdx >= parts.length - 1) return;
     const modality = parts[modalityIdx];
     const filename = parts[parts.length - 1];
+
+    // The same directory that makes `modality` a key of `modalities` makes it
+    // a member of this session's list, so the two can never disagree about
+    // which datatypes exist. Outside every session directory it lands under
+    // NO_SESSION_KEY, which exists only once a datatype is seen there.
+    const sessionKey = sessionLabel ?? NO_SESSION_KEY;
+    let inSession = acc[subject].sessionModalities.get(sessionKey);
+    if (!inSession) {
+      inSession = new Set();
+      acc[subject].sessionModalities.set(sessionKey, inSession);
+    }
+    inSession.add(modality);
 
     if (!acc[subject].modalities.has(modality)) {
       acc[subject].modalities.set(modality, new Map());
@@ -1056,9 +1104,14 @@ export class BidsIndexBuilder {
         }
         modalities[mod] = { tasks };
       }
+      const sessionModalities: Record<string, string[]> = {};
+      for (const key of [...node.sessionModalities.keys()].sort()) {
+        sessionModalities[key] = [...(node.sessionModalities.get(key) ?? [])].sort();
+      }
       out[subject] = {
         sessions: [...node.sessions].sort(),
         modalities,
+        session_modalities: sessionModalities,
       };
     }
     return out;
