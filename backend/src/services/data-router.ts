@@ -13,6 +13,7 @@
 // (routes/data.ts) keep working.
 import { formatBytesCompact, formatBytesDetailed } from "../../../shared/bytes.js";
 import {
+  type BidsIndexSubjectWire,
   NEUROSCHEMA_VERSION,
   NO_SESSION_KEY,
   toBareVersion,
@@ -737,6 +738,29 @@ export interface BidsIndexSubjectNode {
    */
   session_modalities: Record<string, string[]>;
 }
+
+/**
+ * Compile-time tie between the node the builder produces and the shape the
+ * wire contract declares (`bidsIndexSubjectSchema`), so the two cannot drift
+ * apart without a typecheck failure. A key the builder drops, or one whose
+ * type changes, no longer fits the schema's inferred type and fails here
+ * rather than only in the route test. The schema's objects end in
+ * `.passthrough()`, so their inferred types carry an open `[k: string]:
+ * unknown` that an interface cannot satisfy and that says nothing about
+ * drift; `Declared` removes exactly that (an index signature whose value is
+ * `unknown`) and keeps every real one, such as `Record<string, ...>`.
+ */
+type Declared<T> = T extends readonly unknown[]
+  ? T
+  : T extends object
+    ? {
+        [K in keyof T as string extends K ? (unknown extends T[K] ? never : K) : K]: Declared<T[K]>;
+      }
+    : T;
+const _builderNodeFitsWireContract: Declared<BidsIndexSubjectNode> extends Declared<BidsIndexSubjectWire>
+  ? true
+  : never = true;
+void _builderNodeFitsWireContract;
 
 export interface BidsIndex {
   version: string;

@@ -568,6 +568,8 @@ export const bidsIndexSubjectSchema = z
     session_modalities: z.record(z.array(z.string())).optional(),
   })
   .passthrough();
+// Kept for the Neurobagel transform (epic #1586 Phase 1) to import rather than redeclare
+// the shape; today only the builder's compile-time check in data-router.ts uses this one.
 export type BidsIndexSubjectWire = z.infer<typeof bidsIndexSubjectSchema>;
 
 /**
@@ -588,4 +590,6 @@ export const bidsIndexSchema = z
     subjects: z.record(bidsIndexSubjectSchema),
   })
   .passthrough();
+// No consumer yet; kept for the Neurobagel transform (epic #1586 Phase 1) to import
+// rather than redeclare the shape.
 export type BidsIndexWire = z.infer<typeof bidsIndexSchema>;
