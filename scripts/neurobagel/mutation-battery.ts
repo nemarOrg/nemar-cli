@@ -340,7 +340,7 @@ export const MUTANTS: Mutant[] = [
     id: "T11-group-not-replaced",
     layer: "transform",
     file: `${NEUROBAGEL}/transform.ts`,
-    find: "const groupIsCurated = curatedDiagnoses.some((d) => d.index === columnIndex.group);",
+    find: "const groupIsCurated = curatedGroup !== undefined;",
     replace: "const groupIsCurated = false;",
     note: "the mechanical group rule runs next to a curated group column",
   },

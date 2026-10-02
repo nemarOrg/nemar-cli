@@ -516,7 +516,8 @@ export async function buildNeurobagelArtifacts(
   // Every column about Diagnosis: the mechanical group column (unless a curated column is that
   // column, which replaces it) and the curated ones.
   const curatedDiagnoses = applied?.diagnoses ?? [];
-  const groupIsCurated = curatedDiagnoses.some((d) => d.index === columnIndex.group);
+  const curatedGroup = curatedDiagnoses.find((d) => d.index === columnIndex.group);
+  const groupIsCurated = curatedGroup !== undefined;
   const diagnosisColumns: (DiagnosisColumn & { index: number; curated: boolean })[] = [];
   if (mechanicalGroup.status === "mapped" && !groupIsCurated) {
     diagnosisColumns.push({
@@ -549,17 +550,17 @@ export async function buildNeurobagelArtifacts(
   const sexReport: ColumnReport = applied?.sex
     ? { status: "curated", counts: (sexOutcome as { counts: ColumnCounts }).counts }
     : columnReport(mechanicalSex);
-  const groupReport: ColumnReport = groupIsCurated
-    ? {
-        status: "curated",
-        counts: curatedCounts(
-          columnIndex.group,
-          (c) =>
-            curatedDiagnoses.find((d) => d.index === columnIndex.group)?.levels.has(c) ?? false,
-          curatedDiagnoses.find((d) => d.index === columnIndex.group)?.missingValues ?? [],
-        ),
-      }
-    : columnReport(mechanicalGroup);
+  const groupReport: ColumnReport =
+    curatedGroup === undefined
+      ? columnReport(mechanicalGroup)
+      : {
+          status: "curated",
+          counts: curatedCounts(
+            columnIndex.group,
+            (c) => curatedGroup.levels.has(c),
+            curatedGroup.missingValues,
+          ),
+        };
 
   const dictionaryColumns = {
     participantColumn: PARTICIPANT_COLUMN,
