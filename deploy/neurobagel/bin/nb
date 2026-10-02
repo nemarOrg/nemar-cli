@@ -4,7 +4,7 @@
 #
 #   nb install              first-time setup (recipes checkout, .env, secrets, first release)
 #   nb up                   start the stack and wait until it is loaded and verified
-#   nb down                 stop THIS project (containers only; volumes and data are kept)
+#   nb down                 stop THIS project (containers only; volumes and data are kept; no arguments)
 #   nb status [--json] [--deep]   health, limits, usage, loader state; exit 0 healthy
 #   nb load [options]       pull artifacts and reload when something changed (cron runs this)
 #   nb reload [options]     deliberate reload of the live release, with timing and rollback
@@ -14,7 +14,9 @@
 #   nb guard [options]      resource guard: sample, log, and optionally stop this project
 #   nb backup [options]     back up the inputs and state (and optionally a graph export)
 #   nb restore ARCHIVE      restore the inputs from a backup (then: nb up)
-#   nb compose ARGS...      docker compose for this project only (never another project)
+#   nb compose ARGS...      docker compose for this project only: the project, its files and its env
+#                           are fixed and a global flag that names another is refused (it can still
+#                           remove this project's own volumes, as `down -v` does)
 #   nb logs [SERVICE]       follow the logs of this project
 #   nb cron-line            print the crontab lines to install (does not install them)
 #
@@ -35,12 +37,18 @@ case "$cmd" in
     exec "$NB_CODE_DIR/bin/nb-$cmd" "$@"
     ;;
   down)
+    # No arguments, so no -v: volumes (the graph store and the data volume) are never removed from here.
+    [ $# -eq 0 ] || nb_die "$NB_EX_USAGE" "nb down takes no arguments (it never removes volumes)"
     nb_need docker
     nb_check_project_name
-    # No -v: volumes (the graph store and the data volume) are never removed from here.
-    nb_compose --profile '*' down --remove-orphans "$@"
+    nb_compose --profile '*' down --remove-orphans
     ;;
   compose)
+    # The project name, its directory, its env files and its compose files are fixed. A global flag
+    # that names another would reach another project, so it is refused (see nb_compose_args_refused).
+    refused="$(nb_compose_args_refused "$@")"
+    [ -z "$refused" ] \
+      || nb_die "$NB_EX_USAGE" "nb compose does not take '$refused' before the subcommand: the project, its directory, its files and its environment are fixed"
     nb_need docker
     nb_check_project_name
     nb_compose "$@"
