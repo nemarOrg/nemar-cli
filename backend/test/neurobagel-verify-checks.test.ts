@@ -17,6 +17,11 @@ import type {
   NeurobagelCheckResult,
   NeurobagelVerdict,
 } from "../../shared/contract/neurobagel-admin";
+import {
+  NEUROBAGEL_VERIFICATION_STALE_MS,
+  neurobagelVerdictExitCode,
+  neurobagelVerificationState,
+} from "../../shared/contract/neurobagel-admin";
 import { VOCAB } from "../../shared/neurobagel/vocab";
 import { TAG_PINS, vocabularyPins } from "../src/services/neurobagel-drift";
 import {
@@ -139,6 +144,28 @@ describe("overall: the worst verdict among the checks that ran", () => {
     ).toBe("healthy");
     // And when nothing ran it says so, rather than inventing health.
     expect(overallVerdict(all("unchecked"))).toBe("unchecked");
+  });
+
+  test("upstream drift alone cannot make a sweep healthy: it reads public pages and always runs", () => {
+    const driftOnly = (drift: NeurobagelVerdict) =>
+      overallVerdict(
+        checks({ store: "unchecked", node: "unchecked", registration: "unchecked", drift }),
+      );
+    expect(driftOnly("healthy")).toBe("unchecked");
+    // It can still alarm, and can still be unknown.
+    expect(driftOnly("alarm")).toBe("alarm");
+    expect(driftOnly("unknown")).toBe("unknown");
+    // Any one of NEMAR's own checks that ran and is fine is what makes it healthy.
+    for (const name of ["store", "node", "registration"] as const) {
+      const v = {
+        store: "unchecked",
+        node: "unchecked",
+        registration: "unchecked",
+        drift: "healthy",
+        [name]: "healthy",
+      } as Record<NeurobagelCheckName, NeurobagelVerdict>;
+      expect(overallVerdict(checks(v)), name).toBe("healthy");
+    }
     expect(
       overallVerdict(
         checks({
@@ -400,5 +427,124 @@ describe("a stored heartbeat", () => {
     );
     expect(parsed?.verification.overall).toBe("healthy");
     expect(parsed?.memory).toBeNull();
+  });
+});
+
+describe("a node behind the store", () => {
+  const IRIS = NODE_DATASETS.map((d) => d.dataset_uuid as string);
+  const stored = new Set(IRIS);
+  const judge = (records: unknown[], previousBehind: boolean | null, held = stored) =>
+    judgeNode({
+      records,
+      eligible: new Set(IRIS),
+      anonymous: new Set(),
+      stored: held,
+      previousBehind,
+    });
+
+  test("a gap is a note on the first sweep and an alarm when the sweep a day earlier saw it too", () => {
+    const gap = NODE_DATASETS.slice(2);
+    const first = judge(gap, null);
+    expect(first.behind).toBe(true);
+    expect(first.result.verdict).toBe("healthy");
+    expect(first.result.counts.store_not_served).toBe(2);
+    expect(first.result.reason).toMatch(/2 dataset\(s\) are not served yet/);
+    expect(judge(gap, false).result.verdict).toBe("healthy");
+    const second = judge(gap, true);
+    expect(second.result.verdict).toBe("alarm");
+    expect(second.result.reason).toMatch(/still not served, on two sweeps a day apart/);
+  });
+
+  test("no gap is no alarm, whatever the sweep before it saw", () => {
+    const whole = judge(NODE_DATASETS, true);
+    expect(whole.behind).toBe(false);
+    expect(whole.result.verdict).toBe("healthy");
+  });
+
+  test("when the store's contents are unknown nothing is judged behind, and nothing is claimed", () => {
+    const unknown = judgeNode({
+      records: NODE_DATASETS.slice(5),
+      eligible: new Set(IRIS),
+      anonymous: new Set(),
+      stored: null,
+      previousBehind: true,
+    });
+    expect(unknown.behind).toBeNull();
+    expect(unknown.result.verdict).toBe("healthy");
+    expect(unknown.result.counts.store_not_served).toBeNull();
+  });
+});
+
+describe("the verification state the status command reports", () => {
+  const at = (hoursAgo: number) => new Date(NOW.getTime() - hoursAgo * HOUR).toISOString();
+  const state = (
+    hoursAgo: number | null,
+    overall: NeurobagelVerdict = "healthy",
+    writerMode: "enabled" | "disabled" | "store_unconfigured" = "enabled",
+  ) =>
+    neurobagelVerificationState({
+      verification: hoursAgo === null ? null : { at: at(hoursAgo), overall },
+      writerMode,
+      now: NOW,
+    });
+
+  test("none recorded is unknown while the writer is on, and quiet while it is off", () => {
+    expect(state(null).verdict).toBe("unknown");
+    expect(state(null).note).toMatch(/none recorded/);
+    expect(state(null, "healthy", "disabled")).toEqual({ verdict: "unchecked", note: null });
+  });
+
+  test("a record is as good as its age: 36 hours is the edge, and beyond it nothing is known", () => {
+    expect(NEUROBAGEL_VERIFICATION_STALE_MS).toBe(36 * HOUR);
+    expect(state(36).verdict).toBe("healthy");
+    expect(state(36 + 1 / 3600).verdict).toBe("unknown");
+    expect(state(36 + 1 / 3600).note).toMatch(/36 hours old/);
+    // A stale alarm is unknown too: it describes a day that is over.
+    expect(state(60, "alarm").verdict).toBe("unknown");
+  });
+
+  test("a fresh record speaks for itself, and an unreadable time says nothing", () => {
+    expect(state(1, "alarm").verdict).toBe("alarm");
+    expect(state(1, "unknown").verdict).toBe("unknown");
+    expect(state(1, "unchecked").verdict).toBe("unchecked");
+    const bad = neurobagelVerificationState({
+      verification: { at: "not a time", overall: "healthy" },
+      writerMode: "enabled",
+      now: NOW,
+    });
+    expect(bad.verdict).toBe("unknown");
+  });
+
+  test("the exit codes of status and verify are one family: 0 healthy or unchecked, 1 alarm, 2 unknown", () => {
+    expect(neurobagelVerdictExitCode("healthy")).toBe(0);
+    expect(neurobagelVerdictExitCode("unchecked")).toBe(0);
+    expect(neurobagelVerdictExitCode("alarm")).toBe(1);
+    expect(neurobagelVerdictExitCode("unknown")).toBe(2);
+  });
+});
+
+describe("a stored heartbeat's node memory", () => {
+  const base = {
+    at: NOW.toISOString(),
+    trigger: "cron",
+    failed: false,
+    overall: "healthy",
+    checks: Object.fromEntries(
+      ["store", "node", "registration", "drift"].map((c) => [
+        c,
+        { verdict: "healthy", reason: "r", counts: {} },
+      ]),
+    ),
+    warnings: [],
+  };
+  test("is read back, and anything that is not a boolean is dropped", () => {
+    const ok = parseHeartbeat(
+      JSON.stringify({ ...base, memory: { residue: [], origin: null, nodeBehind: true } }),
+    );
+    expect(ok?.memory?.nodeBehind).toBe(true);
+    const bad = parseHeartbeat(
+      JSON.stringify({ ...base, memory: { residue: [], origin: null, nodeBehind: "yes" } }),
+    );
+    expect(bad?.memory).toEqual({ residue: [], origin: null });
   });
 });

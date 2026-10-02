@@ -22,6 +22,9 @@
  * unexpected body) is `unknown`, never an alarm and never "no drift": a check that could
  * not look says so (ADR 0054). If some reads succeeded and found drift while others
  * failed, the verdict is `alarm` and the reason says how many reads failed.
+ *
+ * A redirect is never followed (an address that answers with one has moved, and is an
+ * `unknown`), and an answer is read to a cap and no further.
  */
 
 import type { NeurobagelCheckResult } from "../../../shared/contract/neurobagel-admin.js";
@@ -78,23 +81,75 @@ export function vocabularyPins(): { repo: string; files: Record<string, string> 
   return { repo: VOCAB.pins.communities.repo, files };
 }
 
-type Read<T> = { ok: true; value: T } | { ok: false; reason: string };
+export type Read<T> = { ok: true; value: T } | { ok: false; reason: string };
 
-async function getJson(url: string, timeoutMs: number): Promise<Read<unknown>> {
+/**
+ * The most bytes of an answer this module will read. The real answers are a few kilobytes (a
+ * release is about 3 KB with its notes, a directory listing about 5 KB), so 512 KiB is more than
+ * a hundred times what is expected and still small enough that no answer can take a Worker's
+ * memory: the body is read in pieces and abandoned the moment it passes the cap.
+ */
+export const MAX_ANSWER_BYTES = 512 * 1024;
+
+/**
+ * Read a body as JSON, never more than `maxBytes` of it. A body that is too large is a failed
+ * read (`answer too large`), not a parse of part of it, and the rest is never downloaded.
+ */
+export async function readJsonCapped(res: Response, maxBytes: number): Promise<Read<unknown>> {
+  const reader = res.body?.getReader();
+  let text: string;
+  if (!reader) {
+    text = await res.text();
+    if (new TextEncoder().encode(text).byteLength > maxBytes) {
+      return { ok: false, reason: "answer too large" };
+    }
+  } else {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {});
+        return { ok: false, reason: "answer too large" };
+      }
+      chunks.push(value);
+    }
+    const all = new Uint8Array(total);
+    let at = 0;
+    for (const chunk of chunks) {
+      all.set(chunk, at);
+      at += chunk.byteLength;
+    }
+    text = new TextDecoder().decode(all);
+  }
   try {
-    // A plain GET: no method, no body, no credential. The scan in neurobagel-source-scan
-    // holds this call to exactly that shape.
-    const res = await fetch(url, {
-      headers: { "User-Agent": UPSTREAM_USER_AGENT, Accept: "application/vnd.github+json" },
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    return { ok: true, value: JSON.parse(text) };
+  } catch {
+    return { ok: false, reason: "the answer was not JSON" };
+  }
+}
+
+/**
+ * Turn the outcome of one request into a read. A REDIRECT is never followed: an address that
+ * answers with one has moved or been taken over, and following it would send a read somewhere
+ * nobody configured. 2xx all count (the public federation answers 207 when a node failed).
+ */
+export async function answerOf(
+  send: () => Promise<Response>,
+  maxBytes: number,
+): Promise<Read<unknown>> {
+  try {
+    const res = await send();
+    if (res.status >= 300 && res.status < 400) return { ok: false, reason: "redirected" };
     if (!res.ok) {
       const limited =
         res.status === 429 ||
         (res.status === 403 && res.headers.get("x-ratelimit-remaining") === "0");
       return { ok: false, reason: limited ? "rate limited" : `HTTP ${res.status}` };
     }
-    return { ok: true, value: await res.json() };
+    return await readJsonCapped(res, maxBytes);
   } catch (err) {
     const name = err instanceof Error ? err.name : "";
     return {
@@ -102,6 +157,20 @@ async function getJson(url: string, timeoutMs: number): Promise<Read<unknown>> {
       reason: name === "TimeoutError" || name === "AbortError" ? "timed out" : "network error",
     };
   }
+}
+
+function getJson(url: string, timeoutMs: number): Promise<Read<unknown>> {
+  // A plain GET: no method, no body, no credential, no redirect followed. The scan in
+  // neurobagel-source-scan holds this call to exactly that shape.
+  return answerOf(
+    () =>
+      fetch(url, {
+        headers: { "User-Agent": UPSTREAM_USER_AGENT, Accept: "application/vnd.github+json" },
+        redirect: "manual",
+        signal: AbortSignal.timeout(timeoutMs),
+      }),
+    MAX_ANSWER_BYTES,
+  );
 }
 
 interface DriftTally {

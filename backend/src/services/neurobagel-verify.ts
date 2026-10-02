@@ -25,13 +25,19 @@
  *   - A check that was configured and could not be answered (a failed read, a thrown error)
  *     is `unknown`: never zero, never healthy, never an alarm.
  *   - `alarm` only when there was outstanding work. An empty store with nothing eligible is
- *     healthy; a store nobody is maintaining (the writer is off) is `unchecked`.
+ *     healthy; a store nobody is maintaining (the writer is off) is `unchecked`; a writer that
+ *     is switched ON with no bucket bound is an `alarm`, a defect with work no waiting will do.
  *   - Residue is an alarm only when it PERSISTS. The writer's daily reconcile removes what
  *     is no longer eligible, and the read route already hides it (ADR 0084, item 3), so a
  *     dataset withdrawn this morning is expected to be residue until that run. A dataset
  *     seen as residue by a sweep at least 20 hours earlier has survived a whole reconcile,
  *     which is the failure. The earlier sweep's residue is remembered as short digests in
- *     its heartbeat, never as dataset ids.
+ *     its heartbeat, never as dataset ids. A check that did not run to completion (unchecked,
+ *     unknown, a throw) hands back no memory and the sweep carries the previous one forward,
+ *     so one failed read does not forget the residue it was following or the clock it began.
+ *   - The node is judged against the STORE too: serving fewer of the store's datasets than it
+ *     holds is a note on one sweep and an alarm on two sweeps a day apart, because the node
+ *     pulls and reloads once a day and a node that never catches up would be healthy for ever.
  *   - "Missing" is dated from the later of the dataset's first publication and the clock's
  *     origin: the writer's first recorded run, or the first sweep that saw the writer
  *     enabled. A dataset eligible for months before the writer was switched on is not
@@ -44,10 +50,17 @@
  *
  * WHAT IS NEVER SAID. Counts and public upstream tags only. A residue or served dataset
  * may be an anonymous deposit, so no output of this module names a dataset: not the route,
- * not the heartbeat, not the weekly report. The one anonymity-class case the node check can
- * find, a served record that is an anonymous deposit's, goes to the audit log and nowhere
- * else: no GitHub issue, no mail (this module loads no mail code, and a source scan holds
- * it to that). The anonymity sweep owns the mail category (ADR 0067).
+ * not the heartbeat, not the weekly report. And no REASON says what kind of dataset it
+ * concerns: a reason can reach the weekly report, which is filed on a public-facing
+ * repository, so it says a record is wrong and nothing more (a source scan holds every string
+ * of this module to that). The one case of this kind the node check can find, a served record
+ * that is a concealed deposit's, goes to the audit log and nowhere else: no GitHub issue, no
+ * mail (this module loads no mail code, and a source scan holds it to that). The anonymity
+ * sweep owns the mail category (ADR 0067).
+ *
+ * WHAT IT ASKS, AND HOW. A plain GET of a configured address, and the one empty datasets
+ * query the federation itself asks, with no credential. A redirect is never followed (it is an
+ * `unknown`) and each answer is read to a documented cap and no further.
  *
  * The cron wrapper is production-only and absent from `DEV_CRON_ALLOWLIST`; the sweep
  * function itself is unguarded so the admin route works on staging.
@@ -66,7 +79,7 @@ import { VOCAB } from "../../../shared/neurobagel/vocab.js";
 import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { isNonProductionEnv } from "./environment.js";
-import { checkUpstreamDrift } from "./neurobagel-drift.js";
+import { type Read, answerOf, checkUpstreamDrift } from "./neurobagel-drift.js";
 import { LEDGER_ACTIONS, hasCompleteSet, ledgerTime, loadPlanRows } from "./neurobagel-plan.js";
 import { listStore, readStoredIndex, sha256OfBytes } from "./neurobagel-store.js";
 import { neurobagelWriterMode } from "./neurobagel-writer.js";
@@ -115,9 +128,12 @@ const verdict = (
 ): NeurobagelCheckResult => ({ verdict: v, reason, counts });
 
 /**
- * The worst verdict among the checks that RAN: alarm, then unknown, then healthy; and
- * `unchecked` when none ran. An unchecked check is neither good nor bad news, so it does
- * not move the answer, and it never makes one healthy that was not.
+ * The worst verdict among the checks (alarm, then unknown), and `healthy` only when the sweep
+ * actually looked at something of NEMAR's: at least one of the store, the node and registration
+ * ran, and nothing is worse. Upstream drift reads public pages and always runs, so it can raise
+ * an alarm (or an unknown) but it cannot make a sweep healthy by itself: with nothing else to
+ * judge, the overall is `unchecked`, which no surface may read as "all is well". An unchecked
+ * check never makes an overall healthy that was not.
  */
 export function overallVerdict(
   checks: Record<NeurobagelCheckName, NeurobagelCheckResult>,
@@ -125,8 +141,10 @@ export function overallVerdict(
   const verdicts = NEUROBAGEL_CHECKS.map((name) => checks[name].verdict);
   if (verdicts.includes("alarm")) return "alarm";
   if (verdicts.includes("unknown")) return "unknown";
-  if (verdicts.includes("healthy")) return "healthy";
-  return "unchecked";
+  const lookedAtNemar = (["store", "node", "registration"] as const).some(
+    (name) => checks[name].verdict === "healthy",
+  );
+  return lookedAtNemar ? "healthy" : "unchecked";
 }
 
 // ----------------------------------------------------------------------------
@@ -216,12 +234,23 @@ type EligibleOutcome = EligibleRead | { ok: false; error: string };
 interface Memory {
   residue: string[];
   origin: string | null;
+  /** Whether the node served fewer of the store's datasets than the store holds, at that sweep. */
+  nodeBehind?: boolean;
 }
 
-/** What one check hands back: its verdict, what the next sweep should remember, and warnings. */
+/**
+ * What one check hands back: its verdict, what the next sweep should remember, and warnings.
+ * A check that did not run to completion (unchecked, unknown, a throw) hands back NO memory, and
+ * the sweep carries the previous memory forward: one blip of the store must not reset the residue
+ * it was following or the clock it started.
+ */
 interface CheckOutcome {
   result: NeurobagelCheckResult;
   memory?: Memory;
+  /** The store check: the datasets the store holds a complete, indexed, eligible set for. */
+  writtenIds?: string[];
+  /** The node check: whether it was behind the store at this sweep (only when it could tell). */
+  nodeBehind?: boolean;
   warnings?: string[];
 }
 
@@ -237,12 +266,16 @@ async function checkStore(
   firstWriterRun: Date | null,
   now: Date,
 ): Promise<CheckOutcome> {
-  const none: Memory = { residue: [], origin: null };
   const mode = neurobagelWriterMode(env);
   if (mode === "store_unconfigured") {
+    // The writer is switched on and nothing can be stored: a deployment defect, and the one state
+    // in which the store check has outstanding work that no amount of waiting will do. `status`
+    // exits non-zero for the same state, so the two agree.
     return {
-      result: verdict("unchecked", "No NEUROBAGEL bucket is bound, so there is no store to check."),
-      memory: none,
+      result: verdict(
+        "alarm",
+        "The writer is switched on but no NEUROBAGEL bucket is bound, so nothing can be stored.",
+      ),
     };
   }
   if (mode === "disabled" || !env.NEUROBAGEL) {
@@ -251,7 +284,6 @@ async function checkStore(
         "unchecked",
         "The writer is off, so nothing maintains the store and none of it is judged.",
       ),
-      memory: none,
     };
   }
   if (!eligible.ok) {
@@ -260,21 +292,31 @@ async function checkStore(
         "unknown",
         "The eligible datasets could not be read, so the store could not be judged.",
       ),
-      memory: none,
     };
   }
   const listing = await listStore(env.NEUROBAGEL);
   const index = await readStoredIndex(env.NEUROBAGEL);
+  // An index that exists and cannot be read as one is a question that was not answered, not an
+  // empty index: judging the store against nothing would call every written dataset missing.
+  if (index.etag !== null && index.document === null) {
+    return {
+      result: verdict(
+        "unknown",
+        "The stored index could not be read as an index, so the store could not be judged.",
+      ),
+    };
+  }
   const indexIds = new Set((index.document?.datasets ?? []).map((d) => d.id));
   const eligibleIds = new Set(eligible.rows.map((r) => r.dataset_id));
 
-  let written = 0;
+  const writtenIds: string[] = [];
   const missing: { published: string | null }[] = [];
   for (const row of eligible.rows) {
     if (hasCompleteSet(listing.datasets.get(row.dataset_id)) && indexIds.has(row.dataset_id))
-      written++;
+      writtenIds.push(row.dataset_id);
     else missing.push({ published: row.first_published_at });
   }
+  const written = writtenIds.length;
   const residueIds = new Set<string>();
   for (const id of listing.datasets.keys()) if (!eligibleIds.has(id)) residueIds.add(id);
   for (const id of indexIds) if (!eligibleIds.has(id)) residueIds.add(id);
@@ -297,6 +339,7 @@ async function checkStore(
   );
   return {
     result,
+    writtenIds,
     memory: { residue: residue.slice(0, RESIDUE_MEMORY_CAP), origin: origin.toISOString() },
   };
 }
@@ -305,38 +348,53 @@ async function checkStore(
 // Check: the node, as seen over the network
 // ----------------------------------------------------------------------------
 
-type Read<T> = { ok: true; value: T } | { ok: false; reason: string };
+/**
+ * The most bytes of each answer this sweep reads, and why. The node's datasets answer is about a
+ * kilobyte a dataset, so 8 MiB holds ten times the 800 datasets the node is sized for; the public
+ * federation's directory is under a kilobyte and its diagnoses a few; both are capped far above
+ * that and far below anything that could take a Worker's memory. A body past its cap is a failed
+ * read, never a parse of part of it.
+ */
+export const NODE_ANSWER_MAX_BYTES = 8 * 1024 * 1024;
+export const FEDERATION_NODES_MAX_BYTES = 256 * 1024;
+export const FEDERATION_DIAGNOSES_MAX_BYTES = 2 * 1024 * 1024;
 
-async function request(
-  url: string,
-  init: { method: "GET" | "POST"; body?: string },
-  timeoutMs: number,
-): Promise<Read<unknown>> {
-  try {
-    const res = await fetch(url, {
-      method: init.method,
-      headers: {
-        "User-Agent": "nemar-neurobagel-verify/1.0 (+https://nemar.org)",
-        Accept: "application/json",
-        ...(init.body === undefined ? {} : { "Content-Type": "application/json" }),
-      },
-      body: init.body,
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    // 2xx all count: the public federation answers 207 when some node failed.
-    if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` };
-    try {
-      return { ok: true, value: await res.json() };
-    } catch {
-      return { ok: false, reason: "the answer was not JSON" };
-    }
-  } catch (err) {
-    const name = err instanceof Error ? err.name : "";
-    return {
-      ok: false,
-      reason: name === "TimeoutError" || name === "AbortError" ? "timed out" : "network error",
-    };
-  }
+const AGENT = "nemar-neurobagel-verify/1.0 (+https://nemar.org)";
+
+/** A plain GET of an address an operator configured: no body, no credential, no redirect followed. */
+function getJson(url: string, maxBytes: number, timeoutMs: number): Promise<Read<unknown>> {
+  return answerOf(
+    () =>
+      fetch(url, {
+        headers: { "User-Agent": AGENT, Accept: "application/json" },
+        redirect: "manual",
+        signal: AbortSignal.timeout(timeoutMs),
+      }),
+    maxBytes,
+  );
+}
+
+/**
+ * The one question put to the node: the empty datasets query the federation itself asks. A fixed
+ * method and a fixed body, no credential, no redirect followed; a source scan holds this call to
+ * exactly that shape.
+ */
+function postDatasetsQuery(base: string, timeoutMs: number): Promise<Read<unknown>> {
+  return answerOf(
+    () =>
+      fetch(`${base}/datasets`, {
+        method: "POST",
+        headers: {
+          "User-Agent": AGENT,
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: "{}",
+        redirect: "manual",
+        signal: AbortSignal.timeout(timeoutMs),
+      }),
+    NODE_ANSWER_MAX_BYTES,
+  );
 }
 
 /** A configured address, trimmed of trailing slashes, or null when unset or blank. */
@@ -383,11 +441,17 @@ export interface NodeObservation {
   eligible: ReadonlySet<string>;
   /** The IRI of each anonymous deposit (or a row whose anonymity is unknown). */
   anonymous: ReadonlySet<string>;
+  /** The IRI of each dataset the STORE holds a complete set for, or null when that is not known. */
+  stored?: ReadonlySet<string> | null;
+  /** Whether the sweep a day earlier found the node behind the store, or null when it did not say. */
+  previousBehind?: boolean | null;
 }
 
 export function judgeNode(obs: NodeObservation): {
   result: NeurobagelCheckResult;
   anonymousServed: string[];
+  /** Whether the node serves fewer of the store's datasets than the store holds; null when unknown. */
+  behind: boolean | null;
 } {
   let invalid = 0;
   let unprotected = 0;
@@ -408,35 +472,54 @@ export function judgeNode(obs: NodeObservation): {
     if (!obs.eligible.has(iri)) ineligible++;
   }
   const notServed = [...obs.eligible].filter((iri) => !served.has(iri)).length;
+  // Behind the STORE: datasets the store holds that the node does not serve. The node pulls and
+  // reloads once a day, so one sweep seeing a gap is a note; a gap on two sweeps a day apart is a
+  // node that is stale or empty, which would otherwise be healthy for ever.
+  const behindCount =
+    obs.stored === undefined || obs.stored === null
+      ? null
+      : [...obs.stored].filter((iri) => !served.has(iri)).length;
+  const behind = behindCount === null ? null : behindCount > 0;
   const counts = {
     records: obs.records.length,
     invalid,
     unprotected,
     ineligible_served: ineligible,
-    anonymous_served: anonymousServed.length,
     eligible_not_served: notServed,
+    store_not_served: behindCount,
   };
   const problems: string[] = [];
   if (ineligible > 0) {
+    // Generic on purpose: this sentence can reach the weekly report, which is public-facing, and
+    // what the records are lives in the audit log.
     problems.push(
-      `${ineligible} record(s) are for datasets that are not eligible${anonymousServed.length > 0 ? ` (${anonymousServed.length} anonymity-class, recorded in the audit log)` : ""}; the node may still hold a release from before a takedown until its next reload`,
+      `${ineligible} record(s) are for datasets that are not eligible; the node may still hold a release from before a takedown until its next reload`,
     );
   }
   if (invalid > 0) problems.push(`${invalid} record(s) do not validate`);
   if (unprotected > 0) problems.push(`${unprotected} record(s) are not protected`);
+  if (behind === true && obs.previousBehind === true) {
+    problems.push(
+      `${behindCount} dataset(s) the store holds are still not served, on two sweeps a day apart, so the node is stale or empty`,
+    );
+  }
   if (problems.length > 0) {
     return {
       result: verdict("alarm", `The node serves ${problems.join("; ")}.`, counts),
       anonymousServed,
+      behind,
     };
   }
+  const gap =
+    behindCount !== null && behindCount > 0 ? behindCount : behindCount === null ? notServed : 0;
   return {
     result: verdict(
       "healthy",
-      `The node serves ${obs.records.length} valid, protected record(s), all for eligible datasets${notServed > 0 ? `; ${notServed} eligible dataset(s) are not served yet (the node reloads once a day)` : ""}.`,
+      `The node serves ${obs.records.length} valid, protected record(s), all for eligible datasets${gap > 0 ? `; ${gap} dataset(s) are not served yet (the node reloads once a day)` : ""}.`,
       counts,
     ),
     anonymousServed,
+    behind,
   };
 }
 
@@ -451,6 +534,8 @@ const ANONYMOUS_ROWS_SQL = "SELECT dataset_id FROM datasets WHERE anonymous IS N
 async function checkNode(
   env: Bindings,
   eligible: EligibleOutcome,
+  writtenIds: readonly string[] | null,
+  previousBehind: boolean | null,
   timeoutMs: number,
 ): Promise<CheckOutcome> {
   const warnings: string[] = [];
@@ -471,7 +556,7 @@ async function checkNode(
     };
   }
   // The same question the federation asks: the empty datasets query.
-  const read = await request(`${base}/datasets`, { method: "POST", body: "{}" }, timeoutMs);
+  const read = await postDatasetsQuery(base, timeoutMs);
   if (!read.ok) {
     return {
       result: verdict("unknown", `The node did not answer the datasets query (${read.reason}).`),
@@ -493,10 +578,14 @@ async function checkNode(
     anonymousByIri.set(await iriOf(row.dataset_id), row.dataset_id);
   }
   const eligibleIris = new Set(await Promise.all(eligible.rows.map((r) => iriOf(r.dataset_id))));
-  const { result, anonymousServed } = judgeNode({
+  const stored =
+    writtenIds === null ? null : new Set(await Promise.all(writtenIds.map((id) => iriOf(id))));
+  const { result, anonymousServed, behind } = judgeNode({
     records: read.value,
     eligible: eligibleIris,
     anonymous: new Set(anonymousByIri.keys()),
+    stored,
+    previousBehind,
   });
   // The durable, private record of the one finding that must never leave the audit log.
   for (const iri of anonymousServed) {
@@ -510,11 +599,11 @@ async function checkNode(
       }).run();
     } catch (err) {
       warnings.push(
-        `the anonymity-class audit row failed: ${err instanceof Error ? err.message : String(err)}`,
+        `the audit row for a served record failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
-  return { result, warnings };
+  return { result, warnings, ...(behind === null ? {} : { nodeBehind: behind }) };
 }
 
 // ----------------------------------------------------------------------------
@@ -580,13 +669,13 @@ async function checkRegistration(env: Bindings, timeoutMs: number): Promise<Neur
       "NEUROBAGEL_FEDERATION_URL is not set, so registration is not checked.",
     );
   }
-  const nodes = await request(`${base}/nodes`, { method: "GET" }, timeoutMs);
+  const nodes = await getJson(`${base}/nodes`, FEDERATION_NODES_MAX_BYTES, timeoutMs);
   if (!nodes.ok) {
     return verdict("unknown", `The federation's node list could not be read (${nodes.reason}).`);
   }
   // Not listed needs no second question; listed asks whether the federation could reach it.
   if (nemarListed(nodes.value) !== true) return judgeRegistration(nodes.value, null);
-  const diagnoses = await request(`${base}/diagnoses`, { method: "GET" }, timeoutMs);
+  const diagnoses = await getJson(`${base}/diagnoses`, FEDERATION_DIAGNOSES_MAX_BYTES, timeoutMs);
   if (!diagnoses.ok) {
     return verdict(
       "unknown",
@@ -643,11 +732,14 @@ export function parseHeartbeat(
       const c = d.checks[name];
       if (!c || !isVerdict(c.verdict) || typeof c.reason !== "string") return null;
     }
-    const memory =
+    const memory: Memory | null =
       Array.isArray(d.memory?.residue) && d.memory.residue.every((x) => typeof x === "string")
         ? {
             residue: d.memory.residue,
             origin: typeof d.memory.origin === "string" ? d.memory.origin : null,
+            ...(typeof d.memory.nodeBehind === "boolean"
+              ? { nodeBehind: d.memory.nodeBehind }
+              : {}),
           }
         : null;
     return {
@@ -682,10 +774,17 @@ export async function readLatestVerification(
   return parsed ? { kind: "ok", verification: parsed.verification } : { kind: "unreadable" };
 }
 
-async function readPrevious(
-  db: D1Database,
-  now: Date,
-): Promise<{ residue: ReadonlySet<string> | null; origin: Date | null }> {
+/** What the previous qualifying sweep (at least 20 hours old) left in its heartbeat, if anything. */
+interface Previous {
+  memory: Memory | null;
+  residue: ReadonlySet<string> | null;
+  origin: Date | null;
+  nodeBehind: boolean | null;
+}
+
+const NO_PREVIOUS: Previous = { memory: null, residue: null, origin: null, nodeBehind: null };
+
+async function readPrevious(db: D1Database, now: Date): Promise<Previous> {
   const row = await db
     .prepare(HEARTBEAT_BEFORE_SQL)
     .bind(VERIFY_ACTIONS.heartbeat, toSqliteUtc(new Date(now.getTime() - PERSISTENCE_MIN_AGE_MS)))
@@ -693,8 +792,10 @@ async function readPrevious(
   const parsed = row ? parseHeartbeat(row.details) : null;
   const memory = parsed?.memory ?? null;
   return {
+    memory,
     residue: memory === null ? null : new Set(memory.residue),
     origin: memory?.origin ? new Date(memory.origin) : null,
+    nodeBehind: memory?.nodeBehind ?? null,
   };
 }
 
@@ -757,10 +858,7 @@ async function runChecks(
   const eligible = await readEligible(env.DB);
   if (!eligible.ok) warnings.push(`eligible datasets: ${eligible.error.slice(0, 300)}`);
 
-  let previous: { residue: ReadonlySet<string> | null; origin: Date | null } = {
-    residue: null,
-    origin: null,
-  };
+  let previous: Previous = NO_PREVIOUS;
   let firstWriterRun: Date | null = null;
   try {
     previous = await readPrevious(env.DB, now);
@@ -770,9 +868,22 @@ async function runChecks(
     warnings.push(`history: ${errText(err)}`);
   }
 
+  // The store first, because the node check asks it which datasets the node should be serving;
+  // the other two checks need neither and run beside them.
+  const storeRun = contained(
+    "store",
+    () => checkStore(env, eligible, previous, firstWriterRun, now),
+    warnings,
+  );
   const [store, node, registration, drift] = await Promise.all([
-    contained("store", () => checkStore(env, eligible, previous, firstWriterRun, now), warnings),
-    contained("node", () => checkNode(env, eligible, timeoutMs), warnings),
+    storeRun,
+    storeRun.then((s) =>
+      contained(
+        "node",
+        () => checkNode(env, eligible, s.writtenIds ?? null, previous.nodeBehind, timeoutMs),
+        warnings,
+      ),
+    ),
     contained(
       "registration",
       async () => ({ result: await checkRegistration(env, timeoutMs) }),
@@ -795,6 +906,16 @@ async function runChecks(
     registration: registration.result,
     drift: drift.result,
   };
+  // What the next sweep remembers. A check that did not run to completion contributes nothing,
+  // and what the previous sweep remembered stands, so one failed read of the store does not
+  // forget the residue it was following or the clock it started.
+  const before = previous.memory ?? { residue: [], origin: null };
+  const nodeBehind = node.nodeBehind ?? before.nodeBehind;
+  const memory: Memory = {
+    residue: store.memory?.residue ?? before.residue,
+    origin: store.memory ? store.memory.origin : before.origin,
+    ...(nodeBehind === undefined ? {} : { nodeBehind }),
+  };
   return {
     verification: {
       at: now.toISOString(),
@@ -804,7 +925,7 @@ async function runChecks(
       checks,
       warnings,
     },
-    memory: store.memory ?? { residue: [], origin: null },
+    memory,
   };
 }
 

@@ -27,6 +27,7 @@ import type {
 } from "../../shared/contract/neurobagel-admin";
 import { datasetName, nbIdentifier } from "../../shared/neurobagel/identifiers";
 import { VOCAB } from "../../shared/neurobagel/vocab";
+import { MAX_ANSWER_BYTES } from "../src/services/neurobagel-drift";
 import { NEUROBAGEL_PLAN_ROWS_SQL } from "../src/services/neurobagel-plan";
 import {
   ARTIFACT_KINDS,
@@ -39,6 +40,8 @@ import {
   sha256OfBytes,
 } from "../src/services/neurobagel-store";
 import {
+  FEDERATION_NODES_MAX_BYTES,
+  NODE_ANSWER_MAX_BYTES,
   type VerifyOptions,
   runNeurobagelVerificationSweep,
   runNeurobagelVerificationSweepCron,
@@ -166,15 +169,31 @@ function muteErrors(): string[] {
 const NODE_URL = () => `${base()}/node`;
 const FED_URL = () => `${base()}/fed`;
 
-function sweep(
+/** Every reason any sweep in this file produced, so the last test can read them all. */
+const reasonsSeen: string[] = [];
+
+async function sweep(
   over: Partial<Bindings> = {},
   opts: VerifyOptions = {},
 ): Promise<NeurobagelVerifyResult> {
-  return runNeurobagelVerificationSweep(h.env(over), {
+  const r = await runNeurobagelVerificationSweep(h.env(over), {
     trigger: "admin",
     timeoutMs: 4000,
     ...opts,
   });
+  for (const c of Object.values(r.checks)) reasonsSeen.push(c.reason);
+  return r;
+}
+
+/** The real bucket, except that listing it fails: a transport failure, the one fault injected. */
+function failingList(): R2Bucket {
+  return new Proxy(h.bucket, {
+    get(target, prop, receiver) {
+      if (prop === "list") return async () => Promise.reject(new Error("R2 unavailable"));
+      const v = Reflect.get(target, prop, receiver);
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  }) as R2Bucket;
 }
 const verdictOf = (r: NeurobagelVerifyResult, check: NeurobagelCheckName) =>
   r.checks[check].verdict;
@@ -278,14 +297,35 @@ describe("the store check", () => {
     });
   });
 
-  test("no bucket, and a writer that is off, are unchecked: the store is not judged, and neither is healthy", async () => {
+  test("a writer that is off is unchecked: the store is not judged, and it is never healthy", async () => {
     seedEligible(["nm000801"]);
-    const noBucket = await sweep({ NEUROBAGEL: undefined });
-    expect(verdictOf(noBucket, "store")).toBe("unchecked");
     const off = await sweep({ NEUROBAGEL_WRITER_ENABLED: undefined });
     expect(verdictOf(off, "store")).toBe("unchecked");
     // An eligible dataset missing from a store nobody maintains is not "outstanding work".
     expect(off.checks.store.reason).toMatch(/writer is off/);
+    // Off and with no bucket either: still nothing is maintained, still unchecked.
+    const offNoBucket = await sweep({
+      NEUROBAGEL_WRITER_ENABLED: undefined,
+      NEUROBAGEL: undefined,
+    });
+    expect(verdictOf(offNoBucket, "store")).toBe("unchecked");
+  });
+
+  test("a writer that is switched on with no bucket bound is an alarm: a deployment defect, not a quiet week", async () => {
+    seedEligible(["nm000801"]);
+    const r = await sweep({ NEUROBAGEL: undefined });
+    expect(verdictOf(r, "store")).toBe("alarm");
+    expect(r.checks.store.reason).toMatch(/no NEUROBAGEL bucket is bound/);
+    expect(r.overall).toBe("alarm");
+  });
+
+  test("an index that exists and cannot be read as an index is unknown, not an empty index", async () => {
+    seedEligible(["nm000802"]);
+    await plantStore(["nm000802"]);
+    await h.bucket.put(NEUROBAGEL_INDEX_KEY, "this is not an index {");
+    const r = await sweep();
+    expect(verdictOf(r, "store")).toBe("unknown");
+    expect(r.checks.store.reason).toMatch(/could not be read as an index/);
   });
 
   test("residue is first seen as healthy, and an alarm when it is still there a day later", async () => {
@@ -416,6 +456,37 @@ describe("the store check", () => {
     expect(verdictOf(day3, "store")).toBe("alarm");
   });
 
+  test("one failed read of the store does not forget the residue it was following", async () => {
+    seedEligible(["nm000802"]);
+    seedDatasetRow(h.db, "nm000803", { visibility: "private" });
+    await plantStore(["nm000802", "nm000803"]);
+    const day0 = new Date();
+    expect(verdictOf(await sweep({}, { now: day0 }), "store")).toBe("healthy");
+    // A day later the bucket cannot be listed: unknown, and the memory of day 0 is carried on.
+    const lines = muteErrors();
+    const blip = await sweep(
+      { NEUROBAGEL: failingList() },
+      { now: new Date(day0.getTime() + 24 * 3_600_000) },
+    );
+    expect(verdictOf(blip, "store")).toBe("unknown");
+    expect(lines.join("\n")).toMatch(/verification check store failed/);
+    // The residue first seen on day 0 is still there on day 2: an alarm, which it would not be if
+    // the failed day had stored an empty memory.
+    const day2 = await sweep({}, { now: new Date(day0.getTime() + 48 * 3_600_000) });
+    expect(verdictOf(day2, "store")).toBe("alarm");
+    expect(day2.checks.store.counts.residue_persisting).toBe(1);
+  });
+
+  test("nor the clock it started: a writer enabled and never run still ages through a failed read", async () => {
+    seedDatasetRow(h.db, "nm000807", { firstPublishedAt: "2025-01-01 00:00:00" });
+    const day0 = new Date();
+    expect(verdictOf(await sweep({}, { now: day0 }), "store")).toBe("healthy");
+    muteErrors();
+    await sweep({ NEUROBAGEL: failingList() }, { now: new Date(day0.getTime() + 24 * 3_600_000) });
+    const day3 = await sweep({}, { now: new Date(day0.getTime() + 3 * 24 * 3_600_000) });
+    expect(verdictOf(day3, "store")).toBe("alarm");
+  });
+
   test("a listing that fails is unknown, the heartbeat is still written, and nothing is reported as absent", async () => {
     seedEligible(["nm000802"]);
     await plantStore(["nm000802"]);
@@ -480,7 +551,6 @@ describe("the node probe", () => {
       invalid: 0,
       unprotected: 0,
       ineligible_served: 0,
-      anonymous_served: 0,
       eligible_not_served: 0,
     });
     const asked = seen.filter((s) => s.path.startsWith("/node"));
@@ -494,7 +564,7 @@ describe("the node probe", () => {
     seedDatasetRow(h.db, "nm000103", { visibility: "private" });
     const r = await sweep({ NEUROBAGEL_NODE_URL: NODE_URL() });
     expect(verdictOf(r, "node")).toBe("alarm");
-    expect(r.checks.node.counts).toMatchObject({ ineligible_served: 1, anonymous_served: 0 });
+    expect(r.checks.node.counts).toMatchObject({ ineligible_served: 1 });
     expect(JSON.stringify(r)).not.toContain("nm000103");
     // And it is the NODE's finding, not a thing the sweep went and fixed.
     expect(auditRows("neurobagel_verify_anonymity_finding")).toEqual([]);
@@ -512,8 +582,11 @@ describe("the node probe", () => {
     const calls = await withFakeResend(async (mail) => {
       const r = await sweep({ NEUROBAGEL_NODE_URL: NODE_URL(), RESEND_API_KEY: "re_test" });
       expect(verdictOf(r, "node")).toBe("alarm");
-      expect(r.checks.node.counts).toMatchObject({ ineligible_served: 1, anonymous_served: 1 });
-      expect(r.checks.node.reason).toMatch(/anonymity-class/);
+      expect(r.checks.node.counts).toMatchObject({ ineligible_served: 1 });
+      // The sentence can reach a public-facing report: it says what is wrong and not what kind of
+      // dataset it is, and no count in the heartbeat says either. The audit row does.
+      expect(r.checks.node.reason).not.toMatch(/anonym|deposit|class/i);
+      expect(Object.keys(r.checks.node.counts)).not.toContain("anonymous_served");
       // Nothing a person reads names the deposit or its identifier.
       expect(JSON.stringify(r)).not.toContain("nm099998");
       expect(JSON.stringify(r)).not.toContain(iri.slice(-36));
@@ -561,12 +634,16 @@ describe("the node probe", () => {
 
   test("an answer that is not a list is an alarm; an empty list over eligible datasets is healthy and says what is waiting", async () => {
     seedEligible(SERVED_IDS);
+    await plantStore(SERVED_IDS);
     world.node = () => json({ detail: "something else" });
     expect(verdictOf(await sweep({ NEUROBAGEL_NODE_URL: NODE_URL() }), "node")).toBe("alarm");
     world.node = () => json([]);
     const empty = await sweep({ NEUROBAGEL_NODE_URL: NODE_URL() });
     expect(verdictOf(empty, "node")).toBe("healthy");
-    expect(empty.checks.node.counts.eligible_not_served).toBe(SERVED_IDS.length);
+    expect(empty.checks.node.counts).toMatchObject({
+      eligible_not_served: SERVED_IDS.length,
+      store_not_served: SERVED_IDS.length,
+    });
     expect(empty.checks.node.reason).toMatch(/not served yet/);
   });
 
@@ -602,6 +679,158 @@ describe("the node probe", () => {
     const refused = await sweep({ NEUROBAGEL_NODE_URL: `http://127.0.0.1:${port}` });
     expect(verdictOf(refused, "node")).toBe("unknown");
     expect(refused.checks.node.reason).toMatch(/network error/);
+  });
+});
+
+describe("the node probe: behind the store, and what an answer may be", () => {
+  test("a node that serves fewer of the store's datasets is a note once and an alarm two sweeps a day apart", async () => {
+    seedEligible(SERVED_IDS);
+    await plantStore(SERVED_IDS);
+    // The real answer without its first record: the node has not reloaded.
+    world.node = () => json(NODE_DATASETS.slice(1));
+    const day0 = new Date();
+    const first = await sweep({ NEUROBAGEL_NODE_URL: NODE_URL() }, { now: day0 });
+    expect(verdictOf(first, "node")).toBe("healthy");
+    expect(first.checks.node.counts.store_not_served).toBe(1);
+    expect(first.checks.node.reason).toMatch(/1 dataset\(s\) are not served yet/);
+    // An on-demand run an hour later is not "a day later".
+    const hour = await sweep(
+      { NEUROBAGEL_NODE_URL: NODE_URL() },
+      { now: new Date(day0.getTime() + 3_600_000) },
+    );
+    expect(verdictOf(hour, "node")).toBe("healthy");
+    const day1 = await sweep(
+      { NEUROBAGEL_NODE_URL: NODE_URL() },
+      { now: new Date(day0.getTime() + 24 * 3_600_000) },
+    );
+    expect(verdictOf(day1, "node")).toBe("alarm");
+    expect(day1.checks.node.reason).toMatch(/still not served, on two sweeps a day apart/);
+    expect(day1.overall).toBe("alarm");
+
+    // The node reloads: healthy again, and a gap that comes back is a fresh note, not an alarm.
+    world.node = () => json(NODE_DATASETS);
+    const healed = await sweep(
+      { NEUROBAGEL_NODE_URL: NODE_URL() },
+      { now: new Date(day0.getTime() + 48 * 3_600_000) },
+    );
+    expect(verdictOf(healed, "node")).toBe("healthy");
+    expect(healed.checks.node.counts.store_not_served).toBe(0);
+    world.node = () => json(NODE_DATASETS.slice(1));
+    const again = await sweep(
+      { NEUROBAGEL_NODE_URL: NODE_URL() },
+      { now: new Date(day0.getTime() + 72 * 3_600_000) },
+    );
+    expect(verdictOf(again, "node")).toBe("healthy");
+  });
+
+  test("a day on which the node could not be asked does not forget that it was behind", async () => {
+    seedEligible(SERVED_IDS);
+    await plantStore(SERVED_IDS);
+    world.node = () => json(NODE_DATASETS.slice(1));
+    const day0 = new Date();
+    expect(verdictOf(await sweep({ NEUROBAGEL_NODE_URL: NODE_URL() }, { now: day0 }), "node")).toBe(
+      "healthy",
+    );
+    world.node = () => new Response("{}", { status: 500 });
+    const blip = await sweep(
+      { NEUROBAGEL_NODE_URL: NODE_URL() },
+      { now: new Date(day0.getTime() + 24 * 3_600_000) },
+    );
+    expect(verdictOf(blip, "node")).toBe("unknown");
+    world.node = () => json(NODE_DATASETS.slice(1));
+    const day2 = await sweep(
+      { NEUROBAGEL_NODE_URL: NODE_URL() },
+      { now: new Date(day0.getTime() + 48 * 3_600_000) },
+    );
+    expect(verdictOf(day2, "node")).toBe("alarm");
+  });
+
+  test("a dataset the store does not hold is not one the node is behind on", async () => {
+    // Eligible and missing from the store (the store check's business, with its 48 hours): the
+    // node serving nothing for it is right.
+    seedEligible(SERVED_IDS);
+    world.node = () => json([]);
+    const day0 = new Date();
+    await sweep({ NEUROBAGEL_NODE_URL: NODE_URL() }, { now: day0 });
+    const day1 = await sweep(
+      { NEUROBAGEL_NODE_URL: NODE_URL() },
+      { now: new Date(day0.getTime() + 24 * 3_600_000) },
+    );
+    expect(verdictOf(day1, "node")).toBe("healthy");
+    expect(day1.checks.node.counts.store_not_served).toBe(0);
+  });
+
+  test("a redirect is never followed: it is unknown, and the address it names is never asked", async () => {
+    seedEligible(SERVED_IDS);
+    world.node = () =>
+      new Response(null, { status: 302, headers: { Location: `${base()}/elsewhere/datasets` } });
+    const r = await sweep({ NEUROBAGEL_NODE_URL: NODE_URL() });
+    expect(verdictOf(r, "node")).toBe("unknown");
+    expect(r.checks.node.reason).toMatch(/redirected/);
+    world.nodes = () =>
+      new Response(null, { status: 301, headers: { Location: `${base()}/elsewhere/nodes` } });
+    const fed = await sweep({ NEUROBAGEL_FEDERATION_URL: FED_URL() });
+    expect(verdictOf(fed, "registration")).toBe("unknown");
+    expect(seen.filter((x) => x.path.startsWith("/elsewhere"))).toEqual([]);
+  });
+
+  test("the drift reader does not follow a redirect either", async () => {
+    world.github = (path) =>
+      path.endsWith("/api/releases/latest")
+        ? new Response(null, { status: 302, headers: { Location: `${base()}/elsewhere/release` } })
+        : json(GITHUB[path]);
+    const r = await sweep();
+    expect(verdictOf(r, "drift")).toBe("unknown");
+    expect(r.checks.drift.reason).toMatch(/redirected/);
+    expect(seen.filter((x) => x.path.startsWith("/elsewhere"))).toEqual([]);
+  });
+
+  test("an answer is read to its cap and no further: one byte over is a failed read, at the cap it is read", async () => {
+    seedEligible([]);
+    const padded = (cap: number, offset: number) => "[]".padEnd(cap + offset, " ");
+    world.node = () => new Response(padded(NODE_ANSWER_MAX_BYTES, 0));
+    const atCap = await sweep({ NEUROBAGEL_NODE_URL: NODE_URL() }, { timeoutMs: 15000 });
+    expect(verdictOf(atCap, "node")).toBe("healthy");
+    world.node = () => new Response(padded(NODE_ANSWER_MAX_BYTES, 1));
+    const over = await sweep({ NEUROBAGEL_NODE_URL: NODE_URL() }, { timeoutMs: 15000 });
+    expect(verdictOf(over, "node")).toBe("unknown");
+    expect(over.checks.node.reason).toMatch(/answer too large/);
+
+    world.nodes = () => new Response(padded(FEDERATION_NODES_MAX_BYTES, 1));
+    const fed = await sweep({ NEUROBAGEL_FEDERATION_URL: FED_URL() });
+    expect(verdictOf(fed, "registration")).toBe("unknown");
+    expect(fed.checks.registration.reason).toMatch(/answer too large/);
+
+    // And the drift reader, which reads upstream's pages the same way.
+    const big = padded(MAX_ANSWER_BYTES, 1);
+    world.github = (path) =>
+      path.endsWith("/api/releases/latest") ? new Response(big) : json(GITHUB[path]);
+    const drift = await sweep();
+    expect(verdictOf(drift, "drift")).toBe("unknown");
+    expect(drift.checks.drift.reason).toMatch(/answer too large/);
+  });
+});
+
+describe("the overall verdict is not made healthy by upstream alone", () => {
+  test("with the writer off and nothing configured, drift healthy is still unchecked overall", async () => {
+    const r = await sweep({ NEUROBAGEL_WRITER_ENABLED: undefined });
+    expect(verdictOf(r, "drift")).toBe("healthy");
+    expect(r.overall).toBe("unchecked");
+  });
+
+  test("drift can still alarm, and can still be unknown, with nothing else to judge", async () => {
+    world.github = (path) =>
+      path.endsWith("/api/releases/latest") ? json({ tag_name: "v9.9.9" }) : json(GITHUB[path]);
+    expect((await sweep({ NEUROBAGEL_WRITER_ENABLED: undefined })).overall).toBe("alarm");
+    resetWorld();
+    world.github = () => new Response("down", { status: 503 });
+    expect((await sweep({ NEUROBAGEL_WRITER_ENABLED: undefined })).overall).toBe("unknown");
+  });
+
+  test("one check of NEMAR's own that ran and is fine makes it healthy", async () => {
+    const r = await sweep();
+    expect(verdictOf(r, "store")).toBe("healthy");
+    expect(r.overall).toBe("healthy");
   });
 });
 
@@ -919,5 +1148,18 @@ describe("the run and its heartbeat", () => {
     });
     expect(mail).toEqual([]);
     expect(await bucketState()).toBe(before);
+  });
+});
+
+describe("what the sweep says", () => {
+  test("no reason of any check, in any state this file produced, says what kind of dataset it concerns", () => {
+    // A reason can reach the weekly report, which is filed on a public-facing repository, so it
+    // may say a record is wrong and never that it belongs to a concealed deposit. The audit log
+    // says that, and only the audit log.
+    expect(reasonsSeen.length).toBeGreaterThan(100);
+    expect(new Set(reasonsSeen).size).toBeGreaterThan(25);
+    for (const reason of new Set(reasonsSeen)) {
+      expect(reason, reason).not.toMatch(/anonym|deposit|\bclass\b/i);
+    }
   });
 });
