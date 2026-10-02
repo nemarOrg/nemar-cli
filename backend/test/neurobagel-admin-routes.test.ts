@@ -311,7 +311,7 @@ describe("status", () => {
     index: { present: boolean | null; entries: number | null; matches_store: boolean | null };
     last_run: { trigger: string } | null;
     last_reconcile: { trigger: string } | null;
-    needs_review: { id: string; source: string; flags?: string[]; code?: string }[];
+    needs_review: { id: string; source: string; flags?: string[]; code?: string; since?: string }[];
     anonymity_findings: number | null;
     warnings: string[];
   };
@@ -397,7 +397,12 @@ describe("status", () => {
     const body = await (await call("GET", "/admin/neurobagel/status")).text();
     const s = JSON.parse(body) as Status;
     expect(s.needs_review).toEqual([
-      { id: "nm000800", source: "refusal", code: "curation_unavailable" },
+      {
+        id: "nm000800",
+        source: "refusal",
+        code: "curation_unavailable",
+        since: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+      },
     ]);
     expect(s.anonymity_findings).toBe(1);
     // The dataset the finding is about is named nowhere in the status.

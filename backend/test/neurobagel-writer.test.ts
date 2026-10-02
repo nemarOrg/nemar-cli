@@ -468,7 +468,12 @@ describe("a second run with nothing changed writes nothing", () => {
     // A standing disagreement is a finding a person can read, until it is resolved.
     const status = await neurobagelStatus(h.env());
     expect(status.needs_review).toEqual([
-      { id: "nm000608", source: "refusal", code: "latest_version_disagreement" },
+      {
+        id: "nm000608",
+        source: "refusal",
+        code: "latest_version_disagreement",
+        since: expect.any(String),
+      },
     ]);
   });
 
@@ -1467,7 +1472,7 @@ describe("an artifact over the loader's cap is never written", () => {
     expect(first.results[0]).toMatchObject({ code: "artifact_too_large" });
     const status = await neurobagelStatus(h.env());
     expect(status.needs_review).toEqual([
-      { id: "nm000872", source: "refusal", code: "artifact_too_large" },
+      { id: "nm000872", source: "refusal", code: "artifact_too_large", since: expect.any(String) },
     ]);
     // The old artifacts are still served: a refusal never replaces a good set with nothing.
     expect(await storeKeys(h.bucket)).toContain("nm000872.jsonld");
@@ -1698,6 +1703,44 @@ describe("every state the real takedown flows leave behind is ineligible, and th
         via,
       ).toEqual([CONTROL]);
     }
+  });
+
+  test("a PARTIAL cascade delete (the row kept, the manifest gone) leaves the old artifact federated, and says so in status with its age", async () => {
+    // `DELETE /admin/datasets/:id` answers 207 when a step failed and keeps the row. If the
+    // objects went and the row did not, the row is still eligible, the writer cannot read a
+    // manifest (`manifest_absent`) and keeps the artifact it has: a manifest that is
+    // missing for a moment must not unfederate a healthy dataset. The dataset stays out
+    // there until the owner finishes the delete, so the refusal is made VISIBLE: a standing
+    // finding with the time it was last confirmed.
+    seedSynthetic(h, ID);
+    seedSynthetic(h, CONTROL);
+    await run();
+    h.standin.remove(`/${ID}/version/v1.0.0.json`);
+    const result = await run();
+    expect(result.results.find((r) => r.id === ID)).toMatchObject({
+      outcome: "refused",
+      code: "manifest_absent",
+    });
+    // Conservative: the old set is still stored and indexed.
+    expect(await storeKeys(h.bucket)).toContain(`${ID}.jsonld`);
+    expect((await storedIndex()).datasets.map((d) => d.id)).toEqual([ID, CONTROL]);
+    // And it is a finding, with its age, not silence.
+    const status = await neurobagelStatus(h.env());
+    expect(status.needs_review).toEqual([
+      {
+        id: ID,
+        source: "refusal",
+        code: "manifest_absent",
+        since: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/),
+      },
+    ]);
+    // Finishing the delete (the row goes) takes it out at the next run, and the finding with it.
+    // (The cascade's last batch: the versions and the row.)
+    h.db.run("DELETE FROM dataset_versions WHERE dataset_id = ?", [ID]);
+    h.db.run("DELETE FROM datasets WHERE dataset_id = ?", [ID]);
+    await run();
+    expect((await storeKeys(h.bucket)).filter((k) => k.startsWith(ID))).toEqual([]);
+    expect((await neurobagelStatus(h.env())).needs_review).toEqual([]);
   });
 
   test("restoring the dataset (the owner reverses the takedown) makes it eligible and written again", async () => {
@@ -2344,6 +2387,9 @@ describe("a tick examines at most N datasets, in a deterministic order", () => {
     // Once all are written, the tick is the rotation: nothing is rewritten.
     const t4 = await run({ limit: 3 });
     expect(t4.results.every((r) => r.outcome === "unchanged")).toBe(true);
+    // The rotation is not work anyone is waiting on, so nothing is "unexamined": a backfill
+    // that is done must read as done, not as hundreds of datasets still to come.
+    expect(t4.unexamined).toBe(0);
     expect((await storedIndex()).datasets).toHaveLength(7);
   });
 

@@ -20,6 +20,7 @@ import {
   LEDGER_ACTIONS,
   currentSignature,
   hasCompleteSet,
+  ledgerTime,
   loadPlanRows,
   readLedger,
 } from "./neurobagel-plan.js";
@@ -208,6 +209,10 @@ export async function neurobagelStatus(
           id: entry.dataset_id,
           source: "refusal",
           code: entry.label.code,
+          // Since when it has stood: a refusal that has stood for days is not a blip. The
+          // ledger re-records a standing refusal once a day, so this is the LAST day it was
+          // confirmed, and the age to read it by is "at least this long".
+          since: ledgerTime(entry.at)?.toISOString() ?? entry.at,
         });
       }
     }

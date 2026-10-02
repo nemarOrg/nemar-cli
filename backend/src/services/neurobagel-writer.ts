@@ -69,6 +69,7 @@ import {
   type PlanRow,
   currentSignature,
   loadPlanRows,
+  neededWork,
   planWork,
   readLedger,
   recordLedgerState,
@@ -963,7 +964,7 @@ export async function runNeurobagelWriter(
       // budget; after it, a dataset is begun only if its worst case still leaves the reserve.
       if (result.examined > 0 && ops.total + DATASET_OPS_WORST + reserve > budget) {
         result.stopped = "ops_budget";
-        result.unexamined += plan.work.length - result.examined;
+        result.unexamined += neededWork(plan.work.slice(result.examined));
         break;
       }
       result.examined++;
@@ -986,7 +987,7 @@ export async function runNeurobagelWriter(
           `the index could not be patched after ${item.id}: the run stopped there and rebuilt the index from the listing`,
         );
         result.stopped = "index_patch";
-        result.unexamined += plan.work.length - result.examined;
+        result.unexamined += neededWork(plan.work.slice(result.examined));
         break;
       }
     }

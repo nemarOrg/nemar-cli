@@ -218,11 +218,20 @@ export function planWork(args: {
   return {
     work: taken,
     eligible: ids.length,
-    unexamined: Math.max(0, work.length - taken.length),
+    unexamined: neededWork(work) - neededWork(taken),
     missing: missing.length,
     stale: stale.length,
     parked: parkedCount,
   };
+}
+
+/**
+ * How many of these are WORK the system is waiting on: a requested, missing or stale
+ * dataset. The rotation is not: it is opportunistic, every up-to-date dataset is in it, and
+ * counting it would make "unexamined" read as hundreds for ever after a backfill is done.
+ */
+export function neededWork(items: readonly PlannedWork[]): number {
+  return items.filter((w) => w.class !== "rotation").length;
 }
 
 /**
@@ -257,12 +266,18 @@ export function standingRefusals(
  */
 export const PARK_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-/** Milliseconds from a ledger row's timestamp (SQLite `YYYY-MM-DD HH:MM:SS`, UTC, or ISO) to `now`. */
-export function ageMs(at: string, now: Date): number {
+/** A ledger row's timestamp (SQLite `YYYY-MM-DD HH:MM:SS`, UTC, or ISO) as a date, or null when unreadable. */
+export function ledgerTime(at: string): Date | null {
   const iso = /[zZ]|[+-]\d\d:?\d\d$/.test(at) ? at : `${at.replace(" ", "T")}Z`;
   const t = Date.parse(iso);
+  return Number.isNaN(t) ? null : new Date(t);
+}
+
+/** Milliseconds from a ledger row's timestamp to `now`. */
+export function ageMs(at: string, now: Date): number {
+  const when = ledgerTime(at);
   // An unreadable timestamp is as old as it can be: it parks nothing.
-  return Number.isNaN(t) ? Number.POSITIVE_INFINITY : now.getTime() - t;
+  return when === null ? Number.POSITIVE_INFINITY : now.getTime() - when.getTime();
 }
 
 // ----------------------------------------------------------------------------

@@ -119,7 +119,14 @@ export interface NeurobagelStatus {
   };
   last_run: NeurobagelRunSummary | null;
   last_reconcile: NeurobagelRunSummary | null;
-  needs_review: { id: string; source: "report" | "refusal"; flags?: string[]; code?: string }[];
+  needs_review: {
+    id: string;
+    source: "report" | "refusal";
+    flags?: string[];
+    code?: string;
+    /** A refusal only: when it was last confirmed (it is re-recorded once a day while it stands). */
+    since?: string;
+  }[];
   /** A count, never an identifier. */
   anonymity_findings: number | null;
   warnings: string[];
