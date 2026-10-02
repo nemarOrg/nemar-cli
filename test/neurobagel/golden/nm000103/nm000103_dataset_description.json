@@ -1,0 +1,32 @@
+{
+  "AccessInstructions": "Public access. License: CC-BY-NC-SA 4.0. Browse and download at https://nemar.org/dataset/nm000103 (latest version v2.0.0).",
+  "AccessLink": "https://nemar.org/dataset/nm000103",
+  "AccessType": "public",
+  "Authors": [
+    "Seyed Yahya Shirazi",
+    "Alexandre Franco",
+    "Maurício Scopel Hoffmann",
+    "Nathalia B. Esper",
+    "Dung Truong",
+    "Arnaud Delorme",
+    "Michael Milham",
+    "Scott Makeig"
+  ],
+  "Keywords": [
+    "EEG",
+    "child and adolescent mental health",
+    "neurodevelopment",
+    "behavioral assessment",
+    "hierarchical event descriptors",
+    "internalizing and externalizing behaviors",
+    "HED",
+    "Healthy Brain Network"
+  ],
+  "Name": "Healthy Brain Network EEG - Not for Commercial Use",
+  "ParticipantCount": 447,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/nm000103",
+    "https://doi.org/10.82901/nemar.nm000103"
+  ],
+  "RepositoryURL": "https://data.nemar.org/nm000103/"
+}

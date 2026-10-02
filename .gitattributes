@@ -1,0 +1,8 @@
+# Neurobagel fixtures are the data plane's documents byte for byte (some have CRLF or CR line
+# endings, a byte order mark or trailing whitespace) and tests compare their sha256, so git must
+# never normalize them. Goldens and recordings are generated and compared byte for byte too.
+test/neurobagel/fixtures/** -text
+test/neurobagel/golden/** -text linguist-generated
+test/neurobagel/oracle/** linguist-generated
+shared/neurobagel/vocab/** linguist-generated
+scripts/neurobagel/*.py.lock linguist-generated

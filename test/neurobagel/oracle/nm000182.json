@@ -1,0 +1,176 @@
+{
+  "bagel": "0.11.6",
+  "bagel_only_subjects": 0,
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/nm000182 (latest version v1.0.2).",
+    "hasAccessLink": "https://nemar.org/dataset/nm000182",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Petr Nejedly",
+      "Vaclav Kremen",
+      "Vladimir Sladky",
+      "Jan Cimbalnik",
+      "Petr Klimes",
+      "Filip Plesinger",
+      "Filip Mivalt",
+      "Vojtech Travnicek",
+      "Ivo Viscor",
+      "Martin Pail",
+      "Josef Halamek",
+      "Benjamin Brinkmann",
+      "Milan Brazdil",
+      "Pavel Jurak",
+      "Gregory Worrell"
+    ],
+    "hasKeywords": [
+      "intracranial EEG",
+      "iEEG",
+      "stereo-EEG",
+      "artifact classification",
+      "graphoelements",
+      "Epilepsy",
+      "seizure onset zone"
+    ],
+    "hasLabel": "Multicenter iEEG dataset for classification of graphoelements and artifactual signals (MAYO)",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/nm000182",
+      "https://doi.org/10.82901/nemar.nm000182"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/nm000182/"
+  },
+  "dataset_id": "nm000182",
+  "imaging": {
+    "attachable_subjects": 0,
+    "modalities": {}
+  },
+  "inputs": {
+    "annotated.json": "9ea57b312318fc5e8cc8515c2f64b560cecd3797f1b758ce20122a4cd0cfe972",
+    "dataset_description.json": "775c90a8bc18c3a400f78153cad0025fe36c7b0a1024312a1f01b8eb7e656e9f",
+    "participants.tsv": "2798ee1d75e82e9f6202f58ba4a984ef17e6f5b706f5dfc8b635892730bd4f6c"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-000": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-001": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-002": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-003": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-004": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-005": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-006": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-007": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-008": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-009": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-010": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-011": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-012": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-013": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-014": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-015": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-016": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-017": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-018": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-019": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-020": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-021": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-022": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-023": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    }
+  },
+  "transform_only_subjects": 0
+}

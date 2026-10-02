@@ -1,0 +1,27 @@
+{
+  "AccessInstructions": "Public access. License: CC-BY-4.0. Browse and download at https://nemar.org/dataset/nm000200 (latest version v1.0.2).",
+  "AccessLink": "https://nemar.org/dataset/nm000200",
+  "AccessType": "public",
+  "Authors": [
+    "Boyla Mainsah",
+    "Chance Fleeting",
+    "Thomas Balmat",
+    "Eric Sellers",
+    "Leslie Collins"
+  ],
+  "Keywords": [
+    "EEG",
+    "P300",
+    "brain-computer interface",
+    "speller",
+    "event-related potentials",
+    "visual perception"
+  ],
+  "Name": "BigP3BCI Study I — 9x8 checkerboard/performance-based (13 healthy subjects)",
+  "ParticipantCount": 13,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/nm000200",
+    "https://doi.org/10.82901/nemar.nm000200"
+  ],
+  "RepositoryURL": "https://data.nemar.org/nm000200/"
+}

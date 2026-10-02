@@ -1,0 +1,28 @@
+{
+  "AccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on006434 (latest version v1.0.0).",
+  "AccessLink": "https://nemar.org/dataset/on006434",
+  "AccessType": "public",
+  "Authors": [
+    "Thomas J Stoll",
+    "Nathan D Vandjelovic",
+    "Melissa J Polonenko",
+    "Nadja R S Li",
+    "Adrian K C Lee",
+    "Ross K Maddox"
+  ],
+  "Keywords": [
+    "EEG",
+    "auditory brainstem response",
+    "selective attention",
+    "natural speech",
+    "subcortical",
+    "audiobook"
+  ],
+  "Name": "The auditory brainstem response to natural speech is not affected by selective attention",
+  "ParticipantCount": 66,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/on006434",
+    "https://doi.org/10.82901/nemar.on006434"
+  ],
+  "RepositoryURL": "https://data.nemar.org/on006434/"
+}

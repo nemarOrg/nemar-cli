@@ -1,0 +1,37 @@
+{
+  "age": {
+    "Annotations": {
+      "Format": {
+        "Label": "range",
+        "TermURL": "nb:FromRange"
+      },
+      "IsAbout": {
+        "Label": "Age",
+        "TermURL": "nb:Age"
+      },
+      "MissingValues": [
+        "",
+        "n/a",
+        "N/A",
+        "NA"
+      ],
+      "ValueRange": {
+        "Max": 37,
+        "Min": 23.5
+      },
+      "VariableType": "Continuous"
+    },
+    "Description": "Age of the participant.",
+    "Units": "years"
+  },
+  "participant_id": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Participant ID",
+        "TermURL": "nb:ParticipantID"
+      },
+      "VariableType": "Identifier"
+    },
+    "Description": "Participant identifier, as in participants.tsv."
+  }
+}

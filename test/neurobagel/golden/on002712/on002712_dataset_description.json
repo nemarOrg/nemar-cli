@@ -1,0 +1,26 @@
+{
+  "AccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on002712 (latest version v1.0.0).",
+  "AccessLink": "https://nemar.org/dataset/on002712",
+  "AccessType": "public",
+  "Authors": [
+    "Sara Aurtenetxe",
+    "Nicola Molinaro",
+    "Doug Davidson",
+    "Manuel Carreiras"
+  ],
+  "Keywords": [
+    "MEG",
+    "numbers",
+    "letters",
+    "false fonts",
+    "visual word recognition",
+    "symbol processing"
+  ],
+  "Name": "Numbers and Letters",
+  "ParticipantCount": 25,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/on002712",
+    "https://doi.org/10.82901/nemar.on002712"
+  ],
+  "RepositoryURL": "https://data.nemar.org/on002712/"
+}

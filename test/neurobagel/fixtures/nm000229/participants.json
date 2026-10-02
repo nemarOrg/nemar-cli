@@ -1,0 +1,48 @@
+{
+  "participant_id": {
+    "Description": "Unique participant identifier"
+  },
+  "age": {
+    "Description": "Age of the participant at time of testing",
+    "Units": "years"
+  },
+  "sex": {
+    "Description": "Biological sex of the participant",
+    "Levels": {
+      "F": "female",
+      "M": "male"
+    }
+  },
+  "hand": {
+    "Description": "Handedness of the participant, measured by the Edinburgh Handedness Inventory questionnaire",
+    "Levels": {
+      "R": "right",
+      "L": "left",
+      "A": "ambidextrous"
+    }
+  },
+  "task_order": {
+    "Description": "Order in which the four stories were presented (0=lw1, 1=cable_spool_fort, 2=easy_money, 3=The_Black_Willow). Note: the README uses 'The_Black_Widow' but the actual audio filenames and events use 'The_Black_Willow'."
+  },
+  "n_sessions": {
+    "Description": "How many MEG sessions the participant completed",
+    "Levels": {
+      "1": "1 session",
+      "2": "2 sessions"
+    }
+  },
+  "mri": {
+    "Description": "Whether the participant has a structural MRI",
+    "Levels": {
+      "fsaverage": "no structural MRI; use the FreeSurfer average",
+      "native": "yes this subject has a structural MRI"
+    }
+  },
+  "native_english_speaker": {
+    "Description": "Whether the participant is a native English speaker",
+    "Levels": {
+      "y": "Yes",
+      "n": "No"
+    }
+  }
+}
