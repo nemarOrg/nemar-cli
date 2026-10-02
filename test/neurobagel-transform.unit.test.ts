@@ -2,9 +2,10 @@
  * The Neurobagel transform against real data-plane documents (epic #1586, phase 1).
  *
  * Every fixture under test/neurobagel/fixtures/ is a set of documents captured
- * byte for byte from data.nemar.org (the anonymous negative control from
- * data-test.nemar.org), with provenance next to it (see
+ * byte for byte from data.nemar.org, with provenance next to it (see
  * neurobagel-fixtures.unit.test.ts).
+ * The one exception is the anonymous negative control, nm099998: only its public,
+ * blinded metadata.json, fetched from the dev data host, is kept.
  * The transform is driven through its one public entry point,
  * `buildNeurobagelArtifacts`, exactly as the writer will drive it.
  *
