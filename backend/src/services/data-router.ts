@@ -730,10 +730,10 @@ export interface BidsIndexSubjectNode {
    * say that `ses-01` has the anat and `ses-02` the eeg. One key per session
    * label, plus {@link NO_SESSION_KEY} when the subject has a datatype
    * directory outside every session directory. A session with only
-   * session-level files is present with `[]`. Always LAST in the node, so a
-   * reader that ignores it sees the bytes this node had before it existed.
-   * The wire contract (and the reading rules) is `bidsIndexSubjectSchema` in
-   * `shared/contract/dataset.ts`.
+   * session-level files is present with `[]`. It is written after `sessions`
+   * and `modalities`, which keep their place in the serialized node; no reader
+   * may depend on the order of keys. The wire contract (and the reading
+   * rules) is `bidsIndexSubjectSchema` in `shared/contract/dataset.ts`.
    */
   session_modalities: Record<string, string[]>;
 }

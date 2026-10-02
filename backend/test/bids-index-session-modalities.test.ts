@@ -149,8 +149,10 @@ function expectConsistent(subjects: Subjects): void {
     );
     // The no-session bucket exists only when a datatype sits outside every session.
     if (NS in map) expect(map[NS].length, `${subject} no-session non-empty`).toBeGreaterThan(0);
-    // A new key goes LAST, so a reader that ignores it sees the node it always did.
-    expect(Object.keys(node)).toEqual(["sessions", "modalities", "session_modalities"]);
+    // The node has exactly these keys. Their ORDER is not asserted: the contract
+    // says key order is not part of it, and the byte-identity of the existing
+    // keys is pinned against the base-commit golden instead.
+    expect(Object.keys(node).sort()).toEqual(["modalities", "session_modalities", "sessions"]);
   }
 }
 
