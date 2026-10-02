@@ -1,0 +1,344 @@
+{
+  "dataset_id": "on006033",
+  "version": "1.0.0",
+  "doi": null,
+  "concept_doi": null,
+  "created": "2026-06-28T09:38:18.000Z",
+  "files": {
+    ".bidsignore": {
+      "key": "git:66fda97533307ffdbd0d7995ab97297aa16b54d4",
+      "size": 8,
+      "checksum": "git:66fda97533307ffdbd0d7995ab97297aa16b54d4"
+    },
+    ".datalad/config": {
+      "key": "git:8308226d60f6559e840cbabd1e59648c158d75c2",
+      "size": 63,
+      "checksum": "git:8308226d60f6559e840cbabd1e59648c158d75c2"
+    },
+    ".gitattributes": {
+      "key": "git:a8599a8e5fdb959624a4c8684c1aa55fb69f5522",
+      "size": 427,
+      "checksum": "git:a8599a8e5fdb959624a4c8684c1aa55fb69f5522"
+    },
+    ".nemar/metadata.json": {
+      "key": "git:283fb86c4a6ef85745ce03d700b73bba4faf17eb",
+      "size": 2962,
+      "checksum": "git:283fb86c4a6ef85745ce03d700b73bba4faf17eb"
+    },
+    "CHANGES": {
+      "key": "git:f8b4c8d7c308a4ad870a0eaeed60fd483e8b7550",
+      "size": 143,
+      "checksum": "git:f8b4c8d7c308a4ad870a0eaeed60fd483e8b7550"
+    },
+    "README.md": {
+      "key": "git:bae419fd7b4f5fd37ae72b0283c8da7d89f59464",
+      "size": 1141,
+      "checksum": "git:bae419fd7b4f5fd37ae72b0283c8da7d89f59464"
+    },
+    "dataset_description.json": {
+      "key": "git:0d01bc37bc0b5773e088559c686dd8589f4ca07b",
+      "size": 1248,
+      "checksum": "git:0d01bc37bc0b5773e088559c686dd8589f4ca07b"
+    },
+    "participants.json": {
+      "key": "git:59bb685dc7163f5b716d66fbbca91e8b365bb358",
+      "size": 404,
+      "checksum": "git:59bb685dc7163f5b716d66fbbca91e8b365bb358"
+    },
+    "participants.tsv": {
+      "key": "git:9f0221f575dc2ddc85b8db1bc15726e4a0fb238d",
+      "size": 134,
+      "checksum": "git:9f0221f575dc2ddc85b8db1bc15726e4a0fb238d"
+    },
+    "sub-01/ses-01/anat/sub-01_ses-01_T1w.json": {
+      "key": "git:0fadcdd59333e8e266629cfb81df9f7895dd629b",
+      "size": 1362,
+      "checksum": "git:0fadcdd59333e8e266629cfb81df9f7895dd629b"
+    },
+    "sub-01/ses-01/anat/sub-01_ses-01_T1w.nii": {
+      "key": "SHA256E-s190841184--bd0017c9715c065e640f54584d2ab76bcd074686d8d8768e880933bd03d94ac6.nii",
+      "size": 190841184,
+      "checksum": "sha256:bd0017c9715c065e640f54584d2ab76bcd074686d8d8768e880933bd03d94ac6"
+    },
+    "sub-01/ses-01/func/sub-01_ses-01_task-innerspeech_bold.json": {
+      "key": "git:a123d22ef81bfe4a956b5fec9da57e4ad91d9e6f",
+      "size": 2023,
+      "checksum": "git:a123d22ef81bfe4a956b5fec9da57e4ad91d9e6f"
+    },
+    "sub-01/ses-01/func/sub-01_ses-01_task-innerspeech_bold.nii": {
+      "key": "SHA256E-s522551648--db8204e0fc4c5616cd6acfdc93adddd1a5c7f1411f16b0e96960a97a263eef2d.nii",
+      "size": 522551648,
+      "checksum": "sha256:db8204e0fc4c5616cd6acfdc93adddd1a5c7f1411f16b0e96960a97a263eef2d"
+    },
+    "sub-01/ses-01/func/sub-01_ses-01_task-innerspeech_events.tsv": {
+      "key": "git:303465a52a929c10f2f94de83254e48320b2d6a5",
+      "size": 2159,
+      "checksum": "git:303465a52a929c10f2f94de83254e48320b2d6a5"
+    },
+    "sub-01/ses-02/anat/sub-01_ses-02_T1w.json": {
+      "key": "git:0fadcdd59333e8e266629cfb81df9f7895dd629b",
+      "size": 1362,
+      "checksum": "git:0fadcdd59333e8e266629cfb81df9f7895dd629b"
+    },
+    "sub-01/ses-02/anat/sub-01_ses-02_T1w.nii": {
+      "key": "SHA256E-s190841184--bd0017c9715c065e640f54584d2ab76bcd074686d8d8768e880933bd03d94ac6.nii",
+      "size": 190841184,
+      "checksum": "sha256:bd0017c9715c065e640f54584d2ab76bcd074686d8d8768e880933bd03d94ac6"
+    },
+    "sub-01/ses-02/eeg/sub-01_ses-02_task-innerspeech_eeg.eeg": {
+      "key": "SHA256E-s2301996288--7a2a6d232238b75220de58f6abb6eae2b77581630218c013d9704665d1f0de34.eeg",
+      "size": 2301996288,
+      "checksum": "sha256:7a2a6d232238b75220de58f6abb6eae2b77581630218c013d9704665d1f0de34"
+    },
+    "sub-01/ses-02/eeg/sub-01_ses-02_task-innerspeech_eeg.json": {
+      "key": "git:f54b0892fcec1ed45dd547e4666bf887eeab5900",
+      "size": 760,
+      "checksum": "git:f54b0892fcec1ed45dd547e4666bf887eeab5900"
+    },
+    "sub-01/ses-02/eeg/sub-01_ses-02_task-innerspeech_eeg.vhdr": {
+      "key": "SHA256E-s3915--dd323145a5a4e84c7e6dd3ae401baac8743c6b2c80c3272ae01f8744c649596e.vhdr",
+      "size": 3915,
+      "checksum": "sha256:dd323145a5a4e84c7e6dd3ae401baac8743c6b2c80c3272ae01f8744c649596e"
+    },
+    "sub-01/ses-02/eeg/sub-01_ses-02_task-innerspeech_eeg.vmrk": {
+      "key": "SHA256E-s1277332--d70bf17c38a9692cfb64b2f3e87237d9ebe2f38f43fcdeb082f0d7d16799e54a.vmrk",
+      "size": 1277332,
+      "checksum": "sha256:d70bf17c38a9692cfb64b2f3e87237d9ebe2f38f43fcdeb082f0d7d16799e54a"
+    },
+    "sub-01/ses-02/eeg/sub-01_ses-02_task-innerspeech_events.tsv": {
+      "key": "git:ec571c34a74b7e8cdad64a7bb2bf2cb7f3be9932",
+      "size": 4823,
+      "checksum": "git:ec571c34a74b7e8cdad64a7bb2bf2cb7f3be9932"
+    },
+    "sub-01/ses-02/func/sub-01_ses-02_task-innerspeech_bold.json": {
+      "key": "git:6f9c49e87125d7b75aade3b23911ebd6d17be75e",
+      "size": 2024,
+      "checksum": "git:6f9c49e87125d7b75aade3b23911ebd6d17be75e"
+    },
+    "sub-01/ses-02/func/sub-01_ses-02_task-innerspeech_bold.nii": {
+      "key": "SHA256E-s1077838176--72d004306d0d4f8cd04d6f4a652d9d9b8e33a189c33cf62afb9bd49f4cc56ead.nii",
+      "size": 1077838176,
+      "checksum": "sha256:72d004306d0d4f8cd04d6f4a652d9d9b8e33a189c33cf62afb9bd49f4cc56ead"
+    },
+    "sub-01/ses-02/func/sub-01_ses-02_task-innerspeech_events.tsv": {
+      "key": "git:760e62a4fcf5a1681ffee918aa8053f36b9144ee",
+      "size": 4529,
+      "checksum": "git:760e62a4fcf5a1681ffee918aa8053f36b9144ee"
+    },
+    "sub-01/sub-01_scans.tsv": {
+      "key": "git:1349fee6911df0cb296ccae88f6eb8941f342c4b",
+      "size": 254,
+      "checksum": "git:1349fee6911df0cb296ccae88f6eb8941f342c4b"
+    },
+    "sub-02/ses-01/anat/sub-02_ses-01_T1w.json": {
+      "key": "git:60e894199af3e20a5efa220118108bb433b9e8cb",
+      "size": 1343,
+      "checksum": "git:60e894199af3e20a5efa220118108bb433b9e8cb"
+    },
+    "sub-02/ses-01/anat/sub-02_ses-01_T1w.nii": {
+      "key": "SHA256E-s190841184--5a3493c8b7b3aa9e835a4e09ac1df2d576eda2b694627ec5107e433325d401bf.nii",
+      "size": 190841184,
+      "checksum": "sha256:5a3493c8b7b3aa9e835a4e09ac1df2d576eda2b694627ec5107e433325d401bf"
+    },
+    "sub-02/ses-01/eeg/sub-02_ses-01_task-innerspeech_eeg.eeg": {
+      "key": "SHA256E-s1751770880--49f438827a9d8eba1dfa51826ba08888ca9ed43f05a308ed60e37734f4cb2140.eeg",
+      "size": 1751770880,
+      "checksum": "sha256:49f438827a9d8eba1dfa51826ba08888ca9ed43f05a308ed60e37734f4cb2140"
+    },
+    "sub-02/ses-01/eeg/sub-02_ses-01_task-innerspeech_eeg.json": {
+      "key": "git:7ce3001824c3a6d34700a4b011b0ee550179117a",
+      "size": 760,
+      "checksum": "git:7ce3001824c3a6d34700a4b011b0ee550179117a"
+    },
+    "sub-02/ses-01/eeg/sub-02_ses-01_task-innerspeech_eeg.vhdr": {
+      "key": "SHA256E-s3919--8dbe93c7f30bbad4354fdcad26c4dd1aeac38693b5613274a67c802f1749b01a.vhdr",
+      "size": 3919,
+      "checksum": "sha256:8dbe93c7f30bbad4354fdcad26c4dd1aeac38693b5613274a67c802f1749b01a"
+    },
+    "sub-02/ses-01/eeg/sub-02_ses-01_task-innerspeech_eeg.vmrk": {
+      "key": "SHA256E-s947972--5fc6de9b2dfd6bb28a2bfaa083506cf0c3826f662fc521dbe78365f5a20723f7.vmrk",
+      "size": 947972,
+      "checksum": "sha256:5fc6de9b2dfd6bb28a2bfaa083506cf0c3826f662fc521dbe78365f5a20723f7"
+    },
+    "sub-02/ses-01/eeg/sub-02_ses-01_task-innerspeech_events.tsv": {
+      "key": "git:af9b28db3bbceabf3e8141d4f78a941ae1e7aa63",
+      "size": 6098,
+      "checksum": "git:af9b28db3bbceabf3e8141d4f78a941ae1e7aa63"
+    },
+    "sub-02/ses-01/func/sub-02_ses-01_task-innerspeech_bold.json": {
+      "key": "git:a45db54a114a649cc5fc26fb63b31b07f83c6d40",
+      "size": 2019,
+      "checksum": "git:a45db54a114a649cc5fc26fb63b31b07f83c6d40"
+    },
+    "sub-02/ses-01/func/sub-02_ses-01_task-innerspeech_bold.nii": {
+      "key": "SHA256E-s817168736--14c2361c16f4148ed0a67ec08d45643a8e4e0a2d61be3658702cea8d488d1555.nii",
+      "size": 817168736,
+      "checksum": "sha256:14c2361c16f4148ed0a67ec08d45643a8e4e0a2d61be3658702cea8d488d1555"
+    },
+    "sub-02/ses-01/func/sub-02_ses-01_task-innerspeech_events.tsv": {
+      "key": "git:7b8ead38dd727bfb01962e4c40de2f57a2b32ae8",
+      "size": 5740,
+      "checksum": "git:7b8ead38dd727bfb01962e4c40de2f57a2b32ae8"
+    },
+    "sub-02/ses-02/anat/sub-02_ses-02_T1w.json": {
+      "key": "git:60e894199af3e20a5efa220118108bb433b9e8cb",
+      "size": 1343,
+      "checksum": "git:60e894199af3e20a5efa220118108bb433b9e8cb"
+    },
+    "sub-02/ses-02/anat/sub-02_ses-02_T1w.nii": {
+      "key": "SHA256E-s190841184--5a3493c8b7b3aa9e835a4e09ac1df2d576eda2b694627ec5107e433325d401bf.nii",
+      "size": 190841184,
+      "checksum": "sha256:5a3493c8b7b3aa9e835a4e09ac1df2d576eda2b694627ec5107e433325d401bf"
+    },
+    "sub-02/ses-02/eeg/sub-02_ses-02_task-innerspeech_eeg.eeg": {
+      "key": "SHA256E-s1382086656--2e610236df679186399302c13524698f5073c86af5ddbbe0c4cdc0ee04a71127.eeg",
+      "size": 1382086656,
+      "checksum": "sha256:2e610236df679186399302c13524698f5073c86af5ddbbe0c4cdc0ee04a71127"
+    },
+    "sub-02/ses-02/eeg/sub-02_ses-02_task-innerspeech_eeg.json": {
+      "key": "git:7e50cf67db46708e6f824265414f16f1b595d19f",
+      "size": 759,
+      "checksum": "git:7e50cf67db46708e6f824265414f16f1b595d19f"
+    },
+    "sub-02/ses-02/eeg/sub-02_ses-02_task-innerspeech_eeg.vhdr": {
+      "key": "SHA256E-s3919--d365265927055f9fe575508a58b2a498a0845e8174c000e6bc3dbbdf2243783b.vhdr",
+      "size": 3919,
+      "checksum": "sha256:d365265927055f9fe575508a58b2a498a0845e8174c000e6bc3dbbdf2243783b"
+    },
+    "sub-02/ses-02/eeg/sub-02_ses-02_task-innerspeech_eeg.vmrk": {
+      "key": "SHA256E-s752136--b9f375c5f05d4b2ed8abe4c00398cc8f2880fd947bd154e68bbafebf0b7f6972.vmrk",
+      "size": 752136,
+      "checksum": "sha256:b9f375c5f05d4b2ed8abe4c00398cc8f2880fd947bd154e68bbafebf0b7f6972"
+    },
+    "sub-02/ses-02/eeg/sub-02_ses-02_task-innerspeech_events.tsv": {
+      "key": "git:42f61191af39f3260d76679453bde6210d62834e",
+      "size": 2875,
+      "checksum": "git:42f61191af39f3260d76679453bde6210d62834e"
+    },
+    "sub-02/ses-02/func/sub-02_ses-02_task-innerspeech_bold.json": {
+      "key": "git:d4bcaf180c1b2618e32af0322c0977adeffd8de8",
+      "size": 2028,
+      "checksum": "git:d4bcaf180c1b2618e32af0322c0977adeffd8de8"
+    },
+    "sub-02/ses-02/func/sub-02_ses-02_task-innerspeech_bold.nii": {
+      "key": "SHA256E-s641368416--703068f292957395356d84b0f01801c8a66025e6cb23bff29a236aad1a13f8dd.nii",
+      "size": 641368416,
+      "checksum": "sha256:703068f292957395356d84b0f01801c8a66025e6cb23bff29a236aad1a13f8dd"
+    },
+    "sub-02/ses-02/func/sub-02_ses-02_task-innerspeech_events.tsv": {
+      "key": "git:95e92b472670c6c674d05a2d65d9b6e82ed14eb0",
+      "size": 2651,
+      "checksum": "git:95e92b472670c6c674d05a2d65d9b6e82ed14eb0"
+    },
+    "sub-02/sub-02_scans.tsv": {
+      "key": "git:11c1f17b259d4fc1df9d6b0854f2aed072f7032e",
+      "size": 332,
+      "checksum": "git:11c1f17b259d4fc1df9d6b0854f2aed072f7032e"
+    },
+    "sub-03/ses-01/anat/sub-03_ses-01_T1w.json": {
+      "key": "git:35c9d9c2413cff89499237717589e64768103bde",
+      "size": 1361,
+      "checksum": "git:35c9d9c2413cff89499237717589e64768103bde"
+    },
+    "sub-03/ses-01/anat/sub-03_ses-01_T1w.nii": {
+      "key": "SHA256E-s190841184--a9418d1858101b66bdfed0f0970bf8743b07a485cc7db5a2db9ca09d8c62e5e5.nii",
+      "size": 190841184,
+      "checksum": "sha256:a9418d1858101b66bdfed0f0970bf8743b07a485cc7db5a2db9ca09d8c62e5e5"
+    },
+    "sub-03/ses-01/eeg/sub-03_ses-01_task-innerspeech_eeg.eeg": {
+      "key": "SHA256E-s2333238528--0bc17d25e38441d640a9b3ae10a59f25eae69a126cbf5be44d8817181827baf6.eeg",
+      "size": 2333238528,
+      "checksum": "sha256:0bc17d25e38441d640a9b3ae10a59f25eae69a126cbf5be44d8817181827baf6"
+    },
+    "sub-03/ses-01/eeg/sub-03_ses-01_task-innerspeech_eeg.json": {
+      "key": "git:cb4f0c38afd1077c754bbc3e68d26b358be2fac6",
+      "size": 760,
+      "checksum": "git:cb4f0c38afd1077c754bbc3e68d26b358be2fac6"
+    },
+    "sub-03/ses-01/eeg/sub-03_ses-01_task-innerspeech_eeg.vhdr": {
+      "key": "SHA256E-s3925--7b457e88542c1ebc26c5afd9041fcaad72cc0efdd8c6f0ab8435b91df8d4eac5.vhdr",
+      "size": 3925,
+      "checksum": "sha256:7b457e88542c1ebc26c5afd9041fcaad72cc0efdd8c6f0ab8435b91df8d4eac5"
+    },
+    "sub-03/ses-01/eeg/sub-03_ses-01_task-innerspeech_eeg.vmrk": {
+      "key": "SHA256E-s1272356--57814bd5c3633315e23b4c065f16bf63b0c6a46081eb0525d61c8bea18c383ec.vmrk",
+      "size": 1272356,
+      "checksum": "sha256:57814bd5c3633315e23b4c065f16bf63b0c6a46081eb0525d61c8bea18c383ec"
+    },
+    "sub-03/ses-01/eeg/sub-03_ses-01_task-innerspeech_events.tsv": {
+      "key": "git:b826507a7b522837542cfb0d9f3c25c54f328af6",
+      "size": 4830,
+      "checksum": "git:b826507a7b522837542cfb0d9f3c25c54f328af6"
+    },
+    "sub-03/ses-01/func/sub-03_ses-01_task-innerspeech_bold.json": {
+      "key": "git:495f112ad227fb8e7c13f54d183da2d6b200a3a8",
+      "size": 2007,
+      "checksum": "git:495f112ad227fb8e7c13f54d183da2d6b200a3a8"
+    },
+    "sub-03/ses-01/func/sub-03_ses-01_task-innerspeech_bold.nii": {
+      "key": "SHA256E-s1077838176--347ff7f2f7ce04efabf1c764ab20e32783e16b62924b6cfe2558da02e8387030.nii",
+      "size": 1077838176,
+      "checksum": "sha256:347ff7f2f7ce04efabf1c764ab20e32783e16b62924b6cfe2558da02e8387030"
+    },
+    "sub-03/ses-01/func/sub-03_ses-01_task-innerspeech_events.tsv": {
+      "key": "git:df517afb6d3eb879d75da72a0808c5352fd4cfa6",
+      "size": 4550,
+      "checksum": "git:df517afb6d3eb879d75da72a0808c5352fd4cfa6"
+    },
+    "sub-03/ses-02/anat/sub-03_ses-02_T1w.json": {
+      "key": "git:35c9d9c2413cff89499237717589e64768103bde",
+      "size": 1361,
+      "checksum": "git:35c9d9c2413cff89499237717589e64768103bde"
+    },
+    "sub-03/ses-02/anat/sub-03_ses-02_T1w.nii": {
+      "key": "SHA256E-s190841184--a9418d1858101b66bdfed0f0970bf8743b07a485cc7db5a2db9ca09d8c62e5e5.nii",
+      "size": 190841184,
+      "checksum": "sha256:a9418d1858101b66bdfed0f0970bf8743b07a485cc7db5a2db9ca09d8c62e5e5"
+    },
+    "sub-03/ses-02/eeg/sub-03_ses-02_task-innerspeech_eeg.eeg": {
+      "key": "SHA256E-s2314920704--70f8e7326a488417384dc667fba205ac4fcc4737422bafb69166dc94f3085137.eeg",
+      "size": 2314920704,
+      "checksum": "sha256:70f8e7326a488417384dc667fba205ac4fcc4737422bafb69166dc94f3085137"
+    },
+    "sub-03/ses-02/eeg/sub-03_ses-02_task-innerspeech_eeg.json": {
+      "key": "git:1ddaa497958e6ddc3286d583612a26354febe78d",
+      "size": 760,
+      "checksum": "git:1ddaa497958e6ddc3286d583612a26354febe78d"
+    },
+    "sub-03/ses-02/eeg/sub-03_ses-02_task-innerspeech_eeg.vhdr": {
+      "key": "SHA256E-s4054--e2113b15a466974433d96d9928cd6591e3ff92353b96916aebd37dc74dc7bd21.vhdr",
+      "size": 4054,
+      "checksum": "sha256:e2113b15a466974433d96d9928cd6591e3ff92353b96916aebd37dc74dc7bd21"
+    },
+    "sub-03/ses-02/eeg/sub-03_ses-02_task-innerspeech_eeg.vmrk": {
+      "key": "SHA256E-s1262823--6d5b20b96829466d36aa68df24fc38690d284d93674838f8b97c115282825114.vmrk",
+      "size": 1262823,
+      "checksum": "sha256:6d5b20b96829466d36aa68df24fc38690d284d93674838f8b97c115282825114"
+    },
+    "sub-03/ses-02/eeg/sub-03_ses-02_task-innerspeech_events.tsv": {
+      "key": "git:be09e8b0b718d32b7356b6a1182f8c8acbc08e13",
+      "size": 4587,
+      "checksum": "git:be09e8b0b718d32b7356b6a1182f8c8acbc08e13"
+    },
+    "sub-03/ses-02/func/sub-03_ses-02_task-innerspeech_bold.json": {
+      "key": "git:eefc2f11780becb6aca3735be4de0dc4020450e6",
+      "size": 2025,
+      "checksum": "git:eefc2f11780becb6aca3735be4de0dc4020450e6"
+    },
+    "sub-03/ses-02/func/sub-03_ses-02_task-innerspeech_bold.nii": {
+      "key": "SHA256E-s1077838176--1be3139cea8ec3cf2d1fa9763bf5d25fed71f21079b2fecb28f9d5298b5d435c.nii",
+      "size": 1077838176,
+      "checksum": "sha256:1be3139cea8ec3cf2d1fa9763bf5d25fed71f21079b2fecb28f9d5298b5d435c"
+    },
+    "sub-03/ses-02/func/sub-03_ses-02_task-innerspeech_events.tsv": {
+      "key": "git:39307809d776e2a43e9802f375fec61721d5a081",
+      "size": 4598,
+      "checksum": "git:39307809d776e2a43e9802f375fec61721d5a081"
+    },
+    "sub-03/sub-03_scans.tsv": {
+      "key": "git:4f7b2374046d77c91e90551473519090e18c140b",
+      "size": 332,
+      "checksum": "git:4f7b2374046d77c91e90551473519090e18c140b"
+    }
+  }
+}

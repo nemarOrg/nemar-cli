@@ -1,0 +1,574 @@
+{
+  "dataset_id": "on004196",
+  "version": "1.0.0",
+  "doi": null,
+  "concept_doi": null,
+  "created": "2026-06-23T15:41:02.000Z",
+  "files": {
+    ".bidsignore": {
+      "key": "git:66fda97533307ffdbd0d7995ab97297aa16b54d4",
+      "size": 8,
+      "checksum": "git:66fda97533307ffdbd0d7995ab97297aa16b54d4"
+    },
+    ".datalad/config": {
+      "key": "git:d16996ba7f5c5b4cf4420a1dc0d5af8ae7ea1acb",
+      "size": 63,
+      "checksum": "git:d16996ba7f5c5b4cf4420a1dc0d5af8ae7ea1acb"
+    },
+    ".gitattributes": {
+      "key": "git:89b38f1fc35f86ddd51e24c73748037e139324c9",
+      "size": 385,
+      "checksum": "git:89b38f1fc35f86ddd51e24c73748037e139324c9"
+    },
+    ".nemar/metadata.json": {
+      "key": "git:49f634b4429dcf426ddf3007c2ee61dba4982752",
+      "size": 3285,
+      "checksum": "git:49f634b4429dcf426ddf3007c2ee61dba4982752"
+    },
+    "CHANGES": {
+      "key": "git:0af1892ea0fdd600eee8a4eaf3768fadfe288f33",
+      "size": 1012,
+      "checksum": "git:0af1892ea0fdd600eee8a4eaf3768fadfe288f33"
+    },
+    "README.md": {
+      "key": "git:85bc222db0cd5544c93c8cf721cd4a1679101bf1",
+      "size": 2008,
+      "checksum": "git:85bc222db0cd5544c93c8cf721cd4a1679101bf1"
+    },
+    "dataset_description.json": {
+      "key": "git:af788a0d9306960b40c78c8b48a5cff05742367f",
+      "size": 1584,
+      "checksum": "git:af788a0d9306960b40c78c8b48a5cff05742367f"
+    },
+    "participants.json": {
+      "key": "git:3accb4121f102651a9b7045c8c0c628c231a45aa",
+      "size": 316,
+      "checksum": "git:3accb4121f102651a9b7045c8c0c628c231a45aa"
+    },
+    "participants.tsv": {
+      "key": "git:65d9b91dbf16fc11bb2a9cdcc3c916ec082b6b51",
+      "size": 76,
+      "checksum": "git:65d9b91dbf16fc11bb2a9cdcc3c916ec082b6b51"
+    },
+    "sub-01/ses-01/anat/sub-01_ses-01_T1w.json": {
+      "key": "git:90fc176f232d38da6598b6a8f5330c02de1faca8",
+      "size": 2059,
+      "checksum": "git:90fc176f232d38da6598b6a8f5330c02de1faca8"
+    },
+    "sub-01/ses-01/anat/sub-01_ses-01_T1w.nii.gz": {
+      "key": "SHA256E-s13744429--54e0c08a67edbb9d16ad57ee8cc3682192b36f0edbabd5b20471dd4731267ad6.nii.gz",
+      "size": 13744429,
+      "checksum": "sha256:54e0c08a67edbb9d16ad57ee8cc3682192b36f0edbabd5b20471dd4731267ad6"
+    },
+    "sub-01/ses-01/fmap/sub-01_ses-01_magnitude1.json": {
+      "key": "git:717a9d967d6a66b40193918c25b80d3bdf1bf121",
+      "size": 2115,
+      "checksum": "git:717a9d967d6a66b40193918c25b80d3bdf1bf121"
+    },
+    "sub-01/ses-01/fmap/sub-01_ses-01_magnitude1.nii.gz": {
+      "key": "SHA256E-s313068--136a072d57cb1b60dffcef57514d01cc041b297185dfa24b1c887649aafcbaf3.nii.gz",
+      "size": 313068,
+      "checksum": "sha256:136a072d57cb1b60dffcef57514d01cc041b297185dfa24b1c887649aafcbaf3"
+    },
+    "sub-01/ses-01/fmap/sub-01_ses-01_magnitude2.json": {
+      "key": "git:0a038ef1866667930b4f241dbaa7ebc8adc759d0",
+      "size": 2083,
+      "checksum": "git:0a038ef1866667930b4f241dbaa7ebc8adc759d0"
+    },
+    "sub-01/ses-01/fmap/sub-01_ses-01_magnitude2.nii.gz": {
+      "key": "SHA256E-s310514--e3da0c7603aca01b1b991ef20890968a0b41d45586109c06f97d4aa7c2c6e0b3.nii.gz",
+      "size": 310514,
+      "checksum": "sha256:e3da0c7603aca01b1b991ef20890968a0b41d45586109c06f97d4aa7c2c6e0b3"
+    },
+    "sub-01/ses-01/fmap/sub-01_ses-01_phasediff.json": {
+      "key": "git:fc8a048e28ddb25392cce8a15001c687572c1ab1",
+      "size": 2131,
+      "checksum": "git:fc8a048e28ddb25392cce8a15001c687572c1ab1"
+    },
+    "sub-01/ses-01/fmap/sub-01_ses-01_phasediff.nii.gz": {
+      "key": "SHA256E-s355157--10b767fbe2cfcff71642ba7ec215f4357d4161d02c378f08d403c9c38c51d64a.nii.gz",
+      "size": 355157,
+      "checksum": "sha256:10b767fbe2cfcff71642ba7ec215f4357d4161d02c378f08d403c9c38c51d64a"
+    },
+    "sub-01/ses-01/func/sub-01_ses-01_task-inner_bold.json": {
+      "key": "git:c354abdd0daa897252a63240375ad19cf9d7d8a3",
+      "size": 3211,
+      "checksum": "git:c354abdd0daa897252a63240375ad19cf9d7d8a3"
+    },
+    "sub-01/ses-01/func/sub-01_ses-01_task-inner_bold.nii.gz": {
+      "key": "SHA256E-s1179202061--369ad565312d796f99a116991be3559d14ce32aa1139b5ec858369bb817ba792.nii.gz",
+      "size": 1179202061,
+      "checksum": "sha256:369ad565312d796f99a116991be3559d14ce32aa1139b5ec858369bb817ba792"
+    },
+    "sub-01/ses-01/func/sub-01_ses-01_task-inner_events.json": {
+      "key": "git:b208c1162efae725390375faa684306e840a4a3f",
+      "size": 654,
+      "checksum": "git:b208c1162efae725390375faa684306e840a4a3f"
+    },
+    "sub-01/ses-01/func/sub-01_ses-01_task-inner_events.tsv": {
+      "key": "git:2760801f7b1b65a3497f524261da8eb1bf26214c",
+      "size": 3257,
+      "checksum": "git:2760801f7b1b65a3497f524261da8eb1bf26214c"
+    },
+    "sub-01/ses-02/fmap/sub-01_ses-02_magnitude1.json": {
+      "key": "git:f40584073b853ba93fe44be123132b8790b48a28",
+      "size": 2096,
+      "checksum": "git:f40584073b853ba93fe44be123132b8790b48a28"
+    },
+    "sub-01/ses-02/fmap/sub-01_ses-02_magnitude1.nii.gz": {
+      "key": "SHA256E-s311560--3de8d85c34d640e25de9bec545b552e38c0c4a6e72a318c03d8cc958ba9c60df.nii.gz",
+      "size": 311560,
+      "checksum": "sha256:3de8d85c34d640e25de9bec545b552e38c0c4a6e72a318c03d8cc958ba9c60df"
+    },
+    "sub-01/ses-02/fmap/sub-01_ses-02_magnitude2.json": {
+      "key": "git:4e372f63225a60e4f20ffb5b3ea80df9612a40a0",
+      "size": 2096,
+      "checksum": "git:4e372f63225a60e4f20ffb5b3ea80df9612a40a0"
+    },
+    "sub-01/ses-02/fmap/sub-01_ses-02_magnitude2.nii.gz": {
+      "key": "SHA256E-s308547--94008af9aa879227997eaa9f780017ce8b0ee9363754a9f192ea64640e155b90.nii.gz",
+      "size": 308547,
+      "checksum": "sha256:94008af9aa879227997eaa9f780017ce8b0ee9363754a9f192ea64640e155b90"
+    },
+    "sub-01/ses-02/fmap/sub-01_ses-02_phasediff.json": {
+      "key": "git:44c06a5d05ffd527f23a9fe11146ca96bc2046a8",
+      "size": 2144,
+      "checksum": "git:44c06a5d05ffd527f23a9fe11146ca96bc2046a8"
+    },
+    "sub-01/ses-02/fmap/sub-01_ses-02_phasediff.nii.gz": {
+      "key": "SHA256E-s355966--898933daa5e961024646ed63448b35edb505945c4dda5235d395599390b4422a.nii.gz",
+      "size": 355966,
+      "checksum": "sha256:898933daa5e961024646ed63448b35edb505945c4dda5235d395599390b4422a"
+    },
+    "sub-01/ses-02/func/sub-01_ses-02_task-inner_bold.json": {
+      "key": "git:f1d5ac5e82fa2c0239b667c3c98bc91aa46a0812",
+      "size": 3207,
+      "checksum": "git:f1d5ac5e82fa2c0239b667c3c98bc91aa46a0812"
+    },
+    "sub-01/ses-02/func/sub-01_ses-02_task-inner_bold.nii.gz": {
+      "key": "SHA256E-s1173067536--8a27f6df31954dc82a13ef57a8c911c7d005f82138aab67e8836766ef5571ec6.nii.gz",
+      "size": 1173067536,
+      "checksum": "sha256:8a27f6df31954dc82a13ef57a8c911c7d005f82138aab67e8836766ef5571ec6"
+    },
+    "sub-01/ses-02/func/sub-01_ses-02_task-inner_events.json": {
+      "key": "git:22299ec4249df74f242e4e1e1ce194e364b530e8",
+      "size": 625,
+      "checksum": "git:22299ec4249df74f242e4e1e1ce194e364b530e8"
+    },
+    "sub-01/ses-02/func/sub-01_ses-02_task-inner_events.tsv": {
+      "key": "git:f114820f39b3c00e82f326713da0e43660b585b0",
+      "size": 3315,
+      "checksum": "git:f114820f39b3c00e82f326713da0e43660b585b0"
+    },
+    "sub-01/ses-EEG/eeg/sub-01_ses-EEG_task-inner_channels.tsv": {
+      "key": "git:c1669cedbcc5545beefeae2838c4b44502c4f9e0",
+      "size": 835,
+      "checksum": "git:c1669cedbcc5545beefeae2838c4b44502c4f9e0"
+    },
+    "sub-01/ses-EEG/eeg/sub-01_ses-EEG_task-inner_eeg.bdf": {
+      "key": "SHA256E-s152513024--b4aa87925f7567440acdd0417aa2fa0e9441b2c04f386e24c20a65da44cccc30.bdf",
+      "size": 152513024,
+      "checksum": "sha256:b4aa87925f7567440acdd0417aa2fa0e9441b2c04f386e24c20a65da44cccc30"
+    },
+    "sub-01/ses-EEG/eeg/sub-01_ses-EEG_task-inner_eeg.json": {
+      "key": "git:a845cb7e6a72a1f3550327d3d647b6afb7ef59d0",
+      "size": 651,
+      "checksum": "git:a845cb7e6a72a1f3550327d3d647b6afb7ef59d0"
+    },
+    "sub-01/ses-EEG/eeg/sub-01_ses-EEG_task-inner_events.tsv": {
+      "key": "git:e0f815fc5f099513b746664dfcb96da396ded7c0",
+      "size": 6680,
+      "checksum": "git:e0f815fc5f099513b746664dfcb96da396ded7c0"
+    },
+    "sub-02/ses-01/anat/sub-02_ses-01_T1w.json": {
+      "key": "git:d0cd07cba72ba7d0656cd34ca8dba6c313faf6df",
+      "size": 2055,
+      "checksum": "git:d0cd07cba72ba7d0656cd34ca8dba6c313faf6df"
+    },
+    "sub-02/ses-01/anat/sub-02_ses-01_T1w.nii.gz": {
+      "key": "SHA256E-s13575642--9f8b1393a129f7f5e73e612c5f5dfbc4ae7eda0db25694534b5b0c1e2afa9c88.nii.gz",
+      "size": 13575642,
+      "checksum": "sha256:9f8b1393a129f7f5e73e612c5f5dfbc4ae7eda0db25694534b5b0c1e2afa9c88"
+    },
+    "sub-02/ses-01/fmap/sub-02_ses-01_magnitude1.json": {
+      "key": "git:fae10ae52a2e17d31ad916a885d3878385c6494d",
+      "size": 2082,
+      "checksum": "git:fae10ae52a2e17d31ad916a885d3878385c6494d"
+    },
+    "sub-02/ses-01/fmap/sub-02_ses-01_magnitude1.nii.gz": {
+      "key": "SHA256E-s318276--b556e0b7fb2f1e622e9ee0a4d11b14669297bdfdd64e1c87ed1464cd431d32c8.nii.gz",
+      "size": 318276,
+      "checksum": "sha256:b556e0b7fb2f1e622e9ee0a4d11b14669297bdfdd64e1c87ed1464cd431d32c8"
+    },
+    "sub-02/ses-01/fmap/sub-02_ses-01_magnitude2.json": {
+      "key": "git:3854039b9362c89d43f90235a75b03da9299467b",
+      "size": 2085,
+      "checksum": "git:3854039b9362c89d43f90235a75b03da9299467b"
+    },
+    "sub-02/ses-01/fmap/sub-02_ses-01_magnitude2.nii.gz": {
+      "key": "SHA256E-s315513--daa7e74a0910dd6a00670e92118729f188ecc8199571899f1f1eb11e60f2c37b.nii.gz",
+      "size": 315513,
+      "checksum": "sha256:daa7e74a0910dd6a00670e92118729f188ecc8199571899f1f1eb11e60f2c37b"
+    },
+    "sub-02/ses-01/fmap/sub-02_ses-01_phasediff.json": {
+      "key": "git:45a576826bfd3e12973e402704fb0154c64315e6",
+      "size": 2133,
+      "checksum": "git:45a576826bfd3e12973e402704fb0154c64315e6"
+    },
+    "sub-02/ses-01/fmap/sub-02_ses-01_phasediff.nii.gz": {
+      "key": "SHA256E-s355510--3bf9fb336f582c9e462537ef3afcd2ca45850dab36ec3e61579e6d8a4a49b427.nii.gz",
+      "size": 355510,
+      "checksum": "sha256:3bf9fb336f582c9e462537ef3afcd2ca45850dab36ec3e61579e6d8a4a49b427"
+    },
+    "sub-02/ses-01/func/sub-02_ses-01_task-inner_bold.json": {
+      "key": "git:a2eda8fc0ccf2fd5d98c2a5a254bcb15648aaa86",
+      "size": 3207,
+      "checksum": "git:a2eda8fc0ccf2fd5d98c2a5a254bcb15648aaa86"
+    },
+    "sub-02/ses-01/func/sub-02_ses-01_task-inner_bold.nii.gz": {
+      "key": "SHA256E-s1174757164--2a608dfa22c18790608805c48125536160133504da23cc6a8d658285760e571a.nii.gz",
+      "size": 1174757164,
+      "checksum": "sha256:2a608dfa22c18790608805c48125536160133504da23cc6a8d658285760e571a"
+    },
+    "sub-02/ses-01/func/sub-02_ses-01_task-inner_events.json": {
+      "key": "git:22299ec4249df74f242e4e1e1ce194e364b530e8",
+      "size": 625,
+      "checksum": "git:22299ec4249df74f242e4e1e1ce194e364b530e8"
+    },
+    "sub-02/ses-01/func/sub-02_ses-01_task-inner_events.tsv": {
+      "key": "git:f25f8d0171829d557669e1befeb32d4cb00e154f",
+      "size": 3314,
+      "checksum": "git:f25f8d0171829d557669e1befeb32d4cb00e154f"
+    },
+    "sub-02/ses-02/fmap/sub-02_ses-02_magnitude1.json": {
+      "key": "git:1f0e89b5a0427ff75e1f24fd4982554a552d8c6e",
+      "size": 2094,
+      "checksum": "git:1f0e89b5a0427ff75e1f24fd4982554a552d8c6e"
+    },
+    "sub-02/ses-02/fmap/sub-02_ses-02_magnitude1.nii.gz": {
+      "key": "SHA256E-s319161--da245776dac427a9b3a9c256242a2d5f7a531b0f61169909f02c449b7c07a55d.nii.gz",
+      "size": 319161,
+      "checksum": "sha256:da245776dac427a9b3a9c256242a2d5f7a531b0f61169909f02c449b7c07a55d"
+    },
+    "sub-02/ses-02/fmap/sub-02_ses-02_magnitude2.json": {
+      "key": "git:eca33dc1dcb3fa5edde833f8d83a815fdda38102",
+      "size": 2093,
+      "checksum": "git:eca33dc1dcb3fa5edde833f8d83a815fdda38102"
+    },
+    "sub-02/ses-02/fmap/sub-02_ses-02_magnitude2.nii.gz": {
+      "key": "SHA256E-s316005--f66bf8e4f485a967f1bce53ecacf7a0089a4985adddc3cd5c74826e2085a57e0.nii.gz",
+      "size": 316005,
+      "checksum": "sha256:f66bf8e4f485a967f1bce53ecacf7a0089a4985adddc3cd5c74826e2085a57e0"
+    },
+    "sub-02/ses-02/fmap/sub-02_ses-02_phasediff.json": {
+      "key": "git:c2c6a17bf81885d1b0dcb06644c48977ce881c5f",
+      "size": 2141,
+      "checksum": "git:c2c6a17bf81885d1b0dcb06644c48977ce881c5f"
+    },
+    "sub-02/ses-02/fmap/sub-02_ses-02_phasediff.nii.gz": {
+      "key": "SHA256E-s357000--5b6de3ea4251c17ba17737bd52cd06fd4d2d3e5b43e3b9a77ad6efe221b2dfc3.nii.gz",
+      "size": 357000,
+      "checksum": "sha256:5b6de3ea4251c17ba17737bd52cd06fd4d2d3e5b43e3b9a77ad6efe221b2dfc3"
+    },
+    "sub-02/ses-02/func/sub-02_ses-02_task-inner_bold.json": {
+      "key": "git:4be0b237819d2fc4a3c335be1f47360be48549c7",
+      "size": 3211,
+      "checksum": "git:4be0b237819d2fc4a3c335be1f47360be48549c7"
+    },
+    "sub-02/ses-02/func/sub-02_ses-02_task-inner_bold.nii.gz": {
+      "key": "SHA256E-s1180261814--dd7360054262b4d57d0854a6c14843b82b793f89c92768ba0ba70159558619a1.nii.gz",
+      "size": 1180261814,
+      "checksum": "sha256:dd7360054262b4d57d0854a6c14843b82b793f89c92768ba0ba70159558619a1"
+    },
+    "sub-02/ses-02/func/sub-02_ses-02_task-inner_events.json": {
+      "key": "git:22299ec4249df74f242e4e1e1ce194e364b530e8",
+      "size": 625,
+      "checksum": "git:22299ec4249df74f242e4e1e1ce194e364b530e8"
+    },
+    "sub-02/ses-02/func/sub-02_ses-02_task-inner_events.tsv": {
+      "key": "git:eb50df30f78d9f37fbe0103656ec0d4ac72803bf",
+      "size": 3357,
+      "checksum": "git:eb50df30f78d9f37fbe0103656ec0d4ac72803bf"
+    },
+    "sub-02/ses-EEG/eeg/sub-02_ses-EEG_task-inner_channels.tsv": {
+      "key": "git:c1669cedbcc5545beefeae2838c4b44502c4f9e0",
+      "size": 835,
+      "checksum": "git:c1669cedbcc5545beefeae2838c4b44502c4f9e0"
+    },
+    "sub-02/ses-EEG/eeg/sub-02_ses-EEG_task-inner_eeg.bdf": {
+      "key": "SHA256E-s146458112--cb005229accf9d2673660668830be726580a898b2948b3656f2250776810133a.bdf",
+      "size": 146458112,
+      "checksum": "sha256:cb005229accf9d2673660668830be726580a898b2948b3656f2250776810133a"
+    },
+    "sub-02/ses-EEG/eeg/sub-02_ses-EEG_task-inner_eeg.json": {
+      "key": "git:a845cb7e6a72a1f3550327d3d647b6afb7ef59d0",
+      "size": 651,
+      "checksum": "git:a845cb7e6a72a1f3550327d3d647b6afb7ef59d0"
+    },
+    "sub-02/ses-EEG/eeg/sub-02_ses-EEG_task-inner_events.tsv": {
+      "key": "git:4526c01da72bc4fac8de57d8db5350e01ae22937",
+      "size": 6685,
+      "checksum": "git:4526c01da72bc4fac8de57d8db5350e01ae22937"
+    },
+    "sub-03/ses-01/anat/sub-03_ses-01_T1w.json": {
+      "key": "git:8b2c66f71591e194003707a4efd7b85d88602852",
+      "size": 2052,
+      "checksum": "git:8b2c66f71591e194003707a4efd7b85d88602852"
+    },
+    "sub-03/ses-01/anat/sub-03_ses-01_T1w.nii.gz": {
+      "key": "SHA256E-s13659840--6a146bdfe7e30c6446aaa0ce3a708bf6d28a4e0f25dfb6e839834ef61c78f4a0.nii.gz",
+      "size": 13659840,
+      "checksum": "sha256:6a146bdfe7e30c6446aaa0ce3a708bf6d28a4e0f25dfb6e839834ef61c78f4a0"
+    },
+    "sub-03/ses-01/fmap/sub-03_ses-01_magnitude1.json": {
+      "key": "git:fd6ff652c2f875e4e28bae526f9e29569e4339c6",
+      "size": 2113,
+      "checksum": "git:fd6ff652c2f875e4e28bae526f9e29569e4339c6"
+    },
+    "sub-03/ses-01/fmap/sub-03_ses-01_magnitude1.nii.gz": {
+      "key": "SHA256E-s317055--e7b76c45a7515cb524cd57caf4bc75ae476593d6b1c74ed7020db35ad7ba10df.nii.gz",
+      "size": 317055,
+      "checksum": "sha256:e7b76c45a7515cb524cd57caf4bc75ae476593d6b1c74ed7020db35ad7ba10df"
+    },
+    "sub-03/ses-01/fmap/sub-03_ses-01_magnitude2.json": {
+      "key": "git:a07a274682b464cd5774c4a9bfe79e9350e61d60",
+      "size": 2081,
+      "checksum": "git:a07a274682b464cd5774c4a9bfe79e9350e61d60"
+    },
+    "sub-03/ses-01/fmap/sub-03_ses-01_magnitude2.nii.gz": {
+      "key": "SHA256E-s313762--635e3ff5ac4385492b857275e1902eed5a1a862bdb484fae805f8f6a4b1d0e6d.nii.gz",
+      "size": 313762,
+      "checksum": "sha256:635e3ff5ac4385492b857275e1902eed5a1a862bdb484fae805f8f6a4b1d0e6d"
+    },
+    "sub-03/ses-01/fmap/sub-03_ses-01_phasediff.json": {
+      "key": "git:f02119b41e9adeb45135edc8b791f9020d26b7d5",
+      "size": 2129,
+      "checksum": "git:f02119b41e9adeb45135edc8b791f9020d26b7d5"
+    },
+    "sub-03/ses-01/fmap/sub-03_ses-01_phasediff.nii.gz": {
+      "key": "SHA256E-s352727--3d688983dce698ead79dab0834996c02ef9926717fc11ecd3df98429afb83750.nii.gz",
+      "size": 352727,
+      "checksum": "sha256:3d688983dce698ead79dab0834996c02ef9926717fc11ecd3df98429afb83750"
+    },
+    "sub-03/ses-01/func/sub-03_ses-01_task-inner_bold.json": {
+      "key": "git:9ff617199c250d265b12b597dace1636e2cc0bcb",
+      "size": 3211,
+      "checksum": "git:9ff617199c250d265b12b597dace1636e2cc0bcb"
+    },
+    "sub-03/ses-01/func/sub-03_ses-01_task-inner_bold.nii.gz": {
+      "key": "SHA256E-s1193499976--8c8c74d275a28cc4cb4ecd10216912ba0ac8615efe5d33454befea3fc394f55b.nii.gz",
+      "size": 1193499976,
+      "checksum": "sha256:8c8c74d275a28cc4cb4ecd10216912ba0ac8615efe5d33454befea3fc394f55b"
+    },
+    "sub-03/ses-01/func/sub-03_ses-01_task-inner_events.json": {
+      "key": "git:22299ec4249df74f242e4e1e1ce194e364b530e8",
+      "size": 625,
+      "checksum": "git:22299ec4249df74f242e4e1e1ce194e364b530e8"
+    },
+    "sub-03/ses-01/func/sub-03_ses-01_task-inner_events.tsv": {
+      "key": "git:b31241f30b07ad90303371732cacc610ef596b57",
+      "size": 3313,
+      "checksum": "git:b31241f30b07ad90303371732cacc610ef596b57"
+    },
+    "sub-03/ses-02/fmap/sub-03_ses-02_magnitude1.json": {
+      "key": "git:e1bf796d322499478cd22fe30d6141824999e957",
+      "size": 2088,
+      "checksum": "git:e1bf796d322499478cd22fe30d6141824999e957"
+    },
+    "sub-03/ses-02/fmap/sub-03_ses-02_magnitude1.nii.gz": {
+      "key": "SHA256E-s315379--88100e694f0d538870ffa4384e3553dad39b3ca4a53034a3cece720839a1377b.nii.gz",
+      "size": 315379,
+      "checksum": "sha256:88100e694f0d538870ffa4384e3553dad39b3ca4a53034a3cece720839a1377b"
+    },
+    "sub-03/ses-02/fmap/sub-03_ses-02_magnitude2.json": {
+      "key": "git:b5445f2905b7e0cc297e8491a48d397d541fd604",
+      "size": 2084,
+      "checksum": "git:b5445f2905b7e0cc297e8491a48d397d541fd604"
+    },
+    "sub-03/ses-02/fmap/sub-03_ses-02_magnitude2.nii.gz": {
+      "key": "SHA256E-s312782--25a3fbb2185b1ffe3f17bd491a9691aee3cd7848def766e935dc6aef9ea7e42b.nii.gz",
+      "size": 312782,
+      "checksum": "sha256:25a3fbb2185b1ffe3f17bd491a9691aee3cd7848def766e935dc6aef9ea7e42b"
+    },
+    "sub-03/ses-02/fmap/sub-03_ses-02_phasediff.json": {
+      "key": "git:3b0ec3a40a0abd7adc6a44a57ca575ce5b475b37",
+      "size": 2132,
+      "checksum": "git:3b0ec3a40a0abd7adc6a44a57ca575ce5b475b37"
+    },
+    "sub-03/ses-02/fmap/sub-03_ses-02_phasediff.nii.gz": {
+      "key": "SHA256E-s351799--7877d45927969e07c3428d2dd0cd0d5c4cae35909659c9405477de4f51a0c349.nii.gz",
+      "size": 351799,
+      "checksum": "sha256:7877d45927969e07c3428d2dd0cd0d5c4cae35909659c9405477de4f51a0c349"
+    },
+    "sub-03/ses-02/func/sub-03_ses-02_task-inner_bold.json": {
+      "key": "git:e34f99d0e2c21334aa14b106ad723d16b306077d",
+      "size": 3204,
+      "checksum": "git:e34f99d0e2c21334aa14b106ad723d16b306077d"
+    },
+    "sub-03/ses-02/func/sub-03_ses-02_task-inner_bold.nii.gz": {
+      "key": "SHA256E-s1190482884--5e2bf98cc7cb5e9eb0fde855c4eb967374cb73677ea8a82b1dcccf36377016ac.nii.gz",
+      "size": 1190482884,
+      "checksum": "sha256:5e2bf98cc7cb5e9eb0fde855c4eb967374cb73677ea8a82b1dcccf36377016ac"
+    },
+    "sub-03/ses-02/func/sub-03_ses-02_task-inner_events.json": {
+      "key": "git:22299ec4249df74f242e4e1e1ce194e364b530e8",
+      "size": 625,
+      "checksum": "git:22299ec4249df74f242e4e1e1ce194e364b530e8"
+    },
+    "sub-03/ses-02/func/sub-03_ses-02_task-inner_events.tsv": {
+      "key": "git:84c3a9ab102e42dee86d554b01e58d09ced14996",
+      "size": 3150,
+      "checksum": "git:84c3a9ab102e42dee86d554b01e58d09ced14996"
+    },
+    "sub-03/ses-EEG/eeg/sub-03_ses-EEG_task-inner_channels.tsv": {
+      "key": "git:c1669cedbcc5545beefeae2838c4b44502c4f9e0",
+      "size": 835,
+      "checksum": "git:c1669cedbcc5545beefeae2838c4b44502c4f9e0"
+    },
+    "sub-03/ses-EEG/eeg/sub-03_ses-EEG_task-inner_eeg.bdf": {
+      "key": "SHA256E-s146682368--d8d42462dea2a7c92e334f92ebd474208640099f732234ebff3a0ff208a66994.bdf",
+      "size": 146682368,
+      "checksum": "sha256:d8d42462dea2a7c92e334f92ebd474208640099f732234ebff3a0ff208a66994"
+    },
+    "sub-03/ses-EEG/eeg/sub-03_ses-EEG_task-inner_eeg.json": {
+      "key": "git:a845cb7e6a72a1f3550327d3d647b6afb7ef59d0",
+      "size": 651,
+      "checksum": "git:a845cb7e6a72a1f3550327d3d647b6afb7ef59d0"
+    },
+    "sub-03/ses-EEG/eeg/sub-03_ses-EEG_task-inner_events.tsv": {
+      "key": "git:369a6405adaa033d00e1522fc81334c4fc643dc0",
+      "size": 6685,
+      "checksum": "git:369a6405adaa033d00e1522fc81334c4fc643dc0"
+    },
+    "sub-05/ses-01/anat/sub-05_ses-01_T1w.json": {
+      "key": "git:d47d6add92fd5765fdba95f2d4c6b09ba93645a4",
+      "size": 2052,
+      "checksum": "git:d47d6add92fd5765fdba95f2d4c6b09ba93645a4"
+    },
+    "sub-05/ses-01/anat/sub-05_ses-01_T1w.nii.gz": {
+      "key": "SHA256E-s13063269--359c3629fb2c8599412886dd7106528675a68c7998e82ca28e4822f541f4408a.nii.gz",
+      "size": 13063269,
+      "checksum": "sha256:359c3629fb2c8599412886dd7106528675a68c7998e82ca28e4822f541f4408a"
+    },
+    "sub-05/ses-01/fmap/sub-05_ses-01_magnitude1.json": {
+      "key": "git:9c5ebc7dfbc81d512124892ee1489aae16d67fb7",
+      "size": 2111,
+      "checksum": "git:9c5ebc7dfbc81d512124892ee1489aae16d67fb7"
+    },
+    "sub-05/ses-01/fmap/sub-05_ses-01_magnitude1.nii.gz": {
+      "key": "SHA256E-s303305--f21876cc783957493c39c485591e28b47a93ec5613a7b47f635f5e95c20f5a7d.nii.gz",
+      "size": 303305,
+      "checksum": "sha256:f21876cc783957493c39c485591e28b47a93ec5613a7b47f635f5e95c20f5a7d"
+    },
+    "sub-05/ses-01/fmap/sub-05_ses-01_magnitude2.json": {
+      "key": "git:3d33f13cecea72ffd847b4069f13fc28329ed419",
+      "size": 2082,
+      "checksum": "git:3d33f13cecea72ffd847b4069f13fc28329ed419"
+    },
+    "sub-05/ses-01/fmap/sub-05_ses-01_magnitude2.nii.gz": {
+      "key": "SHA256E-s298393--80264312b83926bb2aab8a7ab4b0dba2c24fa31f7d0c85215faf94d59e151a54.nii.gz",
+      "size": 298393,
+      "checksum": "sha256:80264312b83926bb2aab8a7ab4b0dba2c24fa31f7d0c85215faf94d59e151a54"
+    },
+    "sub-05/ses-01/fmap/sub-05_ses-01_phasediff.json": {
+      "key": "git:d72ee55d6c5310cb8bf4eb661db31033cc1fb3d5",
+      "size": 2130,
+      "checksum": "git:d72ee55d6c5310cb8bf4eb661db31033cc1fb3d5"
+    },
+    "sub-05/ses-01/fmap/sub-05_ses-01_phasediff.nii.gz": {
+      "key": "SHA256E-s360862--4435553e5cc9c19dd36ff38eadcad975dfb10658a8ecfee8b920ae783258c7e6.nii.gz",
+      "size": 360862,
+      "checksum": "sha256:4435553e5cc9c19dd36ff38eadcad975dfb10658a8ecfee8b920ae783258c7e6"
+    },
+    "sub-05/ses-01/func/sub-05_ses-01_task-inner_bold.json": {
+      "key": "git:0a7aea787e29b1e2db50a7aeed5f0ce23d94cb7d",
+      "size": 3214,
+      "checksum": "git:0a7aea787e29b1e2db50a7aeed5f0ce23d94cb7d"
+    },
+    "sub-05/ses-01/func/sub-05_ses-01_task-inner_bold.nii.gz": {
+      "key": "SHA256E-s1135594699--616cacc2ca4cc46a1821d395be938fd893757a8ee383839dfc4f0f7740f87ab1.nii.gz",
+      "size": 1135594699,
+      "checksum": "sha256:616cacc2ca4cc46a1821d395be938fd893757a8ee383839dfc4f0f7740f87ab1"
+    },
+    "sub-05/ses-01/func/sub-05_ses-01_task-inner_events.json": {
+      "key": "git:22299ec4249df74f242e4e1e1ce194e364b530e8",
+      "size": 625,
+      "checksum": "git:22299ec4249df74f242e4e1e1ce194e364b530e8"
+    },
+    "sub-05/ses-01/func/sub-05_ses-01_task-inner_events.tsv": {
+      "key": "git:e90614d4a5e521586b082d0248f8358b996ae659",
+      "size": 3285,
+      "checksum": "git:e90614d4a5e521586b082d0248f8358b996ae659"
+    },
+    "sub-05/ses-02/fmap/sub-05_ses-02_magnitude1.json": {
+      "key": "git:f6909e3008bec7955c6bcc39e5a3f96e6e9878a1",
+      "size": 2087,
+      "checksum": "git:f6909e3008bec7955c6bcc39e5a3f96e6e9878a1"
+    },
+    "sub-05/ses-02/fmap/sub-05_ses-02_magnitude1.nii.gz": {
+      "key": "SHA256E-s305753--327aa1549eed1db7bd893fbb54b7b3d7035898f76b25dbc3a19f0b014f4d3643.nii.gz",
+      "size": 305753,
+      "checksum": "sha256:327aa1549eed1db7bd893fbb54b7b3d7035898f76b25dbc3a19f0b014f4d3643"
+    },
+    "sub-05/ses-02/fmap/sub-05_ses-02_magnitude2.json": {
+      "key": "git:eee290cdb80387acab3f6eff8e57a046da962ecd",
+      "size": 2089,
+      "checksum": "git:eee290cdb80387acab3f6eff8e57a046da962ecd"
+    },
+    "sub-05/ses-02/fmap/sub-05_ses-02_magnitude2.nii.gz": {
+      "key": "SHA256E-s303149--5502bf717fa998fa7e074c6fd2989f0ed47b27a7603e5f71e493ae913dd200dd.nii.gz",
+      "size": 303149,
+      "checksum": "sha256:5502bf717fa998fa7e074c6fd2989f0ed47b27a7603e5f71e493ae913dd200dd"
+    },
+    "sub-05/ses-02/fmap/sub-05_ses-02_phasediff.json": {
+      "key": "git:076982f2799b70131a29ae2d2ad7ff53cee0b1f2",
+      "size": 2137,
+      "checksum": "git:076982f2799b70131a29ae2d2ad7ff53cee0b1f2"
+    },
+    "sub-05/ses-02/fmap/sub-05_ses-02_phasediff.nii.gz": {
+      "key": "SHA256E-s359928--249626d8fe7fdcdac4026710059313504901dbd6fdca04657a4a2e340669efb0.nii.gz",
+      "size": 359928,
+      "checksum": "sha256:249626d8fe7fdcdac4026710059313504901dbd6fdca04657a4a2e340669efb0"
+    },
+    "sub-05/ses-02/func/sub-05_ses-02_task-inner_bold.json": {
+      "key": "git:f2f64a21a537c16750f3c6ebd05af3fe8458da88",
+      "size": 3211,
+      "checksum": "git:f2f64a21a537c16750f3c6ebd05af3fe8458da88"
+    },
+    "sub-05/ses-02/func/sub-05_ses-02_task-inner_bold.nii.gz": {
+      "key": "SHA256E-s1140995236--889683f329ac9eb4a5c7f1eb74cb2be368f009f7fa3ddca8b0b767d2a36f9254.nii.gz",
+      "size": 1140995236,
+      "checksum": "sha256:889683f329ac9eb4a5c7f1eb74cb2be368f009f7fa3ddca8b0b767d2a36f9254"
+    },
+    "sub-05/ses-02/func/sub-05_ses-02_task-inner_events.json": {
+      "key": "git:22299ec4249df74f242e4e1e1ce194e364b530e8",
+      "size": 625,
+      "checksum": "git:22299ec4249df74f242e4e1e1ce194e364b530e8"
+    },
+    "sub-05/ses-02/func/sub-05_ses-02_task-inner_events.tsv": {
+      "key": "git:455ba04759c70605d65e71017740fde69663860d",
+      "size": 3263,
+      "checksum": "git:455ba04759c70605d65e71017740fde69663860d"
+    },
+    "sub-05/ses-EEG/eeg/sub-05_ses-EEG_task-inner_channels.tsv": {
+      "key": "git:c1669cedbcc5545beefeae2838c4b44502c4f9e0",
+      "size": 835,
+      "checksum": "git:c1669cedbcc5545beefeae2838c4b44502c4f9e0"
+    },
+    "sub-05/ses-EEG/eeg/sub-05_ses-EEG_task-inner_eeg.bdf": {
+      "key": "SHA256E-s147355136--e8be5b4467d653d3ea59df0e4409b5866f156cf134c2b59085fd1e8c83cd0e67.bdf",
+      "size": 147355136,
+      "checksum": "sha256:e8be5b4467d653d3ea59df0e4409b5866f156cf134c2b59085fd1e8c83cd0e67"
+    },
+    "sub-05/ses-EEG/eeg/sub-05_ses-EEG_task-inner_eeg.json": {
+      "key": "git:a845cb7e6a72a1f3550327d3d647b6afb7ef59d0",
+      "size": 651,
+      "checksum": "git:a845cb7e6a72a1f3550327d3d647b6afb7ef59d0"
+    },
+    "sub-05/ses-EEG/eeg/sub-05_ses-EEG_task-inner_events.tsv": {
+      "key": "git:a17f8aabc6aa4a799aa1995ea1740dbe9c1487fd",
+      "size": 6704,
+      "checksum": "git:a17f8aabc6aa4a799aa1995ea1740dbe9c1487fd"
+    }
+  }
+}
