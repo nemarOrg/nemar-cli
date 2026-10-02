@@ -554,6 +554,18 @@ async function processDataset(rc: RunContext, row: PlanRow): Promise<DatasetResu
     return { id, outcome: "error", error: clip(err instanceof Error ? err.message : String(err)) };
   }
 
+  // Two readers pick "the latest version" by different SQL (the writer breaks a timestamp
+  // tie by id, the data plane does not). They must agree, or one version's manifest ETag
+  // would be stamped on another version's content, and nothing would ever correct it.
+  if (toVersionTag(gathered.latestVersion) !== prepared.latestVersion) {
+    return refuse(
+      rc,
+      id,
+      "latest_version_disagreement",
+      `the writer reads ${prepared.latestVersion} as latest, the data plane ${gathered.latestVersion}`,
+    );
+  }
+
   const input = applyCuration(gathered.input, curation);
 
   let built: Awaited<ReturnType<typeof buildNeurobagelArtifacts>>;

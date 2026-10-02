@@ -383,6 +383,42 @@ describe("a second run with nothing changed writes nothing", () => {
     expect(rec.log).toEqual([]);
   });
 
+  test("two readers that disagree on the latest version (a timestamp tie) refuse the dataset, not stamp one version's ETag on another's content", async () => {
+    // Two versions created in the same second. The writer breaks the tie by id (the newer
+    // row); the data plane's own query does not, and answers the first. Both manifests exist.
+    const tie = "2026-01-02 03:04:05";
+    seedSynthetic(h, "nm000608", {
+      version: "1.0.0",
+      versions: [
+        ["1.0.0", tie],
+        ["1.1.0", tie],
+      ],
+    });
+    const manifest = JSON.parse(
+      new TextDecoder().decode(h.standin.objects.get("/nm000608/version/v1.0.0.json")?.body),
+    );
+    h.standin.put(
+      "/nm000608/version/v1.1.0.json",
+      JSON.stringify({ ...manifest, version: "1.1.0", doi: "10.82901/nemar.nm000608.v1.1.0" }),
+    );
+    const rec = recordWrites(h.bucket);
+    const result = await run({}, h.env({ NEUROBAGEL: rec.bucket }));
+    expect(result.results).toEqual([
+      {
+        id: "nm000608",
+        outcome: "refused",
+        code: "latest_version_disagreement",
+        detail: expect.stringContaining("1.1.0"),
+      },
+    ]);
+    expect(rec.log).toEqual([]);
+    // A standing disagreement is a finding a person can read, until it is resolved.
+    const status = await neurobagelStatus(h.env());
+    expect(status.needs_review).toEqual([
+      { id: "nm000608", source: "refusal", code: "latest_version_disagreement" },
+    ]);
+  });
+
   test("a rewritten manifest (a new ETag, same name) is a change the row cannot see", async () => {
     seedSynthetic(h, "nm000604");
     await run();
