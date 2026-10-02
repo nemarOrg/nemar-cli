@@ -5,6 +5,14 @@
  */
 
 export { canonicalJson } from "./canonical-json";
+// Types only: the loader (`./curation`) imports the full vocabularies, so it is imported by name.
+export type {
+  CuratedColumn,
+  CurationEntry,
+  CurationFile,
+  CurationKind,
+  CurationReview,
+} from "./curation-types";
 export { NEMAR_NEUROBAGEL_NAMESPACE, nbIdentifier, uuid5 } from "./identifiers";
 export {
   metadataSchema,
@@ -12,7 +20,13 @@ export {
   type NeurobagelInput,
   participantsJsonSchema,
 } from "./input-schema";
-export type { ColumnReport, NeurobagelReport, TableStatus } from "./report";
+export type {
+  ColumnReport,
+  CurationReport,
+  CurationStatus,
+  NeurobagelReport,
+  TableStatus,
+} from "./report";
 export {
   artifactFileNames,
   buildNeurobagelArtifacts,
