@@ -18,9 +18,9 @@
  * Pure: no I/O.
  */
 
-import { type CanonicalJsonValue, JsonFloat } from "./canonical-json";
+import { type BidsIndexSubjectWire, NO_SESSION_KEY } from "../contract/dataset.js";
+import { type CanonicalJsonValue, JsonFloat, byCodeUnit } from "./canonical-json";
 import { datasetName, nbIdentifier } from "./identifiers";
-import { NO_SESSION_KEY } from "./input-schema";
 import { VOCAB, type VocabTerm, modalityTermForDatatype } from "./vocab";
 
 /** `bagel`'s label for a session the source data does not name (`bagel/cli.py` CUSTOM_SESSION_LABEL). */
@@ -87,7 +87,7 @@ export type PairingBasis =
 
 export interface ImagingSource {
   /** Session labels without `ses-`. */
-  sessions: string[];
+  sessions: BidsIndexSubjectWire["sessions"];
   /** Datatype directories the subject has (keys of `modalities`). */
   datatypes: string[];
   /** `session_modalities` as served; `undefined` when the document does not carry it. */
@@ -131,23 +131,27 @@ const sameSet = (a: Iterable<string>, b: Iterable<string>): boolean => {
  * public index, so the datatypes go on ONE unnamed session instead: true of
  * the subject, silent about the sessions.
  *
- * A `session_modalities` that is malformed, or whose datatypes are not the
- * subject's `modalities`, is not trusted: the subject falls back to the
+ * A `session_modalities` that is malformed, or whose MAPPED datatypes are not the
+ * subject's mapped `modalities`, is not trusted: the subject falls back to the
  * absent-field rules above and the report says why.
+ * Only mapped datatypes are compared: the datatype names are directory names, not a
+ * checked list, and a name no JSON object can hold (`__proto__`) is lost from
+ * `modalities` on the wire but kept in a list, which says nothing about the
+ * datatypes this transform emits.
  */
 export function imagingSessionsFor(source: ImagingSource): {
   sessions: ImagingSessionModel[];
   basis: PairingBasis;
 } {
   const mappedOf = (datatypes: Iterable<string>): string[] =>
-    [...new Set(datatypes)].filter((d) => modalityTermForDatatype(d) !== null).sort();
+    [...new Set(datatypes)].filter((d) => modalityTermForDatatype(d) !== null).sort(byCodeUnit);
 
   let degraded: "unreadable" | "inconsistent" | null = null;
   if (source.sessionModalities !== undefined) {
     const recorded = readSessionModalities(source.sessionModalities);
     if (recorded === null) {
       degraded = "unreadable";
-    } else if (!sameSet([...recorded.values()].flat(), source.datatypes)) {
+    } else if (!sameSet(mappedOf([...recorded.values()].flat()), mappedOf(source.datatypes))) {
       degraded = "inconsistent";
     } else {
       const byLabel = new Map<string, Set<string>>();
@@ -160,8 +164,11 @@ export function imagingSessionsFor(source: ImagingSource): {
         byLabel.set(label, into);
       }
       const sessions = [...byLabel.entries()]
-        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-        .map(([sessionLabel, datatypes]) => ({ sessionLabel, datatypes: [...datatypes].sort() }));
+        .sort(([a], [b]) => byCodeUnit(a, b))
+        .map(([sessionLabel, datatypes]) => ({
+          sessionLabel,
+          datatypes: [...datatypes].sort(byCodeUnit),
+        }));
       return { sessions, basis: "recorded" };
     }
   }

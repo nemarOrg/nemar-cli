@@ -951,6 +951,42 @@ describe("SYNTHETIC session_modalities over real metadata: the pairing the bids 
     }
   });
 
+  test("a directory that is not a session (ses-pre-op) is a datatype of that name, dropped and counted, and breaks nothing", async () => {
+    // The data plane's index only reads ses-<alphanumeric> as a session, so `ses-pre-op` shows up
+    // as a datatype of that name (shared/contract/dataset.ts). It must not become a session
+    // label, a modality or a report key.
+    const { subject, report } = await withSessionModalities((subjects) => {
+      for (const [, node] of onlyMeg(subjects)) {
+        node.modalities = { meg: {}, "ses-pre-op": {} };
+        node.session_modalities = { "0": ["meg"], "1": ["meg", "ses-pre-op"] };
+      }
+    });
+    const sessions = imaging(subject("sub-02"));
+    expect(sessions.map((x) => x.hasLabel)).toEqual(["ses-0", "ses-1"]);
+    expect(JSON.stringify(subject("sub-02"))).not.toContain("pre-op");
+    const imagingReport = report.imaging as Json;
+    expect(((imagingReport.datatypes_dropped_subjects as Json).other as number) > 0).toBe(true);
+    expect(JSON.stringify(report)).not.toContain("pre-op");
+    expect(report.flags).not.toContain("session_modalities_inconsistent");
+  });
+
+  test("datatype names that are also Object members (__proto__, constructor) cannot break the output or the counts", async () => {
+    const { subject, report } = await withSessionModalities((subjects) => {
+      // JSON.parse makes `__proto__` an OWN key, as it is in a real response.
+      const hostile = JSON.parse(
+        '{"sessions":["0","1"],"modalities":{"meg":{"tasks":{}},"__proto__":{"tasks":{}},"constructor":{"tasks":{}}},' +
+          '"session_modalities":{"0":["meg","__proto__"],"1":["constructor","meg"]}}',
+      ) as Node;
+      for (const [label] of onlyMeg(subjects)) subjects[label] = hostile;
+    });
+    expect(imaging(subject("sub-02")).map((x) => x.hasLabel)).toEqual(["ses-0", "ses-1"]);
+    const dropped = (report.imaging as Json).datatypes_dropped_subjects as Record<string, unknown>;
+    expect(typeof dropped.constructor).toBe("number");
+    expect(Object.keys(dropped)).not.toContain("__proto__");
+    expect(report.flags).not.toContain("session_modalities_inconsistent");
+    expect(({} as Json).tasks).toBeUndefined();
+  });
+
   test("absent is unknown: the same metadata without the field gives the cautious single session", async () => {
     const { subject, report } = await withSessionModalities(() => {});
     expect(imaging(subject("sub-02")).map((x) => x.hasLabel)).toEqual(["ses-unnamed"]);

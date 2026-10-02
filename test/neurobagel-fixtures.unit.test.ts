@@ -15,6 +15,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { FIXTURE_ROOT, NEUROBAGEL_TEST_ROOT, fixtureIds } from "../scripts/neurobagel/fixtures-io";
+import { bidsIndexSchema } from "../shared/contract/dataset.js";
 
 interface DocumentProvenance {
   absent: boolean;
@@ -105,6 +106,18 @@ describe("fixture provenance", () => {
       }
     });
   }
+
+  test("every fixture's bids_index is a valid wire document of the data plane's own contract", () => {
+    for (const id of fixtureIds()) {
+      const metadata = JSON.parse(
+        readFileSync(join(FIXTURE_ROOT, id, "metadata.json"), "utf8"),
+      ) as {
+        extensions?: { nemar?: { bids_index?: unknown } };
+      };
+      const result = bidsIndexSchema.nullable().safeParse(metadata.extensions?.nemar?.bids_index);
+      expect(result.success).toBe(true);
+    }
+  });
 
   test("a redirected (annexed) response is recorded as such and never keeps the presigned URL", () => {
     for (const id of fixtureIds()) {

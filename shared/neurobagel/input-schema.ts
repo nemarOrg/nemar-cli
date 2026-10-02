@@ -23,19 +23,10 @@
  */
 
 import { z } from "zod";
+import type { BidsIndexSubjectWire } from "../contract/dataset.js";
 
 const authorSchema = z.object({ name: z.string() }).passthrough();
 const keywordSchema = z.object({ term: z.string() }).passthrough();
-
-/**
- * The key `session_modalities` uses for datatype directories that sit directly
- * under a subject, outside every `ses-*` directory.
- * It is declared once for the data plane in `shared/contract/dataset.ts`
- * (`NO_SESSION_KEY`, epic #1586 phase 2); a session label is alphanumeric, so
- * the hyphen means this key can never collide with a real label, and a reader
- * looks labels up by name and never builds `ses-<key>` for it.
- */
-export const NO_SESSION_KEY = "no-session";
 
 /**
  * One subject of `extensions.nemar.bids_index`.
@@ -44,8 +35,12 @@ export const NO_SESSION_KEY = "no-session";
  *
  * `sessions` and `modalities` are independent sets: they do not say which
  * datatype was recorded in which session.
- * `session_modalities` does (session label, or {@link NO_SESSION_KEY}, to the
+ * `session_modalities` does (session label, or `NO_SESSION_KEY` from
+ * `shared/contract/dataset.ts`, where the data plane declares it, to the
  * datatypes found in it).
+ * "Datatype" there means ANY directory name found under a subject or a session
+ * (`ses-pre-op`, `sourcedata`), so every datatype is filtered through an
+ * allowlist before it reaches the graph.
  * It is OPTIONAL on purpose: a document written before the data plane learned
  * it omits it, and absent means unknown while present (even `{}`) is the whole
  * truth.
@@ -60,6 +55,17 @@ const bidsIndexSubjectSchema = z
     session_modalities: z.unknown().optional(),
   })
   .passthrough();
+
+/**
+ * The contract's wire type must stay readable by this lenient schema: if the data
+ * plane's `BidsIndexSubjectWire` ever stops being assignable to what the transform
+ * parses, this stops compiling.
+ */
+export type WireIndexSubjectIsReadable = BidsIndexSubjectWire extends z.input<
+  typeof bidsIndexSubjectSchema
+>
+  ? true
+  : never;
 
 export const metadataSchema = z
   .object({
