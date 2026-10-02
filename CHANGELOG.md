@@ -61,11 +61,13 @@ earlier releases are described only by their generated notes.
   `not_dispatchable` or `already_in_flight`, or 502 `dispatch_failed`,
   `dispatch_unconfigured` or `dispatch_unconfirmed`. The payload names an environment
   (`production` only for the production Worker, `dev` for anything else including an
-  unset value) and never a URL or a credential. A dispatch whose reply is lost keeps the
-  lease, because GitHub may have accepted it, so a retry answers 409 until the lease
-  lapses (up to 15 minutes); only a definite not-sent failure releases the claim, and it
-  puts the cleared `last_error` back. The lease gates only this route: a terminal
-  approval is never refused by it.
+  unset value) and never a URL or a credential. A dispatch whose answer is lost (a
+  dropped connection, a timeout, or a 5xx from GitHub, which can follow an event it had
+  already queued) keeps the lease and writes an `approval_dispatch_unconfirmed` audit
+  row, so a retry answers 409 until the lease lapses (up to 15 minutes). Only a definite
+  not-sent failure (a 4xx from GitHub, a token that cannot be minted, no credential)
+  releases the claim, and it puts the cleared `last_error` back unless a run has begun
+  since. The lease gates only this route: a terminal approval is never refused by it.
 - **`GET /admin/publish/requests` reports `approval_requested_by`,
   `approval_dispatched_at` and `approval_in_flight` (#1578).** `approval_in_flight` comes
   from the same SQL the claim uses, so a page never offers a button the route would
@@ -82,13 +84,17 @@ earlier releases are described only by their generated notes.
   and, while the time-only lease is live, records that admin in `approved_by`, the
   `dataset_published` audit row and the `notify_user_failed` audit row; the
   `dataset_published` details also keep the executing account as `executed_by`. A run
-  that lapsed and was resumed by
-  a different admin at a terminal records that admin, and a terminal approval is
-  unchanged. `POST /admin/publish/:id/approve` keeps its request and response contract;
-  each attempt now starts by clearing `last_error`. One cost, stated in ADR 0080: a web
-  run that sat quiet longer than the lease before its first `/approve` call is recorded
-  under the executing key, while its `approval_dispatched` audit row still names the
-  clicker.
+  that lapsed and was resumed by a different admin at a terminal records that admin, and
+  a terminal approval outside a live lease is unchanged. A clicker who has since been
+  demoted below admin, revoked or deleted is not recorded: the executing account stands
+  in. `POST /admin/publish/:id/approve` keeps its request and response contract; each
+  attempt now starts by clearing `last_error`, and the owner-name gate's walk-back to
+  `blocked` clears the web claim. Two costs, stated in ADR 0080: a web run that sat
+  quiet longer than the lease before its first `/approve` call is recorded under the
+  executing key (its `approval_dispatched` audit row still names the clicker), and the
+  fork is on the lease, not on who calls, so a person who runs `/approve` at a terminal
+  inside a web run's live lease is recorded as its clicker, with themselves as
+  `executed_by`.
 - **Sign-out, an admin account revoke and the owner soft delete also end the account's
   private-site sessions and grants (#1577).** A role demotion leaves `private` sessions
   alone because `resolvePrincipal` reports the live role on every call, and an API key
@@ -100,10 +106,12 @@ earlier releases are described only by their generated notes.
   environments.
 - **The deploy workflow smoke-tests the private grant route on both environments
   (#1577).** After `/health` reports the new version, an anonymous
-  `POST /auth/private/grant` with an allowed Origin must answer 401. Any other answer
-  fails the deploy after three attempts (a 404 means the route is missing from what
-  shipped; network errors and 5xx are retried); in maintenance mode every POST is a 503
-  and the check warns instead of failing.
+  `POST /auth/private/grant` with an allowed Origin must answer 401. A network error, a
+  5xx and a 404 are retried, up to three attempts, because a request can land on an edge
+  still serving the previous version for a few seconds; any other answer, or a 404 on the
+  last attempt (the route is missing from what shipped), fails the job and prints the last
+  response's headers and body. In maintenance mode every POST is a 503 and the check
+  warns instead of failing.
 
 ### Security
 
@@ -143,12 +151,14 @@ earlier releases are described only by their generated notes.
   partial `idx_web_sessions_private_scope` and `idx_private_grants_expires`).
   `_rebuild_guard` aborts before the `DROP` if the copy is short or altered, provided the
   runner stops at the first failed statement: that holds for `wrangler --local` and
-  Miniflare and is unverified for the remote apply. This is the one migration in the release that is not additive. Cloudflare does
-  not document the remote apply as atomic, so the file's header records the window (a stop
-  between the `DROP` and the `RENAME` leaves no `web_sessions` table, with every row safe
-  in `web_sessions_new`, which must then be renamed, never dropped) and the recovery: D1
-  Time Travel to the start of the workflow's migration-apply step, with the previous Worker
-  redeployed first.
+  Miniflare and is unverified for the remote apply. This is the one migration in the
+  release that is not additive. Cloudflare does not document the remote apply as atomic,
+  so the file's header records the window (a stop between the `DROP` and the `RENAME`
+  leaves no `web_sessions` table, with every row safe in `web_sessions_new`, which must
+  then be renamed, never dropped) and the recovery: D1 Time Travel to the start of the
+  workflow's migration-apply step with the previous Worker redeployed first, or the
+  remaining statements by hand, including the `d1_migrations` insert and the scratch
+  table cleanup that the header spells out.
 - `0090_approval_dispatch.sql` adds two nullable columns to `publication_requests`,
   `approval_requested_by INTEGER` and `approval_dispatched_at TEXT`, with no backfill and
   no index. It is additive, so rolling the Worker back is enough: the 0.10.11 Worker never
@@ -161,6 +171,11 @@ earlier releases are described only by their generated notes.
 - Migration 0089 rebuilds `web_sessions` on production, the table every sign-in reads.
   Record a D1 Time Travel bookmark before the release; the migration's replay test
   asserts that every session row survives the rebuild.
+- Rolling the Worker back to 0.10.11 is safe for the database, but once the private site
+  is live it removes the `NemarApiRpc` export and the private site fails closed, so roll
+  the private site back first. While 0.10.11 serves, its sign-out and key-revoke paths do
+  not end `private` sessions or purge `private_grants`, so rolling forward within 8 hours
+  revives the private sessions of accounts that signed out in between.
 - The private site, the website's private-site authorize page and the website's
   web-approval button deploy after this release; none is live until then. Existing
   clients see only additive fields on the publish request list, plus the two `Security`
