@@ -76,18 +76,31 @@ The website does not run an approval. It asks the backend to dispatch one.
    While the lease is live (the time-only lease, read at the top of `/approve`, before that call's own
    heartbeat bump), that admin is the approver: `approved_by`, the `dataset_published` audit row and the
    `notify_user_failed` audit row name them, and the executing account is kept as `executed_by` in the
-   details. Otherwise, which includes every terminal approval, the caller is the approver and the
-   audit row is byte-identical to what it was.
-   The column is never cleared, so without the lease a run that lapsed and was resumed by a different admin
-   at a terminal would be recorded as the original clicker's. Attribution reads the time-only lease rather
-   than the failure-aware predicate above, so a failure does not strip the clicker from the retry that
-   finishes the run.
+   details. Otherwise, which includes a terminal approval outside a live web lease, the caller is the
+   approver and the audit row is byte-identical to what it was.
+   The column is never cleared on a lapse, so without the lease a run that lapsed and was resumed by a
+   different admin at a terminal would be recorded as the original clicker's. Attribution reads the
+   time-only lease rather than the failure-aware predicate above, so a failure does not strip the clicker
+   from the retry that finishes the run.
+   **The fork is on the lease, not on who calls.** A person who runs `/approve` at a terminal inside a web
+   run's live lease is recorded as that run's clicker, with themselves kept as `executed_by`. Telling a
+   service key from a person would need the caller's account kind (ADR 0048), and an executor whose key
+   is not marked as a service account would then lose web attribution entirely, so the cost is accepted
+   and stated here. A clicker who has since been demoted below admin, revoked or deleted is not recorded
+   either: the caller stands in, because the run carries on after that person's access has ended.
+   The claim itself is cleared when the owner-name gate walks the request back to `blocked`, because that
+   run is over and a claim left on the row would read as live again once the owner re-requests.
 6. **A dispatch whose answer is lost keeps the lease.**
    GitHub may have accepted the event and lost only the reply, and releasing the claim then would let the next
    click start a second run. The claim is released only for a failure that is definitely not sent: no
    credential (`dispatch_unconfigured`, and retrying will not help), a token that cannot be minted, or
-   GitHub answering non-2xx (`dispatch_failed`). A dropped connection or the 10 second timeout answers
-   `dispatch_unconfirmed` and the lease stands until it lapses.
+   GitHub refusing the request with a 4xx (`dispatch_failed`). A dropped connection, the 10 second
+   timeout or a 5xx answer is `dispatch_unconfirmed` and the lease stands until it lapses: GitHub's edge
+   can answer 502, 503 or 504 after the event was already queued, which is the same lost answer as a
+   dropped connection. Every unconfirmed answer writes an `approval_dispatch_unconfirmed` audit row (the
+   HTTP status, never GitHub's body), because a run may exist that the lease alone would not explain.
+   The release restores the error the claim cleared only while `updated_at` still holds the value read
+   before the claim, so a run that began in between (a person's terminal) is not made to read as failed.
 
 ## Consequences
 
@@ -105,7 +118,7 @@ Harder, and honest about it:
   names the clicker by id.
 - **A refusal before the step loop does not read as a failure.** The gates after the request flips to
   `approving` behave differently, and only some leave a trace:
-  an owner with no real name walks the row back to `blocked` with a `block_reason`;
+  an owner with no real name walks the row back to `blocked` with a `block_reason` and clears the web claim;
   the sandbox, no-repository, dataset-not-found and invalid-repository answers (400, 404, 500) return with the
   row left at `approving`, a fresh `updated_at` and no `last_error`, so the page reads "running" for the lease
   although nothing is running; only the 426 outdated-client answer returns before the row is touched.
@@ -118,7 +131,7 @@ Harder, and honest about it:
   it lapses, even when the event was in fact never created. A terminal approval is not gated by the lease,
   so an admin in a hurry uses that.
 - **The web path depends on GitHub being able to start a workflow.**
-  A refused dispatch releases the claim and answers 502, and the terminal path is the fallback.
+  A dispatch GitHub refuses with a 4xx releases the claim and answers 502, and the terminal path is the fallback.
 
 ## Alternatives considered
 
