@@ -3,9 +3,11 @@
  *
  * `buildNeurobagelArtifacts` runs these on everything it returns and throws
  * `output_invalid` on a problem.
- * No real input can make the transform write an invalid document (that is the
- * point of the check: it catches a BUG in the transform), so the
- * entry-point tests cannot exercise the failure path, and these tests call the
+ * Almost no input can make the transform write an invalid document (that is the
+ * point of the check: it catches a BUG in the transform); the one that can, an
+ * empty subject id in the bids index, is tested at the entry point in
+ * neurobagel-transform.unit.test.ts.
+ * The failure paths of each rule are not reachable that way, so these tests call the
  * validators directly on perturbed copies of a real golden.
  * They are a supplement, not coverage of the transform: the real Neurobagel
  * models validate the same goldens in neurobagel-vocab.unit.test.ts (JSON

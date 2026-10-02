@@ -263,6 +263,20 @@ describe("refusals that are not about anonymity", () => {
     expect((error as NeurobagelRefusal).code).toBe("invalid_metadata");
   });
 
+  test("a document that would make the transform write an invalid graph is refused as output_invalid, never emitted", async () => {
+    // The data plane never writes an empty subject id, so this is as near to an internal fault
+    // as an input can get: the subject's label would be empty, which Neurobagel's model rejects,
+    // and the transform's own validation catches it before anything is returned.
+    const input = loadFixture("nm000270");
+    const metadata = parse(JSON.stringify(input.metadata));
+    const bids = (metadata.extensions as { nemar: { bids_index: { subjects: Json } } }).nemar
+      .bids_index;
+    bids.subjects[""] = bids.subjects["sub-1"] as Json;
+    const error = await buildNeurobagelArtifacts({ ...input, metadata }).catch((e) => e);
+    expect(error).toBeInstanceOf(NeurobagelRefusal);
+    expect((error as NeurobagelRefusal).code).toBe("output_invalid");
+  });
+
   test("a dataset with no subject in any input has nothing to describe", async () => {
     const input = loadFixture("nm000270");
     const metadata = parse(JSON.stringify(input.metadata));
@@ -1339,5 +1353,194 @@ describe("SYNTHETIC subjects and the bids index: the graph holds the subjects th
     });
     expect(disagree.description.ParticipantCount).toBe(45);
     expect(disagree.report.flags).toContain("participant_count_disagrees");
+  });
+});
+
+describe("SYNTHETIC boundaries of the age, group and identity rules", () => {
+  const tsv = (...lines: string[]): string => `${lines.join("\n")}\n`;
+  const idOf = (i: number): string => `sub-${String(i + 1).padStart(3, "0")}`;
+  const phenotypeOf = (artifacts: NeurobagelArtifacts, label: string): Session | undefined =>
+    (
+      (docs(artifacts).jsonld.hasSamples as Subject[]).find((s) => s.hasLabel === label) as Subject
+    ).hasSession.find((x) => x.schemaKey === "PhenotypicSession");
+  const withColumn = async (column: string, cells: string[], units?: string) =>
+    buildNeurobagelArtifacts(
+      withTable(
+        "nm000132",
+        tsv(`participant_id\t${column}`, ...cells.map((c, i) => `${idOf(i)}\t${c}`)),
+        units === undefined ? null : JSON.stringify({ [column]: { Units: units } }),
+      ),
+    );
+  const agesOf = async (cells: string[], units?: string) => {
+    const art = await withColumn("age", cells, units);
+    return {
+      art,
+      ages: cells.map((_, i) => phenotypeOf(art, idOf(i))?.hasAge),
+      column: (docs(art).report.columns as Json).age as Json,
+    };
+  };
+  const filler = (n: number, from = 20): string[] =>
+    Array.from({ length: n }, (_, i) => String(from + i));
+
+  test("120 years is the oldest age, inclusive; 121 is not an age (decimal, range, bound and ISO 8601)", async () => {
+    const edge = await agesOf(["120", ...filler(9)]);
+    expect(edge.ages[0]).toBe(120);
+    expect((edge.column.counts as Json).unmappable).toBe(0);
+
+    const over = await agesOf(["121", ...filler(9)]);
+    expect(over.ages[0]).toBeUndefined();
+    expect((over.column.counts as Json).unmappable).toBe(1);
+    expect(JSON.stringify(docs(over.art).dictionary.age)).toContain('"121"');
+
+    // Each of the other grammars, as the only one in its column.
+    expect((await agesOf(["100-120", "20-30"])).ages).toEqual([110, 25]);
+    expect((await agesOf(["100-121", "20-30"])).ages[0]).toBeUndefined();
+    expect((await agesOf(["120+", "90+"])).ages).toEqual([120, 90]);
+    expect((await agesOf(["121+", "122+"])).column.status).toBe("needs_curation");
+    expect((await agesOf(["P120Y", "P30Y"])).ages).toEqual([120, 30]);
+    expect((await agesOf(["P121Y", "P122Y"])).column.status).toBe("needs_curation");
+    expect(await agesOf(["0", "1", "2"])).toMatchObject({ ages: [0, 1, 2] });
+  });
+
+  test("a reversed range (30-20) is unparseable, not the midpoint of its bounds", async () => {
+    const { ages, art } = await agesOf([
+      "30-20",
+      "20-30",
+      "25-35",
+      "30-40",
+      "40-50",
+      "50-60",
+      "60-70",
+      "35-45",
+      "45-55",
+      "55-65",
+    ]);
+    expect(ages[0]).toBeUndefined();
+    expect(ages[1]).toBe(25);
+    expect(JSON.stringify(docs(art).dictionary.age)).toContain('"30-20"');
+  });
+
+  test("floats with surrounding spaces parse; a space inside a number does not", async () => {
+    const { ages } = await agesOf([
+      "25 ",
+      " 26",
+      "  27.5  ",
+      "28",
+      "29",
+      "30",
+      "31",
+      "32",
+      "33",
+      "2 5",
+    ]);
+    expect(ages.slice(0, 4)).toEqual([25, 26, 27.5, 28]);
+    expect(ages[9]).toBeUndefined();
+  });
+
+  test("units yrs, yr, y and YEARS say years", async () => {
+    for (const units of ["yrs", "yr", "y", "YEARS", " Years "]) {
+      const { column } = await agesOf(["24", "36"], units);
+      expect(column.status).toBe("mapped");
+    }
+    for (const units of ["yearly", "yrs old?", "ys", ""]) {
+      const { column } = await agesOf(["24", "36"], units);
+      expect(column.status).toBe("needs_curation");
+    }
+  });
+
+  test("healthy control spellings: ctl, ctrl, hc, healthy-control, Healthy  Control, controls", async () => {
+    const controls = [
+      "ctl",
+      "Ctrl",
+      "HC",
+      "healthy-control",
+      "Healthy  Control",
+      "controls",
+      "healthy",
+      "Healthy Controls",
+    ];
+    const others = ["normal", "control group", "C", "cont"];
+    const values = [...controls, ...others];
+    const art = await withColumn("group", values);
+    const diagnoses = values.map(
+      (_, i) => phenotypeOf(art, idOf(i))?.hasDiagnosis?.[0]?.identifier,
+    );
+    expect(diagnoses.slice(0, controls.length).every((d) => d === "ncit:C94342")).toBe(true);
+    expect(diagnoses.slice(controls.length).every((d) => d === undefined)).toBe(true);
+  });
+
+  test("a table that is all N/A, NA, n/a or empty is a placeholder, whichever spelling it uses", async () => {
+    for (const missing of ["N/A", "NA", "n/a", ""]) {
+      const input = withTable(
+        "nm000132",
+        tsv(
+          "participant_id\tage\tsex",
+          ...Array.from({ length: 5 }, (_, i) => `${idOf(i)}\t${missing}\t${missing}`),
+        ),
+      );
+      const art = await buildNeurobagelArtifacts(input);
+      expect(docs(art).report.flags).toContain("participants_tsv_placeholder");
+    }
+    // One real cell anywhere and it is not a placeholder.
+    const real = await buildNeurobagelArtifacts(
+      withTable(
+        "nm000132",
+        tsv("participant_id\tage\tsex", "sub-001\tn/a\tn/a", "sub-002\t30\tn/a"),
+      ),
+    );
+    expect(docs(real).report.flags).not.toContain("participants_tsv_placeholder");
+  });
+
+  test("a dataset DOI that is not a DOI is flagged and not linked; a padded one is trimmed; none is no flag", async () => {
+    const build = async (doi: unknown) => {
+      const input = loadFixture("nm000132");
+      const metadata = JSON.parse(JSON.stringify(input.metadata)) as Json;
+      (metadata.external_links as Json).dataset_doi = doi;
+      return docs(await buildNeurobagelArtifacts({ ...input, metadata }));
+    };
+    const bad = await build("not a doi");
+    expect(bad.report.flags).toContain("dataset_doi_unusable");
+    expect(bad.description.ReferencesAndLinks).toEqual(["https://nemar.org/dataset/nm000132"]);
+
+    const padded = await build("  10.82901/nemar.nm000132  ");
+    expect(padded.report.flags).not.toContain("dataset_doi_unusable");
+    expect(padded.description.ReferencesAndLinks).toEqual([
+      "https://nemar.org/dataset/nm000132",
+      "https://doi.org/10.82901/nemar.nm000132",
+    ]);
+
+    for (const none of [null, "", "   "]) {
+      const absent = await build(none);
+      expect(absent.report.flags).not.toContain("dataset_doi_unusable");
+      expect(absent.description.ReferencesAndLinks).toEqual(["https://nemar.org/dataset/nm000132"]);
+    }
+  });
+
+  test("keywords are trimmed, de-duplicated in order, and blanks dropped; authors are trimmed", async () => {
+    const input = loadFixture("nm000132");
+    const metadata = JSON.parse(JSON.stringify(input.metadata)) as Json;
+    metadata.keywords = ["EEG", "EEG", " EEG ", "P3", "", "  ", "P3", "N170"].map((term) => ({
+      term,
+    }));
+    metadata.authors = [{ name: "  Ada Lovelace " }, { name: "" }, { name: "Grace Hopper" }];
+    const d = docs(await buildNeurobagelArtifacts({ ...input, metadata }));
+    expect(d.description.Keywords).toEqual(["EEG", "P3", "N170"]);
+    expect(d.jsonld.hasKeywords).toEqual(["EEG", "P3", "N170"]);
+    expect(d.description.Authors).toEqual(["Ada Lovelace", "Grace Hopper"]);
+  });
+
+  test("a datatype directory named with free text never reaches the report", async () => {
+    const input = loadFixture("nm000229");
+    const metadata = JSON.parse(JSON.stringify(input.metadata)) as {
+      extensions: { nemar: { bids_index: { subjects: Record<string, { modalities: Json }> } } };
+    };
+    const secret = "Jane Doe's scans (private)";
+    metadata.extensions.nemar.bids_index.subjects["sub-02"].modalities[secret] = {};
+    const art = await buildNeurobagelArtifacts({ ...input, metadata });
+    expect(JSON.stringify(art.report)).not.toContain("Jane");
+    expect(Object.values(art.files).join("\n")).not.toContain("Jane");
+    expect(((art.report.imaging.datatypes_dropped_subjects as Json).other as number) > 0).toBe(
+      true,
+    );
   });
 });
