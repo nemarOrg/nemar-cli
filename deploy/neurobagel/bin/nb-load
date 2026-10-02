@@ -5,36 +5,41 @@
 # told not to) hands it to nb-reload for a deliberate, measured reload of the graph.
 #
 # The source is the private artifact store Phase 4 provides. Until it exists, point NB_SOURCE at
-# a local directory that holds an index.json and the files it lists. The exact interface is in
-# README.md, "Artifact store interface".
+# a local directory that holds an index.json and the files it lists. The format of the index is
+# index.schema.json; README.md, "Artifact store interface", explains it for the producer.
 #
 # Guarantees:
 #   * The live input directory (data/current) is only ever swapped to a COMPLETE, verified
 #     release by one rename(2). A failed run leaves it exactly as it was, with no residue.
-#   * Two loaders, or a loader and a reload, can never overlap (lock in state/lock.d).
+#   * Two loaders, or a loader and a reload, can never overlap (flock on state/lock).
 #   * A dataset that disappears from the index disappears from the next release. That is how an
 #     ineligible dataset leaves the federation. Emptying the node by accident is refused.
+#   * Nothing the source sends can make the host work without bound: the index, each artifact, the
+#     total and the number of datasets are capped, and free disk is checked first.
 #
 # Usage: bin/nb-load [--source SRC] [--force] [--no-reload] [--dry-run]
-#                    [--allow-mass-removal] [--seed-example]
-#   --source SRC          base URL (http or https) or directory; default NB_SOURCE from .env
-#   --force               build and reload a release even when nothing changed, and retry
-#                         content that failed to reload before
+#                    [--allow-mass-removal] [--seed-example] [--thaw]
+#   --source SRC          https URL or a local directory; default NB_SOURCE from .env
+#   --force               build and reload a release even when nothing changed, retry content that
+#                         failed to reload before, and load while frozen
 #   --no-reload           stage the release and swap data/current, but do not touch the graph;
 #                         run bin/nb-reload when ready (also: NB_RELOAD=0)
 #   --dry-run             fetch the index, print the plan as JSON, change nothing
-#   --allow-mass-removal  accept an index that drops more than half of the datasets
+#   --allow-mass-removal  accept an index that drops more than half of at least ten datasets
 #   --thaw                end a freeze set by `nb rollback` and exit
-#   --seed-example        first-install helper: make the first release from Neurobagel's own
-#                         example JSON-LD in the recipes checkout. Never reloads.
+#   --seed-example        first-install helper: make the first release from Neurobagel's example
+#                         JSON-LD in the recipes checkout. Never reloads.
 #
-# Environment: NB_SOURCE, NB_SOURCE_AUTH_HEADER_FILE, NB_VALIDATE (docker | jq | none; default
-# docker when the stack is installed, else jq), NB_MAX_ARTIFACT_BYTES (default 134217728),
-# NB_FETCH_TIMEOUT_S (default 300), NB_KEEP_RELEASES (default 4), NB_RELOAD (default 1).
+# Environment (defaults in brackets): NB_SOURCE; NB_ALLOW_HTTP (unset; plain http is refused
+# unless this is 1, for tests and local development); NB_SOURCE_AUTH_HEADER_FILE; NB_VALIDATE
+# (docker, jq or none; docker when the stack is installed, else jq); the caps NB_MAX_INDEX_BYTES
+# [8 MiB], NB_MAX_ARTIFACT_BYTES [32 MiB], NB_MAX_TOTAL_BYTES [512 MiB], NB_MIN_FREE_DISK_MB
+# [2048] (the dataset cap comes from index.schema.json); NB_FETCH_TIMEOUT_S [300]; NB_KEEP_RELEASES
+# [4]; NB_RELOAD [1]; NB_KNOWN_BAD_TTL_S [21600].
 #
-# Exit codes: 0 ok or nothing to do; 3 source unreadable or invalid; 4 validation failed;
-# 5 reload failed and was rolled back; 6 reload failed and rollback failed; 7 node on hold;
-# 75 another loader or reload is running.
+# Exit codes: 0 ok or nothing to do; 3 source unreadable, invalid or over a cap; 4 validation
+# failed; 5 reload failed and was rolled back; 6 reload failed and rollback failed; 7 node on hold;
+# 8 pre-flight refused (disk); 75 another loader or reload is running; 78 configuration.
 
 set -euo pipefail
 # shellcheck source=nb-common.sh
@@ -62,7 +67,7 @@ while [ $# -gt 0 ]; do
     --seed-example) seed_example=1; shift ;;
     --thaw) thaw=1; shift ;;
     -h | --help)
-      sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+      nb_usage "$0"
       exit 0
       ;;
     *) nb_die "$NB_EX_USAGE" "unknown argument: $1 (see --help)" ;;
@@ -83,7 +88,10 @@ if [ "$thaw" = 1 ]; then
 fi
 nb_rotate_log "$NB_LOGS_DIR/load.log"
 
-max_artifact_bytes="$(nb_env_get NB_MAX_ARTIFACT_BYTES 134217728)"
+max_index_bytes="$(nb_env_get NB_MAX_INDEX_BYTES 8388608)"
+max_artifact_bytes="$(nb_env_get NB_MAX_ARTIFACT_BYTES 33554432)"
+max_total_bytes="$(nb_env_get NB_MAX_TOTAL_BYTES 536870912)"
+min_free_disk_mb="$(nb_env_get NB_MIN_FREE_DISK_MB 2048)"
 fetch_timeout="$(nb_env_get NB_FETCH_TIMEOUT_S 300)"
 keep_releases="$(nb_env_get NB_KEEP_RELEASES 4)"
 auth_file="$(nb_env_get NB_SOURCE_AUTH_HEADER_FILE "")"
@@ -91,10 +99,7 @@ user_agent="nemar-neurobagel-loader/1.0"
 started_epoch="$(nb_epoch)"
 
 if [ "$dry_run" = 0 ]; then
-  if ! nb_lock_acquire "nb-load"; then
-    nb_log "another loader or reload is running ($(nb_lock_describe)); exiting"
-    exit "$NB_EX_BUSY"
-  fi
+  nb_lock_or_exit "nb-load"
 fi
 
 stage=""
@@ -107,11 +112,55 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [ "$dry_run" = 0 ]; then
+  # Under the lock nobody else is staging, so anything left behind by a run that was killed (a
+  # SIGKILL runs no trap) is garbage.
+  rm -rf "$NB_DATA_DIR"/.stage.* 2>/dev/null || true
+  rm -f "$NB_STATE_DIR"/.warnings.* "$NB_STATE_DIR"/*.tmp.* 2>/dev/null || true
+fi
+
 warnings_file="$NB_STATE_DIR/.warnings.$$"
 : >"$warnings_file"
 warn() {
   nb_log "WARNING: $*"
   printf '%s\n' "$*" >>"$warnings_file"
+}
+
+# jq on a file the source supplied runs with a bounded address space where the platform allows it
+# (Linux), so a document that expands badly in memory fails the check instead of the host.
+bounded_jq() {
+  (
+    ulimit -v "$(nb_env_get NB_JQ_MAX_KB 1048576)" 2>/dev/null || true
+    exec jq "$@"
+  )
+}
+
+# ---------------------------------------------------------------------------------------------
+# The source. Sanitised before it is recorded anywhere; credentials in it are refused.
+# ---------------------------------------------------------------------------------------------
+source=""
+source_label=""
+resolve_source() {
+  local raw="$1" rest
+  case "$raw" in
+    http://* | https://*)
+      rest="${raw#*://}"
+      case "${rest%%/*}" in
+        *@*) nb_die "$NB_EX_CONFIG" "the source URL carries credentials (user:password@host); put a token in NB_SOURCE_AUTH_HEADER_FILE instead" ;;
+      esac
+      if [ "${raw#https://}" = "$raw" ] && [ "$(nb_env_get NB_ALLOW_HTTP 0)" != 1 ]; then
+        nb_die "$NB_EX_CONFIG" "the source must be https (plain http only with NB_ALLOW_HTTP=1, for tests and local development)"
+      fi
+      source="$raw"
+      # Query strings and fragments can carry a presigned token: never record them.
+      source_label="${raw%%[?#]*}"
+      ;;
+    *)
+      source="${raw#file://}"
+      [ -d "$source" ] || nb_die "$NB_EX_CONFIG" "the source directory does not exist: $source"
+      source_label="$source"
+      ;;
+  esac
 }
 
 # Record how the run ended. Called on every exit path that has a decision to report.
@@ -121,36 +170,42 @@ write_last_load() { # outcome release extra-json
   [ "$dry_run" = 0 ] || return 0
   jq -n \
     --arg at "$(nb_ts)" --arg outcome "$outcome" --arg release "$release" \
-    --arg source "${source:-}" --argjson seconds "$(($(nb_epoch) - started_epoch))" \
+    --arg source "$source_label" --argjson seconds "$(($(nb_epoch) - started_epoch))" \
     --argjson extra "$extra" \
     --slurpfile warnings <(jq -R . "$warnings_file") \
     '{at:$at, outcome:$outcome, release:$release, source:$source, seconds:$seconds,
       warnings:$warnings} + $extra' | nb_write_atomic "$NB_STATE_DIR/last-load.json"
+  # A run that ended well, including one that found nothing to do, is what "the loader is alive"
+  # means. nb-status alarms when this is old.
+  case "$outcome" in
+    unchanged | staged | reloaded | seeded) nb_epoch | nb_write_atomic "$NB_STATE_DIR/last-load-ok" ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------------------------
 # Fetching. Both source kinds hand back a file at DEST or fail; nothing else is promised.
 # ---------------------------------------------------------------------------------------------
-fetch() { # base rel dest
-  local base="$1" rel="$2" dest="$3" url
+fetch() { # base rel dest max_bytes
+  local base="$1" rel="$2" dest="$3" max="$4" url
   case "$base" in
     http://* | https://*)
       url="${base%/}/$rel"
       if [ -n "$auth_file" ]; then
         [ -r "$auth_file" ] || { nb_log "auth header file is not readable: $auth_file"; return 1; }
-        curl --fail --silent --show-error --location --max-redirs 3 --proto '=http,https' \
+        curl --fail --silent --show-error --location --max-redirs 3 \
+          --proto '=http,https' --proto-redir '=https' \
           --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 15 \
-          --max-time "$fetch_timeout" --max-filesize "$max_artifact_bytes" \
+          --max-time "$fetch_timeout" --max-filesize "$max" \
           -A "$user_agent" -H "@$auth_file" -o "$dest" "$url"
       else
-        curl --fail --silent --show-error --location --max-redirs 3 --proto '=http,https' \
+        curl --fail --silent --show-error --location --max-redirs 3 \
+          --proto '=http,https' --proto-redir '=https' \
           --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 15 \
-          --max-time "$fetch_timeout" --max-filesize "$max_artifact_bytes" \
+          --max-time "$fetch_timeout" --max-filesize "$max" \
           -A "$user_agent" -o "$dest" "$url"
       fi
       ;;
     *)
-      base="${base#file://}"
       [ -f "$base/$rel" ] || { nb_log "not found in source directory: $rel"; return 1; }
       cp "$base/$rel" "$dest"
       ;;
@@ -160,31 +215,48 @@ fetch() { # base rel dest
 file_bytes() { wc -c <"$1" | tr -d ' '; }
 
 # ---------------------------------------------------------------------------------------------
-# Index validation. The same rules are written out for the producer in README.md.
+# Index validation. The constants come from index.schema.json, the one definition of the format;
+# what a JSON Schema cannot say (name equals id plus a per-kind suffix, one JSON-LD per dataset,
+# uniqueness) is written here and tested against the schema for drift.
 # ---------------------------------------------------------------------------------------------
 # shellcheck disable=SC2016  # the $-names below are jq variables, not shell expansions
 INDEX_CHECK='
-  def okname: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$") and (contains("..") | not);
+  def okid: type == "string" and test($c.idpat) and (contains("..") | not);
+  def okname: type == "string" and test($c.namepat) and (contains("..") | not);
   (type == "object")
-  and (.schema == "nemar-neurobagel-artifact-index/1")
-  and (.datasets | type == "array")
+  and (.schema == $c.schema)
+  and (.generated_at | type == "string" and test($c.gatpat))
+  and (.datasets | type == "array" and length <= $c.maxdatasets)
   and all(.datasets[];
-        (.id | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"))
-        and (.fingerprint | type == "string" and length > 0 and length <= 256)
-        and (.artifacts | type == "array" and length >= 1)
+        (type == "object")
+        and (.id | okid)
+        and (.fingerprint | type == "string" and test($c.fppat))
+        and (.artifacts | type == "array" and length >= 1 and length <= $c.maxartifacts)
         and all(.artifacts[];
-              (.name | okname)
-              and (.kind | IN("jsonld", "dictionary", "description"))
-              and (.sha256 | type == "string" and test("^[0-9a-f]{64}$"))
-              and ((.bytes // 0) | type == "number" and . >= 0))
-        and (.id as $id | all(.artifacts[];
-              (.kind != "jsonld" or .name == ($id + ".jsonld"))
-              and (.kind != "dictionary" or .name == ($id + "_annotated.json"))
-              and (.kind != "description" or .name == ($id + "_dataset_description.json"))))
+              (type == "object")
+              and (.name | okname)
+              and (((.kind as $k | $c.kinds | index($k)) != null))
+              and (.sha256 | type == "string" and test($c.shapat))
+              and ((.bytes // 1) | type == "number" and . >= 1 and floor == .))
+        and (.id as $id | all(.artifacts[]; .name == ($id + $c.suffix[.kind])))
         and ([.artifacts[] | select(.kind == "jsonld")] | length == 1))
   and ([.datasets[].id] | length == (unique | length))
   and ([.datasets[].artifacts[].name] | length == (unique | length))
 '
+
+# shellcheck disable=SC2016
+CONTRACT_PROGRAM='{
+  schema: .properties.schema.const,
+  gatpat: .properties.generated_at.pattern,
+  maxdatasets: .properties.datasets.maxItems,
+  idpat: .definitions.id.pattern,
+  fppat: .definitions.dataset.properties.fingerprint.pattern,
+  maxartifacts: .definitions.dataset.properties.artifacts.maxItems,
+  namepat: .definitions.artifact.properties.name.pattern,
+  kinds: .definitions.artifact.properties.kind.enum,
+  shapat: .definitions.sha256.pattern,
+  suffix: ."x-rules".artifactSuffix
+}'
 
 # Normalised view of an index: {id: {fingerprint, artifacts: {name: {kind, sha256, bytes}}}}.
 # shellcheck disable=SC2016
@@ -220,14 +292,14 @@ validate_candidate() { # dir expected_jsonld_count
   for f in "$dir"/*.jsonld; do
     [ -e "$f" ] || continue
     # shellcheck disable=SC2016
-    jq -e '
+    bounded_jq -e '
       (.identifier | type == "string" and startswith("nb:"))
       and (.schemaKey == "Dataset")
       and (.hasLabel | type == "string" and length > 0)
       and (.hasSamples | type == "array" and length >= 1)
       and (has("@context"))' "$f" >/dev/null 2>&1 \
       || { nb_log "not a Neurobagel dataset document: $(basename "$f")"; return 1; }
-    jq -r .identifier "$f" >>"$idfile"
+    bounded_jq -r .identifier "$f" >>"$idfile"
   done
   dups="$(sort "$idfile" | uniq -d)"
   [ -z "$dups" ] || { nb_log "duplicate dataset identifier(s) across files: $dups"; return 1; }
@@ -269,21 +341,21 @@ validate_candidate() { # dir expected_jsonld_count
 # with the same content give the same id whatever their fingerprints or timestamps say.
 content_id_of() { # normalised_json_file
   jq -r 'to_entries | map(.key as $id | .value.artifacts | to_entries | map("\($id)/\(.key)/\(.value.sha256)")) | flatten | sort | join("\n")' "$1" \
-    | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } | cut -d' ' -f1
+    | nb_sha256_stdin
 }
 
 # Every step is checked explicitly: errexit does not reach into a command substitution on bash 3.2,
 # and an earlier version of this function published a release with an EMPTY manifest because a
-# jq call failed on a long argument list (found by the 800-dataset trial, 2026-10-01). The big
-# JSON therefore travels in files, never in arguments, and nothing empty is ever installed.
+# jq call failed on a long argument list (found by the 800-dataset trial). The big JSON therefore
+# travels in files, never in arguments, and nothing empty is ever installed.
 PUBLISHED_RELEASE=""
 publish_release() { # candidate_dir normalised_json_file source_label index_generated_at
   local cand="$1" normfile="$2" label="$3" generated="$4" content_id name base n prev manifest
   content_id="$(content_id_of "$normfile")" || return 1
   [ -n "$content_id" ] || return 1
   name="$(date -u +%Y%m%dT%H%M%SZ)-${content_id:0:8}"
-  # The same content published twice within one second (a forced retry) must not collide: mv would
-  # move the new directory INTO the old one.
+  # The same content published twice within one second (a forced retry) must not collide: mv
+  # would move the new directory INTO the old one.
   base="$name"
   n=1
   while [ -e "$NB_RELEASES_DIR/$name" ]; do
@@ -312,19 +384,26 @@ publish_release() { # candidate_dir normalised_json_file source_label index_gene
   PUBLISHED_RELEASE="$name"
 }
 
+# Release directories are kept newest first up to NB_KEEP_RELEASES, but never the live one, the
+# one a failed reload would return to (the last release that was loaded and verified), or the
+# release loaded before that.
 prune_releases() {
-  local keep="$keep_releases" current rollback n=0 name
-  current="$(nb_current_release || true)"
-  rollback="$(cat "$NB_STATE_DIR/rollback-to" 2>/dev/null || true)"
+  local keep="$keep_releases" n=0 name protected
+  protected="$(nb_current_release || true) $(cat "$NB_STATE_DIR/rollback-to" 2>/dev/null || true) $(cat "$NB_STATE_DIR/previous-loaded" 2>/dev/null || true)"
+  if [ -f "$NB_STATE_DIR/applied.json" ]; then
+    protected="$protected $(jq -r '.release // ""' "$NB_STATE_DIR/applied.json" 2>/dev/null || true)"
+  fi
   # Release names start with a UTC timestamp, so reverse lexical order is newest first.
   for name in $(find "$NB_RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort -r); do
     n=$((n + 1))
     [ "$n" -gt "$keep" ] || continue
-    [ "$name" != "$current" ] && [ "$name" != "$rollback" ] || continue
+    case " $protected " in *" $name "*) continue ;; esac
     rm -rf "${NB_RELEASES_DIR:?}/$name" "$NB_MANIFESTS_DIR/$name.json"
     nb_log "pruned release $name"
   done
 }
+
+free_disk_mb() { df -Pk "$NB_DATA_DIR" | awk 'NR == 2 { printf "%d", $4 / 1024 }'; }
 
 # ---------------------------------------------------------------------------------------------
 # Seed
@@ -333,7 +412,7 @@ if [ "$seed_example" = 1 ]; then
   example="$NB_RECIPES_DIR/data/example_synthetic_pheno-bids-derivatives.jsonld"
   [ -f "$example" ] || nb_die "$NB_EX_PREFLIGHT" "recipes example not found: $example (run nb-install first)"
   [ ! -L "$NB_CURRENT_LINK" ] || nb_die "$NB_EX_USAGE" "a release is already live: $(nb_current_release)"
-  source="recipes-example"
+  source_label="recipes-example"
   stage="$(mktemp -d "$NB_DATA_DIR/.stage.XXXXXX")"
   mkdir "$stage/release"
   cp "$example" "$stage/release/recipes-example.jsonld"
@@ -355,8 +434,14 @@ fi
 # ---------------------------------------------------------------------------------------------
 # Normal run
 # ---------------------------------------------------------------------------------------------
-source="${source_arg:-$(nb_env_get NB_SOURCE "")}"
-[ -n "$source" ] || nb_die "$NB_EX_CONFIG" "no source: set NB_SOURCE in .env or pass --source"
+raw_source="${source_arg:-$(nb_env_get NB_SOURCE "")}"
+[ -n "$raw_source" ] || nb_die "$NB_EX_CONFIG" "no source: set NB_SOURCE in .env or pass --source"
+resolve_source "$raw_source"
+
+# Any permission bit for group or others (find's -perm differs between GNU and BSD, perl does not).
+if [ -n "$auth_file" ] && [ -e "$auth_file" ] && perl -e 'exit(((stat $ARGV[0])[2] & 077) ? 0 : 1)' "$auth_file"; then
+  warn "the auth header file $auth_file is readable by other accounts; it should be mode 600"
+fi
 
 if [ -f "$NB_STATE_DIR/freeze" ] && [ "$force" = 0 ] && [ "$dry_run" = 0 ]; then
   nb_log "loader is frozen ($(cat "$NB_STATE_DIR/freeze")); nothing fetched. End it with: nb load --thaw"
@@ -369,19 +454,39 @@ if nb_hold_active && [ "$dry_run" = 0 ]; then
   reload=0
 fi
 
+if [ "$dry_run" = 0 ]; then
+  free_mb="$(free_disk_mb)"
+  if [ -n "$free_mb" ] && [ "$free_mb" -lt "$min_free_disk_mb" ]; then
+    write_last_load source-failed "" '{"reason":"low disk"}'
+    nb_die "$NB_EX_PREFLIGHT" "only ${free_mb} MiB of disk is free where the releases live; the floor is ${min_free_disk_mb} MiB (NB_MIN_FREE_DISK_MB)"
+  fi
+fi
+
 stage="$(mktemp -d "$NB_DATA_DIR/.stage.XXXXXX")"
 
-nb_log "reading index from $source"
-if ! fetch "$source" index.json "$stage/index.json"; then
+nb_log "reading index from $source_label"
+if ! fetch "$source" index.json "$stage/index.json" "$max_index_bytes"; then
   write_last_load source-failed "" '{"reason":"index unreadable"}'
   nb_die "$NB_EX_SOURCE" "could not read index.json from the source"
 fi
-if ! jq -e "$INDEX_CHECK" "$stage/index.json" >/dev/null 2>&1; then
+if [ "$(file_bytes "$stage/index.json")" -gt "$max_index_bytes" ]; then
+  write_last_load source-failed "" '{"reason":"index too large"}'
+  nb_die "$NB_EX_SOURCE" "index.json is larger than NB_MAX_INDEX_BYTES ($max_index_bytes)"
+fi
+contract="$(jq -c "$CONTRACT_PROGRAM" "$NB_SCHEMA_FILE")" || nb_die "$NB_EX_CONFIG" "index.schema.json is unreadable"
+if ! jq -e --argjson c "$contract" "$INDEX_CHECK" "$stage/index.json" >/dev/null 2>&1; then
   write_last_load source-failed "" '{"reason":"index invalid"}'
-  nb_die "$NB_EX_SOURCE" "index.json does not satisfy the interface (README, \"Artifact store interface\")"
+  nb_die "$NB_EX_SOURCE" "index.json does not satisfy the interface (index.schema.json; README, \"Artifact store interface\")"
 fi
 generated="$(jq -r '.generated_at // ""' "$stage/index.json")"
 jq "$NORMALISE" "$stage/index.json" >"$stage/new.json"
+
+# The total the index promises (where it states sizes) is checked before anything is downloaded.
+promised_bytes="$(jq '[.[] | .artifacts[] | .bytes // 0] | add // 0' "$stage/new.json")"
+if [ "$promised_bytes" -gt "$max_total_bytes" ]; then
+  write_last_load source-failed "" '{"reason":"over the total size cap"}'
+  nb_die "$NB_EX_SOURCE" "the index promises $promised_bytes bytes in all, over NB_MAX_TOTAL_BYTES ($max_total_bytes)"
+fi
 
 cur="$(nb_current_release || true)"
 if [ -n "$cur" ] && [ -f "$NB_MANIFESTS_DIR/$cur.json" ]; then
@@ -428,6 +533,8 @@ if [ "$n_new" -eq 0 ]; then
   write_last_load source-failed "" "$plan_summary"
   nb_die "$NB_EX_SOURCE" "the index lists zero datasets; refusing to empty the node"
 fi
+# More than half of at least ten datasets disappearing is refused. At exactly half it is allowed:
+# the rule is removed * 2 > old.
 if [ "$allow_mass_removal" = 0 ] && [ "$n_old" -ge 10 ] && [ "$((n_removed * 2))" -gt "$n_old" ]; then
   write_last_load source-failed "" "$plan_summary"
   nb_die "$NB_EX_SOURCE" "the index drops $n_removed of $n_old datasets; refusing (use --allow-mass-removal if intended)"
@@ -443,6 +550,7 @@ if [ "$((n_added + n_removed + n_changed))" -eq 0 ] && [ "$force" = 0 ]; then
     write_last_load pending-reload "$pending" "$plan_summary"
     rc=0
     "$NB_CODE_DIR/bin/nb-reload" || rc=$?
+    [ "$rc" -ne 0 ] || write_last_load reloaded "$pending" "$plan_summary"
     exit "$rc"
   fi
   write_last_load unchanged "${cur:-}" "$plan_summary"
@@ -473,35 +581,41 @@ jq -r 'to_entries[] | .key as $id | .value.artifacts | to_entries[]
 fetched=0
 reused=0
 bytes_fetched=0
+bytes_total=0
+source_fail() { # message
+  write_last_load source-failed "${cur:-}" "$plan_summary"
+  nb_die "$NB_EX_SOURCE" "$1"
+}
 while IFS=$'\t' read -r id name sha bytes; do
   dest="$cand/$name"
   if grep -qxF "$id" "$unchanged_list" && [ -f "$NB_CURRENT_LINK/$name" ]; then
     ln "$NB_CURRENT_LINK/$name" "$dest" 2>/dev/null || cp -p "$NB_CURRENT_LINK/$name" "$dest"
     reused=$((reused + 1))
+    got="$(file_bytes "$dest")"
   else
     tmp="$stage/dl.$$.part"
     rm -f "$tmp"
-    if ! fetch "$source" "$name" "$tmp"; then
-      write_last_load source-failed "${cur:-}" "$plan_summary"
-      nb_die "$NB_EX_SOURCE" "download failed: $name (live data untouched)"
+    if ! fetch "$source" "$name" "$tmp" "$max_artifact_bytes"; then
+      source_fail "download failed: $name (live data untouched)"
     fi
     got="$(file_bytes "$tmp")"
     if [ "$got" -eq 0 ] || [ "$got" -gt "$max_artifact_bytes" ]; then
-      write_last_load source-failed "${cur:-}" "$plan_summary"
-      nb_die "$NB_EX_SOURCE" "artifact $name has an unacceptable size ($got bytes)"
+      source_fail "artifact $name has an unacceptable size ($got bytes; the cap is $max_artifact_bytes)"
     fi
     if [ -n "$bytes" ] && [ "$bytes" != "null" ] && [ "$got" != "$bytes" ]; then
-      write_last_load source-failed "${cur:-}" "$plan_summary"
-      nb_die "$NB_EX_SOURCE" "artifact $name is $got bytes, the index says $bytes (live data untouched)"
+      source_fail "artifact $name is $got bytes, the index says $bytes (live data untouched)"
     fi
     mv "$tmp" "$dest"
     fetched=$((fetched + 1))
     bytes_fetched=$((bytes_fetched + got))
   fi
+  bytes_total=$((bytes_total + got))
+  if [ "$bytes_total" -gt "$max_total_bytes" ]; then
+    source_fail "the artifacts add up to more than NB_MAX_TOTAL_BYTES ($max_total_bytes)"
+  fi
   actual="$(nb_sha256 "$dest")"
   if [ "$actual" != "$sha" ]; then
-    write_last_load source-failed "${cur:-}" "$plan_summary"
-    nb_die "$NB_EX_SOURCE" "sha256 mismatch for $name: index says $sha, file is $actual (live data untouched)"
+    source_fail "sha256 mismatch for $name: index says $sha, file is $actual (live data untouched)"
   fi
 done <"$stage/files.tsv"
 nb_log "assembled candidate: fetched $fetched file(s) ($bytes_fetched bytes), reused $reused"
@@ -512,7 +626,7 @@ if ! validate_candidate "$cand" "$n_jsonld"; then
   nb_die "$NB_EX_VALIDATE" "candidate release failed validation; live data untouched"
 fi
 
-publish_release "$cand" "$stage/new.json" "$source" "$generated" || nb_die 1 "could not publish the release; live data untouched or restored by the next run"
+publish_release "$cand" "$stage/new.json" "$source_label" "$generated" || nb_die 1 "could not publish the release; live data untouched or restored by the next run"
 release="$PUBLISHED_RELEASE"
 nb_log "published release $release (data/current now points at it)"
 

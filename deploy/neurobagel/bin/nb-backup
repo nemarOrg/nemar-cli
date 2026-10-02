@@ -14,13 +14,19 @@
 # credential read inside the container, and it needs no downtime (one read query slot is used).
 #
 # The archive CONTAINS THE GRAPHDB PASSWORDS. It is created mode 600 in a mode 700 directory;
-# treat copies of it with the same care as the secrets store itself.
+# treat copies of it with the same care as any other credential store.
+#
+# The archive lives in backups/, on the SAME disk as the node. That protects against a bad release
+# or an operator error, not against losing the disk. Set NB_BACKUP_HOOK in .env to copy each archive
+# off the host: it is run through `sh -c` with the archive path as its first argument, after the
+# archive is written (for example: NB_BACKUP_HOOK='rclone copyto "$1" remote:nb-backups/"$(basename "$1")"').
+# A failing hook makes the backup exit 9 and is logged; the local archive is kept either way.
 #
 # Takes the shared lock so a release cannot change under the tar; waits up to 15 minutes.
 #
 # Usage: bin/nb-backup [--graph-export] [--keep N]
 #   --keep N   keep the newest N archives of each kind (default 14)
-# Exit codes: 0 done; 75 lock still busy after the wait.
+# Exit codes: 0 done; 9 the off-host hook failed; 75 lock still busy after the wait.
 
 set -euo pipefail
 # shellcheck source=nb-common.sh
@@ -37,7 +43,7 @@ while [ $# -gt 0 ]; do
       shift 2
       ;;
     -h | --help)
-      sed -n '3,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+      nb_usage "$0"
       exit 0
       ;;
     *) nb_die "$NB_EX_USAGE" "unknown argument: $1" ;;
@@ -63,6 +69,12 @@ cur="$(nb_current_release || true)"
 [ -n "$cur" ] || nb_die "$NB_EX_PREFLIGHT" "no live release; nothing to back up"
 rollback="$(cat "$NB_STATE_DIR/rollback-to" 2>/dev/null || true)"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+# Two backups in one second must not overwrite each other.
+n=1
+while [ -e "$NB_BACKUPS_DIR/nb-$stamp.tar.gz" ]; do
+  n=$((n + 1))
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)-$n"
+done
 out="$NB_BACKUPS_DIR/nb-$stamp.tar.gz"
 
 work="$(mktemp -d "$NB_BACKUPS_DIR/.work.XXXXXX")"
@@ -126,3 +138,17 @@ for pat in 'nb-2*.tar.gz' 'nb-graph-2*.nq.gz'; do
     [ "$n" -le "$keep" ] || { rm -f "$f"; nb_log "removed old backup $(basename "$f")"; }
   done
 done
+
+# Off-host copy, if configured. Runs last so a hook that hangs or fails cannot cost the archive.
+hook="$(nb_env_get NB_BACKUP_HOOK "")"
+if [ -n "$hook" ]; then
+  for f in "$out" ${gout:+"$gout"}; do
+    if sh -c "$hook" nb-backup-hook "$f"; then
+      nb_log "off-host hook ran for $(basename "$f")"
+    else
+      nb_log "ERROR: the off-host hook failed for $(basename "$f")"
+      hook_failed=1
+    fi
+  done
+  [ "${hook_failed:-0}" = 0 ] || exit 9
+fi

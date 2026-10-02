@@ -25,7 +25,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --overwrite-config) overwrite=1; shift ;;
     -h | --help)
-      sed -n '3,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+      nb_usage "$0"
       exit 0
       ;;
     -*) nb_die "$NB_EX_USAGE" "unknown argument: $1" ;;
@@ -35,7 +35,6 @@ done
 [ -n "$archive" ] && [ -f "$archive" ] || nb_die "$NB_EX_USAGE" "usage: nb-restore ARCHIVE [--overwrite-config]"
 
 nb_need tar gzip jq perl
-nb_init_dirs
 
 if command -v docker >/dev/null 2>&1; then
   if [ -n "$(docker ps -q --filter "label=com.docker.compose.project=$NB_PROJECT" 2>/dev/null)" ]; then
@@ -43,13 +42,11 @@ if command -v docker >/dev/null 2>&1; then
   fi
 fi
 
-if ! nb_lock_acquire "nb-restore"; then
-  nb_log "another loader or reload is running ($(nb_lock_describe)); exiting"
-  exit "$NB_EX_BUSY"
-fi
-
+# The archive is read and verified in a scratch directory BEFORE any directory of the node is
+# created or the lock is taken, so an archive that is damaged, altered or forged leaves nothing
+# behind.
 work="$(mktemp -d "$NB_HOME/.restore.XXXXXX")"
-trap 'rm -rf "$work"; nb_lock_release' EXIT
+trap 'rm -rf "$work"' EXIT
 tar -C "$work" -xzf "$archive"
 [ -f "$work/SHA256SUMS" ] && [ -f "$work/BACKUP.json" ] || nb_die "$NB_EX_PREFLIGHT" "not an nb-backup archive"
 bad=0
@@ -59,10 +56,20 @@ done <"$work/SHA256SUMS"
 [ "$bad" = 0 ] || nb_die "$NB_EX_PREFLIGHT" "the archive is damaged; nothing was restored"
 
 release="$(jq -r .live_release "$work/BACKUP.json")"
+rollback_release="$(jq -r '.rollback_release // ""' "$work/BACKUP.json")"
+# These two names come from the archive and are used to build paths that are deleted and copied
+# over, so they must be release names and nothing else (a value such as ../.. passes a -d test).
+nb_release_name_ok "$release" || nb_die "$NB_EX_PREFLIGHT" "the archive names a live release that is not a release name; refusing"
+[ -z "$rollback_release" ] || nb_release_name_ok "$rollback_release" \
+  || nb_die "$NB_EX_PREFLIGHT" "the archive names a rollback release that is not a release name; refusing"
+
+nb_init_dirs
+nb_lock_or_exit "nb-restore"
+trap 'rm -rf "$work"; nb_lock_release' EXIT
 nb_log "restoring release $release from a backup taken $(jq -r .at "$work/BACKUP.json") on $(jq -r .host "$work/BACKUP.json")"
 
 mkdir -p "$NB_RELEASES_DIR" "$NB_MANIFESTS_DIR"
-for r in "$release" "$(jq -r .rollback_release "$work/BACKUP.json")"; do
+for r in "$release" "$rollback_release"; do
   [ -n "$r" ] && [ -d "$work/data/releases/$r" ] || continue
   rm -rf "${NB_RELEASES_DIR:?}/$r"
   cp -R "$work/data/releases/$r" "$NB_RELEASES_DIR/$r"

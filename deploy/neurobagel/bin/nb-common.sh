@@ -11,6 +11,10 @@
 #   NB_HOME      where the deployment keeps its state: .env, secrets/, recipes/, data/, state/,
 #                backups/, logs/. On the host both are the same directory; tests point NB_HOME at
 #                a scratch directory so a test run can never touch a real deployment.
+#
+# The decisions the scripts make (rollback target, memory abort, hold, guard breaches, whether the
+# node serves what it should, status verdicts) are pure functions in nb-decide.sh, so they can be
+# tested against real captured text without Docker.
 
 # errexit reaches into command substitutions on bash >= 4.4 with this; older bash ignores it.
 shopt -s inherit_errexit 2>/dev/null || true
@@ -31,6 +35,7 @@ NB_RECIPES_DIR="$NB_HOME/recipes"
 NB_ENV_FILE="$NB_HOME/.env"
 NB_PINS_FILE="$NB_CODE_DIR/pins.env"
 NB_OVERLAY_FILE="$NB_CODE_DIR/docker-compose.nemar.yml"
+NB_SCHEMA_FILE="$NB_CODE_DIR/index.schema.json"
 
 # Exit codes shared by every script (sysexits-style where one exists).
 NB_EX_USAGE=2
@@ -51,6 +56,11 @@ nb_die() {
   shift
   nb_log "ERROR: $*"
   exit "$code"
+}
+
+# Print the comment block that follows the shebang, without the comment marks.
+nb_usage() { # script
+  awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$1"
 }
 
 nb_need() {
@@ -87,13 +97,14 @@ nb_pin_get() {
 # ---------------------------------------------------------------------------------------------
 # Files
 # ---------------------------------------------------------------------------------------------
-nb_sha256() {
+nb_sha256_stdin() {
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | cut -d' ' -f1
+    sha256sum | cut -d' ' -f1
   else
-    shasum -a 256 "$1" | cut -d' ' -f1
+    shasum -a 256 | cut -d' ' -f1
   fi
 }
+nb_sha256() { nb_sha256_stdin <"$1"; }
 
 # Replace DEST (a symlink or file) with TARGET in one rename(2). `mv` and `ln -sfn` are not used
 # for symlink swaps: mv follows a symlink-to-directory destination and ln unlinks before it
@@ -139,42 +150,34 @@ nb_current_release() {
 }
 
 # ---------------------------------------------------------------------------------------------
-# Lock. One directory, created atomically by mkdir. A holder that has died is detected with
-# kill -0 and its lock is taken over by renaming it away first, so two processes that notice the
-# same stale lock cannot both win.
+# Lock. An flock(2) on state/lock, held on file descriptor 9 for the life of the process. The
+# kernel drops it when the process dies, however it dies, so there is no stale lock to detect and
+# no process id to be reused after a reboot. (perl is the portable way to call flock from bash:
+# the flock command is not on a Mac, and perl is in every Debian and macOS base system.)
 #
+# state/lock.info says who holds it, for humans: "<pid> <what> <time>". It is informative only.
 # Callers acquire once. A child script started by a holder inherits the lock through
-# NB_LOCK_HELD=<holder pid>, which is honoured only while that pid really holds the lock.
+# NB_LOCK_HELD=<holder pid>, honoured only while that process is alive and named in lock.info.
 # ---------------------------------------------------------------------------------------------
-NB_LOCK_DIR="$NB_STATE_DIR/lock.d"
+NB_LOCK_FILE="$NB_STATE_DIR/lock"
+NB_LOCK_INFO="$NB_STATE_DIR/lock.info"
 NB_LOCK_OWNED=0
 
 nb_lock_acquire() {
-  local what="${1:-$(basename "$0")}" holder attempt=0
+  local what="${1:-$(basename "$0")}"
   mkdir -p "$NB_STATE_DIR"
-  if [ -n "${NB_LOCK_HELD:-}" ] && [ -f "$NB_LOCK_DIR/pid" ] \
-    && [ "$(cat "$NB_LOCK_DIR/pid" 2>/dev/null)" = "$NB_LOCK_HELD" ] && kill -0 "$NB_LOCK_HELD" 2>/dev/null; then
+  if [ -n "${NB_LOCK_HELD:-}" ] && [ -f "$NB_LOCK_INFO" ] \
+    && [ "$(cut -d' ' -f1 "$NB_LOCK_INFO" 2>/dev/null)" = "$NB_LOCK_HELD" ] && kill -0 "$NB_LOCK_HELD" 2>/dev/null; then
     return 0
   fi
-  while ! mkdir "$NB_LOCK_DIR" 2>/dev/null; do
-    attempt=$((attempt + 1))
-    holder="$(cat "$NB_LOCK_DIR/pid" 2>/dev/null || true)"
-    if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
-      return 1
-    fi
-    if [ -z "$holder" ] && [ -z "$(find "$NB_LOCK_DIR" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
-      # A holder is between mkdir and writing its pid, or the lock is a few seconds old. Treat it
-      # as held.
-      return 1
-    fi
-    [ "$attempt" -le 5 ] || return 1
-    nb_log "taking over a stale lock (holder pid ${holder:-unknown} is gone)"
-    if mv "$NB_LOCK_DIR" "${NB_LOCK_DIR}.stale.$$" 2>/dev/null; then
-      rm -rf "${NB_LOCK_DIR}.stale.$$"
-    fi
-  done
-  printf '%s\n' "$$" >"$NB_LOCK_DIR/pid"
-  printf '%s %s\n' "$what" "$(nb_ts)" >"$NB_LOCK_DIR/what"
+  { exec 9>>"$NB_LOCK_FILE"; } 2>/dev/null || return 1
+  # LOCK_EX | LOCK_NB. The lock belongs to the open file description, which bash keeps on fd 9
+  # after this short perl process has exited.
+  if ! perl -e 'open(my $f, ">&=", 9) or exit 2; flock($f, 6) or exit 1' 2>/dev/null; then
+    exec 9>&-
+    return 1
+  fi
+  printf '%s %s %s\n' "$$" "$what" "$(nb_ts)" >"$NB_LOCK_INFO"
   NB_LOCK_OWNED=1
   export NB_LOCK_HELD="$$"
   trap 'nb_lock_release' EXIT
@@ -182,21 +185,33 @@ nb_lock_acquire() {
 }
 
 nb_lock_release() {
-  if [ "$NB_LOCK_OWNED" = 1 ] && [ "$(cat "$NB_LOCK_DIR/pid" 2>/dev/null)" = "$$" ]; then
-    rm -rf "$NB_LOCK_DIR"
+  if [ "$NB_LOCK_OWNED" = 1 ]; then
+    rm -f "$NB_LOCK_INFO"
+    exec 9>&-
   fi
   NB_LOCK_OWNED=0
 }
 
 nb_lock_describe() {
-  [ -d "$NB_LOCK_DIR" ] && printf 'pid %s, %s' "$(cat "$NB_LOCK_DIR/pid" 2>/dev/null || echo '?')" \
-    "$(cat "$NB_LOCK_DIR/what" 2>/dev/null || echo '?')"
+  if [ -f "$NB_LOCK_INFO" ]; then
+    awk '{printf "pid %s, %s since %s", $1, $2, $3}' "$NB_LOCK_INFO"
+  else
+    printf 'holder unknown'
+  fi
+}
+
+# The usual start of a script that must not overlap another: take the lock or leave with 75.
+nb_lock_or_exit() { # what
+  if ! nb_lock_acquire "$1"; then
+    nb_log "another loader or reload is running ($(nb_lock_describe)); exiting"
+    exit "$NB_EX_BUSY"
+  fi
 }
 
 # ---------------------------------------------------------------------------------------------
-# Docker Compose wrapper. Every call names the project, so nothing here can ever act on
-# nemar-infisical or nemar-umami. The project directory is the recipes checkout because the
-# recipes compose file uses paths relative to itself (./scripts, ./vocab, ./init_data).
+# Docker Compose wrapper. Every call names the project, so nothing here can ever act on another
+# compose project. The project directory is the recipes checkout because the recipes compose file
+# uses paths relative to itself (./scripts, ./vocab, ./init_data).
 # ---------------------------------------------------------------------------------------------
 nb_compose() {
   docker compose \
@@ -236,13 +251,6 @@ nb_load1() {
 # ---------------------------------------------------------------------------------------------
 nb_hold_active() { [ -f "$NB_STATE_DIR/hold" ]; }
 
-# Append one JSON object as a line. Used for reload-history.jsonl.
-nb_append_jsonl() {
-  local file="$1"
-  shift
-  jq -cn "$@" >>"$file"
-}
-
 # ---------------------------------------------------------------------------------------------
 # Containers of this project
 # ---------------------------------------------------------------------------------------------
@@ -277,58 +285,33 @@ nb_post_json() { # url body
 }
 
 # ---------------------------------------------------------------------------------------------
-# The node must serve exactly the datasets of a release, and only protected records.
-#
-# Expected identifiers come from the release's own files, in the form the n-API reports them
-# (the vocabulary URI form of nb:<uuid>). Sets NB_VERIFY_REASON, NB_VERIFY_EXPECTED and
-# NB_VERIFY_SERVED. Returns 0 only when the served set equals the release and every record is
-# protected. The empty query is the heaviest query a user can send, which is the point.
+# The node must serve exactly the datasets of a release, and only protected records. This asks the
+# running node; the judgement itself is nb_verify_judge in nb-decide.sh. Sets NB_VERIFY_REASON,
+# NB_VERIFY_EXPECTED and NB_VERIFY_SERVED. The empty datasets query is the heaviest dataset-level
+# query a user can send, which is the point.
 # ---------------------------------------------------------------------------------------------
 nb_verify_node() { # release
-  local release="$1" port want got datasets subjects missing extra f first
+  local release="$1" port datasets subjects first
   port="$(nb_env_get NB_NAPI_PORT_HOST 18000)"
   NB_VERIFY_REASON=""
   NB_VERIFY_EXPECTED=0
   NB_VERIFY_SERVED=0
-  want="$(for f in "$NB_RELEASES_DIR/$release"/*.jsonld; do
-    [ -e "$f" ] || continue
-    jq -r '.identifier | sub("^nb:"; "http://neurobagel.org/vocab/")' "$f"
-  done | sort)"
-  NB_VERIFY_EXPECTED="$(printf '%s\n' "$want" | grep -c . || true)"
-
   if ! datasets="$(nb_post_json "http://127.0.0.1:${port}/datasets" '{}')"; then
     NB_VERIFY_REASON="the node API did not answer a datasets query"
     return 1
   fi
-  got="$(printf '%s' "$datasets" | jq -r '.[].dataset_uuid' | sort)"
-  NB_VERIFY_SERVED="$(printf '%s\n' "$got" | grep -c . || true)"
-  if [ "$(printf '%s' "$datasets" | jq '[.[] | select(.records_protected != true)] | length')" -ne 0 ]; then
-    NB_VERIFY_REASON="the node returned a dataset that is not marked records_protected"
-    return 1
+  # One dataset is enough for the subject check: record protection is a node-wide setting, and the
+  # unrestricted subjects query at the planned scale is heavy enough for GraphDB to refuse it for
+  # lack of free heap (measured with a 1 GiB heap and 50,105 subjects).
+  first="$(printf '%s' "$datasets" | jq -r '.[0].dataset_uuid // empty' 2>/dev/null || true)"
+  subjects="[]"
+  if [ -n "$first" ]; then
+    if ! subjects="$(nb_post_json "http://127.0.0.1:${port}/subjects" "$(jq -cn --arg u "$first" '{dataset_uuids: [$u]}')")"; then
+      NB_VERIFY_REASON="the node API did not answer a subjects query"
+      return 1
+    fi
   fi
-  # One dataset is enough: record protection is a node-wide setting, and the unrestricted subjects
-  # query at the planned scale is heavy enough for GraphDB to refuse it for lack of free heap
-  # (measured 2026-10-01 with a 1 GiB heap and 50,105 subjects).
-  first="$(printf '%s' "$datasets" | jq -r '.[0].dataset_uuid // empty')"
-  if [ -z "$first" ]; then
-    NB_VERIFY_REASON="the node served no dataset at all"
-    return 1
-  fi
-  if ! subjects="$(nb_post_json "http://127.0.0.1:${port}/subjects" "$(jq -cn --arg u "$first" '{dataset_uuids: [$u]}')")"; then
-    NB_VERIFY_REASON="the node API did not answer a subjects query"
-    return 1
-  fi
-  if ! printf '%s' "$subjects" | jq -e 'all(.[]; .subject_data == "protected")' >/dev/null; then
-    NB_VERIFY_REASON="the node returned participant-level records; NB_RETURN_AGG must be true"
-    return 1
-  fi
-  missing="$(comm -23 <(printf '%s\n' "$want") <(printf '%s\n' "$got") | tr '\n' ' ')"
-  extra="$(comm -13 <(printf '%s\n' "$want") <(printf '%s\n' "$got") | tr '\n' ' ')"
-  if [ -n "$missing" ] || [ -n "$extra" ]; then
-    NB_VERIFY_REASON="served datasets differ from the release (missing: ${missing:-none}; unexpected: ${extra:-none})"
-    return 1
-  fi
-  return 0
+  nb_verify_judge "$NB_RELEASES_DIR/$release" "$datasets" "$subjects"
 }
 
 # Keep a cron-redirected log from growing without bound: rename it once it passes MAXBYTES. The
@@ -341,41 +324,6 @@ nb_rotate_log() { # file [maxbytes]
   fi
 }
 
-# ---------------------------------------------------------------------------------------------
-# Reading what the stock containers print. These are pure functions over text so that they can be
-# tested against REAL captured output (test/fixtures/neurobagel-node/) and cannot drift unnoticed.
-# ---------------------------------------------------------------------------------------------
-
-# Reads the graph container's log for ONE start on stdin and prints exactly one line:
-#   loaded            the stock setup script finished and reported no upload error
-#   failed: <reason>  it finished with an error, or stopped on one
-#   pending           it has not finished yet
-# The stock upload script prints "ERROR: Upload failed for these files" and still exits 0, so the
-# log text is the only signal there is.
-nb_graph_log_verdict() {
-  local logs
-  logs="$(cat)"
-  if printf '%s\n' "$logs" | grep -q 'Finished setting up the Neurobagel graph backend'; then
-    if printf '%s\n' "$logs" | grep -qE 'ERROR: (Upload failed|Failed to clear)'; then
-      printf 'failed: the graph reported upload errors: %s\n' \
-        "$(printf '%s\n' "$logs" | grep -A5 -E 'ERROR: (Upload failed|Failed to clear)' | tr '\n' ' ' | cut -c1-300)"
-    else
-      echo loaded
-    fi
-  elif printf '%s\n' "$logs" | grep -qE 'Error: NB_GRAPH|ERROR: Failed to clear'; then
-    printf 'failed: the graph setup script failed: %s\n' \
-      "$(printf '%s\n' "$logs" | grep -E 'Error:|ERROR:' | head -n 2 | tr '\n' ' ' | cut -c1-300)"
-  else
-    echo pending
-  fi
-}
-
-# Reads the stock initialiser's log on stdin and prints "<accepted> <total>" for the JSON-LD files
-# it validated, or nothing when the summary line is absent.
-nb_init_counts() {
-  sed -n 's/.*successfully extracted from \([0-9]*\)\/\([0-9]*\) JSONLD.*/\1 \2/p' | tail -n 1
-}
-
 # What a failed reload leaves behind so the scheduled loader does not retry the same content in a
 # loop: the release, the reason, and the content id from that release's manifest.
 nb_record_reload_failure() { # release reason
@@ -386,3 +334,6 @@ nb_record_reload_failure() { # release reason
     '{at:$at, epoch:$epoch, release:$release, reason:$reason, content_id:$m[0].content_id}' \
     | nb_write_atomic "$NB_STATE_DIR/reload-failed"
 }
+
+# shellcheck source=nb-decide.sh
+. "$NB_CODE_DIR/bin/nb-decide.sh"
