@@ -1,0 +1,40 @@
++ rm -rf /data/datasets_metadata.json /data/nm000103.jsonld /data/nm000104.jsonld /data/nm000109.jsonld /data/nm000118.jsonld /data/nm000132.jsonld /data/nm000147.jsonld /data/nm000182.jsonld /data/nm000229.jsonld /data/nm000270.jsonld /data/nm000276.jsonld /data/nm000290.jsonld /data/on000117.jsonld /data/on000246.jsonld /data/on001787.jsonld /data/on002712.jsonld /data/on003194.jsonld /data/on003751.jsonld /data/on004019.jsonld
++ python -m init_data.process_jsonld /input_data /data
+2026-10-02 07:02:38 INFO Initializing node data in subject-level mode.
+2026-10-02 07:02:38 INFO (1/18) Processing file: nm000132.jsonld
+2026-10-02 07:02:38 INFO File validated: nm000132.jsonld
+2026-10-02 07:02:38 INFO (2/18) Processing file: nm000229.jsonld
+2026-10-02 07:02:38 INFO File validated: nm000229.jsonld
+2026-10-02 07:02:38 INFO (3/18) Processing file: nm000109.jsonld
+2026-10-02 07:02:38 INFO File validated: nm000109.jsonld
+2026-10-02 07:02:38 INFO (4/18) Processing file: on004019.jsonld
+2026-10-02 07:02:38 INFO File validated: on004019.jsonld
+2026-10-02 07:02:38 INFO (5/18) Processing file: nm000147.jsonld
+2026-10-02 07:02:38 INFO File validated: nm000147.jsonld
+2026-10-02 07:02:38 INFO (6/18) Processing file: nm000103.jsonld
+2026-10-02 07:02:39 INFO File validated: nm000103.jsonld
+2026-10-02 07:02:39 INFO (7/18) Processing file: on001787.jsonld
+2026-10-02 07:02:39 INFO File validated: on001787.jsonld
+2026-10-02 07:02:39 INFO (8/18) Processing file: nm000276.jsonld
+2026-10-02 07:02:39 INFO File validated: nm000276.jsonld
+2026-10-02 07:02:39 INFO (9/18) Processing file: nm000118.jsonld
+2026-10-02 07:02:39 INFO File validated: nm000118.jsonld
+2026-10-02 07:02:39 INFO (10/18) Processing file: on003194.jsonld
+2026-10-02 07:02:39 INFO File validated: on003194.jsonld
+2026-10-02 07:02:39 INFO (11/18) Processing file: on000246.jsonld
+2026-10-02 07:02:39 INFO File validated: on000246.jsonld
+2026-10-02 07:02:39 INFO (12/18) Processing file: nm000182.jsonld
+2026-10-02 07:02:39 INFO File validated: nm000182.jsonld
+2026-10-02 07:02:39 INFO (13/18) Processing file: nm000104.jsonld
+2026-10-02 07:02:39 INFO File validated: nm000104.jsonld
+2026-10-02 07:02:39 INFO (14/18) Processing file: on000117.jsonld
+2026-10-02 07:02:39 INFO File validated: on000117.jsonld
+2026-10-02 07:02:39 INFO (15/18) Processing file: on003751.jsonld
+2026-10-02 07:02:39 INFO File validated: on003751.jsonld
+2026-10-02 07:02:39 INFO (16/18) Processing file: nm000290.jsonld
+2026-10-02 07:02:39 INFO File validated: nm000290.jsonld
+2026-10-02 07:02:39 INFO (17/18) Processing file: nm000270.jsonld
+2026-10-02 07:02:39 INFO File validated: nm000270.jsonld
+2026-10-02 07:02:39 INFO (18/18) Processing file: on002712.jsonld
+2026-10-02 07:02:39 INFO File validated: on002712.jsonld
+2026-10-02 07:02:39 INFO Dataset metadata successfully extracted from 18/18 JSONLD file(s); will upload the file(s) to the graph store.

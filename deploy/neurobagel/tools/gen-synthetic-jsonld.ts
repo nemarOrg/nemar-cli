@@ -20,14 +20,42 @@
  *   rich   the example's own density: two phenotypic sessions with a diagnosis and two
  *          assessments, two imaging sessions with four acquisitions and two pipelines
  *
- * With --index it also writes index.json in the artifact store interface that nb-load reads, so
- * the output directory is directly usable as NB_SOURCE.
+ * With --index it also writes index.json in the format defined by ../index.schema.json (the one
+ * source of truth: the schema string, the artifact suffix and the fingerprint form are read from
+ * it), so the output directory is directly usable as NB_SOURCE.
+ *
+ * The functions are exported so a test can drive them; running the file runs main().
  */
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import schema from "../index.schema.json";
 
 type Json = Record<string, unknown>;
+
+export type Options = {
+  out: string;
+  datasets: number;
+  minSubjects: number;
+  maxSubjects: number;
+  profile: "nemar" | "rich";
+  seed: number;
+  prefix: string;
+  index: boolean;
+  contextFrom: string;
+};
+
+export type IndexArtifact = { name: string; kind: string; sha256: string; bytes: number };
+export type IndexDataset = { id: string; fingerprint: string; artifacts: IndexArtifact[] };
+export type ArtifactIndex = {
+  schema: string;
+  generated_at: string;
+  datasets: IndexDataset[];
+};
+
+/** The index constants, read from the schema rather than written a second time here. */
+export const INDEX_SCHEMA_STRING: string = schema.properties.schema.const;
+export const JSONLD_SUFFIX: string = schema["x-rules"].artifactSuffix.jsonld;
 
 function parseArgs(argv: string[]): Map<string, string> {
   const args = new Map<string, string>();
@@ -42,6 +70,42 @@ function parseArgs(argv: string[]): Map<string, string> {
     }
   }
   return args;
+}
+
+function positiveInt(name: string, raw: string | undefined): number {
+  if (raw === undefined || !/^[0-9]+$/.test(raw) || Number(raw) < 1) {
+    throw new Error(`--${name} must be a positive whole number, got '${raw ?? ""}'`);
+  }
+  return Number(raw);
+}
+
+export function parseOptions(argv: string[]): Options {
+  const args = parseArgs(argv);
+  const need = (k: string): string => {
+    const v = args.get(k);
+    if (!v) throw new Error(`missing --${k}`);
+    return v;
+  };
+  const range = need("subjects").split("-");
+  if (range.length > 2) throw new Error("--subjects must be N or MIN-MAX");
+  const minSubjects = positiveInt("subjects", range[0]);
+  const maxSubjects = range.length === 2 ? positiveInt("subjects", range[1]) : minSubjects;
+  if (maxSubjects < minSubjects) throw new Error("--subjects MAX must not be below MIN");
+  const profile = args.get("profile") ?? "nemar";
+  if (profile !== "nemar" && profile !== "rich") throw new Error("--profile must be nemar or rich");
+  const seedRaw = args.get("seed") ?? "1";
+  if (!/^[0-9]+$/.test(seedRaw)) throw new Error(`--seed must be a whole number, got '${seedRaw}'`);
+  return {
+    out: need("out"),
+    datasets: positiveInt("datasets", args.get("datasets")),
+    minSubjects,
+    maxSubjects,
+    profile,
+    seed: Number(seedRaw),
+    prefix: args.get("prefix") ?? "sy",
+    index: args.get("index") === "true",
+    contextFrom: need("context-from"),
+  };
 }
 
 // Small deterministic PRNG (mulberry32): the same seed always yields the same bytes.
@@ -64,42 +128,25 @@ function uuid(rand: () => number): string {
   return `${s.slice(0, 8)}-${s.slice(8, 12)}-${s.slice(12, 16)}-${s.slice(16, 20)}-${s.slice(20)}`;
 }
 
-const args = parseArgs(process.argv.slice(2));
-const need = (k: string): string => {
-  const v = args.get(k);
-  if (!v) throw new Error(`missing --${k}`);
-  return v;
-};
-
-const out = need("out");
-const nDatasets = Number(need("datasets"));
-const [minSub, maxSub] = need("subjects").split("-").map(Number);
-const subjectsHi = maxSub ?? minSub;
-const profile = args.get("profile") ?? "nemar";
-const seed = Number(args.get("seed") ?? "1");
-const prefix = args.get("prefix") ?? "sy";
-const writeIndex = args.get("index") === "true";
-if (!["nemar", "rich"].includes(profile)) throw new Error("--profile must be nemar or rich");
-
-const context = (JSON.parse(readFileSync(need("context-from"), "utf8")) as Json)["@context"];
-mkdirSync(out, { recursive: true });
-
 const sexes = ["snomed:248153007", "snomed:248152002"];
 const modalities = ["nidm:Electroencephalography", "nidm:Magnetoencephalography"];
 const assessments = ["snomed:859351000000102", "snomed:342061000000106"];
 
-const indexEntries: Json[] = [];
-for (let d = 1; d <= nDatasets; d++) {
-  const id = `${prefix}${String(d).padStart(6, "0")}`;
-  const rand = rng(seed * 1_000_003 + d);
-  const nSub = minSub + Math.floor(rand() * (subjectsHi - minSub + 1));
+/** One dataset document (as a string) for dataset number `d`, 1-based. */
+export function generateDataset(
+  opts: Options,
+  d: number,
+  context: unknown,
+): { id: string; body: string } {
+  const id = `${opts.prefix}${String(d).padStart(6, "0")}`;
+  const rand = rng(opts.seed * 1_000_003 + d);
+  const nSub = opts.minSubjects + Math.floor(rand() * (opts.maxSubjects - opts.minSubjects + 1));
+  const rich = opts.profile === "rich";
   const subjects: Json[] = [];
   for (let s = 1; s <= nSub; s++) {
     const label = `sub-${String(s).padStart(3, "0")}`;
     const sessions: Json[] = [];
-    const nPheno = profile === "rich" ? 2 : 1;
-    const nImg = profile === "rich" ? 2 : 1;
-    for (let k = 1; k <= nPheno; k++) {
+    for (let k = 1; k <= (rich ? 2 : 1); k++) {
       const ses: Json = {
         identifier: `nb:${uuid(rand)}`,
         hasLabel: `ses-${String(k).padStart(2, "0")}`,
@@ -107,21 +154,20 @@ for (let d = 1; d <= nDatasets; d++) {
         hasSex: { identifier: sexes[Math.floor(rand() * 2)], schemaKey: "Sex" },
         schemaKey: "PhenotypicSession",
       };
-      if (profile === "rich" || rand() < 0.4) {
+      if (rich || rand() < 0.4) {
         ses.hasDiagnosis = [{ identifier: "ncit:C94342", schemaKey: "Diagnosis" }];
       }
-      if (profile === "rich") {
+      if (rich) {
         ses.hasAssessment = assessments.map((a) => ({ identifier: a, schemaKey: "Assessment" }));
       }
       sessions.push(ses);
     }
-    for (let k = 1; k <= nImg; k++) {
-      const nAcq = profile === "rich" ? 4 : 1;
+    for (let k = 1; k <= (rich ? 2 : 1); k++) {
       const ses: Json = {
         identifier: `nb:${uuid(rand)}`,
         hasLabel: `ses-${String(k).padStart(2, "0")}`,
         hasFilePath: `/synthetic/${id}/${label}/ses-${String(k).padStart(2, "0")}`,
-        hasAcquisition: Array.from({ length: nAcq }, () => ({
+        hasAcquisition: Array.from({ length: rich ? 4 : 1 }, () => ({
           identifier: `nb:${uuid(rand)}`,
           hasContrastType: {
             identifier: modalities[Math.floor(rand() * 2)],
@@ -131,7 +177,7 @@ for (let d = 1; d <= nDatasets; d++) {
         })),
         schemaKey: "ImagingSession",
       };
-      if (profile === "rich") {
+      if (rich) {
         ses.hasCompletedPipeline = ["fmriprep", "freesurfer"].map((p) => ({
           identifier: `nb:${uuid(rand)}`,
           hasPipelineVersion: "1.0.0",
@@ -162,29 +208,57 @@ for (let d = 1; d <= nDatasets; d++) {
     hasSamples: subjects,
     schemaKey: "Dataset",
   };
-  const body = `${JSON.stringify(doc)}\n`;
-  const name = `${id}.jsonld`;
-  writeFileSync(join(out, name), body);
-  indexEntries.push({
+  return { id, body: `${JSON.stringify(doc)}\n` };
+}
+
+const sha256 = (b: string): string => createHash("sha256").update(b).digest("hex");
+
+/** The index entry for one dataset document: the fingerprint form is the schema's. */
+export function indexEntry(id: string, body: string): IndexDataset {
+  const hash = sha256(body);
+  return {
     id,
-    fingerprint: `synthetic-${seed}-${createHash("sha256").update(body).digest("hex").slice(0, 16)}`,
+    // The reference form: sha256 of the artifacts' own hashes (here, one artifact).
+    fingerprint: `sha256:${sha256(hash)}`,
     artifacts: [
       {
-        name,
+        name: `${id}${JSONLD_SUFFIX}`,
         kind: "jsonld",
-        sha256: createHash("sha256").update(body).digest("hex"),
+        sha256: hash,
         bytes: Buffer.byteLength(body),
       },
     ],
-  });
+  };
 }
 
-if (writeIndex) {
-  const index = {
-    schema: "nemar-neurobagel-artifact-index/1",
-    generated_at: new Date(0).toISOString(),
-    datasets: indexEntries,
-  };
-  writeFileSync(join(out, "index.json"), `${JSON.stringify(index, null, 1)}\n`);
+export function buildIndex(entries: IndexDataset[], generatedAt: string): ArtifactIndex {
+  return { schema: INDEX_SCHEMA_STRING, generated_at: generatedAt, datasets: entries };
 }
-console.log(`wrote ${nDatasets} dataset(s) to ${out}${writeIndex ? " with index.json" : ""}`);
+
+export function main(argv: string[]): void {
+  const opts = parseOptions(argv);
+  const context = (JSON.parse(readFileSync(opts.contextFrom, "utf8")) as Json)["@context"];
+  mkdirSync(opts.out, { recursive: true });
+  const entries: IndexDataset[] = [];
+  for (let d = 1; d <= opts.datasets; d++) {
+    const { id, body } = generateDataset(opts, d, context);
+    writeFileSync(join(opts.out, `${id}${JSONLD_SUFFIX}`), body);
+    entries.push(indexEntry(id, body));
+  }
+  if (opts.index) {
+    const index = buildIndex(entries, new Date(0).toISOString());
+    writeFileSync(join(opts.out, "index.json"), `${JSON.stringify(index, null, 1)}\n`);
+  }
+  console.log(
+    `wrote ${opts.datasets} dataset(s) to ${opts.out}${opts.index ? " with index.json" : ""}`,
+  );
+}
+
+if (import.meta.main) {
+  try {
+    main(process.argv.slice(2));
+  } catch (e) {
+    console.error(`error: ${(e as Error).message}`);
+    process.exit(2);
+  }
+}
