@@ -95,3 +95,25 @@ A "NEMAR emits Neurobagel artifacts by one pure transform over data-plane docume
 1 ANONYMITY-RULE INCONSISTENCY, LOW SEVERITY (owner assessment 2026-10-02: the reserved DOI does not resolve and the string follows the public dataset id, so nothing identifying is exposed; left unfixed unless the owner asks; the Neurobagel writer still uses CONCEPT_DOI_SQL) (lead re-verified 2026-10-02): https://zarr.nemar.org/catalog.json serves "doi":"10.82901/nemar.nm000284", the reserved concept DOI of the anonymous deposit. Cause: ZARR_CATALOG_CANDIDATE_SQL (services/zarr-catalog.ts:132-142) projects raw d.concept_doi instead of CONCEPT_DOI_SQL (anonymity.ts:245). Contradicts ADR 0065 ("no surface may blur" reserved vs published). ADR 0067's sweep does not check this surface. Not identity data, but the class of gap at a second writer. Per ADR 0067 an anonymity-class finding is NOT filed as a GitHub issue. 2 Explorer's manifest bound "413 above 30,000 (ADR 0072:60)" is stale (per branch 38,000/30,000). 3 Explorer said nm000284 Authors ['Anonymous']; metadata.json serves authors []; the catalog column holds the label (ADR 0065:222). 4 Explorer: "bad node shows as per-node 207": true only for transport/HTTP errors; invalid records escape uncaught (code V; the resulting 500 is I, tested in S2). 5 f-API 5 s timeout applies only to instance endpoints; /datasets and /subjects unbounded. 6 Explorer: "communities#70 plans all suffixes": the work exists unmerged on auto-generate-bids-vocab; the ask is to ship it. 7 Catalog UUID churn is not only bagel's: recipes mints a new uuid4 per start in catalog mode; the n-API demands graph credentials even in catalog mode (V). 8 #349 vs evidence: nm000103-107 public with DOIs (AGENTS.md:149-154); "include private as restricted" contradicts ADR 0017 and the data-plane gate; Zenodo-first DOIs contradict ADR 0007; Quebec node replaced by TOSI Neuro (menu#24); bagel==0.11.4 now 0.11.6; .context/validated_workflows.md is now a docs.nemar.org page. 9 Data quality: nm000270-272 lack participants.tsv despite subjects (ensureParticipantsTsv should have produced a placeholder); nm000147, 150, 153 have annexed metadata against ADR 0015.
 
 Critical files: backend/src/services/data-router.ts, backend/src/routes/data.ts, backend/src/services/anonymity.ts, backend/src/services/zarr-catalog.ts, backend/src/index.ts, backend/src/services/host-routing.ts.
+
+---
+
+## ADR numbers reserved for this epic
+
+Phase branches all start from the same epic commit, so each reserves its ADR number here to avoid collisions.
+A phase PR that writes an ADR uses its number and adds it to the index in `.context/decisions/README.md`; a test enforces that the index and the files agree.
+
+| Number | Title | Phase |
+| --- | --- | --- |
+| 0081 | NEMAR emits Neurobagel artifacts by one pure transform over data-plane documents | Phase 1 |
+| 0082 | The Neurobagel node runs stock on nemaring under hard resource limits and is fed by pull | Phase 3 |
+| 0083 | Federation eligibility is one predicate decided from the row and re-checked at read time | Phase 4 |
+| 0084 | Curated Neurobagel annotations are a reviewed, content-pinned file keyed by dataset id | Phase 5 |
+| amendment | ADR 0067 gains the invariant that no anonymous deposit is present in the Neurobagel store | Phase 6 |
+
+Phases 2 and 7 write no ADR.
+
+## Follow-ups recorded from reviews
+
+- The `bids_index` section of `docs.nemar.org/platform/data-api` needs the new `session_modalities` key (the docs repository is private, so this is done there, after Phase 2 merges).
+- Decision (lead, Phase 2): keep the `no-session` entry for sessionless subjects. The schema marks the whole field optional with "absent means unknown", so omitting entries would make absence ambiguous; brotli absorbs the raw growth on the wire.
