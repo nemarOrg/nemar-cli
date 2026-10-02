@@ -3,6 +3,7 @@
  *
  *   GET  /admin/neurobagel/status        what is eligible, written, stale, waiting on a person
  *   POST /admin/neurobagel/regenerate    examine datasets and, on request, write what changed
+ *   POST /admin/neurobagel/verify        run the verification sweep now (reports only)
  *
  * `regenerate` is a DRY RUN BY DEFAULT: it reports what it would write and remove
  * and touches nothing. Only an explicit boolean `execute: true` writes, and only when
@@ -18,6 +19,11 @@
  * fingerprint matches, the one lever for a change the fingerprint cannot see (a new
  * data-plane metadata builder; see neurobagel-fingerprint.ts).
  *
+ * `verify` runs the verification sweep on demand (epic #1586, phase 6) and works on staging:
+ * the sweep function is unguarded, only its cron wrapper is production-only. It REPORTS and
+ * never repairs, writes only its own heartbeat (as an `admin` run, which the weekly report
+ * does not count) and returns counts, never a dataset id. It takes no body.
+ *
  * Admin-only through the router's `authMiddleware` and `adminMiddleware`. The result
  * carries counts, dataset ids and codes, never participant data, and the anonymity-
  * class findings as a COUNT.
@@ -28,6 +34,7 @@ import { z } from "zod";
 import { auditLogStatement } from "../../db/audit-log";
 import { isValidDatasetId } from "../../services/datasetId";
 import { neurobagelStatus } from "../../services/neurobagel-status";
+import { runNeurobagelVerificationSweep } from "../../services/neurobagel-verify";
 import {
   RECONCILE_HARD_LIMIT,
   neurobagelWriterMode,
@@ -59,6 +66,12 @@ export function registerNeurobagelRoutes(admin: AdminRouter): void {
       console.error("[neurobagel] status failed:", message);
       return c.json({ error: `Neurobagel status failed: ${message}` }, 500);
     }
+  });
+
+  admin.post("/neurobagel/verify", async (c) => {
+    // The sweep contains its own failures (a throw becomes an unknown verdict), so this
+    // answers 200 whatever it found: the verdicts are the answer.
+    return c.json(await runNeurobagelVerificationSweep(c.env, { trigger: "admin" }));
   });
 
   admin.post("/neurobagel/regenerate", zValidator("json", regenerateSchema), async (c) => {

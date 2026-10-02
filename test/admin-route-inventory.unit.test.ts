@@ -159,6 +159,8 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   // the dry-run-by-default regeneration (zValidator + handler on the strict body).
   "GET /neurobagel/status": 1,
   "POST /neurobagel/regenerate": 2,
+  // Epic #1586 phase 6: the verification sweep on demand. No body, so no validator.
+  "POST /neurobagel/verify": 1,
 };
 
 describe("admin route inventory", () => {
@@ -191,7 +193,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(129);
+    expect(adminRoutes.routes.length).toBe(130);
   });
 
   // The count pin above can't see a SWAP of the two router-level middleware

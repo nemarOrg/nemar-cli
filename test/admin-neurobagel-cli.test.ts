@@ -31,6 +31,11 @@ import {
   startHarness,
   storeKeys,
 } from "../backend/test/helpers/neurobagel-harness";
+import {
+  RECORDED,
+  type UpstreamStandin,
+  startUpstreamStandin,
+} from "../backend/test/helpers/neurobagel-upstream";
 import { NEUROBAGEL_REGENERATE_MAX } from "../shared/contract/neurobagel-admin";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
@@ -47,11 +52,15 @@ let h: Harness;
 let configDir: string;
 let server: ReturnType<typeof Bun.serve>;
 let envOverrides: Partial<Bindings> = {};
+// The verification sweep reads upstream's public API: a local server with the real recorded
+// answers, so the command line is driven end to end without reaching the internet.
+let upstream: UpstreamStandin;
 /** Every request the server received, `METHOD /path`, so a test can say what was NOT sent. */
 let requests: string[] = [];
 
 beforeAll(async () => {
   h = await startHarness();
+  upstream = startUpstreamStandin();
   server = Bun.serve({
     port: 0,
     fetch: (req) => {
@@ -62,6 +71,7 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   server.stop(true);
+  upstream.stop();
   await h.dispose();
 });
 
@@ -69,6 +79,8 @@ beforeEach(async () => {
   await h.reset();
   envOverrides = {};
   requests = [];
+  upstream.answers = { ...RECORDED };
+  upstream.requests.length = 0;
   configDir = mkdtempSync(join(tmpdir(), "nemar-admin-neurobagel-cli-"));
   writeFileSync(
     join(configDir, "config.json"),
@@ -276,6 +288,8 @@ describe("nemar admin neurobagel regenerate", () => {
 
 describe("nemar admin neurobagel status", () => {
   test("an empty system reads as such, with a zero where it is known", async () => {
+    // A verification record exists (the daily sweep ran), so nothing about it is unknown.
+    await runCli(["admin", "neurobagel", "verify"]);
     const result = await runCli(["admin", "neurobagel", "status"]);
     expect(result.exitCode).toBe(0);
     expect(result.all).toContain("enabled");
@@ -289,6 +303,7 @@ describe("nemar admin neurobagel status", () => {
       tsv: "participant_id\tage\nsub-01\t21\nsub-02\t22\nsub-09\t23\n",
     });
     await runCli(["admin", "neurobagel", "regenerate", "--execute"]);
+    await runCli(["admin", "neurobagel", "verify"]);
     const result = await runCli(["admin", "neurobagel", "status"]);
     expect(result.exitCode).toBe(0);
     expect(result.all).toContain("eligible=2 written=2");
@@ -316,11 +331,182 @@ describe("nemar admin neurobagel status", () => {
   });
 });
 
+describe("nemar admin neurobagel verify", () => {
+  const movedUpstream = () => {
+    upstream.answers = {
+      ...upstream.answers,
+      "/repos/neurobagel/api/releases/latest": {
+        ...(upstream.answers["/repos/neurobagel/api/releases/latest"] as object),
+        tag_name: "v0.12.0",
+      },
+    };
+  };
+
+  test("prints each check's verdict as itself, and an unconfigured check as unchecked, with exit 0", async () => {
+    seedSynthetic(h, "nm000950");
+    const result = await runCli(["admin", "neurobagel", "verify"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.all).toMatch(/Verification\s+healthy/);
+    expect(result.all).toMatch(/store\s+healthy/);
+    expect(result.all).toMatch(/node\s+unchecked\s+NEUROBAGEL_NODE_URL is not set/);
+    expect(result.all).toMatch(/registration\s+unchecked/);
+    expect(result.all).toMatch(/drift\s+healthy/);
+    expect(requests).toContain("POST /admin/neurobagel/verify");
+  });
+
+  test("an alarm exits 1 and says what moved", async () => {
+    movedUpstream();
+    const result = await runCli(["admin", "neurobagel", "verify"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.all).toMatch(/Verification\s+alarm/);
+    expect(result.all).toContain("node API v0.11.0 -> v0.12.0");
+  });
+
+  test("a check that could not be answered exits 2, printed as unknown and never as healthy", async () => {
+    const node = Bun.serve({ port: 0, fetch: () => new Response("{}", { status: 500 }) });
+    try {
+      envOverrides = { NEUROBAGEL_NODE_URL: `http://127.0.0.1:${node.port}` };
+      const result = await runCli(["admin", "neurobagel", "verify"]);
+      expect(result.exitCode).toBe(2);
+      expect(result.all).toMatch(/Verification\s+unknown/);
+      expect(result.all).toMatch(
+        /node\s+unknown\s+The node did not answer the datasets query \(HTTP 500\)/,
+      );
+    } finally {
+      node.stop(true);
+    }
+  });
+
+  test("a writer that is on with no bucket bound is an alarm for verify, and for status", async () => {
+    envOverrides = { NEUROBAGEL: undefined };
+    const verify = await runCli(["admin", "neurobagel", "verify"]);
+    expect(verify.exitCode).toBe(1);
+    expect(verify.all).toMatch(
+      /store\s+alarm\s+The writer is switched on but no NEUROBAGEL bucket is bound/,
+    );
+    const status = await runCli(["admin", "neurobagel", "status"]);
+    expect(status.exitCode).toBe(1);
+    expect(status.all).toContain("store_unconfigured");
+    // And the same state with the writer off is nothing to judge, for both.
+    envOverrides = { NEUROBAGEL: undefined, NEUROBAGEL_WRITER_ENABLED: undefined };
+    expect((await runCli(["admin", "neurobagel", "verify"])).exitCode).toBe(0);
+  });
+
+  test("--json is the server's document", async () => {
+    const result = await runCli(["admin", "neurobagel", "verify", "--json"]);
+    const parsed = JSON.parse(result.stdout) as {
+      overall: string;
+      heartbeat_written: boolean;
+      checks: Record<string, { verdict: string }>;
+    };
+    expect(parsed.heartbeat_written).toBe(true);
+    expect(parsed.checks.node?.verdict).toBe("unchecked");
+  });
+
+  test("a member's key is refused with the server's own answer", async () => {
+    h.db.run("UPDATE users SET role = 'member' WHERE username = 'nbcliadmin'");
+    const result = await runCli(["admin", "neurobagel", "verify"]);
+    expect(result.exitCode).not.toBe(0);
+    expect(upstream.requests).toEqual([]);
+  });
+});
+
+describe("nemar admin neurobagel status prints the verification", () => {
+  test("before any run, with the writer on, it is unknown and exits 2: nothing proves the sweep ever ran", async () => {
+    const result = await runCli(["admin", "neurobagel", "status"]);
+    expect(result.all).toMatch(/Verification\s+unknown\s+none recorded/);
+    expect(result.all).toContain("unknown and not healthy");
+    expect(result.all).not.toMatch(/Verification\s+healthy/);
+    expect(result.exitCode).toBe(2);
+  });
+
+  test("before any run, with the writer off, it stays quiet and exits 0: nothing here is maintained", async () => {
+    envOverrides = { NEUROBAGEL_WRITER_ENABLED: undefined };
+    const result = await runCli(["admin", "neurobagel", "status"]);
+    expect(result.all).toMatch(
+      /Verification\s+none recorded; the writer is off, so none is expected/,
+    );
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("a healthy record older than 36 hours is unknown and exits 2; a fresh one is healthy and exits 0", async () => {
+    await runCli(["admin", "neurobagel", "verify"]);
+    const fresh = await runCli(["admin", "neurobagel", "status"]);
+    expect(fresh.all).toMatch(/Verification\s+healthy/);
+    expect(fresh.exitCode).toBe(0);
+
+    const hoursAgo = (n: number) => new Date(Date.now() - n * 3_600_000).toISOString();
+    h.db.run(
+      "UPDATE audit_log SET details = json_set(details, '$.at', ?) WHERE action = 'neurobagel_verification'",
+      [hoursAgo(40)],
+    );
+    const stale = await runCli(["admin", "neurobagel", "status"]);
+    expect(stale.all).toMatch(/Verification\s+unknown\s+the last record is 4\d hours old/);
+    expect(stale.exitCode).toBe(2);
+
+    // Inside the 36 hours it is still believed.
+    h.db.run(
+      "UPDATE audit_log SET details = json_set(details, '$.at', ?) WHERE action = 'neurobagel_verification'",
+      [hoursAgo(30)],
+    );
+    expect((await runCli(["admin", "neurobagel", "status"])).exitCode).toBe(0);
+  });
+
+  test("after a run it prints the latest verdicts, and an alarm makes the exit code non-zero", async () => {
+    await runCli(["admin", "neurobagel", "verify"]);
+    const ok = await runCli(["admin", "neurobagel", "status"]);
+    expect(ok.all).toMatch(/Verification\s+healthy/);
+    expect(ok.all).toMatch(/registration\s+unchecked/);
+
+    upstream.answers = {
+      ...upstream.answers,
+      "/repos/neurobagel/query-tool/releases/latest": { tag_name: "v1.0.0" },
+    };
+    await runCli(["admin", "neurobagel", "verify"]);
+    const alarming = await runCli(["admin", "neurobagel", "status"]);
+    expect(alarming.all).toMatch(/Verification\s+alarm/);
+    expect(alarming.exitCode).toBe(1);
+  });
+});
+
+describe("nemar admin neurobagel status exit code for an unanswerable verification", () => {
+  test("an unknown verdict exits 2, like `verify`: unknown is not healthy and not an alarm", async () => {
+    const node = Bun.serve({ port: 0, fetch: () => new Response("{}", { status: 500 }) });
+    try {
+      envOverrides = { NEUROBAGEL_NODE_URL: `http://127.0.0.1:${node.port}` };
+      await runCli(["admin", "neurobagel", "verify"]);
+      const status = await runCli(["admin", "neurobagel", "status"]);
+      expect(status.all).toMatch(/Verification\s+unknown/);
+      // The same family as `verify`: 2, could not be determined.
+      expect(status.exitCode).toBe(2);
+    } finally {
+      node.stop(true);
+    }
+  });
+});
+
+describe("the exit codes are stated in the help of both commands", () => {
+  test("status and verify say the same three codes in their ordinary help, and the long form says when", async () => {
+    for (const command of ["status", "verify"]) {
+      const help = await runCli(["admin", "neurobagel", command, "--help"]);
+      expect(help.exitCode, command).toBe(0);
+      expect(help.all, command).toMatch(/exit\s+0\s+healthy,\s+1\s+alarm,\s+2\s+unknown/);
+      const long = await runCli(["admin", "neurobagel", command, "--help-all"]);
+      expect(long.all, command).toMatch(
+        /Exit codes: 0 healthy or nothing to check, 1 an alarm, 2 could not be determined/,
+      );
+    }
+    const status = await runCli(["admin", "neurobagel", "status", "--help-all"]);
+    expect(status.all).toContain("36 hours");
+  });
+});
+
 describe("the command group", () => {
-  test("is listed under admin, with both subcommands", async () => {
+  test("is listed under admin, with every subcommand", async () => {
     const result = await runCli(["admin", "neurobagel", "--help"]);
     expect(result.exitCode).toBe(0);
     expect(result.all).toContain("regenerate");
     expect(result.all).toContain("status");
+    expect(result.all).toContain("verify");
   });
 });

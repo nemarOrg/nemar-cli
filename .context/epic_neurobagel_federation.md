@@ -211,3 +211,37 @@ Two independent reviews of the pull request found no anonymity, authentication o
   Blips (`fetch_failed`, `metadata_degraded`) are now never recorded, and parking expires after a day with the refusal re-recorded while it stands.
 - The closing reserve scales with the store (one call per listing page, twice), the listing fails loudly past 100 pages (about 3,300 datasets), and `status` shows a refusal's age: a partial cascade delete leaves the dataset federated, so a rollback must confirm `deleted: true` or withdraw first.
   Measured at 800 datasets: a hook costs 57 to 75 operations, a tick of 10 rewritten datasets 275, a backfill 57 calls at the ceiling.
+
+## Findings from the Phase 6 implementation (2026-10-02)
+
+- The sweep is `services/neurobagel-verify.ts` (store, node, registration) and `services/neurobagel-drift.ts` (upstream); it reports and never repairs, and writes only its own heartbeat row (`neurobagel_verification`) and, for one case, an audit row.
+  The cron wrapper is production-only and absent from `DEV_CRON_ALLOWLIST`; `POST /admin/neurobagel/verify` and `nemar admin neurobagel verify` run the unguarded sweep, on staging too.
+- Two optional variables turn on the network checks: `NEUROBAGEL_NODE_URL` (the node's address, probed with the empty datasets query the federation asks) and `NEUROBAGEL_FEDERATION_URL` (the public federation, read at `/nodes`, and `/diagnoses` only when NEMAR is listed).
+  Unset means `unchecked`, shown as such and never healthy.
+  The committed configuration sets neither, and a test holds it to that.
+- Residue is an alarm only when it persists: the daily reconcile removes it and the read route already hides it, so a dataset withdrawn this morning is residue until that run.
+  The sweep remembers the previous sweep's residue as short digests of dataset ids (never ids) in its heartbeat, and calls residue an alarm when it was also there at least 20 hours earlier.
+  "Missing for 48 hours" counts from the later of the dataset's first publication and the clock's origin, which is the writer's first recorded run or, if it has never run, the first sweep that saw it enabled; so a writer that is enabled and never runs still alarms after two days.
+- Drift is an `alarm`, not a notice: the pins are a decision, and a moved upstream is a decision somebody owes.
+  The release tags in `deploy/neurobagel/pins.env` are copied into `neurobagel-drift.ts` (a Worker cannot read the file) and a test compares the two.
+  The reads are unauthenticated, so GitHub's limit for an anonymous address applies; a rate limit is `unknown`.
+  If that proves frequent on the shared egress addresses of the platform, give the reads a token in a later change; it would be the first credential this module carries.
+- The federation answers `/diagnoses` with HTTP 207 when any node failed, and the repository of the federation API is `federation-api`.
+- The weekly report gains a section from the daily heartbeats (cron runs only): the latest verdicts, the days by verdict, and a COUNT of anonymity-class findings; it names no dataset.
+- The anonymity sweep gains `neurobagel_store_holds_deposit` (ADR 0067's amendment), found by one listing of the store per pass.
+  A node that serves a record for an anonymous deposit is found by the verification sweep, which loads no mail code, so it goes to the audit log only (`neurobagel_verify_anonymity_finding`); the store invariant is the one that mails.
+- Not verified: everything against the real node and the real federation, because the node is not reachable and NEMAR is not registered.
+  The probe and the registration check are proven against the node's recorded answer and the federation's recorded answers (`backend/test/fixtures/neurobagel-verify/PROVENANCE.md`), with a registered state made by adding one entry to the real directory.
+- `scripts/neurobagel/verification-mutation-battery.ts` is the phase's mutation battery, in the style of the writer's.
+
+## Phase 6 review changes (2026-10-02)
+
+- The sweep's overall verdict is `unchecked` unless at least one of the store, node and registration checks ran: upstream drift always runs and can alarm, but it cannot make a sweep healthy by itself.
+  A writer switched on with no bucket bound is an `alarm` in the sweep and in `status`; a writer that is off is `unchecked` and quiet.
+- A check that did not run to completion (unchecked, unknown, a throw) no longer clears what the previous sweep remembered: one failed read of the store keeps the residue it was following and the clock it started.
+  An index that exists and cannot be read as one is `unknown`, and a node that serves fewer of the store's datasets than the store holds on two sweeps at least 20 hours apart is an `alarm` (one sweep is a note, because the node pulls and reloads once a day).
+- Requests never follow a redirect (a redirect is `unknown`) and read at most a documented cap of each answer.
+- `status` and `verify` share one exit-code family (0 healthy or nothing to check, 1 alarm, 2 could not be determined), and a record older than 36 hours, or none while the writer is on, is `unknown`.
+- The weekly report's attention rule is one function in `shared/contract/weekly-attention.ts`, called by the report's headline and by `nemar admin import-weekly`; it also flags unknown days, failed runs and missing daily runs, and its headline says which checks did not run instead of "all look normal".
+- The weekly counts findings from the writer's ledger, the anonymity sweep and the verification sweep, each dataset once, independent of the daily rows, and says nothing of their kind.
+- The id scan of the store uses a boundary an underscore does not defeat, and the test plants every real object name the writer produces.

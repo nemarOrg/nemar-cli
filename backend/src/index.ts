@@ -78,6 +78,10 @@ import {
 } from "./services/import-weekly-summary-sweep";
 import { manifestIntegritySweep } from "./services/manifest-sweep";
 import { runNeurobagelReconcileCron } from "./services/neurobagel-hooks";
+import {
+  runNeurobagelVerificationSweepCron,
+  verificationLogLine,
+} from "./services/neurobagel-verify";
 import { getActiveNotices } from "./services/notices";
 import { sweepBlockedBidsValidationRequests } from "./services/publication-sweep";
 import { runRecordingStatsSweepCron } from "./services/recording-stats-sweep";
@@ -1276,6 +1280,33 @@ export default {
           .catch((err) =>
             console.error(
               "[neurobagel] reconcile failed:",
+              err instanceof Error ? (err.stack ?? err.message) : err,
+            ),
+          ),
+      );
+
+      // Epic #1586 phase 6 (ADR 0067's amendment): the Neurobagel verification sweep. It
+      // REPORTS and never repairs: the store against the predicate, the node, registration
+      // with the public federation, and upstream drift. PRODUCTION-ONLY, and deliberately NOT
+      // in DEV_CRON_ALLOWLIST: a new daily job is production-only by default. It sends no
+      // mail and dispatches nothing (a source scan holds it to that), so the fence is the
+      // default and not a necessity; the cron wrapper carries it so the admin route, which
+      // calls the sweep directly, still works on staging. It writes its heartbeat on every
+      // run, even one that throws, and costs about ten outbound requests plus the store's
+      // listing pages, which is why it shares this tick (ADR 0054) rather than adding one.
+      ctx.waitUntil(
+        runNeurobagelVerificationSweepCron(env)
+          .then((r) => {
+            if (!r) return;
+            const line = verificationLogLine(r);
+            // Healthy, or nothing here to check, is routine; an alarm, an unknown or a sweep that
+            // failed is logged where someone reading the logs will see it.
+            if (r.overall === "healthy" || r.overall === "unchecked") console.log(line);
+            else console.error(line);
+          })
+          .catch((err) =>
+            console.error(
+              "[neurobagel] verification failed:",
               err instanceof Error ? (err.stack ?? err.message) : err,
             ),
           ),

@@ -76,6 +76,7 @@ import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { fetchGitTrackedFile } from "./github/git-file-broker.js";
 import { GITHUB_API, ORG_NAME } from "./github/shared.js";
+import { readStoreDatasetIds } from "./neurobagel-status.js";
 import {
   ANONYMITY_ATTEMPTED_AT_PATH,
   ANONYMITY_CHECKED_AT_PATH,
@@ -169,6 +170,12 @@ export const ANONYMITY_DECLARED_SCOPE_LIMITS: readonly string[] = [
  * which makes it a gap rather than a silent truncation.
  */
 export const ANONYMITY_MAX_VERSION_IDENTIFIERS = 5;
+
+/**
+ * The check id of the Neurobagel store invariant (epic #1586, ADR 0067's amendment). Named here
+ * so the weekly report can COUNT its findings without spelling the string a second time.
+ */
+export const NEUROBAGEL_STORE_CHECK = "neurobagel_store_holds_deposit";
 
 export interface AnonymityFinding {
   /** Stable id, so a reader can branch on it without parsing prose. */
@@ -1035,6 +1042,13 @@ export interface AnonymitySweepSeams {
   listGitFilesImpl?: (
     repo: string,
   ) => Promise<{ path: string; sha: string; size?: number; mode?: string }[] | null>;
+  /**
+   * Every dataset id the Neurobagel artifact store holds anything for (epic #1586, ADR 0067's
+   * amendment), or `null` when no store is bound in this environment. Resolved ONCE per pass,
+   * so the listing is paid for once however many deposits are swept. A throw is reported as
+   * unchecked, never as "not there". Defaults to the real bucket through `readStoreDatasetIds`.
+   */
+  readNeurobagelStoreIds?: () => Promise<Set<string> | null>;
 }
 
 /**
@@ -1241,6 +1255,28 @@ async function scanDataset(
     }
   }
 
+  // --- the Neurobagel artifact store -----------------------------------------
+  // An anonymous deposit is never federated: the writer's predicate excludes it by the row's
+  // flag and the read route re-checks that on every request (ADR 0084). A copy in the store is
+  // still what the node's loader pulls, so its presence is a broken guarantee, not a detail.
+  // No store bound means nothing there to find; a listing that failed is a question that
+  // could not be answered.
+  if (seams.readNeurobagelStoreIds) {
+    try {
+      const held = await seams.readNeurobagelStoreIds();
+      if (held?.has(row.dataset_id)) {
+        findings.push({
+          check: NEUROBAGEL_STORE_CHECK,
+          severity: "invariant",
+          detail:
+            "The Neurobagel artifact store holds an artifact or an index entry for this dataset. An anonymous deposit is never federated, so no copy should exist; the node's loader pulls everything in that store into a search that other institutions can query.",
+        });
+      }
+    } catch {
+      unchecked.push("neurobagel_store");
+    }
+  }
+
   // --- the depositor's own files ------------------------------------------
   let filesScanned = 0;
   let filesListed = 0;
@@ -1401,8 +1437,17 @@ export async function runAnonymitySweep(
     }
   }
 
+  // One listing of the Neurobagel store for the whole pass, and only when there is a deposit
+  // to look for. The promise is shared, so a failure is the same failure for every deposit.
+  let storeIds: Promise<Set<string> | null> | undefined;
+  const readStoreIds = seams.readNeurobagelStoreIds ?? (() => readStoreDatasetIds(env));
+
   const resolvedSeams: AnonymitySweepSeams = {
     ...seams,
+    readNeurobagelStoreIds: () => {
+      storeIds ??= readStoreIds();
+      return storeIds;
+    },
     getIdentifierImpl: seams.getIdentifierImpl ?? (await defaultIdentifierReader(env)),
     fetchZarrIndexImpl: seams.fetchZarrIndexImpl ?? defaultZarrIndexReader(env),
     listGitFilesImpl: seams.listGitFilesImpl ?? defaultGitFileLister(token),

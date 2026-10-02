@@ -48,6 +48,9 @@ import {
 const SERVICES = join(SRC, "services");
 const WRITER = join(SERVICES, "neurobagel-writer.ts");
 const HOOKS = join(SERVICES, "neurobagel-hooks.ts");
+// Phase 6: the verification sweep (ADR 0067's amendment) and its upstream drift reader.
+const VERIFY = join(SERVICES, "neurobagel-verify.ts");
+const DRIFT = join(SERVICES, "neurobagel-drift.ts");
 const real = createTree();
 
 function featureOf(tree: Tree): string[] {
@@ -64,11 +67,49 @@ function codeOf(tree: Tree, file: string): string {
 }
 
 const BOUNDARY = new Set([join(SRC, "routes/data.ts"), join(SERVICES, "data-router.ts")]);
+const PUBLIC_API_HOST = /\bapi\.github\.com\b/;
 
 /** A scratch file the planted violations live in: not the writer, not part of the feature unless named so. */
 const SCRATCH = join(SERVICES, "scratch-not-the-writer.ts");
 const planted = (text: string, file = "services/scratch-not-the-writer.ts") =>
   createTree({ [file]: text });
+
+const FORBIDDEN_NAMES =
+  /\b(sendEmail|sendBroadcast|sendAnonymity\w*Email|repository_dispatch|getDatasetsToken|createOrUpdateFile|createIssue|triggerWorkflow|RESEND_API_KEY|api\.github\.com)\b/;
+
+/**
+ * The ONE exemption: the upstream drift reader names the public GitHub API host, to read it.
+ * Every other forbidden name stays forbidden there, and the host stays forbidden everywhere
+ * else; `describe("the upstream drift reader")` below holds what it does with that host to a
+ * plain GET.
+ */
+const PUBLIC_READ_HOST = PUBLIC_API_HOST;
+const exempt = (file: string, text: string): boolean =>
+  file === DRIFT && PUBLIC_READ_HOST.test(text) && !FORBIDDEN_NAMES_WITHOUT_HOST.test(text);
+const FORBIDDEN_NAMES_WITHOUT_HOST =
+  /\b(sendEmail|sendBroadcast|sendAnonymity\w*Email|repository_dispatch|getDatasetsToken|createOrUpdateFile|createIssue|triggerWorkflow|RESEND_API_KEY)\b/;
+
+/** The names the feature uses, as identifiers and as strings (a name split in two included). */
+function forbiddenNames(tree: Tree): string[] {
+  const hits: string[] = [];
+  for (const file of featureOf(tree)) {
+    const sf = parse(tree, file);
+    const visit = (n: ts.Node): void => {
+      if (ts.isIdentifier(n) && FORBIDDEN_NAMES.test(n.text)) {
+        hits.push(`${rel(file)}: ${n.text}`);
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+    for (const s of foldedStrings(sf)) {
+      const text = s.replaceAll(HOLE, "");
+      if (FORBIDDEN_NAMES.test(text) && !exempt(file, text)) {
+        hits.push(`${rel(file)}: "${s.slice(0, 40)}"`);
+      }
+    }
+  }
+  return hits;
+}
 
 describe("the feature is the set of files this scan thinks it is", () => {
   test("discovery finds the modules, so nothing below passes over an empty list", () => {
@@ -77,6 +118,7 @@ describe("the feature is the set of files this scan thinks it is", () => {
         "routes/admin/neurobagel.ts",
         "routes/neurobagel.ts",
         "services/neurobagel-curation.ts",
+        "services/neurobagel-drift.ts",
         "services/neurobagel-eligibility.ts",
         "services/neurobagel-fingerprint.ts",
         "services/neurobagel-gather.ts",
@@ -85,6 +127,7 @@ describe("the feature is the set of files this scan thinks it is", () => {
         "services/neurobagel-plan.ts",
         "services/neurobagel-status.ts",
         "services/neurobagel-store.ts",
+        "services/neurobagel-verify.ts",
         "services/neurobagel-writer.ts",
       ].sort(),
     );
@@ -155,6 +198,7 @@ describe("only the writer writes the bucket", () => {
         "routes/neurobagel.ts",
         "services/neurobagel-ops.ts",
         "services/neurobagel-status.ts",
+        "services/neurobagel-verify.ts",
         "services/neurobagel-writer.ts",
         "types/bindings.ts",
       ].sort(),
@@ -373,8 +417,6 @@ describe("nothing in the feature sends mail or dispatches to GitHub", () => {
   // live mail key and records everything it speaks to.
   const FORBIDDEN_MODULE =
     /^(services\/(email|broadcast|approval-dispatch|import-failure-issue|notices|publication-orchestrator|central-manifest|doi|doi-metadata|doi-registry|doi-reconcile|datacite|ezid|zenodo|github-auth|github)(\.ts|\/.*)|routes\/(callbacks|webhooks)\/.*)$/;
-  const FORBIDDEN_NAMES =
-    /\b(sendEmail|sendBroadcast|sendAnonymity\w*Email|repository_dispatch|getDatasetsToken|createOrUpdateFile|createIssue|triggerWorkflow|RESEND_API_KEY|api\.github\.com)\b/;
 
   /** What a feature, as laid out in `tree`, loads that it must not: with how it got there. */
   function reached(tree: Tree): { forbidden: string[]; unanalyzable: string[]; size: number } {
@@ -386,27 +428,6 @@ describe("nothing in the feature sends mail or dispatches to GitHub", () => {
       unanalyzable: closure.unanalyzable.map((u) => `${rel(u.file)}: ${u.text}`),
       size: closure.files.size,
     };
-  }
-
-  /** The names the feature uses, as identifiers and as strings (a name split in two included). */
-  function forbiddenNames(tree: Tree): string[] {
-    const hits: string[] = [];
-    for (const file of featureOf(tree)) {
-      const sf = parse(tree, file);
-      const visit = (n: ts.Node): void => {
-        if (ts.isIdentifier(n) && FORBIDDEN_NAMES.test(n.text)) {
-          hits.push(`${rel(file)}: ${n.text}`);
-        }
-        ts.forEachChild(n, visit);
-      };
-      visit(sf);
-      for (const s of foldedStrings(sf)) {
-        if (FORBIDDEN_NAMES.test(s.replaceAll(HOLE, ""))) {
-          hits.push(`${rel(file)}: "${s.slice(0, 40)}"`);
-        }
-      }
-    }
-    return hits;
   }
 
   test("the transitive closure of the feature loads no mail, GitHub-write, registrar or webhook module", () => {
@@ -522,6 +543,213 @@ describe("nothing in the feature sends mail or dispatches to GitHub", () => {
     for (const file of featureOf(real)) {
       expect(codeOf(real, file), rel(file)).not.toMatch(/dataset_anonymity/);
     }
+  });
+});
+
+describe("the verification sweep reports and never repairs", () => {
+  // Behavioural twin: neurobagel-verify.test.ts runs the sweep against a store holding residue
+  // and a missing dataset and shows the bucket, the catalog and every request unchanged except
+  // for the heartbeat. The scans here prove the absences a run cannot: no second kind of write.
+  const SWEEP_MODULES = [VERIFY, DRIFT];
+  const SQL_WRITE = /\b(INSERT|UPDATE|DELETE|DROP|ALTER|REPLACE|CREATE)\b/;
+  const WRITE_METHODS = /^(PUT|PATCH|DELETE)$/;
+
+  /** Strings of a module that are, or contain, a SQL write statement. */
+  const sqlWrites = (tree: Tree, file: string): string[] =>
+    foldedStrings(parse(tree, file)).filter((str) => SQL_WRITE.test(str.replaceAll(HOLE, "")));
+
+  /**
+   * Every `fetch(...)` call of a module: the option keys, and the string-literal value of each
+   * key that has one. `<not a literal>` is a call whose options cannot be read, `<spread>` a key
+   * that cannot be named; either one fails every shape below.
+   */
+  interface FetchCall {
+    keys: string[];
+    literal: Record<string, string>;
+  }
+  function fetchCalls(tree: Tree, file: string): FetchCall[] {
+    const out: FetchCall[] = [];
+    const visit = (n: ts.Node): void => {
+      if (
+        ts.isCallExpression(n) &&
+        ts.isIdentifier(n.expression) &&
+        n.expression.text === "fetch"
+      ) {
+        const options = n.arguments[1];
+        if (options === undefined) out.push({ keys: [], literal: {} });
+        else if (!ts.isObjectLiteralExpression(options)) {
+          out.push({ keys: ["<not a literal>"], literal: {} });
+        } else {
+          const call: FetchCall = { keys: [], literal: {} };
+          for (const p of options.properties) {
+            if (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) {
+              const key = p.name.getText();
+              call.keys.push(key);
+              if (ts.isPropertyAssignment(p) && ts.isStringLiteralLike(p.initializer)) {
+                call.literal[key] = p.initializer.text;
+              }
+            } else call.keys.push("<spread>");
+          }
+          out.push(call);
+        }
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(parse(tree, file));
+    return out;
+  }
+  const sameKeys = (a: string[], b: string[]) => [...a].sort().join() === [...b].sort().join();
+  /** A plain read: headers, a signal, and a redirect that is NOT followed. No method, no body. */
+  const isPlainRead = (c: FetchCall) =>
+    sameKeys(c.keys, ["headers", "redirect", "signal"]) && c.literal.redirect === "manual";
+  /** The one question put to the node: a fixed method, a fixed body, no redirect followed. */
+  const isDatasetsQuery = (c: FetchCall) =>
+    sameKeys(c.keys, ["method", "headers", "body", "redirect", "signal"]) &&
+    c.literal.method === "POST" &&
+    c.literal.body === "{}" &&
+    c.literal.redirect === "manual";
+
+  /** String literals of a module that say what KIND of dataset something concerns. */
+  const KIND = /anonym|deposit|\bclass\b/i;
+  const kindStrings = (tree: Tree, file: string): string[] =>
+    foldedStrings(parse(tree, file))
+      .map((str) => str.replaceAll(HOLE, ""))
+      .filter((str) => KIND.test(str));
+
+  test("the sweep modules write no SQL: every statement they hold is a read", () => {
+    for (const file of SWEEP_MODULES) expect(sqlWrites(real, file), rel(file)).toEqual([]);
+  });
+
+  test("a write statement is found, including one built from two halves; a read is not", () => {
+    const found = (code: string) => sqlWrites(planted(code), SCRATCH);
+    expect(found("export const q = 'UPDATE datasets SET anonymous = 0';")).toHaveLength(1);
+    expect(found("export const q = 'DEL' + 'ETE FROM audit_log';")).toHaveLength(1);
+    expect(found("export const q = `INSERT INTO audit_log VALUES (1)`;")).toHaveLength(1);
+    expect(
+      found("export const q = 'SELECT dataset_id FROM datasets WHERE anonymous IS NOT 0';"),
+    ).toEqual([]);
+  });
+
+  test("the only write a sweep module makes to D1 goes through the audit helper", () => {
+    // The helper is the one shape every audit row converges on (db/audit-log.ts); a sweep that
+    // wrote the catalog directly would need a SQL string, which the scan above would find.
+    expect(codeOf(real, VERIFY)).toMatch(/auditLogStatement/);
+    expect(codeOf(real, DRIFT)).not.toMatch(/\.run\(|\.exec\(|\.batch\(/);
+  });
+
+  test("neither module names a write method of HTTP", () => {
+    for (const file of SWEEP_MODULES) {
+      const strings = foldedStrings(parse(real, file)).map((str) => str.replaceAll(HOLE, ""));
+      expect(
+        strings.filter((str) => WRITE_METHODS.test(str)),
+        rel(file),
+      ).toEqual([]);
+    }
+  });
+
+  describe("the upstream drift reader", () => {
+    test("every fetch is a plain read: no method, no body, no credential, and no redirect is followed", () => {
+      const calls = fetchCalls(real, DRIFT);
+      // Not vacuous: it does fetch.
+      expect(calls.length).toBeGreaterThanOrEqual(1);
+      for (const call of calls) expect(isPlainRead(call), call.keys.join(",")).toBe(true);
+      expect(codeOf(real, DRIFT)).not.toMatch(/authorization|cookie|bearer|token|secret|password/i);
+    });
+
+    test("a fetch with a method, a body, a spread, a followed redirect or none declared is found", () => {
+      const bad = (code: string) =>
+        fetchCalls(planted(code), SCRATCH).filter((call) => !isPlainRead(call));
+      expect(bad("export const f = () => fetch('x', { method: 'POST' });")).toHaveLength(1);
+      expect(
+        bad("export const f = () => fetch('x', { body: 'b', signal: s, redirect: 'manual' });"),
+      ).toHaveLength(1);
+      expect(bad("export const f = (o: RequestInit) => fetch('x', o);")).toHaveLength(1);
+      expect(bad("export const f = (o: RequestInit) => fetch('x', { ...o });")).toHaveLength(1);
+      expect(bad("export const f = () => fetch('x', { headers: {}, signal: s });")).toHaveLength(1);
+      expect(
+        bad("export const f = () => fetch('x', { headers: {}, signal: s, redirect: 'follow' });"),
+      ).toHaveLength(1);
+      expect(bad("export const f = () => fetch('x');")).toHaveLength(1);
+      expect(
+        bad("export const f = () => fetch('x', { headers: {}, signal: s, redirect: 'manual' });"),
+      ).toEqual([]);
+    });
+
+    test("it is the only module that names the public GitHub API host, and a copy elsewhere is found", () => {
+      const holders = featureOf(real).filter((f) =>
+        foldedStrings(parse(real, f)).some((str) => PUBLIC_API_HOST.test(str)),
+      );
+      expect(holders.map(rel)).toEqual(["services/neurobagel-drift.ts"]);
+      const planted2 = createTree({
+        "services/neurobagel-plan.ts": `${readFileSync(join(SERVICES, "neurobagel-plan.ts"), "utf8")}\nexport const h = "https://api.github.com/x";`,
+      });
+      expect(forbiddenNames(planted2)).toHaveLength(1);
+    });
+  });
+
+  describe("the node probe and the registration reads", () => {
+    test("the verification module makes exactly two kinds of request: a plain read, and the one datasets query", () => {
+      const calls = fetchCalls(real, VERIFY);
+      expect(calls).toHaveLength(2);
+      expect(calls.filter(isPlainRead)).toHaveLength(1);
+      expect(calls.filter(isDatasetsQuery)).toHaveLength(1);
+      expect(codeOf(real, VERIFY)).not.toMatch(/authorization|cookie|bearer|credentials/i);
+    });
+
+    test("a different method, a different body, a body that is not fixed, or a followed redirect is found", () => {
+      const notDatasetsQuery = (options: string) =>
+        fetchCalls(planted(`export const f = () => fetch('x', ${options});`), SCRATCH).filter(
+          (c) => !isDatasetsQuery(c),
+        );
+      const good = "{ method: 'POST', headers: {}, body: '{}', redirect: 'manual', signal: s }";
+      expect(notDatasetsQuery(good)).toEqual([]);
+      expect(notDatasetsQuery(good.replace("'POST'", "'PUT'"))).toHaveLength(1);
+      expect(notDatasetsQuery(good.replace("'{}'", "JSON.stringify(q)"))).toHaveLength(1);
+      expect(notDatasetsQuery(good.replace("'{}'", "'{\"x\":1}'"))).toHaveLength(1);
+      expect(notDatasetsQuery(good.replace("'manual'", "'follow'"))).toHaveLength(1);
+      expect(notDatasetsQuery(good.replace(", redirect: 'manual'", ""))).toHaveLength(1);
+      expect(
+        notDatasetsQuery(good.replace("headers: {}, ", "headers: {}, credentials: 'include', ")),
+      ).toHaveLength(1);
+    });
+  });
+
+  describe("what a reason may say", () => {
+    // Behavioural twin: neurobagel-verify.test.ts collects every reason a sweep produced across
+    // its scenarios. A reason can reach the weekly report, which is filed on a public-facing
+    // repository, so it may say a record is wrong and never that it belongs to a concealed
+    // deposit: the audit log says that, and only the audit log.
+    const ALLOWED_IN_VERIFY = new Set([
+      // The audit action and the check code of the one finding that goes to the audit log, and
+      // the query that finds the rows it concerns. None of them is a reason.
+      "neurobagel_verify_anonymity_finding",
+      "node_serves_anonymous_record",
+      "SELECT dataset_id FROM datasets WHERE anonymous IS NOT 0",
+    ]);
+    const WEEKLY_TEXT = [
+      join(SRC, "../../shared/contract/weekly-attention.ts"),
+      join(SERVICES, "import-weekly-summary.ts"),
+    ];
+
+    test("no string of the sweep modules says what kind of dataset a finding concerns, but the three that are not reasons", () => {
+      expect(kindStrings(real, DRIFT)).toEqual([]);
+      expect(kindStrings(real, VERIFY).filter((str) => !ALLOWED_IN_VERIFY.has(str))).toEqual([]);
+      // Not vacuous: the three allowed strings are really there.
+      expect(new Set(kindStrings(real, VERIFY))).toEqual(ALLOWED_IN_VERIFY);
+    });
+
+    test("no string the weekly report renders, or decides its headline from, says it", () => {
+      for (const file of WEEKLY_TEXT) expect(kindStrings(real, file), file).toEqual([]);
+    });
+
+    test("a string that says it is found, however it is built; one that does not is not", () => {
+      const found = (code: string) => kindStrings(planted(code), SCRATCH);
+      expect(found("export const r = '1 anonymity-class finding';")).toHaveLength(1);
+      expect(found("export const r = 'a deposit ' + 'in the store';")).toHaveLength(1);
+      expect(found("export const r = `${n} record(s) of the Class`;")).toHaveLength(1);
+      expect(found("export const r = '3 record(s) are not protected';")).toEqual([]);
+      expect(found("export const r = 'subclass of nothing';")).toEqual([]);
+    });
   });
 });
 
@@ -699,5 +927,31 @@ describe("the committed configuration is OFF", () => {
     expect(reconcile).toBeLessThan(nonProdTail);
     expect(index.slice(reconcile - 40, reconcile)).toMatch(/ctx\.waitUntil\(\s*$/);
     expect(index.slice(reconcile, reconcile + 1800)).toContain(".catch(");
+  });
+
+  test("the verification sweep's cron call is production-only, inside waitUntil, with a catch, and the raw sweep is never called there", () => {
+    // Epic #1586 phase 6. A new daily job is production-only by default (AGENTS.md); this one
+    // sends no mail and dispatches nothing, so the fence is the rule and not a necessity.
+    const index = readFileSync(join(SRC, "index.ts"), "utf8");
+    const start = index.indexOf("if (prodOnlyJobs) {");
+    const call = index.indexOf("runNeurobagelVerificationSweepCron(env)");
+    const nonProdTail = index.indexOf("fetchAndSyncCitationCounts(env.DB)");
+    expect(start).toBeGreaterThan(-1);
+    expect(call).toBeGreaterThan(start);
+    expect(call).toBeLessThan(nonProdTail);
+    expect(index.slice(call - 40, call)).toMatch(/ctx\.waitUntil\(\s*$/);
+    expect(index.slice(call, call + 1200)).toContain(".catch(");
+    // Called once, and only the wrapper: the raw sweep has no environment fence of its own.
+    expect(index.split("runNeurobagelVerificationSweepCron(env)").length - 1).toBe(1);
+    expect(index).not.toMatch(/\brunNeurobagelVerificationSweep\(/);
+  });
+
+  test("no verification name is on the dev allowlist, and the committed configuration sets neither probe address", () => {
+    expect([...DEV_CRON_ALLOWLIST].some((n) => /verif/i.test(n))).toBe(false);
+    for (const name of ["NEUROBAGEL_NODE_URL", "NEUROBAGEL_FEDERATION_URL"]) {
+      expect(config.vars?.[name], name).toBeUndefined();
+      expect(config.env?.dev?.vars?.[name], name).toBeUndefined();
+      expect(text).not.toMatch(new RegExp(`^\\s*${name}\\s*=`, "m"));
+    }
   });
 });

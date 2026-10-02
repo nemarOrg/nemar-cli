@@ -26,8 +26,10 @@ import type {
   NeurobagelRegenerateRequest,
   NeurobagelRunResult,
   NeurobagelStatus,
+  NeurobagelVerifyResult,
 } from "../../../shared/contract/neurobagel-admin.js";
 import type { BackfillNameOutcome } from "../../../shared/contract/publication.js";
+import type { NeurobagelWeekly } from "../../../shared/contract/weekly-attention.js";
 import { request } from "./client.js";
 
 // ============================================================================
@@ -1554,6 +1556,8 @@ export type {
   NeurobagelRunResult,
   NeurobagelRunSummary,
   NeurobagelStatus,
+  NeurobagelVerification,
+  NeurobagelVerifyResult,
 } from "../../../shared/contract/neurobagel-admin.js";
 
 /**
@@ -1573,6 +1577,18 @@ export async function neurobagelRegenerate(
 
 export async function getNeurobagelStatus(): Promise<NeurobagelStatus> {
   return request<NeurobagelStatus>("/admin/neurobagel/status", { method: "GET" }, true);
+}
+
+/**
+ * Run the Neurobagel verification sweep now (epic #1586 phase 6). It reports and never
+ * repairs; it works on staging and writes only its own heartbeat.
+ */
+export async function neurobagelVerify(): Promise<NeurobagelVerifyResult> {
+  return request<NeurobagelVerifyResult>(
+    "/admin/neurobagel/verify",
+    { method: "POST", body: "{}" },
+    true,
+  );
 }
 
 // ============================================================================
@@ -1856,6 +1872,10 @@ export interface WeeklySummaryResponse {
     parked: WeeklyParkedDataset[] | null;
     issuesClosed: number | null;
     issuesRelabelled: number | null;
+    /** The daily Neurobagel verification runs of the window; null when none was recorded. */
+    neurobagel: NeurobagelWeekly | null;
+    /** Findings that need a person, as a count with no kind; null when it could not be counted. */
+    neurobagelFindings: number | null;
     errors: { stage: string; error: string }[];
   } | null;
   issue: { number: number | null; action: "created" | "would-create" | "already-filed" } | null;

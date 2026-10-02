@@ -1,6 +1,9 @@
 # ADR 0067: Anonymity is verified on a schedule, and reported, never repaired
 
 **Status:** accepted
+**Amendment 2026-10-02 (#1592, epic #1586):** the sweep also verifies that no anonymous deposit is present in the Neurobagel artifact store.
+The verdict stands: it reports, it never repairs, it files no GitHub issue, and what it cannot read is `unchecked`.
+Read "Amendment 2026-10-02" below for the check and for what the weekly report may and may not say about it.
 **Date:** 2026-09-16
 **Owner:** Seyed Yahya Shirazi
 
@@ -286,6 +289,40 @@ an over-reported finding costs a depositor a look at a sentence that was already
 under-reported one is the disclosure this sweep exists to catch.
 Extending the vocabulary to other languages is future work, not a defect in this one.
 
+## Amendment 2026-10-02 (#1592): the Neurobagel store is a surface the sweep reads
+
+Epic #1586 puts public datasets into Neurobagel's federated search, and the private store that the node pulls from (ADR 0084) is a new surface a concealed deposit must never reach.
+The writer excludes an anonymous deposit by the row's flag, the gathered document must say `anonymous: false` as a second guard, and the read route re-checks eligibility on every request.
+Those are claims about code that nothing re-reads, which is this ADR's premise, so the sweep reads the store.
+
+**The invariant.**
+For every anonymous deposit the sweep examines, the store holds nothing for its id: no artifact, no object whose name contains its id, and no mention of its id anywhere in the index, parseable or not.
+An id is found wherever it is followed by anything that is not a digit and is not preceded by a letter or digit, which covers every name the writer produces (`<id>.jsonld`, `<id>_annotated.json`, `<id>_dataset_description.json`) as well as a name it did not.
+A deposit that fails is reported as `neurobagel_store_holds_deposit`, severity `invariant`: a NEMAR bug, and the same kind of finding as a public repository or a resolving DOI.
+It travels exactly as every other invariant finding does.
+The audit log gets the row, the depositor and the administrators get the mail under `dataset_anonymity`, and `sweep_stamps` carries the verdict.
+No GitHub issue is filed, for the reason this ADR already gives.
+
+**The reading.**
+One listing of the store per pass, shared by every deposit, and only when there is a deposit to look for.
+A store that could not be listed makes the check `unchecked`, so the verdict is `unverifiable` and never `verified` (ADR 0054).
+An environment with no store bound has nothing there to find, and its verdict is unchanged.
+
+**The weekly report.**
+The daily Neurobagel verification sweep (`neurobagel-verify.ts`, epic #1586) reports on the federation as a whole, and the weekly report gains a section from it.
+That section folds findings into its generic Neurobagel attention total, with no label, kind or identifier of its own.
+It counts findings, not rows: each dataset once, from the writer's ledger (what stands), the anonymity sweep and the verification sweep, whether or not the daily sweep wrote a row that week.
+Every sentence a check can produce says that a record is wrong and never what kind of dataset it belongs to, and tests scan every reason a sweep produced and every string the report renders for that.
+The one case of this kind the verification sweep can find itself, a record the node serves for a deposit, goes to the audit log and nowhere else: that sweep loads no mail code, and a source scan holds it to that.
+The mail for a deposit in the store stays with this sweep.
+
+**Digests.**
+The verification sweep's heartbeat remembers the residue it was following as short digests of dataset ids, never as ids.
+A six-digit id can be recovered from a digest by trying every id, which is intentional and acceptable only because `audit_log` is readable by administrators alone; it is not a defect, and it is the reason the digests are not shown by the status route or the report.
+
+**What does not change.**
+The candidate predicate, the cadence, the verdict names, the declared scope limits, and the rule that a finding never quotes what it matched.
+
 ## Consequences
 
 - The sweep is PRODUCTION-ONLY on the cron and deliberately absent from
@@ -353,6 +390,12 @@ Extending the vocabulary to other languages is future work, not a defect in this
   Foundation" / "Blinded Veterans Association" / real grant numbers still reported -- driven
   both at the `isBlindedEntry`/`scanDepositFile` unit level and end to end through
   `runAnonymitySweep`.
+- The 2026-10-02 amendment (#1592): the check is in `backend/src/services/anonymity-sweep.ts`
+  (`NEUROBAGEL_STORE_CHECK`) over `readStoreDatasetIds` in `neurobagel-status.ts`, and its tests are
+  `backend/test/neurobagel-anonymity-store.test.ts`: a planted artifact, an unrecognised object
+  and an index that only mentions the id are each found; a store that cannot be listed is
+  unverifiable; the mail goes to the depositor and to the administrators under
+  `dataset_anonymity`; every request the sweep makes to GitHub is a read.
 - The same-day PR-review follow-up (#1517) added its own tests to
   `backend/test/anonymity-sweep.test.ts`: "unspecified"/"placeholder" as a whole token rather
   than a substring (both directions), the three vocabulary-only entries pinned as intentionally

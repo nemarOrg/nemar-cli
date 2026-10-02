@@ -21,6 +21,11 @@ import {
   startHarness,
   storeKeys,
 } from "./helpers/neurobagel-harness";
+import {
+  RECORDED,
+  type UpstreamStandin,
+  startUpstreamStandin,
+} from "./helpers/neurobagel-upstream";
 
 const ADMIN_KEY = "nb-admin-key-0123456789abcdef0123456789abcdef";
 const MEMBER_KEY = "nb-member-key-0123456789abcdef0123456789abcdef";
@@ -34,16 +39,23 @@ const ctx = {
 
 let h: Harness;
 let adminId = 0;
+// The verification route reads upstream's public API; this is a local server with the real
+// recorded answers, so no test here reaches the internet.
+let upstream: UpstreamStandin;
 
 beforeAll(async () => {
   h = await startHarness();
+  upstream = startUpstreamStandin();
 });
 afterAll(async () => {
+  upstream.stop();
   await h.dispose();
 });
 
 beforeEach(async () => {
   await h.reset();
+  upstream.answers = { ...RECORDED };
+  upstream.requests.length = 0;
   for (const [username, role, key] of [
     ["nbadmin", "admin", ADMIN_KEY],
     ["nbmember", "member", MEMBER_KEY],
@@ -450,5 +462,145 @@ describe("status", () => {
     expect(s.counts.missing).toBeNull();
     expect(s.counts.stale).toBeNull();
     expect(s.warnings.join(" ")).toMatch(/eligible datasets could not be read/);
+  });
+});
+
+describe("verify: the verification sweep on demand", () => {
+  type Verify = {
+    trigger: string;
+    failed: boolean;
+    overall: string;
+    heartbeat_written: boolean;
+    checks: Record<
+      string,
+      { verdict: string; reason: string; counts: Record<string, number | null> }
+    >;
+    warnings: string[];
+  };
+  const verify = (opts: { key?: string | null; env?: Bindings } = {}) =>
+    call("POST", "/admin/neurobagel/verify", opts);
+  const heartbeats = () =>
+    h.db
+      .query(
+        "SELECT user_id, resource_id, details FROM audit_log WHERE action = 'neurobagel_verification'",
+      )
+      .all() as { user_id: number | null; resource_id: string; details: string }[];
+
+  test("a member is refused and an unauthenticated caller is not let in, and nothing is read", async () => {
+    expect((await verify({ key: MEMBER_KEY })).status).toBe(403);
+    expect((await verify({ key: null })).status).toBe(401);
+    expect(upstream.requests).toEqual([]);
+    expect(heartbeats()).toEqual([]);
+  });
+
+  test("an admin gets the verdicts, with no body, and one heartbeat recorded as an on-demand run", async () => {
+    seedSynthetic(h, "nm000800");
+    const res = await verify();
+    expect(res.status).toBe(200);
+    const v = (await res.json()) as Verify;
+    expect(v.trigger).toBe("admin");
+    expect(v.failed).toBe(false);
+    expect(v.heartbeat_written).toBe(true);
+    expect(Object.keys(v.checks)).toEqual(["store", "node", "registration", "drift"]);
+    // Nothing is configured for the node or the federation here, and upstream equals the pins.
+    expect(v.checks.node?.verdict).toBe("unchecked");
+    expect(v.checks.registration?.verdict).toBe("unchecked");
+    expect(v.checks.drift?.verdict).toBe("healthy");
+    expect(v.checks.store?.verdict).toBe("healthy");
+    expect(heartbeats()).toHaveLength(1);
+    expect(heartbeats()[0]).toMatchObject({ user_id: null, resource_id: "admin" });
+  });
+
+  test("it works on staging, which is the whole reason the sweep is unguarded: only the cron wrapper is production-only", async () => {
+    for (const environment of ["staging", "development", "test"] as const) {
+      const res = await verify({ env: h.env({ ENVIRONMENT: environment }) });
+      expect(res.status, environment).toBe(200);
+      expect(((await res.json()) as Verify).heartbeat_written).toBe(true);
+    }
+    expect(heartbeats()).toHaveLength(3);
+  });
+
+  test("it reports and never repairs: a store with residue is left exactly as it was", async () => {
+    seedSynthetic(h, "nm000800");
+    // Written, then the dataset goes private: its artifacts are now residue.
+    await call("POST", "/admin/neurobagel/regenerate", { body: { execute: true } });
+    h.db.run("UPDATE datasets SET visibility = 'private' WHERE dataset_id = 'nm000800'");
+    const before = await storeKeys(h.bucket);
+    const rec = recordWrites(h.bucket);
+    const res = await verify({ env: h.env({ NEUROBAGEL: rec.bucket }) });
+    expect(((await res.json()) as Verify).checks.store?.counts.residue).toBe(1);
+    expect(rec.log).toEqual([]);
+    expect(await storeKeys(h.bucket)).toEqual(before);
+    expect(
+      h.db.query("SELECT visibility FROM datasets WHERE dataset_id = 'nm000800'").get(),
+    ).toEqual({
+      visibility: "private",
+    });
+  });
+
+  test("an upstream that has moved is an alarm in the answer, and the status then shows it", async () => {
+    upstream.answers = {
+      ...upstream.answers,
+      "/repos/neurobagel/query-tool/releases/latest": {
+        ...(upstream.answers["/repos/neurobagel/query-tool/releases/latest"] as object),
+        tag_name: "v0.99.0",
+      },
+    };
+    const v = (await (await verify()).json()) as Verify;
+    expect(v.overall).toBe("alarm");
+    expect(v.checks.drift?.reason).toContain("query tool v0.17.0 -> v0.99.0");
+    const s = (await (await call("GET", "/admin/neurobagel/status")).json()) as {
+      verification: Verify | null;
+    };
+    expect(s.verification?.overall).toBe("alarm");
+    expect(s.verification?.checks.drift?.verdict).toBe("alarm");
+  });
+
+  test("the answer names no dataset: counts and verdicts only", async () => {
+    seedSynthetic(h, "nm000800");
+    const body = JSON.stringify(await (await verify()).json());
+    expect(body).not.toMatch(/\b(nm|on)\d{6}\b/);
+  });
+});
+
+describe("status carries the verification verdicts", () => {
+  type WithVerification = {
+    verification: {
+      overall: string;
+      at: string;
+      trigger: string;
+      checks: Record<string, { verdict: string }>;
+    } | null;
+    warnings: string[];
+  };
+  const status = async () =>
+    (await (await call("GET", "/admin/neurobagel/status")).json()) as WithVerification;
+
+  test("before any run it is null: unknown, which a reader must not take for healthy", async () => {
+    const s = await status();
+    expect(s.verification).toBeNull();
+    expect(s.warnings.join(" ")).not.toMatch(/verification/);
+  });
+
+  test("after a run it is the latest heartbeat of any trigger, verbatim", async () => {
+    await call("POST", "/admin/neurobagel/verify");
+    const s = await status();
+    expect(s.verification?.trigger).toBe("admin");
+    expect(s.verification?.overall).toBe("healthy");
+    expect(Object.values(s.verification?.checks ?? {}).map((c) => c.verdict)).toEqual([
+      "healthy",
+      "unchecked",
+      "unchecked",
+      "healthy",
+    ]);
+  });
+
+  test("a heartbeat that cannot be read as one is a warning and not a healthy answer", async () => {
+    h.db.run(
+      "INSERT INTO audit_log (action, resource_type, resource_id, details) VALUES ('neurobagel_verification', 'neurobagel', 'cron', '{\"overall\":\"healthy\"}')",
+    );
+    const s = await status();
+    expect(s.verification).toBeNull();
+    expect(s.warnings.join(" ")).toMatch(/heartbeat could not be read/);
   });
 });

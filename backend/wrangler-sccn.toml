@@ -194,6 +194,11 @@ bucket_name = "nemar-news-media"
 # Everything is OFF until the owner sets NEUROBAGEL_WRITER_ENABLED = "1" in [vars]
 # (deliberately absent here) and creates the NEUROBAGEL_READ_TOKEN secret; with the
 # variable absent the writer, the hooks and the reconcile do nothing at all.
+# The daily verification sweep (phase 6) needs no switch and writes only its heartbeat. Two
+# OPTIONAL variables, deliberately absent from this file, turn on its network checks: set
+# NEUROBAGEL_NODE_URL (the node's address) to probe the node, and NEUROBAGEL_FEDERATION_URL
+# (the public federation's address) to check registration. While one is unset its check
+# reports "unchecked", never healthy.
 [[r2_buckets]]
 binding = "NEUROBAGEL"
 bucket_name = "nemar-neurobagel"

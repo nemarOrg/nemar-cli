@@ -1309,7 +1309,7 @@ async function runTestsOnce(files: string[]): Promise<TestRun> {
  * did not load) run them once more before believing it. A second such failure is returned as
  * it is, and the caller reports the mutant as inconclusive, never as killed.
  */
-async function runTests(files: string[]): Promise<TestRun> {
+export async function runTests(files: string[]): Promise<TestRun> {
   const first = await runTestsOnce(files);
   if (first.passed || first.asserted.length > 0) return first;
   return runTestsOnce(files);
