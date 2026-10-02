@@ -240,6 +240,19 @@ nb_mem_available_mb() {
   fi
 }
 
+# Which boot of the host this is, and how long ago it began. Empty where /proc does not say (a Mac).
+nb_boot_id() {
+  if [ -r /proc/sys/kernel/random/boot_id ]; then
+    tr -d '\n' </proc/sys/kernel/random/boot_id
+  fi
+}
+
+nb_uptime_s() {
+  if [ -r /proc/uptime ]; then
+    awk '{printf "%d", $1}' /proc/uptime
+  fi
+}
+
 nb_load1() {
   if [ -r /proc/loadavg ]; then
     cut -d' ' -f1 /proc/loadavg

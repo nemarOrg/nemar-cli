@@ -29,10 +29,22 @@ nb_decide_mem_preflight_ok() { # available_mb min_mb
 
 # ---------------------------------------------------------------------------------------------
 # Hold. A node on hold must stay down, so a hold wins over a reload in progress, except when the
-# reload IS the operator ending the hold (nb unhold).
+# reload IS the operator ending that hold (nb unhold). A hold with different text is a NEWER hold,
+# set by `nb hold` while the unhold's reload was running, and it wins like any other.
 # ---------------------------------------------------------------------------------------------
-nb_decide_hold_stop() { # hold_present(0|1) from_unhold(0|1) -> prints stop or go
-  if [ "$1" = 1 ] && [ "$2" = 0 ]; then echo stop; else echo go; fi
+nb_decide_hold_stop() { # present(0|1) from_unhold(0|1) ending_text current_text -> prints stop or go
+  if [ "$1" != 1 ]; then echo go; return 0; fi
+  if [ "$2" != 1 ]; then echo stop; return 0; fi
+  # An unhold that does not say which hold it is ending (no text) ends whatever is there.
+  if [ -z "$3" ] || [ "$3" = "$4" ]; then echo go; else echo stop; fi
+}
+
+# `nb unhold` removes the hold it was asked to end, and only that one. It reads the flag when it
+# starts (READ) and, when its work is done, looks at the flag again (NOW; empty when it is gone).
+# A different text means `nb hold` ran again in between, and that newer hold is not ours to end.
+nb_decide_unhold_flag() { # read_text now_text -> prints remove, keep or gone
+  if [ -z "$2" ]; then echo gone; return 0; fi
+  if [ "$1" = "$2" ]; then echo remove; else echo keep; fi
 }
 
 # A failed reload is held against the CONTENT (and not retried for a while) only when the content
@@ -46,8 +58,12 @@ nb_decide_blame_content() { # held(0|1) mem_breach(0|1) -> prints yes or no
 # ---------------------------------------------------------------------------------------------
 
 # A release name is <UTC timestamp>-<8 hex>[-<n>]. Anything else is never used as a path.
+# The match is on the WHOLE string: `grep` works line by line, so a value such as "valid<newline>../.."
+# matched when any one line did. [[ =~ ]] anchors on the string, and a newline is refused outright.
 nb_release_name_ok() {
-  printf '%s' "$1" | grep -qE '^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}(-[0-9]+)?$'
+  local re='^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}(-[0-9]+)?$'
+  case "$1" in *$'\n'*) return 1 ;; esac
+  [[ "$1" =~ $re ]]
 }
 
 # Prints the first candidate that is a well-formed release name, is not the one named as `current`,
@@ -96,6 +112,39 @@ nb_guard_load_rule() { # load streak threshold samples
   fi
 }
 
+# The baseline of the other containers (name, start time, restart count) belongs to ONE boot of the
+# host. After a reboot every container has a new start time, and a baseline taken before it would
+# read all of them as restarted: a guard allowed to act on the neighbour rule would then stop the
+# node a few seconds after every boot. So the baseline carries the boot id it was taken in, and a
+# different boot id (or a host that has only just booted and whose containers are still coming up)
+# means "record it again", never "breach".
+#
+# nb_guard_baseline_render BOOT_ID < neighbour state lines  -> the baseline file text
+nb_guard_baseline_render() { # boot_id
+  printf '#boot_id\t%s\n' "$1"
+  cut -f1-3
+}
+
+# The boot id a baseline was taken in; empty when it has none (a baseline from before this rule).
+nb_guard_baseline_boot_id() { # < baseline text
+  awk -F'\t' '$1 == "#boot_id" { print $2; exit }'
+}
+
+# What the guard does with its baseline before judging the neighbours. Prints one of:
+#   record  take a new baseline now, and judge nothing against the old one
+#   stamp   keep the entries and add the current boot id (a baseline from before boot ids; it is
+#           taken to belong to this boot, which is true for the one-time upgrade it exists for)
+#   keep    judge against the baseline as it is
+# An unknown boot id (no /proc) never forces a record; an unknown uptime never counts as "just booted".
+nb_decide_baseline_action() { # present(0|1) baseline_boot current_boot uptime_s settle_s
+  local present="$1" bboot="$2" cboot="$3" up="$4" settle="$5"
+  if [ "$present" != 1 ]; then echo record; return 0; fi
+  if [ -n "$cboot" ] && [ -n "$bboot" ] && [ "$bboot" != "$cboot" ]; then echo record; return 0; fi
+  if [ -n "$cboot" ] && [ -z "$bboot" ]; then echo stamp; return 0; fi
+  if [ -n "$up" ] && [ "$up" -lt "$settle" ]; then echo record; return 0; fi
+  echo keep
+}
+
 # Neighbour rule. BASELINE_FILE and stdin hold lines "name<TAB>started_at<TAB>restart_count" and
 # "name<TAB>started_at<TAB>restart_count<TAB>health<TAB>state". Prints a ;-separated list such as
 # "svc-a(restarted);svc-b(gone)", or nothing. A container the baseline has never seen is new, not
@@ -103,14 +152,16 @@ nb_guard_load_rule() { # load streak threshold samples
 nb_guard_neighbor_breaches() { # baseline_file < current lines
   local baseline="$1" now n s r h bad=""
   now="$(cat)"
+  # Lines starting with # are the baseline's header (its boot id), not containers.
   while IFS=$'\t' read -r n s r h _; do
     [ -n "$n" ] || continue
-    cut -f1 "$baseline" | grep -qxF "$n" || continue
-    grep -qxF "$(printf '%s\t%s\t%s' "$n" "$s" "$r")" <(cut -f1-3 "$baseline") || bad="$bad $n(restarted)"
+    grep -v '^#' "$baseline" | cut -f1 | grep -qxF "$n" || continue
+    grep -qxF "$(printf '%s\t%s\t%s' "$n" "$s" "$r")" <(grep -v '^#' "$baseline" | cut -f1-3) || bad="$bad $n(restarted)"
     [ "$h" != unhealthy ] || bad="$bad $n(unhealthy)"
   done <<<"$now"
   while IFS=$'\t' read -r n _; do
     [ -n "$n" ] || continue
+    case "$n" in '#'*) continue ;; esac
     printf '%s\n' "$now" | cut -f1 | grep -qxF "$n" || bad="$bad $n(gone)"
   done <"$baseline"
   printf '%s' "${bad# }" | tr ' ' ';'
@@ -147,10 +198,15 @@ nb_loader_problems() { # last_load_json last_ok_epoch now source_set stale_s fre
   fi
 }
 
-# Prints a problem when the guard's heartbeat exists and is older than MAX_AGE seconds. A guard that
-# was running and has gone quiet is itself a finding.
-nb_guard_heartbeat_problem() { # heartbeat_epoch now max_age
-  [ -n "$1" ] || return 0
+# Prints a problem when the guard's heartbeat is older than MAX_AGE seconds (a guard that was running
+# and has gone quiet is itself a finding), or is missing while a guard is EXPECTED (a guard that
+# never started is the same finding). EXPECTED is NB_GUARD_EXPECTED: 1 unless the operator has said
+# in .env that this node runs without one.
+nb_guard_heartbeat_problem() { # heartbeat_epoch now max_age expected(0|1)
+  if [ -z "$1" ]; then
+    if [ "${4:-0}" = 1 ]; then echo "the resource guard has never started (no heartbeat)"; fi
+    return 0
+  fi
   if [ $(($2 - $1)) -gt "$3" ]; then
     echo "the resource guard last sampled $((($2 - $1) / 60)) minutes ago"
   fi
@@ -266,4 +322,50 @@ nb_graph_log_verdict() {
 # it validated, or nothing when the summary line is absent.
 nb_init_counts() {
   sed -n 's/.*successfully extracted from \([0-9]*\)\/\([0-9]*\) JSONLD.*/\1 \2/p' | tail -n 1
+}
+
+# ---------------------------------------------------------------------------------------------
+# `nb compose` passes the operator's arguments to `docker compose` after the project name, the
+# project directory, the env files and the compose files. A global flag in those arguments would
+# override one of them and reach another project, so they are refused. Only the arguments BEFORE
+# the subcommand are global flags: `logs -f` and `up -p` mean something else after it.
+# Prints the offending flag, or nothing when the arguments are fine.
+# ---------------------------------------------------------------------------------------------
+nb_compose_args_refused() { # args...
+  local a
+  while [ $# -gt 0 ]; do
+    a="$1"
+    case "$a" in
+      -p | -p* | --project-name | --project-name=* | --project-directory | --project-directory=* \
+        | -f | -f* | --file | --file=* | --env-file | --env-file=*)
+        printf '%s' "$a"
+        return 0
+        ;;
+      # Global flags that take a separate value: skip the value, it is not the subcommand.
+      --profile | --ansi | --progress | --parallel | --context | -H | --host)
+        shift
+        ;;
+      -*) ;;
+      *) return 0 ;;
+    esac
+    shift
+  done
+  return 0
+}
+
+# ---------------------------------------------------------------------------------------------
+# The stock validator runs in a throwaway container: no network, a memory limit with no swap, a
+# CPU limit, low CPU shares and a high OOM score (the kernel sacrifices it first), a pids limit,
+# no new privileges, the caller's own uid, and the candidate mounted read-only. It carries this
+# project's compose labels (as a one-off), so `nb down` and the guard treat it as this project's
+# and never as another container of the host. One argument per line, so the caller can build an
+# array without word splitting.
+# ---------------------------------------------------------------------------------------------
+nb_validator_args() { # image mem cpus uid_gid input_dir output_dir name
+  printf '%s\n' run --rm --name "$7" --network none \
+    --memory "$2" --memory-swap "$2" --cpus "$3" --cpu-shares 128 --oom-score-adj 500 --pids-limit 128 \
+    --security-opt no-new-privileges:true --user "$4" \
+    --label "com.docker.compose.project=$NB_PROJECT" --label com.docker.compose.oneoff=True \
+    -e NB_CATALOG_MODE=false -e PYTHONDONTWRITEBYTECODE=1 \
+    -v "$5:/input_data:ro" -v "$6:/data" "$1"
 }
