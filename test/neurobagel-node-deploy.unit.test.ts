@@ -32,6 +32,7 @@ import {
   readlinkSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -231,6 +232,8 @@ function serve(
     missing?: string[];
     corrupt?: string[];
     redirectIndexTo?: string;
+    /** Answer every artifact (not the index) with a 302 to this base URL. */
+    redirectArtifactsTo?: string;
     /** Serve /?token=...<name> as if the base URL carried a query string. */
     queryStyle?: boolean;
   } = {},
@@ -251,6 +254,12 @@ function serve(
       log.push({ path, headers });
       if (opts.redirectIndexTo && path === "index.json") {
         return new Response(null, { status: 302, headers: { location: opts.redirectIndexTo } });
+      }
+      if (opts.redirectArtifactsTo && path !== "index.json") {
+        return new Response(null, {
+          status: 302,
+          headers: { location: `${opts.redirectArtifactsTo}/${path}` },
+        });
       }
       if (opts.delayMs && path !== "index.json") await Bun.sleep(opts.delayMs);
       if (opts.missing?.includes(path)) return new Response("gone", { status: 404 });
@@ -339,6 +348,20 @@ describe("the public tree carries no host posture", () => {
     ],
     ["a crontab listing", new RegExp(["crontab ", "-l"].join(""))],
     ["the host's CPU and memory", /\b[0-9]+ CPUs\b|GiB of RAM/],
+    ["an ssh command to a literal host", /^[ \t]*(?:\$ )?ssh\s|`ssh\s+[^`]*`/m],
+    [
+      "a figure for another container's memory",
+      /\b[0-9][0-9,.]*\s?(?:MiB|GiB|MB|GB)\b[^|\n]{0,30}\((?:no|none|unlimited)[^)]*\)|\|\s*[0-9.]+%\s*\|\s*[0-9][0-9,.]*\s?(?:MiB|GiB)|\b(?:neighbou?rs?|siblings?|other (?:containers?|projects?|services?)|existing containers?)\b[^.\n]{0,80}\b[0-9][0-9,.]*\s?(?:MiB|GiB|MB|GB)\b/i,
+    ],
+    [
+      "a remark that something has no limit",
+      /\bno (?:memory )?limits?\b|\bwithout (?:a )?(?:memory )?limits?\b|\bunlimited memory\b/i,
+    ],
+    [
+      "a remark that a secret is visible to other processes",
+      /\b(?:password|credential|secret|token)s?\b[^.\n]{0,60}\b(?:visible|shown|exposed|readable)\b[^.\n]{0,60}\bprocess|\bcan list (?:the )?processes\b|\bvisible in a process\b/i,
+    ],
+    ["a secrets store", /\bsecrets? (?:store|manager|vault)\b/i],
   ];
   function files(dir: string): string[] {
     const out: string[] = [];
@@ -349,6 +372,50 @@ describe("the public tree carries no host posture", () => {
     }
     return out;
   }
+  // Lines a careless edit could add, built from pieces so that this file states no host fact. The
+  // scan must flag every one by the pattern named for it, and none of the sentences the docs really
+  // contain: a scan that cannot fail, or that fails on the docs, is no scan.
+  const planted: Array<[string, string]> = [
+    ["an ssh command to a literal host", ["ssh ", "somehost"].join("")],
+    ["an ssh command to a literal host", ["    ssh -L 1:127.0.0.1:1 ", "somehost"].join("")],
+    ["an ssh command to a literal host", ["run `ssh ", "somehost` and look"].join("")],
+    ["a figure for another container's memory", "| svc-one | 0.6% | 123 MiB | none |"],
+    [
+      "a figure for another container's memory",
+      "svc-one uses 123 MiB (no limit) and svc-two 45 MiB",
+    ],
+    ["a figure for another container's memory", "the other container peaks at 123 MiB"],
+    ["a remark that something has no limit", "the neighbour's backend has no memory limit"],
+    ["a remark that something has no limit", "it runs without a limit"],
+    [
+      "a remark that a secret is visible to other processes",
+      "the password is visible in a process listing",
+    ],
+    [
+      "a remark that a secret is visible to other processes",
+      "only the host's administrators can list processes",
+    ],
+    ["a secrets store", "the organisation's secrets store"],
+  ];
+  const legitimate = [
+    "so the token never appears in a process listing, a log or a state file",
+    "forward local ports to the same ports on the loopback with an ssh tunnel, then open the tool",
+    "Every container has `mem_limit` equal to `memswap_limit` (no swap), a CPU limit and a pids limit",
+    "| `graph` | 2048 MiB (heap 1.5 GiB) | 2.0 | Peak 1.9 GiB at 50,105 subjects |",
+    "the host also runs other long-lived services, so the node runs under hard limits",
+    "The archive contains the GraphDB passwords: copy it only to a credential store",
+  ];
+  test("the patterns flag the lines they exist for, and none of the docs' own sentences", () => {
+    for (const [what, line] of planted) {
+      const re = forbidden.find(([w]) => w === what)?.[1];
+      expect(re, what).toBeDefined();
+      expect(re?.test(line), `${what}: ${line}`).toBe(true);
+    }
+    for (const line of legitimate) {
+      for (const [what, re] of forbidden) expect(re.test(line), `${what}: ${line}`).toBe(false);
+    }
+  });
+
   test("deploy/neurobagel, its fixtures and ADR 0082", () => {
     const candidates = [
       ...files(DEPLOY),
@@ -376,6 +443,37 @@ describe("pins and the settings template", () => {
     }
     for (const k of ["NB_GRAPHDB_IMAGE", "NB_CLOUDFLARED_IMAGE"]) {
       expect(get(k), k).toMatch(/^[a-z0-9/.-]+:[0-9][0-9.]*@sha256:[0-9a-f]{64}$/);
+    }
+  });
+
+  test("the validator's memory limit is one number in the loader, the overlay and the template", () => {
+    const overlay = readFileSync(join(DEPLOY, "docker-compose.nemar.yml"), "utf8");
+    const env = readFileSync(join(DEPLOY, ".env.example"), "utf8");
+    const loader = readFileSync(join(BIN, "nb-load"), "utf8");
+    expect(env).toMatch(/^NB_INIT_MEM_LIMIT=160m$/m);
+    expect(overlay).toContain("${NB_INIT_MEM_LIMIT:-160m}");
+    expect(loader).toContain("nb_env_get NB_INIT_MEM_LIMIT 160m");
+  });
+
+  test("the caps, the loader's time budget and the guard settings are the same in the loader, the template and the README", () => {
+    const env = readFileSync(join(DEPLOY, ".env.example"), "utf8");
+    const loader = readFileSync(join(BIN, "nb-load"), "utf8");
+    const readme = readFileSync(join(DEPLOY, "README.md"), "utf8");
+    for (const [key, value] of [
+      ["NB_MAX_ARTIFACT_BYTES", 6 * 1024 * 1024],
+      ["NB_MAX_TOTAL_BYTES", 192 * 1024 * 1024],
+      ["NB_LOAD_BUDGET_S", 900],
+    ] as const) {
+      expect(env, key).toMatch(new RegExp(`^${key}=${value}$`, "m"));
+      expect(loader, key).toContain(`nb_env_get ${key} ${value}`);
+      expect(readme, key).toContain(key);
+    }
+    expect(env).toMatch(/^NB_GUARD_EXPECTED=1$/m);
+    expect(env).toMatch(/^NB_GUARD_BOOT_SETTLE_S=180$/m);
+    expect(readFileSync(join(BIN, "nb-status"), "utf8")).toContain("NB_GUARD_EXPECTED 1");
+    expect(readFileSync(join(BIN, "nb-guard"), "utf8")).toContain("NB_GUARD_BOOT_SETTLE_S 180");
+    for (const quoted of ["192 MiB", "6 MiB", "160 MiB", "3040 MiB", "2912 MiB"]) {
+      expect(readme, quoted).toContain(quoted);
     }
   });
 
@@ -749,6 +847,9 @@ describe.skipIf(!haveLoaderTools)("the loader, on a directory source", () => {
     makeSource(src, ["nm000001", "nm000002"]);
     expect((await run("nb-load", ["--source", src], home)).status).toBe(0);
     const first = currentRelease(home);
+    // The first run wrote the marker. Put an old one in its place, so that only the idle run below
+    // can have refreshed it: without this the assertion is satisfied by the first run.
+    writeFileSync(join(home, "state/last-load-ok"), "1\n");
     const server = serve(src);
     const r = await run("nb-load", ["--source", server.url], home);
     expect(r.status, r.out).toBe(0);
@@ -756,7 +857,8 @@ describe.skipIf(!haveLoaderTools)("the loader, on a directory source", () => {
     expect(readdirSync(join(home, "data/releases"))).toHaveLength(1);
     expect(lastLoad(home).outcome).toBe("unchanged");
     expect(server.log.map((l) => l.path)).toEqual(["index.json"]);
-    // A run that found nothing to do still counts as a good run, for the stale-loader alarm.
+    // A run that found nothing to do still counts as a good run, for the stale-loader alarm: an idle
+    // node must not raise a false "no successful loader run" alarm.
     expect(Number(readFileSync(join(home, "state/last-load-ok"), "utf8"))).toBeGreaterThan(
       1_700_000_000,
     );
@@ -1043,14 +1145,28 @@ describe.skipIf(!haveLoaderTools)("what a source is allowed to be", () => {
     expect(existsSync(join(home, "state/last-load.json"))).toBe(false);
   });
 
-  test("a redirect from the source to plain http is not followed", async () => {
+  test("a redirect is refused, for the index and for an artifact, and nothing behind it is asked", async () => {
     const src = tmp("src");
     makeSource(src, ["nm000001"]);
     const target = serve(src);
+    // The index redirects, to plain http and to a perfectly good copy of itself: both are refused.
     const first = serve(src, { redirectIndexTo: `${target.url}/index.json` });
     const r = await run("nb-load", ["--source", first.url], newHome());
     expect(r.status, r.out).toBe(3);
+    expect(r.out).toContain("refused a redirect");
     expect(target.log).toHaveLength(0);
+    // An artifact that redirects is refused the same way, with the header file in play: curl would
+    // send a non-Authorization credential header on to the target.
+    const hdr = join(tmp("hdr"), "header");
+    writeFileSync(hdr, "X-Api-Key: not-a-secret\n", { mode: 0o600 });
+    const second = serve(src, { redirectArtifactsTo: target.url });
+    const r2 = await run("nb-load", ["--source", second.url], newHome(), {
+      NB_SOURCE_AUTH_HEADER_FILE: hdr,
+    });
+    expect(r2.status, r2.out).toBe(3);
+    expect(r2.out).toContain("refused a redirect");
+    expect(target.log).toHaveLength(0);
+    for (const l of target.log) expect(l.headers["x-api-key"]).toBeUndefined();
   });
 
   test("a query string in the source is never recorded", async () => {
@@ -1153,10 +1269,299 @@ describe.skipIf(!haveLoaderTools)("caps on what the source can make the host do"
     writeFileSync(join(home, "data/.stage.dead01/part"), "half a download");
     mkdirSync(join(home, "state"), { recursive: true });
     writeFileSync(join(home, "state/applied.json.tmp.4242"), "x");
+    // A temp file of a writer that takes no lock (nb hold writes state/hold this way) may be
+    // mid-write: only one that is more than a minute old is garbage.
+    writeFileSync(join(home, "state/hold.tmp.4243"), "being written");
+    const longAgo = new Date(Date.now() - 5 * 60_000);
+    utimesSync(join(home, "state/applied.json.tmp.4242"), longAgo, longAgo);
     const r = await run("nb-load", ["--source", src], home);
     expect(r.status, r.out).toBe(0);
     expect(readdirSync(join(home, "data")).filter((f) => f.startsWith(".stage"))).toEqual([]);
     expect(existsSync(join(home, "state/applied.json.tmp.4242"))).toBe(false);
+    expect(existsSync(join(home, "state/hold.tmp.4243"))).toBe(true);
+  });
+});
+
+describe.skipIf(!haveLoaderTools)("each index rule fires on its own", () => {
+  const SCHEMA_STRING: string = schema.properties.schema.const;
+  const MIB = 1024 * 1024;
+
+  /** Valid in every respect and needing no files: --dry-run reads the index and nothing else. */
+  function validIndex(n: number): ArtifactIndex {
+    const datasets: IndexDataset[] = [];
+    for (let i = 0; i < n; i++) {
+      const id = `x${String(i).padStart(5, "0")}`;
+      const sha = sha256(id);
+      datasets.push({
+        id,
+        fingerprint: `sha256:${sha}`,
+        artifacts: [{ name: `${id}.jsonld`, kind: "jsonld", sha256: sha, bytes: 100 }],
+      });
+    }
+    return { schema: SCHEMA_STRING, generated_at: "2026-10-02T03:00:00Z", datasets };
+  }
+  async function dryRun(idx: unknown, env: Record<string, string> = {}): Promise<Result> {
+    const src = tmp("src");
+    mkdirSync(src, { recursive: true });
+    writeIndex(src, idx);
+    return run("nb-load", ["--source", src, "--dry-run"], newHome(), env);
+  }
+
+  test("the dataset cap: exactly the cap passes, one more is refused, and only its sentence is printed", async () => {
+    const cap: number = schema.properties.datasets.maxItems;
+    const ok = await dryRun(validIndex(cap));
+    expect(ok.status, ok.out.slice(0, 500)).toBe(0);
+    const over = await dryRun(validIndex(cap + 1));
+    expect(over.status, over.out.slice(-500)).toBe(3);
+    expect(over.out).toContain(`more than ${cap} datasets`);
+    expect(over.out.match(/index: /g)).toHaveLength(1);
+  });
+
+  test("the artifact cap: three artifacts pass, a fourth is refused and its sentence says so", async () => {
+    const cap: number = schema.definitions.dataset.properties.artifacts.maxItems;
+    const idx = validIndex(1);
+    const d = idx.datasets[0];
+    d.artifacts.push(
+      { name: `${d.id}_annotated.json`, kind: "dictionary", sha256: sha256("d"), bytes: 10 },
+      {
+        name: `${d.id}_dataset_description.json`,
+        kind: "description",
+        sha256: sha256("e"),
+        bytes: 10,
+      },
+    );
+    expect(d.artifacts).toHaveLength(cap);
+    const ok = await dryRun(idx);
+    expect(ok.status, ok.out).toBe(0);
+    d.artifacts.push({
+      name: `${d.id}_annotated.json`,
+      kind: "dictionary",
+      sha256: sha256("f"),
+      bytes: 10,
+    });
+    const r = await dryRun(idx);
+    expect(r.status, r.out).toBe(3);
+    expect(r.out).toContain(`more than ${cap} artifacts`);
+  });
+
+  // One mutation per rule. Each must be refused AND named by its own sentence, so that a rule that
+  // stopped firing cannot hide behind the others that still do.
+  const rules: Array<[string, string, (i: ArtifactIndex) => void]> = [
+    [
+      "the schema string",
+      "schema is not",
+      (i) => {
+        i.schema = "other/1";
+      },
+    ],
+    [
+      "generated_at",
+      "generated_at is missing",
+      (i) => {
+        i.generated_at = "yesterday";
+      },
+    ],
+    [
+      "an id",
+      "is not allowed",
+      (i) => {
+        i.datasets[0].id = "-bad";
+      },
+    ],
+    [
+      "an id with a trailing newline",
+      "is not allowed",
+      (i) => {
+        i.datasets[0].id = `${i.datasets[0].id}\n`;
+      },
+    ],
+    [
+      "a fingerprint",
+      "fingerprint is not",
+      (i) => {
+        i.datasets[0].fingerprint = "md5:abc";
+      },
+    ],
+    [
+      "no artifacts",
+      "no artifacts",
+      (i) => {
+        i.datasets[0].artifacts = [];
+      },
+    ],
+    [
+      "an artifact name with a path in it",
+      "artifact name",
+      (i) => {
+        i.datasets[0].artifacts[0].name = "../x.jsonld";
+      },
+    ],
+    [
+      "an artifact name with a trailing newline",
+      "artifact name",
+      (i) => {
+        i.datasets[0].artifacts[0].name = `${i.datasets[0].artifacts[0].name}\n`;
+      },
+    ],
+    [
+      "an artifact kind",
+      "artifact kind",
+      (i) => {
+        i.datasets[0].artifacts[0].kind = "other";
+      },
+    ],
+    [
+      "a sha256",
+      "has no valid sha256",
+      (i) => {
+        i.datasets[0].artifacts[0].sha256 = "abc";
+      },
+    ],
+    [
+      "a sha256 with a trailing newline",
+      "has no valid sha256",
+      (i) => {
+        i.datasets[0].artifacts[0].sha256 = `${i.datasets[0].artifacts[0].sha256}\n`;
+      },
+    ],
+    [
+      "bytes of zero",
+      "bytes is not a whole number",
+      (i) => {
+        i.datasets[0].artifacts[0].bytes = 0;
+      },
+    ],
+    [
+      "a name that is not the id plus its suffix",
+      "is not the id plus the suffix",
+      (i) => {
+        i.datasets[0].artifacts[0].name = "other.jsonld";
+      },
+    ],
+    [
+      "no jsonld artifact",
+      "needs exactly one jsonld",
+      (i) => {
+        i.datasets[0].artifacts[0].kind = "dictionary";
+      },
+    ],
+    [
+      "two datasets with one id",
+      "dataset ids are not unique",
+      (i) => {
+        i.datasets.push(structuredClone(i.datasets[0]));
+      },
+    ],
+    [
+      "two artifacts with one name",
+      "artifact names are not unique",
+      (i) => {
+        i.datasets.push(structuredClone(i.datasets[0]));
+      },
+    ],
+  ];
+  test.each(rules)(
+    "%s is refused and its own sentence says why",
+    async (_what, sentence, mutate) => {
+      const idx = validIndex(2);
+      mutate(idx);
+      const r = await dryRun(idx);
+      expect(r.status, r.out).toBe(3);
+      expect(r.out).toContain("index: ");
+      expect(r.out).toContain(sentence);
+    },
+  );
+
+  test("the default total cap is 192 MiB: a promise at it passes, one byte over is refused", async () => {
+    const at = validIndex(1);
+    at.datasets[0].artifacts[0].bytes = 192 * MIB;
+    expect((await dryRun(at)).status).toBe(0);
+    const over = validIndex(1);
+    over.datasets[0].artifacts[0].bytes = 192 * MIB + 1;
+    const r = await dryRun(over);
+    expect(r.status, r.out).toBe(3);
+    expect(r.out).toContain("the index promises");
+  });
+
+  test("the default per-artifact cap is 6 MiB: a file of exactly that is fetched, one byte more is refused", async () => {
+    const make = (size: number): string => {
+      const src = tmp("src");
+      mkdirSync(src, { recursive: true });
+      const body = Buffer.alloc(size, "x");
+      writeFileSync(join(src, "x00000.jsonld"), body);
+      const idx = validIndex(1);
+      idx.datasets[0].artifacts[0].sha256 = sha256(body);
+      idx.datasets[0].artifacts[0].bytes = size;
+      writeIndex(src, idx);
+      return src;
+    };
+    // At the cap the file is accepted by the size rules and is then refused for what it is (not a
+    // Neurobagel document: exit 4), which is how the two outcomes differ.
+    const at = await run("nb-load", ["--source", make(6 * MIB)], newHome());
+    expect(at.status, at.out.slice(-400)).toBe(4);
+    const over = await run("nb-load", ["--source", make(6 * MIB + 1)], newHome());
+    expect(over.status, over.out.slice(-400)).toBe(3);
+    expect(over.out).toContain("unacceptable size");
+  });
+});
+
+describe.skipIf(!haveLoaderTools)("what the loader refuses on its own", () => {
+  test("a stated size that is not the file's size is refused although the hash is right", async () => {
+    const home = newHome();
+    const src = tmp("src");
+    makeSource(src, ["nm000001"]);
+    const idx = readIndex(src);
+    idx.datasets[0].artifacts[0].bytes = (idx.datasets[0].artifacts[0].bytes as number) + 1;
+    writeIndex(src, idx);
+    const r = await run("nb-load", ["--source", src], home);
+    expect(r.status, r.out).toBe(3);
+    expect(r.out).toContain("the index says");
+    expect(currentRelease(home)).toBeNull();
+  });
+
+  test("while the node is on hold the loader stages and publishes, and never reloads", async () => {
+    const home = newHome();
+    const src = tmp("src");
+    makeSource(src, ["nm000001"]);
+    mkdirSync(join(home, "state"), { recursive: true });
+    writeFileSync(
+      join(home, "state/hold"),
+      "2026-10-02T09:39:51Z by operator: a hold, as nb hold writes it\n",
+    );
+    // NB_RELOAD=1 asks for a reload; only the hold stands in its way.
+    const r = await run("nb-load", ["--source", src], home, { NB_RELOAD: "1" });
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain("on hold");
+    expect(lastLoad(home).outcome).toBe("staged");
+    const release = currentRelease(home) as string;
+    expect(release).toBeTruthy();
+    expect(readFileSync(join(home, "state/pending-reload"), "utf8").trim()).toBe(release);
+    expect(existsSync(join(home, "state/reload-history.jsonl"))).toBe(false);
+  });
+
+  test("the whole run has a time budget: a slow store ends it near the budget, retries included", async () => {
+    const src = tmp("src");
+    makeSource(src, ["nm000001"]);
+    const server = serve(src, { delayMs: 20_000 });
+    const t0 = Date.now();
+    const r = await run("nb-load", ["--source", server.url], newHome(), {
+      NB_LOAD_BUDGET_S: "3",
+      NB_FETCH_TIMEOUT_S: "60",
+    });
+    const took = Date.now() - t0;
+    expect(r.status, r.out).toBe(3);
+    expect(r.out).toContain("time budget");
+    expect(took).toBeLessThan(12_000);
+  });
+
+  test("a budget that is already spent fetches nothing at all", async () => {
+    const src = tmp("src");
+    makeSource(src, ["nm000001"]);
+    const server = serve(src);
+    const r = await run("nb-load", ["--source", server.url], newHome(), { NB_LOAD_BUDGET_S: "0" });
+    expect(r.status, r.out).toBe(3);
+    expect(r.out).toContain("time budget");
+    expect(server.log).toHaveLength(0);
   });
 });
 
@@ -1528,6 +1933,76 @@ describe.skipIf(!haveLoaderTools)("seed, backup and restore", () => {
     expect(readFileSync(join(sentinel, "keep"), "utf8")).toBe("do not delete");
   });
 
+  test("a rollback release name that is not a release name is refused before any path is built, whatever it holds", async () => {
+    const { home, archive, live } = await backedUpHome();
+    for (const evil of ["../..", `${live}\n../..`, "../sentinel-dir", `${live}/../..`]) {
+      const work = tmp("evil");
+      expect(spawnSync("tar", ["-C", work, "-xzf", archive]).status).toBe(0);
+      const meta = JSON.parse(readFileSync(join(work, "BACKUP.json"), "utf8"));
+      meta.rollback_release = evil;
+      writeFileSync(join(work, "BACKUP.json"), JSON.stringify(meta));
+      const forged = join(tmp("forged"), "forged.tar.gz");
+      expect(spawnSync("tar", ["-C", work, "-czf", forged, "."]).status).toBe(0);
+      // "../.." from the releases directory IS the deployment root: without the check the restore
+      // would remove it. The sentinel is a file at that root.
+      writeFileSync(join(home, "sentinel.txt"), "the deployment root still exists");
+      const r = await run("nb-restore", [forged], home, noDockerPath());
+      expect(r.status, `${JSON.stringify(evil)}: ${r.out}`).not.toBe(0);
+      expect(r.out).toContain("not a release name");
+      expect(readFileSync(join(home, "sentinel.txt"), "utf8")).toContain("still exists");
+      expect(existsSync(join(home, "data/releases", live))).toBe(true);
+    }
+  });
+
+  test("a live release name with a newline in it is refused the same way", async () => {
+    const { home, archive, live } = await backedUpHome();
+    const work = tmp("evil");
+    expect(spawnSync("tar", ["-C", work, "-xzf", archive]).status).toBe(0);
+    const meta = JSON.parse(readFileSync(join(work, "BACKUP.json"), "utf8"));
+    meta.live_release = `${live}\n../..`;
+    writeFileSync(join(work, "BACKUP.json"), JSON.stringify(meta));
+    const forged = join(tmp("forged"), "forged.tar.gz");
+    expect(spawnSync("tar", ["-C", work, "-czf", forged, "."]).status).toBe(0);
+    writeFileSync(join(home, "sentinel.txt"), "the deployment root still exists");
+    const r = await run("nb-restore", [forged], home, noDockerPath());
+    expect(r.status, r.out).not.toBe(0);
+    expect(r.out).toContain("not a release name");
+    expect(readFileSync(join(home, "sentinel.txt"), "utf8")).toContain("still exists");
+  });
+
+  test("a hold in force when the backup was taken is in force after the restore", async () => {
+    const { home } = await backedUpHome();
+    const holdText = "2026-10-02T09:39:51Z by operator: a hold in force at backup time\n";
+    writeFileSync(join(home, "state/hold"), holdText);
+    await Bun.sleep(1100); // archive names carry the second
+    expect((await run("nb-backup", [], home)).status).toBe(0);
+    const newest = readdirSync(join(home, "backups"))
+      .filter((f) => f.endsWith(".tar.gz"))
+      .sort()
+      .pop() as string;
+    rmSync(join(home, "data"), { recursive: true });
+    rmSync(join(home, "state"), { recursive: true });
+    const r = await run("nb-restore", [join(home, "backups", newest)], home, noDockerPath());
+    expect(r.status, r.out).toBe(0);
+    expect(readFileSync(join(home, "state/hold"), "utf8")).toBe(holdText);
+  });
+
+  test("two backups within one second do not overwrite each other", async () => {
+    const home = newHome();
+    const src = tmp("src");
+    makeSource(src, ["nm000001"]);
+    expect((await run("nb-load", ["--source", src], home)).status).toBe(0);
+    const stampOf = (f: string) => f.replace(/^nb-/, "").replace(/\.tar\.gz$/, "");
+    const seen = new Set<string>();
+    for (let k = 0; k < 3; k++) {
+      expect((await run("nb-backup", [], home)).status).toBe(0);
+    }
+    for (const f of readdirSync(join(home, "backups")).filter((x) => x.endsWith(".tar.gz"))) {
+      seen.add(stampOf(f));
+    }
+    expect(seen.size).toBe(3);
+  });
+
   test("backup retention keeps the newest N", async () => {
     const home = newHome();
     const src = tmp("src");
@@ -1542,6 +2017,28 @@ describe.skipIf(!haveLoaderTools)("seed, backup and restore", () => {
     const left = readdirSync(join(home, "backups")).filter((f) => f.endsWith(".tar.gz"));
     expect(left).toHaveLength(2);
     expect(left).not.toContain("nb-20250101T000000Z.tar.gz");
+  });
+
+  test("a hook written in .env as the template shows it, with no quotes around it, runs as written", async () => {
+    const home = newHome();
+    const src = tmp("src");
+    makeSource(src, ["nm000001"]);
+    expect((await run("nb-load", ["--source", src], home)).status).toBe(0);
+    const copies = tmp("copies");
+    writeFileSync(
+      join(home, ".env"),
+      `COMPOSE_PROJECT_NAME=nemar-neurobagel\nNB_BACKUP_HOOK=cp "$1" ${copies}/\n`,
+    );
+    const r = await run("nb-backup", [], home);
+    expect(r.status, r.out).toBe(0);
+    expect(readdirSync(copies)).toHaveLength(1);
+    // Values are read literally, so a value wrapped in quotes keeps them: the template says not to.
+    const quoted = newHome();
+    writeFileSync(join(quoted, ".env"), "NB_BACKUP_HOOK='echo hi'\n");
+    expect(sh("nb_env_get NB_BACKUP_HOOK", { home: quoted }).stdout).toBe("'echo hi'");
+    const template = readFileSync(join(DEPLOY, ".env.example"), "utf8");
+    expect(template).toMatch(/^# {3}NB_BACKUP_HOOK=[^'"]/m);
+    expect(readFileSync(join(BIN, "nb-backup"), "utf8")).not.toContain("NB_BACKUP_HOOK='");
   });
 
   test("the off-host hook runs once per archive, and a failing hook is reported but keeps the archive", async () => {
@@ -1605,6 +2102,14 @@ describe("the decisions, as pure functions over real text", () => {
       ).toBe("");
       expect(sh(`nb_release_name_ok "../sentinel"`, { home }).status).not.toBe(0);
       expect(sh(`nb_release_name_ok "${r[0]}"`, { home }).status).toBe(0);
+      // The whole string is matched, not one line of it: a valid name beside a path is not valid.
+      for (const evil of [`${r[0]}\n../..`, `../..\n${r[0]}`, `${r[0]}\n`, `\n${r[0]}`]) {
+        // $'...' makes the newline part of the value itself, with nothing to strip it.
+        const ok = sh(`nb_release_name_ok $'${evil.replace(/\n/g, "\\n")}'`, { home });
+        expect(ok.status, JSON.stringify(evil)).not.toBe(0);
+      }
+      expect(sh(`nb_release_name_ok "${r[0]}-2"`, { home }).status).toBe(0);
+      expect(sh(`nb_release_name_ok ""`, { home }).status).not.toBe(0);
     });
 
     test("nb rollback's default: back to what was loaded before when the live release is the loaded one", async () => {
@@ -1666,13 +2171,28 @@ describe("the decisions, as pure functions over real text", () => {
       expect(ok("", "1800")).toBe(true);
     });
 
-    test("a hold stops a reload, unless the reload is the operator ending the hold", () => {
-      const d = (hold: string, unhold: string) =>
-        sh(`nb_decide_hold_stop ${hold} ${unhold}`).stdout;
-      expect(d("1", "0")).toBe("stop");
-      expect(d("1", "1")).toBe("go");
-      expect(d("0", "0")).toBe("go");
-      expect(d("0", "1")).toBe("go");
+    // The text of a hold as `nb hold` writes it: UTC time, who, why.
+    const holdA = "2026-10-02T09:39:51Z by operator: first hold";
+    const holdB =
+      "2026-10-02T09:41:13Z by operator: second hold, set while the node was coming back";
+
+    test("a hold stops a reload; the hold an unhold is ending does not; a newer hold does", () => {
+      const d = (present: string, unhold: string, ending: string, current: string) =>
+        sh(`nb_decide_hold_stop ${present} ${unhold} "${ending}" "${current}"`).stdout;
+      expect(d("0", "0", "", "")).toBe("go"); // no hold
+      expect(d("1", "0", "", holdA)).toBe("stop"); // an ordinary reload on a held node
+      expect(d("1", "1", holdA, holdA)).toBe("go"); // the unhold's own reload
+      expect(d("1", "1", holdA, holdB)).toBe("stop"); // nb hold ran again during it
+      expect(d("1", "1", "", holdA)).toBe("go"); // an unhold that does not say which hold
+      expect(d("0", "1", holdA, "")).toBe("go");
+    });
+
+    test("an unhold ends the hold it read and no other", () => {
+      const d = (read: string, now: string) =>
+        sh(`nb_decide_unhold_flag "${read}" "${now}"`).stdout;
+      expect(d(holdA, holdA)).toBe("remove");
+      expect(d(holdA, holdB)).toBe("keep"); // a newer hold is not the unhold's to end
+      expect(d(holdA, "")).toBe("gone");
     });
 
     test("a failed reload is held against the content unless a hold or a memory abort caused it", () => {
@@ -1681,6 +2201,112 @@ describe("the decisions, as pure functions over real text", () => {
       expect(d("1", "0")).toBe("no");
       expect(d("0", "1")).toBe("no");
       expect(d("1", "1")).toBe("no");
+    });
+  });
+
+  describe("the scripts' own wiring of those decisions, run as they are written", () => {
+    /** One function of a script, as written, to be defined in a bash snippet next to its inputs. */
+    const fn = (file: string, name: string): string => {
+      const m = readFileSync(join(BIN, file), "utf8").match(
+        new RegExp(`\\n${name}\\(\\) \\{[\\s\\S]*?\\n\\}\\n`),
+      );
+      expect(m, `${name} in ${file}`).toBeTruthy();
+      return m?.[0] ?? "";
+    };
+    const holdA = "2026-10-02T09:39:51Z by operator: first hold";
+    const holdB =
+      "2026-10-02T09:41:13Z by operator: second hold, set while the node was coming back";
+
+    test("end_this_hold removes the hold it read, leaves a newer one in place, and accepts one that is gone", () => {
+      const attempt = (flagText: string | null) => {
+        const home = tmp("holdhome");
+        mkdirSync(join(home, "state"), { recursive: true });
+        const flag = join(home, "state/hold");
+        if (flagText !== null) writeFileSync(flag, `${flagText}\n`);
+        const r = sh(
+          `held_text="${holdA}"\n${fn("nb-hold", "end_this_hold")}\nend_this_hold; echo rc=$?`,
+          { home },
+        );
+        return {
+          rc: r.stdout.match(/rc=(\d+)/)?.[1],
+          left: existsSync(flag) ? readFileSync(flag, "utf8").trim() : null,
+          strays: readdirSync(join(home, "state")).filter((f) => f.startsWith("hold.")),
+        };
+      };
+      expect(attempt(holdA)).toEqual({ rc: "0", left: null, strays: [] });
+      expect(attempt(holdB)).toEqual({ rc: "1", left: holdB, strays: [] }); // a newer hold stands
+      expect(attempt(null)).toEqual({ rc: "0", left: null, strays: [] });
+    });
+
+    test("nb unhold hands its reload the text of the hold it is ending, and the reload judges a hold by it", () => {
+      expect(readFileSync(join(BIN, "nb-hold"), "utf8")).toContain(
+        'NB_ENDING_HOLD="$held_text" "$NB_CODE_DIR/bin/nb-reload" --from-unhold',
+      );
+      const stops = (fromUnhold: string, ending: string, flagText: string | null) => {
+        const home = tmp("holdhome");
+        mkdirSync(join(home, "state"), { recursive: true });
+        if (flagText !== null) writeFileSync(join(home, "state/hold"), `${flagText}\n`);
+        const r = sh(
+          `from_unhold=${fromUnhold}; export NB_ENDING_HOLD="${ending}"\n${fn("nb-reload", "hold_stops")}\nhold_stops; echo rc=$?`,
+          { home },
+        );
+        return r.stdout.match(/rc=(\d+)/)?.[1] === "0";
+      };
+      expect(stops("0", "", null)).toBe(false); // no hold
+      expect(stops("0", "", holdA)).toBe(true); // an ordinary reload on a held node
+      expect(stops("1", holdA, holdA)).toBe(false); // the reload that is ending this hold
+      expect(stops("1", holdA, holdB)).toBe(true); // nb hold ran again while it worked
+    });
+
+    test("the guard's baseline: recorded when there is none or the host has rebooted, stamped when old, kept when current", () => {
+      const state = join(FIX, "guard-state-before.txt");
+      const entries = readFileSync(state, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => l.split("\t").slice(0, 3).join("\t"));
+      const outcome = (existing: string | null, boot: string, uptime: string) => {
+        const dir = tmp("guard");
+        mkdirSync(join(dir, "state"), { recursive: true });
+        const file = join(dir, "baseline.tsv");
+        if (existing !== null) writeFileSync(file, existing);
+        const r = sh(
+          [
+            `baseline_file="${file}"; settle_s=180; boot_note=""`,
+            `neighbors() { cat "${state}"; }`,
+            `nb_boot_id() { echo "${boot}"; }; nb_uptime_s() { echo "${uptime}"; }`,
+            fn("nb-guard", "record_baseline"),
+            fn("nb-guard", "settle_baseline"),
+            "settle_baseline",
+          ].join("\n"),
+          { home: dir },
+        );
+        expect(r.status, r.stderr).toBe(0);
+        return readFileSync(file, "utf8").trimEnd().split("\n");
+      };
+      const taken = (boot: string) => [`#boot_id\t${boot}`, ...entries];
+      expect(readFileSync(join(BIN, "nb-guard"), "utf8")).toMatch(
+        /settle_baseline\n {2}now_neighbors="\$\(neighbors\)"\n {2}neighbors_bad="/,
+      );
+      // None yet: recorded, with this boot's id.
+      expect(outcome(null, "B", "5000")).toEqual(taken("B"));
+      // Taken in an earlier boot: the host has rebooted, so it is taken again.
+      expect(outcome("#boot_id\tA\nold-container\t2020-01-01T00:00:00Z\t0\n", "B", "5000")).toEqual(
+        taken("B"),
+      );
+      // Taken in this boot, host up for long enough: untouched, whatever the containers are doing.
+      expect(outcome("#boot_id\tB\nkept\t2020-01-01T00:00:00Z\t0\n", "B", "5000")).toEqual([
+        "#boot_id\tB",
+        "kept\t2020-01-01T00:00:00Z\t0",
+      ]);
+      // Taken in this boot but the host has only just come up: taken again as the containers appear.
+      expect(outcome("#boot_id\tB\nkept\t2020-01-01T00:00:00Z\t0\n", "B", "60")).toEqual(
+        taken("B"),
+      );
+      // From before boot ids existed: its entries are kept and it is stamped.
+      expect(outcome("legacy\t2020-01-01T00:00:00Z\t0\n", "B", "5000")).toEqual([
+        "#boot_id\tB",
+        "legacy\t2020-01-01T00:00:00Z\t0",
+      ]);
     });
   });
 
@@ -1745,9 +2371,71 @@ describe("the decisions, as pure functions over real text", () => {
       expect(sh('nb_guard_load_rule "" 5 6 6').stdout).toBe("0 ok");
     });
 
+    // The baseline belongs to one boot of the host. These use the real captured container state:
+    // after a reboot every container has a new start time and a restart count of zero.
+    const rebooted = before
+      .split("\n")
+      .filter(Boolean)
+      .map((l, i) => {
+        const f = l.split("\t");
+        f[1] = `2026-10-03T00:00:0${i}.000000000Z`;
+        f[2] = "0";
+        return f.join("\t");
+      })
+      .join("\n");
+
+    test("a baseline carries the boot id of the host it was taken in", () => {
+      const text = sh('nb_guard_baseline_render "boot-A"', { input: before }).stdout;
+      const lines = text.split("\n");
+      expect(lines[0]).toBe("#boot_id\tboot-A");
+      expect(lines.slice(1)).toEqual(
+        before
+          .split("\n")
+          .filter(Boolean)
+          .map((l) => l.split("\t").slice(0, 3).join("\t")),
+      );
+      expect(sh("nb_guard_baseline_boot_id", { input: text }).stdout).toBe("boot-A");
+      expect(sh("nb_guard_baseline_boot_id", { input: before }).stdout).toBe(""); // none: an old one
+    });
+
+    test("what the guard does with its baseline: record after a reboot or just after boot, stamp an old one, keep otherwise", () => {
+      const action = (present: string, bboot: string, cboot: string, up: string, settle = "180") =>
+        sh(`nb_decide_baseline_action ${present} "${bboot}" "${cboot}" "${up}" ${settle}`).stdout;
+      expect(action("0", "", "B", "5000")).toBe("record"); // none yet
+      expect(action("1", "A", "B", "5000")).toBe("record"); // the host has rebooted
+      expect(action("1", "A", "A", "5000")).toBe("keep");
+      expect(action("1", "A", "A", "179")).toBe("record"); // up for less than the settle time
+      expect(action("1", "A", "A", "180")).toBe("keep");
+      expect(action("1", "", "B", "5000")).toBe("stamp"); // from before boot ids existed
+      expect(action("1", "A", "", "")).toBe("keep"); // no /proc to compare with: never forced
+    });
+
+    test("the failure this prevents: a baseline from before a reboot reads every container as restarted", () => {
+      const stale = sh(`nb_guard_neighbor_breaches "${baselineFile(before)}"`, {
+        input: rebooted,
+      }).stdout;
+      expect(stale.split(";")).toHaveLength(before.split("\n").filter(Boolean).length);
+      expect(stale).toContain("(restarted)");
+      // The boot id differs, so the decision is to record again; judged against that, the same
+      // state is no breach, and the header line is not mistaken for a container.
+      expect(sh("nb_decide_baseline_action 1 A B 5000 180").stdout).toBe("record");
+      const fresh = join(tmp("baseline"), "guard-baseline.tsv");
+      writeFileSync(fresh, `${sh("nb_guard_baseline_render B", { input: rebooted }).stdout}\n`);
+      expect(sh(`nb_guard_neighbor_breaches "${fresh}"`, { input: rebooted }).stdout).toBe("");
+      // And a real restart AFTER the new baseline is still caught.
+      const again = rebooted.replace(/(svc-api\t)[^\t]*/, "$12026-10-03T01:00:00.000000000Z");
+      expect(sh(`nb_guard_neighbor_breaches "${fresh}"`, { input: again }).stdout).toBe(
+        "svc-api(restarted)",
+      );
+    });
+
     test("the heartbeat: stale beyond the maximum age, silent before it and when there is none", () => {
-      expect(sh("nb_guard_heartbeat_problem 1000 2200 1200").stdout).toBe("");
-      expect(sh("nb_guard_heartbeat_problem 1000 2201 1200").stdout).toContain("last sampled");
+      expect(sh("nb_guard_heartbeat_problem 1000 2200 1200 1").stdout).toBe("");
+      expect(sh("nb_guard_heartbeat_problem 1000 2201 1200 1").stdout).toContain("last sampled");
+      // No heartbeat at all: a problem while a guard is expected, nothing when the operator said
+      // the node runs without one.
+      expect(sh('nb_guard_heartbeat_problem "" 2201 1200 1').stdout).toContain("never started");
+      expect(sh('nb_guard_heartbeat_problem "" 2201 1200 0').stdout).toBe("");
       expect(sh('nb_guard_heartbeat_problem "" 2201 1200').stdout).toBe("");
     });
   });
@@ -1945,6 +2633,73 @@ describe("the decisions, as pure functions over real text", () => {
   );
 });
 
+describe.skipIf(!haveLoaderTools)("what nb hands to docker", () => {
+  const refused = (...args: string[]) =>
+    sh(`nb_compose_args_refused ${args.map((a) => `'${a}'`).join(" ")}`).stdout;
+
+  test("nb compose refuses a global flag that names another project, and lets a subcommand's own flags through", () => {
+    expect(refused("-p", "other", "ps")).toBe("-p");
+    expect(refused("-pother", "ps")).toBe("-pother");
+    expect(refused("--project-name=other", "ps")).toBe("--project-name=other");
+    expect(refused("--project-name", "other", "ps")).toBe("--project-name");
+    expect(refused("--project-directory", "/elsewhere", "ps")).toBe("--project-directory");
+    expect(refused("-f", "other.yml", "config")).toBe("-f");
+    expect(refused("--file=other.yml", "config")).toBe("--file=other.yml");
+    expect(refused("--env-file", "other.env", "ps")).toBe("--env-file");
+    // A flag that takes a value: the value is skipped, and what follows is still looked at.
+    expect(refused("--profile", "portal", "-p", "other", "ps")).toBe("-p");
+    expect(refused("--profile", "-p", "ps")).toBe("");
+    // After the subcommand the same letters mean something else: logs -f is "follow".
+    expect(refused("logs", "-f")).toBe("");
+    expect(refused("up", "-p", "x")).toBe("");
+    expect(refused("ps")).toBe("");
+    expect(refused()).toBe("");
+  });
+
+  test("the nb command itself refuses it, before it looks for docker, and nb down takes no arguments", async () => {
+    const home = newHome();
+    const a = await run("nb", ["compose", "-p", "other", "ps"], home);
+    expect(a.status, a.out).toBe(2);
+    expect(a.out).toContain("does not take '-p'");
+    const d = await run("nb", ["down", "-v"], home);
+    expect(d.status, d.out).toBe(2);
+    expect(d.out).toContain("takes no arguments");
+  });
+
+  test("the validator container: no network, memory without swap, CPU limits, first to be killed, this project's labels", () => {
+    const lines = sh(
+      "nb_validator_args img 160m 1.0 1000:1000 /in /out nemar-neurobagel-validate-1",
+    ).stdout.split("\n");
+    const pair = (flag: string, value: string) => {
+      const at = lines.indexOf(flag);
+      expect(at, flag).toBeGreaterThan(-1);
+      expect(lines[at + 1], flag).toBe(value);
+    };
+    expect(lines[0]).toBe("run");
+    expect(lines).toContain("--rm");
+    pair("--network", "none");
+    pair("--memory", "160m");
+    pair("--memory-swap", "160m");
+    pair("--cpus", "1.0");
+    pair("--cpu-shares", "128");
+    pair("--oom-score-adj", "500");
+    pair("--pids-limit", "128");
+    pair("--security-opt", "no-new-privileges:true");
+    pair("--user", "1000:1000");
+    pair("--name", "nemar-neurobagel-validate-1");
+    expect(lines).toContain("com.docker.compose.project=nemar-neurobagel");
+    expect(lines).toContain("/in:/input_data:ro");
+    expect(lines).toContain("/out:/data");
+    expect(lines.at(-1)).toBe("img");
+  });
+
+  test("the loader builds its one docker run from that function and from nothing else", () => {
+    const src = readFileSync(join(BIN, "nb-load"), "utf8");
+    expect(src).toContain("nb_validator_args");
+    expect(src).not.toMatch(/docker run/);
+  });
+});
+
 describe.skipIf(!composeOk)("the compose overlay, merged over the recipes file it pins", () => {
   // `docker compose config` needs no daemon. It validates the real merge: the overlay over the
   // real recipes v0.9.1 file, through the same wrapper every script uses.
@@ -1999,12 +2754,19 @@ describe.skipIf(!composeOk)("the compose overlay, merged over the recipes file i
     }
   });
 
-  test("the always-on stack fits the 3 GiB ceiling, tunnel connector included", () => {
+  test("the stack fits the 3 GiB ceiling at its peak: everything, the tunnel connector, and the helper that runs during a load", () => {
     const cfg = configure(["*"]);
-    const total = Object.entries(cfg.services)
-      .filter(([name]) => name !== "init_data") // runs for seconds; measured 30 MiB
+    const MIB = 1024 * 1024;
+    const limit = (name: string) => Number(cfg.services[name]?.mem_limit);
+    const always = Object.entries(cfg.services)
+      .filter(([name]) => name !== "init_data")
       .reduce((sum, [, svc]) => sum + Number(svc.mem_limit), 0);
-    expect(total).toBeLessThanOrEqual(3 * 1024 * 1024 * 1024);
+    expect(always).toBe(2880 * MIB);
+    // init_data (a reload) and the loader's validator (the same image and limit) run for seconds and
+    // never together, because both run under one lock: the peak is the stack plus one of them.
+    expect(always + limit("init_data")).toBe(3040 * MIB);
+    expect(always + limit("init_data")).toBeLessThan(3 * 1024 * MIB);
+    expect(always + limit("init_data") - limit("cloudflared")).toBe(2912 * MIB);
     // The GraphDB heap must fit its container with room for the JVM's own memory.
     const heap = Number.parseInt(
       readFileSync(join(DEPLOY, ".env.example"), "utf8").match(/^NB_GRAPH_MEMORY=(\d+)M$/m)?.[1] ??
