@@ -35,6 +35,21 @@ export interface Bindings {
   // `nemar-news-media` in production, `nemar-news-media-dev` in [env.dev].
   NEWS_MEDIA: R2Bucket;
 
+  // Neurobagel artifact store (epic #1586 phase 4, ADR 0084): a PRIVATE R2 bucket
+  // holding each eligible dataset's JSON-LD artifacts and one `index.json`, written
+  // only by services/neurobagel-writer.ts and read by the node's loader through
+  // GET /neurobagel/*. `nemar-neurobagel` in production, `nemar-neurobagel-dev` in
+  // [env.dev]. Optional: with no binding the writer is a reported no-op
+  // (`store_unconfigured`) and the read route answers 404.
+  NEUROBAGEL?: R2Bucket;
+  /** The writer's switch. Anything other than exactly "1" (including unset) is OFF. */
+  NEUROBAGEL_WRITER_ENABLED?: string;
+  /** Datasets one reconcile tick examines. A positive integer; unset or bad means 25. */
+  NEUROBAGEL_RECONCILE_MAX?: string;
+  /** Worker SECRET: the bearer the node's loader sends to GET /neurobagel/*. A deployment
+   *  secret, not an account credential (ADR 0084); unset means the read route is off. */
+  NEUROBAGEL_READ_TOKEN?: string;
+
   // Environment variables
   ENVIRONMENT: "production" | "development" | "staging" | "test";
   API_BASE_URL: string;

@@ -26,7 +26,7 @@ import { join } from "node:path";
 import { Miniflare } from "miniflare";
 import { resetManifestAnswerMemo } from "../../src/services/manifest-source";
 import type { Bindings } from "../../src/types/bindings";
-import { InMemoryCache } from "./cache";
+import { DrainingCache, keyFor } from "./cache";
 import { freshDb, realD1 } from "./d1";
 import { type S3ManifestStandin, startS3ManifestStandin } from "./s3-manifest-standin";
 
@@ -96,11 +96,20 @@ export interface Harness {
   dispose(): Promise<void>;
 }
 
+/** `DrainingCache` plus the one Workers Cache API method the writer needs, `delete`. */
+class HarnessCache extends DrainingCache {
+  async delete(request: RequestInfo | URL): Promise<boolean> {
+    return this.store.delete(keyFor(request));
+  }
+}
+
 function installEdgeCache(): void {
   // The Workers Cache API the data plane's manifest and git-file caches and the rate
-  // limiter use. A fresh one per test: a manifest copy trusted for 60 seconds must not
+  // limiter use. A `DrainingCache`, which READS the body it is handed as the real API
+  // does (the manifest edge copy is written into it as the scan reads); an in-memory
+  // double that only clones would never pull it. A fresh one per test: a manifest copy trusted for 60 seconds must not
   // outlive the test that stored it.
-  (globalThis as { caches?: unknown }).caches = { default: new InMemoryCache() };
+  (globalThis as { caches?: unknown }).caches = { default: new HarnessCache() };
   resetManifestAnswerMemo();
 }
 
@@ -222,7 +231,9 @@ export function seedSynthetic(h: Harness, id: string, o: SyntheticOptions = {}):
       doi: `10.82901/nemar.${id}.v${version}`,
       concept_doi: `10.82901/nemar.${id}`,
       created: "2026-01-02T03:04:05.000Z",
-      files,
+      // Keys in strictly ascending order, as the pipeline writes them: the data plane's
+      // totals are only proven for such a manifest (ADR 0072).
+      files: Object.fromEntries(Object.entries(files).sort(([a], [b]) => (a < b ? -1 : 1))),
     }),
   );
   seedDatasetRow(h.db, id, {
