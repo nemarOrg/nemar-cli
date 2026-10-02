@@ -8,6 +8,13 @@
  * output line a person reads is a statement about what the store actually holds.
  *
  * Isolated NEMAR_CONFIG_DIR, no mocks.
+ *
+ * CI TIER: this file runs in the integration tier, not `unit-pure`, because the workflows
+ * route a test by a text match on `TEST_API_URL` and the CLI spawn helper, as they route every
+ * CLI suite that starts the binary against a local server (admin-keys-cli, admin-kind-cli, ...):
+ * `TEST_API_URL` is the only API override the CLI reads. It touches no live backend and holds no
+ * secret, so it also passes offline, which is how it is run here; moving it is a change to
+ * that routing, not to this test.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
@@ -24,6 +31,7 @@ import {
   startHarness,
   storeKeys,
 } from "../backend/test/helpers/neurobagel-harness";
+import { NEUROBAGEL_REGENERATE_MAX } from "../shared/contract/neurobagel-admin";
 
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -39,12 +47,17 @@ let h: Harness;
 let configDir: string;
 let server: ReturnType<typeof Bun.serve>;
 let envOverrides: Partial<Bindings> = {};
+/** Every request the server received, `METHOD /path`, so a test can say what was NOT sent. */
+let requests: string[] = [];
 
 beforeAll(async () => {
   h = await startHarness();
   server = Bun.serve({
     port: 0,
-    fetch: (req) => worker.fetch(req, h.env(envOverrides), ctx),
+    fetch: (req) => {
+      requests.push(`${req.method} ${new URL(req.url).pathname}`);
+      return worker.fetch(req, h.env(envOverrides), ctx);
+    },
   });
 });
 afterAll(async () => {
@@ -55,6 +68,7 @@ afterAll(async () => {
 beforeEach(async () => {
   await h.reset();
   envOverrides = {};
+  requests = [];
   configDir = mkdtempSync(join(tmpdir(), "nemar-admin-neurobagel-cli-"));
   writeFileSync(
     join(configDir, "config.json"),
@@ -177,11 +191,63 @@ describe("nemar admin neurobagel regenerate", () => {
     expect(await storeKeys(h.bucket)).toEqual([]);
   });
 
-  test("a bad --limit is refused before any request", async () => {
-    for (const limit of ["0", "-2", "abc", "1.5"]) {
+  test("a bad --limit is refused by the CLI itself, before ANY request reaches the server", async () => {
+    // The server refuses these too, so the exit code alone proves nothing about WHO refused:
+    // the log of requests does. A value the client lets through is a request the log shows.
+    for (const limit of ["0", "-2", "abc", "1.5", "5x", "1e2", "51", "200", "100000"]) {
+      requests = [];
       const result = await runCli(["admin", "neurobagel", "regenerate", "--limit", limit]);
-      expect(result.exitCode).not.toBe(0);
+      expect(result.exitCode, limit).not.toBe(0);
+      expect(
+        requests.filter((r) => r.includes("/admin/neurobagel")),
+        `--limit ${limit}`,
+      ).toEqual([]);
     }
+  });
+
+  test("an over-ceiling --limit says what the ceiling is and to run again", async () => {
+    const result = await runCli(["admin", "neurobagel", "regenerate", "--limit", "51"]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.all).toContain(`at most ${NEUROBAGEL_REGENERATE_MAX} per call`);
+    expect(result.all).toContain("run the command again to continue");
+  });
+
+  test("the control: the ceiling itself, 50, is sent", async () => {
+    requests = [];
+    const result = await runCli(["admin", "neurobagel", "regenerate", "--limit", "50"]);
+    expect(result.exitCode).toBe(0);
+    expect(requests.filter((r) => r.includes("/admin/neurobagel"))).toEqual([
+      "POST /admin/neurobagel/regenerate",
+    ]);
+  });
+
+  test("a run that spends its operation budget says so, says to run again, and the next call finishes", async () => {
+    // About 22 operations a dataset against a budget of 400 (less what the run holds back to
+    // finish with): 30 first-time datasets cannot all be done in one call, whatever --limit says.
+    const ids = Array.from({ length: 30 }, (_, i) => `nm${String(970 + i).padStart(6, "0")}`);
+    for (const id of ids) seedSynthetic(h, id);
+    const first = await runCli(["admin", "neurobagel", "regenerate", "--execute", "--limit", "50"]);
+    expect(first.exitCode).toBe(0);
+    expect(first.all).toContain("spent its operation budget");
+    expect(first.all).toContain("run the same command again to continue");
+    expect(first.all).toMatch(/ops=\d+\/400/);
+    const writtenFirst = (await storeKeys(h.bucket)).filter((k) => k.endsWith(".jsonld")).length;
+    expect(writtenFirst).toBeGreaterThan(0);
+    expect(writtenFirst).toBeLessThan(30);
+
+    for (let again = 0; again < 5; again++) {
+      const next = await runCli([
+        "admin",
+        "neurobagel",
+        "regenerate",
+        "--execute",
+        "--limit",
+        "50",
+      ]);
+      expect(next.exitCode).toBe(0);
+      if (!next.all.includes("spent its operation budget")) break;
+    }
+    expect((await storeKeys(h.bucket)).filter((k) => k.endsWith(".jsonld"))).toHaveLength(30);
   });
 
   test("an anonymity-class refusal exits non-zero and names no dataset in the summary line", async () => {
