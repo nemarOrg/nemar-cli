@@ -36,6 +36,7 @@ interface Recording {
   subjects?: Record<string, Phenotype>;
   imaging: { modalities: Record<string, string[]> } | null;
   transform_only_subjects?: number;
+  bagel_only_subjects?: number;
 }
 interface Phenotype {
   age: number | null;
@@ -167,7 +168,10 @@ describe("recordings of the real bagel CLI", () => {
       if (recording.status === "compared") {
         test("bagel pheno describes the same phenotype for every participant it saw", () => {
           const mine = phenotypeView(jsonld);
-          const theirs = recording.subjects as Record<string, Phenotype>;
+          const all = recording.subjects as Record<string, Phenotype>;
+          expect(Object.keys(all).length).toBeGreaterThan(0);
+          // Subjects bagel makes from table rows that the graph leaves out are checked below.
+          const theirs = Object.fromEntries(Object.entries(all).filter(([label]) => label in mine));
           expect(Object.keys(theirs).length).toBeGreaterThan(0);
           expect(phenotypeDisagreements(mine, theirs)).toEqual([]);
         });
@@ -179,6 +183,14 @@ describe("recordings of the real bagel CLI", () => {
           expect(extra.length).toBe(recording.transform_only_subjects as number);
           for (const label of extra)
             expect(mine[label]).toEqual({ age: null, sex: null, diagnoses: [] });
+        });
+
+        test("the subjects bagel makes from table rows and the graph leaves out are exactly the table-only rows the report counts", () => {
+          const mine = phenotypeView(jsonld);
+          const theirs = recording.subjects as Record<string, Phenotype>;
+          const absent = Object.keys(theirs).filter((label) => !(label in mine));
+          expect(absent.length).toBe(recording.bagel_only_subjects as number);
+          expect(absent.length).toBe((report.subjects as Json).table_only as number);
         });
 
         test("the dataset-level fields equal what bagel wrote from the same description", () => {

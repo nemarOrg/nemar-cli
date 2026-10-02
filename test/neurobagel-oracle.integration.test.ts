@@ -13,6 +13,7 @@
  * the recipes graph-mode and catalog-mode loaders, and an RDF expansion of the
  * JSON-LD, and it re-verifies the committed vocabulary snapshot against its
  * pins.
+ * Without the opt-in every test below is reported as skipped, not passed.
  * The unit tests check the goldens against RECORDINGS of that run; this is the
  * test that the recordings are true.
  */
@@ -24,6 +25,11 @@ import { join } from "node:path";
 const ROOT = join(import.meta.dir, "..");
 const enabled = process.env.NEUROBAGEL_ORACLE === "1";
 const hasUv = spawnSync("uv", ["--version"]).status === 0;
+if (!enabled || !hasUv) {
+  console.warn(
+    "neurobagel-oracle.integration: skipped (set NEUROBAGEL_ORACLE=1 and install uv to run bagel over the goldens)",
+  );
+}
 
 describe.skipIf(!enabled || !hasUv)("the real Neurobagel code agrees with the goldens", () => {
   test("oracle.py --check passes for every golden", () => {
@@ -47,13 +53,4 @@ describe.skipIf(!enabled || !hasUv)("the real Neurobagel code agrees with the go
     expect(result.stdout).toContain("vocabulary snapshot matches the pins");
     expect(result.status).toBe(0);
   }, 300_000);
-});
-
-test("when the oracle is not enabled, say so rather than pass silently", () => {
-  if (!enabled || !hasUv) {
-    console.warn(
-      "neurobagel-oracle.integration: skipped (set NEUROBAGEL_ORACLE=1 and install uv to run bagel over the goldens)",
-    );
-  }
-  expect(true).toBe(true);
 });
