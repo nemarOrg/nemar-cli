@@ -135,12 +135,33 @@ async function entryFor(
 
 const tsv = (...lines: string[]): string => `${lines.join("\n")}\n`;
 /** The real nm000132 subjects (sub-001 to sub-040) with a table the test writes. */
-const withTable = (table: string, curation: CurationEntry | null): NeurobagelInput => ({
+const withTable = (
+  table: string,
+  curation: CurationEntry | null,
+  participantsJson: string | null = null,
+): NeurobagelInput => ({
   ...loadFixture("nm000132"),
   participantsTsv: table,
-  participantsJson: null,
+  participantsJson,
   curation,
 });
+
+/** The committed entry of `id`, through the real loader, pinned to these (edited) documents instead. */
+async function repinned(id: string, tsv: string, json: string | null): Promise<CurationEntry> {
+  const file = JSON.parse(readFileSync(CURATION_PATH, "utf8")) as {
+    datasets: Record<string, Json>;
+  };
+  const raw = clone(file.datasets[id]);
+  raw.pins = {
+    participants_json: json === null ? null : await gitBlobSha(json),
+    participants_tsv: await gitBlobSha(tsv),
+  };
+  const entry = parseCuration(JSON.stringify({ datasets: { [id]: raw }, format: 1 })).entries.get(
+    id,
+  );
+  if (entry === undefined) throw new Error("the loader dropped the entry");
+  return entry;
+}
 
 describe("the committed curation, applied to its real fixtures", () => {
   for (const id of curatedIds) {
@@ -298,48 +319,57 @@ describe("the committed curation, applied to its real fixtures", () => {
   });
 });
 
-describe("a curation that does not fit changes nothing mechanical", () => {
+describe("a curation that does not fit is skipped whole", () => {
   const id = "nm000158";
   const table = fixtureText(id, "participants.tsv");
   const json = fixtureText(id, "participants.json");
   const entry = entries.get(id) as CurationEntry;
+  const stroke = {
+    "acute stroke patients (1-30 days post-stroke)": {
+      Label: "Cerebrovascular accident",
+      TermURL: "snomed:230690007",
+    },
+  };
 
-  /** The three artifacts a node reads, and the report without what curation adds. */
+  /** The artifacts the same input gives with no entry at all. */
   async function mechanical(input: NeurobagelInput) {
-    const a = await buildNeurobagelArtifacts({ ...input, curation: null });
-    return docs(a);
+    return docs(await buildNeurobagelArtifacts({ ...input, curation: null }));
   }
+  /** A report with what curation adds taken away: the mechanical report. */
   const withoutCuration = (report: Json): Json => {
     const { curation: _curation, ...rest } = report;
     return { ...rest, flags: (rest.flags as string[]).filter((f) => !f.startsWith("curation_")) };
   };
+  const NOTHING_WITHHELD = { age: 0, diagnosis: 0, sex: 0 };
 
-  test("a participants.tsv that is not the pinned file: stale, mechanical output intact, skipped columns counted", async () => {
+  test("a participants.tsv that is not the pinned file: stale; the variables it does not name ship as without an entry", async () => {
     const edited = `${table}sub-99\t71\tn/a\tn/a\tn/a\tn/a\tany group at all\thomo sapiens\tn/a\n`;
     const input = { ...loadFixture(id), participantsTsv: edited };
-    const built = await buildNeurobagelArtifacts(input);
+    const got = docs(await buildNeurobagelArtifacts(input));
     const plain = await mechanical(input);
-    const got = docs(built);
+    // nm000158's mechanical group rule maps nothing (no control value), so there is nothing to withhold.
     expect(got.jsonld).toEqual(plain.jsonld);
     expect(got.dictionary).toEqual(plain.dictionary);
     expect(withoutCuration(got.report)).toEqual(plain.report);
     expect(got.report.flags as string[]).toContain("curation_stale");
+    expect(got.report.flags as string[]).not.toContain("curation_withheld");
     expect(got.report.curation).toEqual({
       columns_applied: 0,
       columns_skipped: 1,
       declared: { age: 0, assessment: 0, diagnosis: 1, sex: 0 },
-      participants_with: { age: 0, assessment: 0, diagnosis: 0, sex: 0 },
-      problems: 0,
       review: "author",
       stale_files: ["participants_tsv"],
       status: "stale",
+      withheld: NOTHING_WITHHELD,
     });
-    // The curated diagnosis is absent, and nothing else was lost.
     expect(phenotypes(got.jsonld).every((s) => s.hasDiagnosis === undefined)).toBe(true);
   });
 
   test("a participants.json that is not the pinned file is stale too, and names that file", async () => {
-    const input = { ...loadFixture(id), participantsJson: json.replace("Unique", "Unique ") };
+    const input = {
+      ...loadFixture(id),
+      participantsJson: (json ?? "").replace("Unique", "Unique "),
+    };
     const got = docs(await buildNeurobagelArtifacts(input));
     expect((got.report.curation as Json).stale_files).toEqual(["participants_json"]);
     expect(got.report.flags as string[]).toContain("curation_stale");
@@ -357,14 +387,7 @@ describe("a curation that does not fit changes nothing mechanical", () => {
     const input: NeurobagelInput = {
       ...loadFixture(id),
       participantsTsv: edited,
-      curation: await entryFor(id, edited, json, {
-        group: diagnosis({
-          "acute stroke patients (1-30 days post-stroke)": {
-            Label: "Cerebrovascular accident",
-            TermURL: "snomed:230690007",
-          },
-        }),
-      }),
+      curation: await entryFor(id, edited, json, { group: diagnosis(stroke) }),
     };
     const built = await buildNeurobagelArtifacts(input);
     const got = docs(built);
@@ -372,38 +395,202 @@ describe("a curation that does not fit changes nothing mechanical", () => {
     expect(got.jsonld).toEqual(plain.jsonld);
     expect(got.dictionary).toEqual(plain.dictionary);
     expect(got.report.flags as string[]).toContain("curation_invalid");
-    expect(got.report.curation).toMatchObject({
-      status: "invalid",
-      problems: 1,
+    expect(got.report.curation).toEqual({
       columns_applied: 0,
       columns_skipped: 1,
+      declared: { age: 0, assessment: 0, diagnosis: 1, sex: 0 },
+      problems: 1,
+      review: "author",
+      status: "invalid",
+      withheld: NOTHING_WITHHELD,
     });
     expect(JSON.stringify(got.report)).not.toContain("an unreviewed group");
     expect(Object.values(built.files).join("")).not.toContain("an unreviewed group");
   });
 
-  test("a table whose ids no longer join the index: unused, and nothing is attached to the wrong subject", async () => {
-    const renamed = table.replace(/^sub-/gm, "x-");
+  test("a table whose ids no longer join the index: unused, the whole output is the mechanical one", async () => {
+    const renamed = (table ?? "").replace(/^sub-/gm, "x-");
     const input: NeurobagelInput = {
       ...loadFixture(id),
       participantsTsv: renamed,
-      curation: await entryFor(id, renamed, json, {
-        group: diagnosis({
-          "acute stroke patients (1-30 days post-stroke)": {
-            Label: "Cerebrovascular accident",
-            TermURL: "snomed:230690007",
-          },
-        }),
-      }),
+      curation: await entryFor(id, renamed, json, { group: diagnosis(stroke) }),
     };
     const got = docs(await buildNeurobagelArtifacts(input));
+    const plain = await mechanical(input);
     expect(got.report.flags as string[]).toContain("curation_unused");
     expect(got.report.curation).toMatchObject({
       status: "unused",
       columns_applied: 0,
       columns_skipped: 1,
+      withheld: NOTHING_WITHHELD,
     });
+    expect(got.jsonld).toEqual(plain.jsonld);
+    expect(got.dictionary).toEqual(plain.dictionary);
     expect(phenotypes(got.jsonld).every((s) => s.hasDiagnosis === undefined)).toBe(true);
+  });
+
+  test("an invalid MULTI-column entry applies none of its columns: one unseen sex spelling skips the assessment items too", async () => {
+    // on006861's entry carries Gender and two UCLA items; the table gains one participant whose
+    // Gender the entry never saw, and the entry is pinned to that table.
+    const real = "on006861";
+    const text = fixtureText(real, "participants.tsv") as string;
+    const description = fixtureText(real, "participants.json");
+    const eol = text.includes("\r\n") ? "\r\n" : "\n";
+    const header = text.split(eol)[0].split("\t");
+    const row = header
+      .map((h) => (h === "participant_id" ? "sub-ZZ9" : h === "Gender" ? "Other" : "n/a"))
+      .join("\t");
+    const edited = `${text}${text.endsWith(eol) ? "" : eol}${row}${eol}`;
+    const input: NeurobagelInput = {
+      ...loadFixture(real),
+      participantsTsv: edited,
+      curation: await repinned(real, edited, description),
+    };
+    const got = docs(await buildNeurobagelArtifacts(input));
+    const plain = await mechanical(input);
+    expect(got.report.curation).toMatchObject({
+      status: "invalid",
+      columns_applied: 0,
+      columns_skipped: 3,
+      declared: { assessment: 2, sex: 1 },
+    });
+    // Nothing the entry would have added is there: no sex, no assessment, the mechanical output.
+    expect(got.jsonld).toEqual(plain.jsonld);
+    expect(got.dictionary).toEqual(plain.dictionary);
+    expect(phenotypes(got.jsonld).every((s) => s.hasAssessment === undefined)).toBe(true);
+    expect(phenotypes(got.jsonld).every((s) => s.hasSex === undefined)).toBe(true);
+    expect(withoutCuration(got.report)).toEqual(plain.report);
+  });
+
+  describe("an entry that exists to WITHDRAW a mechanical claim fails closed, not open", () => {
+    for (const [arm, controls] of [
+      ["on004166", 20],
+      ["on006801", 7],
+    ] as const) {
+      const armTable = fixtureText(arm, "participants.tsv") as string;
+      const armJson = fixtureText(arm, "participants.json");
+
+      test(`${arm}: stale (one newline appended), the ${controls} false healthy controls stay withdrawn`, async () => {
+        const input: NeurobagelInput = { ...loadFixture(arm), participantsTsv: `${armTable}\n` };
+        const built = await buildNeurobagelArtifacts(input);
+        // Without the entry the mechanical rule claims them; with a STALE entry it must not.
+        const plain = await mechanical(input);
+        expect(plain.jsonld).toBeDefined();
+        const claimed = JSON.stringify(plain.jsonld).match(/ncit:C94342/g)?.length;
+        expect(claimed).toBe(controls);
+        expect(Object.values(built.files).join("")).not.toContain("ncit:C94342");
+        const report = built.report as unknown as Json;
+        expect(report.flags as string[]).toEqual(
+          expect.arrayContaining(["curation_stale", "curation_withheld"]),
+        );
+        expect((report.curation as Json).withheld).toEqual({ age: 0, diagnosis: 1, sex: 0 });
+        expect((report.columns as Json).group).toMatchObject({
+          status: "withheld",
+          counts: { mapped: controls },
+        });
+        expect(JSON.stringify(report)).not.toContain("Control");
+      });
+
+      test(`${arm}: invalid (a group value the entry never saw), the false healthy controls stay withdrawn`, async () => {
+        const row = (armTable.split(/\r?\n/)[0] ?? "")
+          .split("\t")
+          .map((h) => (h === "participant_id" ? "sub-ZZ9" : h === "group" ? "Unseen arm" : "n/a"))
+          .join("\t");
+        const eol = armTable.includes("\r\n") ? "\r\n" : "\n";
+        const edited = `${armTable}${armTable.endsWith(eol) ? "" : eol}${row}${eol}`;
+        const input: NeurobagelInput = {
+          ...loadFixture(arm),
+          participantsTsv: edited,
+          curation: await repinned(arm, edited, armJson),
+        };
+        const built = await buildNeurobagelArtifacts(input);
+        expect(Object.values(built.files).join("")).not.toContain("ncit:C94342");
+        const report = built.report as unknown as Json;
+        expect(report.flags as string[]).toEqual(
+          expect.arrayContaining(["curation_invalid", "curation_withheld"]),
+        );
+        expect((report.curation as Json).withheld).toEqual({ age: 0, diagnosis: 1, sex: 0 });
+      });
+    }
+
+    const ids = (n: number): string[] =>
+      Array.from({ length: n }, (_, i) => `sub-${String(i + 1).padStart(3, "0")}`);
+    const rows = (suffix = ""): string =>
+      tsv(
+        "participant_id\tage\tsex\tgroup",
+        ...ids(3).map(
+          (s, i) =>
+            `${s}\t${30 + 10 * i}\t${i % 2 ? "F" : "M"}\t${i === 2 ? "patient" : "control"}`,
+        ),
+      ) + suffix;
+    const allThree: Record<string, Json> = {
+      age: ageBlock({ Label: "decimal", TermURL: "nb:FromFloat" }, ["", "n/a"]),
+      group: diagnosis({ control: HC, patient: ASD }),
+      sex: sexBlock({ F: FEMALE, M: MALE }),
+    };
+    const claims = (jsonld: Json): { age: boolean; sex: boolean; diagnosis: boolean } => ({
+      age: phenotypes(jsonld).some((s) => s.hasAge !== undefined),
+      diagnosis: phenotypes(jsonld).some((s) => s.hasDiagnosis !== undefined),
+      sex: phenotypes(jsonld).some((s) => s.hasSex !== undefined),
+    });
+
+    test("SYNTHETIC, three variables named: a stale entry withholds the age, the sex and the group the mechanical rules would map", async () => {
+      const good = rows();
+      const entry = await entryFor("nm000132", good, null, allThree);
+      // The entry applies to the table it pinned...
+      const applied = docs(await buildNeurobagelArtifacts(withTable(good, entry)));
+      expect(claims(applied.jsonld)).toEqual({ age: true, diagnosis: true, sex: true });
+      // ...and mechanical rules alone would say all three too.
+      expect(claims((await mechanical(withTable(good, null))).jsonld)).toEqual({
+        age: true,
+        diagnosis: true,
+        sex: true,
+      });
+      // One byte later the entry is stale and NOTHING is claimed for the three variables.
+      const stale = docs(await buildNeurobagelArtifacts(withTable(rows("\n"), entry)));
+      expect(claims(stale.jsonld)).toEqual({ age: false, diagnosis: false, sex: false });
+      expect(Object.keys(stale.dictionary)).toEqual(["participant_id"]);
+      expect(stale.report.curation).toMatchObject({
+        status: "stale",
+        withheld: { age: 1, diagnosis: 1, sex: 1 },
+      });
+      expect(stale.report.columns).toMatchObject({
+        age: { status: "withheld" },
+        group: { status: "withheld" },
+        sex: { status: "withheld" },
+      });
+      expect(stale.report.flags as string[]).toContain("curation_withheld");
+    });
+
+    test("SYNTHETIC, three variables named: an invalid entry withholds them too", async () => {
+      const edited = `${rows()}sub-004\t50\tM\tunseen group\n`;
+      const entry = await entryFor("nm000132", edited, null, allThree);
+      const got = docs(await buildNeurobagelArtifacts(withTable(edited, entry)));
+      expect(got.report.curation).toMatchObject({
+        status: "invalid",
+        withheld: { age: 1, diagnosis: 1, sex: 1 },
+      });
+      expect(claims(got.jsonld)).toEqual({ age: false, diagnosis: false, sex: false });
+    });
+
+    test("SYNTHETIC: only the variables the entry names are withheld; the others ship", async () => {
+      const entry = await entryFor("nm000132", rows(), null, { sex: allThree.sex });
+      const stale = docs(await buildNeurobagelArtifacts(withTable(rows("\n"), entry)));
+      expect(stale.report.curation).toMatchObject({
+        status: "stale",
+        withheld: { age: 0, diagnosis: 0, sex: 1 },
+      });
+      expect(claims(stale.jsonld)).toEqual({ age: true, diagnosis: true, sex: false });
+    });
+
+    test("a variable the mechanical rule did not map has nothing to withhold, and is not counted", async () => {
+      // An entry for a column the mechanical rules do not read: its absence withholds nothing.
+      const table = tsv("participant_id\tgender", "sub-001\tF", "sub-002\tM");
+      const entry = await entryFor("nm000132", table, null, { gender: allThree.sex });
+      const stale = docs(await buildNeurobagelArtifacts(withTable(`${table}\n`, entry)));
+      expect(stale.report.curation).toMatchObject({ withheld: { age: 0, diagnosis: 0, sex: 0 } });
+      expect(stale.report.flags as string[]).not.toContain("curation_withheld");
+    });
   });
 
   test("an entry for another dataset is refused, and the anonymity refusal still comes first", async () => {
@@ -427,6 +614,49 @@ describe("a curation that does not fit changes nothing mechanical", () => {
     await expect(buildNeurobagelArtifacts(missing)).rejects.toMatchObject({
       code: "anonymous_not_false",
     });
+  });
+
+  test("an entry the loader did not make is refused, whatever terms it carries", async () => {
+    const handBuilt = {
+      datasetId: id,
+      evidence: { source: "x", reviewer: "x", review: "author", date: "2026-10-02" },
+      pins: { participantsTsv: await gitBlobSha(table ?? ""), participantsJson: null },
+      columns: [
+        {
+          kind: "diagnosis",
+          name: "group",
+          levels: new Map([
+            [
+              "acute stroke patients (1-30 days post-stroke)",
+              { identifier: "snomed:NOT-A-TERM", label: "Not a term" },
+            ],
+          ]),
+          missingValues: [],
+        },
+      ],
+    };
+    // @ts-expect-error a hand-built entry does not satisfy the opaque CurationEntry type
+    const typed: NeurobagelInput = { ...loadFixture(id), curation: handBuilt };
+    expect(typed).toBeDefined();
+    const forged = { ...loadFixture(id), curation: handBuilt as unknown as CurationEntry };
+    await expect(buildNeurobagelArtifacts(forged)).rejects.toMatchObject({
+      code: "curation_not_loaded",
+    });
+    // A copy of a real entry is not the real entry either: only the loader's own object counts.
+    const copied = { ...loadFixture(id), curation: { ...entry } as CurationEntry };
+    await expect(buildNeurobagelArtifacts(copied)).rejects.toMatchObject({
+      code: "curation_not_loaded",
+    });
+  });
+
+  test("a loaded entry is frozen, so it cannot be edited into something the loader never saw", () => {
+    expect(Object.isFrozen(entry)).toBe(true);
+    expect(Object.isFrozen(entry.columns)).toBe(true);
+    expect(Object.isFrozen(entry.pins)).toBe(true);
+    expect(Object.isFrozen(entry.evidence)).toBe(true);
+    expect(() => {
+      (entry as { datasetId: string }).datasetId = "nm000999";
+    }).toThrow();
   });
 });
 
@@ -627,5 +857,83 @@ describe("SYNTHETIC: what a real entry can say that the committed ones do not", 
     const { report } = docs(await buildNeurobagelArtifacts(withTable(table, entry)));
     // `X` is in no level and no missing list: the entry does not fit the table it pinned.
     expect(report.curation).toMatchObject({ status: "invalid" });
+  });
+});
+
+describe("a curated age gets the checks the mechanical rule gives an age", () => {
+  const years = ageBlock({ Label: "decimal", TermURL: "nb:FromFloat" }, ["", "n/a"]);
+
+  test("nm000157's ages are all 0 (a placeholder): a curated FromFloat age cannot turn no age into an age of 0 for 19 participants", async () => {
+    const id = "nm000157";
+    const table = fixtureText(id, "participants.tsv");
+    const json = fixtureText(id, "participants.json");
+    const input: NeurobagelInput = {
+      ...loadFixture(id),
+      curation: await entryFor(id, table, json, { age: years }),
+    };
+    const built = await buildNeurobagelArtifacts(input);
+    const plain = await buildNeurobagelArtifacts({ ...input, curation: null });
+    const got = docs(built);
+    expect(phenotypes(got.jsonld).every((s) => s.hasAge === undefined)).toBe(true);
+    expect(got.jsonld).toEqual(docs(plain).jsonld);
+    expect(got.report.curation).toMatchObject({ status: "invalid", problems: 1 });
+    expect(got.report.flags as string[]).toEqual(
+      expect.arrayContaining(["curation_invalid", "age_column_needs_curation"]),
+    );
+    // The binder's wording quotes the table; none of it reaches the report.
+    expect(JSON.stringify(got.report)).not.toContain("ages are 0");
+  });
+
+  test("an age column whose participants.json says months cannot be curated into the graph, and the graph says no age", async () => {
+    const table = tsv(
+      "participant_id\tage",
+      ...Array.from({ length: 4 }, (_, i) => `sub-00${i + 1}\t${6 + i}`),
+    );
+    const months = JSON.stringify({ age: { Description: "Age", Units: "months" } });
+    const input = withTable(
+      table,
+      await entryFor("nm000132", table, months, { age: years }),
+      months,
+    );
+    const got = docs(await buildNeurobagelArtifacts(input));
+    expect(got.report.curation).toMatchObject({ status: "invalid", problems: 1 });
+    expect(phenotypes(got.jsonld).every((s) => s.hasAge === undefined)).toBe(true);
+    // The mechanical rule says the same: months are left to curation, never read as years.
+    expect(got.report.columns).toMatchObject({
+      age: { status: "needs_curation", reason: "age_units_not_years" },
+    });
+    // The same ages in years are an age.
+    const inYears = JSON.stringify({ age: { Description: "Age", Units: "years" } });
+    const ok = withTable(
+      table,
+      await entryFor("nm000132", table, inYears, { age: years }),
+      inYears,
+    );
+    const applied = docs(await buildNeurobagelArtifacts(ok));
+    expect(applied.report.curation).toMatchObject({ status: "applied" });
+    expect(
+      phenotypes(applied.jsonld)
+        .slice(0, 4)
+        .map((s) => s.hasAge),
+    ).toEqual([6, 7, 8, 9]);
+  });
+
+  test("the zero share is the mechanical rule's: half zeros is a placeholder, fewer is not, and a declared missing 0 does not count", async () => {
+    const outcome = async (ages: number[], missing: string[] = ["", "n/a"]): Promise<string> => {
+      const table = tsv(
+        "participant_id\tage",
+        ...ages.map((a, i) => `sub-${String(i + 1).padStart(3, "0")}\t${a}`),
+      );
+      const entry = await entryFor("nm000132", table, null, {
+        age: ageBlock({ Label: "decimal", TermURL: "nb:FromFloat" }, missing),
+      });
+      const got = docs(await buildNeurobagelArtifacts(withTable(table, entry)));
+      return (got.report.curation as Json).status as string;
+    };
+    expect(await outcome([0, 5])).toBe("invalid"); // exactly half: a placeholder
+    expect(await outcome([0, 0, 5, 6])).toBe("invalid"); // exactly half again
+    expect(await outcome([0, 5, 6])).toBe("applied"); // a third: newborns recorded in years
+    expect(await outcome([0, 0, 0, 5])).toBe("invalid");
+    expect(await outcome([0, 0, 0, 5], ["", "n/a", "0"])).toBe("applied"); // 0 is declared not recorded
   });
 });

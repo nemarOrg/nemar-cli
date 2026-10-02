@@ -1,7 +1,8 @@
 /**
  * The types of a reviewed curation entry (epic #1586, phase 5; ADR 0083).
  *
- * Types and the list of kinds: no logic, no vocabulary.
+ * Types, the lists of kinds and reviews, and the empty counts keyed by kind: no other logic and no
+ * vocabulary.
  * They are split from the loader (`curation.ts`) so that the transform and the
  * binder can name an entry without importing the full diagnosis and assessment
  * vocabularies, which only the loader needs.
@@ -14,6 +15,10 @@ import type { VocabTerm } from "./vocab";
 export const CURATION_KINDS = ["age", "assessment", "diagnosis", "sex"] as const;
 export type CurationKind = (typeof CURATION_KINDS)[number];
 
+/** A count of zero for every kind: the shape the report and the binder keep their tallies in. */
+export const kindCounts = (): Record<CurationKind, number> =>
+  Object.fromEntries(CURATION_KINDS.map((kind) => [kind, 0])) as Record<CurationKind, number>;
+
 /**
  * Who looked at the entry.
  *   author              the author of the change; not a domain expert
@@ -21,7 +26,8 @@ export type CurationKind = (typeof CURATION_KINDS)[number];
  *   upstream_community  copied from Neurobagel's published OpenNeuro annotations, which their
  *                       community reviewed; NEMAR has not reviewed it beyond the loader's checks
  */
-export type CurationReview = "author" | "domain_expert" | "upstream_community";
+export const CURATION_REVIEWS = ["author", "domain_expert", "upstream_community"] as const;
+export type CurationReview = (typeof CURATION_REVIEWS)[number];
 
 export interface CurationEvidence {
   /** Where the annotations came from, in words a reviewer can follow. */
@@ -48,19 +54,19 @@ interface CuratedColumnBase {
   /** The participants.tsv column, spelled exactly as in its header. */
   name: string;
   /** Raw cell values that mean "not recorded" in this column. */
-  missingValues: string[];
+  readonly missingValues: readonly string[];
 }
 
 export type CuratedColumn =
   | (CuratedColumnBase & {
       kind: "sex";
       /** Raw cell value to the sex term it means, sorted by raw value. */
-      levels: Map<string, VocabTerm>;
+      levels: ReadonlyMap<string, VocabTerm>;
     })
   | (CuratedColumnBase & {
       kind: "diagnosis";
       /** Raw cell value to the diagnosis term it means, sorted by raw value. */
-      levels: Map<string, VocabTerm>;
+      levels: ReadonlyMap<string, VocabTerm>;
     })
   | (CuratedColumnBase & {
       kind: "age";
@@ -75,15 +81,26 @@ export type CuratedColumn =
       tool: VocabTerm;
     });
 
-export interface CurationEntry {
+/** The fields of an entry. Only the loader makes one that the rest of the code will accept. */
+export interface CurationEntryData {
   datasetId: string;
   evidence: CurationEvidence;
   pins: CurationPins;
   /** Sorted by column name; at most one `sex` and one `age` column. */
-  columns: CuratedColumn[];
+  columns: readonly CuratedColumn[];
 }
+
+declare const loadedByTheLoader: unique symbol;
+
+/**
+ * A reviewed entry exactly as `parseCuration` (curation.ts) returns it.
+ * The type is opaque: a hand-built object does not satisfy it, and at run time the transform and
+ * the binder accept only an object the loader made (curation-loaded.ts), because that is where an
+ * entry's terms were checked against the pinned vocabulary.
+ */
+export type CurationEntry = Readonly<CurationEntryData> & { readonly [loadedByTheLoader]: true };
 
 /** A loaded `curation.json`: its entries by dataset id. */
 export interface CurationFile {
-  entries: Map<string, CurationEntry>;
+  entries: ReadonlyMap<string, CurationEntry>;
 }

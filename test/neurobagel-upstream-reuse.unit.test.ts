@@ -21,12 +21,15 @@ import {
   NEUROBAGEL_TEST_ROOT,
   loadCuration,
 } from "../scripts/neurobagel/fixtures-io";
+import { parseArgs } from "../scripts/neurobagel/reuse-openneuro-annotations";
 import {
   type Conversion,
+  MergeRefusal,
   type MirrorDocuments,
   UPSTREAM,
   type UpstreamFile,
   convertUpstream,
+  mergeEntries,
 } from "../scripts/neurobagel/upstream-annotations";
 import { canonicalJson } from "../shared/neurobagel/canonical-json";
 import { gitBlobShaOfBytes } from "../shared/neurobagel/git-blob";
@@ -86,13 +89,13 @@ const withRow = (tsv: string, row: string): string => {
 
 const convert = async (
   id: string,
-  options: { date?: string; skipRedundant?: boolean } = {},
+  options: { date?: string; keepRedundant?: boolean } = {},
   upstream: unknown = upstreamOf(id),
   mirror?: MirrorDocuments,
 ): Promise<Conversion> =>
   convertUpstream(id, upstream, sourceOf(id), mirror ?? (await mirrorOf(id)), {
     date: options.date ?? "2026-10-02",
-    skipRedundant: options.skipRedundant ?? true,
+    keepRedundant: options.keepRedundant ?? false,
   });
 
 describe("the upstream files kept as fixtures", () => {
@@ -189,13 +192,14 @@ describe("the converter keeps only what fits, and counts what it drops", () => {
   });
 
   test("a column the table does not have", async () => {
-    const mirror = await mirrorOf("on004635", (tsv, json) => [
-      tsv.replace("Gender", "Sex_at_birth"),
+    // on004574 annotates GENDER, MOCA and UPDRS.
+    const mirror = await mirrorOf("on004574", (tsv, json) => [
+      tsv.replace("GENDER", "SEX_AT_BIRTH"),
       json,
     ]);
-    const out = await convert("on004635", {}, undefined, mirror);
+    const out = await convert("on004574", {}, undefined, mirror);
     expect(out.dropped).toEqual({ column_not_in_table: 1 });
-    expect(Object.keys((out.entry?.columns as Json) ?? {})).toEqual(["Age"]);
+    expect(Object.keys((out.entry?.columns as Json) ?? {}).sort()).toEqual(["MOCA", "UPDRS"]);
   });
 
   test("a term upstream uses that the pinned vocabulary does not have", async () => {
@@ -231,7 +235,7 @@ describe("the converter keeps only what fits, and counts what it drops", () => {
     );
     expect(withInt).toBeDefined();
     if (withInt === undefined) return;
-    const out = await convert(withInt.datasetId, { skipRedundant: false });
+    const out = await convert(withInt.datasetId, { keepRedundant: true });
     expect(out.notes.age_format_int_as_float).toBeGreaterThan(0);
     expect(JSON.stringify(out.entry)).not.toContain("FromInt");
   });
@@ -328,8 +332,8 @@ describe("the converter keeps only what fits, and counts what it drops", () => {
 
   test("columns the mechanical rules already map to the same values are left out, and counted, when asked", async () => {
     // on003568's `sex` column holds MALE and FEMALE, which the mechanical rule maps; upstream annotates it too.
-    const all = await convert("on003568", { skipRedundant: false });
-    const lean = await convert("on003568", { skipRedundant: true });
+    const all = await convert("on003568", { keepRedundant: true });
+    const lean = await convert("on003568");
     expect(all.redundant).toBe(0);
     expect(lean.redundant).toBeGreaterThan(0);
     expect(all.kept).toBe(lean.kept + lean.redundant);
@@ -360,5 +364,167 @@ describe("the converter keeps only what fits, and counts what it drops", () => {
       (b.entry?.pins as Json).participants_tsv,
     );
     expect((b.entry?.pins as Json).participants_tsv).toBe(later.pins.participantsTsv);
+  });
+});
+
+describe("an age column gets the mechanical rule's checks before it is reused", () => {
+  test("on004635's Age is in months (its participants.json says so, for 48 infants): dropped, and the real Gender stays", async () => {
+    const out = await convert("on004635");
+    expect(out.dropped).toEqual({ age_units_not_years: 1 });
+    expect(Object.keys((out.entry?.columns as Json) ?? {})).toEqual(["Gender"]);
+    expect(readFileSync(join(FIXTURE_ROOT, "on004635", "participants.json"), "utf8")).toContain(
+      "months",
+    );
+  });
+
+  test("an age whose participants.json declares weeks, days or months is dropped; years, or nothing declared, is kept", async () => {
+    // on003568 annotates `participant_age` and has no participants.json of its own.
+    const withUnits = async (units: string | null) => {
+      const json = units === null ? null : JSON.stringify({ participant_age: { Units: units } });
+      const mirror = await mirrorOf("on003568", (tsv) => [tsv, json]);
+      return convert("on003568", {}, undefined, mirror);
+    };
+    for (const units of ["weeks", "days", "months"]) {
+      const out = await withUnits(units);
+      expect(out.dropped).toEqual({ age_units_not_years: 1 });
+      expect(Object.keys((out.entry?.columns as Json) ?? {})).toEqual(["group"]);
+    }
+    for (const units of ["years", null]) {
+      const out = await withUnits(units);
+      expect(out.dropped).toEqual({});
+      expect(Object.keys((out.entry?.columns as Json) ?? {}).sort()).toEqual([
+        "group",
+        "participant_age",
+      ]);
+    }
+  });
+
+  test("an age column that is mostly zeros is dropped, like the mechanical rule's placeholder", async () => {
+    const mirror = await mirrorOf("on003568", (tsv, json) => [
+      tsv.replace(/^(sub-\d+\t)\d+(\t)/gm, "$10$2"),
+      json,
+    ]);
+    const out = await convert("on003568", {}, undefined, mirror);
+    expect(out.dropped).toEqual({ age_zero_placeholder: 1 });
+    expect(Object.keys((out.entry?.columns as Json) ?? {})).toEqual(["group"]);
+  });
+});
+
+describe("an empty upstream level map never becomes a column", () => {
+  test("a diagnosis column with Levels {} and every value missing would withdraw the mechanical healthy control from unreviewed data, so it is dropped", async () => {
+    const upstream = JSON.parse(JSON.stringify(upstreamOf("on003568")));
+    upstream.group.Annotations.Levels = {};
+    upstream.group.Annotations.MissingValues = ["HV", "MDD"];
+    const out = await convert("on003568", {}, upstream);
+    expect(out.dropped).toEqual({ levels_empty: 1 });
+    expect(Object.keys((out.entry?.columns as Json) ?? {})).toEqual(["participant_age"]);
+    // And alone, it leaves no entry at all.
+    const only = {
+      group: upstream.group,
+    };
+    const none = await convert("on003568", {}, only);
+    expect(none.skip).toBe("all_columns_dropped");
+    expect(none.entry).toBeNull();
+  });
+});
+
+describe("the evidence of a reused entry carries what a spot-check needs", () => {
+  const sourceOfEntry = (id: string): string =>
+    loadCuration().entries.get(id)?.evidence.source ?? "";
+
+  test("a gender column read as sex says so, with what participants.json says about it", () => {
+    for (const id of ["on004574", "on006861", "on004635", "on001787"]) {
+      expect(sourceOfEntry(id)).toMatch(/is read as Sex \(participants\.json says: "/);
+    }
+    expect(sourceOfEntry("on004574")).toContain("GENDER is read as Sex");
+    expect(sourceOfEntry("on006861")).toContain("Gender is read as Sex");
+  });
+
+  test("numeric sex codes say whether participants.json confirms them, and they do for on003474", async () => {
+    expect(sourceOfEntry("on003474")).toContain(
+      "numeric sex codes are confirmed by the Levels of participants.json",
+    );
+    // The same documents with the Levels describing the codes the other way round: not confirmed.
+    const swapped = await mirrorOf("on003474", (tsv, json) => [
+      tsv,
+      (json ?? "")
+        .replace('"one": "female"', '"one": "male"')
+        .replace('"two": "male"', '"two": "female"'),
+    ]);
+    const out = await convert("on003474", {}, undefined, swapped);
+    expect(out.entry && JSON.stringify(out.entry)).toContain(
+      "are NOT confirmed by participants.json",
+    );
+    // And with no Levels at all.
+    const none = await mirrorOf("on003474", (tsv, json) => [
+      tsv,
+      JSON.stringify({ ...(JSON.parse(json ?? "{}") as Json), sex: { Description: "sex" } }),
+    ]);
+    const bare = await convert("on003474", {}, undefined, none);
+    expect(JSON.stringify(bare.entry)).toContain("are NOT confirmed by participants.json");
+  });
+
+  test("an age column says which units participants.json declares, or that years are assumed", async () => {
+    expect(sourceOfEntry("on003568")).toContain(
+      "participant_age age units: none declared, years assumed",
+    );
+    const mirror = await mirrorOf("on003568", (tsv) => [
+      tsv,
+      JSON.stringify({ participant_age: { Units: "years" } }),
+    ]);
+    const out = await convert("on003568", {}, undefined, mirror);
+    expect(JSON.stringify(out.entry)).toContain(
+      'participant_age age units: \\"years\\" in participants.json',
+    );
+  });
+});
+
+describe("a regeneration never overwrites what a person wrote", () => {
+  const committed = JSON.parse(
+    readFileSync(join(NEUROBAGEL_TEST_ROOT, "../../shared/neurobagel/curation.json"), "utf8"),
+  ) as { datasets: Record<string, Json>; format: number };
+
+  test("a merge into an entry of review `author` is refused, naming the entry and the review", () => {
+    expect(() => mergeEntries(committed, { on004166: { columns: {} } })).toThrow(MergeRefusal);
+    try {
+      mergeEntries(committed, { on004166: { columns: {} } });
+    } catch (error) {
+      expect((error as MergeRefusal).datasetId).toBe("on004166");
+      expect((error as MergeRefusal).review).toBe("author");
+      expect((error as Error).message).toContain("on004166");
+      expect((error as Error).message).toContain('"author"');
+    }
+    // domain_expert is a person's review too.
+    const expert = {
+      ...committed,
+      datasets: {
+        ...committed.datasets,
+        on003568: { ...committed.datasets.on003568, evidence: { review: "domain_expert" } },
+      },
+    };
+    expect(() => mergeEntries(expert, { on003568: { columns: {} } })).toThrow(MergeRefusal);
+  });
+
+  test("an entry whose review cannot be read is refused, not overwritten", () => {
+    const odd = { ...committed, datasets: { ...committed.datasets, on003568: "not an entry" } };
+    expect(() => mergeEntries(odd, { on003568: {} })).toThrow('"(unreadable)"');
+  });
+
+  test("a reused entry is refreshed, a new id is added, and every other entry is left exactly as it is", () => {
+    const fresh = { marker: "fresh" };
+    const merged = mergeEntries(committed, { on003568: fresh, on009999: fresh });
+    expect(merged.datasets.on003568).toBe(fresh);
+    expect(merged.datasets.on009999).toBe(fresh);
+    for (const id of Object.keys(committed.datasets)) {
+      if (id !== "on003568") expect(merged.datasets[id]).toBe(committed.datasets[id]);
+    }
+    expect(committed.datasets.on003568).not.toBe(fresh);
+    expect(merged.format).toBe(1);
+  });
+
+  test("the command line leaves redundant columns out by default, and --keep-redundant opts out", () => {
+    expect(parseArgs(["on003568"]).keepRedundant).toBe(false);
+    expect(parseArgs(["--keep-redundant", "on003568"]).keepRedundant).toBe(true);
+    expect(parseArgs(["--merge-into", "x.json", "on003568"]).ids).toEqual(["on003568"]);
   });
 });

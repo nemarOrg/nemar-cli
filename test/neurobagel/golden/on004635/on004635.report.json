@@ -3,11 +3,12 @@
     "age": {
       "counts": {
         "cells": 48,
-        "mapped": 48,
+        "mapped": 0,
         "missing": 0,
-        "unmappable": 0
+        "unmappable": 48
       },
-      "status": "curated"
+      "reason": "age_units_not_years",
+      "status": "needs_curation"
     },
     "group": {
       "status": "absent"
@@ -23,27 +24,27 @@
     }
   },
   "curation": {
-    "columns_applied": 2,
+    "columns_applied": 1,
     "columns_skipped": 0,
     "declared": {
-      "age": 1,
+      "age": 0,
       "assessment": 0,
       "diagnosis": 0,
       "sex": 1
     },
     "participants_with": {
-      "age": 48,
+      "age": 0,
       "assessment": 0,
       "diagnosis": 0,
       "sex": 48
     },
-    "problems": 0,
     "review": "upstream_community",
-    "stale_files": [],
     "status": "applied"
   },
   "dataset_id": "on004635",
-  "flags": [],
+  "flags": [
+    "age_column_needs_curation"
+  ],
   "graph": {
     "acquisitions": 48,
     "imaging_sessions": 48,

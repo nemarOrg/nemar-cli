@@ -22,6 +22,8 @@ import { loadCuration } from "../scripts/neurobagel/fixtures-io";
 import { canonicalJson } from "../shared/neurobagel/canonical-json";
 
 const live = process.env.NEUROBAGEL_LIVE === "1";
+/** Each test starts a command that makes real requests; bun's 5 second default is not enough. */
+const LIVE_TIMEOUT = 120_000;
 if (!live) {
   console.warn(
     "neurobagel-reuse.integration: skipped (set NEUROBAGEL_LIVE=1 to read the live servers)",
@@ -29,52 +31,59 @@ if (!live) {
 }
 
 describe.skipIf(!live)("reuse of upstream annotations, live", () => {
-  test("the command line writes the committed entry for a reused dataset, byte for byte", async () => {
-    const id = "on003568";
-    const committed = loadCuration().entries.get(id);
-    expect(committed).toBeDefined();
-    const dir = mkdtempSync(join(tmpdir(), "nemar-reuse-"));
-    try {
-      const out = join(dir, "entries.json");
-      const proc = Bun.spawn(
-        [
-          "bun",
-          "run",
-          "scripts/neurobagel/reuse-openneuro-annotations.ts",
-          "--skip-redundant",
-          "--date",
-          committed?.evidence.date as string,
-          "--out",
-          out,
-          id,
-        ],
-        { cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" },
+  test(
+    "the command line writes the committed entry for a reused dataset, byte for byte",
+    async () => {
+      const id = "on003568";
+      const committed = loadCuration().entries.get(id);
+      expect(committed).toBeDefined();
+      const dir = mkdtempSync(join(tmpdir(), "nemar-reuse-"));
+      try {
+        const out = join(dir, "entries.json");
+        const proc = Bun.spawn(
+          [
+            "bun",
+            "run",
+            "scripts/neurobagel/reuse-openneuro-annotations.ts",
+            "--date",
+            committed?.evidence.date as string,
+            "--out",
+            out,
+            id,
+          ],
+          { cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" },
+        );
+        expect(await proc.exited).toBe(0);
+        const written = JSON.parse(readFileSync(out, "utf8")) as {
+          datasets: Record<string, unknown>;
+        };
+        const file = JSON.parse(
+          readFileSync(join(import.meta.dir, "../shared/neurobagel/curation.json"), "utf8"),
+        ) as { datasets: Record<string, unknown> };
+        expect(canonicalJson(written.datasets[id] as never)).toBe(
+          canonicalJson(file.datasets[id] as never),
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    LIVE_TIMEOUT,
+  );
+
+  test(
+    "every committed entry still fits the data plane today",
+    async () => {
+      const proc = Bun.spawn(["bun", "run", "scripts/neurobagel/curation-check.ts", "--live"], {
+        cwd: join(import.meta.dir, ".."),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const output = await new Response(proc.stdout).text();
+      expect(output).toContain(
+        `${loadCuration().entries.size} entries, ${loadCuration().entries.size} applied`,
       );
       expect(await proc.exited).toBe(0);
-      const written = JSON.parse(readFileSync(out, "utf8")) as {
-        datasets: Record<string, unknown>;
-      };
-      const file = JSON.parse(
-        readFileSync(join(import.meta.dir, "../shared/neurobagel/curation.json"), "utf8"),
-      ) as { datasets: Record<string, unknown> };
-      expect(canonicalJson(written.datasets[id] as never)).toBe(
-        canonicalJson(file.datasets[id] as never),
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("every committed entry still fits the data plane today", async () => {
-    const proc = Bun.spawn(["bun", "run", "scripts/neurobagel/curation-check.ts", "--live"], {
-      cwd: join(import.meta.dir, ".."),
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const output = await new Response(proc.stdout).text();
-    expect(output).toContain(
-      `${loadCuration().entries.size} entries, ${loadCuration().entries.size} applied`,
-    );
-    expect(await proc.exited).toBe(0);
-  });
+    },
+    LIVE_TIMEOUT,
+  );
 });

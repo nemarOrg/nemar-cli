@@ -169,7 +169,7 @@
         "date": "2026-10-02",
         "review": "upstream_community",
         "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
-        "source": "neurobagel/openneuro-annotations@116676d:ds001787.json (git blob cf03faf), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed"
+        "source": "neurobagel/openneuro-annotations@116676d:ds001787.json (git blob cf03faf), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed; for a spot-check: gender is read as Sex (participants.json says: \"sex of the participant\")"
       },
       "pins": {
         "participants_json": "941c1cb3010a6516b0336e3d97073a48146b0df5",
@@ -243,41 +243,11 @@
         "date": "2026-10-02",
         "review": "upstream_community",
         "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
-        "source": "neurobagel/openneuro-annotations@116676d:ds003474.json (git blob 7fd184e), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed"
+        "source": "neurobagel/openneuro-annotations@116676d:ds003474.json (git blob 7fd184e), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed; for a spot-check: numeric sex codes are confirmed by the Levels of participants.json"
       },
       "pins": {
         "participants_json": "e80c29cd06b0415881023b57c7a7538b176d152e",
         "participants_tsv": "233a36ffddce67d8596f958b3bf8aefc54ab8ad6"
-      }
-    },
-    "on003505": {
-      "columns": {
-        "age": {
-          "Format": {
-            "Label": "decimal",
-            "TermURL": "nb:FromFloat"
-          },
-          "IsAbout": {
-            "Label": "Age",
-            "TermURL": "nb:Age"
-          },
-          "MissingValues": [
-            "",
-            "n/a",
-            " "
-          ],
-          "VariableType": "Continuous"
-        }
-      },
-      "evidence": {
-        "date": "2026-10-02",
-        "review": "upstream_community",
-        "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
-        "source": "neurobagel/openneuro-annotations@116676d:ds003505.json (git blob 1e15497), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed"
-      },
-      "pins": {
-        "participants_json": "bdb2a22604766adf35236f269aa91960f5be9fab",
-        "participants_tsv": "144afa3e0bb8e6ab0d5cdc2112a0c7180fa59b03"
       }
     },
     "on003568": {
@@ -321,7 +291,7 @@
         "date": "2026-10-02",
         "review": "upstream_community",
         "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
-        "source": "neurobagel/openneuro-annotations@116676d:ds003568.json (git blob 5bd83c1), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed"
+        "source": "neurobagel/openneuro-annotations@116676d:ds003568.json (git blob 5bd83c1), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed; for a spot-check: participant_age age units: none declared, years assumed"
       },
       "pins": {
         "participants_json": null,
@@ -421,7 +391,7 @@
         "date": "2026-10-02",
         "review": "upstream_community",
         "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
-        "source": "neurobagel/openneuro-annotations@116676d:ds004574.json (git blob de41b26), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed"
+        "source": "neurobagel/openneuro-annotations@116676d:ds004574.json (git blob de41b26), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed; for a spot-check: GENDER is read as Sex (participants.json says: \"Gender of the participant\")"
       },
       "pins": {
         "participants_json": "5573c4a26fc1b69e687bcd35b6691f8ae4aab8a1",
@@ -430,26 +400,6 @@
     },
     "on004635": {
       "columns": {
-        "Age": {
-          "Format": {
-            "Label": "decimal",
-            "TermURL": "nb:FromFloat"
-          },
-          "IsAbout": {
-            "Label": "Age",
-            "TermURL": "nb:Age"
-          },
-          "MissingValues": [
-            "n/a",
-            "N/A",
-            "na",
-            "NA",
-            "nan",
-            "NaN",
-            ""
-          ],
-          "VariableType": "Continuous"
-        },
         "Gender": {
           "IsAbout": {
             "Label": "Sex",
@@ -473,7 +423,7 @@
         "date": "2026-10-02",
         "review": "upstream_community",
         "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
-        "source": "neurobagel/openneuro-annotations@116676d:ds004635.json (git blob fcf5dd9), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed"
+        "source": "neurobagel/openneuro-annotations@116676d:ds004635.json (git blob fcf5dd9), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed; for a spot-check: Gender is read as Sex (participants.json says: \"Participant biological sex assigned at birth\")"
       },
       "pins": {
         "participants_json": "f539786e1a83d3a7b1267975833b26a56c155c9f",
@@ -572,7 +522,7 @@
         "date": "2026-10-02",
         "review": "upstream_community",
         "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
-        "source": "neurobagel/openneuro-annotations@116676d:ds006861.json (git blob 63d93fc), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed"
+        "source": "neurobagel/openneuro-annotations@116676d:ds006861.json (git blob 63d93fc), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed; for a spot-check: Gender is read as Sex (participants.json says: \"Participant gender. Values: Female or Male.\")"
       },
       "pins": {
         "participants_json": "16c18ebbefcdd669a33207068a2c870e4ce42533",

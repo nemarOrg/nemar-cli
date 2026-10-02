@@ -4,11 +4,13 @@
  *
  *   bun run scripts/neurobagel/reuse-openneuro-annotations.ts --report <file>
  *       measure only: how many of the catalog's `on` datasets would be covered, and at what size
- *   bun run scripts/neurobagel/reuse-openneuro-annotations.ts --out <file> --skip-redundant on000117 ...
+ *   bun run scripts/neurobagel/reuse-openneuro-annotations.ts --out <file> on000117 ...
  *       write the entries for these datasets as a curation file
  *   bun run scripts/neurobagel/reuse-openneuro-annotations.ts --merge-into shared/neurobagel/curation.json \
- *       --skip-redundant --date 2026-10-02 on000117 ...
- *       merge them into the committed file, leaving every other entry as it is
+ *       --date 2026-10-02 on000117 ...
+ *       merge them into the committed file, leaving every other entry as it is; it REFUSES to
+ *       replace an entry whose review is not `upstream_community`, so a person's entry is never
+ *       overwritten by an upstream annotation
  *
  * Upstream is https://github.com/neurobagel/openneuro-annotations, MIT licence, pinned to one
  * commit (UPSTREAM in upstream-annotations.ts).
@@ -29,7 +31,8 @@
  *   --save-upstream <dir> keep the upstream files the entries came from, with the licence and
  *                         a provenance.json, under <dir>/<short commit>/ (the test fixtures)
  *   --date YYYY-MM-DD     the date written into the evidence (default: today, UTC)
- *   --skip-redundant      leave out a column the mechanical rules already give the same values
+ *   --keep-redundant      keep a column the mechanical rules already give the same values
+ *                         (by default such a column is left out and counted)
  *   --base <url>          the data plane (default https://data.nemar.org)
  *   <on######>...         only these datasets (default: every `on` dataset in the catalog)
  */
@@ -46,12 +49,13 @@ import {
   UPSTREAM,
   type UpstreamFile,
   convertUpstream,
+  mergeEntries,
 } from "./upstream-annotations";
 
 const raw = (file: string): string =>
   `https://raw.githubusercontent.com/${UPSTREAM.repo}/${UPSTREAM.commit}/${file}`;
 
-function parseArgs(argv: string[]) {
+export function parseArgs(argv: string[]) {
   const flag = (name: string): string | undefined => {
     const at = argv.indexOf(name);
     return at === -1 ? undefined : argv[at + 1];
@@ -73,7 +77,7 @@ function parseArgs(argv: string[]) {
     saveUpstream: flag("--save-upstream"),
     date: flag("--date") ?? new Date().toISOString().slice(0, 10),
     base: flag("--base") ?? DEFAULT_BASE,
-    skipRedundant: argv.includes("--skip-redundant"),
+    keepRedundant: argv.includes("--keep-redundant"),
     ids: argv.filter((a, i) => /^on\d{6}$/.test(a) && !valueFlags.has(argv[i - 1] ?? "")),
   };
 }
@@ -260,7 +264,7 @@ async function main(): Promise<void> {
         JSON.parse(new TextDecoder().decode(upstreamBytes)) as unknown,
         source,
         mirror.documents,
-        { date: args.date, skipRedundant: args.skipRedundant },
+        { date: args.date, keepRedundant: args.keepRedundant },
       );
       rows.push({
         id,
@@ -307,7 +311,7 @@ async function main(): Promise<void> {
   const total = sizes.reduce((a, b) => a + b, 0);
   const report = {
     upstream: { commit: UPSTREAM.commit, license: UPSTREAM.license, repo: UPSTREAM.repo },
-    options: { skip_redundant: args.skipRedundant },
+    options: { keep_redundant: args.keepRedundant },
     catalog_on_datasets: catalog.length,
     considered: ids.length,
     entries: Object.keys(entries).length,
@@ -340,8 +344,7 @@ async function main(): Promise<void> {
       datasets: Record<string, unknown>;
       format: number;
     };
-    for (const [id, entry] of Object.entries(entries)) existing.datasets[id] = entry;
-    writeFileSync(args.mergeInto, canonicalJson(existing as never));
+    writeFileSync(args.mergeInto, canonicalJson(mergeEntries(existing, entries) as never));
   }
 }
 

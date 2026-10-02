@@ -3,7 +3,7 @@
  * NEMAR's mirror of it (epic #1586, phase 5; ADR 0083).
  *
  * Source: https://github.com/neurobagel/openneuro-annotations, MIT licence (see
- * test/neurobagel/upstream/LICENSE), one `dsNNNNNN.json` per OpenNeuro dataset, each a BIDS data
+ * test/neurobagel/upstream/<short commit>/LICENSE), one `dsNNNNNN.json` per OpenNeuro dataset, each a BIDS data
  * dictionary whose columns carry the annotation tool's `Annotations` block.
  * NEMAR's mirror `onNNNNNN` is OpenNeuro's `dsNNNNNN` (backend/src/services/auto-import.ts).
  *
@@ -18,8 +18,12 @@
  *     same cells);
  *   - the loader accepts it (`curatedColumnFrom`);
  *   - the binder accepts it against the mirror's CURRENT participants.tsv (`bindCuratedColumn`):
- *     the column exists, and the annotation covers every value the table holds.
+ *     the column exists, the annotation covers every value the table holds, and an age column is
+ *     not declared in units other than years nor mostly zeros.
  * Whatever fails is dropped and counted, never repaired.
+ * What a person spot-checking an entry needs to know (a `gender` column read as sex, numeric sex
+ * codes and whether participants.json confirms them, the declared age units) is written into the
+ * entry's `evidence.source` from the documents, so the review does not start from nothing.
  * The entry pins the mirror's files, so if the mirror changes the entry goes stale; it does not
  * silently describe a table it never saw.
  *
@@ -32,10 +36,12 @@ import {
   type BoundColumn,
   bindCuratedColumn,
   bindCuration,
+  readParticipantsJson,
 } from "../../shared/neurobagel/curation-bind";
 import type { CuratedColumn } from "../../shared/neurobagel/curation-types";
 import {
   HEALTHY_CONTROL,
+  ageUnitsIn,
   mapAgeColumn,
   mapGroupColumn,
   mapSexColumn,
@@ -68,8 +74,12 @@ export interface MirrorDocuments {
 export interface ConvertOptions {
   /** `YYYY-MM-DD`, the date written into the evidence. */
   date: string;
-  /** Leave out a column the mechanical rules would already map to exactly the same values. */
-  skipRedundant?: boolean;
+  /**
+   * Keep a column the mechanical rules would already map to exactly the same values.
+   * By default such a column is left out and counted: it adds nothing and only adds a way for an
+   * entry to go stale.
+   */
+  keepRedundant?: boolean;
 }
 
 export type DatasetSkip =
@@ -125,6 +135,8 @@ function classify(problem: string): string {
     return "column_ambiguous_in_table";
   }
   if (problem.includes("neither Levels nor MissingValues")) return "levels_do_not_cover_table";
+  if (problem.includes("declares Units")) return "age_units_not_years";
+  if (problem.includes("are 0, a placeholder")) return "age_zero_placeholder";
   if (problem.includes("are not ages in")) return "age_values_unreadable";
   if (problem.includes("no cell holds an age")) return "age_has_no_value";
   if (problem.includes("would count as recorded items")) return "item_blank_not_declared_missing";
@@ -227,7 +239,7 @@ function redundantWithMechanical(
   bound: BoundColumn,
   header: string[],
   rows: string[][],
-  participantsJson: string | null,
+  participantsJson: Record<string, unknown> | null,
 ): boolean {
   const index = header.indexOf(column.name);
   const cells = rows.map((r) => r[index]);
@@ -252,20 +264,76 @@ function redundantWithMechanical(
     );
   }
   if (mechanicalIndex(header, "age") !== index) return false;
-  let units: unknown;
-  try {
-    const parsed = participantsJson === null ? null : (JSON.parse(participantsJson) as unknown);
-    const entry = isRecord(parsed) ? parsed[column.name] : undefined;
-    units = isRecord(entry) ? entry.Units : undefined;
-  } catch {
-    units = undefined;
-  }
+  const units = ageUnitsIn(participantsJson, column.name);
   if (bound.kind !== "age") return false;
   const mechanical = mapAgeColumn(column.name, cells, units);
   const { ageOf } = bound.mapping;
   return cells.every(
     (c) => ageOf(c) === (mechanical.status === "mapped" ? mechanical.ageOf(c) : null),
   );
+}
+
+const NUMBER_WORDS = [
+  "zero",
+  "one",
+  "two",
+  "three",
+  "four",
+  "five",
+  "six",
+  "seven",
+  "eight",
+  "nine",
+];
+
+/** `text` shortened for an evidence note. */
+const brief = (text: string, max = 100): string =>
+  text.length <= max ? text : `${text.slice(0, max - 3)}...`;
+
+/**
+ * What a person spot-checking an entry needs to know about one kept column, from the dataset's own
+ * documents.
+ * Numeric sex codes are CONFIRMED only if participants.json describes that code (its key, or the
+ * number word, `one` for `1`) in words that name the sex it was mapped to.
+ */
+function reviewNotes(
+  column: CuratedColumn,
+  participantsJson: Record<string, unknown> | null,
+): string[] {
+  const entry = participantsJson?.[column.name];
+  const description = isRecord(entry) ? entry : null;
+  const notes: string[] = [];
+  if (column.kind === "sex") {
+    if (column.name.trim().toLowerCase() === "gender") {
+      const text = typeof description?.Description === "string" ? description.Description : null;
+      notes.push(
+        `${column.name} is read as Sex (participants.json ${text === null ? "does not describe it" : `says: "${brief(text)}"`})`,
+      );
+    }
+    const numeric = [...column.levels.entries()].filter(([raw]) => /^\d+$/.test(raw));
+    if (numeric.length > 0) {
+      const levels = isRecord(description?.Levels) ? description.Levels : null;
+      const confirmed = numeric.every(([raw, t]) => {
+        if (levels === null) return false;
+        const word = Number(raw) < NUMBER_WORDS.length ? NUMBER_WORDS[Number(raw)] : null;
+        const key = Object.keys(levels).find(
+          (k) => k === raw || (word !== null && k.toLowerCase() === word),
+        );
+        const text = key === undefined ? null : levels[key];
+        return typeof text === "string" && new RegExp(`\\b${t.label}\\b`, "i").test(text);
+      });
+      notes.push(
+        `numeric sex codes ${confirmed ? "are confirmed by the Levels of participants.json" : "are NOT confirmed by participants.json (check the dataset's own description)"}`,
+      );
+    }
+  }
+  if (column.kind === "age") {
+    const units = ageUnitsIn(participantsJson, column.name);
+    notes.push(
+      `${column.name} age units: ${typeof units === "string" ? `${JSON.stringify(units)} in participants.json` : "none declared, years assumed"}`,
+    );
+  }
+  return notes;
 }
 
 /**
@@ -295,8 +363,10 @@ export async function convertUpstream(
     return skip("mirror_table_unreadable");
   }
   const { header, rows } = parsed.table;
+  const participantsJson = readParticipantsJson(mirror.participantsJson);
 
   const blocks: Record<string, Record<string, unknown>> = {};
+  const evidenceNotes: string[] = [];
   const keptKinds = new Set<string>();
   let curatable = 0;
   let annotated = 0;
@@ -328,15 +398,15 @@ export async function convertUpstream(
       bump(result.dropped, `second_${kind}_column`);
       continue;
     }
-    const bound = bindCuratedColumn(column.column, { header, rows });
+    const bound = bindCuratedColumn(column.column, { header, rows }, participantsJson);
     if ("problems" in bound) {
       bump(result.dropped, classify(bound.problems[0]));
       continue;
     }
     if (
-      options.skipRedundant &&
+      !options.keepRedundant &&
       column.column.kind !== "assessment" &&
-      redundantWithMechanical(column.column, bound.bound, header, rows, mirror.participantsJson)
+      redundantWithMechanical(column.column, bound.bound, header, rows, participantsJson)
     ) {
       result.redundant++;
       keptKinds.add(kind);
@@ -344,6 +414,7 @@ export async function convertUpstream(
     }
     keptKinds.add(kind);
     blocks[name] = made.block;
+    evidenceNotes.push(...reviewNotes(column.column, participantsJson));
     result.kept++;
     bump(result.keptByKind, kind);
     for (const [note, n] of Object.entries(notes)) bump(result.notes, note, n);
@@ -362,7 +433,7 @@ export async function convertUpstream(
       review: "upstream_community",
       reviewer:
         "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
-      source: `${UPSTREAM.repo}@${UPSTREAM.commit.slice(0, 7)}:${source.file} (git blob ${source.blobSha.slice(0, 7)}), ${UPSTREAM.license} licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed`,
+      source: `${UPSTREAM.repo}@${UPSTREAM.commit.slice(0, 7)}:${source.file} (git blob ${source.blobSha.slice(0, 7)}), ${UPSTREAM.license} licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed${evidenceNotes.length === 0 ? "" : `; for a spot-check: ${evidenceNotes.join("; ")}`}`,
     },
     pins: {
       participants_json: mirror.pins.participantsJson,
@@ -378,15 +449,52 @@ export async function convertUpstream(
     const bound =
       loaded === undefined
         ? null
-        : await bindCuration(
-            loaded,
-            { participantsJson: mirror.participantsJson, participantsTsv: mirror.participantsTsv },
-            { header, rows },
-          );
+        : await bindCuration(loaded, {
+            participantsJson: mirror.participantsJson,
+            participantsTsv: mirror.participantsTsv,
+          });
     if (bound?.status !== "applied") return skip("entry_failed_final_check");
   } catch (error) {
     if (!(error instanceof CurationError)) throw error;
     return skip("entry_failed_final_check");
   }
   return { ...result, entry };
+}
+
+/** A merge that would replace an entry a person wrote with an upstream annotation. */
+export class MergeRefusal extends Error {
+  constructor(
+    readonly datasetId: string,
+    readonly review: string,
+  ) {
+    super(
+      `${datasetId} already has an entry reviewed by ${JSON.stringify(review)}; an upstream annotation never replaces it (remove that entry by hand if that is what you mean)`,
+    );
+    this.name = "MergeRefusal";
+  }
+}
+
+/**
+ * The curation file with `generated` merged in, every other entry untouched.
+ * An existing entry is replaced only if it is itself a reused upstream annotation
+ * (`evidence.review` of `upstream_community`): a regeneration refreshes those, and anything a
+ * person reviewed, or that cannot be read well enough to tell, stops the merge.
+ */
+export function mergeEntries(
+  existing: { datasets: Record<string, unknown>; format: number },
+  generated: Record<string, unknown>,
+): { datasets: Record<string, unknown>; format: number } {
+  const datasets = { ...existing.datasets };
+  for (const [id, entry] of Object.entries(generated)) {
+    const current = datasets[id];
+    if (current !== undefined) {
+      const evidence = isRecord(current) ? current.evidence : undefined;
+      const review = isRecord(evidence) ? evidence.review : undefined;
+      if (review !== "upstream_community") {
+        throw new MergeRefusal(id, typeof review === "string" ? review : "(unreadable)");
+      }
+    }
+    datasets[id] = entry;
+  }
+  return { ...existing, datasets };
 }

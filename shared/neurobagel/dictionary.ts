@@ -31,8 +31,8 @@ import { type VocabTerm, variableTerm } from "./vocab";
 export interface DiagnosisColumn {
   column: string;
   /** Raw cell value to the diagnosis term it means. */
-  levels: Map<string, VocabTerm>;
-  missingValues: string[];
+  levels: ReadonlyMap<string, VocabTerm>;
+  missingValues: readonly string[];
   description: string;
 }
 
@@ -40,7 +40,7 @@ export interface DiagnosisColumn {
 export interface AssessmentColumn {
   column: string;
   tool: VocabTerm;
-  missingValues: string[];
+  missingValues: readonly string[];
 }
 
 export interface DictionaryColumns {
@@ -104,7 +104,7 @@ export function buildDictionary(columns: DictionaryColumns): Record<string, Cano
         Levels: Object.fromEntries(
           levels.map(([raw, t]) => [raw, { Label: t.label, TermURL: t.identifier }]),
         ),
-        MissingValues: sex.missingValues,
+        MissingValues: [...sex.missingValues],
         VariableType: "Categorical",
       },
       Description: "Sex of the participant.",
@@ -120,7 +120,7 @@ export function buildDictionary(columns: DictionaryColumns): Record<string, Cano
         Levels: Object.fromEntries(
           levels.map(([raw, t]) => [raw, { Label: t.label, TermURL: t.identifier }]),
         ),
-        MissingValues: diagnosis.missingValues,
+        MissingValues: [...diagnosis.missingValues],
         VariableType: "Categorical",
       },
       Description: diagnosis.description,
@@ -133,7 +133,7 @@ export function buildDictionary(columns: DictionaryColumns): Record<string, Cano
       Annotations: {
         IsAbout: term("Assessment"),
         IsPartOf: { Label: assessment.tool.label, TermURL: assessment.tool.identifier },
-        MissingValues: assessment.missingValues,
+        MissingValues: [...assessment.missingValues],
         VariableType: "Collection",
       },
       Description: ASSESSMENT_DESCRIPTION,

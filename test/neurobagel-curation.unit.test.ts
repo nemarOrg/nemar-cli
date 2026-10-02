@@ -81,12 +81,10 @@ describe("the committed curation.json", () => {
     for (const [id, entry] of loadCuration().entries) {
       expect(fixtureIds()).toContain(id);
       const tsv = fixtureText(id, "participants.tsv");
-      const parsed = tsv === null ? null : parseTsv(tsv);
-      const result = await bindCuration(
-        entry,
-        { participantsTsv: tsv, participantsJson: fixtureText(id, "participants.json") },
-        parsed?.ok ? { header: parsed.table.header, rows: parsed.table.rows } : null,
-      );
+      const result = await bindCuration(entry, {
+        participantsTsv: tsv,
+        participantsJson: fixtureText(id, "participants.json"),
+      });
       expect(result.status).toBe("applied");
     }
   });
@@ -440,6 +438,41 @@ describe("the loader rejects, and says why", () => {
     expect(problemsOf(evidence({ date: "1900-02-29" })).join()).toContain("evidence.date");
   });
 
+  test("a review dated after today is rejected when the caller says what today is", () => {
+    const text = mutated((f) => {
+      (f.datasets.nm000119.evidence as Json).date = "2026-10-03";
+    });
+    // The loader has no clock: without a `today` there is nothing to compare with.
+    expect(problemsOf(text)).toEqual([]);
+    expect(() => parseCuration(text, { today: "2026-10-02" })).toThrow(
+      "2026-10-03 is after today, 2026-10-02",
+    );
+    expect(() => parseCuration(text, { today: "2026-10-03" })).not.toThrow();
+    expect(() => parseCuration(text, { today: "10/03/2026" })).toThrow("YYYY-MM-DD");
+    // The committed file's own dates are not in the future.
+    expect(() =>
+      parseCuration(fileText, { today: new Date().toISOString().slice(0, 10) }),
+    ).not.toThrow();
+  });
+
+  test("problems are reported per stage: keys first, then the shape, then the meaning", () => {
+    const meaning = (f: { datasets: Record<string, Json> }) => {
+      (f.datasets.nm000149.evidence as Json).date = "tomorrow";
+    };
+    // A meaning problem alone is reported.
+    expect(problemsOf(mutated(meaning)).join()).toContain("evidence.date");
+    // With an unknown key beside it, only the shape problem is, until it is fixed.
+    const shapeAndMeaning = mutated((f) => {
+      meaning(f);
+      f.datasets.nm000119.note = "x";
+    });
+    expect(problemsOf(shapeAndMeaning)).toEqual([expect.stringContaining('unknown key "note"')]);
+    // And a duplicated key hides both.
+    const entry = JSON.stringify(fileJson.datasets.nm000149);
+    const duplicated = `{"format":1,"datasets":{"nm000149":${entry},"nm000149":${entry},"nm000119":{"note":1}}}`;
+    expect(problemsOf(duplicated)).toEqual(["/datasets/nm000149: this key appears more than once"]);
+  });
+
   test("an entry with no column, a second sex column, a second age column, and a participant id column", () => {
     const none = mutated((f) => {
       f.datasets.nm000119.columns = {};
@@ -658,28 +691,36 @@ describe("git blob pins", () => {
   });
 });
 
-/** An entry for a real fixture, edited, with the pins recomputed from the (edited) documents. */
-async function entryOver(
-  base: CurationEntry,
+/**
+ * An entry from the REAL loader: the committed entry of `id` (or of `like`, for the evidence and
+ * columns it brings), pinned to these documents, with its columns replaced if the test says.
+ * No hand-built entry reaches the binder or the transform; they refuse one.
+ */
+async function loadedEntry(
+  id: string,
   tsv: string,
   json: string | null,
-  change: (entry: CurationEntry) => void = () => {},
+  over: { like?: string; columns?: Record<string, Json> } = {},
 ): Promise<CurationEntry> {
-  const entry = clone(base) as CurationEntry;
-  entry.columns = base.columns;
-  entry.pins = {
-    participantsTsv: await gitBlobSha(tsv),
-    participantsJson: json === null ? null : await gitBlobSha(json),
+  const raw = clone(fileJson.datasets[over.like ?? id]) as Json;
+  raw.pins = {
+    participants_json: json === null ? null : await gitBlobSha(json),
+    participants_tsv: await gitBlobSha(tsv),
   };
-  change(entry);
+  if (over.columns !== undefined) raw.columns = over.columns;
+  const entry = parseCuration(JSON.stringify({ datasets: { [id]: raw }, format: 1 })).entries.get(
+    id,
+  );
+  if (entry === undefined) throw new Error("the loader dropped the entry");
   return entry;
 }
 
-const tableOf = (tsv: string) => {
-  const parsed = parseTsv(tsv);
-  if (!parsed.ok) throw new Error("fixture table does not parse");
-  return { header: parsed.table.header, rows: parsed.table.rows };
-};
+/** The committed raw columns of `id`, each with its MissingValues replaced. */
+function columnsWithMissing(id: string, missing: string[]): Record<string, Json> {
+  const columns = clone(fileJson.datasets[id].columns) as Record<string, Json>;
+  for (const column of Object.values(columns)) column.MissingValues = missing;
+  return columns;
+}
 
 describe("bindCuration", () => {
   const id = "nm000158";
@@ -688,95 +729,102 @@ describe("bindCuration", () => {
   const docs = { participantsTsv: tsv, participantsJson: json };
 
   test("applies an entry to the exact documents it pinned", async () => {
-    const result = await bindCuration(entryFor(id), docs, tableOf(tsv));
+    const result = await bindCuration(entryFor(id), docs);
     expect(result.status).toBe("applied");
     if (result.status !== "applied") return;
     expect(result.bound.diagnoses.map((d) => d.name)).toEqual(["group"]);
-    expect(result.bound.declared).toEqual({ age: 0, assessment: 0, diagnosis: 1, sex: 0 });
+  });
+
+  test("takes only an entry the loader made, and says so", async () => {
+    const forged = { ...entryFor(id) } as unknown as CurationEntry;
+    await expect(bindCuration(forged, docs)).rejects.toThrow("not a hand-built object");
   });
 
   test("a table that changed by one byte is stale, and so is a participants.json that changed", async () => {
     const edited = `${tsv}\n`;
-    expect(
-      await bindCuration(entryFor(id), { ...docs, participantsTsv: edited }, tableOf(edited)),
-    ).toEqual({
+    expect(await bindCuration(entryFor(id), { ...docs, participantsTsv: edited })).toEqual({
       status: "stale",
       staleFiles: ["participants_tsv"],
     });
     const editedJson = json.replace("Unique", "Unique ");
-    expect(
-      await bindCuration(entryFor(id), { ...docs, participantsJson: editedJson }, tableOf(tsv)),
-    ).toEqual({
+    expect(await bindCuration(entryFor(id), { ...docs, participantsJson: editedJson })).toEqual({
       status: "stale",
       staleFiles: ["participants_json"],
     });
     expect(
-      await bindCuration(
-        entryFor(id),
-        { participantsTsv: edited, participantsJson: editedJson },
-        tableOf(edited),
-      ),
+      await bindCuration(entryFor(id), { participantsTsv: edited, participantsJson: editedJson }),
     ).toEqual({ status: "stale", staleFiles: ["participants_json", "participants_tsv"] });
   });
 
+  test("a line-ending flip is a change: CRLF to LF makes the pin stale", async () => {
+    // The committed on003568 table has CRLF line endings, which git must never normalize.
+    const crlf = fixtureText("on003568", "participants.tsv") as string;
+    expect(crlf).toContain("\r\n");
+    const entry = entryFor("on003568");
+    const docs3568 = { participantsTsv: crlf, participantsJson: null };
+    expect((await bindCuration(entry, docs3568)).status).toBe("applied");
+    const lf = crlf.replace(/\r\n/g, "\n");
+    expect(await bindCuration(entry, { ...docs3568, participantsTsv: lf })).toEqual({
+      status: "stale",
+      staleFiles: ["participants_tsv"],
+    });
+  });
+
   test("a pinned table that is now absent, or a pinned participants.json that is now absent, is stale", async () => {
-    expect(
-      (await bindCuration(entryFor(id), { ...docs, participantsTsv: null }, null)).status,
-    ).toBe("stale");
-    expect(
-      await bindCuration(entryFor(id), { ...docs, participantsJson: null }, tableOf(tsv)),
-    ).toEqual({ status: "stale", staleFiles: ["participants_json"] });
+    expect((await bindCuration(entryFor(id), { ...docs, participantsTsv: null })).status).toBe(
+      "stale",
+    );
+    expect(await bindCuration(entryFor(id), { ...docs, participantsJson: null })).toEqual({
+      status: "stale",
+      staleFiles: ["participants_json"],
+    });
   });
 
   test("a pin of an ABSENT participants.json holds only while it stays absent", async () => {
     const real = "nm000109";
     const text = fixtureText(real, "participants.tsv") as string;
     expect(fixtureText(real, "participants.json")).toBeNull();
-    const entry: CurationEntry = {
-      datasetId: real,
-      evidence: { source: "test", reviewer: "test", review: "author", date: "2026-10-02" },
-      pins: { participantsTsv: await gitBlobSha(text), participantsJson: null },
-      columns: [
-        {
-          kind: "sex",
-          name: "sex",
-          levels: new Map([
-            ["F", { identifier: "snomed:248152002", label: "Female" }],
-            ["M", { identifier: "snomed:248153007", label: "Male" }],
-          ]),
-          missingValues: [],
+    const entry = await loadedEntry(real, text, null, {
+      like: "nm000154",
+      columns: {
+        sex: {
+          IsAbout: { Label: "Sex", TermURL: "nb:Sex" },
+          Levels: {
+            F: { Label: "Female", TermURL: "snomed:248152002" },
+            M: { Label: "Male", TermURL: "snomed:248153007" },
+          },
+          MissingValues: [],
+          VariableType: "Categorical",
         },
-      ],
-    };
+      },
+    });
     // The real table starts with a byte order mark; the text a decoder hands over may not.
-    expect(text.startsWith("﻿")).toBe(true);
+    expect(text.startsWith("\uFEFF")).toBe(true);
     for (const given of [text, text.slice(1)]) {
-      const result = await bindCuration(
-        entry,
-        { participantsTsv: given, participantsJson: null },
-        tableOf(given),
-      );
+      const result = await bindCuration(entry, { participantsTsv: given, participantsJson: null });
       expect(result.status).toBe("applied");
     }
     expect(
-      (await bindCuration(entry, { participantsTsv: text, participantsJson: "{}" }, tableOf(text)))
-        .status,
+      (await bindCuration(entry, { participantsTsv: text, participantsJson: "{}" })).status,
     ).toBe("stale");
   });
 
   test("the pinned table cannot be read: invalid, not stale", async () => {
-    const result = await bindCuration(entryFor(id), docs, null);
+    const broken = '"unterminated\n';
+    const entry = await loadedEntry(id, broken, json);
+    const result = await bindCuration(entry, { participantsTsv: broken, participantsJson: json });
     expect(result.status).toBe("invalid");
+    const noId = "name\tgroup\nx\tacute stroke patients (1-30 days post-stroke)\n";
+    const noIdEntry = await loadedEntry(id, noId, json);
+    expect(
+      (await bindCuration(noIdEntry, { participantsTsv: noId, participantsJson: json })).status,
+    ).toBe("invalid");
   });
 
   test("a value the level map does not cover, in a table the pins now describe, is invalid and names the value", async () => {
     const edited = `${tsv}sub-99\t71\tn/a\tn/a\tn/a\tn/a\tan unreviewed group\thomo sapiens\tn/a\n`;
-    const entry = await entryOver(entryFor(id), edited, json);
-    const result = await bindCuration(
-      entry,
-      { participantsTsv: edited, participantsJson: json },
-      tableOf(edited),
-    );
+    const entry = await loadedEntry(id, edited, json);
+    const result = await bindCuration(entry, { participantsTsv: edited, participantsJson: json });
     expect(result.status).toBe("invalid");
     if (result.status !== "invalid") return;
     expect(result.problems).toEqual([
@@ -784,50 +832,55 @@ describe("bindCuration", () => {
     ]);
   });
 
+  test("coverage reads EVERY row: blank-id rows and both rows of a conflicting duplicate count", async () => {
+    // on004166 has 98 rows with no participant id, and the dictionary is read by bagel over all rows.
+    const blank = `${tsv}\t71\tn/a\tn/a\tn/a\tn/a\tvalue in a blank-id row\thomo sapiens\tn/a\n`;
+    const blankEntry = await loadedEntry(id, blank, json);
+    const blankResult = await bindCuration(blankEntry, {
+      participantsTsv: blank,
+      participantsJson: json,
+    });
+    expect(blankResult).toMatchObject({ status: "invalid" });
+    // The same participant listed twice with rows that disagree: neither value may escape coverage.
+    const twice = `${tsv}sub-1\t71\tn/a\tn/a\tn/a\tn/a\tfirst unseen value\thomo sapiens\tn/a\nsub-1\t71\tn/a\tn/a\tn/a\tn/a\tsecond unseen value\thomo sapiens\tn/a\n`;
+    const twiceEntry = await loadedEntry(id, twice, json);
+    const twiceResult = await bindCuration(twiceEntry, {
+      participantsTsv: twice,
+      participantsJson: json,
+    });
+    expect(twiceResult).toMatchObject({
+      status: "invalid",
+      problems: [expect.stringContaining("2 value(s) are in neither Levels nor MissingValues")],
+    });
+  });
+
   test("a blank cell is a value too: it must be covered or declared missing", async () => {
     const edited = tsv.replace(/(sub-1\t71\tn\/a\tn\/a\tn\/a\tn\/a\t)[^\t]*/, "$1");
     expect(edited).not.toBe(tsv);
-    const entry = await entryOver(entryFor(id), edited, json);
-    const uncovered = await bindCuration(
-      entry,
-      { participantsTsv: edited, participantsJson: json },
-      tableOf(edited),
-    );
-    expect(uncovered.status).toBe("invalid");
-    const declared = await entryOver(entryFor(id), edited, json, (e) => {
-      e.columns = e.columns.map((c) => ({ ...c, missingValues: [""] }));
+    const entry = await loadedEntry(id, edited, json);
+    const uncovered = await bindCuration(entry, {
+      participantsTsv: edited,
+      participantsJson: json,
     });
+    expect(uncovered.status).toBe("invalid");
+    const declared = await loadedEntry(id, edited, json, { columns: columnsWithMissing(id, [""]) });
     expect(
-      (
-        await bindCuration(
-          declared,
-          { participantsTsv: edited, participantsJson: json },
-          tableOf(edited),
-        )
-      ).status,
+      (await bindCuration(declared, { participantsTsv: edited, participantsJson: json })).status,
     ).toBe("applied");
   });
 
   test("a curated column that is not in the header, or is in it twice", async () => {
     const renamed = tsv.replace("\tgroup\t", "\tcohort\t");
-    const entry = await entryOver(entryFor(id), renamed, json);
-    const missing = await bindCuration(
-      entry,
-      { participantsTsv: renamed, participantsJson: json },
-      tableOf(renamed),
-    );
+    const entry = await loadedEntry(id, renamed, json);
+    const missing = await bindCuration(entry, { participantsTsv: renamed, participantsJson: json });
     expect(missing).toEqual({
       status: "invalid",
       problems: ['column "group" is not in the table header'],
     });
 
     const doubled = tsv.replace("\tspecies\t", "\tgroup\t");
-    const twice = await entryOver(entryFor(id), doubled, json);
-    const result = await bindCuration(
-      twice,
-      { participantsTsv: doubled, participantsJson: json },
-      tableOf(doubled),
-    );
+    const twice = await loadedEntry(id, doubled, json);
+    const result = await bindCuration(twice, { participantsTsv: doubled, participantsJson: json });
     expect(result).toEqual({
       status: "invalid",
       problems: ['column "group" appears 2 times in the table header'],
@@ -835,10 +888,117 @@ describe("bindCuration", () => {
   });
 
   test("the header is matched exactly, not case-insensitively", async () => {
-    const entry = entryFor(id);
-    const wrongCase = { ...entry, columns: entry.columns.map((c) => ({ ...c, name: "Group" })) };
-    const result = await bindCuration(wrongCase as CurationEntry, docs, tableOf(tsv));
-    expect(result.status).toBe("invalid");
+    const [columnName] = Object.keys(fileJson.datasets[id].columns as Json);
+    const columns = { Group: (fileJson.datasets[id].columns as Record<string, Json>)[columnName] };
+    const entry = await loadedEntry(id, tsv, json, { columns });
+    expect((await bindCuration(entry, docs)).status).toBe("invalid");
+  });
+
+  test("an age column is bound only while participants.json does not declare units other than years", async () => {
+    // The real nm000132 table has an age column in years; the test writes the descriptions.
+    const table = fixtureText("nm000132", "participants.tsv") as string;
+    const ageColumns = {
+      age: {
+        Format: { Label: "decimal", TermURL: "nb:FromFloat" },
+        IsAbout: { Label: "Age", TermURL: "nb:Age" },
+        MissingValues: ["", "n/a"],
+        VariableType: "Continuous",
+      },
+    };
+    const outcomes: [string | null, string][] = [];
+    for (const units of [
+      undefined,
+      "years",
+      "Years",
+      "(years)",
+      "y",
+      "yrs",
+      null,
+      "months",
+      "days",
+      "weeks",
+      "",
+      12,
+    ]) {
+      const description = JSON.stringify({
+        age: units === undefined ? { Description: "Age" } : { Description: "Age", Units: units },
+      });
+      const entry = await loadedEntry("nm000132", table, description, {
+        like: "nm000154",
+        columns: ageColumns,
+      });
+      const result = await bindCuration(entry, {
+        participantsTsv: table,
+        participantsJson: description,
+      });
+      outcomes.push([units === undefined ? "(absent)" : JSON.stringify(units), result.status]);
+    }
+    expect(outcomes).toEqual([
+      ["(absent)", "applied"],
+      ['"years"', "applied"],
+      ['"Years"', "applied"],
+      ['"(years)"', "applied"],
+      ['"y"', "applied"],
+      ['"yrs"', "applied"],
+      ["null", "applied"],
+      ['"months"', "invalid"],
+      ['"days"', "invalid"],
+      ['"weeks"', "invalid"],
+      ['""', "invalid"],
+      ["12", "invalid"],
+    ]);
+    const months = JSON.stringify({ age: { Units: "months" } });
+    const entry = await loadedEntry("nm000132", table, months, {
+      like: "nm000154",
+      columns: ageColumns,
+    });
+    const result = await bindCuration(entry, { participantsTsv: table, participantsJson: months });
+    expect(result).toMatchObject({
+      status: "invalid",
+      problems: [expect.stringContaining('declares Units "months", not years')],
+    });
+  });
+
+  test("an age column on the real nm000157 table, whose ages are all 0, is invalid, not an age of 0 for everyone", async () => {
+    const zeros = fixtureText("nm000157", "participants.tsv") as string;
+    const description = fixtureText("nm000157", "participants.json") as string;
+    const entry = await loadedEntry("nm000157", zeros, description, {
+      like: "nm000154",
+      columns: {
+        age: {
+          Format: { Label: "decimal", TermURL: "nb:FromFloat" },
+          IsAbout: { Label: "Age", TermURL: "nb:Age" },
+          MissingValues: ["", "n/a"],
+          VariableType: "Continuous",
+        },
+      },
+    });
+    const result = await bindCuration(entry, {
+      participantsTsv: zeros,
+      participantsJson: description,
+    });
+    expect(result).toMatchObject({
+      status: "invalid",
+      problems: [expect.stringContaining("19 of 19 ages are 0")],
+    });
+    // The reviewer who knows 0 is not an age says so, and then there is nothing left to curate.
+    const declared = await loadedEntry("nm000157", zeros, description, {
+      like: "nm000154",
+      columns: {
+        age: {
+          Format: { Label: "decimal", TermURL: "nb:FromFloat" },
+          IsAbout: { Label: "Age", TermURL: "nb:Age" },
+          MissingValues: ["", "0", "n/a"],
+          VariableType: "Continuous",
+        },
+      },
+    });
+    expect(
+      await bindCuration(declared, { participantsTsv: zeros, participantsJson: description }),
+    ).toMatchObject({
+      status: "invalid",
+      problems: [expect.stringContaining("no cell holds an age")],
+    });
   });
 
   test("an age column: unreadable values, no age at all, and a ValueRange the table does not have", () => {

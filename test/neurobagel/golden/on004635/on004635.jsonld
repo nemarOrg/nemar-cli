@@ -116,7 +116,6 @@
       "hasLabel": "sub-S1",
       "hasSession": [
         {
-          "hasAge": 9.44,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -148,7 +147,6 @@
       "hasLabel": "sub-S10",
       "hasSession": [
         {
-          "hasAge": 7.17,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -180,7 +178,6 @@
       "hasLabel": "sub-S11",
       "hasSession": [
         {
-          "hasAge": 9.86,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248152002",
@@ -212,7 +209,6 @@
       "hasLabel": "sub-S12",
       "hasSession": [
         {
-          "hasAge": 8.98,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -244,7 +240,6 @@
       "hasLabel": "sub-S13",
       "hasSession": [
         {
-          "hasAge": 6.18,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -276,7 +271,6 @@
       "hasLabel": "sub-S14",
       "hasSession": [
         {
-          "hasAge": 9.67,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -308,7 +302,6 @@
       "hasLabel": "sub-S15",
       "hasSession": [
         {
-          "hasAge": 9.73,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248152002",
@@ -340,7 +333,6 @@
       "hasLabel": "sub-S16",
       "hasSession": [
         {
-          "hasAge": 6.77,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -372,7 +364,6 @@
       "hasLabel": "sub-S17",
       "hasSession": [
         {
-          "hasAge": 9.27,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248152002",
@@ -404,7 +395,6 @@
       "hasLabel": "sub-S18",
       "hasSession": [
         {
-          "hasAge": 9.63,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -436,7 +426,6 @@
       "hasLabel": "sub-S19",
       "hasSession": [
         {
-          "hasAge": 6.44,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -468,7 +457,6 @@
       "hasLabel": "sub-S2",
       "hasSession": [
         {
-          "hasAge": 6.12,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248152002",
@@ -500,7 +488,6 @@
       "hasLabel": "sub-S20",
       "hasSession": [
         {
-          "hasAge": 9.17,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -532,7 +519,6 @@
       "hasLabel": "sub-S21",
       "hasSession": [
         {
-          "hasAge": 9.34,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248152002",
@@ -564,7 +550,6 @@
       "hasLabel": "sub-S22",
       "hasSession": [
         {
-          "hasAge": 6.12,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -596,7 +581,6 @@
       "hasLabel": "sub-S23",
       "hasSession": [
         {
-          "hasAge": 9.11,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248152002",
@@ -628,7 +612,6 @@
       "hasLabel": "sub-S24",
       "hasSession": [
         {
-          "hasAge": 10.16,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -660,7 +643,6 @@
       "hasLabel": "sub-S25",
       "hasSession": [
         {
-          "hasAge": 6.21,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -692,7 +674,6 @@
       "hasLabel": "sub-S26",
       "hasSession": [
         {
-          "hasAge": 10.42,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248152002",
@@ -724,7 +705,6 @@
       "hasLabel": "sub-S27",
       "hasSession": [
         {
-          "hasAge": 6.12,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248152002",
@@ -756,7 +736,6 @@
       "hasLabel": "sub-S28",
       "hasSession": [
         {
-          "hasAge": 9.17,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248152002",
@@ -788,7 +767,6 @@
       "hasLabel": "sub-S29",
       "hasSession": [
         {
-          "hasAge": 9.01,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248152002",
@@ -820,7 +798,6 @@
       "hasLabel": "sub-S3",
       "hasSession": [
         {
-          "hasAge": 6.74,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -852,7 +829,6 @@
       "hasLabel": "sub-S30",
       "hasSession": [
         {
-          "hasAge": 6.61,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -884,7 +860,6 @@
       "hasLabel": "sub-S31",
       "hasSession": [
         {
-          "hasAge": 9.37,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248152002",
@@ -916,7 +891,6 @@
       "hasLabel": "sub-S32",
       "hasSession": [
         {
-          "hasAge": 6.28,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248152002",
@@ -948,7 +922,6 @@
       "hasLabel": "sub-S33",
       "hasSession": [
         {
-          "hasAge": 6.87,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -980,7 +953,6 @@
       "hasLabel": "sub-S34",
       "hasSession": [
         {
-          "hasAge": 9.17,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -1012,7 +984,6 @@
       "hasLabel": "sub-S35",
       "hasSession": [
         {
-          "hasAge": 9.76,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -1044,7 +1015,6 @@
       "hasLabel": "sub-S36",
       "hasSession": [
         {
-          "hasAge": 6.18,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248152002",
@@ -1076,7 +1046,6 @@
       "hasLabel": "sub-S37",
       "hasSession": [
         {
-          "hasAge": 9.07,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -1108,7 +1077,6 @@
       "hasLabel": "sub-S38",
       "hasSession": [
         {
-          "hasAge": 9.07,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248152002",
@@ -1140,7 +1108,6 @@
       "hasLabel": "sub-S39",
       "hasSession": [
         {
-          "hasAge": 9.6,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248152002",
@@ -1172,7 +1139,6 @@
       "hasLabel": "sub-S4",
       "hasSession": [
         {
-          "hasAge": 5.98,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -1204,7 +1170,6 @@
       "hasLabel": "sub-S40",
       "hasSession": [
         {
-          "hasAge": 6.58,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248152002",
@@ -1236,7 +1201,6 @@
       "hasLabel": "sub-S41",
       "hasSession": [
         {
-          "hasAge": 9.63,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -1268,7 +1232,6 @@
       "hasLabel": "sub-S42",
       "hasSession": [
         {
-          "hasAge": 6.12,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -1300,7 +1263,6 @@
       "hasLabel": "sub-S43",
       "hasSession": [
         {
-          "hasAge": 9.47,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -1332,7 +1294,6 @@
       "hasLabel": "sub-S44",
       "hasSession": [
         {
-          "hasAge": 9.24,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -1364,7 +1325,6 @@
       "hasLabel": "sub-S45",
       "hasSession": [
         {
-          "hasAge": 6.54,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -1396,7 +1356,6 @@
       "hasLabel": "sub-S46",
       "hasSession": [
         {
-          "hasAge": 9.86,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248152002",
@@ -1428,7 +1387,6 @@
       "hasLabel": "sub-S47",
       "hasSession": [
         {
-          "hasAge": 6.12,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -1460,7 +1418,6 @@
       "hasLabel": "sub-S48",
       "hasSession": [
         {
-          "hasAge": 7.27,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -1492,7 +1449,6 @@
       "hasLabel": "sub-S5",
       "hasSession": [
         {
-          "hasAge": 6.21,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248153007",
@@ -1524,7 +1480,6 @@
       "hasLabel": "sub-S6",
       "hasSession": [
         {
-          "hasAge": 6.9,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248152002",
@@ -1556,7 +1511,6 @@
       "hasLabel": "sub-S7",
       "hasSession": [
         {
-          "hasAge": 6.48,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248152002",
@@ -1588,7 +1542,6 @@
       "hasLabel": "sub-S8",
       "hasSession": [
         {
-          "hasAge": 9.04,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248152002",
@@ -1620,7 +1573,6 @@
       "hasLabel": "sub-S9",
       "hasSession": [
         {
-          "hasAge": 6.08,
           "hasLabel": "ses-unnamed",
           "hasSex": {
             "identifier": "snomed:248152002",

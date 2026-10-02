@@ -22,8 +22,17 @@
  *   - a pin that is not 40 lowercase hex digits, evidence that is blank, a date that is not a
  *     calendar date.
  * What it cannot reject from the text alone, because it depends on the table, is done by
- * `bindCuration` (curation-bind.ts): the pins, and whether the level maps cover every value
- * the table holds.
+ * `bindCuration` (curation-bind.ts): the pins, whether the level maps cover every value the table
+ * holds, and an age column's units and placeholder zeros.
+ *
+ * "Every problem" is per stage: key problems (duplicates, `__proto__`) are reported first, and
+ * only if there are none is the SHAPE checked (unknown keys, wrong types), and only if the shape
+ * is sound is the MEANING checked (terms, labels, levels, pins' use, dates).
+ * Fix one stage and run again to see the next; within a stage everything found is listed.
+ *
+ * What the loader returns is opaque: an entry is registered (curation-loaded.ts) and the
+ * transform and the binder accept nothing else, because here is where its terms were checked
+ * against the full pinned vocabulary.
  *
  * An entry has the shape of the Neurobagel annotation tool's export: each column maps to the
  * tool's `Annotations` block, pasted as exported.
@@ -35,12 +44,13 @@
 
 import { z } from "zod";
 import { byCodeUnit } from "./canonical-json";
-import type {
-  CuratedColumn,
-  CurationEntry,
-  CurationFile,
-  CurationKind,
-  CurationReview,
+import { markLoaded } from "./curation-loaded";
+import {
+  CURATION_REVIEWS,
+  type CuratedColumn,
+  type CurationEntry,
+  type CurationFile,
+  type CurationKind,
 } from "./curation-types";
 import { scanKeys } from "./json-keys";
 import { AGE_FORMAT_IDS, AGE_MAX_YEARS, AGE_MIN_YEARS, type AgeFormatId } from "./participants";
@@ -56,13 +66,6 @@ export class CurationError extends Error {
     this.name = "CurationError";
   }
 }
-
-/** The review values, for the schema and for anything that must list them. */
-export const CURATION_REVIEWS: readonly CurationReview[] = [
-  "author",
-  "domain_expert",
-  "upstream_community",
-];
 
 const term = z.object({ TermURL: z.string(), Label: z.string() }).strict();
 // Uniqueness is checked by hand below, for a message that names the repeated value.
@@ -111,7 +114,7 @@ const entrySchema = z
       .object({
         source: z.string().refine(notBlank, "must not be blank"),
         reviewer: z.string().refine(notBlank, "must not be blank"),
-        review: z.enum(["author", "domain_expert", "upstream_community"]),
+        review: z.enum(CURATION_REVIEWS),
         date: z.string(),
       })
       .strict(),
@@ -378,11 +381,23 @@ function datasetIdProblem(id: string): string | null {
   return null;
 }
 
+export interface ParseOptions {
+  /**
+   * Today's date, `YYYY-MM-DD`, from the caller's clock (this module has none).
+   * When given, an `evidence.date` after it is rejected: a review cannot have happened yet.
+   */
+  today?: string;
+}
+
 /**
  * Parse and check the text of `curation.json`.
- * Returns the entries by dataset id, or throws a `CurationError` listing every problem.
+ * Returns the entries by dataset id, or throws a `CurationError` listing the problems of the first
+ * stage that has any (see the header).
  */
-export function parseCuration(text: string): CurationFile {
+export function parseCuration(text: string, options: ParseOptions = {}): CurationFile {
+  if (options.today !== undefined && !isCalendarDate(options.today)) {
+    throw new Error(`parseCuration: today must be a YYYY-MM-DD date, not ${quote(options.today)}`);
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -411,6 +426,10 @@ export function parseCuration(text: string): CurationFile {
     if (idProblem !== null) problems.push(`${here}: ${idProblem}`);
     if (!isCalendarDate(raw.evidence.date)) {
       problems.push(`${here}.evidence.date: ${quote(raw.evidence.date)} is not a YYYY-MM-DD date`);
+    } else if (options.today !== undefined && raw.evidence.date > options.today) {
+      problems.push(
+        `${here}.evidence.date: ${raw.evidence.date} is after today, ${options.today}; a review cannot have happened yet`,
+      );
     }
     const names = Object.keys(raw.columns).sort(byCodeUnit);
     if (names.length === 0) problems.push(`${here}.columns: an entry must curate a column`);
@@ -429,15 +448,18 @@ export function parseCuration(text: string): CurationFile {
         );
       }
     }
-    entries.set(id, {
-      datasetId: id,
-      evidence: raw.evidence,
-      pins: {
-        participantsTsv: raw.pins.participants_tsv,
-        participantsJson: raw.pins.participants_json,
-      },
-      columns,
-    });
+    entries.set(
+      id,
+      markLoaded({
+        datasetId: id,
+        evidence: { ...raw.evidence },
+        pins: {
+          participantsTsv: raw.pins.participants_tsv,
+          participantsJson: raw.pins.participants_json,
+        },
+        columns,
+      }),
+    );
   }
   if (problems.length > 0) throw new CurationError(problems);
   return { entries };

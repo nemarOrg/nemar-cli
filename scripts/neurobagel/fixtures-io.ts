@@ -27,7 +27,11 @@ export const CURATION_PATH = resolve(HERE, "../../shared/neurobagel/curation.jso
 let committedCuration: CurationFile | null = null;
 /** The committed `curation.json`, loaded strictly (a bad file throws `CurationError`). */
 export function loadCuration(): CurationFile {
-  committedCuration ??= parseCuration(readFileSync(CURATION_PATH, "utf8"));
+  // A review dated after today cannot have happened, so the loader is given today's date (it has no
+  // clock of its own).
+  committedCuration ??= parseCuration(readFileSync(CURATION_PATH, "utf8"), {
+    today: new Date().toISOString().slice(0, 10),
+  });
   return committedCuration;
 }
 

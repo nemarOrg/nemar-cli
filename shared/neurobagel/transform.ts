@@ -23,9 +23,11 @@
  *     (see participants.ts). EMG is never mapped to EEG.
  *     A reviewed curation entry (curation.ts, ADR 0083) can supply what the rules
  *     leave out. It is applied only if the two participants documents are the bytes
- *     it pinned and it fits them, only to the graph's participants, and it is
- *     skipped whole, with a flag, otherwise: the mechanical output never changes
- *     because of an entry that does not apply.
+ *     it pinned and it fits them, and only to the graph's participants. Otherwise it
+ *     is skipped whole, with a flag, and the variables it names are WITHHELD: their
+ *     mechanical mapping is held back too, because an entry may exist to withdraw a
+ *     claim the rules would make, and one that goes stale must lose claims, never
+ *     make a false one. The variables it does not name ship as without an entry.
  *   - Output is byte-stable: same input, same bytes (canonical-json.ts), and
  *     identifiers are derived from names (identifiers.ts).
  *   - The output is validated before it is returned (validate-output.ts).
@@ -34,8 +36,9 @@
  */
 
 import { type CanonicalJsonValue, byCodeUnit, canonicalJson } from "./canonical-json";
-import { type BoundCuration, bindCuration } from "./curation-bind";
-import type { CurationKind } from "./curation-types";
+import { type BoundCuration, type StaleFile, bindCuration, kindsOf } from "./curation-bind";
+import { isLoaded } from "./curation-loaded";
+import { type CurationEntry, type CurationKind, kindCounts } from "./curation-types";
 import {
   CURATED_DIAGNOSIS_DESCRIPTION,
   type DiagnosisColumn,
@@ -64,11 +67,18 @@ import {
   HEALTHY_CONTROL,
   STANDARD_MISSING_VALUES,
   type SexMapping,
+  ageUnitsIn,
   mapAgeColumn,
   mapGroupColumn,
   mapSexColumn,
 } from "./participants";
-import type { ColumnReport, CurationReport, NeurobagelReport, TableStatus } from "./report";
+import type {
+  ColumnReport,
+  CurationReport,
+  NeurobagelReport,
+  TableStatus,
+  WithheldCounts,
+} from "./report";
 import { parseTsv } from "./tsv";
 import {
   validateDatasetDescription,
@@ -83,6 +93,7 @@ export type RefusalCode =
   | "invalid_metadata"
   | "dataset_id_mismatch"
   | "no_subjects"
+  | "curation_not_loaded"
   | "curation_dataset_mismatch"
   | "output_invalid";
 
@@ -154,13 +165,6 @@ function findColumn(header: string[], wanted: string): number {
   return header.findIndex((h) => h.trim().toLowerCase() === wanted);
 }
 
-function ageUnitsOf(participantsJson: ParticipantsJson | null, column: string): unknown {
-  if (participantsJson === null) return undefined;
-  const entry = participantsJson[column];
-  if (entry === null || typeof entry !== "object") return undefined;
-  return (entry as Record<string, unknown>).Units;
-}
-
 /** `001` and `sub-001` name one subject; the graph and the bids index use the prefixed form. */
 function normalizeParticipantId(raw: string): { id: string; prefixed: boolean } {
   return raw.startsWith("sub-")
@@ -177,8 +181,6 @@ interface TableRead {
   rows: Map<string, string[]>;
   /** Every participant the table names, including those whose duplicate rows disagree. */
   ids: Set<string>;
-  /** Every data row as parsed, in file order, for the checks that read the whole table. */
-  allRows: string[][];
   rowCount: number;
   rowsWithoutId: number;
   /** Rows that repeat an id already seen. */
@@ -210,7 +212,6 @@ function readTable(text: string | null, flags: Set<string>): TableRead {
     idColumn: -1,
     rows: new Map(),
     ids: new Set(),
-    allRows: [],
     rowCount: 0,
     rowsWithoutId: 0,
     duplicates: 0,
@@ -238,7 +239,6 @@ function readTable(text: string | null, flags: Set<string>): TableRead {
     return { ...read, status: "no_participant_id" };
   }
   read.status = "ok";
-  read.allRows = parsed.table.rows;
   read.rowCount = parsed.table.rows.length;
   const first = new Map<string, string[]>();
   const conflicting = new Set<string>();
@@ -288,6 +288,46 @@ function readParticipantsJson(
     return { status: "unreadable", value: null };
   }
   return { status: "present", value: checked.data };
+}
+
+/** What became of an entry, before the counts the report adds to it. */
+type CurationOutcome =
+  | { status: "applied" }
+  | { status: "stale"; stale_files: StaleFile[] }
+  | { status: "invalid"; problems: number }
+  | { status: "unused" };
+
+/** The report's account of an entry: counts and enumerated values only, never a name or a cell. */
+function curationReportFor(
+  entry: CurationEntry,
+  outcome: CurationOutcome,
+  participantsWith: Record<CurationKind, number>,
+  withheld: WithheldCounts,
+): CurationReport {
+  const declared = kindCounts();
+  for (const column of entry.columns) declared[column.kind]++;
+  const common = { review: entry.evidence.review, declared };
+  const notApplied = {
+    columns_applied: 0 as const,
+    columns_skipped: entry.columns.length,
+    withheld,
+  };
+  switch (outcome.status) {
+    case "applied":
+      return {
+        ...common,
+        status: "applied",
+        columns_applied: entry.columns.length,
+        columns_skipped: 0,
+        participants_with: participantsWith,
+      };
+    case "stale":
+      return { ...common, ...notApplied, status: "stale", stale_files: outcome.stale_files };
+    case "invalid":
+      return { ...common, ...notApplied, status: "invalid", problems: outcome.problems };
+    case "unused":
+      return { ...common, ...notApplied, status: "unused" };
+  }
 }
 
 export async function buildNeurobagelArtifacts(
@@ -414,7 +454,7 @@ export async function buildNeurobagelArtifacts(
       : mapAgeColumn(
           table.header[columnIndex.age],
           cellsOf(columnIndex.age),
-          ageUnitsOf(participantsJson.value, table.header[columnIndex.age]),
+          ageUnitsIn(participantsJson.value, table.header[columnIndex.age]),
         );
   const mechanicalSex: ColumnOutcome<SexMapping> =
     columnIndex.sex === -1
@@ -428,7 +468,17 @@ export async function buildNeurobagelArtifacts(
   // 5b. A reviewed curation entry, if the caller has one for this dataset.
   // It replaces the mechanical rule for the variables it curates, applies only to the participants
   // of the graph, and is skipped whole when it does not fit the documents in hand.
+  // An entry that is NOT applied still names variables, and some entries exist only to withdraw
+  // what the mechanical rule would claim (a `Control` that is an intervention arm, not a healthy
+  // control): for those variables the mechanical mapping is withheld too, so that an entry that
+  // goes stale loses claims and never makes a false one.
   const curationEntry = input.curation ?? null;
+  if (curationEntry !== null && !isLoaded(curationEntry)) {
+    throw new NeurobagelRefusal(
+      "curation_not_loaded",
+      "the curation entry did not come from parseCuration, so its terms were never checked",
+    );
+  }
   if (curationEntry !== null && curationEntry.datasetId !== datasetId) {
     throw new NeurobagelRefusal(
       "curation_dataset_mismatch",
@@ -436,47 +486,35 @@ export async function buildNeurobagelArtifacts(
     );
   }
   let applied: BoundCuration | null = null;
-  let curationReport: CurationReport | undefined;
+  let curationOutcome: CurationOutcome | null = null;
+  let namedByUnappliedEntry: ReadonlySet<CurationKind> = new Set();
   if (curationEntry !== null) {
-    const bound = await bindCuration(
-      curationEntry,
-      { participantsTsv: input.participantsTsv, participantsJson: input.participantsJson },
-      table.status === "ok" ? { header: table.header, rows: table.allRows } : null,
-    );
-    const none: Record<CurationKind, number> = { age: 0, assessment: 0, diagnosis: 0, sex: 0 };
-    const declared: Record<CurationKind, number> = { ...none };
-    for (const column of curationEntry.columns) declared[column.kind]++;
-    const base = {
-      review: curationEntry.evidence.review,
-      declared,
-      participants_with: none,
-      stale_files: [] as string[],
-      problems: 0,
-    };
-    const skipped = { columns_applied: 0, columns_skipped: curationEntry.columns.length };
+    const bound = await bindCuration(curationEntry, {
+      participantsTsv: input.participantsTsv,
+      participantsJson: input.participantsJson,
+    });
     if (bound.status === "stale") {
       flags.add("curation_stale");
-      curationReport = { ...base, ...skipped, status: "stale", stale_files: bound.staleFiles };
+      curationOutcome = { status: "stale", stale_files: bound.staleFiles };
     } else if (bound.status === "invalid") {
       flags.add("curation_invalid");
-      curationReport = { ...base, ...skipped, status: "invalid", problems: bound.problems.length };
+      curationOutcome = { status: "invalid", problems: bound.problems.length };
     } else if (!phenotypeUsable) {
       // The table fits, but none of its participants are the graph's: nothing to attach it to.
       flags.add("curation_unused");
-      curationReport = { ...base, ...skipped, status: "unused" };
+      curationOutcome = { status: "unused" };
     } else {
       applied = bound.bound;
-      curationReport = {
-        ...base,
-        status: "applied",
-        columns_applied: curationEntry.columns.length,
-        columns_skipped: 0,
-        participants_with: { ...none },
-      };
+      curationOutcome = { status: "applied" };
     }
+    if (applied === null) namedByUnappliedEntry = new Set(kindsOf(curationEntry));
   }
 
-  const curatedCounts = (column: number, mapped: (cell: string) => boolean, missing: string[]) => {
+  const curatedCounts = (
+    column: number,
+    mapped: (cell: string) => boolean,
+    missing: readonly string[],
+  ) => {
     const cells = cellsOf(column);
     const counts: ColumnCounts = {
       cells: cells.length,
@@ -487,9 +525,13 @@ export async function buildNeurobagelArtifacts(
     return counts;
   };
 
-  // The variable's final outcome: the curated column where there is one, else the mechanical rule.
+  // The variable's final outcome: the curated column where there is one, else the mechanical rule,
+  // unless an entry that did not apply names the variable (then nothing is claimed for it).
+  const withheldFor = (kind: CurationKind): boolean => namedByUnappliedEntry.has(kind);
   let ageColumn = columnIndex.age;
-  let ageOutcome = mechanicalAge;
+  let ageOutcome: ColumnOutcome<AgeMapping> = withheldFor("age")
+    ? { status: "absent" }
+    : mechanicalAge;
   if (applied?.age) {
     const { index, name, mapping } = applied.age;
     ageColumn = index;
@@ -501,7 +543,9 @@ export async function buildNeurobagelArtifacts(
     };
   }
   let sexColumn = columnIndex.sex;
-  let sexOutcome = mechanicalSex;
+  let sexOutcome: ColumnOutcome<SexMapping> = withheldFor("sex")
+    ? { status: "absent" }
+    : mechanicalSex;
   if (applied?.sex) {
     const { index, name, mapping } = applied.sex;
     sexColumn = index;
@@ -519,7 +563,7 @@ export async function buildNeurobagelArtifacts(
   const curatedGroup = curatedDiagnoses.find((d) => d.index === columnIndex.group);
   const groupIsCurated = curatedGroup !== undefined;
   const diagnosisColumns: (DiagnosisColumn & { index: number; curated: boolean })[] = [];
-  if (mechanicalGroup.status === "mapped" && !groupIsCurated) {
+  if (mechanicalGroup.status === "mapped" && !groupIsCurated && !withheldFor("diagnosis")) {
     diagnosisColumns.push({
       column: mechanicalGroup.column,
       curated: false,
@@ -544,15 +588,23 @@ export async function buildNeurobagelArtifacts(
     byCodeUnit(a.name, b.name),
   );
 
+  /** What the mechanical rule found, or that it found something and an entry made it be withheld. */
+  const mechanicalReport = (
+    outcome: Parameters<typeof columnReport>[0],
+    kind: CurationKind,
+  ): ColumnReport =>
+    withheldFor(kind) && outcome.status === "mapped"
+      ? { status: "withheld", counts: { ...outcome.counts } }
+      : columnReport(outcome);
   const ageReport: ColumnReport = applied?.age
     ? { status: "curated", counts: (ageOutcome as { counts: ColumnCounts }).counts }
-    : columnReport(mechanicalAge);
+    : mechanicalReport(mechanicalAge, "age");
   const sexReport: ColumnReport = applied?.sex
     ? { status: "curated", counts: (sexOutcome as { counts: ColumnCounts }).counts }
-    : columnReport(mechanicalSex);
+    : mechanicalReport(mechanicalSex, "sex");
   const groupReport: ColumnReport =
     curatedGroup === undefined
-      ? columnReport(mechanicalGroup)
+      ? mechanicalReport(mechanicalGroup, "diagnosis")
       : {
           status: "curated",
           counts: curatedCounts(
@@ -574,6 +626,12 @@ export async function buildNeurobagelArtifacts(
     })),
   };
 
+  const withheld = {
+    age: ageReport.status === "withheld" ? 1 : 0,
+    diagnosis: groupReport.status === "withheld" ? 1 : 0,
+    sex: sexReport.status === "withheld" ? 1 : 0,
+  };
+  if (withheld.age + withheld.diagnosis + withheld.sex > 0) flags.add("curation_withheld");
   if (ageReport.status === "needs_curation") flags.add("age_column_needs_curation");
   if (sexReport.status === "needs_curation") flags.add("sex_column_needs_curation");
   if (groupReport.status === "needs_curation") flags.add("group_column_needs_curation");
@@ -605,7 +663,7 @@ export async function buildNeurobagelArtifacts(
   const mappedDatatypeSubjects = new Map<string, number>();
   const droppedDatatypeSubjects = new Map<string, number>();
   const pairingBasis = new Map<string, number>();
-  const curatedWith = { age: 0, assessment: 0, diagnosis: 0, sex: 0 };
+  const curatedWith = kindCounts();
   const subjects: SubjectModel[] = graphIds.map((label) => {
     const row = phenotypeUsable ? table.rows.get(label) : undefined;
     const phenotype: SubjectModel["phenotype"] = {
@@ -662,9 +720,6 @@ export async function buildNeurobagelArtifacts(
     }
     return { label, phenotype, imaging };
   });
-  if (curationReport !== undefined && curationReport.status === "applied") {
-    curationReport.participants_with = curatedWith;
-  }
   if (pairingBasis.get("unknown")) flags.add("session_pairing_unknown");
   if (pairingBasis.get("unreadable")) flags.add("session_modalities_unreadable");
   if (pairingBasis.get("inconsistent")) flags.add("session_modalities_inconsistent");
@@ -723,7 +778,11 @@ export async function buildNeurobagelArtifacts(
 
   const report: NeurobagelReport = {
     columns: { age: ageReport, group: groupReport, sex: sexReport },
-    ...(curationReport === undefined ? {} : { curation: curationReport }),
+    ...(curationEntry === null || curationOutcome === null
+      ? {}
+      : {
+          curation: curationReportFor(curationEntry, curationOutcome, curatedWith, withheld),
+        }),
     dataset_id: datasetId,
     flags: [...flags].sort(byCodeUnit),
     graph: {

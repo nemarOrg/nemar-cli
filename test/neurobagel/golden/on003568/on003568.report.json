@@ -43,13 +43,12 @@
       "diagnosis": 51,
       "sex": 0
     },
-    "problems": 0,
     "review": "upstream_community",
-    "stale_files": [],
     "status": "applied"
   },
   "dataset_id": "on003568",
   "flags": [
+    "age_units_assumed_years",
     "participants_json_absent"
   ],
   "graph": {

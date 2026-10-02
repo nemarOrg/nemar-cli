@@ -1,6 +1,6 @@
 {
   "commit": "116676db7114b68338c48df2d6bb804c99e8c354",
-  "fetched_at": "2026-10-02T10:46:34.505Z",
+  "fetched_at": "2026-10-02T11:40:25.415Z",
   "files": {
     "LICENSE": {
       "blob_sha": "fcddee3df04738a21ca807abc1928a4292c6f82e",
@@ -19,12 +19,6 @@
       "bytes": 2263,
       "sha256": "45fb813c9297b8b1fd998bc73f76fba4c3b86bdb9e375392058019c8375bbdc7",
       "url": "https://raw.githubusercontent.com/neurobagel/openneuro-annotations/116676db7114b68338c48df2d6bb804c99e8c354/ds003474.json"
-    },
-    "ds003505.json": {
-      "blob_sha": "1e154976d7915abb903d564e98a4834b0dabdb82",
-      "bytes": 1360,
-      "sha256": "748a02387a786feeda08502319d9b67c54cbcaf977bd93af6e4e280e3a7cce51",
-      "url": "https://raw.githubusercontent.com/neurobagel/openneuro-annotations/116676db7114b68338c48df2d6bb804c99e8c354/ds003505.json"
     },
     "ds003568.json": {
       "blob_sha": "5bd83c1283e224a1c50b217b4e41b47c5d5da609",

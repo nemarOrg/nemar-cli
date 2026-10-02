@@ -1,7 +1,8 @@
 /**
  * Git blob hashes, for the content pins of a curation entry.
  *
- * The data plane's entity tag for a git-tracked file IS its git blob SHA-1 (ADR 0066),
+ * The data plane's entity tag for a git-tracked file IS its git blob hash, the Secure Hash
+ * Algorithm 1 (SHA-1) of the file's bytes with a git header (ADR 0066),
  * so a pin written from that tag and a pin computed here from the bytes agree.
  * Computing it from the text the transform was handed, instead of trusting a hash the
  * caller supplies, makes a pin say something about the very bytes being converted.
@@ -28,7 +29,7 @@ export async function gitBlobShaOfBytes(bytes: Uint8Array): Promise<string> {
   return hex(new Uint8Array(await crypto.subtle.digest("SHA-1", input)));
 }
 
-/** The git blob SHA-1 of the UTF-8 bytes of `text`. */
+/** The git blob SHA-1 of the bytes of `text` in 8-bit Unicode Transformation Format (UTF-8). */
 export function gitBlobSha(text: string): Promise<string> {
   return gitBlobShaOfBytes(encoder.encode(text));
 }
@@ -38,7 +39,7 @@ export function gitBlobSha(text: string): Promise<string> {
  * `null` text is a file the data plane does not have, and `null` is how a pin says "absent",
  * so the two agree only with each other.
  *
- * A UTF-8 byte order mark is the one tolerance: `Response.text()` and `TextDecoder` drop a
+ * A UTF-8 byte order mark (BOM) is the one tolerance: `Response.text()` and `TextDecoder` drop a
  * leading mark, and the transform's own table reader drops it too, so the text of a file that
  * starts with one matches the pin of the file's true bytes.
  * Text that is not valid UTF-8 never matches: decoding replaced bytes, and the pin is of the

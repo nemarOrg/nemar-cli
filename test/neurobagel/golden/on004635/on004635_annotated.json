@@ -1,32 +1,4 @@
 {
-  "Age": {
-    "Annotations": {
-      "Format": {
-        "Label": "decimal",
-        "TermURL": "nb:FromFloat"
-      },
-      "IsAbout": {
-        "Label": "Age",
-        "TermURL": "nb:Age"
-      },
-      "MissingValues": [
-        "",
-        "N/A",
-        "NA",
-        "NaN",
-        "n/a",
-        "na",
-        "nan"
-      ],
-      "ValueRange": {
-        "Max": 10.42,
-        "Min": 5.98
-      },
-      "VariableType": "Continuous"
-    },
-    "Description": "Age of the participant.",
-    "Units": "years"
-  },
   "Gender": {
     "Annotations": {
       "IsAbout": {

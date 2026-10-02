@@ -38,9 +38,7 @@
       "diagnosis": 10,
       "sex": 0
     },
-    "problems": 0,
     "review": "author",
-    "stale_files": [],
     "status": "applied"
   },
   "dataset_id": "nm000149",

@@ -39,26 +39,25 @@ const UNMAPPABLE_SHARE_LIMIT = 0.1;
  * answered "age 0" for a participant of unknown age would match every infant query.
  * A few zeros among real ages (newborns recorded in years) stay ages.
  */
-const ZERO_PLACEHOLDER_SHARE = 0.5;
+export const ZERO_PLACEHOLDER_SHARE = 0.5;
 
 /** Plausible ages in years. A cell outside it is unparseable, which also catches months and days. */
 export const AGE_MIN_YEARS = 0;
 export const AGE_MAX_YEARS = 120;
-
-export type AgeFormatId = "FromFloat" | "FromRange" | "FromBounded" | "FromISO8601" | "FromEuro";
 
 /**
  * Every age format the pinned vocabulary declares.
  * The mechanical rule detects only the first four (a column is never guessed to be European
  * decimal); `FromEuro` is reachable through a reviewed curation entry.
  */
-export const AGE_FORMAT_IDS: readonly AgeFormatId[] = [
+export const AGE_FORMAT_IDS = [
   "FromFloat",
   "FromRange",
   "FromBounded",
   "FromISO8601",
   "FromEuro",
-];
+] as const;
+export type AgeFormatId = (typeof AGE_FORMAT_IDS)[number];
 
 // A type alias, not an interface: only an alias is assignable to canonicalJson's object type.
 export type ColumnCounts = {
@@ -93,8 +92,8 @@ export interface AgeMapping {
 
 export interface SexMapping {
   /** Raw cell value to the sex term it maps to. */
-  levels: Map<string, VocabTerm>;
-  missingValues: string[];
+  levels: ReadonlyMap<string, VocabTerm>;
+  missingValues: readonly string[];
 }
 
 export interface GroupMapping {
@@ -168,6 +167,29 @@ function unitsAreYears(units: string): boolean {
   return YEARS_UNIT_RE.test(units.trim());
 }
 
+/**
+ * True when participants.json DECLARES units for the age column and they are not years.
+ * An absent `Units` (or `null`) is not a declaration: years are assumed, as everywhere.
+ * Neurobagel has no age format for months, weeks or days, so such a column cannot reach the
+ * graph, mechanically or through curation.
+ */
+export function ageUnitsAreNotYears(units: unknown): boolean {
+  return (
+    units !== undefined && units !== null && (typeof units !== "string" || !unitsAreYears(units))
+  );
+}
+
+/** The `Units` participants.json declares for `column`, or undefined (also when it is unreadable). */
+export function ageUnitsIn(
+  participantsJson: Record<string, unknown> | null,
+  column: string,
+): unknown {
+  if (participantsJson === null) return undefined;
+  const entry = participantsJson[column];
+  if (entry === null || typeof entry !== "object") return undefined;
+  return (entry as Record<string, unknown>).Units;
+}
+
 function distinctSorted(values: Iterable<string>): string[] {
   return [...new Set(values)].sort(byCodeUnit);
 }
@@ -203,7 +225,7 @@ export function mapAgeColumn(
   if (present.length === 0) return { status: "all_missing", column };
 
   const declared = units === undefined || units === null ? undefined : units;
-  if (declared !== undefined && (typeof declared !== "string" || !unitsAreYears(declared))) {
+  if (ageUnitsAreNotYears(declared)) {
     return {
       status: "curation",
       column,

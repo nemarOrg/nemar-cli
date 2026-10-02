@@ -17,7 +17,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { bindCuration } from "../../shared/neurobagel/curation-bind";
 import type { CurationEntry } from "../../shared/neurobagel/curation-types";
-import { parseTsv } from "../../shared/neurobagel/tsv";
 import { FIXTURE_ROOT, loadCuration } from "./fixtures-io";
 import { DEFAULT_BASE, MAX_TABLE_BYTES, fetchDocument, get } from "./gather";
 
@@ -59,9 +58,7 @@ export async function checkEntry(
   entry: CurationEntry,
   documents: Documents,
 ): Promise<{ status: string; detail: string }> {
-  const parsed = documents.participantsTsv === null ? null : parseTsv(documents.participantsTsv);
-  const table = parsed?.ok ? { header: parsed.table.header, rows: parsed.table.rows } : null;
-  const result = await bindCuration(entry, documents, table);
+  const result = await bindCuration(entry, documents);
   if (result.status === "applied") return { status: "applied", detail: "" };
   if (result.status === "stale") {
     return { status: "stale", detail: `changed since review: ${result.staleFiles.join(", ")}` };

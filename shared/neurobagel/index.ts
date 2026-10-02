@@ -26,6 +26,7 @@ export type {
   CurationStatus,
   NeurobagelReport,
   TableStatus,
+  WithheldCounts,
 } from "./report";
 export {
   artifactFileNames,

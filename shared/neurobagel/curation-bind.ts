@@ -1,38 +1,60 @@
 /**
- * Bind a curation entry to the table it was reviewed against (epic #1586, phase 5; ADR 0083).
+ * Bind a curation entry to the documents it was reviewed against (epic #1586, phase 5; ADR 0083).
  *
  * The loader (curation.ts) judges the file from its text.
- * This module judges an entry against the dataset's own documents, which is where two more
- * failures can be seen:
+ * This module judges an entry against the dataset's own documents, which is where more failures
+ * can be seen:
  *
  *   stale    the participants.tsv or participants.json now being converted is not the file the
- *            entry pinned (its git blob SHA differs).
- *            The reviewer never saw these bytes, so none of the entry is applied;
- *            the transform ships its mechanical columns and the report says `curation_stale`.
+ *            entry pinned (its git blob hash, SHA-1 of the bytes with git's header, differs).
+ *            The reviewer never saw these bytes, so none of the entry is applied.
  *   invalid  the bytes ARE the pinned ones and the entry still does not fit them: a curated
  *            column is not in the header, or the level map misses a value the table holds,
- *            or an age is unreadable in its declared format.
- *            Nothing is applied and the report says `curation_invalid`.
+ *            or an age is unreadable in its declared format, declared in units other than
+ *            years, or a placeholder.
+ *            Nothing is applied.
  *            A committed entry can only reach this through a mistake in the review, which the
  *            tests that bind every committed entry to its fixture exist to catch.
+ * What the transform then does about each (the mechanical columns, the variables the entry names,
+ * the report) is in transform.ts.
  *
  * Coverage is checked over EVERY row of the table, not only the participants that have data:
  * the data dictionary is also fed to `bagel pheno` and to catalog-mode nodes, which read every
  * row, and a value the dictionary does not declare makes them refuse the table.
  * The graph itself still takes values from its own participants only (transform.ts).
  *
+ * An age column gets the checks the mechanical rule gives one (participants.ts), because a
+ * reviewer who curates the column has not seen those facts in the table and a wrong age is a false
+ * claim in a public index:
+ *   - participants.json must not declare units other than years: Neurobagel has no age format
+ *     for months, weeks or days, so such a column cannot be curated into the graph, and a
+ *     dictionary that says "years" over months would make 6-month-olds match an age search of
+ *     5 to 10 years;
+ *   - at least half of the parsed ages must not be 0, unless 0 is declared a missing value:
+ *     a column of zeros is a placeholder for "not recorded".
+ *
  * Pure: no I/O.
  */
 
 import { byCodeUnit } from "./canonical-json";
-import type { CuratedColumn, CurationEntry, CurationKind } from "./curation-types";
+import { isLoaded } from "./curation-loaded";
+import {
+  type CuratedColumn,
+  type CurationEntry,
+  type CurationKind,
+  kindCounts,
+} from "./curation-types";
 import { contentMatchesPin } from "./git-blob";
 import {
   type AgeMapping,
   STANDARD_MISSING_VALUES,
   type SexMapping,
+  ZERO_PLACEHOLDER_SHARE,
+  ageUnitsAreNotYears,
+  ageUnitsIn,
   parseAge,
 } from "./participants";
+import { parseTsv } from "./tsv";
 import type { VocabTerm } from "./vocab";
 
 /** A parsed participants.tsv: its header and every row, padded to the header's width. */
@@ -56,15 +78,15 @@ export type BoundColumn =
       kind: "diagnosis";
       name: string;
       index: number;
-      levels: Map<string, VocabTerm>;
-      missingValues: string[];
+      levels: ReadonlyMap<string, VocabTerm>;
+      missingValues: readonly string[];
     }
   | {
       kind: "assessment";
       name: string;
       index: number;
       tool: VocabTerm;
-      missingValues: string[];
+      missingValues: readonly string[];
     };
 
 /** The columns of an entry that fit their table, grouped the way the transform uses them. */
@@ -73,8 +95,6 @@ export interface BoundCuration {
   sex: Extract<BoundColumn, { kind: "sex" }> | null;
   diagnoses: Extract<BoundColumn, { kind: "diagnosis" }>[];
   assessments: Extract<BoundColumn, { kind: "assessment" }>[];
-  /** Columns the entry declares, by kind. */
-  declared: Record<CurationKind, number>;
 }
 
 export type BindResult =
@@ -90,13 +110,29 @@ function examplesOf(values: Set<string>): string {
   return sorted.length > 3 ? `${shown.join(", ")} and ${sorted.length - 3} more` : shown.join(", ");
 }
 
+/** participants.json as an object keyed by column, or null when it is absent or unreadable. */
+export function readParticipantsJson(text: string | null): Record<string, unknown> | null {
+  if (text === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Check one curated column against its table.
+ * `participantsJson` is the dataset's column descriptions (null when it has none), read only for an
+ * age column's declared units.
  * Returns the bound column, or every reason it does not fit.
  */
 export function bindCuratedColumn(
   column: CuratedColumn,
   table: ParsedTable,
+  participantsJson: Record<string, unknown> | null = null,
 ): { bound: BoundColumn } | { problems: string[] } {
   const where = `column ${JSON.stringify(column.name)}`;
   const found = table.header.flatMap((h, i) => (h === column.name ? [i] : []));
@@ -128,7 +164,7 @@ export function bindCuratedColumn(
               kind: "sex",
               name: column.name,
               index,
-              mapping: { levels: column.levels, missingValues: column.missingValues },
+              mapping: { levels: column.levels, missingValues: [...column.missingValues] },
             },
           }
         : {
@@ -142,8 +178,15 @@ export function bindCuratedColumn(
           };
     }
     case "age": {
+      const units = ageUnitsIn(participantsJson, column.name);
+      if (ageUnitsAreNotYears(units)) {
+        problems.push(
+          `${where}: participants.json declares Units ${JSON.stringify(units)}, not years; Neurobagel has no age format for months, weeks or days, so this column cannot be curated into the graph`,
+        );
+      }
       const unreadable = new Set<string>();
       let parsed = 0;
+      let zeros = 0;
       let min = Number.POSITIVE_INFINITY;
       let max = Number.NEGATIVE_INFINITY;
       for (const row of table.rows) {
@@ -155,6 +198,7 @@ export function bindCuratedColumn(
           continue;
         }
         parsed++;
+        if (age === 0) zeros++;
         if (age < min) min = age;
         if (age > max) max = age;
       }
@@ -165,6 +209,12 @@ export function bindCuratedColumn(
       }
       if (parsed === 0) {
         problems.push(`${where}: no cell holds an age, so the column carries nothing`);
+      }
+      // The same rule as the mechanical one: a column that is mostly zeros says "not recorded".
+      if (parsed > 0 && zeros / parsed >= ZERO_PLACEHOLDER_SHARE) {
+        problems.push(
+          `${where}: ${zeros} of ${parsed} ages are 0, a placeholder for "not recorded"; declare 0 a missing value if it is one`,
+        );
       }
       if (
         parsed > 0 &&
@@ -185,9 +235,9 @@ export function bindCuratedColumn(
           mapping: {
             format,
             formatTerm: column.formatTerm,
-            missingValues: column.missingValues,
+            missingValues: [...column.missingValues],
             valueRange: { min, max },
-            unitsAssumed: false,
+            unitsAssumed: units === undefined || units === null,
             ageOf: (raw) => (missing.has(raw) ? null : parseAge(raw, format)),
           },
         },
@@ -195,7 +245,7 @@ export function bindCuratedColumn(
     }
     case "assessment": {
       // `bagel` counts a cell as a recorded item unless it is a declared missing value, so a blank
-      // that is not declared would claim an assessment nobody took.
+      // that is not declared missing would claim an assessment nobody took.
       const undeclared = new Set<string>();
       for (const row of table.rows) {
         const cell = row[index];
@@ -220,23 +270,26 @@ export function bindCuratedColumn(
   }
 }
 
-const emptyDeclared = (): Record<CurationKind, number> => ({
-  age: 0,
-  assessment: 0,
-  diagnosis: 0,
-  sex: 0,
-});
+/** The kinds of variable an entry names, in the report's order. */
+export const kindsOf = (entry: CurationEntry): CurationKind[] => {
+  const named = kindCounts();
+  for (const column of entry.columns) named[column.kind]++;
+  return (Object.keys(named) as CurationKind[]).filter((kind) => named[kind] > 0);
+};
 
 /**
  * Bind `entry` to the documents it is being applied to.
- * `table` is `documents.participantsTsv` parsed, or null when it could not be read as a table
- * with a `participant_id` column.
+ * The table is read from the text here, so it cannot disagree with the text the pins were
+ * computed from.
+ * `entry` must be one the loader made (curation-loaded.ts).
  */
 export async function bindCuration(
   entry: CurationEntry,
   documents: CurationDocuments,
-  table: ParsedTable | null,
 ): Promise<BindResult> {
+  if (!isLoaded(entry)) {
+    throw new Error("bindCuration takes an entry from parseCuration, not a hand-built object");
+  }
   const staleFiles: StaleFile[] = [];
   if (!(await contentMatchesPin(documents.participantsJson, entry.pins.participantsJson))) {
     staleFiles.push("participants_json");
@@ -245,7 +298,9 @@ export async function bindCuration(
     staleFiles.push("participants_tsv");
   }
   if (staleFiles.length > 0) return { status: "stale", staleFiles };
-  if (table === null) {
+
+  const parsed = documents.participantsTsv === null ? null : parseTsv(documents.participantsTsv);
+  if (parsed === null || !parsed.ok || !parsed.table.header.includes("participant_id")) {
     return {
       status: "invalid",
       problems: [
@@ -253,13 +308,13 @@ export async function bindCuration(
       ],
     };
   }
+  const table: ParsedTable = parsed.table;
+  const participantsJson = readParticipantsJson(documents.participantsJson);
 
   const problems: string[] = [];
-  const declared = emptyDeclared();
-  const bound: BoundCuration = { age: null, sex: null, diagnoses: [], assessments: [], declared };
+  const bound: BoundCuration = { age: null, sex: null, diagnoses: [], assessments: [] };
   for (const column of entry.columns) {
-    declared[column.kind]++;
-    const result = bindCuratedColumn(column, table);
+    const result = bindCuratedColumn(column, table, participantsJson);
     if ("problems" in result) {
       problems.push(...result.problems);
       continue;
