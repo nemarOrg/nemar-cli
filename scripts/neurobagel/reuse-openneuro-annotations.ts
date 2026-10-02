@@ -276,6 +276,7 @@ async function main(): Promise<void> {
   // The counts.
   const skips: Record<string, number> = {};
   const dropped: Record<string, number> = {};
+  const droppedDatasets: Record<string, number> = {};
   const notes: Record<string, number> = {};
   const keptByKind: Record<string, number> = {};
   let kept = 0;
@@ -284,7 +285,10 @@ async function main(): Promise<void> {
   const sizes: number[] = [];
   for (const { id, skip, conversion } of rows) {
     if (conversion !== null) {
-      for (const [k, n] of Object.entries(conversion.dropped)) dropped[k] = (dropped[k] ?? 0) + n;
+      for (const [k, n] of Object.entries(conversion.dropped)) {
+        dropped[k] = (dropped[k] ?? 0) + n;
+        droppedDatasets[k] = (droppedDatasets[k] ?? 0) + 1;
+      }
       for (const [k, n] of Object.entries(conversion.notes)) notes[k] = (notes[k] ?? 0) + n;
       for (const [k, n] of Object.entries(conversion.keptByKind)) {
         keptByKind[k] = (keptByKind[k] ?? 0) + n;
@@ -313,6 +317,9 @@ async function main(): Promise<void> {
       kept_by_kind: Object.fromEntries(Object.entries(keptByKind).sort()),
       redundant_with_mechanical: redundant,
       dropped_by_reason: Object.fromEntries(Object.entries(dropped).sort()),
+      datasets_with_a_dropped_column_by_reason: Object.fromEntries(
+        Object.entries(droppedDatasets).sort(),
+      ),
     },
     notes: Object.fromEntries(Object.entries(notes).sort()),
     size_bytes: {
