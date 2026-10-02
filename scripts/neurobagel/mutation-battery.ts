@@ -415,7 +415,7 @@ export const MUTANTS: Mutant[] = [
     id: "U05-redundant-columns-kept",
     layer: "upstream",
     file: `${SCRIPTS}/upstream-annotations.ts`,
-    find: "options.skipRedundant &&",
+    find: "!options.keepRedundant &&",
     replace: "false &&",
     note: "columns that add nothing are carried",
   },
@@ -435,6 +435,195 @@ export const MUTANTS: Mutant[] = [
     replace:
       "    if (isRecord(annotations.ValueRange)) return { block: { Format: { Label: term.label, TermURL: term.identifier }, IsAbout: isAbout, ...common, ValueRange: annotations.ValueRange, VariableType: 'Continuous' } };",
     note: "upstream's ValueRange is trusted",
+  },
+  // Review round 2: the age rules, withholding, the opaque entry, whole-entry skipping, the pins.
+  {
+    id: "B12-age-units-ignored",
+    layer: "binder",
+    file: `${NEUROBAGEL}/curation-bind.ts`,
+    find: "if (ageUnitsAreNotYears(units)) {",
+    replace: "if (false) {",
+    note: "an age declared in months is bound as years",
+  },
+  {
+    id: "B13-null-units-not-years",
+    layer: "binder",
+    file: `${NEUROBAGEL}/participants.ts`,
+    find: "units !== undefined && units !== null && (typeof units",
+    replace: "units !== undefined && (typeof units",
+    note: "a null Units is read as a declaration of something other than years",
+  },
+  {
+    id: "B14-zero-share-ignored",
+    layer: "binder",
+    file: `${NEUROBAGEL}/curation-bind.ts`,
+    find: "if (parsed > 0 && zeros / parsed >= ZERO_PLACEHOLDER_SHARE) {",
+    replace: "if (false) {",
+    note: "a column of placeholder zeros becomes an age of 0 for everyone",
+  },
+  {
+    id: "B15-zero-share-boundary",
+    layer: "binder",
+    file: `${NEUROBAGEL}/curation-bind.ts`,
+    find: "zeros / parsed >= ZERO_PLACEHOLDER_SHARE",
+    replace: "zeros / parsed > ZERO_PLACEHOLDER_SHARE",
+    note: "exactly half zeros passes",
+  },
+  {
+    id: "B16-declared-missing-zero-counted",
+    layer: "binder",
+    file: `${NEUROBAGEL}/curation-bind.ts`,
+    find: "        if (missing.has(cell)) continue;\n        const age = parseAge(cell, column.format);",
+    replace: "        const age = parseAge(cell, column.format);",
+    note: "a 0 the reviewer declared missing still counts as a placeholder zero (and a missing value as unreadable)",
+  },
+  {
+    id: "B17-binder-takes-a-forged-entry",
+    layer: "binder",
+    file: `${NEUROBAGEL}/curation-bind.ts`,
+    find: "if (!isLoaded(entry)) {",
+    replace: "if (false) {",
+    note: "the binder accepts a hand-built entry",
+  },
+  {
+    id: "B18-partial-application",
+    layer: "binder",
+    file: `${NEUROBAGEL}/curation-bind.ts`,
+    find: '  if (problems.length > 0) return { status: "invalid", problems };\n  return { status: "applied", bound };',
+    replace: '  return { status: "applied", bound };',
+    note: "the columns that fit are applied when others do not",
+  },
+  {
+    id: "B19-coverage-skips-blank-id-rows",
+    layer: "binder",
+    file: `${NEUROBAGEL}/curation-bind.ts`,
+    find: "for (const row of table.rows) {",
+    occurrence: 1,
+    count: 3,
+    replace: 'for (const row of table.rows.filter((r) => r[0].trim() !== "")) {',
+    note: "rows without a participant id escape coverage",
+  },
+  {
+    id: "B20-coverage-keeps-one-row-per-id",
+    layer: "binder",
+    file: `${NEUROBAGEL}/curation-bind.ts`,
+    find: "for (const row of table.rows) {",
+    occurrence: 1,
+    count: 3,
+    replace: "for (const row of [...new Map(table.rows.map((r) => [r[0], r])).values()]) {",
+    note: "only the last of a participant's repeated rows is covered",
+  },
+  {
+    id: "B21-line-endings-normalized",
+    layer: "binder",
+    file: `${NEUROBAGEL}/git-blob.ts`,
+    find: "gitBlobShaOfBytes(encoder.encode(text))",
+    replace: 'gitBlobShaOfBytes(encoder.encode(text.replace(/\\r\\n/g, "\\n")))',
+    note: "a CRLF to LF flip leaves the pin matching",
+  },
+  {
+    id: "T13-unapplied-entry-withholds-nothing",
+    layer: "transform",
+    file: `${NEUROBAGEL}/transform.ts`,
+    find: "if (applied === null) namedByUnappliedEntry = new Set(kindsOf(curationEntry));",
+    replace: "",
+    note: "a stale or invalid entry that withdraws a claim fails open",
+  },
+  {
+    id: "T14-group-not-withheld",
+    layer: "transform",
+    file: `${NEUROBAGEL}/transform.ts`,
+    find: ' && !groupIsCurated && !withheldFor("diagnosis")) {',
+    replace: " && !groupIsCurated) {",
+    note: "the mechanical healthy control mapping survives a stale veto entry",
+  },
+  {
+    id: "T15-sex-not-withheld",
+    layer: "transform",
+    file: `${NEUROBAGEL}/transform.ts`,
+    find: 'let sexOutcome: ColumnOutcome<SexMapping> = withheldFor("sex")',
+    replace: "let sexOutcome: ColumnOutcome<SexMapping> = false",
+    note: "the mechanical sex survives an entry that names sex and does not apply",
+  },
+  {
+    id: "T16-age-not-withheld",
+    layer: "transform",
+    file: `${NEUROBAGEL}/transform.ts`,
+    find: 'let ageOutcome: ColumnOutcome<AgeMapping> = withheldFor("age")',
+    replace: "let ageOutcome: ColumnOutcome<AgeMapping> = false",
+    note: "the mechanical age survives an entry that names age and does not apply",
+  },
+  {
+    id: "T17-withheld-not-flagged",
+    layer: "transform",
+    file: `${NEUROBAGEL}/transform.ts`,
+    find: 'if (withheld.age + withheld.diagnosis + withheld.sex > 0) flags.add("curation_withheld");',
+    replace: "",
+    note: "claims are withheld without a word",
+  },
+  {
+    id: "T18-forged-entry-accepted",
+    layer: "transform",
+    file: `${NEUROBAGEL}/transform.ts`,
+    find: "if (curationEntry !== null && !isLoaded(curationEntry)) {",
+    replace: "if (false) {",
+    note: "the transform accepts a hand-built entry",
+  },
+  {
+    id: "L16-future-review-accepted",
+    layer: "loader",
+    file: `${NEUROBAGEL}/curation.ts`,
+    find: "raw.evidence.date > options.today",
+    replace: "raw.evidence.date < options.today",
+    note: "a review dated tomorrow passes (or yesterday's does not)",
+  },
+  {
+    id: "L17-loaded-entry-not-frozen",
+    layer: "loader",
+    file: `${NEUROBAGEL}/curation-loaded.ts`,
+    find: "  Object.freeze(data.columns);",
+    replace: "",
+    note: "a loaded entry's columns can be edited afterwards",
+  },
+  {
+    id: "U08-age-units-not-checked-by-the-converter",
+    layer: "upstream",
+    file: `${SCRIPTS}/upstream-annotations.ts`,
+    find: "const bound = bindCuratedColumn(column.column, { header, rows }, participantsJson);",
+    replace: "const bound = bindCuratedColumn(column.column, { header, rows });",
+    note: "upstream's age in months is carried",
+  },
+  {
+    id: "U09-merge-overwrites-a-persons-entry",
+    layer: "upstream",
+    file: `${SCRIPTS}/upstream-annotations.ts`,
+    find: 'if (review !== "upstream_community") {',
+    replace: "if (false) {",
+    note: "a regeneration replaces an author entry",
+  },
+  {
+    id: "U10-redundant-kept-by-default",
+    layer: "upstream",
+    file: `${SCRIPTS}/reuse-openneuro-annotations.ts`,
+    find: 'keepRedundant: argv.includes("--keep-redundant"),',
+    replace: 'keepRedundant: !argv.includes("--keep-redundant"),',
+    note: "the default flips back to keeping redundant columns",
+  },
+  {
+    id: "U11-empty-levels-guard-removed",
+    layer: "upstream",
+    file: `${SCRIPTS}/upstream-annotations.ts`,
+    find: 'if (Object.keys(levels).length === 0) return { drop: "levels_empty" };',
+    replace: "",
+    note: "an upstream diagnosis column that maps nothing withdraws the mechanical healthy control from unreviewed data",
+  },
+  {
+    id: "U12-gender-note-dropped",
+    layer: "upstream",
+    file: `${SCRIPTS}/upstream-annotations.ts`,
+    find: 'if (column.name.trim().toLowerCase() === "gender") {',
+    replace: "if (false) {",
+    note: "a gender column read as sex is not flagged in the evidence",
   },
 ];
 
@@ -484,6 +673,20 @@ async function runTests(): Promise<{ passed: boolean; failed: string[] }> {
 }
 
 async function main(): Promise<void> {
+  if (process.argv.includes("--check-anchors")) {
+    // No tests: only that every mutant still applies to the source as it is.
+    let broken = 0;
+    for (const m of MUTANTS) {
+      try {
+        mutate(readFileSync(join(ROOT, m.file), "utf8"), m);
+      } catch (error) {
+        broken++;
+        console.log((error as Error).message);
+      }
+    }
+    console.log(`${MUTANTS.length} mutants, ${broken} whose anchor no longer applies`);
+    process.exit(broken === 0 ? 0 : 1);
+  }
   const only = process.argv[2] as Layer | undefined;
   const selected = MUTANTS.filter((m) => only === undefined || m.layer === only);
   const baseline = await runTests();
