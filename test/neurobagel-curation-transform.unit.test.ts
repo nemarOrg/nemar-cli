@@ -558,7 +558,9 @@ describe("SYNTHETIC: what a real entry can say that the committed ones do not", 
     expect(Object.keys(dictionary).sort()).toEqual(["dx", "group", "participant_id"]);
     // The reviewer's missing values are the dictionary's, and the mechanical column keeps its own.
     expect((dictionary.dx as { Annotations: Json }).Annotations.MissingValues).toEqual(["none"]);
-    expect((dictionary.group as { Annotations: Json }).Annotations.MissingValues).toContain("patient");
+    expect((dictionary.group as { Annotations: Json }).Annotations.MissingValues).toContain(
+      "patient",
+    );
   });
 
   test("a curated group column takes over from the mechanical group rule, control spellings included", async () => {
