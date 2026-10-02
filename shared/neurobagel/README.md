@@ -1,9 +1,11 @@
 # NEMAR to Neurobagel transform
 
 One pure TypeScript transform that turns the documents the NEMAR data plane already serves into the artifacts a stock Neurobagel node loads (epic #1586, phase 1).
-Nothing in this directory does I/O, uses a Node-only API or needs wasm, so the same code runs in the Cloudflare Worker and in Bun scripts.
+Nothing in this directory does input or output (I/O), uses a Node-only application programming interface (API) or needs wasm, so the same code runs in the Cloudflare Worker and in Bun scripts.
 The only code that reads the network lives in `scripts/neurobagel/`.
-`bun run typecheck` compiles this directory against the Worker's types, and `test/neurobagel-purity.unit.test.ts` scans it for anything the type check cannot see.
+Two checks hold that claim, and they run in different places.
+`tsc --noEmit` in `backend/` compiles this directory against the Worker's types (`backend/tsconfig.json` includes it), where `node:` modules, `process`, `Buffer` and `Bun` do not exist; it runs in the `deploy-backend.yml` type-check steps and in the husky pre-commit hook (`bun run typecheck`), not in the pull request gate.
+The pull request gate (`test.yml`) runs the root `tsc --noEmit`, which compiles it against Bun's types, and the unit tier, which includes `test/neurobagel-purity.unit.test.ts`, a source scan for everything the type check cannot see (`eval`, `new Function`, dynamic `import()`, `Date`, randomness, `fetch`, timers and imports from outside the directory).
 
 ## Inputs
 
@@ -13,14 +15,14 @@ The input is `NeurobagelInput` (`input-schema.ts`):
 | --- | --- | --- |
 | `expectedDatasetId` | the dataset the caller is converting; REQUIRED, checked against `metadata.json` | not allowed |
 | `metadata` | parsed `GET <data host>/<id>/metadata.json` | not allowed |
-| `participantsTsv` | text of `GET <data host>/<id>/<latest>/participants.tsv`; TSV is tab-separated values | the dataset has no phenotype table (HTTP 404) |
+| `participantsTsv` | text of `GET <data host>/<id>/<latest>/participants.tsv`; TSV is tab-separated values | the dataset has no phenotype table (Hypertext Transfer Protocol, HTTP, status 404) |
 | `participantsJson` | text of `GET <data host>/<id>/<latest>/participants.json` | no column descriptions (HTTP 404) |
 
 A caller passes `null` only for an HTTP 404.
 A failed fetch is an error and must not be passed as `null`.
 The two participants files are passed as text, so a file that is served but not valid is reported (`malformed`, `unreadable`) instead of failing in the caller.
 
-Identity (name, authors, keywords, DOI) comes only from `metadata.json`, which the backend writes and blinds.
+Identity (name, authors, keywords, digital object identifier or DOI) comes only from `metadata.json`, which the backend writes and blinds.
 A depositor's own files are never an identity source, and the transform refuses any input whose `anonymous` is not exactly `false`.
 Eligibility is decided elsewhere, from the database row; this refusal is a backstop.
 
@@ -37,8 +39,8 @@ Eligibility is decided elsewhere, from the database row; this refusal is a backs
 | `<id>.report.json` | counts and flags only, never a participant id or value |
 
 Output bytes are stable: keys are sorted, lists keep the order the transform built, and identifiers are version 5 universally unique identifiers (UUIDs) derived from names under one fixed namespace (`identifiers.ts`).
-Changing that namespace, or any identifier name, changes every identifier at once, so both are committed once and never edited (ADR 0081 records the name grammar).
-`version.ts` holds the output version, which moves in any PR that changes a byte of output for the same input.
+Changing that namespace, or any identifier name, changes every identifier at once, so both are committed once and never edited (architecture decision record, ADR, 0081 records the name grammar).
+`version.ts` holds the output version, which moves in any pull request that changes a byte of output for the same input.
 
 ## Mapping rules
 
@@ -105,8 +107,8 @@ A pin change that alters any output needs a version bump in `version.ts`, regene
 
 ## Fixtures, goldens and the Neurobagel oracle
 
-`test/neurobagel/fixtures/<id>/` holds documents captured byte for byte from `data.nemar.org`, with `provenance.json` (URL, fetch time, version, sha256, size, ETag).
-Nothing whose metadata is not `anonymous: false` is ever written there (`refusalToWrite` in `scripts/neurobagel/gather.ts`).
+`test/neurobagel/fixtures/<id>/` holds documents captured byte for byte from `data.nemar.org`, with `provenance.json` (uniform resource locator or URL, fetch time, version, sha256, size, entity tag or ETag).
+Nothing whose metadata is not `anonymous: false` is written there, with one declared exception (`refusalToWrite` in `scripts/neurobagel/gather.ts`): the negative control `nm099998`, and then only its `metadata.json`.
 `nm000284`, the live anonymous deposit, is never fetched into this repository.
 `nm099998` is the dev-owned standing anonymous deposit (AGENTS.md); it is the negative control, and only its public, blinded `metadata.json`, fetched from the dev host `data-test.nemar.org`, is kept, never its participants files.
 
@@ -122,7 +124,7 @@ bun run scripts/neurobagel/regenerate-goldens.ts
 uv run scripts/neurobagel/oracle.py
 ```
 
-`oracle.py` runs the pinned `bagel` release (`bagel pheno`, `bagel bids`, its pydantic models and validators), the recipes graph-mode and catalog-mode loaders at the pinned commit, an RDF expansion of the JSON-LD, and the queries a federated search sends, built by the node API's own `create_query` at the pinned tag and run by rdflib over the goldens.
+`oracle.py` runs the pinned `bagel` release (`bagel pheno`, `bagel bids`, its pydantic models and validators), the recipes graph-mode and catalog-mode loaders at the pinned commit, a Resource Description Framework (RDF) expansion of the JSON-LD, and the SPARQL Protocol and RDF Query Language (SPARQL) queries a federated search sends, built by the node API's own `create_query` at the pinned tag and run by rdflib over the goldens.
 Its environment is locked (`scripts/neurobagel/*.py.lock`, written by `uv lock --script`), so a rerun resolves the same packages.
 None of that is a GraphDB load: no container runtime was available, so loading a golden into a stock GraphDB-backed stack is checked separately, on the real host.
 It records bagel's output, with identifiers set aside, so `bun test` compares the goldens to it without Python.

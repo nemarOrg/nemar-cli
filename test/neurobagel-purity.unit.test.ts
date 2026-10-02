@@ -5,13 +5,17 @@
  * Bun scripts: no I/O, no Node or Bun API, no wasm, no clock, no randomness, no
  * dynamic code.
  * Two guards hold that claim, and neither depends on a reviewer remembering it:
- *   1. `backend/tsconfig.json` includes `../shared/neurobagel/**` so `bun run typecheck`
- *      (the lint job and the deploy gate) compiles it against the Worker's types,
- *      where `node:` modules, `process`, `Buffer` and `Bun` do not exist;
+ *   1. `backend/tsconfig.json` includes `../shared/neurobagel/**`, so `tsc --noEmit` in
+ *      `backend/` compiles it against the Worker's types, where `node:` modules,
+ *      `process`, `Buffer` and `Bun` do not exist.
+ *      That compile runs in the `deploy-backend.yml` type-check steps and in the husky
+ *      pre-commit hook (`bun run typecheck`); the pull request gate (`test.yml`) runs
+ *      only the root `tsc --noEmit`, against Bun's types;
  *   2. this test reads every source file with the TypeScript parser and rejects what the
  *      type check cannot see: `eval`, `new Function`, dynamic `import()`, `Date`,
  *      `Math.random`, network and timer calls, and any import outside this directory,
  *      the contract and zod.
+ *      It runs in the unit tier, so it IS in the pull request gate.
  * The scanner is itself tested on sources that break each rule, so a rule that stops
  * matching fails here.
  */

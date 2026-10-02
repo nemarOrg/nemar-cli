@@ -14,19 +14,19 @@ NEMAR has to convert about 780 datasets, keep the output stable across regenerat
 ## Decision
 
 **One pure TypeScript transform in `shared/neurobagel/` turns the three documents the data plane already serves (`metadata.json`, `participants.tsv` and `participants.json`) into graph-mode JSON-LD, a Neurobagel data dictionary, a dataset description and a counts-only report.**
-It does no I/O, uses no Node-only API and no wasm, so the same module runs in the Worker and in Bun scripts; the only code that reads the network is the gatherer under `scripts/neurobagel/`.
-`bun run typecheck` compiles it against the Worker's types and a source scan rejects the rest, so the claim is enforced rather than remembered.
+It does no input or output (I/O), uses no Node-only application programming interface (API) and no wasm, so the same module runs in the Worker and in Bun scripts; the only code that reads the network is the gatherer under `scripts/neurobagel/`.
+Two checks enforce the claim rather than leave it to memory, and they run in different places: `tsc --noEmit` in `backend/` compiles it against the Worker's types (in the `deploy-backend.yml` type-check steps and the husky pre-commit hook, not in the pull request gate), and a source scan in the unit tier rejects what the type check cannot see (in the pull request gate, with the root `tsc --noEmit` that compiles it against Bun's types).
 
 Seven rules bind it:
 
 1. **Identity comes only from `metadata.json`.**
-   The backend writes and blinds that file (ADR 0065); a depositor's files cannot be blinded (ADR 0067), so name, authors, keywords and DOI are never read from them.
+   The backend writes and blinds that file (architecture decision record, ADR, 0065); a depositor's files cannot be blinded (ADR 0067), so name, authors, keywords and digital object identifier (DOI) are never read from them.
    The transform refuses any input whose `anonymous` is not exactly `false`; a missing value is unknown, not false.
    The caller must also say which dataset it is converting (`expectedDatasetId`, required), and a `metadata.json` for another dataset is refused.
    This is a backstop: eligibility is decided from the database row by the writer.
 2. **Identifiers are derived, never random.**
    Every node id is a version 5 universally unique identifier (UUID) of a name under one namespace committed once (`shared/neurobagel/identifiers.ts`).
-   The names are URLs under `https://nemar.org/dataset/<id>`:
+   The names are uniform resource locators (URLs) under `https://nemar.org/dataset/<id>`:
    the dataset is `<dataset>`, a subject is `<dataset>/<sub>`, its phenotypic session is `<dataset>/<sub>/phenotypic/ses-unnamed`, an imaging session is `<dataset>/<sub>/imaging/<ses>`, and an acquisition is `<dataset>/<sub>/imaging/<ses>/<datatype>`.
    The design note's literal names (`/<sub>`, `/<ses>`, `/<datatype>`) are not used for sessions and acquisitions because a phenotypic session and an imaging session both default to the label `ses-unnamed`, and under one shared name they would get one identifier on two nodes of different types; the kind segment keeps them apart, and the acquisition sits under the imaging session it belongs to.
    **This grammar is as permanent as the namespace.**
@@ -58,7 +58,8 @@ Until the backend change that records `session_modalities` is deployed, 234 of 7
 The vocabulary snapshot adds about 900 KB to the repository, because the curation loader of a later phase needs the diagnosis and assessment vocabularies whole.
 Fixtures and goldens are real documents the data plane serves publicly.
 `nm000284`, the live anonymous deposit, is never fetched into this repository.
-`nm099998` is the dev-owned standing anonymous deposit (ADR 0068) and the negative control; only its public, blinded `metadata.json`, fetched from the dev host, is kept, and the gatherer refuses to write any document of a dataset whose metadata is not `anonymous: false`.
+`nm099998` is the dev-owned standing anonymous deposit (ADR 0068) and the negative control; only its public, blinded `metadata.json`, fetched from the dev host, is kept.
+The gatherer refuses to write any document of a dataset whose metadata is not `anonymous: false`, with one declared exception: the control on the dev host, and then only its `metadata.json`, never a participants file; the exception is decided by the dataset id and the host together.
 
 ## Alternatives considered
 
@@ -69,7 +70,7 @@ Fixtures and goldens are real documents the data plane serves publicly.
   A catalog-mode node answers no modality filter, and the owner chose a stock graph-mode node.
   The pair falls out of the same transform and is emitted anyway (`<id>_annotated.json`, `<id>_dataset_description.json`).
 - **Sidecar files in the dataset repositories.**
-  The repositories are published and PR-only (ADR 0001), and a publicly served backend-written surface would need the anonymity blind (ADR 0065).
+  The repositories are published and accept pull requests only (ADR 0001), and a publicly served backend-written surface would need the anonymity blind (ADR 0065).
 - **A hand-written Workers implementation of the node API.**
   Dropped by the owner: the node is stock, so contract conformance holds by construction.
 - **The union of table and index subjects.**
@@ -78,5 +79,5 @@ Fixtures and goldens are real documents the data plane serves publicly.
 ## Receipts
 
 - Epic #1586 and phase issue #1587; design in `.context/epic_neurobagel_federation.md`.
-- `uv run scripts/neurobagel/oracle.py` runs the pinned `bagel` (pheno, bids, models, validators), the recipes graph-mode and catalog-mode loaders, an RDF expansion and the node API's own SPARQL generator over every golden; its results are in the phase 1 pull request.
+- `uv run scripts/neurobagel/oracle.py` runs the pinned `bagel` (pheno, bids, models, validators), the recipes graph-mode and catalog-mode loaders, a Resource Description Framework (RDF) expansion and the node API's own SPARQL Protocol and RDF Query Language (SPARQL) generator over every golden; its results are in the phase 1 pull request.
 - ADR 0034 (no new `datasets` column), ADR 0050 (no wasm in the Worker), ADR 0065 and ADR 0067 (anonymity), ADR 0068 (the standing fixtures), ADR 0072 (the manifest is never read whole).
