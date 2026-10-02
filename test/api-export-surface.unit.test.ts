@@ -135,6 +135,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "getEmailPreferences",
     "getFleetDrift",
     "getImportStatus",
+    "getNeurobagelStatus",
     "getSummaryCoverage",
     "getUserDuplicates",
     "hedSweep",
@@ -145,6 +146,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "importWeeklySummary",
     "listKeysFor",
     "listUsers",
+    "neurobagelRegenerate",
     "publishDataset",
     "publishVersionDoi",
     "publishZarrCatalog",
@@ -238,6 +240,8 @@ const POST_SPLIT_ADDITIONS = [
   "zarrFidelitySweep", // #1068, epic #1181 phase 8: POST /admin/datasets/zarr-fidelity-sweep
   "anonymitySweep", // #1409, epic #1406: POST /admin/datasets/anonymity-sweep
   "anonymitySweepReset", // the same route with ?reset=1
+  "getNeurobagelStatus", // epic #1586 phase 4, ADR 0084: GET /admin/neurobagel/status
+  "neurobagelRegenerate", // epic #1586 phase 4, ADR 0084: POST /admin/neurobagel/regenerate (dry run by default)
 ];
 
 /** The api.ts monolith's runtime surface, captured at #908 commit 1. */
