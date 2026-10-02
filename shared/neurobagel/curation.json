@@ -1,0 +1,149 @@
+{
+  "datasets": {
+    "nm000119": {
+      "columns": {
+        "group": {
+          "IsAbout": {
+            "Label": "Diagnosis",
+            "TermURL": "nb:Diagnosis"
+          },
+          "Levels": {
+            "able-bodied subjects without any known neuro-muscular or mental disorders": {
+              "Label": "Healthy Control",
+              "TermURL": "ncit:C94342"
+            }
+          },
+          "MissingValues": [],
+          "VariableType": "Categorical"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "author",
+        "reviewer": "pull request author; not a domain expert, so a clinical or instrument review is still required before federation",
+        "source": "The one group value of participants.tsv names able-bodied subjects without a known neuro-muscular or mental disorder, which is the pinned vocabulary's Healthy Control; the mechanical rule recognises only the spellings healthy and control."
+      },
+      "pins": {
+        "participants_json": "4927572818012f2b1c7c181b4d63c85b4eacf0c4",
+        "participants_tsv": "eb610a87ff4dfb93efdcba2da17bfef12dce9b82"
+      }
+    },
+    "nm000149": {
+      "columns": {
+        "group": {
+          "IsAbout": {
+            "Label": "Diagnosis",
+            "TermURL": "nb:Diagnosis"
+          },
+          "Levels": {
+            "spinal cord injury": {
+              "Label": "Spinal cord injury",
+              "TermURL": "snomed:90584004"
+            }
+          },
+          "MissingValues": [],
+          "VariableType": "Categorical"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "author",
+        "reviewer": "pull request author; not a domain expert, so a clinical or instrument review is still required before federation",
+        "source": "The one group value of participants.tsv, spinal cord injury, matches the dataset title (BNCI 2019-001 motor imagery for spinal cord injury); term chosen from the pinned diagnosis vocabulary."
+      },
+      "pins": {
+        "participants_json": "66276855a370067ffecf07f735d0cd6b7a362263",
+        "participants_tsv": "82d02b4e63fe414c6473d85c0474b2d97723d153"
+      }
+    },
+    "nm000154": {
+      "columns": {
+        "gender": {
+          "IsAbout": {
+            "Label": "Sex",
+            "TermURL": "nb:Sex"
+          },
+          "Levels": {
+            "F": {
+              "Label": "Female",
+              "TermURL": "snomed:248152002"
+            },
+            "M": {
+              "Label": "Male",
+              "TermURL": "snomed:248153007"
+            }
+          },
+          "MissingValues": [],
+          "VariableType": "Categorical"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "author",
+        "reviewer": "pull request author; not a domain expert, so a clinical or instrument review is still required before federation",
+        "source": "participants.json describes the gender column as the sex of the participant with levels male and female; the dataset has no sex column, so the mechanical rule leaves the column unmapped."
+      },
+      "pins": {
+        "participants_json": "51644bc9f58641110aeaf53fc783e3ff0c2b683c",
+        "participants_tsv": "ed6bc01071b75371d741593b4d8808c3168a55c0"
+      }
+    },
+    "nm000158": {
+      "columns": {
+        "group": {
+          "IsAbout": {
+            "Label": "Diagnosis",
+            "TermURL": "nb:Diagnosis"
+          },
+          "Levels": {
+            "acute stroke patients (1-30 days post-stroke)": {
+              "Label": "Cerebrovascular accident",
+              "TermURL": "snomed:230690007"
+            }
+          },
+          "MissingValues": [],
+          "VariableType": "Categorical"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "author",
+        "reviewer": "pull request author; not a domain expert, so a clinical or instrument review is still required before federation",
+        "source": "The one group value of participants.tsv names acute stroke patients, matching the dataset title (EEG datasets of stroke patients); the pinned diagnosis vocabulary holds stroke as Cerebrovascular accident."
+      },
+      "pins": {
+        "participants_json": "62529215a6e9ca66e3addcad46edb107367b3a5d",
+        "participants_tsv": "7110f7e4a9c13ce67ee1c9510141135246c4ff30"
+      }
+    },
+    "nm000210": {
+      "columns": {
+        "group": {
+          "IsAbout": {
+            "Label": "Diagnosis",
+            "TermURL": "nb:Diagnosis"
+          },
+          "Levels": {
+            "autism spectrum disorder (ASD)": {
+              "Label": "Autism spectrum disorder",
+              "TermURL": "snomed:35919005"
+            }
+          },
+          "MissingValues": [],
+          "VariableType": "Categorical"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "author",
+        "reviewer": "pull request author; not a domain expert, so a clinical or instrument review is still required before federation",
+        "source": "The one group value of participants.tsv, autism spectrum disorder, matches the dataset title (BCIAUT-P300 dataset for autism); term chosen from the pinned diagnosis vocabulary."
+      },
+      "pins": {
+        "participants_json": "66276855a370067ffecf07f735d0cd6b7a362263",
+        "participants_tsv": "212dee19cb4c1ffd1d31432b7031700f4b6456a8"
+      }
+    }
+  },
+  "format": 1
+}

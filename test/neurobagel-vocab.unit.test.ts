@@ -16,7 +16,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import addFormats from "ajv-formats";
 import Ajv2020 from "ajv/dist/2020";
-import { GOLDEN_ROOT, fixtureIds } from "../scripts/neurobagel/fixtures-io";
+import { GOLDEN_ROOT, fixtureIds, loadCuration } from "../scripts/neurobagel/fixtures-io";
 import {
   MAPPED_DATATYPES,
   VOCAB,
@@ -153,36 +153,39 @@ describe("every emitted term exists in the pinned vocabulary", () => {
     });
   }
 
-  test("across all goldens, exactly the terms the rules can produce appear", () => {
-    const allowed = new Set([
-      "nb:ParticipantID",
-      "nb:Age",
-      "nb:Sex",
-      "nb:Diagnosis",
-      "nb:FromFloat",
-      "nb:FromRange",
-      "snomed:248153007",
-      "snomed:248152002",
-      "ncit:C94342",
-      "nidm:Electroencephalography",
-      "nidm:Magnetoencephalography",
-    ]);
-    for (const iri of emitted) expect(allowed.has(iri)).toBe(true);
-    for (const iri of [
-      "nb:ParticipantID",
-      "nb:Age",
-      "nb:Sex",
-      "nb:Diagnosis",
-      "nb:FromFloat",
-      "nb:FromRange",
-      "snomed:248153007",
-      "snomed:248152002",
-      "ncit:C94342",
-      "nidm:Electroencephalography",
-      "nidm:Magnetoencephalography",
-    ]) {
-      expect(emitted.has(iri)).toBe(true);
+  /** Every term a committed curation entry may add to a dataset's output. */
+  const curatedTerms = new Set<string>();
+  for (const entry of loadCuration().entries.values()) {
+    for (const c of entry.columns) {
+      if (c.kind === "sex" || c.kind === "diagnosis") {
+        for (const t of c.levels.values()) curatedTerms.add(t.identifier);
+      } else if (c.kind === "age") curatedTerms.add(c.formatTerm.identifier);
+      else {
+        curatedTerms.add(c.tool.identifier);
+        curatedTerms.add(VOCAB.variables.Assessment.identifier);
+      }
     }
+  }
+
+  test("across all goldens, exactly the terms the rules and the committed curation can produce appear", () => {
+    const mechanical = [
+      "nb:ParticipantID",
+      "nb:Age",
+      "nb:Sex",
+      "nb:Diagnosis",
+      "nb:FromFloat",
+      "nb:FromRange",
+      "snomed:248153007",
+      "snomed:248152002",
+      "ncit:C94342",
+      "nidm:Electroencephalography",
+      "nidm:Magnetoencephalography",
+    ];
+    // A term outside the mechanical set is in a golden only because a reviewed entry names it.
+    for (const iri of emitted) expect(mechanical.includes(iri) || curatedTerms.has(iri)).toBe(true);
+    for (const iri of mechanical) expect(emitted.has(iri)).toBe(true);
+    // And the reverse: every term of a committed entry reaches its dataset's golden.
+    for (const iri of curatedTerms) expect(emitted.has(iri)).toBe(true);
   });
 });
 

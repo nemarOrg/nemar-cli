@@ -1,0 +1,57 @@
+{
+  "age": {
+    "Annotations": {
+      "Format": {
+        "Label": "decimal",
+        "TermURL": "nb:FromFloat"
+      },
+      "IsAbout": {
+        "Label": "Age",
+        "TermURL": "nb:Age"
+      },
+      "MissingValues": [
+        "",
+        "n/a",
+        "N/A",
+        "NA"
+      ],
+      "ValueRange": {
+        "Max": 71,
+        "Min": 71
+      },
+      "VariableType": "Continuous"
+    },
+    "Description": "Age of the participant.",
+    "Units": "years"
+  },
+  "group": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Diagnosis",
+        "TermURL": "nb:Diagnosis"
+      },
+      "Levels": {
+        "acute stroke patients (1-30 days post-stroke)": {
+          "Label": "Cerebrovascular accident",
+          "TermURL": "snomed:230690007"
+        }
+      },
+      "MissingValues": [],
+      "VariableType": "Categorical"
+    },
+    "Description": "Participant group or diagnosis; values are mapped to diagnosis terms by a reviewed curation entry.",
+    "Levels": {
+      "acute stroke patients (1-30 days post-stroke)": "Cerebrovascular accident"
+    }
+  },
+  "participant_id": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Participant ID",
+        "TermURL": "nb:ParticipantID"
+      },
+      "VariableType": "Identifier"
+    },
+    "Description": "Participant identifier, as in participants.tsv."
+  }
+}
