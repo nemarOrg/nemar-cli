@@ -1,0 +1,30 @@
+{
+  "AccessInstructions": "Public access. License: CC-BY-4.0. Browse and download at https://nemar.org/dataset/nm000290 (latest version v1.0.0).",
+  "AccessLink": "https://nemar.org/dataset/nm000290",
+  "AccessType": "public",
+  "Authors": [
+    "Dreyer Pauline",
+    "Bourdil Manon",
+    "Bechon Loic",
+    "Kojima Simon",
+    "Velut Sebastien",
+    "Rimbert Sebastien",
+    "Roy Raphaëlle",
+    "Lotte Fabien"
+  ],
+  "Keywords": [
+    "EEG",
+    "Brain-Computer Interfaces",
+    "motor imagery",
+    "mental subtraction",
+    "word generation",
+    "neurofeedback"
+  ],
+  "Name": "PROTEUS BCI Bordeaux — EEG/EMG Foundation Challenge 2026, Track 02",
+  "ParticipantCount": 10,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/nm000290",
+    "https://doi.org/10.82901/nemar.nm000290"
+  ],
+  "RepositoryURL": "https://data.nemar.org/nm000290/"
+}

@@ -1,0 +1,27 @@
+{
+    "age": {
+        "Description": "Age of the participant (not disclosed; anonymized)."
+    },
+    "sex": {
+        "Description": "Biological sex (not disclosed; anonymized)."
+    },
+    "hand": {
+        "Description": "Handedness (not disclosed; anonymized)."
+    },
+    "n_channels": {
+        "Description": "Number of intracranial EEG channels.",
+        "Units": "count"
+    },
+    "sampling_frequency": {
+        "Description": "Sampling frequency of the recording.",
+        "Units": "Hz"
+    },
+    "recording_duration_hours": {
+        "Description": "Total continuous recording duration.",
+        "Units": "hours"
+    },
+    "n_seizures": {
+        "Description": "Number of annotated electrographic seizures.",
+        "Units": "count"
+    }
+}

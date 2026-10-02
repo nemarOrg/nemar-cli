@@ -65,6 +65,10 @@ jobs:
               # so unit-pure -- the job that actually runs
               # test/probe-github-token.test.ts -- silently skipped it.
               - 'scripts/ci/**'
+              # The Neurobagel gatherer, vocabulary generator and golden regenerator
+              # (epic #1586) are imported by test/neurobagel-*.test.ts and type-checked
+              # with the root tsconfig; a change to them alone must run lint and unit-pure.
+              - 'scripts/neurobagel/**'
             backend:
               - 'backend/**'
             tests:

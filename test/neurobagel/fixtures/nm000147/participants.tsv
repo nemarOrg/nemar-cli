@@ -1,0 +1,44 @@
+participant_id	species	Sex	Age	Occupation	Tired	Study_time	GPA	Caffeine	Occupation_field
+sub-01	homosapiens	Female	20	Student	Awake	8	3.1	2	BIochemistry
+sub-02	homosapiens	Female	18	student	Moderate	2	4	2	biochem
+sub-03	homosapiens	Male	32	Student	Awake	2	3.94	3	Biochemistry
+sub-04	homosapiens	Female	19	Student	Moderate	6	3	n/a	BME
+sub-05	homosapiens	Female	24	Intern	Moderate	n/a	3.78	3	Nanotechnology
+sub-06	homosapiens	Female	19	Student	Moderate	1	3.8	7	Mechanical Engineering
+sub-07	homosapiens	Female	20	Undergraduate Student	Awake	3	3.8	n/a	Environmental Engineering
+sub-08	homosapiens	Male	23	Student	Awake	2	3	2	Mechanical engineering
+sub-09	homosapiens	Male	21	Student	Awake	5	3.8	4	Mechanical Engineering
+sub-10	homosapiens	Male	21	Student	Awake	1	3.54	2	Biomedical Engineering
+sub-11	homosapiens	Female	21	Student	Awake	6	2.7	8	Electrical Engineering
+sub-12	homosapiens	Female	21	Student	Moderate	2	3.2	1	Biomedical Engineering
+sub-13	homosapiens	Female	19	student	Awake	3	3	4	communication sciences and disorders
+sub-14	homosapiens	Female	23	Student	Moderate	6	n/a	n/a	Chemistry
+sub-15	homosapiens	Female	18	Student	Tired	5	3.5	n/a	Neuroscience
+sub-16	homosapiens	Female	19	Student	Moderate	5	3.2	4	Biology
+sub-17	homosapiens	Male	24	Student	VeryAwake	2	3.2	5	EE
+sub-18	homosapiens	Male	21	Student	Moderate	4	3	7	Chemical Engineer
+sub-19	homosapiens	Male	25	student	Awake	5	2.38	2	Physics
+sub-20	homosapiens	Female	21	Student	Awake	4	3.3	n/a	Medicine
+sub-21	homosapiens	Male	27	Behaviral health associate	Awake	6	3.5	n/a	Psychiatry
+sub-22	homosapiens	Male	19	Student	Awake	4	2.5	5	Chemical Engineering
+sub-23	homosapiens	Male	30	Uber Driver	VeryAwake	4	2.78	n/a	Chemical Student
+sub-24	homosapiens	Male	30	Food Courier	Tired	n/a	n/a	2	Delivery
+sub-25	homosapiens	Male	29	student	Tired	3	3.1	1	Chemical Engineering
+sub-26	homosapiens	Female	23	student	VeryAwake	8	3	2	Chemical Engineer
+sub-27	homosapiens	Female	19	student	Moderate	2	3.5	7	psychology
+sub-28	homosapiens	Female	18	Student	Awake	1	4.1	n/a	Biology
+sub-29	homosapiens	Female	23	student	VeryAwake	3	3.2	2	Civil Engineering
+sub-30	homosapiens	Male	31	Student	Awake	2	3.24	9	Chemical Engineering
+sub-31	homosapiens	Male	38	production	VeryAwake	n/a	n/a	2	n/a
+sub-32	homosapiens	Female	28	Customer Service	Awake	5	3.56	0	n/a
+sub-33	homosapiens	Female	23	unemployed	Moderate	1	n/a	6	film
+sub-34	homosapiens	Female	26	student	VeryAwake	2	2.8	n/a	health informatics
+sub-35	homosapiens	Male	34	Logistics	Awake	n/a	n/a	n/a	n/a
+sub-36	homosapiens	Female	26	Paraprofessional	Awake	n/a	n/a	1	Speech Pathology/Business
+sub-37	homosapiens	Male	25	business owner	Moderate	1	n/a	n/a	n/a
+sub-38	homosapiens	Female	25	n/a	Awake	2	n/a	2	n/a
+sub-39	homosapiens	Female	26	Physical Therapy Aide	Tired	2	0	8	Health Care
+sub-40	homosapiens	Male	39	case manager	Moderate	2	n/a	n/a	Social work
+sub-41	homosapiens	Male	26	cook	Awake	0	0	0	cook
+sub-42	homosapiens	Male	40	Customer Service	Awake	6	n/a	7	n/a
+sub-43	homosapiens	Female	45	retire	Moderate	n/a	n/a	2	n/a

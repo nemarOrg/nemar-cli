@@ -1,0 +1,38 @@
+{
+  "AccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/nm000182 (latest version v1.0.2).",
+  "AccessLink": "https://nemar.org/dataset/nm000182",
+  "AccessType": "public",
+  "Authors": [
+    "Petr Nejedly",
+    "Vaclav Kremen",
+    "Vladimir Sladky",
+    "Jan Cimbalnik",
+    "Petr Klimes",
+    "Filip Plesinger",
+    "Filip Mivalt",
+    "Vojtech Travnicek",
+    "Ivo Viscor",
+    "Martin Pail",
+    "Josef Halamek",
+    "Benjamin Brinkmann",
+    "Milan Brazdil",
+    "Pavel Jurak",
+    "Gregory Worrell"
+  ],
+  "Keywords": [
+    "intracranial EEG",
+    "iEEG",
+    "stereo-EEG",
+    "artifact classification",
+    "graphoelements",
+    "Epilepsy",
+    "seizure onset zone"
+  ],
+  "Name": "Multicenter iEEG dataset for classification of graphoelements and artifactual signals (MAYO)",
+  "ParticipantCount": 24,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/nm000182",
+    "https://doi.org/10.82901/nemar.nm000182"
+  ],
+  "RepositoryURL": "https://data.nemar.org/nm000182/"
+}

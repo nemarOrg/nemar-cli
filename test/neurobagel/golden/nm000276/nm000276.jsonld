@@ -1,0 +1,601 @@
+{
+  "@context": {
+    "Acquisition": "nb:Acquisition",
+    "Assessment": "nb:Assessment",
+    "Bagel": "nb:Bagel",
+    "BaseModel": "nb:BaseModel",
+    "CompletedPipeline": "nb:CompletedPipeline",
+    "ControlledTerm": "nb:ControlledTerm",
+    "Dataset": "nb:Dataset",
+    "Diagnosis": "nb:Diagnosis",
+    "Image": "nb:Image",
+    "ImagingSession": "nb:ImagingSession",
+    "PhenotypicSession": "nb:PhenotypicSession",
+    "Pipeline": "nb:Pipeline",
+    "Session": "nb:Session",
+    "Sex": "nb:Sex",
+    "Subject": "nb:Subject",
+    "SubjectGroup": "nb:SubjectGroup",
+    "hasAccessEmail": {
+      "@id": "nb:hasAccessEmail"
+    },
+    "hasAccessInstructions": {
+      "@id": "nb:hasAccessInstructions"
+    },
+    "hasAccessLink": {
+      "@id": "nb:hasAccessLink"
+    },
+    "hasAccessType": {
+      "@id": "nb:hasAccessType"
+    },
+    "hasAcquisition": {
+      "@id": "nb:hasAcquisition"
+    },
+    "hasAge": {
+      "@id": "nb:hasAge"
+    },
+    "hasAssessment": {
+      "@id": "nb:hasAssessment"
+    },
+    "hasAuthors": {
+      "@id": "nb:hasAuthors"
+    },
+    "hasCompletedPipeline": {
+      "@id": "nb:hasCompletedPipeline"
+    },
+    "hasContrastType": {
+      "@id": "nb:hasContrastType"
+    },
+    "hasDiagnosis": {
+      "@id": "nb:hasDiagnosis"
+    },
+    "hasFilePath": {
+      "@id": "nb:hasFilePath"
+    },
+    "hasKeywords": {
+      "@id": "nb:hasKeywords"
+    },
+    "hasLabel": {
+      "@id": "nb:hasLabel"
+    },
+    "hasPipelineName": {
+      "@id": "nb:hasPipelineName"
+    },
+    "hasPipelineVersion": {
+      "@id": "nb:hasPipelineVersion"
+    },
+    "hasReferencesAndLinks": {
+      "@id": "nb:hasReferencesAndLinks"
+    },
+    "hasRepositoryURL": {
+      "@id": "nb:hasRepositoryURL"
+    },
+    "hasSamples": {
+      "@id": "nb:hasSamples"
+    },
+    "hasSession": {
+      "@id": "nb:hasSession"
+    },
+    "hasSex": {
+      "@id": "nb:hasSex"
+    },
+    "identifier": "@id",
+    "isSubjectGroup": {
+      "@id": "nb:isSubjectGroup"
+    },
+    "nb": "http://neurobagel.org/vocab/",
+    "ncit": "http://ncicb.nci.nih.gov/xml/owl/EVS/Thesaurus.owl#",
+    "nidm": "http://purl.org/nidash/nidm#",
+    "np": "https://github.com/nipoppy/pipeline-catalog/tree/main/processing/",
+    "schemaKey": "@type",
+    "snomed": "http://purl.bioontology.org/ontology/SNOMEDCT/"
+  },
+  "hasAccessInstructions": "Public access. License: CDLA-Permissive-2.0. Browse and download at https://nemar.org/dataset/nm000276 (latest version v1.0.0).",
+  "hasAccessLink": "https://nemar.org/dataset/nm000276",
+  "hasAccessType": "public",
+  "hasAuthors": [
+    "Francesco Carzaniga",
+    "Michael Hersche",
+    "Abu Sebastian",
+    "Kaspar Schindler",
+    "Abbas Rahimi"
+  ],
+  "hasKeywords": [
+    "intracranial EEG",
+    "iEEG",
+    "Epilepsy",
+    "Seizures",
+    "long-term monitoring",
+    "seizure detection"
+  ],
+  "hasLabel": "SWEC iEEG Dataset",
+  "hasReferencesAndLinks": [
+    "https://nemar.org/dataset/nm000276",
+    "https://doi.org/10.82901/nemar.nm000276"
+  ],
+  "hasRepositoryURL": "https://data.nemar.org/nm000276/",
+  "hasSamples": [
+    {
+      "hasLabel": "sub-01",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:112cbacd-f756-57ca-b5a8-cad8c2539b12",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:cc901537-5ab7-5225-bd76-009da24d4ce5",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-02",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:7e070ad1-3a68-572a-a039-4582f0a9664d",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:d67547b1-71cb-5be0-8eb1-528fe4704bfe",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-03",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:b7a01af3-4831-5d93-b9f8-2a3e915296a7",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:a7bac8eb-46d3-55d1-852c-51aa79a67844",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-04",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:b49a954a-46de-5936-9112-b53521a30a15",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:7052ae0d-381d-54d0-885b-5a666ac9234c",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-05",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:abfab575-358b-5aba-b51d-aefc9782d41d",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:21d69462-55c9-5431-8507-e8974dc67673",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-06",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:993129d5-1e22-5498-ae36-db79eff96e3e",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:76dd0103-e9e5-565c-8aa1-82abfeaff08c",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-08",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:b084ade3-0f12-51cc-b0c2-76f7a8fff7de",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:b0b52254-a9bb-56e6-96e8-553ffcc0f143",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-09",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:d05084bd-a232-5168-be5f-a24e7cfaf142",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:b1c9bf98-d742-5d1d-8e02-924764e5c347",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-10",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:30090daf-8273-5a51-911b-a5e6a4b57b0c",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:871bf5b1-2daa-573b-8c29-03344ea5b080",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-11",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:1c7d23c2-7924-5bf2-ac8b-33273ebcaa64",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:b556faa1-d0b3-511d-8818-1dfc0f5f881c",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-12",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:9895ce0a-743a-5471-9a63-6b000367240e",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:ff06e04a-0fd5-5f3d-a1c4-477ef0de0d8e",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-15",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:7e1bb6b8-5f6d-5fda-a123-3f8613d374ed",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:d4bb2cfc-1655-5e46-8989-9d90d4d3b9cc",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-16",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:1d6c96dd-4399-5237-add5-15ed790c69e5",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:25c87de4-68ef-5bf2-b862-a82b1970b4f2",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-18",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:1882ff5f-5586-5811-8fc7-6019f4228e08",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:5985ea2e-ab9c-5402-ab9b-77fc59602add",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-19",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:634e8199-8caa-51a0-ad2d-9149ee8301aa",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:ba55e8d2-478c-563f-99a5-f88b9c44b453",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-20",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:915c903f-6d1c-500a-9fd8-e22b185a03cf",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:4f4b5dfb-7b70-536f-88fc-2fbf403ef4fd",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-22",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:e9512c68-aac6-5896-ae5e-0982d8b886f3",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:23c3ba01-abbd-53cd-bc41-c799027e51c7",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-23",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:77c9841c-3030-5209-bf66-cfe2bfdc9551",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:4c5c765b-78ea-53c1-be0c-6b4c76cd69d0",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-24",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:ab42a60a-4411-5148-b104-f638bb6ac3f3",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:e9976bbe-60a0-5d9a-8ee5-45db474be867",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-27",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:125f3aa4-bad9-5203-93dd-4b95ed34a44d",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:138d84dd-2523-5db7-8734-ab49e32caaa1",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-28",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:d2d99237-9e26-58f6-b4a4-890c3c391953",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:2dbb2418-a7a9-5bd0-8928-eb1f5f4e1dc6",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-29",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:093dd047-ee45-53a3-8b8c-f307a93de431",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:874e36a0-a9e1-5b7b-9a23-523e42703080",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-30",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:6b51c832-b094-5df3-a43b-40638713fa1b",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:896d1e1b-3f96-5067-a487-a8363d14f25c",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-31",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:05bd0082-f827-5d37-af33-2a20596e2017",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:61516305-a5b7-5904-acb6-e916e3509a89",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-32",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:b272c00c-a184-5a53-ba6d-598c5b922344",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:a5cb748a-03c7-500f-8a37-cee9f29aa1da",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-33",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:21c0bef8-67cd-5609-bcf3-7521c4ca7333",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:e77a8d36-8deb-5215-a0d9-1ddd9e913508",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-34",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:b3fbe3eb-a93e-5a19-aab6-687f9fdabedf",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:7a66e868-3a4a-5552-8656-59486b3fb9c8",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-35",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:d5da9d64-8372-5134-b7b1-2dce589e2158",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:893db296-e43e-55ad-adcb-f19c8a014f54",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-36",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:b0cf6e94-947b-5d25-973c-c4f595e98784",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:05a49f93-9701-5009-97e9-a6407d2c6942",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-37",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:f9067de0-39b1-5e40-9c82-27ccfea045c6",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:374a30d2-1bb0-55d1-80bc-4fa8af7a6613",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-38",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:72fb843d-353f-5da5-baf7-1802966e9f79",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:3dd55aef-bb42-5b75-a4a5-59cee0b6f098",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-39",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:70572755-bd47-5869-bf6d-12d9f75e33a0",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:c8bc1804-d44f-5c36-b32c-158953e2e0ab",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-41",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:624ed8ff-5832-5bae-8bd4-d39303ea2fa0",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:b36f2c93-0c10-5301-873b-8d0312f4289f",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-42",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:3b2bab56-9e56-521d-b496-14586d488c1b",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:f65b52a8-2fd0-58ac-8a43-f15fa8e5ced4",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-43",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:fa4928c8-f73e-537a-8910-003c5e740a7b",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:4417706a-6b6e-589b-bccc-3470a2f62e7d",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-45",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:0b9d234e-5fc6-58b7-b5ab-5800845f0340",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:0411552b-8e8a-5e9b-be43-35d849485e36",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-46",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:79cf4041-3f5e-54d9-a3bd-47d7e314d002",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:5b80ccd0-d4d2-5bf7-9a50-47a78c03b144",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-47",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:8533e7cd-3bdb-59d8-90c4-9818923789a1",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:8edd31ef-f4f7-5c5a-a733-0da29b61cbde",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-48",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:6df64510-b78d-5929-93bf-799c44efaa06",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:cf66f386-fb65-5113-889a-04f5323fd4fe",
+      "schemaKey": "Subject"
+    },
+    {
+      "hasLabel": "sub-50",
+      "hasSession": [
+        {
+          "hasLabel": "ses-unnamed",
+          "identifier": "nb:26e2e98f-08b0-5f29-9b44-a6330960f00d",
+          "schemaKey": "PhenotypicSession"
+        }
+      ],
+      "identifier": "nb:2fdac455-cf65-5341-a591-42f12f19187e",
+      "schemaKey": "Subject"
+    }
+  ],
+  "identifier": "nb:23e467be-002d-566e-a337-5d51168ea84c",
+  "schemaKey": "Dataset"
+}

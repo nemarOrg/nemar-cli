@@ -1,0 +1,23 @@
+{
+  "AccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on001787 (latest version v1.0.0).",
+  "AccessLink": "https://nemar.org/dataset/on001787",
+  "AccessType": "public",
+  "Authors": [
+    "Arnaud Delorme",
+    "Tracy Brandmeyer"
+  ],
+  "Keywords": [
+    "EEG",
+    "Meditation",
+    "mind wandering",
+    "Attention",
+    "concentration"
+  ],
+  "Name": "EEG meditation study",
+  "ParticipantCount": 24,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/on001787",
+    "https://doi.org/10.82901/nemar.on001787"
+  ],
+  "RepositoryURL": "https://data.nemar.org/on001787/"
+}
