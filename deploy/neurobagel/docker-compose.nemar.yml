@@ -10,8 +10,11 @@
 # Resource ceiling for the whole stack is 3 GiB (epic #1586): graph 2048 + api 512 + f-API 128
 # + query tool 64 + tunnel connector 128 = 2880 MiB. The init container (256 MiB limit) runs for
 # seconds during a reload and measured 30 MiB.
-# `mem_limit` equals `memswap_limit` everywhere, so a container is killed at its limit instead
-# of swapping or growing into the memory Infisical and Umami need.
+# `mem_limit` equals `memswap_limit` everywhere, so a container is killed at its limit instead of
+# swapping or growing into memory that other services on the host need. `oom_score_adj` of 500 makes
+# every container of this project the kernel's first choice if the whole host ever runs out, and a
+# low `cpu_shares` makes it yield first when the CPUs are contended. The stock graph setup script
+# polls GraphDB in a loop with no sleep while the server starts; `cpus` contains that.
 
 x-logging: &logging
   driver: json-file
@@ -22,6 +25,8 @@ x-logging: &logging
 x-hardening: &hardening
   security_opt:
     - no-new-privileges:true
+  oom_score_adj: 500
+  cpu_shares: 128
 
 services:
 
@@ -30,6 +35,12 @@ services:
   # runs it explicitly, under a lock, and checks its result before anything else is touched.
   init_data:
     <<: *hardening
+    # The stock Dockerfile starts FROM python:3.11-slim. BuildKit replaces that reference with the
+    # digest below, so a moved tag cannot change the image that validates every release.
+    # (The pip packages it installs are not pinned by recipes; that is recipes' choice.)
+    build:
+      additional_contexts:
+        - python:3.11-slim=docker-image://python@sha256:bab1b7ef4b450c81002278d035eff85ebe394ae94df904f7a3ba14f7e16e487b
     restart: "no"
     logging: *logging
     mem_limit: ${NB_INIT_MEM_LIMIT:-256m}
@@ -84,6 +95,9 @@ services:
     # published port exists for local checks and the f-API-free smoke tests.
     ports: !override
       - "127.0.0.1:${NB_NAPI_PORT_HOST:-18000}:8000"
+    # `tunnel` is the only network the optional connector joins, so the connector can reach the API
+    # and nothing else; GraphDB is on `default` alone.
+    networks: [default, tunnel]
     environment:
       # Fixed here, not in .env: this node never returns participant-level records.
       NB_RETURN_AGG: "true"
@@ -152,7 +166,7 @@ services:
       start_interval: 3s
 
   # Tunnel connector, OFF unless the `tunnel` profile is enabled in .env. It exposes exactly one
-  # thing: the node API, as http://api:8000 inside the project network. The hostname mapping is
+  # thing: the node API, as http://api:8000, over a network of its own that holds only the API. The hostname mapping is
   # configured in the Cloudflare dashboard (README, "Cloudflare Tunnel"); the lead approves the
   # hostname before this profile is ever turned on.
   cloudflared:
@@ -161,6 +175,7 @@ services:
     image: ${NB_CLOUDFLARED_IMAGE:?set NB_CLOUDFLARED_IMAGE in pins.env}
     restart: unless-stopped
     logging: *logging
+    networks: [tunnel]
     command: tunnel --no-autoupdate --metrics 127.0.0.1:2000 run
     environment:
       # Empty unless the profile is enabled; `bin/nb up` refuses to start the tunnel profile
@@ -180,3 +195,7 @@ services:
       retries: 3
       start_period: 20s
       start_interval: 3s
+
+networks:
+  # Holds the API and, when the tunnel profile is on, the connector. Nothing else.
+  tunnel: {}
