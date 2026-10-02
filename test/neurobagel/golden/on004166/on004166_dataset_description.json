@@ -1,0 +1,35 @@
+{
+  "AccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on004166 (latest version v1.0.0).",
+  "AccessLink": "https://nemar.org/dataset/on004166",
+  "AccessType": "public",
+  "Authors": [
+    "Yang Li (data and curation)",
+    "Wenjin Fu (data)",
+    "Qiumei Zhang (data)",
+    "Xiongying Chen (data)",
+    "Xiaohong Li (data)",
+    "Boqi Du (data)",
+    "Xiaoxiang Deng (data)",
+    "Feng Ji (curation)",
+    "Qi Dong (curation)",
+    "Susanne M. Jaeggi (curation)",
+    "Chuansheng Chen (curation)",
+    "Jun Li (data and curation)"
+  ],
+  "Keywords": [
+    "EEG",
+    "event-related potentials",
+    "working memory",
+    "cognitive training",
+    "randomized controlled trial",
+    "contralateral delay activity",
+    "change detection task"
+  ],
+  "Name": "Effects of Forward and Backward Span Trainings on Working Memory: Evidence from a Randomized, Controlled Trial",
+  "ParticipantCount": 71,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/on004166",
+    "https://doi.org/10.82901/nemar.on004166"
+  ],
+  "RepositoryURL": "https://data.nemar.org/on004166/"
+}

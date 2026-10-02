@@ -252,3 +252,104 @@ describe("validateDatasetDescription", () => {
     });
   }
 });
+
+/**
+ * Curated terms (epic #1586, phase 5).
+ * A diagnosis or assessment term may appear in a dataset's output only if that dataset's
+ * curation entry names it, so the validators take the entry's terms and nothing else makes
+ * one legal.
+ * The goldens of three curated datasets are the real input: nm000158 (a curated diagnosis),
+ * on003474 (two assessment tools and a curated sex) and the same documents with one thing spoiled.
+ */
+describe("validation of curated terms", () => {
+  const golden = (id: string, name: string): Json =>
+    JSON.parse(readFileSync(join(GOLDEN_ROOT, id, name), "utf8")) as Json;
+  const stroke = { assessment: [], diagnosis: ["snomed:230690007"] };
+  const BDI = "snomed:273306008";
+  const STAI = "snomed:273830002";
+  const tools = { assessment: [BDI, STAI], diagnosis: [] };
+
+  const strokeGraph = golden("nm000158", "nm000158.jsonld");
+  const strokeDictionary = golden("nm000158", "nm000158_annotated.json");
+  const assessedGraph = golden("on003474", "on003474.jsonld");
+  const assessedDictionary = golden("on003474", "on003474_annotated.json");
+
+  test("a diagnosis is legal only for the entry that names it", () => {
+    expect(validateGraphDocument(asValue(strokeGraph), stroke)).toEqual([]);
+    expect(validateGraphDocument(asValue(strokeGraph)).length).toBeGreaterThan(0);
+    expect(validateGraphDocument(asValue(strokeGraph), tools).length).toBeGreaterThan(0);
+    expect(validateDictionary(asValue(strokeDictionary), stroke)).toEqual([]);
+    expect(validateDictionary(asValue(strokeDictionary)).length).toBeGreaterThan(0);
+    expect(validateDictionary(asValue(strokeDictionary), tools).length).toBeGreaterThan(0);
+  });
+
+  test("an assessment tool is legal only for the entry that names it, in the graph and the dictionary", () => {
+    expect(validateGraphDocument(asValue(assessedGraph), tools)).toEqual([]);
+    expect(validateGraphDocument(asValue(assessedGraph)).length).toBeGreaterThan(0);
+    expect(
+      validateGraphDocument(asValue(assessedGraph), { assessment: [BDI], diagnosis: [] }).length,
+    ).toBeGreaterThan(0);
+    expect(validateDictionary(asValue(assessedDictionary), tools)).toEqual([]);
+    expect(validateDictionary(asValue(assessedDictionary)).length).toBeGreaterThan(0);
+    expect(
+      validateDictionary(asValue(assessedDictionary), { assessment: [BDI], diagnosis: [] }).length,
+    ).toBeGreaterThan(0);
+  });
+
+  test("the healthy control term stays legal beside a curated one", () => {
+    const doc = clone(strokeGraph);
+    const session = ((subjectsOf(doc)[0].hasSession as Json[])[0] ?? {}) as Json;
+    session.hasDiagnosis = [
+      { identifier: "ncit:C94342", schemaKey: "Diagnosis" },
+      { identifier: "snomed:230690007", schemaKey: "Diagnosis" },
+    ];
+    expect(validateGraphDocument(asValue(doc), stroke)).toEqual([]);
+  });
+
+  test("a tool nobody curated is rejected even when other tools are legal", () => {
+    const doc = clone(assessedDictionary);
+    const column = Object.values(doc).find(
+      (c) => ((c as Json).Annotations as Json)?.VariableType === "Collection",
+    ) as { Annotations: { IsPartOf: Json } };
+    column.Annotations.IsPartOf.TermURL = "snomed:1";
+    expect(validateDictionary(asValue(doc), tools).length).toBeGreaterThan(0);
+  });
+
+  test("a collection column must be about the assessment variable and carry no levels", () => {
+    const about = clone(assessedDictionary);
+    const column = Object.values(about).find(
+      (c) => ((c as Json).Annotations as Json)?.VariableType === "Collection",
+    ) as { Annotations: Json };
+    (column.Annotations.IsAbout as Json).TermURL = "nb:Age";
+    expect(validateDictionary(asValue(about), tools).length).toBeGreaterThan(0);
+
+    const levels = clone(assessedDictionary);
+    const item = Object.values(levels).find(
+      (c) => ((c as Json).Annotations as Json)?.VariableType === "Collection",
+    ) as Json;
+    item.Levels = { x: "y" };
+    expect(validateDictionary(asValue(levels), tools).length).toBeGreaterThan(0);
+  });
+
+  test("a sex column cannot be about diagnosis, and a diagnosis column cannot be about sex", () => {
+    const sex = clone(assessedDictionary);
+    (((sex.sex as Json).Annotations as Json).IsAbout as Json).TermURL = "nb:Diagnosis";
+    expect(validateDictionary(asValue(sex), tools).length).toBeGreaterThan(0);
+
+    const diagnosis = clone(strokeDictionary);
+    (((diagnosis.group as Json).Annotations as Json).IsAbout as Json).TermURL = "nb:Sex";
+    expect(validateDictionary(asValue(diagnosis), stroke).length).toBeGreaterThan(0);
+  });
+
+  test("an assessment node has no schema key but Assessment, and a repeated tool node is not an identifier clash", () => {
+    const doc = clone(assessedGraph);
+    const session = ((subjectsOf(doc)[0].hasSession as Json[])[0] ?? {}) as Json;
+    expect(session.hasAssessment).toBeDefined();
+    // The same tool on two participants is the same term, not two nodes with one identifier.
+    expect(validateGraphDocument(asValue(doc), tools)).toEqual([]);
+    const wrong = clone(assessedGraph);
+    const wrongSession = ((subjectsOf(wrong)[0].hasSession as Json[])[0] ?? {}) as Json;
+    wrongSession.hasAssessment = [{ identifier: BDI, schemaKey: "Diagnosis" }];
+    expect(validateGraphDocument(asValue(wrong), tools).length).toBeGreaterThan(0);
+  });
+});

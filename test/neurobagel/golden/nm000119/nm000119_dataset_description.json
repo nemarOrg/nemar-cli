@@ -1,0 +1,29 @@
+{
+  "AccessInstructions": "Public access. License: ODC-By-1.0. Browse and download at https://nemar.org/dataset/nm000119 (latest version v1.0.2).",
+  "AccessLink": "https://nemar.org/dataset/nm000119",
+  "AccessType": "public",
+  "Authors": [
+    "Vangelis P. Oikonomou",
+    "Georgios Liaros",
+    "Kostantinos Georgiadis",
+    "Elisavet Chatzilari",
+    "Katerina Adam",
+    "Spiros Nikolopoulos",
+    "Ioannis Kompatsiaris"
+  ],
+  "Keywords": [
+    "EEG",
+    "SSVEP",
+    "brain-computer interface",
+    "visual evoked potentials",
+    "steady-state visual stimulation",
+    "algorithm benchmarking"
+  ],
+  "Name": "Oikonomou2016 – SSVEP MAMEM 1 dataset",
+  "ParticipantCount": 11,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/nm000119",
+    "https://doi.org/10.82901/nemar.nm000119"
+  ],
+  "RepositoryURL": "https://data.nemar.org/nm000119/"
+}

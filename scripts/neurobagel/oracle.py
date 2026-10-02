@@ -20,8 +20,10 @@ For every golden it checks, with the real pinned code and nothing reimplemented:
      description.
   3. `bagel pheno`, run on the fixture's participants.tsv with the golden
      dictionary and description, describes the same phenotype (age, sex,
-     diagnosis) for every participant as the golden JSON-LD, after identifiers
-     are set aside (bagel mints random uuid4, the transform derives uuid5).
+     diagnosis, and the assessment tools of a curated dataset) for every
+     participant as the golden JSON-LD, after identifiers are set aside (bagel
+     mints random uuid4, the transform derives uuid5).
+     A participant's diagnoses are compared as a set.
   4. `bagel bids`, run on a table built from the fixture's bids index, finds the
      same imaging modalities for every subject it can attach them to.
   5. The recipes stack's own graph-mode loader (`init_data/process_jsonld.py`
@@ -174,13 +176,23 @@ def phenotype_view(dataset: dict) -> dict[str, dict]:
                 f"{subject['hasLabel']} has {len(phenotypic)} phenotypic sessions"
             )
         session = phenotypic[0]
-        view[normalize_label(subject["hasLabel"])] = {
+        entry = {
             "age": session.get("hasAge"),
             "sex": session.get("hasSex", {}).get("identifier"),
+            # A set: two columns that say the same diagnosis give bagel a repeated node, and a graph
+            # that says it twice says nothing more.
             "diagnoses": sorted(
-                d["identifier"] for d in session.get("hasDiagnosis", [])
+                {d["identifier"] for d in session.get("hasDiagnosis", [])}
             ),
         }
+        # Only a curated dataset has assessments; leaving the key out when empty keeps every
+        # recording of a dataset without one as it was.
+        assessments = sorted(
+            {a["identifier"] for a in session.get("hasAssessment", [])}
+        )
+        if assessments:
+            entry["assessments"] = assessments
+        view[normalize_label(subject["hasLabel"])] = entry
     return view
 
 

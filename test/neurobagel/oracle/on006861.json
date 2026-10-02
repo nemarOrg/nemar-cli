@@ -1,0 +1,1365 @@
+{
+  "bagel": "0.11.6",
+  "bagel_only_subjects": 0,
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on006861 (latest version v1.0.0).",
+    "hasAccessLink": "https://nemar.org/dataset/on006861",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Szymon M\u0105ka",
+      "Marta Chrustowicz",
+      "\u0141ukasz Okruszek"
+    ],
+    "hasKeywords": [
+      "EEG",
+      "tDCS",
+      "Transcranial Direct Current Stimulation",
+      "Loneliness",
+      "Emotion regulation",
+      "Dorsolateral prefrontal cortex",
+      "Event-related potentials"
+    ],
+    "hasLabel": "Targeted Neuromodulation of the Left Dorsolateral Prefrontal Cortex Alleviates Altered Affective Response Evaluation in Lonely Individuals",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/on006861",
+      "https://doi.org/10.82901/nemar.on006861"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/on006861/"
+  },
+  "dataset_id": "on006861",
+  "imaging": {
+    "attachable_subjects": 120,
+    "modalities": {
+      "sub-001": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-002": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-003": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-004": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-005": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-006": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-007": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-008": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-009": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-010": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-011": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-012": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-013": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-014": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-015": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-016": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-017": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-018": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-019": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-020": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-021": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-022": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-023": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-024": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-025": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-026": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-027": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-028": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-029": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-030": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-031": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-032": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-033": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-034": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-035": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-036": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-037": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-038": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-039": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-040": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-041": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-042": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-043": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-044": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-045": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-046": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-047": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-048": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-049": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-050": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-051": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-052": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-053": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-054": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-055": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-056": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-057": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-058": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-059": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-060": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-061": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-062": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-063": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-064": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-065": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-066": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-067": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-068": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-069": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-070": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-071": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-072": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-073": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-074": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-075": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-076": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-077": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-078": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-079": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-080": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-081": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-082": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-083": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-084": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-085": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-086": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-087": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-088": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-089": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-090": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-091": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-092": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-093": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-094": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-095": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-096": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-097": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-098": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-099": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-100": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-101": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-102": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-103": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-104": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-105": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-106": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-107": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-108": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-109": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-110": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-111": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-112": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-113": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-114": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-115": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-116": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-117": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-118": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-119": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-120": [
+        "nidm:Electroencephalography"
+      ]
+    }
+  },
+  "inputs": {
+    "annotated.json": "58122bc81274b274a7c1e89689b58d9732251162fdd650b08512c3d17fc586b1",
+    "dataset_description.json": "586d634fd90c9a295095a2bb16937357783e050bcb192b54401c64c7e91d4f41",
+    "participants.tsv": "ca134846b57e8c2606416ab1282c1d3cb04b77c0bbc77e38ba7775a56336b6be"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-001": {
+      "age": 22.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-002": {
+      "age": 19.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-003": {
+      "age": 23.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-004": {
+      "age": 28.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-005": {
+      "age": 21.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-006": {
+      "age": 22.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-007": {
+      "age": 25.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-008": {
+      "age": 31.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-009": {
+      "age": 26.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-010": {
+      "age": 35.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-011": {
+      "age": 24.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-012": {
+      "age": 21.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-013": {
+      "age": 23.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-014": {
+      "age": 32.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-015": {
+      "age": 33.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-016": {
+      "age": 22.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-017": {
+      "age": 34.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-018": {
+      "age": 22.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-019": {
+      "age": 26.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-020": {
+      "age": 23.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-021": {
+      "age": 25.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-022": {
+      "age": 26.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-023": {
+      "age": 31.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-024": {
+      "age": 30.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-025": {
+      "age": 35.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-026": {
+      "age": 31.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-027": {
+      "age": 27.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-028": {
+      "age": 20.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-029": {
+      "age": 35.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-030": {
+      "age": 27.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-031": {
+      "age": 19.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-032": {
+      "age": 28.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-033": {
+      "age": 21.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-034": {
+      "age": 22.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-035": {
+      "age": 24.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-036": {
+      "age": 19.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-037": {
+      "age": 23.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-038": {
+      "age": 22.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-039": {
+      "age": 18.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-040": {
+      "age": 26.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-041": {
+      "age": 30.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-042": {
+      "age": 24.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-043": {
+      "age": 22.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-044": {
+      "age": 21.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-045": {
+      "age": 18.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-046": {
+      "age": 28.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-047": {
+      "age": 19.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-048": {
+      "age": 19.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-049": {
+      "age": 19.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-050": {
+      "age": 28.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-051": {
+      "age": 29.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-052": {
+      "age": 29.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-053": {
+      "age": 26.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-054": {
+      "age": 20.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-055": {
+      "age": 21.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-056": {
+      "age": 24.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-057": {
+      "age": 22.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-058": {
+      "age": 32.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-059": {
+      "age": 33.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-060": {
+      "age": 19.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-061": {
+      "age": 21.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-062": {
+      "age": 22.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-063": {
+      "age": 19.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-064": {
+      "age": 27.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-065": {
+      "age": 25.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-066": {
+      "age": 21.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-067": {
+      "age": 28.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-068": {
+      "age": 19.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-069": {
+      "age": 27.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-070": {
+      "age": 22.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-071": {
+      "age": 21.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-072": {
+      "age": 19.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-073": {
+      "age": 25.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-074": {
+      "age": 24.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-075": {
+      "age": 21.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-076": {
+      "age": 24.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-077": {
+      "age": 22.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-078": {
+      "age": 31.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-079": {
+      "age": 21.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-080": {
+      "age": 24.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-081": {
+      "age": 21.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-082": {
+      "age": 25.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-083": {
+      "age": 21.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-084": {
+      "age": 19.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-085": {
+      "age": 20.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-086": {
+      "age": 23.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-087": {
+      "age": 24.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-088": {
+      "age": 18.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-089": {
+      "age": 22.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-090": {
+      "age": 26.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-091": {
+      "age": 26.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-092": {
+      "age": 21.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-093": {
+      "age": 18.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-094": {
+      "age": 21.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-095": {
+      "age": 22.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-096": {
+      "age": 23.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-097": {
+      "age": 23.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-098": {
+      "age": 20.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-099": {
+      "age": 20.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-100": {
+      "age": 21.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-101": {
+      "age": 28.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-102": {
+      "age": 18.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-103": {
+      "age": 23.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-104": {
+      "age": 23.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-105": {
+      "age": 25.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-106": {
+      "age": 28.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-107": {
+      "age": 34.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-108": {
+      "age": 18.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-109": {
+      "age": 25.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-110": {
+      "age": 22.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-111": {
+      "age": 30.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-112": {
+      "age": 27.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-113": {
+      "age": 23.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-114": {
+      "age": 35.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-115": {
+      "age": 23.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-116": {
+      "age": 21.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-117": {
+      "age": 28.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    },
+    "sub-118": {
+      "age": 24.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-119": {
+      "age": 19.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-120": {
+      "age": 20.0,
+      "assessments": [
+        "snomed:1103791000000109"
+      ],
+      "diagnoses": [],
+      "sex": "snomed:248152002"
+    }
+  },
+  "transform_only_subjects": 0
+}

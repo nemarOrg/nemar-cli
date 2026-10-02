@@ -40,6 +40,8 @@ export interface SubjectModel {
     age: number | null;
     sex: VocabTerm | null;
     diagnoses: VocabTerm[];
+    /** Assessment tools with at least one recorded item; set only by a curation entry. */
+    assessments: VocabTerm[];
   };
   /** Sorted by label; empty when the subject has no mapped datatype. */
   imaging: ImagingSessionModel[];
@@ -232,6 +234,12 @@ export async function buildJsonLd(
       if (subject.phenotype.diagnoses.length > 0) {
         phenotypic.hasDiagnosis = subject.phenotype.diagnoses.map((t) =>
           controlledTerm(t, "Diagnosis"),
+        );
+      }
+
+      if (subject.phenotype.assessments.length > 0) {
+        phenotypic.hasAssessment = subject.phenotype.assessments.map((t) =>
+          controlledTerm(t, "Assessment"),
         );
       }
 

@@ -1,0 +1,101 @@
+{
+  "columns": {
+    "age": {
+      "counts": {
+        "cells": 48,
+        "mapped": 0,
+        "missing": 0,
+        "unmappable": 48
+      },
+      "reason": "age_units_not_years",
+      "status": "needs_curation"
+    },
+    "group": {
+      "status": "absent"
+    },
+    "sex": {
+      "counts": {
+        "cells": 48,
+        "mapped": 48,
+        "missing": 0,
+        "unmappable": 0
+      },
+      "status": "curated"
+    }
+  },
+  "curation": {
+    "columns_applied": 1,
+    "columns_skipped": 0,
+    "declared": {
+      "age": 0,
+      "assessment": 0,
+      "diagnosis": 0,
+      "sex": 1
+    },
+    "participants_with": {
+      "age": 0,
+      "assessment": 0,
+      "diagnosis": 0,
+      "sex": 48
+    },
+    "review": "upstream_community",
+    "status": "applied"
+  },
+  "dataset_id": "on004635",
+  "flags": [
+    "age_column_needs_curation"
+  ],
+  "graph": {
+    "acquisitions": 48,
+    "imaging_sessions": 48,
+    "phenotypic_sessions": 48,
+    "subjects": 48
+  },
+  "imaging": {
+    "datatypes_dropped_subjects": {},
+    "datatypes_mapped_subjects": {
+      "eeg": 48
+    },
+    "mapped_datatypes_supported": [
+      "eeg",
+      "meg"
+    ],
+    "session_pairing_subjects": {
+      "single_session": 48
+    }
+  },
+  "participant_count": {
+    "bids_index": 48,
+    "declared": 48,
+    "graph": 48,
+    "participants_tsv": 48,
+    "used": 48,
+    "used_from": "demographics"
+  },
+  "participants_json": {
+    "status": "present"
+  },
+  "participants_tsv": {
+    "bom_stripped": false,
+    "conflicting_ids": 0,
+    "duplicate_ids": 0,
+    "ids_prefixed": 0,
+    "rows": 48,
+    "rows_without_id": 0,
+    "status": "ok"
+  },
+  "report_version": 1,
+  "session_label_used_for_phenotype": "ses-unnamed",
+  "subjects": {
+    "graph": 48,
+    "index_without_row": 0,
+    "joined": 48,
+    "source": "bids_index",
+    "table_only": 0
+  },
+  "transform_version": 1,
+  "vocabulary": {
+    "bagel": "0.11.6",
+    "communities_commit": "0cbf82a4777a10e984253dac2b134902963c4095"
+  }
+}

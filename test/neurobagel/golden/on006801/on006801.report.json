@@ -1,0 +1,94 @@
+{
+  "columns": {
+    "age": {
+      "status": "absent"
+    },
+    "group": {
+      "counts": {
+        "cells": 21,
+        "mapped": 0,
+        "missing": 21,
+        "unmappable": 0
+      },
+      "status": "curated"
+    },
+    "sex": {
+      "status": "absent"
+    }
+  },
+  "curation": {
+    "columns_applied": 1,
+    "columns_skipped": 0,
+    "declared": {
+      "age": 0,
+      "assessment": 0,
+      "diagnosis": 1,
+      "sex": 0
+    },
+    "participants_with": {
+      "age": 0,
+      "assessment": 0,
+      "diagnosis": 0,
+      "sex": 0
+    },
+    "review": "author",
+    "status": "applied"
+  },
+  "dataset_id": "on006801",
+  "flags": [
+    "session_pairing_unknown"
+  ],
+  "graph": {
+    "acquisitions": 21,
+    "imaging_sessions": 21,
+    "phenotypic_sessions": 21,
+    "subjects": 21
+  },
+  "imaging": {
+    "datatypes_dropped_subjects": {},
+    "datatypes_mapped_subjects": {
+      "eeg": 21
+    },
+    "mapped_datatypes_supported": [
+      "eeg",
+      "meg"
+    ],
+    "session_pairing_subjects": {
+      "unknown": 21
+    }
+  },
+  "participant_count": {
+    "bids_index": 21,
+    "declared": 21,
+    "graph": 21,
+    "participants_tsv": 21,
+    "used": 21,
+    "used_from": "demographics"
+  },
+  "participants_json": {
+    "status": "present"
+  },
+  "participants_tsv": {
+    "bom_stripped": false,
+    "conflicting_ids": 0,
+    "duplicate_ids": 0,
+    "ids_prefixed": 0,
+    "rows": 21,
+    "rows_without_id": 0,
+    "status": "ok"
+  },
+  "report_version": 1,
+  "session_label_used_for_phenotype": "ses-unnamed",
+  "subjects": {
+    "graph": 21,
+    "index_without_row": 0,
+    "joined": 21,
+    "source": "bids_index",
+    "table_only": 0
+  },
+  "transform_version": 1,
+  "vocabulary": {
+    "bagel": "0.11.6",
+    "communities_commit": "0cbf82a4777a10e984253dac2b134902963c4095"
+  }
+}

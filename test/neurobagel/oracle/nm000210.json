@@ -1,0 +1,200 @@
+{
+  "bagel": "0.11.6",
+  "bagel_only_subjects": 0,
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: CC-BY-4.0. Browse and download at https://nemar.org/dataset/nm000210 (latest version v1.0.2).",
+    "hasAccessLink": "https://nemar.org/dataset/nm000210",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Marco Simoes",
+      "Davide Borra",
+      "Eduardo Santamaria-Vazquez",
+      "Mayra Bittencourt-Villalpando",
+      "Dominik Krzeminski",
+      "Aleksandar Miladinovic",
+      "Carlos Amaral",
+      "Bruno Direito",
+      "Miguel Castelo-Branco"
+    ],
+    "hasKeywords": [
+      "EEG",
+      "P300",
+      "event-related potentials",
+      "Brain-Computer Interfaces",
+      "Autism Spectrum Disorder",
+      "joint attention training"
+    ],
+    "hasLabel": "BCIAUT-P300 dataset for autism from Simoes et al 2020",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/nm000210",
+      "https://doi.org/10.82901/nemar.nm000210"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/nm000210/"
+  },
+  "dataset_id": "nm000210",
+  "imaging": {
+    "attachable_subjects": 15,
+    "modalities": {
+      "sub-1": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-10": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-11": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-12": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-13": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-14": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-15": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-2": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-3": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-4": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-5": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-6": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-7": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-8": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-9": [
+        "nidm:Electroencephalography"
+      ]
+    }
+  },
+  "inputs": {
+    "annotated.json": "5871ada4883e3339bb82e21e04578e4ee3b1f1c8af26ea7af6cd8810c092a523",
+    "dataset_description.json": "8c1cfeaab72ed4bbe66d3370fa18ee18c289fd1d42f73c2863bfba876d215e1d",
+    "participants.tsv": "bd8477956d8a6de0e7d3ef88be51f7828c68ed25ba75a9c3544f58ce20093d5f"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-1": {
+      "age": 22.17,
+      "diagnoses": [
+        "snomed:35919005"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-10": {
+      "age": 22.17,
+      "diagnoses": [
+        "snomed:35919005"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-11": {
+      "age": 22.17,
+      "diagnoses": [
+        "snomed:35919005"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-12": {
+      "age": 22.17,
+      "diagnoses": [
+        "snomed:35919005"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-13": {
+      "age": 22.17,
+      "diagnoses": [
+        "snomed:35919005"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-14": {
+      "age": 22.17,
+      "diagnoses": [
+        "snomed:35919005"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-15": {
+      "age": 22.17,
+      "diagnoses": [
+        "snomed:35919005"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-2": {
+      "age": 22.17,
+      "diagnoses": [
+        "snomed:35919005"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-3": {
+      "age": 22.17,
+      "diagnoses": [
+        "snomed:35919005"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-4": {
+      "age": 22.17,
+      "diagnoses": [
+        "snomed:35919005"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-5": {
+      "age": 22.17,
+      "diagnoses": [
+        "snomed:35919005"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-6": {
+      "age": 22.17,
+      "diagnoses": [
+        "snomed:35919005"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-7": {
+      "age": 22.17,
+      "diagnoses": [
+        "snomed:35919005"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-8": {
+      "age": 22.17,
+      "diagnoses": [
+        "snomed:35919005"
+      ],
+      "sex": "snomed:248153007"
+    },
+    "sub-9": {
+      "age": 22.17,
+      "diagnoses": [
+        "snomed:35919005"
+      ],
+      "sex": "snomed:248153007"
+    }
+  },
+  "transform_only_subjects": 0
+}

@@ -21,6 +21,13 @@
  *     out; no join of mismatched ids is guessed.
  *   - A fact the rules cannot establish is left out and counted, never guessed
  *     (see participants.ts). EMG is never mapped to EEG.
+ *     A reviewed curation entry (curation.ts, ADR 0083) can supply what the rules
+ *     leave out. It is applied only if the two participants documents are the bytes
+ *     it pinned and it fits them, and only to the graph's participants. Otherwise it
+ *     is skipped whole, with a flag, and the variables it names are WITHHELD: their
+ *     mechanical mapping is held back too, because an entry may exist to withdraw a
+ *     claim the rules would make, and one that goes stale must lose claims, never
+ *     make a false one. The variables it does not name ship as without an entry.
  *   - Output is byte-stable: same input, same bytes (canonical-json.ts), and
  *     identifiers are derived from names (identifiers.ts).
  *   - The output is validated before it is returned (validate-output.ts).
@@ -29,7 +36,16 @@
  */
 
 import { type CanonicalJsonValue, byCodeUnit, canonicalJson } from "./canonical-json";
-import { type DictionaryColumns, buildDatasetDescription, buildDictionary } from "./dictionary";
+import type { BoundCuration } from "./curation-bind";
+import { curationRefusal, curationReportFor, resolveCuration } from "./curation-resolve";
+import { type CurationKind, kindCounts } from "./curation-types";
+import {
+  CURATED_DIAGNOSIS_DESCRIPTION,
+  type DiagnosisColumn,
+  GROUP_DESCRIPTION,
+  buildDatasetDescription,
+  buildDictionary,
+} from "./dictionary";
 import {
   type NemarMetadata,
   type NeurobagelInput,
@@ -45,14 +61,24 @@ import {
   imagingSessionsFor,
 } from "./jsonld";
 import {
+  type AgeMapping,
+  type ColumnCounts,
   type ColumnOutcome,
   HEALTHY_CONTROL,
   STANDARD_MISSING_VALUES,
+  type SexMapping,
+  ageUnitsIn,
   mapAgeColumn,
   mapGroupColumn,
   mapSexColumn,
 } from "./participants";
-import type { ColumnReport, NeurobagelReport, TableStatus } from "./report";
+import type {
+  ColumnReport,
+  CurationReport,
+  NeurobagelReport,
+  TableStatus,
+  WithheldCounts,
+} from "./report";
 import { parseTsv } from "./tsv";
 import {
   validateDatasetDescription,
@@ -60,13 +86,15 @@ import {
   validateGraphDocument,
 } from "./validate-output";
 import { NEUROBAGEL_TRANSFORM_VERSION } from "./version";
-import { MAPPED_DATATYPES, VOCAB, modalityTermForDatatype } from "./vocab";
+import { MAPPED_DATATYPES, VOCAB, type VocabTerm, modalityTermForDatatype } from "./vocab";
 
 export type RefusalCode =
   | "anonymous_not_false"
   | "invalid_metadata"
   | "dataset_id_mismatch"
   | "no_subjects"
+  | "curation_not_loaded"
+  | "curation_dataset_mismatch"
   | "output_invalid";
 
 /** The transform declined to produce artifacts. `code` is stable; `message` is for a person. */
@@ -135,13 +163,6 @@ function columnReport(outcome: ColumnOutcome<object>): ColumnReport {
 /** Index of the first header cell that names `wanted` (case-insensitive, surrounding space ignored). */
 function findColumn(header: string[], wanted: string): number {
   return header.findIndex((h) => h.trim().toLowerCase() === wanted);
-}
-
-function ageUnitsOf(participantsJson: ParticipantsJson | null, column: string): unknown {
-  if (participantsJson === null) return undefined;
-  const entry = participantsJson[column];
-  if (entry === null || typeof entry !== "object") return undefined;
-  return (entry as Record<string, unknown>).Units;
 }
 
 /** `001` and `sub-001` name one subject; the graph and the bids index use the prefixed form. */
@@ -387,34 +408,181 @@ export async function buildNeurobagelArtifacts(
     sex: phenotypeUsable ? findColumn(table.header, "sex") : -1,
     group: phenotypeUsable ? findColumn(table.header, "group") : -1,
   };
-  const outcomes: DictionaryColumns = {
-    participantColumn: PARTICIPANT_COLUMN,
-    age:
-      columnIndex.age === -1
-        ? { status: "absent" }
-        : mapAgeColumn(
-            table.header[columnIndex.age],
-            cellsOf(columnIndex.age),
-            ageUnitsOf(participantsJson.value, table.header[columnIndex.age]),
-          ),
-    sex:
-      columnIndex.sex === -1
-        ? { status: "absent" }
-        : mapSexColumn(table.header[columnIndex.sex], cellsOf(columnIndex.sex)),
-    group:
-      columnIndex.group === -1
-        ? { status: "absent" }
-        : mapGroupColumn(table.header[columnIndex.group], cellsOf(columnIndex.group)),
+  const mechanicalAge: ColumnOutcome<AgeMapping> =
+    columnIndex.age === -1
+      ? { status: "absent" }
+      : mapAgeColumn(
+          table.header[columnIndex.age],
+          cellsOf(columnIndex.age),
+          ageUnitsIn(participantsJson.value, table.header[columnIndex.age]),
+        );
+  const mechanicalSex: ColumnOutcome<SexMapping> =
+    columnIndex.sex === -1
+      ? { status: "absent" }
+      : mapSexColumn(table.header[columnIndex.sex], cellsOf(columnIndex.sex));
+  const mechanicalGroup =
+    columnIndex.group === -1
+      ? ({ status: "absent" } as const)
+      : mapGroupColumn(table.header[columnIndex.group], cellsOf(columnIndex.group));
+
+  // 5b. A reviewed curation entry, if the caller has one for this dataset.
+  // It replaces the mechanical rule for the variables it curates, applies only to the participants
+  // of the graph, and is skipped whole when it does not fit the documents in hand.
+  // An entry that is NOT applied still names variables, and some entries exist only to withdraw
+  // what the mechanical rule would claim (a `Control` that is an intervention arm, not a healthy
+  // control): for those variables the mechanical mapping is withheld too, so that an entry that
+  // goes stale loses claims and never makes a false one.
+  const curationEntry = input.curation ?? null;
+  const refusal = curationEntry === null ? null : curationRefusal(curationEntry, datasetId);
+  if (refusal !== null) throw new NeurobagelRefusal(refusal.code, refusal.message);
+  const resolved =
+    curationEntry === null
+      ? null
+      : await resolveCuration(
+          curationEntry,
+          { participantsTsv: input.participantsTsv, participantsJson: input.participantsJson },
+          phenotypeUsable,
+        );
+  if (resolved?.flag) flags.add(resolved.flag);
+  const applied: BoundCuration | null = resolved?.applied ?? null;
+  const curationOutcome = resolved?.outcome ?? null;
+  const namedByUnappliedEntry: ReadonlySet<CurationKind> = resolved?.namedByUnapplied ?? new Set();
+
+  const curatedCounts = (
+    column: number,
+    mapped: (cell: string) => boolean,
+    missing: readonly string[],
+  ) => {
+    const cells = cellsOf(column);
+    const counts: ColumnCounts = {
+      cells: cells.length,
+      missing: cells.filter((c) => missing.includes(c)).length,
+      unmappable: 0,
+      mapped: cells.filter(mapped).length,
+    };
+    return counts;
   };
-  for (const key of ["age", "sex", "group"] as const) {
-    if (outcomes[key].status === "curation") flags.add(`${key}_column_needs_curation`);
+
+  // The variable's final outcome: the curated column where there is one, else the mechanical rule,
+  // unless an entry that did not apply names the variable (then nothing is claimed for it).
+  const withheldFor = (kind: CurationKind): boolean => namedByUnappliedEntry.has(kind);
+  let ageColumn = columnIndex.age;
+  let ageOutcome: ColumnOutcome<AgeMapping> = withheldFor("age")
+    ? { status: "absent" }
+    : mechanicalAge;
+  if (applied?.age) {
+    const { index, name, mapping } = applied.age;
+    ageColumn = index;
+    ageOutcome = {
+      ...mapping,
+      status: "mapped",
+      column: name,
+      counts: curatedCounts(index, (c) => mapping.ageOf(c) !== null, mapping.missingValues),
+    };
   }
-  if (outcomes.age.status === "mapped" && outcomes.age.unitsAssumed) {
+  let sexColumn = columnIndex.sex;
+  let sexOutcome: ColumnOutcome<SexMapping> = withheldFor("sex")
+    ? { status: "absent" }
+    : mechanicalSex;
+  if (applied?.sex) {
+    const { index, name, mapping } = applied.sex;
+    sexColumn = index;
+    sexOutcome = {
+      ...mapping,
+      status: "mapped",
+      column: name,
+      counts: curatedCounts(index, (c) => mapping.levels.has(c), mapping.missingValues),
+    };
+  }
+
+  // Every column about Diagnosis: the mechanical group column (unless a curated column is that
+  // column, which replaces it) and the curated ones.
+  const curatedDiagnoses = applied?.diagnoses ?? [];
+  const curatedGroup = curatedDiagnoses.find((d) => d.index === columnIndex.group);
+  const groupIsCurated = curatedGroup !== undefined;
+  const diagnosisColumns: (DiagnosisColumn & { index: number; curated: boolean })[] = [];
+  if (mechanicalGroup.status === "mapped" && !groupIsCurated && !withheldFor("diagnosis")) {
+    diagnosisColumns.push({
+      column: mechanicalGroup.column,
+      curated: false,
+      description: GROUP_DESCRIPTION,
+      index: columnIndex.group,
+      levels: new Map([...mechanicalGroup.levels].map((raw) => [raw, HEALTHY_CONTROL])),
+      missingValues: mechanicalGroup.missingValues,
+    });
+  }
+  for (const d of curatedDiagnoses) {
+    diagnosisColumns.push({
+      column: d.name,
+      curated: true,
+      description: CURATED_DIAGNOSIS_DESCRIPTION,
+      index: d.index,
+      levels: d.levels,
+      missingValues: d.missingValues,
+    });
+  }
+  diagnosisColumns.sort((a, b) => byCodeUnit(a.column, b.column));
+  const assessmentColumns = [...(applied?.assessments ?? [])].sort((a, b) =>
+    byCodeUnit(a.name, b.name),
+  );
+
+  /** What the mechanical rule found, or that it found something and an entry made it be withheld. */
+  const mechanicalReport = (
+    outcome: Parameters<typeof columnReport>[0],
+    kind: CurationKind,
+  ): ColumnReport =>
+    withheldFor(kind) && outcome.status === "mapped"
+      ? { status: "withheld", counts: { ...outcome.counts } }
+      : columnReport(outcome);
+  const ageReport: ColumnReport = applied?.age
+    ? { status: "curated", counts: (ageOutcome as { counts: ColumnCounts }).counts }
+    : mechanicalReport(mechanicalAge, "age");
+  const sexReport: ColumnReport = applied?.sex
+    ? { status: "curated", counts: (sexOutcome as { counts: ColumnCounts }).counts }
+    : mechanicalReport(mechanicalSex, "sex");
+  const groupReport: ColumnReport =
+    curatedGroup === undefined
+      ? mechanicalReport(mechanicalGroup, "diagnosis")
+      : {
+          status: "curated",
+          counts: curatedCounts(
+            columnIndex.group,
+            (c) => curatedGroup.levels.has(c),
+            curatedGroup.missingValues,
+          ),
+        };
+
+  const dictionaryColumns = {
+    participantColumn: PARTICIPANT_COLUMN,
+    age: ageOutcome,
+    sex: sexOutcome,
+    diagnoses: diagnosisColumns,
+    assessments: assessmentColumns.map((a) => ({
+      column: a.name,
+      tool: a.tool,
+      missingValues: a.missingValues,
+    })),
+  };
+
+  const withheld = {
+    age: ageReport.status === "withheld" ? 1 : 0,
+    diagnosis: groupReport.status === "withheld" ? 1 : 0,
+    sex: sexReport.status === "withheld" ? 1 : 0,
+  };
+  if (withheld.age + withheld.diagnosis + withheld.sex > 0) flags.add("curation_withheld");
+  if (ageReport.status === "needs_curation") flags.add("age_column_needs_curation");
+  if (sexReport.status === "needs_curation") flags.add("sex_column_needs_curation");
+  if (groupReport.status === "needs_curation") flags.add("group_column_needs_curation");
+  if (ageOutcome.status === "mapped" && ageOutcome.unitsAssumed) {
     flags.add("age_units_assumed_years");
   }
-  // `gender` is not `sex`: left alone and reported so a curator can see it exists.
+  // `gender` is not `sex`: left alone and reported so a curator can see it exists, unless a
+  // reviewed entry already says which column holds sex.
   const genderOnly =
-    phenotypeUsable && findColumn(table.header, "gender") !== -1 && columnIndex.sex === -1;
+    phenotypeUsable &&
+    findColumn(table.header, "gender") !== -1 &&
+    columnIndex.sex === -1 &&
+    sexOutcome.status !== "mapped";
   if (genderOnly) flags.add("gender_column_needs_curation");
 
   const dataColumns = table.header
@@ -433,18 +601,42 @@ export async function buildNeurobagelArtifacts(
   const mappedDatatypeSubjects = new Map<string, number>();
   const droppedDatatypeSubjects = new Map<string, number>();
   const pairingBasis = new Map<string, number>();
+  const curatedWith = kindCounts();
   const subjects: SubjectModel[] = graphIds.map((label) => {
     const row = phenotypeUsable ? table.rows.get(label) : undefined;
-    const phenotype: SubjectModel["phenotype"] = { age: null, sex: null, diagnoses: [] };
+    const phenotype: SubjectModel["phenotype"] = {
+      age: null,
+      sex: null,
+      diagnoses: [],
+      assessments: [],
+    };
     if (row !== undefined) {
-      if (outcomes.age.status === "mapped")
-        phenotype.age = outcomes.age.ageOf(row[columnIndex.age]);
-      if (outcomes.sex.status === "mapped") {
-        phenotype.sex = outcomes.sex.levels.get(row[columnIndex.sex]) ?? null;
+      if (ageOutcome.status === "mapped") phenotype.age = ageOutcome.ageOf(row[ageColumn]);
+      if (sexOutcome.status === "mapped") {
+        phenotype.sex = sexOutcome.levels.get(row[sexColumn]) ?? null;
       }
-      if (outcomes.group.status === "mapped" && outcomes.group.levels.has(row[columnIndex.group])) {
-        phenotype.diagnoses = [HEALTHY_CONTROL];
+      const seen = new Set<string>();
+      let curatedDiagnosis = false;
+      for (const column of diagnosisColumns) {
+        const t = column.levels.get(row[column.index]);
+        if (t === undefined || seen.has(t.identifier)) continue;
+        seen.add(t.identifier);
+        phenotype.diagnoses.push(t);
+        if (column.curated) curatedDiagnosis = true;
       }
+      const tools = new Map<string, VocabTerm>();
+      for (const column of assessmentColumns) {
+        if (!column.missingValues.includes(row[column.index])) {
+          tools.set(column.tool.identifier, column.tool);
+        }
+      }
+      phenotype.assessments = [...tools.values()].sort((a, b) =>
+        byCodeUnit(a.identifier, b.identifier),
+      );
+      if (applied?.age && phenotype.age !== null) curatedWith.age++;
+      if (applied?.sex && phenotype.sex !== null) curatedWith.sex++;
+      if (curatedDiagnosis) curatedWith.diagnosis++;
+      if (phenotype.assessments.length > 0) curatedWith.assessment++;
     }
 
     const node = index[label];
@@ -492,7 +684,7 @@ export async function buildNeurobagelArtifacts(
     subjects,
   };
   const graph = await buildJsonLd(model);
-  const dictionary = buildDictionary(outcomes);
+  const dictionary = buildDictionary(dictionaryColumns);
   const description = buildDatasetDescription({
     name,
     authors,
@@ -504,9 +696,15 @@ export async function buildNeurobagelArtifacts(
     participantCount,
   });
 
+  // The terms a reviewed entry adds are the only diagnosis and assessment terms beyond healthy
+  // control that this dataset's output may carry.
+  const curated = {
+    diagnosis: curatedDiagnoses.flatMap((d) => [...d.levels.values()].map((t) => t.identifier)),
+    assessment: assessmentColumns.map((a) => a.tool.identifier),
+  };
   const problems = [
-    ...validateGraphDocument(graph.document).map((p) => `jsonld ${p}`),
-    ...validateDictionary(dictionary).map((p) => `dictionary ${p}`),
+    ...validateGraphDocument(graph.document, curated).map((p) => `jsonld ${p}`),
+    ...validateDictionary(dictionary, curated).map((p) => `dictionary ${p}`),
     ...validateDatasetDescription(description).map((p) => `dataset description ${p}`),
   ];
   if (problems.length > 0) {
@@ -517,11 +715,12 @@ export async function buildNeurobagelArtifacts(
   }
 
   const report: NeurobagelReport = {
-    columns: {
-      age: columnReport(outcomes.age),
-      group: columnReport(outcomes.group),
-      sex: columnReport(outcomes.sex),
-    },
+    columns: { age: ageReport, group: groupReport, sex: sexReport },
+    ...(curationEntry === null || curationOutcome === null
+      ? {}
+      : {
+          curation: curationReportFor(curationEntry, curationOutcome, curatedWith, withheld),
+        }),
     dataset_id: datasetId,
     flags: [...flags].sort(byCodeUnit),
     graph: {

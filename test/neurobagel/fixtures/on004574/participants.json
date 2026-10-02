@@ -1,0 +1,36 @@
+{
+  "participant_id": {
+    "Description": "unique participant identifier"
+  },
+  "GROUP": {
+    "Description": "Control or PD"
+  },
+  "ID": {
+    "Description": "ID"
+  },
+  "EEG": {
+    "Description": "EEG file name"
+  },
+  "BEHAVIOR": {
+    "Description": "Behavior file name"
+  },
+  "GENDER": {
+    "Description": "Gender of the participant",
+    "Levels": {
+      "F": "Female",
+      "M": "Male"
+    }
+  },
+  "AGE": {
+    "Description": "Age of the participant"
+  },
+  "MOCA": {
+    "Description": "MOCA score"
+  },
+  "UPDRS": {
+    "Description": "UPDRS score"
+  },
+  "TYPE": {
+    "Description": "numeric value of participant type (1=PD, 0=Control)"
+  }
+}

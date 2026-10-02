@@ -10,6 +10,7 @@
  * Types only: no code, no I/O.
  */
 
+import type { CurationKind, CurationReview } from "./curation-types";
 import type { ColumnCounts } from "./participants";
 
 /**
@@ -21,7 +22,57 @@ export type ColumnReport =
   | { status: "absent" }
   | { status: "all_missing" }
   | { status: "needs_curation"; reason: string; counts: ColumnCounts }
-  | { status: "mapped"; counts: ColumnCounts };
+  | { status: "mapped"; counts: ColumnCounts }
+  /** A reviewed curation entry maps this variable, replacing the mechanical rule. */
+  | { status: "curated"; counts: ColumnCounts }
+  /** The mechanical rule mapped this, an entry that names the variable did not apply, so nothing is claimed. */
+  | { status: "withheld"; counts: ColumnCounts };
+
+/**
+ * What became of a reviewed curation entry (shared/neurobagel/curation.ts).
+ *   applied  the entry's columns are in the dictionary and the graph
+ *   stale    the participants.tsv or participants.json is not the file the entry pinned, so none of it is applied
+ *   invalid  the pinned files are in hand and the entry does not fit them, so none of it is applied
+ *   unused   the entry fits, but the table's participants are not the graph's, so nothing in it can be attached
+ * An entry that is not applied still names variables, so the mechanical mapping of each such
+ * variable is withheld too (an entry may exist to withdraw a claim the mechanical rule would make):
+ * `withheld` counts the variables for which a mechanical mapping existed and was held back.
+ * The writer must treat every status but `applied` as a finding that needs a person.
+ */
+export type CurationStatus = "applied" | "stale" | "invalid" | "unused";
+
+/** How many mechanical mappings (0 or 1 each) were held back for want of an applied entry. */
+export type WithheldCounts = { age: number; diagnosis: number; sex: number };
+
+type CurationReportCommon = {
+  review: CurationReview;
+  /** Columns the entry declares, by kind. */
+  declared: Record<CurationKind, number>;
+};
+type CurationNotApplied = { columns_applied: 0; columns_skipped: number; withheld: WithheldCounts };
+
+/** Counts and enumerated values only: no column name, no cell value, no reviewer text. */
+export type CurationReport = CurationReportCommon &
+  (
+    | {
+        status: "applied";
+        columns_applied: number;
+        columns_skipped: 0;
+        /** Graph participants that received a value from the entry, by kind. */
+        participants_with: Record<CurationKind, number>;
+      }
+    | ({
+        status: "stale";
+        /** Which pinned files differ. */
+        stale_files: ("participants_json" | "participants_tsv")[];
+      } & CurationNotApplied)
+    | ({
+        status: "invalid";
+        /** How many things were wrong; the wording quotes cells, so it stays out of the report. */
+        problems: number;
+      } & CurationNotApplied)
+    | ({ status: "unused" } & CurationNotApplied)
+  );
 
 /** `ids_do_not_join`: the table and the bids index share no participant id, so the table is not used. */
 export type TableStatus = "ok" | "absent" | "malformed" | "no_participant_id" | "ids_do_not_join";
@@ -31,6 +82,13 @@ export type NeurobagelReport = {
   transform_version: number;
   dataset_id: string;
   columns: { age: ColumnReport; group: ColumnReport; sex: ColumnReport };
+  /**
+   * Present only when the caller passed a curation entry for the dataset.
+   * The writer surfaces `curation_stale`, `curation_invalid`, `curation_unused` and
+   * `curation_withheld`: a reviewed entry that did not apply is work somebody did that is not
+   * reaching the index, and it may have changed what is claimed.
+   */
+  curation?: CurationReport;
   /** Sorted. The writer surfaces `partial_join` and `bids_index_empty_fell_back_to_table`. */
   flags: string[];
   graph: {

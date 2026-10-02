@@ -1,0 +1,31 @@
+{
+  "AccessInstructions": "Public access. License: CC-BY-4.0. Browse and download at https://nemar.org/dataset/nm000210 (latest version v1.0.2).",
+  "AccessLink": "https://nemar.org/dataset/nm000210",
+  "AccessType": "public",
+  "Authors": [
+    "Marco Simoes",
+    "Davide Borra",
+    "Eduardo Santamaria-Vazquez",
+    "Mayra Bittencourt-Villalpando",
+    "Dominik Krzeminski",
+    "Aleksandar Miladinovic",
+    "Carlos Amaral",
+    "Bruno Direito",
+    "Miguel Castelo-Branco"
+  ],
+  "Keywords": [
+    "EEG",
+    "P300",
+    "event-related potentials",
+    "Brain-Computer Interfaces",
+    "Autism Spectrum Disorder",
+    "joint attention training"
+  ],
+  "Name": "BCIAUT-P300 dataset for autism from Simoes et al 2020",
+  "ParticipantCount": 15,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/nm000210",
+    "https://doi.org/10.82901/nemar.nm000210"
+  ],
+  "RepositoryURL": "https://data.nemar.org/nm000210/"
+}

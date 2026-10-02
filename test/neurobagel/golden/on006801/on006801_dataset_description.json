@@ -1,0 +1,26 @@
+{
+  "AccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on006801 (latest version v1.0.0).",
+  "AccessLink": "https://nemar.org/dataset/on006801",
+  "AccessType": "public",
+  "Authors": [
+    "Paloma Victoria de Sales Alves",
+    "Antonio Simeão Sobrinho Neto",
+    "Carla Alexandra da Silva Moita Minervino"
+  ],
+  "Keywords": [
+    "EEG",
+    "resting-state",
+    "retrieval practice",
+    "active learning",
+    "educational neuroscience",
+    "Learning",
+    "Electroencephalography"
+  ],
+  "Name": "Resting-state EEG before and after different study methods",
+  "ParticipantCount": 21,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/on006801",
+    "https://doi.org/10.82901/nemar.on006801"
+  ],
+  "RepositoryURL": "https://data.nemar.org/on006801/"
+}
