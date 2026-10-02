@@ -540,6 +540,20 @@ const bidsIndexModalitySchema = z
  *    the values equals the keys of `modalities`, and the keys other than
  *    {@link NO_SESSION_KEY} equal `sessions`.
  *
+ *    "Datatype" here means ANY directory name found directly under the
+ *    subject or a session directory; it is not checked against the BIDS
+ *    datatype list, and neither are the keys of `modalities`. A directory
+ *    that is not a session (`ses-pre-op`, whose label is not alphanumeric,
+ *    or `sourcedata`) appears as a datatype of that name. A consumer that
+ *    needs real datatypes, such as the Neurobagel transform, must filter
+ *    against an allowlist of the ones it understands.
+ *
+ *    A subject with no session directories carries `{ "no-session": [...] }`
+ *    rather than an empty map, and that entry is not decoration: an absent or
+ *    empty map reads as "not known" or "nothing here", so omitting the entry
+ *    would make absence ambiguous and would break the invariant that the
+ *    union of the lists equals the keys of `modalities`.
+ *
  *    OPTIONAL on purpose: a data plane that predates the field (and any
  *    response cached before it deployed, for up to a minute) does not send
  *    it. A consumer must read an absent key as "not known" and a present one,

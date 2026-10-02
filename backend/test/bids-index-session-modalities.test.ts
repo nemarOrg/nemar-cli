@@ -336,6 +336,24 @@ describe("rules the real manifests cannot reach, on synthetic manifests", () => 
     expect(subjects["sub-01"].sessions).toEqual([]);
   });
 
+  // What a session directory whose label is not alphanumeric BECOMES, pinned
+  // exactly. BIDS labels are alphanumeric, so `ses-pre-op` is not a session
+  // here: it is read as a directory named `ses-pre-op` directly under the
+  // subject, which is how `modalities` already treated it before this field
+  // existed. The field inherits that rather than correcting it, so a datatype
+  // key is ANY directory name found under the subject or a session, not a name
+  // from the BIDS datatype list, and a consumer filters datatypes against an
+  // allowlist (the contract's doc comment says so). No real manifest has a
+  // hyphenated session label, so this rests on a synthetic path alone.
+  test("a session directory with a non-alphanumeric label is a datatype directory named after it", () => {
+    const subjects = buildBidsIndex(files("sub-01/ses-pre-op/eeg/x.edf"));
+    expect(subjects["sub-01"]).toEqual({
+      sessions: [],
+      modalities: { "ses-pre-op": { tasks: {} } },
+      session_modalities: { [NS]: ["ses-pre-op"] },
+    });
+  });
+
   test("integer-like labels are looked up by name, not by position", () => {
     // JavaScript serializes "1", "2", "10" first and numerically, whatever
     // order they were added in, so the contract says key order is not meaning.
