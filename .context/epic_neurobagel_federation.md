@@ -159,7 +159,8 @@ Renumbering (2026-10-02): the ADR index test requires gapless numbering, and Pha
 
 ## Contract for the Phase 4 writer from the Phase 5 review
 
-A dataset id that has an entry in the curation file is never converted without it: if loading or parsing the file or the entry fails, conversion stops for that dataset (no artifact written, an existing one left as is) and a needs-review finding is reported. Falling back to a conversion without the entry would publish false claims for datasets whose entry exists only to withdraw a mechanical mapping. All four curation flags (`curation_stale`, `curation_invalid`, `curation_unused`, `curation_withheld`) are needs-review findings. Import the curation loader lazily on the writer path only (about 850 KB of vocabulary). One cohort, nm000154 and on001787, shares an identical participants table and would be federated twice; this is an open owner question.
+A dataset id that has an entry in the curation file is never converted without it: if loading or parsing the file or the entry fails, conversion stops for that dataset (no artifact written, an existing one left as is) and a needs-review finding is reported. Falling back to a conversion without the entry would publish false claims for datasets whose entry exists only to withdraw a mechanical mapping. All four curation flags (`curation_stale`, `curation_invalid`, `curation_unused`, `curation_withheld`) are needs-review findings. Import the curation loader lazily on the writer path only (about 850 KB of vocabulary). One cohort, nm000154 and on001787, shared an identical participants table and would have been federated twice.
+Resolved: nm000154 was a duplicate of on001787 created by a regression, the owner rolled it back and tombstoned its DOI, and its curation entry and fixtures were removed in #1606.
 
 Tracked follow-up (not a Phase): split `buildNeurobagelArtifacts` (about 513 lines) into stage modules, protected by the byte-identical goldens.
 
@@ -245,3 +246,20 @@ Two independent reviews of the pull request found no anonymity, authentication o
 - The weekly report's attention rule is one function in `shared/contract/weekly-attention.ts`, called by the report's headline and by `nemar admin import-weekly`; it also flags unknown days, failed runs and missing daily runs, and its headline says which checks did not run instead of "all look normal".
 - The weekly counts findings from the writer's ledger, the anonymity sweep and the verification sweep, each dataset once, independent of the daily rows, and says nothing of their kind.
 - The id scan of the store uses a boundary an underscore does not defeat, and the test plants every real object name the writer produces.
+
+## Cost, fallback and what the soak must measure (lead, 2026-10-02)
+
+Conversion is cheap.
+The store holds about 776 datasets.
+The pure transform measured a median of about 3 ms and a worst case of about 38 ms per dataset on the 32 real fixtures (local runtime, not a Worker), and about 37 KB median and 480 KB worst case of output per dataset.
+The writer measured about 22 operations for a rewritten dataset and 3 for an unchanged one, so a full backfill is about 17,000 operations once and a daily tick of 10 rewritten datasets is about 275.
+That is far inside the free allowances of the platform services involved, so the binding limit is the subrequest budget of the shared daily tick, not money.
+
+A dataset is rewritten only when its fingerprint changes: a new published version, a metadata or enrichment change, a curation entry change, or a transform or vocabulary bump (the last, and the forced regeneration after the Phase 2 deploy, rewrite everything once).
+
+Fallback if the Worker cannot carry the writer: run the same transform from a scheduled, dispatch-only workflow in one repository (never in the shared dataset workflows, whose edits reach every dataset repository at once, ADR 0020).
+The transform and the HTTP gatherer are pure and already run against the public data plane, and conversion engine code already lives in this repository with Actions calling it (ADR 0029).
+It would need a read-only admin route that returns the predicate's candidate list (Actions cannot read D1), a write credential for the store held as a secret (no secrets on pull-request events, because this repository is public), and the read-time re-check stays in the Worker route.
+The trigger for opening that issue is the soak showing subrequest exhaustion or the daily tick overrunning.
+
+The soak must record, from the first enabled run: Worker CPU time per dataset and per tick against the transform measurement above, the operations and subrequests a tick actually uses against the writer's own counter, the number of ticks a full reconcile takes at the configured cap (raise `NEUROBAGEL_RECONCILE_MAX` toward its ceiling of 50 if the default is too slow), and the daily sweep's verdicts.
