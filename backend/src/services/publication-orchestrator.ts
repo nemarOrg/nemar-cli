@@ -69,7 +69,7 @@ import {
 } from "./github";
 import { getDatasetsToken } from "./github-auth";
 import { generateManifest } from "./manifest";
-import { scheduleNeurobagelSync } from "./neurobagel-writer.js";
+import { scheduleNeurobagelSync } from "./neurobagel-hooks.js";
 import { BIDS_METADATA_UNAVAILABLE, errorMessage, readRepoMetadata } from "./repo-metadata";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "./repo-spec";
 import { withRetry } from "./retry";

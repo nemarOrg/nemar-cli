@@ -10,7 +10,7 @@
 
 import { refreshMetadataAfterVersionDoi } from "../../services/dataset-reindex.js";
 import { verifyManifestCallbackToken } from "../../services/github.js";
-import { scheduleNeurobagelSync } from "../../services/neurobagel-writer.js";
+import { scheduleNeurobagelSync } from "../../services/neurobagel-hooks.js";
 import { errorMessage } from "../../services/repo-metadata.js";
 import { headVersionArtifact } from "../../services/s3.js";
 import type { WebhookRouter } from "../webhooks/shared.js";

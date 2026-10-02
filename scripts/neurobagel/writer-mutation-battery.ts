@@ -72,6 +72,7 @@ const ALL_TESTS = [
 
 const ELIGIBILITY = `${SVC}/neurobagel-eligibility.ts`;
 const WRITER = `${SVC}/neurobagel-writer.ts`;
+const HOOKS = `${SVC}/neurobagel-hooks.ts`;
 const GATHER = `${SVC}/neurobagel-gather.ts`;
 const STORE = `${SVC}/neurobagel-store.ts`;
 const PLAN = `${SVC}/neurobagel-plan.ts`;
@@ -619,7 +620,7 @@ export const MUTANTS: Mutant[] = [
   {
     id: "H01-hook-ignores-the-switch",
     layer: "hooks",
-    file: WRITER,
+    file: HOOKS,
     find: `    if (mode === "disabled") return;`,
     replace: "",
     note: "the hooks run with the writer off",
@@ -637,7 +638,7 @@ export const MUTANTS: Mutant[] = [
   {
     id: "H03-cron-runs-outside-production",
     layer: "hooks",
-    file: WRITER,
+    file: HOOKS,
     find: '  if (isNonProductionEnv(env)) {\n    console.log("[neurobagel] reconcile skipped (non-production)");',
     replace: '  if (false) {\n    console.log("[neurobagel] reconcile skipped (non-production)");',
     note: "the dev worker's reconcile runs",
@@ -646,7 +647,7 @@ export const MUTANTS: Mutant[] = [
   {
     id: "H04-hook-awaits-nothing-but-throws",
     layer: "hooks",
-    file: WRITER,
+    file: HOOKS,
     find: "    if (waitUntil) waitUntil(work);\n  } catch (err) {",
     replace: `    if (waitUntil) waitUntil(work);\n    throw new Error("scheduling failed");\n  } catch (err) {\n    throw err;`,
     note: "a failure while scheduling reaches the flow",

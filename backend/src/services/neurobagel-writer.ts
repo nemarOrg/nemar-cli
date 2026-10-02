@@ -25,10 +25,9 @@
  * IDEMPOTENT: a second run over unchanged inputs writes NOTHING, to the artifacts or
  * to the index. The fingerprint (neurobagel-fingerprint.ts) is what decides.
  *
- * NEVER A BLOCKER: the hooks (publication, import, a new version) call
- * {@link scheduleNeurobagelSync}, which does nothing at all unless the writer is
- * enabled, runs inside `waitUntil`, and catches everything. The daily reconcile
- * ({@link runNeurobagelReconcileCron}) is the safety net and is production-only.
+ * NEVER A BLOCKER: the hooks (publication, import, a new version) and the daily
+ * reconcile live in neurobagel-hooks.ts, which only calls {@link runNeurobagelWriter}
+ * and writes nothing itself.
  *
  * OFF BY DEFAULT: nothing here acts unless `NEUROBAGEL_WRITER_ENABLED` is exactly
  * "1", and with no `NEUROBAGEL` binding the writer is a reported no-op.
@@ -44,7 +43,7 @@ import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { CONCEPT_DOI_SQL } from "./anonymity.js";
 import { toVersionTag } from "./data-router.js";
-import { isNonProductionEnv, resolveDataBaseOrigin } from "./environment.js";
+import { resolveDataBaseOrigin } from "./environment.js";
 import { manifestCacheKey } from "./manifest-source.js";
 import {
   type CurationResolution,
@@ -52,7 +51,7 @@ import {
   applyCuration,
   defaultCurationResolver,
 } from "./neurobagel-curation.js";
-import { couldBeFederated, eligibleAmong, loadEligibleRow } from "./neurobagel-eligibility.js";
+import { eligibleAmong, loadEligibleRow } from "./neurobagel-eligibility.js";
 import { inputFingerprint, rowFingerprint, sha256Hex } from "./neurobagel-fingerprint.js";
 import { type GatherDeps, GatherRefusal, gatherNeurobagelInput } from "./neurobagel-gather.js";
 import {
@@ -871,92 +870,4 @@ async function recordRun(env: Bindings, result: RunResult): Promise<void> {
   } catch (err) {
     result.warnings.push(`run record failed: ${err instanceof Error ? err.message : String(err)}`);
   }
-}
-
-// ----------------------------------------------------------------------------
-// The entry points
-// ----------------------------------------------------------------------------
-
-/** One dataset: the hook's work. Also removes it when it is no longer eligible. */
-export function syncNeurobagelDataset(
-  env: Bindings,
-  datasetId: string,
-  trigger: string,
-  waitUntil?: (work: Promise<unknown>) => void,
-  deps?: RunOptions["deps"],
-): Promise<RunResult> {
-  return runNeurobagelWriter(env, {
-    trigger,
-    execute: true,
-    only: [datasetId],
-    limit: 1,
-    waitUntil,
-    deps,
-  });
-}
-
-/**
- * The hook publication, import and a new version call. It must NEVER fail, block or
- * delay the flow that calls it:
- *   - with the writer off (the default) it returns before doing any I/O;
- *   - an id that can never be federated (an `xx` sandbox, a reserved fixture) returns
- *     before any read;
- *   - the work is handed to `waitUntil` and never awaited by the caller;
- *   - every failure, including one thrown synchronously here, is caught and logged.
- *
- * `after` is work the caller has already started and that this sync must follow (the
- * metadata refresh that writes the D1 columns a fingerprint reads). Its failure is the
- * refresh's own business and never stops the sync.
- */
-export function scheduleNeurobagelSync(
-  env: Bindings,
-  waitUntil: ((work: Promise<unknown>) => void) | undefined,
-  datasetId: string,
-  trigger: string,
-  options: { after?: Promise<unknown>; deps?: RunOptions["deps"] } = {},
-): void {
-  try {
-    const mode = neurobagelWriterMode(env);
-    if (mode === "disabled") return;
-    if (!couldBeFederated(datasetId)) return;
-    if (mode === "store_unconfigured") {
-      console.warn(`[neurobagel] store_unconfigured: ${trigger} for ${datasetId} did nothing`);
-      return;
-    }
-    const work = (options.after ?? Promise.resolve())
-      .catch(() => {})
-      .then(() => syncNeurobagelDataset(env, datasetId, trigger, waitUntil, options.deps))
-      .then((r) => {
-        if (r.status === "error") {
-          console.error(`[neurobagel] ${trigger} ${datasetId}: ${r.error}`);
-        }
-      })
-      .catch((err) =>
-        console.error(
-          `[neurobagel] ${trigger} ${datasetId} failed:`,
-          err instanceof Error ? (err.stack ?? err.message) : err,
-        ),
-      );
-    if (waitUntil) waitUntil(work);
-  } catch (err) {
-    console.error(
-      `[neurobagel] could not schedule ${trigger} for ${datasetId}:`,
-      err instanceof Error ? err.message : err,
-    );
-  }
-}
-
-/**
- * The daily reconcile, the safety net: bounded by `NEUROBAGEL_RECONCILE_MAX`, in the
- * deterministic order of neurobagel-plan.ts. PRODUCTION ONLY and absent from
- * `DEV_CRON_ALLOWLIST` (a new daily job is production-only by default, AGENTS.md):
- * this is the cron fence, and the fence lives HERE so the admin route, which calls
- * `runNeurobagelWriter` directly, still works on staging.
- */
-export async function runNeurobagelReconcileCron(env: Bindings): Promise<RunResult | null> {
-  if (isNonProductionEnv(env)) {
-    console.log("[neurobagel] reconcile skipped (non-production)");
-    return null;
-  }
-  return runNeurobagelWriter(env, { trigger: "cron", execute: true });
 }

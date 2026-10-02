@@ -18,6 +18,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import Ajv from "ajv";
 import schema from "../../deploy/neurobagel/index.schema.json";
 import { type CurationResolver, createCurationResolver } from "../src/services/neurobagel-curation";
+import { syncNeurobagelDataset } from "../src/services/neurobagel-hooks";
 import { neurobagelStatus } from "../src/services/neurobagel-status";
 import {
   ARTIFACT_KINDS,
@@ -35,7 +36,6 @@ import {
   neurobagelWriterMode,
   reconcileLimit,
   runNeurobagelWriter,
-  syncNeurobagelDataset,
 } from "../src/services/neurobagel-writer";
 import type { Bindings } from "../src/types/bindings";
 import { realD1, wrapD1 } from "./helpers/d1";

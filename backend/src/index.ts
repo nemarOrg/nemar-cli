@@ -77,7 +77,7 @@ import {
   weeklySummaryCronLine,
 } from "./services/import-weekly-summary-sweep";
 import { manifestIntegritySweep } from "./services/manifest-sweep";
-import { runNeurobagelReconcileCron } from "./services/neurobagel-writer";
+import { runNeurobagelReconcileCron } from "./services/neurobagel-hooks";
 import { getActiveNotices } from "./services/notices";
 import { sweepBlockedBidsValidationRequests } from "./services/publication-sweep";
 import { runRecordingStatsSweepCron } from "./services/recording-stats-sweep";
@@ -1248,7 +1248,7 @@ export default {
       // (ADR 0054), which is why the bound is small. The cron wrapper carries the fence
       // so the admin route, which calls the writer directly, still works on staging.
       ctx.waitUntil(
-        runNeurobagelReconcileCron(env)
+        runNeurobagelReconcileCron(env, (work) => ctx.waitUntil(work))
           .then((r) => {
             if (!r) return;
             const wrote = r.results.filter((d) => d.outcome === "written").length;

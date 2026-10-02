@@ -25,9 +25,9 @@ import worker from "../src/index";
 import { signManifestCallbackToken } from "../src/services/github/callback-tokens";
 import {
   runNeurobagelReconcileCron,
-  runNeurobagelWriter,
   scheduleNeurobagelSync,
-} from "../src/services/neurobagel-writer";
+} from "../src/services/neurobagel-hooks";
+import { runNeurobagelWriter } from "../src/services/neurobagel-writer";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings } from "../src/types/bindings";
 import { wrapD1 } from "./helpers/d1";

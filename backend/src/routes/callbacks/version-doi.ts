@@ -24,7 +24,7 @@ import { conceptEzidIdentifier, isSandboxIdentifier } from "../../services/ezid.
 import { getDatasetsToken } from "../../services/github-auth.js";
 import { downloadReleaseArchive } from "../../services/github.js";
 import { generateManifest } from "../../services/manifest.js";
-import { scheduleNeurobagelSync } from "../../services/neurobagel-writer.js";
+import { scheduleNeurobagelSync } from "../../services/neurobagel-hooks.js";
 import { errorMessage, extractRepoName, readRepoMetadata } from "../../services/repo-metadata.js";
 import { uploadManifest } from "../../services/s3.js";
 import * as zenodo from "../../services/zenodo.js";

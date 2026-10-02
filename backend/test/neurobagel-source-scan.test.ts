@@ -85,6 +85,7 @@ const FEATURE = [
   join(SRC, "routes/admin/neurobagel.ts"),
 ];
 const WRITER = join(SERVICES, "neurobagel-writer.ts");
+const HOOKS = join(SERVICES, "neurobagel-hooks.ts");
 const rel = (f: string) => f.slice(SRC.length + 1);
 
 describe("the feature is the set of files this scan thinks it is", () => {
@@ -97,6 +98,7 @@ describe("the feature is the set of files this scan thinks it is", () => {
         "services/neurobagel-eligibility.ts",
         "services/neurobagel-fingerprint.ts",
         "services/neurobagel-gather.ts",
+        "services/neurobagel-hooks.ts",
         "services/neurobagel-plan.ts",
         "services/neurobagel-status.ts",
         "services/neurobagel-store.ts",
@@ -239,7 +241,7 @@ describe("the hooks", () => {
   test("exactly these files call the hook, this many times (the legacy version path included)", () => {
     const found: Record<string, number> = {};
     for (const file of walk(SRC)) {
-      if (file === WRITER) continue;
+      if (file === HOOKS) continue;
       const n = (code(file).match(/\bscheduleNeurobagelSync\s*\(/g) ?? []).length;
       if (n > 0) found[rel(file)] = n;
     }
@@ -276,9 +278,9 @@ describe("the hooks", () => {
     }
   });
 
-  test("the writer runs the work inside waitUntil and catches everything", () => {
-    const writer = code(WRITER);
-    const fn = writer.slice(writer.indexOf("export function scheduleNeurobagelSync"));
+  test("the hook module runs the work inside waitUntil and catches everything", () => {
+    const hooks = code(HOOKS);
+    const fn = hooks.slice(hooks.indexOf("export function scheduleNeurobagelSync"));
     expect(fn).toMatch(/waitUntil\(work\)/);
     expect(fn).toMatch(/\.catch\(/);
     expect(fn).toMatch(/try\s*\{/);
@@ -361,7 +363,7 @@ describe("the committed configuration is OFF", () => {
   test("the cron call sits in the production-only block, inside waitUntil, with a catch", () => {
     const index = readFileSync(join(SRC, "index.ts"), "utf8");
     const start = index.indexOf("if (prodOnlyJobs) {");
-    const reconcile = index.indexOf("runNeurobagelReconcileCron(env)");
+    const reconcile = index.indexOf("runNeurobagelReconcileCron(env,");
     const nonProdTail = index.indexOf("fetchAndSyncCitationCounts(env.DB)");
     expect(start).toBeGreaterThan(-1);
     expect(reconcile).toBeGreaterThan(start);

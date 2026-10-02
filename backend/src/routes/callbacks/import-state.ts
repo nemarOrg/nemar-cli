@@ -15,7 +15,7 @@ import {
   type ImportStatus,
   runImportRecovery,
 } from "../../services/import-recovery.js";
-import { scheduleNeurobagelSync } from "../../services/neurobagel-writer.js";
+import { scheduleNeurobagelSync } from "../../services/neurobagel-hooks.js";
 import type { WebhookRouter } from "../webhooks/shared.js";
 
 // ============================================================================
