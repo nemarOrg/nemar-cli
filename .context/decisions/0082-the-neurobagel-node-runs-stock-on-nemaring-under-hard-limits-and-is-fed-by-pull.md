@@ -12,7 +12,7 @@ The owner decided that the node is Neurobagel's own, unmodified stack
 GraphDB, node API, federation API, query tool) on the NEMAR application host, `nemaring`.
 It is not a Workers implementation of the node API and not Cloudflare Containers.
 
-The host also runs other long-lived services, including the organisation's secrets store.
+The host also runs other long-lived services.
 So the node runs under hard limits: a fault in it must cost the node, never those services.
 What the host runs, and how much room it has, is operations documentation (gated), not part of this record.
 
@@ -48,14 +48,17 @@ The overlay is `deploy/neurobagel/docker-compose.nemar.yml`; versions are pinned
 
 - **Hard limits.**
   Every container has `mem_limit` equal to `memswap_limit`, a CPU limit, a low `cpu_shares` and an `oom_score_adj` of 500, so the node is the first thing the kernel sacrifices and the first to yield CPU.
-  The stack's limits sum to 2880 MiB with the tunnel connector, under a 3 GiB ceiling.
+  The stack's limits sum to 2880 MiB with the tunnel connector.
+  The helper that runs during a load (the stock initialiser in a reload, and the loader's validator before it, the same image at 160 MiB, never both at once) brings the peak to 3040 MiB, or 2912 MiB without the connector, under a 3 GiB ceiling.
   If host memory available falls below 1.5 GiB, the guard stops this project and nothing else, and the stop is visible: `nb status` reports it and exits non-zero until the operator starts the node again.
+  The guard's baseline of the other containers belongs to one boot of the host: it carries the boot id and is taken again after a reboot or while the host has only just come up, so a reboot is never read as every other container having restarted.
 - **No inbound access.**
   Published ports are loopback-only, and GraphDB publishes none.
   Exposure is a Cloudflare Tunnel hostname that maps to the node API only, through a connector on a network that holds nothing else, enabled by the lead after approval.
   It is not enabled.
 - **Pull, never push.**
   A loader on the host fetches an index and the changed artifacts from the private store, verifies every file against the index and against caps on size and count, assembles a complete release directory, validates it with the stock initialiser, and swaps one symlink.
+  A run is bounded: 900 seconds in all, retries included; 6 MiB per artifact and 192 MiB in all, set from the measured sizes (the largest real document is 0.44 MB, and the largest release the graph container was measured to load is 172 MB); and a redirect from the store is refused, so a credential header is never sent to a third party.
   The producer's only obligation is the index interface in `deploy/neurobagel/index.schema.json`, explained in `deploy/neurobagel/README.md`.
   The loader, the index builder, the synthetic generator and the README example all take their constants from that one file, and a test fails on drift.
 - **Reload is a deliberate operation.**
@@ -66,14 +69,13 @@ The overlay is `deploy/neurobagel/docker-compose.nemar.yml`; versions are pinned
 - **Taking the node out of the federation is stopping the API container**,
   recorded as a hold flag so that no scheduled run brings it back.
 - **Nothing is silent.**
-  A failed reload, a failed load, a frozen or stale loader (no successful run for two hours, where a run that finds nothing to do counts), a stale guard heartbeat and a guard abort are each a problem that `nb status` reports with a non-zero exit.
+  A failed reload, a failed load, a frozen or stale loader (no successful run for two hours, where a run that finds nothing to do counts), a guard that has never started (while one is expected, `NB_GUARD_EXPECTED`, default 1) or whose heartbeat is stale, and a guard abort are each a problem that `nb status` reports with a non-zero exit.
 - **The cell-size floor is zero, on purpose.**
   `NB_MIN_CELL_SIZE` is set explicitly to 0 (the stock value) because every federated dataset is public.
   It must be raised before any non-public dataset is ever federated.
 - **Nothing existing on the host is touched.**
   The project name, network and volumes are its own, and every script names the project.
-  The GraphDB passwords are generated on the host at first install into a mode 700 directory and a mode 600 `.env`, and are never in git.
-  NEMAR has no shared pattern for secrets of this kind, so this one is stated here rather than borrowed.
+  The GraphDB passwords are generated on the host at first install (random, `openssl rand -hex 16`) into a mode 700 directory of mode 600 files, are never in git, and are in every backup archive.
 - **Scheduling is not part of this change.**
   `nb cron-line` prints the crontab entries, and none is installed: loads run when a person runs them, and the guard watcher is started by hand and supervised only by its heartbeat check.
   Installing the entries is a separate decision for the owner.

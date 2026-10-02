@@ -39,7 +39,7 @@ Runtime directories, all created by the scripts and all untracked: `recipes/` (t
 | --- | --- |
 | `bin/nb install` | First-time setup. Idempotent; starts nothing |
 | `bin/nb up` | Starts the stack from nothing and waits until it is loaded and verified. Clears a guard abort marker |
-| `bin/nb down` | Stops this project's containers. Volumes and data are kept |
+| `bin/nb down` | Stops this project's containers. Volumes and data are kept; it takes no arguments, so it cannot remove volumes |
 | `bin/nb status [--json] [--deep] [--quiet]` | One read-only look. Exit 0 healthy, 1 degraded, 2 down, 3 on hold. `--quiet` prints nothing when healthy |
 | `bin/nb load` | Pulls changed artifacts and reloads the graph if (and only if) something changed. Cron runs this |
 | `bin/nb reload` | A deliberate, measured, verified reload of the live release, with rollback |
@@ -47,7 +47,7 @@ Runtime directories, all created by the scripts and all untracked: `recipes/` (t
 | `bin/nb rollback [--list] [RELEASE]` | Go back to an earlier release, reload it, and freeze the loader |
 | `bin/nb guard [--watch N] [--abort-on mem,load,neighbor] [--check]` | Resource guard: sample, log, and stop this project (only) on a breach; `--check` tests its heartbeat |
 | `bin/nb backup [--graph-export]` / `bin/nb restore ARCHIVE` | Back up and restore the inputs and state; a restore is followed by `bin/nb up` |
-| `bin/nb compose ARGS` | `docker compose` for this project only; it cannot name another project |
+| `bin/nb compose ARGS` | `docker compose` for this project only: a global flag that would name another project, directory, file or env file (`-p`, `--project-name`, `--project-directory`, `-f`, `--env-file`) is refused before the subcommand, while a subcommand's own flags such as `logs -f` pass. It is still a raw escape hatch for this project's own resources (`compose down -v` removes its volumes) |
 | `bin/nb logs [SERVICE]` | Shows the last 200 lines of this project's container logs, then follows them |
 | `bin/nb cron-line` | Prints crontab lines. Installs nothing |
 
@@ -95,7 +95,7 @@ Nothing here touches another compose project.
 
    `bin/nb-install` generates the two GraphDB passwords with `openssl rand -hex 16` into `secrets/` (a mode 700 directory with mode 600 files) and creates `.env` from `.env.example` (mode 600).
    They are readable by the deployment account only, are never printed or copied by any script, are not in git, and are inside every backup archive.
-   NEMAR has no shared pattern for this: they are generated on the host the first time and nowhere else.
+   They are generated on the host the first time and exist nowhere else.
 3. Review `.env`.
    The defaults are the measured ones.
    `COMPOSE_PROFILES=portal` runs the local f-API and query tool (192 MiB of limits); remove `portal` to free it.
@@ -171,13 +171,20 @@ The index is refused, with exit code 3 and nothing changed, if any of these rule
 - Every `jsonld` file must be a Neurobagel dataset: an `@context`, an `identifier` starting `nb:`, `schemaKey` `Dataset`, a non-empty `hasLabel`, and at least one entry in `hasSamples`.
   No two files may share an identifier, because the stock initialiser silently keeps only one.
   The stock validator must accept every file; a file it rejects fails the whole load rather than being skipped.
-- Caps, so that nothing the source sends can make the host work without bound, all overridable in `.env`.
-  The index is at most 8 MiB, one artifact at most 32 MiB, all artifacts together at most 512 MiB, and at least 2,048 MiB of disk must be free where releases live.
-  They are set from the measured sizes: the index for 800 datasets is a few hundred KB, one dataset's JSON-LD is under 1 MB, and a release of 800 datasets is 35 MB.
+- Caps, so that nothing the source sends can make the host work without bound, all overridable in `.env` (`.env.example` holds the same numbers and reasons).
+  The index is at most 8 MiB, one artifact at most 6 MiB (`NB_MAX_ARTIFACT_BYTES`), all artifacts together at most 192 MiB (`NB_MAX_TOTAL_BYTES`), and at least 2,048 MiB of disk must be free where releases live.
+  They are set from measurements.
+  The index for 800 datasets is a few hundred KB.
+  The largest real dataset document is 0.44 MB, so 6 MiB is 14 times over it; and the stock validator holds a document in memory at 12 to 14 times its size (an 8.06 MB document needed 104 MiB and a 10.9 MB one 160 MiB), so 6 MiB needs about 90 MiB of its 160 MiB limit.
+  The largest release the 2 GiB graph container was measured to load is 172 MB of JSON-LD (3.56 million statements, 1.57 GiB peak), and the planned scale is about 70 MB, so 192 MiB is the measured maximum plus a margin.
+  Raise the per-artifact cap and the validator limit (`NB_INIT_MEM_LIMIT`) together, and the total only after loading something larger.
+- Time: a whole loader run, retries included, ends by 900 seconds after it began (`NB_LOAD_BUDGET_S`), and one request by 300 seconds (`NB_FETCH_TIMEOUT_S`) or what is left of the budget, whichever is less.
+  A store that is slow or stuck ends the run with exit 3 and changes nothing.
 - Authentication: if the store needs it, put one complete header line (for example `Authorization: Bearer ...`) in a mode 600 file and set `NB_SOURCE_AUTH_HEADER_FILE`.
   The loader hands it to curl with `-H @file`, so the token never appears in a process listing, a log or a state file, and it warns if the file is readable by other accounts.
 - The source must be an https URL (plain http only with `NB_ALLOW_HTTP=1`, for tests).
-  A URL with credentials in it is refused, redirects to anything but https are not followed, and the query string of a URL is never recorded.
+  A URL with credentials in it is refused, and the query string of a URL is never recorded.
+  A redirect is refused outright, for the index and for every artifact: curl would send a credential header other than `Authorization` on to the redirect target, and every URL here is one the loader names itself, so it must answer directly (HTTP 200).
   A local directory is also accepted as a source, for tests and trials.
 - The loader only reads: it sends `GET index.json` and `GET <name>`, with the user agent `nemar-neurobagel-loader/1.0`.
 
@@ -205,11 +212,21 @@ When something changed it fetches only the changed files (unchanged ones are har
 While the graph reloads, the node's API is stopped, so the federation sees an error from this node instead of silent partial results from a half-loaded graph.
 Any change, one dataset or all of them, costs one full reload, because the stock design clears and reloads the whole graph.
 The measured numbers are below; read them before choosing a schedule.
-After a reboot the stock graph clears and reloads itself while its health check can already report healthy, so run `bin/nb reload --adopt` then (the printed cron entry does): it holds the API down until the load is done and then verifies it.
+After a reboot the stock graph clears and reloads itself while its health check can already report healthy, so run `bin/nb reload --adopt` then (the printed cron entry does, 90 seconds after boot): it holds the API down until the load is done and then verifies it.
+
+**What the federation sees after a reboot.**
+The stock stack starts the API as soon as the graph reports healthy, which can be before the graph has finished loading.
+From then until the adopt run starts, the node can answer from a graph that is empty or half loaded: an empty or partial answer, not an error.
+That window is at most the 90 seconds of the printed `@reboot` delay, less the time the containers take to come up.
+When the adopt runs it stops the API, and from then the federation sees an error from this node until the graph has finished loading and been verified: 41 seconds measured with 21 datasets, and about 175 seconds at 50,105 subjects (the graph and API phases of the reload table).
+The 90 seconds was chosen to let the Docker daemon start its containers; it has not been rehearsed with a real reboot, because rebooting the deployment host was out of scope, so treat it as an upper bound to tune, and lower it if the partial-answer window matters.
+The guard does not misread the reboot either: see "The guard".
 
 A hold wins over everything.
 If `bin/nb hold` is set at any point of a reload, the API is killed again and stays down, and the reload exits 7.
 `bin/nb hold` itself confirms the API container is not running before it returns.
+`bin/nb unhold` ends the hold it read when it started, and only that one.
+If `bin/nb hold` runs again while the node is coming back (an unhold with a staged release reloads it first), the newer hold wins: the reload stops the API again, or `unhold` does when the reload had finished, the newer flag stays, and the command exits 7.
 
 | State file | Meaning |
 | --- | --- |
@@ -224,6 +241,7 @@ If `bin/nb hold` is set at any point of a reload, the API is killed again and st
 | `state/reload-history.jsonl` | One JSON line per reload, adopt or rollback: the seconds each phase took, how long the API was unavailable, and the lowest host memory seen |
 | `state/last-load.json`, `state/last-load-ok` | How the last loader run ended, and when a run last ended well (a run that found nothing to do counts) |
 | `state/guard.log`, `state/guard-heartbeat`, `state/guard-abort.json` | Tab-separated guard samples; when the guard last sampled; and why it last stopped the project |
+| `state/guard-baseline.tsv` | The start time and restart count of every other container, and the boot id of the host it was taken in |
 | `state/lock`, `state/lock.info` | The `flock(2)` lock, and who holds it (informative) |
 
 A reload refuses to start unless the host has `NB_MIN_AVAILABLE_MB` available (1800).
@@ -234,7 +252,8 @@ Release directories are pruned past `NB_KEEP_RELEASES` (4), but never the live o
 ## Resource limits and monitoring
 
 Every container has `mem_limit` equal to `memswap_limit` (no swap), a CPU limit and a low `cpu_shares`, a pids limit, `oom_score_adj` of 500 (the kernel's first choice if the whole host runs out of memory), `no-new-privileges`, and a 30 MiB log cap.
-The defaults sum to 2880 MiB with the tunnel connector, under the epic's 3 GiB ceiling.
+The defaults sum to 2880 MiB with the tunnel connector.
+The stock initialiser (in a reload) and the loader's validator (before it) are one helper of 160 MiB that runs for seconds, under one lock, never both at once, so the peak is 3040 MiB with the tunnel connector and 2912 MiB without it, under the epic's 3 GiB (3072 MiB).
 
 | Container | Memory limit | CPUs | Why this much (measured) |
 | --- | --- | --- | --- |
@@ -243,7 +262,7 @@ The defaults sum to 2880 MiB with the tunnel connector, under the epic's 3 GiB c
 | `federation` | 128 MiB | 0.5 | Peak 63 MiB |
 | `query_federation` | 64 MiB | 0.5 | Peak 12 MiB |
 | `cloudflared` (profile `tunnel`, not started) | 128 MiB | 0.5 | A tunnel connector is small; 17 to 27 MiB is typical |
-| `init_data` (runs for seconds) | 256 MiB | 1.0 | Peak 30 MiB |
+| `init_data`, and the loader's validator (run for seconds, one at a time) | 160 MiB | 1.0 | Peak 30 MiB at 800 datasets of under 1 MB each; one large document needs 12 to 14 times its size (8.06 MB: 104 MiB; 10.9 MB: 160 MiB), which is what the 6 MiB artifact cap is sized against |
 
 The stock graph setup script polls GraphDB in a loop with no sleep while the server starts; the CPU limit contains that.
 
@@ -254,7 +273,7 @@ The stock graph setup script polls GraphDB in a loop with no sleep while the ser
 - A failed reload, or a failed load (the newest content is not being served).
 - A frozen loader.
 - No successful loader run for two hours (only when `NB_SOURCE` is set).
-- A guard heartbeat older than 20 minutes, or none at all.
+- A guard heartbeat older than 20 minutes, or none at all while a guard is expected: `NB_GUARD_EXPECTED` is 1 unless `.env` says 0, so a node whose guard never started is a problem, and a node deliberately run without one has to say so.
 - A guard abort marker.
 - A node on hold whose API still answers.
 
@@ -267,6 +286,11 @@ The breaches are host available memory below 1536 MiB, a load average above 6 fo
 `--abort-on mem,load,neighbor` makes a breach stop THIS project and nothing else; the default is `mem`.
 The stop happens first, and the marker saying why is written afterwards, best effort.
 After a change you made on purpose to another container, run `bin/nb guard --baseline`, or the `neighbor` rule reads the restart as a breach.
+A reboot is not such a change and needs no action.
+The baseline carries the boot id of the host it was taken in (`/proc/sys/kernel/random/boot_id`), and the guard takes it again when the boot id differs, or while the host has been up for less than `NB_GUARD_BOOT_SETTLE_S` (180 seconds) because its containers are still coming up.
+Without that, every other container would have a new start time after a reboot, and the `@reboot` guard (with `neighbor` in `--abort-on`) would stop the node about 30 seconds after boot, before the adopt run.
+A baseline from before boot ids existed is stamped with the current one, once.
+The memory and load rules keep running during the settle time.
 `bin/nb up` clears the abort marker (and logs it), because starting the node is the operator's answer to it.
 
 The guard runs as a watcher, started at boot and supervised by its heartbeat:
@@ -277,7 +301,7 @@ cd "$HOME/neurobagel" && setsid nohup bin/nb guard --watch 10 --abort-on mem,loa
 ```
 
 It writes `state/guard-heartbeat` every sample and survives a failed probe (an earlier version died silently on a vanished one-off container).
-`bin/nb guard --check` exits 21 and says so when the heartbeat is missing or older than `NB_GUARD_STALE_S`, and `bin/nb status` raises a problem for the same.
+`bin/nb guard --check` exits 21 and says so when the heartbeat is missing or older than `NB_GUARD_STALE_S`, and `bin/nb status` raises a problem for the same (a missing heartbeat only while a guard is expected, as above).
 `bin/nb cron-line` prints the `@reboot` start line and the `guard --check` entry that would make the watcher supervised; until they are installed, the watcher is hand-started, and a reboot ends it.
 To restart the watcher, stop it and run the line above.
 
@@ -488,22 +512,30 @@ The hold only buys time.
 | The n-API cannot start | It fetches its vocabularies from GitHub raw at start. Check outbound access to `raw.githubusercontent.com` |
 | `nb load` exits 75 | Another loader or reload holds `state/lock`. `state/lock.info` says who. The kernel drops the lock when its holder dies, so there is nothing to clean up |
 | `nb status`: `the node is on hold but its API still answers` | A reload started the API after the hold was set. Run `bin/nb hold` again; it confirms the container is down |
+| `nb status`: `the resource guard has never started (no heartbeat)` | No guard watcher has run since the state was created. Start it with the line under "The guard" (or `NB_GUARD_EXPECTED=0` in `.env` for a node that is deliberately run without one) |
 | `nb status`: `the guard stopped the project` | The guard saw a breach and ran `compose down`. Fix the cause, then `bin/nb up` (which clears the marker) |
 | Host available memory falls | `bin/nb guard` logs it and stops this project below 1.5 GiB. `bin/nb up` starts it again once memory recovers |
 
 ## Rehearsals on the deployment host (2026-10-02)
 
 Each of these was run for real on the trial stack, with real Phase 1 datasets or the 800-dataset set loaded.
-The first group was run on the final code; the second group was run earlier in the trial, on a previous version of the scripts whose behaviour in those cases has not changed.
+Nothing here stopped or restarted the stack: the reload rehearsals restart the graph and API processes, as every reload does.
+The first group was run on the final code, in two rounds; the second group was run earlier in the trial, on a previous version of the scripts whose behaviour in those cases has not changed.
 
 | Rehearsal | Result |
 | --- | --- |
-| `nb hold` 8 seconds into a reload (the API already stopped for the load window) | `nb hold` returned in 0.65 s. The reload finished its graph load, saw the hold, left the API down and exited 7; no known-bad record was written, because a hold is not the content's fault. `nb status` exited 3 and said `HOLD`. `nb unhold` brought the node back verified (21 of 21 datasets) and `nb status` was healthy again |
-| A release that GraphDB rejects (a dataset with an invalid JSON-LD `@context`; the stock validator and the loader's own checks accept it) | The stock upload script printed the error and exited 0. The reload read it from the log and rolled back to the last release that was loaded and verified in 47 s (API unavailable 43 s), exited 5, and `nb status` said the newest content was not being served. A second `nb load` refused to retry the content, and a load from a good source cleared the problem |
-| `nb rollback` | The earlier release was live again in 46 s and the loader was frozen: `nb status` listed the freeze as a problem and a following `nb load` fetched nothing. `nb load --thaw` and a load went forward again in 46 s (API unavailable 44 s) |
-| Disaster recovery: backup, `nb down`, discard `data/` and `state/`, `nb restore`, `nb up` | The restore kept the existing `.env` and secrets, and the node was up and verified in 43 s (API unavailable 41 s), 21 of 21 datasets served |
-| `nb up` after a guard abort (a marker planted by hand, node down) | `nb status` exited 2 and named the marker; `nb up` cleared it, logged that it did, and loaded and verified in 43 s |
-| The guard watcher found dead | The watcher had stopped when the stack was redeployed. `nb status` exited 1 with `the resource guard last sampled 37 minutes ago` and `nb guard --check` exited 21. The documented start line restarted it and both went quiet |
+| `nb hold` 8 seconds into a reload (the API already stopped for the load window) | `nb hold` returned in 0.69 s. The reload finished its graph load, saw the hold, left the API down and exited 7; no known-bad record was written, because a hold is not the content's fault. `nb status` exited 3 and said `HOLD`. `nb unhold` brought the node back verified (21 of 21 datasets) and `nb status` was healthy again |
+| A newer `nb hold` set while `nb unhold` was reloading a staged release (18 datasets) | The reload finished its graph load, saw a hold whose text was not the one being ended, left the API down and exited 7. `nb unhold` exited 7 and the newer flag stood untouched, with no stray files. `nb status` exited 3. A second `nb unhold` loaded the staged release (51 s, API unavailable 48 s) and the node came back healthy |
+| A release that GraphDB rejects (a dataset with an invalid JSON-LD `@context`; the stock validator and the loader's own checks accept it), validated by the real container | The stock upload script printed the error and exited 0. The reload read it from the log and rolled back to the last release that was loaded and verified in 51 s (API unavailable 49 s), exited 5, and `nb status` said the newest content was not being served. A second `nb load` refused to retry the content, and a load from a good source cleared the problem |
+| `nb rollback` | The earlier release was live again in 51 s (API unavailable 49 s) and the loader was frozen: `nb status` listed the freeze as a problem and a following `nb load` fetched nothing. `nb load --thaw` and a load went forward again |
+| A real backup restored into a fresh directory, with Docker hidden from the script so the running stack is not stopped | The release came back byte for byte (63 files). A copy of that archive with `../..` as its rollback release was refused (exit 8) and the file standing at the root of the target directory was still there |
+| `nb status` for a state directory with no guard heartbeat | `the resource guard has never started (no heartbeat)` is a problem, and is not with `NB_GUARD_EXPECTED=0` |
+| The validator container, started from `nb_validator_args` | Inside it: `oom_score_adj` 500, a memory limit of 160 MiB, and no network (a connection attempt fails at once) |
+| `nb compose -p other ps` and `nb down -v` on the host | Both refused with exit 2 before anything ran |
+| The guard watcher restarted with the documented line | The first sample stamped the baseline, taken before boot ids existed, with this boot's id and kept its entries. A reboot of the host was not rehearsed: the choice between recording and judging is tested over real captured container state and with a different boot id |
+| Disaster recovery: backup, `nb down`, discard `data/` and `state/`, `nb restore`, `nb up` (an earlier round) | The restore kept the existing `.env` and secrets, and the node was up and verified in 43 s (API unavailable 41 s), 21 of 21 datasets served |
+| `nb up` after a guard abort (a marker planted by hand, node down; an earlier round) | `nb status` exited 2 and named the marker; `nb up` cleared it, logged that it did, and loaded and verified in 43 s |
+| The guard watcher found dead (an earlier round) | The watcher had stopped when the stack was redeployed. `nb status` exited 1 with `the resource guard last sampled 37 minutes ago` and `nb guard --check` exited 21. The documented start line restarted it and both went quiet |
 | An `@context` of `{}` (earlier) | GraphDB loaded it as no statements at all, and verification named the missing dataset (799 of 800); rolled back |
 | A change arriving while on hold (earlier) | Staged, validated and published, not loaded, API left stopped |
 | `nb unhold` with a staged release (earlier) | Loaded first, the API started only after the graph held the new release: 52 s, deep check passed |
@@ -512,7 +544,7 @@ The first group was run on the final code; the second group was run earlier in t
 | A reload whose API was OOM-killed by the 384 MiB limit, and a heap that refused the heaviest query (earlier) | Found, and the limits and the verification query were changed (see the footprint section) |
 | Load of the 21 merged goldens through the shipped loader, API stopped for the load | 52 s in all, API unavailable 48 s, both verified |
 
-Bugs these rehearsals found and fixed: a manifest written empty after a `jq` argument-length failure on 800 datasets, a guard that died silently on a vanished one-off container, an unhold that could not restart a stopped API, a lock leaked by `exec`, a release name that collided when the same content was published twice in one second, a Docker restart that waited out a 60 s kill timeout, two backups in the same second overwriting each other, a header-file permission check that never fired (the `-perm` flag of `find` differs between GNU and BSD), and a reload interrupted by a hold that kept `nb status` degraded after the node was put back.
+Bugs these rehearsals found and fixed: a manifest written empty after a `jq` argument-length failure on 800 datasets, a guard that died silently on a vanished one-off container, an unhold that could not restart a stopped API, a lock leaked by `exec`, a release name that collided when the same content was published twice in one second, a Docker restart that waited out a 60 s kill timeout, two backups in the same second overwriting each other, a header-file permission check that never fired (the `-perm` flag of `find` differs between GNU and BSD), a reload interrupted by a hold that kept `nb status` degraded after the node was put back, a hold set during an unhold's reload that the unhold erased, a guard baseline that read every other container as restarted after a reboot, a release-name check that accepted a valid name next to a path (`grep` matches by line), a restore that created directories before it had verified the archive, and redirects that curl would have followed with a credential header.
 
 ## Tests
 
@@ -522,9 +554,11 @@ It covers:
 
 - the loader: first load, no-change run, one changed dataset, removal, sha256 mismatch, missing and truncated artifacts, a hostile name planted outside the source, mass removal at its boundaries, dry run, authentication, https-only sources, credentials and redirects, and every cap at its boundary
 - the index format: the schema, the loader and both producers agree (a table of malformed indexes refused by both, the cross-field rules only the loader enforces, unknown fields ignored, the README example valid)
+- each rule of the index format on its own: a table with one mutation per rule, each refused and named by its own sentence (so the dataset and artifact caps cannot hide behind other rules), the caps at their boundaries, the default byte caps, a stated size that differs from the file's, and the loader's time budget
+- redirects refused for the index and for an artifact, a loader that stages but never reloads while on hold, and the sweep that spares a temp file a lock-free writer may be writing
 - atomic publication seen by a concurrent reader, the symlink swap seen by a tight reader, the empty-write guard, the flock lock (two loaders, a dead holder's file, a live holder), freeze, known-bad content and its expiry
 - seed, backup, restore (byte for byte, an altered archive, a forged release name, configuration kept), retention, the off-host hook
-- the decisions as pure functions over real text: rollback target, memory abort, hold, guard breaches (against real captured container state before and after a real restart), status verdicts, the loader's problems (from the real loader's own records), and whether the node serves what it should (against a real node's answers for the real goldens, including a real answer from a node that returns participant rows)
+- the decisions as pure functions over real text: rollback target, memory abort, hold (including the hold an unhold must not erase), guard breaches (against real captured container state before and after a real restart, and across a reboot with a different boot id), the arguments `nb compose` refuses, the validator container's flags, status verdicts, the loader's problems (from the real loader's own records), and whether the node serves what it should (against a real node's answers for the real goldens, including a real answer from a node that returns participant rows)
 - the log parsers against the stock containers' real first-start, upload-failure and initialiser output
 - `docker compose config` of the overlay merged over the recipes file it pins: hard limits and no swap, OOM score and CPU shares, the 3 GiB ceiling, loopback ports, a tunnel network that holds only the API, `NB_RETURN_AGG` fixed, the init base image pinned, profiles, restart policies and health checks
 - shellcheck over every script, and a scan that the public tree carries no host details
