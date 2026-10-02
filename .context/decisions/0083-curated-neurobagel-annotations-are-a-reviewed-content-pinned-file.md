@@ -28,6 +28,9 @@ NEMAR mirrors about 580 OpenNeuro datasets (`on` ids) beside its own (`nm` ids),
 3. **The loader fails closed.**
    One problem anywhere rejects the whole file, and the error lists the problems of the first stage that has any: key problems first, then the shape, then the meaning.
    It rejects text that is not JavaScript Object Notation (JSON), a key that appears twice (`JSON.parse` would keep the last), `__proto__`, an unknown key at any level, an empty level map, a level that is also a missing value, a second sex or age column, a column named `age`, `sex` or `group` that is about something else, a dataset id outside `nm` and `on` or inside the reserved fixture band (ADR 0068), a malformed pin, blank evidence, a date that does not exist, and, when the caller supplies today's date (the loader has no clock), a review dated in the future.
+   A file that does not load STOPS conversion, for every dataset: `lookupCuration` answers `stop`, never `none`, because a broken file cannot say which datasets it names and an entry may exist only to withdraw a claim the mechanical rule would make (without the entry for on004166 and on006801, 20 and 7 false healthy controls are published).
+   The writer then writes no artifact (an existing one stays as it is) and reports a finding that needs a person; it must never catch the failure and convert with `curation: null`.
+   A dataset id that has an entry is never converted without it.
 4. **A pin is the git blob hash (Secure Hash Algorithm 1, SHA-1) of the bytes reviewed, computed by the transform from the text it converts.**
    Each entry pins `participants.tsv` and `participants.json` (`null` pins a file as absent).
    A pin is what `git hash-object` prints for the file, or the `git:` value of the data plane's entity tag for a git-tracked file (ADR 0066); a file that is annexed has no such tag and is pinned from its bytes with `git hash-object`.

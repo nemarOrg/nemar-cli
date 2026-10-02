@@ -10,15 +10,23 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, readdirSync } from "node:fs";
+import { join, relative } from "node:path";
+import ts from "typescript";
 import {
   CURATION_PATH,
   FIXTURE_ROOT,
   fixtureIds,
+  latestReviewDate,
   loadCuration,
+  parseCommittedCuration,
 } from "../scripts/neurobagel/fixtures-io";
-import { CurationError, curatedColumnFrom, parseCuration } from "../shared/neurobagel/curation";
+import {
+  CurationError,
+  curatedColumnFrom,
+  lookupCuration,
+  parseCuration,
+} from "../shared/neurobagel/curation";
 import { bindCuratedColumn, bindCuration } from "../shared/neurobagel/curation-bind";
 import type { CuratedColumn, CurationEntry } from "../shared/neurobagel/curation-types";
 import { contentMatchesPin, gitBlobSha, gitBlobShaOfBytes } from "../shared/neurobagel/git-blob";
@@ -894,6 +902,14 @@ describe("bindCuration", () => {
     expect((await bindCuration(entry, docs)).status).toBe("invalid");
   });
 
+  test("a participants.json that is not readable JSON, or not an object, never makes the binder throw", async () => {
+    for (const broken of ["{not json", "[]", '"a string"', "null", "42", ""]) {
+      const entry = await loadedEntry(id, tsv, broken);
+      const result = await bindCuration(entry, { participantsTsv: tsv, participantsJson: broken });
+      expect(result.status, JSON.stringify(broken)).toBe("applied");
+    }
+  });
+
   test("an age column is bound only while participants.json does not declare units other than years", async () => {
     // The real nm000132 table has an age column in years; the test writes the descriptions.
     const table = fixtureText("nm000132", "participants.tsv") as string;
@@ -1001,6 +1017,52 @@ describe("bindCuration", () => {
     });
   });
 
+  test("the zero share is of the AGES, not of the rows: missing cells do not dilute a placeholder", () => {
+    const rows = [
+      ["sub-1", "0"],
+      ["sub-2", "5"],
+      ...Array.from({ length: 8 }, (_, i) => [`sub-${i + 3}`, "n/a"]),
+    ];
+    const table = { header: ["participant_id", "age"], rows };
+    const age: CuratedColumn = {
+      kind: "age",
+      name: "age",
+      format: "FromFloat",
+      formatTerm: { identifier: "nb:FromFloat", label: "decimal" },
+      missingValues: ["n/a"],
+      valueRange: null,
+    };
+    // One of two ages is 0 (half), whatever else the table holds.
+    const result = bindCuratedColumn(age, table);
+    expect("problems" in result && result.problems[0]).toContain("1 of 2 ages are 0");
+  });
+
+  test("only an age of exactly 0 is a placeholder zero: newborns in decimal years are ages", () => {
+    const table = {
+      header: ["participant_id", "age"],
+      rows: [
+        ["sub-1", "0.1"],
+        ["sub-2", "0.2"],
+        ["sub-3", "30"],
+      ],
+    };
+    const age: CuratedColumn = {
+      kind: "age",
+      name: "age",
+      format: "FromFloat",
+      formatTerm: { identifier: "nb:FromFloat", label: "decimal" },
+      missingValues: [],
+      valueRange: null,
+    };
+    const result = bindCuratedColumn(age, table);
+    expect(
+      "bound" in result && result.bound.kind === "age" && result.bound.mapping.valueRange,
+    ).toEqual({
+      min: 0.1,
+      max: 30,
+    });
+  });
+
   test("an age column: unreadable values, no age at all, and a ValueRange the table does not have", () => {
     const table = {
       header: ["participant_id", "age"],
@@ -1095,5 +1157,126 @@ describe("bindCuration", () => {
     expect(
       "bound" in bindCuratedColumn(item(["", "n/a"]), { ...table, rows: [["sub-1", "-"]] }),
     ).toBe(true);
+  });
+});
+
+describe("lookupCuration: a file that does not load stops conversion", () => {
+  const ids = [...loadCuration().entries.keys()];
+  const spoilers: [string, (text: string) => string][] = [
+    ["an unknown key", (t) => t.replace('"format": 1', '"format": 1, "extra": 1')],
+    ["text that is not JSON", (t) => t.slice(0, t.length - 40)],
+    [
+      "a duplicated dataset",
+      (t) => t.replace('"nm000119": {', '"nm000119": {"x": 1},\n"nm000119": {'),
+    ],
+    ["a term that is not in the vocabulary", (t) => t.replaceAll("snomed:35919005", "snomed:1")],
+    ["an empty file", () => ""],
+  ];
+
+  test("a good file gives each dataset its entry, and a dataset with none gets none", () => {
+    for (const id of ids) {
+      const found = lookupCuration(fileText, id);
+      expect(found.status).toBe("entry");
+      if (found.status === "entry") expect(found.entry.datasetId).toBe(id);
+    }
+    expect(lookupCuration(fileText, "nm000132")).toEqual({ status: "none" });
+  });
+
+  test("a file that does not load is `stop` for every dataset, in particular the two whose entry only withdraws a claim", () => {
+    for (const [label, spoil] of spoilers) {
+      const text = spoil(fileText);
+      expect(() => parseCuration(text), label).toThrow(CurationError);
+      for (const id of [...ids, "nm000132"]) {
+        const found = lookupCuration(text, id);
+        // Never `none` and never `entry`: a writer that read either would convert without the entry.
+        expect(found.status, `${label}: ${id}`).toBe("stop");
+        if (found.status === "stop") expect(found.problems.length).toBeGreaterThan(0);
+      }
+    }
+    for (const id of ["on004166", "on006801"]) {
+      expect(lookupCuration(fileText.slice(0, 100), id).status).toBe("stop");
+    }
+  });
+
+  test("the options reach the loader: a review dated in the future is a `stop` when today is given", () => {
+    const future = mutated((f) => {
+      (f.datasets.nm000119.evidence as Json).date = "2099-01-01";
+    });
+    expect(lookupCuration(future, "nm000119").status).toBe("entry");
+    expect(lookupCuration(future, "nm000119", { today: "2026-10-02" }).status).toBe("stop");
+  });
+
+  test("a bug in the caller is not swallowed as a `stop`", () => {
+    expect(() => lookupCuration(fileText, "nm000119", { today: "not a date" })).toThrow(
+      "YYYY-MM-DD",
+    );
+  });
+});
+
+describe("the review date allows one day of slack for time zones", () => {
+  // 23:00 UTC on 2026-10-02 is already 2026-10-03 in Auckland (UTC+13) and 2026-10-03 at UTC+14.
+  const now = Date.UTC(2026, 9, 2, 23, 0, 0);
+  const dated = (date: string): string =>
+    mutated((f) => {
+      (f.datasets.nm000119.evidence as Json).date = date;
+    });
+
+  test("the latest believable date is one day after the UTC date", () => {
+    expect(latestReviewDate(now)).toBe("2026-10-03");
+    expect(latestReviewDate(Date.UTC(2026, 11, 31, 0, 0, 0))).toBe("2027-01-01");
+  });
+
+  test("a review dated today in a zone ahead of UTC is accepted, and one dated two days ahead is not", () => {
+    expect(() => parseCommittedCuration(dated("2026-10-02"), now)).not.toThrow();
+    expect(() => parseCommittedCuration(dated("2026-10-03"), now)).not.toThrow();
+    expect(() => parseCommittedCuration(dated("2026-10-04"), now)).toThrow("is after today");
+  });
+});
+
+describe("only the loader registers an entry as loaded", () => {
+  /** Where `name` is used as an identifier in `source`: an import, a call or any other reference. */
+  function usesOf(source: string, name: string): number {
+    const file = ts.createSourceFile("x.ts", source, ts.ScriptTarget.ES2022, true);
+    let found = 0;
+    const visit = (node: ts.Node): void => {
+      if (ts.isIdentifier(node) && node.text === name) found++;
+      ts.forEachChild(node, visit);
+    };
+    visit(file);
+    return found;
+  }
+
+  const ROOT = join(import.meta.dir, "..");
+  const sources = ["shared", "scripts", "src", "backend/src", "backend/test", "test"].flatMap(
+    (dir) =>
+      (readdirSync(join(ROOT, dir), { recursive: true }) as string[])
+        .filter((f) => /\.tsx?$/.test(f) && !f.includes("node_modules"))
+        .map((f) => relative(ROOT, join(ROOT, dir, f))),
+  );
+  const ALLOWED = ["shared/neurobagel/curation-loaded.ts", "shared/neurobagel/curation.ts"];
+
+  test("the scan sees the sources it is meant to (it is not vacuous)", () => {
+    expect(sources.length).toBeGreaterThan(100);
+    for (const allowed of ALLOWED) expect(sources).toContain(allowed);
+    expect(
+      usesOf(readFileSync(join(ROOT, "shared/neurobagel/curation.ts"), "utf8"), "markLoaded"),
+    ).toBeGreaterThan(0);
+  });
+
+  test("no other file imports or calls markLoaded", () => {
+    const offenders = sources.filter(
+      (f) => !ALLOWED.includes(f) && usesOf(readFileSync(join(ROOT, f), "utf8"), "markLoaded") > 0,
+    );
+    expect(offenders).toEqual([]);
+  });
+
+  test("the scanner finds an import, a call, an alias and a re-export", () => {
+    expect(usesOf('import { markLoaded } from "./curation-loaded";', "markLoaded")).toBe(1);
+    expect(usesOf("const x = markLoaded(data);", "markLoaded")).toBe(1);
+    expect(usesOf('import { markLoaded as m } from "./curation-loaded"; m(1);', "markLoaded")).toBe(
+      1,
+    );
+    expect(usesOf('export { markLoaded } from "./curation-loaded";', "markLoaded")).toBe(1);
+    expect(usesOf('const s = "markLoaded"; // markLoaded', "markLoaded")).toBe(0);
   });
 });

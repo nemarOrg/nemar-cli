@@ -128,6 +128,11 @@ Neurobagel has no age format for months, weeks or days, so such a column cannot 
 | `bindCuration(entry, documents)` | `curation-bind.ts` | whether the entry fits THIS dataset's documents: the pins, then that every curated column exists, its level map covers every value of the table, and an age column passes the age rules. It reads the table from the text, so the two cannot disagree |
 | `buildNeurobagelArtifacts({..., curation})` | `transform.ts` | applies a bound entry, to the graph's participants only |
 
+**Contract for a writer.**
+Ask `lookupCuration(text, datasetId, {today})` (`curation.ts`) for the dataset's entry: `entry` means convert with it, `none` means the file loads and has nothing for this dataset, and `stop` means the file does not load, so DO NOT convert, for this dataset or any other.
+On `stop` write no artifact (leave an existing one as it is) and report a finding that needs a person; never answer it with `curation: null`, because an entry may exist only to withdraw a mechanical claim (on004166 and on006801 would publish 20 and 7 false healthy controls).
+A dataset id that has an entry is never converted without it.
+
 The entry the loader returns is opaque: the transform and the binder refuse an entry the loader did not make (`curation_not_loaded`), because the loader is where its terms were checked against the full pinned vocabulary.
 Import the loader from `curation.ts` explicitly; the transform and `index.ts` do not load the full diagnosis and assessment vocabularies.
 The text of a participants file must reach the transform exactly as the data plane served it, because the pin is the hash of those bytes (a leading BOM may be dropped; text that is not valid 8-bit Unicode Transformation Format (UTF-8) makes the entry stale, which is safe).
@@ -174,7 +179,7 @@ bun run scripts/neurobagel/reuse-openneuro-annotations.ts --date 2026-10-02 \
 
 It keeps a column only if it is about one of the four curatable variables, every term is in the pinned vocabulary (upstream's blank labels are rewritten, `nb:FromInt` is read as `nb:FromFloat`), the loader accepts it, and the binder accepts it against the mirror's CURRENT table (including the age rules); whatever fails is dropped and counted.
 A column the mechanical rules would already map to the same values for every row is left out too (`--keep-redundant` opts out).
-`--merge-into` REFUSES to replace an entry whose review is not `upstream_community`, naming it, so a person's entry is never overwritten by an upstream annotation.
+`--merge-into` REFUSES to replace an entry whose review is not `upstream_community`: it prints one clear message naming every such entry and exits 1 before writing anything, so a person's entry is never overwritten by an upstream annotation; `--skip-authored` leaves those entries alone instead, merges the rest and reports what it skipped.
 What a person spot-checking needs (a `gender` column read as sex and what participants.json says of it, numeric sex codes and whether participants.json confirms them, the declared age units) is written into each entry's `evidence.source`.
 `NOTICE-openneuro-annotations.txt` carries the upstream licence notice that reused entries require.
 `scripts/neurobagel/mutation-battery.ts` runs hand-written mutants over the loader, the binder, the transform's use of an entry, the output validators and the converter, and reports which survive.

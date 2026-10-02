@@ -25,13 +25,24 @@ export const GOLDEN_ROOT = join(NEUROBAGEL_TEST_ROOT, "golden");
 export const CURATION_PATH = resolve(HERE, "../../shared/neurobagel/curation.json");
 
 let committedCuration: CurationFile | null = null;
+
+/**
+ * The latest date a review may carry and still be believed: the UTC date of one day from `now`.
+ * A review is dated in its reviewer's own zone, which can be a calendar day ahead of UTC for up to
+ * 14 hours, so "today" is allowed one day of slack and a review dated further ahead cannot be real.
+ */
+export function latestReviewDate(now: number = Date.now()): string {
+  return new Date(now + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+/** Parse the text of a curation file strictly, as the committed one is, with the date slack. */
+export function parseCommittedCuration(text: string, now?: number): CurationFile {
+  return parseCuration(text, { today: latestReviewDate(now) });
+}
+
 /** The committed `curation.json`, loaded strictly (a bad file throws `CurationError`). */
 export function loadCuration(): CurationFile {
-  // A review dated after today cannot have happened, so the loader is given today's date (it has no
-  // clock of its own).
-  committedCuration ??= parseCuration(readFileSync(CURATION_PATH, "utf8"), {
-    today: new Date().toISOString().slice(0, 10),
-  });
+  committedCuration ??= parseCommittedCuration(readFileSync(CURATION_PATH, "utf8"));
   return committedCuration;
 }
 

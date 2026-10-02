@@ -583,6 +583,27 @@ describe("a curation that does not fit is skipped whole", () => {
       expect(claims(stale.jsonld)).toEqual({ age: true, diagnosis: true, sex: false });
     });
 
+    test("withholding any one of the three variables raises the flag, so a writer cannot miss it", async () => {
+      const age = allThree.age;
+      const group = allThree.group;
+      const sex = allThree.sex;
+      for (const [kind, columns] of [
+        ["age", { age }],
+        ["diagnosis", { group }],
+        ["sex", { sex }],
+      ] as const) {
+        const entry = await entryFor("nm000132", rows(), null, columns);
+        const stale = docs(await buildNeurobagelArtifacts(withTable(rows("\n"), entry)));
+        expect(stale.report.flags as string[], kind).toContain("curation_withheld");
+        const counts = (stale.report.curation as Json).withheld as Record<string, number>;
+        expect(counts[kind], kind).toBe(1);
+        expect(
+          Object.values(counts).reduce((a, b) => a + b, 0),
+          kind,
+        ).toBe(1);
+      }
+    });
+
     test("a variable the mechanical rule did not map has nothing to withhold, and is not counted", async () => {
       // An entry for a column the mechanical rules do not read: its absence withholds nothing.
       const table = tsv("participant_id\tgender", "sub-001\tF", "sub-002\tM");

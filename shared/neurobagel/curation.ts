@@ -30,6 +30,9 @@
  * is sound is the MEANING checked (terms, labels, levels, pins' use, dates).
  * Fix one stage and run again to see the next; within a stage everything found is listed.
  *
+ * A caller that converts datasets must not treat a load failure as "no entry": see
+ * `lookupCuration`, whose `stop` answer means do not convert.
+ *
  * What the loader returns is opaque: an entry is registered (curation-loaded.ts) and the
  * transform and the binder accept nothing else, because here is where its terms were checked
  * against the full pinned vocabulary.
@@ -463,4 +466,36 @@ export function parseCuration(text: string, options: ParseOptions = {}): Curatio
   }
   if (problems.length > 0) throw new CurationError(problems);
   return { entries };
+}
+
+/**
+ * What a writer finds when it looks for the entry of one dataset in the text of `curation.json`.
+ *   none   the file loads and has no entry for this dataset: convert without one
+ *   entry  convert with this entry
+ *   stop   the file does not load: DO NOT convert, for this dataset or any other
+ * A file that does not load cannot say which datasets it names, and an entry may exist only to
+ * withdraw a claim the mechanical rule would make (a `Control` that is an intervention arm), so a
+ * conversion without the entry would publish the false claim.
+ * `stop` means: write no artifact (leave any existing one as it is) and report a finding that
+ * needs a person, with `problems` for them to read.
+ * Never answer `stop` with `curation: null`.
+ */
+export type CurationLookup =
+  | { status: "none" }
+  | { status: "entry"; entry: CurationEntry }
+  | { status: "stop"; problems: string[] };
+
+/** Look up one dataset's entry; see {@link CurationLookup}. */
+export function lookupCuration(
+  text: string,
+  datasetId: string,
+  options: ParseOptions = {},
+): CurationLookup {
+  try {
+    const entry = parseCuration(text, options).entries.get(datasetId);
+    return entry === undefined ? { status: "none" } : { status: "entry", entry };
+  } catch (error) {
+    if (!(error instanceof CurationError)) throw error;
+    return { status: "stop", problems: error.problems };
+  }
 }
