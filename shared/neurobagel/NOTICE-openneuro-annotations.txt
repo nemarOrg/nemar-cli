@@ -1,18 +1,14 @@
-Some entries of curation.json whose evidence.review is "upstream_community" are derived from
-the OpenNeuro annotations published by the Neurobagel project:
+Some entries of curation.json whose evidence.review is "upstream_community" are derived from the OpenNeuro annotations published by the Neurobagel project:
 
   https://github.com/neurobagel/openneuro-annotations
   commit 116676db7114b68338c48df2d6bb804c99e8c354
 
 Each such entry names the upstream file it comes from in its evidence.source.
-What is taken is the annotation tool's Annotations block of a column (which variable the column
-is about, which term each value means, which values are missing).
-It is rewritten onto the pinned Neurobagel vocabulary and checked against NEMAR's own copy of the
-dataset's participants.tsv; nothing is copied that does not fit that table.
+What is taken is the annotation tool's Annotations block of a column (which variable the column is about, which term each value means, which values are missing).
+It is rewritten onto the pinned Neurobagel vocabulary and checked against NEMAR's own copy of the dataset's participants.tsv; nothing is copied that does not fit that table.
 The upstream files used for the tests are kept, unchanged, under test/neurobagel/upstream/.
 
-The upstream repository is distributed under the following licence, whose notice is reproduced
-here as that licence requires:
+The upstream repository is distributed under the following licence, whose notice is reproduced here as that licence requires:
 
 MIT License
 
