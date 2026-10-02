@@ -208,6 +208,24 @@ describe("only strict artifact names are served", () => {
     }
   });
 
+  test("an object under a name that merely ENDS like an artifact's is not served: the name is anchored on both sides", async () => {
+    // The strict name is a whole-string match. Unanchored on the left, `x/nm000700.jsonld`
+    // would parse as dataset nm000700 (eligible, in the store), pass the check, and the bucket
+    // read below it would return this stamped object, planted under a path of its own.
+    await populate("nm000700");
+    const stamp = { sha256: "0".repeat(64), kind: "jsonld" };
+    const planted = ["x/nm000700.jsonld", "prefix_nm000700.jsonld", "..%2Fnm000700.jsonld"];
+    for (const key of planted)
+      await h.bucket.put(decodeURIComponent(key), "{ planted }", { customMetadata: stamp });
+    for (const key of ["x%2Fnm000700.jsonld", "prefix_nm000700.jsonld", "..%2Fnm000700.jsonld"]) {
+      const res = await get(`/neurobagel/${key}`);
+      expect(res.status, key).toBe(404);
+      expect(await res.text(), key).not.toContain("planted");
+    }
+    // The control: the real artifact of that dataset is served.
+    expect((await get("/neurobagel/nm000700.jsonld")).status).toBe(200);
+  });
+
   test("the bucket is never listed: the root and listing-shaped requests are not an index of it", async () => {
     await populate("nm000700");
     for (const path of [
