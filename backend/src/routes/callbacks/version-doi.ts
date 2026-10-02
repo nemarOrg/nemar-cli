@@ -1022,16 +1022,6 @@ async function handleZenodoVersionDoi(
     if (!centralFlow) {
       const refreshed = refreshMetadataAfterVersionDoi(c.env, dataset.dataset_id, version);
       c.executionCtx.waitUntil(refreshed);
-      // Neurobagel federation (epic #1586 phase 4, ADR 0084): a new published version
-      // on the legacy path, where the version row is written inline. A hook: off unless
-      // the writer is enabled, never awaited, every failure caught.
-      scheduleNeurobagelSync(
-        c.env,
-        (work) => c.executionCtx.waitUntil(work),
-        dataset.dataset_id,
-        "hook:version",
-        { after: refreshed },
-      );
     }
 
     return c.json({

@@ -584,6 +584,302 @@ describe("the publication approval (a publication)", () => {
   });
 });
 
+/**
+ * An admin who owns `datasetId`'s repository and a publication request that has done every
+ * step but the two logged no-ops (`upload_to_zenodo`, `sync_nemar`): the golden resume path
+ * of publication-approve-golden.test.ts, which touches no external service, so the whole
+ * approval, its finalize block and the hook after it run for real.
+ */
+async function seedApprovalWithTwoStepsLeft(datasetId: string): Promise<void> {
+  seedSynthetic(h, datasetId);
+  h.db
+    .query(
+      `INSERT INTO users (username, email, password_hash, status, role, email_verified,
+                          service_access, given_name, family_name)
+       VALUES ('mainadmin', 'mainadmin@example.org', 'x', 'approved', 'admin', 1, 1, 'Main', 'Admin')`,
+    )
+    .run();
+  const admin = h.db
+    .query<{ id: number }, []>("SELECT id FROM users WHERE username = 'mainadmin'")
+    .get();
+  h.db
+    .query("INSERT INTO tokens (user_id, api_key_hash, api_key_prefix) VALUES (?, ?, ?)")
+    .run(admin?.id ?? 0, await hashApiKey(ADMIN_KEY), ADMIN_KEY.slice(0, 8));
+  h.db
+    .query("UPDATE datasets SET owner_user_id = ?, github_repo = ? WHERE dataset_id = ?")
+    .run(admin?.id ?? 0, `nemarDatasets/${datasetId}`, datasetId);
+  h.db
+    .query(
+      `INSERT INTO publication_requests (dataset_id, status, requested_by, requested_at, steps_completed)
+       VALUES (?, 'requested', ?, datetime('now'), ?)`,
+    )
+    .run(
+      datasetId,
+      admin?.id ?? 0,
+      JSON.stringify(
+        PUBLICATION_STEPS.filter((x) => x !== "upload_to_zenodo" && x !== "sync_nemar"),
+      ),
+    );
+}
+
+function approveResume(datasetId: string, c: ReturnType<typeof collector>, env: Bindings) {
+  return worker.fetch(
+    new Request(`${API}/admin/publish/${datasetId}/approve`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ resume: true }),
+    }),
+    env,
+    { waitUntil: c.waitUntil, passThroughOnException: () => {} } as unknown as ExecutionContext,
+  );
+}
+
+describe("the publication approval's own finalize (the main path)", () => {
+  test("the approval finishes, answers as it always did, and federates THAT dataset and no other", async () => {
+    await seedApprovalWithTwoStepsLeft("nm000991");
+    // Another eligible dataset with a manifest, which a hook for the wrong id would write.
+    seedSynthetic(h, "nm000992");
+    const c = collector();
+
+    const res = await approveResume("nm000991", c, h.env());
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      message: "Dataset published successfully",
+      dataset_id: "nm000991",
+      status: "published",
+    });
+    expect(
+      h.db.query("SELECT status FROM publication_requests WHERE dataset_id = 'nm000991'").get(),
+    ).toEqual({ status: "published" });
+    await c.settle();
+    expect(await objectsAfter()).toEqual([
+      "nm000991.jsonld",
+      "nm000991_annotated.json",
+      "nm000991_dataset_description.json",
+    ]);
+  });
+
+  test("a writer that fails never reaches the approval: the dataset is published and the answer is the same", async () => {
+    await seedApprovalWithTwoStepsLeft("nm000993");
+    const broken = new Proxy(h.bucket, {
+      get(target, prop) {
+        if (prop === "list") return async () => Promise.reject(new Error("R2 is down"));
+        const value = Reflect.get(target, prop);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as R2Bucket;
+    const logged: string[] = [];
+    console.error = (...a: unknown[]) => logged.push(a.join(" "));
+    const c = collector();
+    const res = await approveResume("nm000993", c, h.env({ NEUROBAGEL: broken }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ status: "published" });
+    await expect(c.settle()).resolves.toBeUndefined();
+    expect(logged.join(" ")).toContain("R2 is down");
+    expect(
+      h.db.query("SELECT status FROM publication_requests WHERE dataset_id = 'nm000993'").get(),
+    ).toEqual({ status: "published" });
+  });
+
+  test("a writer that hangs cannot hold the approval", async () => {
+    await seedApprovalWithTwoStepsLeft("nm000994");
+    const d1 = wrapD1(h.env().DB, (sql) => {
+      if (sql.includes("latest_version") && sql.includes("json_each")) {
+        return new Promise<void>(() => {});
+      }
+    });
+    const c = collector();
+    const started = Date.now();
+    const res = await approveResume("nm000994", c, h.env({ DB: d1 }));
+    expect(res.status).toBe(200);
+    expect(Date.now() - started).toBeLessThan(3000);
+    expect(await storeKeys(h.bucket)).toEqual([]);
+  });
+
+  test("with the writer off the approval does exactly what it did: nothing scheduled, no store", async () => {
+    await seedApprovalWithTwoStepsLeft("nm000995");
+    const c = collector();
+    const res = await approveResume("nm000995", c, h.env({ NEUROBAGEL_WRITER_ENABLED: undefined }));
+    expect(res.status).toBe(200);
+    await c.settle();
+    expect(await storeKeys(h.bucket)).toEqual([]);
+  });
+});
+
+// ----------------------------------------------------------------------------
+// The legacy version path
+// ----------------------------------------------------------------------------
+
+/**
+ * A local EZID: the registrar's own wire format (ANVL over HTTP), a store of identifiers,
+ * `NEMAR_EZID_API_URL` pointing at it (the override the DOI suites use). PUT creates, POST
+ * updates, GET reads.
+ */
+function startEzidStandin(): { url: string; stop(): void; created: string[] } {
+  const store = new Map<string, Record<string, string>>();
+  const created: string[] = [];
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const identifier = decodeURIComponent(new URL(req.url).pathname.replace(/^\/id\//, ""));
+      const anvl = (fields: Record<string, string>) =>
+        [`success: ${identifier}`, ...Object.entries(fields).map(([k, v]) => `${k}: ${v}`)].join(
+          "\n",
+        );
+      if (req.method === "GET") {
+        const fields = store.get(identifier);
+        return new Response(fields ? anvl(fields) : "error: bad request - no such identifier");
+      }
+      const fields: Record<string, string> = {};
+      for (const line of (await req.text()).split("\n")) {
+        const at = line.indexOf(": ");
+        if (at > 0)
+          fields[decodeURIComponent(line.slice(0, at))] = decodeURIComponent(line.slice(at + 2));
+      }
+      if (req.method === "PUT") {
+        if (store.has(identifier)) return new Response("error: identifier already exists");
+        store.set(identifier, { _status: "reserved", ...fields });
+        created.push(identifier);
+      } else {
+        store.set(identifier, { ...(store.get(identifier) ?? {}), ...fields });
+      }
+      return new Response(`success: ${identifier}`);
+    },
+  });
+  (globalThis as { NEMAR_EZID_API_URL?: string }).NEMAR_EZID_API_URL =
+    `http://127.0.0.1:${server.port}`;
+  return {
+    url: `http://127.0.0.1:${server.port}`,
+    created,
+    stop() {
+      server.stop(true);
+      (globalThis as { NEMAR_EZID_API_URL?: string }).NEMAR_EZID_API_URL = undefined;
+    },
+  };
+}
+
+describe("the legacy version-DOI path (the version row is written inline)", () => {
+  let ezid: ReturnType<typeof startEzidStandin>;
+  beforeAll(() => {
+    ezid = startEzidStandin();
+  });
+  afterAll(() => {
+    ezid.stop();
+  });
+
+  const WEBHOOK = "legacy-version-doi-token-0123456789abcdef";
+  /** The ref lookups the metadata read and refresh start with: answered, so they do not retry. */
+  const answerCommits = (id: string) => {
+    for (const ref of ["v1.0.1", "main"]) {
+      h.standin.put(
+        `/repos/nemarDatasets/${id}/commits/${ref}`,
+        JSON.stringify({ sha: "a".repeat(40), commit: { tree: { sha: "b".repeat(40) } } }),
+      );
+    }
+  };
+  const legacyEnv = (over: Partial<Bindings> = {}) =>
+    h.env({
+      NEMAR_WEBHOOK_TOKEN: WEBHOOK,
+      EZID_USERNAME: "apitest",
+      EZID_PASSWORD: "apitest",
+      EZID_SANDBOX_USERNAME: "apitest",
+      EZID_SANDBOX_PASSWORD: "apitest",
+      ...over,
+    });
+
+  function publishVersionDoi(
+    datasetId: string,
+    version: string,
+    c: ReturnType<typeof collector>,
+    env: Bindings,
+  ) {
+    return worker.fetch(
+      new Request(`${API}/webhooks/publish-version-doi`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Webhook-Token": WEBHOOK },
+        body: JSON.stringify({
+          dataset_id: datasetId,
+          version,
+          release_url: `https://github.com/nemarDatasets/${datasetId}/releases/tag/v${version}`,
+        }),
+      }),
+      env,
+      { waitUntil: c.waitUntil, passThroughOnException: () => {} } as unknown as ExecutionContext,
+    );
+  }
+
+  test("the version row lands inline, the webhook answers, and THAT dataset is federated after", async () => {
+    // A published dataset with no row for the new version (1.0.1): the webhook mints its DOI
+    // and writes the row itself. The manifest for 1.0.1 is already on S3.
+    seedSynthetic(h, "nm000996", { version: "1.0.1", versions: [] });
+    h.db.run(
+      "UPDATE datasets SET github_repo = 'nemarDatasets/nm000996' WHERE dataset_id = 'nm000996'",
+    );
+    answerCommits("nm000996");
+    seedSynthetic(h, "nm000997"); // eligible, never the subject of a hook
+    const c = collector();
+    console.error = () => {};
+
+    const res = await publishVersionDoi("nm000996", "1.0.1", c, legacyEnv());
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ message: "Version DOI published successfully" });
+    expect(ezid.created.some((id) => id.toLowerCase().includes("nm000996"))).toBe(true);
+    expect(
+      h.db.query("SELECT version FROM dataset_versions WHERE dataset_id = 'nm000996'").get(),
+    ).toEqual({ version: "1.0.1" });
+    await c.settle();
+    expect(await objectsAfter()).toEqual([
+      "nm000996.jsonld",
+      "nm000996_annotated.json",
+      "nm000996_dataset_description.json",
+    ]);
+  });
+
+  test("a writer that fails cannot fail the webhook, which the release workflow waits on", async () => {
+    seedSynthetic(h, "nm000998", { version: "1.0.1", versions: [] });
+    h.db.run(
+      "UPDATE datasets SET github_repo = 'nemarDatasets/nm000998' WHERE dataset_id = 'nm000998'",
+    );
+    answerCommits("nm000998");
+    const broken = new Proxy(h.bucket, {
+      get(target, prop) {
+        if (prop === "list") return async () => Promise.reject(new Error("R2 is down"));
+        const value = Reflect.get(target, prop);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as R2Bucket;
+    const c = collector();
+    console.error = () => {};
+    const res = await publishVersionDoi("nm000998", "1.0.1", c, legacyEnv({ NEUROBAGEL: broken }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ message: "Version DOI published successfully" });
+    await expect(c.settle()).resolves.toBeUndefined();
+  });
+
+  test("with the writer off the webhook schedules nothing of ours", async () => {
+    seedSynthetic(h, "nm000999", { version: "1.0.1", versions: [] });
+    h.db.run(
+      "UPDATE datasets SET github_repo = 'nemarDatasets/nm000999' WHERE dataset_id = 'nm000999'",
+    );
+    answerCommits("nm000999");
+    const c = collector();
+    console.error = () => {};
+    const withOn = c.count();
+    const res = await publishVersionDoi(
+      "nm000999",
+      "1.0.1",
+      c,
+      legacyEnv({ NEUROBAGEL_WRITER_ENABLED: undefined }),
+    );
+    expect(res.status).toBe(200);
+    expect(c.count() - withOn).toBe(1); // only the metadata refresh
+    await c.settle();
+    expect(await storeKeys(h.bucket)).toEqual([]);
+  });
+});
+
 // ----------------------------------------------------------------------------
 // The daily reconcile and the dev fences
 // ----------------------------------------------------------------------------

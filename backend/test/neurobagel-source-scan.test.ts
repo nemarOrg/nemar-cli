@@ -236,11 +236,11 @@ describe("the hooks", () => {
   const SITES: Record<string, number> = {
     "services/publication-orchestrator.ts": 2,
     "routes/callbacks/manifest.ts": 1,
-    "routes/callbacks/version-doi.ts": 2,
+    "routes/callbacks/version-doi.ts": 1,
     "routes/callbacks/import-state.ts": 1,
   };
 
-  test("exactly these files call the hook, this many times (the legacy version path included)", () => {
+  test("exactly these files call the hook, this many times (the one reachable legacy version path included)", () => {
     const found: Record<string, number> = {};
     for (const file of walk(SRC)) {
       if (file === HOOKS) continue;
