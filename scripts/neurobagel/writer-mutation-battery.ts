@@ -8,8 +8,10 @@
  * Each mutant makes ONE plausible mistake in the eligibility predicate, the two anonymity
  * guards, removal, write order, the index, the read route's authentication and its re-check,
  * the hooks or the cron fence.
- * The tests that exist for the area are then run against it, and the mutant is KILLED if any
- * fails and has SURVIVED if none does.
+ * The tests that exist for the area are then run against it, and the mutant is KILLED only if a
+ * TEST FAILS ON AN ASSERTION: the log is read for failing tests, and a run that exits non-zero
+ * with none (a suite that did not load, a refused connection to a test server) is run once more
+ * and then reported INCONCLUSIVE, never counted as a kill. It has SURVIVED if every test passes.
  * A mutant that survives its own layer's tests is run once more against every Neurobagel
  * writer test, so the report can say whether the guard exists somewhere else or not at all.
  * A survivor is either a test that is missing or a mutant that changes nothing observable;
@@ -35,9 +37,13 @@ type Layer =
   | "auth"
   | "route"
   | "hooks"
-  | "admin";
+  | "admin"
+  | "budget"
+  | "plan"
+  | "fingerprint"
+  | "limits";
 
-interface Mutant {
+export interface Mutant {
   id: string;
   layer: Layer;
   file: string;
@@ -59,6 +65,7 @@ const ALL_TESTS = [
   `${T}/neurobagel-eligibility.test.ts`,
   `${T}/neurobagel-writer.test.ts`,
   `${T}/neurobagel-curation.test.ts`,
+  `${T}/neurobagel-fingerprint.test.ts`,
   `${T}/neurobagel-read-route.test.ts`,
   `${T}/neurobagel-admin-routes.test.ts`,
   `${T}/neurobagel-hooks.test.ts`,
@@ -279,18 +286,16 @@ export const MUTANTS: Mutant[] = [
     id: "G01-metadata-guard-unknown-is-false",
     layer: "guards",
     file: GATHER,
-    find: "if (doc.anonymous !== false) {",
-    replace: "if (doc.anonymous === true) {",
-    note: "a metadata document with no anonymous value is trusted",
+    find: "return value === false;",
+    replace: "return value !== true;",
+    note: "a metadata document with no anonymous value (or null, or the string false) is trusted",
     tests: [`${T}/neurobagel-writer.test.ts`],
-    equivalent:
-      "the data plane always writes the field, so only the guard's own contract differs; the test reaches it only through a true value",
   },
   {
     id: "G02-metadata-guard-removed",
     layer: "guards",
     file: GATHER,
-    find: "if (doc.anonymous !== false) {",
+    find: "if (!saysNotAnonymous(doc.anonymous)) {",
     replace: "if (false) {",
     note: "the second guard is gone: the row is the only line",
     tests: [`${T}/neurobagel-writer.test.ts`],
@@ -311,8 +316,7 @@ export const MUTANTS: Mutant[] = [
     find: `if (!fresh.eligible) return { id, outcome: "refused", code: "no_longer_eligible" };`,
     replace: "",
     note: "a dataset that stopped being eligible between the plan and the write is written",
-    equivalent:
-      "the plan and the write read D1 microseconds apart; no test can change a row between them without a hook in the plan query, and removal still follows from the listing",
+    tests: [`${T}/neurobagel-writer.test.ts`],
   },
   {
     id: "G05-transform-backstop-not-anonymity",
@@ -368,8 +372,6 @@ export const MUTANTS: Mutant[] = [
     replace: "return true;",
     note: "a manifest the data plane could not read is passed to the transform as an absent table",
     tests: [`${T}/neurobagel-writer.test.ts`],
-    equivalent:
-      "the data plane answers a different 404 body only when the manifest cannot be read, and then metadata.json is degraded and refused earlier in the same gather",
   },
 
   // Removal.
@@ -603,8 +605,6 @@ export const MUTANTS: Mutant[] = [
     replace: "`(${DATASET_ID})(\\\\.jsonld|_annotated\\\\.json|_dataset_description\\\\.json)$`,",
     note: "any name that ENDS like an artifact name is parsed as one",
     tests: [`${T}/neurobagel-read-route.test.ts`],
-    equivalent:
-      "the captured id and the object key are still checked against D1 and the bucket, so a name with a prefix reaches a 404 either way; nothing observable changes",
   },
   {
     id: "A09-own-rate-bucket-removed",
@@ -718,9 +718,302 @@ export const MUTANTS: Mutant[] = [
     note: "the CLI writes without --execute",
     tests: ["test/admin-neurobagel-cli.test.ts"],
   },
+
+  // The review round (PR #1605): the index per dataset, the budget, parking, the signature,
+  // the fingerprint's inputs, the size guards, the hooks' sites.
+  {
+    id: "I05-index-patch-skipped",
+    layer: "index",
+    file: WRITER,
+    find: "const patch = await patchIndexEntry(rc, written);",
+    replace: 'const patch = "unchanged" as const;',
+    note: "artifacts are written and the index is left for the end of the run: a run cut off leaves them newer than it",
+    tests: [`${T}/neurobagel-writer.test.ts`],
+  },
+  {
+    id: "I06-index-patch-unconditional",
+    layer: "index",
+    file: WRITER,
+    find: "      onlyIf: { etagMatches: previous.etag },\n",
+    replace: "",
+    note: "a per-dataset patch overwrites an index another run replaced",
+    tests: [`${T}/neurobagel-writer.test.ts`],
+  },
+  {
+    id: "I07-patch-failure-ignored",
+    layer: "index",
+    file: WRITER,
+    find: 'if (patch === "failed") rc.indexPatchFailed = true;',
+    replace: "",
+    note: "a run whose index cannot be patched keeps writing artifacts",
+    tests: [`${T}/neurobagel-writer.test.ts`],
+  },
+  {
+    id: "I08-index-read-after-listing",
+    layer: "index",
+    file: WRITER,
+    find: "    const previous = await readStoredIndex(bucket);\n    if (attempt > 1 || options.execute) listing = await listStore(bucket);",
+    replace:
+      "    if (attempt > 1 || options.execute) listing = await listStore(bucket);\n    const previous = await readStoredIndex(bucket);",
+    note: "the previous index is read after the listing: the conditional write no longer protects an interleaved run",
+    tests: [`${T}/neurobagel-writer.test.ts`],
+  },
+  {
+    id: "I09-eligibility-from-the-start-of-the-run",
+    layer: "index",
+    file: WRITER,
+    find: "const eligibleNow = await eligibleAmong(env.DB, [...fresh.datasets.keys()]);",
+    replace: "const eligibleNow = eligibleIds;",
+    note: "a dataset another run published while this one worked is dropped from the index and its artifacts deleted",
+    tests: [`${T}/neurobagel-writer.test.ts`],
+  },
+  {
+    id: "B01-budget-never-stops-the-loop",
+    layer: "budget",
+    file: WRITER,
+    find: "ops.total + DATASET_OPS_WORST + reserve > budget",
+    replace: "false",
+    note: "a run spends past its budget",
+    tests: [`${T}/neurobagel-writer.test.ts`],
+  },
+  {
+    id: "B02-no-reserve-for-the-closing-steps",
+    layer: "budget",
+    file: WRITER,
+    find: "const reserve = CLOSING_OPS + Math.min(leavingEstimate, REMOVAL_LIMIT);",
+    replace: "const reserve = 0;",
+    note: "the loop spends what the index sync and the removals need",
+    tests: [`${T}/neurobagel-writer.test.ts`],
+  },
+  {
+    id: "B03-first-dataset-not-exempt",
+    layer: "budget",
+    file: WRITER,
+    find: "result.examined > 0 && ops.total",
+    replace: "ops.total",
+    note: "a tiny budget examines nothing, and never makes progress",
+    tests: [`${T}/neurobagel-writer.test.ts`],
+  },
+  {
+    id: "B04-hard-limit-not-enforced",
+    layer: "budget",
+    file: WRITER,
+    find: "  const limit = Math.min(\n    RECONCILE_HARD_LIMIT,\n    Math.max(1, options.limit ?? reconcileLimit(callerEnv)),\n  );",
+    replace: "  const limit = Math.max(1, options.limit ?? reconcileLimit(callerEnv));",
+    note: "a caller can ask a run to examine more than the hard limit",
+    tests: [`${T}/neurobagel-writer.test.ts`],
+  },
+  {
+    id: "B05-removal-limit-ignored",
+    layer: "budget",
+    file: WRITER,
+    find: "leaving.slice(0, Math.min(REMOVAL_LIMIT, room))",
+    replace: "leaving.slice(0, room)",
+    note: "one run deletes every leaving dataset's artifacts, however many",
+    tests: [`${T}/neurobagel-writer.test.ts`],
+  },
+  {
+    id: "B06-removals-ignore-the-budget",
+    layer: "budget",
+    file: WRITER,
+    find: "const room = Math.max(0, budget - ops.total - 4);",
+    replace: "const room = Number.POSITIVE_INFINITY;",
+    note: "removals spend past the budget",
+    tests: [`${T}/neurobagel-writer.test.ts`],
+  },
+  {
+    id: "B07-schema-limit-unbounded",
+    layer: "admin",
+    file: ADMIN,
+    find: ".max(RECONCILE_HARD_LIMIT).optional(),\n    force",
+    replace: ".optional(),\n    force",
+    note: "the route accepts a limit above the ceiling and the writer shortens it silently",
+    tests: [`${T}/neurobagel-admin-routes.test.ts`],
+  },
+  {
+    id: "B08-cli-ceiling-not-checked",
+    layer: "admin",
+    file: "src/commands/admin.ts",
+    find: "if (limit !== undefined && limit > NEUROBAGEL_REGENERATE_MAX) {",
+    replace: "if (false) {",
+    note: "the CLI sends an over-ceiling limit and leaves the refusal to the server",
+    tests: ["test/admin-neurobagel-cli.test.ts"],
+  },
+  {
+    id: "B09-client-limit-check-removed",
+    layer: "admin",
+    file: "src/commands/admin.ts",
+    find: "if (limit !== undefined && !Number.isInteger(limit)) {",
+    replace: "if (false) {",
+    note: "the CLI sends a malformed limit and leaves the refusal to the server",
+    tests: ["test/admin-neurobagel-cli.test.ts"],
+  },
+  {
+    id: "K01-standing-refusals-never-parked",
+    layer: "plan",
+    file: PLAN,
+    find: "if (entry.label.sig === signatures.get(id)) parked.add(id);",
+    replace: "if (false) parked.add(id);",
+    note: "a dataset refused for ever takes a slot of every tick",
+    tests: [`${T}/neurobagel-writer.test.ts`],
+  },
+  {
+    id: "K02-parked-datasets-forgotten",
+    layer: "plan",
+    file: PLAN,
+    find: "      rest.push(id);\n      parkedCount++;",
+    replace: "      parkedCount++;",
+    note: "a parked dataset never joins the rotation, so it is never examined again",
+    tests: [`${T}/neurobagel-writer.test.ts`],
+  },
+  {
+    id: "K03-refusal-signature-ignored",
+    layer: "plan",
+    file: PLAN,
+    find: "? a.code === b.code && a.sig === b.sig",
+    replace: "? a.code === b.code",
+    note: "a refusal after the row changed is not recorded, so the parking decision reads the old signature",
+    tests: [`${T}/neurobagel-writer.test.ts`],
+  },
+  {
+    id: "S01-signature-from-the-plan-row",
+    layer: "plan",
+    file: WRITER,
+    find: "{ dataset_id: id, ...prepared.detail },\n    prepared.curationHash,",
+    replace: "row,\n    prepared.curationHash,",
+    note: "a row edited between plan and processing is stamped with a state it was not built from, and is stale for ever",
+    tests: [`${T}/neurobagel-writer.test.ts`],
+  },
+  {
+    id: "L01-latest-version-agreement-unchecked",
+    layer: "guards",
+    file: WRITER,
+    find: "if (toVersionTag(gathered.latestVersion) !== prepared.latestVersion) {",
+    replace: "if (false) {",
+    note: "one version's manifest ETag is stamped on another version's content",
+    tests: [`${T}/neurobagel-writer.test.ts`],
+  },
+  {
+    id: "F01-enrichment-length-not-in-the-signature",
+    layer: "fingerprint",
+    file: FINGERPRINT,
+    find: "      enrichment_length: enrichmentLength,\n",
+    replace: "",
+    note: "a changed enrichment document does not make the dataset stale",
+    tests: [`${T}/neurobagel-fingerprint.test.ts`],
+  },
+  {
+    id: "F02-enrichment-hash-not-in-the-row-fingerprint",
+    layer: "fingerprint",
+    file: FINGERPRINT,
+    find: "      enrichment_sha256: enrichmentSha256,\n",
+    replace: "",
+    note: "an enrichment edit of the same length is never rewritten",
+    tests: [`${T}/neurobagel-fingerprint.test.ts`],
+  },
+  {
+    id: "F03-vocabulary-pin-not-in-the-identity",
+    layer: "fingerprint",
+    file: FINGERPRINT,
+    find: "    vocab_communities: VOCAB.pins.communities.commit,\n",
+    replace: '    vocab_communities: "",\n',
+    note: "a vocabulary re-pin does not mark any dataset stale",
+    tests: [`${T}/neurobagel-fingerprint.test.ts`],
+  },
+  {
+    id: "F04-writer-revision-not-in-the-identity",
+    layer: "fingerprint",
+    file: FINGERPRINT,
+    find: "    writer: NEUROBAGEL_WRITER_REVISION,\n",
+    replace: "    writer: 0,\n",
+    note: "bumping the writer revision rewrites nothing",
+    tests: [`${T}/neurobagel-fingerprint.test.ts`],
+  },
+  {
+    id: "F05-license-not-in-the-fingerprint",
+    layer: "fingerprint",
+    file: WRITER,
+    find: "      license: detail.license,\n",
+    replace: "      license: null,\n",
+    note: "a license change is not rewritten",
+    tests: [`${T}/neurobagel-fingerprint.test.ts`],
+  },
+  {
+    id: "F06-subject-count-not-in-the-fingerprint",
+    layer: "fingerprint",
+    file: WRITER,
+    find: "      subject_count: detail.subject_count,\n",
+    replace: "      subject_count: null,\n",
+    note: "a subject count change is not rewritten",
+    tests: [`${T}/neurobagel-fingerprint.test.ts`],
+  },
+  {
+    id: "F07-concept-doi-not-in-the-fingerprint",
+    layer: "fingerprint",
+    file: WRITER,
+    find: "      concept_doi: detail.concept_doi,\n",
+    replace: "      concept_doi: null,\n",
+    note: "a concept DOI change is not rewritten",
+    tests: [`${T}/neurobagel-fingerprint.test.ts`],
+  },
+  {
+    id: "Z01-size-cap-off-by-one",
+    layer: "limits",
+    file: WRITER,
+    find: "if (size > (options.maxArtifactBytes ?? MAX_ARTIFACT_BYTES)) {",
+    replace: "if (size >= (options.maxArtifactBytes ?? MAX_ARTIFACT_BYTES)) {",
+    note: "an artifact exactly at the cap is refused",
+    tests: [`${T}/neurobagel-writer.test.ts`],
+  },
+  {
+    id: "Z02-size-cap-removed",
+    layer: "limits",
+    file: WRITER,
+    find: "if (size > (options.maxArtifactBytes ?? MAX_ARTIFACT_BYTES)) {",
+    replace: "if (false) {",
+    note: "an oversize artifact is written and the loader refuses the whole release",
+    tests: [`${T}/neurobagel-writer.test.ts`],
+  },
+  {
+    id: "Z03-metadata-never-trimmed",
+    layer: "limits",
+    file: WRITER,
+    find: "while (flags.length > 0 && size(trimmed) > R2_METADATA_BUDGET) {",
+    replace: "while (false) {",
+    note: "custom metadata over R2's limit is written as it is",
+    tests: [`${T}/neurobagel-writer.test.ts`],
+  },
+  {
+    id: "Z04-dry-run-writes-the-ledger",
+    layer: "limits",
+    file: WRITER,
+    find: "  if (!rc.options.execute) return;\n  try {\n    await recordLedgerState(",
+    replace: "  try {\n    await recordLedgerState(",
+    note: "a dry run records findings",
+    tests: [`${T}/neurobagel-writer.test.ts`],
+  },
+  {
+    id: "H08-publication-hook-wrong-dataset",
+    layer: "hooks",
+    file: `${SVC}/publication-orchestrator.ts`,
+    find: 'scheduleNeurobagelSync(env, waitUntil, datasetId, "hook:publication");\n\n  // Audit log (non-fatal but warn user if fails)',
+    replace:
+      'scheduleNeurobagelSync(env, waitUntil, "nm000992", "hook:publication");\n\n  // Audit log (non-fatal but warn user if fails)',
+    note: "the approval's own finalize federates the wrong dataset",
+    tests: [`${T}/neurobagel-hooks.test.ts`],
+  },
+  {
+    id: "H09-legacy-version-hook-wrong-dataset",
+    layer: "hooks",
+    file: `${ROUTES}/callbacks/version-doi.ts`,
+    find: '        dataset.dataset_id,\n        "hook:version",',
+    replace: '        "nm000997",\n        "hook:version",',
+    note: "the legacy version path federates the wrong dataset",
+    tests: [`${T}/neurobagel-hooks.test.ts`],
+  },
 ];
 
-function mutate(source: string, m: Mutant): string {
+export function mutate(source: string, m: Mutant): string {
   const expected = m.count ?? 1;
   const found = source.split(m.find).length - 1;
   if (found !== expected) {
@@ -732,7 +1025,52 @@ function mutate(source: string, m: Mutant): string {
   return source.slice(0, at) + m.replace + source.slice(at + m.find.length);
 }
 
-async function runTests(files: string[]): Promise<{ passed: boolean; failed: string[] }> {
+/** One failing test, and whether the TEST INFRASTRUCTURE failed it rather than an assertion. */
+interface Failure {
+  name: string;
+  infra: boolean;
+}
+
+interface TestRun {
+  /** The process exited 0. */
+  passed: boolean;
+  failures: Failure[];
+  /** Failing tests the code under test answers for: not a refused connection, not a missing suite. */
+  asserted: Failure[];
+}
+
+/** What a failure caused by the harness (a stand-in or Miniflare's proxy not answering) reads like. */
+const INFRASTRUCTURE =
+  /ConnectionRefused|ECONNREFUSED|ECONNRESET|Unable to connect|platform[- ]proxy|socket hang up|fetch failed/i;
+
+/**
+ * Read a `bun test` log: the failing tests, each with the error text printed before it.
+ * Exit status alone is not evidence of a kill: a suite that did not load, a crash, or a
+ * server that refused a connection all exit non-zero with no failing assertion.
+ */
+export function readTestLog(text: string, exitCode: number): TestRun {
+  const failures: Failure[] = [];
+  let pending: string[] = [];
+  for (const line of text.split("\n")) {
+    const status = /^(?:\((pass|fail|skip)\)|(✓|✗)) (.+?)(?: \[[\d.]+ms\])?$/.exec(line);
+    if (!status) {
+      pending.push(line);
+      continue;
+    }
+    const failed = status[1] === "fail" || status[2] === "✗";
+    if (failed) {
+      failures.push({ name: status[3] as string, infra: INFRASTRUCTURE.test(pending.join("\n")) });
+    }
+    pending = [];
+  }
+  return {
+    passed: exitCode === 0,
+    failures,
+    asserted: failures.filter((f) => !f.infra),
+  };
+}
+
+async function runTestsOnce(files: string[]): Promise<TestRun> {
   const proc = Bun.spawn(["bun", "test", "--timeout", "60000", ...files], {
     cwd: ROOT,
     stdout: "pipe",
@@ -745,8 +1083,18 @@ async function runTests(files: string[]): Promise<{ passed: boolean; failed: str
   const code = await proc.exited;
   // biome-ignore lint/suspicious/noControlCharactersInRegex: the escape character IS what is stripped
   const text = `${out}\n${err}`.replace(/\u001b\[[0-9;]*m/g, "");
-  const failed = [...text.matchAll(/^(?:\(fail\)|✗) (.+?)(?: \[[\d.]+ms\])?$/gm)].map((m) => m[1]);
-  return { passed: code === 0, failed };
+  return readTestLog(text, code);
+}
+
+/**
+ * Run the tests; when they fail WITHOUT a failing assertion (infrastructure, or a suite that
+ * did not load) run them once more before believing it. A second such failure is returned as
+ * it is, and the caller reports the mutant as inconclusive, never as killed.
+ */
+async function runTests(files: string[]): Promise<TestRun> {
+  const first = await runTestsOnce(files);
+  if (first.passed || first.asserted.length > 0) return first;
+  return runTestsOnce(files);
 }
 
 async function main(): Promise<void> {
@@ -767,31 +1115,44 @@ async function main(): Promise<void> {
   const selected = MUTANTS.filter((m) => only === undefined || m.layer === only);
   const baseline = await runTests(ALL_TESTS);
   if (!baseline.passed) {
-    console.error("the unmutated tests do not pass; fix them before measuring mutants");
+    console.error(
+      `the unmutated tests do not pass${baseline.failures.length > 0 ? ` (${baseline.failures.map((f) => f.name).join("; ")})` : " (no failing test: a suite did not load or the infrastructure failed)"}; fix them before measuring mutants`,
+    );
     process.exit(2);
   }
   let killed = 0;
   const survivors: Mutant[] = [];
+  const inconclusive: Mutant[] = [];
   for (const m of selected) {
     const path = join(ROOT, m.file);
     const original = readFileSync(path, "utf8");
     try {
       writeFileSync(path, mutate(original, m));
       const focused = await runTests(m.tests ?? ALL_TESTS);
+      if (!focused.passed && focused.asserted.length === 0) {
+        inconclusive.push(m);
+        console.log(
+          `INCONCLUSIVE ${m.id}  (the tests failed twice without a failing assertion: ${focused.failures.map((f) => f.name).join("; ") || "no test ran to a result"})`,
+        );
+        continue;
+      }
       if (!focused.passed) {
         killed++;
         console.log(
-          `killed   ${m.id}  by ${focused.failed.length} test(s), for example: ${focused.failed[0] ?? "(a suite failed to load)"}`,
+          `killed   ${m.id}  by ${focused.asserted.length} test(s), for example: ${focused.asserted[0]?.name}`,
         );
         continue;
       }
       // Survived its own tests: does any other writer test notice?
       const wide = m.tests === undefined ? focused : await runTests(ALL_TESTS);
-      if (!wide.passed) {
+      if (!wide.passed && wide.asserted.length > 0) {
         killed++;
         console.log(
-          `killed   ${m.id}  only by the wider suite (${wide.failed[0] ?? "a suite failed to load"}); its own tests missed it`,
+          `killed   ${m.id}  only by the wider suite (${wide.asserted[0]?.name}); its own tests missed it`,
         );
+      } else if (!wide.passed) {
+        inconclusive.push(m);
+        console.log(`INCONCLUSIVE ${m.id}  (the wider suite failed without a failing assertion)`);
       } else {
         survivors.push(m);
         console.log(
@@ -804,9 +1165,9 @@ async function main(): Promise<void> {
   }
   const equivalent = survivors.filter((s) => s.equivalent).length;
   console.log(
-    `\n${selected.length} mutants: ${killed} killed, ${survivors.length} survived (${equivalent} believed equivalent, ${survivors.length - equivalent} real gaps)`,
+    `\n${selected.length} mutants: ${killed} killed, ${survivors.length} survived (${equivalent} believed equivalent, ${survivors.length - equivalent} real gaps), ${inconclusive.length} inconclusive`,
   );
-  if (survivors.length - equivalent > 0) process.exit(1);
+  if (survivors.length - equivalent > 0 || inconclusive.length > 0) process.exit(1);
 }
 
 if (import.meta.main) await main();
