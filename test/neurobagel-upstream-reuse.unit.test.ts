@@ -22,7 +22,7 @@ import {
   NEUROBAGEL_TEST_ROOT,
   loadCuration,
 } from "../scripts/neurobagel/fixtures-io";
-import { parseArgs, planMerge } from "../scripts/neurobagel/reuse-openneuro-annotations";
+import { parseArgs, planMerge, sexAudit } from "../scripts/neurobagel/reuse-openneuro-annotations";
 import {
   type Conversion,
   MergeRefusal,
@@ -31,6 +31,7 @@ import {
   type UpstreamFile,
   convertUpstream,
   mergeEntries,
+  sexReadingDrop,
 } from "../scripts/neurobagel/upstream-annotations";
 import { canonicalJson } from "../shared/neurobagel/canonical-json";
 import { gitBlobShaOfBytes } from "../shared/neurobagel/git-blob";
@@ -193,14 +194,14 @@ describe("the converter keeps only what fits, and counts what it drops", () => {
   });
 
   test("a column the table does not have", async () => {
-    // on004574 annotates GENDER, MOCA and UPDRS.
-    const mirror = await mirrorOf("on004574", (tsv, json) => [
-      tsv.replace("GENDER", "SEX_AT_BIRTH"),
+    // on003474 annotates sex, BDI and STAI.
+    const mirror = await mirrorOf("on003474", (tsv, json) => [
+      tsv.replace("sex", "SEX_AT_BIRTH"),
       json,
     ]);
-    const out = await convert("on004574", {}, undefined, mirror);
+    const out = await convert("on003474", {}, undefined, mirror);
     expect(out.dropped).toEqual({ column_not_in_table: 1 });
-    expect(Object.keys((out.entry?.columns as Json) ?? {}).sort()).toEqual(["MOCA", "UPDRS"]);
+    expect(Object.keys((out.entry?.columns as Json) ?? {}).sort()).toEqual(["BDI", "STAI"]);
   });
 
   test("a term upstream uses that the pinned vocabulary does not have", async () => {
@@ -429,16 +430,369 @@ describe("an empty upstream level map never becomes a column", () => {
   });
 });
 
+/**
+ * The owner's rule (2026-10-02, ADR 0083 amendment): Neurobagel's term is sex, not gender, so a
+ * column NOT named `sex` is read as sex only when the dataset's own participants.json describes it
+ * as sex.
+ * Every case here is a real document: the descriptions are the four real ones of on001787,
+ * on004635, on004574 and on006861, and each variation changes one thing in a real participants.json.
+ */
+describe("a sex column not named sex is read as sex only when its own description says sex", () => {
+  const descriptionIn = (id: string, column: string): string | null => {
+    const path = join(FIXTURE_ROOT, id, "participants.json");
+    if (!existsSync(path)) return null;
+    const doc = JSON.parse(readFileSync(path, "utf8")) as Record<string, Json | undefined>;
+    return (doc[column]?.Description as string | undefined) ?? null;
+  };
+  /** The real participants.json of `id` with the Description of `column` replaced (undefined removes it). */
+  const redescribed = (id: string, column: string, description: string | undefined) =>
+    mirrorOf(id, (tsv, json) => {
+      const doc = JSON.parse(json ?? "{}") as Record<string, Json>;
+      if (description === undefined) {
+        const { Description: _removed, ...rest } = doc[column];
+        doc[column] = rest;
+      } else {
+        doc[column] = { ...doc[column], Description: description };
+      }
+      return [tsv, JSON.stringify(doc)];
+    });
+  const columnsOf = (out: Conversion): string[] =>
+    Object.keys((out.entry?.columns as Json) ?? {}).sort();
+
+  const REAL = [
+    { id: "on001787", column: "gender", says: "sex of the participant", kept: true },
+    {
+      id: "on004635",
+      column: "Gender",
+      says: "Participant biological sex assigned at birth",
+      kept: true,
+    },
+    { id: "on004574", column: "GENDER", says: "Gender of the participant", kept: false },
+    {
+      id: "on006861",
+      column: "Gender",
+      says: "Participant gender. Values: Female or Male.",
+      kept: false,
+    },
+  ] as const;
+
+  describe("the four real descriptions", () => {
+    for (const { id, column, says, kept } of REAL) {
+      test(`${id} ${column}: participants.json says "${says}", so the column is ${kept ? "read as sex" : "left out"}`, async () => {
+        expect(descriptionIn(id, column)).toBe(says);
+        expect(sexReadingDrop(column, says)).toBe(kept ? null : "sex_described_as_gender");
+        const out = await convert(id);
+        expect(columnsOf(out).includes(column)).toBe(kept);
+        expect<number | undefined>(out.dropped.sex_described_as_gender).toBe(kept ? undefined : 1);
+        expect(out.dropped.sex_not_described_as_sex).toBeUndefined();
+        expect(out.kept).toBe(columnsOf(out).length);
+      });
+    }
+
+    test("a column left out costs the entry that column and nothing else", async () => {
+      expect(columnsOf(await convert("on004574"))).toEqual(["MOCA", "UPDRS"]);
+      expect(columnsOf(await convert("on006861"))).toEqual(["UCLA_R", "UCLA_R_screening"]);
+      expect(columnsOf(await convert("on001787"))).toEqual(["gender"]);
+      expect(columnsOf(await convert("on004635"))).toEqual(["Gender"]);
+      // The other drop reasons of the same datasets are untouched.
+      expect((await convert("on004635")).dropped).toEqual({ age_units_not_years: 1 });
+    });
+
+    test("a dataset left with no column to keep because its gender column was left out has no entry, and says why", async () => {
+      const out = await convert(
+        "on001787",
+        {},
+        undefined,
+        await redescribed("on001787", "gender", "gender of the participant"),
+      );
+      // The only other annotated column, age, is one the mechanical rules already read.
+      expect(out.skip).toBe("only_redundant_columns");
+      expect(out.entry).toBeNull();
+      expect(out.dropped).toEqual({ sex_described_as_gender: 1 });
+    });
+  });
+
+  describe("one change to a real participants.json, case by case", () => {
+    test("the description says sex: a gender column is kept, and the evidence quotes the words", async () => {
+      const mirror = await redescribed("on004574", "GENDER", "Sex of the participant");
+      const out = await convert("on004574", {}, undefined, mirror);
+      expect(columnsOf(out)).toEqual(["GENDER", "MOCA", "UPDRS"]);
+      expect(out.dropped).toEqual({});
+      expect(JSON.stringify(out.entry)).toContain(
+        'GENDER is read as Sex (participants.json says: \\"Sex of the participant\\")',
+      );
+    });
+
+    test("the description says gender: left out, whatever the values and Levels look like", async () => {
+      // The real Levels of on004574's GENDER are Female and Male, and still do not make it sex.
+      const mirror = await redescribed("on004574", "GENDER", "Gender identity of the participant");
+      const out = await convert("on004574", {}, undefined, mirror);
+      expect(columnsOf(out)).toEqual(["MOCA", "UPDRS"]);
+      expect(out.dropped).toEqual({ sex_described_as_gender: 1 });
+    });
+
+    test("the description is absent: left out, because nothing in the sidecar supports sex", async () => {
+      const noDescription = await redescribed("on004574", "GENDER", undefined);
+      const out = await convert("on004574", {}, undefined, noDescription);
+      expect(columnsOf(out)).toEqual(["MOCA", "UPDRS"]);
+      expect(out.dropped).toEqual({ sex_not_described_as_sex: 1 });
+      // The column is not in participants.json at all.
+      const noColumn = await mirrorOf("on004574", (tsv, json) => {
+        const doc = JSON.parse(json ?? "{}") as Record<string, Json>;
+        const { GENDER: _removed, ...rest } = doc;
+        return [tsv, JSON.stringify(rest)];
+      });
+      const bare = await convert("on004574", {}, undefined, noColumn);
+      expect(columnsOf(bare)).toEqual(["MOCA", "UPDRS"]);
+      expect(bare.dropped).toEqual({ sex_not_described_as_sex: 1 });
+    });
+
+    test("participants.json is absent: left out, the other columns stay and pin the file as absent", async () => {
+      const mirror = await mirrorOf("on004574", (tsv) => [tsv, null]);
+      const out = await convert("on004574", {}, undefined, mirror);
+      expect(columnsOf(out)).toEqual(["MOCA", "UPDRS"]);
+      expect(out.dropped).toEqual({ sex_not_described_as_sex: 1 });
+      expect((out.entry?.pins as Json).participants_json).toBeNull();
+    });
+
+    test("a description that says neither word leaves the column out, and the words are whole words", async () => {
+      for (const description of [
+        "Participant category",
+        "Sexual maturity of the participant",
+        "Essex of residence",
+        "",
+      ]) {
+        const mirror = await redescribed("on004574", "GENDER", description);
+        const out = await convert("on004574", {}, undefined, mirror);
+        expect(out.dropped).toEqual({ sex_not_described_as_sex: 1 });
+        expect(columnsOf(out)).toEqual(["MOCA", "UPDRS"]);
+      }
+    });
+
+    test("a description that names both says gender: left out", async () => {
+      for (const description of ["Sex or gender of the participant", "Gender (sex at birth)"]) {
+        const mirror = await redescribed("on004574", "GENDER", description);
+        const out = await convert("on004574", {}, undefined, mirror);
+        expect(out.dropped).toEqual({ sex_described_as_gender: 1 });
+        expect(columnsOf(out)).toEqual(["MOCA", "UPDRS"]);
+      }
+    });
+
+    test("the match ignores case, and gender is found inside a longer word", async () => {
+      const upper = await redescribed("on004574", "GENDER", "SEX OF THE PARTICIPANT");
+      expect(columnsOf(await convert("on004574", {}, undefined, upper))).toContain("GENDER");
+      const shouted = await redescribed("on004574", "GENDER", "GENDER OF THE PARTICIPANT");
+      expect((await convert("on004574", {}, undefined, shouted)).dropped).toEqual({
+        sex_described_as_gender: 1,
+      });
+      const longer = await redescribed("on004574", "GENDER", "Sex, including transgender status");
+      expect((await convert("on004574", {}, undefined, longer)).dropped).toEqual({
+        sex_described_as_gender: 1,
+      });
+    });
+
+    test("the sex a column's own Description names is the only evidence: a Levels text does not count", async () => {
+      // on004574's real Levels say Female and Male; give the Description nothing and put sex in a Levels text.
+      const mirror = await mirrorOf("on004574", (tsv, json) => {
+        const doc = JSON.parse(json ?? "{}") as Record<string, Json>;
+        doc.GENDER = { Levels: { F: "female sex", M: "male sex" } };
+        return [tsv, JSON.stringify(doc)];
+      });
+      const out = await convert("on004574", {}, undefined, mirror);
+      expect(out.dropped).toEqual({ sex_not_described_as_sex: 1 });
+    });
+  });
+
+  describe("a column literally named sex is unchanged by the rule", () => {
+    test("on003474's sex column stays with its real description, with a description that says gender, and with none", async () => {
+      expect(descriptionIn("on003474", "sex")).toBe("sex of the participant");
+      for (const description of [
+        "sex of the participant",
+        "gender of the participant",
+        undefined,
+      ]) {
+        const mirror = await redescribed("on003474", "sex", description);
+        const out = await convert("on003474", {}, undefined, mirror);
+        expect(columnsOf(out)).toEqual(["BDI", "STAI", "sex"]);
+        expect(out.dropped).toEqual({});
+      }
+      const absent = await mirrorOf("on003474", (tsv) => [tsv, null]);
+      expect(columnsOf(await convert("on003474", {}, undefined, absent))).toContain("sex");
+    });
+
+    test("the name is matched as the mechanical rule matches it: any case, padding ignored", () => {
+      for (const name of ["sex", "Sex", "SEX", " sex ", "\tSex"]) {
+        expect(sexReadingDrop(name, null)).toBeNull();
+        expect(sexReadingDrop(name, "gender of the participant")).toBeNull();
+      }
+      for (const name of ["gender", "Gender", "GENDER", "sex_at_birth", "biological_sex", "sexe"]) {
+        expect(sexReadingDrop(name, null)).toBe("sex_not_described_as_sex");
+      }
+    });
+
+    test("a sex column the mechanical rules already read is still kept on request, with no participants.json at all", async () => {
+      // on003568 has a `sex` column of MALE and FEMALE and no participants.json.
+      const out = await convert("on003568", { keepRedundant: true });
+      expect(columnsOf(out)).toContain("sex");
+      expect(out.dropped).toEqual({});
+    });
+  });
+
+  describe("a dataset with both a sex and a gender column maps each by its own description", () => {
+    /** on003474 with a `gender` column of F and M, annotated as sex, ahead of the real `sex` column. */
+    const bothColumns = async (description: string) => {
+      const upstream = JSON.parse(JSON.stringify(upstreamOf("on003474"))) as Json;
+      const gender = (upstreamOf("on001787") as Json).gender;
+      const ordered = { gender, ...upstream };
+      const mirror = await mirrorOf("on003474", (tsv, json) => {
+        const eol = tsv.includes("\r\n") ? "\r\n" : "\n";
+        const lines = tsv.split(eol);
+        const withColumn = lines.map((line, i) =>
+          line === "" ? line : `${line}\t${i === 0 ? "gender" : i % 2 === 0 ? "F" : "M"}`,
+        );
+        const doc = JSON.parse(json ?? "{}") as Record<string, Json>;
+        doc.gender = { Description: description };
+        return [withColumn.join(eol), JSON.stringify(doc)];
+      });
+      return convert("on003474", {}, ordered, mirror);
+    };
+
+    test("gender described as gender is left out and the real sex column still takes the sex slot", async () => {
+      const out = await bothColumns("gender of the participant");
+      expect(columnsOf(out)).toEqual(["BDI", "STAI", "sex"]);
+      // Not `second_sex_column`: a column left out never claimed the slot.
+      expect(out.dropped).toEqual({ sex_described_as_gender: 1 });
+      expect(out.keptByKind).toEqual({ assessment: 2, sex: 1 });
+    });
+
+    test("gender described as sex ahead of the sex column is the one sex column, as bagel takes the first", async () => {
+      const out = await bothColumns("sex of the participant");
+      expect(columnsOf(out)).toEqual(["BDI", "STAI", "gender"]);
+      expect(out.dropped).toEqual({ second_sex_column: 1 });
+    });
+
+    test("gender with no description at all is left out too", async () => {
+      const out = await bothColumns("");
+      expect(columnsOf(out)).toEqual(["BDI", "STAI", "sex"]);
+      expect(out.dropped).toEqual({ sex_not_described_as_sex: 1 });
+    });
+  });
+
+  describe("the audit trail shows what decided each column", () => {
+    test("a conversion records each sex column not named sex with the description that decided it, and none for a column named sex", async () => {
+      expect((await convert("on004574")).sexReadings).toEqual([
+        {
+          column: "GENDER",
+          decision: "sex_described_as_gender",
+          description: "Gender of the participant",
+          participantsJson: true,
+        },
+      ]);
+      expect((await convert("on001787")).sexReadings).toEqual([
+        {
+          column: "gender",
+          decision: "kept",
+          description: "sex of the participant",
+          participantsJson: true,
+        },
+      ]);
+      expect((await convert("on003474")).sexReadings).toEqual([]);
+      const absent = await mirrorOf("on004574", (tsv) => [tsv, null]);
+      expect((await convert("on004574", {}, undefined, absent)).sexReadings).toEqual([
+        {
+          column: "GENDER",
+          decision: "sex_not_described_as_sex",
+          description: null,
+          participantsJson: false,
+        },
+      ]);
+    });
+
+    test("the audit lists kept and left-out columns by dataset, and counts the left-out ones by reason", async () => {
+      const ids = ["on001787", "on003474", "on004574", "on004635", "on006861"];
+      const rows = await Promise.all(
+        ids.map(async (id) => ({ id, conversion: await convert(id) })),
+      );
+      const audit = sexAudit(rows);
+      expect(audit.kept).toBe(2);
+      expect(audit.left_out_by_reason).toEqual({ sex_described_as_gender: 2 });
+      expect(audit.columns.map((c) => `${c.dataset_id} ${c.column} ${c.decision}`)).toEqual([
+        "on001787 gender kept",
+        "on004574 GENDER sex_described_as_gender",
+        "on004635 Gender kept",
+        "on006861 Gender sex_described_as_gender",
+      ]);
+      expect(audit.columns.every((c) => c.participants_json)).toBe(true);
+      expect(audit.columns.find((c) => c.dataset_id === "on006861")?.description).toBe(
+        "Participant gender. Values: Female or Male.",
+      );
+    });
+
+    test("a column that was kept but whose dataset got no entry is not listed as kept", async () => {
+      const mirror = await mirrorOf("on004635");
+      const wrong: MirrorDocuments = {
+        ...mirror,
+        pins: { ...mirror.pins, participantsTsv: "0".repeat(40) },
+      };
+      const out = await convert("on004635", {}, undefined, wrong);
+      expect(out.entry).toBeNull();
+      expect(out.sexReadings.map((r) => r.decision)).toEqual(["kept"]);
+      expect(sexAudit([{ id: "on004635", conversion: out }]).columns).toEqual([]);
+    });
+
+    test("the command line takes --audit-sex with a file, and the file name is not read as a dataset", () => {
+      expect(parseArgs(["on004574"]).auditSex).toBeUndefined();
+      const args = parseArgs(["--audit-sex", "audit.json", "on004574"]);
+      expect(args.auditSex).toBe("audit.json");
+      expect(args.ids).toEqual(["on004574"]);
+      // A file named like a dataset id is still the flag's value, never a dataset.
+      expect(parseArgs(["--audit-sex", "on000001", "on004574"]).ids).toEqual(["on004574"]);
+    });
+  });
+
+  describe("the committed sample", () => {
+    test("every reused entry's sex column not named sex has a description saying sex in its own fixture", () => {
+      let checked = 0;
+      for (const e of reused) {
+        for (const c of e.columns) {
+          if (c.kind !== "sex" || c.name.trim().toLowerCase() === "sex") continue;
+          expect(sexReadingDrop(c.name, descriptionIn(e.datasetId, c.name))).toBeNull();
+          checked++;
+        }
+      }
+      // on001787's gender and on004635's Gender.
+      expect(checked).toBe(2);
+    });
+
+    test("on004574 and on006861 keep their assessment items and no sex column", () => {
+      const names = (id: string) =>
+        (loadCuration().entries.get(id)?.columns ?? []).map((c) => c.name);
+      expect(names("on004574").sort()).toEqual(["MOCA", "UPDRS"]);
+      expect(names("on006861").sort()).toEqual(["UCLA_R", "UCLA_R_screening"]);
+    });
+  });
+});
+
 describe("the evidence of a reused entry carries what a spot-check needs", () => {
   const sourceOfEntry = (id: string): string =>
     loadCuration().entries.get(id)?.evidence.source ?? "";
 
   test("a gender column read as sex says so, with what participants.json says about it", () => {
-    for (const id of ["on004574", "on006861", "on004635", "on001787"]) {
+    for (const id of ["on004635", "on001787"]) {
       expect(sourceOfEntry(id)).toMatch(/is read as Sex \(participants\.json says: "/);
     }
-    expect(sourceOfEntry("on004574")).toContain("GENDER is read as Sex");
-    expect(sourceOfEntry("on006861")).toContain("Gender is read as Sex");
+    expect(sourceOfEntry("on004635")).toContain(
+      'Gender is read as Sex (participants.json says: "Participant biological sex assigned at birth")',
+    );
+    expect(sourceOfEntry("on001787")).toContain(
+      'gender is read as Sex (participants.json says: "sex of the participant")',
+    );
+  });
+
+  test("a gender column that is NOT read as sex leaves no such claim behind in the evidence", () => {
+    for (const id of ["on004574", "on006861"]) {
+      expect(sourceOfEntry(id)).not.toContain("is read as Sex");
+    }
   });
 
   test("numeric sex codes say whether participants.json confirms them, and they do for on003474", async () => {

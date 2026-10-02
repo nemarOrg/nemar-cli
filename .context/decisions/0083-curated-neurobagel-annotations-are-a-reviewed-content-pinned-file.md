@@ -4,6 +4,8 @@
 **Date:** 2026-10-02
 **Owner:** Seyed Yahya Shirazi
 
+**Amendment 2026-10-02:** the reuse converter reads a column not named `sex` as sex only when its own `participants.json` description says sex; read "Amendment 2026-10-02" below before relying on any statement here that a `gender` column is read as sex.
+
 ## Context
 
 The transform of ADR 0081 maps only what a table says plainly: a column named `age` in years, a column named `sex` with `m` and `f`, a healthy control group.
@@ -78,6 +80,28 @@ The reused upstream annotations are the riskiest class, because NEMAR did not re
 Numeric sex codes (`1` and `2`, `0` and `1`) are the clearest case: the meaning is a convention of the dataset and nothing in the table says it, so an entry that maps them is only as good as upstream's reading of the dataset's own description.
 `upstream_community` marks them, and a person spot-checks those columns before the entries are committed in bulk.
 The licence asks that its notice travel with copies, so `shared/neurobagel/NOTICE-openneuro-annotations.txt` carries it and every reused entry names its upstream file and blob.
+
+## Amendment 2026-10-02: a sex column not named `sex` is read as sex only when its own description says sex
+
+Neurobagel's term is sex, not gender, and a federated search for sex must not return people whose column says gender.
+The owner decided that NEMAR does not relabel a gender column as sex, and reports only what the dataset's own sidecar supports.
+The rule binds the reuse converter (item 8), and is defined once, in `sexReadingDrop` in `scripts/neurobagel/upstream-annotations.ts`:
+
+- A column literally named `sex` (any case, padding ignored, which is the mechanical rule's own test) is read as sex, as before.
+- Any other column that upstream annotates as `nb:Sex` is kept only if its Description in the mirror's `participants.json` contains the word sex (a whole word, any case) and does not contain gender.
+- Otherwise it is dropped, and counted in the report, never silently.
+  `sex_described_as_gender` is a Description that mentions gender, and a Description that names both words says gender.
+  `sex_not_described_as_sex` is a Description that names neither word, a column with no Description, or a mirror with no `participants.json`.
+- A dataset with both a `sex` and a `gender` column maps each by its own description, and a column left out does not take the dataset's one sex slot.
+
+The transform's mechanical rule (ADR 0081) is unchanged: only a column named `sex` is mapped, and `gender` is left alone and flagged `gender_column_needs_curation`.
+The loader and the binder are unchanged too, so a reviewed entry that a person writes is that person's own claim, with `evidence.review` saying who made it; no committed entry maps a gender column to sex by hand.
+
+Measured over the 579 `on` mirrors, of the 100 `gender`-named columns that upstream reads as sex, 35 are kept because the description says sex, 60 are left out because it says gender, and 5 because it says nothing.
+The default regeneration gives 54 entries where it gave 111, since 57 datasets had a gender column as their only kept column.
+on004574 and on006861 keep their assessment items and lose their sex column, so their goldens now carry `gender_column_needs_curation`.
+`--audit-sex <file>` writes every such column, kept or left out, with the description that decided it, so a person can audit the rule column by column.
+The mutation battery gained nine mutants for the rule (U18 to U26) and two for the audit (U27 and U28).
 
 ## Alternatives considered
 

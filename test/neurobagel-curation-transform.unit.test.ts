@@ -430,15 +430,16 @@ describe("a curation that does not fit is skipped whole", () => {
   });
 
   test("an invalid MULTI-column entry applies none of its columns: one unseen sex spelling skips the assessment items too", async () => {
-    // on006861's entry carries Gender and two UCLA items; the table gains one participant whose
-    // Gender the entry never saw, and the entry is pinned to that table.
-    const real = "on006861";
+    // on003474's entry carries the sex column (numeric codes) and two assessment items, BDI and
+    // STAI; the table gains one participant whose sex the entry never saw, and the entry is pinned
+    // to that table.
+    const real = "on003474";
     const text = fixtureText(real, "participants.tsv") as string;
     const description = fixtureText(real, "participants.json");
     const eol = text.includes("\r\n") ? "\r\n" : "\n";
     const header = text.split(eol)[0].split("\t");
     const row = header
-      .map((h) => (h === "participant_id" ? "sub-ZZ9" : h === "Gender" ? "Other" : "n/a"))
+      .map((h) => (h === "participant_id" ? "sub-ZZ9" : h === "sex" ? "Other" : "n/a"))
       .join("\t");
     const edited = `${text}${text.endsWith(eol) ? "" : eol}${row}${eol}`;
     const input: NeurobagelInput = {
