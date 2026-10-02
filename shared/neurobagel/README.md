@@ -17,8 +17,9 @@ The input is `NeurobagelInput` (`input-schema.ts`):
 | `metadata` | parsed `GET <data host>/<id>/metadata.json` | not allowed |
 | `participantsTsv` | text of `GET <data host>/<id>/<latest>/participants.tsv`; TSV is tab-separated values | the dataset has no phenotype table (Hypertext Transfer Protocol, HTTP, status 404) |
 | `participantsJson` | text of `GET <data host>/<id>/<latest>/participants.json` | no column descriptions (HTTP 404) |
+| `curation` | the dataset's entry from `curation.json`, as `parseCuration` returns it | no reviewed entry for this dataset (also: the field is absent) |
 
-A caller passes `null` only for an HTTP 404.
+A caller passes `null` for the two participants files only for an HTTP 404.
 A failed fetch is an error and must not be passed as `null`.
 The two participants files are passed as text, so a file that is served but not valid is reported (`malformed`, `unreadable`) instead of failing in the caller.
 
@@ -54,6 +55,7 @@ Changing that namespace, or any identifier name, changes every identifier at onc
 | bids index `eeg`, `meg` | one acquisition per datatype: `nidm:Electroencephalography` for electroencephalography (EEG) and `nidm:Magnetoencephalography` for magnetoencephalography (MEG) | every other datatype (intracranial EEG or iEEG, electromyography or EMG, near-infrared spectroscopy or NIRS, motion, behavior, anatomy) gets no term and is counted in the report |
 
 A value the rules cannot map is a declared missing value, counted in the report, never a guess.
+What the rules leave out can be supplied by a reviewed curation entry, which replaces the rule for the variable it curates (see Curation below).
 Missing values are `""`, `n/a`, `N/A` and `NA`.
 An EMG recording is never mapped to EEG.
 
@@ -86,6 +88,78 @@ A `session_modalities` that is malformed, or whose mapped datatypes differ from 
 The output is validated before it is returned (`validate-output.ts`): strict shapes mirroring Neurobagel's pydantic models, and every controlled term checked against the pinned vocabulary.
 A failure there is a bug and surfaces as a `NeurobagelRefusal` with code `output_invalid`.
 
+## Curation
+
+Some annotations a table cannot yield mechanically: which diagnosis a free-text group value means, which column holds sex when it is called `gender`, which assessment tool a column is an item of, what an age column of placeholder zeros holds.
+They live in one reviewed file, `curation.json`, keyed by dataset id, and an entry applies only to the exact bytes it was reviewed against (architecture decision record, ADR, 0084).
+
+```json
+{
+  "format": 1,
+  "datasets": {
+    "nm000158": {
+      "columns": { "group": { "IsAbout": {"TermURL": "nb:Diagnosis", "Label": "Diagnosis"}, "Levels": {"acute stroke patients (1-30 days post-stroke)": {"TermURL": "snomed:230690007", "Label": "Cerebrovascular accident"}}, "MissingValues": [], "VariableType": "Categorical" } },
+      "evidence": { "source": "...", "reviewer": "...", "review": "author", "date": "2026-10-02" },
+      "pins": { "participants_tsv": "<git blob sha of the file>", "participants_json": "<sha, or null if the dataset has none>" }
+    }
+  }
+}
+```
+
+Each column maps to the `Annotations` block the Neurobagel annotation tool exports, pasted as exported.
+Four kinds are curatable: age (`nb:Age`, a `Continuous` block with a `Format`), sex and diagnosis (`Categorical` with `Levels`), and an item of an assessment tool (`Collection` with `IsPartOf`).
+Terms must be in the pinned vocabulary with the pinned label, a column named `age`, `sex` or `group` must be about the same thing, and a dataset has at most one sex and one age column.
+
+| Step | Module | Decides |
+| --- | --- | --- |
+| `parseCuration(text)` | `curation.ts` | whether the FILE is fit to be believed; throws `CurationError` listing every problem, and never returns a half-checked file |
+| `bindCuration(entry, documents, table)` | `curation-bind.ts` | whether the entry fits THIS dataset's documents: the pins, then that every curated column exists and its level map covers every value of the table |
+| `buildNeurobagelArtifacts({..., curation})` | `transform.ts` | applies a bound entry, to the graph's participants only |
+
+Import the loader from `curation.ts` explicitly; the transform and `index.ts` do not load the full diagnosis and assessment vocabularies.
+The text of a participants file must reach the transform exactly as the data plane served it, because the pin is the git blob SHA-1 of those bytes (a leading byte order mark may be dropped; invalid UTF-8 makes the entry stale, which is safe).
+
+An entry that does not fit is skipped whole, never partly applied, and the report says why in `curation` (counts and enumerated values only):
+
+| `curation.status` | Meaning | Flag |
+| --- | --- | --- |
+| `applied` | the entry's columns are in the dictionary and the graph | none |
+| `stale` | a pinned file is not the file in hand (`stale_files` names it); the reviewer never saw these bytes | `curation_stale` |
+| `invalid` | the files are the pinned ones and the entry does not fit them (`problems` counts) | `curation_invalid` |
+| `unused` | the entry fits, but none of the table's participants are the graph's | `curation_unused` |
+
+Whatever the status, the mechanical columns ship as they would without an entry.
+The `curation` key is absent from the report of a dataset with no entry, so such a dataset's output is byte-identical to before.
+`participants_with` counts the graph participants that received a value from the entry, by kind.
+
+To add an entry, write it in the file with the pins of the dataset's current files, then check it:
+
+```bash
+bun run scripts/neurobagel/curation-check.ts            # every entry against the captured fixtures
+bun run scripts/neurobagel/curation-check.ts --live     # every entry against data.nemar.org now (read-only GETs)
+```
+
+A new entry needs a captured fixture of its dataset (`gather.ts`, below) and regenerated goldens; the tests bind every committed entry to its fixture and compare the curated goldens with the real `bagel pheno`.
+`evidence.review` is `author` (written by the author of the change, not a domain expert), `domain_expert`, or `upstream_community`; registration of the node waits until the entries it serves have the review they need.
+
+### Reusing Neurobagel's OpenNeuro annotations
+
+[`neurobagel/openneuro-annotations`](https://github.com/neurobagel/openneuro-annotations) is published under the MIT licence, one `dsNNNNNN.json` per OpenNeuro dataset, and NEMAR's mirror `onNNNNNN` is OpenNeuro's `dsNNNNNN`.
+`scripts/neurobagel/reuse-openneuro-annotations.ts` converts those annotations into entries of this file, pinned to one upstream commit:
+
+```bash
+# measure only: how many mirrors would be covered, how many columns dropped and why, the size
+bun run scripts/neurobagel/reuse-openneuro-annotations.ts --skip-redundant --cache <dir> --report <file>
+# write the entries for some mirrors into the committed file, and keep the upstream files and licence
+bun run scripts/neurobagel/reuse-openneuro-annotations.ts --skip-redundant --date 2026-10-02 \
+  --merge-into shared/neurobagel/curation.json --save-upstream test/neurobagel/upstream on003568 ...
+```
+
+It keeps a column only if it is about one of the four curatable variables, every term is in the pinned vocabulary (upstream's blank labels are rewritten, `nb:FromInt` is read as `nb:FromFloat`), the loader accepts it, and the binder accepts it against the mirror's CURRENT table; whatever fails is dropped and counted.
+`--skip-redundant` leaves out a column the mechanical rules would already map to the same values for every row.
+`NOTICE-openneuro-annotations.txt` carries the upstream licence notice that reused entries require.
+`scripts/neurobagel/mutation-battery.ts` runs hand-written mutants over the loader, the binder, the transform's use of an entry, the output validators and the converter, and reports which survive.
+
 ## The pinned vocabulary
 
 `vocab/` is a snapshot of Neurobagel's vocabulary and models, generated and never edited by hand:
@@ -93,7 +167,7 @@ A failure there is a bug and surfaces as a `NeurobagelRefusal` with code `output
 | File | Holds |
 | --- | --- |
 | `snapshot.json` | pins (repository, commit, and the blob and sha256 of every file used), namespaces, the JSON-LD `@context`, sex, imaging modality and age format terms |
-| `diagnosis-terms.json`, `assessment-terms.json` | every term of those vocabularies, one `identifier: label` pair per line (about 700 KB and 150 KB; the curation loader of a later phase needs them whole) |
+| `diagnosis-terms.json`, `assessment-terms.json` | every term of those vocabularies, one `identifier: label` pair per line (about 700 KB and 150 KB; only the curation loader imports them, through `vocab-terms.ts`) |
 | `dataset.schema.json`, `dictionary.schema.json` | JSON Schemas generated from the pinned `bagel` pydantic models |
 
 Regenerate after moving a pin in `scripts/neurobagel/generate-vocab.ts`:
@@ -111,6 +185,8 @@ A pin change that alters any output needs a version bump in `version.ts`, regene
 Nothing whose metadata is not `anonymous: false` is written there, with one declared exception (`refusalToWrite` in `scripts/neurobagel/gather.ts`): the negative control `nm099998`, and then only its `metadata.json`.
 `nm000284`, the live anonymous deposit, is never fetched into this repository.
 `nm099998` is the dev-owned standing anonymous deposit (AGENTS.md); it is the negative control, and only its public, blinded `metadata.json`, fetched from the dev host `data-test.nemar.org`, is kept, never its participants files.
+Every dataset with an entry in `curation.json` has a fixture, and `loadFixture` passes the entry to the transform as the writer will, so its golden is the output of the production path and the curated goldens are the ones the oracle compares with `bagel pheno`.
+`test/neurobagel/upstream/<short commit>/` holds the upstream annotation files the reused entries were converted from, unchanged, with the upstream licence and a `provenance.json`.
 
 ```bash
 # refresh a fixture
@@ -128,14 +204,17 @@ uv run scripts/neurobagel/oracle.py
 Its environment is locked (`scripts/neurobagel/*.py.lock`, written by `uv lock --script`), so a rerun resolves the same packages.
 None of that is a GraphDB load: no container runtime was available, so loading a golden into a stock GraphDB-backed stack is checked separately, on the real host.
 It records bagel's output, with identifiers set aside, so `bun test` compares the goldens to it without Python.
-`bagel pheno` reads the whole table, and the dictionary is built from the graph's participants only, so a table that lists participants with no data could hold a value the dictionary does not declare; the oracle would then stop and print bagel's message.
+`bagel pheno` reads the whole table, and the mechanical dictionary is built from the graph's participants only, so a table that lists participants with no data could hold a value the dictionary does not declare; the oracle would then stop and print bagel's message.
 No fixture does this today.
+A curated column is checked against every row of the table before it is applied, so it cannot.
+For a curated golden the oracle also compares assessments (`bagel` marks a tool on a participant with at least one item that is not a declared missing value), and it compares a participant's diagnoses as a set.
 
 Opt-in tests that need the network or `uv`:
 
 ```bash
 NEUROBAGEL_ORACLE=1 bun test test/neurobagel-oracle.integration.test.ts
 NEUROBAGEL_LIVE=1 bun test test/neurobagel-gather.integration.test.ts
+NEUROBAGEL_LIVE=1 bun test test/neurobagel-reuse.integration.test.ts
 ```
 
 Without the opt-in they are reported as skipped.

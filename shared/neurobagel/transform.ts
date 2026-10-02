@@ -21,6 +21,11 @@
  *     out; no join of mismatched ids is guessed.
  *   - A fact the rules cannot establish is left out and counted, never guessed
  *     (see participants.ts). EMG is never mapped to EEG.
+ *     A reviewed curation entry (curation.ts, ADR 0084) can supply what the rules
+ *     leave out. It is applied only if the two participants documents are the bytes
+ *     it pinned and it fits them, only to the graph's participants, and it is
+ *     skipped whole, with a flag, otherwise: the mechanical output never changes
+ *     because of an entry that does not apply.
  *   - Output is byte-stable: same input, same bytes (canonical-json.ts), and
  *     identifiers are derived from names (identifiers.ts).
  *   - The output is validated before it is returned (validate-output.ts).

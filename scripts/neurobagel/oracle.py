@@ -20,8 +20,10 @@ For every golden it checks, with the real pinned code and nothing reimplemented:
      description.
   3. `bagel pheno`, run on the fixture's participants.tsv with the golden
      dictionary and description, describes the same phenotype (age, sex,
-     diagnosis) for every participant as the golden JSON-LD, after identifiers
-     are set aside (bagel mints random uuid4, the transform derives uuid5).
+     diagnosis, and the assessment tools of a curated dataset) for every
+     participant as the golden JSON-LD, after identifiers are set aside (bagel
+     mints random uuid4, the transform derives uuid5).
+     A participant's diagnoses are compared as a set.
   4. `bagel bids`, run on a table built from the fixture's bids index, finds the
      same imaging modalities for every subject it can attach them to.
   5. The recipes stack's own graph-mode loader (`init_data/process_jsonld.py`

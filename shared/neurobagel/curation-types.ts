@@ -1,7 +1,7 @@
 /**
  * The types of a reviewed curation entry (epic #1586, phase 5; ADR 0084).
  *
- * Types only: no code, no vocabulary.
+ * Types and the list of kinds: no logic, no vocabulary.
  * They are split from the loader (`curation.ts`) so that the transform and the
  * binder can name an entry without importing the full diagnosis and assessment
  * vocabularies, which only the loader needs.

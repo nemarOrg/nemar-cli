@@ -120,6 +120,7 @@ invisible one — which is why it is checked rather than trusted.
 - [ADR 0079](0079-the-private-site-holds-a-session-scope-of-its-own.md) - The private site holds a `private` session scope of its own, minted for any active account through a grant bound to the browser's `state`, ended by sign-out, revoke and delete but not by demotion or key revocation
 - [ADR 0080](0080-a-web-approval-is-dispatched-to-an-executor.md) - A web approval is dispatched to an executor and never run by the page or the Worker: `/approve` stays the contract, a 15-minute lease allows one run at a time (a terminal run included), the payload names an environment and never a URL or credential, and the approver is the admin who clicked
 - [ADR 0081](0081-nemar-emits-neurobagel-artifacts-by-one-pure-transform.md) - NEMAR emits Neurobagel artifacts by one pure transform over data-plane documents: identity only from `metadata.json`, `anonymous` must be exactly `false`, identifiers are uuid5 under one committed namespace, the vocabulary is a pinned snapshot, and a fact the rules cannot establish is left out and counted
+- [ADR 0084](0084-curated-neurobagel-annotations-are-a-reviewed-content-pinned-file.md) - Curated Neurobagel annotations are a reviewed, content-pinned file keyed by dataset id: terms only from the pinned vocabulary, a strict loader that fails closed, git blob pins computed from the bytes converted, a stale or ill-fitting entry skipped whole with the mechanical columns intact and a flag, and never generated at build time
 
 ## Backfill note (2026-07-31)
 
