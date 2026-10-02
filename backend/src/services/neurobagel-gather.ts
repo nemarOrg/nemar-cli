@@ -78,6 +78,12 @@ export interface GatherDeps {
    * the default is the global `fetch`, and a test substitutes the object host.
    */
   followRedirect?: typeof fetch;
+  /**
+   * The data plane's entry point. The default calls the real `dataRoutes` in process. A
+   * test wraps THAT, to inject a fault the real one makes only by accident: a document
+   * with no `anonymous` value, or a 404 that is not "this file is not in the manifest".
+   */
+  dataPlane?: (request: Request) => Promise<Response>;
 }
 
 function executionContext(deps: GatherDeps): ExecutionContext | undefined {
@@ -137,7 +143,9 @@ function dataPlaneRequest(env: Bindings, path: string): Request {
 
 async function callDataPlane(env: Bindings, path: string, deps: GatherDeps): Promise<Response> {
   try {
-    return await dataRoutes.fetch(dataPlaneRequest(env, path), env, executionContext(deps));
+    const request = dataPlaneRequest(env, path);
+    if (deps.dataPlane) return await deps.dataPlane(request);
+    return await dataRoutes.fetch(request, env, executionContext(deps));
   } catch (err) {
     throw new GatherRefusal(
       "fetch_failed",
@@ -216,6 +224,15 @@ async function fetchTable(
 }
 
 /**
+ * The anonymity guard's whole contract: the data plane's `anonymous` value must be
+ * EXACTLY `false`. A missing value, `null`, the string `"false"` and `0` are unknown or
+ * something else, and unknown is not false; `true` is the disagreement itself.
+ */
+export function saysNotAnonymous(value: unknown): value is false {
+  return value === false;
+}
+
+/**
  * Gather one dataset's inputs. Throws {@link GatherRefusal}; returns the input the
  * transform takes, with `expectedDatasetId` set (the transform requires it).
  *
@@ -263,7 +280,7 @@ export async function gatherNeurobagelInput(
   // The SECOND guard. The row said eligible; the document must say not anonymous,
   // and "exactly false": a missing or null value is unknown, and unknown is not false.
   // Checked before any depositor file is requested.
-  if (doc.anonymous !== false) {
+  if (!saysNotAnonymous(doc.anonymous)) {
     throw new GatherRefusal(
       "anonymity_disagreement",
       "the row is eligible but the data plane's metadata does not say anonymous: false",

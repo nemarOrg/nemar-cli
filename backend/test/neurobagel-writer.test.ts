@@ -17,7 +17,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import Ajv from "ajv";
 import schema from "../../deploy/neurobagel/index.schema.json";
+import { dataRoutes } from "../src/routes/data";
 import { type CurationResolver, createCurationResolver } from "../src/services/neurobagel-curation";
+import { saysNotAnonymous } from "../src/services/neurobagel-gather";
 import { syncNeurobagelDataset } from "../src/services/neurobagel-hooks";
 import { countOps, createOpCounter } from "../src/services/neurobagel-ops";
 import {
@@ -85,6 +87,24 @@ async function storedIndex(): Promise<IndexDocument> {
   const parsed = parseStoredIndex(await text(NEUROBAGEL_INDEX_KEY));
   if (!parsed) throw new Error("stored index is not an index");
   return parsed;
+}
+
+/**
+ * The REAL data plane, with one fault injected: `fault(path, real)` may return a replacement
+ * for the answer to a request, or null to let the real one stand. For the faults the real
+ * one makes only by accident (see `GatherDeps.dataPlane`).
+ */
+function dataPlaneWith(
+  env: Bindings,
+  fault: (path: string, real: Response) => Promise<Response | null>,
+): (request: Request) => Promise<Response> {
+  return async (request) => {
+    const real = await dataRoutes.fetch(request, env, undefined);
+    const replacement = await fault(new URL(request.url).pathname, real.clone());
+    if (!replacement) return real;
+    await real.body?.cancel().catch(() => {});
+    return replacement;
+  };
 }
 
 function run(over: Partial<Parameters<typeof runNeurobagelWriter>[1]> = {}, env?: Bindings) {
@@ -528,6 +548,35 @@ describe("a dataset that stops being eligible leaves the store", () => {
     });
   }
 
+  test("a dataset that stops being eligible AFTER the plan, while earlier datasets are being written, is not written", async () => {
+    // A run examines up to fifty datasets one after another, each taking round trips, so the
+    // catalog read at its start is not the catalog it is working from by the end. The row is
+    // asked for again when each dataset's turn comes.
+    for (const id of ["nm000626", "nm000627", "nm000628"]) seedSynthetic(h, id);
+    let rechecks = 0;
+    const interleaved = wrapD1(realD1(h.db), (sql) => {
+      // Each dataset's turn begins with the re-check of its row; the second turn is nm000627's.
+      if (sql.includes("WHERE d.dataset_id = ?") && !sql.includes("enrichment_length")) {
+        rechecks++;
+        if (rechecks === 2) {
+          // Archived, not private: the data plane's own gate looks at visibility only, so
+          // only the writer's re-check stands between this row and a write.
+          h.db.run("UPDATE datasets SET status = 'archived' WHERE dataset_id = 'nm000627'");
+        }
+      }
+    });
+    const result = await run({}, h.env({ DB: interleaved }));
+    expect(rechecks).toBeGreaterThanOrEqual(2);
+    expect(outcomes(result).filter((o) => !o.endsWith(":removed"))).toEqual([
+      "nm000626:written",
+      "nm000627:refused",
+      "nm000628:written",
+    ]);
+    expect(result.results[1]).toMatchObject({ code: "no_longer_eligible" });
+    expect(await storeKeys(h.bucket)).not.toContain("nm000627.jsonld");
+    expect((await storedIndex()).datasets.map((d) => d.id)).toEqual(["nm000626", "nm000628"]);
+  });
+
   test("removal does not depend on ingestion: the data plane can be down entirely", async () => {
     seedSynthetic(h, "nm000612");
     seedSynthetic(h, "nm000613");
@@ -843,20 +892,65 @@ describe("anonymity: two independent guards", () => {
     expect((await storedIndex()).datasets.map((d) => d.id)).toEqual(["nm000645"]);
   });
 
-  test("a metadata document with a missing or null anonymous is refused too: unknown is not false", async () => {
-    // The data plane always writes the field, so this is the guard's own contract, driven
-    // through the real gather by serving a document without it from a real route.
-    const { gatherNeurobagelInput } = await import("../src/services/neurobagel-gather");
-    seedSynthetic(h, "nm000646");
-    const env = h.env();
-    const ok = await gatherNeurobagelInput(env, "nm000646");
-    expect((ok.input.metadata as { anonymous: unknown }).anonymous).toBe(false);
-    h.db.run(
-      "UPDATE datasets SET anonymous = 1, first_published_at = NULL WHERE dataset_id = 'nm000646'",
-    );
-    await expect(gatherNeurobagelInput(env, "nm000646")).rejects.toMatchObject({
-      code: "anonymity_disagreement",
+  test("the guard's contract, as a pure function: exactly false passes, everything else is refused", () => {
+    expect(saysNotAnonymous(false)).toBe(true);
+    for (const value of [true, null, undefined, "false", "true", "", 0, 1, {}, [], Number.NaN]) {
+      expect(saysNotAnonymous(value), String(value)).toBe(false);
+    }
+  });
+
+  const UNKNOWN_VALUES: [string, (doc: Record<string, unknown>) => void][] = [
+    ["a missing anonymous", (doc) => Reflect.deleteProperty(doc, "anonymous")],
+    ["a null anonymous", (doc) => Object.assign(doc, { anonymous: null })],
+    ['the string "false"', (doc) => Object.assign(doc, { anonymous: "false" })],
+    ["the number 0", (doc) => Object.assign(doc, { anonymous: 0 })],
+    ['the string "true"', (doc) => Object.assign(doc, { anonymous: "true" })],
+    ["an empty object", (doc) => Object.assign(doc, { anonymous: {} })],
+  ];
+
+  for (const [label, corrupt] of UNKNOWN_VALUES) {
+    test(`a metadata document with ${label} is refused: unknown is not false, and no depositor file is read`, async () => {
+      seedSynthetic(h, "nm000646");
+      const env = h.env();
+      const dataPlane = dataPlaneWith(env, async (path, real) => {
+        if (!path.endsWith("/metadata.json")) return null;
+        const doc = (await real.json()) as Record<string, unknown>;
+        corrupt(doc);
+        return new Response(JSON.stringify(doc), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+      const rec = recordWrites(h.bucket);
+      const mark = h.standin.log.length;
+      const result = await run(
+        { deps: { dataPlane } },
+        h.env({ NEUROBAGEL: rec.bucket, DB: env.DB }),
+      );
+      expect(result.results).toEqual([
+        { id: "nm000646", outcome: "refused", code: "anonymity_disagreement" },
+      ]);
+      expect(result.anonymity_findings).toBe(1);
+      expect(rec.log).toEqual([]);
+      // The depositor's files live under the repository path; none was requested.
+      expect(h.standin.log.slice(mark).filter((r) => r.path.startsWith("/nemarDatasets/"))).toEqual(
+        [],
+      );
+      expect(
+        h.db
+          .query(
+            "SELECT COUNT(*) AS n FROM audit_log WHERE action = 'neurobagel_anonymity_finding'",
+          )
+          .get(),
+      ).toEqual({ n: 1 });
     });
+  }
+
+  test("the control: the same wrapper leaving anonymous: false alone writes the dataset", async () => {
+    seedSynthetic(h, "nm000647");
+    const env = h.env();
+    const result = await run({ deps: { dataPlane: dataPlaneWith(env, async () => null) } }, env);
+    expect(outcomes(result)).toEqual(["nm000647:written"]);
   });
 });
 
@@ -1087,6 +1181,49 @@ describe("failures never replace a good artifact with a worse one", () => {
     console.warn = quiet.warn;
     expect(bad.results[0]?.outcome).toBe("refused");
     expect(await storeKeys(h.bucket)).not.toContain("nm000674.jsonld");
+  });
+
+  test("a 404 that is not 'this file is not in the manifest' is never an absent table, even after metadata.json succeeded", async () => {
+    // The manifest read fine for metadata.json; by the time participants.tsv is asked for, the
+    // data plane answers 404 for another reason (the version, a manifest it could not read).
+    // That must not publish the dataset without its phenotype table because S3 blinked.
+    seedSynthetic(h, "nm000657");
+    const env = h.env();
+    for (const body of ["Version not published", "Version not found", "Dataset not found"]) {
+      const dataPlane = dataPlaneWith(env, async (path) =>
+        path.endsWith("/participants.tsv")
+          ? new Response(JSON.stringify({ error: body }), {
+              status: 404,
+              headers: { "Content-Type": "application/json" },
+            })
+          : null,
+      );
+      const rec = recordWrites(h.bucket);
+      const result = await run(
+        { deps: { dataPlane } },
+        h.env({ NEUROBAGEL: rec.bucket, DB: env.DB }),
+      );
+      expect(result.results).toEqual([
+        {
+          id: "nm000657",
+          outcome: "refused",
+          code: "fetch_failed",
+          detail: expect.stringContaining("not for the file"),
+        },
+      ]);
+      expect(rec.log, body).toEqual([]);
+    }
+    // The one 404 that IS an absent file ("File not found") still publishes without the table.
+    const absent = dataPlaneWith(env, async (path) =>
+      path.endsWith("/participants.tsv")
+        ? new Response(JSON.stringify({ error: "File not found" }), {
+            status: 404,
+            headers: { "Content-Type": "application/json" },
+          })
+        : null,
+    );
+    const ok = await run({ deps: { dataPlane: absent } }, env);
+    expect(outcomes(ok)).toEqual(["nm000657:written"]);
   });
 
   test("an annexed participants file is reached through its redirect, once, and the URL is not reported", async () => {
