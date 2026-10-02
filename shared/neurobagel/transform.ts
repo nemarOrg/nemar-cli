@@ -16,6 +16,9 @@
  *     A missing value is unknown, and unknown is not false.
  *     This is a backstop: whether a dataset is eligible at all is decided
  *     from the database row by the writer, never from this document.
+ *   - The graph holds the subjects of the bids index, the participants that have
+ *     data at NEMAR. Table rows for participants with no data are counted and left
+ *     out; no join of mismatched ids is guessed.
  *   - A fact the rules cannot establish is left out and counted, never guessed
  *     (see participants.ts). EMG is never mapped to EEG.
  *   - Output is byte-stable: same input, same bytes (canonical-json.ts), and
@@ -25,11 +28,12 @@
  * Pure: no I/O, no network, no clock, no randomness.
  */
 
-import { type CanonicalJsonValue, canonicalJson } from "./canonical-json";
+import { type CanonicalJsonValue, byCodeUnit, canonicalJson } from "./canonical-json";
 import { type DictionaryColumns, buildDatasetDescription, buildDictionary } from "./dictionary";
 import {
   type NemarMetadata,
   type NeurobagelInput,
+  type ParticipantsJson,
   metadataSchema,
   participantsJsonSchema,
 } from "./input-schema";
@@ -43,10 +47,12 @@ import {
 import {
   type ColumnOutcome,
   HEALTHY_CONTROL,
+  STANDARD_MISSING_VALUES,
   mapAgeColumn,
   mapGroupColumn,
   mapSexColumn,
 } from "./participants";
+import type { ColumnReport, NeurobagelReport, TableStatus } from "./report";
 import { parseTsv } from "./tsv";
 import {
   validateDatasetDescription,
@@ -74,28 +80,31 @@ export class NeurobagelRefusal extends Error {
   }
 }
 
-export interface TransformOptions {
-  /** When set, the metadata's own dataset_id must equal it (guards against mixed-up documents). */
-  expectedDatasetId?: string;
-}
-
 export interface NeurobagelArtifacts {
   datasetId: string;
-  /** File name to file text, exactly the bytes to store. */
+  /** File name to file text, exactly the bytes to store; names come from {@link artifactFileNames}. */
   files: Record<string, string>;
-  /** The same four documents by role. */
+  /** The typed view of `files[<id>.report.json]`. */
+  report: NeurobagelReport;
+}
+
+/** The names of the four files `buildNeurobagelArtifacts` returns for a dataset. */
+export function artifactFileNames(datasetId: string): {
   jsonld: string;
   dictionary: string;
   datasetDescription: string;
   report: string;
+} {
+  return {
+    jsonld: `${datasetId}.jsonld`,
+    dictionary: `${datasetId}_annotated.json`,
+    datasetDescription: `${datasetId}_dataset_description.json`,
+    report: `${datasetId}.report.json`,
+  };
 }
-
-type TableStatus = "ok" | "absent" | "malformed" | "no_participant_id" | "ids_do_not_join";
 
 const DOI_RE = /^10\.\d{4,9}\/\S+$/;
 const PARTICIPANT_COLUMN = "participant_id";
-
-const byCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
 /** Datatype keys in the report must be plain directory names, never free text. */
 const REPORTABLE_DATATYPE = /^[a-z0-9]{1,24}$/;
@@ -110,7 +119,7 @@ function sortedRecord(map: Map<string, number>): Record<string, number> {
   return Object.fromEntries([...map.entries()].sort(([a], [b]) => byCodeUnit(a, b)));
 }
 
-function columnReport(outcome: ColumnOutcome<object>): CanonicalJsonValue {
+function columnReport(outcome: ColumnOutcome<object>): ColumnReport {
   switch (outcome.status) {
     case "absent":
       return { status: "absent" };
@@ -128,7 +137,7 @@ function findColumn(header: string[], wanted: string): number {
   return header.findIndex((h) => h.trim().toLowerCase() === wanted);
 }
 
-function ageUnitsOf(participantsJson: Record<string, unknown> | null, column: string): unknown {
+function ageUnitsOf(participantsJson: ParticipantsJson | null, column: string): unknown {
   if (participantsJson === null) return undefined;
   const entry = participantsJson[column];
   if (entry === null || typeof entry !== "object") return undefined;
@@ -142,9 +151,121 @@ function normalizeParticipantId(raw: string): { id: string; prefixed: boolean } 
     : { id: `sub-${raw}`, prefixed: true };
 }
 
+interface TableRead {
+  status: Exclude<TableStatus, "ids_do_not_join">;
+  bomStripped: boolean;
+  header: string[];
+  idColumn: number;
+  /** One row per participant whose rows agree: the table's phenotype. */
+  rows: Map<string, string[]>;
+  /** Every participant the table names, including those whose duplicate rows disagree. */
+  ids: Set<string>;
+  rowCount: number;
+  rowsWithoutId: number;
+  /** Rows that repeat an id already seen. */
+  duplicates: number;
+  /** Participants whose duplicate rows disagree; their phenotype is dropped. */
+  conflicting: number;
+  prefixed: number;
+}
+
+const sameRow = (a: string[], b: string[]): boolean =>
+  a.length === b.length && a.every((cell, i) => cell === b[i]);
+
+/**
+ * Read participants.tsv into one phenotype row per participant.
+ * A participant listed twice with identical rows is one participant; listed twice
+ * with rows that disagree, no row can be taken as the truth, so the participant
+ * stays (the table does name them) but carries no phenotype.
+ */
+function readTable(text: string | null, flags: Set<string>): TableRead {
+  const empty: TableRead = {
+    status: "absent",
+    bomStripped: false,
+    header: [],
+    idColumn: -1,
+    rows: new Map(),
+    ids: new Set(),
+    rowCount: 0,
+    rowsWithoutId: 0,
+    duplicates: 0,
+    conflicting: 0,
+    prefixed: 0,
+  };
+  if (text === null) {
+    flags.add("participants_tsv_absent");
+    return empty;
+  }
+  const parsed = parseTsv(text);
+  if (!parsed.ok) {
+    flags.add("participants_tsv_malformed");
+    return { ...empty, status: "malformed" };
+  }
+  const read: TableRead = {
+    ...empty,
+    bomStripped: parsed.bomStripped,
+    header: parsed.table.header,
+  };
+  if (read.bomStripped) flags.add("bom_stripped");
+  read.idColumn = read.header.indexOf(PARTICIPANT_COLUMN);
+  if (read.idColumn === -1) {
+    flags.add("participants_tsv_no_participant_id");
+    return { ...read, status: "no_participant_id" };
+  }
+  read.status = "ok";
+  read.rowCount = parsed.table.rows.length;
+  const first = new Map<string, string[]>();
+  const conflicting = new Set<string>();
+  for (const row of parsed.table.rows) {
+    const raw = row[read.idColumn];
+    if (raw.trim() === "") {
+      read.rowsWithoutId++;
+      continue;
+    }
+    const { id, prefixed } = normalizeParticipantId(raw);
+    const seen = first.get(id);
+    if (seen !== undefined) {
+      read.duplicates++;
+      if (!sameRow(seen, row)) conflicting.add(id);
+      continue;
+    }
+    if (prefixed) read.prefixed++;
+    read.ids.add(id);
+    first.set(id, row);
+  }
+  for (const [id, row] of first) if (!conflicting.has(id)) read.rows.set(id, row);
+  read.conflicting = conflicting.size;
+  if (read.prefixed > 0) flags.add("participant_ids_prefixed");
+  if (read.duplicates > 0) flags.add("duplicate_participant_ids");
+  if (read.conflicting > 0) flags.add("conflicting_duplicate_participant_ids");
+  return read;
+}
+
+function readParticipantsJson(
+  text: string | null,
+  flags: Set<string>,
+): { status: "present" | "absent" | "unreadable"; value: ParticipantsJson | null } {
+  if (text === null) {
+    flags.add("participants_json_absent");
+    return { status: "absent", value: null };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    flags.add("participants_json_unreadable");
+    return { status: "unreadable", value: null };
+  }
+  const checked = participantsJsonSchema.safeParse(parsed);
+  if (!checked.success) {
+    flags.add("participants_json_unreadable");
+    return { status: "unreadable", value: null };
+  }
+  return { status: "present", value: checked.data };
+}
+
 export async function buildNeurobagelArtifacts(
   input: NeurobagelInput,
-  options: TransformOptions = {},
 ): Promise<NeurobagelArtifacts> {
   // 1. The anonymity backstop runs on the RAW value, before anything is parsed or read.
   const rawMetadata = input.metadata;
@@ -170,10 +291,10 @@ export async function buildNeurobagelArtifacts(
   }
   const metadata: NemarMetadata = parsedMetadata.data;
   const datasetId = metadata.dataset_id;
-  if (options.expectedDatasetId !== undefined && options.expectedDatasetId !== datasetId) {
+  if (input.expectedDatasetId !== datasetId) {
     throw new NeurobagelRefusal(
       "dataset_id_mismatch",
-      `expected ${options.expectedDatasetId} but metadata.json is for ${datasetId}`,
+      `expected ${input.expectedDatasetId} but metadata.json is for ${datasetId}`,
     );
   }
 
@@ -201,95 +322,65 @@ export async function buildNeurobagelArtifacts(
   const versionSuffix = latestVersion ? ` (latest version ${latestVersion}).` : ".";
   const accessInstructions = `Public access. ${licenseSentence}Browse and download at ${pageUrl}${versionSuffix}`;
 
-  // 3. The phenotype table.
-  let tableStatus: TableStatus = "absent";
-  let bomStripped = false;
-  let header: string[] = [];
-  const rowsById = new Map<string, string[]>();
-  let rowCount = 0;
-  let rowsWithoutId = 0;
-  let duplicateIds = 0;
-  let prefixedIds = 0;
-  let idColumnIndex = -1;
+  // 3. The documents about participants.
+  const table = readTable(input.participantsTsv, flags);
+  const participantsJson = readParticipantsJson(input.participantsJson, flags);
 
-  if (input.participantsTsv === null) {
-    flags.add("participants_tsv_absent");
-  } else {
-    const parsed = parseTsv(input.participantsTsv);
-    if (!parsed.ok) {
-      tableStatus = "malformed";
-      flags.add("participants_tsv_malformed");
-    } else {
-      bomStripped = parsed.bomStripped;
-      if (bomStripped) flags.add("bom_stripped");
-      header = parsed.table.header;
-      idColumnIndex = header.indexOf(PARTICIPANT_COLUMN);
-      if (idColumnIndex === -1) {
-        tableStatus = "no_participant_id";
-        flags.add("participants_tsv_no_participant_id");
-      } else {
-        tableStatus = "ok";
-        rowCount = parsed.table.rows.length;
-        for (const row of parsed.table.rows) {
-          const raw = row[idColumnIndex];
-          if (raw.trim() === "") {
-            rowsWithoutId++;
-            continue;
-          }
-          const { id, prefixed } = normalizeParticipantId(raw);
-          if (rowsById.has(id)) {
-            duplicateIds++;
-            continue;
-          }
-          if (prefixed) prefixedIds++;
-          rowsById.set(id, row);
-        }
-        if (prefixedIds > 0) flags.add("participant_ids_prefixed");
-        if (duplicateIds > 0) flags.add("duplicate_participant_ids");
-      }
-    }
-  }
-
-  let participantsJson: Record<string, unknown> | null = null;
-  let participantsJsonStatus: "present" | "absent" | "unreadable" = "absent";
-  if (input.participantsJson === null) {
-    flags.add("participants_json_absent");
-  } else {
-    const parsedJson = participantsJsonSchema.safeParse(input.participantsJson);
-    if (parsedJson.success) {
-      participantsJson = parsedJson.data;
-      participantsJsonStatus = "present";
-    } else {
-      participantsJsonStatus = "unreadable";
-      flags.add("participants_json_unreadable");
-    }
-  }
-
-  // 4. Subjects: the bids index gives structure, the table gives phenotype.
+  // 4. Subjects. The graph holds the subjects of the bids index: the participants that
+  // have data at NEMAR. A table row for a participant with no data is counted and left
+  // out. Ids meet by exact equality (after `sub-` is added); a near miss is never joined.
   const index = metadata.extensions?.nemar?.bids_index?.subjects ?? {};
   const indexIds = Object.keys(index).sort(byCodeUnit);
-  const tableIds = [...rowsById.keys()];
-  const joined = tableIds.filter((id) => id in index).length;
-  if (tableStatus === "ok" && indexIds.length > 0 && tableIds.length > 0 && joined === 0) {
+  const indexSet = new Set(indexIds);
+  const tableUsable = table.status === "ok";
+  const sharedWithIndex = tableUsable ? [...table.ids].filter((id) => indexSet.has(id)).length : 0;
+
+  let tableStatus: TableStatus = table.status;
+  let source: "bids_index" | "participants_tsv" = "bids_index";
+  let graphIds = indexIds;
+  if (indexIds.length === 0) {
+    // No subject has data in the index: the table is the only list of subjects there is.
+    source = "participants_tsv";
+    graphIds = tableUsable ? [...table.ids].sort(byCodeUnit) : [];
+    if (graphIds.length > 0) flags.add("bids_index_empty_fell_back_to_table");
+  } else if (tableUsable && table.ids.size > 0 && sharedWithIndex === 0) {
     // Two id spaces with nothing in common: the table's phenotype cannot be attributed to
-    // any subject that has data, and a union would double the dataset's subject count.
+    // any subject, so the table is not used.
     tableStatus = "ids_do_not_join";
     flags.add("participant_ids_do_not_join_bids_index");
+  } else if (
+    tableUsable &&
+    sharedWithIndex > 0 &&
+    sharedWithIndex < table.ids.size &&
+    sharedWithIndex < indexIds.length
+  ) {
+    // Ids are left over on BOTH sides: a renamed participant would look exactly like this.
+    // The counts are in the report; nothing is guessed.
+    flags.add("partial_join");
   }
-  const phenotypeUsable = tableStatus === "ok";
-  const usableIds = phenotypeUsable ? tableIds : [];
-  const subjectIds = [...new Set([...usableIds, ...indexIds])].sort(byCodeUnit);
-  if (subjectIds.length === 0) {
+  if (graphIds.length === 0) {
     throw new NeurobagelRefusal("no_subjects", `${datasetId} has no subjects in any input`);
   }
+  // What became of the table's rows: those in the graph, those left out, and the graph's
+  // subjects with no row.
+  const inGraph = new Set(graphIds);
+  const joined =
+    tableStatus === "ids_do_not_join" || !tableUsable
+      ? 0
+      : [...table.ids].filter((id) => inGraph.has(id)).length;
+  const tableOnly = tableUsable ? table.ids.size - joined : 0;
+  const indexWithoutRow = tableUsable ? graphIds.length - joined : 0;
+  const phenotypeUsable = tableStatus === "ok";
+  // Only the participants that are in the graph and have a row inform a column.
+  const phenotypeIds = phenotypeUsable ? graphIds.filter((id) => table.rows.has(id)) : [];
 
-  // 5. Column mapping.
+  // 5. Column mapping, over the graph's participants only.
   const cellsOf = (column: number): string[] =>
-    usableIds.map((id) => rowsById.get(id)?.[column] ?? "");
+    phenotypeIds.map((id) => table.rows.get(id)?.[column] ?? "");
   const columnIndex = {
-    age: phenotypeUsable ? findColumn(header, "age") : -1,
-    sex: phenotypeUsable ? findColumn(header, "sex") : -1,
-    group: phenotypeUsable ? findColumn(header, "group") : -1,
+    age: phenotypeUsable ? findColumn(table.header, "age") : -1,
+    sex: phenotypeUsable ? findColumn(table.header, "sex") : -1,
+    group: phenotypeUsable ? findColumn(table.header, "group") : -1,
   };
   const outcomes: DictionaryColumns = {
     participantColumn: PARTICIPANT_COLUMN,
@@ -297,18 +388,18 @@ export async function buildNeurobagelArtifacts(
       columnIndex.age === -1
         ? { status: "absent" }
         : mapAgeColumn(
-            header[columnIndex.age],
+            table.header[columnIndex.age],
             cellsOf(columnIndex.age),
-            ageUnitsOf(participantsJson, header[columnIndex.age]),
+            ageUnitsOf(participantsJson.value, table.header[columnIndex.age]),
           ),
     sex:
       columnIndex.sex === -1
         ? { status: "absent" }
-        : mapSexColumn(header[columnIndex.sex], cellsOf(columnIndex.sex)),
+        : mapSexColumn(table.header[columnIndex.sex], cellsOf(columnIndex.sex)),
     group:
       columnIndex.group === -1
         ? { status: "absent" }
-        : mapGroupColumn(header[columnIndex.group], cellsOf(columnIndex.group)),
+        : mapGroupColumn(table.header[columnIndex.group], cellsOf(columnIndex.group)),
   };
   for (const key of ["age", "sex", "group"] as const) {
     if (outcomes[key].status === "curation") flags.add(`${key}_column_needs_curation`);
@@ -318,17 +409,17 @@ export async function buildNeurobagelArtifacts(
   }
   // `gender` is not `sex`: left alone and reported so a curator can see it exists.
   const genderOnly =
-    phenotypeUsable && findColumn(header, "gender") !== -1 && columnIndex.sex === -1;
+    phenotypeUsable && findColumn(table.header, "gender") !== -1 && columnIndex.sex === -1;
   if (genderOnly) flags.add("gender_column_needs_curation");
 
-  const dataColumns = header
+  const dataColumns = table.header
     .map((_, i) => i)
-    .filter((i) => i !== idColumnIndex)
+    .filter((i) => i !== table.idColumn)
     .map((i) => cellsOf(i));
   if (
-    phenotypeUsable &&
+    phenotypeIds.length > 0 &&
     dataColumns.length > 0 &&
-    dataColumns.every((cells) => cells.every((c) => ["", "n/a", "N/A", "NA"].includes(c)))
+    dataColumns.every((cells) => cells.every((c) => STANDARD_MISSING_VALUES.includes(c)))
   ) {
     flags.add("participants_tsv_placeholder");
   }
@@ -337,10 +428,10 @@ export async function buildNeurobagelArtifacts(
   const mappedDatatypeSubjects = new Map<string, number>();
   const droppedDatatypeSubjects = new Map<string, number>();
   const pairingBasis = new Map<string, number>();
-  const subjects: SubjectModel[] = subjectIds.map((label) => {
-    const row = rowsById.get(label);
+  const subjects: SubjectModel[] = graphIds.map((label) => {
+    const row = phenotypeUsable ? table.rows.get(label) : undefined;
     const phenotype: SubjectModel["phenotype"] = { age: null, sex: null, diagnoses: [] };
-    if (row !== undefined && phenotypeUsable) {
+    if (row !== undefined) {
       if (outcomes.age.status === "mapped")
         phenotype.age = outcomes.age.ageOf(row[columnIndex.age]);
       if (outcomes.sex.status === "mapped") {
@@ -375,17 +466,13 @@ export async function buildNeurobagelArtifacts(
   if (pairingBasis.get("inconsistent")) flags.add("session_modalities_inconsistent");
   if (mappedDatatypeSubjects.size === 0) flags.add("no_mapped_datatypes");
 
-  // 7. Counts that reach the catalog description.
+  // 7. The count the catalog description carries: what the dataset declares, else the
+  // subjects of the graph, which is the index (or, with no index, the table).
   const declaredCount = metadata.demographics?.subjects_count ?? null;
-  const participantCount =
-    declaredCount !== null && declaredCount > 0 ? declaredCount : subjectIds.length;
-  const countSource =
-    declaredCount !== null && declaredCount > 0
-      ? "demographics"
-      : indexIds.length > 0
-        ? "bids_index"
-        : "participants_tsv";
-  if (participantCount !== subjectIds.length) flags.add("participant_count_disagrees");
+  const declaredUsable = declaredCount !== null && declaredCount > 0;
+  const participantCount = declaredUsable ? declaredCount : graphIds.length;
+  const countSource = declaredUsable ? "demographics" : source;
+  if (participantCount !== graphIds.length) flags.add("participant_count_disagrees");
 
   // 8. Build.
   const model: DatasetModel = {
@@ -424,7 +511,7 @@ export async function buildNeurobagelArtifacts(
     );
   }
 
-  const report: CanonicalJsonValue = {
+  const report: NeurobagelReport = {
     columns: {
       age: columnReport(outcomes.age),
       group: columnReport(outcomes.group),
@@ -447,22 +534,30 @@ export async function buildNeurobagelArtifacts(
     participant_count: {
       bids_index: indexIds.length,
       declared: declaredCount,
-      graph: subjectIds.length,
-      participants_tsv: tableIds.length,
+      graph: graphIds.length,
+      participants_tsv: table.ids.size,
       used: participantCount,
       used_from: countSource,
     },
-    participants_json: { status: participantsJsonStatus },
+    participants_json: { status: participantsJson.status },
     participants_tsv: {
-      bom_stripped: bomStripped,
-      duplicate_ids: duplicateIds,
-      ids_prefixed: prefixedIds,
-      rows: rowCount,
-      rows_without_id: rowsWithoutId,
+      bom_stripped: table.bomStripped,
+      conflicting_ids: table.conflicting,
+      duplicate_ids: table.duplicates,
+      ids_prefixed: table.prefixed,
+      rows: table.rowCount,
+      rows_without_id: table.rowsWithoutId,
       status: tableStatus,
     },
     report_version: 1,
     session_label_used_for_phenotype: UNNAMED_SESSION_LABEL,
+    subjects: {
+      graph: graphIds.length,
+      index_without_row: indexWithoutRow,
+      joined,
+      source,
+      table_only: tableOnly,
+    },
     transform_version: NEUROBAGEL_TRANSFORM_VERSION,
     vocabulary: {
       bagel: VOCAB.bagel_version,
@@ -470,21 +565,15 @@ export async function buildNeurobagelArtifacts(
     },
   };
 
-  const jsonld = canonicalJson(graph.document);
-  const dictionaryText = canonicalJson(dictionary);
-  const descriptionText = canonicalJson(description);
-  const reportText = canonicalJson(report);
+  const names = artifactFileNames(datasetId);
   return {
     datasetId,
-    datasetDescription: descriptionText,
-    dictionary: dictionaryText,
     files: {
-      [`${datasetId}.jsonld`]: jsonld,
-      [`${datasetId}.report.json`]: reportText,
-      [`${datasetId}_annotated.json`]: dictionaryText,
-      [`${datasetId}_dataset_description.json`]: descriptionText,
+      [names.jsonld]: canonicalJson(graph.document),
+      [names.report]: canonicalJson(report),
+      [names.dictionary]: canonicalJson(dictionary),
+      [names.datasetDescription]: canonicalJson(description),
     },
-    jsonld,
-    report: reportText,
+    report,
   };
 }

@@ -377,10 +377,35 @@ def check_dataset(id_: str, recipes: Path, record: bool) -> dict:
         pheno = run_pheno(fixture, golden, work, id_, report)
         mine = phenotype_view(jsonld)
         if pheno["status"] == "compared":
-            for label, view in pheno["subjects"].items():
-                assert label in mine, (
-                    f"{id_}: {label} is in bagel's graph but not in the transform's"
+            # The graph holds the bids index's subjects. bagel makes a subject of every table
+            # row, so the bagel subjects the graph lacks must be exactly the table rows for
+            # participants the index does not list, and the report must count them.
+            index_labels = {
+                normalize_label(k)
+                for k in (
+                    (metadata.get("extensions") or {})
+                    .get("nemar", {})
+                    .get("bids_index", {})
+                    .get("subjects", {})
                 )
+            }
+            absent = sorted(label for label in pheno["subjects"] if label not in mine)
+            if report["subjects"]["source"] == "bids_index":
+                expected_absent = sorted(
+                    label for label in pheno["subjects"] if label not in index_labels
+                )
+            else:
+                expected_absent = []
+            assert absent == expected_absent, (
+                f"{id_}: bagel subjects missing from the graph are not the table-only rows"
+            )
+            assert len(absent) == report["subjects"]["table_only"], (
+                f"{id_}: report counts {report['subjects']['table_only']} table-only rows, "
+                f"bagel has {len(absent)} subjects the graph lacks"
+            )
+            for label, view in pheno["subjects"].items():
+                if label in absent:
+                    continue
                 assert mine[label] == view, (
                     f"{id_}: {label} differs: transform {mine[label]} bagel {view}"
                 )
@@ -394,6 +419,7 @@ def check_dataset(id_: str, recipes: Path, record: bool) -> dict:
                     f"{id_}: dataset field {key} differs"
                 )
             result["transform_only_subjects"] = len(extra)
+            result["bagel_only_subjects"] = len(absent)
         # 4. bagel bids
         bids = run_bids(metadata, pheno, work, id_)
         if bids is not None:

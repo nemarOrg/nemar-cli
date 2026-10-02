@@ -58,6 +58,7 @@
   },
   "participants_tsv": {
     "bom_stripped": false,
+    "conflicting_ids": 0,
     "duplicate_ids": 0,
     "ids_prefixed": 0,
     "rows": 447,
@@ -66,6 +67,13 @@
   },
   "report_version": 1,
   "session_label_used_for_phenotype": "ses-unnamed",
+  "subjects": {
+    "graph": 447,
+    "index_without_row": 0,
+    "joined": 447,
+    "source": "bids_index",
+    "table_only": 0
+  },
   "transform_version": 1,
   "vocabulary": {
     "bagel": "0.11.6",

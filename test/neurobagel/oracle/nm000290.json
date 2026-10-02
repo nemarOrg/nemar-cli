@@ -1,5 +1,6 @@
 {
   "bagel": "0.11.6",
+  "bagel_only_subjects": 0,
   "dataset": {
     "hasAccessInstructions": "Public access. License: CC-BY-4.0. Browse and download at https://nemar.org/dataset/nm000290 (latest version v1.0.0).",
     "hasAccessLink": "https://nemar.org/dataset/nm000290",

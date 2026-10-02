@@ -19,7 +19,7 @@ import { GOLDEN_ROOT, fixtureIds, loadFixture } from "./fixtures-io";
 rmSync(GOLDEN_ROOT, { recursive: true, force: true });
 for (const id of fixtureIds()) {
   try {
-    const artifacts = await buildNeurobagelArtifacts(loadFixture(id), { expectedDatasetId: id });
+    const artifacts = await buildNeurobagelArtifacts(loadFixture(id));
     const dir = join(GOLDEN_ROOT, id);
     mkdirSync(dir, { recursive: true });
     for (const [name, text] of Object.entries(artifacts.files))

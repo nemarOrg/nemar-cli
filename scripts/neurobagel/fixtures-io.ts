@@ -31,10 +31,10 @@ export function loadFixture(id: string, root: string = FIXTURE_ROOT): Neurobagel
     existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf8") : null;
   const metadata = text("metadata.json");
   if (metadata === null) throw new Error(`fixture ${id} has no metadata.json`);
-  const participantsJson = text("participants.json");
   return {
+    expectedDatasetId: id,
     metadata: JSON.parse(metadata),
     participantsTsv: text("participants.tsv"),
-    participantsJson: participantsJson === null ? null : JSON.parse(participantsJson),
+    participantsJson: text("participants.json"),
   };
 }

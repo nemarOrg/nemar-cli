@@ -39,7 +39,8 @@ export const AGE_MAX_YEARS = 120;
 
 export type AgeFormatId = "FromFloat" | "FromRange" | "FromBounded" | "FromISO8601";
 
-export interface ColumnCounts {
+// A type alias, not an interface: only an alias is assignable to canonicalJson's object type.
+export type ColumnCounts = {
   /** Cells in the column. */
   cells: number;
   /** Cells listed as missing by the standard list. */
@@ -48,7 +49,7 @@ export interface ColumnCounts {
   unmappable: number;
   /** Cells that became a value in the graph. */
   mapped: number;
-}
+};
 
 export type ColumnOutcome<T> =
   | { status: "absent" }

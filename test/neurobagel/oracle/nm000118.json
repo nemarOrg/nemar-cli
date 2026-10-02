@@ -1,5 +1,6 @@
 {
   "bagel": "0.11.6",
+  "bagel_only_subjects": 0,
   "dataset": {
     "hasAccessInstructions": "Public access. License: Unknown. Browse and download at https://nemar.org/dataset/nm000118 (latest version v1.0.2).",
     "hasAccessLink": "https://nemar.org/dataset/nm000118",

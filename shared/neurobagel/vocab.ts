@@ -110,8 +110,3 @@ export function modalityTermForDatatype(datatype: string): ImagingModalityTerm |
   }
   return term;
 }
-
-/** The namespace prefix of an `ns:id` identifier. */
-export function namespaceOf(identifier: string): string {
-  return identifier.slice(0, identifier.indexOf(":"));
-}

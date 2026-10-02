@@ -12,12 +12,13 @@ export {
   type NeurobagelInput,
   participantsJsonSchema,
 } from "./input-schema";
+export type { ColumnReport, NeurobagelReport, TableStatus } from "./report";
 export {
+  artifactFileNames,
   buildNeurobagelArtifacts,
   type NeurobagelArtifacts,
   NeurobagelRefusal,
   type RefusalCode,
-  type TransformOptions,
 } from "./transform";
 export { NEUROBAGEL_TRANSFORM_VERSION } from "./version";
 export { VOCAB } from "./vocab";

@@ -127,14 +127,24 @@ export type ParticipantsJson = z.infer<typeof participantsJsonSchema>;
 
 /**
  * The transform's input.
- * `metadata` and `participantsJson` are parsed JSON values, `participantsTsv`
- * is the file's text.
- * `null` means the data plane answered 404: the dataset has no such file.
- * A caller must not pass `null` for a file it failed to fetch; a fetch failure
- * is an error, not an absent file.
+ *
+ * `expectedDatasetId` is REQUIRED: the dataset the caller is converting, checked
+ * against the dataset id inside `metadata.json`.
+ * A caller that fetched the three documents for one dataset and the metadata of
+ * another would otherwise publish the wrong dataset's name and subjects under
+ * the right id, and nothing else in the transform could notice.
+ *
+ * `metadata` is the parsed `metadata.json`.
+ * `participantsTsv` and `participantsJson` are the TEXT of the files, so that a file
+ * the data plane served but that is not valid is reported (`malformed`,
+ * `unreadable`) rather than failing in the caller.
+ * `null` for either means the data plane answered 404: the dataset has no such file.
+ * A caller must not pass `null` for a file it failed to fetch; a fetch failure is an
+ * error, not an absent file.
  */
 export interface NeurobagelInput {
+  expectedDatasetId: string;
   metadata: unknown;
   participantsTsv: string | null;
-  participantsJson: unknown | null;
+  participantsJson: string | null;
 }

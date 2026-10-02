@@ -1768,19 +1768,6 @@
       "schemaKey": "Subject"
     },
     {
-      "hasLabel": "sub-59     ",
-      "hasSession": [
-        {
-          "hasAge": 9.0,
-          "hasLabel": "ses-unnamed",
-          "identifier": "nb:381d5e5d-9c9e-59b2-a999-706a49e1ddf1",
-          "schemaKey": "PhenotypicSession"
-        }
-      ],
-      "identifier": "nb:29cfefb2-45db-5317-8c5d-4e29f6afdd9c",
-      "schemaKey": "Subject"
-    },
-    {
       "hasLabel": "sub-60",
       "hasSession": [
         {
