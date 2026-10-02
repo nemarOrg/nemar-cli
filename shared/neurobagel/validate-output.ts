@@ -17,7 +17,7 @@
  */
 
 import { z } from "zod";
-import { type CanonicalJsonValue, canonicalJson } from "./canonical-json";
+import { type CanonicalJsonValue, byCodeUnit, canonicalJson } from "./canonical-json";
 import { MAPPED_DATATYPES, VOCAB } from "./vocab";
 
 const UUID_IDENTIFIER = /^nb:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -156,7 +156,7 @@ function sortKeys(value: unknown): unknown {
     const record = value as Record<string, unknown>;
     return Object.fromEntries(
       Object.keys(record)
-        .sort()
+        .sort(byCodeUnit)
         .map((k) => [k, sortKeys(record[k])]),
     );
   }

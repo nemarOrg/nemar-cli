@@ -100,16 +100,14 @@ const byCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0
 /** Datatype keys in the report must be plain directory names, never free text. */
 const REPORTABLE_DATATYPE = /^[a-z0-9]{1,24}$/;
 
-function bump(map: Record<string, number>, key: string): void {
-  map[key] = (map[key] ?? 0) + 1;
+// Maps, not objects: a datatype directory may be named `constructor`, and an object
+// would find Object's member there instead of a count.
+function bump(map: Map<string, number>, key: string): void {
+  map.set(key, (map.get(key) ?? 0) + 1);
 }
 
-function sortedRecord(map: Record<string, number>): Record<string, number> {
-  return Object.fromEntries(
-    Object.keys(map)
-      .sort(byCodeUnit)
-      .map((k) => [k, map[k]]),
-  );
+function sortedRecord(map: Map<string, number>): Record<string, number> {
+  return Object.fromEntries([...map.entries()].sort(([a], [b]) => byCodeUnit(a, b)));
 }
 
 function columnReport(outcome: ColumnOutcome<object>): CanonicalJsonValue {
@@ -336,9 +334,9 @@ export async function buildNeurobagelArtifacts(
   }
 
   // 6. Per-subject model.
-  const mappedDatatypeSubjects: Record<string, number> = {};
-  const droppedDatatypeSubjects: Record<string, number> = {};
-  const pairingBasis: Record<string, number> = {};
+  const mappedDatatypeSubjects = new Map<string, number>();
+  const droppedDatatypeSubjects = new Map<string, number>();
+  const pairingBasis = new Map<string, number>();
   const subjects: SubjectModel[] = subjectIds.map((label) => {
     const row = rowsById.get(label);
     const phenotype: SubjectModel["phenotype"] = { age: null, sex: null, diagnoses: [] };
@@ -372,10 +370,10 @@ export async function buildNeurobagelArtifacts(
     }
     return { label, phenotype, imaging };
   });
-  if (pairingBasis.unknown) flags.add("session_pairing_unknown");
-  if (pairingBasis.unreadable) flags.add("session_modalities_unreadable");
-  if (pairingBasis.inconsistent) flags.add("session_modalities_inconsistent");
-  if (Object.keys(mappedDatatypeSubjects).length === 0) flags.add("no_mapped_datatypes");
+  if (pairingBasis.get("unknown")) flags.add("session_pairing_unknown");
+  if (pairingBasis.get("unreadable")) flags.add("session_modalities_unreadable");
+  if (pairingBasis.get("inconsistent")) flags.add("session_modalities_inconsistent");
+  if (mappedDatatypeSubjects.size === 0) flags.add("no_mapped_datatypes");
 
   // 7. Counts that reach the catalog description.
   const declaredCount = metadata.demographics?.subjects_count ?? null;

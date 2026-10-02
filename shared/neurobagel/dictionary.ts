@@ -17,7 +17,7 @@
  * Pure: no I/O.
  */
 
-import type { CanonicalJsonValue } from "./canonical-json";
+import { type CanonicalJsonValue, byCodeUnit } from "./canonical-json";
 import {
   type AgeMapping,
   type ColumnOutcome,
@@ -70,7 +70,7 @@ export function buildDictionary(columns: DictionaryColumns): Record<string, Cano
 
   const sex = columns.sex;
   if (sex.status === "mapped") {
-    const levels = [...sex.levels.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    const levels = [...sex.levels.entries()].sort(([a], [b]) => byCodeUnit(a, b));
     dictionary[sex.column] = {
       Annotations: {
         IsAbout: term("Sex"),
@@ -87,7 +87,7 @@ export function buildDictionary(columns: DictionaryColumns): Record<string, Cano
 
   const group = columns.group;
   if (group.status === "mapped") {
-    const levels = [...group.levels].sort();
+    const levels = [...group.levels].sort(byCodeUnit);
     dictionary[group.column] = {
       Annotations: {
         IsAbout: term("Diagnosis"),

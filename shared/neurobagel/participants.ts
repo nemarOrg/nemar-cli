@@ -21,6 +21,7 @@
  * Pure: no I/O.
  */
 
+import { byCodeUnit } from "./canonical-json";
 import { VOCAB, type VocabTerm, ageFormatTerm, sexTerm } from "./vocab";
 
 /** Cell values that mean "not recorded" in every column. Fixed order, part of the output. */
@@ -138,7 +139,7 @@ export function unitsAreYears(units: string): boolean {
 }
 
 function distinctSorted(values: Iterable<string>): string[] {
-  return [...new Set(values)].sort();
+  return [...new Set(values)].sort(byCodeUnit);
 }
 
 /** The standard missing values followed by any extra declared ones, in a fixed order. */

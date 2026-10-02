@@ -18,6 +18,17 @@
  * Pure: no I/O, no Node-only APIs.
  */
 
+/**
+ * The order every list of names in this module is sorted in: UTF-16 code unit
+ * order, which is `Array.prototype.sort`'s default for strings and equals code
+ * point order for every key and label NEMAR writes.
+ * Spelled out as a function so a sorted list never depends on the runtime's
+ * locale, and so there is one definition of it.
+ */
+export function byCodeUnit(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 /** A finite number that must print with a decimal point (`20.0`, never `20`). */
 export class JsonFloat {
   constructor(readonly value: number) {
@@ -65,7 +76,7 @@ function write(value: CanonicalJsonValue, indent: string): string {
   }
   const keys = Object.keys(value)
     .filter((key) => value[key] !== undefined)
-    .sort();
+    .sort(byCodeUnit);
   if (keys.length === 0) return "{}";
   const members = keys.map((key) => {
     const member = value[key] as CanonicalJsonValue;
