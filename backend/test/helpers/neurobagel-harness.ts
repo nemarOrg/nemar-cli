@@ -122,6 +122,27 @@ class HarnessCache extends DrainingCache {
   }
 }
 
+/**
+ * A stand-in server that ANSWERS. Under bun, a Miniflare instance disposed just before this
+ * one can still be closing its own HTTP servers (bun implements node:http over its own
+ * server), and in one process, after several instances, a stand-in created at that moment
+ * has been found not listening a few milliseconds later. The cause is outside this code, so
+ * the harness checks that the server answers and starts another if it does not.
+ */
+async function startReachableStandin(): Promise<S3ManifestStandin> {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const candidate = startS3ManifestStandin();
+    try {
+      await fetch(`${candidate.url}/__alive`, { method: "HEAD" });
+      return candidate;
+    } catch {
+      candidate.stop();
+      await Bun.sleep(25);
+    }
+  }
+  throw new Error("could not start a stand-in server that answers");
+}
+
 function installEdgeCache(): void {
   // The Workers Cache API the data plane's manifest and git-file caches and the rate
   // limiter use. A `DrainingCache`, which READS the body it is handed as the real API
@@ -155,7 +176,7 @@ export async function startHarness(
   opts: { routeWorker?: RouteWorkerOptions } = {},
 ): Promise<Harness> {
   installEdgeCache();
-  const standin = startS3ManifestStandin();
+  const standin = await startReachableStandin();
   const rw = opts.routeWorker;
   const mf = new Miniflare({
     modules: true,
@@ -185,8 +206,8 @@ export async function startHarness(
         DB: realD1(harness.db),
         ENVIRONMENT: "test",
         DATA_BASE_URL: "https://data.nemar.org",
-        GITHUB_RAW_BASE: standin.url,
-        S3_ENDPOINT_URL: standin.url,
+        GITHUB_RAW_BASE: harness.standin.url,
+        S3_ENDPOINT_URL: harness.standin.url,
         S3_BUCKET: "nemar",
         AWS_REGION: "us-east-2",
         AWS_ACCESS_KEY_ID: "AKIATEST",
@@ -232,8 +253,15 @@ export async function startHarness(
       installEdgeCache();
       harness.db.close();
       harness.db = freshDb();
-      standin.objects.clear();
-      standin.log.length = 0;
+      // A stand-in that stopped answering is replaced (see startReachableStandin); one
+      // that answers is emptied. Its objects are the test's own, so nothing is lost.
+      try {
+        await fetch(`${harness.standin.url}/__alive`, { method: "HEAD" });
+      } catch {
+        harness.standin = await startReachableStandin();
+      }
+      harness.standin.objects.clear();
+      harness.standin.log.length = 0;
       let cursor: string | undefined;
       do {
         const listed = await bucket.list({ cursor });
@@ -244,7 +272,7 @@ export async function startHarness(
     async dispose() {
       (globalThis as { caches?: unknown }).caches = undefined;
       await mf.dispose();
-      standin.stop();
+      harness.standin.stop();
     },
   };
   return harness;
