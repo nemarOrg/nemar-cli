@@ -354,6 +354,38 @@ describe("releasing a claim", () => {
     expect(row(id)?.approval_requested_by).toBe(secondAdminId);
     expect(row(id)?.approval_dispatched_at).not.toBeNull();
   });
+
+  test("restores the cleared error only while no run has begun since the claim", async () => {
+    // The claim clears `last_error`; a not-sent release puts it back. But
+    // `/approve` bumps `updated_at` as it starts, so a changed `updated_at`
+    // means a run (a person's terminal) began between the claim and the
+    // release. Writing the old error back over its fresh state would make that
+    // live run read as failed after the grace window.
+    const id = seedRequest({ status: "approving", updatedAt: "-20 minutes", lastError: "boom" });
+    githubStatus = 422;
+    let landed = false;
+    const bindings = {
+      ...env(),
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (!landed && sql.includes("SET approval_requested_by = NULL")) {
+          landed = true;
+          // What `/approve` does as it starts: a fresh heartbeat, error cleared.
+          db.run(
+            "UPDATE publication_requests SET updated_at = datetime('now', '+5 seconds'), last_error = NULL WHERE id = ?",
+            [id],
+          );
+        }
+      }),
+    } as Bindings;
+
+    const res = await dispatchWith(ADMIN_KEY, DATASET, bindings);
+    expect(res.status).toBe(502);
+    expect(landed).toBe(true);
+    // The claim is released, but the stale error is not written back.
+    expect(row(id)?.approval_requested_by).toBeNull();
+    expect(row(id)?.approval_dispatched_at).toBeNull();
+    expect(row(id)?.last_error).toBeNull();
+  });
 });
 
 describe("a run that failed", () => {
@@ -554,12 +586,78 @@ describe("when GitHub refuses the dispatch", () => {
     // it would leave this row "running" for the whole lease after a failure.
     const id = seedRequest({ status: "approving", updatedAt: "-20 minutes" });
     const before = row(id)?.updated_at;
-    githubStatus = 500;
+    githubStatus = 422;
     expect((await dispatchWith(ADMIN_KEY)).status).toBe(502);
     expect(row(id)?.updated_at).toBe(before ?? "");
 
     githubStatus = 204;
     expect((await dispatchWith(ADMIN_KEY)).status).toBe(202);
+  });
+
+  test("every 4xx is a refusal GitHub made before creating an event: released, retry succeeds", async () => {
+    // 401 (bad token), 404 (no repository) and 429 (rate limited) are all
+    // answered before any event exists, so nothing can be running.
+    for (const status of [401, 404, 429]) {
+      const id = seedRequest({ dataset: `nm09876${status % 10}` });
+      githubStatus = status;
+      const failed = await dispatchWith(ADMIN_KEY, `nm09876${status % 10}`);
+      expect(failed.status).toBe(502);
+      expect((await errorBody(failed)).error).toBe("dispatch_failed");
+      expect(row(id)?.approval_requested_by).toBeNull();
+      expect(row(id)?.approval_dispatched_at).toBeNull();
+    }
+  });
+
+  describe("a 5xx answer is not a refusal", () => {
+    // GitHub's edge can answer 502, 503 or 504 AFTER it queued the event: the
+    // same lost-answer case as a dropped connection. Releasing the claim then
+    // would let the next click start a second run beside the first, so the lease
+    // is kept and the admin is told the run may have started.
+    for (const status of [500, 502, 503, 504]) {
+      test(`${status}: dispatch_unconfirmed, the lease kept, a second click refused`, async () => {
+        const id = seedRequest();
+        githubStatus = status;
+        const res = await dispatchWith(ADMIN_KEY);
+
+        expect(res.status).toBe(502);
+        const body = await errorBody(res);
+        expect(body.error).toBe("dispatch_unconfirmed");
+        // The page shows `message`; GitHub's body must not reach it.
+        expect(body.message).not.toContain("refused");
+        expect(row(id)?.approval_requested_by).toBe(adminId);
+        expect(row(id)?.approval_dispatched_at).not.toBeNull();
+
+        githubStatus = 204;
+        const again = await dispatchWith(SECOND_ADMIN_KEY);
+        expect(again.status).toBe(409);
+        expect((await errorBody(again)).error).toBe("already_in_flight");
+        // Only the first click ever reached GitHub.
+        expect(dispatches).toHaveLength(1);
+
+        // The run that may exist is on record, with the status and nothing else
+        // of GitHub's answer, and the launch audit row is not written.
+        const rows = db
+          .query<{ user_id: number; details: string }, []>(
+            "SELECT user_id, details FROM audit_log WHERE action = 'approval_dispatch_unconfirmed'",
+          )
+          .all();
+        expect(rows).toHaveLength(1);
+        expect(rows[0].user_id).toBe(adminId);
+        expect(JSON.parse(rows[0].details)).toEqual({
+          request_id: id,
+          resume: false,
+          environment: "dev",
+          reason: `http_${status}`,
+        });
+        expect(
+          db
+            .query<{ n: number }, []>(
+              "SELECT COUNT(*) AS n FROM audit_log WHERE action = 'approval_dispatched'",
+            )
+            .get()?.n,
+        ).toBe(0);
+      });
+    }
   });
 
   test("no GitHub credential configured: 502 dispatch_unconfigured, retrying will not help, claim released", async () => {
@@ -654,6 +752,19 @@ describe("when GitHub's answer is lost", () => {
     // The claim stands: it may be the only record that a run started.
     expect(row(id)?.approval_requested_by).toBe(adminId);
     expect(row(id)?.approval_dispatched_at).not.toBeNull();
+
+    // And the audit log says a run may exist, with no HTTP status to give.
+    const audit = db
+      .query<{ details: string }, []>(
+        "SELECT details FROM audit_log WHERE action = 'approval_dispatch_unconfirmed'",
+      )
+      .get();
+    expect(JSON.parse(audit?.details ?? "{}")).toEqual({
+      request_id: id,
+      resume: false,
+      environment: "dev",
+      reason: "no_answer",
+    });
 
     // So a second click is held off by the lease, not allowed to start a second run.
     pointGithubAt(server.port);
@@ -774,4 +885,28 @@ describe("who may dispatch", () => {
     expect(dispatches).toHaveLength(0);
     expect(row(id)?.approval_requested_by).toBeNull();
   });
+
+  // The host-scoped sessions (docs, ADR 0056; private, ADR 0079) are credentials
+  // for another host. Each reader names the scope it wants, so an admin's docs or
+  // private session must open neither the irreversible route nor the list.
+  for (const scope of ["docs", "private"] as const) {
+    test(`an admin's ${scope}-scope session authenticates nothing here: 401, nothing claimed or listed`, async () => {
+      const id = seedRequest();
+      const cookie = await cookieFor(adminId);
+      db.run("UPDATE web_sessions SET scope = ? WHERE user_id = ?", [scope, adminId]);
+
+      const dispatch = await dispatchWithCookie(cookie, APP_ORIGIN);
+      expect(dispatch.status).toBe(401);
+      expect(dispatches).toHaveLength(0);
+      expect(row(id)?.approval_requested_by).toBeNull();
+      expect(row(id)?.approval_dispatched_at).toBeNull();
+
+      const list = await app.request(
+        "/admin/publish/requests",
+        { method: "GET", headers: { Cookie: cookie } },
+        env(),
+      );
+      expect(list.status).toBe(401);
+    });
+  }
 });

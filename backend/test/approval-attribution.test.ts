@@ -255,6 +255,38 @@ describe("a web-queued approval", () => {
     expect(approvedBy()).toBe(executorId);
     expect(publishedAudit()?.userId).toBe(executorId);
   });
+
+  // A run carries on after its clicker's access ends. The executing key is who
+  // actually finishes it, so that is who is recorded; the dispatch's own audit
+  // row still names the clicker by id.
+  const AFTER_ACCESS_ENDED = [
+    ["demoted to member", "UPDATE users SET role = 'member' WHERE id = ?"],
+    ["revoked", "UPDATE users SET status = 'revoked' WHERE id = ?"],
+    ["soft-deleted", "UPDATE users SET deleted_at = datetime('now') WHERE id = ?"],
+  ] as const;
+
+  for (const [label, update] of AFTER_ACCESS_ENDED) {
+    test(`a clicker who has since been ${label} is not recorded: the caller stands in`, async () => {
+      const clicker = await seedAdmin("lapsedclicker", "lapsedclicker@example.org", null);
+      seedRequest({ clickedBy: clicker, dispatchedAt: LIVE });
+      db.run(update, [clicker]);
+
+      const res = await approveAs(EXECUTOR_KEY);
+      expect(res.status).toBe(200);
+      expect(approvedBy()).toBe(executorId);
+      expect(publishedAudit()?.userId).toBe(executorId);
+    });
+  }
+
+  test("an owner who clicked is still honored: owner meets the admin requirement", async () => {
+    const owner = await seedAdmin("ownerclicker", "ownerclicker@example.org", null);
+    db.run("UPDATE users SET role = 'owner' WHERE id = ?", [owner]);
+    seedRequest({ clickedBy: owner, dispatchedAt: LIVE });
+
+    const res = await approveAs(EXECUTOR_KEY);
+    expect(res.status).toBe(200);
+    expect(approvedBy()).toBe(owner);
+  });
 });
 
 describe("the clicker is honored only while their run is live", () => {

@@ -199,23 +199,26 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *   409 not_dispatchable  the newest active request is `blocked`
    *   409 already_in_flight a run is live (services/approval-dispatch.ts), a
    *                         failed run inside its short grace window included
-   *   502 dispatch_failed   GitHub answered non-2xx, or a token could not be
+   *   502 dispatch_failed   GitHub answered 4xx, or a token could not be
    *                         minted: nothing was sent, the claim is released
    *   502 dispatch_unconfigured  the Worker has no GitHub credential; retrying
    *                         cannot help; the claim is released
-   *   502 dispatch_unconfirmed   the call to GitHub dropped or timed out: it MAY
-   *                         have started, so the lease is KEPT (a retry is a
-   *                         409 until it lapses)
+   *   502 dispatch_unconfirmed   the call to GitHub dropped, timed out or was
+   *                         answered 5xx: it MAY have started, so the lease is
+   *                         KEPT (a retry is a 409 until it lapses) and an
+   *                         `approval_dispatch_unconfirmed` audit row is written
    */
   admin.post("/publish/:id/approve-dispatch", async (c) => {
     // A session cookie rides along with any cross-site request a browser can be
     // tricked into making, and this route launches an irreversible publication,
-    // so the cookie path must come from a NEMAR origin. A bearer key cannot be
-    // forged cross-site and a terminal sends no Origin, so it is not asked for
-    // one. This is the cookie-only rule `resolveActingAccount` and
-    // `/auth/orcid/cli-start` apply; the admin router does not apply it to its
-    // routes in general, and this one should not wait for that to change.
-    if (c.get("authMethod") === "cookie" && !isAllowedOrigin(c.req.header("Origin"))) {
+    // so every path but a bearer key must come from a NEMAR origin. A bearer key
+    // cannot be forged cross-site and a terminal sends no Origin, so it is not
+    // asked for one. Phrased as "not a token" rather than "is a cookie" so that
+    // an unset `authMethod` fails closed. This is the cookie-only rule
+    // `resolveActingAccount` and `/auth/orcid/cli-start` apply; the admin router
+    // does not apply it to its routes in general, and this one should not wait
+    // for that to change.
+    if (c.get("authMethod") !== "token" && !isAllowedOrigin(c.req.header("Origin"))) {
       return c.json(
         {
           error: "origin_not_allowed",
@@ -230,9 +233,9 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     const db = c.env.DB;
 
     const request = await db
-      .prepare(`SELECT id, status, last_error ${ACTIVE_REQUEST_TAIL_SQL}`)
+      .prepare(`SELECT id, status, last_error, updated_at ${ACTIVE_REQUEST_TAIL_SQL}`)
       .bind(datasetId)
-      .first<{ id: number; status: string; last_error: string | null }>();
+      .first<{ id: number; status: string; last_error: string | null; updated_at: string }>();
 
     if (!request) {
       return c.json({ error: "not_found", message: "No active publication request found" }, 404);
@@ -310,20 +313,25 @@ export function registerPublishRoutes(admin: AdminRouter): void {
 
     // Release the claim so the admin can try again at once rather than wait out
     // the lease. Only ever done for a failure that is DEFINITELY "not sent", so
-    // the row goes back to how it was: the error the claim cleared is restored
-    // (unless something wrote a newer one meanwhile). `AND approval_requested_by
-    // = ?` makes it clear only a claim this click made. If even the release fails the lease lapses by itself, which errs
-    // toward refusing a retry, never toward a second run.
+    // the row goes back to how it was. `AND approval_requested_by = ?` makes it
+    // clear only a claim this click made. The error the claim cleared is
+    // restored only while `updated_at` still holds the value read before the
+    // claim: `/approve` bumps it as it starts, so a changed `updated_at` means a
+    // run began in the meantime (a person's terminal), and restoring the old
+    // error over its fresh state would make that live run read as failed after
+    // the grace window. If even the release fails the lease lapses by itself,
+    // which errs toward refusing a retry, never toward a second run.
     const releaseClaim = async (): Promise<void> => {
       try {
         await db
           .prepare(
             `UPDATE publication_requests
                SET approval_requested_by = NULL, approval_dispatched_at = NULL,
-                   last_error = COALESCE(last_error, ?)
+                   last_error = CASE WHEN updated_at = ? THEN COALESCE(last_error, ?)
+                                     ELSE last_error END
              WHERE id = ? AND approval_requested_by = ?`,
           )
-          .bind(request.last_error, request.id, adminUser.id)
+          .bind(request.updated_at, request.last_error, request.id, adminUser.id)
           .run();
       } catch (releaseErr) {
         console.error(
@@ -370,16 +378,37 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       );
     }
 
-    // 2. The dispatch itself. GitHub answering non-2xx means nothing was sent:
-    // release. A dropped connection or a timeout means UNKNOWN: GitHub may have
-    // accepted the event and lost only the reply, and releasing then would let
-    // the next click start a second run beside it. KEEP the lease; it lapses on
-    // its own if nothing started.
+    // The audit row for this click's dispatch. A missing row must never change
+    // what the admin is told about a run, so a failed write is only logged.
+    const audit = async (action: string, extra: Record<string, unknown> = {}): Promise<void> => {
+      try {
+        await auditLogStatement(db, {
+          userId: adminUser.id,
+          action,
+          resourceType: "dataset",
+          resourceId: datasetId,
+          details: JSON.stringify({ request_id: request.id, resume, environment, ...extra }),
+        }).run();
+      } catch (auditErr) {
+        console.error(
+          `[approve-dispatch] audit write failed (${action}) for ${datasetId}:`,
+          errorMessage(auditErr),
+        );
+      }
+    };
+
+    // 2. The dispatch itself. GitHub refusing the request (a 4xx) means nothing
+    // was sent: release. Anything else means UNKNOWN: a dropped connection, a
+    // timeout, or a 5xx from GitHub's edge, any of which can follow an event that
+    // was already queued. Releasing then would let the next click start a second
+    // run beside it. KEEP the lease; it lapses on its own if nothing started, and
+    // the audit row records that a run may exist that the lease alone would not
+    // explain.
     try {
       await triggerApprovePublication(datasetId, request.id, resume, environment, pat);
     } catch (err) {
       console.error(`[approve-dispatch] dispatch failed for ${datasetId}:`, errorMessage(err));
-      if (err instanceof DispatchRejectedError) {
+      if (err instanceof DispatchRejectedError && err.definitelyNotSent) {
         await releaseClaim();
         return c.json(
           {
@@ -389,6 +418,10 @@ export function registerPublishRoutes(admin: AdminRouter): void {
           502,
         );
       }
+      await audit("approval_dispatch_unconfirmed", {
+        // The status only: never GitHub's body, which the error text carries.
+        reason: err instanceof DispatchRejectedError ? `http_${err.httpStatus}` : "no_answer",
+      });
       return c.json(
         {
           error: "dispatch_unconfirmed",
@@ -399,22 +432,9 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       );
     }
 
-    try {
-      await auditLogStatement(db, {
-        userId: adminUser.id,
-        action: "approval_dispatched",
-        resourceType: "dataset",
-        resourceId: datasetId,
-        details: JSON.stringify({ request_id: request.id, resume, environment }),
-      }).run();
-    } catch (auditErr) {
-      // The run is already launched; a missing audit row must not report the
-      // launch as failed.
-      console.error(
-        `[approve-dispatch] audit write failed for ${datasetId}:`,
-        errorMessage(auditErr),
-      );
-    }
+    // The run is already launched; a missing audit row must not report the
+    // launch as failed (`audit` only logs).
+    await audit("approval_dispatched");
 
     return c.json(
       { status: "dispatched", dataset_id: datasetId, request_id: request.id, resume },

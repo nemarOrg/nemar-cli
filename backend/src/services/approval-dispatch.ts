@@ -1,3 +1,6 @@
+import { hasRole, parseRole } from "../types/bindings";
+import { isActiveAccountStatus } from "./account-tier";
+
 /**
  * The lease behind a web-launched approval (ADR 0080).
  *
@@ -130,9 +133,17 @@ export interface Approver {
  * lease before its first `/approve` call is recorded under the executing key,
  * with `executed_by` still in the audit details.
  *
- * A clicker whose account row is gone falls back to the caller rather than
- * failing a publication that is already underway; the dispatch left its own
- * audit row naming the clicker by id.
+ * The fork is on the lease, not on who the caller is: a person who runs
+ * `/approve` at a terminal inside a web run's live lease is recorded as that
+ * run's clicker, with themselves kept as `executed_by` in the audit details
+ * (ADR 0080 states this). Telling a service key from a person would need the
+ * caller's account kind, and an executor whose key is not marked as a service
+ * account would then lose web attribution entirely.
+ *
+ * A clicker whose account row is gone, who is no longer an active admin, or who
+ * has been deleted falls back to the caller rather than failing a publication
+ * that is already underway; the dispatch left its own audit row naming the
+ * clicker by id.
  */
 export async function resolveApprover(
   db: D1Database,
@@ -142,10 +153,24 @@ export async function resolveApprover(
 ): Promise<Approver> {
   if (approvalRequestedBy === null || !leaseLive) return caller;
   const clicker = await db
-    .prepare("SELECT id, username, email FROM users WHERE id = ?")
+    .prepare("SELECT id, username, email, role, status, deleted_at FROM users WHERE id = ?")
     .bind(approvalRequestedBy)
-    .first<{ id: number; username: string | null; email: string }>();
+    .first<{
+      id: number;
+      username: string | null;
+      email: string;
+      role: string | null;
+      status: string;
+      deleted_at: string | null;
+    }>();
   if (!clicker) return caller;
+  // A clicker who has since been demoted, revoked or deleted must not be
+  // recorded as the approver of a run that carries on after their access ended:
+  // the executing key is who actually finished it, and the dispatch left its own
+  // audit row naming the clicker by id.
+  if (clicker.deleted_at !== null || !isActiveAccountStatus(clicker.status)) return caller;
+  const role = parseRole(clicker.role, clicker.username ?? undefined);
+  if (role === null || !hasRole(role, "admin")) return caller;
   // Web-only accounts may have no username yet; the address still names them.
   return { id: clicker.id, username: clicker.username || clicker.email };
 }
