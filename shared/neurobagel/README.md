@@ -179,6 +179,8 @@ bun run scripts/neurobagel/reuse-openneuro-annotations.ts --date 2026-10-02 \
 
 It keeps a column only if it is about one of the four curatable variables, every term is in the pinned vocabulary (upstream's blank labels are rewritten, `nb:FromInt` is read as `nb:FromFloat`), the loader accepts it, and the binder accepts it against the mirror's CURRENT table (including the age rules); whatever fails is dropped and counted.
 A column the mechanical rules would already map to the same values for every row is left out too (`--keep-redundant` opts out).
+A column upstream annotates as Sex whose name is not `sex` is kept only if the dataset's own participants.json description says sex and not gender, because Neurobagel's term is sex and a gender column is never relabelled as sex on upstream's word.
+Otherwise it is left out and counted as `sex_described_as_gender` or `sex_not_described_as_sex`, and `--audit-sex <file>` writes each such column with the description that decided it.
 `--merge-into` REFUSES to replace an entry whose review is not `upstream_community`: it prints one clear message naming every such entry and exits 1 before writing anything, so a person's entry is never overwritten by an upstream annotation; `--skip-authored` leaves those entries alone instead, merges the rest and reports what it skipped.
 What a person spot-checking needs (a `gender` column read as sex and what participants.json says of it, numeric sex codes and whether participants.json confirms them, the declared age units) is written into each entry's `evidence.source`.
 `NOTICE-openneuro-annotations.txt` carries the upstream licence notice that reused entries require.
