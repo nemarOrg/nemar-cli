@@ -1,0 +1,412 @@
+#!/usr/bin/env bash
+#
+# nb-reload: the deliberate reload. Stock recipes wipes /data and the whole graph on every start
+# of the init and graph containers; here that is an operation with a lock, a pre-flight check, a
+# measured duration, a verification, and a way back.
+#
+# What it does, in order (all under the lock in state/lock):
+#   1. pre-flight: node not on hold, graph running, enough memory available
+#   2. api        stopped for the load window, so the federation sees an error from this node
+#                 instead of partial results while the graph is empty or half loaded
+#   3. init_data  the stock initialiser validates data/current and rebuilds the /data volume
+#   4. graph      restart: the stock setup clears the graph and uploads every file plus the vocabulary
+#   5. api        started again (it reads its dataset metadata once, at start)
+#   6. verify     the node must serve exactly the datasets in the release and nothing but protected
+#                 records (a node that returns participant-level data fails the reload)
+# On any failure the API is stopped again, data/current is pointed back at the last release that
+# was loaded and verified, and that release is loaded instead. Every reload appends one JSON line to
+# state/reload-history.jsonl with the seconds each phase took and for how long the API was down.
+#
+# A hold wins: if `nb hold` is set at any point, the API is killed again and stays down.
+#
+# Usage: bin/nb-reload [--adopt] [--no-rollback] [--from-unhold]
+#   --adopt        do not restart the graph: wait for one that has just started on its own (first
+#                  `nb up`, a host reboot) to finish loading, with the API held down meanwhile,
+#                  then verify it and record the duration
+#   --no-rollback  report a failure without restoring the previous release
+#   --from-unhold  used by `nb unhold`: the hold flag is still set and the API container is
+#                  stopped on purpose; it is started only after the graph holds the new release
+#
+# Exit codes: 0 loaded and verified; 5 failed and rolled back; 6 failed and rollback failed;
+# 7 node on hold; 8 pre-flight refused; 75 another loader or reload is running.
+
+set -euo pipefail
+# shellcheck source=nb-common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/nb-common.sh"
+
+adopt=0
+rollback=1
+from_unhold=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --adopt) adopt=1; shift ;;
+    --no-rollback) rollback=0; shift ;;
+    --from-unhold) from_unhold=1; shift ;;
+    -h | --help)
+      nb_usage "$0"
+      exit 0
+      ;;
+    *) nb_die "$NB_EX_USAGE" "unknown argument: $1" ;;
+  esac
+done
+
+nb_need docker jq curl perl
+nb_check_project_name
+nb_init_dirs
+nb_lock_or_exit "nb-reload"
+
+timeout_s="$(nb_env_get NB_RELOAD_TIMEOUT_S 3600)"
+min_avail="$(nb_env_get NB_MIN_AVAILABLE_MB 1800)"
+abort_avail="$(nb_env_get NB_ABORT_AVAILABLE_MB 1536)"
+history="$NB_STATE_DIR/reload-history.jsonl"
+
+REASON=""
+min_seen_mb=""
+t_init=0
+t_graph=0
+t_api=0
+t_verify=0
+t_api_down=0
+api_killed_at=0
+served=0
+expected=0
+held=0
+mem_breach=0
+
+track_memory() {
+  local m
+  m="$(nb_mem_available_mb)"
+  [ -n "$m" ] || return 0
+  if [ -z "$min_seen_mb" ] || [ "$m" -lt "$min_seen_mb" ]; then min_seen_mb="$m"; fi
+  if nb_decide_mem_breach "$m" "$abort_avail"; then mem_breach=1; fi
+}
+
+# The epic's guardrail: host memory below the abort threshold stops the node's graph store (this
+# project's container, nothing else) and the reload is reported failed WITHOUT a rollback, since a
+# rollback is another full load on a host that has no room for one.
+abort_for_memory() {
+  REASON="host memory available fell to ${min_seen_mb} MiB, below the ${abort_avail} MiB guardrail; the graph store was stopped"
+  nb_log "ERROR: $REASON"
+  nb_compose stop graph >/dev/null 2>&1 || true
+}
+
+# kill, not stop: the API holds no state and its entrypoint script ignores SIGTERM.
+kill_api() {
+  nb_compose kill api >/dev/null 2>&1 || true
+  [ "$api_killed_at" -ne 0 ] || api_killed_at="$(nb_epoch)"
+}
+
+# Stops (or keeps down) the API when a hold is in force. Returns 0 if it did, so the caller can
+# stop the reload. The hold flag is the operator's word and outranks everything in here.
+# `nb unhold` sets NB_ENDING_HOLD to the text of the hold it is ending; a hold with other text is a
+# newer one and wins even during an unhold's reload.
+hold_stops() {
+  local present=0 current=""
+  if nb_hold_active; then
+    present=1
+    current="$(cat "$NB_STATE_DIR/hold" 2>/dev/null || true)"
+  fi
+  [ "$(nb_decide_hold_stop "$present" "$from_unhold" "${NB_ENDING_HOLD:-}" "$current")" = stop ]
+}
+
+hold_wins() {
+  hold_stops || return 1
+  REASON="the node was placed on hold during the reload; the API was killed and stays down"
+  held=1
+  kill_api
+  return 0
+}
+
+preflight() {
+  if hold_stops; then
+    nb_log "node is on hold: $(cat "$NB_STATE_DIR/hold"); not reloading (nb unhold first)"
+    exit "$NB_EX_HOLD"
+  fi
+  [ -L "$NB_CURRENT_LINK" ] || nb_die "$NB_EX_PREFLIGHT" "no release is live (data/current is missing)"
+  # The API may be stopped (a failed rollback leaves it so); the reload starts it. The graph must be
+  # running: a reload does not start a stack, `nb up` does.
+  nb_container_running graph || nb_die "$NB_EX_PREFLIGHT" "service graph is not running; start the stack with: nb up"
+  if ! nb_decide_mem_preflight_ok "$(nb_mem_available_mb)" "$min_avail"; then
+    nb_die "$NB_EX_PREFLIGHT" "host has $(nb_mem_available_mb) MiB available, below the ${min_avail} MiB needed to reload"
+  fi
+}
+
+# Wait for the stock setup script in the graph container to finish its load. `since` is the
+# container's StartedAt, so a previous run's log lines can never be mistaken for this one's.
+wait_graph_loaded() { # since
+  local since="$1" cid verdict deadline now
+  cid="$(nb_container_id graph)"
+  deadline=$(($(nb_epoch) + timeout_s))
+  while true; do
+    track_memory
+    if [ "$mem_breach" = 1 ]; then
+      abort_for_memory
+      return 1
+    fi
+    verdict="$(docker logs --since "$since" "$cid" 2>&1 | nb_graph_log_verdict || true)"
+    case "$verdict" in
+      loaded) return 0 ;;
+      failed:*)
+        REASON="${verdict#failed: }"
+        return 1
+        ;;
+    esac
+    if [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" != true ]; then
+      REASON="the graph container stopped while loading"
+      return 1
+    fi
+    now="$(nb_epoch)"
+    if [ "$now" -ge "$deadline" ]; then
+      REASON="the graph did not finish loading within ${timeout_s}s"
+      return 1
+    fi
+    sleep 5
+  done
+}
+
+# The stock container runs a shell script as PID 1 that ignores SIGTERM, so `docker restart`
+# waits out its whole timeout and then kills GraphDB (a 60 s wait, then "Detected unclean shutdown"
+# on the next start). Instead, ask the JVM (Java virtual machine) to shut down: its hook closes the
+# repository cleanly, the script ends, and the restart policy starts the container again. If the
+# container has not come back by itself it is started; if it never stopped, it is restarted with a
+# short timeout.
+restart_graph() {
+  local cid before now deadline
+  cid="$(nb_container_id graph)"
+  before="$(docker inspect -f '{{.State.StartedAt}}' "$cid")"
+  docker exec "$cid" pkill -TERM java >/dev/null 2>&1 || true
+  deadline=$(($(nb_epoch) + 90))
+  while [ "$(nb_epoch)" -lt "$deadline" ]; do
+    now="$(docker inspect -f '{{.State.StartedAt}}' "$cid" 2>/dev/null || true)"
+    if [ -n "$now" ] && [ "$now" != "$before" ]; then
+      return 0 # the restart policy already brought it back
+    fi
+    if [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" != true ]; then
+      nb_compose start graph >/dev/null 2>&1
+      return 0
+    fi
+    sleep 1
+  done
+  nb_log "the graph container did not stop on SIGTERM within 90s; restarting it"
+  nb_compose restart --timeout 10 graph >/dev/null 2>&1
+}
+
+wait_healthy() { # service seconds
+  local id deadline
+  id="$(nb_container_id "$1")"
+  deadline=$(($(nb_epoch) + $2))
+  while [ "$(nb_epoch)" -lt "$deadline" ]; do
+    track_memory
+    if [ "$mem_breach" = 1 ]; then
+      abort_for_memory
+      return 1
+    fi
+    case "$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$id" 2>/dev/null)" in
+      healthy) return 0 ;;
+    esac
+    sleep 3
+  done
+  REASON="service $1 did not become healthy within ${2}s"
+  return 1
+}
+
+record() { # kind release ok
+  local kind="$1" release="$2" ok="$3"
+  jq -cn --arg at "$(nb_ts)" --arg kind "$kind" --arg release "$release" --argjson ok "$ok" \
+    --arg reason "$REASON" --argjson init "$t_init" --argjson graph "$t_graph" --argjson api "$t_api" \
+    --argjson verify "$t_verify" --argjson down "$t_api_down" --argjson expected "$expected" \
+    --argjson served "$served" --arg minavail "${min_seen_mb:-}" \
+    '{at:$at, kind:$kind, release:$release, ok:$ok, reason:$reason,
+      seconds:{init:$init, graph:$graph, api:$api, verify:$verify, total:($init+$graph+$api+$verify),
+               api_unavailable:$down},
+      datasets_expected:$expected, datasets_served:$served,
+      min_available_mb:(if $minavail == "" then null else ($minavail|tonumber) end)}' >>"$history"
+}
+
+# One full load of the release that data/current points at. Returns 0 or 1 (REASON set).
+load_current() { # kind
+  local kind="$1" release t0 t1 since vrc ok_n all_n counts verdict
+  release="$(nb_current_release)"
+  REASON=""
+  min_seen_mb=""
+  mem_breach=0
+  t_init=0
+  t_graph=0
+  t_api=0
+  t_verify=0
+  t_api_down=0
+  api_killed_at=0
+  served=0
+  expected=0
+  track_memory
+  nb_log "$kind: loading release $release"
+
+  if [ "$kind" != adopt ]; then
+    t0="$(nb_epoch)"
+    nb_log "step 1/5 init: validating the release and rebuilding the data volume"
+    if ! nb_compose run --rm --no-deps -T init_data >"$NB_LOGS_DIR/last-init.log" 2>&1; then
+      REASON="the stock initialiser failed: $(tail -n 3 "$NB_LOGS_DIR/last-init.log" | tr '\n' ' ' | cut -c1-300)"
+      t_init=$(($(nb_epoch) - t0))
+      return 1
+    fi
+    counts="$(nb_init_counts <"$NB_LOGS_DIR/last-init.log")"
+    ok_n="${counts%% *}"
+    all_n="${counts##* }"
+    if [ -z "$ok_n" ] || [ "$ok_n" != "$all_n" ]; then
+      REASON="the stock initialiser accepted ${ok_n:-no} of ${all_n:-?} files"
+      t_init=$(($(nb_epoch) - t0))
+      return 1
+    fi
+    t_init=$(($(nb_epoch) - t0))
+
+    # From here until the graph holds the release, this node must answer with an error, not with
+    # partial results, so the API is taken down for the window.
+    nb_log "step 2/5 api: down for the load window"
+    kill_api
+    t0="$(nb_epoch)"
+    nb_log "step 3/5 graph: restarting; the stock setup clears and reloads everything"
+    restart_graph || {
+      REASON="could not restart the graph container"
+      return 1
+    }
+  else
+    t0="$(nb_epoch)"
+    since="$(docker inspect -f '{{.State.StartedAt}}' "$(nb_container_id graph)")"
+    verdict="$(docker logs --since "$since" "$(nb_container_id graph)" 2>&1 | nb_graph_log_verdict || true)"
+    if [ "$verdict" = pending ] && nb_container_running api; then
+      # A graph that is still loading after a start of its own (a reboot): the healthy-looking API
+      # in front of it would serve partial results, so it is held down until the load is done.
+      nb_log "adopt: the graph is still loading; taking the API down until it is done"
+      kill_api
+    fi
+  fi
+
+  since="$(docker inspect -f '{{.State.StartedAt}}' "$(nb_container_id graph)")"
+  wait_graph_loaded "$since" || { t_graph=$(($(nb_epoch) - t0)); return 1; }
+  t_graph=$(($(nb_epoch) - t0))
+  nb_log "graph loaded in ${t_graph}s"
+
+  t0="$(nb_epoch)"
+  if hold_wins; then
+    t_api=0
+    return 1
+  fi
+  if [ "$kind" != adopt ] || ! nb_container_running api; then
+    nb_log "step 4/5 api: starting so it reads the new datasets_metadata.json"
+    nb_compose restart api >/dev/null 2>&1 || {
+      REASON="could not start the api container"
+      return 1
+    }
+  fi
+  wait_healthy api 180 || { t_api=$(($(nb_epoch) - t0)); return 1; }
+  t_api=$(($(nb_epoch) - t0))
+  # A hold set while the API was starting must not be outrun by the start.
+  if hold_wins; then
+    return 1
+  fi
+  if [ "$api_killed_at" -ne 0 ]; then t_api_down=$(($(nb_epoch) - api_killed_at)); fi
+
+  t0="$(nb_epoch)"
+  nb_log "step 5/5 verify: the node must serve exactly the release, protected"
+  vrc=0
+  nb_verify_node "$release" || vrc=$?
+  served="$NB_VERIFY_SERVED"
+  expected="$NB_VERIFY_EXPECTED"
+  t_verify=$(($(nb_epoch) - t0))
+  if [ "$vrc" -ne 0 ]; then
+    REASON="$NB_VERIFY_REASON"
+    return 1
+  fi
+  if hold_wins; then
+    return 1
+  fi
+  t1=$((t_init + t_graph + t_api + t_verify))
+  nb_log "$kind OK: $served dataset(s) served; ${t1}s total (init ${t_init}s, graph ${t_graph}s, api ${t_api}s, verify ${t_verify}s); the API was unavailable for ${t_api_down}s"
+  return 0
+}
+
+# `graph_restarts` is the container's restart count right now. A reload restarts the graph through
+# the restart policy, which counts; nb-status only warns about restarts beyond this number.
+# `previous-loaded` keeps the release that was loaded before the one now applied, for `nb rollback`.
+mark_loaded() { # release kind
+  local restarts old
+  restarts="$(docker inspect -f '{{.RestartCount}}' "$(nb_container_id graph)" 2>/dev/null || echo 0)"
+  if [ -f "$NB_STATE_DIR/applied.json" ]; then
+    old="$(jq -r '.release // ""' "$NB_STATE_DIR/applied.json" 2>/dev/null || true)"
+    if [ -n "$old" ] && [ "$old" != "$1" ]; then
+      printf '%s\n' "$old" | nb_write_atomic "$NB_STATE_DIR/previous-loaded"
+    fi
+  fi
+  rm -f "$NB_STATE_DIR/pending-reload" "$NB_STATE_DIR/degraded"
+  # A successful load of new content clears the memory of an earlier failure; a successful ROLLBACK
+  # must not, or the failure it just recorded would be forgotten before the loader could use it.
+  [ "$2" = rollback ] || rm -f "$NB_STATE_DIR/reload-failed"
+  jq -n --arg at "$(nb_ts)" --arg release "$1" --argjson datasets "$served" --argjson restarts "$restarts" \
+    '{at:$at, release:$release, datasets:$datasets, graph_restarts:$restarts}' | nb_write_atomic "$NB_STATE_DIR/applied.json"
+}
+
+if [ "$adopt" = 1 ]; then
+  if ! nb_container_running graph; then
+    nb_die "$NB_EX_PREFLIGHT" "the stack is not running"
+  fi
+  cur="$(nb_current_release)"
+  if load_current adopt; then
+    record adopt "$cur" true
+    mark_loaded "$cur" adopt
+    exit 0
+  fi
+  record adopt "$cur" false
+  nb_log "ERROR: adopt failed: $REASON"
+  [ "$held" = 0 ] || exit "$NB_EX_HOLD"
+  exit "$NB_EX_RELOAD"
+fi
+
+preflight
+cur="$(nb_current_release)"
+applied=""
+[ ! -f "$NB_STATE_DIR/applied.json" ] || applied="$(jq -r '.release // ""' "$NB_STATE_DIR/applied.json" 2>/dev/null || true)"
+if load_current reload; then
+  record reload "$cur" true
+  mark_loaded "$cur" reload
+  exit 0
+fi
+nb_log "ERROR: reload of $cur failed: $REASON"
+record reload "$cur" false
+failed_reason="$REASON"
+
+# Content that fails to reload is remembered so the scheduled loader does not retry it forever.
+# A hold or a memory abort is not the content's fault and is not remembered against it.
+if [ "$(nb_decide_blame_content "$held" "$mem_breach")" = yes ]; then
+  nb_record_reload_failure "$cur" "$failed_reason"
+fi
+
+if [ "$held" = 1 ]; then
+  nb_log "on hold: not rolling back; the staged release stays pending and the API stays down"
+  exit "$NB_EX_HOLD"
+fi
+# Fail closed: once the load has touched the graph or the API, the API does not serve while the
+# release is in doubt. (A failure in the init step touched neither, and leaves the API serving.)
+[ "$api_killed_at" -eq 0 ] || kill_api
+if [ "$mem_breach" = 1 ]; then
+  : >"$NB_STATE_DIR/degraded"
+  exit "$NB_EX_ROLLBACK"
+fi
+prev="$(nb_decide_rollback_target "$cur" "$applied" "$(cat "$NB_STATE_DIR/rollback-to" 2>/dev/null || true)" "$NB_RELEASES_DIR")"
+if [ "$rollback" = 0 ] || [ -z "$prev" ]; then
+  nb_log "no rollback performed (rollback disabled, or no earlier release is on disk); the API stays down"
+  : >"$NB_STATE_DIR/degraded"
+  exit "$NB_EX_RELOAD"
+fi
+
+nb_log "rolling back to release $prev (the last release that was loaded and verified)"
+nb_atomic_symlink "releases/$prev" "$NB_CURRENT_LINK"
+if load_current rollback; then
+  record rollback "$prev" true
+  mark_loaded "$prev" rollback
+  nb_log "rolled back to $prev; the node serves the previous release"
+  exit "$NB_EX_RELOAD"
+fi
+record rollback "$prev" false
+nb_log "ERROR: rollback to $prev also failed: $REASON"
+printf '%s\n' "reload of $cur failed ($failed_reason); rollback to $prev failed ($REASON)" >"$NB_STATE_DIR/degraded"
+exit "$NB_EX_ROLLBACK"
