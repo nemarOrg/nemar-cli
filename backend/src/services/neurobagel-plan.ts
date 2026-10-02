@@ -13,10 +13,21 @@
  * progress across ticks):
  *   1. missing   eligible, with no complete artifact set in the store: by id.
  *   2. stale     a stored signature that is not the current one: by id.
- *   3. rotation  the rest, a window that moves by N each UTC day, so every dataset
- *                is examined within ceil(eligible / N) days even when nothing is
- *                known to have changed. This is the only way a rewrite of a manifest
- *                with no D1 change is found, and it is what the daily reconcile is for.
+ *   3. rotation  the rest, a window that moves by N each UTC day. This is the only way a
+ *                rewrite of a manifest with no D1 change is found, and it is what the daily
+ *                reconcile is for.
+ * A dataset that is missing or stale but whose ledger shows a STANDING REFUSAL recorded
+ * against its current signature is PARKED: it joins the rotation instead of the first two
+ * classes. Without that, a dataset refused for ever (no manifest, a document over the
+ * loader's cap) is "missing" on every tick, sorts by id ahead of the healthy ones, and
+ * takes a slot of every tick for ever; enough of them and a healthy dataset is never
+ * examined. A parked dataset is still re-examined, on the rotation's cadence, and at once
+ * when its row changes (its signature then no longer matches the one the refusal named).
+ *
+ * THE GUARANTEE, stated exactly: when no dataset is missing or stale, every one is
+ * examined within ceil(eligible / N) days. Missing or stale work takes slots first, so
+ * while there is any the rotation's window is narrower than N and a full cycle takes
+ * longer; the order is still deterministic, and nothing is examined twice in a day.
  * The order is a function of the inputs and the date, never of a clock inside the
  * loop, so a test (and a person) can say what a tick will do.
  */
@@ -155,20 +166,37 @@ export function planWork(args: {
   limit: number;
   day: number;
   requested?: readonly string[];
-}): { work: PlannedWork[]; eligible: number; unexamined: number; missing: number; stale: number } {
-  const { rows, stored, signatures, limit, day, requested } = args;
+  /** Datasets with a standing refusal against their current signature ({@link standingRefusals}). */
+  parked?: ReadonlySet<string>;
+}): {
+  work: PlannedWork[];
+  eligible: number;
+  unexamined: number;
+  missing: number;
+  stale: number;
+  parked: number;
+} {
+  const { rows, stored, signatures, limit, day, requested, parked: standing } = args;
   const ids = rows.map((r) => r.dataset_id);
   const eligibleSet = new Set(ids);
 
   const missing: string[] = [];
   const stale: string[] = [];
   const rest: string[] = [];
+  let parkedCount = 0;
   for (const id of ids) {
     const s = stored.get(id);
-    if (!hasCompleteSet(s)) missing.push(id);
-    else if (s?.jsonld?.meta[META.signature] !== signatures.get(id)) stale.push(id);
+    const incomplete = !hasCompleteSet(s);
+    const isStale = !incomplete && s?.jsonld?.meta[META.signature] !== signatures.get(id);
+    if ((incomplete || isStale) && standing?.has(id)) {
+      // Refused, and nothing it is built from has changed since: the rotation's business.
+      rest.push(id);
+      parkedCount++;
+    } else if (incomplete) missing.push(id);
+    else if (isStale) stale.push(id);
     else rest.push(id);
   }
+  rest.sort();
 
   let work: PlannedWork[];
   if (requested !== undefined) {
@@ -193,7 +221,25 @@ export function planWork(args: {
     unexamined: Math.max(0, work.length - taken.length),
     missing: missing.length,
     stale: stale.length,
+    parked: parkedCount,
   };
+}
+
+/**
+ * The datasets whose ledger entry is a refusal recorded against the signature they have
+ * now: nothing the writer reads has changed, so examining them again would only refuse
+ * them again. A transient failure is never in the ledger, so it is never parked.
+ */
+export function standingRefusals(
+  ledger: ReadonlyMap<string, LedgerEntry>,
+  signatures: ReadonlyMap<string, string>,
+): Set<string> {
+  const parked = new Set<string>();
+  for (const [id, entry] of ledger) {
+    if (entry.label.state !== "refused" || !entry.label.sig) continue;
+    if (entry.label.sig === signatures.get(id)) parked.add(id);
+  }
+  return parked;
 }
 
 // ----------------------------------------------------------------------------
@@ -208,7 +254,16 @@ export const LEDGER_ACTIONS = {
 } as const;
 
 export type LedgerLabel =
-  | { state: "refused"; code: string }
+  | {
+      state: "refused";
+      code: string;
+      /**
+       * The dataset's cheap signature when it was refused. A refusal recorded against the
+       * signature the row has NOW is standing (nothing the writer reads has changed); one
+       * recorded against another is not, and the dataset is examined again.
+       */
+      sig?: string;
+    }
   | { state: "anonymity" }
   | { state: "clear" };
 
@@ -249,13 +304,15 @@ export async function readLedger(db: D1Database): Promise<Map<string, LedgerEntr
     else if (row.action === LEDGER_ACTIONS.anonymity) label = { state: "anonymity" };
     else {
       let code = "unknown";
+      let sig: string | undefined;
       try {
-        const parsed = JSON.parse(row.details ?? "{}") as { code?: unknown };
+        const parsed = JSON.parse(row.details ?? "{}") as { code?: unknown; sig?: unknown };
         if (typeof parsed.code === "string") code = parsed.code;
+        if (typeof parsed.sig === "string") sig = parsed.sig;
       } catch {
         // a damaged row still means "refused"
       }
-      label = { state: "refused", code };
+      label = { state: "refused", code, ...(sig ? { sig } : {}) };
     }
     out.set(row.resource_id, { dataset_id: row.resource_id, label, at: row.timestamp });
   }
@@ -265,7 +322,11 @@ export async function readLedger(db: D1Database): Promise<Map<string, LedgerEntr
 function sameLabel(a: LedgerLabel | undefined, b: LedgerLabel): boolean {
   if (!a) return b.state === "clear";
   if (a.state !== b.state) return false;
-  return a.state === "refused" && b.state === "refused" ? a.code === b.code : true;
+  // A refusal is the same finding only for the same code against the same signature: the
+  // same code after the row changed is a new fact, and the parking decision reads it.
+  return a.state === "refused" && b.state === "refused"
+    ? a.code === b.code && a.sig === b.sig
+    : true;
 }
 
 /**
@@ -288,7 +349,10 @@ export async function recordLedgerState(
       : label.state === "anonymity"
         ? LEDGER_ACTIONS.anonymity
         : LEDGER_ACTIONS.cleared;
-  const details = label.state === "refused" ? { code: label.code, ...detail } : detail;
+  const details =
+    label.state === "refused"
+      ? { code: label.code, ...(label.sig ? { sig: label.sig } : {}), ...detail }
+      : detail;
   await auditLogStatement(db, {
     userId: null,
     action,

@@ -71,6 +71,7 @@ import {
   planWork,
   readLedger,
   recordLedgerState,
+  standingRefusals,
   utcDay,
 } from "./neurobagel-plan.js";
 import {
@@ -459,7 +460,14 @@ async function refuse(
     return { id, outcome: "refused", code };
   }
   if (!TRANSIENT_CODES.has(code)) {
-    await ledgerNote(rc, id, { state: "refused", code }, detail ? { detail } : {});
+    // Against the signature the plan read, which is the one the next plan compares: a row
+    // edited since changes it, and the dataset is examined again.
+    await ledgerNote(
+      rc,
+      id,
+      { state: "refused", code, sig: rc.signatures.get(id) },
+      detail ? { detail } : {},
+    );
   }
   return { id, outcome: "refused", code, ...(detail ? { detail } : {}) };
 }
@@ -826,7 +834,8 @@ export async function runNeurobagelWriter(
     const listing = await listStore(bucket);
     // `eligible` is the catalog's count, which a scoped run does not read: null, not zero.
     result.eligible = only === undefined ? rows.length : null;
-    const ledger = options.execute ? await readLedger(env.DB) : new Map<string, LedgerEntry>();
+    // Read on a dry run too (it is a read): the plan a dry run shows is the plan a run follows.
+    const ledger = await readLedger(env.DB);
 
     const resolver = options.deps?.curation ?? defaultCurationResolver;
     const curations = new Map<string, CurationResolution>();
@@ -858,6 +867,7 @@ export async function runNeurobagelWriter(
       limit,
       day: utcDay(now),
       requested: only,
+      parked: standingRefusals(ledger, signatures),
     });
     result.unexamined = plan.unexamined;
 

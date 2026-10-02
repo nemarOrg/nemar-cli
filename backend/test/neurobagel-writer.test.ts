@@ -20,6 +20,12 @@ import schema from "../../deploy/neurobagel/index.schema.json";
 import { type CurationResolver, createCurationResolver } from "../src/services/neurobagel-curation";
 import { syncNeurobagelDataset } from "../src/services/neurobagel-hooks";
 import { countOps, createOpCounter } from "../src/services/neurobagel-ops";
+import {
+  type LedgerEntry,
+  type PlanRow,
+  planWork,
+  standingRefusals,
+} from "../src/services/neurobagel-plan";
 import { neurobagelStatus } from "../src/services/neurobagel-status";
 import {
   ARTIFACT_KINDS,
@@ -1670,6 +1676,152 @@ describe("a tick examines at most N datasets, in a deterministic order", () => {
       });
       expect(outcomes(dry)).toEqual(["nm000702:would_write"]);
     }
+  });
+
+  describe("a dataset refused for ever does not take a slot of every tick", () => {
+    const day = (n: number) => new Date(Date.UTC(2026, 9, 1 + n, 12));
+    const examined = (r: RunResult) => r.results.map((x) => x.id);
+
+    function seedStarvation(): void {
+      // Two eligible rows with no manifest (refused for ever, manifest_absent) and one
+      // healthy dataset whose id sorts after both.
+      seedDatasetRow(h.db, "nm000860");
+      seedDatasetRow(h.db, "nm000861");
+      seedSynthetic(h, "nm000862");
+    }
+
+    test("two refused datasets and a healthy later one, limit 2, six daily ticks: the healthy one is written on the second", async () => {
+      seedStarvation();
+      const perTick: string[][] = [];
+      for (let n = 0; n < 6; n++) {
+        const tick = await run({ limit: 2, now: day(n) });
+        perTick.push(examined(tick));
+        if (n === 0) {
+          expect(outcomes(tick)).toEqual(["nm000860:refused", "nm000861:refused"]);
+        }
+      }
+      // The first tick is all there is to know about the pair; after it they are parked, so
+      // the healthy dataset is examined next, and written.
+      expect(perTick[1]).toContain("nm000862");
+      expect((await storeKeys(h.bucket)).filter((k) => k.startsWith("nm000862"))).toHaveLength(3);
+      expect((await storedIndex()).datasets.map((d) => d.id)).toEqual(["nm000862"]);
+      // The pair is not forgotten: each is examined again, on the rotation's cadence.
+      const flat = perTick.flat();
+      for (const id of ["nm000860", "nm000861"]) {
+        expect(flat.filter((x) => x === id).length, id).toBeGreaterThanOrEqual(2);
+      }
+    });
+
+    test("the refusal is recorded against the row's signature, once, and again only when the row changes", async () => {
+      seedDatasetRow(h.db, "nm000863");
+      const rows = () =>
+        h.db
+          .query<{ details: string }, []>(
+            "SELECT details FROM audit_log WHERE action = 'neurobagel_refused' AND resource_id = 'nm000863' ORDER BY id",
+          )
+          .all()
+          .map((r) => JSON.parse(r.details) as { code: string; sig?: string });
+      await run({ now: day(0) });
+      await run({ now: day(1) });
+      await run({ now: day(2) });
+      expect(rows()).toHaveLength(1);
+      expect(rows()[0]?.code).toBe("manifest_absent");
+      expect(rows()[0]?.sig).toMatch(/^sha256:[0-9a-f]{64}$/);
+
+      h.db.run("UPDATE datasets SET name = 'Renamed' WHERE dataset_id = 'nm000863'");
+      await run({ now: day(3) });
+      const after = rows();
+      expect(after).toHaveLength(2);
+      expect(after[1]?.sig).not.toBe(after[0]?.sig);
+    });
+
+    test("a refused dataset whose row changes is examined first again, ahead of the rotation", async () => {
+      seedStarvation();
+      await run({ limit: 2, now: day(0) });
+      await run({ limit: 2, now: day(1) });
+      // Parked now. A change to nm000861's row un-parks it: it is missing again.
+      h.db.run("UPDATE datasets SET name = 'Fixed upstream' WHERE dataset_id = 'nm000861'");
+      const plan = await run({ execute: false, limit: 1, now: day(2) });
+      expect(examined(plan)).toEqual(["nm000861"]);
+    });
+
+    test("a transient failure is never parked: it is retried every tick", async () => {
+      seedSynthetic(h, "nm000864");
+      // The manifest HEAD fails (S3 answers 500 for the key): a transient error, not a finding.
+      h.standin.remove("/nm000864/version/v1.0.0.json");
+      const failing = h.env({ S3_ENDPOINT_URL: "http://127.0.0.1:9" });
+      console.error = () => {};
+      const first = await run({ limit: 1, now: day(0) }, failing);
+      const second = await run({ limit: 1, now: day(1) }, failing);
+      console.error = quiet.error;
+      expect(outcomes(first)).toEqual(["nm000864:error"]);
+      expect(outcomes(second)).toEqual(["nm000864:error"]);
+      expect(
+        h.db.query("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'neurobagel_refused'").get(),
+      ).toEqual({ n: 0 });
+    });
+
+    test("planWork: parked datasets join the rotation, the window covers them, and a changed signature un-parks", () => {
+      const row = (id: string): PlanRow =>
+        ({
+          dataset_id: id,
+          name: id,
+          subject_count: 1,
+          license: null,
+          concept_doi: null,
+          enrichment_length: 0,
+          latest_version: "1.0.0",
+        }) as PlanRow;
+      const rows = ["nm000870", "nm000871", "nm000872", "nm000873"].map(row);
+      const signatures = new Map(rows.map((r) => [r.dataset_id, `sig-${r.dataset_id}`]));
+      const none = new Map();
+      const parked = new Set(["nm000870", "nm000871"]);
+      const plan = (limit: number, d: number, p: ReadonlySet<string> | undefined) =>
+        planWork({ rows, stored: none, signatures, limit, day: d, parked: p });
+      // Unparked: every dataset is missing, by id.
+      expect(plan(2, 0, undefined).work.map((w) => w.id)).toEqual(["nm000870", "nm000871"]);
+      // Parked: the two healthy ones lead as missing; the parked pair follow in the rotation.
+      const first = plan(2, 0, parked);
+      expect(first.work.map((w) => [w.id, w.class])).toEqual([
+        ["nm000872", "missing"],
+        ["nm000873", "missing"],
+      ]);
+      expect(first.parked).toBe(2);
+      expect(first.missing).toBe(2);
+      const wide = plan(4, 0, parked);
+      expect(wide.work.map((w) => [w.id, w.class])).toEqual([
+        ["nm000872", "missing"],
+        ["nm000873", "missing"],
+        ["nm000870", "rotation"],
+        ["nm000871", "rotation"],
+      ]);
+      // The rotation window over the parked pair moves with the day.
+      const lead = (d: number) => plan(3, d, parked).work[2]?.id;
+      expect(new Set([lead(0), lead(1)]).size).toBe(2);
+      // A signature that no longer matches the refusal's un-parks it.
+      const ledger = new Map<string, LedgerEntry>([
+        [
+          "nm000870",
+          {
+            dataset_id: "nm000870",
+            label: { state: "refused", code: "x", sig: "sig-nm000870" },
+            at: "",
+          },
+        ],
+        [
+          "nm000871",
+          {
+            dataset_id: "nm000871",
+            label: { state: "refused", code: "x", sig: "an older one" },
+            at: "",
+          },
+        ],
+        // A refusal recorded before signatures were kept names no signature and parks nothing.
+        ["nm000872", { dataset_id: "nm000872", label: { state: "refused", code: "x" }, at: "" }],
+        ["nm000873", { dataset_id: "nm000873", label: { state: "clear" }, at: "" }],
+      ]);
+      expect([...standingRefusals(ledger, signatures)]).toEqual(["nm000870"]);
+    });
   });
 
   test("an explicit list is examined as asked and bounded by its own length", async () => {
