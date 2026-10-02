@@ -22,6 +22,11 @@ import {
   clearIdentityConflictResponseSchema,
   duplicateReportSchema,
 } from "../../../shared/contract/index.js";
+import type {
+  NeurobagelRegenerateRequest,
+  NeurobagelRunResult,
+  NeurobagelStatus,
+} from "../../../shared/contract/neurobagel-admin.js";
 import type { BackfillNameOutcome } from "../../../shared/contract/publication.js";
 import { request } from "./client.js";
 
@@ -1541,47 +1546,15 @@ export async function publishZarrCatalog(): Promise<PublishZarrCatalogResponse> 
 // Neurobagel artifact store (epic #1586 phase 4, ADR 0084)
 // ============================================================================
 
-/** What became of one dataset in a run of the Neurobagel writer. */
-export type NeurobagelDatasetResult =
-  | { id: string; outcome: "unchanged" | "would_remove" | "removed" }
-  | { id: string; outcome: "would_write"; reason: string }
-  | { id: string; outcome: "written"; fingerprint: string; flags: string[]; wrote: string[] }
-  | { id: string; outcome: "refused"; code: string; detail?: string }
-  | { id: string; outcome: "error"; error: string };
-
-/** The body of `POST /admin/neurobagel/regenerate`. Omitting `execute` is a dry run. */
-export interface NeurobagelRegenerateRequest {
-  execute?: boolean;
-  datasets?: string[];
-  limit?: number;
-  force?: boolean;
-}
-
-export interface NeurobagelRunResult {
-  trigger: string;
-  dry_run: boolean;
-  status: "ok" | "disabled" | "store_unconfigured" | "error";
-  writer_enabled: boolean;
-  error?: string;
-  eligible: number | null;
-  examined: number;
-  limit: number;
-  unexamined: number;
-  results: NeurobagelDatasetResult[];
-  removed: string[];
-  removals_pending: number;
-  index: {
-    changed: boolean;
-    written: boolean;
-    entries: number | null;
-    contended?: boolean;
-    problems?: string[];
-    skipped_incomplete?: string[];
-  };
-  anonymity_findings: number;
-  needs_review: { id: string; flags: string[] }[];
-  warnings: string[];
-}
+// The wire shapes live in shared/contract so the Worker that answers and this client that
+// prints read one definition; a field the writer adds is a type error here, not a blank.
+export type {
+  NeurobagelDatasetResult,
+  NeurobagelRegenerateRequest,
+  NeurobagelRunResult,
+  NeurobagelRunSummary,
+  NeurobagelStatus,
+} from "../../../shared/contract/neurobagel-admin.js";
 
 /**
  * Examine datasets for the Neurobagel artifact store and, only with `execute: true`,
@@ -1596,46 +1569,6 @@ export async function neurobagelRegenerate(
     { method: "POST", body: JSON.stringify(body) },
     true,
   );
-}
-
-export interface NeurobagelRunSummary {
-  at: string;
-  trigger: string;
-  summary: Record<string, unknown>;
-}
-
-/** `GET /admin/neurobagel/status`. A null count is unknown, never zero. */
-export interface NeurobagelStatus {
-  environment: string | null;
-  writer: { mode: "enabled" | "disabled" | "store_unconfigured" };
-  read_route: { token_configured: boolean };
-  limits: { reconcile_max: number; hard_max: number };
-  counts: {
-    eligible: number | null;
-    written: number | null;
-    missing: number | null;
-    stale: number | null;
-    incomplete: number | null;
-    residue: number | null;
-  };
-  store: {
-    configured: boolean;
-    objects: number | null;
-    unexpected_objects: number | null;
-    total_bytes: number | null;
-    over_loader_cap: boolean | null;
-  };
-  index: {
-    present: boolean | null;
-    generated_at: string | null;
-    entries: number | null;
-    matches_store: boolean | null;
-  };
-  last_run: NeurobagelRunSummary | null;
-  last_reconcile: NeurobagelRunSummary | null;
-  needs_review: { id: string; source: "report" | "refusal"; flags?: string[]; code?: string }[];
-  anonymity_findings: number | null;
-  warnings: string[];
 }
 
 export async function getNeurobagelStatus(): Promise<NeurobagelStatus> {

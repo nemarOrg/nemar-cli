@@ -99,6 +99,7 @@ describe("the feature is the set of files this scan thinks it is", () => {
         "services/neurobagel-fingerprint.ts",
         "services/neurobagel-gather.ts",
         "services/neurobagel-hooks.ts",
+        "services/neurobagel-ops.ts",
         "services/neurobagel-plan.ts",
         "services/neurobagel-status.ts",
         "services/neurobagel-store.ts",
@@ -137,6 +138,7 @@ describe("only the writer writes the bucket", () => {
       [
         "types/bindings.ts",
         "routes/neurobagel.ts",
+        "services/neurobagel-ops.ts",
         "services/neurobagel-status.ts",
         "services/neurobagel-writer.ts",
       ].sort(),

@@ -176,7 +176,7 @@ Tracked follow-up (not a Phase): split `buildNeurobagelArtifacts` (about 513 lin
   It is the second line, not a duplicate: a table rebuild drops triggers.
   Its mutation test drops them first and then shows the term necessary.
 - A cheap signature (the row's name, subject count, license, the length of its enrichment document, the latest version, the curation hash, the transform and vocabulary identity) lets one query find datasets that are probably stale; the daily window is the only way to find a manifest rewritten with no D1 change, so with 25 datasets a tick a full pass takes about 31 days.
-  The hooks give immediacy for a publication, a new version and an import, and an operator can backfill or force with `nemar admin neurobagel regenerate --execute --limit 200 [--force]`.
+  The hooks give immediacy for a publication, a new version and an import, and an operator can backfill or force with `nemar admin neurobagel regenerate --execute --limit 50 [--force] (run again until it reports nothing unexamined)`.
 - The loader refuses an empty index and a mass removal.
   The last dataset to leave the federation therefore cannot leave through the index; `nb hold` is the way, and the runbook says so.
 - Not covered by the fingerprint, by design: a change to the data plane's own `metadata.json` builder (a new field, a corrected digest) moves neither a row nor an ETag.

@@ -1243,7 +1243,7 @@ export default {
       // in DEV_CRON_ALLOWLIST: a new daily job is production-only by default, and this
       // one reads dataset repositories through the shared nemarDatasets org. It does
       // nothing at all unless NEUROBAGEL_WRITER_ENABLED is "1", examines at most
-      // NEUROBAGEL_RECONCILE_MAX datasets per tick (default 25) in a deterministic
+      // NEUROBAGEL_RECONCILE_MAX datasets per tick (default 10) in a deterministic
       // order, and shares this tick's subrequest budget with every job around it
       // (ADR 0054), which is why the bound is small. The cron wrapper carries the fence
       // so the admin route, which calls the writer directly, still works on staging.

@@ -35,6 +35,7 @@ import {
   OPERATIONAL_ACCOUNT_KINDS,
   isAccountKind,
 } from "../../shared/contract/index.js";
+import { NEUROBAGEL_REGENERATE_MAX } from "../../shared/contract/neurobagel-admin.js";
 import {
   PUBLICATION_STEPS,
   PUBLICATION_STEP_LABELS,
@@ -9285,7 +9286,7 @@ function printNeurobagelRun(res: NeurobagelRunResult): void {
   }
   console.log(
     chalk.cyan(
-      `eligible=${neurobagelNum(res.eligible)} examined=${res.examined} limit=${res.limit} unexamined=${res.unexamined} removed=${res.removed.length} removals_pending=${res.removals_pending} index_entries=${neurobagelNum(res.index.entries)} index_written=${res.index.written} anonymity_findings=${res.anonymity_findings}`,
+      `eligible=${neurobagelNum(res.eligible)} examined=${res.examined} limit=${res.limit} unexamined=${res.unexamined} removed=${res.removed.length} removals_pending=${res.removals_pending} index_entries=${neurobagelNum(res.index.entries)} index_written=${res.index.written} index_patched=${res.index.patched ?? 0} anonymity_findings=${res.anonymity_findings} ops=${res.ops.spent}/${res.ops.budget}`,
     ),
   );
   for (const r of res.results) {
@@ -9319,6 +9320,19 @@ function printNeurobagelRun(res: NeurobagelRunResult): void {
         break;
     }
   }
+  if (res.stopped === "ops_budget") {
+    console.log(
+      chalk.yellow(
+        `  the run spent its operation budget (${res.ops.spent} of ${res.ops.budget}) with ${res.unexamined} dataset(s) not yet examined: run the same command again to continue`,
+      ),
+    );
+  } else if (res.unexamined > 0 && res.stopped === null) {
+    console.log(
+      chalk.yellow(
+        `  ${res.unexamined} dataset(s) are still waiting beyond this call's limit: run the same command again to continue`,
+      ),
+    );
+  }
   if (res.index.contended) {
     console.log(
       chalk.red("  the index was replaced by another run during this one; re-run to settle it"),
@@ -9344,7 +9358,10 @@ neurobagelCommand
   )
   .option("--execute", "Write to the store (without it, only report what would change)")
   .option("--dataset <ids...>", "Examine exactly these dataset ids instead of the next ones due")
-  .option("--limit <n>", "Datasets to examine (default: the server's per-tick bound, max 200)")
+  .option(
+    "--limit <n>",
+    `Datasets to examine (default: the server's per-tick bound, at most ${NEUROBAGEL_REGENERATE_MAX}); run again to continue`,
+  )
   .option("--force", "Rewrite even when the fingerprint matches")
   .option("--json", "Output raw JSON instead of the human summary")
   .action(
@@ -9366,6 +9383,17 @@ neurobagelCommand
             : Number.NaN;
       if (limit !== undefined && !Number.isInteger(limit)) {
         console.error(chalk.red("--limit must be a positive whole number"));
+        process.exit(1);
+        return;
+      }
+      // Refused here, before any request: the server holds the same ceiling, and a call
+      // that asks for more would only be told so after the round trip.
+      if (limit !== undefined && limit > NEUROBAGEL_REGENERATE_MAX) {
+        console.error(
+          chalk.red(
+            `--limit is at most ${NEUROBAGEL_REGENERATE_MAX} per call (each call runs inside one request); run the command again to continue`,
+          ),
+        );
         process.exit(1);
         return;
       }
@@ -9401,6 +9429,7 @@ neurobagelCommand
         res.status !== "ok" ||
         errors ||
         res.index.contended ||
+        res.stopped === "index_patch" ||
         (res.index.problems?.length ?? 0) > 0 ||
         res.anonymity_findings > 0
       ) {

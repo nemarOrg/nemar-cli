@@ -9,6 +9,10 @@
  * anonymous" is a fact about a person being concealed (ADR 0067).
  */
 
+import type {
+  NeurobagelRunSummary,
+  NeurobagelStatus,
+} from "../../../shared/contract/neurobagel-admin.js";
 import type { Bindings } from "../types/bindings.js";
 import { isNonProductionEnv } from "./environment.js";
 import { type CurationResolver, defaultCurationResolver } from "./neurobagel-curation.js";
@@ -27,53 +31,8 @@ import {
   reconcileLimit,
 } from "./neurobagel-writer.js";
 
-export interface RunSummary {
-  at: string;
-  trigger: string;
-  summary: Record<string, unknown>;
-}
-
-export interface NeurobagelStatus {
-  environment: string | null;
-  writer: { mode: "enabled" | "disabled" | "store_unconfigured" };
-  /** Booleans only: the secret is never read back. */
-  read_route: { token_configured: boolean };
-  limits: { reconcile_max: number; hard_max: number };
-  /** Everything below is null when it could not be determined, never zero. */
-  counts: {
-    eligible: number | null;
-    written: number | null;
-    missing: number | null;
-    stale: number | null;
-    incomplete: number | null;
-    /** In the store but no longer eligible: waiting to be deleted. */
-    residue: number | null;
-  };
-  store: {
-    configured: boolean;
-    objects: number | null;
-    unexpected_objects: number | null;
-    total_bytes: number | null;
-    over_loader_cap: boolean | null;
-  };
-  index: {
-    present: boolean | null;
-    generated_at: string | null;
-    entries: number | null;
-    matches_store: boolean | null;
-  };
-  last_run: RunSummary | null;
-  last_reconcile: RunSummary | null;
-  needs_review: {
-    id: string;
-    source: "report" | "refusal";
-    flags?: string[];
-    code?: string;
-  }[];
-  /** A count, never an identifier. */
-  anonymity_findings: number | null;
-  warnings: string[];
-}
+export type { NeurobagelStatus };
+type RunSummary = NeurobagelRunSummary;
 
 async function lastRuns(
   db: D1Database,

@@ -163,14 +163,25 @@ describe("regenerate: a dry run by default", () => {
       { datasets: [] },
       { datasets: ["garbage"] },
       { datasets: ["nm000800", "NM000801"] },
-      { datasets: Array.from({ length: 201 }, (_, i) => `nm${String(100000 + i).slice(1)}`) },
+      { datasets: Array.from({ length: 51 }, (_, i) => `nm${String(1000700 + i).slice(1)}`) },
       { limit: 0 },
+      // One more than a call may examine: refused, not silently shortened.
+      { limit: 51 },
+      { limit: 200 },
       { limit: -1 },
       { limit: 1.5 },
       { limit: "5" },
     ]) {
       expect((await regenerate(body)).status).toBe(400);
     }
+  });
+
+  test("the ceiling itself is accepted: 50 datasets named, a limit of 50", async () => {
+    const fifty = Array.from({ length: 50 }, (_, i) => `nm${String(1000700 + i).slice(1)}`);
+    expect((await regenerate({ datasets: fifty })).status).toBe(200);
+    const res = await regenerate({ limit: 50 });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { limit: number }).limit).toBe(50);
   });
 
   test("an invalid JSON body is a 400, not a dry run", async () => {

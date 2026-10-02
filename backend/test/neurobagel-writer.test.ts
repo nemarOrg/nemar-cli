@@ -19,6 +19,7 @@ import Ajv from "ajv";
 import schema from "../../deploy/neurobagel/index.schema.json";
 import { type CurationResolver, createCurationResolver } from "../src/services/neurobagel-curation";
 import { syncNeurobagelDataset } from "../src/services/neurobagel-hooks";
+import { countOps, createOpCounter } from "../src/services/neurobagel-ops";
 import { neurobagelStatus } from "../src/services/neurobagel-status";
 import {
   ARTIFACT_KINDS,
@@ -32,6 +33,9 @@ import {
   parseStoredIndex,
 } from "../src/services/neurobagel-store";
 import {
+  CLOSING_OPS,
+  DATASET_OPS_WORST,
+  OP_BUDGET,
   type RunResult,
   neurobagelWriterMode,
   reconcileLimit,
@@ -1175,13 +1179,154 @@ describe("off by default, and a reported no-op without a bucket", () => {
     expect(dry.index.written).toBe(false);
   });
 
-  test("the per-tick bound reads its variable, defaults to 25 and never exceeds the hard limit", () => {
-    expect(reconcileLimit({})).toBe(25);
+  test("the per-tick bound reads its variable, defaults to 10 and never exceeds the hard limit of 50", () => {
+    expect(reconcileLimit({})).toBe(10);
     expect(reconcileLimit({ NEUROBAGEL_RECONCILE_MAX: "7" })).toBe(7);
-    expect(reconcileLimit({ NEUROBAGEL_RECONCILE_MAX: "0" })).toBe(25);
-    expect(reconcileLimit({ NEUROBAGEL_RECONCILE_MAX: "-3" })).toBe(25);
-    expect(reconcileLimit({ NEUROBAGEL_RECONCILE_MAX: "lots" })).toBe(25);
-    expect(reconcileLimit({ NEUROBAGEL_RECONCILE_MAX: "99999" })).toBe(200);
+    expect(reconcileLimit({ NEUROBAGEL_RECONCILE_MAX: "0" })).toBe(10);
+    expect(reconcileLimit({ NEUROBAGEL_RECONCILE_MAX: "-3" })).toBe(10);
+    expect(reconcileLimit({ NEUROBAGEL_RECONCILE_MAX: "lots" })).toBe(10);
+    expect(reconcileLimit({ NEUROBAGEL_RECONCILE_MAX: "50" })).toBe(50);
+    expect(reconcileLimit({ NEUROBAGEL_RECONCILE_MAX: "51" })).toBe(50);
+    expect(reconcileLimit({ NEUROBAGEL_RECONCILE_MAX: "99999" })).toBe(50);
+  });
+
+  test("a run is clamped to the hard limit however large a limit it is handed", async () => {
+    for (let i = 0; i < 3; i++) seedSynthetic(h, `nm00083${i}`);
+    for (const limit of [51, 200, 100000]) {
+      const result = await run({ execute: false, limit });
+      expect(result.limit).toBe(50);
+    }
+    expect((await run({ execute: false, limit: 50 })).limit).toBe(50);
+    expect((await run({ execute: false, limit: 0 })).limit).toBe(1);
+  });
+});
+
+// ----------------------------------------------------------------------------
+// What a run costs, and the budget that keeps it inside a request
+// ----------------------------------------------------------------------------
+
+describe("a run counts what it spends and stops with headroom to finish", () => {
+  const ids = (n: number) =>
+    Array.from({ length: n }, (_, i) => `nm0008${String(i).padStart(2, "0")}`);
+
+  async function rewriteCost(n: number): Promise<RunResult> {
+    await h.reset();
+    for (const id of ids(n)) seedSynthetic(h, id);
+    await run();
+    h.db.run("UPDATE datasets SET name = name || ' (revised)'");
+    return run({ limit: 50 });
+  }
+
+  test("the count is kept at the bindings: D1 statements, R2 calls and HTTP requests", async () => {
+    seedSynthetic(h, "nm000801");
+    const result = await run();
+    expect(result.ops.d1).toBeGreaterThan(5);
+    expect(result.ops.r2).toBeGreaterThan(3);
+    expect(result.ops.http).toBeGreaterThan(0);
+    expect(result.ops.spent).toBe(result.ops.d1 + result.ops.r2 + result.ops.http);
+    expect(result.ops.budget).toBe(OP_BUDGET);
+    // The same run on a quiet system is cheaper, which is the point of a fingerprint.
+    const quiet = await run();
+    expect(quiet.ops.spent).toBeLessThan(result.ops.spent);
+  });
+
+  test("a rewritten dataset costs no more than DATASET_OPS_WORST, an unchanged one far less", async () => {
+    const small = await rewriteCost(2);
+    const large = await rewriteCost(6);
+    expect(small.results.every((r) => r.outcome === "written")).toBe(true);
+    expect(large.results.every((r) => r.outcome === "written")).toBe(true);
+    const perRewritten = (large.ops.spent - small.ops.spent) / 4;
+    expect(perRewritten).toBeGreaterThan(5);
+    expect(perRewritten).toBeLessThanOrEqual(DATASET_OPS_WORST);
+    // A run's fixed overhead (the plan, the listing, the ledger, the index sync) fits its reserve.
+    expect(small.ops.spent - 2 * perRewritten).toBeLessThanOrEqual(CLOSING_OPS);
+
+    const unchanged = await run({ limit: 50 });
+    expect(unchanged.results.every((r) => r.outcome === "unchanged")).toBe(true);
+    expect(unchanged.ops.spent).toBeLessThan(CLOSING_OPS + 6 * 6);
+  });
+
+  test("a run that spends its budget stops, says so, and still brings the index up to date", async () => {
+    for (const id of ids(8)) seedSynthetic(h, id);
+    await run({ limit: 1 });
+    h.db.run("UPDATE datasets SET name = name || ' (revised)'");
+    const result = await run({ limit: 50, opBudget: 130 });
+    expect(result.stopped).toBe("ops_budget");
+    expect(result.examined).toBeGreaterThanOrEqual(1);
+    expect(result.examined).toBeLessThan(8);
+    expect(result.unexamined).toBe(8 - result.examined);
+    // The reserve is real: what was spent, closing steps included, is inside the budget.
+    expect(result.ops.spent).toBeLessThanOrEqual(130);
+    expect(await indexMismatches()).toEqual([]);
+    expect(result.index.written || !result.index.changed).toBe(true);
+
+    // Run again to continue: every dataset is eventually rewritten, and the index agrees at each step.
+    for (let again = 0; again < 8; again++) {
+      const next = await run({ limit: 50, opBudget: 130 });
+      expect(await indexMismatches()).toEqual([]);
+      if (next.stopped === null) break;
+    }
+    for (const id of ids(8)) expect(await text(`${id}.jsonld`)).toContain("(revised)");
+  });
+
+  test("the first dataset is always examined, so a tiny budget still makes progress", async () => {
+    for (const id of ids(3)) seedSynthetic(h, id);
+    const result = await run({ opBudget: 1 });
+    expect(result.examined).toBe(1);
+    expect(result.stopped).toBe("ops_budget");
+    expect(outcomes(result)).toEqual(["nm000800:written"]);
+  });
+
+  test("a dry run reports the budget and spends no write", async () => {
+    seedSynthetic(h, "nm000801");
+    const rec = recordWrites(h.bucket);
+    const result = await run({ execute: false }, h.env({ NEUROBAGEL: rec.bucket }));
+    expect(rec.log).toEqual([]);
+    expect(result.ops.spent).toBeGreaterThan(0);
+    expect(result.stopped).toBeNull();
+  });
+});
+
+describe("the operation counter", () => {
+  test("counts statements run through D1 (first, all, run, batch as one), and R2 calls, and changes no result", async () => {
+    const counter = createOpCounter();
+    const env = countOps(h.env(), counter);
+    seedDatasetRow(h.db, "nm000850");
+    const row = await env.DB.prepare("SELECT dataset_id FROM datasets WHERE dataset_id = ?")
+      .bind("nm000850")
+      .first<{ dataset_id: string }>();
+    expect(row?.dataset_id).toBe("nm000850");
+    const all = await env.DB.prepare("SELECT dataset_id FROM datasets").all<{
+      dataset_id: string;
+    }>();
+    expect(all.results.map((r) => r.dataset_id)).toEqual(["nm000850"]);
+    await env.DB.prepare("UPDATE datasets SET name = 'x' WHERE dataset_id = 'nm000850'").run();
+    expect(counter.d1).toBe(3);
+    // A batch is one round trip, whatever it carries, and its statements still run.
+    await env.DB.batch([
+      env.DB.prepare("UPDATE datasets SET name = 'y' WHERE dataset_id = 'nm000850'"),
+      env.DB.prepare("UPDATE datasets SET name = 'z' WHERE dataset_id = 'nm000850'"),
+    ]);
+    expect(counter.d1).toBe(4);
+    expect(h.db.query("SELECT name FROM datasets WHERE dataset_id = 'nm000850'").get()).toEqual({
+      name: "z",
+    });
+
+    const bucket = env.NEUROBAGEL as R2Bucket;
+    await bucket.put("nm000850.jsonld", "{}");
+    expect(await bucket.head("nm000850.jsonld")).not.toBeNull();
+    await bucket.list();
+    await bucket.delete("nm000850.jsonld");
+    expect(counter.r2).toBe(4);
+    expect(counter.total).toBe(counter.d1 + counter.r2 + counter.http);
+  });
+
+  test("an environment with no bucket or no database is passed through", () => {
+    const counter = createOpCounter();
+    const env = countOps({ ENVIRONMENT: "test" } as Bindings, counter);
+    expect(env.NEUROBAGEL).toBeUndefined();
+    expect(env.DB).toBeUndefined();
+    expect(counter.total).toBe(0);
   });
 });
 

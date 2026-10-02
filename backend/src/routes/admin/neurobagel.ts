@@ -11,8 +11,10 @@
  * a silent dry run.
  *
  * The per-call work bound is the same one the cron honors (`NEUROBAGEL_RECONCILE_MAX`,
- * default 25), raisable per call with `limit` up to the hard ceiling, because a first
- * backfill of every dataset is this route's second job. `force` rewrites even when the
+ * default 10), raisable per call with `limit` up to the hard ceiling of 50, because a
+ * first backfill of every dataset is this route's second job and takes several calls.
+ * A call that spends its operation budget first stops early and says so (`stopped`,
+ * `unexamined`); run it again. `force` rewrites even when the
  * fingerprint matches, the one lever for a change the fingerprint cannot see (a new
  * data-plane metadata builder; see neurobagel-fingerprint.ts).
  *
@@ -41,7 +43,9 @@ export const regenerateSchema = z
       .min(1)
       .max(RECONCILE_HARD_LIMIT)
       .optional(),
-    limit: z.number().int().min(1).optional(),
+    // The same ceiling the writer clamps to: a call runs inline in one request, so a larger
+    // number is refused here rather than silently shortened (ADR 0084, "What a run costs").
+    limit: z.number().int().min(1).max(RECONCILE_HARD_LIMIT).optional(),
     force: z.boolean().optional(),
   })
   .strict();

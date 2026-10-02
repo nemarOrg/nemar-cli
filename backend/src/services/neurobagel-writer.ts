@@ -33,6 +33,12 @@
  * "1", and with no `NEUROBAGEL` binding the writer is a reported no-op.
  */
 
+import {
+  NEUROBAGEL_RECONCILE_DEFAULT,
+  NEUROBAGEL_REGENERATE_MAX,
+  type NeurobagelDatasetResult,
+  type NeurobagelRunResult,
+} from "../../../shared/contract/neurobagel-admin.js";
 import { canonicalJson } from "../../../shared/neurobagel/canonical-json.js";
 import {
   NeurobagelRefusal,
@@ -55,6 +61,7 @@ import {
 import { eligibleAmong, loadEligibleRow } from "./neurobagel-eligibility.js";
 import { inputFingerprint, rowFingerprint, sha256Hex } from "./neurobagel-fingerprint.js";
 import { type GatherDeps, GatherRefusal, gatherNeurobagelInput } from "./neurobagel-gather.js";
+import { type OpCounter, countOps, createOpCounter } from "./neurobagel-ops.js";
 import {
   LEDGER_ACTIONS,
   type LedgerEntry,
@@ -105,11 +112,32 @@ export function neurobagelWriterMode(
   return "enabled";
 }
 
-export const RECONCILE_DEFAULT_LIMIT = 25;
+export const RECONCILE_DEFAULT_LIMIT = NEUROBAGEL_RECONCILE_DEFAULT;
 /** The most datasets one run examines, whatever a caller or the variable asks for. */
-export const RECONCILE_HARD_LIMIT = 200;
+export const RECONCILE_HARD_LIMIT = NEUROBAGEL_REGENERATE_MAX;
 /** Datasets whose artifacts one run deletes. The index drops them all at once regardless. */
-export const REMOVAL_LIMIT = 200;
+export const REMOVAL_LIMIT = 50;
+
+/**
+ * Operations (D1 statements, R2 calls, HTTP requests) one run may spend. A Worker
+ * invocation has 1000 subrequests in all, and the daily reconcile shares its tick with
+ * every other job (ADR 0054), so a run takes well under half.
+ *
+ * What a dataset costs, measured by difference over runs of 1, 3 and 7 datasets (ADR 0084,
+ * "What a run costs"): a REWRITTEN dataset about 22 operations (9 D1 statements, 4 R2
+ * calls, the manifest HEAD and the allowance for the data plane's requests), an UNCHANGED
+ * one 3 (two D1 reads and the HEAD), and a run about 7 more besides (the plan, the listing,
+ * the ledger, and the index sync). A test fails if a dataset ever costs more than
+ * {@link DATASET_OPS_WORST}, so the numbers here cannot go stale unnoticed.
+ */
+export const OP_BUDGET = 400;
+/** The most one dataset may cost: its measured 22, with a margin for a ledger row and a retried index patch. */
+export const DATASET_OPS_WORST = 30;
+/** Held back for the closing index sync (list, read, decide, write, up to three attempts) and the run record. */
+export const CLOSING_OPS = 30;
+/** What a gather is charged for the HTTP requests the data plane makes inside it (S3 manifest, the git broker's token and blobs, an annexed file's redirect). Measured: 3 in the test environment, more in production. */
+export const GATHER_HTTP_OPS = 8;
+
 /** The loader's per-artifact cap (deploy/neurobagel/README.md: NB_MAX_ARTIFACT_BYTES, 6 MiB). */
 export const MAX_ARTIFACT_BYTES = 6 * 1024 * 1024;
 /** The loader's whole-release cap (NB_MAX_TOTAL_BYTES, 192 MiB). Reported, not enforced here. */
@@ -117,7 +145,7 @@ export const LOADER_TOTAL_CAP_BYTES = 192 * 1024 * 1024;
 const R2_METADATA_BUDGET = 1800;
 const INDEX_ATTEMPTS = 3;
 
-/** The per-tick bound: `NEUROBAGEL_RECONCILE_MAX`, a positive integer, default 25, never above the hard limit. */
+/** The per-tick bound: `NEUROBAGEL_RECONCILE_MAX`, a positive integer, default 10, never above the hard limit. */
 export function reconcileLimit(env: Pick<Bindings, "NEUROBAGEL_RECONCILE_MAX">): number {
   const raw = env.NEUROBAGEL_RECONCILE_MAX?.trim();
   if (raw && /^[0-9]{1,6}$/.test(raw)) {
@@ -161,13 +189,7 @@ export function needsReviewFlags(report: Pick<NeurobagelReport, "flags">): strin
 // Results
 // ----------------------------------------------------------------------------
 
-export type DatasetResult =
-  | { id: string; outcome: "unchanged" }
-  | { id: string; outcome: "would_write"; reason: string }
-  | { id: string; outcome: "written"; fingerprint: string; flags: string[]; wrote: string[] }
-  | { id: string; outcome: "refused"; code: string; detail?: string }
-  | { id: string; outcome: "error"; error: string }
-  | { id: string; outcome: "would_remove" | "removed" };
+export type DatasetResult = NeurobagelDatasetResult;
 
 export interface RunOptions {
   /** Who asked: `cron`, `admin`, `hook:publication`, `hook:import`, `hook:version`. */
@@ -180,39 +202,13 @@ export interface RunOptions {
   /** Rewrite even when the fingerprint matches. */
   force?: boolean;
   now?: Date;
+  /** Operations this run may spend; {@link OP_BUDGET} unless a test narrows it. */
+  opBudget?: number;
   waitUntil?: (work: Promise<unknown>) => void;
   deps?: GatherDeps & { curation?: CurationResolver };
 }
 
-export interface RunResult {
-  trigger: string;
-  dry_run: boolean;
-  status: "ok" | "disabled" | "store_unconfigured" | "error";
-  writer_enabled: boolean;
-  error?: string;
-  eligible: number | null;
-  examined: number;
-  limit: number;
-  /** Work found but past the bound: left for the next tick. */
-  unexamined: number;
-  results: DatasetResult[];
-  removed: string[];
-  removals_pending: number;
-  index: {
-    changed: boolean;
-    written: boolean;
-    /** Entries put into the index right after their artifacts, one per dataset written. */
-    patched?: number;
-    entries: number | null;
-    contended?: boolean;
-    problems?: string[];
-    skipped_incomplete?: string[];
-  };
-  /** Datasets this run refused because their data does not say `anonymous: false`. Counted, never named in status. */
-  anonymity_findings: number;
-  needs_review: { id: string; flags: string[] }[];
-  warnings: string[];
-}
+export type RunResult = NeurobagelRunResult;
 
 function emptyResult(options: RunOptions, limit: number, mode: WriterMode): RunResult {
   return {
@@ -224,6 +220,8 @@ function emptyResult(options: RunOptions, limit: number, mode: WriterMode): RunR
     examined: 0,
     limit,
     unexamined: 0,
+    stopped: null,
+    ops: { spent: 0, budget: options.opBudget ?? OP_BUDGET, d1: 0, r2: 0, http: 0 },
     results: [],
     removed: [],
     removals_pending: 0,
@@ -300,6 +298,7 @@ type Prepared =
  */
 async function prepareDataset(
   env: Bindings,
+  ops: OpCounter,
   id: string,
   curation: Exclude<CurationResolution, { kind: "failed" }>,
 ): Promise<Prepared> {
@@ -311,6 +310,7 @@ async function prepareDataset(
 
   let head: Awaited<ReturnType<typeof headManifestObject>>;
   try {
+    ops.add("http");
     head = await headManifestObject(s3Options(env), id, latestVersion);
   } catch (err) {
     return {
@@ -425,6 +425,7 @@ interface RunContext {
   anonymityRefused: Set<string>;
   /** Set when an index patch failed: the run stops examining and goes to its closing sync. */
   indexPatchFailed: boolean;
+  ops: OpCounter;
 }
 
 async function ledgerNote(
@@ -565,7 +566,7 @@ async function processDataset(rc: RunContext, row: PlanRow): Promise<DatasetResu
   if (curation.kind === "failed") {
     return refuse(rc, id, "curation_unavailable", clip(curation.reason));
   }
-  const prepared = await prepareDataset(env, id, curation);
+  const prepared = await prepareDataset(env, rc.ops, id, curation);
   if (prepared.kind === "refused") return refuse(rc, id, prepared.code, prepared.detail);
   if (prepared.kind === "transient") {
     return { id, outcome: "error", error: prepared.error };
@@ -610,6 +611,9 @@ async function processDataset(rc: RunContext, row: PlanRow): Promise<DatasetResu
 
   // Gather: the anonymity guard inside it runs before any depositor file is read.
   let gathered: Awaited<ReturnType<typeof gatherNeurobagelInput>>;
+  // The data plane's own D1 and R2 calls are counted at the binding; its HTTP requests are
+  // not visible from here, so a gather is charged what it has been measured to make.
+  rc.ops.add("http", GATHER_HTTP_OPS);
   try {
     gathered = await gatherNeurobagelInput(env, id, {
       waitUntil: options.waitUntil,
@@ -779,9 +783,15 @@ async function removeArtifacts(
  * the index to the listing, delete what left. Never throws for an expected failure;
  * the failure is the result's `status` and `error`.
  */
-export async function runNeurobagelWriter(env: Bindings, options: RunOptions): Promise<RunResult> {
-  const mode = neurobagelWriterMode(env);
-  const limit = Math.min(RECONCILE_HARD_LIMIT, Math.max(1, options.limit ?? reconcileLimit(env)));
+export async function runNeurobagelWriter(
+  callerEnv: Bindings,
+  options: RunOptions,
+): Promise<RunResult> {
+  const mode = neurobagelWriterMode(callerEnv);
+  const limit = Math.min(
+    RECONCILE_HARD_LIMIT,
+    Math.max(1, options.limit ?? reconcileLimit(callerEnv)),
+  );
   const result = emptyResult(options, limit, mode);
   const now = options.now ?? new Date();
 
@@ -791,11 +801,18 @@ export async function runNeurobagelWriter(env: Bindings, options: RunOptions): P
     result.status = mode === "disabled" ? "disabled" : "store_unconfigured";
     return result;
   }
-  const bucket = env.NEUROBAGEL;
-  if (!bucket) {
+  if (!callerEnv.NEUROBAGEL) {
     result.status = "store_unconfigured";
     return result;
   }
+  // Every D1 statement and R2 call below, the data plane's included, is counted at the binding.
+  const ops = createOpCounter();
+  const env = countOps(callerEnv, ops);
+  const bucket = env.NEUROBAGEL as R2Bucket;
+  const budget = options.opBudget ?? OP_BUDGET;
+  const finishOps = () => {
+    result.ops = { spent: ops.total, budget, d1: ops.d1, r2: ops.r2, http: ops.http };
+  };
 
   try {
     // A run for named datasets reads only those; the whole catalog only for an unscoped run.
@@ -856,13 +873,28 @@ export async function runNeurobagelWriter(env: Bindings, options: RunOptions): P
       now,
       anonymityRefused: new Set(),
       indexPatchFailed: false,
+      ops,
     };
 
     // Work. Sequential on purpose: each dataset moves a manifest digest and two small
     // files through a shared isolate, and the subrequest budget is shared with every
     // other job on the tick (ADR 0054).
     const rowsById = new Map(rows.map((r) => [r.dataset_id, r]));
+    // What the closing steps need, held back: the sync, the run record, and one delete per
+    // dataset leaving. A run that spends the rest has nothing left to finish with.
+    const eligibleIds = new Set(rows.map((r) => r.dataset_id));
+    const leavingEstimate = [...listing.datasets.keys()].filter(
+      (id) => !eligibleIds.has(id) && (only === undefined || only.includes(id)),
+    ).length;
+    const reserve = CLOSING_OPS + Math.min(leavingEstimate, REMOVAL_LIMIT);
     for (const item of plan.work) {
+      // The first dataset is always examined, so a run makes progress however small the
+      // budget; after it, a dataset is begun only if its worst case still leaves the reserve.
+      if (result.examined > 0 && ops.total + DATASET_OPS_WORST + reserve > budget) {
+        result.stopped = "ops_budget";
+        result.unexamined += plan.work.length - result.examined;
+        break;
+      }
       result.examined++;
       const row = rowsById.get(item.id) as PlanRow;
       let outcome: DatasetResult;
@@ -882,6 +914,7 @@ export async function runNeurobagelWriter(env: Bindings, options: RunOptions): P
         result.warnings.push(
           `the index could not be patched after ${item.id}: the run stopped there and rebuilt the index from the listing`,
         );
+        result.stopped = "index_patch";
         result.unexamined += plan.work.length - result.examined;
         break;
       }
@@ -915,7 +948,10 @@ export async function runNeurobagelWriter(env: Bindings, options: RunOptions): P
       .filter((id) => !indexable.has(id) && (only === undefined || only.includes(id)))
       .sort();
 
-    const batch = leaving.slice(0, REMOVAL_LIMIT);
+    // One delete per dataset, within what the budget has left (the rest waits for the next run;
+    // the index and the read route already omit them).
+    const room = Math.max(0, budget - ops.total - 4);
+    const batch = leaving.slice(0, Math.min(REMOVAL_LIMIT, room));
     result.removals_pending = leaving.length - batch.length;
     if (options.execute) {
       if (index.written || !index.changed) {
@@ -930,12 +966,14 @@ export async function runNeurobagelWriter(env: Bindings, options: RunOptions): P
     } else {
       for (const id of batch) result.results.push({ id, outcome: "would_remove" });
     }
+    finishOps();
     await recordRun(env, result);
   } catch (err) {
     result.status = "error";
     result.error = clip(err instanceof Error ? err.message : String(err));
     console.error(`[neurobagel] run failed trigger=${options.trigger}:`, result.error);
   }
+  finishOps();
   return result;
 }
 
@@ -970,6 +1008,8 @@ async function recordRun(env: Bindings, result: RunResult): Promise<void> {
         anonymity_findings: result.anonymity_findings,
         needs_review: result.needs_review.length,
         status: result.status,
+        stopped: result.stopped,
+        ops: result.ops.spent,
       }),
     }).run();
   } catch (err) {
