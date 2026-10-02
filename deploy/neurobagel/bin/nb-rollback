@@ -3,8 +3,10 @@
 # nb-rollback: deliberately go back to an earlier release, and stay there.
 #
 #   nb rollback --list        the releases that are still on disk, newest first
-#   nb rollback [RELEASE]     make RELEASE live (default: the release that was live before the
-#                             current one), reload it, and FREEZE the loader
+#   nb rollback [RELEASE]     make RELEASE live, reload it, and FREEZE the loader. The default is
+#                             the release that was LOADED AND VERIFIED before the live one (or, if
+#                             the live release was never loaded, the one that is loaded); it is not
+#                             simply the previously published release, which may never have loaded.
 #
 # The freeze matters: without it the next scheduled `nb load` would stage the newest content from
 # the artifact store again, undoing the rollback within minutes. While frozen, nb-load fetches
@@ -17,12 +19,14 @@ set -euo pipefail
 # shellcheck source=nb-common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/nb-common.sh"
 
-nb_init_dirs
 case "${1:-}" in
   -h | --help)
-    sed -n '3,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+    nb_usage "$0"
     exit 0
     ;;
+esac
+nb_init_dirs
+case "${1:-}" in
   --list)
     cur="$(nb_current_release || true)"
     for name in $(find "$NB_RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort -r); do
@@ -34,16 +38,21 @@ case "${1:-}" in
     ;;
 esac
 
-target="${1:-$(cat "$NB_STATE_DIR/rollback-to" 2>/dev/null || true)}"
-[ -n "$target" ] || nb_die "$NB_EX_PREFLIGHT" "no previous release recorded; name one (see: nb rollback --list)"
-[ -d "$NB_RELEASES_DIR/$target" ] || nb_die "$NB_EX_PREFLIGHT" "release not found: $target (see: nb rollback --list)"
 cur="$(nb_current_release || true)"
+if [ -n "${1:-}" ]; then
+  target="$1"
+  nb_release_name_ok "$target" || nb_die "$NB_EX_USAGE" "not a release name: $target (see: nb rollback --list)"
+else
+  applied=""
+  [ ! -f "$NB_STATE_DIR/applied.json" ] || applied="$(jq -r '.release // ""' "$NB_STATE_DIR/applied.json" 2>/dev/null || true)"
+  target="$(nb_decide_manual_rollback_target "$cur" "$applied" "$(cat "$NB_STATE_DIR/previous-loaded" 2>/dev/null || true)" \
+    "$(cat "$NB_STATE_DIR/rollback-to" 2>/dev/null || true)" "$NB_RELEASES_DIR")"
+fi
+[ -n "$target" ] || nb_die "$NB_EX_PREFLIGHT" "no earlier release is on disk to go back to; name one (see: nb rollback --list)"
+[ -d "$NB_RELEASES_DIR/$target" ] || nb_die "$NB_EX_PREFLIGHT" "release not found: $target (see: nb rollback --list)"
 [ "$target" != "$cur" ] || nb_die "$NB_EX_PREFLIGHT" "release $target is already live"
 
-if ! nb_lock_acquire "nb-rollback"; then
-  nb_log "another loader or reload is running ($(nb_lock_describe)); exiting"
-  exit "$NB_EX_BUSY"
-fi
+nb_lock_or_exit "nb-rollback"
 nb_log "rolling back: $cur -> $target"
 nb_atomic_symlink "releases/$target" "$NB_CURRENT_LINK"
 [ -z "$cur" ] || printf '%s\n' "$cur" | nb_write_atomic "$NB_STATE_DIR/rollback-to"

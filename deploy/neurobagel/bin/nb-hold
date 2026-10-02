@@ -3,21 +3,31 @@
 # nb-hold / nb-unhold: incident mode. Takes the node out of the federation in seconds and keeps
 # it out until a person puts it back.
 #
-#   nb hold [reason...]   write the hold flag, then stop the node API container. The federation
+#   nb hold [reason...]   write the hold flag, then kill the node API container and confirm it is
+#                         down (it polls, and kills again, until the container is not running or
+#                         10 seconds have passed, and fails loudly if it never stops). The federation
 #                         API of Neurobagel marks a node whose API does not answer as failed and
 #                         returns no records from it. The graph store, the loader state and the
 #                         data stay as they are; the loader keeps staging releases but never
-#                         reloads, and a reload in progress refuses to restart the API.
+#                         reloads, and a reload already in progress kills the API again if it
+#                         starts it: a hold wins.
 #   nb unhold             remove the flag and bring the API back. If a staged release is waiting it
 #                         is reloaded first (which restarts the API); otherwise the API is just
 #                         started and verified.
 #
 # Deliberately takes no lock: during an incident the hold must not wait for a running load.
-# Never touches any other project. Exit codes: 0 done; 8 pre-flight refused.
+# Never touches any other project. Exit codes: 0 done; 9 the API would not stop; 8 refused.
 
 set -euo pipefail
 # shellcheck source=nb-common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/nb-common.sh"
+
+case "${1:-}" in
+  -h | --help)
+    nb_usage "$0"
+    exit 0
+    ;;
+esac
 
 nb_need docker jq
 nb_check_project_name
@@ -28,12 +38,6 @@ case "$(basename "$0")" in
   *) mode=hold ;;
 esac
 [ "$mode" = hold ] && [ "${1:-}" = "--unhold" ] && mode=unhold
-case "${1:-}" in
-  -h | --help)
-    sed -n '3,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
-    exit 0
-    ;;
-esac
 
 if [ "$mode" = hold ]; then
   reason="${*:-no reason given}"
@@ -41,9 +45,18 @@ if [ "$mode" = hold ]; then
   nb_log "hold flag written; stopping the node API container"
   # kill, not stop: the API holds no state, its entrypoint script ignores SIGTERM, and in an
   # incident every second a stop would wait is a second the node is still answering.
-  nb_compose kill api >/dev/null 2>&1 || nb_log "api was not running"
-  nb_log "node is OUT of the federation: $(cat "$NB_STATE_DIR/hold")"
-  exit 0
+  # A reload in flight can start the API between our kill and our exit, so the hold is not done
+  # until the container is seen not running.
+  for _ in $(seq 1 20); do
+    nb_compose kill api >/dev/null 2>&1 || true
+    api_id="$(nb_container_id api)"
+    if [ -z "$api_id" ] || [ "$(docker inspect -f '{{.State.Running}}' "$api_id" 2>/dev/null)" != true ]; then
+      nb_log "node is OUT of the federation: $(cat "$NB_STATE_DIR/hold")"
+      exit 0
+    fi
+    sleep 0.5
+  done
+  nb_die 9 "the hold flag is written, but the API container is still running after 10 seconds; run: docker kill $(nb_container_id api)"
 fi
 
 # unhold
