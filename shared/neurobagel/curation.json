@@ -56,38 +56,6 @@
         "participants_tsv": "82d02b4e63fe414c6473d85c0474b2d97723d153"
       }
     },
-    "nm000154": {
-      "columns": {
-        "gender": {
-          "IsAbout": {
-            "Label": "Sex",
-            "TermURL": "nb:Sex"
-          },
-          "Levels": {
-            "F": {
-              "Label": "Female",
-              "TermURL": "snomed:248152002"
-            },
-            "M": {
-              "Label": "Male",
-              "TermURL": "snomed:248153007"
-            }
-          },
-          "MissingValues": [],
-          "VariableType": "Categorical"
-        }
-      },
-      "evidence": {
-        "date": "2026-10-02",
-        "review": "author",
-        "reviewer": "pull request author; not a domain expert, so a clinical or instrument review is still required before federation",
-        "source": "participants.json describes the gender column as the sex of the participant with levels male and female; the dataset has no sex column, so the mechanical rule leaves the column unmapped."
-      },
-      "pins": {
-        "participants_json": "51644bc9f58641110aeaf53fc783e3ff0c2b683c",
-        "participants_tsv": "ed6bc01071b75371d741593b4d8808c3168a55c0"
-      }
-    },
     "nm000158": {
       "columns": {
         "group": {

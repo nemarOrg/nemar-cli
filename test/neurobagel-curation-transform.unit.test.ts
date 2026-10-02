@@ -217,15 +217,15 @@ describe("the committed curation, applied to its real fixtures", () => {
     expect(sessions.every((s) => s.hasAge === 71)).toBe(true);
   });
 
-  test("nm000154: the gender column is the sex column, and the gender flag is gone", () => {
-    const jsonld = golden("nm000154", "nm000154.jsonld");
+  test("on001787: the gender column is the sex column, and the gender flag is gone", () => {
+    const jsonld = golden("on001787", "on001787.jsonld");
     const sexes = phenotypes(jsonld).map((s) => s.hasSex?.identifier);
     expect(sexes.filter((s) => s === "snomed:248153007").length).toBe(12);
     expect(sexes.filter((s) => s === "snomed:248152002").length).toBe(12);
-    const report = golden("nm000154", "nm000154.report.json");
+    const report = golden("on001787", "on001787.report.json");
     expect(report.flags as string[]).not.toContain("gender_column_needs_curation");
     expect((report.columns as Json).sex).toMatchObject({ status: "curated" });
-    const dictionary = golden("nm000154", "nm000154_annotated.json");
+    const dictionary = golden("on001787", "on001787_annotated.json");
     expect(Object.keys(dictionary).sort()).toEqual(["age", "gender", "participant_id"]);
   });
 

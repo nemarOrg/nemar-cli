@@ -263,7 +263,7 @@ describe("the loader rejects, and says why", () => {
 
   test("a sex level whose term is a diagnosis, and a diagnosis level whose term is a sex", () => {
     const sexAsDiagnosis = mutated((f) => {
-      const g = (f.datasets.nm000154.columns as Json).gender as {
+      const g = (f.datasets.on001787.columns as Json).gender as {
         Levels: Record<string, { TermURL: string; Label: string }>;
       };
       g.Levels.F = { TermURL: "snomed:35919005", Label: "Autism spectrum disorder" };
@@ -310,7 +310,7 @@ describe("the loader rejects, and says why", () => {
 
   test("a VariableType that does not suit the variable, and an unknown one", () => {
     const wrongType = mutated((f) => {
-      f.datasets.nm000154.columns = {
+      f.datasets.on001787.columns = {
         gender: {
           Format: { Label: "decimal", TermURL: "nb:FromFloat" },
           IsAbout: { Label: "Sex", TermURL: "nb:Sex" },
@@ -356,7 +356,7 @@ describe("the loader rejects, and says why", () => {
     expect(problemsOf(nothing({ MissingValues: [] })).join()).toContain("Levels is empty");
     // A sex column that maps nothing would only withdraw what the mechanical rule can read.
     const sex = mutated((f) => {
-      Object.assign(inCopy(f, "nm000154", "gender"), { Levels: {}, MissingValues: ["F", "M"] });
+      Object.assign(inCopy(f, "on001787", "gender"), { Levels: {}, MissingValues: ["F", "M"] });
     });
     expect(problemsOf(sex).join()).toContain("Levels is empty");
     const parsed = parseCuration(nothing({ MissingValues: ["spinal cord injury"] }));
@@ -488,13 +488,13 @@ describe("the loader rejects, and says why", () => {
     expect(problemsOf(none).join()).toContain("an entry must curate a column");
 
     const sex = (extra: string): Json => ({
-      ...(column("nm000154", "gender") as Json),
+      ...(column("on001787", "gender") as Json),
       _: extra,
     });
     const twoSex = mutated((f) => {
-      f.datasets.nm000154.columns = {
-        gender: column("nm000154", "gender"),
-        sexo: column("nm000154", "gender"),
+      f.datasets.on001787.columns = {
+        gender: column("on001787", "gender"),
+        sexo: column("on001787", "gender"),
       };
     });
     expect(problemsOf(twoSex).join()).toContain("more than one sex column");
@@ -506,7 +506,7 @@ describe("the loader rejects, and says why", () => {
       VariableType: "Continuous",
     };
     const twoAge = mutated((f) => {
-      f.datasets.nm000154.columns = { age1: age, age2: age };
+      f.datasets.on001787.columns = { age1: age, age2: age };
     });
     expect(problemsOf(twoAge).join()).toContain("more than one age column");
 
@@ -522,7 +522,7 @@ describe("the loader rejects, and says why", () => {
     });
     expect(problemsOf(text).join()).toContain("must be about sex, not diagnosis");
     const group = mutated((f) => {
-      f.datasets.nm000149.columns = { " GROUP ": column("nm000154", "gender") };
+      f.datasets.nm000149.columns = { " GROUP ": column("on001787", "gender") };
     });
     expect(problemsOf(group).join()).toContain("must be about diagnosis, not sex");
     const aligned = mutated((f) => {
@@ -596,7 +596,7 @@ describe("the loader rejects, and says why", () => {
   test("every problem at once, not only the first", () => {
     const text = mutated((f) => {
       (f.datasets.nm000149.evidence as Json).date = "tomorrow";
-      f.datasets.xx000001 = clone(f.datasets.nm000154);
+      f.datasets.xx000001 = clone(f.datasets.on001787);
       const g = inCopy(f, "nm000119", "group") as { Levels: Record<string, { TermURL: string }> };
       Object.values(g.Levels)[0].TermURL = "snomed:1";
     });
@@ -793,7 +793,7 @@ describe("bindCuration", () => {
     const text = fixtureText(real, "participants.tsv") as string;
     expect(fixtureText(real, "participants.json")).toBeNull();
     const entry = await loadedEntry(real, text, null, {
-      like: "nm000154",
+      like: "nm000119",
       columns: {
         sex: {
           IsAbout: { Label: "Sex", TermURL: "nb:Sex" },
@@ -940,7 +940,7 @@ describe("bindCuration", () => {
         age: units === undefined ? { Description: "Age" } : { Description: "Age", Units: units },
       });
       const entry = await loadedEntry("nm000132", table, description, {
-        like: "nm000154",
+        like: "nm000119",
         columns: ageColumns,
       });
       const result = await bindCuration(entry, {
@@ -965,7 +965,7 @@ describe("bindCuration", () => {
     ]);
     const months = JSON.stringify({ age: { Units: "months" } });
     const entry = await loadedEntry("nm000132", table, months, {
-      like: "nm000154",
+      like: "nm000119",
       columns: ageColumns,
     });
     const result = await bindCuration(entry, { participantsTsv: table, participantsJson: months });
@@ -979,7 +979,7 @@ describe("bindCuration", () => {
     const zeros = fixtureText("nm000157", "participants.tsv") as string;
     const description = fixtureText("nm000157", "participants.json") as string;
     const entry = await loadedEntry("nm000157", zeros, description, {
-      like: "nm000154",
+      like: "nm000119",
       columns: {
         age: {
           Format: { Label: "decimal", TermURL: "nb:FromFloat" },
@@ -999,7 +999,7 @@ describe("bindCuration", () => {
     });
     // The reviewer who knows 0 is not an age says so, and then there is nothing left to curate.
     const declared = await loadedEntry("nm000157", zeros, description, {
-      like: "nm000154",
+      like: "nm000119",
       columns: {
         age: {
           Format: { Label: "decimal", TermURL: "nb:FromFloat" },
