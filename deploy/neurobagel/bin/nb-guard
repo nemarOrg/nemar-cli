@@ -24,7 +24,12 @@
 #   mem       MemAvailable below NB_ABORT_AVAILABLE_MB (default 1536, the epic's 1.5 GiB rule)
 #   load      1-minute load average above NB_ABORT_LOAD (default 6) in NB_ABORT_LOAD_SAMPLES
 #             consecutive samples (default 6)
-#   neighbor  another container restarted, died, or turned unhealthy since the baseline
+#   neighbor  another container restarted, died, or turned unhealthy since the baseline. The
+#             baseline belongs to one boot of the host: it carries the boot id, and after a reboot
+#             (a different boot id) or while the host has been up for less than
+#             NB_GUARD_BOOT_SETTLE_S (default 180 s, its containers still coming up) the baseline is
+#             taken again instead of judged, so a reboot is never read as every other container
+#             having restarted.
 #
 # Samples are appended to state/guard.log (tab separated). Exit codes: 0 fine; 20 breach.
 
@@ -71,7 +76,7 @@ if [ "$check_only" = 1 ]; then
     echo "the resource guard has never sampled (no heartbeat)"
     exit 21
   fi
-  msg="$(nb_guard_heartbeat_problem "$hb" "$(nb_epoch)" "$(nb_env_get NB_GUARD_STALE_S 1200)")"
+  msg="$(nb_guard_heartbeat_problem "$hb" "$(nb_epoch)" "$(nb_env_get NB_GUARD_STALE_S 1200)" 1)"
   if [ -n "$msg" ]; then
     echo "$msg"
     exit 21
@@ -82,6 +87,8 @@ fi
 abort_mb="$(nb_env_get NB_ABORT_AVAILABLE_MB 1536)"
 abort_load="$(nb_env_get NB_ABORT_LOAD 6)"
 abort_load_samples="$(nb_env_get NB_ABORT_LOAD_SAMPLES 6)"
+settle_s="$(nb_env_get NB_GUARD_BOOT_SETTLE_S 180)"
+boot_note=""
 baseline_file="$NB_STATE_DIR/guard-baseline.tsv"
 log_file="$NB_STATE_DIR/guard.log"
 high_load_streak=0
@@ -97,9 +104,34 @@ neighbors() {
   done | sort
 }
 
+# The baseline is written whole to a temp file and renamed, and it carries the boot id of the host
+# (see nb_guard_baseline_render in nb-decide.sh for why).
 record_baseline() {
-  neighbors | cut -f1-3 >"$baseline_file"
-  nb_log "baseline recorded for $(wc -l <"$baseline_file" | tr -d ' ') other container(s)"
+  neighbors | nb_guard_baseline_render "$(nb_boot_id)" | nb_write_atomic "$baseline_file" || {
+    nb_log "could not record the baseline"
+    return 1
+  }
+  nb_log "baseline recorded for $(grep -vc '^#' "$baseline_file" | tr -d ' ') other container(s) (boot ${boot_note:-unknown})"
+}
+
+# Before the neighbours are judged: take a new baseline if the host has rebooted since the last one,
+# or has only just booted and its containers are still coming up; stamp an old baseline with the
+# boot id. A reboot must never read as every neighbour having restarted.
+settle_baseline() {
+  local present=0 action bboot=""
+  if [ -f "$baseline_file" ]; then
+    present=1
+    bboot="$(nb_guard_baseline_boot_id <"$baseline_file")"
+  fi
+  boot_note="$(nb_boot_id | cut -c1-8)"
+  action="$(nb_decide_baseline_action "$present" "$bboot" "$(nb_boot_id)" "$(nb_uptime_s)" "$settle_s")"
+  case "$action" in
+    record) record_baseline ;;
+    stamp)
+      { printf '#boot_id\t%s\n' "$(nb_boot_id)"; cat "$baseline_file"; } | nb_write_atomic "$baseline_file" \
+        && nb_log "baseline stamped with this boot's id"
+      ;;
+  esac
 }
 
 # Only long-lived containers: a one-off `compose run` container (the init step of a reload) can be
@@ -134,9 +166,7 @@ sample() {
     add_breach "load(${load}>${abort_load} for ${high_load_streak} samples)"
   fi
 
-  if [ ! -f "$baseline_file" ]; then
-    record_baseline
-  fi
+  settle_baseline
   now_neighbors="$(neighbors)"
   neighbors_bad="$(printf '%s\n' "$now_neighbors" | nb_guard_neighbor_breaches "$baseline_file")"
   [ -z "$neighbors_bad" ] || add_breach "neighbor($neighbors_bad)"
