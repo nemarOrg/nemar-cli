@@ -43,8 +43,12 @@ import {
 import {
   CLOSING_OPS,
   DATASET_OPS_WORST,
+  MAX_ARTIFACT_BYTES,
   OP_BUDGET,
+  R2_METADATA_BUDGET,
+  REMOVAL_LIMIT,
   type RunResult,
+  fitMetadata,
   neurobagelWriterMode,
   reconcileLimit,
   runNeurobagelWriter,
@@ -1341,6 +1345,211 @@ describe("off by default, and a reported no-op without a bucket", () => {
     }
     expect((await run({ execute: false, limit: 50 })).limit).toBe(50);
     expect((await run({ execute: false, limit: 0 })).limit).toBe(1);
+  });
+});
+
+// ----------------------------------------------------------------------------
+// Limits on what is written
+// ----------------------------------------------------------------------------
+
+describe("an artifact over the loader's cap is never written", () => {
+  /** The three artifacts' sizes as stored, from a first real run. */
+  async function sizesAfterFirstRun(
+    id: string,
+  ): Promise<{ jsonld: number; dictionary: number; description: number }> {
+    seedSynthetic(h, id);
+    await run();
+    const stored = (await listStore(h.bucket)).datasets.get(id);
+    return {
+      jsonld: stored?.jsonld?.size ?? 0,
+      dictionary: stored?.dictionary?.size ?? 0,
+      description: stored?.description?.size ?? 0,
+    };
+  }
+
+  test("exactly at the cap is written; one byte over is refused, with the artifact and its size named", async () => {
+    const sizes = await sizesAfterFirstRun("nm000870");
+    const largest = Math.max(sizes.jsonld, sizes.dictionary, sizes.description);
+    expect(largest).toBeGreaterThan(100);
+    const rec = recordWrites(h.bucket);
+
+    const exact = await run(
+      { force: true, maxArtifactBytes: largest },
+      h.env({ NEUROBAGEL: rec.bucket }),
+    );
+    expect(outcomes(exact)).toEqual(["nm000870:written"]);
+
+    const over = await run(
+      { force: true, maxArtifactBytes: largest - 1 },
+      h.env({ NEUROBAGEL: rec.bucket }),
+    );
+    expect(over.results[0]).toMatchObject({
+      id: "nm000870",
+      outcome: "refused",
+      code: "artifact_too_large",
+      detail: expect.stringMatching(/nm000870.*is \d+ bytes/),
+    });
+    // One oversize artifact makes the loader refuse the whole release, so none of the set
+    // is written, and what the store held stays.
+    expect(rec.log.filter((e) => e.op === "put").length).toBe(1);
+    expect(await sizesAfterFirstRun2("nm000870")).toEqual(sizes);
+  });
+
+  async function sizesAfterFirstRun2(id: string) {
+    const stored = (await listStore(h.bucket)).datasets.get(id);
+    return {
+      jsonld: stored?.jsonld?.size ?? 0,
+      dictionary: stored?.dictionary?.size ?? 0,
+      description: stored?.description?.size ?? 0,
+    };
+  }
+
+  test("each of the three artifacts is held to the cap, not only the largest", async () => {
+    // A cap below the smallest artifact refuses the dataset on whichever it meets first; a
+    // cap between them refuses it on the larger. Together: no artifact is exempt.
+    const sizes = await sizesAfterFirstRun("nm000871");
+    for (const [kind, size] of Object.entries(sizes)) {
+      const result = await run({ force: true, maxArtifactBytes: size - 1 });
+      expect(result.results[0], kind).toMatchObject({ code: "artifact_too_large" });
+    }
+  });
+
+  test("the refusal is a finding a person can read, and the good set the store holds stays", async () => {
+    await sizesAfterFirstRun("nm000872");
+    h.db.run("UPDATE datasets SET name = 'Revised' WHERE dataset_id = 'nm000872'");
+    const first = await run({ maxArtifactBytes: 100 });
+    expect(first.results[0]).toMatchObject({ code: "artifact_too_large" });
+    const status = await neurobagelStatus(h.env());
+    expect(status.needs_review).toEqual([
+      { id: "nm000872", source: "refusal", code: "artifact_too_large" },
+    ]);
+    // The old artifacts are still served: a refusal never replaces a good set with nothing.
+    expect(await storeKeys(h.bucket)).toContain("nm000872.jsonld");
+    expect((await storedIndex()).datasets.map((d) => d.id)).toEqual(["nm000872"]);
+  });
+
+  test("the default cap is the loader's 6 MiB", () => {
+    expect(MAX_ARTIFACT_BYTES).toBe(6 * 1024 * 1024);
+  });
+});
+
+describe("custom metadata is kept inside R2's limit", () => {
+  const base = {
+    [META.sha256]: "a".repeat(64),
+    [META.kind]: "jsonld",
+    [META.fingerprint]: `sha256:${"b".repeat(64)}`,
+  };
+
+  test("a set under the budget is returned unchanged", () => {
+    const meta = { ...base, [META.flags]: "partial_join,curation_stale" };
+    expect(fitMetadata(meta)).toBe(meta);
+  });
+
+  test("over it, the FLAGS give way, one at a time, and the cut is marked with a +", () => {
+    const flags = Array.from({ length: 200 }, (_, i) => `curation_flag_${i}`);
+    const meta = { ...base, [META.flags]: flags.join(",") };
+    const size = (m: Record<string, string>) =>
+      Object.entries(m).reduce((n, [k, v]) => n + k.length + v.length, 0);
+    expect(size(meta)).toBeGreaterThan(R2_METADATA_BUDGET);
+    const fitted = fitMetadata(meta);
+    expect(size(fitted)).toBeLessThanOrEqual(R2_METADATA_BUDGET);
+    expect(fitted[META.flags]?.endsWith("+")).toBe(true);
+    // Nothing else is touched, and what survives is a prefix of the flags, in order.
+    expect(fitted[META.sha256]).toBe(base[META.sha256]);
+    expect(fitted[META.fingerprint]).toBe(base[META.fingerprint]);
+    const kept = (fitted[META.flags] ?? "").slice(0, -1).split(",");
+    expect(kept.length).toBeGreaterThan(10);
+    expect(kept).toEqual(flags.slice(0, kept.length));
+  });
+
+  test("over it with no flags to cut, there is nothing to trim and the set is returned as it is", () => {
+    const meta = { ...base, [META.manifestEtag]: "e".repeat(2000) };
+    expect(fitMetadata(meta)).toEqual(meta);
+  });
+
+  test("a real write stays inside the budget and is still stamped", async () => {
+    // The stamp the writer puts on a JSON-LD is read back by the next run; a write R2 refused
+    // for size would lose the whole dataset.
+    seedSynthetic(h, "nm000873");
+    const result = await run();
+    expect(outcomes(result)).toEqual(["nm000873:written"]);
+    const head = await h.bucket.head("nm000873.jsonld");
+    const size = Object.entries(head?.customMetadata ?? {}).reduce(
+      (n, [k, v]) => n + k.length + v.length,
+      0,
+    );
+    expect(size).toBeLessThanOrEqual(R2_METADATA_BUDGET);
+  });
+});
+
+describe("removals are bounded per run", () => {
+  test("more datasets leaving than REMOVAL_LIMIT: that many are removed, the rest are reported pending, and the next run finishes", async () => {
+    const total = REMOVAL_LIMIT + 5;
+    const stamp = (kind: string) => ({ sha256: "0".repeat(64), kind });
+    const ids = Array.from({ length: total }, (_, i) => `nm0009${String(i).padStart(2, "0")}`);
+    // Objects the writer stamped for datasets that are in no catalog: all of them are leaving.
+    for (const id of ids) {
+      await h.bucket.put(`${id}.jsonld`, "{}", {
+        customMetadata: { ...stamp("jsonld"), [META.fingerprint]: "sha256:x" },
+      });
+      await h.bucket.put(`${id}_annotated.json`, "{}", { customMetadata: stamp("dictionary") });
+      await h.bucket.put(`${id}_dataset_description.json`, "{}", {
+        customMetadata: stamp("description"),
+      });
+    }
+    const first = await run();
+    expect(first.removed).toHaveLength(REMOVAL_LIMIT);
+    expect(first.removals_pending).toBe(5);
+    expect((await storeKeys(h.bucket)).length).toBe(5 * 3);
+    const second = await run();
+    expect(second.removed).toHaveLength(5);
+    expect(second.removals_pending).toBe(0);
+    expect(await storeKeys(h.bucket)).toEqual([]);
+  });
+});
+
+describe("a dry run writes no ledger row and no audit row, whatever it finds", () => {
+  const auditCount = () =>
+    (h.db.query("SELECT COUNT(*) AS n FROM audit_log").get() as { n: number }).n;
+
+  test("including a refused dataset, an anonymity-class disagreement and a failed curation lookup", async () => {
+    seedDatasetRow(h.db, "nm000880"); // no manifest: refused (manifest_absent)
+    seedSynthetic(h, "nm000881"); // the data plane will say anonymous: an anonymity finding
+    seedSynthetic(h, "nm000882"); // its curation lookup fails
+    const env = h.env();
+    const dataPlane = dataPlaneWith(env, async (path, real) => {
+      if (!path.startsWith("/nm000881/metadata.json")) return null;
+      const doc = (await real.json()) as Record<string, unknown>;
+      doc.anonymous = true;
+      return new Response(JSON.stringify(doc), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    const curation: CurationResolver = async (id) =>
+      id === "nm000882" ? { kind: "failed", reason: "the file did not load" } : { kind: "none" };
+
+    const before = auditCount();
+    const dry = await run({ execute: false, deps: { dataPlane, curation } }, env);
+    // The dry run found what a real one would: the refusal and the failed lookup. (The
+    // anonymity disagreement is only seen by a gather, which a dry run does not do.)
+    expect(outcomes(dry)).toContain("nm000880:refused");
+    expect(outcomes(dry)).toContain("nm000882:refused");
+    expect(auditCount()).toBe(before);
+
+    // The same inputs, executed, DO write the ledger: the guard above is what kept it clean.
+    const real = await run({ deps: { dataPlane, curation } }, env);
+    expect(real.anonymity_findings).toBe(1);
+    expect(auditCount()).toBeGreaterThan(before);
+    const kinds = h.db
+      .query<{ action: string }, []>(
+        "SELECT DISTINCT action FROM audit_log WHERE action LIKE 'neurobagel_%'",
+      )
+      .all()
+      .map((r) => r.action);
+    expect(kinds).toEqual(
+      expect.arrayContaining(["neurobagel_refused", "neurobagel_anonymity_finding"]),
+    );
   });
 });
 

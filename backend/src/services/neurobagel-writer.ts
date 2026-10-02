@@ -143,7 +143,7 @@ export const GATHER_HTTP_OPS = 8;
 export const MAX_ARTIFACT_BYTES = 6 * 1024 * 1024;
 /** The loader's whole-release cap (NB_MAX_TOTAL_BYTES, 192 MiB). Reported, not enforced here. */
 export const LOADER_TOTAL_CAP_BYTES = 192 * 1024 * 1024;
-const R2_METADATA_BUDGET = 1800;
+export const R2_METADATA_BUDGET = 1800;
 const INDEX_ATTEMPTS = 3;
 
 /** The per-tick bound: `NEUROBAGEL_RECONCILE_MAX`, a positive integer, default 10, never above the hard limit. */
@@ -205,6 +205,8 @@ export interface RunOptions {
   now?: Date;
   /** Operations this run may spend; {@link OP_BUDGET} unless a test narrows it. */
   opBudget?: number;
+  /** The loader's per-artifact cap; {@link MAX_ARTIFACT_BYTES} unless a test narrows it (a real 6 MiB document is not worth building for the check). */
+  maxArtifactBytes?: number;
   waitUntil?: (work: Promise<unknown>) => void;
   deps?: GatherDeps & { curation?: CurationResolver };
 }
@@ -347,7 +349,7 @@ async function prepareDataset(
 }
 
 /** R2 custom metadata, kept inside R2's 2 KiB: the flags are what gives way. */
-function fitMetadata(meta: Record<string, string>): Record<string, string> {
+export function fitMetadata(meta: Record<string, string>): Record<string, string> {
   const size = (m: Record<string, string>) =>
     Object.entries(m).reduce((n, [k, v]) => n + k.length + v.length, 0);
   if (size(meta) <= R2_METADATA_BUDGET) return meta;
@@ -663,7 +665,7 @@ async function processDataset(rc: RunContext, row: PlanRow): Promise<DatasetResu
     const size = new TextEncoder().encode(built.files[name] as string).length;
     // The loader refuses the WHOLE load for one artifact over its cap; such a file is
     // never written, so one dataset cannot stop every other from being loaded.
-    if (size > MAX_ARTIFACT_BYTES) {
+    if (size > (options.maxArtifactBytes ?? MAX_ARTIFACT_BYTES)) {
       return refuse(rc, id, "artifact_too_large", `${name} is ${size} bytes`);
     }
   }
