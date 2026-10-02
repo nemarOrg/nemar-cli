@@ -1230,6 +1230,22 @@ describe("a tick examines at most N datasets, in a deterministic order", () => {
     expect([...seen].sort()).toEqual(IDS);
   });
 
+  test("a set missing a companion is MISSING to the plan: it is examined first, on any day, however late its id", async () => {
+    for (const id of ["nm000700", "nm000701", "nm000702"]) seedSynthetic(h, id);
+    await run({ limit: 3 });
+    await h.bucket.delete("nm000702_annotated.json");
+    // With one slot a day, a rotation member would be examined on one day in three; a
+    // set that is not whole must lead on every one of them.
+    for (let day = 0; day < 3; day++) {
+      const dry = await run({
+        execute: false,
+        limit: 1,
+        now: new Date(Date.UTC(2026, 9, 1 + day, 12)),
+      });
+      expect(outcomes(dry)).toEqual(["nm000702:would_write"]);
+    }
+  });
+
   test("an explicit list is examined as asked and bounded by its own length", async () => {
     for (const id of IDS) seedSynthetic(h, id);
     const result = await run({ only: ["nm000705", "nm000701", "nm000999"], limit: 2 });
