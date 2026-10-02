@@ -500,3 +500,78 @@ export const neuroschemaDatasetSchema = z
   })
   .passthrough();
 export type NeuroschemaDataset = z.infer<typeof neuroschemaDatasetSchema>;
+
+/**
+ * The `session_modalities` key that stands for "this datatype sits directly
+ * under the subject, in no session directory" (epic #1586 Phase 2, #1588).
+ *
+ * It is a key, not a session label, and it can never be mistaken for one:
+ * the index only treats `ses-<label>` as a session when the label is
+ * alphanumeric (`[A-Za-z0-9]+`), so a label can never contain the hyphen
+ * this key does. A reader must therefore look a label up by its own name and
+ * ask for this key by name; it must never build a `ses-<key>` identifier from
+ * it. It is declared here, once, and everything that reads or writes
+ * `session_modalities` imports it, the way every other sentinel in this
+ * repository is declared where it is allocated and never guessed at a call
+ * site.
+ */
+export const NO_SESSION_KEY = "no-session";
+
+/** `modalities.<datatype>` of one subject in `bids_index`. */
+const bidsIndexModalitySchema = z
+  .object({
+    tasks: z.record(z.object({ runs: z.array(z.string()) }).passthrough()),
+  })
+  .passthrough();
+
+/**
+ * One subject in `extensions.nemar.bids_index.subjects` of `metadata.json`.
+ *
+ *  - `sessions`: the subject's session labels (no `ses-` prefix), sorted.
+ *  - `modalities`: every datatype directory the subject has, across all of
+ *    its sessions, with that datatype's tasks and runs. A set per subject:
+ *    it says WHAT the subject has, not in which session.
+ *  - `session_modalities` (additive, #1588): which datatypes each session
+ *    holds, the pairing `sessions` and `modalities` lose. One key per session
+ *    label, plus {@link NO_SESSION_KEY} when the subject has a datatype
+ *    directory outside every session directory. Each value is the sorted list
+ *    of datatype directories in that session; a session that only has
+ *    session-level files (a `scans.tsv`) is present with `[]`. The union of
+ *    the values equals the keys of `modalities`, and the keys other than
+ *    {@link NO_SESSION_KEY} equal `sessions`.
+ *
+ *    OPTIONAL on purpose: a data plane that predates the field (and any
+ *    response cached before it deployed, for up to a minute) does not send
+ *    it. A consumer must read an absent key as "not known" and a present one,
+ *    including `{}`, as the whole truth. Key order on the wire is not part of
+ *    the contract (JavaScript objects serialize integer-like labels such as
+ *    `"1"` and `"10"` first and in numeric order); read `sessions` for order.
+ */
+export const bidsIndexSubjectSchema = z
+  .object({
+    sessions: z.array(z.string()),
+    modalities: z.record(bidsIndexModalitySchema),
+    session_modalities: z.record(z.array(z.string())).optional(),
+  })
+  .passthrough();
+export type BidsIndexSubjectWire = z.infer<typeof bidsIndexSubjectSchema>;
+
+/**
+ * `extensions.nemar.bids_index` of `metadata.json`: the BIDS subject tree of
+ * the dataset's latest version, derived from its manifest. `null` on the wire
+ * when no version has a readable manifest, so a consumer parses
+ * `bidsIndexSchema.nullable()`.
+ *
+ * Standalone rather than part of {@link neuroschemaDatasetSchema}: neuroschema
+ * declares `extensions.nemar` with `additionalProperties: true` and does not
+ * describe this block, so the vendored JSON Schema neither requires nor
+ * forbids it, and a live-response check that hard-failed on its shape would
+ * turn a cosmetic difference in one dataset into a red contract run.
+ */
+export const bidsIndexSchema = z
+  .object({
+    version: z.string(),
+    subjects: z.record(bidsIndexSubjectSchema),
+  })
+  .passthrough();
+export type BidsIndexWire = z.infer<typeof bidsIndexSchema>;
