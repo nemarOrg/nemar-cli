@@ -48,7 +48,7 @@ describe("the verification mutants", () => {
 
   test("the battery reaches every layer of the feature it claims to", () => {
     expect(new Set(MUTANTS.map((m) => m.layer))).toEqual(
-      new Set(["verify", "drift", "run", "anonymity", "weekly"]),
+      new Set(["verify", "drift", "run", "anonymity", "weekly", "cli", "contract"]),
     );
     expect(MUTANTS.length).toBeGreaterThanOrEqual(30);
   });

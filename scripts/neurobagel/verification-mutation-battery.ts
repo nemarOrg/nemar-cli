@@ -30,7 +30,7 @@ import {
 
 /** A mutant of this phase: the writer battery's shape, with this phase's own layers. */
 export interface Mutant extends Omit<WriterMutant, "layer"> {
-  layer: "verify" | "drift" | "run" | "anonymity" | "weekly";
+  layer: "verify" | "drift" | "run" | "anonymity" | "weekly" | "cli" | "contract";
 }
 
 /** The writer battery's rule: the anchor must match exactly as often as declared. */
@@ -49,9 +49,21 @@ const WEEKLY_PURE = `${T}/import-weekly-summary-decisions.test.ts`;
 const WEEKLY_SWEEP = `${T}/import-weekly-summary-sweep.test.ts`;
 const SCAN = `${T}/neurobagel-source-scan.test.ts`;
 const WIRING = `${T}/cron-sweep-wiring.test.ts`;
+const CLI_NB = "test/admin-neurobagel-cli.test.ts";
+const CLI_WEEKLY = "test/import-weekly-cli.test.ts";
 
 /** Every test the phase added or changed, run for a mutant that survives its own. */
-export const ALL_TESTS = [CHECKS, VERIFY_T, ANON_T, WEEKLY_PURE, WEEKLY_SWEEP, SCAN, WIRING];
+export const ALL_TESTS = [
+  CHECKS,
+  VERIFY_T,
+  ANON_T,
+  WEEKLY_PURE,
+  WEEKLY_SWEEP,
+  SCAN,
+  WIRING,
+  CLI_NB,
+  CLI_WEEKLY,
+];
 
 const VERIFY = `${SVC}/neurobagel-verify.ts`;
 const DRIFT = `${SVC}/neurobagel-drift.ts`;
@@ -60,6 +72,9 @@ const STATUS = `${SVC}/neurobagel-status.ts`;
 const WEEKLY_SVC = `${SVC}/import-weekly-summary.ts`;
 const WEEKLY_GATHER = `${SVC}/import-weekly-summary-sweep.ts`;
 const INDEX = "backend/src/index.ts";
+const CONTRACT = "shared/contract/neurobagel-admin.ts";
+const ATTENTION = "shared/contract/weekly-attention.ts";
+const CLI = "src/commands/admin.ts";
 
 const UNIT = [CHECKS, VERIFY_T];
 
@@ -81,15 +96,6 @@ export const MUTANTS: Mutant[] = [
     find: '  if (verdicts.includes("unknown")) return "unknown";\n',
     replace: "",
     note: "a check that could not be answered leaves the overall healthy",
-    tests: UNIT,
-  },
-  {
-    id: "V03-overall-unchecked-is-healthy",
-    layer: "verify",
-    file: VERIFY,
-    find: '  if (verdicts.includes("healthy")) return "healthy";\n  return "unchecked";',
-    replace: '  return "healthy";',
-    note: "a sweep in which nothing ran reads as healthy",
     tests: UNIT,
   },
 
@@ -252,11 +258,11 @@ export const MUTANTS: Mutant[] = [
     tests: UNIT,
   },
   {
-    id: "N06-node-asked-with-get",
+    id: "N06-node-asked-with-the-wrong-method",
     layer: "verify",
     file: VERIFY,
-    find: '{ method: "POST", body: "{}" }',
-    replace: '{ method: "GET" }',
+    find: '        method: "POST",\n        headers: {',
+    replace: '        method: "PUT",\n        headers: {',
     note: "the probe asks a different question from the one the federation asks",
     tests: UNIT,
   },
@@ -474,12 +480,332 @@ export const MUTANTS: Mutant[] = [
   },
   {
     id: "W03-alarm-days-hidden",
-    layer: "weekly",
-    file: WEEKLY_SVC,
-    find: '    if (f.neurobagel.days.alarm > 0 && f.neurobagel.latest.overall !== "alarm") {',
+    layer: "contract",
+    file: ATTENTION,
+    find: '    if (n.days.alarm > 0 && n.latest.overall !== "alarm") {',
     replace: "    if (false) {",
     note: "a week with an alarm and a healthy last run reads as a clean week",
     tests: [WEEKLY_PURE, WEEKLY_SWEEP],
+  },
+
+  // Review changes: the id scan of the store.
+  {
+    id: "R01-id-boundary-after-the-id",
+    layer: "anonymity",
+    file: STATUS,
+    find: "const DATASET_ID_IN_TEXT = /(?<![A-Za-z0-9])(?:nm|on)\\d{6}(?!\\d)/g;",
+    replace: "const DATASET_ID_IN_TEXT = /\\b(?:nm|on)\\d{6}\\b/g;",
+    note: "an id followed by an underscore is not found, so a deposit's copy under `<id>_annotated.json` reads as a clean store",
+    tests: [ANON_T],
+  },
+  {
+    id: "R02-id-longer-number-matches",
+    layer: "anonymity",
+    file: STATUS,
+    find: "(?:nm|on)\\d{6}(?!\\d)/g;",
+    replace: "(?:nm|on)\\d{6}/g;",
+    note: "a longer number that begins with a deposit's id is taken for the deposit",
+    tests: [ANON_T],
+  },
+  {
+    id: "R03-id-inside-a-word-matches",
+    layer: "anonymity",
+    file: STATUS,
+    find: "/(?<![A-Za-z0-9])(?:nm|on)",
+    replace: "/(?:nm|on)",
+    note: "an id inside a longer word is taken for the deposit",
+    tests: [ANON_T],
+  },
+
+  // Review changes: the weekly findings.
+  {
+    id: "R04-weekly-ledger-not-read",
+    layer: "weekly",
+    file: WEEKLY_GATHER,
+    find: '      if (entry.label.state === "anonymity") datasets.add(entry.dataset_id);\n',
+    replace: "",
+    note: "the writer's standing finding is missing from the weekly count while status shows it",
+    tests: [WEEKLY_SWEEP],
+  },
+  {
+    id: "R05-weekly-counts-rows",
+    layer: "weekly",
+    file: WEEKLY_GATHER,
+    find: "const key = r.resource_id ?? `row-${i}`;",
+    replace: "const key = `row-${i}`;",
+    note: "a finding repeated on every daily run is counted once per run, not once",
+    tests: [WEEKLY_SWEEP],
+  },
+  {
+    id: "R06-weekly-findings-need-a-run",
+    layer: "weekly",
+    file: ATTENTION,
+    find: "  } else if (f.neurobagelFindings > 0) {",
+    replace: "  } else if (f.neurobagelFindings > 0 && n !== null) {",
+    note: "findings are ignored in a week the daily sweep wrote no row",
+    tests: [WEEKLY_PURE],
+  },
+  {
+    id: "R07-weekly-text-names-the-kind",
+    layer: "weekly",
+    file: WEEKLY_SVC,
+    find: "Findings that need a person, over the window",
+    replace: "Anonymity-class findings, over the window",
+    note: "the public report says what kind of finding a count is",
+    tests: [WEEKLY_PURE, SCAN],
+  },
+  {
+    id: "R08-node-reason-names-the-kind",
+    layer: "verify",
+    file: VERIFY,
+    find: "are for datasets that are not eligible; the node may",
+    replace: "are for datasets that are not eligible (some anonymity-class); the node may",
+    note: "a reason that reaches the weekly report says what kind of dataset a record belongs to",
+    tests: [VERIFY_T, SCAN],
+  },
+
+  // Review changes: what the week asks attention for.
+  {
+    id: "R09-missed-runs-ignored",
+    layer: "contract",
+    file: ATTENTION,
+    find: "    if (missed > NEUROBAGEL_MISSED_RUNS_TOLERATED) {",
+    replace: "    if (false) {",
+    note: "a cron that died on day two is not noticed",
+    tests: [WEEKLY_PURE, CLI_WEEKLY],
+  },
+  {
+    id: "R10-missed-runs-tolerance-two",
+    layer: "contract",
+    file: ATTENTION,
+    find: "export const NEUROBAGEL_MISSED_RUNS_TOLERATED = 1;",
+    replace: "export const NEUROBAGEL_MISSED_RUNS_TOLERATED = 2;",
+    note: "two missing daily runs are tolerated, not one",
+    tests: [WEEKLY_PURE],
+  },
+  {
+    id: "R11-unknown-days-ignored",
+    layer: "contract",
+    file: ATTENTION,
+    find: '    if (n.days.unknown > 0 && n.latest.overall !== "unknown") {',
+    replace: "    if (false) {",
+    note: "days on which the sweep could not determine anything are not noticed once the latest run is fine",
+    tests: [WEEKLY_PURE, CLI_WEEKLY],
+  },
+  {
+    id: "R12-failed-runs-ignored",
+    layer: "contract",
+    file: ATTENTION,
+    find: "    if (n.failedRuns > 0) {",
+    replace: "    if (false) {",
+    note: "a sweep that failed outright is not noticed",
+    tests: [WEEKLY_PURE, CLI_WEEKLY],
+  },
+  {
+    id: "R13-one-unchecked-day-not-said",
+    layer: "contract",
+    file: ATTENTION,
+    find: "WEEKLY_NEUROBAGEL_CHECKS.filter((c) => n.checkDays[c].unchecked > 0);",
+    replace: "WEEKLY_NEUROBAGEL_CHECKS.filter((c) => n.checkDays[c].unchecked > 1);",
+    note: "a single day on which a check did not run is covered by 'all look normal'",
+    tests: [WEEKLY_PURE],
+  },
+  {
+    id: "R14-headline-claims-all-ran",
+    layer: "weekly",
+    file: WEEKLY_SVC,
+    find: "    const neurobagel =\n      notChecked.length > 0\n",
+    replace: "    const neurobagel =\n      false\n",
+    note: "the headline says all four checks ran when some did not",
+    tests: [WEEKLY_PURE],
+  },
+  {
+    id: "R33-weekly-cli-restates-the-rule",
+    layer: "cli",
+    file: CLI,
+    find: "  return weeklyAttention(f).attention;",
+    replace: '  return f.coverageStatus === "alarm" || f.errors.length > 0;',
+    note: "the command's exit code stops following the report's own rule, as it once did",
+    tests: [CLI_WEEKLY],
+  },
+
+  // Review changes: the overall verdict, the unconfigured writer, and the memory.
+  {
+    id: "R15-drift-alone-makes-healthy",
+    layer: "verify",
+    file: VERIFY,
+    find: '  return lookedAtNemar ? "healthy" : "unchecked";',
+    replace: '  return "healthy";',
+    note: "a sweep that looked at nothing of NEMAR's reads as healthy",
+    tests: UNIT,
+  },
+  {
+    id: "R16-drift-counts-as-looking",
+    layer: "verify",
+    file: VERIFY,
+    find: '(["store", "node", "registration"] as const).some(',
+    replace: '(["store", "node", "registration", "drift"] as const).some(',
+    note: "upstream drift counts as a check of NEMAR's own",
+    tests: UNIT,
+  },
+  {
+    id: "R17-writer-on-no-bucket-is-quiet",
+    layer: "verify",
+    file: VERIFY,
+    find: '      result: verdict(\n        "alarm",\n        "The writer is switched on but no NEUROBAGEL bucket is bound',
+    replace:
+      '      result: verdict(\n        "unchecked",\n        "The writer is switched on but no NEUROBAGEL bucket is bound',
+    note: "a production misconfiguration reads as a normal week",
+    tests: UNIT,
+  },
+  {
+    id: "R18-residue-memory-reset-by-a-blip",
+    layer: "verify",
+    file: VERIFY,
+    find: "    residue: store.memory?.residue ?? before.residue,",
+    replace: "    residue: store.memory?.residue ?? [],",
+    note: "one failed read of the store forgets the residue it was following",
+    tests: [VERIFY_T],
+  },
+  {
+    id: "R19-origin-reset-by-a-blip",
+    layer: "verify",
+    file: VERIFY,
+    find: "    origin: store.memory ? store.memory.origin : before.origin,",
+    replace: "    origin: store.memory ? store.memory.origin : null,",
+    note: "one failed read of the store restarts the clock a never-run writer was aging on",
+    tests: [VERIFY_T],
+  },
+  {
+    id: "R20-node-behind-reset-by-a-blip",
+    layer: "verify",
+    file: VERIFY,
+    find: "  const nodeBehind = node.nodeBehind ?? before.nodeBehind;",
+    replace: "  const nodeBehind = node.nodeBehind;",
+    note: "a day on which the node could not be asked forgets that it was behind",
+    tests: [VERIFY_T],
+  },
+  {
+    id: "R21-unreadable-index-is-empty",
+    layer: "verify",
+    file: VERIFY,
+    find: "  if (index.etag !== null && index.document === null) {",
+    replace: "  if (false) {",
+    note: "an index that cannot be read is judged as an empty one",
+    tests: [VERIFY_T],
+  },
+  {
+    id: "R22-node-gap-alarms-at-once",
+    layer: "verify",
+    file: VERIFY,
+    find: "  if (behind === true && obs.previousBehind === true) {",
+    replace: "  if (behind === true) {",
+    note: "a node that has not reloaded yet is an alarm on the first sweep",
+    tests: UNIT,
+  },
+  {
+    id: "R23-node-gap-never-alarms",
+    layer: "verify",
+    file: VERIFY,
+    find: "  if (behind === true && obs.previousBehind === true) {",
+    replace: "  if (false) {",
+    note: "a stale or empty node is healthy for ever",
+    tests: UNIT,
+  },
+
+  // Review changes: requests.
+  {
+    id: "R24-node-redirect-followed",
+    layer: "verify",
+    file: VERIFY,
+    find: '        body: "{}",\n        redirect: "manual",',
+    replace: '        body: "{}",\n        redirect: "follow",',
+    note: "the node probe follows a redirect to an address nobody configured",
+    tests: [VERIFY_T, SCAN],
+  },
+  {
+    id: "R24b-federation-redirect-followed",
+    layer: "verify",
+    file: VERIFY,
+    find: '        headers: { "User-Agent": AGENT, Accept: "application/json" },\n        redirect: "manual",',
+    replace:
+      '        headers: { "User-Agent": AGENT, Accept: "application/json" },\n        redirect: "follow",',
+    note: "the federation reads follow a redirect to an address nobody configured",
+    tests: [VERIFY_T, SCAN],
+  },
+  {
+    id: "R25-drift-redirect-followed",
+    layer: "drift",
+    file: DRIFT,
+    find: '        redirect: "manual",',
+    replace: '        redirect: "follow",',
+    note: "the upstream reads follow a redirect",
+    tests: [VERIFY_T, SCAN],
+  },
+  {
+    id: "R26-redirect-not-named",
+    layer: "drift",
+    file: DRIFT,
+    find: '    if (res.status >= 300 && res.status < 400) return { ok: false, reason: "redirected" };\n',
+    replace: "",
+    note: "a redirect is reported as a plain HTTP failure, with no hint that the address has moved",
+    tests: [VERIFY_T],
+  },
+  {
+    id: "R27-answer-cap-doubled",
+    layer: "drift",
+    file: DRIFT,
+    find: "      if (total > maxBytes) {",
+    replace: "      if (total > maxBytes * 2) {",
+    note: "an answer twice its cap is still read whole",
+    tests: [VERIFY_T],
+  },
+  {
+    id: "R28-answer-cap-exclusive",
+    layer: "drift",
+    file: DRIFT,
+    find: "      if (total > maxBytes) {",
+    replace: "      if (total >= maxBytes) {",
+    note: "an answer of exactly its cap is refused",
+    tests: [VERIFY_T],
+  },
+
+  // Review changes: the status command's exit codes.
+  {
+    id: "R29-stale-edge-inclusive",
+    layer: "contract",
+    file: CONTRACT,
+    find: "age > NEUROBAGEL_VERIFICATION_STALE_MS",
+    replace: "age >= NEUROBAGEL_VERIFICATION_STALE_MS",
+    note: "a record exactly 36 hours old is already unknown",
+    tests: [CHECKS],
+  },
+  {
+    id: "R30-writer-off-none-recorded-is-unknown",
+    layer: "contract",
+    file: CONTRACT,
+    find: '    return writerMode === "enabled"',
+    replace: "    return true",
+    note: "a deployment that does not run the writer is told its verification is unknown",
+    tests: [CHECKS, CLI_NB],
+  },
+  {
+    id: "R31-unknown-exits-one",
+    layer: "contract",
+    file: CONTRACT,
+    find: '  return v === "alarm" ? 1 : v === "unknown" ? 2 : 0;',
+    replace: '  return v === "alarm" || v === "unknown" ? 1 : 0;',
+    note: "status and verify stop telling an alarm from an unknown",
+    tests: [CHECKS, CLI_NB],
+  },
+  {
+    id: "R32-status-ignores-the-verification",
+    layer: "cli",
+    file: CLI,
+    find: "    process.exitCode = alarming ? 1 : neurobagelVerdictExitCode(verification.verdict);",
+    replace: "    process.exitCode = alarming ? 1 : 0;",
+    note: "status exits 0 on no record, and on a stale healthy one",
+    tests: [CLI_NB],
   },
 ];
 
