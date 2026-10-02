@@ -69,6 +69,11 @@ jobs:
               - 'backend/**'
             tests:
               - 'test/**'
+              # The Neurobagel node deployment (epic #1586, ADR 0082). Its scripts and
+              # compose overlay are exercised by test/neurobagel-node-deploy.unit.test.ts,
+              # which unit-pure runs; without this line a change to deploy/neurobagel alone
+              # matched no category and that test would not run on exactly the change it guards.
+              - 'deploy/neurobagel/**'
             # shared/ is imported by BOTH src/ and backend/ but matched by
             # neither filter, so a PR touching only shared/** -- the wire
             # contract, the facet vocabulary, the two published Zarr JSON
