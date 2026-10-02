@@ -40,6 +40,7 @@ NEMAR mirrors about 580 OpenNeuro datasets (`on` ids) beside its own (`nm` ids),
    The graph holds the subjects that have data (ADR 0081), so a curated value is attached to those participants only.
    Coverage is checked over every row of the table, because the dictionary is also read by `bagel pheno` and by catalog-mode nodes, which refuse a table whose values the dictionary does not declare.
    A curated column replaces the mechanical rule for its variable: a curated sex or age column replaces the mechanical one, a curated column that is the group column replaces the group rule, and a participant's diagnoses are the distinct terms of all diagnosis columns.
+   A diagnosis column may map no value at all if it lists every value as missing, which is how a reviewer withdraws the mechanical healthy control mapping from a group column whose `Control` is an intervention arm, not a healthy participant (on004166, on006801); no other kind of column may map nothing.
    An assessment tool is on a participant when any item of it is recorded, with `bagel`'s meaning: a cell is recorded unless it is a declared missing value, so a blank that is not declared missing is rejected rather than read as an assessment nobody took.
 7. **Every entry says who looked at it.**
    `evidence` carries a source, a reviewer, a date and a `review` of `author` (not a domain expert), `domain_expert`, or `upstream_community` (copied from Neurobagel's published annotations, reviewed by their community and not by NEMAR beyond the loader).
@@ -90,5 +91,5 @@ The licence asks that its notice travel with copies, so `shared/neurobagel/NOTIC
 - Epic #1586 and phase issue #1591; design in `.context/epic_neurobagel_federation.md`.
 - ADR 0081 (the transform and its rules), ADR 0034 (no new `datasets` column), ADR 0065 (the blind), ADR 0066 (the entity tag of a git-tracked file is its blob SHA), ADR 0068 (the reserved fixture band), ADR 0073 (a reviewed declaration the code does not guess).
 - `uv run scripts/neurobagel/oracle.py` runs the real pinned `bagel pheno` over every curated golden, including Collection columns, and its recordings are in `test/neurobagel/oracle/`.
-- `bun run scripts/neurobagel/mutation-battery.ts` runs 47 hand-written mutants over the loader, the binder, the transform's use of an entry, the output validators and the upstream converter.
+- `bun run scripts/neurobagel/mutation-battery.ts` runs 48 hand-written mutants over the loader, the binder, the transform's use of an entry, the output validators and the upstream converter.
 - Upstream: `neurobagel/openneuro-annotations` at commit `116676db7114b68338c48df2d6bb804c99e8c354`, MIT licence, kept under `test/neurobagel/upstream/` with its licence and provenance.

@@ -277,8 +277,14 @@ export function curatedColumnFrom(
     case "Categorical": {
       const levels = new Map<string, VocabTerm>();
       const entries = Object.entries(annotation.Levels).sort(([a], [b]) => byCodeUnit(a, b));
-      if (entries.length === 0) {
-        problems.push(`${where}: Levels is empty, so the column maps no value to a term`);
+      // A diagnosis column may map no value at all, if it says what its values are instead
+      // (they are all missing): that is how a reviewer withdraws the mechanical healthy control
+      // mapping from a group column that is an intervention arm. Nothing else may be empty.
+      const mapsNothing = entries.length === 0;
+      if (mapsNothing && !(about.kind === "diagnosis" && annotation.MissingValues.length > 0)) {
+        problems.push(
+          `${where}: Levels is empty, so the column maps no value to a term (only a diagnosis column that lists its values as MissingValues may)`,
+        );
       }
       for (const [raw, given] of entries) {
         const levelWhere = `${where} Levels[${quote(raw)}]`;

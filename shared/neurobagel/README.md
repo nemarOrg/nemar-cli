@@ -109,6 +109,7 @@ They live in one reviewed file, `curation.json`, keyed by dataset id, and an ent
 Each column maps to the `Annotations` block the Neurobagel annotation tool exports, pasted as exported.
 Four kinds are curatable: age (`nb:Age`, a `Continuous` block with a `Format`), sex and diagnosis (`Categorical` with `Levels`), and an item of an assessment tool (`Collection` with `IsPartOf`).
 Terms must be in the pinned vocabulary with the pinned label, a column named `age`, `sex` or `group` must be about the same thing, and a dataset has at most one sex and one age column.
+A curated column replaces the mechanical rule for its variable, so a diagnosis column with empty `Levels` and every value listed in `MissingValues` withdraws the healthy control the mechanical rule would read from a `Control` that is an intervention arm (`on004166`, `on006801`); no other kind of column may map nothing.
 
 | Step | Module | Decides |
 | --- | --- | --- |

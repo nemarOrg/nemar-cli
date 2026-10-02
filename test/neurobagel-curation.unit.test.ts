@@ -341,6 +341,27 @@ describe("the loader rejects, and says why", () => {
     expect(problemsOf(repeated).join()).toContain('MissingValues repeats "n/a"');
   });
 
+  test("a diagnosis column may map nothing if it lists its values as missing; no other column may", () => {
+    const nothing = (change: Json): string =>
+      mutated((f) => {
+        Object.assign(inCopy(f, "nm000149", "group"), { Levels: {}, ...change });
+      });
+    expect(problemsOf(nothing({ MissingValues: ["spinal cord injury"] }))).toEqual([]);
+    expect(problemsOf(nothing({ MissingValues: [] })).join()).toContain("Levels is empty");
+    // A sex column that maps nothing would only withdraw what the mechanical rule can read.
+    const sex = mutated((f) => {
+      Object.assign(inCopy(f, "nm000154", "gender"), { Levels: {}, MissingValues: ["F", "M"] });
+    });
+    expect(problemsOf(sex).join()).toContain("Levels is empty");
+    const parsed = parseCuration(nothing({ MissingValues: ["spinal cord injury"] }));
+    const column = parsed.entries.get("nm000149")?.columns[0] as Extract<
+      CuratedColumn,
+      { kind: "diagnosis" }
+    >;
+    expect(column.levels.size).toBe(0);
+    expect(column.missingValues).toEqual(["spinal cord injury"]);
+  });
+
   test("a malformed pin: too short, upper case, not hex, missing, or null where a table is required", () => {
     const wrong: [string, unknown][] = [
       ["participants_tsv", "abc123"],

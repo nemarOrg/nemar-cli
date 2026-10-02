@@ -197,6 +197,9 @@ function blockFrom(
   }
   const levels = annotations.Levels;
   if (!isRecord(levels)) return { drop: "annotation_malformed" };
+  // Upstream's empty level map says nothing was mapped; carrying it would only withdraw what the
+  // mechanical rules can read (a curated sex column replaces the mechanical one).
+  if (Object.keys(levels).length === 0) return { drop: "levels_empty" };
   const rewritten: Record<string, unknown> = {};
   for (const [raw, term] of Object.entries(levels)) {
     const t = pinnedLabelled(
