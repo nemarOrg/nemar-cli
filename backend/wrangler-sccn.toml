@@ -2,7 +2,9 @@
 # Multi-account deploys use cfman; see AGENTS.md (CLAUDE.md imports it).
 
 name = "nemar-api"
-main = "src/index.ts"
+# src/worker.ts re-exports index.ts's default handler and adds the NemarApiRpc
+# service-binding entrypoint (ADR 0078). Inherited by [env.dev].
+main = "src/worker.ts"
 compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
 

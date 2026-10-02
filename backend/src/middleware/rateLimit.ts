@@ -288,6 +288,13 @@ const AUTH_PATHS = [
   "/auth/docs/grant",
   "/auth/docs/exchange",
   "/auth/docs/cli-session",
+  // `/auth/private/grant` (ADR 0079) is DELIBERATELY ABSENT. Every sign-in to
+  // the private site reaches it through the website's server-side render, so
+  // every caller arrives from a few Cloudflare egress addresses (issue #1354),
+  // and this bucket's ten a minute would be shared by everyone signing in at
+  // once. It is limited per ACCOUNT instead (`checkPrivateGrantBudget` below,
+  // called by the route once the session names the account), and rides the
+  // generic `ip` bucket here.
   // NOT an /auth path, and deliberately in this list anyway (ADR 0042, #1253):
   // POST /users/me/upload-access/request spends a live GitHub API call on the
   // shared installation token for every attempt, and a refused one writes
@@ -785,9 +792,10 @@ export type DataMissBudgetOutcome =
  * listing, or the "not in the manifest at all" 404 (none of those go through
  * this path either).
  *
- * Mirrors `rateLimiter`'s own mechanics exactly: the same Cache API counter
- * shape (`{count, warned}` under `max-age=<WINDOW_SIZE>`), the same
- * dev-environment and `X-Test-Bypass` exemptions, and the same
+ * Mirrors `rateLimiter`'s own mechanics: a Cache API counter (`{count}`
+ * under `max-age=<WINDOW_SIZE>`; it needs no `warned` flag, having no
+ * observe-only mode), the same dev-environment and `X-Test-Bypass`
+ * exemptions, and the same
  * `waitUntil`-deferred write with the bounded no-context fallback (so a
  * route-suite call with no execution context cannot hang on a stalled test
  * cache). Kept as a standalone function rather than folded into the
@@ -800,6 +808,69 @@ export async function checkDataMissBudget(
   request: Request,
   waitUntil: ((work: Promise<unknown>) => void) | undefined,
 ): Promise<DataMissBudgetOutcome> {
+  const ip =
+    request.headers.get("CF-Connecting-IP") ||
+    request.headers.get("X-Forwarded-For") ||
+    crypto.randomUUID();
+  return consumeKeyedBudget(
+    env,
+    request,
+    { kind: DATA_MISS_BUCKET_KIND, key: ip, maxRequests: DATA_MISS_MAX_REQUESTS },
+    waitUntil,
+  );
+}
+
+/**
+ * Ten private-site grants a minute per ACCOUNT (ADR 0079). A person signs in
+ * to the private site once per eight-hour session; ten a minute is far above
+ * that and far below what a script replaying a stolen app session could want.
+ */
+const PRIVATE_GRANT_MAX_REQUESTS = 10;
+const PRIVATE_GRANT_BUCKET_KIND = "private-grant-account";
+
+/**
+ * Count one `POST /auth/private/grant` against its account's budget, and
+ * refuse it once the budget is spent. Keyed by the user id the authenticated
+ * app session names, never by address: the route is called server-side by
+ * the website, so every sign-in arrives from a few Cloudflare egress
+ * addresses (issue #1354), and a per-IP bucket would make strangers share one
+ * limit. The route calls this after authentication, because the account is
+ * only known then; that is why it is not a path rule in `__selectBucket`.
+ */
+export async function checkPrivateGrantBudget(
+  env: Pick<Bindings, "ENVIRONMENT" | "TEST_BYPASS_TOKEN">,
+  request: Request,
+  userId: number,
+  waitUntil: ((work: Promise<unknown>) => void) | undefined,
+): Promise<DataMissBudgetOutcome> {
+  return consumeKeyedBudget(
+    env,
+    request,
+    {
+      kind: PRIVATE_GRANT_BUCKET_KIND,
+      key: `user-${userId}`,
+      maxRequests: PRIVATE_GRANT_MAX_REQUESTS,
+    },
+    waitUntil,
+  );
+}
+
+/**
+ * The shared core of the keyed budgets a route checks itself, because the
+ * key is something only the route knows (whether a request missed the cache,
+ * which account a session names). Mirrors `rateLimiter`'s own mechanics: a
+ * Cache API counter (`{count}` under `max-age=<WINDOW_SIZE>`, with no
+ * `warned` flag because there is no observe-only mode), the same
+ * dev-environment and `X-Test-Bypass`
+ * exemptions, the same fail-open on a cache outage, and the same
+ * `waitUntil`-deferred write with the bounded no-context fallback.
+ */
+async function consumeKeyedBudget(
+  env: Pick<Bindings, "ENVIRONMENT" | "TEST_BYPASS_TOKEN">,
+  request: Request,
+  bucket: { kind: string; key: string; maxRequests: number },
+  waitUntil: ((work: Promise<unknown>) => void) | undefined,
+): Promise<DataMissBudgetOutcome> {
   // Same narrower check as `rateLimiter`'s dev bypass, deliberately: staging
   // runs as "development" and must be exempt, but "test" must NOT be, or
   // every test that sets ENVIRONMENT="test" stops exercising this budget.
@@ -810,18 +881,14 @@ export async function checkDataMissBudget(
     return { allowed: true };
   }
 
-  const ip =
-    request.headers.get("CF-Connecting-IP") ||
-    request.headers.get("X-Forwarded-For") ||
-    crypto.randomUUID();
-  const cacheKey = new Request(`https://rate-limit.internal/rl:${DATA_MISS_BUCKET_KIND}:${ip}`);
+  const cacheKey = new Request(`https://rate-limit.internal/rl:${bucket.kind}:${bucket.key}`);
 
   try {
     const cache = caches.default;
     const cached = await cache.match(cacheKey);
     const count = cached ? ((await cached.json()) as { count: number }).count : 0;
 
-    if (count >= DATA_MISS_MAX_REQUESTS) {
+    if (count >= bucket.maxRequests) {
       const retryAfter = WINDOW_SIZE;
       return {
         allowed: false,
@@ -836,10 +903,10 @@ export async function checkDataMissBudget(
             headers: {
               "Content-Type": "application/json",
               "Retry-After": retryAfter.toString(),
-              "X-RateLimit-Limit": DATA_MISS_MAX_REQUESTS.toString(),
+              "X-RateLimit-Limit": bucket.maxRequests.toString(),
               "X-RateLimit-Remaining": "0",
               "X-RateLimit-Reset": (Math.floor(Date.now() / 1000) + retryAfter).toString(),
-              "X-RateLimit-Bucket": DATA_MISS_BUCKET_KIND,
+              "X-RateLimit-Bucket": bucket.kind,
             },
           },
         ),
@@ -859,7 +926,7 @@ export async function checkDataMissBudget(
       )
       .catch((err: unknown) => {
         console.error("[rate-limit] cache failure", {
-          keyKind: DATA_MISS_BUCKET_KIND,
+          keyKind: bucket.kind,
           error: err instanceof Error ? err.message : String(err),
         });
       });
@@ -874,11 +941,11 @@ export async function checkDataMissBudget(
     return { allowed: true };
   } catch (error) {
     // Fail open, the same policy `rateLimiter` itself follows on a cache
-    // outage: a broken Cache API must not block data-plane traffic. Deduped
-    // the same way, and against the SAME timestamp: one outage should log
-    // once total, not once per bucket kind.
+    // outage: a broken Cache API must not block traffic. Deduped the same
+    // way, and against the SAME timestamp: one outage should log once total,
+    // not once per bucket kind.
     logCacheFaultOnce({
-      keyKind: DATA_MISS_BUCKET_KIND,
+      keyKind: bucket.kind,
       error: error instanceof Error ? error.message : String(error),
     });
     return { allowed: true };
@@ -894,5 +961,6 @@ export const __limits = {
   MAX_REQUESTS,
   DATA_MAX_REQUESTS,
   DATA_MISS_MAX_REQUESTS,
+  PRIVATE_GRANT_MAX_REQUESTS,
   WINDOW_SIZE,
 };

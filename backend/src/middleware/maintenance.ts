@@ -54,6 +54,19 @@ function respond503(c: MaintenanceContext, mode: ActiveMaintenanceMode) {
   );
 }
 
+/**
+ * The same rule for a caller this middleware never sees: the `NemarApiRpc`
+ * service-binding entrypoint (ADR 0078), which bypasses the HTTP stack. It
+ * has no paths to allowlist, so what remains of the rule is the rule itself:
+ * `full` refuses everything, `read-only` refuses writes, `off` (or an
+ * unrecognised value, parsed exactly as above) refuses nothing.
+ */
+export function maintenanceRefuses(raw: string | undefined, access: "read" | "write"): boolean {
+  const mode = parseMode(raw);
+  if (mode === "off") return false;
+  return mode === "full" || access === "write";
+}
+
 export async function maintenanceMode(c: MaintenanceContext, next: Next) {
   const mode = parseMode(c.env.MAINTENANCE_MODE);
 

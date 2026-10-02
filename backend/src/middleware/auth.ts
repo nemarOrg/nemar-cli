@@ -12,8 +12,9 @@
  */
 
 import type { Context, Next } from "hono";
+import type { AccountKind } from "../../../shared/contract/user.js";
 import {
-  ACTIVE_ACCOUNT_STATUS_SQL_LIST,
+  type ActiveAccountStatus,
   inactiveAccountBody,
   isActiveAccountStatus,
 } from "../services/account-tier";
@@ -153,40 +154,100 @@ export type BearerAuthResult =
   | { kind: "user"; user: AuthUser };
 
 /**
- * Resolve `Authorization: Bearer <api_key>` to a full AuthUser.
+ * What an API key resolved to, before any HTTP response is built around it.
  *
- * Extracted from `authMiddleware` for #1266 so the CLI-facing self-service
- * routes in auth-web.ts / auth-orcid.ts accept a token through the SAME
- * lookup the rest of the API uses — same key hashing, same revoked/expired
- * filter, same active-account rule, same `last_used_at` touch. A second copy
- * of this SELECT is how a route ends up honouring a token the middleware
- * would have refused.
+ * `malformed` is a value too short to be a key, `unknown` is no live token
+ * (never issued, revoked, expired, or its account deleted), `inactive` is a
+ * live token whose account may not authenticate, and `misconfigured` is an
+ * account whose `role` column holds a value `parseRole` rejects. `profile` is
+ * present only when the caller asked for it.
  */
-export async function resolveBearerUser(c: AuthContext): Promise<BearerAuthResult> {
-  const authHeader = c.req.header("Authorization");
-  if (!authHeader) return { kind: "absent" };
+export type ApiKeyResolution<Profile = undefined> =
+  | { kind: "malformed" }
+  | { kind: "unknown" }
+  | { kind: "inactive"; status: string }
+  | { kind: "misconfigured" }
+  | { kind: "user"; user: AuthUser; profile: Profile };
 
-  if (!authHeader.startsWith("Bearer ")) {
-    return {
-      kind: "refused",
-      response: c.json(
-        { error: "Invalid Authorization header format. Use: Bearer <api_key>" },
-        401,
-      ),
-    };
-  }
+/**
+ * The account fields the service-binding entrypoint's `Principal` needs
+ * beyond `AuthUser` (ADR 0078). Read in the SAME SELECT as the rest when asked
+ * for, so the two can never describe different moments.
+ */
+export interface ApiKeyProfile {
+  /** Only ever an active status: an inactive account never reaches `user`. */
+  status: ActiveAccountStatus;
+  /** Honest about NULL, unlike `AuthUser.username`, which keeps the typing
+   *  every route has always relied on. */
+  username: string | null;
+  orcid: string | null;
+  given_name: string | null;
+  family_name: string | null;
+  orcid_verified: boolean;
+  email_verified: boolean;
+  account_kind: AccountKind;
+}
 
-  const apiKey = authHeader.substring(7);
+/**
+ * The profile columns, appended to the lookup only when a caller asks.
+ *
+ * Opt-in rather than always selected so the HTTP path's SELECT stays exactly
+ * what it was: several route tests build their schema from a prefix of the
+ * migrations, before some of these columns existed, and a lookup that named
+ * them would fail every bearer request those tests make.
+ */
+const API_KEY_PROFILE_COLUMNS = `,
+        u.given_name,
+        u.family_name,
+        u.orcid_verified,
+        u.email_verified,
+        u.account_kind`;
 
-  if (!apiKey || apiKey.length < 32) {
-    return { kind: "refused", response: c.json({ error: "Invalid API key format" }, 401) };
-  }
+/**
+ * `touch: false` skips the `last_used_at` write, for a caller that must stay a
+ * pure read (`optionalAuthMiddleware`). Every other caller keeps the awaited
+ * touch.
+ */
+export interface ApiKeyLookupOptions {
+  touch?: boolean;
+}
+
+/**
+ * Resolve a raw API key to its account: the ONE API-key lookup.
+ *
+ * Extracted from `resolveBearerUser` so a caller that is not an HTTP route
+ * gets exactly the rule the API applies -- same length floor, same hashing,
+ * same revoked / `expires_at` / `deleted_at` filter, same active-account
+ * rule, same awaited `last_used_at` touch -- without an `Authorization`
+ * header or a Hono context. `resolveBearerUser` maps each outcome onto the
+ * response it has always sent.
+ *
+ * `optionalAuthMiddleware` reads keys through it too, so there is no second
+ * copy of this SELECT left to drift; it passes `touch: false`, because a
+ * public read must not write (see there).
+ */
+export async function resolveApiKeyUser(
+  env: Bindings,
+  apiKey: string,
+  opts?: ApiKeyLookupOptions,
+): Promise<ApiKeyResolution>;
+export async function resolveApiKeyUser(
+  env: Bindings,
+  apiKey: string,
+  opts: ApiKeyLookupOptions & { withProfile: true },
+): Promise<ApiKeyResolution<ApiKeyProfile>>;
+export async function resolveApiKeyUser(
+  env: Bindings,
+  apiKey: string,
+  opts?: ApiKeyLookupOptions & { withProfile?: true },
+): Promise<ApiKeyResolution<ApiKeyProfile | undefined>> {
+  if (!apiKey || apiKey.length < 32) return { kind: "malformed" };
 
   // Hash the key for lookup
   const hashedKey = await hashApiKey(apiKey);
 
   // Find token and associated user
-  const result = await c.env.DB.prepare(
+  const result = await env.DB.prepare(
     `
       SELECT
         u.id,
@@ -195,7 +256,7 @@ export async function resolveBearerUser(c: AuthContext): Promise<BearerAuthResul
         u.github_username,
         u.role,
         u.orcid,
-        u.status,
+        u.status${opts?.withProfile ? API_KEY_PROFILE_COLUMNS : ""},
         t.id as token_id
       FROM tokens t
       JOIN users u ON t.user_id = u.id
@@ -215,32 +276,33 @@ export async function resolveBearerUser(c: AuthContext): Promise<BearerAuthResul
       orcid: string | null;
       status: string;
       token_id: number;
+      // Present only with `withProfile`.
+      given_name?: string | null;
+      family_name?: string | null;
+      // NOT NULL DEFAULT 0 in D1 (0050 and 0001), so plain numbers.
+      orcid_verified?: number;
+      email_verified?: number;
+      // Closed by migration 0082's CHECK constraint (ADR 0048).
+      account_kind?: AccountKind;
     }>();
 
-  if (!result) {
-    return { kind: "refused", response: c.json({ error: "Invalid or expired API key" }, 401) };
-  }
+  if (!result) return { kind: "unknown" };
 
   // ADR 0040 phase 2: `verified` is the base tier and holds a usable API
   // key, so the token is accepted here and the upload gate — not this
   // middleware — is what a base-tier account runs into.
-  if (!isActiveAccountStatus(result.status)) {
-    return { kind: "refused", response: c.json(inactiveAccountBody(result.status), 403) };
-  }
+  if (!isActiveAccountStatus(result.status)) return { kind: "inactive", status: result.status };
 
   // Validate role from DB
   const role = parseRole(result.role, result.username);
-  if (role === null) {
-    return {
-      kind: "refused",
-      response: c.json({ error: "Account configuration error. Contact an administrator." }, 500),
-    };
-  }
+  if (role === null) return { kind: "misconfigured" };
 
-  // Update last_used_at for the token
-  await c.env.DB.prepare("UPDATE tokens SET last_used_at = datetime('now') WHERE id = ?")
-    .bind(result.token_id)
-    .run();
+  // Update last_used_at for the token, unless the caller must not write.
+  if (opts?.touch !== false) {
+    await env.DB.prepare("UPDATE tokens SET last_used_at = datetime('now') WHERE id = ?")
+      .bind(result.token_id)
+      .run();
+  }
 
   return {
     kind: "user",
@@ -252,7 +314,62 @@ export async function resolveBearerUser(c: AuthContext): Promise<BearerAuthResul
       role,
       orcid: result.orcid || undefined,
     },
+    profile: opts?.withProfile
+      ? {
+          // Narrowed by the `isActiveAccountStatus` check above.
+          status: result.status,
+          username: result.username ?? null,
+          orcid: result.orcid,
+          given_name: result.given_name ?? null,
+          family_name: result.family_name ?? null,
+          orcid_verified: result.orcid_verified === 1,
+          email_verified: result.email_verified === 1,
+          account_kind: result.account_kind as AccountKind,
+        }
+      : undefined,
   };
+}
+
+/**
+ * Resolve `Authorization: Bearer <api_key>` to a full AuthUser.
+ *
+ * Extracted from `authMiddleware` for #1266 so the CLI-facing self-service
+ * routes in auth-web.ts / auth-orcid.ts accept a token through the SAME
+ * lookup the rest of the API uses. That lookup is {@link resolveApiKeyUser};
+ * this function owns only the header parsing and the HTTP shape of each
+ * refusal. A second copy of the SELECT is how a route ends up honouring a
+ * token the middleware would have refused.
+ */
+export async function resolveBearerUser(c: AuthContext): Promise<BearerAuthResult> {
+  const authHeader = c.req.header("Authorization");
+  if (!authHeader) return { kind: "absent" };
+
+  if (!authHeader.startsWith("Bearer ")) {
+    return {
+      kind: "refused",
+      response: c.json(
+        { error: "Invalid Authorization header format. Use: Bearer <api_key>" },
+        401,
+      ),
+    };
+  }
+
+  const resolved = await resolveApiKeyUser(c.env, authHeader.substring(7));
+  switch (resolved.kind) {
+    case "malformed":
+      return { kind: "refused", response: c.json({ error: "Invalid API key format" }, 401) };
+    case "unknown":
+      return { kind: "refused", response: c.json({ error: "Invalid or expired API key" }, 401) };
+    case "inactive":
+      return { kind: "refused", response: c.json(inactiveAccountBody(resolved.status), 403) };
+    case "misconfigured":
+      return {
+        kind: "refused",
+        response: c.json({ error: "Account configuration error. Contact an administrator." }, 500),
+      };
+    case "user":
+      return { kind: "user", user: resolved.user };
+  }
 }
 
 /**
@@ -463,59 +580,25 @@ export async function optionalAuthMiddleware(c: AuthContext, next: Next) {
     return;
   }
 
-  const apiKey = authHeader.substring(7);
-  if (!apiKey || apiKey.length < 32) {
-    // Malformed token — caller clearly intended to authenticate.
-    c.set("authAttempted", true);
-    await next();
-    return;
-  }
-
+  // The caller clearly intended to authenticate, whatever the key turns out
+  // to be, so a route can answer "your key is invalid or expired" rather
+  // than the anonymous branch's "sign in".
   c.set("authAttempted", true);
 
-  const hashedKey = await hashApiKey(apiKey);
-
-  const result = await c.env.DB.prepare(
-    `
-    SELECT
-      u.id,
-      u.username,
-      u.email,
-      u.github_username,
-      u.role,
-      u.orcid,
-      u.status
-    FROM tokens t
-    JOIN users u ON t.user_id = u.id
-    WHERE t.api_key_hash = ?
-      AND t.revoked_at IS NULL
-      AND u.status IN ${ACTIVE_ACCOUNT_STATUS_SQL_LIST}
-      AND u.deleted_at IS NULL
-  `,
-  )
-    .bind(hashedKey)
-    .first<{
-      id: number;
-      username: string;
-      email: string;
-      github_username: string;
-      role: string | null;
-      orcid: string | null;
-      status: string;
-    }>();
-
-  if (result) {
-    const role = parseRole(result.role, result.username);
-    if (role !== null) {
-      c.set("user", {
-        id: result.id,
-        username: result.username,
-        email: result.email,
-        github_username: result.github_username,
-        role,
-        orcid: result.orcid || undefined,
-      });
-    }
+  // The ONE API-key lookup, the same `resolveBearerUser` uses, so a key the
+  // API refuses (revoked, EXPIRED, on an inactive or deleted account, or with
+  // an unrecognised role) is no identity here either. This middleware used to
+  // carry its own copy of that SELECT, and the copy had no `expires_at`
+  // predicate, so an expired key still identified its account on every route
+  // behind it. It never refuses: anything but a user is the anonymous branch.
+  //
+  // `touch: false`, as the old copy never wrote either. These are public
+  // reads: an awaited write would turn a failed UPDATE into a 500 on a route
+  // that has an anonymous answer, and `/notices` is served even in `full`
+  // maintenance mode, when nothing should write.
+  const resolved = await resolveApiKeyUser(c.env, authHeader.substring(7), { touch: false });
+  if (resolved.kind === "user") {
+    c.set("user", resolved.user);
   }
 
   await next();

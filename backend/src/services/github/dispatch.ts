@@ -421,3 +421,119 @@ export async function triggerPrescreenRun(
     throw new Error(`Failed to trigger prescreen run: HTTP ${response.status} - ${error}`);
   }
 }
+
+/**
+ * Which backend the approval workflow should talk to. The central repo is
+ * shared by every environment, so the dispatch has to say; and it says it as a
+ * NAME, never a URL or a credential, so the workflow maps the name to an API
+ * origin and a secret from a fixed table of its own and an admin key can never
+ * be steered to a host the payload chose.
+ */
+export type ApprovalDispatchEnvironment = "production" | "dev";
+
+/**
+ * `production` only for the production Worker, exactly. Every other value,
+ * including an unset or misspelled ENVIRONMENT, answers `dev`: the failure
+ * direction that matters here is a non-production Worker driving a PRODUCTION
+ * approval, which would run with the production admin key, so the fallback has
+ * to be the harmless side (a dev key against a dev API simply finds no such
+ * request). That is the opposite of `isNonProductionEnv`'s fail-closed answer,
+ * which protects disclosure and is right for that purpose.
+ */
+export function approvalDispatchEnvironment(env: {
+  ENVIRONMENT?: string;
+}): ApprovalDispatchEnvironment {
+  return env.ENVIRONMENT === "production" ? "production" : "dev";
+}
+
+/**
+ * How long the approve dispatch waits for GitHub before giving up. Under the
+ * website's 15 second deadline on this call, so the Worker answers the page
+ * itself ("unconfirmed") rather than the page timing out first and showing a
+ * bare network error for a request that may have been accepted.
+ */
+export const APPROVE_DISPATCH_TIMEOUT_MS = 10_000;
+
+/**
+ * GitHub ANSWERED the dispatch with a non-2xx. Whether the event was created
+ * depends on the status, and callers branch on {@link definitelyNotSent} to
+ * decide whether it is safe to release the claim they made before dispatching.
+ * A thrown fetch or a timeout is a third case, and not an instance of this
+ * class: GitHub may have accepted the request and lost only the answer.
+ */
+export class DispatchRejectedError extends Error {
+  constructor(
+    readonly httpStatus: number,
+    detail: string,
+  ) {
+    super(`Failed to trigger approve-publication: HTTP ${httpStatus} - ${detail}`);
+    this.name = "DispatchRejectedError";
+  }
+
+  /**
+   * True only for a 4xx: GitHub refused the request itself (a bad token, a
+   * missing repository, a malformed payload), which it does before it creates
+   * an event. A 5xx is NOT "not sent". A 502, 503 or 504 comes from GitHub's
+   * edge and can be returned after the event was already queued, the same
+   * lost-answer case as a dropped connection, and releasing the claim then
+   * would let the next click start a second run beside the first.
+   */
+  get definitelyNotSent(): boolean {
+    return this.httpStatus < 500;
+  }
+}
+
+/**
+ * Hand a publication approval to the central workflow via
+ * `repository_dispatch[approve-publication]` (ADR 0080).
+ *
+ * The workflow runs `nemar admin publish approve <dataset_id>` on a runner and
+ * drives the same caller-side loop (S3 Object Lock batches, retries,
+ * `--resume`) a terminal does, which is why the approval does not run inside
+ * the Worker: that loop is long and its cost belongs on the runner. The payload
+ * names the dataset, the request it was claimed for, whether to resume, and the
+ * environment. It carries no credential and no URL.
+ *
+ * Failure has two meanings, and the difference matters to the caller:
+ *   - {@link DispatchRejectedError} with `definitelyNotSent` (a 4xx): GitHub
+ *     refused the request. Nothing was sent.
+ *   - anything else a rejected promise carries (a dropped connection, a
+ *     `TimeoutError` after `timeoutMs`, or a {@link DispatchRejectedError} for a
+ *     5xx): UNKNOWN. GitHub may have accepted the dispatch and lost only the
+ *     reply, so a caller must not assume nothing started.
+ * The error text names GitHub's status and body, never the token. `pat` must
+ * carry write access on the central repo's dispatch endpoint -- use
+ * `getDatasetsToken()`.
+ */
+export async function triggerApprovePublication(
+  datasetId: string,
+  requestId: number,
+  resume: boolean,
+  environment: ApprovalDispatchEnvironment,
+  pat: string,
+  timeoutMs: number = APPROVE_DISPATCH_TIMEOUT_MS,
+): Promise<void> {
+  const response = await fetch(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      event_type: "approve-publication",
+      client_payload: {
+        dataset_id: datasetId,
+        request_id: requestId,
+        resume,
+        environment,
+      },
+    }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+
+  if (!response.ok) {
+    throw new DispatchRejectedError(response.status, await response.text());
+  }
+}

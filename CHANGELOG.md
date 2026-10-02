@@ -13,6 +13,199 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## 0.10.12 - 2026-10-02
+
+### Added
+
+- **A session scope and a service-binding entrypoint for the private site (#1577, ADR 0078,
+  ADR 0079).** The private site (`private.nemar.org`, which hosts access-controlled
+  features) reaches the API through a service binding to a new `NemarApiRpc` entrypoint,
+  not over HTTP. It has three methods: `resolvePrincipal` (a private-site session or an
+  API key in, the account behind it out, with its live role and status),
+  `exchangePrivateGrant` and `revokePrivateSession`. The public API gains exactly one
+  route, `POST /auth/private/grant`, called server-side by the website's authorize page
+  behind the app session and the NEMAR Origin allow-list. It answers 200 with
+  `{ code, expires_in }`, 403 `Origin not allowed` for a missing or foreign Origin
+  (checked first), 401 `unauthenticated` without a session, 429 past the per-account
+  limit, 403 with the usual inactive-account body for an account that is not active, and
+  400 `invalid_request` without a valid `state` (32 to 256 base64url characters). Every
+  answer is `no-store`. A third `web_sessions` scope, `private`, is minted by the
+  same one-time-grant handoff the docs host uses (a 60-second code, traded once) for any
+  active account, not only admins, and lasts 8 hours with no remember-me. Unlike the docs
+  handoff it binds the browser that starts a sign-in to the one that finishes it: the
+  private site keeps a random `state` in a host-only cookie, the grant stores only its
+  hash, and the exchange mints only when the same value comes back. The private site is a
+  write surface, so without that an attacker could finish their own sign-in in a victim's
+  browser and receive the victim's uploads. Grants are limited to ten a minute per
+  account rather than by address, because every sign-in arrives from the website's few
+  Cloudflare egress addresses (#1354). Maintenance mode applies to the entrypoint by the
+  middleware's own rule: writes are refused in `read-only` and `full`, reads in `full`.
+  The entrypoint has no CORS and no rate limit of its own, and any Worker deployed in the
+  Cloudflare account can bind it, so the account's deploy permissions are part of this
+  API's security and no method takes a bare user id as authority (ADR 0078).
+  A method for dataset facts was drafted and left out on purpose, until a caller settles
+  how anonymous deposits and archived rows are disclosed.
+  `shared/contract/private-site.ts` is the contract the other repositories transcribe.
+- **`POST /admin/publish/:id/approve-dispatch` hands a web approval to a workflow (#1578,
+  ADR 0080).** Approval is sixteen steps, and S3 Object Lock (step 14, after the
+  irreversible DOI publish) works in batches of 100 objects that the caller must keep
+  requesting. The CLI loops; the website sent one `{}` and reloaded, so a dataset over
+  100 files would stop at `approving` with its DOI public and nothing locked. The route
+  (admin only, no body) claims the newest active request with one conditional update,
+  records the clicking admin, clears `last_error`, and dispatches
+  `repository_dispatch[approve-publication]` to `nemarDatasets/.github`, which runs
+  `nemar admin publish approve` on a runner. It writes an `approval_dispatched` audit
+  row and answers 202 `dispatched` with `dataset_id`, `request_id` and `resume` (true
+  when the request was already `approving`), or 403 `origin_not_allowed` (a cookie
+  request needs a NEMAR `Origin`; a bearer key does not), 404 `not_found`, 409
+  `not_dispatchable` or `already_in_flight`, or 502 `dispatch_failed`,
+  `dispatch_unconfigured` or `dispatch_unconfirmed`. The payload names an environment
+  (`production` only for the production Worker, `dev` for anything else including an
+  unset value) and never a URL or a credential. A dispatch whose answer is lost (a
+  dropped connection, a timeout, or a 5xx from GitHub, which can follow an event it had
+  already queued) keeps the lease and writes an `approval_dispatch_unconfirmed` audit
+  row, so a retry answers 409 until the lease lapses (up to 15 minutes). Only a definite
+  not-sent failure (a 4xx from GitHub, a token that cannot be minted, no credential)
+  releases the claim, and it puts the cleared `last_error` back unless a run has begun
+  since. The lease gates only this route: a terminal approval is never refused by it.
+- **`GET /admin/publish/requests` reports `approval_requested_by`,
+  `approval_dispatched_at` and `approval_in_flight` (#1578).** `approval_in_flight` comes
+  from the same SQL the claim uses, so a page never offers a button the route would
+  refuse. A run is in flight for 15 minutes after its dispatch or its last progress, a
+  person's terminal run blocks a web launch, and a run that recorded an error stays in
+  flight for a 60-second grace window (longer than the CLI's 10-second retry wait) and is
+  stalled after it, so the page can offer Resume without waiting out the lease. Clients
+  read the boolean and must not hard-code the minutes.
+
+### Changed
+
+- **A web approval is attributed to the admin who clicked, while their run is live
+  (#1578).** The orchestrator reads `approval_requested_by` from the request it acts on
+  and, while the time-only lease is live, records that admin in `approved_by`, the
+  `dataset_published` audit row and the `notify_user_failed` audit row; the
+  `dataset_published` details also keep the executing account as `executed_by`. A run
+  that lapsed and was resumed by a different admin at a terminal records that admin, and
+  a terminal approval outside a live lease is unchanged. A clicker who has since been
+  demoted below admin, revoked or deleted is not recorded: the executing account stands
+  in. `POST /admin/publish/:id/approve` keeps its request and response contract; each
+  attempt now starts by clearing `last_error`, and the owner-name gate's walk-back to
+  `blocked` clears the web claim. Two costs, stated in ADR 0080: a web run that sat
+  quiet longer than the lease before its first `/approve` call is recorded under the
+  executing key (its `approval_dispatched` audit row still names the clicker), and the
+  fork is on the lease, not on who calls, so a person who runs `/approve` at a terminal
+  inside a web run's live lease is recorded as its clicker, with themselves as
+  `executed_by`.
+- **Sign-out, an admin account revoke and the owner soft delete also end the account's
+  private-site sessions and grants (#1577).** A role demotion leaves `private` sessions
+  alone because `resolvePrincipal` reports the live role on every call, and an API key
+  revocation leaves them alone because a private session is never minted from a key
+  (ADR 0079 records both).
+- **The Worker entry module is `backend/src/worker.ts` (#1577).** It re-exports the HTTP
+  app and cron handler from `index.ts` unchanged and adds `NemarApiRpc`, so `index.ts`
+  never imports `cloudflare:workers`. `wrangler-sccn.toml` `main` points at it for both
+  environments.
+- **The deploy workflow smoke-tests the private grant route on both environments
+  (#1577).** After `/health` reports the new version, an anonymous
+  `POST /auth/private/grant` with an allowed Origin must answer 401. A network error, a
+  5xx and a 404 are retried, up to three attempts, because a request can land on an edge
+  still serving the previous version for a few seconds; any other answer, or a 404 on the
+  last attempt (the route is missing from what shipped), fails the job and prints the last
+  response's headers and body. In maintenance mode every POST is a 503 and the check
+  warns instead of failing.
+
+### Security
+
+- **Revoking an API key ends the account's docs sessions on every path (#1577).** A docs
+  session can be minted from an API key (`POST /auth/docs/cli-session`), and two paths
+  that revoke keys did not end it: an owner revoking a user's key
+  (`DELETE /admin/users/:username/keys/:id`) and the key-regeneration confirmation link
+  (`GET /auth/confirm-key-regeneration`). The docs session kept reading `/admin/*` for the
+  rest of its fifteen minutes. Both now run the same best-effort cascade as self-service
+  revocation, and it also runs when a by-id revoke loses a race to a concurrent one,
+  whose own cascade may be the one that failed.
+- **`optionalAuthMiddleware` no longer identifies an account from an expired API key
+  (#1577).** Its private copy of the key lookup had no `expires_at` predicate, so an
+  expired key still resolved to its account on every route that reads the caller
+  optionally (`GET /notices`, the catalog reads and the manifest reads). It now shares the
+  one lookup the rest of the API uses, still without the `last_used_at` write, so those
+  routes stay pure reads. Such a key is now anonymous there: `GET /datasets?mine=true`
+  and a non-public `GET /datasets/:id` answer 401 "Your API key was rejected". No
+  `INSERT INTO tokens` in the backend sets `expires_at` today, so this closes a latent gap
+  rather than one a live key could hit.
+
+### Fixed
+
+- **A failed logout revoke names the account in the log (#1577).** The batch is
+  all-or-nothing, so the account id is what an operator needs to finish the job by hand.
+- **The docs-session cascade after a key revoke names the account in its log (#1577).**
+  The line is now `[docs-auth] failed to cascade key revocation into docs sessions for
+  user <id>` (it was `[auth-keys] failed to cascade revocation into docs sessions`), so
+  update any log search that matches the old text.
+
+### Migrations
+
+- `0089_private_site_sessions.sql` rebuilds `web_sessions` to widen
+  `CHECK (scope IN ('app', 'docs'))` to include `'private'` (SQLite cannot alter a
+  `CHECK`), and adds `private_grants` with a required `state_hash`. Every row and column
+  is copied across and the two existing indexes are recreated, plus two new ones (a
+  partial `idx_web_sessions_private_scope` and `idx_private_grants_expires`).
+  `_rebuild_guard` aborts before the `DROP` if the copy is short or altered, provided the
+  runner stops at the first failed statement: that holds for `wrangler --local` and
+  Miniflare and is unverified for the remote apply. This is the one migration in the
+  release that is not additive. Cloudflare does not document the remote apply as atomic,
+  so the file's header records the window (a stop between the `DROP` and the `RENAME`
+  leaves no `web_sessions` table, with every row safe in `web_sessions_new`, which must
+  then be renamed, never dropped) and the recovery: D1 Time Travel to the start of the
+  workflow's migration-apply step with the previous Worker redeployed first, or the
+  remaining statements by hand, including the `d1_migrations` insert and the scratch
+  table cleanup that the header spells out.
+- `0090_approval_dispatch.sql` adds two nullable columns to `publication_requests`,
+  `approval_requested_by INTEGER` and `approval_dispatched_at TEXT`, with no backfill and
+  no index. It is additive, so rolling the Worker back is enough: the 0.10.11 Worker never
+  reads either column, except that `GET /admin/publish/requests` returns both raw (its
+  `SELECT pr.*`) and has no `approval_in_flight`, and its `/approve` does not attribute a
+  web run to the admin who clicked.
+
+### Deploy coupling
+
+- Migration 0089 rebuilds `web_sessions` on production, the table every sign-in reads.
+  Record a D1 Time Travel bookmark before the release; the migration's replay test
+  asserts that every session row survives the rebuild.
+- Rolling the Worker back to 0.10.11 is safe for the database, but once the private site
+  is live it removes the `NemarApiRpc` export and the private site fails closed, so roll
+  the private site back first. While 0.10.11 serves, its sign-out and key-revoke paths do
+  not end `private` sessions or purge `private_grants`, so rolling forward within 8 hours
+  revives the private sessions of accounts that signed out in between.
+- The private site, the website's private-site authorize page and the website's
+  web-approval button deploy after this release; none is live until then. Existing
+  clients see only additive fields on the publish request list, plus the two `Security`
+  changes above. The CLI itself does not change (its 10-second approve retry wait now
+  comes from a shared constant).
+- A web approval dispatches to `approve-publication.yml` in `nemarDatasets/.github`,
+  which already exists on its default branch. A dispatch with no workflow would do
+  nothing and the page would read "queued" until the lease lapsed.
+- A failure inside the workflow before it reaches `/approve` (a missing secret, a failed
+  install) is invisible to the backend: nothing is written and the lease lapses on its
+  own, up to 15 minutes. So is a refusal inside the orchestrator before its step loop
+  (the sandbox, no-repository, dataset-not-found and invalid-repository answers): the row
+  is left `approving` with a fresh `updated_at` and no `last_error`, so the page reads
+  "running" for the lease. Releasing it on failure is #1582.
+
+### Known limitations
+
+- **A resumed approval restarts S3 Object Lock at page 1 (#1580).** The continuation
+  token lives only in the CLI process, so `--resume` or a new dispatch re-locks from the
+  first batch. Already-locked objects answer 403 and count as success, so it is safe and
+  only slow, but the workflow's job timeout is 350 minutes, so a dataset whose lock phase
+  outlasts that cannot finish from the web. Approve a very large dataset from a terminal.
+- **`nemar admin publish approve` exits 0 when an approval fails (#1581).** Automation
+  cannot trust the exit code; the approve workflow reads `GET /datasets/:id/publish/status`
+  back and fails unless the status is `published`.
+- **`approve-dispatch` does not validate the dataset id before it claims the lease
+  (#1583).** An id the workflow rejects (anything but `nm` or `on` plus six digits, or an
+  `xx` id on production) claims the lease, fails in the workflow's Validate step, and
+  leaves the website showing the approval as queued for 15 minutes.
+
 ## 0.10.11 - 2026-09-30
 
 ### Added

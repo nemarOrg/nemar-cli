@@ -39,8 +39,12 @@ export const ACTIVE_ACCOUNT_STATUS_SQL_LIST = `(${ACTIVE_ACCOUNT_STATUSES.map(
   (status) => `'${status}'`,
 ).join(", ")})`;
 
-/** True when an account at this status may authenticate. */
-export function isActiveAccountStatus(status: string | null | undefined): boolean {
+/** True when an account at this status may authenticate. A type predicate,
+ *  so a caller that has checked it holds an `ActiveAccountStatus` without a
+ *  cast. */
+export function isActiveAccountStatus(
+  status: string | null | undefined,
+): status is ActiveAccountStatus {
   return (ACTIVE_ACCOUNT_STATUSES as readonly string[]).includes(status ?? "");
 }
 

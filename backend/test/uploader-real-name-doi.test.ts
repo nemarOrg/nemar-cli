@@ -421,6 +421,40 @@ describe("POST /admin/publish/:id/approve name precondition", () => {
     expect(row?.block_reason).toBe(OWNER_NAME_MISSING_REASON);
   });
 
+  test("the walk-back also ends a web run's claim, so the re-requested row is not 'running' (ADR 0080)", async () => {
+    // A web approval claims the request (`approval_requested_by`,
+    // `approval_dispatched_at`) and dispatches a run. This gate ends that run, so
+    // the claim must go with it: left on the blocked row, it reads as live for
+    // the rest of the 15 minute lease once the owner re-requests, showing
+    // "running" with nothing running.
+    await seedOwner({ given: null });
+    seedDataset();
+    seedRequest();
+    db.run(
+      "UPDATE publication_requests SET approval_requested_by = ?, approval_dispatched_at = datetime('now') WHERE dataset_id = ?",
+      [ownerId, DATASET_ID],
+    );
+
+    const res = await post(`/admin/publish/${DATASET_ID}/approve`, ADMIN_KEY, {});
+    expect(res.status).toBe(422);
+
+    const row = db
+      .query<
+        {
+          status: string;
+          approval_requested_by: number | null;
+          approval_dispatched_at: string | null;
+        },
+        [string]
+      >(
+        "SELECT status, approval_requested_by, approval_dispatched_at FROM publication_requests WHERE dataset_id = ?",
+      )
+      .get(DATASET_ID);
+    expect(row?.status).toBe("blocked");
+    expect(row?.approval_requested_by).toBeNull();
+    expect(row?.approval_dispatched_at).toBeNull();
+  });
+
   test("an OpenNeuro import is exempt from the approve gate", async () => {
     await seedOwner({ given: null, family: null });
     seedDataset({ source: "openneuro" });

@@ -29,6 +29,7 @@ import { authDeviceRoutes } from "./routes/auth-device";
 import { authDocsRoutes } from "./routes/auth-docs";
 import { authKeysRoutes } from "./routes/auth-keys";
 import { authOrcidRoutes } from "./routes/auth-orcid";
+import { authPrivateRoutes } from "./routes/auth-private";
 import { authWebRoutes } from "./routes/auth-web";
 import { catalogIndexResponse, dataRoutes } from "./routes/data";
 import { datasetRoutes } from "./routes/datasets";
@@ -192,6 +193,10 @@ api.route("/auth", authKeysRoutes);
 // (it is scoped to app.nemar.org on purpose), so these three routes are the
 // handoff that gives docs.nemar.org a credential of its own.
 api.route("/auth", authDocsRoutes);
+// The private site's session handoff (ADR 0079). Same /auth prefix; one path,
+// /auth/private/grant. The exchange, the per-request check and sign-out are
+// service-binding methods (ADR 0078), not routes.
+api.route("/auth", authPrivateRoutes);
 api.route("/users", userRoutes);
 api.route("/admin", adminRoutes);
 api.route("/datasets", datasetRoutes);

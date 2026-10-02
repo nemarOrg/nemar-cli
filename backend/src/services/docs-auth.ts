@@ -223,15 +223,17 @@ export const DOCS_MINT_CONSUME_SQL = `DELETE FROM docs_grants
 /**
  * Revoke every docs session belonging to one account. Binds: userId.
  *
- * Called by `/auth/logout` and by an admin role demotion. Without it, signing
- * out of nemar.org would leave docs access live for up to eight hours, which is
- * not what anyone means by signing out, and it is the specific failure the core
- * principle about revocation cascading to linked credentials is meant to
- * prevent.
+ * THREE CALLERS: `/auth/logout`, an admin role demotion, and
+ * {@link revokeDocsCredentials} below, which runs after an API key is revoked
+ * because a docs session can be minted from a key
+ * (`POST /auth/docs/cli-session`). Without it, signing out of nemar.org
+ * would leave docs access live for up to eight hours, which is not what anyone
+ * means by signing out, and it is the specific failure the core principle
+ * about revocation cascading to linked credentials is meant to prevent.
  *
- * The other two callers that end a credential do NOT use this one, and should
- * not: `finalizeRevocation` and the owner-only soft delete revoke every session
- * of every scope for the account, which is a superset. This statement is for the
+ * The two paths that end EVERY credential do NOT use this one, and should not:
+ * `finalizeRevocation` and the owner-only soft delete revoke every session of
+ * every scope for the account, which is a superset. This statement is for the
  * cases where the app session legitimately survives.
  */
 export const DOCS_REVOKE_ALL_SQL = `UPDATE web_sessions
@@ -250,10 +252,68 @@ export const DOCS_REVOKE_ALL_SQL = `UPDATE web_sessions
  * survived sign-out and could still be spent. Ending access has to end what can
  * still create access, not only the access that exists.
  *
- * FOUR CALLERS, and the count is the point: every path that ends or downgrades
+ * FIVE CALLERS, and the count is the point: every path that ends or downgrades
  * this credential runs this statement -- `/auth/logout`, `finalizeRevocation`, a
- * role demotion, and the owner-only soft delete. The FK's `ON DELETE CASCADE`
- * covers none of them, because none of them deletes the `users` row. A fifth
- * path that ends a credential needs this line too.
+ * role demotion, the owner-only soft delete, and {@link revokeDocsCredentials}
+ * (every route that revokes keys without ending every session; it lists them).
+ * The FK's `ON DELETE CASCADE` covers none of them, because none of them
+ * deletes the `users` row. A sixth path that ends a credential needs this line
+ * too.
+ * The private site's grants have their own table and their own count
+ * (`PRIVATE_GRANTS_PURGE_SQL` in `services/private-auth.ts`).
  */
 export const DOCS_GRANTS_PURGE_SQL = "DELETE FROM docs_grants WHERE user_id = ?";
+
+/**
+ * End every docs session and outstanding docs grant this account holds, after
+ * one of its API keys is revoked.
+ *
+ * WHY IT EXISTS. `POST /auth/docs/cli-session` mints a docs credential FROM an
+ * API key, so every path that revokes a key is a path that ends a credential,
+ * and needs {@link DOCS_REVOKE_ALL_SQL} and {@link DOCS_GRANTS_PURGE_SQL}. The
+ * first of those paths shipped without them, and revoking the key left the
+ * docs session reading `/admin/*` for the rest of its fifteen minutes.
+ *
+ * ITS CALLERS: every route that revokes keys WITHOUT ending every session --
+ * self-service `DELETE /auth/keys/:id` and `/auth/keys/current`
+ * (`routes/auth-keys.ts`), the owner's `DELETE /admin/users/:username/keys/:id`
+ * (`routes/admin/user-keys.ts`), and the emailed
+ * `GET /auth/confirm-key-regeneration` (`routes/auth.ts`), which revokes every
+ * key on the account. A new route of that kind calls this too. The three paths
+ * that revoke keys and ALSO end the docs credential in their own batch do not
+ * need it: a role demotion, `finalizeRevocation` and the owner-only soft delete.
+ *
+ * The by-id routes also run it when their revoke changed nothing (a
+ * concurrent revoke of the same key won the race), because it is idempotent
+ * and the other request's cascade may have been the one that failed.
+ *
+ * WHY IT REVOKES ALL OF THEM rather than the one that key minted: the session
+ * row records no minting token, so there is nothing to revoke precisely. Adding
+ * a column to make this surgical would buy very little -- a docs session is
+ * read-only and short-lived, and the CLI silently mints another on the next
+ * command -- so the blunt version is the right trade. The grants purge rides
+ * along for the same reason it does elsewhere: a grant is a licence to create a
+ * new session, and ending access has to end what can still create access.
+ *
+ * The private site's sessions are deliberately NOT ended here: one is never
+ * minted from a key, so a key's end has nothing of that scope to reach (ADR
+ * 0079, `PRIVATE_REVOKE_ALL_SQL`).
+ *
+ * BEST EFFORT, DELIBERATELY. The key is already revoked by the time this runs;
+ * a failure here must not turn a successful revocation into an error, which
+ * would leave the caller believing the key still works. It is logged instead.
+ */
+export async function revokeDocsCredentials(db: D1Database, userId: number): Promise<void> {
+  try {
+    await db.batch([
+      db.prepare(DOCS_REVOKE_ALL_SQL).bind(userId),
+      db.prepare(DOCS_GRANTS_PURGE_SQL).bind(userId),
+    ]);
+  } catch (err) {
+    // The account id is what an operator needs to finish the job by hand.
+    console.error(
+      `[docs-auth] failed to cascade key revocation into docs sessions for user ${userId}`,
+      err,
+    );
+  }
+}
