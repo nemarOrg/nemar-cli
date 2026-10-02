@@ -789,6 +789,13 @@ describe("the Neurobagel read route has its own IP-keyed bucket (epic #1586 phas
     app.use("*", rateLimiter);
     app.route("/neurobagel", neurobagelRoutes);
     const env = PROD_ENV;
+    // The privileged-token lookup logs when it cannot reach D1 (here there is none), so
+    // a log line is the witness that a lookup was attempted.
+    const lookups: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      lookups.push(args.map(String).join(" "));
+    };
     let limited = 0;
     let served = 0;
     const total = __limits.NEUROBAGEL_MAX_REQUESTS + 10;
@@ -803,8 +810,10 @@ describe("the Neurobagel read route has its own IP-keyed bucket (epic #1586 phas
       else if (res.status === 404) served++;
       else throw new Error(`unexpected status ${res.status}`);
     }
+    console.warn = originalWarn;
     expect(served).toBe(__limits.NEUROBAGEL_MAX_REQUESTS);
     expect(limited).toBe(10);
+    expect(lookups.filter((l) => l.includes("admin-flag lookup"))).toEqual([]);
   });
 
   test("another IP has its own allowance", async () => {

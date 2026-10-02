@@ -44,21 +44,22 @@ import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { CONCEPT_DOI_SQL } from "./anonymity.js";
 import { toVersionTag } from "./data-router.js";
-import { isNonProductionEnv } from "./environment.js";
+import { isNonProductionEnv, resolveDataBaseOrigin } from "./environment.js";
+import { manifestCacheKey } from "./manifest-source.js";
 import {
   type CurationResolution,
   type CurationResolver,
   applyCuration,
   defaultCurationResolver,
 } from "./neurobagel-curation.js";
-import { couldBeFederated, federationContext, loadEligibleRow } from "./neurobagel-eligibility.js";
-import { inputFingerprint, rowFingerprint, sha256Hex } from "./neurobagel-fingerprint.js";
 import {
-  type GatherDeps,
-  GatherRefusal,
-  evictStaleManifestCopy,
-  gatherNeurobagelInput,
-} from "./neurobagel-gather.js";
+  couldBeFederated,
+  eligibleAmong,
+  federationContext,
+  loadEligibleRow,
+} from "./neurobagel-eligibility.js";
+import { inputFingerprint, rowFingerprint, sha256Hex } from "./neurobagel-fingerprint.js";
+import { type GatherDeps, GatherRefusal, gatherNeurobagelInput } from "./neurobagel-gather.js";
 import {
   LEDGER_ACTIONS,
   type LedgerEntry,
@@ -450,6 +451,41 @@ async function refuse(
   return { id, outcome: "refused", code, ...(detail ? { detail } : {}) };
 }
 
+/**
+ * Make the data plane read a manifest at least as new as `currentEtag`.
+ *
+ * The data plane trusts an edge copy of a manifest for 60 seconds without asking S3
+ * (ADR 0072). A writer that fingerprints a dataset by the manifest's CURRENT ETag but
+ * builds its artifacts from a copy that is up to a minute older would stamp new
+ * metadata on old content, and since the stamp matches the ETag, nothing would ever
+ * correct it. So the writer asks first: if the edge copy's ETag is not the current
+ * one, the copy is evicted and the data plane reads S3. A copy that is current, or
+ * none, is left alone. Content is then never OLDER than the ETag it is stamped with
+ * (a manifest that moves again after this check only makes the stamp older than the
+ * content, which the next examination notices and redoes).
+ *
+ * Returns what it did. `unsupported` means a stale copy exists and the cache cannot
+ * delete it: the caller must not gather, because the data plane would answer from it.
+ */
+async function evictStaleManifestCopy(
+  env: Bindings,
+  datasetId: string,
+  version: string,
+  currentEtag: string,
+): Promise<"none" | "current" | "evicted" | "unsupported"> {
+  const cache = (globalThis as { caches?: { default?: Partial<Cache> } }).caches?.default;
+  if (!cache?.match) return "none";
+  const request = new Request(manifestCacheKey(resolveDataBaseOrigin(env), datasetId, version));
+  const hit = await cache.match(request);
+  if (!hit) return "none";
+  const copyEtag = hit.headers.get("ETag");
+  await hit.body?.cancel().catch(() => {});
+  if (copyEtag === currentEtag) return "current";
+  if (typeof cache.delete !== "function") return "unsupported";
+  await cache.delete(request);
+  return "evicted";
+}
+
 /** Examine one dataset and, on a real run, write it when it changed. */
 async function processDataset(rc: RunContext, row: PlanRow): Promise<DatasetResult> {
   const { env, options } = rc;
@@ -662,15 +698,27 @@ export async function runNeurobagelWriter(env: Bindings, options: RunOptions): P
 
   try {
     const federation = federationContext(env);
-    const { rows, refusedByRecheck } = await loadPlanRows(env.DB, federation);
+    // A run for named datasets reads only those; the whole catalog only for an unscoped run.
+    const only = options.only ? [...new Set(options.only)] : undefined;
+    const { rows, refusedByRecheck } = await loadPlanRows(env.DB, federation, only);
     if (refusedByRecheck > 0) {
       result.warnings.push(
         `${refusedByRecheck} row(s) selected by the SQL predicate failed its TypeScript re-check`,
       );
     }
-    result.eligible = rows.length;
-    const eligibleIds = new Set(rows.map((r) => r.dataset_id));
     const listing = await listStore(bucket);
+    // `eligible` is the catalog's count, which a scoped run does not read: null, not zero.
+    result.eligible = only === undefined ? rows.length : null;
+    // Who is eligible among everything this run may touch: the whole catalog when unscoped,
+    // else what the store holds plus what was named. The index is judged against this.
+    const eligibleIds =
+      only === undefined
+        ? new Set(rows.map((r) => r.dataset_id))
+        : await eligibleAmong(
+            env.DB,
+            [...new Set([...listing.datasets.keys(), ...only])],
+            federation,
+          );
     const ledger = options.execute ? await readLedger(env.DB) : new Map<string, LedgerEntry>();
 
     const resolver = options.deps?.curation ?? defaultCurationResolver;
@@ -696,7 +744,6 @@ export async function runNeurobagelWriter(env: Bindings, options: RunOptions): P
       );
     }
 
-    const only = options.only ? [...new Set(options.only)] : undefined;
     const plan = planWork({
       rows,
       stored: listing.datasets,

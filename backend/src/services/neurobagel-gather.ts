@@ -31,7 +31,6 @@ import type { NeurobagelInput } from "../../../shared/neurobagel/index.js";
 import { dataRoutes } from "../routes/data.js";
 import type { Bindings } from "../types/bindings.js";
 import { resolveDataBaseOrigin } from "./environment.js";
-import { manifestCacheKey } from "./manifest-source.js";
 
 /** metadata.json carries the bids_index, so it grows with the subject count. */
 export const MAX_METADATA_BYTES = 16 * 1024 * 1024;
@@ -295,39 +294,4 @@ export async function gatherNeurobagelInput(
     latestVersion: latest,
     input: { expectedDatasetId: datasetId, metadata, participantsTsv, participantsJson },
   };
-}
-
-/**
- * Make the data plane read a manifest at least as new as `currentEtag`.
- *
- * The data plane trusts an edge copy of a manifest for 60 seconds without asking S3
- * (ADR 0072). A writer that fingerprints a dataset by the manifest's CURRENT ETag but
- * builds its artifacts from a copy that is up to a minute older would stamp new
- * metadata on old content, and since the stamp matches the ETag, nothing would ever
- * correct it. So the writer asks first: if the edge copy's ETag is not the current
- * one, the copy is evicted and the data plane reads S3. A copy that is current, or
- * none, is left alone. Content is then never OLDER than the ETag it is stamped with
- * (a manifest that moves again after this check only makes the stamp older than the
- * content, which the next examination notices and redoes).
- *
- * Returns what it did. `unsupported` means a stale copy exists and the cache cannot
- * delete it: the caller must not gather, because the data plane would answer from it.
- */
-export async function evictStaleManifestCopy(
-  env: Bindings,
-  datasetId: string,
-  version: string,
-  currentEtag: string,
-): Promise<"none" | "current" | "evicted" | "unsupported"> {
-  const cache = (globalThis as { caches?: { default?: Partial<Cache> } }).caches?.default;
-  if (!cache?.match) return "none";
-  const request = new Request(manifestCacheKey(resolveDataBaseOrigin(env), datasetId, version));
-  const hit = await cache.match(request);
-  if (!hit) return "none";
-  const copyEtag = hit.headers.get("ETag");
-  await hit.body?.cancel().catch(() => {});
-  if (copyEtag === currentEtag) return "current";
-  if (typeof cache.delete !== "function") return "unsupported";
-  await cache.delete(request);
-  return "evicted";
 }

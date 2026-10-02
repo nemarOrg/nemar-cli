@@ -45,26 +45,45 @@ export interface PlanRow extends FederationRow {
   latest_version: string | null;
 }
 
-/** Every eligible dataset, in id order, with the cheap fields. Bind the eligibility flag first. */
-export const NEUROBAGEL_PLAN_ROWS_SQL = `SELECT ${NEUROBAGEL_ROW_COLUMNS},
+const PLAN_SELECT = `SELECT ${NEUROBAGEL_ROW_COLUMNS},
     d.name, d.subject_count, d.license, ${CONCEPT_DOI_SQL} AS concept_doi,
     length(d.enrichment_json) AS enrichment_length,
     (SELECT dv.version FROM dataset_versions dv
       WHERE dv.dataset_id = d.dataset_id
       ORDER BY dv.created_at DESC, dv.id DESC LIMIT 1) AS latest_version
-  FROM datasets d
+  FROM datasets d`;
+
+/** Every eligible dataset, in id order, with the cheap fields. Bind the eligibility flag first. */
+export const NEUROBAGEL_PLAN_ROWS_SQL = `${PLAN_SELECT}
  WHERE ${NEUROBAGEL_ELIGIBLE_SQL}
  ORDER BY d.dataset_id`;
 
-/** The eligible rows, each re-confirmed in TypeScript. A row the SQL returned and the check refuses is dropped and counted. */
+/** The same, for the named datasets only: the eligibility flag, then a JSON array of ids. */
+export const NEUROBAGEL_PLAN_ROWS_FOR_SQL = `${PLAN_SELECT}
+ WHERE ${NEUROBAGEL_ELIGIBLE_SQL}
+   AND d.dataset_id IN (SELECT value FROM json_each(?))
+ ORDER BY d.dataset_id`;
+
+/**
+ * The eligible rows, each re-confirmed in TypeScript. A row the SQL returned and the check
+ * refuses is dropped and counted. With `ids`, only those datasets are read: a hook for one
+ * dataset has no business reading, signing and hashing the whole catalog.
+ */
 export async function loadPlanRows(
   db: D1Database,
   ctx: FederationContext,
+  ids?: readonly string[],
 ): Promise<{ rows: PlanRow[]; refusedByRecheck: number }> {
-  const result = await db
-    .prepare(NEUROBAGEL_PLAN_ROWS_SQL)
-    .bind(...neurobagelEligibleBinds(ctx))
-    .all<PlanRow>();
+  const result =
+    ids === undefined
+      ? await db
+          .prepare(NEUROBAGEL_PLAN_ROWS_SQL)
+          .bind(...neurobagelEligibleBinds(ctx))
+          .all<PlanRow>()
+      : await db
+          .prepare(NEUROBAGEL_PLAN_ROWS_FOR_SQL)
+          .bind(...neurobagelEligibleBinds(ctx), JSON.stringify([...ids]))
+          .all<PlanRow>();
   const rows: PlanRow[] = [];
   let refusedByRecheck = 0;
   for (const row of result.results ?? []) {
