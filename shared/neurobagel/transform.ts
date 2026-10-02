@@ -169,8 +169,13 @@ interface TableRead {
   prefixed: number;
 }
 
-const sameRow = (a: string[], b: string[]): boolean =>
-  a.length === b.length && a.every((cell, i) => cell === b[i]);
+/**
+ * Whether two rows say the same thing about a participant: every cell but the id cell.
+ * `sub-01` and `01` name one participant, so two rows that differ only in how the id is
+ * spelled are the same row.
+ */
+const sameRow = (a: string[], b: string[], idColumn: number): boolean =>
+  a.length === b.length && a.every((cell, i) => i === idColumn || cell === b[i]);
 
 /**
  * Read participants.tsv into one phenotype row per participant.
@@ -226,7 +231,7 @@ function readTable(text: string | null, flags: Set<string>): TableRead {
     const seen = first.get(id);
     if (seen !== undefined) {
       read.duplicates++;
-      if (!sameRow(seen, row)) conflicting.add(id);
+      if (!sameRow(seen, row, read.idColumn)) conflicting.add(id);
       continue;
     }
     if (prefixed) read.prefixed++;
