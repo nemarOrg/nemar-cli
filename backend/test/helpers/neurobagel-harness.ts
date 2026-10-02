@@ -28,6 +28,7 @@ import { resetManifestAnswerMemo } from "../../src/services/manifest-source";
 import type { Bindings } from "../../src/types/bindings";
 import { DrainingCache, keyFor } from "./cache";
 import { freshDb, realD1 } from "./d1";
+import { applyMigrations, migrationFiles } from "./miniflare-d1";
 import { type S3ManifestStandin, startS3ManifestStandin } from "./s3-manifest-standin";
 
 const REPO_ROOT = join(import.meta.dir, "../../..");
@@ -84,6 +85,15 @@ export function seedDatasetRow(db: Database, id: string, seed: DatasetSeed = {})
   }
 }
 
+export interface RouteWorkerOptions {
+  /** The bundled worker module the Miniflare instance runs (see `bundleRouteWorker`). */
+  script: string;
+  /** The Worker secret the read route compares the bearer against. */
+  token: string;
+  /** Extra bindings, such as `ENVIRONMENT`. */
+  bindings?: Record<string, string>;
+}
+
 export interface Harness {
   db: Database;
   standin: S3ManifestStandin;
@@ -91,6 +101,15 @@ export interface Harness {
   bucket: R2Bucket;
   /** Bindings for the writer: production-shaped unless overridden. */
   env(over?: Partial<Bindings>): Bindings;
+  /**
+   * Only with `routeWorker`: the Miniflare D1 the worker reads, migrated like production's,
+   * and a function that copies the bun:sqlite catalog into it (the writer runs against
+   * `db`, the route runs in workerd against this one, and both must hold the same rows).
+   */
+  workerD1?: D1Database;
+  mirrorCatalog?(): Promise<void>;
+  /** Only with `routeWorker`: a request to the route worker, inside workerd. */
+  dispatch?(path: string, init?: RequestInit): Promise<Response>;
   /** Reset D1, the bucket and the stand-in between tests. */
   reset(): Promise<void>;
   dispose(): Promise<void>;
@@ -113,16 +132,49 @@ function installEdgeCache(): void {
   resetManifestAnswerMemo();
 }
 
-export async function startHarness(): Promise<Harness> {
+/**
+ * The read route as one ES module workerd can run, mounted where the api app mounts it.
+ * Under bun, reading `.body` of an object Miniflare's Node-side proxy returns throws
+ * `DataCloneError`, so the route's 200 branch can only run inside workerd (the same
+ * reason the news media suite does this).
+ */
+export async function bundleRouteWorker(): Promise<string> {
+  const build = await Bun.build({
+    entrypoints: [join(import.meta.dir, "neurobagel-routes-worker.ts")],
+    target: "browser",
+    format: "esm",
+  });
+  const [output] = build.outputs;
+  if (!build.success || !output) {
+    throw new Error(`bundling the neurobagel routes failed: ${build.logs.join("\n")}`);
+  }
+  return output.text();
+}
+
+export async function startHarness(
+  opts: { routeWorker?: RouteWorkerOptions } = {},
+): Promise<Harness> {
   installEdgeCache();
   const standin = startS3ManifestStandin();
+  const rw = opts.routeWorker;
   const mf = new Miniflare({
     modules: true,
-    script: "export default { fetch() { return new Response('ok') } }",
+    script: rw?.script ?? "export default { fetch() { return new Response('ok') } }",
     compatibilityDate: "2024-12-01",
     r2Buckets: ["NEUROBAGEL"],
+    ...(rw
+      ? {
+          d1Databases: ["DB"],
+          bindings: { NEUROBAGEL_READ_TOKEN: rw.token, ENVIRONMENT: "test", ...rw.bindings },
+        }
+      : {}),
   });
   const bucket = (await mf.getR2Bucket("NEUROBAGEL")) as unknown as R2Bucket;
+  let workerD1: D1Database | undefined;
+  if (rw) {
+    workerD1 = (await mf.getD1Database("DB")) as unknown as D1Database;
+    await applyMigrations(workerD1, migrationFiles());
+  }
   const harness: Harness = {
     db: freshDb(),
     standin,
@@ -145,6 +197,37 @@ export async function startHarness(): Promise<Harness> {
         ...over,
       } as Bindings;
     },
+    workerD1,
+    async mirrorCatalog() {
+      if (!workerD1) throw new Error("no route worker");
+      // Whole-table copy of the two tables eligibility reads. The anonymity triggers see
+      // each row as it was in the source, which already satisfied them.
+      await workerD1.prepare("DELETE FROM dataset_versions").run();
+      await workerD1.prepare("DELETE FROM datasets").run();
+      const copy = async (table: string) => {
+        for (const row of harness.db.query(`SELECT * FROM ${table}`).all() as Record<
+          string,
+          unknown
+        >[]) {
+          const cols = Object.keys(row);
+          await workerD1
+            .prepare(
+              `INSERT INTO ${table} (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`,
+            )
+            .bind(...cols.map((c) => row[c]))
+            .run();
+        }
+      };
+      await copy("datasets");
+      await copy("dataset_versions");
+    },
+    dispatch: rw
+      ? async (path, init) =>
+          (await mf.dispatchFetch(
+            `https://api.nemar.org${path}`,
+            init as never,
+          )) as unknown as Response
+      : undefined,
     async reset() {
       installEdgeCache();
       harness.db.close();

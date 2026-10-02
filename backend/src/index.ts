@@ -34,6 +34,7 @@ import { authWebRoutes } from "./routes/auth-web";
 import { catalogIndexResponse, dataRoutes } from "./routes/data";
 import { datasetRoutes } from "./routes/datasets";
 import { mcpRoutes } from "./routes/mcp";
+import { neurobagelRoutes } from "./routes/neurobagel";
 import { newsRoutes } from "./routes/news";
 import { openApiRoutes } from "./routes/openapi";
 import { sandboxRoutes } from "./routes/sandbox";
@@ -174,6 +175,11 @@ api.get("/notices", optionalAuthMiddleware, async (c) => {
 api.route("/news", newsRoutes);
 
 // Mount route handlers
+// The Neurobagel artifact store, read side (epic #1586 phase 4, ADR 0084): the index
+// and artifacts the node's loader pulls, behind one shared bearer secret, each answer
+// re-checked against D1. Off (404) until NEUROBAGEL_READ_TOKEN and the bucket exist.
+api.route("/neurobagel", neurobagelRoutes);
+
 api.route("/auth", authRoutes);
 // Web-dashboard auth (#569). Mounted at the same /auth prefix as the
 // CLI flow; no path overlap with authRoutes (existing /signup, /login,
