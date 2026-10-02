@@ -1251,13 +1251,23 @@ export default {
         runNeurobagelReconcileCron(env)
           .then((r) => {
             if (!r) return;
+            const wrote = r.results.filter((d) => d.outcome === "written").length;
+            const refused = r.results.filter((d) => d.outcome === "refused").length;
+            const errors = r.results.filter((d) => d.outcome === "error").length;
             const line =
               `[neurobagel] reconcile status=${r.status} eligible=${r.eligible ?? "?"} ` +
-              `examined=${r.examined} written=${r.results.filter((d) => d.outcome === "written").length} ` +
-              `refused=${r.results.filter((d) => d.outcome === "refused").length} ` +
+              `examined=${r.examined} written=${wrote} refused=${refused} errors=${errors} ` +
               `removed=${r.removed.length} unexamined=${r.unexamined} ` +
               `index_written=${r.index.written} needs_review=${r.needs_review.length}`;
-            if (r.status === "ok" && r.anonymity_findings === 0) console.log(line);
+            // `disabled` is the default and is routine. A misconfiguration, a failed run,
+            // an error on any dataset, or an anonymity-class finding is not: those are
+            // logged where someone reading the logs will see them.
+            const routine =
+              (r.status === "ok" || r.status === "disabled") &&
+              errors === 0 &&
+              r.anonymity_findings === 0 &&
+              !r.index.contended;
+            if (routine) console.log(line);
             else
               console.error(
                 `${line} anonymity_findings=${r.anonymity_findings} error=${r.error ?? ""}`,
