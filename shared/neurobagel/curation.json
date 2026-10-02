@@ -296,24 +296,6 @@
     },
     "on004574": {
       "columns": {
-        "GENDER": {
-          "IsAbout": {
-            "Label": "Sex",
-            "TermURL": "nb:Sex"
-          },
-          "Levels": {
-            "F": {
-              "Label": "Female",
-              "TermURL": "snomed:248152002"
-            },
-            "M": {
-              "Label": "Male",
-              "TermURL": "snomed:248153007"
-            }
-          },
-          "MissingValues": [],
-          "VariableType": "Categorical"
-        },
         "MOCA": {
           "IsAbout": {
             "Label": "Assessment Tool",
@@ -359,7 +341,7 @@
         "date": "2026-10-02",
         "review": "upstream_community",
         "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
-        "source": "neurobagel/openneuro-annotations@116676d:ds004574.json (git blob de41b26), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed; for a spot-check: GENDER is read as Sex (participants.json says: \"Gender of the participant\")"
+        "source": "neurobagel/openneuro-annotations@116676d:ds004574.json (git blob de41b26), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed"
       },
       "pins": {
         "participants_json": "5573c4a26fc1b69e687bcd35b6691f8ae4aab8a1",
@@ -427,24 +409,6 @@
     },
     "on006861": {
       "columns": {
-        "Gender": {
-          "IsAbout": {
-            "Label": "Sex",
-            "TermURL": "nb:Sex"
-          },
-          "Levels": {
-            "Female": {
-              "Label": "Female",
-              "TermURL": "snomed:248152002"
-            },
-            "Male": {
-              "Label": "Male",
-              "TermURL": "snomed:248153007"
-            }
-          },
-          "MissingValues": [],
-          "VariableType": "Categorical"
-        },
         "UCLA_R": {
           "IsAbout": {
             "Label": "Assessment Tool",
@@ -490,7 +454,7 @@
         "date": "2026-10-02",
         "review": "upstream_community",
         "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
-        "source": "neurobagel/openneuro-annotations@116676d:ds006861.json (git blob 63d93fc), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed; for a spot-check: Gender is read as Sex (participants.json says: \"Participant gender. Values: Female or Male.\")"
+        "source": "neurobagel/openneuro-annotations@116676d:ds006861.json (git blob 63d93fc), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed"
       },
       "pins": {
         "participants_json": "16c18ebbefcdd669a33207068a2c870e4ce42533",

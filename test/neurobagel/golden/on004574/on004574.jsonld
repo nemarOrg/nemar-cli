@@ -132,10 +132,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:605ce851-b11f-5a95-843f-349627669266",
           "schemaKey": "PhenotypicSession"
         },
@@ -174,10 +170,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:f4da2cb6-1c07-55c9-a7ce-1865899b81ed",
           "schemaKey": "PhenotypicSession"
         },
@@ -216,10 +208,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:cdb91cff-4112-5185-9d24-b9036cb5d170",
           "schemaKey": "PhenotypicSession"
         },
@@ -258,10 +246,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:e81a95f7-bc05-5837-87f2-77304ffcd2a2",
           "schemaKey": "PhenotypicSession"
         },
@@ -300,10 +284,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:e66cacc2-3e91-58a5-a09f-0ba8638d295f",
           "schemaKey": "PhenotypicSession"
         },
@@ -342,10 +322,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:49f108b5-8a4e-58ab-8f4a-0db998259ed6",
           "schemaKey": "PhenotypicSession"
         },
@@ -384,10 +360,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:cc2eb26e-37ea-563c-a96c-774fe326f41b",
           "schemaKey": "PhenotypicSession"
         },
@@ -426,10 +398,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:3373b2f4-ca03-5518-a856-a1be83349b02",
           "schemaKey": "PhenotypicSession"
         },
@@ -468,10 +436,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:f1c488d2-2733-5907-8f52-6d703e27b4ad",
           "schemaKey": "PhenotypicSession"
         },
@@ -510,10 +474,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:6cfbd3a6-5cbc-5d0d-bea4-fce83c01d010",
           "schemaKey": "PhenotypicSession"
         },
@@ -552,10 +512,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:70d96073-61bf-5d2f-b33c-7f4ac29a0076",
           "schemaKey": "PhenotypicSession"
         },
@@ -594,10 +550,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:21d97a8b-5a9c-5948-bbb0-c8a3f4dd6438",
           "schemaKey": "PhenotypicSession"
         },
@@ -636,10 +588,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:0ad3dd30-ac9e-54e5-99e0-5a72728d09b2",
           "schemaKey": "PhenotypicSession"
         },
@@ -678,10 +626,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:ffec1596-1d9d-5be9-b0a3-53daf6ef8cfd",
           "schemaKey": "PhenotypicSession"
         },
@@ -720,10 +664,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:54233984-4e11-5800-9eb7-78b983d8bed6",
           "schemaKey": "PhenotypicSession"
         },
@@ -762,10 +702,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:216fbcb0-b8d5-5c40-b90c-b677200efc5d",
           "schemaKey": "PhenotypicSession"
         },
@@ -804,10 +740,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:b00c4e88-eaaa-5696-a287-11ac8cd7af6e",
           "schemaKey": "PhenotypicSession"
         },
@@ -846,10 +778,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:d19325c3-b9ae-5b65-ba74-a7f4785d6645",
           "schemaKey": "PhenotypicSession"
         },
@@ -888,10 +816,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:1512cc30-2b68-56af-814e-230cf27d8d59",
           "schemaKey": "PhenotypicSession"
         },
@@ -930,10 +854,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:55241771-e9af-5e7d-8ca3-ca51dc885f58",
           "schemaKey": "PhenotypicSession"
         },
@@ -972,10 +892,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:34cb1cbb-ce2e-5bf5-a667-16f3bb1a0cf5",
           "schemaKey": "PhenotypicSession"
         },
@@ -1014,10 +930,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:e5175775-3de0-59ab-9fe9-00492f31f696",
           "schemaKey": "PhenotypicSession"
         },
@@ -1056,10 +968,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:e155b524-62fc-5814-a24e-8584ff80cbb7",
           "schemaKey": "PhenotypicSession"
         },
@@ -1098,10 +1006,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:e2c54c42-95ff-548c-a061-feb35a5f0d8c",
           "schemaKey": "PhenotypicSession"
         },
@@ -1140,10 +1044,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:5494039f-2ed5-517b-ab1b-28ed17c4b49f",
           "schemaKey": "PhenotypicSession"
         },
@@ -1182,10 +1082,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:ab54bf9b-ef60-51f4-87d7-9bc64b2f1424",
           "schemaKey": "PhenotypicSession"
         },
@@ -1224,10 +1120,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:b0933156-9272-5259-8111-0134b40fd4f9",
           "schemaKey": "PhenotypicSession"
         },
@@ -1266,10 +1158,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:83797359-60ec-504a-a6c9-99bcf13d52db",
           "schemaKey": "PhenotypicSession"
         },
@@ -1308,10 +1196,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:984e9b33-7f74-5ee6-a31f-bcede3415643",
           "schemaKey": "PhenotypicSession"
         },
@@ -1350,10 +1234,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:fb7a4768-ea7b-55bc-8558-34a5ad1debf5",
           "schemaKey": "PhenotypicSession"
         },
@@ -1392,10 +1272,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:c260d5fa-0261-5206-858a-343668d78ab4",
           "schemaKey": "PhenotypicSession"
         },
@@ -1434,10 +1310,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:461b6f93-678c-5002-b94b-c4d0f472e768",
           "schemaKey": "PhenotypicSession"
         },
@@ -1476,10 +1348,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:8af0d85a-8800-5a4c-9ce9-e02b0a47e2b0",
           "schemaKey": "PhenotypicSession"
         },
@@ -1518,10 +1386,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:b00aab23-4c8c-50da-936e-b3a7e0f17e25",
           "schemaKey": "PhenotypicSession"
         },
@@ -1560,10 +1424,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:302ef7aa-2fbb-544a-96b9-4dcb58937c86",
           "schemaKey": "PhenotypicSession"
         },
@@ -1602,10 +1462,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:29770d4f-c1fa-5c66-be5b-b01995b7fe2b",
           "schemaKey": "PhenotypicSession"
         },
@@ -1644,10 +1500,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:11feeddf-117e-5eac-901e-e513d235c8d7",
           "schemaKey": "PhenotypicSession"
         },
@@ -1686,10 +1538,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:744862c0-7230-5151-a727-4d803445efd6",
           "schemaKey": "PhenotypicSession"
         },
@@ -1728,10 +1576,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:c96e45df-fb1a-5fa6-9931-faba3ddaf01d",
           "schemaKey": "PhenotypicSession"
         },
@@ -1770,10 +1614,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:788bf632-5b13-5457-a5ca-9873611b2817",
           "schemaKey": "PhenotypicSession"
         },
@@ -1812,10 +1652,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:ec000729-2de2-570f-a1f9-0726aabe2ec7",
           "schemaKey": "PhenotypicSession"
         },
@@ -1854,10 +1690,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:aa3c3ed5-4902-59aa-9d18-ac4d42b57605",
           "schemaKey": "PhenotypicSession"
         },
@@ -1896,10 +1728,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:d2cd2ba1-cf40-5813-96bd-0d2c8093ac9e",
           "schemaKey": "PhenotypicSession"
         },
@@ -1938,10 +1766,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:805f91f7-44d3-5b3e-9e7e-8090cc0fb24b",
           "schemaKey": "PhenotypicSession"
         },
@@ -1980,10 +1804,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:c8705783-41cd-5226-9f5e-5105116bea68",
           "schemaKey": "PhenotypicSession"
         },
@@ -2022,10 +1842,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:08eae32c-5284-5c98-b6c7-78b3f6c6542d",
           "schemaKey": "PhenotypicSession"
         },
@@ -2064,10 +1880,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:5dfd16bf-15a6-5d4c-8730-811cfe6ac6cd",
           "schemaKey": "PhenotypicSession"
         },
@@ -2106,10 +1918,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:219487d0-8297-5948-a97a-72f5d94cf42d",
           "schemaKey": "PhenotypicSession"
         },
@@ -2148,10 +1956,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:b18945a2-510e-5f29-8629-8d83740749fe",
           "schemaKey": "PhenotypicSession"
         },
@@ -2190,10 +1994,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:93e52638-63e6-598c-b50e-194a2020ec6f",
           "schemaKey": "PhenotypicSession"
         },
@@ -2232,10 +2032,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:a48b9548-6cae-5e74-9af5-396cce990b78",
           "schemaKey": "PhenotypicSession"
         },
@@ -2274,10 +2070,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:530dff0c-4272-52fb-b837-e5e82ba2a3d6",
           "schemaKey": "PhenotypicSession"
         },
@@ -2316,10 +2108,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:1be2efdd-991b-5264-8e5c-1bf47995d313",
           "schemaKey": "PhenotypicSession"
         },
@@ -2358,10 +2146,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:c26a955d-513f-5a77-9b17-ab6d1eb0fad8",
           "schemaKey": "PhenotypicSession"
         },
@@ -2400,10 +2184,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:af1201dc-1b77-5d88-a107-5774eb15540c",
           "schemaKey": "PhenotypicSession"
         },
@@ -2442,10 +2222,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:e41bce1c-dbc4-5335-9cc7-2f8302b0f5c0",
           "schemaKey": "PhenotypicSession"
         },
@@ -2484,10 +2260,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:0d143628-efbb-5ad9-add6-23ba6acfd090",
           "schemaKey": "PhenotypicSession"
         },
@@ -2526,10 +2298,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:94cf25fd-3a72-5970-bfb0-f6f888cc7065",
           "schemaKey": "PhenotypicSession"
         },
@@ -2568,10 +2336,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:5973bbaf-26d1-5584-87c2-43a530bd3166",
           "schemaKey": "PhenotypicSession"
         },
@@ -2610,10 +2374,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:fb2a17b8-f251-5565-a556-b0c4549e0b2b",
           "schemaKey": "PhenotypicSession"
         },
@@ -2652,10 +2412,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:5f41d061-7b21-5b19-911f-1d1b3ed75696",
           "schemaKey": "PhenotypicSession"
         },
@@ -2694,10 +2450,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:2b6b4dec-c3a5-5bf1-a120-ad70496685aa",
           "schemaKey": "PhenotypicSession"
         },
@@ -2736,10 +2488,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:79d752bf-f997-5fd1-9ab2-162cd7475536",
           "schemaKey": "PhenotypicSession"
         },
@@ -2778,10 +2526,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:cb2337d0-636a-5973-8200-62f35d6209c0",
           "schemaKey": "PhenotypicSession"
         },
@@ -2820,10 +2564,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:9c0bf606-5172-5a15-b4cc-aeb28e37a7c4",
           "schemaKey": "PhenotypicSession"
         },
@@ -2862,10 +2602,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:bfd2f7e4-1e95-5dbb-bfc3-08d8df5bc53e",
           "schemaKey": "PhenotypicSession"
         },
@@ -2904,10 +2640,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:d22ad1bd-d6dc-5358-b797-c0e1a7798ad1",
           "schemaKey": "PhenotypicSession"
         },
@@ -2946,10 +2678,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:e9515395-2e9f-571f-b49b-d51f7f35a297",
           "schemaKey": "PhenotypicSession"
         },
@@ -2988,10 +2716,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:74e61683-3b06-569e-b909-bc632fe31ff3",
           "schemaKey": "PhenotypicSession"
         },
@@ -3030,10 +2754,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:6a0f962b-758c-52b8-ba8e-338193d18a57",
           "schemaKey": "PhenotypicSession"
         },
@@ -3072,10 +2792,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:88da02c3-b123-5af7-97d0-341c322e192b",
           "schemaKey": "PhenotypicSession"
         },
@@ -3114,10 +2830,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:56f71e0a-05f0-5e2e-a68d-9f24612746cf",
           "schemaKey": "PhenotypicSession"
         },
@@ -3156,10 +2868,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:32d9518d-063e-5b81-ade9-25adbdbecb57",
           "schemaKey": "PhenotypicSession"
         },
@@ -3198,10 +2906,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:4ecdd925-8cd8-5980-83d9-730544463f88",
           "schemaKey": "PhenotypicSession"
         },
@@ -3240,10 +2944,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:ca19e46e-2ede-51b9-8c6d-5574e2c17406",
           "schemaKey": "PhenotypicSession"
         },
@@ -3282,10 +2982,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:df1f1303-b607-5746-8669-000afd115160",
           "schemaKey": "PhenotypicSession"
         },
@@ -3324,10 +3020,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:1cbaa4eb-0303-5cf0-99f7-ab32b74a8f9d",
           "schemaKey": "PhenotypicSession"
         },
@@ -3366,10 +3058,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:fa81e3dd-8052-5d49-84c5-0b38d6a04680",
           "schemaKey": "PhenotypicSession"
         },
@@ -3408,10 +3096,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:824e3079-339d-57ff-bad3-1049848d0d00",
           "schemaKey": "PhenotypicSession"
         },
@@ -3450,10 +3134,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:c695e49f-58f3-5c54-bedb-29d7011ede77",
           "schemaKey": "PhenotypicSession"
         },
@@ -3492,10 +3172,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:a3ed80c2-0ba1-5a23-8c6e-48f97ea73586",
           "schemaKey": "PhenotypicSession"
         },
@@ -3534,10 +3210,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:5e2aedb7-71aa-5593-8d07-b53e000edf1d",
           "schemaKey": "PhenotypicSession"
         },
@@ -3576,10 +3248,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:fcaaefbe-2ec1-586c-adf0-915c5051e803",
           "schemaKey": "PhenotypicSession"
         },
@@ -3618,10 +3286,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:55276b50-e565-5a62-87ec-33aef2360f42",
           "schemaKey": "PhenotypicSession"
         },
@@ -3660,10 +3324,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:17b4575c-8313-56b2-bec1-e5379d1b23de",
           "schemaKey": "PhenotypicSession"
         },
@@ -3702,10 +3362,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:42bbf07b-f7c2-5bfb-9db7-e9669add77c6",
           "schemaKey": "PhenotypicSession"
         },
@@ -3744,10 +3400,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:a8430325-7d89-5f96-8068-6931b34c5624",
           "schemaKey": "PhenotypicSession"
         },
@@ -3786,10 +3438,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:382bb370-24c4-577c-9304-694f048d6a29",
           "schemaKey": "PhenotypicSession"
         },
@@ -3828,10 +3476,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:20add43e-c5ba-551d-938d-e0e33b0a4f1f",
           "schemaKey": "PhenotypicSession"
         },
@@ -3870,10 +3514,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:bfa65f73-6d79-53b5-bccb-075e56ed3ec3",
           "schemaKey": "PhenotypicSession"
         },
@@ -3912,10 +3552,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:7b69b11b-41d9-504e-a356-99aee19bdbff",
           "schemaKey": "PhenotypicSession"
         },
@@ -3954,10 +3590,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:e095767c-4d4c-538a-bdc9-7a77dff18a31",
           "schemaKey": "PhenotypicSession"
         },
@@ -3996,10 +3628,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:60db5e6b-5315-5a7e-8a6c-54990ece5e5b",
           "schemaKey": "PhenotypicSession"
         },
@@ -4038,10 +3666,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:4e7c38f7-9b57-5279-95b4-24997ed41a18",
           "schemaKey": "PhenotypicSession"
         },
@@ -4080,10 +3704,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:19399c04-4660-5597-a899-3e1776b578c8",
           "schemaKey": "PhenotypicSession"
         },
@@ -4122,10 +3742,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:3ec7a23a-266d-519a-a21f-1ab7fee62e64",
           "schemaKey": "PhenotypicSession"
         },
@@ -4164,10 +3780,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:a16f21ee-96d1-5e55-9e71-7a3131a5a12e",
           "schemaKey": "PhenotypicSession"
         },
@@ -4206,10 +3818,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:7e65f333-8548-596c-9687-94eeeefe20ca",
           "schemaKey": "PhenotypicSession"
         },
@@ -4250,10 +3858,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:12bb826f-9b2c-54c4-a37a-109e22cf16b8",
           "schemaKey": "PhenotypicSession"
         },
@@ -4294,10 +3898,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:65e4a240-ee97-5a17-b8aa-1e8f1c77f1ce",
           "schemaKey": "PhenotypicSession"
         },
@@ -4338,10 +3938,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:3390a667-ff23-5e9c-be14-bd1a28896387",
           "schemaKey": "PhenotypicSession"
         },
@@ -4382,10 +3978,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:cb717b52-b139-56f8-b317-3f649013271b",
           "schemaKey": "PhenotypicSession"
         },
@@ -4426,10 +4018,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:7b6603db-7f9e-5db4-9c49-0cf35b763b83",
           "schemaKey": "PhenotypicSession"
         },
@@ -4470,10 +4058,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:a1b061ff-777c-5770-89d1-dfdba2ac2eac",
           "schemaKey": "PhenotypicSession"
         },
@@ -4514,10 +4098,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:076f9c84-b792-5d61-8e7d-74ad92cc398d",
           "schemaKey": "PhenotypicSession"
         },
@@ -4558,10 +4138,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:ba4fed63-d36e-54fa-9c0b-0461bd061ce9",
           "schemaKey": "PhenotypicSession"
         },
@@ -4602,10 +4178,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:2746bfb4-62b9-52bf-a22d-50aac20c4c71",
           "schemaKey": "PhenotypicSession"
         },
@@ -4646,10 +4218,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:c0b8be5b-f65d-5fc2-afba-e1d1957296d0",
           "schemaKey": "PhenotypicSession"
         },
@@ -4690,10 +4258,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:2d016c22-fdc3-5ce9-abfb-15b32379bafa",
           "schemaKey": "PhenotypicSession"
         },
@@ -4734,10 +4298,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:c264f63c-1d32-5542-aab8-0020c2cf870c",
           "schemaKey": "PhenotypicSession"
         },
@@ -4778,10 +4338,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:88189662-985e-542d-af3c-c2b685f0c8d0",
           "schemaKey": "PhenotypicSession"
         },
@@ -4822,10 +4378,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:e3f0ff24-8261-5185-b5c4-2c5f96a2e7ca",
           "schemaKey": "PhenotypicSession"
         },
@@ -4866,10 +4418,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:a2d66352-008b-5ca0-94aa-8f5f66ff9e40",
           "schemaKey": "PhenotypicSession"
         },
@@ -4910,10 +4458,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:729decdf-8b8b-59d5-849f-d0071c2d5de3",
           "schemaKey": "PhenotypicSession"
         },
@@ -4954,10 +4498,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:da0e8b56-07f5-579c-92ce-2e5798714a0b",
           "schemaKey": "PhenotypicSession"
         },
@@ -4998,10 +4538,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:3cff2020-efdc-5588-85a1-c2010b4fa7e9",
           "schemaKey": "PhenotypicSession"
         },
@@ -5042,10 +4578,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:9c45947d-5567-5c8a-85fe-22a6766e8d6c",
           "schemaKey": "PhenotypicSession"
         },
@@ -5086,10 +4618,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:cdf25409-c9c3-52ba-a507-102083e18ecf",
           "schemaKey": "PhenotypicSession"
         },
@@ -5130,10 +4658,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:76d79040-d45d-5a70-8033-8ad0aa32f949",
           "schemaKey": "PhenotypicSession"
         },
@@ -5174,10 +4698,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:e266d134-8943-59cc-a8b5-61547393124b",
           "schemaKey": "PhenotypicSession"
         },
@@ -5218,10 +4738,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:41763ce6-09c9-517f-b3e0-84135fbed23e",
           "schemaKey": "PhenotypicSession"
         },
@@ -5262,10 +4778,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:c7b46739-625b-5dc6-aac2-b19d11dc9dcb",
           "schemaKey": "PhenotypicSession"
         },
@@ -5306,10 +4818,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:f1b3425f-c5f5-5c64-8fa2-74454650caaa",
           "schemaKey": "PhenotypicSession"
         },
@@ -5350,10 +4858,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:b36a4f81-3e32-5b0e-aee9-51a956116265",
           "schemaKey": "PhenotypicSession"
         },
@@ -5394,10 +4898,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:96f5063e-e931-536b-bc3d-c5d8242a07b6",
           "schemaKey": "PhenotypicSession"
         },
@@ -5438,10 +4938,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:efe1896a-aa0e-54d2-b843-05ffdfd6e8ec",
           "schemaKey": "PhenotypicSession"
         },
@@ -5482,10 +4978,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:9a9852e6-ed27-52c8-92ba-825644b12bb7",
           "schemaKey": "PhenotypicSession"
         },
@@ -5526,10 +5018,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:a4ac7e61-b2b6-50ec-8513-49f30a8492e2",
           "schemaKey": "PhenotypicSession"
         },
@@ -5570,10 +5058,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:120f30f7-f94e-5153-97f7-ce415a9be290",
           "schemaKey": "PhenotypicSession"
         },
@@ -5614,10 +5098,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:d3e3cf98-172a-55c0-b081-f8d8c62fdc7a",
           "schemaKey": "PhenotypicSession"
         },
@@ -5658,10 +5138,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:8923cccb-c6cc-5e78-88c9-4020cf2cfd04",
           "schemaKey": "PhenotypicSession"
         },
@@ -5702,10 +5178,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:4c9d44a0-8e1d-5742-b409-c7172edb6302",
           "schemaKey": "PhenotypicSession"
         },
@@ -5746,10 +5218,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:b569ffd5-9390-516d-a70c-5a9ef4d4ce4a",
           "schemaKey": "PhenotypicSession"
         },
@@ -5790,10 +5258,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:a0f4699c-09e1-5e8a-8071-087f6fcaeccb",
           "schemaKey": "PhenotypicSession"
         },
@@ -5834,10 +5298,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:b8647f7b-d265-5805-a237-e8ce25e1902f",
           "schemaKey": "PhenotypicSession"
         },
@@ -5878,10 +5338,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:1629694a-d061-580e-a7cd-4cffadab5db5",
           "schemaKey": "PhenotypicSession"
         },
@@ -5922,10 +5378,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:6cceca7d-03ab-51ee-a48b-24fd170817c8",
           "schemaKey": "PhenotypicSession"
         },
@@ -5966,10 +5418,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:d38a3681-fbdf-53f5-b7b2-c60788d7fb2f",
           "schemaKey": "PhenotypicSession"
         },
@@ -6010,10 +5458,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:7f7d3913-9c1b-5e00-94da-a9d87493566f",
           "schemaKey": "PhenotypicSession"
         },
@@ -6054,10 +5498,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:cca6fc58-299c-539a-bf35-679088deb976",
           "schemaKey": "PhenotypicSession"
         },
@@ -6098,10 +5538,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:37381db4-badc-565a-b265-6ca2c7182fc1",
           "schemaKey": "PhenotypicSession"
         },
@@ -6142,10 +5578,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:861f003d-a922-505f-bbdd-2cf66f325df0",
           "schemaKey": "PhenotypicSession"
         },
@@ -6186,10 +5618,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:52aebf29-caae-564a-8ec3-95fe1a648b51",
           "schemaKey": "PhenotypicSession"
         },
@@ -6230,10 +5658,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248153007",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:f9718727-2b2a-5ed6-a4f2-276df1ffaf9e",
           "schemaKey": "PhenotypicSession"
         },
@@ -6274,10 +5698,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:ee9acc60-5467-5f88-aedf-105c14554d0f",
           "schemaKey": "PhenotypicSession"
         },
@@ -6318,10 +5738,6 @@
             }
           ],
           "hasLabel": "ses-unnamed",
-          "hasSex": {
-            "identifier": "snomed:248152002",
-            "schemaKey": "Sex"
-          },
           "identifier": "nb:ae04fe76-82d7-5399-9cf4-a419bd5910b0",
           "schemaKey": "PhenotypicSession"
         },

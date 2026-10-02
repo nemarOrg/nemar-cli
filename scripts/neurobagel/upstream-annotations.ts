@@ -19,11 +19,15 @@
  *   - the loader accepts it (`curatedColumnFrom`);
  *   - the binder accepts it against the mirror's CURRENT participants.tsv (`bindCuratedColumn`):
  *     the column exists, the annotation covers every value the table holds, and an age column is
- *     not declared in units other than years nor mostly zeros.
+ *     not declared in units other than years nor mostly zeros;
+ *   - a sex column that is not literally named `sex` is described as sex by the dataset's own
+ *     participants.json (`sexReadingDrop`): Neurobagel's term is sex, and NEMAR does not relabel a
+ *     gender column as sex on upstream's word.
  * Whatever fails is dropped and counted, never repaired.
- * What a person spot-checking an entry needs to know (a `gender` column read as sex, numeric sex
- * codes and whether participants.json confirms them, the declared age units) is written into the
- * entry's `evidence.source` from the documents, so the review does not start from nothing.
+ * What a person spot-checking an entry needs to know (what participants.json says of a sex column
+ * not named `sex`, numeric sex codes and whether participants.json confirms them, the declared age
+ * units) is written into the entry's `evidence.source` from the documents, so the review does not
+ * start from nothing.
  * The entry pins the mirror's files, so if the mirror changes the entry goes stale; it does not
  * silently describe a table it never saw.
  *
@@ -226,6 +230,45 @@ function blockFrom(
   };
 }
 
+/** Whether a column is literally the `sex` column, as the mechanical rules decide it. */
+const isNamedSex = (name: string): boolean => name.trim().toLowerCase() === "sex";
+
+/**
+ * Why a column upstream annotates as Sex is NOT read as sex, or null when it is.
+ *
+ * THE RULE (the owner's decision, 2026-10-02; ADR 0083 amendment).
+ * Neurobagel's term is sex, not gender, and a federated search for sex must not return people
+ * whose column says gender.
+ * NEMAR therefore never relabels a gender column as sex on upstream's word, and reports only what
+ * the dataset's own sidecar supports:
+ *   - a column literally named `sex` (any case, padding ignored: the mechanical rule's own test)
+ *     is read as sex, as before;
+ *   - any other column is read as sex only if its Description in participants.json contains the
+ *     word `sex` (a whole word, any case) and does not contain `gender` anywhere (a substring, so
+ *     `transgender` counts), since a description that names both says gender;
+ *   - a description that says gender, or says neither, or is missing, or a participants.json that
+ *     is missing, leaves the column out.
+ * The two drop reasons are kept apart so that the report shows how many columns said gender and
+ * how many said nothing; neither is a guess.
+ */
+export type SexReadingDrop = "sex_described_as_gender" | "sex_not_described_as_sex";
+
+export function sexReadingDrop(name: string, description: string | null): SexReadingDrop | null {
+  if (isNamedSex(name)) return null;
+  if (description !== null && /gender/i.test(description)) return "sex_described_as_gender";
+  if (description !== null && /\bsex\b/i.test(description)) return null;
+  return "sex_not_described_as_sex";
+}
+
+/** The Description participants.json gives a column, or null when it gives none. */
+function descriptionOf(
+  participantsJson: Record<string, unknown> | null,
+  column: string,
+): string | null {
+  const entry = participantsJson?.[column];
+  return isRecord(entry) && typeof entry.Description === "string" ? entry.Description : null;
+}
+
 /** The index of the first header cell the mechanical rules would read as `wanted`. */
 const mechanicalIndex = (header: string[], wanted: string): number =>
   header.findIndex((h) => h.trim().toLowerCase() === wanted);
@@ -304,11 +347,11 @@ function reviewNotes(
   const description = isRecord(entry) ? entry : null;
   const notes: string[] = [];
   if (column.kind === "sex") {
-    if (column.name.trim().toLowerCase() === "gender") {
-      const text = typeof description?.Description === "string" ? description.Description : null;
-      notes.push(
-        `${column.name} is read as Sex (participants.json ${text === null ? "does not describe it" : `says: "${brief(text)}"`})`,
-      );
+    // A column not named `sex` is only here because its Description says sex (`sexReadingDrop`),
+    // and the note shows the words that decided it.
+    const text = descriptionOf(participantsJson, column.name);
+    if (!isNamedSex(column.name) && text !== null) {
+      notes.push(`${column.name} is read as Sex (participants.json says: "${brief(text)}")`);
     }
     const numeric = [...column.levels.entries()].filter(([raw]) => /^\d+$/.test(raw));
     if (numeric.length > 0) {
@@ -402,6 +445,16 @@ export async function convertUpstream(
     if ("problems" in bound) {
       bump(result.dropped, classify(bound.problems[0]));
       continue;
+    }
+    // Last of the checks on whether the column fits, so a column dropped for another reason keeps
+    // that reason and only a column that would otherwise be kept is counted here; and before the
+    // kind is claimed, so a column left out here does not take the dataset's one sex slot.
+    if (kind === "sex") {
+      const refusal = sexReadingDrop(name, descriptionOf(participantsJson, name));
+      if (refusal !== null) {
+        bump(result.dropped, refusal);
+        continue;
+      }
     }
     if (
       !options.keepRedundant &&

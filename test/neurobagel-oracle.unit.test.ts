@@ -268,4 +268,23 @@ describe("recordings of the real bagel CLI", () => {
     // on003474, on004574 and on006861 carry reused assessment items: 122, 146 and 120 participants.
     expect(assessed).toBeGreaterThan(300);
   });
+
+  test("a gender column is read as sex only where its own description says sex: bagel finds no sex in on004574 and on006861", () => {
+    // Their participants.json describe the column as gender, so the reused annotation of it as Sex
+    // is left out and bagel has no sex to read; their assessment items are still read.
+    for (const id of ["on004574", "on006861"]) {
+      const recording = recordingOf(id);
+      expect(recording.status).toBe("compared");
+      const subjects = Object.values(recording.subjects as Record<string, Phenotype>);
+      expect(subjects.length).toBeGreaterThan(100);
+      expect(subjects.every((p) => p.sex === null)).toBe(true);
+      expect(subjects.every((p) => (p.assessments ?? []).length > 0)).toBe(true);
+    }
+    // And where the description says sex (on001787, on004635), bagel reads the sex of everyone.
+    for (const id of ["on001787", "on004635"]) {
+      const subjects = Object.values(recordingOf(id).subjects as Record<string, Phenotype>);
+      expect(subjects.length).toBeGreaterThan(10);
+      expect(subjects.every((p) => p.sex !== null)).toBe(true);
+    }
+  });
 });
