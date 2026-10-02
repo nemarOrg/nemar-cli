@@ -31,7 +31,7 @@ export const STANDARD_MISSING_VALUES: readonly string[] = ["", "n/a", "N/A", "NA
  * A column with more than this share of its non-missing cells unmappable is
  * not mapped at all: the column is more likely misunderstood than dirty.
  */
-export const UNMAPPABLE_SHARE_LIMIT = 0.1;
+const UNMAPPABLE_SHARE_LIMIT = 0.1;
 
 /**
  * An age column in which zeros are at least this share of the parsed ages is not
@@ -39,7 +39,7 @@ export const UNMAPPABLE_SHARE_LIMIT = 0.1;
  * answered "age 0" for a participant of unknown age would match every infant query.
  * A few zeros among real ages (newborns recorded in years) stay ages.
  */
-export const ZERO_PLACEHOLDER_SHARE = 0.5;
+const ZERO_PLACEHOLDER_SHARE = 0.5;
 
 /** Plausible ages in years. A cell outside it is unparseable, which also catches months and days. */
 export const AGE_MIN_YEARS = 0;
@@ -104,7 +104,7 @@ const inRange = (age: number): boolean => age >= AGE_MIN_YEARS && age <= AGE_MAX
  * Mirrors `bagel.utilities.pheno_utils.transform_age` for the cells it
  * accepts, and accepts a strict subset of what that function accepts.
  */
-export function parseAge(raw: string, format: AgeFormatId): number | null {
+function parseAge(raw: string, format: AgeFormatId): number | null {
   let age: number | null = null;
   switch (format) {
     case "FromFloat": {
@@ -145,7 +145,7 @@ const AGE_FORMAT_PRIORITY: AgeFormatId[] = ["FromFloat", "FromRange", "FromBound
 const YEARS_UNIT_RE = /^\(?\s*(?:years?|yrs?|y|years? old)\s*\)?$/i;
 
 /** True when a participants.json `Units` value says years. */
-export function unitsAreYears(units: string): boolean {
+function unitsAreYears(units: string): boolean {
   return YEARS_UNIT_RE.test(units.trim());
 }
 

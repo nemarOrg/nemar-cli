@@ -34,7 +34,7 @@
 export const NEMAR_NEUROBAGEL_NAMESPACE = "df8e9091-cb02-4426-ba88-973cf2e050f9";
 
 /** Neurobagel's identifier prefix: `nb:` followed by a UUID. */
-export const NB_IDENTIFIER_PREFIX = "nb:";
+const NB_IDENTIFIER_PREFIX = "nb:";
 
 /** The name every identifier of one dataset extends. */
 export function datasetName(datasetId: string): string {
