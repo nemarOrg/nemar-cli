@@ -44,7 +44,8 @@ export interface Bindings {
   NEUROBAGEL?: R2Bucket;
   /** The writer's switch. Anything other than exactly "1" (including unset) is OFF. */
   NEUROBAGEL_WRITER_ENABLED?: string;
-  /** Datasets one reconcile tick examines. A positive integer; unset or bad means 25. */
+  /** Datasets one reconcile tick examines. A positive integer; unset or bad means 10, and nothing is
+   *  ever above the ceiling of 50 (ADR 0084). */
   NEUROBAGEL_RECONCILE_MAX?: string;
   /** Worker SECRET: the bearer the node's loader sends to GET /neurobagel/*. A deployment
    *  secret, not an account credential (ADR 0084); unset means the read route is off. */
