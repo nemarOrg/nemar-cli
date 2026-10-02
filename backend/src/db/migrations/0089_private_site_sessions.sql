@@ -78,7 +78,13 @@
 -- WHAT THE ORDERING PROTECTS, AND THE WINDOW IT LEAVES:
 --   * Everything before the DROP is non-destructive. A failure there leaves
 --     `web_sessions` untouched, plus the two scratch tables, which a re-run
---     trips over loudly.
+--     trips over loudly (`CREATE TABLE _rebuild_guard` fails). Once
+--     `SELECT COUNT(*) FROM web_sessions` shows the table intact, clear them
+--     and re-run the deploy job:
+--       DROP TABLE IF EXISTS _rebuild_guard;
+--       DROP TABLE IF EXISTS web_sessions_new;
+--     Never run the second one when `web_sessions` is missing: it is then the
+--     only copy of the rows.
 --   * The window is DROP -> RENAME -> CREATE INDEX. Stopping after the DROP and
 --     before the RENAME leaves no `web_sessions` table, so every session read
 --     fails and sign-in is down, with every row intact in `web_sessions_new`
@@ -93,8 +99,11 @@
 --     deploy workflow's migration-apply step, read from the Actions log, not
 --     the merge time. It undoes every other write since then too. Redeploy the
 --     previous Worker version before or together with the restore, because the
---     new one expects this schema. Or finish the remaining statements below by
---     hand, in order, then record the file in d1_migrations.
+--     new one expects this schema. (If the migration step itself failed, the
+--     deploy step never ran and the previous Worker is still serving, so there
+--     is nothing to redeploy.) Or finish the remaining statements below by
+--     hand, in order, then record the file the way wrangler does:
+--       INSERT INTO d1_migrations (name) VALUES ('0089_private_site_sessions.sql');
 --
 -- Ids are copied verbatim, never reassigned. Copying them into the
 -- AUTOINCREMENT table reseeds `sqlite_sequence` at the highest surviving id, and
