@@ -50,6 +50,34 @@ function facts(over: Partial<WeeklySummaryFacts> = {}): WeeklySummaryFacts {
     parked: [],
     issuesClosed: 3,
     issuesRelabelled: 1,
+    neurobagel: {
+      runs: 7,
+      failedRuns: 0,
+      days: { healthy: 7, alarm: 0, unknown: 0, unchecked: 0 },
+      latest: {
+        at: "2026-09-09T03:00:05.000Z",
+        overall: "healthy",
+        checks: {
+          store: {
+            verdict: "healthy",
+            reason: "20 eligible dataset(s), 20 written and indexed; no residue.",
+          },
+          node: {
+            verdict: "unchecked",
+            reason: "NEUROBAGEL_NODE_URL is not set, so the node is not probed.",
+          },
+          registration: {
+            verdict: "unchecked",
+            reason: "NEUROBAGEL_FEDERATION_URL is not set, so registration is not checked.",
+          },
+          drift: {
+            verdict: "healthy",
+            reason: "11 pinned release tags and vocabulary files match upstream.",
+          },
+        },
+      },
+      anonymityFindings: 0,
+    },
     errors: [],
     ...over,
   };
@@ -586,4 +614,87 @@ describe("the UTC boundary holds regardless of the host timezone", () => {
       }
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// The Neurobagel section (epic #1586, phase 6)
+// ---------------------------------------------------------------------------
+
+describe("the Neurobagel section", () => {
+  type Neurobagel = NonNullable<WeeklySummaryFacts["neurobagel"]>;
+  const nb = (
+    over: Partial<Neurobagel> = {},
+    overall: Neurobagel["latest"]["overall"] = "healthy",
+  ): WeeklySummaryFacts["neurobagel"] => {
+    const base = facts().neurobagel as Neurobagel;
+    return { ...base, ...over, latest: { ...base.latest, overall } };
+  };
+
+  test("a healthy week with the unconfigured checks shown as unchecked needs no attention", () => {
+    const f = facts();
+    const body = buildWeeklySummaryBody(f, "2026-09-09T03:00:00Z");
+    expect(weeklyHeadline(f).attention).toBe(false);
+    expect(body).toContain("## Neurobagel federation");
+    expect(body).toContain("| node | unchecked |");
+    expect(body).toContain("| registration | unchecked |");
+    expect(body).toContain("Latest daily run (2026-09-09T03:00:05.000Z): **HEALTHY**.");
+  });
+
+  test("no run at all is unknown, rendered as unknown and asking for attention, never as zero runs", () => {
+    const f = facts({ neurobagel: null });
+    const h = weeklyHeadline(f);
+    expect(h.attention).toBe(true);
+    expect(h.line).toContain("no Neurobagel verification run was recorded");
+    const body = buildWeeklySummaryBody(f, "2026-09-09T03:00:00Z");
+    expect(body).toContain("which is unknown rather than zero");
+    expect(body).not.toContain("Daily runs in this window");
+    expect(weeklySummaryLogLine(f, null)).toContain("neurobagel=unknown");
+  });
+
+  test("an alarm and an unknown each need attention, with their own words", () => {
+    expect(weeklyHeadline(facts({ neurobagel: nb({}, "alarm") })).line).toContain(
+      "Neurobagel verification is alarming",
+    );
+    expect(weeklyHeadline(facts({ neurobagel: nb({}, "unknown") })).line).toContain(
+      "Neurobagel verification could not be determined",
+    );
+    // The overall of all-unchecked is not a problem: nothing here is configured to check.
+    expect(weeklyHeadline(facts({ neurobagel: nb({}, "unchecked") })).attention).toBe(false);
+  });
+
+  test("a day that alarmed counts even when the latest run is healthy; the same alarm is not said twice", () => {
+    const earlier = weeklyHeadline(
+      facts({ neurobagel: nb({ days: { healthy: 5, alarm: 2, unknown: 0, unchecked: 0 } }) }),
+    );
+    expect(earlier.line).toContain("alarmed on 2 day(s)");
+    const latest = weeklyHeadline(
+      facts({
+        neurobagel: nb({ days: { healthy: 5, alarm: 2, unknown: 0, unchecked: 0 } }, "alarm"),
+      }),
+    );
+    expect(latest.line).toContain("is alarming");
+    expect(latest.line).not.toContain("alarmed on");
+  });
+
+  test("the anonymity-class count is a count: zero says zero, a positive one asks for the audit log, an unknown says unknown", () => {
+    const zero = buildWeeklySummaryBody(facts({ neurobagel: nb({ anonymityFindings: 0 }) }), "x");
+    expect(zero).toContain("Anonymity-class findings recorded in this window: 0.");
+    const some = facts({ neurobagel: nb({ anonymityFindings: 3 }) });
+    expect(weeklyHeadline(some).line).toContain(
+      "3 Neurobagel anonymity-class finding(s) were recorded (see the audit log)",
+    );
+    expect(buildWeeklySummaryBody(some, "x")).toContain("recorded in this window: 3.");
+    const unknown = facts({ neurobagel: nb({ anonymityFindings: null }) });
+    expect(buildWeeklySummaryBody(unknown, "x")).toContain("recorded in this window: unknown.");
+    expect(weeklyHeadline(unknown).line).toContain("could not be counted");
+  });
+
+  test("the section names no dataset: it carries only the checks' own sentences and counts", () => {
+    const body = buildWeeklySummaryBody(facts(), "x");
+    const section = body.slice(
+      body.indexOf("## Neurobagel federation"),
+      body.indexOf("## Blocklisted datasets"),
+    );
+    expect(section).not.toMatch(/\b(nm|on)\d{6}\b/);
+  });
 });
