@@ -117,3 +117,21 @@ Phases 2 and 7 write no ADR.
 
 - The `bids_index` section of `docs.nemar.org/platform/data-api` needs the new `session_modalities` key (the docs repository is private, so this is done there, after Phase 2 merges).
 - Decision (lead, Phase 2): keep the `no-session` entry for sessionless subjects. The schema marks the whole field optional with "absent means unknown", so omitting entries would make absence ambiguous; brotli absorbs the raw growth on the wire.
+
+## Follow-ups for later phases (from the Phase 1 reviews, 2026-10-02)
+
+Phase 4 (eligibility-writer):
+- The writer must pass `expectedDatasetId` to the transform (it is a required input).
+- The transform report is a typed `NeurobagelReport`; the writer should consume it as such, not parse a string blind.
+- Subjects are index-only (subjects with data at NEMAR). The report carries table-only counts and two flags to surface: an empty or absent index fell back to the table rows, and `partial_join` when table ids join the index only in part (no join is guessed).
+- After the Phase 2 backend change is deployed to production, 234 of 776 datasets currently use the single-session fallback; regenerate the goldens and the artifacts then.
+
+Phase 5 (curation-annotations):
+- 114 datasets have a `gender` column but no `sex` column; consider a reviewed bulk mapping.
+- "Control" is an intervention arm, not healthy control, in on004166, on006801 and on007990; they need per-dataset curation.
+- 17 datasets (283 subjects) have placeholder ages of `0`; the transform now sends such an age column to curation, so curate real ages where a source exists.
+- 106 of 776 datasets have no EEG or MEG datatype and are federated with no modality (including EMG and iEEG datasets, until Neurobagel ships its BIDS-suffix vocabulary); this is a known gap, not a bug.
+
+At epic finalization:
+- Add ADRs 0081 to 0084 to the load-bearing list in `AGENTS.md`.
+- ADR 0081's uuid5 name grammar is as permanent as the namespace; changing either churns every identifier.
