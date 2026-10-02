@@ -100,8 +100,28 @@ export function hasCompleteSet(stored: StoredDataset | undefined): boolean {
   return Boolean(stored?.jsonld?.meta[META.fingerprint] && stored.dictionary && stored.description);
 }
 
-/** The signature every row would carry if it were rewritten now. */
-export async function currentSignature(row: PlanRow, curationHash: string | null): Promise<string> {
+/** What a signature reads: a plan row, or the writer's own re-read of one dataset. */
+export type SignatureSource = Pick<
+  PlanRow,
+  | "dataset_id"
+  | "name"
+  | "subject_count"
+  | "license"
+  | "concept_doi"
+  | "enrichment_length"
+  | "latest_version"
+>;
+
+/**
+ * The signature every row would carry if it were rewritten now. The writer stamps one
+ * built from the SAME read its fingerprint comes from, never from the plan's earlier row:
+ * a row edited between the two would otherwise carry a signature of a state it was not
+ * built from, and read as stale forever.
+ */
+export async function currentSignature(
+  row: SignatureSource,
+  curationHash: string | null,
+): Promise<string> {
   return cheapSignature(
     {
       dataset_id: row.dataset_id,

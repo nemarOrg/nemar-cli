@@ -579,7 +579,11 @@ async function processDataset(rc: RunContext, row: PlanRow): Promise<DatasetResu
   }
 
   const flags = needsReviewFlags(built.report);
-  const signature = await currentSignature(row, prepared.curationHash);
+  // From the row read for THIS fingerprint (`prepared.detail`), not the plan's earlier one.
+  const signature = await currentSignature(
+    { dataset_id: id, ...prepared.detail },
+    prepared.curationHash,
+  );
   const wrote = await writeSet(rc.bucket, id, built.files, stored, {
     [META.fingerprint]: prepared.fingerprint,
     [META.rowFingerprint]: prepared.rowFp,

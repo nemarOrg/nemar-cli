@@ -18,6 +18,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import Ajv from "ajv";
 import schema from "../../deploy/neurobagel/index.schema.json";
 import { type CurationResolver, createCurationResolver } from "../src/services/neurobagel-curation";
+import { neurobagelStatus } from "../src/services/neurobagel-status";
 import {
   ARTIFACT_KINDS,
   ARTIFACT_SUFFIX,
@@ -37,7 +38,7 @@ import {
   syncNeurobagelDataset,
 } from "../src/services/neurobagel-writer";
 import type { Bindings } from "../src/types/bindings";
-import { wrapD1 } from "./helpers/d1";
+import { realD1, wrapD1 } from "./helpers/d1";
 import {
   type Harness,
   gitBlobSha,
@@ -351,6 +352,35 @@ describe("a second run with nothing changed writes nothing", () => {
     expect(puts.every((k) => k === "index.json" || k.startsWith("nm000602"))).toBe(true);
     expect(puts).toContain("nm000602.jsonld");
     expect(puts).toContain("index.json");
+  });
+
+  test("a row edited between the plan and the processing is stamped with what it was built from, so it is not stale for ever", async () => {
+    seedSynthetic(h, "nm000607");
+    // The edit lands on the first statement the writer issues AFTER it planned: the
+    // re-check of the one row. The plan saw the old name; the fingerprint and the artifacts
+    // are built from the new one, and the signature must be too.
+    let edited = false;
+    const d1 = wrapD1(realD1(h.db), (sql) => {
+      if (!edited && sql.includes("WHERE d.dataset_id = ?") && !sql.includes("enrichment_length")) {
+        edited = true;
+        h.db
+          .query("UPDATE datasets SET name = 'Edited mid-run' WHERE dataset_id = 'nm000607'")
+          .run();
+      }
+    });
+    const first = await run({}, h.env({ DB: d1 }));
+    expect(edited).toBe(true);
+    expect(outcomes(first)).toEqual(["nm000607:written"]);
+    expect(await text("nm000607.jsonld")).toContain("Edited mid-run");
+
+    const status = await neurobagelStatus(h.env());
+    expect(status.counts.stale).toBe(0);
+    expect(status.counts.written).toBe(1);
+    // And the next run finds nothing to do at all, rather than examining it as stale each time.
+    const rec = recordWrites(h.bucket);
+    const second = await run({}, h.env({ NEUROBAGEL: rec.bucket }));
+    expect(outcomes(second)).toEqual(["nm000607:unchanged"]);
+    expect(rec.log).toEqual([]);
   });
 
   test("a rewritten manifest (a new ETag, same name) is a change the row cannot see", async () => {
