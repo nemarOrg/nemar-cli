@@ -1,5 +1,5 @@
 /**
- * The curation loader (epic #1586, phase 5; ADR 0084).
+ * The curation loader (epic #1586, phase 5; ADR 0083).
  *
  * `shared/neurobagel/curation.json` holds the annotations a table cannot yield mechanically:
  * which diagnosis a free-text group value means, which column is the sex column, which

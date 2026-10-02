@@ -1,5 +1,5 @@
 /**
- * A hand-written mutation battery for curation (epic #1586, phase 5; ADR 0084).
+ * A hand-written mutation battery for curation (epic #1586, phase 5; ADR 0083).
  *
  *   bun run scripts/neurobagel/mutation-battery.ts            # run every mutant
  *   bun run scripts/neurobagel/mutation-battery.ts loader     # one layer

@@ -91,7 +91,7 @@ A failure there is a bug and surfaces as a `NeurobagelRefusal` with code `output
 ## Curation
 
 Some annotations a table cannot yield mechanically: which diagnosis a free-text group value means, which column holds sex when it is called `gender`, which assessment tool a column is an item of, what an age column of placeholder zeros holds.
-They live in one reviewed file, `curation.json`, keyed by dataset id, and an entry applies only to the exact bytes it was reviewed against (architecture decision record, ADR, 0084).
+They live in one reviewed file, `curation.json`, keyed by dataset id, and an entry applies only to the exact bytes it was reviewed against (architecture decision record, ADR, 0083).
 
 ```json
 {

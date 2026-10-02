@@ -1,6 +1,6 @@
 /**
  * Convert Neurobagel's published OpenNeuro annotations into curation entries for NEMAR's mirrors
- * (epic #1586, phase 5; ADR 0084).
+ * (epic #1586, phase 5; ADR 0083).
  *
  *   bun run scripts/neurobagel/reuse-openneuro-annotations.ts --report <file>
  *       measure only: how many of the catalog's `on` datasets would be covered, and at what size

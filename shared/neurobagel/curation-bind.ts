@@ -1,5 +1,5 @@
 /**
- * Bind a curation entry to the table it was reviewed against (epic #1586, phase 5; ADR 0084).
+ * Bind a curation entry to the table it was reviewed against (epic #1586, phase 5; ADR 0083).
  *
  * The loader (curation.ts) judges the file from its text.
  * This module judges an entry against the dataset's own documents, which is where two more

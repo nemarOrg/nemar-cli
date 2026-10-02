@@ -1,4 +1,4 @@
-# ADR 0084: Curated Neurobagel annotations are a reviewed, content-pinned file keyed by dataset id
+# ADR 0083: Curated Neurobagel annotations are a reviewed, content-pinned file keyed by dataset id
 
 **Status:** accepted
 **Date:** 2026-10-02

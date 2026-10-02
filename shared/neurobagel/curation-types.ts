@@ -1,5 +1,5 @@
 /**
- * The types of a reviewed curation entry (epic #1586, phase 5; ADR 0084).
+ * The types of a reviewed curation entry (epic #1586, phase 5; ADR 0083).
  *
  * Types and the list of kinds: no logic, no vocabulary.
  * They are split from the loader (`curation.ts`) so that the transform and the

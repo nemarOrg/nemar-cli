@@ -1,5 +1,5 @@
 /**
- * Check every curation entry against the documents it pins (epic #1586, phase 5; ADR 0084).
+ * Check every curation entry against the documents it pins (epic #1586, phase 5; ADR 0083).
  *
  *   bun run scripts/neurobagel/curation-check.ts                     # against the captured fixtures
  *   bun run scripts/neurobagel/curation-check.ts --live              # against data.nemar.org now

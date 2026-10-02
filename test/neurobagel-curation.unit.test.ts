@@ -1,5 +1,5 @@
 /**
- * The curation loader and binder (epic #1586, phase 5; ADR 0084).
+ * The curation loader and binder (epic #1586, phase 5; ADR 0083).
  *
  * The committed `shared/neurobagel/curation.json` is the real input: the loader accepts it, and
  * every negative case below is that file with ONE thing made wrong, so a rejection is the

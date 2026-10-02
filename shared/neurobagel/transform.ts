@@ -21,7 +21,7 @@
  *     out; no join of mismatched ids is guessed.
  *   - A fact the rules cannot establish is left out and counted, never guessed
  *     (see participants.ts). EMG is never mapped to EEG.
- *     A reviewed curation entry (curation.ts, ADR 0084) can supply what the rules
+ *     A reviewed curation entry (curation.ts, ADR 0083) can supply what the rules
  *     leave out. It is applied only if the two participants documents are the bytes
  *     it pinned and it fits them, only to the graph's participants, and it is
  *     skipped whole, with a flag, otherwise: the mechanical output never changes

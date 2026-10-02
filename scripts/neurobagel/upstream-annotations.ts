@@ -1,6 +1,6 @@
 /**
  * Turn Neurobagel's published OpenNeuro annotation of a dataset into a curation entry for
- * NEMAR's mirror of it (epic #1586, phase 5; ADR 0084).
+ * NEMAR's mirror of it (epic #1586, phase 5; ADR 0083).
  *
  * Source: https://github.com/neurobagel/openneuro-annotations, MIT licence (see
  * test/neurobagel/upstream/LICENSE), one `dsNNNNNN.json` per OpenNeuro dataset, each a BIDS data

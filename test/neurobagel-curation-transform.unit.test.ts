@@ -1,5 +1,5 @@
 /**
- * Curation through the transform's one entry point (epic #1586, phase 5; ADR 0084).
+ * Curation through the transform's one entry point (epic #1586, phase 5; ADR 0083).
  *
  * `buildNeurobagelArtifacts` is driven exactly as the writer will drive it: the documents of a
  * real fixture, plus the entry `parseCuration` returns for the dataset.

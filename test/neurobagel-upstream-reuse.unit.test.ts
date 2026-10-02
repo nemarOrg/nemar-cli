@@ -1,5 +1,5 @@
 /**
- * Reuse of Neurobagel's published OpenNeuro annotations (epic #1586, phase 5; ADR 0084).
+ * Reuse of Neurobagel's published OpenNeuro annotations (epic #1586, phase 5; ADR 0083).
  *
  * Upstream is https://github.com/neurobagel/openneuro-annotations, MIT licence.
  * The converter (scripts/neurobagel/upstream-annotations.ts) is pure; here it is driven with the
