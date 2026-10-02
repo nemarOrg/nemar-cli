@@ -162,3 +162,24 @@ Renumbering (2026-10-02): the ADR index test requires gapless numbering, and Pha
 A dataset id that has an entry in the curation file is never converted without it: if loading or parsing the file or the entry fails, conversion stops for that dataset (no artifact written, an existing one left as is) and a needs-review finding is reported. Falling back to a conversion without the entry would publish false claims for datasets whose entry exists only to withdraw a mechanical mapping. All four curation flags (`curation_stale`, `curation_invalid`, `curation_unused`, `curation_withheld`) are needs-review findings. Import the curation loader lazily on the writer path only (about 850 KB of vocabulary). One cohort, nm000154 and on001787, shares an identical participants table and would be federated twice; this is an open owner question.
 
 Tracked follow-up (not a Phase): split `buildNeurobagelArtifacts` (about 513 lines) into stage modules, protected by the byte-identical goldens.
+
+## Findings from the Phase 4 implementation (2026-10-02)
+
+- The read route is flat, `GET /neurobagel/index.json` and `GET /neurobagel/<name>`, not `/neurobagel/artifacts/<name>`: the loader builds `<base>/<name>` and the index schema forbids a sub-directory, so an `artifacts/` segment would make every artifact unreachable.
+- The index's `fingerprint` is the schema's reference form (sha256 of the artifact hashes), because the loader's contract says it must change whenever any artifact does.
+  The input fingerprint the plan describes (row fields, latest version, manifest ETag, curation hash, transform version, vocabulary pin) is stored as R2 custom metadata on the JSON-LD and also appears in the index as the additive field `input_fingerprint`, which the loader ignores.
+- The data plane trusts a manifest copy for 60 seconds (ADR 0072), so a writer that stamps the CURRENT ETag but builds from a copy up to a minute older would stamp new metadata on old content, and nothing would ever correct it.
+  The writer evicts a copy whose ETag is not the current one before it gathers; a test that removes the eviction fails.
+- `metadata.json` carries `bids_index: null` exactly when the manifest digest could not be read, and the data plane answers 200 anyway.
+  The transform would then fall back to the participants table and publish a degraded graph over a good one, so the writer refuses such a document (`metadata_degraded`) and leaves the stored artifact alone.
+- The `not_anonymous` predicate term cannot be told apart from `first_published` while migration 0085's triggers hold, since anonymous implies unpublished.
+  It is the second line, not a duplicate: a table rebuild drops triggers.
+  Its mutation test drops them first and then shows the term necessary.
+- A cheap signature (the row's name, subject count, license, the length of its enrichment document, the latest version, the curation hash, the transform and vocabulary identity) lets one query find datasets that are probably stale; the daily window is the only way to find a manifest rewritten with no D1 change, so with 25 datasets a tick a full pass takes about 31 days.
+  The hooks give immediacy for a publication, a new version and an import, and an operator can backfill or force with `nemar admin neurobagel regenerate --execute --limit 200 [--force]`.
+- The loader refuses an empty index and a mass removal.
+  The last dataset to leave the federation therefore cannot leave through the index; `nb hold` is the way, and the runbook says so.
+- Not covered by the fingerprint, by design: a change to the data plane's own `metadata.json` builder (a new field, a corrected digest) moves neither a row nor an ETag.
+  `NEUROBAGEL_WRITER_REVISION` in `neurobagel-fingerprint.ts` is the manual knob and `force` is the operator's lever.
+  The Phase 2 `session_modalities` change is exactly such a change: after it is deployed, run a forced regeneration.
+- `scripts/neurobagel/writer-mutation-battery.ts` is the phase's mutation battery, in the style of phase 5's.

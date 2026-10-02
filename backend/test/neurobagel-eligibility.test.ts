@@ -174,6 +174,19 @@ describe("each term is necessary (mutation-style)", () => {
     });
   }
 
+  test("an UNKNOWN anonymous value is not false in TypeScript, and the schema cannot hold one in SQL", async () => {
+    // `anonymous` is NOT NULL, so no row can carry an unknown value and `= 0` and
+    // `COALESCE(.., 0) = 0` select the same rows today. The TypeScript form still refuses
+    // an unknown value (a row object built from a future schema, or a projection that lost
+    // the column), so the two stay equally strict if the constraint is ever relaxed.
+    seedDatasetRow(db, "nm000504");
+    expect(() =>
+      db.run("UPDATE datasets SET anonymous = NULL WHERE dataset_id = 'nm000504'"),
+    ).toThrow(/NOT NULL constraint failed: datasets\.anonymous/);
+    const { row } = await loadEligibleRow(realD1(db), "nm000504", PROD);
+    expect(isFederationEligible({ ...(row as FederationRow), anonymous: null }, PROD)).toBe(false);
+  });
+
   test("with the schema's triggers in place an anonymous row fails two terms, which back each other up", async () => {
     // The row the invariant allows: anonymous and NOT first-published.
     seedDatasetRow(db, "nm000502", { anonymous: 1, firstPublishedAt: null });

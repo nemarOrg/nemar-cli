@@ -267,6 +267,15 @@ describe("the hooks", () => {
     }
   });
 
+  test("the version hooks follow the metadata refresh they depend on (they read what it writes)", () => {
+    for (const file of ["routes/callbacks/manifest.ts", "routes/callbacks/version-doi.ts"]) {
+      const c = code(join(SRC, file));
+      const calls = [...c.matchAll(/scheduleNeurobagelSync\(([\s\S]*?)\);/g)];
+      expect(calls.length, file).toBeGreaterThan(0);
+      for (const call of calls) expect(call[1], file).toMatch(/after:\s*refreshed/);
+    }
+  });
+
   test("the writer runs the work inside waitUntil and catches everything", () => {
     const writer = code(WRITER);
     const fn = writer.slice(writer.indexOf("export function scheduleNeurobagelSync"));

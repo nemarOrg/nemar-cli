@@ -1138,6 +1138,24 @@ describe("the index is rebuilt from the listing", () => {
     expect(result.removed).toEqual([]);
   });
 
+  test("a JSON-LD the writer did not stamp as a whole set is never indexed, whatever else it carries", async () => {
+    seedSynthetic(h, "nm000695");
+    await run();
+    // The commit marker is the fingerprint on the JSON-LD. An object with the right
+    // hash and kind but no fingerprint is a set that was never completed.
+    const object = await h.bucket.get("nm000695.jsonld");
+    const body = await (object as R2ObjectBody).arrayBuffer();
+    await h.bucket.put("nm000695.jsonld", body, {
+      customMetadata: {
+        [META.sha256]: object?.customMetadata?.[META.sha256] as string,
+        [META.kind]: "jsonld",
+      },
+    });
+    const result = await run({ execute: false });
+    expect(result.index.skipped_incomplete).toEqual(["nm000695"]);
+    expect(result.index.changed).toBe(true);
+  });
+
   test("a set missing its companions is incomplete: rewritten, and not indexed until complete", async () => {
     seedSynthetic(h, "nm000694");
     await run();
@@ -1170,6 +1188,16 @@ describe("a tick examines at most N datasets, in a deterministic order", () => {
     const t4 = await run({ limit: 3 });
     expect(t4.results.every((r) => r.outcome === "unchanged")).toBe(true);
     expect((await storedIndex()).datasets).toHaveLength(7);
+  });
+
+  test("a dataset with nothing in the store is examined before one that merely changed", async () => {
+    for (const id of ["nm000700", "nm000701", "nm000702"]) seedSynthetic(h, id);
+    await run({ limit: 2 });
+    // 700 and 701 are written; 702 is missing; 700 then goes stale. Missing outranks stale
+    // even though 700 sorts first.
+    h.db.run("UPDATE datasets SET name = 'Late edit' WHERE dataset_id = 'nm000700'");
+    const dry = await run({ execute: false, limit: 2 });
+    expect(outcomes(dry)).toEqual(["nm000702:would_write", "nm000700:would_write"]);
   });
 
   test("the same inputs plan the same work (a pure function of inputs and date)", async () => {
