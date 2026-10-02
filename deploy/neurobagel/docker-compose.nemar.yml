@@ -8,8 +8,10 @@
 # and both compose files in the right order.
 #
 # Resource ceiling for the whole stack is 3 GiB (epic #1586): graph 2048 + api 512 + f-API 128
-# + query tool 64 + tunnel connector 128 = 2880 MiB. The init container (256 MiB limit) runs for
-# seconds during a reload and measured 30 MiB.
+# + query tool 64 + tunnel connector 128 = 2880 MiB. The init container (160 MiB) runs for seconds
+# during a reload, and the loader's validator container (the same image and limit) for seconds
+# before it; never both at once, because both run under one lock. With either of them the peak is
+# 3040 MiB with the tunnel connector and 2912 MiB without it, under 3 GiB (3072 MiB).
 # `mem_limit` equals `memswap_limit` everywhere, so a container is killed at its limit instead of
 # swapping or growing into memory that other services on the host need. `oom_score_adj` of 500 makes
 # every container of this project the kernel's first choice if the whole host ever runs out, and a
@@ -43,8 +45,8 @@ services:
         - python:3.11-slim=docker-image://python@sha256:bab1b7ef4b450c81002278d035eff85ebe394ae94df904f7a3ba14f7e16e487b
     restart: "no"
     logging: *logging
-    mem_limit: ${NB_INIT_MEM_LIMIT:-256m}
-    memswap_limit: ${NB_INIT_MEM_LIMIT:-256m}
+    mem_limit: ${NB_INIT_MEM_LIMIT:-160m}
+    memswap_limit: ${NB_INIT_MEM_LIMIT:-160m}
     cpus: ${NB_INIT_CPUS:-1.0}
     pids_limit: 128
     volumes:
