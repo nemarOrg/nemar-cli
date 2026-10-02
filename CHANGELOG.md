@@ -20,12 +20,16 @@ earlier releases are described only by their generated notes.
 - **A session scope and a service-binding entrypoint for the private site (#1577, ADR 0078,
   ADR 0079).** The private site (`private.nemar.org`, which hosts access-controlled
   features) reaches the API through a service binding to a new `NemarApiRpc` entrypoint,
-  not over HTTP. It has three methods: `resolvePrincipal` (who is this session, with the
-  account's live role and status), `exchangePrivateGrant` and `revokePrivateSession`. The
-  public API gains exactly one route, `POST /auth/private/grant`, called server-side by
-  the website's authorize page behind the app session and the NEMAR Origin allow-list.
-  It answers 401 without a session, 403 for an inactive account and 400 without a valid
-  `state`, and is `no-store`. A third `web_sessions` scope, `private`, is minted by the
+  not over HTTP. It has three methods: `resolvePrincipal` (a private-site session or an
+  API key in, the account behind it out, with its live role and status),
+  `exchangePrivateGrant` and `revokePrivateSession`. The public API gains exactly one
+  route, `POST /auth/private/grant`, called server-side by the website's authorize page
+  behind the app session and the NEMAR Origin allow-list. It answers 200 with
+  `{ code, expires_in }`, 403 `Origin not allowed` for a missing or foreign Origin
+  (checked first), 401 `unauthenticated` without a session, 429 past the per-account
+  limit, 403 with the usual inactive-account body for an account that is not active, and
+  400 `invalid_request` without a valid `state` (32 to 256 base64url characters). Every
+  answer is `no-store`. A third `web_sessions` scope, `private`, is minted by the
   same one-time-grant handoff the docs host uses (a 60-second code, traded once) for any
   active account, not only admins, and lasts 8 hours with no remember-me. Unlike the docs
   handoff it binds the browser that starts a sign-in to the one that finishes it: the
@@ -36,6 +40,9 @@ earlier releases are described only by their generated notes.
   account rather than by address, because every sign-in arrives from the website's few
   Cloudflare egress addresses (#1354). Maintenance mode applies to the entrypoint by the
   middleware's own rule: writes are refused in `read-only` and `full`, reads in `full`.
+  The entrypoint has no CORS and no rate limit of its own, and any Worker deployed in the
+  Cloudflare account can bind it, so the account's deploy permissions are part of this
+  API's security and no method takes a bare user id as authority (ADR 0078).
   A method for dataset facts was drafted and left out on purpose, until a caller settles
   how anonymous deposits and archived rows are disclosed.
   `shared/contract/private-site.ts` is the contract the other repositories transcribe.
@@ -45,15 +52,20 @@ earlier releases are described only by their generated notes.
   requesting. The CLI loops; the website sent one `{}` and reloaded, so a dataset over
   100 files would stop at `approving` with its DOI public and nothing locked. The route
   (admin only, no body) claims the newest active request with one conditional update,
-  records the clicking admin, and dispatches `repository_dispatch[approve-publication]`
-  to `nemarDatasets/.github`, which runs `nemar admin publish approve` on a runner. It
-  answers 202 `dispatched`, or 403 `origin_not_allowed` (a cookie request needs a NEMAR
-  `Origin`; a bearer key does not), 404 `not_found`, 409 `not_dispatchable` or
-  `already_in_flight`, or 502 `dispatch_failed`, `dispatch_unconfigured` or
-  `dispatch_unconfirmed`. The payload names an environment (`production` only for the
-  production Worker, `dev` for anything else including an unset value) and never a URL
-  or a credential. A dispatch whose reply is lost keeps the lease, because GitHub may
-  have accepted it; only a definite not-sent failure releases the claim.
+  records the clicking admin, clears `last_error`, and dispatches
+  `repository_dispatch[approve-publication]` to `nemarDatasets/.github`, which runs
+  `nemar admin publish approve` on a runner. It writes an `approval_dispatched` audit
+  row and answers 202 `dispatched` with `dataset_id`, `request_id` and `resume` (true
+  when the request was already `approving`), or 403 `origin_not_allowed` (a cookie
+  request needs a NEMAR `Origin`; a bearer key does not), 404 `not_found`, 409
+  `not_dispatchable` or `already_in_flight`, or 502 `dispatch_failed`,
+  `dispatch_unconfigured` or `dispatch_unconfirmed`. The payload names an environment
+  (`production` only for the production Worker, `dev` for anything else including an
+  unset value) and never a URL or a credential. A dispatch whose reply is lost keeps the
+  lease, because GitHub may have accepted it, so a retry answers 409 until the lease
+  lapses (up to 15 minutes); only a definite not-sent failure releases the claim, and it
+  puts the cleared `last_error` back. The lease gates only this route: a terminal
+  approval is never refused by it.
 - **`GET /admin/publish/requests` reports `approval_requested_by`,
   `approval_dispatched_at` and `approval_in_flight` (#1578).** `approval_in_flight` comes
   from the same SQL the claim uses, so a page never offers a button the route would
@@ -68,8 +80,9 @@ earlier releases are described only by their generated notes.
 - **A web approval is attributed to the admin who clicked, while their run is live
   (#1578).** The orchestrator reads `approval_requested_by` from the request it acts on
   and, while the time-only lease is live, records that admin in `approved_by`, the
-  `dataset_published` audit row and the `notify_user_failed` audit row, keeping the
-  executing account as `executed_by` in the details. A run that lapsed and was resumed by
+  `dataset_published` audit row and the `notify_user_failed` audit row; the
+  `dataset_published` details also keep the executing account as `executed_by`. A run
+  that lapsed and was resumed by
   a different admin at a terminal records that admin, and a terminal approval is
   unchanged. `POST /admin/publish/:id/approve` keeps its request and response contract;
   each attempt now starts by clearing `last_error`. One cost, stated in ADR 0080: a web
@@ -77,18 +90,20 @@ earlier releases are described only by their generated notes.
   under the executing key, while its `approval_dispatched` audit row still names the
   clicker.
 - **Sign-out, an admin account revoke and the owner soft delete also end the account's
-  private-site sessions and grants (#1577).** A role demotion and an API key revocation
-  deliberately leave `private` sessions alone, because `resolvePrincipal` reports the
-  live role on every call (ADR 0079 records why).
+  private-site sessions and grants (#1577).** A role demotion leaves `private` sessions
+  alone because `resolvePrincipal` reports the live role on every call, and an API key
+  revocation leaves them alone because a private session is never minted from a key
+  (ADR 0079 records both).
 - **The Worker entry module is `backend/src/worker.ts` (#1577).** It re-exports the HTTP
   app and cron handler from `index.ts` unchanged and adds `NemarApiRpc`, so `index.ts`
   never imports `cloudflare:workers`. `wrangler-sccn.toml` `main` points at it for both
   environments.
 - **The deploy workflow smoke-tests the private grant route on both environments
   (#1577).** After `/health` reports the new version, an anonymous
-  `POST /auth/private/grant` with an allowed Origin must answer 401. A 404 fails the
-  deploy (the route is missing from what shipped); in maintenance mode every POST is a
-  503 and the check warns instead of failing.
+  `POST /auth/private/grant` with an allowed Origin must answer 401. Any other answer
+  fails the deploy after three attempts (a 404 means the route is missing from what
+  shipped; network errors and 5xx are retried); in maintenance mode every POST is a 503
+  and the check warns instead of failing.
 
 ### Security
 
@@ -103,21 +118,32 @@ earlier releases are described only by their generated notes.
 - **`optionalAuthMiddleware` no longer identifies an account from an expired API key
   (#1577).** Its private copy of the key lookup had no `expires_at` predicate, so an
   expired key still resolved to its account on every route that reads the caller
-  optionally. It now shares the one lookup the rest of the API uses, which also means a
-  live key on those routes touches `last_used_at`, as it does everywhere else.
+  optionally (`GET /notices`, the catalog reads and the manifest reads). It now shares the
+  one lookup the rest of the API uses, still without the `last_used_at` write, so those
+  routes stay pure reads. Such a key is now anonymous there: `GET /datasets?mine=true`
+  and a non-public `GET /datasets/:id` answer 401 "Your API key was rejected". No
+  `INSERT INTO tokens` in the backend sets `expires_at` today, so this closes a latent gap
+  rather than one a live key could hit.
 
 ### Fixed
 
 - **A failed logout revoke names the account in the log (#1577).** The batch is
   all-or-nothing, so the account id is what an operator needs to finish the job by hand.
+- **The docs-session cascade after a key revoke names the account in its log (#1577).**
+  The line is now `[docs-auth] failed to cascade key revocation into docs sessions for
+  user <id>` (it was `[auth-keys] failed to cascade revocation into docs sessions`), so
+  update any log search that matches the old text.
 
 ### Migrations
 
 - `0089_private_site_sessions.sql` rebuilds `web_sessions` to widen
   `CHECK (scope IN ('app', 'docs'))` to include `'private'` (SQLite cannot alter a
-  `CHECK`), and adds `private_grants` with a required `state_hash`. Every row, column and
-  index is copied across; `_rebuild_guard` aborts before the `DROP` if the copy is short or
-  altered. This is the one migration in the release that is not additive. Cloudflare does
+  `CHECK`), and adds `private_grants` with a required `state_hash`. Every row and column
+  is copied across and the two existing indexes are recreated, plus two new ones (a
+  partial `idx_web_sessions_private_scope` and `idx_private_grants_expires`).
+  `_rebuild_guard` aborts before the `DROP` if the copy is short or altered, provided the
+  runner stops at the first failed statement: that holds for `wrangler --local` and
+  Miniflare and is unverified for the remote apply. This is the one migration in the release that is not additive. Cloudflare does
   not document the remote apply as atomic, so the file's header records the window (a stop
   between the `DROP` and the `RENAME` leaves no `web_sessions` table, with every row safe
   in `web_sessions_new`, which must then be renamed, never dropped) and the recovery: D1
@@ -125,20 +151,30 @@ earlier releases are described only by their generated notes.
   redeployed first.
 - `0090_approval_dispatch.sql` adds two nullable columns to `publication_requests`,
   `approval_requested_by INTEGER` and `approval_dispatched_at TEXT`, with no backfill and
-  no index. It is additive, so rolling the Worker back is enough: the 0.10.11 Worker
-  ignores both.
+  no index. It is additive, so rolling the Worker back is enough: the 0.10.11 Worker never
+  reads either column, except that `GET /admin/publish/requests` returns both raw (its
+  `SELECT pr.*`) and has no `approval_in_flight`, and its `/approve` does not attribute a
+  web run to the admin who clicked.
 
 ### Deploy coupling
 
-- The private site and the website's web-approval button deploy after this release;
-  neither is live until then. Existing clients see only additive fields on the publish
-  request list, plus the two `Security` changes above.
+- Migration 0089 rebuilds `web_sessions` on production, the table every sign-in reads.
+  Record a D1 Time Travel bookmark before the release; the migration's replay test
+  asserts that every session row survives the rebuild.
+- The private site, the website's private-site authorize page and the website's
+  web-approval button deploy after this release; none is live until then. Existing
+  clients see only additive fields on the publish request list, plus the two `Security`
+  changes above. The CLI itself does not change (its 10-second approve retry wait now
+  comes from a shared constant).
 - A web approval dispatches to `approve-publication.yml` in `nemarDatasets/.github`,
   which already exists on its default branch. A dispatch with no workflow would do
   nothing and the page would read "queued" until the lease lapsed.
 - A failure inside the workflow before it reaches `/approve` (a missing secret, a failed
   install) is invisible to the backend: nothing is written and the lease lapses on its
-  own, up to 15 minutes. Releasing it on failure is #1582.
+  own, up to 15 minutes. So is a refusal inside the orchestrator before its step loop
+  (the sandbox, no-repository, dataset-not-found and invalid-repository answers): the row
+  is left `approving` with a fresh `updated_at` and no `last_error`, so the page reads
+  "running" for the lease. Releasing it on failure is #1582.
 
 ### Known limitations
 
