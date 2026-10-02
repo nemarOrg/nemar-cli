@@ -111,6 +111,23 @@ const PRE_CHANGE = JSON.parse(
 
 const sorted = (xs: string[]) => [...xs].sort();
 
+/**
+ * One subject whose directory names are properties of every JavaScript object,
+ * as datatypes outside a session (`__proto__`, `constructor`, `toString`,
+ * `hasOwnProperty`), as a session label (`ses-constructor`, `ses-toString`),
+ * and as a datatype inside one.
+ */
+const CRAFTED_PATHS = [
+  "sub-04/__proto__/x.txt",
+  "sub-04/constructor/x.txt",
+  "sub-04/hasOwnProperty/x.txt",
+  "sub-04/ses-constructor/eeg/x.txt",
+  "sub-04/ses-toString/__proto__/x.txt",
+  "sub-04/toString/x.txt",
+];
+/** Every datatype the paths above name, sorted the way the index sorts them. */
+const CRAFTED_DATATYPES = ["__proto__", "constructor", "eeg", "hasOwnProperty", "toString"];
+
 /** The rules every index must satisfy whatever manifest it came from. */
 function expectConsistent(subjects: Subjects): void {
   for (const [subject, node] of Object.entries(subjects)) {
@@ -337,6 +354,26 @@ describe("rules the real manifests cannot reach, on synthetic manifests", () => 
     expect(map.baseline).toEqual(["eeg"]);
   });
 
+  // A datatype key is whatever directory name the manifest holds. Names that
+  // are also properties of every JavaScript object are the ones a plain
+  // `obj[name] = value` can get wrong: `__proto__` sets a prototype instead of
+  // an own key (the datatype vanished from `modalities` while the
+  // `session_modalities` lists still named it), `constructor`, `toString` and
+  // `hasOwnProperty` shadow inherited members. No real manifest has these, so
+  // this rule rests on synthetic paths alone.
+  test("directory names that are Object.prototype members are datatypes like any other", () => {
+    const node = buildBidsIndex(files(...CRAFTED_PATHS))["sub-04"];
+    expect(Object.keys(node.modalities)).toEqual(CRAFTED_DATATYPES);
+    expect(Object.keys(node.session_modalities).sort()).toEqual(
+      ["constructor", "no-session", "toString"].sort(),
+    );
+    expect(node.session_modalities[NS]).toEqual(CRAFTED_DATATYPES.filter((d) => d !== "eeg"));
+    expect(node.session_modalities.constructor).toEqual(["eeg"]);
+    expect(node.session_modalities.toString).toEqual(["__proto__"]);
+    expect(node.sessions).toEqual(["constructor", "toString"]);
+    expectConsistent({ "sub-04": node });
+  });
+
   // `add` is a set insertion, so neither order nor a repeated path may change
   // the bytes. A streamed manifest can present paths in any order (an unsorted
   // one is the case ADR 0072 handles), so the bytes must not depend on it.
@@ -458,5 +495,40 @@ describe("GET /<id>/metadata.json, through the real route", () => {
   test("the same request twice serves the same bytes", async () => {
     const id = "on007347";
     expect(await harness.metadataText(id)).toBe(bodyOf(id));
+  });
+
+  // The builder test above covers the rule; this proves it survives the
+  // route's serialization and a consumer's parse. A manifest is a JSON object
+  // keyed by path, so `__proto__` is never a manifest key itself, only part of
+  // one, and the stand-in serves it like any other.
+  test("a manifest with Object.prototype-named directories serves them all, in both maps", async () => {
+    const id = "nm000977";
+    const crafted = {
+      ...fixtureManifest(fixtureById("nm000132")),
+      dataset_id: id,
+      files: Object.fromEntries(
+        [...CRAFTED_PATHS].sort().map((p) => [p, { key: `git:${p}`, size: 1, checksum: p }]),
+      ),
+    };
+    harness.serveManifest(id, "v1.1.1", JSON.stringify(crafted));
+    resetManifestAnswerMemo();
+    __resetPublicReadCacheForTests();
+    const body = await harness.metadataText(id);
+    const node = (
+      JSON.parse(body) as {
+        extensions: { nemar: { bids_index: { subjects: Subjects } } };
+      }
+    ).extensions.nemar.bids_index.subjects["sub-04"];
+    // `Object.keys`, not `toEqual` or a property read: `__proto__` must be an
+    // OWN key of the parsed document, and `node.modalities.__proto__` would
+    // read the prototype whether or not it is.
+    expect(Object.keys(node.modalities)).toEqual(CRAFTED_DATATYPES);
+    expect(Object.keys(node.session_modalities).sort()).toEqual(
+      ["constructor", "no-session", "toString"].sort(),
+    );
+    expect(node.session_modalities[NS]).toEqual(CRAFTED_DATATYPES.filter((d) => d !== "eeg"));
+    expectConsistent({ "sub-04": node });
+    // Parse and serialize again: an own `__proto__` key survives both.
+    expect(JSON.stringify(JSON.parse(body))).toBe(body);
   });
 });

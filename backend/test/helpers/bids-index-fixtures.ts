@@ -80,6 +80,12 @@ export function fixtureManifest(fixture: BidsIndexFixture): VersionManifest {
 export interface MetadataJsonHarness {
   s3: S3ManifestStandin;
   db: Database;
+  /**
+   * Publish one more public dataset with one version whose manifest is `text`,
+   * for a manifest that exists only to reach a rule no real one does. The
+   * caller picks an id that is not a fixture's.
+   */
+  serveManifest(id: string, version: string, text: string): void;
   /** `GET /<id>/metadata.json` as text, for byte-level comparison. */
   metadataText(id: string): Promise<string>;
   stop(): void;
@@ -90,17 +96,18 @@ export function startMetadataJsonHarness(
 ): MetadataJsonHarness {
   const s3 = startS3ManifestStandin();
   const db = freshDb();
-  for (const fixture of fixtures) {
+  const serveManifest = (id: string, version: string, text: string): void => {
     db.prepare(
       `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, is_sandbox)
        VALUES (?, ?, 1, 'active', 'public', 0)`,
-    ).run(fixture.id, fixture.id);
+    ).run(id, id);
     db.prepare(
       `INSERT INTO dataset_versions (dataset_id, version, doi, provider, created_at)
        VALUES (?, ?, ?, 'ezid', '2026-04-04 06:05:15')`,
-    ).run(fixture.id, fixture.version.slice(1), `10.5072/FK2${fixture.id}`);
-    s3.put(`/${fixture.id}/version/${fixture.version}.json`, fixtureText(fixture));
-  }
+    ).run(id, version.slice(1), `10.5072/FK2${id}`);
+    s3.put(`/${id}/version/${version}.json`, text);
+  };
+  for (const fixture of fixtures) serveManifest(fixture.id, fixture.version, fixtureText(fixture));
   const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
   app.route("/", dataRoutes);
   const env = {
@@ -116,6 +123,7 @@ export function startMetadataJsonHarness(
   return {
     s3,
     db,
+    serveManifest,
     async metadataText(id: string): Promise<string> {
       const res = await app.request(`https://data.nemar.org/${id}/metadata.json`, {}, env);
       if (res.status !== 200) throw new Error(`metadata.json for ${id} answered ${res.status}`);

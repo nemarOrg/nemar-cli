@@ -1094,7 +1094,14 @@ export class BidsIndexBuilder {
     const out: Record<string, BidsIndexSubjectNode> = {};
     for (const subject of Object.keys(acc).sort()) {
       const node = acc[subject];
-      const modalities: Record<string, BidsIndexModalityNode> = {};
+      // A datatype key is whatever directory name the manifest holds, so it
+      // can be `__proto__`, and `obj["__proto__"] = x` sets a prototype instead
+      // of an own key: the datatype would vanish from `modalities` while
+      // `session_modalities` still listed it. `Object.fromEntries` defines own
+      // properties, so the two agree for every name, and the bytes are the
+      // same as assignment for every other name. Task and session labels are
+      // alphanumeric and subjects start `sub-`, so they cannot be `__proto__`.
+      const modalityEntries: [string, BidsIndexModalityNode][] = [];
       for (const mod of [...node.modalities.keys()].sort()) {
         const tasksMap = node.modalities.get(mod);
         if (!tasksMap) continue;
@@ -1102,12 +1109,14 @@ export class BidsIndexBuilder {
         for (const task of [...tasksMap.keys()].sort()) {
           tasks[task] = { runs: [...(tasksMap.get(task) ?? [])].sort() };
         }
-        modalities[mod] = { tasks };
+        modalityEntries.push([mod, { tasks }]);
       }
-      const sessionModalities: Record<string, string[]> = {};
-      for (const key of [...node.sessionModalities.keys()].sort()) {
-        sessionModalities[key] = [...(node.sessionModalities.get(key) ?? [])].sort();
-      }
+      const modalities: Record<string, BidsIndexModalityNode> = Object.fromEntries(modalityEntries);
+      const sessionModalities: Record<string, string[]> = Object.fromEntries(
+        [...node.sessionModalities.keys()]
+          .sort()
+          .map((key) => [key, [...(node.sessionModalities.get(key) ?? [])].sort()]),
+      );
       out[subject] = {
         sessions: [...node.sessions].sort(),
         modalities,
