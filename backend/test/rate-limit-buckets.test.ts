@@ -25,6 +25,7 @@ import {
   rateLimiter,
 } from "../src/middleware/rateLimit";
 import { createMcpRoutes } from "../src/routes/mcp";
+import { neurobagelRoutes } from "../src/routes/neurobagel";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { InMemoryCache } from "./helpers/cache";
 
@@ -738,3 +739,101 @@ describe("the API is mounted twice, and both spellings must bucket alike", () =>
     expect(zarr.keyKind).toBe("data-ip");
   });
 });
+
+describe("the Neurobagel read route has its own IP-keyed bucket (epic #1586 phase 4)", () => {
+  const IP = "203.0.113.77";
+  const ROUTES = [
+    "/neurobagel/index.json",
+    "/neurobagel/nm000132.jsonld",
+    "/neurobagel",
+    "/neurobagel/",
+    "/nemar/neurobagel/index.json",
+  ];
+
+  test("every spelling is IP-keyed whatever bearer it carries, at the route's own cap", () => {
+    for (const route of ROUTES) {
+      for (const auth of [
+        undefined,
+        `Bearer ${VALID_TOKEN}`,
+        "Bearer made-up-0123456789abcdef0123456789abcdef",
+      ]) {
+        const sel = __selectBucket(route, auth, IP);
+        expect(sel.keyKind).toBe("neurobagel-ip");
+        expect(sel.rawKey).toBe(IP);
+        expect(sel.maxRequests).toBe(__limits.NEUROBAGEL_MAX_REQUESTS);
+      }
+    }
+  });
+
+  test("the cap holds a first load of about 800 datasets (index + 3 files each) and is not unbounded", () => {
+    // The loader fetches the index and then up to three files per dataset in one run.
+    expect(__limits.NEUROBAGEL_MAX_REQUESTS).toBeGreaterThan(MAX_ANONYMOUS_FLOOR_FOR_LOADER);
+    expect(__limits.NEUROBAGEL_MAX_REQUESTS).toBeLessThanOrEqual(5000);
+  });
+
+  test("a lookalike path is not the route", () => {
+    for (const route of [
+      "/neurobagelx/index.json",
+      "/xneurobagel/index.json",
+      "/datasets/neurobagel",
+    ]) {
+      expect(__selectBucket(route, undefined, IP).keyKind).toBe("ip");
+    }
+  });
+
+  test("rotating made-up bearers neither mint a bucket per request nor reach the privileged-token lookup", async () => {
+    // The hole `anonymousSurface` documents for /mcp: with the bearer branch the bucket
+    // would be keyed on the bearer, so each fresh string would get a fresh allowance, and
+    // each would cost a D1 lookup (here DB is undefined, so a lookup would throw: a 500).
+    const app = new Hono<AppEnv>();
+    app.use("*", rateLimiter);
+    app.route("/neurobagel", neurobagelRoutes);
+    const env = PROD_ENV;
+    // The privileged-token lookup logs when it cannot reach D1 (here there is none), so
+    // a log line is the witness that a lookup was attempted.
+    const lookups: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      lookups.push(args.map(String).join(" "));
+    };
+    let limited = 0;
+    let served = 0;
+    const total = __limits.NEUROBAGEL_MAX_REQUESTS + 10;
+    for (let i = 0; i < total; i++) {
+      const res = await hit(app, env, "/neurobagel/index.json", {
+        Authorization: `Bearer rotating-${i}-0123456789abcdef0123456789abcdef`,
+        "CF-Connecting-IP": IP,
+      });
+      // No token or bucket is configured on this env, so the route itself answers 404;
+      // what is under test is that the limiter counts all of them against ONE bucket.
+      if (res.status === 429) limited++;
+      else if (res.status === 404) served++;
+      else throw new Error(`unexpected status ${res.status}`);
+    }
+    console.warn = originalWarn;
+    expect(served).toBe(__limits.NEUROBAGEL_MAX_REQUESTS);
+    expect(limited).toBe(10);
+    expect(lookups.filter((l) => l.includes("admin-flag lookup"))).toEqual([]);
+  });
+
+  test("another IP has its own allowance", async () => {
+    const app = new Hono<AppEnv>();
+    app.use("*", rateLimiter);
+    app.route("/neurobagel", neurobagelRoutes);
+    for (let i = 0; i < __limits.NEUROBAGEL_MAX_REQUESTS + 3; i++) {
+      await hit(app, PROD_ENV, "/neurobagel/index.json", { "CF-Connecting-IP": "198.51.100.1" });
+    }
+    const other = await hit(app, PROD_ENV, "/neurobagel/index.json", {
+      "CF-Connecting-IP": "198.51.100.2",
+    });
+    expect(other.status).toBe(404);
+    const over = await hit(app, PROD_ENV, "/neurobagel/index.json", {
+      "CF-Connecting-IP": "198.51.100.1",
+    });
+    expect(over.status).toBe(429);
+    expect(over.headers.get("X-RateLimit-Bucket")).toBe("neurobagel-ip");
+  });
+});
+
+/** The anonymous floor a first load would overrun: three files for each of ~800 datasets, sequentially. */
+const MAX_ANONYMOUS_FLOOR_FOR_LOADER = 500;

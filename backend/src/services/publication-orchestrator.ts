@@ -69,6 +69,7 @@ import {
 } from "./github";
 import { getDatasetsToken } from "./github-auth";
 import { generateManifest } from "./manifest";
+import { scheduleNeurobagelSync } from "./neurobagel-hooks.js";
 import { BIDS_METADATA_UNAVAILABLE, errorMessage, readRepoMetadata } from "./repo-metadata";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "./repo-spec";
 import { withRetry } from "./retry";
@@ -2453,6 +2454,11 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
       anonymousRelease,
     );
     const retryWarnings = [retryWarning, retryVersionWarning].filter(Boolean);
+    // Neurobagel federation (epic #1586 phase 4, ADR 0084): a run whose steps are all
+    // complete is still a publication that may not have been federated yet. A hook,
+    // never a step: it does nothing unless the writer is enabled, runs in `waitUntil`,
+    // and cannot fail or delay this response.
+    scheduleNeurobagelSync(env, waitUntil, datasetId, "hook:publication");
     return c.json({
       message: "All steps already completed",
       dataset_id: datasetId,
@@ -2652,6 +2658,14 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     )
     .bind(request.id)
     .run();
+
+  // Neurobagel federation (epic #1586 phase 4, ADR 0084): the dataset is published.
+  // A hook, never a step: it does nothing unless the writer is enabled (the default is
+  // off), runs in `waitUntil` and catches every failure, so it can neither fail nor
+  // delay this approval. A dataset whose version row has not landed yet (the central
+  // manifest job writes it later) is not eligible yet, and the manifest-ready callback
+  // runs the same hook when it does.
+  scheduleNeurobagelSync(env, waitUntil, datasetId, "hook:publication");
 
   // Audit log (non-fatal but warn user if fails)
   let auditLogFailed = false;

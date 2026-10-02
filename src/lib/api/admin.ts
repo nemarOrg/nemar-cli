@@ -22,6 +22,11 @@ import {
   clearIdentityConflictResponseSchema,
   duplicateReportSchema,
 } from "../../../shared/contract/index.js";
+import type {
+  NeurobagelRegenerateRequest,
+  NeurobagelRunResult,
+  NeurobagelStatus,
+} from "../../../shared/contract/neurobagel-admin.js";
 import type { BackfillNameOutcome } from "../../../shared/contract/publication.js";
 import { request } from "./client.js";
 
@@ -1535,6 +1540,39 @@ export async function publishZarrCatalog(): Promise<PublishZarrCatalogResponse> 
     { method: "POST" },
     true,
   );
+}
+
+// ============================================================================
+// Neurobagel artifact store (epic #1586 phase 4, ADR 0084)
+// ============================================================================
+
+// The wire shapes live in shared/contract so the Worker that answers and this client that
+// prints read one definition; a field the writer adds is a type error here, not a blank.
+export type {
+  NeurobagelDatasetResult,
+  NeurobagelRegenerateRequest,
+  NeurobagelRunResult,
+  NeurobagelRunSummary,
+  NeurobagelStatus,
+} from "../../../shared/contract/neurobagel-admin.js";
+
+/**
+ * Examine datasets for the Neurobagel artifact store and, only with `execute: true`,
+ * write what changed. Dry run by default; the server refuses `execute` unless the
+ * writer is enabled.
+ */
+export async function neurobagelRegenerate(
+  body: NeurobagelRegenerateRequest,
+): Promise<NeurobagelRunResult> {
+  return request<NeurobagelRunResult>(
+    "/admin/neurobagel/regenerate",
+    { method: "POST", body: JSON.stringify(body) },
+    true,
+  );
+}
+
+export async function getNeurobagelStatus(): Promise<NeurobagelStatus> {
+  return request<NeurobagelStatus>("/admin/neurobagel/status", { method: "GET" }, true);
 }
 
 // ============================================================================

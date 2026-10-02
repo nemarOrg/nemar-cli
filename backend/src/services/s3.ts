@@ -623,6 +623,51 @@ export async function fetchManifestObject(
 }
 
 /**
+ * What {@link headManifestObject} found. `etag` is null only when S3 answered
+ * without one, which a caller that needs a fingerprint must treat as unknown.
+ */
+export type ManifestHead = { kind: "found"; etag: string | null } | { kind: "absent" };
+
+/**
+ * HEAD a version manifest for its ETag, moving none of its bytes (epic #1586,
+ * phase 4: the Neurobagel writer fingerprints a dataset by it). Same access
+ * strategy as {@link fetchManifestObject}: unsigned first, a signed retry on 403,
+ * `absent` for a 404 or a 403 that survives the retry, a throw for anything else.
+ * `endpointUrl` is the same test-only origin override every function here honors.
+ */
+export async function headManifestObject(
+  options: PresignedUrlOptions,
+  datasetId: string,
+  version: string,
+): Promise<ManifestHead> {
+  const { bucket, region, endpointUrl } = options;
+  const key = versionArtifactKey(datasetId, version, "");
+  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+  const origin = (endpointUrl ?? `https://${bucket}.s3.${region}.amazonaws.com`).replace(
+    /\/+$/,
+    "",
+  );
+  const url = `${origin}/${encodedKey}`;
+
+  let response = await fetch(url, { method: "HEAD" });
+  if (response.status === 403) {
+    try {
+      const aws = createS3Client(options);
+      response = await fetch(await aws.sign(url, { method: "HEAD" }));
+    } catch (err) {
+      console.error(
+        `[s3] headManifestObject signed-fallback failed dataset=${datasetId} version=${version}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      return { kind: "absent" };
+    }
+  }
+  if (response.status === 404 || response.status === 403) return { kind: "absent" };
+  if (!response.ok) throw new Error(`Failed to HEAD manifest: HTTP ${response.status}`);
+  return { kind: "found", etag: response.headers.get("ETag") };
+}
+
+/**
  * Build the S3 object key for a per-version JSON artifact. The suffix
  * selects the sibling: "" = the canonical manifest (`version/v<X>.json`),
  * "-summary" = the summary sibling (#559), "-records" = the records sibling
