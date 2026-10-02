@@ -455,11 +455,11 @@ export function approvalDispatchEnvironment(env: {
 export const APPROVE_DISPATCH_TIMEOUT_MS = 10_000;
 
 /**
- * GitHub ANSWERED the dispatch with a non-2xx, so the event was not created.
- * That is the one failure of the call that is definitely "not sent": a thrown
- * fetch or a timeout is different, because GitHub may have accepted the
- * request and lost only the answer. Callers branch on this class to decide
- * whether it is safe to release the claim they made before dispatching.
+ * GitHub ANSWERED the dispatch with a non-2xx. Whether the event was created
+ * depends on the status, and callers branch on {@link definitelyNotSent} to
+ * decide whether it is safe to release the claim they made before dispatching.
+ * A thrown fetch or a timeout is a third case, and not an instance of this
+ * class: GitHub may have accepted the request and lost only the answer.
  */
 export class DispatchRejectedError extends Error {
   constructor(
@@ -468,6 +468,18 @@ export class DispatchRejectedError extends Error {
   ) {
     super(`Failed to trigger approve-publication: HTTP ${httpStatus} - ${detail}`);
     this.name = "DispatchRejectedError";
+  }
+
+  /**
+   * True only for a 4xx: GitHub refused the request itself (a bad token, a
+   * missing repository, a malformed payload), which it does before it creates
+   * an event. A 5xx is NOT "not sent". A 502, 503 or 504 comes from GitHub's
+   * edge and can be returned after the event was already queued, the same
+   * lost-answer case as a dropped connection, and releasing the claim then
+   * would let the next click start a second run beside the first.
+   */
+  get definitelyNotSent(): boolean {
+    return this.httpStatus < 500;
   }
 }
 
@@ -483,11 +495,12 @@ export class DispatchRejectedError extends Error {
  * environment. It carries no credential and no URL.
  *
  * Failure has two meanings, and the difference matters to the caller:
- *   - {@link DispatchRejectedError}: GitHub answered non-2xx. Nothing was sent.
+ *   - {@link DispatchRejectedError} with `definitelyNotSent` (a 4xx): GitHub
+ *     refused the request. Nothing was sent.
  *   - anything else a rejected promise carries (a dropped connection, a
- *     `TimeoutError` after `timeoutMs`): UNKNOWN. GitHub may have accepted the
- *     dispatch and lost only the reply, so a caller must not assume nothing
- *     started.
+ *     `TimeoutError` after `timeoutMs`, or a {@link DispatchRejectedError} for a
+ *     5xx): UNKNOWN. GitHub may have accepted the dispatch and lost only the
+ *     reply, so a caller must not assume nothing started.
  * The error text names GitHub's status and body, never the token. `pat` must
  * carry write access on the central repo's dispatch endpoint -- use
  * `getDatasetsToken()`.
