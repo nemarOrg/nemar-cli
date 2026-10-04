@@ -97,6 +97,20 @@ describe("stage files", () => {
     expect(() => parseGitPlan(JSON.stringify({ version: 1, dropPaths: [] }))).toThrow(
       ContractError,
     );
+    const gp = { version: 1, dropPaths: [], blankJsonKeys: {}, appendText: {} };
+    expect(parseGitPlan(JSON.stringify({ ...gp, dataset: "d" })).dropPaths).toEqual([]);
+    const withOps = {
+      ...gp,
+      dataset: "d",
+      jsonOps: { "p.json": [{ op: "set", key: "k", value: "v" }] },
+    };
+    expect(parseGitPlan(JSON.stringify(withOps)).jsonOps?.["p.json"]?.length).toBe(1);
+    expect(() =>
+      parseGitPlan(JSON.stringify({ ...gp, dataset: "d", jsonOps: { "p.json": [{ op: "rm" }] } })),
+    ).toThrow(ContractError);
+    expect(() =>
+      parseGitPlan(JSON.stringify({ ...gp, dataset: "d", jsonOps: { "p.json": "x" } })),
+    ).toThrow(ContractError);
     const plan = { version: 1, dataset: "d", keys: [{ oldKey: OLD }] };
     expect(parsePlan(JSON.stringify(plan)).keys.length).toBe(1);
   });

@@ -116,7 +116,20 @@ export interface GitPlanFile {
   blankJsonKeys: Record<string, string[]>;
   /** Appended to each listed text file in every commit that has it; the file is created if absent. */
   appendText: Record<string, string>;
+  /**
+   * Structural edits to JSON files, by exact path, applied in order in every commit that has the
+   * file. Needed for a provenance file that lists the files being removed.
+   */
+  jsonOps?: Record<string, JsonOp[]>;
 }
+
+export type JsonOp =
+  /** Remove entries of a top-level array whose `matchField` equals one of `matchValues`. */
+  | { op: "drop-array-entries"; array: string; matchField: string; matchValues: string[] }
+  /** Recompute a count and a byte total from a top-level array, after entries were dropped. */
+  | { op: "recount"; array: string; countKey: string; sumKey: string; sumField: string }
+  /** Set a top-level key to a constant string (for example a privacy-correction note). */
+  | { op: "set"; key: string; value: string };
 
 /** One line of the corrective-action ledger. Counts and fixed words only. */
 export interface LedgerEntry {
@@ -238,6 +251,18 @@ export function parseGitPlan(text: string): GitPlanFile {
     !isObject(x.appendText)
   ) {
     throw new ContractError("git-plan.json does not match the contract");
+  }
+  if (x.jsonOps !== undefined) {
+    if (!isObject(x.jsonOps)) throw new ContractError("git-plan.json jsonOps is not an object");
+    for (const ops of Object.values(x.jsonOps)) {
+      if (!Array.isArray(ops)) throw new ContractError("git-plan.json jsonOps holds a non-list");
+      for (const o of ops as unknown[]) {
+        const kind = isObject(o) ? o.op : undefined;
+        if (kind !== "drop-array-entries" && kind !== "recount" && kind !== "set") {
+          throw new ContractError("git-plan.json jsonOps holds an unknown op");
+        }
+      }
+    }
   }
   return x as unknown as GitPlanFile;
 }
