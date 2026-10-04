@@ -771,6 +771,38 @@ describe("status from EDF/BDF headers", () => {
     expect(record.incomplete).toBe(false);
   });
 
+  test("a start date that is not a date is review, not dates-only and not clean", async () => {
+    const garbage = await scanFiles({ [EDF]: edfHeader({ startdate: "xx.xx.xx" }) });
+    expect(garbage.record.status).toBe("review");
+    expect(garbage.record.findings_by_kind?.["edf-startdate-unparsed"]).toBe(1);
+    const parsed = await scanFiles({ [EDF]: edfHeader({ startdate: "14.03.93" }) });
+    expect(parsed.record.status).toBe("dates-only");
+    const clipped = await scanFiles({ [EDF]: edfHeader({ startdate: "01.01.85" }) });
+    expect(clipped.record.status).toBe("clean");
+  });
+
+  test("a record number in the patient field is review; a study code is clean", async () => {
+    const number = await scanFiles({ [EDF]: edfHeader({ patient: "12345678 F X X" }) });
+    expect(number.record.status).toBe("review");
+    expect(number.record.findings_by_kind?.["edf-patient-recordnumber"]).toBe(1);
+    const code = await scanFiles({ [EDF]: edfHeader({ patient: "P01 F X X" }) });
+    expect(code.record.status).toBe("clean");
+  });
+
+  test("free text in the recording id decides by severity: identifier is direct, review is review", async () => {
+    const named = await scanFiles({ [EDF]: edfHeader({ recording: "Quillfeather Annabelle" }) });
+    expect(named.record.findings_by_kind?.["edf-recording-freetext"]).toBe(1);
+    expect(named.record.status).toBe("direct-identifiers");
+    // The same kind at review severity (a name in the technician slot) stays review.
+    const technician = await scanFiles({
+      [EDF]: edfHeader({ recording: "Startdate X Quillfeather X" }),
+    });
+    expect(technician.record.findings_by_kind?.["edf-recording-freetext"]).toBe(1);
+    expect(technician.record.status).toBe("review");
+    const placeholder = await scanFiles({ [EDF]: edfHeader() });
+    expect(placeholder.record.status).toBe("clean");
+  });
+
   test("an image or document is review; the same dataset without it is clean", async () => {
     const withPdf = await scanFiles({ [EDF]: CLEAN, "sourcedata/consent.pdf": "x" });
     expect(withPdf.record.status).toBe("review");
@@ -848,6 +880,88 @@ describe("status from recording formats", () => {
       "sourcedata/export.json": JSON.stringify({ PatientName: "Ottoline" }),
     });
     expect(record.status).toBe("direct-identifiers");
+  });
+});
+
+describe("recording data this scanner cannot parse is counted by what the file is", () => {
+  const bids = (name: string, ext: string) => `sub-01/${name}/sub-01_task-a_${name}.${ext}`;
+  const never = (w: StandIn, ...paths: string[]) => {
+    for (const path of paths) expect(w.hits(w.pathOf(ID, path))).toBe(0);
+  };
+
+  test("a MEG directory beside a clean EDF is not clean; two files in it count once", async () => {
+    const files = {
+      [EDF]: CLEAN,
+      "sub-01/meg/sub-01_task-a_meg.ds/a.meg4": "x",
+      "sub-01/meg/sub-01_task-a_meg.ds/a.res4": "y",
+    };
+    const { w, record } = await scanFiles(files);
+    expect(record.status).toBe("clean-edf-only-others-unscreened");
+    expect(record.unscreened_formats).toEqual({ ".ds/": 1 });
+    expect(record.incomplete).toBe(false);
+    never(w, "sub-01/meg/sub-01_task-a_meg.ds/a.meg4", "sub-01/meg/sub-01_task-a_meg.ds/a.res4");
+    // Twin: a second .ds directory is a second recording.
+    const two = await scanFiles({ ...files, "sub-02/meg/sub-02_task-a_meg.ds/a.meg4": "z" });
+    expect(two.record.unscreened_formats).toEqual({ ".ds/": 2 });
+    // Twin: without the directory the dataset is plain clean.
+    const alone = await scanFiles({ [EDF]: CLEAN });
+    expect(alone.record.status).toBe("clean");
+  });
+
+  test(".hdf5 only is not-screened, not no-recordings; a dataset with no data file is no-recordings", async () => {
+    const file = bids("eeg", "hdf5");
+    const { w, record } = await scanFiles({ [file]: "x", "dataset_description.json": "{}" });
+    expect(record.status).toBe("not-screened");
+    expect(record.unscreened_formats).toEqual({ ".hdf5": 1 });
+    never(w, file);
+    const none = await scanFiles({ "dataset_description.json": "{}" });
+    expect(none.record.status).toBe("no-recordings");
+  });
+
+  test(".edf.gz only is not-screened and is never read as an EDF header", async () => {
+    const file = bids("eeg", "edf.gz");
+    const { w, record } = await scanFiles({ [file]: CLEAN });
+    expect(record.status).toBe("not-screened");
+    expect(record.unscreened_formats).toEqual({ ".edf.gz": 1 });
+    expect(record.files?.edf_bdf).toBe(0);
+    never(w, file);
+    // Twin: the same bytes named .edf are read, and are clean.
+    const plain = await scanFiles({ [bids("eeg", "edf")]: CLEAN });
+    expect(plain.record.status).toBe("clean");
+    expect(plain.record.files?.header_read).toBe(1);
+  });
+
+  test("a BIDS data file in a format nobody listed is still counted; its JSON and TSV companions are not", async () => {
+    const odd = await scanFiles({ [bids("eeg", "xyz")]: "x" });
+    expect(odd.record.status).toBe("not-screened");
+    expect(odd.record.unscreened_formats).toEqual({ ".xyz": 1 });
+    const companions = await scanFiles({
+      [bids("eeg", "json")]: "{}",
+      [bids("eeg", "tsv")]: "a\tb\n",
+    });
+    expect(companions.record.status).toBe("no-recordings");
+  });
+
+  test("other signal files count wherever they sit: .mat, .h5, .bdf.gz", async () => {
+    const { record } = await scanFiles({
+      "sourcedata/export.mat": "x",
+      "sourcedata/run1.h5": "y",
+      [bids("emg", "bdf.gz")]: "z",
+    });
+    expect(record.status).toBe("not-screened");
+    expect(record.unscreened_formats).toEqual({ ".mat": 1, ".h5": 1, ".bdf.gz": 1 });
+  });
+
+  test("the other directory formats count once per directory: .mff/, .mefd/, .zarr/", async () => {
+    const { record } = await scanFiles({
+      "sub-01/eeg/sub-01_task-a_eeg.mff/signal1.bin": "x",
+      "sub-01/eeg/sub-01_task-a_eeg.mff/info.xml": "x",
+      "sub-01/ieeg/sub-01_task-a_ieeg.mefd/a.timd/b.segd/c.tdat": "x",
+      "sub-01/emg/sub-01_task-a_emg.zarr/.zarray": "x",
+      "sub-01/emg/sub-01_task-a_emg.zarr/0.0": "x",
+    });
+    expect(record.status).toBe("not-screened");
+    expect(record.unscreened_formats).toEqual({ ".mff/": 1, ".mefd/": 1, ".zarr/": 1 });
   });
 });
 
@@ -1043,7 +1157,7 @@ describe("sampling caps are counted and make the dataset incomplete", () => {
     expect(one.record.status).toBe("clean");
   });
 
-  test("a scans table longer than the read does not make the dataset incomplete; a dated row is a review finding", async () => {
+  test("a scans table longer than the read does not make the dataset incomplete; a dated row is dates-only", async () => {
     const rows = Array.from({ length: 4000 }, (_, i) => `sub-01/eeg/f${i}.edf\tn/a`).join("\n");
     const long = `filename\tacq_time\n${rows}\n`;
     const truncated = await scanFiles({ [EDF]: CLEAN, "sub-01/sub-01_scans.tsv": long });
@@ -1054,7 +1168,7 @@ describe("sampling caps are counted and make the dataset incomplete", () => {
       [EDF]: CLEAN,
       "sub-01/sub-01_scans.tsv": "filename\tacq_time\nsub-01/eeg/a.edf\t2020-03-14T10:00:00\n",
     });
-    expect(dated.record.status).toBe("review");
+    expect(dated.record.status).toBe("dates-only");
     expect(dated.record.findings_by_kind?.["acq-time-dated"]).toBe(1);
     const clipped = await scanFiles({
       [EDF]: CLEAN,
@@ -1067,8 +1181,23 @@ describe("sampling caps are counted and make the dataset incomplete", () => {
       "sub-01/sub-01_scans.tsv":
         "\uFEFFacq_time\tfilename\n2020-03-14T10:00:00\tsub-01/eeg/a.edf\n",
     });
-    expect(bom.record.status).toBe("review");
+    expect(bom.record.status).toBe("dates-only");
     expect(bom.record.findings_by_kind?.["acq-time-dated"]).toBe(1);
+  });
+
+  test("a dated scans row follows the same rules as a dated header: others unscreened, an unread header, a review finding", async () => {
+    const table = "filename\tacq_time\nsub-01/eeg/a.edf\t2020-03-14T10:00:00\n";
+    const scans = { "sub-01/sub-01_scans.tsv": table };
+    const withSet = await scanFiles({ [EDF]: CLEAN, ...scans, "sub-01/eeg/b.set": "x" });
+    expect(withSet.record.status).toBe("clean-edf-only-others-unscreened");
+    const unread = await scanFiles({
+      [EDF]: CLEAN,
+      ...scans,
+      [edfPath(2)]: { bytes: CLEAN, status: 404 },
+    });
+    expect(unread.record.status).toBe("unchecked");
+    const review = await scanFiles({ [EDF]: CLEAN, ...scans, "sourcedata/note.pdf": "x" });
+    expect(review.record.status).toBe("review");
   });
 
   test("participants.tsv longer than its read is participants-truncated; a larger read is complete", async () => {
@@ -1654,8 +1783,8 @@ describe("the CLI", () => {
     expect(record.findings_by_kind?.["path-subject-label"]).toBeGreaterThanOrEqual(1);
     expect(record.findings_by_kind?.["local-user-path"]).toBe(1);
     // Only matched keys are named, never an ancestor key.
-    expect(record.finding_fields).toContain("json-identifier-key:PatientName");
-    expect(record.finding_fields).toContain("json-identifier-key:MRN");
+    expect(record.finding_fields).toContain("json-identifier-key:patientname");
+    expect(record.finding_fields).toContain("json-identifier-key:mrn");
 
     const written = everythingWritten(out);
     expect(readdirSync(out).sort()).toEqual(["_summary.json", "nm000001.json"]);
