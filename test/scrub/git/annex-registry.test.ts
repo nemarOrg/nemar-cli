@@ -308,4 +308,28 @@ SUITE("annex-registry with more than one named remote", () => {
     }
     for (const key of fx.oldKeys) expect(whereis(fx.repo, key)).toEqual([]);
   }, 180_000);
+
+  test("a new key that already has a holder outside the named remotes fails the run", async () => {
+    // The command never records a new key anywhere but the named remotes; if something else
+    // already did, the run says so instead of reporting success.
+    const fx = build();
+    const stray = fx.newKeys[0] as string;
+    sh(fx.repo, ["git", "annex", "setpresentkey", stray, fx.uploaderUuid, "1"]);
+    const r = await cli([
+      "annex-registry",
+      "--repo",
+      fx.repo,
+      "--keymap",
+      fx.keymapPath,
+      "--remote-uuid",
+      fx.remoteUuid,
+      "--execute",
+    ]);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain("annex-registry: FAILED");
+    expect(counts(r.out, "annex-registry: FAILED")).toMatchObject({
+      newForeignHolders: 1,
+      newPresent: 3,
+    });
+  }, 180_000);
 });
