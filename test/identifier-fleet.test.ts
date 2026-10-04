@@ -27,6 +27,7 @@ import {
   classifyDataset,
   createContext,
   createLimiter,
+  isFinalRecord,
   parseCliArgs,
   pool,
   readHead,
@@ -36,6 +37,7 @@ import {
   scanDatasetFromManifest,
   withRetry,
 } from "../scripts/identifier-fleet-lib";
+import { shapeOf } from "../shared/identifier-scan";
 
 // ---------------------------------------------------------------------------------------
 // EDF headers
@@ -984,6 +986,24 @@ describe("classifyDataset", () => {
     expect(classifyDataset({ ...base, edfCount: 2, headerRead: 1 })).toBe("unchecked");
     expect(classifyDataset({ ...base, incompleteReasons: ["json-sampled"] })).toBe("unchecked");
   });
+
+  test("a review finding is never hidden by incompleteness (twin: no finding is unchecked)", () => {
+    const review = {
+      kind: "image-or-document-file" as const,
+      severity: "review" as const,
+      field: "path",
+      shape: shapeOf("consent.pdf"),
+    };
+    const incomplete = {
+      ...base,
+      edfCount: 2,
+      headerRead: 1,
+      unscreenedCount: 1,
+      incompleteReasons: ["json-sampled"],
+    };
+    expect(classifyDataset({ ...incomplete, findings: [review] })).toBe("review");
+    expect(classifyDataset({ ...incomplete, findings: [] })).toBe("unchecked");
+  });
 });
 
 // ---------------------------------------------------------------------------------------
@@ -1040,6 +1060,37 @@ describe("complete means every header was read", () => {
     expect(record.status).toBe("direct-identifiers");
     expect(record.incomplete).toBe(true);
     expect(record.incomplete_reasons).toEqual(["edf-headers-unread"]);
+  });
+
+  test("a review finding stays review when a read fails; the same failure without it is unchecked", async () => {
+    const failing = { [edfPath(2)]: { bytes: CLEAN, status: 404 } };
+    const withReview = await scanFiles({
+      [edfPath(1)]: CLEAN,
+      ...failing,
+      "sourcedata/note.pdf": "x",
+    });
+    expect(withReview.record.status).toBe("review");
+    expect(withReview.record.incomplete).toBe(true);
+    expect(withReview.record.incomplete_reasons).toEqual(["edf-headers-unread"]);
+    const without = await scanFiles({ [edfPath(1)]: CLEAN, ...failing });
+    expect(without.record.status).toBe("unchecked");
+  });
+
+  test("a scans table that cannot be read blocks clean (scans-unread); the readable twin is clean", async () => {
+    const table = "filename\tacq_time\nsub-01/eeg/a.edf\tn/a\n";
+    const broken = await scanFiles({
+      [EDF]: CLEAN,
+      "sub-01/sub-01_scans.tsv": { bytes: enc(table), status: 500 },
+    });
+    expect(broken.record.status).toBe("unchecked");
+    expect(broken.record.incomplete).toBe(true);
+    expect(broken.record.incomplete_reasons).toEqual(["scans-unread"]);
+    expect(broken.record.read_failures).toEqual({ "scans/http-500": 1 });
+    // So a resumed run does not keep the verdict.
+    expect(isFinalRecord(broken.record, "v1.0.0")).toBe(false);
+    const fine = await scanFiles({ [EDF]: CLEAN, "sub-01/sub-01_scans.tsv": table });
+    expect(fine.record.status).toBe("clean");
+    expect(isFinalRecord(fine.record, "v1.0.0")).toBe(true);
   });
 
   test("participants.tsv that cannot be read blocks clean; the readable twin is clean", async () => {

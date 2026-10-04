@@ -1059,6 +1059,8 @@ export async function scanDatasetFromManifest(
   // truncating them is recorded in `sampling` but does not make a dataset incomplete.
   shortfall("json", sampling.json_files);
   shortfall("text", sampling.text_files);
+  // A scans table that could not be read is a read nobody made, however acceptable its dates.
+  if (sampling.scans_tables.scanned < sampling.scans_tables.selected) reasons.add("scans-unread");
   if (participantsUnread) reasons.add("participants-unread");
   if (participantsTruncated) reasons.add("participants-truncated");
   const incompleteReasons = [...reasons].sort();
