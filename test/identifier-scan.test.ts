@@ -891,3 +891,51 @@ describe("fourth review: birth words, strict slots, ages, month names, harmless 
     expect(counted(["data/archive.zip"])).toEqual({ ".zip": 1 });
   });
 });
+
+describe("fifth pass: group words, localized months, asterisk, units, survivors", () => {
+  const pat = (patient: string) => kinds(buildHeader({ patient }));
+  const recKinds = (recording: string) => kinds(buildHeader({ recording }));
+
+  test("study-design words are codes in a code slot, but surname-like words still are not", () => {
+    for (const code of ["Control_01", "Healthy_05", "Test01", "Pilot_03", "Phantom", "Study1"]) {
+      expect(pat(`${code} F X X`), code).toEqual([]);
+    }
+    expect(pat("Day F X X")).toEqual(["edf-patient-code"]);
+    expect(pat("Open_01 F X X")).toEqual(["edf-patient-code"]);
+  });
+
+  test("a date written with a non-English month is still a date, in both fields", () => {
+    for (const date of [
+      "14.Okt.1993",
+      "14-Dez-1993",
+      "14-Mai-1993",
+      "14-Avr-1993",
+      "14-Ene-1993",
+    ]) {
+      expect(pat(`P01 F ${date} X`), date.replace(/\d/g, "9")).toContain("edf-patient-birthdate");
+    }
+    expect(recKinds("session 14-Dez-2020")).toEqual(["edf-recording-startdate"]);
+    expect(pat("P01 F X X Marker 2020")).not.toContain("edf-patient-birthdate");
+  });
+
+  test("a leading asterisk marks a birth date in a free-text recording id, and `born` is a whole word", () => {
+    expect(recKinds("*14.03.1993")).toContain("edf-patient-birthdate");
+    expect(recKinds("*14.03.1993")).not.toContain("edf-recording-startdate");
+    expect(recKinds("Osborne 14.03.2020")).not.toContain("edf-patient-birthdate");
+    expect(recKinds("nacimiento 14.03.1993")).toContain("edf-patient-birthdate");
+  });
+
+  test("a number followed by a unit is not an age", () => {
+    for (const patient of ["M 95 kg", "F 100 cm", "M 95 bpm"]) {
+      expect(pat(patient), patient).not.toContain("edf-patient-age");
+    }
+    expect(pat("M 95")).toContain("edf-patient-age");
+    expect(pat("M 95 years")).toContain("edf-patient-age");
+  });
+
+  test("the age slot works on its own, and Sept is a month", () => {
+    expect(pat("P01 X 95 X")).toContain("edf-patient-age");
+    expect(pat("dob sept 1993")).toContain("edf-patient-birthdate");
+    expect(pat("dob september 1993")).toContain("edf-patient-birthdate");
+  });
+});

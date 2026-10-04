@@ -283,6 +283,20 @@ const SLOT_PLACEHOLDERS = new Set([
   "deidentified",
 ]);
 
+/** Study-design words that are never a surname, so a code like `Control_01` or `Phantom` is a code. */
+const GROUP_WORDS = new Set([
+  "control",
+  "healthy",
+  "test",
+  "pilot",
+  "phantom",
+  "study",
+  "group",
+  "cohort",
+  "patient",
+  "volunteer",
+]);
+
 /** `sub-01`, `S_01`, `subject12`, `P3`: a study code, not a person. */
 const SUBJECT_LABEL = /^(sub|subj|subject|s|p|pt|participant)[-_ ]?\d+$/i;
 
@@ -360,7 +374,9 @@ const PART_SPLIT = /[^\p{L}\p{N}'._-]+/u;
  */
 function isNameLikePart(part: string, strict: boolean): boolean {
   if (part === "" || isCodeLike(part)) return false;
-  const exempt = strict ? (w: string) => SLOT_PLACEHOLDERS.has(w.toLowerCase()) : isNeutral;
+  const exempt = strict
+    ? (w: string) => SLOT_PLACEHOLDERS.has(w.toLowerCase()) || GROUP_WORDS.has(w.toLowerCase())
+    : isNeutral;
   if (/^[\p{L}'._-]+$/u.test(part)) {
     const pieces = part.split(/['._-]+/).filter((p) => p !== "");
     return pieces.length > 0 && !pieces.every(exempt);
@@ -446,6 +462,16 @@ function findDates(text: string): DateMatch[] {
     const month = monthNumber(m[2] as string);
     const day = Number(m[1]);
     if (validDayMonth(day, month)) push(m, [{ day, month, year: Number(m[3]) }]);
+  }
+  // A day, a word that is not an English month, and a year (`14.Okt.1993`, `14-Dez-1993`): a date in
+  // another language. The month is unknown, so it can never be year-only.
+  const localized =
+    /(?<![\p{L}\p{N}])(\d{1,2})[-./_ ]?([A-Za-z]{3,9})[-./_ ]?((?:19|20)\d{2})(?![\p{L}\p{N}])/gu;
+  for (const m of text.matchAll(localized)) {
+    const day = Number(m[1]);
+    if (monthNumber(m[2] as string) === 0 && day >= 1 && day <= 31) {
+      push(m, [{ day, month: 0, year: Number(m[3]) }]);
+    }
   }
   const iso = /(?<![\p{N}])(\d{4})[-./_](\d{1,2})[-./_](\d{1,2})(?![\p{N}])/gu;
   for (const m of text.matchAll(iso)) {
@@ -614,7 +640,7 @@ export function scanEdfHeader(bytes: Uint8Array): Finding[] {
       /\bage[=: _-]*(\d{2,3})\b/gi,
       /\b(\d{2,3})\s?(?:y|yr|yrs|yo|y\/o|years?)\b/gi,
       /\b(\d{2,3})[- ]?(?:year|yr)s?[- ]?old\b/gi,
-      /\b(?:m|f|male|female)\s+(\d{2,3})\b/gi,
+      /\b(?:m|f|male|female)\s+(\d{2,3})\b(?!\s?(?:kg|cm|lbs?|bpm|mm|hz|ms|mv|uv|years?\b))/gi,
     ];
     for (const re of patterns) {
       for (const m of blanked.matchAll(re)) {
@@ -648,7 +674,8 @@ export function scanEdfHeader(bytes: Uint8Array): Finding[] {
       slot !== undefined && d.index >= slotStart && d.index < slotStart + slot.length;
     // A birth word anywhere in a free-text recording id makes every date in it a birth date: the
     // writer said what the field holds, and which date it means cannot be told from distance.
-    const hasBirthWord = /\b(?:dob|d\.o\.b)\b|birth|born|\bgeb|nacid|nacimiento/iu.test(recording);
+    const hasBirthWord =
+      /\b(?:dob|d\.o\.b)\b|birth|\bborn|\bgeb|nacid|nacimiento|(?:^|\s)\*(?=\d)/iu.test(recording);
     let acquisitionDate: DateMatch | undefined;
     for (const d of recDates) {
       if (isYearOnly(d.candidates)) continue;
