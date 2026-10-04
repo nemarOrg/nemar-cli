@@ -722,6 +722,31 @@ describe("status from EDF/BDF headers", () => {
     expect(clipped.record.status).toBe("clean");
   });
 
+  test("a date with an unparsed recording format beside it follows the unscreened rule, not dates-only", async () => {
+    const mixed = await scanFiles({
+      [EDF]: edfHeader({ startdate: "14.03.93" }),
+      "sub-01/eeg/b.set": "x",
+    });
+    expect(mixed.record.status).toBe("clean-edf-only-others-unscreened");
+  });
+
+  test("a date never hides an incomplete scan: an unreadable header beside it is unchecked", async () => {
+    const files = await scanFiles({
+      [EDF]: edfHeader({ startdate: "14.03.93" }),
+      "sub-02/eeg/c.edf": { status: 404 },
+    });
+    expect(files.record.status).toBe("unchecked");
+    expect(files.record.incomplete).toBe(true);
+  });
+
+  test("a date beside a review finding is review: the other finding is not hidden", async () => {
+    const files = await scanFiles({
+      [EDF]: edfHeader({ startdate: "14.03.93" }),
+      "sourcedata/note.png": "x",
+    });
+    expect(files.record.status).toBe("review");
+  });
+
   test("a name beside a date is direct-identifiers: the name wins over dates-only", async () => {
     const both = await scanFiles({
       [EDF]: edfHeader({ patient: "P01 F X Quillfeather", startdate: "14.03.93" }),
@@ -999,14 +1024,15 @@ describe("sampling caps are counted and make the dataset incomplete", () => {
     expect(fine.record.status).toBe("clean");
   });
 
-  test("a second scans table beyond the one read: scans-tables-sampled; one table is complete", async () => {
+  test("a second scans table beyond the one read is recorded but does not make the dataset incomplete", async () => {
     const table = "filename\tacq_time\nsub-01/eeg/a.edf\tn/a\n";
     const two = await scanFiles({
       [EDF]: CLEAN,
       "sub-01/sub-01_scans.tsv": table,
       "sub-02/sub-02_scans.tsv": table,
     });
-    expect(two.record.incomplete_reasons).toEqual(["scans-tables-sampled"]);
+    expect(two.record.incomplete_reasons).toEqual([]);
+    expect(two.record.status).toBe("clean");
     expect(two.record.sampling?.scans_tables).toEqual({
       candidates: 2,
       oversize: 0,
@@ -1017,12 +1043,13 @@ describe("sampling caps are counted and make the dataset incomplete", () => {
     expect(one.record.status).toBe("clean");
   });
 
-  test("a scans table longer than the read is scans-table-truncated; a dated row is a review finding", async () => {
+  test("a scans table longer than the read does not make the dataset incomplete; a dated row is a review finding", async () => {
     const rows = Array.from({ length: 4000 }, (_, i) => `sub-01/eeg/f${i}.edf\tn/a`).join("\n");
     const long = `filename\tacq_time\n${rows}\n`;
     const truncated = await scanFiles({ [EDF]: CLEAN, "sub-01/sub-01_scans.tsv": long });
     expect(long.length).toBeGreaterThan(65_536);
-    expect(truncated.record.incomplete_reasons).toEqual(["scans-table-truncated"]);
+    expect(truncated.record.incomplete_reasons).toEqual([]);
+    expect(truncated.record.status).toBe("clean");
     const dated = await scanFiles({
       [EDF]: CLEAN,
       "sub-01/sub-01_scans.tsv": "filename\tacq_time\nsub-01/eeg/a.edf\t2020-03-14T10:00:00\n",

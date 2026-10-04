@@ -730,9 +730,11 @@ export type DatasetStatus =
 export const isDirectFinding = (f: Finding): boolean =>
   f.severity === "identifier" && DIRECT_KINDS.has(f.kind);
 
-/** An identifier-severity calendar date finer than year: barred, but not a name. */
-export const isDateFinding = (f: Finding): boolean =>
-  f.severity === "identifier" && DATE_KINDS.has(f.kind);
+/**
+ * A calendar date finer than year in a header. Acceptable when nothing links the recording to a
+ * person (policy 2026-10-04), so it is reported but never changes whether a dataset is clean.
+ */
+export const isDateFinding = (f: Finding): boolean => DATE_KINDS.has(f.kind);
 
 export interface ClassifyInput {
   findings: readonly Finding[];
@@ -762,13 +764,13 @@ export function isComplete(input: ClassifyInput): boolean {
  */
 export function classifyDataset(input: ClassifyInput): DatasetStatus {
   if (input.findings.some(isDirectFinding)) return "direct-identifiers";
-  if (input.findings.some(isDateFinding)) return "dates-only";
-  if (input.findings.length > 0) return "review";
+  // Any finding that is not just an acceptable date needs a person to look.
+  if (input.findings.some((f) => !isDateFinding(f))) return "review";
   if (!isComplete(input)) return "unchecked";
-  if (input.edfCount > 0) {
-    return input.unscreenedCount > 0 ? "clean-edf-only-others-unscreened" : "clean";
-  }
-  return input.unscreenedCount > 0 ? "not-screened" : "no-recordings";
+  if (input.edfCount > 0 && input.unscreenedCount > 0) return "clean-edf-only-others-unscreened";
+  if (input.edfCount === 0) return input.unscreenedCount > 0 ? "not-screened" : "no-recordings";
+  // Complete, EDF/BDF only: clean, noting acceptable dates when there are any.
+  return input.findings.length > 0 ? "dates-only" : "clean";
 }
 
 // ---------------------------------------------------------------------------------------
@@ -941,14 +943,13 @@ export async function scanDatasetFromManifest(
   const scansAll = manifest.filter((e) => e.path.endsWith("_scans.tsv"));
   const scansSelected = sampleEvenly(scansAll, ctx.limits.scansTables, subjectKey);
   let scansScanned = 0;
-  let scansTruncated = 0;
   for (const entry of scansSelected) {
     if (entry.size === 0) {
       scansScanned++;
       continue;
     }
     try {
-      const { text, truncated } = await readText(ctx, entry, ctx.limits.sideFileBytes);
+      const { text } = await readText(ctx, entry, ctx.limits.sideFileBytes);
       // The decoder already drops a leading BOM; this keeps the header match independent of it.
       const rows = text.replace(/^\uFEFF/, "").split("\n");
       const col = (rows[0] ?? "").replace(/\r$/, "").split("\t").indexOf("acq_time");
@@ -957,7 +958,6 @@ export async function scanDatasetFromManifest(
         for (const row of rows.slice(1)) found.push(...scanAcqTime(row.split("\t")[col] ?? ""));
       }
       findings.push(...found);
-      if (truncated) scansTruncated++;
       scansScanned++;
     } catch (error) {
       fail("scans", error);
@@ -1054,12 +1054,13 @@ export async function scanDatasetFromManifest(
     if (stat.scanned < stat.selected) reasons.add(`${name}-unread`);
   };
   shortfall("edf-headers", sampling.edf_headers);
-  shortfall("scans-tables", sampling.scans_tables);
+  // Scans tables only carry dated acq_time values, which are review findings and never block
+  // (acquisition dates are acceptable when nothing links them to a person), so sampling or
+  // truncating them is recorded in `sampling` but does not make a dataset incomplete.
   shortfall("json", sampling.json_files);
   shortfall("text", sampling.text_files);
   if (participantsUnread) reasons.add("participants-unread");
   if (participantsTruncated) reasons.add("participants-truncated");
-  if (scansTruncated > 0) reasons.add("scans-table-truncated");
   const incompleteReasons = [...reasons].sort();
 
   const classify: ClassifyInput = {
