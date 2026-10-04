@@ -39,4 +39,4 @@ Pulling new upstream content bumps the **major** version: `1.0.0` -> `2.0.0`. Mi
 
 ## Amendment 2026-10-04 (#1610): privacy corrections
 
-A privacy correction under [ADR 0077](0077-a-privacy-correction-scrubs-every-version-in-place.md) changes bytes under an existing version and issues no new version at all, so it is the one exception to "minor and patch are NEMAR's own corrections". The ledger and the dataset's change log, not the version number, are its record.
+A privacy correction under [ADR 0085](0085-a-privacy-correction-scrubs-every-version-in-place.md) changes bytes under an existing version and issues no new version at all, so it is the one exception to "minor and patch are NEMAR's own corrections". The ledger and the dataset's change log, not the version number, are its record.

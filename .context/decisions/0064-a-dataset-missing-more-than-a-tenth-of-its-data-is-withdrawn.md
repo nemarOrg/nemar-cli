@@ -206,4 +206,4 @@ data nobody can supply, which is what withdrawal is for.
 
 ## Amendment 2026-10-04 (#1610): privacy corrections
 
-A key on the purge list is not missing: it is excluded from both the numerator and the denominator of the availability ratio ([ADR 0077](0077-a-privacy-correction-scrubs-every-version-in-place.md)).
+A key on the purge list is not missing: it is excluded from both the numerator and the denominator of the availability ratio ([ADR 0085](0085-a-privacy-correction-scrubs-every-version-in-place.md)).

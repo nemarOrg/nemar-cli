@@ -37,4 +37,4 @@ Presence is never sufficient evidence of a successful copy. An object must match
 
 ## Amendment 2026-10-04 (#1610): privacy corrections
 
-A scrub never happens in the server-side copy leg, which copies by upstream key. It happens in the importer's prepare step ([ADR 0060](0060-an-imported-tree-is-brought-onto-nemars-annex-policy-in-prepare.md)), where bytes cross the host and are bounded at 5 GiB ([ADR 0077](0077-a-privacy-correction-scrubs-every-version-in-place.md)).
+A scrub never happens in the server-side copy leg, which copies by upstream key. It happens in the importer's prepare step ([ADR 0060](0060-an-imported-tree-is-brought-onto-nemars-annex-policy-in-prepare.md)), where bytes cross the host and are bounded at 5 GiB ([ADR 0085](0085-a-privacy-correction-scrubs-every-version-in-place.md)).

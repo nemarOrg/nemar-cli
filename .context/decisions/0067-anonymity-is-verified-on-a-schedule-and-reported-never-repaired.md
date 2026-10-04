@@ -405,4 +405,4 @@ The candidate predicate, the cadence, the verdict names, the declared scope limi
 
 ## Amendment 2026-10-04 (#1610): privacy corrections
 
-"Never repaired" is about depositor anonymity and the sweep. The manual privacy correction in [ADR 0077](0077-a-privacy-correction-scrubs-every-version-in-place.md) is a separate, deliberate action by the owner and is not a sweep.
+"Never repaired" is about depositor anonymity and the sweep. The manual privacy correction in [ADR 0085](0085-a-privacy-correction-scrubs-every-version-in-place.md) is a separate, deliberate action by the owner and is not a sweep.

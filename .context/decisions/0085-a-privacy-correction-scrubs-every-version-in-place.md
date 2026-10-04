@@ -1,4 +1,4 @@
-# ADR 0077: A privacy correction scrubs every version in place, and NEMAR keeps the history of each correction
+# ADR 0085: A privacy correction scrubs every version in place, and NEMAR keeps the history of each correction
 
 **Status:** accepted
 **Date:** 2026-10-04

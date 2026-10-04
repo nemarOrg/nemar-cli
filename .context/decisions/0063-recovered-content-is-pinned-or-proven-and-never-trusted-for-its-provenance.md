@@ -80,4 +80,4 @@ Tightening it further would refuse oversized pinned content that nothing suggest
 
 ## Amendment 2026-10-04 (#1610): privacy corrections
 
-A key on the purge list is never recovered, pinned or copied from upstream, even when a `.log.rmet` pin names it ([ADR 0077](0077-a-privacy-correction-scrubs-every-version-in-place.md)).
+A key on the purge list is never recovered, pinned or copied from upstream, even when a `.log.rmet` pin names it ([ADR 0085](0085-a-privacy-correction-scrubs-every-version-in-place.md)).

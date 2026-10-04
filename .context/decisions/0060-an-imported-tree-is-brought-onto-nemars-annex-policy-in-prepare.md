@@ -205,4 +205,4 @@ to claim as uploaded.
 
 ## Amendment 2026-10-04 (#1610): privacy corrections
 
-The prepare step also scrubs identifying fields in place and then runs the identifier screen, so an import or re-pull cannot reintroduce what a privacy correction removed, and it refuses any key on the purge list ([ADR 0077](0077-a-privacy-correction-scrubs-every-version-in-place.md)).
+The prepare step also scrubs identifying fields in place and then runs the identifier screen, so an import or re-pull cannot reintroduce what a privacy correction removed, and it refuses any key on the purge list ([ADR 0085](0085-a-privacy-correction-scrubs-every-version-in-place.md)).
