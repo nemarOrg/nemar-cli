@@ -527,6 +527,16 @@ export function startS3Standin(): S3Standin {
           record({ ...base, status: 404 });
           return s3Error("NoSuchUpload", 404);
         }
+        // Real S3 (measured 2026-10-04): a part of an upload created with lock parameters must
+        // carry Content-MD5 or an x-amz-checksum-* header, or it is refused.
+        if (upload.lock && !checksum && !req.headers.has("content-md5")) {
+          record({ ...base, status: 400 });
+          return s3Error(
+            "InvalidRequest",
+            400,
+            "Content-MD5 OR x-amz-checksum- HTTP header is required for Put Part requests with Object Lock parameters",
+          );
+        }
         const etag = `"${md5hex(body)}"`;
         upload.parts.set(partNumber, { data: body, etag });
         record({ ...base, status: 200, size: body.length });

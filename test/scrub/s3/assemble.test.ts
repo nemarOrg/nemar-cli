@@ -181,8 +181,8 @@ describe("assemble", () => {
       expect(standin.calls("CreateMultipartUpload").length).toBe(2);
       const parts = standin.calls("UploadPart");
       expect(parts.map((p) => p.size).sort()).toEqual([8 * MIB, e.bytes.length].sort());
-      // A part carries no checksum header: the multipart upload was created with no type.
-      for (const p of parts) expect(p.checksum, "part checksum header").toBe(false);
+      // A part carries a checksum header: real S3 refuses a part of a lock-created upload without one.
+      for (const p of parts) expect(p.checksum, "part checksum header").toBe(true);
       const copies = standin.calls("UploadPartCopy");
       expect(copies.length).toBe(1);
       expect(copies[0]?.range).toBe(`bytes=${8 * MIB}-${c.bytes.length - 1}`);

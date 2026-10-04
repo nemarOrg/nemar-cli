@@ -714,11 +714,15 @@ export async function createMultipart(
 }
 
 /**
- * The CLI sends a CRC64NVME checksum header on UploadPart by default (measured on aws-cli
- * 2.36.47). The multipart upload is created with no checksum type, so a part must not carry one:
- * `when_required` turns the default off for this one call and leaves put-object's alone.
+ * Real S3 refuses an UploadPart on a multipart upload created with Object Lock parameters unless
+ * the request carries `Content-MD5` or an `x-amz-checksum-*` header ("Content-MD5 OR
+ * x-amz-checksum- HTTP header is required for Put Part requests with Object Lock parameters",
+ * measured against the real bucket on 2026-10-04 with aws-cli 2.36.47). The CLI's default,
+ * `when_supported`, sends a CRC64NVME header and is accepted even though the upload was created
+ * with no checksum type. This pins that default for the one call, so an ambient
+ * `AWS_REQUEST_CHECKSUM_CALCULATION=when_required` cannot turn the header off.
  */
-const NO_PART_CHECKSUM = { AWS_REQUEST_CHECKSUM_CALCULATION: "when_required" };
+const PART_CHECKSUM = { AWS_REQUEST_CHECKSUM_CALCULATION: "when_supported" };
 
 export async function uploadPart(
   ctx: S3Ctx,
@@ -741,7 +745,7 @@ export async function uploadPart(
       "--body",
       bodyFile,
     ],
-    { slow: true, env: NO_PART_CHECKSUM },
+    { slow: true, env: PART_CHECKSUM },
   );
   const etag = str(out.ETag);
   if (!etag) throw new AwsCliError("bad-output", "UploadPart");

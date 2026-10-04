@@ -123,6 +123,49 @@ describe("canary", () => {
   );
 
   test(
+    "--multipart still sends a part checksum when the operator's environment asks for none",
+    async () => {
+      standin = startS3Standin();
+      const r = await runScrub(standin, canary(["--execute", "--multipart"]), {
+        AWS_REQUEST_CHECKSUM_CALCULATION: "when_required",
+      });
+      expect(r.exitCode, r.all).toBe(0);
+      const parts = standin.calls("UploadPart");
+      expect(parts.length).toBe(1);
+      expect(parts[0]?.status).toBe(200);
+      expect(parts[0]?.checksum).toBe(true);
+    },
+    SLOW,
+  );
+
+  test(
+    "the stand-in refuses a part of a lock-created upload that has no checksum, as real S3 does",
+    async () => {
+      standin = startS3Standin();
+      const create = await fetch(`${standin.url}/${BUCKET}/${prefix}raw.bin?uploads`, {
+        method: "POST",
+        headers: {
+          "x-amz-object-lock-mode": "GOVERNANCE",
+          "x-amz-object-lock-retain-until-date": new Date(Date.now() + 86_400_000).toISOString(),
+        },
+      });
+      const uploadId = /<UploadId>([^<]+)<\/UploadId>/.exec(await create.text())?.[1];
+      expect(uploadId).toBeTruthy();
+      const part = (headers: Record<string, string>) =>
+        fetch(
+          `${standin.url}/${BUCKET}/${prefix}raw.bin?partNumber=1&uploadId=${encodeURIComponent(uploadId as string)}`,
+          { method: "PUT", headers, body: new Uint8Array(16) },
+        );
+      const bare = await part({});
+      expect(bare.status).toBe(400);
+      expect(await bare.text()).toContain("InvalidRequest");
+      const withChecksum = await part({ "x-amz-checksum-crc64nvme": "AAAAAAAAAAA=" });
+      expect(withChecksum.status).toBe(200);
+    },
+    SLOW,
+  );
+
+  test(
     "--multipart proves the production path: the lock set at create, an upload part, a server-side copy",
     async () => {
       standin = startS3Standin();
@@ -142,7 +185,7 @@ describe("canary", () => {
       const parts = standin.calls("UploadPart");
       expect(parts.length).toBe(1);
       expect(parts[0]?.size).toBe(6 * MIB);
-      expect(parts[0]?.checksum).toBe(false);
+      expect(parts[0]?.checksum, "real S3 requires a part checksum under a lock").toBe(true);
       expect(standin.calls("UploadPartCopy")[0]?.range).toBe(`bytes=0-${MIB - 1}`);
       expect(standin.calls("CompleteMultipartUpload")[0]?.size).toBe(7 * MIB);
       expect(lockSeen?.mode).toBe("GOVERNANCE");
