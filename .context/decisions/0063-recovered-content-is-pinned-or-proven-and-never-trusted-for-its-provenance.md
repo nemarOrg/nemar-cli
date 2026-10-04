@@ -77,3 +77,7 @@ Tightening it further would refuse oversized pinned content that nothing suggest
 - **Trust the path and copy the current object.** Rejected: it is exactly how a dataset acquires the wrong recording under a right-looking key, and one of the sampled datasets already has a path whose current upstream object differs in size from the key.
 - **Fetch through git-annex (`get` from upstream, then `copy --to nemar-s3`), which verifies hashes itself.** Rejected as the default: git-annex caches an S3 remote's credentials with no slot for a session token, so it cannot sign for `nemar-s3` with the credentials this archive issues, and it would move every byte through the operator's machine. It remains the fallback for a source S3 cannot copy from.
 - **Verify by downloading each copy and hashing it.** Rejected: it is the same bytes again, for a check S3 already performs during the copy at no cost.
+
+## Amendment 2026-10-04 (#1610): privacy corrections
+
+A key on the purge list is never recovered, pinned or copied from upstream, even when a `.log.rmet` pin names it ([ADR 0077](0077-a-privacy-correction-scrubs-every-version-in-place.md)).

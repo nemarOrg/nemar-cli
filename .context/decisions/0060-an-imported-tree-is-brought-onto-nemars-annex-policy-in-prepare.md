@@ -202,3 +202,7 @@ to claim as uploaded.
 - ADR 0010 - server-side copy for the bulk data plane, and the bound this leg keeps
 - Issue #1158 (the policy fix), issue #1159 (this), `nemarDatasets/on007788`
   `.gitattributes` (the live upstream shape the fixture copies)
+
+## Amendment 2026-10-04 (#1610): privacy corrections
+
+The prepare step also scrubs identifying fields in place and then runs the identifier screen, so an import or re-pull cannot reintroduce what a privacy correction removed, and it refuses any key on the purge list ([ADR 0077](0077-a-privacy-correction-scrubs-every-version-in-place.md)).
