@@ -1,0 +1,826 @@
+/**
+ * The S3 half of an in-place privacy scrub: an `aws` CLI runner, the handful of S3 operations
+ * the stages need, and the pure rules (part layout, sampled ranges, retention) the stages and
+ * their tests share.
+ *
+ * Everything here shells out to the real `aws` CLI, asynchronously and with a timeout on every
+ * spawn. Tests point the CLI at a local stand-in through `AWS_ENDPOINT_URL_S3`
+ * (`test/scrub/helpers/s3-standin.ts`), so the production code path is the one that runs.
+ *
+ * **No participant value is ever held anywhere it could be printed.** A header read from S3
+ * exists only in memory and in a temp file that is deleted in a `finally`; errors are classes
+ * with fixed words (`AwsCliError`, `StageError`), never the CLI's own stderr, which can carry a
+ * key, a URL or a header. The only strings that leave this module are annex keys, sizes, version
+ * ids, counts and fixed words.
+ */
+
+import { createHash, randomBytes } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { spawn } from "bun";
+import { EDF_HEADER_BYTES } from "../../../shared/identifier-scan";
+
+export const MIB = 1024 * 1024;
+export const GIB = 1024 * MIB;
+
+/** At or below this size the new object is one put-object; above it, a multipart upload. */
+export const SINGLE_PUT_MAX = 5 * MIB;
+/** Part 1 of a multipart upload is uploaded (it carries the patched header). */
+export const FIRST_PART_BYTES = 8 * MIB;
+/** S3 refuses a non-final part smaller than this. */
+export const MIN_PART_BYTES = 5 * MIB;
+/** Largest range one `upload-part-copy` is asked for. S3's own ceiling is 5 GiB. */
+export const MAX_COPY_PART_BYTES = 4 * GIB;
+/** S3 allows at most this many parts. */
+export const MAX_PARTS = 10_000;
+
+/** What the planner reads from each object: far more than the 256-byte header the scrub uses. */
+export const PLAN_READ_BYTES = 8192;
+/** One sampled comparison window in the verify stage. */
+export const SAMPLE_BYTES = 64 * 1024;
+export const DEFAULT_SAMPLES = 8;
+
+/** Retention a new object gets, and the shortest a verified one may have left. */
+export const RETAIN_YEARS = 100;
+export const MIN_RETAIN_YEARS = 99;
+
+// ---------------------------------------------------------------------------
+// Errors: fixed words, never values.
+// ---------------------------------------------------------------------------
+
+/** Process exit codes. 0 is success; each other code names one kind of stop. */
+export const EXIT = {
+  failed: 1,
+  usage: 2,
+  refused: 3,
+  unreadable: 4,
+  remainder: 5,
+} as const;
+export type ExitCode = (typeof EXIT)[keyof typeof EXIT];
+
+/** A stage stopped on purpose. `word` is a fixed reason; `exitCode` says what kind of stop. */
+export class StageError extends Error {
+  constructor(
+    readonly word: string,
+    readonly exitCode: ExitCode = EXIT.failed,
+  ) {
+    super(word);
+    this.name = "StageError";
+  }
+}
+
+export type AwsErrorCode =
+  | "timeout"
+  | "access-denied"
+  | "not-found"
+  | "precondition-failed"
+  | "invalid-range"
+  | "no-such-upload"
+  | "throttled"
+  | "credentials"
+  | "unreachable"
+  | "spawn-failed"
+  | "bad-output"
+  | "short-read"
+  | "failed";
+
+/** An `aws` call failed. `op` is the S3 operation name and `code` a fixed class. */
+export class AwsCliError extends Error {
+  constructor(
+    readonly code: AwsErrorCode,
+    readonly op: string,
+  ) {
+    super(`${op}:${code}`);
+    this.name = "AwsCliError";
+  }
+}
+
+const CODE_BY_S3: Record<string, AwsErrorCode> = {
+  AccessDenied: "access-denied",
+  "403": "access-denied",
+  NoSuchKey: "not-found",
+  NoSuchVersion: "not-found",
+  NoSuchObjectLockConfiguration: "not-found",
+  NotFound: "not-found",
+  "404": "not-found",
+  NoSuchUpload: "no-such-upload",
+  PreconditionFailed: "precondition-failed",
+  "412": "precondition-failed",
+  InvalidRange: "invalid-range",
+  "416": "invalid-range",
+  SlowDown: "throttled",
+  Throttling: "throttled",
+  ThrottlingException: "throttled",
+  RequestLimitExceeded: "throttled",
+  "503": "throttled",
+  ExpiredToken: "credentials",
+  InvalidAccessKeyId: "credentials",
+  InvalidToken: "credentials",
+  SignatureDoesNotMatch: "credentials",
+  "401": "credentials",
+};
+
+/**
+ * Classify a FAILED `aws` invocation from its stderr into a fixed class.
+ *
+ * The match is anchored on the CLI's own error line, `An error occurred (<code>) when calling
+ * the <Op> operation`: a bare `404` elsewhere in stderr is NOT a not-found signal, because
+ * connection errors embed the request URL and the URL embeds the key. A 403 is never read as
+ * absence: this bucket denies anonymous listing, so 403 also covers a missing key.
+ */
+export function classifyAwsError(stderr: string, fallbackOp: string): AwsCliError {
+  const m = /An error occurred \(([A-Za-z0-9]+)\) when calling the (\w+) operation/.exec(stderr);
+  if (m) {
+    const op = m[2] as string;
+    return new AwsCliError(CODE_BY_S3[m[1] as string] ?? "failed", op);
+  }
+  if (/Could not connect to the endpoint URL|Connection was closed|Read timeout/.test(stderr)) {
+    return new AwsCliError("unreachable", fallbackOp);
+  }
+  if (/Unable to locate credentials|SSO session|token has expired/i.test(stderr)) {
+    return new AwsCliError("credentials", fallbackOp);
+  }
+  return new AwsCliError("failed", fallbackOp);
+}
+
+/** The fixed word a failure is counted under. Never includes a message from the CLI. */
+export function failureWord(err: unknown): string {
+  if (err instanceof StageError) return err.word;
+  if (err instanceof AwsCliError) return `${err.op}:${err.code}`;
+  return "unexpected";
+}
+
+// ---------------------------------------------------------------------------
+// The runner.
+// ---------------------------------------------------------------------------
+
+export interface AwsConfig {
+  region: string;
+  /** Sets `AWS_ENDPOINT_URL_S3` for the child. Tests use it; production leaves it unset. */
+  endpointUrl?: string;
+  /** Per-call limit. Transfers get {@link SLOW_FACTOR} times as long. */
+  timeoutMs: number;
+  /** The whole environment of the child, replacing `process.env`. Tests use it to stay hermetic. */
+  env?: Record<string, string>;
+}
+
+export const DEFAULT_TIMEOUT_MS = 120_000;
+export const SLOW_FACTOR = 5;
+
+export interface ApiOptions {
+  /** A transfer or a completion: allowed {@link SLOW_FACTOR} times the base timeout. */
+  slow?: boolean;
+  /** Extra environment for this one call. */
+  env?: Record<string, string>;
+}
+
+export interface AwsRunner {
+  /** `aws s3api <op> ...args --region R --output json`; parsed JSON ({} for empty output). */
+  api(op: string, args: string[], opts?: ApiOptions): Promise<Record<string, unknown>>;
+}
+
+export function createAwsRunner(cfg: AwsConfig): AwsRunner {
+  const base: Record<string, string> = {};
+  for (const [k, v] of Object.entries(cfg.env ?? process.env)) if (v !== undefined) base[k] = v;
+  base.AWS_PAGER = "";
+  if (cfg.endpointUrl) base.AWS_ENDPOINT_URL_S3 = cfg.endpointUrl;
+
+  return {
+    async api(op, args, opts = {}) {
+      const cmd = ["aws", "s3api", op, ...args, "--region", cfg.region, "--output", "json"];
+      let proc: ReturnType<typeof spawn>;
+      try {
+        proc = spawn({
+          cmd,
+          env: { ...base, ...(opts.env ?? {}) },
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+      } catch {
+        throw new AwsCliError("spawn-failed", op);
+      }
+      const limit = cfg.timeoutMs * (opts.slow ? SLOW_FACTOR : 1);
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        proc.kill("SIGKILL");
+      }, limit);
+      try {
+        const [stdout, stderr, code] = await Promise.all([
+          new Response(proc.stdout as ReadableStream).text(),
+          new Response(proc.stderr as ReadableStream).text(),
+          proc.exited,
+        ]);
+        if (timedOut) throw new AwsCliError("timeout", op);
+        if (code !== 0) throw classifyAwsError(stderr, op);
+        const text = stdout.trim();
+        if (text === "") return {};
+        try {
+          const parsed = JSON.parse(text) as unknown;
+          if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+            throw new AwsCliError("bad-output", op);
+          }
+          return parsed as Record<string, unknown>;
+        } catch (err) {
+          if (err instanceof AwsCliError) throw err;
+          throw new AwsCliError("bad-output", op);
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  };
+}
+
+/**
+ * A private directory for the one kind of file the CLI needs on disk (an object body or a part).
+ * Created 0700 by `mkdtemp`, and every file is removed as soon as its bytes are read, because a
+ * header read from S3 holds the very values being scrubbed.
+ */
+export class TempArea {
+  private n = 0;
+  private constructor(readonly dir: string) {}
+
+  static async create(): Promise<TempArea> {
+    return new TempArea(await mkdtemp(path.join(tmpdir(), "scrub-s3-")));
+  }
+
+  file(): string {
+    this.n += 1;
+    return path.join(this.dir, `f${this.n}-${randomBytes(4).toString("hex")}`);
+  }
+
+  async remove(file: string): Promise<void> {
+    await rm(file, { force: true });
+  }
+
+  async dispose(): Promise<void> {
+    await rm(this.dir, { recursive: true, force: true });
+  }
+}
+
+export interface S3Ctx {
+  aws: AwsRunner;
+  bucket: string;
+  tmp: TempArea;
+}
+
+// ---------------------------------------------------------------------------
+// Small pure helpers.
+// ---------------------------------------------------------------------------
+
+export function sha256Hex(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+export function toHex(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString("hex");
+}
+
+export function fromHex(hex: string): Uint8Array {
+  return new Uint8Array(Buffer.from(hex, "hex"));
+}
+
+export function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && Buffer.compare(a, b) === 0;
+}
+
+/** The `YYYY-MM-DDTHH:MM:SSZ` form `--object-lock-retain-until-date` takes. */
+export function isoSeconds(d: Date): string {
+  return d.toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+/** `now` plus `years`, in the form {@link isoSeconds} gives. */
+export function retainUntilFrom(now: Date, years: number): string {
+  const d = new Date(now.getTime());
+  d.setUTCFullYear(d.getUTCFullYear() + years);
+  return isoSeconds(d);
+}
+
+/** True when the lock is GOVERNANCE and runs at least {@link MIN_RETAIN_YEARS} years out. */
+export function retentionOk(
+  mode: string | undefined,
+  until: string | undefined,
+  now: Date = new Date(),
+): boolean {
+  if (mode !== "GOVERNANCE" || !until) return false;
+  const t = Date.parse(until);
+  if (Number.isNaN(t)) return false;
+  return t >= Date.parse(retainUntilFrom(now, MIN_RETAIN_YEARS));
+}
+
+/** An ISO timestamp from whatever the CLI printed, or undefined when it is not a date. */
+export function isoOrUndefined(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const t = Date.parse(value);
+  return Number.isNaN(t) ? undefined : new Date(t).toISOString();
+}
+
+export const objectKey = (dataset: string, annexKey: string) => `${dataset}/objects/${annexKey}`;
+
+export const DATASET_ID = /^[a-z]{2}\d{6}$/;
+
+/** Run `fn` over `items` with at most `concurrency` in flight; stop starting new ones on `stop()`. */
+export async function runPool<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+  stop: () => boolean = () => false,
+): Promise<Array<R | undefined>> {
+  const results: Array<R | undefined> = new Array(items.length).fill(undefined);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length && !stop()) {
+      const i = next++;
+      results[i] = await fn(items[i] as T, i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, concurrency) }, worker));
+  return results;
+}
+
+export function countWords(words: string[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const w of words) out[w] = (out[w] ?? 0) + 1;
+  return out;
+}
+
+export function formatWordCounts(counts: Record<string, number>): string {
+  const entries = Object.entries(counts).sort(([a], [b]) => a.localeCompare(b));
+  return entries.map(([w, n]) => `${w}=${n}`).join(", ");
+}
+
+// ---------------------------------------------------------------------------
+// Pure layout rules.
+// ---------------------------------------------------------------------------
+
+export interface PartSpec {
+  number: number;
+  /** "upload": bytes read from the old object, patched, and uploaded. "copy": copied server side. */
+  kind: "upload" | "copy";
+  start: number;
+  /** Inclusive. */
+  end: number;
+}
+
+export interface AssemblyLayout {
+  mode: "put" | "multipart";
+  parts: PartSpec[];
+  uploadedBytes: number;
+  copiedBytes: number;
+}
+
+/**
+ * How one new object is built from an old one of `size` bytes.
+ *
+ * Up to {@link SINGLE_PUT_MAX} it is one put-object of the patched content. Above it, part 1
+ * is the first {@link FIRST_PART_BYTES} (the whole object when it is under that plus the 5 MiB
+ * minimum, so the remainder is never a runt non-final part) and is uploaded patched; the rest
+ * is `upload-part-copy` in ranges of at most `maxCopyPart`. Every non-final part is at least
+ * {@link MIN_PART_BYTES}, which S3 enforces at completion.
+ */
+export function planAssembly(
+  size: number,
+  maxCopyPart: number = MAX_COPY_PART_BYTES,
+): AssemblyLayout {
+  if (!Number.isInteger(size) || size < EDF_HEADER_BYTES) throw new StageError("size-too-small");
+  if (maxCopyPart < MIN_PART_BYTES || maxCopyPart > MAX_COPY_PART_BYTES) {
+    throw new StageError("bad-part-size", EXIT.usage);
+  }
+  if (size <= SINGLE_PUT_MAX) {
+    return { mode: "put", parts: [], uploadedBytes: size, copiedBytes: 0 };
+  }
+  const first = size < FIRST_PART_BYTES + MIN_PART_BYTES ? size : FIRST_PART_BYTES;
+  const parts: PartSpec[] = [{ number: 1, kind: "upload", start: 0, end: first - 1 }];
+  let start = first;
+  while (start < size) {
+    const end = Math.min(start + maxCopyPart, size) - 1;
+    parts.push({ number: parts.length + 1, kind: "copy", start, end });
+    start = end + 1;
+  }
+  if (parts.length > MAX_PARTS) throw new StageError("too-many-parts");
+  return { mode: "multipart", parts, uploadedBytes: first, copiedBytes: size - first };
+}
+
+/** S3 calls one new object costs at most (a skipped, already-assembled object costs fewer). */
+export function callsFor(layout: AssemblyLayout): Record<string, number> {
+  const calls: Record<string, number> = { "head-object": 3 };
+  if (layout.mode === "put") {
+    calls["get-object"] = 1;
+    calls["put-object"] = 1;
+    return calls;
+  }
+  calls["create-multipart-upload"] = 1;
+  calls["complete-multipart-upload"] = 1;
+  for (const p of layout.parts) {
+    if (p.kind === "upload") {
+      calls["get-object"] = (calls["get-object"] ?? 0) + 1;
+      calls["upload-part"] = (calls["upload-part"] ?? 0) + 1;
+    } else {
+      calls["upload-part-copy"] = (calls["upload-part-copy"] ?? 0) + 1;
+    }
+  }
+  return calls;
+}
+
+/**
+ * The byte windows the verify stage compares between an old and a new object: `n` evenly
+ * spaced windows of `len` bytes plus the final `len` bytes. Windows start at or after the
+ * header, because the first 256 bytes differ by design and are checked on their own.
+ */
+export function sampleRanges(
+  size: number,
+  n: number = DEFAULT_SAMPLES,
+  len: number = SAMPLE_BYTES,
+): Array<[number, number]> {
+  if (size <= EDF_HEADER_BYTES) return [];
+  const usable = size - EDF_HEADER_BYTES;
+  const starts = new Set<number>();
+  if (usable <= len) {
+    starts.add(EDF_HEADER_BYTES);
+  } else {
+    const span = usable - len;
+    for (let i = 0; i < n; i++) starts.add(EDF_HEADER_BYTES + Math.floor((i * span) / n));
+    starts.add(EDF_HEADER_BYTES + span);
+  }
+  return [...starts]
+    .sort((a, b) => a - b)
+    .map((s): [number, number] => [s, Math.min(s + len, size) - 1]);
+}
+
+// ---------------------------------------------------------------------------
+// S3 operations.
+// ---------------------------------------------------------------------------
+
+export interface HeadInfo {
+  size: number;
+  etag: string;
+  versionId?: string;
+  contentType?: string;
+  sse?: string;
+  kmsKeyId?: string;
+  lockMode?: string;
+  /** ISO 8601. */
+  retainUntil?: string;
+}
+
+const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+
+/** head-object. `null` only for a genuine 404; every other failure throws. */
+export async function headObject(
+  ctx: S3Ctx,
+  key: string,
+  versionId?: string,
+): Promise<HeadInfo | null> {
+  const args = ["--bucket", ctx.bucket, "--key", key];
+  if (versionId) args.push("--version-id", versionId);
+  let out: Record<string, unknown>;
+  try {
+    out = await ctx.aws.api("head-object", args);
+  } catch (err) {
+    if (err instanceof AwsCliError && err.code === "not-found") return null;
+    throw err;
+  }
+  const size = out.ContentLength;
+  const etag = str(out.ETag);
+  if (typeof size !== "number" || etag === undefined)
+    throw new AwsCliError("bad-output", "HeadObject");
+  return {
+    size,
+    etag,
+    versionId: str(out.VersionId),
+    contentType: str(out.ContentType),
+    sse: str(out.ServerSideEncryption),
+    kmsKeyId: str(out.SSEKMSKeyId),
+    lockMode: str(out.ObjectLockMode),
+    retainUntil: isoOrUndefined(out.ObjectLockRetainUntilDate),
+  };
+}
+
+export interface VersionEntry {
+  versionId: string;
+  isLatest: boolean;
+}
+
+export interface VersionListing {
+  versions: VersionEntry[];
+  markers: VersionEntry[];
+}
+
+function entriesOf(raw: unknown, key: string): VersionEntry[] {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw new AwsCliError("bad-output", "ListObjectVersions");
+  const out: VersionEntry[] = [];
+  for (const e of raw as Array<Record<string, unknown>>) {
+    // list-object-versions is a PREFIX match: only the exact key counts.
+    if (e.Key !== key) continue;
+    const id = str(e.VersionId);
+    if (id === undefined) throw new AwsCliError("bad-output", "ListObjectVersions");
+    out.push({ versionId: id, isLatest: e.IsLatest === true });
+  }
+  return out;
+}
+
+/** Every Version and DeleteMarker of EXACTLY `key`. The CLI follows every page. */
+export async function listKeyVersions(ctx: S3Ctx, key: string): Promise<VersionListing> {
+  const out = await ctx.aws.api("list-object-versions", ["--bucket", ctx.bucket, "--prefix", key]);
+  return { versions: entriesOf(out.Versions, key), markers: entriesOf(out.DeleteMarkers, key) };
+}
+
+export interface PrefixEntry extends VersionEntry {
+  key: string;
+  kind: "version" | "marker";
+}
+
+/** Every Version and DeleteMarker under a PREFIX, with its key. */
+export async function listPrefixVersions(ctx: S3Ctx, prefix: string): Promise<PrefixEntry[]> {
+  const out = await ctx.aws.api("list-object-versions", [
+    "--bucket",
+    ctx.bucket,
+    "--prefix",
+    prefix,
+  ]);
+  const collect = (raw: unknown, kind: "version" | "marker"): PrefixEntry[] => {
+    if (raw === undefined || raw === null) return [];
+    if (!Array.isArray(raw)) throw new AwsCliError("bad-output", "ListObjectVersions");
+    return (raw as Array<Record<string, unknown>>).map((e) => {
+      const key = str(e.Key);
+      const id = str(e.VersionId);
+      if (key === undefined || id === undefined) {
+        throw new AwsCliError("bad-output", "ListObjectVersions");
+      }
+      return { key, versionId: id, isLatest: e.IsLatest === true, kind };
+    });
+  };
+  return [...collect(out.Versions, "version"), ...collect(out.DeleteMarkers, "marker")];
+}
+
+/** Current object keys under a prefix (list-objects-v2; the CLI follows every page). */
+export async function listCurrentKeys(ctx: S3Ctx, prefix: string): Promise<string[]> {
+  const out = await ctx.aws.api("list-objects-v2", ["--bucket", ctx.bucket, "--prefix", prefix]);
+  const raw = out.Contents;
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw new AwsCliError("bad-output", "ListObjectsV2");
+  return (raw as Array<Record<string, unknown>>).map((e) => {
+    const k = str(e.Key);
+    if (k === undefined) throw new AwsCliError("bad-output", "ListObjectsV2");
+    return k;
+  });
+}
+
+export interface RangeOptions {
+  versionId?: string;
+  ifMatch?: string;
+}
+
+/** Bytes [start, end] (inclusive) of an object, through a temp file that is removed at once. */
+export async function readRange(
+  ctx: S3Ctx,
+  key: string,
+  start: number,
+  end: number,
+  opts: RangeOptions = {},
+): Promise<Uint8Array> {
+  const file = ctx.tmp.file();
+  try {
+    const args = ["--bucket", ctx.bucket, "--key", key, "--range", `bytes=${start}-${end}`];
+    if (opts.versionId) args.push("--version-id", opts.versionId);
+    if (opts.ifMatch) args.push("--if-match", opts.ifMatch);
+    args.push(file);
+    await ctx.aws.api("get-object", args, { slow: true });
+    const bytes = new Uint8Array(await readFile(file));
+    if (bytes.length !== end - start + 1) throw new AwsCliError("short-read", "GetObject");
+    return bytes;
+  } finally {
+    await ctx.tmp.remove(file);
+  }
+}
+
+/** A whole object's bytes (no Range header). For small files such as a manifest. */
+export async function readWhole(ctx: S3Ctx, key: string): Promise<Uint8Array> {
+  const file = ctx.tmp.file();
+  try {
+    await ctx.aws.api("get-object", ["--bucket", ctx.bucket, "--key", key, file], { slow: true });
+    return new Uint8Array(await readFile(file));
+  } finally {
+    await ctx.tmp.remove(file);
+  }
+}
+
+export interface Retention {
+  mode: string;
+  /** ISO 8601. */
+  retainUntil: string;
+}
+
+/** get-object-retention of one version. `null` when the version carries no retention. */
+export async function getRetention(
+  ctx: S3Ctx,
+  key: string,
+  versionId: string,
+): Promise<Retention | null> {
+  let out: Record<string, unknown>;
+  try {
+    out = await ctx.aws.api("get-object-retention", [
+      "--bucket",
+      ctx.bucket,
+      "--key",
+      key,
+      "--version-id",
+      versionId,
+    ]);
+  } catch (err) {
+    if (err instanceof AwsCliError && err.code === "not-found") return null;
+    throw err;
+  }
+  const r = out.Retention as Record<string, unknown> | undefined;
+  const mode = r ? str(r.Mode) : undefined;
+  const until = r ? isoOrUndefined(r.RetainUntilDate) : undefined;
+  if (!mode || !until) return null;
+  return { mode, retainUntil: until };
+}
+
+export interface ObjectMeta {
+  contentType?: string;
+  sse?: string;
+  kmsKeyId?: string;
+}
+
+function metaArgs(meta: ObjectMeta): string[] {
+  const a: string[] = [];
+  if (meta.contentType) a.push("--content-type", meta.contentType);
+  if (meta.sse) a.push("--server-side-encryption", meta.sse);
+  if (meta.kmsKeyId) a.push("--ssekms-key-id", meta.kmsKeyId);
+  return a;
+}
+
+const lockArgs = (retainUntil: string) => [
+  "--object-lock-mode",
+  "GOVERNANCE",
+  "--object-lock-retain-until-date",
+  retainUntil,
+];
+
+/** put-object with the lock set at put time. Returns the new version id. */
+export async function putObjectLocked(
+  ctx: S3Ctx,
+  key: string,
+  bodyFile: string,
+  meta: ObjectMeta,
+  retainUntil: string,
+): Promise<string> {
+  const out = await ctx.aws.api(
+    "put-object",
+    [
+      "--bucket",
+      ctx.bucket,
+      "--key",
+      key,
+      "--body",
+      bodyFile,
+      ...lockArgs(retainUntil),
+      ...metaArgs(meta),
+    ],
+    { slow: true },
+  );
+  const id = str(out.VersionId);
+  if (!id) throw new AwsCliError("bad-output", "PutObject");
+  return id;
+}
+
+export async function createMultipart(
+  ctx: S3Ctx,
+  key: string,
+  meta: ObjectMeta,
+  retainUntil: string,
+): Promise<string> {
+  const out = await ctx.aws.api("create-multipart-upload", [
+    "--bucket",
+    ctx.bucket,
+    "--key",
+    key,
+    ...lockArgs(retainUntil),
+    ...metaArgs(meta),
+  ]);
+  const id = str(out.UploadId);
+  if (!id) throw new AwsCliError("bad-output", "CreateMultipartUpload");
+  return id;
+}
+
+/**
+ * The CLI sends a CRC64NVME checksum header on UploadPart by default (measured on aws-cli
+ * 2.36.47). The multipart upload is created with no checksum type, so a part must not carry one:
+ * `when_required` turns the default off for this one call and leaves put-object's alone.
+ */
+const NO_PART_CHECKSUM = { AWS_REQUEST_CHECKSUM_CALCULATION: "when_required" };
+
+export async function uploadPart(
+  ctx: S3Ctx,
+  key: string,
+  uploadId: string,
+  partNumber: number,
+  bodyFile: string,
+): Promise<string> {
+  const out = await ctx.aws.api(
+    "upload-part",
+    [
+      "--bucket",
+      ctx.bucket,
+      "--key",
+      key,
+      "--upload-id",
+      uploadId,
+      "--part-number",
+      String(partNumber),
+      "--body",
+      bodyFile,
+    ],
+    { slow: true, env: NO_PART_CHECKSUM },
+  );
+  const etag = str(out.ETag);
+  if (!etag) throw new AwsCliError("bad-output", "UploadPart");
+  return etag;
+}
+
+export async function uploadPartCopy(
+  ctx: S3Ctx,
+  key: string,
+  uploadId: string,
+  partNumber: number,
+  source: { key: string; etag: string; start: number; end: number },
+): Promise<string> {
+  const out = await ctx.aws.api(
+    "upload-part-copy",
+    [
+      "--bucket",
+      ctx.bucket,
+      "--key",
+      key,
+      "--upload-id",
+      uploadId,
+      "--part-number",
+      String(partNumber),
+      "--copy-source",
+      `${ctx.bucket}/${source.key}`,
+      "--copy-source-range",
+      `bytes=${source.start}-${source.end}`,
+      "--copy-source-if-match",
+      source.etag,
+    ],
+    { slow: true },
+  );
+  const result = out.CopyPartResult as Record<string, unknown> | undefined;
+  const etag = result ? str(result.ETag) : undefined;
+  if (!etag) throw new AwsCliError("bad-output", "UploadPartCopy");
+  return etag;
+}
+
+export async function completeMultipart(
+  ctx: S3Ctx,
+  key: string,
+  uploadId: string,
+  parts: Array<{ ETag: string; PartNumber: number }>,
+): Promise<void> {
+  await ctx.aws.api(
+    "complete-multipart-upload",
+    [
+      "--bucket",
+      ctx.bucket,
+      "--key",
+      key,
+      "--upload-id",
+      uploadId,
+      "--multipart-upload",
+      JSON.stringify({ Parts: parts }),
+    ],
+    { slow: true },
+  );
+}
+
+export async function abortMultipart(ctx: S3Ctx, key: string, uploadId: string): Promise<void> {
+  await ctx.aws.api("abort-multipart-upload", [
+    "--bucket",
+    ctx.bucket,
+    "--key",
+    key,
+    "--upload-id",
+    uploadId,
+  ]);
+}
+
+/**
+ * Delete ONE version (or delete marker) by id. `bypass` adds the governance bypass; without it
+ * a locked version is refused, which is what the canary relies on and what prune relies on to
+ * never touch a locked object.
+ */
+export async function deleteVersion(
+  ctx: S3Ctx,
+  key: string,
+  versionId: string,
+  bypass: boolean,
+): Promise<void> {
+  const args = ["--bucket", ctx.bucket, "--key", key, "--version-id", versionId];
+  if (bypass) args.push("--bypass-governance-retention");
+  await ctx.aws.api("delete-object", args);
+}
