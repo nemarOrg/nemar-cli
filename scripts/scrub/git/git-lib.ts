@@ -794,22 +794,31 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
 export interface AnnexRegistryOptions {
   repo: string;
   keymap: KeymapFile;
-  remoteUuid: string;
+  /** The only repositories a NEW key is recorded present at (the S3 special remote). */
+  remoteUuids: string[];
   execute: boolean;
 }
 
 export interface AnnexRegistryResult {
   executed: boolean;
-  newKeys: number;
   oldKeys: number;
-  /** After `execute`, what the location log shows. All zero in a dry run. */
-  newPresent: number;
-  oldRetracted: number;
-  oldDead: number;
+  newKeys: number;
   /**
-   * Old keys `git annex dead` refused to kill because some other repository (this clone
-   * included) still records the content as present. `--force` does not lift that guard; the
-   * holder has to give the key up, and the command is safe to run again afterward.
+   * (old key, repository) pairs the location log records as present. In a dry run these are
+   * the retractions that would be made; after `execute`, the ones that were.
+   */
+  holders: number;
+  /** (new key, named remote) pairs not yet recorded present: to record, or recorded. */
+  newToRegister: number;
+  /** After `execute` only, from the log read back. All zero in a dry run. */
+  oldStillHeld: number;
+  oldDead: number;
+  newPresent: number;
+  /** (new key, repository) pairs present at a repository that was NOT named. Must be 0. */
+  newForeignHolders: number;
+  /**
+   * Old keys `git annex dead` refused. It refuses while any repository still records the key,
+   * and `--force` does not lift that; retracting every holder first is what avoids it.
    */
   deadRefused: number;
 }
@@ -851,55 +860,125 @@ async function locationLogs(repo: string, keys: string[]): Promise<string[]> {
   return contents.map((c) => (c ? c.toString("utf8") : ""));
 }
 
+/** The uuids git-annex itself says hold each key (trusted and untrusted), by key. */
+async function whereisHolders(repo: string, keys: string[]): Promise<Map<string, Set<string>>> {
+  const out = new Map<string, Set<string>>();
+  if (keys.length === 0) return out;
+  // `whereis` exits 1 for a key with no copies, so its JSON is read, never its exit code. It
+  // also reads the journal, which a raw read of the git-annex branch does not see, and it
+  // merges remote git-annex branches first, as every git-annex command does.
+  const r = await annex(repo, ["whereis", "--batch-keys", "--json"], `${keys.join("\n")}\n`);
+  for (const line of r.stdout.toString("utf8").split("\n")) {
+    if (!line.startsWith("{")) continue;
+    const j = JSON.parse(line) as {
+      key: string;
+      whereis?: { uuid: string }[];
+      untrusted?: { uuid: string }[];
+    };
+    out.set(j.key, new Set([...(j.whereis ?? []), ...(j.untrusted ?? [])].map((w) => w.uuid)));
+  }
+  // A run that answered for fewer keys than it was asked about did not answer: "no holders"
+  // for a key it never examined is the dangerous reading.
+  if (!keys.every((k) => out.has(k))) throw new GitScrubError("annex-command-failed", r.stderr);
+  return out;
+}
+
+function presentIn(log: string): Set<string> {
+  return new Set([...newestStatuses(log)].filter(([, status]) => status === "1").map(([u]) => u));
+}
+
+/** Dead: some repository's newest line is `X` and none is present. */
+function isDead(log: string): boolean {
+  const statuses = [...newestStatuses(log).values()];
+  return statuses.includes("X") && !statuses.includes("1");
+}
+
 /**
- * Register the new keys at the special remote and retract and kill the old ones, in a
+ * Retire the old keys everywhere and register the new keys at the named remote(s) only, in a
  * clone with git-annex initialized. A dry run (the default) only counts.
  *
- * One `setpresentkey --batch` process per direction, never one process per key: parallel
- * writers lose each other's updates in the git-annex journal. `dead` runs one key at a
- * time for the same reason. The result comes from the location log afterward; an exit code
- * is not evidence.
+ * For every OLD key it finds every repository the location log records as present (the S3
+ * remote and any uploader's own clone alike), retracts each, and only then marks the key dead:
+ * git-annex refuses `dead` while any holder remains. For every NEW key it records presence at
+ * the `remoteUuids` and nowhere else. It writes only what is missing, so a second run changes
+ * nothing.
+ *
+ * One `setpresentkey --batch` process per direction, never one per key: parallel writers lose
+ * each other's updates in the git-annex journal. `dead` runs one key at a time for the same
+ * reason. The result is read back (holders from `whereis`, which sees the journal; death from
+ * the location log, which `dead` commits), and an exit code is not evidence.
  */
 export async function annexRegistry(opts: AnnexRegistryOptions): Promise<AnnexRegistryResult> {
-  const { repo, keymap, remoteUuid } = opts;
-  if (!UUID.test(remoteUuid)) throw new ContractError("remote uuid is not a uuid");
+  const { repo, keymap, remoteUuids } = opts;
+  if (remoteUuids.length === 0 || !remoteUuids.every((u) => UUID.test(u))) {
+    throw new ContractError("remote uuid is not a uuid");
+  }
   for (const [a, b] of Object.entries(keymap)) {
     if (!ANNEX_KEY.test(a) || !ANNEX_KEY.test(b)) throw new ContractError("keymap holds a bad key");
   }
   const own = await git(repo, ["config", "--get", "annex.uuid"]).catch(() => "");
   if (!own.trim()) throw new GitScrubError("annex-not-initialized");
 
+  const named = new Set(remoteUuids);
   const oldKeys = [...new Set(Object.keys(keymap))];
   const newKeys = [...new Set(Object.values(keymap))];
+
+  // What the log says now. `whereis` first: it merges remote git-annex branches, so the raw
+  // logs read after it are current. Holders are the union of both views, which also catches a
+  // repository marked dead-trust that `whereis` leaves out and that still blocks `dead`.
+  const asked = await whereisHolders(repo, [...oldKeys, ...newKeys]);
+  const oldLogs = await locationLogs(repo, oldKeys);
+  const holdersOf = oldKeys.map((k, i) => [
+    ...new Set([...(asked.get(k) ?? []), ...presentIn(oldLogs[i] ?? "")]),
+  ]);
+  const retractions = oldKeys.flatMap((k, i) => (holdersOf[i] ?? []).map((u) => `${k} ${u} 0`));
+  const registrations = newKeys.flatMap((k) =>
+    remoteUuids.filter((u) => !asked.get(k)?.has(u)).map((u) => `${k} ${u} 1`),
+  );
   const result: AnnexRegistryResult = {
     executed: opts.execute,
-    newKeys: newKeys.length,
     oldKeys: oldKeys.length,
-    newPresent: 0,
-    oldRetracted: 0,
+    newKeys: newKeys.length,
+    holders: retractions.length,
+    newToRegister: registrations.length,
+    oldStillHeld: 0,
     oldDead: 0,
+    newPresent: 0,
+    newForeignHolders: 0,
     deadRefused: 0,
   };
   if (!opts.execute) return result;
 
-  const batch = async (keys: string[], flag: "1" | "0"): Promise<void> => {
-    const input = `${keys.map((k) => `${k} ${remoteUuid} ${flag}`).join("\n")}\n`;
-    const r = await annex(repo, ["setpresentkey", "--batch"], input);
+  const batch = async (lines: string[]): Promise<void> => {
+    if (lines.length === 0) return;
+    const r = await annex(repo, ["setpresentkey", "--batch"], `${lines.join("\n")}\n`);
     if (r.exitCode !== 0) throw new GitScrubError("annex-command-failed", r.stderr);
   };
-  await batch(newKeys, "1");
-  await batch(oldKeys, "0");
-  for (const key of oldKeys) {
-    const r = await annex(repo, ["dead", "--quiet", "--key", key]);
+  await batch(registrations);
+  await batch(retractions);
+  for (let i = 0; i < oldKeys.length; i++) {
+    const log = oldLogs[i] ?? "";
+    const alreadyDead = isDead(log) && (holdersOf[i] ?? []).length === 0;
+    // A key with no log at all is recorded nowhere; there is nothing to mark.
+    if (alreadyDead || (log === "" && (holdersOf[i] ?? []).length === 0)) continue;
+    const r = await annex(repo, ["dead", "--quiet", "--key", oldKeys[i] as string]);
     // A refusal is counted, not thrown: the other keys still need their turn, and the
-    // location log below is what says how many are dead.
+    // read-back below is what says how many are dead.
     if (r.exitCode !== 0) result.deadRefused++;
   }
 
-  const newLogs = await locationLogs(repo, newKeys);
-  result.newPresent = newLogs.filter((l) => newestStatuses(l).get(remoteUuid) === "1").length;
-  const oldLogs = await locationLogs(repo, oldKeys);
-  result.oldRetracted = oldLogs.filter((l) => newestStatuses(l).get(remoteUuid) !== "1").length;
-  result.oldDead = oldLogs.filter((l) => newestStatuses(l).get(remoteUuid) === "X").length;
+  const after = await whereisHolders(repo, [...oldKeys, ...newKeys]);
+  const afterLogs = await locationLogs(repo, oldKeys);
+  oldKeys.forEach((k, i) => {
+    const log = afterLogs[i] ?? "";
+    const held = (after.get(k)?.size ?? 0) > 0 || presentIn(log).size > 0;
+    if (held) result.oldStillHeld++;
+    else if (isDead(log) || log === "") result.oldDead++;
+  });
+  for (const k of newKeys) {
+    const holders = after.get(k) ?? new Set<string>();
+    if (remoteUuids.every((u) => holders.has(u))) result.newPresent++;
+    result.newForeignHolders += [...holders].filter((u) => !named.has(u)).length;
+  }
   return result;
 }

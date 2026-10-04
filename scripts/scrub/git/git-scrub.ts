@@ -9,7 +9,7 @@
  *   bun run scripts/scrub/git/git-scrub.ts verify   --repo CLONE --keymap keymap.json \
  *        --plan git-plan.json --before before.json [--allow-unparseable-json]
  *   bun run scripts/scrub/git/git-scrub.ts annex-registry --repo ANNEX_CLONE \
- *        --keymap keymap.json --remote-uuid UUID [--execute]
+ *        --keymap keymap.json --remote-uuid UUID [--remote-uuid UUID ...] [--execute]
  *
  * Output is counts and fixed words only: a path, a key or a file name can be the identifier.
  * Exit codes: 0 done, 1 refused or failed, 2 usage.
@@ -34,7 +34,7 @@ const USAGE = `usage: git-scrub <snapshot|rewrite|verify|annex-registry> --repo 
   rewrite         --keymap FILE --plan FILE [--expect-remote URL] [--snapshot-out FILE]
                   [--refs REF...] [--report FILE]
   verify          --keymap FILE --plan FILE --before FILE [--allow-unparseable-json]
-  annex-registry  --keymap FILE --remote-uuid UUID [--execute]`;
+  annex-registry  --keymap FILE --remote-uuid UUID [--remote-uuid UUID ...] [--execute]`;
 
 class UsageError extends Error {}
 
@@ -68,7 +68,7 @@ export async function main(argv: string[]): Promise<number> {
       "snapshot-out": { type: "string" },
       report: { type: "string" },
       refs: { type: "string", multiple: true },
-      "remote-uuid": { type: "string" },
+      "remote-uuid": { type: "string", multiple: true },
       execute: { type: "boolean", default: false },
       "allow-unparseable-json": { type: "boolean", default: false },
     },
@@ -130,23 +130,30 @@ export async function main(argv: string[]): Promise<number> {
       }
       case "annex-registry": {
         const keymap = readKeymap(need(values.keymap, "--keymap"));
+        const remoteUuids = values["remote-uuid"] ?? [];
+        if (remoteUuids.length === 0) throw new UsageError("missing --remote-uuid");
         const result = await annexRegistry({
           repo,
           keymap,
-          remoteUuid: need(values["remote-uuid"], "--remote-uuid"),
+          remoteUuids,
           execute: values.execute === true,
         });
         if (!result.executed) {
           console.log(
-            `annex-registry: dry-run newKeys=${result.newKeys} oldKeys=${result.oldKeys} (pass --execute)`,
+            `annex-registry: dry-run oldKeys=${result.oldKeys} holdersToRetract=${result.holders} newKeys=${result.newKeys} newToRegister=${result.newToRegister} (pass --execute)`,
           );
           return 0;
         }
         const good =
+          result.oldStillHeld === 0 &&
+          result.oldDead === result.oldKeys &&
           result.newPresent === result.newKeys &&
-          result.oldRetracted === result.oldKeys &&
-          result.oldDead === result.oldKeys;
-        console.log(`annex-registry: ${good ? "ok" : "FAILED"} ${fmt({ ...result, executed: 1 })}`);
+          result.newForeignHolders === 0 &&
+          result.deadRefused === 0;
+        const { holders, newToRegister, ...rest } = result;
+        console.log(
+          `annex-registry: ${good ? "ok" : "FAILED"} ${fmt({ ...rest, holdersRetracted: holders, newRegistered: newToRegister, executed: 1 })}`,
+        );
         return good ? 0 : 1;
       }
       default:

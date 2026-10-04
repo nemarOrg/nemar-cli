@@ -1,15 +1,21 @@
 /**
- * `git-scrub annex-registry`, run as the real program in a real git-annex repository with a real
- * `type=directory` special remote standing in for `nemar-s3`.
+ * `git-scrub annex-registry`, run as the real program on real git-annex repositories.
+ *
+ * The shape mirrors the dataset it is for: an origin repository (A) with a `type=directory`
+ * special remote standing in for `nemar-s3`, an uploader's own clone (B) that fetched the
+ * content from that remote, and the operator's fresh clone (C) where the command runs. A key
+ * therefore has TWO holders, the special remote and B, which is what the real dataset has, and
+ * git-annex refuses `dead` while either remains.
  *
  * The expectations come from git-annex itself, read independently of the program: `whereis
- * --key --json` for where a key is, and the key's location log on the `git-annex` branch for
+ * --key --json` for who holds a key, and the key's location log on the `git-annex` branch for
  * whether it is dead. An exit code is not evidence of either, so none is trusted.
  *
  * Skipped when git-annex is unavailable.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   HAVE_ANNEX,
@@ -29,12 +35,15 @@ afterAll(cleanupRoots);
 const SUITE = HAVE_ANNEX ? describe : describe.skip;
 
 interface Registry {
+  /** The operator's fresh clone: where the command runs. */
   repo: string;
   keymapPath: string;
-  uuid: string;
+  /** The special remote, and the uploader's clone: the two holders of every old key. */
+  remoteUuid: string;
+  uploaderUuid: string;
   oldKeys: string[];
   newKeys: string[];
-  /** A key outside the keymap, present at the remote: it must not be touched. */
+  /** A key outside the keymap held by both: it must not be touched. */
   bystander: string;
 }
 
@@ -43,7 +52,7 @@ function whereis(repo: string, key: string): string[] {
   const r = shAny(repo, ["git", "annex", "whereis", "--key", key, "--json"]);
   const line = r.out.split("\n").find((l) => l.startsWith("{"));
   if (!line) throw new Error("no whereis json");
-  return (JSON.parse(line) as { whereis: { uuid: string }[] }).whereis.map((w) => w.uuid);
+  return (JSON.parse(line) as { whereis: { uuid: string }[] }).whereis.map((w) => w.uuid).sort();
 }
 
 /** The key's location log as git-annex stored it on the git-annex branch. */
@@ -58,14 +67,21 @@ function locationLog(repo: string, key: string): string {
   return shAny(repo, ["git", "show", `git-annex:${path}`]).out;
 }
 
-function build(dropLocal: boolean): Registry {
+function journal(repo: string): string[] {
+  return readdirSync(join(repo, ".git", "annex", "journal"));
+}
+
+function build(): Registry {
   const root = makeRoot();
-  const repo = join(root, "repo");
-  const store = join(root, "store");
-  sh(root, ["mkdir", "-p", repo, store]);
-  git(repo, "init", "-q", "-b", "main");
-  sh(repo, ["git", "annex", "init", "--quiet", "clone"]);
-  sh(repo, [
+  const [a, b, c, store] = ["origin", "uploader", "operator", "store"].map((n) =>
+    join(root, n),
+  ) as [string, string, string, string];
+  sh(root, ["mkdir", "-p", a, store]);
+
+  // A: the published repository. Its content lives only at the special remote.
+  git(a, "init", "-q", "-b", "main");
+  sh(a, ["git", "annex", "init", "--quiet", "origin"]);
+  sh(a, [
     "git",
     "annex",
     "initremote",
@@ -74,59 +90,94 @@ function build(dropLocal: boolean): Registry {
     `directory=${store}`,
     "encryption=none",
   ]);
-  const uuid = git(repo, "config", "remote.stand-in.annex-uuid").trim();
+  const remoteUuid = git(a, "config", "remote.stand-in.annex-uuid").trim();
   const oldKeys: string[] = [];
   for (let i = 0; i < 3; i++) {
-    write(repo, `sub-0${i}/eeg/rec.edf`, `recording-${i}-`.repeat(50));
-    sh(repo, ["git", "annex", "add", "--quiet", `sub-0${i}/eeg/rec.edf`]);
-    oldKeys.push(sh(repo, ["git", "annex", "lookupkey", `sub-0${i}/eeg/rec.edf`]).trim());
+    write(a, `sub-0${i}/eeg/rec.edf`, `recording-${i}-`.repeat(50));
+    sh(a, ["git", "annex", "add", "--quiet", `sub-0${i}/eeg/rec.edf`]);
+    oldKeys.push(sh(a, ["git", "annex", "lookupkey", `sub-0${i}/eeg/rec.edf`]).trim());
   }
-  write(repo, "bystander.edf", "bystander-".repeat(50));
-  sh(repo, ["git", "annex", "add", "--quiet", "bystander.edf"]);
-  const bystander = sh(repo, ["git", "annex", "lookupkey", "bystander.edf"]).trim();
-  git(repo, "commit", "-q", "-m", "data");
-  sh(repo, ["git", "annex", "copy", "--quiet", "--to", "stand-in", "."]);
-  // A scrub clone has no content of its own: only the special remote holds it.
-  if (dropLocal) sh(repo, ["git", "annex", "drop", "--quiet", "."]);
+  write(a, "bystander.edf", "bystander-".repeat(50));
+  sh(a, ["git", "annex", "add", "--quiet", "bystander.edf"]);
+  const bystander = sh(a, ["git", "annex", "lookupkey", "bystander.edf"]).trim();
+  git(a, "commit", "-q", "-m", "data");
+  sh(a, ["git", "annex", "copy", "--quiet", "--to", "stand-in", "."]);
+  sh(a, ["git", "annex", "drop", "--quiet", "."]);
+
+  // B: the uploader's own clone. It fetches the content from the special remote, which makes it
+  // a second holder, and its record reaches A's git-annex branch the way a push would.
+  sh(root, ["git", "clone", "-q", "--no-local", a, b]);
+  sh(b, ["git", "annex", "init", "--quiet", "uploader"]);
+  sh(b, ["git", "annex", "enableremote", "stand-in", `directory=${store}`]);
+  sh(b, ["git", "annex", "get", "--quiet", "."]);
+  sh(b, ["git", "annex", "merge"]);
+  const uploaderUuid = git(b, "config", "annex.uuid").trim();
+  git(a, "fetch", "-q", b, "git-annex:git-annex");
+
+  // C: the operator's fresh clone. It sees both holders through origin's git-annex branch.
+  sh(root, ["git", "clone", "-q", "--no-local", a, c]);
+  sh(c, ["git", "annex", "init", "--quiet", "operator"]);
+
   const newKeys = oldKeys.map((k, i) => k.replace(/--[0-9a-f]{64}/, `--${sha(`scrubbed-${i}`)}`));
-  const keymapPath = join(root, "keymap.json");
   write(
     root,
     "keymap.json",
     JSON.stringify(Object.fromEntries(oldKeys.map((k, i) => [k, newKeys[i]]))),
   );
-  return { repo, keymapPath, uuid, oldKeys, newKeys, bystander };
+  return {
+    repo: c,
+    keymapPath: join(root, "keymap.json"),
+    remoteUuid,
+    uploaderUuid,
+    oldKeys,
+    newKeys,
+    bystander,
+  };
 }
 
-SUITE("annex-registry in a real git-annex repository", () => {
+function registry(fx: Registry, ...extra: string[]): Promise<{ code: number; out: string }> {
+  return cli([
+    "annex-registry",
+    "--repo",
+    fx.repo,
+    "--keymap",
+    fx.keymapPath,
+    "--remote-uuid",
+    fx.remoteUuid,
+    ...extra,
+  ]);
+}
+
+SUITE("annex-registry on a key with two holders", () => {
   let fx: Registry;
 
   beforeAll(() => {
-    fx = build(true);
-  }, 120_000);
+    fx = build();
+  }, 180_000);
 
-  test("the fixture starts as the tests assume: the old keys are at the remote, the new ones nowhere", () => {
-    for (const key of fx.oldKeys) expect(whereis(fx.repo, key)).toContain(fx.uuid);
+  test("the fixture starts as the tests assume: two holders per old key, none for the new ones", () => {
+    const both = [fx.remoteUuid, fx.uploaderUuid].sort();
+    for (const key of fx.oldKeys) expect(whereis(fx.repo, key), key).toEqual(both);
     for (const key of fx.newKeys) expect(whereis(fx.repo, key)).toEqual([]);
-    expect(whereis(fx.repo, fx.bystander)).toContain(fx.uuid);
+    expect(whereis(fx.repo, fx.bystander)).toEqual(both);
+    // The guard this command works around: with both holders recorded, dead is refused.
+    const refused = shAny(fx.repo, ["git", "annex", "dead", "--key", fx.oldKeys[0] as string]);
+    expect(refused.code).not.toBe(0);
+    expect(refused.err).toContain("still known to be present");
   });
 
   test("a dry run counts and changes nothing", async () => {
     const before = git(fx.repo, "rev-parse", "refs/heads/git-annex").trim();
-    const r = await cli([
-      "annex-registry",
-      "--repo",
-      fx.repo,
-      "--keymap",
-      fx.keymapPath,
-      "--remote-uuid",
-      fx.uuid,
-    ]);
+    const r = await registry(fx);
     expect(r.code).toBe(0);
-    const c = counts(r.out, "annex-registry: dry-run");
-    expect(c).toEqual({ newKeys: 3, oldKeys: 3 });
+    expect(counts(r.out, "annex-registry: dry-run")).toEqual({
+      oldKeys: 3,
+      holdersToRetract: 6,
+      newKeys: 3,
+      newToRegister: 3,
+    });
     expect(git(fx.repo, "rev-parse", "refs/heads/git-annex").trim()).toBe(before);
-    for (const key of fx.oldKeys) expect(whereis(fx.repo, key)).toContain(fx.uuid);
+    expect(journal(fx.repo)).toEqual([]);
     for (const key of fx.newKeys) expect(whereis(fx.repo, key)).toEqual([]);
   });
 
@@ -141,7 +192,7 @@ SUITE("annex-registry in a real git-annex repository", () => {
       "--keymap",
       fx.keymapPath,
       "--remote-uuid",
-      fx.uuid,
+      fx.remoteUuid,
     ]);
     expect(a.code).not.toBe(0);
     expect(a.out).toContain("annex-not-initialized");
@@ -156,82 +207,84 @@ SUITE("annex-registry in a real git-annex repository", () => {
     ]);
     expect(b.code).not.toBe(0);
     expect(b.out).toContain("refused: contract");
+    const c = await cli(["annex-registry", "--repo", fx.repo, "--keymap", fx.keymapPath]);
+    expect(c.code).toBe(2);
   });
 
-  test("--execute registers the new keys, retracts the old ones and marks them dead", async () => {
-    const r = await cli([
-      "annex-registry",
-      "--repo",
-      fx.repo,
-      "--keymap",
-      fx.keymapPath,
-      "--remote-uuid",
-      fx.uuid,
-      "--execute",
-    ]);
+  test("--execute retracts every holder, kills the old keys, and records the new ones only at the named remote", async () => {
+    const r = await registry(fx, "--execute");
     expect(r.out).toContain("annex-registry: ok");
     expect(r.code).toBe(0);
     expect(counts(r.out, "annex-registry: ok")).toMatchObject({
-      newKeys: 3,
       oldKeys: 3,
-      newPresent: 3,
-      oldRetracted: 3,
+      holdersRetracted: 6,
+      newKeys: 3,
+      newRegistered: 3,
+      oldStillHeld: 0,
       oldDead: 3,
+      newPresent: 3,
+      newForeignHolders: 0,
+      deadRefused: 0,
     });
 
     // Asked of git-annex, not of the program.
-    for (const key of fx.newKeys) {
-      expect(whereis(fx.repo, key), key).toEqual([fx.uuid]);
-      expect(locationLog(fx.repo, key)).toMatch(new RegExp(` 1 ${fx.uuid}`));
-    }
     for (const key of fx.oldKeys) {
       expect(whereis(fx.repo, key), key).toEqual([]);
       const log = locationLog(fx.repo, key);
-      expect(log).toMatch(new RegExp(` X ${fx.uuid}`));
-      expect(log).not.toMatch(new RegExp(` 1 ${fx.uuid}`));
+      for (const uuid of [fx.remoteUuid, fx.uploaderUuid]) {
+        expect(log, `${key} ${uuid}`).toMatch(new RegExp(` X ${uuid}`));
+      }
+      expect(log).not.toMatch(/ 1 [0-9a-f-]{36}/);
+    }
+    for (const key of fx.newKeys) {
+      expect(whereis(fx.repo, key), key).toEqual([fx.remoteUuid]);
+      expect(locationLog(fx.repo, key)).not.toContain(fx.uploaderUuid);
     }
     // A key outside the keymap is exactly where it was.
-    expect(whereis(fx.repo, fx.bystander)).toEqual([fx.uuid]);
+    expect(whereis(fx.repo, fx.bystander)).toEqual([fx.remoteUuid, fx.uploaderUuid].sort());
     expect(locationLog(fx.repo, fx.bystander)).not.toContain(" X ");
   }, 120_000);
 
-  test("a key another repository still records is not killed; the run fails, and succeeds once it is released", async () => {
-    // This repository keeps the content locally, so git-annex's own guard ("still known to be
-    // present in some locations") refuses `dead`, and `--force` does not lift it. The refusal is
-    // counted and fails the run; the command is idempotent, so the operator releases the key
-    // and runs it again.
-    const held = build(false);
-    const args = [
-      "annex-registry",
-      "--repo",
-      held.repo,
-      "--keymap",
-      held.keymapPath,
-      "--remote-uuid",
-      held.uuid,
-      "--execute",
-    ];
-    const refused = await cli(args);
-    expect(refused.code).not.toBe(0);
-    expect(refused.out).toContain("annex-registry: FAILED");
-    expect(counts(refused.out, "annex-registry: FAILED")).toMatchObject({
-      oldRetracted: 3,
-      oldDead: 0,
-      deadRefused: 3,
+  test("a second run is a no-op: nothing retracted, nothing recorded, the git-annex branch does not move", async () => {
+    const before = git(fx.repo, "rev-parse", "refs/heads/git-annex").trim();
+    const r = await registry(fx, "--execute");
+    expect(r.out).toContain("annex-registry: ok");
+    expect(r.code).toBe(0);
+    expect(counts(r.out, "annex-registry: ok")).toMatchObject({
+      holdersRetracted: 0,
+      newRegistered: 0,
+      oldDead: 3,
+      newPresent: 3,
     });
-    for (const key of held.oldKeys) expect(locationLog(held.repo, key)).not.toMatch(/ X /);
-
-    sh(held.repo, ["git", "annex", "drop", "--force", "--quiet", "."]);
-    const again = await cli(args);
-    expect(again.out).toContain("annex-registry: ok");
-    expect(again.code).toBe(0);
-    for (const key of held.oldKeys) {
-      expect(locationLog(held.repo, key)).toMatch(new RegExp(` X ${held.uuid}`));
-      expect(whereis(held.repo, key)).toEqual([]);
-    }
+    expect(git(fx.repo, "rev-parse", "refs/heads/git-annex").trim()).toBe(before);
+    expect(journal(fx.repo)).toEqual([]);
+    const dry = await registry(fx);
+    expect(counts(dry.out, "annex-registry: dry-run")).toMatchObject({
+      holdersToRetract: 0,
+      newToRegister: 0,
+    });
   }, 120_000);
 
-  test("the output carries counts only, never a key", async () => {
+  test("the output carries counts only, never a key or a uuid", async () => {
+    const r = await registry(fx);
+    for (const secret of [
+      ...fx.oldKeys,
+      ...fx.newKeys,
+      fx.remoteUuid,
+      fx.uploaderUuid,
+      sha("scrubbed-0"),
+    ]) {
+      expect(r.out).not.toContain(secret);
+    }
+    for (const key of [...fx.oldKeys, ...fx.newKeys]) {
+      expect(r.out).not.toContain(key.split("--")[1]?.split(".")[0] as string);
+    }
+  });
+});
+
+SUITE("annex-registry with more than one named remote", () => {
+  test("repeated --remote-uuid records the new keys at each named uuid and at no other", async () => {
+    const fx = build();
     const r = await cli([
       "annex-registry",
       "--repo",
@@ -239,11 +292,20 @@ SUITE("annex-registry in a real git-annex repository", () => {
       "--keymap",
       fx.keymapPath,
       "--remote-uuid",
-      fx.uuid,
+      fx.remoteUuid,
+      "--remote-uuid",
+      fx.uploaderUuid,
+      "--execute",
     ]);
-    for (const key of [...fx.oldKeys, ...fx.newKeys]) {
-      expect(r.out).not.toContain(key);
-      expect(r.out).not.toContain(key.split("--")[1]?.split(".")[0] as string);
+    expect(r.out).toContain("annex-registry: ok");
+    expect(counts(r.out, "annex-registry: ok")).toMatchObject({
+      newRegistered: 6,
+      newPresent: 3,
+      newForeignHolders: 0,
+    });
+    for (const key of fx.newKeys) {
+      expect(whereis(fx.repo, key)).toEqual([fx.remoteUuid, fx.uploaderUuid].sort());
     }
-  });
+    for (const key of fx.oldKeys) expect(whereis(fx.repo, key)).toEqual([]);
+  }, 180_000);
 });
