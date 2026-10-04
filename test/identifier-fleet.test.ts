@@ -127,6 +127,8 @@ class StandIn {
   readonly maxInflight = { data: 0, s3: 0 };
   /** Hung `aws` requests whose connection the client closed. */
   hungClosed = 0;
+  /** When set, the catalog answers this status instead of the list. */
+  catalogStatus: number | null = null;
   readonly requests: { path: string; authorization: string | null }[] = [];
   private readonly server: ReturnType<typeof Bun.serve>;
   private readonly routes = new Map<string, FileSpec>();
@@ -248,6 +250,7 @@ class StandIn {
 
   private async route(req: Request, path: string, url: URL, n: number): Promise<Response> {
     if (path === "/api/datasets") {
+      if (this.catalogStatus !== null) return new Response("", { status: this.catalogStatus });
       const limit = Number(url.searchParams.get("limit") ?? 100);
       const offset = Number(url.searchParams.get("offset") ?? 0);
       const all = [...this.datasets].sort(([a], [b]) => (a < b ? -1 : 1));
@@ -2456,5 +2459,17 @@ describe("the summary and the pause, edge cases", () => {
     // The first request was told to wait and the run tripped during the wait: its retry never goes out.
     const sent = w.requests.filter((r) => r.path.endsWith("_eeg.edf")).length;
     expect(sent).toBe(1);
+  });
+
+  test("a catalog that cannot be read removes the earlier summary", async () => {
+    const w = newWorld();
+    w.add("nm000001", { [EDF]: CLEAN });
+    const out = tempDir();
+    writeFileSync(join(out, "_summary.json"), JSON.stringify({ earlier: true }));
+    w.catalogStatus = 500;
+    await expect(
+      runFleet(w.ctx({ retryBaseMs: 0 }), { outDir: out, force: false, datasetConcurrency: 1 }),
+    ).rejects.toThrow();
+    expect(existsSync(join(out, "_summary.json"))).toBe(false);
   });
 });
