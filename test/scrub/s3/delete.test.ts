@@ -15,6 +15,7 @@ import { type AssembledFile, type PlanFile, parseKey } from "../../../scripts/sc
 import { AwsCliError, deleteVersion } from "../../../scripts/scrub/s3/s3-lib";
 import type { DeletedFile } from "../../../scripts/scrub/s3/s3-stages";
 import { type S3Standin, type Snapshot, startS3Standin } from "../helpers/s3-standin";
+import { expectStopped } from "./refusal";
 import {
   type Assembled,
   BUCKET,
@@ -122,15 +123,13 @@ describe("delete-old: refusals", () => {
     async () => {
       rmSync(path.join(dir, "verified.json"));
       const noVerified = await runScrub(standin, executeArgs());
-      expect(noVerified.exitCode, noVerified.all).toBe(3);
-      expect(noVerified.stderr).toContain("verified.json-missing");
+      expectStopped(noVerified, 3, "verified.json-missing");
       expectOldIntact();
 
       writeProofs();
       rmSync(path.join(dir, "new-hash-verified.json"));
       const noHash = await runScrub(standin, executeArgs());
-      expect(noHash.exitCode, noHash.all).toBe(3);
-      expect(noHash.stderr).toContain("new-hash-verified.json-missing");
+      expectStopped(noHash, 3, "new-hash-verified.json-missing");
       expectOldIntact();
       expect(has(dir, "deleted.json")).toBe(false);
     },
@@ -146,9 +145,15 @@ describe("delete-old: refusals", () => {
         `${readFileSync(path.join(dir, "assembled.json"), "utf8")}\n`,
       );
       const stale = await runScrub(standin, executeArgs());
-      expect(stale.exitCode, stale.all).toBe(3);
-      expect(stale.stderr).toContain("verified-stale");
+      expectStopped(stale, 3, "verified-stale");
       expectOldIntact();
+
+      // The re-hash proof current, verified.json alone stale.
+      writeProofs();
+      const staleVerified = readJson<{ assembledSha256: string }>(dir, "verified.json");
+      staleVerified.assembledSha256 = "0".repeat(64);
+      writeJson(dir, "verified.json", staleVerified);
+      expectStopped(await runScrub(standin, executeArgs()), 3, "verified-stale", "verified alone");
 
       // verified.json current, the re-hash proof stale.
       writeProofs();
@@ -156,8 +161,7 @@ describe("delete-old: refusals", () => {
       hv.assembledSha256 = "0".repeat(64);
       writeJson(dir, "new-hash-verified.json", hv);
       const staleHash = await runScrub(standin, executeArgs());
-      expect(staleHash.exitCode, staleHash.all).toBe(3);
-      expect(staleHash.stderr).toContain("new-hash-verified-stale");
+      expectStopped(staleHash, 3, "new-hash-verified-stale");
 
       // Right bytes, wrong dataset; right bytes, wrong count.
       writeProofs();
@@ -165,13 +169,11 @@ describe("delete-old: refusals", () => {
       wrongDataset.dataset = "xx090999";
       writeJson(dir, "verified.json", wrongDataset);
       const dataset = await runScrub(standin, executeArgs());
-      expect(dataset.exitCode).toBe(3);
-      expect(dataset.stderr).toContain("proof-wrong-dataset");
+      expectStopped(dataset, 3, "proof-wrong-dataset");
 
       writeProofs(5);
       const count = await runScrub(standin, executeArgs());
-      expect(count.exitCode).toBe(3);
-      expect(count.stderr).toContain("proof-count-mismatch");
+      expectStopped(count, 3, "proof-count-mismatch");
       expectOldIntact();
     },
     SLOW,
@@ -182,8 +184,7 @@ describe("delete-old: refusals", () => {
     async () => {
       writeProofs();
       const tight = await runScrub(standin, executeArgs(["--max-delete", "3"]));
-      expect(tight.exitCode, tight.all).toBe(3);
-      expect(tight.stderr).toContain("over-max-delete");
+      expectStopped(tight, 3, "over-max-delete");
       expectOldIntact();
       expect(has(dir, "deleted.json")).toBe(false);
     },
@@ -204,8 +205,7 @@ describe("delete-old: refusals", () => {
         .reduce((n, k) => n + k.versionIds.length, 0);
       expect(recorded).toBe(6);
       const refused = await runScrub(standin, executeArgs());
-      expect(refused.exitCode, refused.all).toBe(3);
-      expect(refused.stderr).toContain("over-max-delete");
+      expectStopped(refused, 3, "over-max-delete");
       expect(refused.stdout).toContain(`planRecorded=${recorded}`);
       expect(standin.calls("DeleteObject").length).toBe(0);
       expect(versionIdsOf(a.oldKey)).toContain(extra);
@@ -234,24 +234,21 @@ describe("delete-old: refusals", () => {
         (e[a.oldKey] as { newKey: string }).newKey = a.oldKey;
       });
       const same = await runScrub(standin, executeArgs());
-      expect(same.exitCode, same.all).toBe(3);
-      expect(same.stderr).toContain("new-key-equals-old-key");
+      expectStopped(same, 3, "new-key-equals-old-key");
 
       // One entry's replacement is another entry's original.
       withEntries((e) => {
         (e[a.oldKey] as { newKey: string }).newKey = b.oldKey;
       });
       const chained = await runScrub(standin, executeArgs());
-      expect(chained.exitCode, chained.all).toBe(3);
-      expect(chained.stderr).toContain("old-key-is-a-new-key");
+      expectStopped(chained, 3, "old-key-is-a-new-key");
 
       // Two originals share one replacement.
       withEntries((e) => {
         (e[a.oldKey] as { newKey: string }).newKey = (e[b.oldKey] as { newKey: string }).newKey;
       });
       const shared = await runScrub(standin, executeArgs());
-      expect(shared.exitCode, shared.all).toBe(3);
-      expect(shared.stderr).toContain("duplicate-new-key");
+      expectStopped(shared, 3, "duplicate-new-key");
       expectOldIntact();
     },
     SLOW,
@@ -268,8 +265,7 @@ describe("delete-old: refusals", () => {
       ).newVersionId;
       standin.dropVersion(BUCKET, objectPath(a.newKey as string), entry);
       const r = await runScrub(standin, executeArgs());
-      expect(r.exitCode, r.all).toBe(3);
-      expect(r.stderr).toContain("new-object-missing");
+      expectStopped(r, 3, "new-object-missing");
       expectOldIntact();
     },
     SLOW,
@@ -285,8 +281,7 @@ describe("delete-old: refusals", () => {
       entry.needsScrub = false;
       writeFileSync(planPath, JSON.stringify(plan));
       const notPlanned = await runScrub(standin, executeArgs());
-      expect(notPlanned.exitCode, notPlanned.all).toBe(3);
-      expect(notPlanned.stderr).toContain("assembled-not-in-plan");
+      expectStopped(notPlanned, 3, "assembled-not-in-plan");
 
       entry.needsScrub = true;
       writeFileSync(planPath, JSON.stringify(plan));
@@ -297,8 +292,7 @@ describe("delete-old: refusals", () => {
         `${DATASET}/../x/`,
       ]) {
         const r = await runScrub(standin, executeArgs(["--prune-noncurrent", prefix]));
-        expect(r.exitCode, `${prefix}: ${r.all}`).toBe(3);
-        expect(r.stderr).toContain("bad-prune-prefix");
+        expectStopped(r, 3, "bad-prune-prefix");
       }
       expectOldIntact();
     },
@@ -521,8 +515,7 @@ describe("delete-old: pruning noncurrent versions", () => {
         standin,
         executeArgs(["--prune-noncurrent", `${DATASET}/version/`, "--max-prune", "1"]),
       );
-      expect(r.exitCode, r.all).toBe(3);
-      expect(r.stderr).toContain("over-max-prune");
+      expectStopped(r, 3, "over-max-prune");
       expectOldIntact();
     },
     SLOW,

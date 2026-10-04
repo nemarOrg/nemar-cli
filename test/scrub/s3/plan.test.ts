@@ -8,6 +8,7 @@ import { parsePatches, parsePlan } from "../../../scripts/scrub/contract";
 import { buildKey } from "../../../scripts/scrub/contract";
 import type { PlanFile } from "../../../scripts/scrub/contract";
 import { type S3Standin, startS3Standin } from "../helpers/s3-standin";
+import { expectStopped } from "./refusal";
 import {
   BUCKET,
   DATASET,
@@ -193,8 +194,7 @@ describe("plan", () => {
       // No later stage runs on this plan, even with hashes supplied.
       writeHashes(dir, [good]);
       const asm = await runScrub(standin, assembleArgs(dir));
-      expect(asm.exitCode).toBe(3);
-      expect(asm.stderr).toContain("plan-has-unreadable");
+      expectStopped(asm, 3, "plan-has-unreadable");
     },
     SLOW,
   );
@@ -212,21 +212,18 @@ describe("plan", () => {
       });
       const dirBad = tempDir("plan-badkey");
       const bad = await runScrub(standin, planArgs(dirBad));
-      expect(bad.exitCode, bad.all).toBe(4);
-      expect(bad.stderr).toContain("manifest-bad-key");
+      expectStopped(bad, 4, "manifest-bad-key");
       expect(has(dirBad, "plan.json")).toBe(false);
 
       // A tag that was asked for and does not exist.
       const dirMissing = tempDir("plan-missing");
       const missing = await runScrub(standin, planArgs(dirMissing, ["--tags", "v9.9.9"]));
-      expect(missing.exitCode).toBe(4);
-      expect(missing.stderr).toContain("manifest-missing");
+      expectStopped(missing, 4, "manifest-missing");
 
       // A dataset with no manifests at all.
       const dirNone = tempDir("plan-none");
       const none = await runScrub(standin, ["plan", "--dataset", "xx090412", "--out", dirNone]);
-      expect(none.exitCode).toBe(4);
-      expect(none.stderr).toContain("no-manifests");
+      expectStopped(none, 4, "no-manifests");
 
       // A manifest that is not JSON must not echo what it holds.
       standin.putObject(
@@ -236,8 +233,7 @@ describe("plan", () => {
       );
       const dirJunk = tempDir("plan-junk");
       const junk = await runScrub(standin, planArgs(dirJunk, ["--tags", "v2.0.0"]));
-      expect(junk.exitCode).toBe(4);
-      expect(junk.stderr).toContain("manifest-malformed");
+      expectStopped(junk, 4, "manifest-malformed");
       expect(leaksAName(junk.all)).toBeNull();
     },
     SLOW,
@@ -256,8 +252,7 @@ describe("plan", () => {
       );
       const dir = tempDir("plan-wrong");
       const wrong = await runScrub(standin, planArgs(dir));
-      expect(wrong.exitCode).toBe(4);
-      expect(wrong.stderr).toContain("manifest-wrong-dataset");
+      expectStopped(wrong, 4, "manifest-wrong-dataset");
 
       seedManifest(standin, "v1.0.0", [a]);
       writeJson(dir, "assembled.json", {
@@ -267,8 +262,7 @@ describe("plan", () => {
         entries: {},
       });
       const again = await runScrub(standin, planArgs(dir));
-      expect(again.exitCode).toBe(3);
-      expect(again.stderr).toContain("assembled-exists");
+      expectStopped(again, 3, "assembled-exists");
       expect(has(dir, "plan.json")).toBe(false);
     },
     SLOW,
@@ -288,8 +282,7 @@ describe("plan", () => {
       const akia = await runScrub(standin, planArgs(dir), {
         AWS_ACCESS_KEY_ID: "AKIAFAKEFAKEFAKE0001",
       });
-      expect(akia.exitCode).toBe(3);
-      expect(akia.stderr).toContain("long-lived-key-in-environment");
+      expectStopped(akia, 3, "long-lived-key-in-environment");
       expect(standin.log.length).toBe(0);
     },
     SLOW,

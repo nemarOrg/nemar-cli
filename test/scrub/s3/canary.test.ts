@@ -5,6 +5,7 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { type S3Standin, startS3Standin } from "../helpers/s3-standin";
+import { expectStopped } from "./refusal";
 import { BUCKET, DATASET, MIB, SLOW, runScrub } from "./support";
 
 let standin: S3Standin;
@@ -96,9 +97,27 @@ describe("canary", () => {
       standin = startS3Standin();
       standin.setDenyBypass(true);
       const r = await runScrub(standin, canary(["--execute"]));
-      expect(r.exitCode, r.all).toBe(1);
-      expect(r.stderr).toContain("bypass-denied");
+      expectStopped(r, 1, "bypass-denied");
       expect(standin.versions(BUCKET, `${prefix}probe.txt`).length).toBe(1);
+    },
+    SLOW,
+  );
+
+  test(
+    "a version left under the prefix after the deletes fails the canary",
+    async () => {
+      standin = startS3Standin();
+      // A stray writer adds an object under the prefix while the probe is being removed.
+      standin.beforeOp(
+        "DeleteObject",
+        () => {
+          standin.putObject(BUCKET, `${prefix}stray.txt`, new Uint8Array(3));
+        },
+        2,
+      );
+      const r = await runScrub(standin, canary(["--execute"]));
+      expectStopped(r, 5, "canary-remainder");
+      expect(standin.keys(BUCKET, prefix)).toEqual([`${prefix}stray.txt`]);
     },
     SLOW,
   );

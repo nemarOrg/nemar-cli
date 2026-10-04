@@ -17,6 +17,7 @@ import {
   parseKeymap,
 } from "../../../scripts/scrub/contract";
 import { type S3Standin, startS3Standin } from "../helpers/s3-standin";
+import { expectStopped } from "./refusal";
 import {
   BUCKET,
   DATASET,
@@ -24,6 +25,7 @@ import {
   MIB,
   SLOW,
   assembleArgs,
+  centuryFromNow,
   dirText,
   edfFile,
   edfHeader,
@@ -318,22 +320,32 @@ describe("assemble", () => {
   );
 
   test(
-    "an unrelated object already at the new key is never overwritten",
+    "an object already at the new key is kept unless it is exactly what assembly makes",
     async () => {
       standin = startS3Standin();
       const a = fixtureA();
       const dir = await planned([a]);
-      const squatter = new Uint8Array(a.bytes.length).fill(9);
-      standin.putObject(BUCKET, objectPath(a.newKey as string), squatter);
-
-      const r = await runScrub(standin, assembleArgs(dir));
-      expect(r.exitCode, r.all).toBe(1);
-      expect(r.stdout).toContain("new-key-conflict");
-      const vs = standin.versions(BUCKET, objectPath(a.newKey as string));
-      expect(vs.length).toBe(1);
-      expect(Buffer.compare((vs[0] as { data: Uint8Array }).data, squatter)).toBe(0);
-      expect(standin.calls("PutObject").length).toBe(0);
-      expect(has(dir, "assembled.json")).toBe(false);
+      const at = objectPath(a.newKey as string);
+      const decade = new Date(Date.now() + 10 * 365 * 24 * 3600 * 1000);
+      const squatters: Array<[string, Uint8Array, Date | undefined]> = [
+        ["unrelated bytes, no lock", new Uint8Array(a.bytes.length).fill(9), undefined],
+        // The case that matters most: the unscrubbed original under the scrubbed key.
+        ["the original bytes, locked", a.bytes, centuryFromNow()],
+        ["the right bytes, no lock", a.expected as Uint8Array, undefined],
+        ["the right bytes, a ten-year lock", a.expected as Uint8Array, decade],
+      ];
+      for (const [label, bytes, lockUntil] of squatters) {
+        const id = standin.putObject(BUCKET, at, bytes, { lockUntil });
+        const r = await runScrub(standin, assembleArgs(dir));
+        expect(r.exitCode, `${label}: ${r.all}`).toBe(1);
+        expect(r.stdout, label).toContain("new-key-conflict");
+        const vs = standin.versions(BUCKET, at);
+        expect(vs.length, label).toBe(1);
+        expect(Buffer.compare((vs[0] as { data: Uint8Array }).data, bytes), label).toBe(0);
+        expect(standin.calls("PutObject").length, label).toBe(0);
+        expect(has(dir, "assembled.json"), label).toBe(false);
+        standin.dropVersion(BUCKET, at, id);
+      }
     },
     SLOW,
   );
@@ -370,8 +382,7 @@ describe("assemble", () => {
         if (hashes === undefined) rmSync(path.join(dir, "hashes.json"), { force: true });
         else writeJson(dir, "hashes.json", hashes);
         const r = await runScrub(standin, assembleArgs(dir));
-        expect(r.exitCode, word).toBe(3);
-        expect(r.stderr, word).toContain(word);
+        expectStopped(r, 3, word);
         expect(has(dir, "assembled.json"), word).toBe(false);
       };
 
@@ -410,8 +421,7 @@ describe("assemble", () => {
       const { [a.oldKey]: _dropped, ...rest } = patches;
       writeJson(dir, "patches.json", rest);
       const noPatch = await runScrub(standin, assembleArgs(dir));
-      expect(noPatch.exitCode).toBe(3);
-      expect(noPatch.stderr).toContain("patches-incomplete");
+      expectStopped(noPatch, 3, "patches-incomplete");
 
       // Every refusal happened before a single S3 call.
       expect(standin.log.length).toBe(before);

@@ -14,6 +14,7 @@ import {
 } from "../../../scripts/scrub/contract";
 import { sampleRanges } from "../../../scripts/scrub/s3/s3-lib";
 import { type S3Standin, type Snapshot, startS3Standin } from "../helpers/s3-standin";
+import { expectStopped } from "./refusal";
 import {
   type Assembled,
   BUCKET,
@@ -226,8 +227,7 @@ describe("verify", () => {
       delete without.entries[a.oldKey];
       writeJson(dir, "assembled.json", without);
       const incomplete = await runScrub(standin, verifyArgs(dir));
-      expect(incomplete.exitCode, incomplete.all).toBe(3);
-      expect(incomplete.stderr).toContain("assembled-incomplete");
+      expectStopped(incomplete, 3, "assembled-incomplete");
 
       const extra = structuredClone(full);
       extra.entries[`SHA256E-s9--${"d".repeat(64)}.edf`] = {
@@ -235,16 +235,14 @@ describe("verify", () => {
       } as never;
       writeJson(dir, "assembled.json", extra);
       const unplanned = await runScrub(standin, verifyArgs(dir));
-      expect(unplanned.exitCode).toBe(3);
-      expect(unplanned.stderr).toContain("assembled-has-unplanned-key");
+      expectStopped(unplanned, 3, "assembled-has-unplanned-key");
 
       writeJson(dir, "assembled.json", full);
       const keymap = readJson<Record<string, string>>(dir, "keymap.json");
       keymap[a.oldKey] = keymap[b.oldKey] as string;
       writeJson(dir, "keymap.json", keymap);
       const mismatch = await runScrub(standin, verifyArgs(dir));
-      expect(mismatch.exitCode).toBe(3);
-      expect(mismatch.stderr).toContain("keymap-mismatch");
+      expectStopped(mismatch, 3, "keymap-mismatch");
       expect(has(dir, "verified.json")).toBe(false);
     },
     SLOW,
