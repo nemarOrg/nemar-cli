@@ -183,6 +183,31 @@ describe("scrubbing a header", () => {
   });
 });
 
+describe("findings the scanner added later", () => {
+  test("a birth date found in the recording field is removed and the acceptable start date is kept", () => {
+    const before = buildHeader({
+      recording: "Startdate 14-MAR-2020 X X X dob=14-MAR-1993",
+      startdate: "14.03.20",
+    });
+    const result = scrubEdfHeader(before);
+    expect(result.fields).toEqual(["recording"]);
+    expect(recordingOf(result.header)).toBe("Startdate 14-MAR-2020 X X X");
+    expect(verifyScrub(before, result.header).ok).toBe(true);
+    const free = scrubEdfHeader(buildHeader({ recording: "DOB 14.03.1993" }));
+    expect(free.fields).toEqual(["recording"]);
+    expect(recordingOf(free.header)).toBe("Startdate X X X X");
+  });
+
+  test("an age over 89 is removed from the patient field", () => {
+    for (const patient of ["P01 M 95 X", "S1 M X X age=95", "M 95"]) {
+      const result = scrubEdfHeader(buildHeader({ patient }));
+      expect(result.fields, patient).toEqual(["patient"]);
+      expect(patientOf(result.header)).toBe(PATIENT_PLACEHOLDER);
+    }
+    expect(scrubEdfHeader(buildHeader({ patient: "P01 M 45 X" })).changed).toBe(false);
+  });
+});
+
 describe("the proof that only the two fields changed", () => {
   const before = buildHeader({ patient: "alice F 14-MAR-1993 alice" });
   const good = scrubEdfHeader(before).header;

@@ -48,7 +48,7 @@ export interface ScrubResult {
   fields: ("patient" | "recording")[];
 }
 
-/** Finding kinds that make the patient field unfit to keep. */
+/** Finding kinds, in the patient field, that make it unfit to keep. */
 const PATIENT_DIRTY = new Set([
   "edf-patient-name",
   "edf-patient-code",
@@ -56,14 +56,27 @@ const PATIENT_DIRTY = new Set([
   "edf-patient-freetext",
   "edf-patient-birthdate",
   "edf-patient-nonascii",
+  "edf-patient-age",
 ]);
 
-/** Finding kinds that make the recording field unfit to keep. Dates are acceptable and absent here. */
+/**
+ * Finding kinds, in the recording field, that make it unfit to keep. An acquisition date is
+ * acceptable and absent here; a birth date found in the recording field is not.
+ */
 const RECORDING_DIRTY = new Set([
   "edf-recording-freetext",
   "edf-recording-technician",
   "edf-recording-nonascii",
+  "edf-patient-birthdate",
 ]);
+
+/** Whether a finding is one this module removes: a patient finding in the patient field, a recording finding in the recording field. */
+function isRemovable(f: Finding): boolean {
+  return (
+    (f.field.startsWith("patient") && PATIENT_DIRTY.has(f.kind)) ||
+    (f.field.startsWith("recording") && RECORDING_DIRTY.has(f.kind))
+  );
+}
 
 function writeField(out: Uint8Array, field: { start: number; end: number }, text: string): void {
   const width = field.end - field.start;
@@ -121,11 +134,7 @@ export function verifyScrub(before: Uint8Array, after: Uint8Array): ScrubVerdict
   if (!same(0, PATIENT_FIELD.start)) reasons.push("bytes-before-patient-changed");
   if (!same(RECORDING_FIELD.end, EDF_HEADER_BYTES)) reasons.push("bytes-after-recording-changed");
   if (detectEdfFamily(before) !== detectEdfFamily(after)) reasons.push("file-family-changed");
-  const direct = scanEdfHeader(after).filter(
-    (f: Finding) =>
-      (f.field.startsWith("patient") && PATIENT_DIRTY.has(f.kind)) ||
-      (f.field.startsWith("recording") && RECORDING_DIRTY.has(f.kind)),
-  );
+  const direct = scanEdfHeader(after).filter(isRemovable);
   if (direct.length > 0) reasons.push("identifying-content-remains");
   return { ok: reasons.length === 0, reasons };
 }

@@ -589,10 +589,12 @@ export function scanEdfHeader(bytes: Uint8Array): Finding[] {
   if (hasNonAscii(bytes, 8, 88)) add("edf-patient-nonascii", "identifier", "patient", patient);
   const tokens = patient === "" ? [] : patient.split(/\s+/);
   const patientDates = findDates(patient);
-  let birthFlagged = false;
+  // One birth-date finding per field, so a birth date in the recording field is reported even when
+  // the patient field has one too (otherwise removing the first would only reveal the second).
+  const birthFlagged = new Set<string>();
   const flagBirth = (field: string, text: string) => {
-    if (birthFlagged) return;
-    birthFlagged = true;
+    if (birthFlagged.has(field)) return;
+    birthFlagged.add(field);
     add("edf-patient-birthdate", "identifier", field, text);
   };
   // Any date anywhere in the field that is not year-only is a birth date.
