@@ -1,0 +1,895 @@
+/**
+ * The git half of the privacy scrub: snapshot a clone, rewrite its history, verify the
+ * rewrite, and retract the old annex keys from the location log.
+ *
+ * Every function here works on a LOCAL clone and never contacts a remote. **Nothing
+ * identifying leaves this module**: a failure is a fixed word and a count, because a file
+ * name or a key can be the identifier. Raw git stderr is kept on the error object for a
+ * developer and is never printed by the CLI.
+ *
+ * `rewrite` runs `rewrite_history.py` (git-filter-repo, driven through its Python API) and
+ * leaves the `git-annex` branch alone. `verifyRewrite` is written independently of that
+ * script on purpose: it reads the repository with plain git and shares no code with it, so
+ * a bug in the rewrite cannot also hide in the check.
+ */
+
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import {
+  ANNEX_KEY,
+  ContractError,
+  type GitPlanFile,
+  type JsonOp,
+  type KeymapFile,
+  parseGitPlan,
+  parseKey,
+  parseKeymap,
+} from "../contract";
+
+/** Pinned: the rewrite script is written against this release's Python API. */
+export const FILTER_REPO_REQUIREMENT = "git-filter-repo==2.47.0";
+export const REWRITE_SCRIPT = join(import.meta.dir, "rewrite_history.py");
+
+export class GitScrubError extends Error {
+  readonly detail: string;
+  constructor(reason: string, detail = "") {
+    super(reason);
+    this.name = "GitScrubError";
+    this.detail = detail;
+  }
+}
+
+// ---------------------------------------------------------------------------------------
+// Inputs
+// ---------------------------------------------------------------------------------------
+
+/** `canon`: the spelling plans use for JSON keys. Lowercase, no space, underscore or hyphen. */
+export function canonicalKey(name: string): string {
+  return name.toLowerCase().replace(/[ _-]/g, "");
+}
+
+/** What the contract's `parseGitPlan` leaves unchecked: the shape of each entry. */
+export function assertGitPlanShape(plan: GitPlanFile): void {
+  const bad = (reason: string): never => {
+    throw new ContractError(reason);
+  };
+  const okPath = (p: unknown): p is string =>
+    typeof p === "string" && p.length > 0 && !p.includes("\n") && !p.startsWith("/");
+  if (!plan.dropPaths.every(okPath)) bad("git-plan.json holds a bad dropPaths entry");
+  for (const [path, keys] of Object.entries(plan.blankJsonKeys)) {
+    if (!okPath(path) || !Array.isArray(keys) || !keys.every((k) => typeof k === "string")) {
+      bad("git-plan.json holds a bad blankJsonKeys entry");
+    }
+  }
+  for (const [path, text] of Object.entries(plan.appendText)) {
+    if (!okPath(path) || typeof text !== "string" || text.length === 0) {
+      bad("git-plan.json holds a bad appendText entry");
+    }
+  }
+  for (const [path, ops] of Object.entries(plan.jsonOps ?? {})) {
+    if (!okPath(path) || !ops.every(validJsonOp)) bad("git-plan.json holds a bad jsonOps entry");
+  }
+  const dropped = new Set(plan.dropPaths);
+  if (
+    [...Object.keys(plan.appendText), ...Object.keys(plan.jsonOps ?? {})].some((p) =>
+      dropped.has(p),
+    )
+  ) {
+    bad("git-plan.json drops and edits the same path");
+  }
+}
+
+/** The fields of one jsonOps entry, beyond the op name `parseGitPlan` already checks. */
+function validJsonOp(op: JsonOp): boolean {
+  const text = (...values: unknown[]): boolean =>
+    values.every((v) => typeof v === "string" && v.length > 0);
+  if (op.op === "drop-array-entries") {
+    return (
+      text(op.array, op.matchField) &&
+      Array.isArray(op.matchValues) &&
+      op.matchValues.every((v) => typeof v === "string")
+    );
+  }
+  if (op.op === "recount") return text(op.array, op.countKey, op.sumKey, op.sumField);
+  return text(op.key) && typeof op.value === "string";
+}
+
+export interface ScrubInputs {
+  keymap: KeymapFile;
+  plan: GitPlanFile;
+}
+
+export function readKeymap(keymapPath: string): KeymapFile {
+  return parseKeymap(readFileSync(keymapPath, "utf8"));
+}
+
+/** Read and guard the two stage files. Throws ContractError on anything that does not match. */
+export function readInputs(keymapPath: string, planPath: string): ScrubInputs {
+  const keymap = readKeymap(keymapPath);
+  const plan = parseGitPlan(readFileSync(planPath, "utf8"));
+  assertGitPlanShape(plan);
+  return { keymap, plan };
+}
+
+// ---------------------------------------------------------------------------------------
+// git
+// ---------------------------------------------------------------------------------------
+
+export interface GitResult {
+  stdout: Buffer;
+  stderr: string;
+  exitCode: number;
+}
+
+const GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" };
+
+/** Run `git -C repo args`, binary-safe. Never throws on a non-zero exit. */
+export async function gitRaw(
+  repo: string,
+  args: string[],
+  stdin?: string | Uint8Array,
+): Promise<GitResult> {
+  const input = typeof stdin === "string" ? new TextEncoder().encode(stdin) : stdin;
+  const proc = Bun.spawn(["git", "-C", repo, ...args], {
+    ...(input === undefined ? {} : { stdin: input as Uint8Array }),
+    stdout: "pipe",
+    stderr: "pipe",
+    env: GIT_ENV,
+  });
+  const [out, err, exitCode] = await Promise.all([
+    new Response(proc.stdout).arrayBuffer(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { stdout: Buffer.from(out), stderr: err, exitCode };
+}
+
+/** Run git and return stdout as text, or throw a fixed-word error. */
+export async function git(repo: string, args: string[], stdin?: string): Promise<string> {
+  const r = await gitRaw(repo, args, stdin);
+  if (r.exitCode !== 0) throw new GitScrubError("git-command-failed", r.stderr);
+  return r.stdout.toString("utf8");
+}
+
+/** Refs, with their object ids and the type of the object each names (commit or tag). */
+export async function listRefs(
+  repo: string,
+): Promise<{ name: string; sha: string; type: string }[]> {
+  const out = await git(repo, [
+    "for-each-ref",
+    "--format=%(refname)%09%(objectname)%09%(objecttype)",
+  ]);
+  return out
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const [name, sha, type] = line.split("\t") as [string, string, string];
+      return { name, sha, type };
+    });
+}
+
+export function isAnnexRef(name: string): boolean {
+  return name.split("/").pop() === "git-annex";
+}
+
+/** The refs a rewrite covers: heads, remote-tracking heads and tags; never git-annex. */
+export function isRewriteRef(name: string): boolean {
+  if (isAnnexRef(name)) return false;
+  if (name.startsWith("refs/heads/") || name.startsWith("refs/tags/")) return true;
+  const parts = name.split("/");
+  return (
+    name.startsWith("refs/remotes/") && parts.length >= 4 && parts[parts.length - 1] !== "HEAD"
+  );
+}
+
+// ---------------------------------------------------------------------------------------
+// Streaming `git cat-file`
+// ---------------------------------------------------------------------------------------
+
+export interface ObjectInfo {
+  oid: string;
+  type: string;
+  size: number;
+}
+
+interface CatHandlers {
+  /** `info` is null for a spec git reports as missing or ambiguous. */
+  header(index: number, info: ObjectInfo | null): void;
+  chunk?(index: number, chunk: Uint8Array): void;
+  end?(index: number): void;
+}
+
+function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
+  if (a.length === 0) return b;
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
+/**
+ * Feed object names to ONE `git cat-file` process and parse its answers as a stream, so a
+ * large inline blob never has to be held whole. `mode` "batch" yields bodies, "check" only
+ * headers. Answers come back in the order the names went in.
+ */
+export async function catBatch(
+  repo: string,
+  specs: string[],
+  mode: "batch" | "check",
+  on: CatHandlers,
+): Promise<void> {
+  if (specs.length === 0) return;
+  const proc = Bun.spawn(
+    ["git", "-C", repo, "cat-file", mode === "batch" ? "--batch" : "--batch-check"],
+    {
+      stdin: new TextEncoder().encode(`${specs.join("\n")}\n`) as Uint8Array,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: GIT_ENV,
+    },
+  );
+  const errText = new Response(proc.stderr).text();
+  let state: "header" | "body" | "newline" = "header";
+  let carry: Uint8Array = new Uint8Array(0);
+  let remaining = 0;
+  let index = -1;
+  let answers = 0;
+
+  for await (const part of proc.stdout as unknown as AsyncIterable<Uint8Array>) {
+    let buf: Uint8Array = part;
+    while (buf.length > 0) {
+      if (state === "header") {
+        const nl = buf.indexOf(10);
+        if (nl < 0) {
+          carry = concat(carry, buf);
+          break;
+        }
+        const line = Buffer.from(concat(carry, buf.subarray(0, nl))).toString("utf8");
+        carry = new Uint8Array(0);
+        buf = buf.subarray(nl + 1);
+        index++;
+        answers++;
+        const tokens = line.split(" ");
+        const last = tokens[tokens.length - 1];
+        if (last === "missing" || last === "ambiguous") {
+          on.header(index, null);
+          continue;
+        }
+        const [oid, type, size] = tokens as [string, string, string];
+        on.header(index, { oid, type, size: Number(size) });
+        if (mode === "check") continue;
+        remaining = Number(size);
+        state = remaining > 0 ? "body" : "newline";
+      } else if (state === "body") {
+        const take = Math.min(remaining, buf.length);
+        on.chunk?.(index, buf.subarray(0, take));
+        remaining -= take;
+        buf = buf.subarray(take);
+        if (remaining === 0) state = "newline";
+      } else {
+        buf = buf.subarray(1);
+        on.end?.(index);
+        state = "header";
+      }
+    }
+  }
+  const exitCode = await proc.exited;
+  const err = await errText;
+  if (exitCode !== 0 || answers !== specs.length) {
+    throw new GitScrubError("git-command-failed", err);
+  }
+}
+
+/** The whole content of each spec, or null for a missing one. Small objects only. */
+async function readObjects(repo: string, specs: string[]): Promise<(Buffer | null)[]> {
+  const parts: Buffer[][] = specs.map(() => []);
+  const present: boolean[] = specs.map(() => false);
+  await catBatch(repo, specs, "batch", {
+    header: (i, info) => {
+      present[i] = info !== null;
+    },
+    chunk: (i, chunk) => {
+      parts[i]?.push(Buffer.from(chunk));
+    },
+  });
+  return specs.map((_s, i) => (present[i] ? Buffer.concat(parts[i] ?? []) : null));
+}
+
+// ---------------------------------------------------------------------------------------
+// snapshot
+// ---------------------------------------------------------------------------------------
+
+export interface RefSnapshot {
+  commits: number;
+  /** Paths of the tip tree, sorted. Names can identify, so this file is private. */
+  tipPaths: string[];
+}
+
+export interface Snapshot {
+  version: 1;
+  refs: Record<string, RefSnapshot>;
+  /** Tag name -> the type of the object the tag ref names ("tag" annotated, "commit" light). */
+  tags: Record<string, string>;
+  /** git-annex refs -> commit id: the rewrite must not move them. */
+  annexRefs: Record<string, string>;
+}
+
+async function tipPaths(repo: string, ref: string): Promise<string[]> {
+  const out = await gitRaw(repo, ["ls-tree", "-r", "-z", "--name-only", `${ref}^{tree}`]);
+  if (out.exitCode !== 0) throw new GitScrubError("git-command-failed", out.stderr);
+  return out.stdout.toString("utf8").split("\0").filter(Boolean).sort();
+}
+
+/** Per ref: commit count and tip path list; the tag names; the git-annex refs. No contents. */
+export async function takeSnapshot(repo: string): Promise<Snapshot> {
+  const snapshot: Snapshot = { version: 1, refs: {}, tags: {}, annexRefs: {} };
+  for (const ref of await listRefs(repo)) {
+    if (isAnnexRef(ref.name)) {
+      snapshot.annexRefs[ref.name] = ref.sha;
+      continue;
+    }
+    if (!isRewriteRef(ref.name)) continue;
+    const count = Number((await git(repo, ["rev-list", "--count", ref.name])).trim());
+    snapshot.refs[ref.name] = { commits: count, tipPaths: await tipPaths(repo, ref.name) };
+    if (ref.name.startsWith("refs/tags/")) {
+      snapshot.tags[ref.name.slice("refs/tags/".length)] = ref.type;
+    }
+  }
+  return snapshot;
+}
+
+export function writeJson(path: string, value: unknown): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+export function readSnapshot(path: string): Snapshot {
+  const x = JSON.parse(readFileSync(path, "utf8")) as Snapshot;
+  if (x.version !== 1 || typeof x.refs !== "object" || typeof x.tags !== "object") {
+    throw new ContractError("snapshot does not match the contract");
+  }
+  return x;
+}
+
+// ---------------------------------------------------------------------------------------
+// rewrite
+// ---------------------------------------------------------------------------------------
+
+export interface RewriteOptions {
+  repo: string;
+  keymapPath: string;
+  planPath: string;
+  expectRemote?: string;
+  refs?: string[];
+  reportPath?: string;
+}
+
+export interface RewriteResult {
+  counts: Record<string, number>;
+  commitMap: string;
+  reportPath: string;
+}
+
+/**
+ * Rewrite a fresh clone. The python side refuses a clone that is not fresh or whose origin is
+ * not `expectRemote`; those arrive here as GitScrubError("refused: <word>").
+ */
+export async function rewriteHistory(opts: RewriteOptions): Promise<RewriteResult> {
+  readInputs(opts.keymapPath, opts.planPath);
+  const cmd = [
+    "uv",
+    "run",
+    "--quiet",
+    "--with",
+    FILTER_REPO_REQUIREMENT,
+    "python",
+    REWRITE_SCRIPT,
+    "--repo",
+    opts.repo,
+    "--keymap",
+    opts.keymapPath,
+    "--plan",
+    opts.planPath,
+  ];
+  if (opts.expectRemote) cmd.push("--expect-remote", opts.expectRemote);
+  if (opts.reportPath) cmd.push("--report", opts.reportPath);
+  if (opts.refs && opts.refs.length > 0) cmd.push("--refs", ...opts.refs);
+
+  const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", env: GIT_ENV });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  if (exitCode !== 0) {
+    // The word is on stdout ("refused: ...", "bad-input: ...", "failed: ..."); stderr is
+    // filter-repo's own output and may name a file, so it is kept for a developer only.
+    throw new GitScrubError(stdout.trim().split("\n").pop() || "failed: no-output", stderr);
+  }
+  const line = stdout.trim().split("\n").pop() ?? "";
+  const parsed = JSON.parse(line) as {
+    counts: Record<string, number>;
+    commitMap: string;
+    reportPath: string;
+  };
+  return parsed;
+}
+
+// ---------------------------------------------------------------------------------------
+// verify
+// ---------------------------------------------------------------------------------------
+
+export type VerifyReason =
+  | "refs-missing"
+  | "tag-names-changed"
+  | "tag-kind-changed"
+  | "commit-count-changed"
+  | "old-key-present"
+  | "old-key-in-message"
+  | "dropped-path-present"
+  | "blank-key-not-empty"
+  | "json-ops-not-applied"
+  | "json-unparseable"
+  | "append-missing"
+  | "append-duplicated"
+  | "tip-paths-mismatch"
+  | "annex-branch-changed";
+
+export interface VerifyFailure {
+  reason: VerifyReason;
+  count: number;
+}
+
+export interface VerifyResult {
+  ok: boolean;
+  failures: VerifyFailure[];
+  counts: Record<string, number>;
+}
+
+export interface VerifyOptions {
+  repo: string;
+  keymap: KeymapFile;
+  plan: GitPlanFile;
+  before: Snapshot;
+  /**
+   * Accept a plan path whose content in some commit is not UTF-8 JSON. Off by default: a
+   * file the rewrite could not parse is a file whose named keys may still hold a value.
+   */
+  allowUnparseableJson?: boolean;
+}
+
+/**
+ * Count the non-empty values of target keys in JSON text, at any depth, counting every
+ * duplicate of a key (a parser that keeps the last duplicate would hide the others).
+ * Returns null when the text is not UTF-8 JSON.
+ */
+export function nonEmptyTargetValues(raw: Uint8Array, targets: ReadonlySet<string>): number | null {
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(raw);
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    JSON.parse(text);
+  } catch {
+    return null;
+  }
+  let bad = 0;
+  const ws = (i: number): number => {
+    let j = i;
+    while (j < text.length && " \t\n\r".includes(text[j] as string)) j++;
+    return j;
+  };
+  const str = (i: number): number => {
+    let j = i + 1;
+    while (text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+    return j + 1;
+  };
+  const value = (i: number): number => {
+    const c = text[i];
+    if (c === "{") {
+      let j = ws(i + 1);
+      if (text[j] === "}") return j + 1;
+      for (;;) {
+        const keyEnd = str(j);
+        const key = JSON.parse(text.slice(j, keyEnd)) as string;
+        const start = ws(ws(keyEnd) + 1);
+        const end = value(start);
+        if (targets.has(canonicalKey(key)) && text.slice(start, end) !== '""') bad++;
+        j = ws(end);
+        if (text[j] === ",") {
+          j = ws(j + 1);
+          continue;
+        }
+        return j + 1;
+      }
+    }
+    if (c === "[") {
+      let j = ws(i + 1);
+      if (text[j] === "]") return j + 1;
+      for (;;) {
+        j = ws(value(j));
+        if (text[j] === ",") {
+          j = ws(j + 1);
+          continue;
+        }
+        return j + 1;
+      }
+    }
+    if (c === '"') return str(i);
+    let j = i;
+    while (j < text.length && !",]} \t\n\r".includes(text[j] as string)) j++;
+    return j;
+  };
+  try {
+    value(ws(0));
+  } catch {
+    return null;
+  }
+  return bad;
+}
+
+/**
+ * How many of the plan's structural edits a JSON object's current state contradicts: an array
+ * entry that should have been dropped, a count or sum that does not match the array, a key that
+ * is not the constant. Returns null when the text is not a UTF-8 JSON object or a sum cannot be
+ * computed.
+ */
+export function jsonOpViolations(raw: Uint8Array, ops: readonly JsonOp[]): number | null {
+  let obj: Record<string, unknown>;
+  try {
+    let text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(raw);
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    const parsed: unknown = JSON.parse(text);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+    obj = parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  let bad = 0;
+  for (const op of ops) {
+    if (op.op === "set") {
+      if (obj[op.key] !== op.value) bad++;
+      continue;
+    }
+    const arr = obj[op.array];
+    if (!Array.isArray(arr)) continue;
+    if (op.op === "drop-array-entries") {
+      for (const entry of arr as unknown[]) {
+        const field = (entry as Record<string, unknown> | null)?.[op.matchField];
+        if (typeof field === "string" && op.matchValues.includes(field)) bad++;
+      }
+      continue;
+    }
+    let sum = 0;
+    for (const entry of arr as unknown[]) {
+      const v = (entry as Record<string, unknown> | null)?.[op.sumField];
+      if (typeof v !== "number") return null;
+      sum += v;
+    }
+    if (op.countKey in obj && obj[op.countKey] !== arr.length) bad++;
+    if (op.sumKey in obj && obj[op.sumKey] !== sum) bad++;
+  }
+  return bad;
+}
+
+function countOccurrences(haystack: Buffer, needle: Buffer): number {
+  let n = 0;
+  let from = 0;
+  for (;;) {
+    const at = haystack.indexOf(needle, from);
+    if (at < 0) return n;
+    n++;
+    from = at + needle.length;
+  }
+}
+
+/** Scans a stream of bytes for any of a set of 64-hex-digit tokens, across chunk borders. */
+class HashScanner {
+  private tail = "";
+  found = false;
+  constructor(private readonly hashes: ReadonlySet<string>) {}
+  push(chunk: Uint8Array): void {
+    const window = this.tail + Buffer.from(chunk).toString("latin1");
+    if (!this.found) {
+      for (const m of window.matchAll(/[0-9a-f]{64}/g)) {
+        if (this.hashes.has(m[0])) {
+          this.found = true;
+          break;
+        }
+      }
+    }
+    this.tail = window.slice(-63);
+  }
+}
+
+function setDiffSize(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
+  let n = 0;
+  for (const x of a) if (!b.has(x)) n++;
+  for (const x of b) if (!a.has(x)) n++;
+  return n;
+}
+
+/**
+ * Prove a rewrite, over EVERY ref and EVERY commit, using plain git only.
+ *
+ * - no object reachable from any non-git-annex ref holds an old key's sha256 (every blob,
+ *   plus commit and tag messages), not only the tips;
+ * - no dropped path in any commit's tree;
+ * - every blanked key is empty in every commit that has the file;
+ * - every ref keeps its commit count and every tag its name and kind;
+ * - each ref's tip paths equal the snapshot's, minus dropped, plus appended;
+ * - the appended text is in every commit exactly once, at the end of the file;
+ * - the git-annex branch is where it was.
+ */
+export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> {
+  const { repo, keymap, plan, before } = opts;
+  const failures: VerifyFailure[] = [];
+  const counts: Record<string, number> = {};
+  const fail = (reason: VerifyReason, count: number): void => {
+    if (count > 0) failures.push({ reason, count });
+  };
+
+  const refs = await listRefs(repo);
+  const byName = new Map(refs.map((r) => [r.name, r]));
+  const scanRefs = refs.filter((r) => !isAnnexRef(r.name)).map((r) => r.name);
+  if (scanRefs.length === 0) throw new GitScrubError("no-refs");
+
+  // Refs, tags, commit counts.
+  const beforeRefs = Object.keys(before.refs);
+  fail("refs-missing", beforeRefs.filter((r) => !byName.has(r)).length);
+  const nowTags = new Set(
+    refs.filter((r) => r.name.startsWith("refs/tags/")).map((r) => r.name.slice(10)),
+  );
+  fail("tag-names-changed", setDiffSize(nowTags, new Set(Object.keys(before.tags))));
+  let kindChanges = 0;
+  for (const [name, type] of Object.entries(before.tags)) {
+    const now = byName.get(`refs/tags/${name}`);
+    if (now && now.type !== type) kindChanges++;
+  }
+  fail("tag-kind-changed", kindChanges);
+  let countChanges = 0;
+  for (const ref of beforeRefs) {
+    if (!byName.has(ref)) continue;
+    const n = Number((await git(repo, ["rev-list", "--count", ref])).trim());
+    if (n !== before.refs[ref]?.commits) countChanges++;
+  }
+  fail("commit-count-changed", countChanges);
+  counts.refs = beforeRefs.length;
+
+  // Old keys in every object reachable from any non-annex ref.
+  const oldHashes = new Set(Object.keys(keymap).map((k) => parseKey(k).sha256));
+  const objects = (await git(repo, ["rev-list", "--objects", ...scanRefs]))
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => line.split(" ")[0] as string);
+  let blobHits = 0;
+  let messageHits = 0;
+  let blobsScanned = 0;
+  const scanners = new Map<number, HashScanner>();
+  const kinds = new Map<number, string>();
+  await catBatch(repo, objects, "batch", {
+    header: (i, info) => {
+      if (info && (info.type === "blob" || info.type === "commit" || info.type === "tag")) {
+        kinds.set(i, info.type);
+        scanners.set(i, new HashScanner(oldHashes));
+        if (info.type === "blob") blobsScanned++;
+      }
+    },
+    chunk: (i, chunk) => scanners.get(i)?.push(chunk),
+    end: (i) => {
+      const scanner = scanners.get(i);
+      const kind = kinds.get(i);
+      scanners.delete(i);
+      kinds.delete(i);
+      if (!scanner?.found) return;
+      if (kind === "blob") blobHits++;
+      else messageHits++;
+    },
+  });
+  fail("old-key-present", blobHits);
+  fail("old-key-in-message", messageHits);
+  counts.objectsScanned = objects.length;
+  counts.blobsScanned = blobsScanned;
+
+  // Per commit: dropped paths, blanked keys, appended text.
+  const commits = (await git(repo, ["rev-list", ...scanRefs])).split("\n").filter(Boolean);
+  counts.commits = commits.length;
+  const perCommitSpecs = (paths: string[]): string[] =>
+    commits.flatMap((c) => paths.map((p) => `${c}:${p}`));
+
+  let dropHits = 0;
+  await catBatch(repo, perCommitSpecs(plan.dropPaths), "check", {
+    header: (_i, info) => {
+      if (info) dropHits++;
+    },
+  });
+  fail("dropped-path-present", dropHits);
+
+  const blankPaths = Object.keys(plan.blankJsonKeys);
+  const blankSpecs = perCommitSpecs(blankPaths);
+  const blankContents = await readObjects(repo, blankSpecs);
+  const targets = blankPaths.map((p) => new Set((plan.blankJsonKeys[p] ?? []).map(canonicalKey)));
+  let notEmpty = 0;
+  let unparseable = 0;
+  let jsonChecked = 0;
+  blankContents.forEach((content, i) => {
+    if (!content) return;
+    const result = nonEmptyTargetValues(content, targets[i % blankPaths.length] as Set<string>);
+    jsonChecked++;
+    if (result === null) unparseable++;
+    else notEmpty += result;
+  });
+  fail("blank-key-not-empty", notEmpty);
+
+  const opPaths = Object.keys(plan.jsonOps ?? {});
+  let opViolations = 0;
+  if (opPaths.length > 0) {
+    const opContents = await readObjects(repo, perCommitSpecs(opPaths));
+    opContents.forEach((content, i) => {
+      if (!content) return;
+      const ops = plan.jsonOps?.[opPaths[i % opPaths.length] as string] ?? [];
+      const result = jsonOpViolations(content, ops);
+      jsonChecked++;
+      if (result === null) unparseable++;
+      else opViolations += result;
+    });
+  }
+  fail("json-ops-not-applied", opViolations);
+
+  if (!opts.allowUnparseableJson) fail("json-unparseable", unparseable);
+  counts.jsonChecked = jsonChecked;
+  counts.jsonUnparseable = unparseable;
+
+  const appendPaths = Object.keys(plan.appendText);
+  const appendContents = await readObjects(repo, perCommitSpecs(appendPaths));
+  let appendMissing = 0;
+  let appendDuplicated = 0;
+  appendContents.forEach((content, i) => {
+    const text = Buffer.from(plan.appendText[appendPaths[i % appendPaths.length] as string] ?? "");
+    if (!content) {
+      appendMissing++;
+      return;
+    }
+    const n = countOccurrences(content, text);
+    if (n === 0 || !content.subarray(content.length - text.length).equals(text)) appendMissing++;
+    else if (n > 1) appendDuplicated++;
+  });
+  fail("append-missing", appendMissing);
+  fail("append-duplicated", appendDuplicated);
+
+  // Tip paths.
+  const dropped = new Set(plan.dropPaths);
+  let pathDiffs = 0;
+  for (const ref of beforeRefs) {
+    if (!byName.has(ref)) continue;
+    const expected = new Set((before.refs[ref]?.tipPaths ?? []).filter((p) => !dropped.has(p)));
+    for (const p of appendPaths) expected.add(p);
+    pathDiffs += setDiffSize(expected, new Set(await tipPaths(repo, ref)));
+  }
+  fail("tip-paths-mismatch", pathDiffs);
+
+  // The git-annex branch is not ours to move.
+  let annexMoved = 0;
+  for (const [name, sha] of Object.entries(before.annexRefs)) {
+    if (byName.get(name)?.sha !== sha) annexMoved++;
+  }
+  fail("annex-branch-changed", annexMoved);
+
+  return { ok: failures.length === 0, failures, counts };
+}
+
+// ---------------------------------------------------------------------------------------
+// annex-registry
+// ---------------------------------------------------------------------------------------
+
+export interface AnnexRegistryOptions {
+  repo: string;
+  keymap: KeymapFile;
+  remoteUuid: string;
+  execute: boolean;
+}
+
+export interface AnnexRegistryResult {
+  executed: boolean;
+  newKeys: number;
+  oldKeys: number;
+  /** After `execute`, what the location log shows. All zero in a dry run. */
+  newPresent: number;
+  oldRetracted: number;
+  oldDead: number;
+  /**
+   * Old keys `git annex dead` refused to kill because some other repository (this clone
+   * included) still records the content as present. `--force` does not lift that guard; the
+   * holder has to give the key up, and the command is safe to run again afterward.
+   */
+  deadRefused: number;
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+async function annex(repo: string, args: string[], stdin?: string): Promise<GitResult> {
+  return gitRaw(repo, ["annex", ...args], stdin);
+}
+
+/** The newest `status uuid` pair per uuid in a location log's text. */
+function newestStatuses(log: string): Map<string, string> {
+  const newest = new Map<string, { at: number; status: string }>();
+  for (const line of log.split("\n")) {
+    const m = /^(\d+(?:\.\d+)?)s (\S+) (\S+)/.exec(line);
+    if (!m) continue;
+    const at = Number(m[1]);
+    const prior = newest.get(m[3] as string);
+    if (!prior || at >= prior.at) newest.set(m[3] as string, { at, status: m[2] as string });
+  }
+  return new Map([...newest].map(([uuid, v]) => [uuid, v.status]));
+}
+
+/** Location-log text for each key, read from the git-annex branch; "" when there is none. */
+async function locationLogs(repo: string, keys: string[]): Promise<string[]> {
+  if (keys.length === 0) return [];
+  const paths = await annex(
+    repo,
+    ["examinekey", "--batch", "--format=${hashdirlower}${key}.log\\n"],
+    `${keys.join("\n")}\n`,
+  );
+  if (paths.exitCode !== 0) throw new GitScrubError("annex-command-failed", paths.stderr);
+  const lines = paths.stdout.toString("utf8").split("\n").filter(Boolean);
+  if (lines.length !== keys.length) throw new GitScrubError("annex-command-failed");
+  const contents = await readObjects(
+    repo,
+    lines.map((p) => `git-annex:${p}`),
+  );
+  return contents.map((c) => (c ? c.toString("utf8") : ""));
+}
+
+/**
+ * Register the new keys at the special remote and retract and kill the old ones, in a
+ * clone with git-annex initialized. A dry run (the default) only counts.
+ *
+ * One `setpresentkey --batch` process per direction, never one process per key: parallel
+ * writers lose each other's updates in the git-annex journal. `dead` runs one key at a
+ * time for the same reason. The result comes from the location log afterward; an exit code
+ * is not evidence.
+ */
+export async function annexRegistry(opts: AnnexRegistryOptions): Promise<AnnexRegistryResult> {
+  const { repo, keymap, remoteUuid } = opts;
+  if (!UUID.test(remoteUuid)) throw new ContractError("remote uuid is not a uuid");
+  for (const [a, b] of Object.entries(keymap)) {
+    if (!ANNEX_KEY.test(a) || !ANNEX_KEY.test(b)) throw new ContractError("keymap holds a bad key");
+  }
+  const own = await git(repo, ["config", "--get", "annex.uuid"]).catch(() => "");
+  if (!own.trim()) throw new GitScrubError("annex-not-initialized");
+
+  const oldKeys = [...new Set(Object.keys(keymap))];
+  const newKeys = [...new Set(Object.values(keymap))];
+  const result: AnnexRegistryResult = {
+    executed: opts.execute,
+    newKeys: newKeys.length,
+    oldKeys: oldKeys.length,
+    newPresent: 0,
+    oldRetracted: 0,
+    oldDead: 0,
+    deadRefused: 0,
+  };
+  if (!opts.execute) return result;
+
+  const batch = async (keys: string[], flag: "1" | "0"): Promise<void> => {
+    const input = `${keys.map((k) => `${k} ${remoteUuid} ${flag}`).join("\n")}\n`;
+    const r = await annex(repo, ["setpresentkey", "--batch"], input);
+    if (r.exitCode !== 0) throw new GitScrubError("annex-command-failed", r.stderr);
+  };
+  await batch(newKeys, "1");
+  await batch(oldKeys, "0");
+  for (const key of oldKeys) {
+    const r = await annex(repo, ["dead", "--quiet", "--key", key]);
+    // A refusal is counted, not thrown: the other keys still need their turn, and the
+    // location log below is what says how many are dead.
+    if (r.exitCode !== 0) result.deadRefused++;
+  }
+
+  const newLogs = await locationLogs(repo, newKeys);
+  result.newPresent = newLogs.filter((l) => newestStatuses(l).get(remoteUuid) === "1").length;
+  const oldLogs = await locationLogs(repo, oldKeys);
+  result.oldRetracted = oldLogs.filter((l) => newestStatuses(l).get(remoteUuid) !== "1").length;
+  result.oldDead = oldLogs.filter((l) => newestStatuses(l).get(remoteUuid) === "X").length;
+  return result;
+}
