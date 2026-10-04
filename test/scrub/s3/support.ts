@@ -340,13 +340,14 @@ export async function withCtx<T>(
   standin: S3Standin,
   fn: (ctx: S3Ctx) => Promise<T>,
   bucket = BUCKET,
+  timeoutMs = 60_000,
 ): Promise<T> {
   const tmp = await TempArea.create();
   try {
     const aws = createAwsRunner({
       region: "us-east-2",
       endpointUrl: standin.url,
-      timeoutMs: 60_000,
+      timeoutMs,
       env: awsTestEnv(standin),
     });
     return await fn({ aws, bucket, tmp });

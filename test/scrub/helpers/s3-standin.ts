@@ -131,6 +131,8 @@ export interface S3Standin {
   setDenyBypass(deny: boolean): void;
   /** Entries per ListObjectVersions / ListObjectsV2 page. */
   setPageSize(n: number): void;
+  /** Hold the next `times` requests with this HTTP method for `ms` before answering (a hung server). */
+  stallNext(method: string, ms: number, times?: number): void;
   inject(op: StandinOp, fault: Fault): void;
   clearFaults(): void;
   /** Run `fn` just before the Nth call (1-based) of `op` is handled. */
@@ -202,6 +204,7 @@ export function startS3Standin(): S3Standin {
   const opCounts = new Map<StandinOp, number>();
   let denyBypass = false;
   let pageSize = 1000;
+  const stalls: Array<{ method: string; ms: number; times: number }> = [];
 
   const slot = (bucket: string, key: string) => `${bucket}/${key}`;
   const versionsOf = (bucket: string, key: string) => store.get(slot(bucket, key)) ?? [];
@@ -243,6 +246,18 @@ export function startS3Standin(): S3Standin {
     port: 0,
     idleTimeout: 120,
     async fetch(req) {
+      const stall = stalls.find((x) => x.method === req.method && x.times > 0);
+      if (stall) {
+        stall.times -= 1;
+        // Answer late, or not at all if the client gives up first (its connection closes).
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, stall.ms);
+          req.signal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            resolve();
+          });
+        });
+      }
       const url = new URL(req.url);
       const segments = url.pathname.slice(1).split("/");
       const bucket = decodeURIComponent(segments[0] ?? "");
@@ -750,6 +765,7 @@ export function startS3Standin(): S3Standin {
       opCounts.clear();
       denyBypass = false;
       pageSize = 1000;
+      stalls.length = 0;
     },
     openUploads: () => uploads.size,
     setDenyBypass(deny) {
@@ -757,6 +773,9 @@ export function startS3Standin(): S3Standin {
     },
     setPageSize(n) {
       pageSize = n;
+    },
+    stallNext(method, ms, times = 1) {
+      stalls.push({ method, ms, times });
     },
     inject(op, fault) {
       const list = faults.get(op) ?? [];

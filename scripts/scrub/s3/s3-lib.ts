@@ -188,6 +188,11 @@ export function createAwsRunner(cfg: AwsConfig): AwsRunner {
 
   return {
     async api(op, args, opts = {}) {
+      // The S3 operation name, as the CLI's own errors spell it: `head-object` is `HeadObject`.
+      const name = op
+        .split("-")
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join("");
       const cmd = ["aws", "s3api", op, ...args, "--region", cfg.region, "--output", "json"];
       let proc: ReturnType<typeof spawn>;
       try {
@@ -198,7 +203,7 @@ export function createAwsRunner(cfg: AwsConfig): AwsRunner {
           stderr: "pipe",
         });
       } catch {
-        throw new AwsCliError("spawn-failed", op);
+        throw new AwsCliError("spawn-failed", name);
       }
       const limit = cfg.timeoutMs * (opts.slow ? SLOW_FACTOR : 1);
       let timedOut = false;
@@ -212,19 +217,19 @@ export function createAwsRunner(cfg: AwsConfig): AwsRunner {
           new Response(proc.stderr as ReadableStream).text(),
           proc.exited,
         ]);
-        if (timedOut) throw new AwsCliError("timeout", op);
-        if (code !== 0) throw classifyAwsError(stderr, op);
+        if (timedOut) throw new AwsCliError("timeout", name);
+        if (code !== 0) throw classifyAwsError(stderr, name);
         const text = stdout.trim();
         if (text === "") return {};
         try {
           const parsed = JSON.parse(text) as unknown;
           if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-            throw new AwsCliError("bad-output", op);
+            throw new AwsCliError("bad-output", name);
           }
           return parsed as Record<string, unknown>;
         } catch (err) {
           if (err instanceof AwsCliError) throw err;
-          throw new AwsCliError("bad-output", op);
+          throw new AwsCliError("bad-output", name);
         }
       } finally {
         clearTimeout(timer);
