@@ -23,6 +23,7 @@ import {
   scanAcqTime,
   scanEdfHeader,
   scanJsonKeys,
+  scanParticipantIds,
   scanPaths,
   scanTableColumns,
   scanTextForLocalPaths,
@@ -220,8 +221,8 @@ describe("tables, JSON and paths", () => {
     };
     const found = scanJsonKeys(doc);
     expect(found.map((f) => f.field).sort()).toEqual([
-      "DataFileInformations.Contact",
-      "Nested.BirthDate",
+      "BirthDate",
+      "Contact",
       "PatientID",
       "PatientName",
     ]);
@@ -306,5 +307,213 @@ describe("coverage and summaries", () => {
     });
     expect(shapeOf("Alice 14-MAR-1993")).toBe("Aa+ 99-A+-9+");
     for (const f of findings) expect(f.shape).toMatch(/^[aA9+\-_ .=]*$/);
+  });
+});
+
+describe("a finding never carries a value (non-ASCII, ancestors, arrays)", () => {
+  const safeShape = /^[aA9 !-/:-@[-`{-~?+]*$/;
+
+  test("shapeOf maps letters of any script to a or A and every other non-ASCII character to ?", () => {
+    expect(shapeOf("Jos\u00e9")).toBe("Aa+");
+    expect(shapeOf("\u5f20\u4f1f")).toBe("aa");
+    expect(shapeOf("\u0418\u0432\u0430\u043d")).toBe("Aa+");
+    expect(shapeOf("a\u0301")).toBe("a?");
+    expect(shapeOf("\u0001\u007f")).toBe("??");
+    expect(shapeOf("")).toBe("");
+  });
+
+  test("a CJK or accented value under an identifier key leaves no letter behind", () => {
+    const found = scanJsonKeys({ PatientName: "\u5f20\u4f1f", Contact: "Jos\u00e9 Garc\u00eda" });
+    expect(found.length).toBe(2);
+    for (const f of found) expect(f.shape).toMatch(safeShape);
+    expect(JSON.stringify(found)).not.toContain("\u5f20");
+    expect(JSON.stringify(found)).not.toContain("Garc");
+  });
+
+  test("a path with a non-ASCII image name reports a shape, not the name", () => {
+    const found = scanPaths(["sourcedata/\u5f20\u4f1f.jpg"]);
+    expect(found.map((f) => f.kind)).toEqual(["image-or-document-file"]);
+    expect(JSON.stringify(found)).not.toContain("\u5f20");
+  });
+
+  test("only the matched key is reported; an ancestor key that is a name never enters a finding", () => {
+    const found = scanJsonKeys({
+      janedoe: { PatientName: "x" },
+      rows: [{ smithfamily: { dob: "1990" } }],
+    });
+    expect(found.map((f) => f.field).sort()).toEqual(["PatientName", "dob"]);
+    expect(JSON.stringify(found)).not.toContain("janedoe");
+    expect(JSON.stringify(found)).not.toContain("smithfamily");
+  });
+
+  test("identifier keys holding arrays or objects are flagged; empty containers are not", () => {
+    expect(scanJsonKeys({ PatientName: ["dan"] }).map((f) => f.kind)).toEqual([
+      "json-identifier-key",
+    ]);
+    expect(scanJsonKeys({ BirthDate: { y: "1990" } }).map((f) => f.kind)).toEqual([
+      "json-identifier-key",
+    ]);
+    expect(scanJsonKeys({ PatientName: [], BirthDate: {}, Contact: [""] })).toEqual([]);
+  });
+
+  test("a non-ASCII byte in the patient field is a finding, whatever it spells", () => {
+    const latin1 = buildHeader({ patient: "S_01 F X Jos\u00e9" });
+    expect(kinds(latin1)).toContain("edf-patient-nonascii");
+    const utf8 = buildHeader();
+    utf8.set([0xe5, 0xbc, 0xa0, 0xe4, 0xbc, 0x9f], 8); // a two-character CJK name as UTF-8 bytes
+    const found = scanEdfHeader(utf8);
+    expect(found.map((f) => f.kind)).toContain("edf-patient-nonascii");
+    for (const f of found) expect(f.shape).toMatch(safeShape);
+    expect(kinds(buildHeader({ patient: "S_01 F X X" }))).not.toContain("edf-patient-nonascii");
+  });
+
+  test("a non-ASCII byte in the recording field is a review finding", () => {
+    const bytes = buildHeader();
+    bytes.set([0xc3, 0xa9], 100);
+    expect(scanEdfHeader(bytes).find((f) => f.kind === "edf-recording-nonascii")?.severity).toBe(
+      "review",
+    );
+  });
+});
+
+describe("header rules: names fused to digits, extras, dates, descriptive words", () => {
+  test("a name fused to digits is a name; a study code is not", () => {
+    expect(kinds(buildHeader({ patient: "alice7 F 01-JAN-1990 X_X" }))).toEqual([
+      "edf-patient-code",
+    ]);
+    expect(kinds(buildHeader({ patient: "S_01 F 01-JAN-1990 john3" }))).toEqual([
+      "edf-patient-name",
+    ]);
+    expect(kinds(buildHeader({ patient: "S01 F 01-JAN-1990 P7" }))).toEqual([]);
+  });
+
+  test("a two-letter name is caught, and a neutral hyphenated phrase is not", () => {
+    expect(kinds(buildHeader({ patient: "S_01 F X Li" }))).toEqual(["edf-patient-name"]);
+    expect(kinds(buildHeader({ patient: "sub-01 right-handed years anonymized" }))).toEqual([]);
+    expect(kinds(buildHeader({ patient: "S_01 F X Unnamed" }))).toEqual([]);
+    expect(kinds(buildHeader({ patient: "S_01 F X HC" }))).toEqual([]);
+  });
+
+  test("additional subfields: key=value metadata is clean, a bare name is not", () => {
+    expect(kinds(buildHeader({ patient: "S_01 M X X hand=1 weight=71.5 height=180" }))).toEqual([]);
+    expect(kinds(buildHeader({ patient: "S_01 M X X hand=1 Smith" }))).toEqual([
+      "edf-patient-freetext",
+    ]);
+    expect(kinds(buildHeader({ patient: "S_01 M X X 14-MAR-1993" }))).toEqual([
+      "edf-patient-birthdate",
+    ]);
+  });
+
+  test("birth dates in ISO, US, European and compact layouts are judged the same way", () => {
+    const flagged = ["1993-03-14", "03/14/1993", "14.03.1993", "19930314", "02/01/1993"];
+    for (const date of flagged) {
+      expect(kinds(buildHeader({ patient: `S_01 M ${date} X_X` }))).toEqual([
+        "edf-patient-birthdate",
+      ]);
+    }
+    const yearOnly = ["1993-01-01", "01/01/1993", "01.01.1993", "19930101"];
+    for (const date of yearOnly) {
+      expect(kinds(buildHeader({ patient: `S_01 M ${date} X_X` }))).toEqual([]);
+    }
+  });
+
+  test("a date with an impossible reading is not a date", () => {
+    expect(kinds(buildHeader({ patient: "S_01 M 31/31/1993 X_X" }))).toEqual([]);
+  });
+
+  test("a three-token field is read as free text, not as a short structured field", () => {
+    expect(kinds(buildHeader({ patient: "S_01 M 14-MAR-1993" }))).toEqual([
+      "edf-patient-birthdate",
+    ]);
+    expect(kinds(buildHeader({ patient: "X X 01-JAN-1993" }))).toEqual([]);
+  });
+
+  test("a lowercase X in the sex position still makes the field structured", () => {
+    expect(kinds(buildHeader({ patient: "alice x X alice" })).sort()).toEqual([
+      "edf-patient-code",
+      "edf-patient-name",
+    ]);
+  });
+
+  test("the BDF magic must start with 0xFF; the same bytes with another first byte are unreadable", () => {
+    const ok = buildHeader({ family: "bdf" });
+    expect(detectEdfFamily(ok)).toBe("bdf");
+    const bad = buildHeader({ family: "bdf" });
+    bad[0] = 0x41;
+    expect(detectEdfFamily(bad)).toBeNull();
+    expect(kinds(bad)).toEqual(["edf-unreadable"]);
+  });
+
+  test("a patient field filling all 80 bytes is read in full", () => {
+    const patient = `S_01 F 01-JAN-1990 ${"n".repeat(80 - "S_01 F 01-JAN-1990 ".length)}`;
+    expect(patient.length).toBe(80);
+    expect(kinds(buildHeader({ patient }))).toEqual(["edf-patient-name"]);
+  });
+
+  test("recording dates: lowercase keyword, bare date, ISO date and year-only are judged correctly", () => {
+    expect(kinds(buildHeader({ recording: "startdate 14-MAR-2023 X X X" }))).toEqual([
+      "edf-recording-startdate",
+    ]);
+    expect(kinds(buildHeader({ recording: "2023-03-14 session" }))).toEqual([
+      "edf-recording-startdate",
+    ]);
+    expect(kinds(buildHeader({ recording: "Startdate 01-JAN-2023 X X X" }))).toEqual([]);
+    expect(kinds(buildHeader({ recording: "Startdate notadate X X X" }))).toEqual([
+      "edf-recording-startdate",
+    ]);
+  });
+
+  test("an admin code or equipment string that reads as a name is a review finding", () => {
+    const found = scanEdfHeader(buildHeader({ recording: "Startdate X Marlowe X X" }));
+    expect(found.map((f) => [f.kind, f.severity])).toEqual([["edf-recording-freetext", "review"]]);
+  });
+});
+
+describe("participant labels and local paths", () => {
+  test("a name-like sub- label in a path or a participants table is a review finding", () => {
+    expect(scanPaths(["sub-johnny/eeg/x.edf"]).map((f) => f.kind)).toEqual(["path-subject-label"]);
+    expect(
+      scanPaths(["sub-01/eeg/x.edf", "sub-control/eeg/x.edf", "sub-NDARINV123/x.edf"]),
+    ).toEqual([]);
+    const table = "participant_id\tage\nsub-johnny\t20\nsub-01\t21\nsub-control\t22\n";
+    const found = scanParticipantIds(table);
+    expect(found.map((f) => f.kind)).toEqual(["path-subject-label"]);
+    expect(JSON.stringify(found)).not.toContain("johnny");
+    expect(scanParticipantIds("participant_id\tage\nsub-01\t21\n")).toEqual([]);
+  });
+
+  test("a home path inside a URL, and a generic account, are not a local user path", () => {
+    expect(scanTextForLocalPaths("see https://example.org/home/page for details")).toEqual([]);
+    expect(scanTextForLocalPaths("cd /home/user/project")).toEqual([]);
+    expect(scanTextForLocalPaths("C:\\Users\\runner\\work")).toEqual([]);
+    expect(scanTextForLocalPaths("cd /home/erin/project").length).toBe(1);
+    expect(scanTextForLocalPaths("x = '/Users/dana/data.csv'").length).toBe(1);
+  });
+});
+
+describe("headers written by an independent EDF+ writer (edfio)", () => {
+  const read = (name: string) =>
+    new Uint8Array(
+      readFileSync(join(import.meta.dir, "fixtures/identifier-scan", name)).subarray(
+        0,
+        EDF_HEADER_BYTES,
+      ),
+    );
+
+  test("an EDF+ header with a name, birth date, acquisition date and operator is flagged field by field", () => {
+    const found = scanEdfHeader(read("flagged.edf"));
+    expect(found.map((f) => f.kind).sort()).toEqual([
+      "edf-patient-birthdate",
+      "edf-patient-name",
+      "edf-recording-startdate",
+      "edf-recording-technician",
+      "edf-startdate",
+    ]);
+    expect(JSON.stringify(found).toLowerCase()).not.toContain("fixturename");
+    expect(JSON.stringify(found)).not.toContain("Opname");
+  });
+
+  test("the clean twin written by the same tool has no findings", () => {
+    expect(scanEdfHeader(read("clean.edf"))).toEqual([]);
   });
 });
