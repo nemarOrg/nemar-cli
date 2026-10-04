@@ -15,7 +15,7 @@
  * words, never an error message, because a parser's message can quote the input.
  */
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   DATE_KINDS,
@@ -243,6 +243,8 @@ export interface Breaker {
   ok(): void;
   /** A failed attempt; may trip the breaker. */
   observe(error: ReadFailure): void;
+  /** Epoch milliseconds before which no request of this class should start: the latest Retry-After. */
+  pausedUntilMs(): number;
 }
 
 /**
@@ -251,14 +253,20 @@ export interface Breaker {
  * timeout, network; any answer in between, including a 404, ends the streak) and at once on a
  * Retry-After longer than the cap, which means maintenance, not congestion.
  */
-export function createBreakers(options: { streak: number; retryAfterCapMs: number }): {
+export function createBreakers(options: {
+  streak: number;
+  retryAfterCapMs: number;
+  now?: () => number;
+}): {
   worker: Breaker;
   direct: Breaker;
 } {
   assertPositiveInt("abort streak", options.streak);
+  const now = options.now ?? Date.now;
   const state: { tripped: RunAborted | null } = { tripped: null };
   const make = (name: string): Breaker => {
     let consecutive = 0;
+    let pausedUntil = 0;
     const trip = (message: string): never => {
       state.tripped = new RunAborted(message);
       throw state.tripped;
@@ -270,6 +278,9 @@ export function createBreakers(options: { streak: number; retryAfterCapMs: numbe
       ok() {
         consecutive = 0;
       },
+      pausedUntilMs() {
+        return pausedUntil;
+      },
       observe(error) {
         if (state.tripped) throw state.tripped;
         if (error.retryAfterMs !== undefined && error.retryAfterMs > options.retryAfterCapMs) {
@@ -277,6 +288,10 @@ export function createBreakers(options: { streak: number; retryAfterCapMs: numbe
             `${name} asked to wait ${Math.round(error.retryAfterMs / 1000)} s (Retry-After), ` +
               `over the ${Math.round(options.retryAfterCapMs / 1000)} s cap (${error.cls})`,
           );
+        }
+        // A Retry-After within the cap pauses the whole request class, not only this request.
+        if (error.retryAfterMs !== undefined) {
+          pausedUntil = Math.max(pausedUntil, now() + error.retryAfterMs);
         }
         if (!error.retryable) {
           consecutive = 0;
@@ -439,6 +454,8 @@ export interface FleetContext {
   retryBaseMs: number;
   /** Waits between retries; tests record it instead of sleeping. */
   sleep: (ms: number) => Promise<void>;
+  /** The clock, in epoch milliseconds; tests advance it from their recorded sleeps. */
+  now: () => number;
   /** A Retry-After above this stops the run (and is never waited out). */
   retryAfterCapMs: number;
   /** Stops the run on a streak of failures, or a Retry-After over the cap. */
@@ -553,8 +570,13 @@ export function createContext(options: ContextOptions = {}): FleetContext {
     retryBaseMs: options.retryBaseMs ?? 400,
     sleep:
       options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))),
+    now: options.now ?? Date.now,
     retryAfterCapMs,
-    breakers: createBreakers({ streak: options.abortStreak ?? 25, retryAfterCapMs }),
+    breakers: createBreakers({
+      streak: options.abortStreak ?? 25,
+      retryAfterCapMs,
+      now: options.now ?? Date.now,
+    }),
     limits: {
       treeHeaderSample: 300,
       scansTables: 1,
@@ -588,6 +610,11 @@ const breakerFor = (ctx: FleetContext, url: string): Breaker =>
 async function guarded<T>(ctx: FleetContext, url: string, run: () => Promise<T>): Promise<T> {
   const breaker = breakerFor(ctx, url);
   breaker.check();
+  const wait = breaker.pausedUntilMs() - ctx.now();
+  if (wait > 0) {
+    await ctx.sleep(wait);
+    breaker.check();
+  }
   try {
     const value = await run();
     breaker.ok();
@@ -1409,6 +1436,8 @@ export interface RunOptions {
 export async function runFleet(ctx: FleetContext, options: RunOptions): Promise<Summary> {
   assertPositiveInt("dataset concurrency", options.datasetConcurrency);
   const log = options.log ?? (() => undefined);
+  // A summary from an earlier run must never read as this run's: remove it before anything can abort.
+  rmSync(join(options.outDir, "_summary.json"), { force: true });
   const catalog = await listPublicDatasets(ctx);
   let targets = catalog;
   if (options.only) {

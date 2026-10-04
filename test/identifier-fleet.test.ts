@@ -14,7 +14,7 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -1966,9 +1966,18 @@ describe("the CLI", () => {
 // Retry-After and the failure streak
 // ---------------------------------------------------------------------------------------
 
+/** Records every sleep and advances a virtual clock by it, as a real sleep advances a real one. */
 const sleepRecorder = () => {
   const calls: number[] = [];
-  return { calls, sleep: async (ms: number) => void calls.push(ms) };
+  let clock = Date.now();
+  return {
+    calls,
+    now: () => clock,
+    sleep: async (ms: number) => {
+      calls.push(ms);
+      clock += ms;
+    },
+  };
 };
 
 describe("parseRetryAfter", () => {
@@ -2024,18 +2033,24 @@ describe("Retry-After at the HTTP stand-in", () => {
 
   test("a 429 with Retry-After 5 waits 5 s, then the read succeeds; without the header it backs off", async () => {
     const asked = sleepRecorder();
-    const a = await scanFiles({ [EDF]: throttled("5") }, { sleep: asked.sleep, retryBaseMs: 100 });
+    const a = await scanFiles(
+      { [EDF]: throttled("5") },
+      { sleep: asked.sleep, now: asked.now, retryBaseMs: 100 },
+    );
     expect(a.record.status).toBe("clean");
     expect(asked.calls).toEqual([5000]);
     const plain = sleepRecorder();
-    const b = await scanFiles({ [EDF]: throttled() }, { sleep: plain.sleep, retryBaseMs: 100 });
+    const b = await scanFiles(
+      { [EDF]: throttled() },
+      { sleep: plain.sleep, now: plain.now, retryBaseMs: 100 },
+    );
     expect(b.record.status).toBe("clean");
     expect(plain.calls).toEqual([100]);
   });
 
   test("30 s is waited out; 31 s stops the run after one request, with no wait", async () => {
     const at = sleepRecorder();
-    const waited = await scanFiles({ [EDF]: throttled("30") }, { sleep: at.sleep });
+    const waited = await scanFiles({ [EDF]: throttled("30") }, { sleep: at.sleep, now: at.now });
     expect(waited.record.status).toBe("clean");
     expect(at.calls).toEqual([30_000]);
 
@@ -2341,5 +2356,51 @@ describe("the aws fallback runs the real aws CLI against an S3 stand-in", () => 
     expect(error).toBeInstanceOf(ReadFailure);
     expect((error as ReadFailure).cls).toBe("aws/unavailable");
     expect(w.requests).toHaveLength(0);
+  });
+});
+
+describe("a Retry-After pauses the request class, and a stale summary never survives", () => {
+  test("after one 429 with Retry-After, the NEXT request of the same class also waits it out", async () => {
+    const asked: number[] = [];
+    const sleep = async (ms: number) => void asked.push(ms);
+    const files: Record<string, FileDef> = {
+      [edfPath(1)]: {
+        bytes: CLEAN,
+        failFirst: { n: 1, status: 429 },
+        headers: { "Retry-After": "2" },
+        via: "worker",
+      },
+      [edfPath(2)]: { bytes: CLEAN, via: "worker" },
+      [edfPath(3)]: { bytes: CLEAN, via: "worker" },
+    };
+    const { record } = await scanFiles(files, { sleep, fileConcurrency: 1, retryBaseMs: 10 });
+    expect(record.read_failures ?? {}).toEqual({});
+    // The retry of file 1 waits its own 2000 ms; files 2 and 3 each wait what is left of the pause.
+    const long = asked.filter((ms) => ms > 1000);
+    expect(long.length).toBeGreaterThanOrEqual(3);
+  });
+
+  test("with no Retry-After nothing but the retry backoff sleeps (twin)", async () => {
+    const asked: number[] = [];
+    const sleep = async (ms: number) => void asked.push(ms);
+    const files: Record<string, FileDef> = {
+      [edfPath(1)]: { bytes: CLEAN, failFirst: { n: 1, status: 429 }, via: "worker" },
+      [edfPath(2)]: { bytes: CLEAN, via: "worker" },
+    };
+    await scanFiles(files, { sleep, fileConcurrency: 1, retryBaseMs: 10 });
+    expect(asked.filter((ms) => ms > 1000)).toEqual([]);
+  });
+
+  test("an aborted run removes the earlier run's summary, so it can never read as current", async () => {
+    const w = newWorld();
+    w.add("nm000001", {
+      [EDF]: { bytes: CLEAN, failFirst: { n: 1, status: 503 }, headers: { "Retry-After": "3600" } },
+    });
+    const out = tempDir();
+    writeFileSync(join(out, "_summary.json"), JSON.stringify({ stale: true }));
+    await expect(
+      runFleet(w.ctx(), { outDir: out, force: false, datasetConcurrency: 1 }),
+    ).rejects.toBeInstanceOf(RunAborted);
+    expect(existsSync(join(out, "_summary.json"))).toBe(false);
   });
 });
