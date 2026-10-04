@@ -1436,9 +1436,16 @@ export interface RunOptions {
 export async function runFleet(ctx: FleetContext, options: RunOptions): Promise<Summary> {
   assertPositiveInt("dataset concurrency", options.datasetConcurrency);
   const log = options.log ?? (() => undefined);
-  // A summary from an earlier run must never read as this run's: remove it before anything can abort.
-  rmSync(join(options.outDir, "_summary.json"), { force: true });
-  const catalog = await listPublicDatasets(ctx);
+  const summaryPath = join(options.outDir, "_summary.json");
+  // A summary from an earlier run must never read as this run's. A catalog that cannot be read
+  // removes it; a mistyped --only (a usage error, checked below) leaves a good one alone.
+  let catalog: Awaited<ReturnType<typeof listPublicDatasets>>;
+  try {
+    catalog = await listPublicDatasets(ctx);
+  } catch (error) {
+    rmSync(summaryPath, { force: true });
+    throw error;
+  }
   let targets = catalog;
   if (options.only) {
     const known = new Set(catalog.map((d) => d.id));
@@ -1449,6 +1456,7 @@ export async function runFleet(ctx: FleetContext, options: RunOptions): Promise<
     const wanted = new Set(options.only);
     targets = catalog.filter((d) => wanted.has(d.id));
   }
+  rmSync(summaryPath, { force: true });
   mkdirSync(options.outDir, { recursive: true });
   log(`public datasets: ${catalog.length}; scanning ${targets.length}`);
   let done = 0;

@@ -2404,3 +2404,57 @@ describe("a Retry-After pauses the request class, and a stale summary never surv
     expect(existsSync(join(out, "_summary.json"))).toBe(false);
   });
 });
+
+describe("the summary and the pause, edge cases", () => {
+  test("a mistyped --only leaves a good earlier summary alone; a run that starts removes it", async () => {
+    const w = newWorld();
+    w.add("nm000001", { [EDF]: CLEAN });
+    const out = tempDir();
+    writeFileSync(join(out, "_summary.json"), JSON.stringify({ earlier: true }));
+    await expect(
+      runFleet(w.ctx(), { outDir: out, force: false, datasetConcurrency: 1, only: ["nm999999"] }),
+    ).rejects.toThrow("not in the public catalog");
+    expect(JSON.parse(readFileSync(join(out, "_summary.json"), "utf8"))).toEqual({ earlier: true });
+    await runFleet(w.ctx(), {
+      outDir: out,
+      force: false,
+      datasetConcurrency: 1,
+      only: ["nm000001"],
+    });
+    expect(JSON.parse(readFileSync(join(out, "_summary.json"), "utf8")).datasets).toBe(1);
+  });
+
+  test("a breaker that trips during a pause stops the request before it is sent", async () => {
+    const w = newWorld();
+    w.add(ID, {
+      [edfPath(1)]: {
+        bytes: CLEAN,
+        failFirst: { n: 1, status: 429 },
+        headers: { "Retry-After": "2" },
+        via: "worker",
+      },
+      [edfPath(2)]: { bytes: CLEAN, via: "worker" },
+    });
+    let ctxRef: ReturnType<typeof w.ctx> | null = null;
+    let first = true;
+    const sleep = async () => {
+      // While the second request is paused, something else trips the run.
+      if (!first) {
+        try {
+          ctxRef?.breakers.worker.observe(
+            new ReadFailure("http-503", { status: 503, retryable: true, retryAfterMs: 3_600_000 }),
+          );
+        } catch {
+          // The trip is recorded in the breaker; the request after the pause must see it.
+        }
+      }
+      first = false;
+    };
+    ctxRef = w.ctx({ sleep, fileConcurrency: 1, retryBaseMs: 1 });
+    const error = await scanDataset(ctxRef, ID, w.versionOf(ID)).catch((e) => e);
+    expect(error).toBeInstanceOf(RunAborted);
+    // The first request was told to wait and the run tripped during the wait: its retry never goes out.
+    const sent = w.requests.filter((r) => r.path.endsWith("_eeg.edf")).length;
+    expect(sent).toBe(1);
+  });
+});
