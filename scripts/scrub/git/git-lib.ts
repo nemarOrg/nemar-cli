@@ -582,19 +582,29 @@ function countOccurrences(haystack: Buffer, needle: Buffer): number {
   }
 }
 
-/** Scans a stream of bytes for any of a set of 64-hex-digit tokens, across chunk borders. */
-class HashScanner {
+/**
+ * Scans a stream of bytes for any of a set of 64-hex-digit tokens, across chunk borders.
+ *
+ * Every 64-digit window of every hex run is tried, in either letter case, so a hash that sits
+ * inside a longer run of hex digits (a concatenation, a hex dump) is still found. The usual
+ * case, a run of exactly 64, costs one set lookup.
+ */
+export class HashScanner {
   private tail = "";
   found = false;
   constructor(private readonly hashes: ReadonlySet<string>) {}
   push(chunk: Uint8Array): void {
     const window = this.tail + Buffer.from(chunk).toString("latin1");
     if (!this.found) {
-      for (const m of window.matchAll(/[0-9a-f]{64}/g)) {
-        if (this.hashes.has(m[0])) {
-          this.found = true;
-          break;
+      for (const m of window.matchAll(/[0-9a-fA-F]{64,}/g)) {
+        const run = m[0].toLowerCase();
+        for (let i = 0; i + 64 <= run.length; i++) {
+          if (this.hashes.has(run.slice(i, i + 64))) {
+            this.found = true;
+            break;
+          }
         }
+        if (this.found) break;
       }
     }
     this.tail = window.slice(-63);

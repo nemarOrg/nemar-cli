@@ -16,6 +16,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { join } from "node:path";
+import { HashScanner } from "../../../scripts/scrub/git/git-lib";
 import {
   BINARY,
   CHANGES_TEXT,
@@ -90,6 +91,39 @@ const REFS = ["main", "refs/remotes/origin/main", ...TAGS.map((t) => `refs/tags/
 // -----------------------------------------------------------------------------------------
 // Pointer-file dataset: the full path through rewrite and verify
 // -----------------------------------------------------------------------------------------
+
+describe("the old-key scanner reads blobs in chunks", () => {
+  // A supplement to the CLI test below, which cannot choose where a pipe splits a blob: a hash
+  // that straddles two chunks must still be found, at every split point.
+  const hash = sha("straddle");
+  const text = `xx${hash}yy`;
+  const bytes = (s: string) => new TextEncoder().encode(s);
+
+  test("a hash split across two or three chunks is found; a near miss is not", () => {
+    for (let cut = 1; cut < text.length; cut++) {
+      const scanner = new HashScanner(new Set([hash]));
+      scanner.push(bytes(text.slice(0, cut)));
+      scanner.push(bytes(text.slice(cut)));
+      expect(scanner.found, `cut ${cut}`).toBe(true);
+    }
+    const three = new HashScanner(new Set([hash]));
+    for (const part of [text.slice(0, 20), text.slice(20, 50), text.slice(50)]) {
+      three.push(bytes(part));
+    }
+    expect(three.found).toBe(true);
+    // Inside a longer run of hex digits, and in capitals.
+    for (const embedded of [`abcdef01${hash}23456789`, hash.toUpperCase()]) {
+      const scanner = new HashScanner(new Set([hash]));
+      scanner.push(bytes(embedded.slice(0, 33)));
+      scanner.push(bytes(embedded.slice(33)));
+      expect(scanner.found, embedded.length.toString()).toBe(true);
+    }
+    const miss = new HashScanner(new Set([hash]));
+    miss.push(bytes(text.slice(0, 40)));
+    miss.push(bytes(`0${text.slice(41)}`));
+    expect(miss.found).toBe(false);
+  });
+});
 
 SUITE("pointer-file dataset", () => {
   let fx: PointerFixture;
@@ -397,6 +431,20 @@ SUITE("pointer-file dataset", () => {
       commitAll(repo, "leak");
     });
     expect(r.out).toContain("reason=old-key-present");
+  });
+
+  test("verify finds an old key inside blobs larger than a pipe buffer", async () => {
+    const r = await verifyDamaged("bigblob", (repo) => {
+      // One blob of hex-looking filler and one of plain text, the key placed to straddle a
+      // 64 KiB read in each. Two blobs, so the count says both were found.
+      const hex = "0123456789abcdef".repeat(20000);
+      const text = "the quick brown fox jumps over the lazy dog ".repeat(7000);
+      const key = sha("old-c");
+      write(repo, "big-hex.dat", `${hex.slice(0, 65506)}${key}${hex.slice(65506)}`);
+      write(repo, "big-text.dat", `${text.slice(0, 65506)}${key}${text.slice(65506)}`);
+      commitAll(repo, "big");
+    });
+    expect(r.out).toContain("reason=old-key-present count=2");
   });
 
   test("verify fails on an old key in a commit message", async () => {
