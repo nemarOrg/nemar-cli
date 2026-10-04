@@ -1167,10 +1167,14 @@ export function buildSummary(records: readonly SummaryRecord[]): Summary {
   };
 }
 
-/** True when an earlier run's file is final: a verdict other than `unchecked`, and complete. */
-export function isFinalRecord(record: unknown): boolean {
+/**
+ * True when an earlier run's file is final: a verdict other than `unchecked`, complete, and made
+ * at the version the catalog names now (a dataset published since then has no verdict yet).
+ */
+export function isFinalRecord(record: unknown, version: string | null): boolean {
   return (
     isRecord(record) &&
+    record.version === version &&
     typeof record.status === "string" &&
     record.status !== "unchecked" &&
     record.incomplete === false
@@ -1214,7 +1218,7 @@ export async function runFleet(ctx: FleetContext, options: RunOptions): Promise<
   let done = 0;
   await pool(targets, options.datasetConcurrency, async ({ id, version }) => {
     const file = join(options.outDir, `${id}.json`);
-    if (!options.force && isFinalRecord(readRecord(file))) {
+    if (!options.force && isFinalRecord(readRecord(file), version)) {
       done++;
       return;
     }

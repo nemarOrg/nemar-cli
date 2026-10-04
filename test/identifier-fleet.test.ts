@@ -1590,6 +1590,34 @@ describe("runFleet", () => {
     expect([hits("nm000001"), hits("nm000002"), hits("nm000003")]).toEqual([2, 4, 3]);
   });
 
+  test("a final record is kept only for the version it was scanned at", async () => {
+    const w = newWorld();
+    w.add("nm000001", { [EDF]: CLEAN });
+    const out = tempDir();
+    const ctx = w.ctx();
+    const options = { outDir: out, force: false, datasetConcurrency: 1 };
+    const first = await runFleet(ctx, options);
+    expect(first.by_status.clean?.ids).toEqual(["nm000001"]);
+    expect(readJson(join(out, "nm000001.json")).version).toBe("v1.0.0");
+
+    // Same version again: the final verdict is kept, nothing is fetched.
+    await runFleet(ctx, options);
+    expect(w.hits(w.manifestPath("nm000001"))).toBe(1);
+
+    // The dataset is published again, now carrying a name in a header.
+    w.patch("nm000001", { version: "v1.1.0" });
+    w.set("nm000001", EDF, NAMED);
+    const second = await runFleet(ctx, options);
+    expect(w.hits(w.manifestPath("nm000001"))).toBe(1); // the new version's manifest, once
+    expect(readJson(join(out, "nm000001.json")).version).toBe("v1.1.0");
+    expect(second.by_status["direct-identifiers"]?.ids).toEqual(["nm000001"]);
+    expect(second.by_status.clean).toBeUndefined();
+
+    // And now that version is final.
+    await runFleet(ctx, options);
+    expect(w.hits(w.manifestPath("nm000001"))).toBe(1);
+  });
+
   test("a damaged or old-format file is rescanned, and no temp file is left behind", async () => {
     const w = newWorld();
     w.add("nm000001", { [EDF]: CLEAN });
