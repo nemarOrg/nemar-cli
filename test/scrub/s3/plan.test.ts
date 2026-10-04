@@ -4,6 +4,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { parsePatches, parsePlan } from "../../../scripts/scrub/contract";
 import { buildKey } from "../../../scripts/scrub/contract";
 import type { PlanFile } from "../../../scripts/scrub/contract";
@@ -61,6 +62,12 @@ describe("plan", () => {
       seedManifest(standin, "v1.0.1", [a, b]);
       // The summary file is not a manifest: its key must never reach the plan.
       seedManifest(standin, "v1.0.0-summary", [e]);
+      // So is the records file the enrichment job writes: a JSON array, which parses as no manifest.
+      standin.putObject(
+        BUCKET,
+        `${DATASET}/version/v1.0.0-records.json`,
+        new TextEncoder().encode(JSON.stringify([{ doc_type: "recording" }])),
+      );
 
       const dir = tempDir("plan");
       const r = await runScrub(standin, planArgs(dir));
@@ -119,10 +126,13 @@ describe("plan", () => {
       const ranged = standin.calls("GetObject").filter((x) => x.range !== undefined);
       expect(ranged.length).toBe(3);
       for (const c of ranged) expect(c.range).toBe("bytes=0-8191");
-      // The summary manifest was never fetched.
-      expect(
-        standin.calls("GetObject").some((x) => x.key === `${DATASET}/version/v1.0.0-summary.json`),
-      ).toBe(false);
+      // Neither sibling was ever fetched.
+      for (const sibling of ["v1.0.0-summary.json", "v1.0.0-records.json"]) {
+        expect(
+          standin.calls("GetObject").some((x) => x.key === `${DATASET}/version/${sibling}`),
+          sibling,
+        ).toBe(false);
+      }
     },
     SLOW,
   );
@@ -145,6 +155,32 @@ describe("plan", () => {
       expect(plan.keys.map((k) => k.oldKey).sort()).toEqual([a.oldKey, b.oldKey].sort());
       // Naming tags skips discovery: no prefix listing of the manifests.
       expect(standin.calls("ListObjectsV2").length).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "a file under version/ that is neither a manifest nor a known sibling stops the plan, never skipped",
+    async () => {
+      for (const name of [
+        "v1.0.0-final.json",
+        "notes.json",
+        "v1.0.0.json.bak",
+        "v1.0.0-beta.1.json",
+      ]) {
+        standin = startS3Standin();
+        const a = fixtureA();
+        seedObject(standin, a);
+        seedManifest(standin, "v1.0.0", [a]);
+        standin.putObject(BUCKET, `${DATASET}/version/${name}`, new TextEncoder().encode("{}"));
+        const dir = tempDir("plan-unknown");
+        const r = await runScrub(standin, planArgs(dir));
+        expectStopped(r, 4, "version-dir-unknown-file");
+        // Stopped before reading any object, so no header was read and no plan was written.
+        expect(standin.calls("GetObject").length, name).toBe(0);
+        expect(existsSync(`${dir}/plan.json`), name).toBe(false);
+        standin.stop();
+      }
     },
     SLOW,
   );

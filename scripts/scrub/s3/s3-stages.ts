@@ -161,15 +161,26 @@ export interface PlanOptions extends CommonOptions {
 
 const TAG = /^[A-Za-z0-9._+-]+$/;
 
-/** Tags with a `<id>/version/<tag>.json` manifest. `<tag>-summary.json` is not a manifest. */
+/**
+ * `<id>/version/` holds three kinds of file, all seen in the real bucket: the manifest
+ * `<tag>.json`, and two siblings the enrichment jobs write, `<tag>-summary.json` and
+ * `<tag>-records.json` (a JSON array, not a manifest). Anything else is refused rather than
+ * skipped, because a manifest that is skipped is a set of keys that is never scrubbed.
+ */
+const MANIFEST_FILE = /^(v\d+\.\d+\.\d+)\.json$/;
+const SIDECAR_FILE = /^v\d+\.\d+\.\d+-(summary|records)\.json$/;
+
+/** Tags with a `<id>/version/<tag>.json` manifest. */
 async function discoverTags(ctx: S3Ctx, dataset: string): Promise<string[]> {
   const prefix = `${dataset}/version/`;
   const keys = await listCurrentKeys(ctx, prefix);
   const tags: string[] = [];
   for (const k of keys) {
     const name = k.slice(prefix.length);
-    if (name.includes("/") || !name.endsWith(".json") || name.endsWith("-summary.json")) continue;
-    tags.push(name.slice(0, -".json".length));
+    const manifest = MANIFEST_FILE.exec(name);
+    if (manifest) tags.push(manifest[1] as string);
+    else if (!SIDECAR_FILE.test(name))
+      throw new StageError("version-dir-unknown-file", EXIT.unreadable);
   }
   return tags.sort();
 }
