@@ -26,6 +26,9 @@ export type Severity = "identifier" | "review";
 
 export type FindingKind =
   | "edf-unreadable"
+  | "edf-patient-nonascii"
+  | "edf-recording-nonascii"
+  | "path-subject-label"
   | "edf-patient-name"
   | "edf-patient-code"
   | "edf-patient-freetext"
@@ -40,6 +43,23 @@ export type FindingKind =
   | "image-or-document-file"
   | "tooling-debris"
   | "local-user-path";
+
+/** Findings that name a person or a clinical record: what must not stay public. */
+export const DIRECT_KINDS: ReadonlySet<FindingKind> = new Set<FindingKind>([
+  "edf-patient-name",
+  "edf-patient-code",
+  "edf-patient-freetext",
+  "edf-patient-birthdate",
+  "edf-patient-nonascii",
+  "json-identifier-key",
+  "participants-identifier-column",
+]);
+
+/** Calendar dates finer than year: barred by the Contributor Terms, but not a name. */
+export const DATE_KINDS: ReadonlySet<FindingKind> = new Set<FindingKind>([
+  "edf-startdate",
+  "edf-recording-startdate",
+]);
 
 export interface Finding {
   kind: FindingKind;
