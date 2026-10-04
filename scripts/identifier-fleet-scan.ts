@@ -165,6 +165,34 @@ async function githubToken(): Promise<string | null> {
   return cachedGithubToken;
 }
 
+/**
+ * Entries for a dataset too large for the data plane's manifest.json, from the raw version
+ * manifest in S3 (`<id>/version/<tag>.json`). Needs the `aws` CLI and credentials that can
+ * read the bucket; a caller without them falls through to the git tree.
+ */
+async function s3Manifest(id: string, version: string): Promise<ManifestEntry[]> {
+  const proc = Bun.spawn(["aws", "s3", "cp", `s3://nemar/${id}/version/${version}.json`, "-"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [text, errText, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  if (code !== 0) throw new Error(`aws s3 cp exit ${code}: ${errText.trim().split("\n").pop()}`);
+  const doc = JSON.parse(text) as {
+    files: Record<string, { key: string; size: number; bytes_url?: string }>;
+  };
+  return Object.entries(doc.files).map(([path, f]) => ({
+    path,
+    size: f.size,
+    url: f.key.startsWith("git:")
+      ? (f.bytes_url ?? "")
+      : new URL(`https://nemar.s3.us-east-2.amazonaws.com/${id}/objects/${f.key}`).toString(),
+  }));
+}
+
 /** Entries for a dataset too large for manifest.json: paths from the git tree, URLs via the data plane. */
 async function treeAsManifest(id: string, version: string): Promise<ManifestEntry[]> {
   const token = await githubToken();
@@ -231,14 +259,19 @@ async function scanDataset(id: string, version: string | null) {
       return { ...result, status: "unchecked", reason: `manifest: ${(error as Error).message}` };
     }
     try {
-      manifest = await treeAsManifest(id, version);
-      manifestSource = "git-tree";
-    } catch (treeError) {
-      return {
-        ...result,
-        status: "unchecked",
-        reason: `manifest too large, tree: ${(treeError as Error).message}`,
-      };
+      manifest = await s3Manifest(id, version);
+      manifestSource = "s3-version-manifest";
+    } catch (s3Error) {
+      try {
+        manifest = await treeAsManifest(id, version);
+        manifestSource = "git-tree";
+      } catch (treeError) {
+        return {
+          ...result,
+          status: "unchecked",
+          reason: `manifest too large; s3: ${(s3Error as Error).message}; tree: ${(treeError as Error).message}`,
+        };
+      }
     }
   }
   result.manifest_source = manifestSource;
@@ -254,6 +287,10 @@ async function scanDataset(id: string, version: string | null) {
   const flaggedFiles: Partial<Record<FindingKind, number>> = {};
   const patientValues = new Set<string>();
   const flaggedPatientValues = new Set<string>();
+  const codeValues = new Set<string>();
+  const nameValues = new Set<string>();
+  const birthValues = new Set<string>();
+  const subjects = new Set<string>();
   let flaggedFileCount = 0;
   await pool(edf, fileConcurrency, async (entry) => {
     try {
@@ -265,6 +302,13 @@ async function scanDataset(id: string, version: string | null) {
         .replace(/\0/g, " ")
         .trim();
       patientValues.add(patient);
+      const parts = patient.split(/\s+/);
+      if (parts.length >= 4) {
+        codeValues.add(parts[0] as string);
+        birthValues.add(parts[2] as string);
+        nameValues.add(parts[3] as string);
+      }
+      subjects.add(/sub-([^/_]+)/.exec(entry.path)?.[1] ?? "?");
       if (found.some((f) => f.severity === "identifier")) {
         flaggedFileCount++;
         flaggedPatientValues.add(patient);
@@ -354,6 +398,10 @@ async function scanDataset(id: string, version: string | null) {
     },
     edf_bdf_files_flagged: flaggedFileCount,
     distinct_patient_field_values: patientValues.size,
+    distinct_subjects_with_edf_bdf: subjects.size,
+    distinct_patient_code_subfield: codeValues.size,
+    distinct_patient_name_subfield: nameValues.size,
+    distinct_patient_birth_subfield: birthValues.size,
     distinct_patient_field_values_in_flagged_files: flaggedPatientValues.size,
     findings_by_kind: countByKind(findings),
     edf_bdf_files_by_kind: flaggedFiles,
