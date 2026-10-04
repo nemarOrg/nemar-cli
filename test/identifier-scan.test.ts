@@ -674,3 +674,124 @@ describe("second review: delimiters, record numbers, slots, coverage, canonical 
     ).toEqual({});
   });
 });
+
+describe("third review: birth dates in the recording field, slots, vocabulary, ages, coverage", () => {
+  const rec = (recording: string) => scanEdfHeader(buildHeader({ recording }));
+  const recKinds = (recording: string) => rec(recording).map((f) => f.kind);
+  const sev = (recording: string, kind: string) =>
+    rec(recording).find((f) => f.kind === kind)?.severity;
+  const pat = (patient: string) => kinds(buildHeader({ patient }));
+
+  test("a birth date in the recording field is a direct finding, never an acquisition date", () => {
+    for (const recording of [
+      "DOB 14.03.1993",
+      "Startdate X X X X 14-MAR-1993",
+      "Startdate 14-MAR-2020 X X X dob=14-MAR-1993",
+      "Startdate 14-MAR-2020 DOB:19930314 X X",
+    ]) {
+      expect(sev(recording, "edf-patient-birthdate"), recording.replace(/\d/g, "9")).toBe(
+        "identifier",
+      );
+    }
+    expect(recKinds("Startdate 14-MAR-2020 DOB:19930314 X X").sort()).toEqual([
+      "edf-patient-birthdate",
+      "edf-recording-startdate",
+    ]);
+    expect(JSON.stringify(rec("DOB 14.03.1993"))).not.toContain("1993");
+  });
+
+  test("an ordinary date in the recording field stays an acquisition date", () => {
+    expect(recKinds("Startdate 14-MAR-2020 X X X")).toEqual(["edf-recording-startdate"]);
+    expect(recKinds("session 14 MAR 2020")).toEqual(["edf-recording-startdate"]);
+    expect(recKinds("Startdate 01-JAN-2020 X X X")).toEqual([]);
+  });
+
+  test("the birth slot accepts placeholders, a bare year and an age, and reports anything else", () => {
+    for (const slot of [
+      "NA",
+      "unknown",
+      "n/a",
+      "-",
+      "x",
+      "X",
+      "1993",
+      "34y",
+      "34",
+      "01-JAN-1993",
+    ]) {
+      expect(pat(`S1 M ${slot} X`), slot).toEqual([]);
+    }
+    expect(pat("S1 M foo123 X")).toEqual(["edf-patient-birthdate"]);
+    expect(pat("S1 M 14-MAR-1993 X")).toEqual(["edf-patient-birthdate"]);
+  });
+
+  test("small numbers separated by spaces are not dates, but a four-digit year makes one", () => {
+    expect(pat("Subject 01 02 03")).toEqual([]);
+    expect(pat("S1 M X X 12 11 10")).toEqual([]);
+    expect(pat("S1 M X X 12 11 2010")).toEqual(["edf-patient-birthdate"]);
+    expect(pat("S1 M X X 14.03.199345")).not.toContain("edf-patient-birthdate");
+  });
+
+  test("underscores, year-month and month-name forms count as dates", () => {
+    for (const date of ["14_03_1993", "1993-03", "MAR-1993", "Mar 1993", "1993_03_14"]) {
+      expect(pat(`P01 F ${date} X`), date.replace(/\d/g, "9")).toContain("edf-patient-birthdate");
+    }
+    expect(pat("P01 F 01_01_1993 X")).toEqual([]);
+  });
+
+  test("ordinary recording vocabulary is not a name", () => {
+    for (const recording of [
+      "Resting state EEG",
+      "Eyes closed",
+      "BrainVision Recorder",
+      "baseline of the study at lab",
+    ]) {
+      expect(recKinds(recording), recording).toEqual([]);
+    }
+    expect(recKinds("Recorded by Marlowe")).toContain("edf-recording-freetext");
+  });
+
+  test("an age over 89 is an identifier wherever it is written; 89 and an age in range are not", () => {
+    for (const patient of [
+      "P01 M 95 X",
+      "S1 M X X age=95",
+      "S1 M X X 95y",
+      "age 100",
+      "P01 M 130 X",
+      "S1 M X X age: 92",
+    ]) {
+      expect(pat(patient), patient).toContain("edf-patient-age");
+    }
+    for (const patient of ["S1 M 89 X", "S1 M X X age=25", "S1 M X X 89y", "S1 M 131 X"]) {
+      expect(pat(patient), patient).not.toContain("edf-patient-age");
+    }
+    const finding = scanEdfHeader(buildHeader({ patient: "S1 M X X age=95" })).find(
+      (f) => f.kind === "edf-patient-age",
+    );
+    expect(finding?.severity).toBe("identifier");
+    expect(DIRECT_KINDS.has("edf-patient-age")).toBe(true);
+  });
+
+  test("coverage counts archives, vendor-native files and unrecognized raw files under sourcedata", () => {
+    const counted = (paths: string[]) => formatCoverage(paths).unscreened;
+    expect(counted(["sourcedata/raw.zip"])).toEqual({ ".zip": 1 });
+    expect(counted(["sourcedata/raw.tar.gz"])).toEqual({ ".tar.gz": 1 });
+    for (const ext of ["ns5", "lay", "rec", "smr", "dat", "npy", "parquet"]) {
+      expect(counted([`data/recording.${ext}`]), ext).toEqual({ [`.${ext}`]: 1 });
+    }
+    expect(counted(["data/raw.hdf5"])).toEqual({ ".hdf5": 1 });
+    expect(counted(["sourcedata/sub-01/rec.xyz"])).toEqual({ ".xyz": 1 });
+    expect(counted(["sourcedata/sub-01/rec"])).toEqual({ "(no extension)": 1 });
+    expect(
+      counted([
+        "sourcedata/README.md",
+        "sourcedata/x.json",
+        "sourcedata/code/run.py",
+        "sourcedata/LICENSE",
+        "sourcedata/CHANGES",
+        "sourcedata/a.jpg",
+      ]),
+    ).toEqual({});
+    expect(counted(["code/run.xyz"])).toEqual({});
+  });
+});

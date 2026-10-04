@@ -15,7 +15,7 @@
  * control characters) becomes `?`, so a report cannot repeat a participant's name.
  *
  * **Screening is a best effort and says what it did not read.** `formatCoverage` counts
- * recording data in formats this module cannot parse, so a caller can tell "nothing found"
+ * recording data in formats this module cannot parse, including archives and any raw file under `sourcedata/` it does not recognize, so a caller can tell "nothing found"
  * from "nothing looked at"; a caller must not call a dataset clean while that count is
  * non-zero. Only the EDF/BDF identification fields are parsed here: the patient
  * identification, the recording identification and the start date and time of the 256-byte
@@ -40,6 +40,7 @@ export type FindingKind =
   | "edf-patient-name"
   | "edf-patient-code"
   | "edf-patient-recordnumber"
+  | "edf-patient-age"
   | "edf-patient-freetext"
   | "edf-patient-birthdate"
   | "edf-recording-startdate"
@@ -65,6 +66,7 @@ export const DIRECT_KINDS: ReadonlySet<FindingKind> = new Set<FindingKind>([
   "edf-patient-freetext",
   "edf-patient-birthdate",
   "edf-patient-nonascii",
+  "edf-patient-age",
   "edf-recording-freetext",
   "json-identifier-key",
   "participants-identifier-column",
@@ -197,6 +199,71 @@ const NEUTRAL_WORDS = new Set([
   "biopac",
   "bitbrain",
   "cognionics",
+  "state",
+  "eyes",
+  "closed",
+  "open",
+  "recorder",
+  "baseline",
+  "calibration",
+  "impedance",
+  "cap",
+  "amplifier",
+  "reference",
+  "ref",
+  "online",
+  "offline",
+  "software",
+  "system",
+  "device",
+  "lab",
+  "laboratory",
+  "clinic",
+  "hospital",
+  "unit",
+  "centre",
+  "center",
+  "department",
+  "dept",
+  "university",
+  "institute",
+  "experiment",
+  "trial",
+  "block",
+  "acquisition",
+  "protocol",
+  "montage",
+  "channel",
+  "channels",
+  "sampling",
+  "filter",
+  "raw",
+  "data",
+  "file",
+  "time",
+  "start",
+  "end",
+  "day",
+  "visit",
+  "pre",
+  "post",
+  "stim",
+  "stimulation",
+  "sham",
+  "active",
+  "of",
+  "the",
+  "at",
+  "in",
+  "by",
+  "with",
+  "for",
+  "to",
+  "a",
+  "an",
+  "on",
+  "or",
+  "from",
 ]);
 
 /** `sub-01`, `S_01`, `subject12`, `P3`: a study code, not a person. */
@@ -302,6 +369,8 @@ interface DateParts {
 
 interface DateMatch {
   text: string;
+  /** Where it starts in the text it was found in. */
+  index: number;
   candidates: DateParts[];
 }
 
@@ -324,27 +393,34 @@ function isYearOnly(candidates: DateParts[]): boolean {
  */
 function findDates(text: string): DateMatch[] {
   const out: DateMatch[] = [];
+  const push = (m: RegExpMatchArray, candidates: DateParts[]) =>
+    out.push({ text: m[0], index: m.index ?? 0, candidates });
   const named =
-    /(?<![\p{L}\p{N}])(\d{1,2})[-./ ]?([A-Za-z]{3,9})[-./ ]?(\d{2,4})(?![\p{L}\p{N}])/gu;
+    /(?<![\p{L}\p{N}])(\d{1,2})[-./_ ]?([A-Za-z]{3,9})[-./_ ]?(\d{2,4})(?![\p{L}\p{N}])/gu;
   for (const m of text.matchAll(named)) {
     const month = MONTHS.indexOf((m[2] as string).slice(0, 3).toUpperCase()) + 1;
     const day = Number(m[1]);
-    if (validDayMonth(day, month)) {
-      out.push({ text: m[0], candidates: [{ day, month, year: Number(m[3]) }] });
-    }
+    if (validDayMonth(day, month)) push(m, [{ day, month, year: Number(m[3]) }]);
   }
-  const iso = /(?<![\p{N}])(\d{4})[-./](\d{1,2})[-./](\d{1,2})(?![\p{N}])/gu;
+  const iso = /(?<![\p{N}])(\d{4})[-./_](\d{1,2})[-./_](\d{1,2})(?![\p{N}])/gu;
   for (const m of text.matchAll(iso)) {
     const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
-    if (validDayMonth(day, month)) out.push({ text: m[0], candidates: [{ day, month, year }] });
+    if (validDayMonth(day, month)) push(m, [{ day, month, year }]);
   }
-  const numeric = /(?<![\p{N}])(\d{1,2})[-./ ](\d{1,2})[-./ ](\d{2,4})(?![\p{N}])/gu;
-  for (const m of text.matchAll(numeric)) {
-    const [a, b, year] = [Number(m[1]), Number(m[2]), Number(m[3])];
-    const candidates: DateParts[] = [];
-    if (validDayMonth(a, b)) candidates.push({ day: a, month: b, year });
-    if (validDayMonth(b, a)) candidates.push({ day: b, month: a, year });
-    if (candidates.length > 0) out.push({ text: m[0], candidates });
+  // Numeric day-month-year. A space may separate the parts only when the year has four digits,
+  // so `Subject 01 02 03` and `12 11 10` are not dates.
+  const numeric = [
+    /(?<![\p{N}])(\d{1,2})[-./_](\d{1,2})[-./_](\d{2,4})(?![\p{N}])/gu,
+    /(?<![\p{N}])(\d{1,2}) (\d{1,2}) (\d{4})(?![\p{N}])/gu,
+  ];
+  for (const re of numeric) {
+    for (const m of text.matchAll(re)) {
+      const [a, b, year] = [Number(m[1]), Number(m[2]), Number(m[3])];
+      const candidates: DateParts[] = [];
+      if (validDayMonth(a, b)) candidates.push({ day: a, month: b, year });
+      if (validDayMonth(b, a)) candidates.push({ day: b, month: a, year });
+      if (candidates.length > 0) push(m, candidates);
+    }
   }
   const compact = /(?<![\p{N}])(\d{8})(?![\p{N}])/gu;
   for (const m of text.matchAll(compact)) {
@@ -366,9 +442,30 @@ function findDates(text: string): DateMatch[] {
     if (dmy.year >= 1900 && dmy.year <= 2100 && validDayMonth(dmy.day, dmy.month)) {
       candidates.push(dmy);
     }
-    if (candidates.length > 0) out.push({ text: m[0], candidates });
+    if (candidates.length > 0) push(m, candidates);
   }
-  return out;
+  // Year and month only (`1993-03`, `MAR-1993`): finer than year, so never year-only (day 0).
+  const yearMonthIso = /(?<![\p{N}])(\d{4})[-./_](\d{1,2})(?![\p{N}])/gu;
+  for (const m of text.matchAll(yearMonthIso)) {
+    const month = Number(m[2]);
+    if (month >= 1 && month <= 12) push(m, [{ day: 0, month, year: Number(m[1]) }]);
+  }
+  const monthYearName = /(?<![\p{L}\p{N}])([A-Za-z]{3,9})[-./_ ](\d{4})(?![\p{L}\p{N}])/gu;
+  for (const m of text.matchAll(monthYearName)) {
+    const month = MONTHS.indexOf((m[1] as string).slice(0, 3).toUpperCase()) + 1;
+    if (month > 0) push(m, [{ day: 0, month, year: Number(m[2]) }]);
+  }
+  // A match wholly inside a longer one is the same date seen twice; keep the longer.
+  return out.filter(
+    (d) =>
+      !out.some(
+        (o) =>
+          o !== d &&
+          o.text.length > d.text.length &&
+          d.index >= o.index &&
+          d.index + d.text.length <= o.index + o.text.length,
+      ),
+  );
 }
 
 /** The text with every date found in it replaced by a space, so month names are not read as names. */
@@ -414,13 +511,14 @@ export function scanEdfHeader(bytes: Uint8Array): Finding[] {
   const tokens = patient === "" ? [] : patient.split(/\s+/);
   const patientDates = findDates(patient);
   let birthFlagged = false;
-  const flagBirth = (text: string) => {
+  const flagBirth = (field: string, text: string) => {
     if (birthFlagged) return;
     birthFlagged = true;
-    add("edf-patient-birthdate", "identifier", "patient.birthdate", text);
+    add("edf-patient-birthdate", "identifier", field, text);
   };
   // Any date anywhere in the field that is not year-only is a birth date.
-  for (const d of patientDates) if (!isYearOnly(d.candidates)) flagBirth(d.text);
+  for (const d of patientDates)
+    if (!isYearOnly(d.candidates)) flagBirth("patient.birthdate", d.text);
 
   const sexWords = ["m", "f", "x", "male", "female"];
   const structuredSlots =
@@ -430,11 +528,15 @@ export function scanEdfHeader(bytes: Uint8Array): Finding[] {
     const [code, , birth, name] = tokens as [string, string, string, string];
     if (isNameLike(clean(code))) add("edf-patient-code", "identifier", "patient.code", code);
     if (isNameLike(clean(name))) add("edf-patient-name", "identifier", "patient.name", name);
-    // The birth slot holds X, a date, or nothing that can be shown to be clean: a short number
-    // is an age, any other content is reported as a birth date.
-    if (birth !== "X" && findDates(birth).length === 0 && !/^\d{1,3}$/.test(birth)) {
-      flagBirth(birth);
-    }
+    // The birth slot holds X or a placeholder, a bare birth year, an age, or a date. Any other
+    // content cannot be shown to be clean, so it is reported as a birth date.
+    const birthOk =
+      birth === "X" ||
+      isPlaceholder(birth) ||
+      /^(19|20)\d{2}$/.test(birth) ||
+      /^\d{1,3}y?$/i.test(birth) ||
+      findDates(birth).length > 0;
+    if (!birthOk) flagBirth("patient.birthdate", birth);
     const extras = tokens.slice(4).map(clean);
     if (extras.some(isNameLike)) {
       add("edf-patient-freetext", "identifier", "patient.additional", extras.join(" "));
@@ -446,6 +548,16 @@ export function scanEdfHeader(bytes: Uint8Array): Finding[] {
       .filter((t) => t !== "");
     if (words.some(isNameLike)) add("edf-patient-freetext", "identifier", "patient", patient);
   }
+  // An age over 89 is an identifier: in the birth slot, as `age=95`, or as `95y`.
+  const ageText = [
+    structuredSlots ? (tokens[2] as string) : "",
+    ...(blankDates(patient, patientDates).match(/\bage[=: _-]*\d{2,3}\b/gi) ?? []),
+    ...(blankDates(patient, patientDates).match(/\b\d{2,3}\s?(?:y|yr|yrs|years?)\b/gi) ?? []),
+  ].find((t) => {
+    const n = /\d{2,3}/.exec(t);
+    return n !== null && /^\d{2,3}y?$|age|y/i.test(t) && Number(n[0]) >= 90 && Number(n[0]) <= 130;
+  });
+  if (ageText) add("edf-patient-age", "identifier", "patient.age", ageText);
   // A long run of digits (or a 3-2-4 digit group) that is not a date is a possible record number.
   const digitRun = /\d{6,}|\b\d{3}-\d{2}-\d{4}\b/.exec(blankDates(patient, patientDates));
   if (digitRun) add("edf-patient-recordnumber", "review", "patient", digitRun[0]);
@@ -457,12 +569,30 @@ export function scanEdfHeader(bytes: Uint8Array): Finding[] {
     const parts = recording.split(/\s+/);
     const keyword = (parts[0] as string).toLowerCase() === "startdate";
     const recDates = findDates(recording);
-    // Any parsed date finer than year is an acquisition date (acceptable, reported for review).
-    const dated = recDates.find((d) => !isYearOnly(d.candidates));
-    if (dated) add("edf-recording-startdate", "review", "recording.startdate", dated.text);
+    const slot = keyword ? parts[1] : undefined;
+    const slotStart =
+      slot === undefined ? -1 : recording.indexOf(slot, (parts[0] as string).length);
+    const inSlot = (d: DateMatch) =>
+      slot !== undefined && d.index >= slotStart && d.index < slotStart + slot.length;
+    // A date written after dob, birth, born or geb is a birth date wherever it sits.
+    const birthWord = (d: DateMatch) =>
+      /(?:dob|d\.o\.b|birth|born|geb)[^\p{L}\p{N}]*$/iu.test(
+        recording.slice(Math.max(0, d.index - 16), d.index),
+      );
+    let acquisitionDate: DateMatch | undefined;
+    for (const d of recDates) {
+      if (isYearOnly(d.candidates)) continue;
+      // In the EDF+ form only the date in the slot after `Startdate` is an acquisition date;
+      // a date anywhere else in the field is not the start date of anything.
+      const acquisition = keyword ? inSlot(d) : !birthWord(d);
+      if (acquisition) acquisitionDate ??= d;
+      else flagBirth("recording.birthdate", d.text);
+    }
+    if (acquisitionDate) {
+      add("edf-recording-startdate", "review", "recording.startdate", acquisitionDate.text);
+    }
     if (keyword) {
       // After the keyword the slot holds X or a date; anything else is not a date, whatever it is.
-      const slot = parts[1];
       if (slot !== undefined && slot !== "X" && findDates(slot).length === 0) {
         add("edf-recording-freetext", "review", "recording.startdate", slot);
       }
@@ -789,7 +919,61 @@ const OTHER_RECORDING_EXTENSIONS = [
   ".bdf.gz",
   ".nii",
   ".nii.gz",
+  ".ns1",
+  ".ns2",
+  ".ns3",
+  ".ns4",
+  ".ns5",
+  ".ns6",
+  ".lay",
+  ".rec",
+  ".smr",
+  ".dat",
+  ".npy",
+  ".parquet",
+  // Archives hold raw files of any format that nobody opened.
+  ".zip",
+  ".tar",
+  ".tar.gz",
+  ".tgz",
+  ".7z",
+  ".rar",
 ];
+
+/**
+ * Under `sourcedata/` anything that is not one of these is raw material of unknown format and is
+ * counted as unscreened. Text, tables, code and documents are read by other rules or carry no signal.
+ */
+const SOURCEDATA_HARMLESS = new Set([
+  "json",
+  "tsv",
+  "csv",
+  "txt",
+  "md",
+  "yml",
+  "yaml",
+  "xml",
+  "iml",
+  "py",
+  "pyc",
+  "m",
+  "r",
+  "rmd",
+  "ipynb",
+  "gitignore",
+  "jpg",
+  "jpeg",
+  "png",
+  "gif",
+  "pdf",
+  "svg",
+  "tex",
+  "bib",
+  "rst",
+  "cfg",
+  "ini",
+  "toml",
+]);
 
 /**
  * Count recording data by whether this module can read it. The question it answers is "what is
@@ -832,7 +1016,23 @@ export function formatCoverage(paths: string[]): FormatCoverage {
     const hit = OTHER_RECORDING_EXTENSIONS.filter((e) => path.endsWith(e)).sort(
       (a, b) => b.length - a.length,
     )[0];
-    if (hit) count(hit);
+    if (hit) {
+      count(hit);
+      continue;
+    }
+    // Raw material under sourcedata/ in a format not listed above is still unread.
+    if (path.startsWith("sourcedata/")) {
+      const base = segments[segments.length - 1] as string;
+      const dot = base.lastIndexOf(".");
+      const ext = dot > 0 ? base.slice(dot + 1) : dot === 0 ? base.slice(1) : "";
+      if (
+        !SOURCEDATA_HARMLESS.has(ext) &&
+        !base.startsWith("license") &&
+        !base.startsWith("changes")
+      ) {
+        count(ext === "" ? "(no extension)" : `.${ext}`);
+      }
+    }
   }
   return { screened, unscreened };
 }
