@@ -74,6 +74,40 @@ const PLACEHOLDER_WORDS = new Set([
   "-",
 ]);
 
+/** Words that describe a field or a group, not a person. Compared case-insensitively. */
+const NEUTRAL_WORDS = new Set([
+  "m",
+  "f",
+  "male",
+  "female",
+  "sex",
+  "age",
+  "id",
+  "name",
+  "hand",
+  "handed",
+  "right",
+  "left",
+  "sub",
+  "subj",
+  "session",
+  "ses",
+  "run",
+  "task",
+  "rest",
+  "resting",
+  "test",
+  "study",
+  "control",
+  "healthy",
+  "recording",
+  "eeg",
+  "birth",
+  "birthdate",
+  "date",
+  "startdate",
+]);
+
 /** `sub-01`, `S_01`, `subject12`, `P3`: a study code, not a person. */
 const SUBJECT_LABEL = /^(sub|subj|subject|s|p|pt|participant)[-_ ]?\d+$/i;
 
@@ -97,6 +131,15 @@ function isCodeLike(token: string): boolean {
   return isPlaceholder(token) || SUBJECT_LABEL.test(token) || /^\d+$/.test(token);
 }
 
+/** A word made only of letters (and `' . _ -`): the shape of a name, with no digit to make it a code. */
+function isNameLike(token: string): boolean {
+  return (
+    /^\p{L}[\p{L}'._-]+$/u.test(token) &&
+    !isCodeLike(token) &&
+    !NEUTRAL_WORDS.has(token.toLowerCase())
+  );
+}
+
 function fieldText(bytes: Uint8Array, start: number, end: number): string {
   let out = "";
   for (let i = start; i < end; i++) {
@@ -106,12 +149,18 @@ function fieldText(bytes: Uint8Array, start: number, end: number): string {
   return out.trim();
 }
 
-/** `DD-MMM-YYYY` with a real month; null otherwise. */
-function parseEdfPlusDate(token: string): { day: number; month: number; year: number } | null {
-  const m = /^(\d{2})-([A-Z]{3})-(\d{4})$/.exec(token);
+/**
+ * A day-month-year token: `14-MAR-1993`, `14-Mar-1993`, `14.03.1993`. Writers vary in month
+ * case and year width, so both are accepted; null when it is not a date at all.
+ */
+function parseLooseDate(token: string): { day: number; month: number; year: number } | null {
+  const m = /^(\d{1,2})[-./ ]([A-Za-z]{3}|\d{1,2})[-./ ](\d{1,4})$/.exec(token);
   if (!m) return null;
-  const month = MONTHS.indexOf(m[2] as string) + 1;
-  if (month === 0) return null;
+  const monthText = m[2] as string;
+  const month = /^\d+$/.test(monthText)
+    ? Number(monthText)
+    : MONTHS.indexOf(monthText.toUpperCase()) + 1;
+  if (month < 1 || month > 12) return null;
   return { day: Number(m[1]), month, year: Number(m[3]) };
 }
 
@@ -151,22 +200,30 @@ export function scanEdfHeader(bytes: Uint8Array): Finding[] {
   // Local patient identification, bytes 8..88.
   const patient = fieldText(bytes, 8, 88);
   const tokens = patient === "" ? [] : patient.split(/\s+/);
+  const sexWords = ["m", "f", "x", "male", "female"];
   const structured =
     tokens.length >= 4 &&
-    ["M", "F", "X"].includes(tokens[1] as string) &&
-    ((tokens[2] as string) === "X" || parseEdfPlusDate(tokens[2] as string) !== null);
+    sexWords.includes((tokens[1] as string).toLowerCase()) &&
+    ((tokens[2] as string) === "X" || parseLooseDate(tokens[2] as string) !== null);
+  const checkBirth = (token: string) => {
+    const date = parseLooseDate(token);
+    if (date && !isYearOnly(date.day, date.month)) {
+      add("edf-patient-birthdate", "identifier", "patient.birthdate", token);
+    }
+  };
   if (structured) {
     const [code, , birth, name] = tokens as [string, string, string, string];
-    if (!isCodeLike(code) && !/\d/.test(code)) {
-      add("edf-patient-code", "identifier", "patient.code", code);
+    if (isNameLike(code)) add("edf-patient-code", "identifier", "patient.code", code);
+    if (isNameLike(name)) add("edf-patient-name", "identifier", "patient.name", name);
+    checkBirth(birth);
+  } else {
+    // A classic free-text patient field: any date is a birth date, any bare word a possible name.
+    let named = false;
+    for (const token of tokens) {
+      if (parseLooseDate(token)) checkBirth(token);
+      else if (isNameLike(token)) named = true;
     }
-    if (!isCodeLike(name)) add("edf-patient-name", "identifier", "patient.name", name);
-    const date = parseEdfPlusDate(birth);
-    if (date && !isYearOnly(date.day, date.month)) {
-      add("edf-patient-birthdate", "identifier", "patient.birthdate", birth);
-    }
-  } else if (patient !== "" && !tokens.every(isCodeLike)) {
-    add("edf-patient-freetext", "identifier", "patient", patient);
+    if (named) add("edf-patient-freetext", "identifier", "patient", patient);
   }
 
   // Local recording identification, bytes 88..168.
@@ -175,15 +232,15 @@ export function scanEdfHeader(bytes: Uint8Array): Finding[] {
     const parts = recording.split(/\s+/);
     if (parts[0] === "Startdate") {
       const startToken = parts[1] ?? "";
-      const date = parseEdfPlusDate(startToken);
+      const date = parseLooseDate(startToken);
       if (startToken !== "X" && (!date || !isYearOnly(date.day, date.month))) {
         add("edf-recording-startdate", "identifier", "recording.startdate", startToken);
       }
       const technician = parts[3] ?? "X";
-      if (!isCodeLike(technician) && !/\d/.test(technician)) {
+      if (isNameLike(technician)) {
         add("edf-recording-technician", "review", "recording.technician", technician);
       }
-    } else if (!parts.every(isCodeLike)) {
+    } else if (parts.some((t) => isNameLike(t) && !parseLooseDate(t))) {
       add("edf-recording-freetext", "review", "recording", recording);
     }
   }
@@ -231,8 +288,15 @@ export function scanAcqTime(value: string): Finding[] {
   return [{ kind: "acq-time-dated", severity: "review", field: "acq_time", shape: shapeOf(value) }];
 }
 
+/**
+ * Keys that name a person or a clinical record. Bare `name`, `first_name` and the like are
+ * NOT here: citation and dataset metadata carry the authors' names by design, and a
+ * pipeline config has a `name` for everything.
+ */
 const IDENTIFIER_KEY =
-  /^(patient[ _-]?(name|id|guid)|name|first[ _-]?name|last[ _-]?name|full[ _-]?name|birth[ _-]?date|date[ _-]?of[ _-]?birth|dob|address|contact|phone|e[ _-]?mail|exam[ _-]?doctor|diagnosis[ _-]?doctor|request[ _-]?doctor|admission[ _-]?id|bed[ _-]?number|national|medical[ _-]?record.*|mrn|ssn)$/i;
+  /^(patient[ _-]?(name|id|guid)|birth[ _-]?date|date[ _-]?of[ _-]?birth|dob|exam[ _-]?doctor|diagnosis[ _-]?doctor|request[ _-]?doctor|admission[ _-]?id|bed[ _-]?number|medical[ _-]?record.*|mrn|ssn|national[ _-]?id)$/i;
+/** Keys that may be an author's public contact or a participant's: a person decides. */
+const REVIEW_KEY = /^(address|contact|phone|telephone|e[ _-]?mail|national)$/i;
 
 /** Walk a parsed JSON document; flag identifier-named keys that hold a non-empty value. */
 export function scanJsonKeys(doc: unknown, path = ""): Finding[] {
@@ -248,10 +312,18 @@ export function scanJsonKeys(doc: unknown, path = ""): Finding[] {
       continue;
     }
     const text = value === null || value === undefined ? "" : String(value).trim();
-    if (text !== "" && IDENTIFIER_KEY.test(key)) {
+    const severity: Severity | null =
+      text === ""
+        ? null
+        : IDENTIFIER_KEY.test(key)
+          ? "identifier"
+          : REVIEW_KEY.test(key)
+            ? "review"
+            : null;
+    if (severity) {
       out.push({
         kind: "json-identifier-key",
-        severity: "identifier",
+        severity,
         field: path ? `${path}.${key}` : key,
         shape: shapeOf(text),
       });

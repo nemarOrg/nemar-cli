@@ -92,6 +92,24 @@ describe("EDF/BDF header: clean headers", () => {
   test("a blank patient field is clean", () => {
     expect(kinds(buildHeader({ patient: "" }))).toEqual([]);
   });
+
+  test("month case and year width vary by writer and do not change the verdict", () => {
+    expect(kinds(buildHeader({ patient: "S_01 M 01-Jan-1993 X_X" }))).toEqual([]);
+    expect(kinds(buildHeader({ patient: "S_01 M 14-Mar-1993 X_X" }))).toEqual([
+      "edf-patient-birthdate",
+    ]);
+  });
+
+  test("descriptive words are not names: sex, handedness, group labels, 'Unknown'", () => {
+    expect(kinds(buildHeader({ patient: "Subject 01 Female" }))).toEqual([]);
+    expect(kinds(buildHeader({ patient: "sub-01 right handed" }))).toEqual([]);
+    expect(kinds(buildHeader({ patient: "S_01 F X Unknown" }))).toEqual([]);
+  });
+
+  test("sex and a date with no name: clean when year-only, a birth date otherwise", () => {
+    expect(kinds(buildHeader({ patient: "M 01-JAN-1990" }))).toEqual([]);
+    expect(kinds(buildHeader({ patient: "M 14-MAR-1990" }))).toEqual(["edf-patient-birthdate"]);
+  });
 });
 
 describe("EDF/BDF header: identifying headers", () => {
@@ -209,6 +227,23 @@ describe("tables, JSON and paths", () => {
     ]);
     expect(JSON.stringify(found).toLowerCase()).not.toContain("carol");
     expect(scanJsonKeys({ Address: "", Contact: "", DeviceName: "EEG-1" })).toEqual([]);
+  });
+
+  test("author, license and tool names in metadata JSON are not participant identifiers", () => {
+    const metadata = {
+      authors: [{ name: "Dr A", first_name: "A", full_name: "A B", affiliations: [{ name: "U" }] }],
+      license: { name: "CC0" },
+      GeneratedBy: [{ Name: "moabb" }],
+    };
+    expect(scanJsonKeys(metadata)).toEqual([]);
+  });
+
+  test("ambiguous contact keys are review findings, patient keys are identifiers", () => {
+    const found = scanJsonKeys({ Contact: "555-0100", PatientName: "dan" });
+    expect(Object.fromEntries(found.map((f) => [f.field, f.severity]))).toEqual({
+      Contact: "review",
+      PatientName: "identifier",
+    });
   });
 
   test("acq_time: a calendar date is a review finding; year-only and n/a are not", () => {
