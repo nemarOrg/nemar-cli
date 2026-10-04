@@ -22,6 +22,7 @@ import {
   type DatasetRecord,
   type FleetContext,
   ReadFailure,
+  RunAborted,
   UsageError,
   buildSummary,
   classifyDataset,
@@ -29,8 +30,10 @@ import {
   createLimiter,
   isFinalRecord,
   parseCliArgs,
+  parseRetryAfter,
   pool,
   readHead,
+  readVersionManifestViaAws,
   runFleet,
   sampleEvenly,
   scanDataset,
@@ -89,6 +92,8 @@ interface FileSpec {
   ignoreRange?: boolean;
   /** Answer the first `n` requests with `status`, then serve normally. */
   failFirst?: { n: number; status: number };
+  /** Headers on the `status` and `failFirst` answers (for example Retry-After). */
+  headers?: Record<string, string>;
   delayMs?: number;
   /** A 200 body of `chunks` 64 KB chunks that starts with `head`; records whether it was cut off. */
   stream?: { head: Uint8Array; chunks: number; state: { sent: number; cancelled: boolean } };
@@ -100,6 +105,9 @@ interface DatasetOptions {
   version?: string;
   visibility?: string;
   manifestStatus?: number;
+  manifestHeaders?: Record<string, string>;
+  /** How the S3 stand-in answers the raw version manifest: a status, or `hang`. */
+  awsStatus?: number | "hang";
   /** Replaces the generated manifest.json body. */
   manifestBody?: unknown;
   manifestRaw?: string;
@@ -117,6 +125,8 @@ interface Dataset extends DatasetOptions {
 class StandIn {
   readonly base: string;
   readonly maxInflight = { data: 0, s3: 0 };
+  /** Hung `aws` requests whose connection the client closed. */
+  hungClosed = 0;
   readonly requests: { path: string; authorization: string | null }[] = [];
   private readonly server: ReturnType<typeof Bun.serve>;
   private readonly routes = new Map<string, FileSpec>();
@@ -254,7 +264,9 @@ class StandIn {
     if (manifest) {
       const ds = this.datasets.get(manifest[1] as string);
       if (!ds) return new Response("", { status: 404 });
-      if (ds.manifestStatus) return new Response("", { status: ds.manifestStatus });
+      if (ds.manifestStatus) {
+        return new Response("", { status: ds.manifestStatus, headers: ds.manifestHeaders });
+      }
       if (ds.manifestRaw !== undefined) return new Response(ds.manifestRaw);
       return Response.json(
         ds.manifestBody !== undefined
@@ -262,6 +274,8 @@ class StandIn {
           : this.manifestFor(manifest[1] as string, ds),
       );
     }
+    const awsObject = /^\/nemar\/([^/]+)\/version\/[^/]+\.json$/.exec(path);
+    if (awsObject) return this.awsObject(req, this.datasets.get(awsObject[1] as string));
     const versionManifest = /^\/s3\/([^/]+)\/version\/[^/]+\.json$/.exec(path);
     if (versionManifest) {
       const ds = this.datasets.get(versionManifest[1] as string);
@@ -279,12 +293,45 @@ class StandIn {
     return this.serve(req, spec, n);
   }
 
+  /** Path-style S3 object GET and HEAD, as the real `aws s3 cp` makes them. */
+  private async awsObject(req: Request, ds: Dataset | undefined): Promise<Response> {
+    if (ds?.awsStatus === "hang") {
+      await new Promise<void>((resolve) => {
+        req.signal.addEventListener("abort", () => {
+          this.hungClosed++;
+          resolve();
+        });
+      });
+      return new Response("", { status: 499 });
+    }
+    const status =
+      typeof ds?.awsStatus === "number" ? ds.awsStatus : ds?.versionManifest ? 200 : 404;
+    if (status !== 200) {
+      if (req.method === "HEAD") return new Response(null, { status });
+      const code = status === 404 ? "NoSuchKey" : "AccessDenied";
+      return new Response(
+        `<?xml version="1.0" encoding="UTF-8"?><Error><Code>${code}</Code><Message>no</Message></Error>`,
+        { status, headers: { "Content-Type": "application/xml" } },
+      );
+    }
+    const body = JSON.stringify(ds?.versionManifest);
+    const headers = {
+      "Content-Type": "application/json",
+      "Content-Length": String(body.length),
+      ETag: '"abc"',
+      "Last-Modified": "Wed, 21 Oct 2015 07:28:00 GMT",
+    };
+    return req.method === "HEAD"
+      ? new Response(null, { headers })
+      : new Response(body, { headers });
+  }
+
   private async serve(req: Request, spec: FileSpec, n: number): Promise<Response> {
     if (spec.delayMs) await Bun.sleep(spec.delayMs);
     if (spec.failFirst && n <= spec.failFirst.n) {
-      return new Response("", { status: spec.failFirst.status });
+      return new Response("", { status: spec.failFirst.status, headers: spec.headers });
     }
-    if (spec.status) return new Response("", { status: spec.status });
+    if (spec.status) return new Response("", { status: spec.status, headers: spec.headers });
     if (spec.stream) {
       const { head, chunks, state } = spec.stream;
       return new Response(
@@ -393,6 +440,8 @@ describe("numeric arguments", () => {
     expect(() => parseCliArgs(["--out", "x", "--datasets", "0"])).toThrow(UsageError);
     expect(() => parseCliArgs(["--out", "x", "--datasets", "abc"])).toThrow(UsageError);
     expect(() => parseCliArgs(["--out", "x", "--worker-concurrency", "0"])).toThrow(UsageError);
+    expect(() => parseCliArgs(["--out", "x", "--abort-streak", "0"])).toThrow(UsageError);
+    expect(() => parseCliArgs(["--out", "x", "--aws-timeout", "abc"])).toThrow(UsageError);
   });
   test("a flag with no value, an unknown flag and a missing --out are errors", () => {
     expect(() => parseCliArgs(["--out", "x", "--concurrency"])).toThrow(UsageError);
@@ -408,6 +457,8 @@ describe("numeric arguments", () => {
       fileConcurrency: 24,
       workerConcurrency: 6,
       datasetConcurrency: 4,
+      abortStreak: 25,
+      awsTimeoutSeconds: 600,
       force: false,
     });
     expect(
@@ -422,6 +473,10 @@ describe("numeric arguments", () => {
         "2",
         "--datasets",
         "1",
+        "--abort-streak",
+        "7",
+        "--aws-timeout",
+        "30",
         "--force",
       ]),
     ).toEqual({
@@ -430,6 +485,8 @@ describe("numeric arguments", () => {
       fileConcurrency: 8,
       workerConcurrency: 2,
       datasetConcurrency: 1,
+      abortStreak: 7,
+      awsTimeoutSeconds: 30,
       force: true,
     });
   });
@@ -1903,4 +1960,386 @@ describe("the CLI", () => {
     expect(written).not.toContain("127.0.0.1");
     expect(result.stderr.toLowerCase()).not.toContain("hollowbrook");
   }, 30_000);
+});
+
+// ---------------------------------------------------------------------------------------
+// Retry-After and the failure streak
+// ---------------------------------------------------------------------------------------
+
+const sleepRecorder = () => {
+  const calls: number[] = [];
+  return { calls, sleep: async (ms: number) => void calls.push(ms) };
+};
+
+describe("parseRetryAfter", () => {
+  test("delta-seconds, an HTTP date, and nothing usable", () => {
+    expect(parseRetryAfter("5")).toBe(5000);
+    expect(parseRetryAfter(" 12 ")).toBe(12_000);
+    expect(parseRetryAfter("0")).toBe(0);
+    const now = 1_700_000_000_000;
+    expect(parseRetryAfter(new Date(now + 7000).toUTCString(), now)).toBe(7000);
+    expect(parseRetryAfter(new Date(now - 7000).toUTCString(), now)).toBe(0);
+    for (const bad of [null, undefined, "", "soon"]) expect(parseRetryAfter(bad)).toBeUndefined();
+  });
+});
+
+describe("withRetry and Retry-After", () => {
+  const throwing = (retryAfterMs: number) => async () => {
+    throw new ReadFailure("http-429", { status: 429, retryable: true, retryAfterMs });
+  };
+  test("waits the longer of the backoff and the Retry-After", async () => {
+    const short = sleepRecorder();
+    await withRetry(throwing(5000), { tries: 2, baseMs: 10, sleep: short.sleep }).catch(() => {});
+    expect(short.calls).toEqual([5000]);
+    const long = sleepRecorder();
+    await withRetry(throwing(5000), { tries: 2, baseMs: 10_000, sleep: long.sleep }).catch(
+      () => {},
+    );
+    expect(long.calls).toEqual([10_000]);
+  });
+  test("a Retry-After at the cap is waited out; above it the request is not retried", async () => {
+    const at = sleepRecorder();
+    await withRetry(throwing(30_000), { tries: 2, sleep: at.sleep }).catch(() => {});
+    expect(at.calls).toEqual([30_000]);
+    const over = sleepRecorder();
+    let attempts = 0;
+    await withRetry(
+      async () => {
+        attempts++;
+        return throwing(30_001)();
+      },
+      { tries: 3, sleep: over.sleep },
+    ).catch(() => {});
+    expect(attempts).toBe(1);
+    expect(over.calls).toEqual([]);
+  });
+});
+
+describe("Retry-After at the HTTP stand-in", () => {
+  const throttled = (retryAfter?: string) => ({
+    bytes: CLEAN,
+    failFirst: { n: 1, status: 429 },
+    ...(retryAfter ? { headers: { "Retry-After": retryAfter } } : {}),
+  });
+
+  test("a 429 with Retry-After 5 waits 5 s, then the read succeeds; without the header it backs off", async () => {
+    const asked = sleepRecorder();
+    const a = await scanFiles({ [EDF]: throttled("5") }, { sleep: asked.sleep, retryBaseMs: 100 });
+    expect(a.record.status).toBe("clean");
+    expect(asked.calls).toEqual([5000]);
+    const plain = sleepRecorder();
+    const b = await scanFiles({ [EDF]: throttled() }, { sleep: plain.sleep, retryBaseMs: 100 });
+    expect(b.record.status).toBe("clean");
+    expect(plain.calls).toEqual([100]);
+  });
+
+  test("30 s is waited out; 31 s stops the run after one request, with no wait", async () => {
+    const at = sleepRecorder();
+    const waited = await scanFiles({ [EDF]: throttled("30") }, { sleep: at.sleep });
+    expect(waited.record.status).toBe("clean");
+    expect(at.calls).toEqual([30_000]);
+
+    const over = sleepRecorder();
+    const w = newWorld();
+    w.add(ID, { [EDF]: throttled("31") });
+    const error = await scanDataset(w.ctx({ sleep: over.sleep }), ID, w.versionOf(ID)).catch(
+      (e) => e,
+    );
+    expect(error).toBeInstanceOf(RunAborted);
+    expect((error as Error).message).toContain("asked to wait 31 s");
+    expect(w.hits(w.pathOf(ID, EDF))).toBe(1);
+    expect(over.calls).toEqual([]);
+  });
+
+  test("maintenance mode (503 with Retry-After 3600) on the manifest stops the run at once", async () => {
+    const w = newWorld();
+    w.add(
+      ID,
+      { [EDF]: CLEAN },
+      { manifestStatus: 503, manifestHeaders: { "Retry-After": "3600" } },
+    );
+    const { calls, sleep } = sleepRecorder();
+    const error = await scanDataset(w.ctx({ sleep }), ID, w.versionOf(ID)).catch((e) => e);
+    expect(error).toBeInstanceOf(RunAborted);
+    expect((error as Error).message).toContain("3600 s");
+    expect(w.hits(w.manifestPath(ID))).toBe(1);
+    expect(calls).toEqual([]);
+  });
+
+  test("a Retry-After on a 404 is not a wait: only 429 and 5xx carry one", async () => {
+    const { record } = await scanFiles({
+      [EDF]: { bytes: CLEAN, status: 404, headers: { "Retry-After": "3600" } },
+    });
+    expect(record.status).toBe("unchecked");
+    expect(record.read_failures).toEqual({ "edf/http-404": 1 });
+  });
+
+  test("once one request class has stopped, the other stops too", async () => {
+    const w = newWorld();
+    w.add(ID, { [EDF]: throttled("3600") });
+    const ctx = w.ctx();
+    await scanDataset(ctx, ID, w.versionOf(ID)).catch(() => {});
+    expect(() => ctx.breakers.direct.check()).toThrow(RunAborted);
+    expect(() => ctx.breakers.worker.check()).toThrow(RunAborted);
+  });
+});
+
+describe("a streak of failures stops the run", () => {
+  const many = (n: number, file: (i: number) => FileDef): Record<string, FileDef> =>
+    Object.fromEntries(Array.from({ length: n }, (_, i) => [edfPath(i + 1), file(i + 1)]));
+  const edfRequests = (w: StandIn) => w.requests.filter((r) => r.path.endsWith("_eeg.edf")).length;
+
+  const cases: [number, "worker" | "s3", string][] = [
+    [503, "worker", "the Worker"],
+    [429, "s3", "direct reads"],
+  ];
+  for (const [status, via, who] of cases) {
+    test(`25 consecutive ${status} from ${who} stop the run after exactly 25 requests`, async () => {
+      const w = newWorld();
+      w.add(
+        ID,
+        many(40, () => ({ bytes: CLEAN, status, via })),
+      );
+      const error = await scanDataset(w.ctx({ fileConcurrency: 1 }), ID, w.versionOf(ID)).catch(
+        (e) => e,
+      );
+      expect(error).toBeInstanceOf(RunAborted);
+      expect((error as Error).message).toContain("25 consecutive");
+      expect((error as Error).message).toContain(who);
+      expect(edfRequests(w)).toBe(25);
+    });
+  }
+
+  test("a success every eighth file keeps the streak under 25: the run completes (twin)", async () => {
+    const { record } = await scanFiles(
+      many(40, (i) => (i % 8 === 0 ? CLEAN : { bytes: CLEAN, status: 503 })),
+      { fileConcurrency: 1 },
+    );
+    expect(record.status).toBe("unchecked");
+    expect(record.read_failures).toEqual({ "edf/http-503": 35 });
+  });
+
+  test("an answer between failures ends the streak: 42 failing attempts around one 404 complete (twin)", async () => {
+    // Seven files of three attempts each, a 404, seven more: 21 + 21, never 25 in a row.
+    const { record } = await scanFiles(
+      many(15, (i) => ({ bytes: CLEAN, status: i === 8 ? 404 : 503 })),
+      { fileConcurrency: 1 },
+    );
+    expect(record.read_failures).toEqual({ "edf/http-503": 14, "edf/http-404": 1 });
+  });
+
+  test("a stopped run refuses every later request, of either class, without sending it", async () => {
+    const w = newWorld();
+    w.add("nm000001", {
+      [EDF]: { bytes: CLEAN, failFirst: { n: 1, status: 503 }, headers: { "Retry-After": "3600" } },
+    });
+    w.add("nm000002", { [EDF]: CLEAN });
+    const ctx = w.ctx();
+    const first = await scanDataset(ctx, "nm000001", "v1.0.0").catch((e) => e);
+    expect(first).toBeInstanceOf(RunAborted);
+    // A healthy dataset is not even asked for its manifest.
+    const second = await scanDataset(ctx, "nm000002", "v1.0.0").catch((e) => e);
+    expect(second).toBeInstanceOf(RunAborted);
+    expect(w.hits(w.manifestPath("nm000002"))).toBe(0);
+    // Twin: a fresh context, same healthy dataset, scans normally.
+    const fresh = await scanDataset(w.ctx(), "nm000002", "v1.0.0");
+    expect(fresh.status).toBe("clean");
+  });
+
+  test("answers that are not 429 or 5xx never build a streak: sixty 404s complete (twin)", async () => {
+    const { record } = await scanFiles(
+      many(60, () => ({ bytes: CLEAN, status: 404 })),
+      {
+        fileConcurrency: 1,
+      },
+    );
+    expect(record.read_failures).toEqual({ "edf/http-404": 60 });
+  });
+
+  test("dropped connections count too", async () => {
+    const dropped = dropServer();
+    const w = newWorld();
+    w.add(
+      ID,
+      {},
+      {
+        manifestBody: Array.from({ length: 30 }, (_, i) => ({
+          path: edfPath(i + 1),
+          size: 256,
+          url: dropped.url,
+        })),
+      },
+    );
+    const error = await scanDataset(w.ctx({ fileConcurrency: 1 }), ID, w.versionOf(ID)).catch(
+      (e) => e,
+    );
+    expect(error).toBeInstanceOf(RunAborted);
+    expect((error as Error).message).toContain("network");
+    expect(dropped.requests()).toBe(25);
+  });
+
+  test("runFleet: finished datasets keep their files, no later dataset starts, no summary is written", async () => {
+    const w = newWorld();
+    for (let i = 1; i <= 6; i++) w.add(`nm00000${i}`, { [EDF]: CLEAN }, { manifestStatus: 503 });
+    const out = tempDir();
+    const options = { outDir: out, force: false, datasetConcurrency: 1 };
+    const error = await runFleet(w.ctx({ abortStreak: 5 }), options).catch((e) => e);
+    expect(error).toBeInstanceOf(RunAborted);
+    // Datasets 1 and 2 used four attempts; the fifth, in dataset 3, tripped the run.
+    expect(readdirSync(out).sort()).toEqual(["nm000001.json", "nm000002.json"]);
+    expect(readJson(join(out, "nm000001.json")).incomplete_reasons).toEqual(["manifest:http-503"]);
+    expect(w.hits(w.manifestPath("nm000003"))).toBe(1);
+    for (const id of ["nm000004", "nm000005", "nm000006"]) {
+      expect(w.hits(w.manifestPath(id))).toBe(0);
+    }
+    // Twin: the same failures under a higher bound are results, and a summary is written.
+    const quiet = tempDir();
+    const summary = await runFleet(w.ctx({ abortStreak: 100 }), { ...options, outDir: quiet });
+    expect(summary.by_status.unchecked?.count).toBe(6);
+    expect(existsSync(join(quiet, "_summary.json"))).toBe(true);
+  });
+
+  test("the CLI exits 3 with a message, keeps finished files and writes no summary", async () => {
+    const w = newWorld();
+    w.add("nm000001", { [EDF]: CLEAN }, { manifestStatus: 503 });
+    w.add("nm000002", { [EDF]: CLEAN }, { manifestStatus: 503 });
+    const out = join(tempDir(), "out");
+    const stopped = await runCli(["--out", out, "--datasets", "1", "--abort-streak", "3"], w);
+    expect(stopped.code).toBe(3);
+    expect(stopped.stderr).toContain("aborting:");
+    expect(stopped.stderr).toContain("3 consecutive");
+    expect(readdirSync(out)).toEqual(["nm000001.json"]);
+    // Twin: a streak bound of 5 is not reached, so the same failures are plain results.
+    const calm = join(tempDir(), "out");
+    const done = await runCli(["--out", calm, "--datasets", "1", "--abort-streak", "5"], w);
+    expect(done.code).toBe(0);
+    expect(done.stderr).toContain("unchecked=2");
+    expect(existsSync(join(calm, "_summary.json"))).toBe(true);
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------------------
+// The aws fallback, with the real CLI
+// ---------------------------------------------------------------------------------------
+
+describe("the aws fallback runs the real aws CLI against an S3 stand-in", () => {
+  // `aws` is not installed everywhere; where it is missing these skip rather than pass.
+  const awsTest = Bun.which("aws") ? test : test.skip;
+  const doc = { files: { [EDF]: { key: "MD5E-s256--aa11.edf", size: 256 } } };
+
+  /** Bun's spawn `env` REPLACES the environment: PATH and a private HOME are passed on purpose. */
+  function awsEnv(w: StandIn): Record<string, string> {
+    return {
+      PATH: process.env.PATH ?? "",
+      HOME: tempDir(),
+      AWS_ACCESS_KEY_ID: "ASIAIOSFODNN7EXAMPLE",
+      AWS_SECRET_ACCESS_KEY: "dummy-secret-key",
+      AWS_SESSION_TOKEN: "dummy-session-token",
+      AWS_DEFAULT_REGION: "us-east-2",
+      AWS_ENDPOINT_URL_S3: w.base,
+      AWS_EC2_METADATA_DISABLED: "true",
+      AWS_PAGER: "",
+    };
+  }
+  const fail = async (w: StandIn, timeoutMs?: number) =>
+    (await readVersionManifestViaAws(ID, "v1.0.0", { env: awsEnv(w), timeoutMs }).catch(
+      (e) => e,
+    )) as ReadFailure;
+
+  awsTest(
+    "an object that exists is read whole",
+    async () => {
+      const w = newWorld();
+      w.add(ID, {}, { versionManifest: doc });
+      const text = await readVersionManifestViaAws(ID, "v1.0.0", { env: awsEnv(w) });
+      expect(JSON.parse(text)).toEqual(doc);
+      expect(w.hits(`/nemar/${ID}/version/v1.0.0.json`)).toBeGreaterThanOrEqual(1);
+    },
+    30_000,
+  );
+
+  awsTest(
+    "404 and 403 are failed reads classed by status, with nothing else in the class",
+    async () => {
+      const w = newWorld();
+      w.add("nm000001", {}, { versionManifest: doc, awsStatus: 404 });
+      w.add("nm000002", {}, { versionManifest: doc, awsStatus: 403 });
+      const env = awsEnv(w);
+      const missing = await readVersionManifestViaAws("nm000001", "v1.0.0", { env }).catch(
+        (e) => e,
+      );
+      const denied = await readVersionManifestViaAws("nm000002", "v1.0.0", { env }).catch((e) => e);
+      expect(missing).toBeInstanceOf(ReadFailure);
+      expect((missing as ReadFailure).cls).toBe("aws/http-404");
+      expect((denied as ReadFailure).cls).toBe("aws/http-403");
+      for (const error of [missing, denied]) {
+        expect((error as Error).message).not.toContain("nm00000");
+        expect((error as Error).message).not.toContain("v1.0.0");
+        expect((error as Error).message).not.toContain("nemar");
+      }
+    },
+    30_000,
+  );
+
+  awsTest(
+    "a server that never answers is killed at the timeout and the connection closes",
+    async () => {
+      const w = newWorld();
+      w.add(ID, {}, { versionManifest: doc, awsStatus: "hang" });
+      const t0 = performance.now();
+      const error = await fail(w, 1500);
+      const elapsed = performance.now() - t0;
+      expect(error).toBeInstanceOf(ReadFailure);
+      expect(error.cls).toBe("aws/timeout");
+      expect(elapsed).toBeGreaterThanOrEqual(1400);
+      expect(elapsed).toBeLessThan(10_000);
+      // The subprocess is gone, not left holding the socket.
+      for (let i = 0; i < 40 && w.hungClosed === 0; i++) await Bun.sleep(50);
+      expect(w.hungClosed).toBe(1);
+    },
+    30_000,
+  );
+
+  awsTest(
+    "through scanDataset: a 413 manifest is read from the version manifest by the real CLI",
+    async () => {
+      const w = newWorld();
+      w.add(ID, {}, { manifestStatus: 413, versionManifest: doc });
+      w.raw(`/s3/${ID}/objects/MD5E-s256--aa11.edf`, { bytes: CLEAN });
+      const ctx = w.ctx({ readVersionManifest: undefined, awsEnv: awsEnv(w) });
+      const record = await scanDataset(ctx, ID, w.versionOf(ID));
+      expect(record.manifest_source).toBe("s3-version-manifest");
+      expect(record.status).toBe("clean");
+      expect(record.files?.header_read).toBe(1);
+    },
+    30_000,
+  );
+
+  awsTest(
+    "through scanDataset: a failing or hung aws is a classed reason, never text or a value",
+    async () => {
+      const w = newWorld();
+      w.add("nm000001", {}, { manifestStatus: 413, versionManifest: doc, awsStatus: 403 });
+      w.add("nm000002", {}, { manifestStatus: 413, versionManifest: doc, awsStatus: "hang" });
+      const ctx = w.ctx({ readVersionManifest: undefined, awsEnv: awsEnv(w), awsTimeoutMs: 1500 });
+      const denied = await scanDataset(ctx, "nm000001", "v1.0.0");
+      expect(denied.incomplete_reasons).toEqual([
+        "manifest:too-large(s3:aws/http-403,tree:http-404)",
+      ]);
+      const hung = await scanDataset(ctx, "nm000002", "v1.0.0");
+      expect(hung.incomplete_reasons).toEqual(["manifest:too-large(s3:aws/timeout,tree:http-404)"]);
+      expect(denied.status).toBe("unchecked");
+    },
+    30_000,
+  );
+
+  test("no aws binary on PATH is aws/unavailable (needs no aws)", async () => {
+    const w = newWorld();
+    const error = await readVersionManifestViaAws(ID, "v1.0.0", { env: { PATH: "" } }).catch(
+      (e) => e,
+    );
+    expect(error).toBeInstanceOf(ReadFailure);
+    expect((error as ReadFailure).cls).toBe("aws/unavailable");
+    expect(w.requests).toHaveLength(0);
+  });
 });

@@ -55,7 +55,7 @@ export class UsageError extends Error {
 
 export const USAGE =
   "usage: identifier-fleet-scan.ts --out <dir> [--only id,id] [--concurrency N] " +
-  "[--worker-concurrency N] [--datasets N] [--force]";
+  "[--worker-concurrency N] [--datasets N] [--abort-streak N] [--aws-timeout SECONDS] [--force]";
 
 /** A positive integer from text, or a UsageError naming the flag. */
 export function parsePositiveInt(name: string, raw: string): number {
@@ -76,10 +76,22 @@ export interface CliOptions {
   /** Concurrent requests to the Worker across ALL datasets. */
   workerConcurrency: number;
   datasetConcurrency: number;
+  /** Consecutive 429, 5xx, timeout or network failures from one request class that stop the run. */
+  abortStreak: number;
+  /** Seconds before a hung `aws s3 cp` is killed. */
+  awsTimeoutSeconds: number;
   force: boolean;
 }
 
-const VALUE_FLAGS = new Set(["out", "only", "concurrency", "worker-concurrency", "datasets"]);
+const VALUE_FLAGS = new Set([
+  "out",
+  "only",
+  "concurrency",
+  "worker-concurrency",
+  "datasets",
+  "abort-streak",
+  "aws-timeout",
+]);
 
 export function parseCliArgs(argv: readonly string[]): CliOptions {
   const values = new Map<string, string>();
@@ -113,6 +125,8 @@ export function parseCliArgs(argv: readonly string[]): CliOptions {
       values.get("worker-concurrency") ?? "6",
     ),
     datasetConcurrency: parsePositiveInt("datasets", values.get("datasets") ?? "4"),
+    abortStreak: parsePositiveInt("abort-streak", values.get("abort-streak") ?? "25"),
+    awsTimeoutSeconds: parsePositiveInt("aws-timeout", values.get("aws-timeout") ?? "600"),
     force,
   };
 }
@@ -177,21 +191,108 @@ export class ReadFailure extends Error {
   readonly cls: string;
   readonly status: number | undefined;
   readonly retryable: boolean;
-  constructor(cls: string, options: { status?: number; retryable?: boolean } = {}) {
+  /** How long the server asked us to wait (Retry-After), when it said. */
+  readonly retryAfterMs: number | undefined;
+  constructor(
+    cls: string,
+    options: { status?: number; retryable?: boolean; retryAfterMs?: number } = {},
+  ) {
     super(cls);
     this.name = "ReadFailure";
     this.cls = cls;
     this.status = options.status;
     this.retryable = options.retryable ?? false;
+    this.retryAfterMs = options.retryAfterMs;
   }
 }
 
-/** 5xx and 429 are worth another try; every other status is an answer. */
-export function httpFailure(status: number): ReadFailure {
+/** `Retry-After` as milliseconds: delta-seconds or an HTTP date; undefined when absent or unusable. */
+export function parseRetryAfter(
+  value: string | null | undefined,
+  now: number = Date.now(),
+): number | undefined {
+  const text = value?.trim();
+  if (!text) return undefined;
+  if (/^\d+$/.test(text)) return Number(text) * 1000;
+  const when = Date.parse(text);
+  return Number.isNaN(when) ? undefined : Math.max(0, when - now);
+}
+
+/** 5xx and 429 are worth another try, after the wait the server asked for; every other status is an answer. */
+export function httpFailure(status: number, retryAfter?: string | null): ReadFailure {
+  const retryable = status >= 500 || status === 429;
   return new ReadFailure(`http-${status}`, {
     status,
-    retryable: status >= 500 || status === 429,
+    retryable,
+    retryAfterMs: retryable ? parseRetryAfter(retryAfter) : undefined,
   });
+}
+
+/** Stops the whole run, not one request: the server is struggling or asked us to stay away. */
+export class RunAborted extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RunAborted";
+  }
+}
+
+export interface Breaker {
+  /** Throws {@link RunAborted} once either request class has tripped. */
+  check(): void;
+  /** The server answered: the streak is over. */
+  ok(): void;
+  /** A failed attempt; may trip the breaker. */
+  observe(error: ReadFailure): void;
+}
+
+/**
+ * One breaker per request class (the Worker and direct reads), sharing a trip: when either
+ * stops, everything stops. It trips on a streak of consecutive retryable failures (429, 5xx,
+ * timeout, network; any answer in between, including a 404, ends the streak) and at once on a
+ * Retry-After longer than the cap, which means maintenance, not congestion.
+ */
+export function createBreakers(options: { streak: number; retryAfterCapMs: number }): {
+  worker: Breaker;
+  direct: Breaker;
+} {
+  assertPositiveInt("abort streak", options.streak);
+  const state: { tripped: RunAborted | null } = { tripped: null };
+  const make = (name: string): Breaker => {
+    let consecutive = 0;
+    const trip = (message: string): never => {
+      state.tripped = new RunAborted(message);
+      throw state.tripped;
+    };
+    return {
+      check() {
+        if (state.tripped) throw state.tripped;
+      },
+      ok() {
+        consecutive = 0;
+      },
+      observe(error) {
+        if (state.tripped) throw state.tripped;
+        if (error.retryAfterMs !== undefined && error.retryAfterMs > options.retryAfterCapMs) {
+          trip(
+            `${name} asked to wait ${Math.round(error.retryAfterMs / 1000)} s (Retry-After), ` +
+              `over the ${Math.round(options.retryAfterCapMs / 1000)} s cap (${error.cls})`,
+          );
+        }
+        if (!error.retryable) {
+          consecutive = 0;
+          return;
+        }
+        consecutive++;
+        if (consecutive >= options.streak) {
+          trip(
+            `${consecutive} consecutive 429, 5xx, timeout or network failures from ${name} ` +
+              `(last ${error.cls})`,
+          );
+        }
+      },
+    };
+  };
+  return { worker: make("the Worker"), direct: make("direct reads") };
 }
 
 /** A fetch or body read that threw: a timeout or a dropped connection, both retryable. */
@@ -210,12 +311,15 @@ export interface RetryOptions {
   tries?: number;
   baseMs?: number;
   sleep?: (ms: number) => Promise<void>;
+  /** A Retry-After above this is not waited out and not retried (default 30 s). */
+  retryAfterCapMs?: number;
 }
 
 /**
  * Retry `fn` on a network error, a timeout, HTTP 5xx or 429, and nowhere else: a 403, 404,
- * 413 or 416 is the server's answer and asking again cannot change it. It does not sleep
- * after the final attempt.
+ * 413 or 416 is the server's answer and asking again cannot change it. A Retry-After the
+ * server sent is waited out when it is longer than the backoff and within the cap; above the
+ * cap the request is not retried. It does not sleep after the final attempt.
  */
 export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions = {}): Promise<T> {
   const tries = options.tries ?? 3;
@@ -228,7 +332,9 @@ export async function withRetry<T>(fn: () => Promise<T>, options: RetryOptions =
     } catch (error) {
       const retryable = error instanceof ReadFailure && error.retryable;
       if (!retryable || attempt >= tries) throw error;
-      await sleep(baseMs * 2 ** (attempt - 1));
+      const asked = error.retryAfterMs ?? 0;
+      if (asked > (options.retryAfterCapMs ?? 30_000)) throw error;
+      await sleep(Math.max(baseMs * 2 ** (attempt - 1), asked));
     }
   }
 }
@@ -276,7 +382,7 @@ export async function readHead(
   }
   if (res.status !== 200 && res.status !== 206) {
     await cancelBody(res);
-    throw httpFailure(res.status);
+    throw httpFailure(res.status, res.headers.get("retry-after"));
   }
   const reader = res.body?.getReader();
   if (!reader) throw new ReadFailure("no-body");
@@ -331,6 +437,12 @@ export interface FleetContext {
   timeoutMs: number;
   manifestTimeoutMs: number;
   retryBaseMs: number;
+  /** Waits between retries; tests record it instead of sleeping. */
+  sleep: (ms: number) => Promise<void>;
+  /** A Retry-After above this stops the run (and is never waited out). */
+  retryAfterCapMs: number;
+  /** Stops the run on a streak of failures, or a Retry-After over the cap. */
+  breakers: { worker: Breaker; direct: Breaker };
   limits: FleetLimits;
   /** Raw text of `<id>/version/<tag>.json` in S3. The default shells out to the `aws` CLI. */
   readVersionManifest: (id: string, version: string) => Promise<string>;
@@ -339,25 +451,67 @@ export interface FleetContext {
 }
 
 export interface ContextOptions
-  extends Partial<Omit<FleetContext, "workerLimit" | "limits" | "fileConcurrency">> {
+  extends Partial<Omit<FleetContext, "workerLimit" | "limits" | "fileConcurrency" | "breakers">> {
   fileConcurrency?: number;
   workerConcurrency?: number;
+  /** Consecutive retryable failures that stop the run (default 25). */
+  abortStreak?: number;
+  /** Kill a hung `aws s3 cp` after this long (default 10 minutes). */
+  awsTimeoutMs?: number;
+  /** The environment for the `aws` subprocess; it REPLACES the ambient one when given. */
+  awsEnv?: Record<string, string>;
   limits?: Partial<FleetLimits>;
 }
 
-/** The ambient-credential fallback: `aws s3 cp` of the raw version manifest. */
-export async function readVersionManifestViaAws(id: string, version: string): Promise<string> {
+/** What the `aws` CLI said went wrong, as a fixed class: an HTTP status or an error code, never text. */
+function awsFailureClass(stderr: string, code: number): string {
+  const found = /An error occurred \(([A-Za-z0-9]{1,40})\)/.exec(stderr)?.[1];
+  if (found) return /^\d+$/.test(found) ? `aws/http-${found}` : `aws/error-${found}`;
+  return `aws/exit-${code}`;
+}
+
+export interface AwsOptions {
+  /** Kill the subprocess after this long (default 10 minutes). */
+  timeoutMs?: number;
+  /** Replaces the ambient environment of the subprocess. */
+  env?: Record<string, string>;
+}
+
+/**
+ * The ambient-credential fallback: `aws s3 cp` of the raw version manifest, killed after
+ * `timeoutMs`. Failures are classed `aws/timeout`, `aws/http-<status>`, `aws/error-<Code>`,
+ * `aws/exit-<n>` or `aws/unavailable` (no `aws` binary); stderr is read only for that class.
+ */
+export async function readVersionManifestViaAws(
+  id: string,
+  version: string,
+  options: AwsOptions = {},
+): Promise<string> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const proc = Bun.spawn(["aws", "s3", "cp", `s3://nemar/${id}/version/${version}.json`, "-"], {
       stdout: "pipe",
-      stderr: "ignore",
+      stderr: "pipe",
+      ...(options.env ? { env: options.env } : {}),
     });
-    const [text, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-    if (code !== 0) throw new ReadFailure(`aws-exit-${code}`);
+    let timedOut = false;
+    timer = setTimeout(() => {
+      timedOut = true;
+      proc.kill("SIGKILL");
+    }, options.timeoutMs ?? 600_000);
+    const [text, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    if (timedOut) throw new ReadFailure("aws/timeout");
+    if (code !== 0) throw new ReadFailure(awsFailureClass(stderr, code));
     return text;
   } catch (error) {
     if (error instanceof ReadFailure) throw error;
-    throw new ReadFailure("aws-unavailable");
+    throw new ReadFailure("aws/unavailable");
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -384,6 +538,8 @@ export function createGithubTokenReader(): () => Promise<string | null> {
 const trimSlash = (url: string) => url.replace(/\/+$/, "");
 
 export function createContext(options: ContextOptions = {}): FleetContext {
+  const retryAfterCapMs = options.retryAfterCapMs ?? 30_000;
+  const awsTimeoutMs = options.awsTimeoutMs ?? 600_000;
   return {
     api: trimSlash(options.api ?? process.env.NEMAR_API_BASE ?? DEFAULT_API),
     data: trimSlash(options.data ?? process.env.NEMAR_DATA_BASE ?? DEFAULT_DATA),
@@ -395,6 +551,10 @@ export function createContext(options: ContextOptions = {}): FleetContext {
     timeoutMs: options.timeoutMs ?? 30_000,
     manifestTimeoutMs: options.manifestTimeoutMs ?? 120_000,
     retryBaseMs: options.retryBaseMs ?? 400,
+    sleep:
+      options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))),
+    retryAfterCapMs,
+    breakers: createBreakers({ streak: options.abortStreak ?? 25, retryAfterCapMs }),
     limits: {
       treeHeaderSample: 300,
       scansTables: 1,
@@ -404,7 +564,10 @@ export function createContext(options: ContextOptions = {}): FleetContext {
       participantsBytes: 1_048_576,
       ...options.limits,
     },
-    readVersionManifest: options.readVersionManifest ?? readVersionManifestViaAws,
+    readVersionManifest:
+      options.readVersionManifest ??
+      ((id, version) =>
+        readVersionManifestViaAws(id, version, { timeoutMs: awsTimeoutMs, env: options.awsEnv })),
     githubToken: options.githubToken ?? createGithubTokenReader(),
   };
 }
@@ -414,6 +577,33 @@ export function createContext(options: ContextOptions = {}): FleetContext {
 // ---------------------------------------------------------------------------------------
 
 const isWorkerUrl = (ctx: FleetContext, url: string) => url.startsWith(`${ctx.data}/`);
+
+/** The Worker serves the data plane and the catalog API; everything else is a direct read. */
+const breakerFor = (ctx: FleetContext, url: string): Breaker =>
+  isWorkerUrl(ctx, url) || url.startsWith(`${ctx.api}/`)
+    ? ctx.breakers.worker
+    : ctx.breakers.direct;
+
+/** One attempt, watched by its request class's breaker (checked before, observed after). */
+async function guarded<T>(ctx: FleetContext, url: string, run: () => Promise<T>): Promise<T> {
+  const breaker = breakerFor(ctx, url);
+  breaker.check();
+  try {
+    const value = await run();
+    breaker.ok();
+    return value;
+  } catch (error) {
+    if (error instanceof ReadFailure) breaker.observe(error);
+    throw error;
+  }
+}
+
+const retryOptions = (ctx: FleetContext, tries?: number): RetryOptions => ({
+  ...(tries === undefined ? {} : { tries }),
+  baseMs: ctx.retryBaseMs,
+  sleep: ctx.sleep,
+  retryAfterCapMs: ctx.retryAfterCapMs,
+});
 
 async function request(
   ctx: FleetContext,
@@ -451,18 +641,19 @@ async function getJson(
   url: string,
   options: { headers?: Record<string, string>; timeoutMs: number; tries: number; limited: boolean },
 ): Promise<unknown> {
-  const attempt = async (): Promise<unknown> => {
-    const res = await request(ctx, url, options.headers ?? {}, options.timeoutMs);
-    if (!res.ok) {
-      await cancelBody(res);
-      throw httpFailure(res.status);
-    }
-    return jsonBody(res);
-  };
-  return withRetry(() => (options.limited ? ctx.workerLimit(attempt) : attempt()), {
-    tries: options.tries,
-    baseMs: ctx.retryBaseMs,
-  });
+  const attempt = (): Promise<unknown> =>
+    guarded(ctx, url, async () => {
+      const res = await request(ctx, url, options.headers ?? {}, options.timeoutMs);
+      if (!res.ok) {
+        await cancelBody(res);
+        throw httpFailure(res.status, res.headers.get("retry-after"));
+      }
+      return jsonBody(res);
+    });
+  return withRetry(
+    () => (options.limited ? ctx.workerLimit(attempt) : attempt()),
+    retryOptions(ctx, options.tries),
+  );
 }
 
 // ---------------------------------------------------------------------------------------
@@ -612,6 +803,7 @@ export async function loadManifest(
     });
     return { ok: true, entries: parseManifest(body), source: "manifest.json" };
   } catch (error) {
+    if (error instanceof RunAborted) throw error;
     if (!(error instanceof ReadFailure) || error.status !== 413) {
       return { ok: false, reason: `manifest:${failureClass(error)}` };
     }
@@ -631,6 +823,7 @@ export async function loadManifest(
       source: "s3-version-manifest",
     };
   } catch (error) {
+    if (error instanceof RunAborted) throw error;
     s3Class = failureClass(error);
   }
   try {
@@ -654,6 +847,7 @@ export async function loadManifest(
       source: "git-tree",
     };
   } catch (error) {
+    if (error instanceof RunAborted) throw error;
     return {
       ok: false,
       reason: `manifest:too-large(s3:${s3Class},tree:${failureClass(error)})`,
@@ -828,10 +1022,13 @@ function readEntry(
   minBytes = 0,
 ): Promise<Uint8Array> {
   const attempt = () =>
-    readHead(entry.url, n, { minBytes, userAgent: ctx.userAgent, timeoutMs: ctx.timeoutMs });
-  return withRetry(() => (isWorkerUrl(ctx, entry.url) ? ctx.workerLimit(attempt) : attempt()), {
-    baseMs: ctx.retryBaseMs,
-  });
+    guarded(ctx, entry.url, () =>
+      readHead(entry.url, n, { minBytes, userAgent: ctx.userAgent, timeoutMs: ctx.timeoutMs }),
+    );
+  return withRetry(
+    () => (isWorkerUrl(ctx, entry.url) ? ctx.workerLimit(attempt) : attempt()),
+    retryOptions(ctx),
+  );
 }
 
 async function readText(
@@ -868,6 +1065,8 @@ export async function scanDatasetFromManifest(
   const unscreenedCount = Object.values(coverage.unscreened).reduce((a, b) => a + b, 0);
   const failures: Record<string, number> = {};
   const fail = (what: string, error: unknown) => {
+    // A stopped run is not a failed read: let it end the scan, record nothing.
+    if (error instanceof RunAborted) throw error;
     const key = `${what}/${failureClass(error)}`;
     failures[key] = (failures[key] ?? 0) + 1;
   };
@@ -1200,7 +1399,13 @@ export interface RunOptions {
   log?: (line: string) => void;
 }
 
-/** Scan the public catalog (or `only`), write one file per dataset and `_summary.json`. */
+/**
+ * Scan the public catalog (or `only`), write one file per dataset and `_summary.json`.
+ *
+ * A stopped run ({@link RunAborted}: a streak of failures, or a Retry-After over the cap)
+ * rejects before any summary is written: the datasets finished so far keep their files and a
+ * rerun resumes from them, but a partial summary would read as a complete one.
+ */
 export async function runFleet(ctx: FleetContext, options: RunOptions): Promise<Summary> {
   assertPositiveInt("dataset concurrency", options.datasetConcurrency);
   const log = options.log ?? (() => undefined);
@@ -1229,6 +1434,8 @@ export async function runFleet(ctx: FleetContext, options: RunOptions): Promise<
     try {
       record = await scanDataset(ctx, id, version);
     } catch (error) {
+      // A stopped run writes nothing further: the next request of any class rethrows it.
+      if (error instanceof RunAborted) throw error;
       record = unchecked(
         { id, version, scanned_at: new Date().toISOString() },
         `internal:${failureClass(error)}`,

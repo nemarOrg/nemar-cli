@@ -23,28 +23,46 @@
  * credentials) and the git tree through the GitHub API (`GITHUB_TOKEN`, else `gh auth
  * token`). A caller without them gets `unchecked` for such a dataset, never a guess.
  *
+ * **A struggling server is never hammered.** A `Retry-After` the server sends is honored up
+ * to 30 seconds; a longer one (maintenance mode sends 3600) stops the run, as does a streak
+ * of `--abort-streak` (default 25) consecutive 429, 5xx, timeout or network failures. The
+ * run then exits 3, writes no summary, and keeps the dataset files it finished; rerun to
+ * resume. The `aws` fallback is killed after `--aws-timeout` seconds (default 600).
+ *
  * **Tri-state, never fail-open.** A dataset is `clean` only when every EDF/BDF header was
- * read, nothing was flagged, no sampling cap was hit and no recording is in a format the
- * scanner cannot parse; see `classifyDataset`. `incomplete` and its reasons are written to
- * each dataset file and to `_summary.json`.
+ * read, nothing was flagged, no read failed, no sampling cap on JSON or text files was hit
+ * and no recording is in a format the scanner cannot parse; see `classifyDataset`.
+ * `incomplete` and its reasons are written to each dataset file and to `_summary.json`.
  *
  * **Output carries no values.** Per-dataset JSON holds kinds, counts, field names and
  * distinct-value COUNTS. A raw header value never leaves memory.
  *
  *   bun run scripts/identifier-fleet-scan.ts --out <dir> [--only nm000348,nm000246]
- *        [--concurrency 24] [--worker-concurrency 6] [--datasets 4] [--force]
+ *        [--concurrency 24] [--worker-concurrency 6] [--datasets 4]
+ *        [--abort-streak 25] [--aws-timeout 600] [--force]
  *
- * An existing per-dataset file is kept unless it is `unchecked` or incomplete, so an
- * interrupted or failed run resumes where it stopped; `--force` rescans everything.
+ * An existing per-dataset file is kept only when it is final: not `unchecked`, not
+ * incomplete, and scanned at the version the catalog names now. So an interrupted or failed
+ * run resumes where it stopped and a newly published version is rescanned; `--force`
+ * rescans everything.
  */
 
-import { USAGE, UsageError, createContext, parseCliArgs, runFleet } from "./identifier-fleet-lib";
+import {
+  RunAborted,
+  USAGE,
+  UsageError,
+  createContext,
+  parseCliArgs,
+  runFleet,
+} from "./identifier-fleet-lib";
 
 try {
   const options = parseCliArgs(process.argv.slice(2));
   const ctx = createContext({
     fileConcurrency: options.fileConcurrency,
     workerConcurrency: options.workerConcurrency,
+    abortStreak: options.abortStreak,
+    awsTimeoutMs: options.awsTimeoutSeconds * 1000,
   });
   const summary = await runFleet(ctx, {
     outDir: options.out,
@@ -64,6 +82,11 @@ try {
     console.error(error.message);
     console.error(USAGE);
     process.exit(2);
+  }
+  if (error instanceof RunAborted) {
+    console.error(`aborting: ${error.message}`);
+    console.error("Datasets finished so far are kept; rerun the same command to resume.");
+    process.exit(3);
   }
   throw error;
 }
