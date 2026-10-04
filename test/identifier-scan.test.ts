@@ -563,7 +563,7 @@ describe("second review: delimiters, record numbers, slots, coverage, canonical 
       expect(birth(`S_01 F X ${name}`), name).toContain("edf-patient-name");
     }
     for (const word of ["right/left", "hand=1", "age=25", "kg=70/cm=180"]) {
-      expect(birth(`S_01 F X ${word}`), word).toEqual([]);
+      expect(birth(`S_01 F X X ${word}`), word).toEqual([]);
     }
   });
 
@@ -793,5 +793,101 @@ describe("third review: birth dates in the recording field, slots, vocabulary, a
       ]),
     ).toEqual({});
     expect(counted(["code/run.xyz"])).toEqual({});
+  });
+});
+
+describe("fourth review: birth words, strict slots, ages, month names, harmless files", () => {
+  const rec = (recording: string) => scanEdfHeader(buildHeader({ recording }));
+  const recKinds = (recording: string) => rec(recording).map((f) => f.kind);
+  const pat = (patient: string) => kinds(buildHeader({ patient }));
+
+  test("a birth word anywhere in a free-text recording id makes its dates birth dates", () => {
+    for (const recording of [
+      "birthdate 14.03.1993",
+      "birth_date=14.03.1993",
+      "*14.03.1993 dob",
+      "DOB (dd.mm.yyyy): 14.03.1993",
+      "Date of Birth (dd.mm.yyyy): 14.03.1993",
+      "born on 14.03.1993",
+      "Geboren 14.03.1993",
+    ]) {
+      expect(recKinds(recording), recording.replace(/\d/g, "9")).toContain("edf-patient-birthdate");
+      expect(recKinds(recording)).not.toContain("edf-recording-startdate");
+    }
+    expect(recKinds("birthdate 01.01.1993")).toEqual([]);
+    expect(recKinds("session 14 MAR 2020")).toEqual(["edf-recording-startdate"]);
+  });
+
+  test("a patient code or name slot exempts placeholders only, not ordinary words that are also surnames", () => {
+    for (const word of ["Day", "To", "In", "Sham", "Block", "Raw", "Open"]) {
+      expect(pat(`P01 F X ${word}`), word).toEqual(["edf-patient-name"]);
+      expect(pat(`${word} F X X`), word).toEqual(["edf-patient-code"]);
+    }
+    for (const word of ["Unknown", "Unnamed", "HC", "NN", "X", "anonymized"]) {
+      expect(pat(`P01 F X ${word}`), word).toEqual([]);
+    }
+    // The same words are fine as additional subfields, which are free text.
+    expect(pat("P01 F X X Day")).toEqual([]);
+  });
+
+  test("ages over 89 in every spelling, and none for the spurious ones", () => {
+    for (const patient of [
+      "M 95",
+      "F 93",
+      "S1 M X X 95yo",
+      "S1 M X X 95-year-old",
+      "P01 M 1930 X",
+      "P01 M 01-JAN-1930 X",
+    ]) {
+      expect(pat(patient), patient).toContain("edf-patient-age");
+    }
+    for (const patient of [
+      "P01 M 5-MAY-95 X",
+      "P01 M 1-MAY-95 X",
+      "P01 M 1993 X",
+      "M 45",
+      "S1 M X X 89yo",
+    ]) {
+      expect(pat(patient), patient).not.toContain("edf-patient-age");
+    }
+  });
+
+  test("month-first year-month forms are dates; words that merely start like a month are not", () => {
+    for (const patient of [
+      "P01 F 03/1993 X",
+      "P01 F 03.1993 X",
+      "P01 F dob 03/1993 X",
+      "P01 F sept 1993 X",
+    ]) {
+      expect(pat(patient), patient).toContain("edf-patient-birthdate");
+    }
+    expect(recKinds("Startdate X X X X 03/1993")).toContain("edf-patient-birthdate");
+    for (const word of [
+      "Marker 2020",
+      "Mayo 1993",
+      "Julia 1993",
+      "Decay 2019",
+      "S01_2020_03",
+      "S01-2012",
+    ]) {
+      expect(pat(`P01 F X X ${word}`), word).not.toContain("edf-patient-birthdate");
+    }
+  });
+
+  test("documentation and housekeeping files under sourcedata are not unscreened data", () => {
+    const counted = (paths: string[]) => formatCoverage(paths).unscreened;
+    expect(
+      counted([
+        "sourcedata/README",
+        "sourcedata/.DS_Store",
+        "sourcedata/.gitkeep",
+        "sourcedata/Thumbs.db",
+        "sourcedata/x.docx",
+        "sourcedata/y.xlsx",
+        "sourcedata/z.html",
+        "sourcedata/a.log",
+      ]),
+    ).toEqual({});
+    expect(counted(["data/archive.zip"])).toEqual({ ".zip": 1 });
   });
 });

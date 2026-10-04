@@ -266,10 +266,54 @@ const NEUTRAL_WORDS = new Set([
   "from",
 ]);
 
+/**
+ * What a patient code or name SLOT may hold without being a name: placeholders and bare group
+ * labels. Slots take no other neutral vocabulary, because a short surname such as `Day` or `Open`
+ * is the same word.
+ */
+const SLOT_PLACEHOLDERS = new Set([
+  ...PLACEHOLDER_WORDS,
+  "unnamed",
+  "nn",
+  "hc",
+  "pd",
+  "mci",
+  "anonymized",
+  "anonymised",
+  "deidentified",
+]);
+
 /** `sub-01`, `S_01`, `subject12`, `P3`: a study code, not a person. */
 const SUBJECT_LABEL = /^(sub|subj|subject|s|p|pt|participant)[-_ ]?\d+$/i;
 
-const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+/** Whole month names and the standard abbreviations, so `Marker` and `Julia` are not months. */
+const MONTH_WORDS: Record<string, number> = {
+  jan: 1,
+  january: 1,
+  feb: 2,
+  february: 2,
+  mar: 3,
+  march: 3,
+  apr: 4,
+  april: 4,
+  may: 5,
+  jun: 6,
+  june: 6,
+  jul: 7,
+  july: 7,
+  aug: 8,
+  august: 8,
+  sep: 9,
+  sept: 9,
+  september: 9,
+  oct: 10,
+  october: 10,
+  nov: 11,
+  november: 11,
+  dec: 12,
+  december: 12,
+};
+const monthNumber = (word: string): number => MONTH_WORDS[word.toLowerCase()] ?? 0;
 
 /**
  * The shape of some text: uppercase letters become `A`, other letters `a`, digits `9`,
@@ -314,20 +358,21 @@ const PART_SPLIT = /[^\p{L}\p{N}'._-]+/u;
  * name-like only when it holds an alphabetic run of four or more letters that is not a neutral
  * word, so a study code like `S_01` is not, and a short name fused to digits is a known miss.
  */
-function isNameLikePart(part: string): boolean {
+function isNameLikePart(part: string, strict: boolean): boolean {
   if (part === "" || isCodeLike(part)) return false;
+  const exempt = strict ? (w: string) => SLOT_PLACEHOLDERS.has(w.toLowerCase()) : isNeutral;
   if (/^[\p{L}'._-]+$/u.test(part)) {
     const pieces = part.split(/['._-]+/).filter((p) => p !== "");
-    return pieces.length > 0 && !pieces.every(isNeutral);
+    return pieces.length > 0 && !pieces.every(exempt);
   }
   const runs = part.match(/\p{L}+/gu) ?? [];
-  return runs.some((run) => run.length >= 4 && !isNeutral(run));
+  return runs.some((run) => run.length >= 4 && !exempt(run));
 }
 
 /** A whitespace token that could be a name, after splitting on delimiters such as `^ , / = :`. */
-function isNameLike(token: string): boolean {
+function isNameLike(token: string, strict = false): boolean {
   if (token === "" || isCodeLike(token)) return false;
-  return token.split(PART_SPLIT).some(isNameLikePart);
+  return token.split(PART_SPLIT).some((part) => isNameLikePart(part, strict));
 }
 
 function hasNonAscii(bytes: Uint8Array, start: number, end: number): boolean {
@@ -398,7 +443,7 @@ function findDates(text: string): DateMatch[] {
   const named =
     /(?<![\p{L}\p{N}])(\d{1,2})[-./_ ]?([A-Za-z]{3,9})[-./_ ]?(\d{2,4})(?![\p{L}\p{N}])/gu;
   for (const m of text.matchAll(named)) {
-    const month = MONTHS.indexOf((m[2] as string).slice(0, 3).toUpperCase()) + 1;
+    const month = monthNumber(m[2] as string);
     const day = Number(m[1]);
     if (validDayMonth(day, month)) push(m, [{ day, month, year: Number(m[3]) }]);
   }
@@ -445,14 +490,22 @@ function findDates(text: string): DateMatch[] {
     if (candidates.length > 0) push(m, candidates);
   }
   // Year and month only (`1993-03`, `MAR-1993`): finer than year, so never year-only (day 0).
-  const yearMonthIso = /(?<![\p{N}])(\d{4})[-./_](\d{1,2})(?![\p{N}])/gu;
+  const yearMonthIso = /(?<![\p{L}\p{N}_])(\d{4})[-./_](\d{1,2})(?![\p{N}])/gu;
   for (const m of text.matchAll(yearMonthIso)) {
     const month = Number(m[2]);
     if (month >= 1 && month <= 12) push(m, [{ day: 0, month, year: Number(m[1]) }]);
   }
+  // Month first, then year: `03/1993`, `03.1993`. A letter before the digits makes it a code (`S01-2012`).
+  const monthYearNumeric = /(?<![\p{L}\p{N}])(\d{1,2})[-./_](\d{4})(?![\p{N}])/gu;
+  for (const m of text.matchAll(monthYearNumeric)) {
+    const [month, year] = [Number(m[1]), Number(m[2])];
+    if (month >= 1 && month <= 12 && year >= 1900 && year <= 2100) {
+      push(m, [{ day: 0, month, year }]);
+    }
+  }
   const monthYearName = /(?<![\p{L}\p{N}])([A-Za-z]{3,9})[-./_ ](\d{4})(?![\p{L}\p{N}])/gu;
   for (const m of text.matchAll(monthYearName)) {
-    const month = MONTHS.indexOf((m[1] as string).slice(0, 3).toUpperCase()) + 1;
+    const month = monthNumber(m[1] as string);
     if (month > 0) push(m, [{ day: 0, month, year: Number(m[2]) }]);
   }
   // A match wholly inside a longer one is the same date seen twice; keep the longer.
@@ -526,8 +579,8 @@ export function scanEdfHeader(bytes: Uint8Array): Finding[] {
   const clean = (t: string) => blankDates(t, findDates(t)).trim();
   if (structuredSlots) {
     const [code, , birth, name] = tokens as [string, string, string, string];
-    if (isNameLike(clean(code))) add("edf-patient-code", "identifier", "patient.code", code);
-    if (isNameLike(clean(name))) add("edf-patient-name", "identifier", "patient.name", name);
+    if (isNameLike(clean(code), true)) add("edf-patient-code", "identifier", "patient.code", code);
+    if (isNameLike(clean(name), true)) add("edf-patient-name", "identifier", "patient.name", name);
     // The birth slot holds X or a placeholder, a bare birth year, an age, or a date. Any other
     // content cannot be shown to be clean, so it is reported as a birth date.
     const birthOk =
@@ -538,7 +591,7 @@ export function scanEdfHeader(bytes: Uint8Array): Finding[] {
       findDates(birth).length > 0;
     if (!birthOk) flagBirth("patient.birthdate", birth);
     const extras = tokens.slice(4).map(clean);
-    if (extras.some(isNameLike)) {
+    if (extras.some((t) => isNameLike(t))) {
       add("edf-patient-freetext", "identifier", "patient.additional", extras.join(" "));
     }
   } else {
@@ -546,17 +599,36 @@ export function scanEdfHeader(bytes: Uint8Array): Finding[] {
     const words = blankDates(patient, patientDates)
       .split(/\s+/)
       .filter((t) => t !== "");
-    if (words.some(isNameLike)) add("edf-patient-freetext", "identifier", "patient", patient);
+    if (words.some((t) => isNameLike(t)))
+      add("edf-patient-freetext", "identifier", "patient", patient);
   }
-  // An age over 89 is an identifier: in the birth slot, as `age=95`, or as `95y`.
-  const ageText = [
-    structuredSlots ? (tokens[2] as string) : "",
-    ...(blankDates(patient, patientDates).match(/\bage[=: _-]*\d{2,3}\b/gi) ?? []),
-    ...(blankDates(patient, patientDates).match(/\b\d{2,3}\s?(?:y|yr|yrs|years?)\b/gi) ?? []),
-  ].find((t) => {
-    const n = /\d{2,3}/.exec(t);
-    return n !== null && /^\d{2,3}y?$|age|y/i.test(t) && Number(n[0]) >= 90 && Number(n[0]) <= 130;
-  });
+  // An age over 89 is an identifier: in the birth slot, as `age=95`, `95y`, `95yo`, `95-year-old`,
+  // after a sex word (`M 95`), or implied by a birth year before the oldest age that is allowed.
+  const blanked = blankDates(patient, patientDates);
+  const ageFound = (): string | undefined => {
+    const over = (text: string, n: number) => (n >= 90 && n <= 130 ? text : undefined);
+    const slot = structuredSlots ? (tokens[2] as string) : "";
+    const slotAge = /^(\d{2,3})y?$/i.exec(slot);
+    if (slotAge) return over(slot, Number(slotAge[1]));
+    const patterns = [
+      /\bage[=: _-]*(\d{2,3})\b/gi,
+      /\b(\d{2,3})\s?(?:y|yr|yrs|yo|y\/o|years?)\b/gi,
+      /\b(\d{2,3})[- ]?(?:year|yr)s?[- ]?old\b/gi,
+      /\b(?:m|f|male|female)\s+(\d{2,3})\b/gi,
+    ];
+    for (const re of patterns) {
+      for (const m of blanked.matchAll(re)) {
+        const hit = over(m[0], Number(m[1]));
+        if (hit) return hit;
+      }
+    }
+    const oldest = new Date().getFullYear() - 90;
+    const bareYear = /^(19|20)\d{2}$/.test(slot) ? Number(slot) : undefined;
+    const years = [...patientDates.flatMap((d) => d.candidates.map((c) => c.year)), bareYear];
+    for (const y of years) if (y !== undefined && y >= 1900 && y < oldest) return String(y);
+    return undefined;
+  };
+  const ageText = ageFound();
   if (ageText) add("edf-patient-age", "identifier", "patient.age", ageText);
   // A long run of digits (or a 3-2-4 digit group) that is not a date is a possible record number.
   const digitRun = /\d{6,}|\b\d{3}-\d{2}-\d{4}\b/.exec(blankDates(patient, patientDates));
@@ -574,17 +646,15 @@ export function scanEdfHeader(bytes: Uint8Array): Finding[] {
       slot === undefined ? -1 : recording.indexOf(slot, (parts[0] as string).length);
     const inSlot = (d: DateMatch) =>
       slot !== undefined && d.index >= slotStart && d.index < slotStart + slot.length;
-    // A date written after dob, birth, born or geb is a birth date wherever it sits.
-    const birthWord = (d: DateMatch) =>
-      /(?:dob|d\.o\.b|birth|born|geb)[^\p{L}\p{N}]*$/iu.test(
-        recording.slice(Math.max(0, d.index - 16), d.index),
-      );
+    // A birth word anywhere in a free-text recording id makes every date in it a birth date: the
+    // writer said what the field holds, and which date it means cannot be told from distance.
+    const hasBirthWord = /\b(?:dob|d\.o\.b)\b|birth|born|\bgeb|nacid|nacimiento/iu.test(recording);
     let acquisitionDate: DateMatch | undefined;
     for (const d of recDates) {
       if (isYearOnly(d.candidates)) continue;
       // In the EDF+ form only the date in the slot after `Startdate` is an acquisition date;
       // a date anywhere else in the field is not the start date of anything.
-      const acquisition = keyword ? inSlot(d) : !birthWord(d);
+      const acquisition = keyword ? inSlot(d) : !hasBirthWord;
       if (acquisition) acquisitionDate ??= d;
       else flagBirth("recording.birthdate", d.text);
     }
@@ -613,7 +683,7 @@ export function scanEdfHeader(bytes: Uint8Array): Finding[] {
       const words = blankDates(recording, recDates)
         .split(/\s+/)
         .filter((t) => t !== "");
-      if (words.some(isNameLike)) {
+      if (words.some((t) => isNameLike(t))) {
         add("edf-recording-freetext", "identifier", "recording", recording);
       }
     }
@@ -973,7 +1043,32 @@ const SOURCEDATA_HARMLESS = new Set([
   "cfg",
   "ini",
   "toml",
+  "docx",
+  "doc",
+  "xlsx",
+  "xls",
+  "pptx",
+  "ppt",
+  "odt",
+  "ods",
+  "rtf",
+  "html",
+  "htm",
+  "log",
+  "sh",
+  "bat",
+  "ps1",
+  "js",
+  "ts",
+  "css",
+  "lock",
+  "gitkeep",
+  "ds_store",
 ]);
+
+/** Base names that are documentation or housekeeping, with or without an extension. */
+const HARMLESS_BASENAME =
+  /^(readme|license|licence|changes|citation|authors|notice|thumbs\.db|\.ds_store|\.gitkeep)/;
 
 /**
  * Count recording data by whether this module can read it. The question it answers is "what is
@@ -1025,11 +1120,7 @@ export function formatCoverage(paths: string[]): FormatCoverage {
       const base = segments[segments.length - 1] as string;
       const dot = base.lastIndexOf(".");
       const ext = dot > 0 ? base.slice(dot + 1) : dot === 0 ? base.slice(1) : "";
-      if (
-        !SOURCEDATA_HARMLESS.has(ext) &&
-        !base.startsWith("license") &&
-        !base.startsWith("changes")
-      ) {
+      if (!SOURCEDATA_HARMLESS.has(ext) && !HARMLESS_BASENAME.test(base)) {
         count(ext === "" ? "(no extension)" : `.${ext}`);
       }
     }
