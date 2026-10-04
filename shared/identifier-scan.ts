@@ -176,6 +176,23 @@ function parseHeaderStartDate(text: string): { day: number; month: number } | nu
   return { day: Number(m[1]), month: Number(m[2]) };
 }
 
+/**
+ * The raw identification text of an EDF/BDF header, for CALLERS THAT ONLY COUNT (for example
+ * distinct values per dataset). It returns values: never log it, serialize it, or put it in a
+ * finding. Offsets are the single source of truth for this module's own scan.
+ */
+export function edfIdentificationText(bytes: Uint8Array): {
+  patient: string;
+  recording: string;
+  startdate: string;
+} {
+  return {
+    patient: fieldText(bytes, 8, 88),
+    recording: fieldText(bytes, 88, 168),
+    startdate: fieldText(bytes, 168, 176),
+  };
+}
+
 export function detectEdfFamily(bytes: Uint8Array): "edf" | "bdf" | null {
   if (bytes.length < EDF_HEADER_BYTES) return null;
   if (bytes[0] === 0xff && fieldText(bytes, 1, 8) === "BIOSEMI") return "bdf";
