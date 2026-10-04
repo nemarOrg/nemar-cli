@@ -18,6 +18,12 @@ dropped, so each ref keeps its commit count, and every tag keeps its name and me
      at any depth. The edit is made on the TEXT of the value, so key order, indentation,
      spacing and every other byte are untouched. Content that is not UTF-8 or not JSON is
      left alone and counted.
+  c2. For a path in `jsonOps`, the listed structural edits are applied in order to the JSON
+     object: `drop-array-entries` removes the entries of a top-level array whose field equals
+     one of the values, `recount` sets a count key and a sum key from that array, `set` sets a
+     top-level key to a constant string. This is a re-serialization (an edit that changes
+     nothing leaves the file's bytes alone); the file's indentation, its trailing newline and
+     its ASCII-or-not escaping are kept.
   d. Text in `appendText` (path -> text) is appended to that path, creating the file in a
      commit that does not have it, once: a file that already ends with the text is left
      as it is, so a second run changes nothing.
@@ -261,6 +267,81 @@ def blank_json(content: bytes, targets: frozenset[str]) -> tuple[bytes | None, s
     return (BOM if bom else b"") + out.encode("utf-8"), "blanked"
 
 
+def _is_number(x: Any) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
+def _apply_ops(obj: dict[str, Any], ops: list[dict[str, Any]]) -> None:
+    """Apply plan ops to a parsed JSON object, in place. ValueError when a sum is impossible."""
+    for op in ops:
+        kind = op["op"]
+        if kind == "set":
+            obj[op["key"]] = op["value"]
+            continue
+        arr = obj.get(op["array"])
+        if not isinstance(arr, list):
+            continue
+        if kind == "drop-array-entries":
+            values = set(op["matchValues"])
+            obj[op["array"]] = [
+                e
+                for e in arr
+                if not (
+                    isinstance(e, dict)
+                    and isinstance(e.get(op["matchField"]), str)
+                    and e[op["matchField"]] in values
+                )
+            ]
+        elif kind == "recount":
+            total = 0
+            for e in arr:
+                value = e.get(op["sumField"]) if isinstance(e, dict) else None
+                if not _is_number(value):
+                    raise ValueError("sum")
+                total += value
+            # Only keys the file already has are recomputed; the file's schema is not extended.
+            if op["countKey"] in obj:
+                obj[op["countKey"]] = len(arr)
+            if op["sumKey"] in obj:
+                obj[op["sumKey"]] = total
+
+
+def apply_json_ops(
+    content: bytes, ops: list[dict[str, Any]]
+) -> tuple[bytes | None, str]:
+    """Apply `jsonOps` to one JSON file's bytes: (new bytes or None, status).
+
+    Status is "applied", "already" (valid, nothing to change; bytes untouched) or "untouched"
+    (not UTF-8, not a JSON object, or a sum that cannot be computed).
+    """
+    bom = content.startswith(BOM)
+    try:
+        text = content[len(BOM) :].decode("utf-8") if bom else content.decode("utf-8")
+        obj = json.loads(text)
+        if not isinstance(obj, dict):
+            raise TypeError("object")
+        edited = json.loads(text)
+        _apply_ops(edited, ops)
+    except (UnicodeDecodeError, ValueError, TypeError, RecursionError):
+        return None, "untouched"
+    if edited == obj:
+        return None, "already"
+    indent_match = re.search(r"\n([ \t]+)\S", text)
+    indent: str | None = None
+    if indent_match:
+        indent = indent_match.group(1)
+    compact = indent is None and not re.search(r'"\s*:\s', text)
+    dumped = json.dumps(
+        edited,
+        indent=indent,
+        ensure_ascii=text.isascii(),
+        separators=(",", ":") if compact else None,
+    )
+    if text.endswith("\n"):
+        dumped += "\n"
+    return (BOM if bom else b"") + dumped.encode("utf-8"), "applied"
+
+
 def append_once(content: bytes, text: bytes) -> bytes:
     """`content` with `text` appended once: unchanged when it already ends with `text`."""
     if content.endswith(text):
@@ -288,6 +369,28 @@ def load_keymap(path: str) -> dict[bytes, bytes]:
             raise BadInput("keymap-bad-pair")
         out[a.encode()] = b.encode()
     return out
+
+
+def valid_op(op: Any) -> bool:
+    """The shape of one `jsonOps` entry, per the contract; nothing else is accepted."""
+
+    def strings(*names: str) -> bool:
+        return all(isinstance(op.get(n), str) and op[n] for n in names)
+
+    if not isinstance(op, dict):
+        return False
+    if op.get("op") == "drop-array-entries":
+        values = op.get("matchValues")
+        return (
+            strings("array", "matchField")
+            and isinstance(values, list)
+            and all(isinstance(v, str) for v in values)
+        )
+    if op.get("op") == "recount":
+        return strings("array", "countKey", "sumKey", "sumField")
+    if op.get("op") == "set":
+        return strings("key") and isinstance(op.get("value"), str)
+    return False
 
 
 class Plan:
@@ -318,8 +421,16 @@ class Plan:
         self.append: dict[bytes, bytes] = {
             p.encode(): t.encode() for p, t in raw["appendText"].items()
         }
-        if self.drop & set(self.append):
-            raise BadInput("plan-drop-and-append-overlap")
+        self.ops: dict[bytes, list[dict[str, Any]]] = {}
+        raw_ops = raw.get("jsonOps", {})
+        if not isinstance(raw_ops, dict):
+            raise BadInput("plan-json-ops")
+        for p, ops in raw_ops.items():
+            if not (p and isinstance(ops, list) and all(valid_op(o) for o in ops)):
+                raise BadInput("plan-json-ops")
+            self.ops[p.encode()] = ops
+        if self.drop & (set(self.append) | set(self.ops)):
+            raise BadInput("plan-drop-and-edit-overlap")
 
 
 # --------------------------------------------------------------------------------------
@@ -452,7 +563,7 @@ class Rewriter:
         self.cat = CatFile()
         self.rf: Any = None
         self.blob_memo: dict[tuple[bytes, bytes, bytes], bytes | None] = {}
-        self.json_memo: dict[tuple[bytes, bytes], tuple[bytes | None, str]] = {}
+        self.json_memo: dict[tuple[bytes, bytes], bytes | None] = {}
         self.append_blob_memo: dict[tuple[bytes, bytes], bytes] = {}
         self.dropped_seen: set[bytes] = set()
         self.counts = {
@@ -462,6 +573,9 @@ class Rewriter:
             "jsonBlanked": 0,
             "jsonAlreadyBlank": 0,
             "jsonUntouched": 0,
+            "jsonOpsApplied": 0,
+            "jsonOpsAlready": 0,
+            "jsonOpsUntouched": 0,
             "commitsSeen": 0,
             "appended": 0,
             "appendAlreadyPresent": 0,
@@ -469,18 +583,36 @@ class Rewriter:
 
     # -- file_info_callback ---------------------------------------------------------
 
-    def _blank(self, path: bytes, oid: bytes) -> tuple[bytes | None, str]:
+    def _edit_json(self, path: bytes, oid: bytes) -> bytes | None:
+        """The new bytes of a plan JSON file (blank keys, then ops), or None when unchanged."""
         memo_key = (oid, path)
-        if memo_key not in self.json_memo:
-            result = blank_json(self.cat.blob(oid), self.plan.blank[path])
-            self.json_memo[memo_key] = result
-            status = result[1]
-            if status == "blanked":
-                self.counts["jsonBlanked"] += 1
-            elif status == "already":
-                self.counts["jsonAlreadyBlank"] += 1
-            else:
-                self.counts["jsonUntouched"] += 1
+        if memo_key in self.json_memo:
+            return self.json_memo[memo_key]
+        content = self.cat.blob(oid)
+        changed = False
+        if path in self.plan.blank:
+            new, status = blank_json(content, self.plan.blank[path])
+            self.counts[
+                {
+                    "blanked": "jsonBlanked",
+                    "already": "jsonAlreadyBlank",
+                    "untouched": "jsonUntouched",
+                }[status]
+            ] += 1
+            if new is not None:
+                content, changed = new, True
+        if path in self.plan.ops:
+            new, status = apply_json_ops(content, self.plan.ops[path])
+            self.counts[
+                {
+                    "applied": "jsonOpsApplied",
+                    "already": "jsonOpsAlready",
+                    "untouched": "jsonOpsUntouched",
+                }[status]
+            ] += 1
+            if new is not None:
+                content, changed = new, True
+        self.json_memo[memo_key] = content if changed else None
         return self.json_memo[memo_key]
 
     def file_info(self, filename: bytes, mode: bytes, blob_id: bytes, value: Any):
@@ -491,14 +623,15 @@ class Rewriter:
         if mode == b"160000":
             return (filename, mode, blob_id)
 
-        memo_key = (blob_id, mode, filename if filename in self.plan.blank else b"")
+        edited = filename in self.plan.blank or filename in self.plan.ops
+        memo_key = (blob_id, mode, filename if edited else b"")
         if memo_key in self.blob_memo:
             new_id = self.blob_memo[memo_key]
             return (filename, mode, new_id if new_id is not None else blob_id)
 
         new_content: bytes | None = None
-        if mode in REGULAR_MODES and filename in self.plan.blank:
-            new_content, _status = self._blank(filename, blob_id)
+        if mode in REGULAR_MODES and edited:
+            new_content = self._edit_json(filename, blob_id)
         if (
             new_content is None
             and value.get_size_by_identifier(blob_id) <= POINTER_MAX_BYTES
@@ -535,10 +668,10 @@ class Rewriter:
             if kind != b"blob" or mode not in REGULAR_MODES:
                 raise RuntimeError("append-target-not-a-regular-file")
             content = self.cat.blob(oid)
-            if path in self.plan.blank:
-                blanked, _status = self._blank(path, oid)
-                if blanked is not None:
-                    content = blanked
+            if path in self.plan.blank or path in self.plan.ops:
+                edited = self._edit_json(path, oid)
+                if edited is not None:
+                    content = edited
         new = append_once(content, text)
         if new == content and entry is not None:
             self.counts["appendAlreadyPresent"] += 1
