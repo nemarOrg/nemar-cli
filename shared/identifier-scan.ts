@@ -23,10 +23,10 @@
  * annotation channels are not read.
  *
  * Policy owned here, not by a library (make-versus-take): what counts as an identifier
- * is NEMAR's rule. The year-only allowance follows HIPAA Safe Harbor, which permits the
- * year of a date. A date on 1 January, in any common layout, is year-only and clean; any
- * other day is not, and a date that could be read as 1 January only under one of two
- * day-month orders is flagged.
+ * is NEMAR's rule. A birth date is an identifier unless it is year-only (1 January, in any
+ * common layout; a date that is 1 January only under one of two day-month orders is flagged).
+ * An acquisition date is NOT an identifier on its own: it is reported at review severity and
+ * never blocks, because it names nobody unless something else links the recording to a person.
  */
 
 export type Severity = "identifier" | "review";
@@ -62,7 +62,11 @@ export const DIRECT_KINDS: ReadonlySet<FindingKind> = new Set<FindingKind>([
   "participants-identifier-column",
 ]);
 
-/** Calendar dates finer than year: barred by the Contributor Terms, but not a name. */
+/**
+ * Calendar dates finer than year in a header. Policy (2026-10-04): an acquisition date alone is
+ * acceptable when nothing links it to an identifiable person, so these are review findings and
+ * never gate a publication; a birth date, a name or a record number is what does.
+ */
 export const DATE_KINDS: ReadonlySet<FindingKind> = new Set<FindingKind>([
   "edf-startdate",
   "edf-recording-startdate",
@@ -392,9 +396,9 @@ export function scanEdfHeader(bytes: Uint8Array): Finding[] {
     // Startdate keyword, something that is neither X nor a date cannot be shown to be clean.
     const dated = parts.map(dateCandidates);
     if (dated.some((c) => c.length > 0 && !isYearOnly(c))) {
-      add("edf-recording-startdate", "identifier", "recording.startdate", recording);
+      add("edf-recording-startdate", "review", "recording.startdate", recording);
     } else if (keyword && parts[1] !== undefined && parts[1] !== "X" && dated[1]?.length === 0) {
-      add("edf-recording-startdate", "identifier", "recording.startdate", parts[1]);
+      add("edf-recording-startdate", "review", "recording.startdate", parts[1]);
     }
     // Admin code, technician and equipment (or free text) that read as names.
     const rest = keyword ? parts.slice(2) : parts;
@@ -414,7 +418,7 @@ export function scanEdfHeader(bytes: Uint8Array): Finding[] {
   const startText = fieldText(bytes, 168, 176);
   const start = parseHeaderStartDate(startText);
   if (!start || !(start.day === 1 && start.month === 1)) {
-    add("edf-startdate", "identifier", "startdate", startText);
+    add("edf-startdate", "review", "startdate", startText);
   }
   return findings;
 }
