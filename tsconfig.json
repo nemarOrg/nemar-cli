@@ -30,7 +30,8 @@
     "scripts/identifier-fleet-scan.ts",
     "test/neurobagel-*.ts",
     "test/identifier-fleet.test.ts",
-    "test/identifier-scan.test.ts"
+    "test/identifier-scan.test.ts",
+    "test/identifier-scrub.test.ts"
   ],
   "exclude": ["node_modules", "dist"]
 }
