@@ -37,12 +37,16 @@ import {
   OTHER_FORMAT,
   type ScreenConfig,
   ScreenUsageError,
+  cloneMetadata,
   deliverReport,
   finalizeScanReport,
   foldOddFormats,
   historyPaths,
+  listTree,
+  objectSizes,
   parseAnnexPointer,
   parseScreenConfig,
+  prefetchBlobs,
   runScreen,
 } from "../scripts/identifier-screen-ci-lib";
 import {
@@ -1585,6 +1589,73 @@ describe("GitBlobReader: one process, in order, only what was asked for", () => 
     }
     expect(await reader.read(oid("small.txt"), 10)).toEqual({ ok: false, reason: "closed" });
   });
+});
+
+describe("the prefetch of blobs the clone left behind", () => {
+  test(
+    "stops when the bytes that arrived pass the budget, and says so; a larger budget fetches all",
+    async () => {
+      fresh();
+      const repo = new Repo();
+      for (const n of [1, 2, 3]) {
+        repo.file(`sourcedata/s${n}.json`, JSON.stringify({ n, pad: "x".repeat(3000) }));
+      }
+      const head = repo.commit("three large blobs");
+      const config = { ...inProcessConfig(repo), blobLimit: "1k" };
+      const clone = join(tempDir("clone"), "repo");
+      expect((await cloneMetadata(config, clone, 60_000)).ok).toBe(true);
+      const oids = (await listTree(clone, head))?.map((t) => t.oid) as string[];
+      expect(oids).toHaveLength(3);
+      // The clone's bound left all three behind: none is here.
+      expect([
+        ...((await objectSizes(clone, oids)) as Map<string, number | null>).values(),
+      ]).toEqual([null, null, null]);
+
+      const deadlineAt = Date.now() + 60_000;
+      expect(
+        await prefetchBlobs(config, clone, oids, { deadlineAt, chunk: 1, budgetBytes: 4000 }),
+      ).toBe(false);
+      const after = (await objectSizes(clone, oids)) as Map<string, number | null>;
+      expect(oids.map((oid) => after.get(oid) !== null)).toEqual([true, true, false]);
+
+      expect(
+        await prefetchBlobs(config, clone, oids, { deadlineAt, chunk: 1, budgetBytes: 1 << 30 }),
+      ).toBe(true);
+      const all = (await objectSizes(clone, oids)) as Map<string, number | null>;
+      expect(oids.every((oid) => all.get(oid) !== null)).toBe(true);
+
+      // One batch that itself passes the budget is reported too: false means "not within it".
+      const second = join(tempDir("clone"), "repo");
+      await cloneMetadata(config, second, 60_000);
+      expect(
+        await prefetchBlobs(config, second, oids, { deadlineAt, chunk: 10, budgetBytes: 4000 }),
+      ).toBe(false);
+    },
+    T,
+  );
+
+  test(
+    "a deadline already past fetches nothing",
+    async () => {
+      fresh();
+      const repo = new Repo();
+      repo.file("sourcedata/s.json", JSON.stringify({ pad: "x".repeat(3000) }));
+      const head = repo.commit("one large blob");
+      const config = { ...inProcessConfig(repo), blobLimit: "1k" };
+      const clone = join(tempDir("clone"), "repo");
+      await cloneMetadata(config, clone, 60_000);
+      const oids = (await listTree(clone, head))?.map((t) => t.oid) as string[];
+      expect(
+        await prefetchBlobs(config, clone, oids, {
+          deadlineAt: Date.now() - 1,
+          chunk: 10,
+          budgetBytes: 1 << 30,
+        }),
+      ).toBe(false);
+      expect((await objectSizes(clone, oids))?.get(oids[0] as string)).toBeNull();
+    },
+    T,
+  );
 });
 
 describe("deliverReport", () => {
