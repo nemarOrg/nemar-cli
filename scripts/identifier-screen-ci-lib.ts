@@ -16,11 +16,16 @@
  * JSON and text file is read: a local read is cheap and a sampling cap would make the verdict
  * `unchecked`.
  *
- * **What it does not read.** The content of earlier commits. Every path that ever existed on any
- * ref (the `git-annex` branch excluded) is run through the path rules, so a removed `photo.jpg`
- * still counts, but a header or sidecar that was changed or deleted in a later commit is not
- * opened. The screen is of `main` as it is now, bound to its commit; history content is the
- * scrub's concern (ADR 0085). Formats the scanner cannot parse are counted, never read.
+ * **What it does not read.** The content of earlier commits, except recordings. Every path that
+ * ever existed on any ref (the `git-annex` branch excluded) is run through the path rules, so a
+ * removed `photo.jpg` still counts. Every EDF/BDF that was in an earlier commit and is not in the
+ * tree (its annex key, or its blob when committed to git directly, is in no file of the tree) has
+ * its header read like a current one, because a header fixed in a later commit is still public in
+ * history and in S3; an old object that S3 says is gone (404) leaks nothing and is counted as
+ * `edf/superseded-absent` without making the record incomplete. But an old sidecar, table or text
+ * file that was changed or deleted in a later commit is NOT opened: its earlier content is
+ * history's concern (ADR 0085). The screen is of `main` as it is now, bound to its commit. Formats
+ * the scanner cannot parse are counted, never read, and so is a submodule (`submodule-unread`).
  *
  * **Unknown is never healthy.** A read that failed, a header past the deadline and a symlink
  * that does not point into the annex are each counted as unread, and the record's
@@ -535,8 +540,15 @@ export interface TreeEntry {
   path: string;
 }
 
-/** Every file of a commit's tree: regular files and symlinks, not directories or submodules. */
-export async function listTree(dir: string, head: string): Promise<TreeEntry[] | null> {
+export interface Tree {
+  /** Every regular file and symlink. */
+  entries: TreeEntry[];
+  /** Submodule entries (mode 160000): a path whose content is another repository, never read. */
+  gitlinks: number;
+}
+
+/** Every file of a commit's tree, and how many submodule entries it holds. */
+export async function listTree(dir: string, head: string): Promise<Tree | null> {
   const result = await run(["git", "-C", dir, "ls-tree", "-r", "-z", "--full-tree", head], {
     env: gitEnv(),
     timeoutMs: 10 * 60_000,
@@ -544,15 +556,20 @@ export async function listTree(dir: string, head: string): Promise<TreeEntry[] |
   if (result.code !== 0) return null;
   const decoder = new TextDecoder();
   const entries: TreeEntry[] = [];
+  let gitlinks = 0;
   for (const record of decoder.decode(result.stdout).split("\0")) {
     if (record === "") continue;
     const tab = record.indexOf("\t");
     if (tab < 0) return null;
     const [mode, type, oid] = record.slice(0, tab).split(" ");
+    if (type === "commit" && mode === "160000") {
+      gitlinks++;
+      continue;
+    }
     if (type !== "blob" || !mode || !oid || !/^[0-9a-f]{40,64}$/.test(oid)) continue;
     entries.push({ mode, oid, path: record.slice(tab + 1) });
   }
-  return entries;
+  return { entries, gitlinks };
 }
 
 /** The size of each object in `oids` that is present, null for one that is not. Null on failure. */
@@ -622,12 +639,22 @@ export async function prefetchBlobs(
   return spent <= options.budgetBytes;
 }
 
+export interface HistoryWalk {
+  /** Every path that appeared in any commit of any ref. */
+  paths: Set<string>;
+  /** Every blob a path held after some commit: object id to the first path and mode it was seen with. */
+  blobs: Map<string, { path: string; mode: string }>;
+}
+
 /**
- * Every path that ever existed on any ref, de-duplicated. The `git-annex` branch is excluded: its
- * "paths" are location logs named by annex key, not files of the dataset. Null when git could not
- * say, which the caller records as incomplete rather than as "no history".
+ * Every path that ever existed on any ref, and every blob it held, de-duplicated. The `git-annex`
+ * branch is excluded: its "paths" are location logs named by annex key, not files of the dataset.
+ * Null when git could not say, which the caller records as incomplete rather than as "no history".
+ *
+ * `--raw -z` is `:<old mode> <new mode> <old oid> <new oid> <status>` then the path, each NUL
+ * ended, so one walk gives both the paths and the blobs without reading any content.
  */
-export async function historyPaths(dir: string, deadlineAt: number): Promise<Set<string> | null> {
+export async function walkHistory(dir: string, deadlineAt: number): Promise<HistoryWalk | null> {
   const left = deadlineAt - Date.now();
   if (left <= 0) return null;
   const result = await run(
@@ -639,7 +666,8 @@ export async function historyPaths(dir: string, deadlineAt: number): Promise<Set
       "--exclude=refs/heads/git-annex",
       "--exclude=refs/remotes/origin/git-annex",
       "--all",
-      "--name-only",
+      "--raw",
+      "--no-abbrev",
       "-m",
       "--no-renames",
       "--no-ext-diff",
@@ -649,11 +677,24 @@ export async function historyPaths(dir: string, deadlineAt: number): Promise<Set
     { env: gitEnv(), timeoutMs: left },
   );
   if (result.code !== 0 || result.timedOut) return null;
+  const tokens = new TextDecoder().decode(result.stdout).split("\0");
   const paths = new Set<string>();
-  for (const path of new TextDecoder().decode(result.stdout).split("\0")) {
-    if (path !== "") paths.add(path);
+  const blobs = new Map<string, { path: string; mode: string }>();
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i] as string;
+    if (!token.startsWith(":")) continue;
+    const meta = token.slice(1).split(" ");
+    const path = tokens[i + 1];
+    if (meta.length < 5 || path === undefined || path === "") return null;
+    i++;
+    paths.add(path);
+    const [, mode, , oid, status] = meta as [string, string, string, string, string];
+    if (status === "D" || /^0+$/.test(oid)) continue;
+    if ((mode === "100644" || mode === "100755" || mode === "120000") && !blobs.has(oid)) {
+      blobs.set(oid, { path, mode });
+    }
   }
-  return paths;
+  return { paths, blobs };
 }
 
 // ---------------------------------------------------------------------------------------
@@ -950,6 +991,80 @@ export async function resolveEntries(
   return { entries, annexed, inline, unresolved, annexedEdf };
 }
 
+export interface Superseded {
+  /** Recordings in an earlier commit and not in the tree, one per annex key or blob. */
+  entries: ManifestEntry[];
+  /** Historic blobs that could not be examined, so a recording among them may be unseen. */
+  unreadable: number;
+  /** Sizes of the historic objects examined, for the prefetch of any that the clone left behind. */
+  sizes: Map<string, number | null>;
+}
+
+const EDF_PATH = /\.(edf|bdf)$/i;
+
+/**
+ * The recordings that are in git history but not in the tree. A header that was fixed in a later
+ * commit is still in the earlier commit's annex key (and in S3), and both become public with the
+ * repository, so a screen of the tree alone would call a dataset clean while the old header is one
+ * `git log` away. A recording is superseded when its annex key is in no file of the tree (a file
+ * that was only renamed or moved keeps its key), or, for a recording committed to git directly,
+ * when its blob is in no file of the tree. Only pointers and recordings are read; the content of
+ * other old files stays unread.
+ */
+export async function findSuperseded(
+  dir: string,
+  walk: HistoryWalk,
+  tree: ResolvedTree,
+  treeOids: ReadonlySet<string>,
+  blobs: GitBlobReader,
+): Promise<Superseded> {
+  const treeKeys = new Set(
+    tree.entries.filter((e) => e.url.startsWith("annex:")).map((e) => e.url.slice(6)),
+  );
+  const candidates = [...walk.blobs].filter(([oid]) => !treeOids.has(oid));
+  const sizes = await objectSizes(
+    dir,
+    candidates.map(([oid]) => oid),
+  );
+  if (!sizes) return { entries: [], unreadable: candidates.length, sizes: new Map() };
+  const found = new Map<string, ManifestEntry>();
+  let unreadable = 0;
+  const examine = async ([oid, { path, mode }]: [string, { path: string; mode: string }]) => {
+    const symlink = mode === "120000";
+    const size = sizes.get(oid) ?? null;
+    const small = size !== null && size <= POINTER_MAX_BYTES;
+    if (symlink || small) {
+      const read = await blobs.read(oid, SYMLINK_MAX_BYTES);
+      if (!read.ok) {
+        unreadable++;
+        return;
+      }
+      const pointed = parseAnnexPointer(decoder.decode(read.bytes), symlink);
+      if (pointed) {
+        if (
+          !treeKeys.has(pointed.key) &&
+          (EDF_KEY_EXTENSION.test(pointed.key) || EDF_PATH.test(path))
+        ) {
+          found.set(`annex:${pointed.key}`, {
+            path,
+            size: pointed.size,
+            url: `annex:${pointed.key}`,
+            edf: true,
+          });
+        }
+        return;
+      }
+      if (symlink) return;
+    }
+    // Not a pointer: a recording committed to git directly is read from its blob.
+    if (EDF_PATH.test(path)) found.set(`git:${oid}`, { path, size, url: `git:${oid}`, edf: true });
+  };
+  for (let i = 0; i < candidates.length; i += 20_000) {
+    await Promise.all(candidates.slice(i, i + 20_000).map(examine));
+  }
+  return { entries: [...found.values()], unreadable, sizes };
+}
+
 /**
  * The inline blobs the scan will read that the clone left behind. The fleet scan's own candidate
  * rules decide what is read, so this names exactly that and no more. Recordings are listed apart
@@ -958,6 +1073,7 @@ export async function resolveEntries(
 export function blobsToFetch(
   entries: readonly ManifestEntry[],
   sizes: ReadonlyMap<string, number | null>,
+  superseded: readonly ManifestEntry[] = [],
 ): { small: string[]; recordings: string[] } {
   const candidates = readCandidates(entries);
   const missing = (entry: ManifestEntry): string | null => {
@@ -975,7 +1091,7 @@ export function blobsToFetch(
       ...candidates.text,
       ...(candidates.participants ? [candidates.participants] : []),
     ]),
-    recordings: collect(candidates.edf),
+    recordings: collect([...candidates.edf, ...superseded]),
   };
 }
 
@@ -1094,7 +1210,7 @@ export interface ScreenDeps {
   /** The scan itself; only a test replaces it, to prove a hostile result cannot be posted. */
   scan?: typeof scanDatasetFromManifest;
   /** The history walk; only a test replaces it, because git cannot be made to fail on a valid clone. */
-  history?: typeof historyPaths;
+  history?: typeof walkHistory;
   log?: (line: string) => void;
   sleep?: (ms: number) => Promise<void>;
   /** The scanner revision; defaults to the HEAD of the checkout this file runs from. */
@@ -1139,25 +1255,48 @@ export async function screenDataset(
 
     const tree = await listTree(repo, head);
     if (!tree) return errorReport("workflow-failed", scannerId, head);
-    let sizes = await objectSizes(repo, [...new Set(tree.map((t) => t.oid))]);
+    const treeOids = new Set(tree.entries.map((t) => t.oid));
+    let sizes = await objectSizes(repo, [...treeOids]);
     if (!sizes) return errorReport("workflow-failed", scannerId, head);
 
     blobs = new GitBlobReader(repo);
-    const resolved = await resolveEntries(tree, sizes, blobs);
+    const resolved = await resolveEntries(tree.entries, sizes, blobs);
     log(
       `screen: tree files=${resolved.entries.length} annexed=${resolved.annexed} ` +
-        `inline=${resolved.inline} unresolved=${resolved.unresolved}`,
+        `inline=${resolved.inline} unresolved=${resolved.unresolved} submodules=${tree.gitlinks}`,
+    );
+
+    // Every path that ever existed, and the recordings an earlier commit held that the tree no
+    // longer does: they are as public as the tree's, so they are read with it.
+    const walk = await (deps.history ?? walkHistory)(repo, deadlineAt);
+    const superseded: Superseded = walk
+      ? await findSuperseded(repo, walk, resolved, treeOids, blobs)
+      : { entries: [], unreadable: 0, sizes: new Map() };
+    sizes = new Map([...sizes, ...superseded.sizes]);
+    const headPaths = new Set(resolved.entries.map((e) => e.path));
+    const extras: ScanExtras = {
+      extraPaths: walk ? [...walk.paths].filter((p) => !headPaths.has(p)) : [],
+      extraIncompleteReasons: [
+        ...(walk && superseded.unreadable === 0 ? [] : ["history-unread"]),
+        ...(tree.gitlinks > 0 ? ["submodule-unread"] : []),
+      ],
+      supersededEdf: superseded.entries,
+    };
+    log(
+      `screen: history ${walk ? `paths=${walk.paths.size} superseded=${superseded.entries.length}` : "unread"}`,
     );
 
     // Annexed recordings are read in S3. Without credentials that is every one of them
     // unread, so say so with its own word instead of a record full of failures.
-    if (!config.aws && resolved.annexedEdf > 0) {
+    const needsStorage =
+      resolved.annexedEdf + superseded.entries.filter((e) => e.url.startsWith("annex:")).length;
+    if (!config.aws && needsStorage > 0) {
       log("screen: error=credentials-missing");
       return errorReport("credentials-missing", scannerId, head);
     }
 
     // Blobs over the clone's bound, fetched in batches for exactly the files the scan reads.
-    const missing = blobsToFetch(resolved.entries, sizes);
+    const missing = blobsToFetch(resolved.entries, sizes, superseded.entries);
     const fetchedAll = [
       await prefetchBlobs(config, repo, missing.small, {
         deadlineAt,
@@ -1176,19 +1315,11 @@ export async function screenDataset(
       const refreshed = await objectSizes(repo, fetchedOids);
       if (refreshed) {
         sizes = new Map([...sizes, ...refreshed]);
-        for (const entry of resolved.entries) {
+        for (const entry of [...resolved.entries, ...superseded.entries]) {
           if (entry.url.startsWith("git:")) entry.size = sizes.get(entry.url.slice(4)) ?? null;
         }
       }
     }
-
-    const history = await (deps.history ?? historyPaths)(repo, deadlineAt);
-    const headPaths = new Set(resolved.entries.map((e) => e.path));
-    const extras: ScanExtras = {
-      extraPaths: history ? [...history].filter((p) => !headPaths.has(p)) : [],
-      extraIncompleteReasons: history ? [] : ["history-unread"],
-    };
-    log(`screen: history ${history ? `paths=${history.size}` : "unread"}`);
 
     const ctx = createContext({
       fileConcurrency: config.concurrency,

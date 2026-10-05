@@ -1104,7 +1104,19 @@ export interface ScanExtras {
   extraPaths?: readonly string[];
   /** Reasons the caller already knows the scan fell short, for example `history-unread`. */
   extraIncompleteReasons?: readonly string[];
+  /**
+   * Recordings that were in an earlier commit but are not in the scanned tree. Their bytes are
+   * as public as the tree's (git history and the bucket), so each header is read and counted with
+   * the tree's recordings: an unreadable one makes the record `unchecked`. The exception is an
+   * object the store answers 404 for, which is gone and leaks nothing: it is counted under the
+   * fixed read-failure class `edf/superseded-absent`, left out of the recording counts, and does
+   * not make the record incomplete. Any other failure (403, a timeout) is a failure like any other.
+   */
+  supersededEdf?: readonly ManifestEntry[];
 }
+
+/** The read-failure class of a superseded recording whose object no longer exists. */
+export const SUPERSEDED_ABSENT = "edf/superseded-absent";
 
 /**
  * Scan one dataset from its manifest: EDF/BDF headers, the participants table, scans tables,
@@ -1141,19 +1153,17 @@ export async function scanDatasetFromManifest(
 
   // EDF/BDF headers: 256 bytes each. A tree-sourced manifest reads everything through the
   // Worker, so it is sampled; every other source reads every header.
-  const {
-    edf: edfAll,
-    participants,
-    scans: scansAll,
-    json: jsonCandidates,
-    text: textCandidates,
-  } = readCandidates(manifest);
+  const candidates = readCandidates(manifest);
+  const superseded = new Set(extras.supersededEdf ?? []);
+  const edfAll = [...candidates.edf, ...superseded];
+  const { participants, scans: scansAll, json: jsonCandidates, text: textCandidates } = candidates;
   const edfSelected =
     source === "git-tree"
       ? sampleEvenly(edfAll, ctx.limits.treeHeaderSample, subjectKey)
       : [...edfAll];
   let headerRead = 0;
   let headerFailed = 0;
+  let supersededAbsent = 0;
   let flaggedFileCount = 0;
   const flaggedKinds: Partial<Record<FindingKind, number>> = {};
   const patientValues = new Set<string>();
@@ -1188,10 +1198,17 @@ export async function scanDatasetFromManifest(
       }
       headerRead++;
     } catch (error) {
+      if (superseded.has(entry) && error instanceof ReadFailure && error.status === 404) {
+        supersededAbsent++;
+        failures[SUPERSEDED_ABSENT] = (failures[SUPERSEDED_ABSENT] ?? 0) + 1;
+        return;
+      }
       headerFailed++;
       fail("edf", error);
     }
   });
+  // A recording that no longer exists is not a recording that was not read.
+  const edfCount = edfAll.length - supersededAbsent;
 
   // participants.tsv: identifier columns in the header row, name-like participant labels below.
   let participantsUnread = false;
@@ -1284,9 +1301,9 @@ export async function scanDatasetFromManifest(
 
   const sampling: NonNullable<DatasetRecord["sampling"]> = {
     edf_headers: {
-      candidates: edfAll.length,
+      candidates: edfCount,
       oversize: 0,
-      selected: edfSelected.length,
+      selected: edfSelected.length - supersededAbsent,
       scanned: headerRead,
     },
     scans_tables: {
@@ -1331,7 +1348,7 @@ export async function scanDatasetFromManifest(
 
   const classify: ClassifyInput = {
     findings,
-    edfCount: edfAll.length,
+    edfCount,
     headerRead,
     unscreenedCount,
     incompleteReasons,
@@ -1350,7 +1367,7 @@ export async function scanDatasetFromManifest(
     incomplete_reasons: incompleteReasons,
     files: {
       total: manifest.length,
-      edf_bdf: edfAll.length,
+      edf_bdf: edfCount,
       header_read: headerRead,
       header_read_failed: headerFailed,
     },

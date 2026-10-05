@@ -2571,6 +2571,44 @@ describe("reading through a caller-supplied reader, and a clone source", () => {
     expect(record.edf_bdf_files_flagged).toBe(1);
   });
 
+  test("a superseded recording that is gone (404) is counted apart; any other failure is unread", async () => {
+    const ctx = ctxWith(async (entry) => {
+      if (entry.path.startsWith("gone")) throw new ReadFailure("http-404", { status: 404 });
+      if (entry.path.startsWith("denied")) throw new ReadFailure("http-403", { status: 403 });
+      return header;
+    });
+    const current = [never("sub-01/eeg/sub-01_task-rest_eeg.edf")];
+    const gone = { ...never("gone/old.edf"), edf: true };
+    const denied = { ...never("denied/old.edf"), edf: true };
+
+    const absent = await scanDatasetFromManifest(ctx, ID, null, current, "clone", {
+      supersededEdf: [gone],
+    });
+    expect(absent.status).toBe("clean");
+    expect(absent.incomplete).toBe(false);
+    expect(absent.files).toMatchObject({ edf_bdf: 1, header_read: 1, header_read_failed: 0 });
+    expect(absent.read_failures).toEqual({ "edf/superseded-absent": 1 });
+
+    const refused = await scanDatasetFromManifest(ctx, ID, null, current, "clone", {
+      supersededEdf: [denied],
+    });
+    expect(refused.status).toBe("unchecked");
+    expect(refused.files).toMatchObject({ edf_bdf: 2, header_read: 1, header_read_failed: 1 });
+    expect(refused.read_failures).toEqual({ "edf/http-403": 1 });
+
+    // The same 404 on a CURRENT recording is data that should be there and is not.
+    const missing = await scanDatasetFromManifest(
+      ctx,
+      ID,
+      null,
+      [never("gone/current.edf")],
+      "clone",
+      {},
+    );
+    expect(missing.status).toBe("unchecked");
+    expect(missing.read_failures).toEqual({ "edf/http-404": 1 });
+  });
+
   test("extra paths get the path rules only; extra reasons make the scan incomplete", async () => {
     const ctx = ctxWith(async () => header);
     const entries = [never("sub-01/eeg/sub-01_task-rest_eeg.edf")];

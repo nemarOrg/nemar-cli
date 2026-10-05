@@ -34,21 +34,24 @@ import {
 } from "../scripts/identifier-fleet-lib";
 import {
   GitBlobReader,
+  type HistoryWalk,
   OTHER_FORMAT,
   type ScreenConfig,
   ScreenUsageError,
+  type Tree,
   cloneMetadata,
   deliverReport,
   finalizeScanReport,
+  findSuperseded,
   foldOddFailures,
   foldOddFormats,
-  historyPaths,
   listTree,
   objectSizes,
   parseAnnexPointer,
   parseScreenConfig,
   prefetchBlobs,
   runScreen,
+  walkHistory,
 } from "../scripts/identifier-screen-ci-lib";
 import {
   type DatasetRecord,
@@ -840,16 +843,212 @@ describe("the screen: a history walk that failed", () => {
     T,
   );
 
+  const PATH = "sub-01/eeg/sub-01_task-rest_eeg.edf";
+
+  /** Commit 1 holds `before`, commit 2 replaces it with `after`; returns the first key. */
+  function replaced(
+    before: string,
+    after: string,
+    how: "symlink" | "pointer",
+  ): { repo: Repo; oldKey: string; newKey: string } {
+    const repo = new Repo();
+    repo.file("README", "x");
+    const oldKey = repo.annexed(PATH, recording(before), s3, how);
+    repo.commit("first recording");
+    repo.remove(PATH);
+    const newKey = repo.annexed(PATH, recording(after), s3, how);
+    repo.commit("replace the recording");
+    return { repo, oldKey, newKey };
+  }
+
+  for (const how of ["symlink", "pointer"] as const) {
+    test(
+      `a header fixed in a later commit is still screened: ${how}, names in commit 1 only`,
+      async () => {
+        fresh();
+        const { repo } = replaced(named(1), CLEAN, how);
+        const result = await runScript(repo);
+        const scan = scanOf(result);
+        // The tree holds only the clean recording; the old one is in history and in S3.
+        expect(scan.status).toBe("direct-identifiers");
+        expect(scan.files?.edf_bdf).toBe(2);
+        expect(scan.files?.header_read).toBe(2);
+        expect(scan.edf_bdf_files_flagged).toBe(1);
+        expect(scan.findings_by_kind?.["edf-patient-name"]).toBe(1);
+        expect(s3.requests).toHaveLength(2);
+        expect(result.stdout).toContain("superseded=1");
+        expect(JSON.stringify(result.report)).not.toContain(NAME);
+
+        // Twin: the same two commits, clean in both, are clean and cost the same two reads.
+        fresh();
+        const clean = replaced(CLEAN, "P09 F X X", how);
+        const twin = scanOf(await runScript(clean.repo));
+        expect(twin.status).toBe("clean");
+        expect(twin.files?.edf_bdf).toBe(2);
+        expect(twin.incomplete).toBe(false);
+        expect(s3.requests).toHaveLength(2);
+      },
+      T,
+    );
+  }
+
   test(
-    "historyPaths says null for a directory git cannot read and for a deadline already past",
+    "a superseded recording whose object is gone leaks nothing: counted as absent, still clean",
+    async () => {
+      fresh();
+      const { repo, oldKey } = replaced(named(1), CLEAN, "symlink");
+      s3.objects.delete(`${ID}/objects/${oldKey}`);
+      const scan = scanOf(await runScript(repo));
+      expect(scan.status).toBe("clean");
+      expect(scan.incomplete).toBe(false);
+      expect(scan.incomplete_reasons).toEqual([]);
+      expect(scan.read_failures).toEqual({ "edf/superseded-absent": 1 });
+      expect(scan.files).toMatchObject({ edf_bdf: 1, header_read: 1, header_read_failed: 0 });
+      expect(s3.requests).toHaveLength(2);
+    },
+    T,
+  );
+
+  test(
+    "a superseded recording the store refuses (403) or times out on is unread, so unchecked",
+    async () => {
+      fresh();
+      const { repo, oldKey } = replaced(named(1), CLEAN, "symlink");
+      (s3.objects.get(`${ID}/objects/${oldKey}`) as S3Object).status = 403;
+      const scan = scanOf(await runScript(repo));
+      expect(scan.status).toBe("unchecked");
+      expect(scan.incomplete_reasons).toContain("edf-headers-unread");
+      expect(scan.read_failures).toEqual({ "edf/http-403": 1 });
+      expect(scan.files).toMatchObject({ edf_bdf: 2, header_read: 1, header_read_failed: 1 });
+
+      // Only a 404 is absence. A 500 is the store failing, not the object being gone.
+      fresh();
+      const failing = replaced(named(1), CLEAN, "symlink");
+      (s3.objects.get(`${ID}/objects/${failing.oldKey}`) as S3Object).status = 500;
+      const server = scanOf(await runScript(failing.repo));
+      expect(server.status).toBe("unchecked");
+      expect(server.read_failures?.["edf/superseded-absent"]).toBeUndefined();
+    },
+    T,
+  );
+
+  test(
+    "a recording that was only moved keeps its key and costs no extra read; a deleted one counts",
+    async () => {
+      fresh();
+      const moved = new Repo();
+      const key = moved.annexed(PATH, recording(CLEAN), s3, "symlink");
+      moved.commit("first");
+      moved.remove(PATH);
+      // One directory up, so the symlink text (and its blob) differs while the key is the same.
+      moved.link("sub-01/moved_eeg.edf", `../.git/annex/objects/Xz/Qk/${key}/${key}`);
+      moved.commit("move");
+      const scan = scanOf(await runScript(moved));
+      expect(scan.status).toBe("clean");
+      expect(scan.files?.edf_bdf).toBe(1);
+      expect(s3.requests).toHaveLength(1);
+
+      fresh();
+      const deleted = new Repo();
+      deleted.annexed(PATH, recording(named(1)), s3, "symlink");
+      deleted.annexed("sub-02/eeg/sub-02_task-rest_eeg.edf", recording("P02 F X X"), s3, "symlink");
+      deleted.commit("two");
+      deleted.remove(PATH).commit("delete the named one");
+      const gone = scanOf(await runScript(deleted));
+      expect(gone.status).toBe("direct-identifiers");
+      expect(gone.files?.edf_bdf).toBe(2);
+    },
+    T,
+  );
+
+  test(
+    "a recording committed to git directly and replaced is read from its old blob",
+    async () => {
+      fresh();
+      const repo = new Repo();
+      // 2000 bytes against a 1 KB clone bound: the old blob is left behind and must be fetched.
+      repo.file(PATH, recording(named(1))).commit("inline, named");
+      repo.file(PATH, recording(CLEAN)).commit("inline, fixed");
+      const scan = scanOf(await runScript(repo));
+      expect(scan.status).toBe("direct-identifiers");
+      expect(scan.files).toMatchObject({ edf_bdf: 2, header_read: 2 });
+
+      fresh();
+      const twin = new Repo();
+      twin.file(PATH, recording(CLEAN)).commit("inline");
+      twin.file(PATH, recording("P09 F X X")).commit("inline, changed");
+      expect(scanOf(await runScript(twin)).status).toBe("clean");
+    },
+    T,
+  );
+
+  test(
+    "an old annexed recording needs credentials just as a current one does",
+    async () => {
+      fresh();
+      const repo = new Repo();
+      repo.annexed(PATH, recording(named(1)), s3, "symlink");
+      repo.commit("annexed");
+      repo.remove(PATH);
+      repo.file(PATH, recording(CLEAN)).commit("inline replacement");
+      const result = await runScript(repo, {
+        env: { AWS_ACCESS_KEY_ID: undefined, AWS_SECRET_ACCESS_KEY: undefined },
+      });
+      expect(result.report?.error).toBe("credentials-missing");
+      expect(s3.requests).toHaveLength(0);
+    },
+    T,
+  );
+
+  test(
+    "historic blobs that cannot be examined make the walk incomplete, never empty",
+    async () => {
+      fresh();
+      const { repo } = replaced(named(1), CLEAN, "symlink");
+      const walk = (await walkHistory(repo.dir, Date.now() + 30_000)) as HistoryWalk;
+      const head = git(repo.dir, "rev-parse", "HEAD");
+      const tree = (await listTree(repo.dir, head)) as Tree;
+      const reader = new GitBlobReader(repo.dir);
+      await reader.close();
+      const resolved = {
+        entries: [],
+        annexed: 0,
+        inline: 0,
+        unresolved: 0,
+        annexedEdf: 0,
+      };
+      const found = await findSuperseded(
+        repo.dir,
+        walk,
+        resolved,
+        new Set(tree.entries.map((t) => t.oid)),
+        reader,
+      );
+      expect(found.unreadable).toBeGreaterThan(0);
+    },
+    T,
+  );
+
+  test(
+    "walkHistory says null for a directory git cannot read and for a deadline already past",
     async () => {
       const notRepo = tempDir("not-a-repo");
-      expect(await historyPaths(notRepo, Date.now() + 10_000)).toBeNull();
+      expect(await walkHistory(notRepo, Date.now() + 10_000)).toBeNull();
       const repo = cleanDataset();
-      expect(await historyPaths(repo.dir, Date.now() - 1)).toBeNull();
-      expect((await historyPaths(repo.dir, Date.now() + 10_000))?.has("participants.tsv")).toBe(
-        true,
+      expect(await walkHistory(repo.dir, Date.now() - 1)).toBeNull();
+      const walk = await walkHistory(repo.dir, Date.now() + 10_000);
+      expect(walk?.paths.has("participants.tsv")).toBe(true);
+      // Every blob a path held, with full object ids: the symlinks and pointers among them.
+      const recordings = [...(walk?.blobs.values() ?? [])].filter((b) =>
+        /\.(edf|bdf)$/.test(b.path),
       );
+      expect(recordings.map((b) => b.mode).sort()).toEqual([
+        "100644",
+        "100644",
+        "120000",
+        "120000",
+      ]);
+      expect([...(walk?.blobs.keys() ?? [])].every((oid) => /^[0-9a-f]{40}$/.test(oid))).toBe(true);
     },
     T,
   );
@@ -900,6 +1099,53 @@ describe("the screen: when it cannot produce a verdict", () => {
       const noRef = await runScript(repo, { env: { REF: "no-such-branch" } });
       expect(noRef.report?.error).toBe("clone-failed");
       expect(noRef.posted).toHaveLength(1);
+    },
+    T,
+  );
+
+  test(
+    "a submodule is a path the screen cannot read: unchecked, never no-recordings or clean",
+    async () => {
+      /** A gitlink committed from the index: `git add -A` would drop it, there is no checkout. */
+      const withSubmodule = (repo: Repo): Repo => {
+        git(
+          repo.dir,
+          "update-index",
+          "--add",
+          "--cacheinfo",
+          `160000,${"1".repeat(40)},vendor/tool`,
+        );
+        git(repo.dir, "commit", "-q", "-m", "add a submodule");
+        return repo;
+      };
+
+      fresh();
+      const readme = (): Repo => {
+        const repo = new Repo().file("README", "x");
+        repo.commit("readme");
+        return repo;
+      };
+      const only = withSubmodule(readme());
+      const result = await runScript(only);
+      const scan = scanOf(result);
+      expect(scan.status).toBe("unchecked");
+      expect(scan.incomplete).toBe(true);
+      expect(scan.incomplete_reasons).toEqual(["submodule-unread"]);
+      expect(scan.files?.total).toBe(1);
+      expect(result.stdout).toContain("submodules=1");
+
+      // A dataset whose every recording was read is still not clean beside a submodule.
+      fresh();
+      const beside = scanOf(await runScript(withSubmodule(cleanDataset())));
+      expect(beside.status).toBe("unchecked");
+      expect(beside.incomplete_reasons).toEqual(["submodule-unread"]);
+      expect(beside.files?.header_read).toBe(4);
+
+      // Twin: without the submodule the same tree has no recordings and says so.
+      fresh();
+      const none = scanOf(await runScript(readme()));
+      expect(none.status).toBe("no-recordings");
+      expect(none.incomplete).toBe(false);
     },
     T,
   );
@@ -1098,9 +1344,9 @@ describe("log discipline: the Actions log is public", () => {
       expect(lines.length).toBeGreaterThan(0);
       const allowed = [
         /^screen: head [0-9a-f]{7}$/,
-        /^screen: tree files=\d+ annexed=\d+ inline=\d+ unresolved=\d+$/,
+        /^screen: tree files=\d+ annexed=\d+ inline=\d+ unresolved=\d+ submodules=\d+$/,
         /^screen: prefetch blobs=\d+ (ok|incomplete)$/,
-        /^screen: history (paths=\d+|unread)$/,
+        /^screen: history (paths=\d+ superseded=\d+|unread)$/,
         /^screen: done files=\d+ edf_bdf=\d+ header_read=\d+ header_unread=\d+$/,
         /^screen: error=[a-z-]+$/,
         /^callback attempt \d: HTTP \d+$/,
@@ -1705,7 +1951,7 @@ describe("the prefetch of blobs the clone left behind", () => {
       const config = { ...inProcessConfig(repo), blobLimit: "1k" };
       const clone = join(tempDir("clone"), "repo");
       expect((await cloneMetadata(config, clone, 60_000)).ok).toBe(true);
-      const oids = (await listTree(clone, head))?.map((t) => t.oid) as string[];
+      const oids = (await listTree(clone, head))?.entries.map((t) => t.oid) as string[];
       expect(oids).toHaveLength(3);
       // The clone's bound left all three behind: none is here.
       expect([
@@ -1745,7 +1991,7 @@ describe("the prefetch of blobs the clone left behind", () => {
       const config = { ...inProcessConfig(repo), blobLimit: "1k" };
       const clone = join(tempDir("clone"), "repo");
       await cloneMetadata(config, clone, 60_000);
-      const oids = (await listTree(clone, head))?.map((t) => t.oid) as string[];
+      const oids = (await listTree(clone, head))?.entries.map((t) => t.oid) as string[];
       expect(
         await prefetchBlobs(config, clone, oids, {
           deadlineAt: Date.now() - 1,
