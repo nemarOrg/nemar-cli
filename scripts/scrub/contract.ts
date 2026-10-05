@@ -105,6 +105,22 @@ export interface VerifiedFile {
 }
 
 /**
+ * `zarr-verified.json`: proof that every Zarr store root of the dataset carries no identifier key.
+ * It names the exact bytes of the two files it was made from, so a re-plan or a re-run makes an
+ * older proof stale: `planSha256` is the sha256 of plan.json and `zarrPlanSha256` that of the
+ * `zarr-plan.json` the same run wrote. Counts only; the store keys stay in `zarr-plan.json`.
+ */
+export interface ZarrVerifiedFile {
+  version: 1;
+  dataset: string;
+  verifiedAt: string;
+  planSha256: string;
+  zarrPlanSha256: string;
+  /** Every store was clean after the run: `rewritten` had keys removed, `untouched` had none. */
+  counts: { stores: number; rewritten: number; untouched: number };
+}
+
+/**
  * `git-plan.json`: the rewrite of the dataset's git history. Names here may be identifying.
  * `dropPaths` are exact repository paths removed from every commit. `blankJsonKeys` maps an exact
  * path to canonical key spellings (lowercase, no separators) whose values become empty strings.
@@ -154,6 +170,13 @@ export interface LedgerEntry {
 
 function isObject(x: unknown): x is Record<string, unknown> {
   return typeof x === "object" && x !== null && !Array.isArray(x);
+}
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+/** A count: a non-negative whole number. */
+function isCount(x: unknown): x is number {
+  return typeof x === "number" && Number.isSafeInteger(x) && x >= 0;
 }
 
 /** Read a JSON file's text into a typed value, or refuse. `kind` names the file in the error. */
@@ -228,6 +251,33 @@ export function parseVerified(text: string): VerifiedFile {
     throw new ContractError("verified.json does not match the contract");
   }
   return x as unknown as VerifiedFile;
+}
+
+export function parseZarrVerified(text: string): ZarrVerifiedFile {
+  const x = JSON.parse(text) as unknown;
+  if (
+    !isObject(x) ||
+    x.version !== 1 ||
+    typeof x.dataset !== "string" ||
+    typeof x.verifiedAt !== "string" ||
+    typeof x.planSha256 !== "string" ||
+    !SHA256_HEX.test(x.planSha256) ||
+    typeof x.zarrPlanSha256 !== "string" ||
+    !SHA256_HEX.test(x.zarrPlanSha256) ||
+    !isObject(x.counts)
+  ) {
+    throw new ContractError("zarr-verified.json does not match the contract");
+  }
+  const c = x.counts;
+  if (
+    !isCount(c.stores) ||
+    !isCount(c.rewritten) ||
+    !isCount(c.untouched) ||
+    c.rewritten + c.untouched !== c.stores
+  ) {
+    throw new ContractError("zarr-verified.json holds counts that do not add up");
+  }
+  return x as unknown as ZarrVerifiedFile;
 }
 
 export function parseKeymap(text: string): KeymapFile {

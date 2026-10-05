@@ -677,6 +677,24 @@ export async function listCurrentKeys(ctx: S3Ctx, prefix: string): Promise<strin
   });
 }
 
+/** True when at least one CURRENT object lies under the prefix. Reads one entry, not the listing. */
+export async function hasCurrentKey(ctx: S3Ctx, prefix: string): Promise<boolean> {
+  const out = await ctx.aws.api("list-objects-v2", [
+    "--bucket",
+    ctx.bucket,
+    "--prefix",
+    prefix,
+    "--max-items",
+    "1",
+    "--page-size",
+    "1",
+  ]);
+  const raw = out.Contents;
+  if (raw === undefined || raw === null) return false;
+  if (!Array.isArray(raw)) throw new AwsCliError("bad-output", "ListObjectsV2");
+  return raw.length > 0;
+}
+
 export interface RangeOptions {
   versionId?: string;
   ifMatch?: string;

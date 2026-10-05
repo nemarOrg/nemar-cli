@@ -277,10 +277,13 @@ export function seedManifest(
   fixtures: Fixture[],
   extra: Record<string, { key: string; size: number }> = {},
   dataset = DATASET,
+  /** Name each scrubbed file by its NEW key, as a regenerated manifest does (runbook step 9). */
+  afterScrub = false,
 ): void {
   const files: Record<string, { key: string; size: number; checksum: string }> = {};
   for (const f of fixtures) {
-    files[f.filePath] = { key: f.oldKey, size: f.bytes.length, checksum: "unused" };
+    const key = afterScrub && f.newKey ? f.newKey : f.oldKey;
+    files[f.filePath] = { key, size: f.bytes.length, checksum: "unused" };
   }
   for (const [p, e] of Object.entries(extra)) files[p] = { ...e, checksum: "unused" };
   const body = JSON.stringify({ dataset_id: dataset, version: tag, files });
@@ -365,6 +368,14 @@ export async function runScrub(
   args: string[],
   extraEnv: Record<string, string> = {},
 ): Promise<RunResult> {
+  // delete-old makes one anonymous request to a public base URL. A test that forgot to point it
+  // at a local server would reach the real network, so the runner refuses to start it.
+  if (args[0] === "delete-old") {
+    const base = args[args.indexOf("--public-base") + 1] ?? "";
+    if (!/^http:\/\/127\.0\.0\.1:\d+/.test(base)) {
+      throw new Error("a delete-old test must pass --public-base with a local server");
+    }
+  }
   const proc = spawn({
     cmd: ["bun", SCRIPT, ...args],
     cwd: REPO_ROOT,
@@ -378,6 +389,59 @@ export async function runScrub(
     proc.exited,
   ]);
   return { exitCode, stdout, stderr, all: `${stdout}\n${stderr}` };
+}
+
+// ---------------------------------------------------------------------------
+// A stand-in for what an anonymous reader reaches.
+// ---------------------------------------------------------------------------
+
+export interface PublicRequest {
+  method: string;
+  path: string;
+  headers: Record<string, string>;
+}
+
+export interface PublicEndpoint {
+  /** Value for `--public-base`. */
+  url: string;
+  /** The status every request is answered with; 403 is a private dataset. */
+  status: number;
+  requests: PublicRequest[];
+  reset(): void;
+  stop(): void;
+}
+
+/**
+ * A tiny real HTTP server standing in for the public bucket URL. It answers every request with
+ * `status` and keeps what it was sent, so a test can check the request was an anonymous HEAD of
+ * the right key and that the stage acted on the answer.
+ */
+export function startPublicEndpoint(): PublicEndpoint {
+  const ep: PublicEndpoint = {
+    url: "",
+    status: 403,
+    requests: [],
+    reset() {
+      ep.status = 403;
+      ep.requests.length = 0;
+    },
+    stop() {
+      server.stop(true);
+    },
+  };
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const headers: Record<string, string> = {};
+      req.headers.forEach((v, k) => {
+        headers[k] = v;
+      });
+      ep.requests.push({ method: req.method, path: new URL(req.url).pathname, headers });
+      return new Response(null, { status: ep.status });
+    },
+  });
+  ep.url = `http://127.0.0.1:${server.port}`;
+  return ep;
 }
 
 // ---------------------------------------------------------------------------

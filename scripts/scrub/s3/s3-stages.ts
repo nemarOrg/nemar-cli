@@ -40,6 +40,7 @@ import {
   parsePatches,
   parsePlan,
   parseVerified,
+  parseZarrVerified,
 } from "../contract";
 import {
   AwsCliError,
@@ -65,6 +66,7 @@ import {
   formatWordCounts,
   fromHex,
   getRetention,
+  hasCurrentKey,
   headObject,
   isoSeconds,
   listCurrentKeys,
@@ -759,6 +761,13 @@ export async function verifyStage(o: VerifyOptions): Promise<number> {
 export interface DeleteOptions extends CommonOptions {
   dir: string;
   execute: boolean;
+  /** The dataset id, typed again by the operator; must equal the plan's. Required, dry run too. */
+  confirmDataset: string;
+  /**
+   * Where an anonymous reader reaches the bucket, for the one request that proves the dataset is
+   * private. No credentials are ever sent to it. Tests point it at a local server.
+   */
+  publicBase: string;
   /** Proof from the verify stage; a path, relative to `dir` unless absolute. */
   verifiedFile: string;
   /** Proof from the separate re-hash stage on another host. */
@@ -850,8 +859,126 @@ async function listOldKeys(
   return out as KeyVersions[];
 }
 
+/** A stage that reads manifests for a delete refuses where the plan stage would have stopped. */
+function asRefusal(err: unknown): never {
+  if (err instanceof StageError) throw new StageError(err.word, EXIT.refused);
+  throw err;
+}
+
+/**
+ * Every CURRENT manifest must already name only new keys: the manifests are regenerated after
+ * the tags move (runbook step 9), and a manifest still naming an old key would serve a key that
+ * is about to stop existing. Tags are discovered now, not taken from the plan, so a manifest
+ * written since the plan is read too.
+ */
+async function refuseManifestNamingOldKey(
+  ctx: S3Ctx,
+  dataset: string,
+  oldKeys: Set<string>,
+): Promise<void> {
+  let tags: string[];
+  try {
+    tags = await discoverTags(ctx, dataset);
+  } catch (err) {
+    return asRefusal(err);
+  }
+  if (tags.length === 0) throw new StageError("no-manifests", EXIT.refused);
+  for (const tag of tags) {
+    let bytes: Uint8Array;
+    try {
+      bytes = await readWhole(ctx, `${dataset}/version/${tag}.json`);
+    } catch {
+      throw new StageError("manifest-unreadable", EXIT.refused);
+    }
+    let found: ManifestKeys;
+    try {
+      found = keysOfManifest(dataset, Buffer.from(bytes).toString("utf8"));
+    } catch (err) {
+      return asRefusal(err);
+    }
+    for (const k of found.keys) {
+      if (oldKeys.has(k)) throw new StageError("manifest-names-old-key", EXIT.refused);
+    }
+  }
+}
+
+/**
+ * The dataset's Zarr serving copy repeats header fields in every store root, so while any Zarr
+ * object is current the `zarr` stage must have run for THIS plan and left a proof behind.
+ */
+async function requireZarrVerified(dir: string, dataset: string, planBytes: Buffer): Promise<void> {
+  const refuse = () => new StageError("zarr-not-scrubbed", EXIT.refused);
+  let verified: ReturnType<typeof parseZarrVerified>;
+  let zarrPlanBytes: Buffer;
+  try {
+    verified = parseZarrVerified((await readFile(path.join(dir, "zarr-verified.json"))).toString());
+    zarrPlanBytes = await readFile(path.join(dir, "zarr-plan.json"));
+  } catch {
+    throw refuse();
+  }
+  if (
+    verified.dataset !== dataset ||
+    verified.planSha256 !== sha256Hex(planBytes) ||
+    verified.zarrPlanSha256 !== sha256Hex(zarrPlanBytes)
+  ) {
+    throw refuse();
+  }
+}
+
+/** Where an anonymous reader reaches the production bucket. */
+export const DEFAULT_PUBLIC_BASE = "https://nemar.s3.us-east-2.amazonaws.com";
+
+/** The status of an anonymous HEAD, or null when there was none (network, timeout). */
+async function anonymousHeadStatus(url: string, timeoutMs: number): Promise<number | null> {
+  try {
+    // No credentials, and a redirect is an answer, not something to follow: S3 sends 301 to a
+    // caller using the wrong regional endpoint.
+    const res = await fetch(url, {
+      method: "HEAD",
+      redirect: "manual",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return res.status;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The dataset must be private before its old bytes go, so there is no window in which an old key
+ * is public while a new one is not yet served. The proof is one anonymous HEAD of one old object
+ * that EXISTS: this bucket denies anonymous listing, so a missing key answers 403 whether or not
+ * the dataset is public, and only a key known to exist makes 403 mean private.
+ */
+async function requirePrivate(
+  ctx: S3Ctx,
+  o: DeleteOptions,
+  dataset: string,
+  oldKeys: string[],
+): Promise<void> {
+  let probe: string | undefined;
+  for (const k of oldKeys) {
+    if (await headObject(ctx, objectKey(dataset, k))) {
+      probe = k;
+      break;
+    }
+  }
+  if (probe === undefined) throw new StageError("privacy-unproven", EXIT.refused);
+  const url = `${o.publicBase.replace(/\/+$/, "")}/${objectKey(dataset, probe)}`;
+  const status = await anonymousHeadStatus(url, o.timeoutMs);
+  if (status === 403) return;
+  if (status === 200) throw new StageError("dataset-is-public", EXIT.refused);
+  throw new StageError("privacy-unproven", EXIT.refused);
+}
+
 export async function deleteOldStage(o: DeleteOptions): Promise<number> {
-  const plan = await loadFile(o.dir, "plan.json", parsePlan);
+  const planBytes = await readBytes(path.join(o.dir, "plan.json"), "plan.json");
+  const plan = parseFile("plan.json", parsePlan, planBytes.toString("utf8"));
+  // Typed again by the operator, before anything else is read: a stage that deletes names its
+  // target twice. Applies to the dry run too, so a wrong working directory shows up early.
+  if (o.confirmDataset !== plan.dataset) {
+    throw new StageError("confirm-dataset-mismatch", EXIT.refused);
+  }
   const assembledBytes = await readBytes(path.join(o.dir, "assembled.json"), "assembled.json");
   const assembled = parseFile("assembled.json", parseAssembled, assembledBytes.toString("utf8"));
   const sha = sha256Hex(assembledBytes);
@@ -907,6 +1034,17 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
       return head !== null && head.size === parseKey(k).size;
     });
     if (missing.some((ok) => ok !== true)) throw new StageError("new-object-missing", EXIT.refused);
+
+    // What must be true of the rest of the dataset before an old key may go. All of it is read
+    // only, and all of it runs in the dry run, so a refusal is seen before --execute is typed.
+    await refuseManifestNamingOldKey(ctx, dataset, new Set(oldKeys));
+    if (await hasCurrentKey(ctx, `${dataset}/archives/`)) {
+      throw new StageError("archives-not-dropped", EXIT.refused);
+    }
+    if (await hasCurrentKey(ctx, `${dataset}/zarr/`)) {
+      await requireZarrVerified(o.dir, dataset, planBytes);
+    }
+    await requirePrivate(ctx, o, dataset, oldKeys);
 
     const listed = await listOldKeys(ctx, dataset, oldKeys, o.concurrency);
     const totalVersions = listed.reduce((n, l) => n + l.versions.length, 0);

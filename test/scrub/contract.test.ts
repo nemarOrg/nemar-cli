@@ -11,6 +11,7 @@ import {
   parseKeymap,
   parsePatches,
   parsePlan,
+  parseZarrVerified,
 } from "../../scripts/scrub/contract";
 
 const H1 = "a".repeat(64);
@@ -113,5 +114,31 @@ describe("stage files", () => {
     ).toThrow(ContractError);
     const plan = { version: 1, dataset: "d", keys: [{ oldKey: OLD }] };
     expect(parsePlan(JSON.stringify(plan)).keys.length).toBe(1);
+  });
+
+  test("zarr-verified.json: bound to two files by sha256, counts that add up", () => {
+    const ok = {
+      version: 1,
+      dataset: "nm1",
+      verifiedAt: "2026-10-04T00:00:00Z",
+      planSha256: H1,
+      zarrPlanSha256: H2,
+      counts: { stores: 3, rewritten: 2, untouched: 1 },
+    };
+    expect(parseZarrVerified(JSON.stringify(ok)).counts.stores).toBe(3);
+    const bad = (over: Record<string, unknown>) => JSON.stringify({ ...ok, ...over });
+    for (const over of [
+      { version: 2 },
+      { dataset: 7 },
+      { planSha256: "abc" },
+      { planSha256: H1.toUpperCase() },
+      { zarrPlanSha256: undefined },
+      { counts: { stores: 3, rewritten: 1, untouched: 1 } },
+      { counts: { stores: -1, rewritten: -1, untouched: 0 } },
+      { counts: { stores: 1.5, rewritten: 1.5, untouched: 0 } },
+      { counts: null },
+    ]) {
+      expect(() => parseZarrVerified(bad(over)), JSON.stringify(over)).toThrow(ContractError);
+    }
   });
 });

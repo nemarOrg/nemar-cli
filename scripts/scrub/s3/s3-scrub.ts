@@ -5,9 +5,9 @@
  *   plan       --dataset ID --out DIR [--tags v1,v2] [--bucket nemar]
  *   assemble   --dir DIR [--execute] [--concurrency 4]
  *   verify     --dir DIR [--samples 8]
- *   delete-old --dir DIR [--execute] [--verified verified.json]
+ *   delete-old --dir DIR --confirm-dataset ID [--execute] [--verified verified.json]
  *              [--hash-verified new-hash-verified.json] [--max-delete N]
- *              [--prune-noncurrent <prefix>]... [--max-prune N]
+ *              [--prune-noncurrent <prefix>]... [--max-prune N] [--public-base URL]
  *   canary     --prefix <id>/canary-<random>/ [--execute] [--multipart] [--bucket nemar]
  *
  * Every subcommand is read-only unless it is given `--execute`; `plan` and `verify` have no
@@ -34,6 +34,7 @@ import {
 } from "./s3-lib";
 import {
   type CommonOptions,
+  DEFAULT_PUBLIC_BASE,
   assembleStage,
   canaryStage,
   deleteOldStage,
@@ -45,8 +46,12 @@ const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|canary> [opti
   plan       --dataset ID --out DIR [--tags v1,v2] [--bucket nemar] [--concurrency 8]
   assemble   --dir DIR [--execute] [--concurrency 4] [--max-part-bytes N]
   verify     --dir DIR [--samples 8] [--concurrency 4]
-  delete-old --dir DIR [--execute] [--verified F] [--hash-verified F] [--max-delete N]
-             [--prune-noncurrent PREFIX]... [--max-prune N]
+  delete-old --dir DIR --confirm-dataset ID [--execute] [--verified F] [--hash-verified F]
+             [--max-delete N] [--prune-noncurrent PREFIX]... [--max-prune N] [--public-base URL]
+             --confirm-dataset: the dataset id again, required even for the dry run.
+             --public-base: where an anonymous HEAD proves the dataset is private
+             (default ${DEFAULT_PUBLIC_BASE}); it must answer 403.
+             PREFIX is exactly ID/version/, ID/archives/ or ID/zarr/.
   canary     --prefix ID/canary-RANDOM/ [--execute] [--multipart] [--bucket nemar]
 common: --region us-east-2  --timeout-sec 120`;
 
@@ -62,6 +67,8 @@ const OPTIONS = {
   "hash-verified": { type: "string" },
   "max-delete": { type: "string" },
   "max-prune": { type: "string" },
+  "confirm-dataset": { type: "string" },
+  "public-base": { type: "string" },
   "max-part-bytes": { type: "string" },
   "prune-noncurrent": { type: "string", multiple: true },
   concurrency: { type: "string" },
@@ -161,10 +168,14 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
         concurrency: concurrency(4),
         samples: intFlag(v.samples, "samples", DEFAULT_SAMPLES, 1),
       });
-    case "delete-old":
+    case "delete-old": {
+      const publicBase = v["public-base"] ?? DEFAULT_PUBLIC_BASE;
+      if (!/^https?:\/\/[^\s/?#]+(\/[^\s?#]*)?$/.test(publicBase)) usage("bad-public-base");
       return deleteOldStage({
         ...opts,
         dir: need(v.dir, "dir"),
+        confirmDataset: need(v["confirm-dataset"], "confirm-dataset"),
+        publicBase,
         execute,
         verifiedFile: v.verified ?? "verified.json",
         hashVerifiedFile: v["hash-verified"] ?? "new-hash-verified.json",
@@ -174,6 +185,7 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
         prune: v["prune-noncurrent"] ?? [],
         concurrency: concurrency(4),
       });
+    }
     case "canary":
       return canaryStage({
         ...opts,
