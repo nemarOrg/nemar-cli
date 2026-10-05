@@ -1227,7 +1227,7 @@ describe("verify-new: the recorded version", () => {
       expect(run.code).toBe(2);
       expect(run.stderr).toContain("names {version}");
       const doc = readJson<AssembledFile>(s.assembled);
-      delete (Object.values(doc.entries)[0] as { newVersionId?: string }).newVersionId;
+      (Object.values(doc.entries)[0] as { newVersionId?: string }).newVersionId = undefined;
       writeFileSync(s.assembled, JSON.stringify(doc));
       expect((await py(verifyArgs(s))).code).toBe(2);
       expect(existsSync(s.proof)).toBe(false);

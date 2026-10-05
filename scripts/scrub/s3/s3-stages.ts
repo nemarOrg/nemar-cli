@@ -1057,14 +1057,14 @@ export const TEST_LOOPBACK_PUBLIC_BASE_ENV = "SCRUB_S3_TEST_LOOPBACK_PUBLIC_BASE
  * host that answers 403 to everything would otherwise satisfy the privacy gate.
  */
 export function checkPublicBase(base: string, bucket: string): void {
-  const bad = (): never => {
+  function bad(): never {
     throw new StageError("bad-public-base", EXIT.usage);
-  };
+  }
   let u: URL;
   try {
     u = new URL(base);
   } catch {
-    return bad();
+    bad();
   }
   if (u.username !== "" || u.password !== "" || u.search !== "" || u.hash !== "") bad();
   const path = u.pathname.replace(/\/+$/, "");

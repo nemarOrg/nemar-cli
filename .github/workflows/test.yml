@@ -408,6 +408,11 @@ jobs:
           uv --version
           aws --version
 
+      # The lint job's filters do not match a scrub-only change, and `bun run lint` covers
+      # src/ only, so the scrub tools are linted here.
+      - name: Lint the scrub toolchain
+        run: bun run lint:scrub
+
       - name: Scrub toolchain and scanner suites
         env:
           NEMAR_REQUIRE_SCRUB_TOOLS: "1"

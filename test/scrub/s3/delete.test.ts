@@ -364,7 +364,7 @@ describe("delete-old: refusals", () => {
     async () => {
       // Reviewer probe T4: without a version id the HEAD would check whatever is current.
       const copy = readJson<AssembledFile>(dir, "assembled.json");
-      delete (copy.entries[a.oldKey] as { newVersionId?: string }).newVersionId;
+      (copy.entries[a.oldKey] as { newVersionId?: string }).newVersionId = undefined;
       writeJson(dir, "assembled.json", copy);
       writeProofs();
       for (const flag of [[], ["--execute"]]) {
