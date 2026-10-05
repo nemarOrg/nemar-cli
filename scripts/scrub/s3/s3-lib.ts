@@ -739,6 +739,8 @@ export async function headObject(
 export interface VersionEntry {
   versionId: string;
   isLatest: boolean;
+  /** Bytes, for a version; absent for a delete marker. */
+  size?: number;
 }
 
 export interface VersionListing {
@@ -755,7 +757,12 @@ function entriesOf(raw: unknown, key: string): VersionEntry[] {
     if (e.Key !== key) continue;
     const id = str(e.VersionId);
     if (id === undefined) throw new AwsCliError("bad-output", "ListObjectVersions");
-    out.push({ versionId: id, isLatest: e.IsLatest === true });
+    const size = typeof e.Size === "number" ? e.Size : undefined;
+    out.push({
+      versionId: id,
+      isLatest: e.IsLatest === true,
+      ...(size === undefined ? {} : { size }),
+    });
   }
   return out;
 }
@@ -845,7 +852,14 @@ export async function listPrefixVersions(
       if (key === undefined || id === undefined) {
         throw new AwsCliError("bad-output", "ListObjectVersions");
       }
-      return { key, versionId: id, isLatest: e.IsLatest === true, kind };
+      const size = typeof e.Size === "number" ? e.Size : undefined;
+      return {
+        key,
+        versionId: id,
+        isLatest: e.IsLatest === true,
+        kind,
+        ...(size === undefined ? {} : { size }),
+      };
     });
   };
   return pages.flatMap((p) => [
@@ -1229,6 +1243,31 @@ export async function completeMultipart(
     ],
     { slow: true },
   );
+}
+
+/**
+ * The multipart uploads open on EXACTLY `key` (one page: an upload left by a failed create is
+ * one or two, never a thousand). Used to find an upload a create left behind when its answer was
+ * lost, so it can be reported by key and upload id.
+ */
+export async function listOpenUploads(ctx: S3Ctx, key: string): Promise<string[]> {
+  const out = await ctx.aws.api("list-multipart-uploads", [
+    "--bucket",
+    ctx.bucket,
+    "--prefix",
+    key,
+    "--no-paginate",
+  ]);
+  const raw = out.Uploads;
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw new AwsCliError("bad-output", "ListMultipartUploads");
+  return (raw as Array<Record<string, unknown>>)
+    .filter((u) => u.Key === key)
+    .map((u) => {
+      const id = str(u.UploadId);
+      if (!id) throw new AwsCliError("bad-output", "ListMultipartUploads");
+      return id;
+    });
 }
 
 export async function abortMultipart(ctx: S3Ctx, key: string, uploadId: string): Promise<void> {

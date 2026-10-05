@@ -53,6 +53,7 @@ import {
   startPublicEndpoint,
   verifyArgs,
   withCtx,
+  writeGitVerified,
   writeJson,
 } from "./support";
 
@@ -106,12 +107,12 @@ async function proveZarr(over: Partial<ZarrVerifiedFile> = {}) {
 const dirtyStore = JSON.stringify({
   zarr_format: 3,
   node_type: "group",
-  attributes: { recording_metadata: { patientcode: "P0042", gender: "F" } },
+  attributes: { recording_metadata: { patientcode: "P0042", startdate: "02.02.20" } },
 });
 const cleanStore = JSON.stringify({
   zarr_format: 3,
   node_type: "group",
-  attributes: { recording_metadata: { gender: "F" } },
+  attributes: { recording_metadata: { startdate: "02.02.20" } },
 });
 
 const deleteArgs = (extra: string[] = [], publicBase: string = pub.url) => [
@@ -170,6 +171,8 @@ beforeAll(async () => {
     assembledSha256: sha,
     count: 2,
   });
+  // Runbook step 14 has run: a fresh clone of the pushed repository verified.
+  writeGitVerified(built.dir);
   snap = standin.snapshot();
 }, SLOW);
 
@@ -305,6 +308,7 @@ describe("delete-old: refusals", () => {
       const entry = plan.keys.find((k) => k.oldKey === a.oldKey) as PlanFile["keys"][number];
       entry.versionIds = [...entry.versionIds.slice(1), "standin-v-not-a-real-id"];
       writeFileSync(path.join(dir, "plan.json"), JSON.stringify(plan));
+      writeGitVerified(dir); // the git proof names the plan's bytes
       expectStopped(await runScrub(standin, deleteArgs()), 3, "version-not-in-plan", "swapped");
       expectOldIntact();
     },
@@ -409,6 +413,7 @@ describe("delete-old: refusals", () => {
           .filter((k) => k.needsScrub)
           .reduce((n, k) => n + k.size, 0);
         writeFileSync(planPath, JSON.stringify(plan));
+        writeGitVerified(dir); // the git proof names the plan's bytes
       };
       setNeedsScrub(false);
       const notPlanned = await runScrub(standin, executeArgs());
@@ -896,6 +901,7 @@ describe("delete-old: what must be true before an old key may go", () => {
         const plan = readJson<PlanFile>(dir, "plan.json");
         (plan.keys.find((k) => k.oldKey === key) as PlanFile["keys"][number]).versionIds.push(id);
         writeFileSync(path.join(dir, "plan.json"), JSON.stringify(plan));
+        writeGitVerified(dir); // the git proof names the plan's bytes
       };
       recordMarker(firstKey);
       const ok = await runScrub(standin, deleteArgs());
@@ -1003,10 +1009,14 @@ describe("delete-old: what must be true before an old key may go", () => {
       await refused("zarr-not-scrubbed", { execute: false });
       await proveZarr({ zarrPlanSha256: "0".repeat(64) });
       await refused("zarr-not-scrubbed", { execute: false });
-      await proveZarr({ counts: { stores: 5, rewritten: 1, untouched: 1 } });
+      await proveZarr({ counts: { stores: 5, docs: 5, rewritten: 1, untouched: 1 } });
       await refused("zarr-not-scrubbed", { execute: false });
       // A well-formed proof that the prefix was empty says nothing about the objects there now.
-      await proveZarr({ found: "no-zarr", counts: { stores: 0, rewritten: 0, untouched: 0 } });
+      await proveZarr({
+        found: "no-zarr",
+        stores: [],
+        counts: { stores: 0, docs: 0, rewritten: 0, untouched: 0 },
+      });
       await refused("zarr-not-scrubbed", { execute: false });
       writeJson(dir, "zarr-verified.json", { version: 1 });
       await refused("zarr-not-scrubbed", { execute: false });
@@ -1058,6 +1068,15 @@ describe("delete-old: what must be true before an old key may go", () => {
       standin.restore(snap);
       standin.putObject(BUCKET, `${DATASET}/objects/not-a-key.bdf`, body("x"));
       await refused("unplanned-recording", { execute: false });
+      // A recording whose current entry is a delete marker is still bytes in a locked version:
+      // the listing is of versions and markers, so it is seen too (C3).
+      standin.restore(snap);
+      standin.putObject(BUCKET, objectPath(late.oldKey), late.bytes, {
+        lockUntil: centuryFromNow(),
+      });
+      standin.putDeleteMarker(BUCKET, objectPath(late.oldKey));
+      expect(standin.current(BUCKET, objectPath(late.oldKey))).toBeUndefined();
+      await refused("unplanned-recording");
       // Not a recording: not this check's business.
       standin.restore(snap);
       standin.putObject(BUCKET, `${DATASET}/objects/SHA256E-s1--${"9".repeat(64)}.json`, body("x"));
@@ -1167,6 +1186,150 @@ describe("delete-old: what must be true before an old key may go", () => {
         expect(() => checkPublicBase(base, "nemar"), base).not.toThrow();
       }
       expect(() => checkPublicBase(DEFAULT_PUBLIC_BASE, "other")).toThrow(StageError);
+    },
+    SLOW,
+  );
+});
+
+describe("delete-old: every file names the same dataset, bucket and bytes (I11, T4)", () => {
+  const body = (text: string) => new TextEncoder().encode(text);
+
+  test(
+    "refuses without a git proof of a fresh clone, or with one that is stale",
+    async () => {
+      writeProofs();
+      rmSync(path.join(dir, "git-verified.json"));
+      expectStopped(await runScrub(standin, executeArgs()), 3, "git-proof-missing");
+      // Strict parser: an extra field is not the file git-scrub writes.
+      writeGitVerified(dir);
+      const extra = { ...readJson<Record<string, unknown>>(dir, "git-verified.json"), more: 1 };
+      writeJson(dir, "git-verified.json", extra);
+      expectStopped(await runScrub(standin, executeArgs()), 3, "git-proof-invalid");
+      // A local verify is not a verify of what was pushed.
+      writeGitVerified(dir, { mode: "local" });
+      expectStopped(await runScrub(standin, executeArgs()), 3, "git-proof-stale");
+      // Another keymap, another plan.
+      writeGitVerified(dir, { keymapSha256: "b".repeat(64) });
+      expectStopped(await runScrub(standin, executeArgs()), 3, "git-proof-stale", "keymap");
+      writeGitVerified(dir, { s3PlanSha256: "c".repeat(64) });
+      expectStopped(await runScrub(standin, executeArgs()), 3, "git-proof-stale", "plan");
+      writeGitVerified(dir, { dataset: "xx090412" });
+      expectStopped(await runScrub(standin, executeArgs()), 3, "proof-wrong-dataset", "dataset");
+      // The keymap the proof names must be this assembly's.
+      const keymap = readJson<Record<string, string>>(dir, "keymap.json");
+      writeJson(dir, "keymap.json", { ...keymap, [a.oldKey]: b.newKey });
+      writeGitVerified(dir);
+      expectStopped(await runScrub(standin, executeArgs()), 3, "keymap-mismatch");
+      expectOldIntact();
+      expect(standin.log.length).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "the plan's dataset and bucket are compared with assembled.json and each proof, pair by pair",
+    async () => {
+      const assembled = readJson<AssembledFile>(dir, "assembled.json");
+      const refuse = async (word: string, label: string) => {
+        writeProofs();
+        writeGitVerified(dir);
+        expectStopped(await runScrub(standin, executeArgs()), 3, word, label);
+        writeJson(dir, "assembled.json", assembled);
+      };
+      writeJson(dir, "assembled.json", { ...assembled, dataset: "xx090412" });
+      await refuse("assembled-wrong-dataset", "assembled dataset");
+      writeJson(dir, "assembled.json", { ...assembled, bucket: "other-bucket" });
+      await refuse("assembled-wrong-bucket", "assembled bucket");
+      // Each proof's dataset on its own, with everything else right.
+      writeProofs();
+      writeJson(dir, "verified.json", {
+        ...readJson<Record<string, unknown>>(dir, "verified.json"),
+        dataset: "xx090412",
+      });
+      expectStopped(await runScrub(standin, executeArgs()), 3, "proof-wrong-dataset", "verified");
+      writeProofs();
+      writeJson(dir, "new-hash-verified.json", {
+        ...readJson<Record<string, unknown>>(dir, "new-hash-verified.json"),
+        dataset: "xx090412",
+      });
+      expectStopped(await runScrub(standin, executeArgs()), 3, "proof-wrong-dataset", "hash");
+      expectOldIntact();
+      expect(standin.log.length).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "a current manifest that cannot be read, and no manifest at all, are refusals (T1)",
+    async () => {
+      writeProofs();
+      const manifest = `${DATASET}/version/v1.0.0.json`;
+      standin.inject("GetObject", { code: "InternalError", status: 500, key: manifest });
+      expectStopped(await runScrub(standin, deleteArgs()), 3, "manifest-unreadable");
+      standin.restore(snap);
+      standin.putDeleteMarker(BUCKET, manifest);
+      expectStopped(await runScrub(standin, deleteArgs()), 3, "no-manifests");
+      expectOldIntact();
+    },
+    SLOW,
+  );
+
+  test(
+    "an older version of an old key that is not the key's size is refused (T10)",
+    async () => {
+      writeProofs();
+      // Recorded by the plan (so version-not-in-plan does not fire first), and the wrong size.
+      const odd = standin.putObject(BUCKET, objectPath(a.oldKey), new Uint8Array(1234), {
+        lockUntil: centuryFromNow(),
+      });
+      const plan = readJson<PlanFile>(dir, "plan.json");
+      (plan.keys.find((k) => k.oldKey === a.oldKey) as PlanFile["keys"][number]).versionIds.push(
+        odd,
+      );
+      writeJson(dir, "plan.json", plan);
+      writeGitVerified(dir);
+      // The odd version is now current; put a right-sized one on top so only an OLDER one is odd.
+      standin.putObject(BUCKET, objectPath(a.oldKey), a.bytes, { lockUntil: centuryFromNow() });
+      const top = standin.versions(BUCKET, objectPath(a.oldKey)).at(-1)?.versionId as string;
+      const plan2 = readJson<PlanFile>(dir, "plan.json");
+      (plan2.keys.find((k) => k.oldKey === a.oldKey) as PlanFile["keys"][number]).versionIds.push(
+        top,
+      );
+      writeJson(dir, "plan.json", plan2);
+      writeGitVerified(dir);
+      const r = await runScrub(standin, executeArgs());
+      expectStopped(r, 3, "version-size-differs");
+      expect(r.stdout).toContain("1 versions of old keys are not the size their key declares");
+      expect(standin.calls("DeleteObject").length).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "an archive that appears during the run is found by the final listing: no deleted.json (T5)",
+    async () => {
+      writeProofs();
+      // Between the last precondition and the final listing: while the deletes run.
+      standin.beforeOp("DeleteObject", () => {
+        standin.putObject(BUCKET, `${DATASET}/archives/${DATASET}.zip`, body("zip"));
+      });
+      const r = await runScrub(standin, executeArgs());
+      expect(r.exitCode, r.all).toBe(5);
+      expect(r.stdout).toContain("history-remains");
+      expect(r.stdout).toContain("archives=1");
+      expect(has(dir, "deleted.json")).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
+    "a deleted.json from an earlier run does not outlive a run that refuses",
+    async () => {
+      writeProofs();
+      writeJson(dir, "deleted.json", { stale: true });
+      rmSync(path.join(dir, "verified.json"));
+      expectStopped(await runScrub(standin, executeArgs()), 3, "verified.json-missing");
+      expect(has(dir, "deleted.json")).toBe(false);
     },
     SLOW,
   );

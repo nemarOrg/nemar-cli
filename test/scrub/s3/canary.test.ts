@@ -9,8 +9,18 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createAwsRunner, isoSeconds, putObjectLocked } from "../../../scripts/scrub/s3/s3-lib";
 import { type S3Standin, startS3Standin } from "../helpers/s3-standin";
-import { expectStopped } from "./refusal";
-import { BUCKET, DATASET, MIB, SLOW, awsTestEnv, runScrub, tempDir, withCtx } from "./support";
+import { expectStopped, expectUsage } from "./refusal";
+import {
+  BUCKET,
+  DATASET,
+  MIB,
+  SLOW,
+  awsTestEnv,
+  diag,
+  runScrub,
+  tempDir,
+  withCtx,
+} from "./support";
 
 let standin: S3Standin;
 afterEach(() => standin?.stop());
@@ -60,8 +70,10 @@ describe("canary", () => {
       ]) {
         for (const extra of [[], ["--execute"]]) {
           const r = await runScrub(standin, canary(extra, bad));
-          expect(r.exitCode, `${JSON.stringify(bad)} ${extra}: ${r.all}`).not.toBe(0);
-          expect([2, 3]).toContain(r.exitCode);
+          const label = `${JSON.stringify(bad)} ${extra}`;
+          // The exact word: an empty prefix is a usage error, every other one a refusal.
+          if (bad === "") expectUsage(r, "missing-prefix", label);
+          else expectStopped(r, 3, "prefix-not-canary", label);
         }
       }
       expect(standin.log.length).toBe(0);
@@ -92,7 +104,7 @@ describe("canary", () => {
     async () => {
       standin = startS3Standin();
       const r = await runScrub(standin, canary());
-      expect(r.exitCode, r.all).toBe(0);
+      expect(r.exitCode, diag(r, standin)).toBe(0);
       expect(r.stdout).toContain("dry run");
       expect(r.stdout).toContain("WITHOUT the bypass");
       expect(r.stdout).toContain("WITH the bypass");
@@ -111,7 +123,7 @@ describe("canary", () => {
         lockSeen = standin.versions(BUCKET, `${prefix}probe.txt`)[0]?.lock;
       });
       const r = await runScrub(standin, canary(["--execute"]));
-      expect(r.exitCode, r.all).toBe(0);
+      expect(r.exitCode, diag(r, standin)).toBe(0);
       expect(r.stdout).toContain("without the bypass was refused");
       expect(r.stdout).toContain("with the bypass succeeded");
       expect(r.stdout).toContain("zero versions and zero delete markers remain");
@@ -176,7 +188,7 @@ describe("canary", () => {
       const r = await runScrub(standin, canary(["--execute", "--multipart"]), {
         AWS_REQUEST_CHECKSUM_CALCULATION: "when_required",
       });
-      expect(r.exitCode, r.all).toBe(0);
+      expect(r.exitCode, diag(r, standin)).toBe(0);
       const parts = standin.calls("UploadPart");
       expect(parts.length).toBe(1);
       expect(parts[0]?.status).toBe(200);
@@ -276,7 +288,7 @@ describe("canary", () => {
       const r = await runScrub(standin, canary(["--execute"]), {
         AWS_REQUEST_CHECKSUM_CALCULATION: "when_required",
       });
-      expect(r.exitCode, r.all).toBe(0);
+      expect(r.exitCode, diag(r, standin)).toBe(0);
       const puts = standin.calls("PutObject").filter((p) => p.key === `${prefix}probe.txt`);
       expect(puts.length).toBe(1);
       expect([puts[0]?.status, puts[0]?.checksum]).toEqual([200, true]);
@@ -318,7 +330,7 @@ describe("canary", () => {
         5,
       );
       const r = await runScrub(standin, canary(["--execute", "--multipart"]));
-      expect(r.exitCode, r.all).toBe(0);
+      expect(r.exitCode, diag(r, standin)).toBe(0);
       expect(r.stdout).toContain("multipart object built with the lock set at create");
 
       expect(standin.calls("CreateMultipartUpload").length).toBe(1);
@@ -353,7 +365,7 @@ describe("canary", () => {
     async () => {
       standin = startS3Standin();
       const r = await runScrub(standin, canary(["--execute"]));
-      expect(r.exitCode, r.all).toBe(0);
+      expect(r.exitCode, diag(r, standin)).toBe(0);
       expect(r.stdout).toContain("a put conditional on the current ETag succeeded");
       expect(r.stdout).toContain("a put and a get conditional on a stale ETag were refused");
       const key = `${prefix}conditional.json`;
@@ -410,6 +422,24 @@ describe("canary", () => {
       });
       const right = await runScrub(standin, canary(["--execute"]));
       expectStopped(right, 1, "conditional-put-failed:PutObject:precondition-failed");
+    },
+    SLOW,
+  );
+});
+
+describe("canary: an abort that fails is said, never swallowed (S1)", () => {
+  test(
+    "a failed part copy whose abort also fails names the key and the upload id",
+    async () => {
+      standin = startS3Standin();
+      standin.inject("UploadPartCopy", { code: "InternalError", status: 500 });
+      standin.inject("AbortMultipartUpload", { code: "InternalError", status: 500 });
+      const r = await runScrub(standin, canary(["--execute", "--multipart"]));
+      expectStopped(r, 1, "UploadPartCopy:failed+abort-failed");
+      expect(r.stdout, diag(r, standin)).toMatch(
+        /canary: abort-failed key=xx090411\/canary-k3x9q2\/multipart\.bin uploadId=upload-standin-v\d+ \(AbortMultipartUpload:failed\)/,
+      );
+      expect(standin.openUploads()).toBe(1);
     },
     SLOW,
   );

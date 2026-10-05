@@ -25,6 +25,7 @@ import {
   objectPath,
   planArgs,
   readJson,
+  rebindPatches,
   runScrub,
   seedManifest,
   seedObject,
@@ -141,6 +142,8 @@ describe("plan, hash and assemble, chained", () => {
         ...patches,
         [a.oldKey]: Buffer.from(other.subarray(0, 256)).toString("hex"),
       });
+      // As that later plan run would have written its plan.json beside it.
+      rebindPatches(dir);
 
       // The hashes in hand are for the first patch: assemble refuses, and nothing was written.
       expectStopped(await runScrub(standin, assembleArgs(dir)), 3, "hashes-stale");

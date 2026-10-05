@@ -240,7 +240,23 @@ function stage(ws: Workspace, items: Staged[], opts: { bucket?: string } = {}): 
     if (i.patched !== false) patches[i.obj.oldKey] = i.obj.patch.toString("hex");
     if (!i.absent) store(ws, i.obj.oldKey, i.obj.content);
   }
-  writeFileSync(ws.patches, JSON.stringify(patches));
+  writePatches(ws, JSON.stringify(patches));
+}
+
+/**
+ * Write patches.json and bind plan.json to its exact bytes, as the plan stage does, so a test that
+ * changes the patches reaches the check it is about rather than `patches-stale`.
+ */
+function writePatches(ws: Workspace, text: string): void {
+  writeFileSync(ws.patches, text);
+  let plan: PlanFile;
+  try {
+    plan = JSON.parse(readFileSync(ws.plan, "utf8")) as PlanFile;
+  } catch {
+    return;
+  }
+  plan.patchesSha256 = sha256(Buffer.from(text, "utf8"));
+  writeFileSync(ws.plan, JSON.stringify(plan));
 }
 
 /** What an entry must name for a patch: the sha256 of its 512 hex characters, computed here. */
@@ -537,7 +553,7 @@ describe("compute: which keys are read", () => {
       stage(ws, [{ obj: needed }, { obj: unread, needsScrub: false, status: "unreadable" }]);
       installSource(ws, LOGGING_SOURCE);
       const run = await py(computeArgs(ws));
-      expect(run.code, run.stderr).toBe(2);
+      expect(run.code, run.stderr).toBe(3);
       expect(run.stderr).toContain("the plan is incomplete");
       expect(readLog(ws)).toEqual([]);
       expect(existsSync(ws.hashes)).toBe(false);
@@ -545,7 +561,7 @@ describe("compute: which keys are read", () => {
       stage(ws, [{ obj: needed }]);
       writeFileSync(ws.plan, JSON.stringify({ ...readJson<PlanFile>(ws.plan), partial: true }));
       const partial = await py(computeArgs(ws));
-      expect(partial.code, partial.stderr).toBe(2);
+      expect(partial.code, partial.stderr).toBe(3);
       expect(partial.stderr).toContain("partial");
       expect(readLog(ws)).toEqual([]);
     },
@@ -596,7 +612,7 @@ describe("compute: which keys are read", () => {
       for (const [label, edited] of cases) {
         writeFileSync(ws.plan, JSON.stringify(edited));
         const run = await py(computeArgs(ws));
-        expect(run.code, label).toBe(2);
+        expect(run.code, label).toBe(3);
         expect(existsSync(ws.hashes), label).toBe(false);
       }
     },
@@ -631,7 +647,7 @@ describe("compute: which keys are read", () => {
       // A well-formed inline entry: the plan parses, and is incomplete, so nothing is read.
       withEntry(inline);
       const incomplete = await py(computeArgs(ws));
-      expect(incomplete.code, incomplete.stderr).toBe(2);
+      expect(incomplete.code, incomplete.stderr).toBe(3);
       expect(incomplete.stderr).toContain("the plan is incomplete");
       expect(readLog(ws)).toEqual([]);
 
@@ -645,7 +661,7 @@ describe("compute: which keys are read", () => {
         withEntry(entry);
         rmSync(ws.hashes, { force: true });
         const refused = await py(computeArgs(ws));
-        expect(refused.code, JSON.stringify(entry)).toBe(2);
+        expect(refused.code, JSON.stringify(entry)).toBe(3);
         expect(existsSync(ws.hashes)).toBe(false);
       }
     },
@@ -682,7 +698,7 @@ describe("compute: resuming and parallelism", () => {
       installSource(ws, LOGGING_SOURCE);
 
       const first = await py(computeArgs(ws, ["--workers", "1", "--limit", "2"]));
-      expect(first.code, first.stderr).toBe(3); // stopped by --limit with keys left
+      expect(first.code, first.stderr).toBe(4); // stopped by --limit with keys left
       expect(Object.keys(readJson<HashesFile>(ws.hashes).entries)).toHaveLength(2);
       expect(readLog(ws)).toHaveLength(2);
 
@@ -717,8 +733,8 @@ describe("compute: resuming and parallelism", () => {
       // and its new key is for the new patch.
       const a2 = repatch(a, edfHeader("Y Y Y Y", "Startdate Y Y Y Y"));
       expect(a2.newKey).not.toBe(a.newKey);
-      writeFileSync(
-        ws.patches,
+      writePatches(
+        ws,
         JSON.stringify({
           [a.oldKey]: a2.patch.toString("hex"),
           [b.oldKey]: b.patch.toString("hex"),
@@ -744,7 +760,7 @@ describe("compute: resuming and parallelism", () => {
       expect(readJson<HashesFile>(ws.hashes)).toEqual(expectedHashes([a2, b]));
 
       // A key whose patch is gone cannot keep its entry: it is dropped and reported.
-      writeFileSync(ws.patches, JSON.stringify({ [b.oldKey]: b.patch.toString("hex") }));
+      writePatches(ws, JSON.stringify({ [b.oldKey]: b.patch.toString("hex") }));
       const fourth = await py(computeArgs(ws));
       expect(fourth.code, fourth.stderr).toBe(1);
       expect(fourth.stderr).toContain("no patch for this key");
@@ -754,7 +770,7 @@ describe("compute: resuming and parallelism", () => {
       const bad = expectedHashes([b]);
       (bad.entries[b.oldKey] as { patchSha256: string }).patchSha256 = "nope";
       writeFileSync(ws.hashes, JSON.stringify(bad));
-      expect((await py(computeArgs(ws))).code).toBe(2);
+      expect((await py(computeArgs(ws))).code).toBe(3);
     },
     TIMEOUT_MS,
   );
@@ -774,12 +790,12 @@ describe("compute: resuming and parallelism", () => {
         const plan = structuredClone(goodPlan);
         (plan.keys[0] as PlanKey).oldKey = bad;
         writeFileSync(ws.plan, JSON.stringify(plan));
-        expect((await py(computeArgs(ws))).code, "plan").toBe(2);
+        expect((await py(computeArgs(ws))).code, "plan").toBe(3);
 
         writeFileSync(ws.plan, JSON.stringify(goodPlan));
-        writeFileSync(ws.patches, JSON.stringify({ [bad]: patchHex }));
-        expect((await py(computeArgs(ws))).code, "patches").toBe(2);
-        writeFileSync(ws.patches, JSON.stringify({ [o.oldKey]: patchHex }));
+        writePatches(ws, JSON.stringify({ [bad]: patchHex }));
+        expect((await py(computeArgs(ws))).code, "patches").toBe(3);
+        writePatches(ws, JSON.stringify({ [o.oldKey]: patchHex }));
 
         const assembled = join(ws.dir, "assembled.json");
         writeFileSync(
@@ -800,7 +816,7 @@ describe("compute: resuming and parallelism", () => {
           "--source-cmd",
           ws.sourceCmd,
         ]);
-        expect(verify.code, "assembled").toBe(2);
+        expect(verify.code, "assembled").toBe(3);
       }
       expect(existsSync(ws.hashes)).toBe(false);
     },
@@ -820,14 +836,14 @@ describe("compute: resuming and parallelism", () => {
       const foreign = { ...expectedHashes([objs[0] as Obj]), dataset: "nm000001" };
       writeFileSync(ws.hashes, JSON.stringify(foreign));
       const a = await py(computeArgs(ws));
-      expect(a.code).toBe(2);
+      expect(a.code).toBe(3);
       expect(JSON.parse(readFileSync(ws.hashes, "utf8"))).toEqual(foreign);
 
       const stranger = makeObject(3002);
       const extra = expectedHashes([stranger]);
       writeFileSync(ws.hashes, JSON.stringify(extra));
       const b = await py(computeArgs(ws));
-      expect(b.code).toBe(2);
+      expect(b.code).toBe(3);
       expect(b.stderr).toContain("keys this plan does not need");
       expect(JSON.parse(readFileSync(ws.hashes, "utf8"))).toEqual(extra);
     },
@@ -963,53 +979,66 @@ cat "$OBJECTS/$KEY"`,
     TIMEOUT_MS,
   );
 
-  test(
-    "SIGTERM stops the running source commands and keeps the keys already hashed",
-    async () => {
-      const ws = workspace();
-      const fast = makeObject(3000);
-      const slow = makeObject(3001);
-      stage(ws, [{ obj: fast }, { obj: slow }]);
-      const pidFile = join(ws.dir, "slow.pid");
-      installSource(
-        ws,
-        `if [ "$KEY" = ${shq(slow.oldKey)} ]; then echo $$ > ${shq(pidFile)}; exec sleep 60; fi\ncat "$OBJECTS/$KEY"`,
-      );
+  for (const [signal, code] of [
+    ["SIGTERM", 143],
+    ["SIGINT", 130],
+    ["SIGHUP", 129],
+  ] as const) {
+    test(
+      `${signal} stops the running source commands and keeps the keys already hashed`,
+      async () => {
+        const ws = workspace();
+        const fast = makeObject(3000);
+        const slow = makeObject(3001);
+        stage(ws, [{ obj: fast }, { obj: slow }]);
+        const pidFile = join(ws.dir, "slow.pid");
+        installSource(
+          ws,
+          `if [ "$KEY" = ${shq(slow.oldKey)} ]; then echo $$ > ${shq(pidFile)}; exec sleep 60; fi\ncat "$OBJECTS/$KEY"`,
+        );
 
-      const proc = Bun.spawn(["python3", SCRIPT, ...computeArgs(ws, ["--workers", "2"])], {
-        stdout: "pipe",
-        stderr: "pipe",
-        env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
-      });
-      const done = Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-        proc.exited,
-      ]);
-      for (let i = 0; i < 100 && !existsSync(pidFile); i++) await Bun.sleep(100);
-      expect(existsSync(pidFile)).toBe(true);
-      await Bun.sleep(1500); // the fast key is long done
-      proc.kill("SIGTERM");
-      const [, stderr, code] = await done;
-      expect(code).toBe(130);
-      expect(stderr).toContain("interrupted");
-
-      const pid = Number(readFileSync(pidFile, "utf8").trim());
-      let alive = true;
-      for (let i = 0; i < 30 && alive; i++) {
-        try {
-          process.kill(pid, 0);
+        const args = computeArgs(ws, ["--workers", "2", "--checkpoint-every", "1"]);
+        const proc = Bun.spawn(["python3", SCRIPT, ...args], {
+          stdout: "pipe",
+          stderr: "pipe",
+          env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+        });
+        const done = Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+          proc.exited,
+        ]);
+        for (let i = 0; i < 300 && !existsSync(pidFile); i++) await Bun.sleep(100);
+        expect(existsSync(pidFile)).toBe(true);
+        // The fast key is done once hashes.json names it; wait for that, not for a guessed time.
+        for (let i = 0; i < 300; i++) {
+          if (existsSync(ws.hashes) && fast.oldKey in readJson<HashesFile>(ws.hashes).entries)
+            break;
           await Bun.sleep(100);
-        } catch {
-          alive = false;
         }
-      }
-      if (alive) process.kill(pid, "SIGKILL");
-      expect(alive).toBe(false);
-      expect(readJson<HashesFile>(ws.hashes)).toEqual(expectedHashes([fast]));
-    },
-    TIMEOUT_MS,
-  );
+        proc.kill(signal);
+        const [, stderr, exit] = await done;
+        expect(exit, stderr).toBe(code);
+        expect(stderr).toContain(`interrupted by ${signal}`);
+
+        // The source command (an `aws` in production) was killed with its process group.
+        const pid = Number(readFileSync(pidFile, "utf8").trim());
+        let alive = true;
+        for (let i = 0; i < 100 && alive; i++) {
+          try {
+            process.kill(pid, 0);
+            await Bun.sleep(100);
+          } catch {
+            alive = false;
+          }
+        }
+        if (alive) process.kill(pid, "SIGKILL");
+        expect(alive).toBe(false);
+        expect(readJson<HashesFile>(ws.hashes)).toEqual(expectedHashes([fast]));
+      },
+      TIMEOUT_MS,
+    );
+  }
 });
 
 // --- verify-new ---------------------------------------------------------------------------------
@@ -1180,7 +1209,7 @@ describe("verify-new", () => {
         JSON.stringify({ version: 1, dataset: DATASET, entries: { a: 1 } }),
       );
       const run = await py(verifyArgs(s));
-      expect(run.code).toBe(2);
+      expect(run.code).toBe(3);
       expect(existsSync(s.proof)).toBe(false);
     },
     TIMEOUT_MS,
@@ -1224,12 +1253,12 @@ describe("verify-new: the recorded version", () => {
     async () => {
       const s = assembledSetup(1);
       const run = await py(verifyArgs(s, ["--source-cmd", `cat ${shq(s.ws.objects)}/{key}`]));
-      expect(run.code).toBe(2);
+      expect(run.code).toBe(3);
       expect(run.stderr).toContain("names {version}");
       const doc = readJson<AssembledFile>(s.assembled);
       (Object.values(doc.entries)[0] as { newVersionId?: string }).newVersionId = undefined;
       writeFileSync(s.assembled, JSON.stringify(doc));
-      expect((await py(verifyArgs(s))).code).toBe(2);
+      expect((await py(verifyArgs(s))).code).toBe(3);
       expect(existsSync(s.proof)).toBe(false);
     },
     TIMEOUT_MS,
@@ -1435,41 +1464,68 @@ describe("command line", () => {
   );
 
   test(
-    "inputs that do not match the contract are refused with status 2 and write nothing",
+    "a patches.json that is not the one written with plan.json is refused (patches-stale)",
+    async () => {
+      const ws = workspace();
+      const o = makeObject(3000);
+      stage(ws, [{ obj: o }]);
+      // Valid patches, but not the bytes the plan names: another plan's file.
+      writeFileSync(ws.patches, `${readFileSync(ws.patches, "utf8")}\n`);
+      const run = await py(computeArgs(ws));
+      expect(run.code, run.stderr).toBe(3);
+      expect(run.stderr).toContain("patches-stale");
+      expect(existsSync(ws.hashes)).toBe(false);
+      // A plan that names no patches.json at all is refused the same way.
+      const plan = readJson<PlanFile>(ws.plan);
+      plan.patchesSha256 = undefined;
+      writeFileSync(ws.plan, JSON.stringify(plan));
+      const unnamed = await py(computeArgs(ws));
+      expect(unnamed.code, unnamed.stderr).toBe(3);
+      expect(unnamed.stderr).toContain("patches-stale");
+      // Bound again, the same files hash.
+      writePatches(ws, readFileSync(ws.patches, "utf8"));
+      const named = await py(computeArgs(ws));
+      expect(named.code, named.stderr).toBe(0);
+    },
+    TIMEOUT_MS,
+  );
+
+  test(
+    "inputs that do not match the contract are refused with status 3 and write nothing",
     async () => {
       const ws = workspace();
       const o = makeObject(3000);
       stage(ws, [{ obj: o }]);
       const goodPlan = readFileSync(ws.plan, "utf8");
 
-      writeFileSync(ws.patches, JSON.stringify({ [o.oldKey]: "ab".repeat(255) })); // 255 bytes
-      expect((await py(computeArgs(ws))).code).toBe(2);
-      writeFileSync(ws.patches, JSON.stringify({ [o.oldKey]: `${"ab".repeat(256)}\n` }));
-      expect((await py(computeArgs(ws))).code).toBe(2);
-      writeFileSync(ws.patches, "{not json");
-      expect((await py(computeArgs(ws))).code).toBe(2);
+      writePatches(ws, JSON.stringify({ [o.oldKey]: "ab".repeat(255) })); // 255 bytes
+      expect((await py(computeArgs(ws))).code).toBe(3);
+      writePatches(ws, JSON.stringify({ [o.oldKey]: `${"ab".repeat(256)}\n` }));
+      expect((await py(computeArgs(ws))).code).toBe(3);
+      writePatches(ws, "{not json");
+      expect((await py(computeArgs(ws))).code).toBe(3);
 
-      writeFileSync(ws.patches, JSON.stringify({ [o.oldKey]: o.patch.toString("hex") }));
+      writePatches(ws, JSON.stringify({ [o.oldKey]: o.patch.toString("hex") }));
       writeFileSync(
         ws.plan,
         JSON.stringify({ version: 1, dataset: DATASET, keys: [{ oldKey: "nope" }] }),
       );
-      expect((await py(computeArgs(ws))).code).toBe(2);
+      expect((await py(computeArgs(ws))).code).toBe(3);
       // A key a shell must never see: a newline after an otherwise valid key.
       writeFileSync(
         ws.plan,
         JSON.stringify({ version: 1, dataset: DATASET, keys: [{ oldKey: `${o.oldKey}\n` }] }),
       );
-      expect((await py(computeArgs(ws))).code).toBe(2);
+      expect((await py(computeArgs(ws))).code).toBe(3);
       // A dataset name that is not a name.
       writeFileSync(ws.plan, goodPlan.replace(DATASET, "nm099999; touch pwned"));
-      expect((await py(computeArgs(ws))).code).toBe(2);
+      expect((await py(computeArgs(ws))).code).toBe(3);
       expect(existsSync(join(ws.dir, "pwned"))).toBe(false);
 
       writeFileSync(ws.plan, goodPlan);
       expect(
         (await py(computeArgs(ws, ["--out", join(ws.dir, "missing-dir", "h.json")]))).code,
-      ).toBe(2);
+      ).toBe(3);
       expect(existsSync(ws.hashes)).toBe(false);
     },
     TIMEOUT_MS,

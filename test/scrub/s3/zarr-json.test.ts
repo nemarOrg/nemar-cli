@@ -11,8 +11,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   EDF_MIRROR_MEMBERS,
+  KNOWN_BENIGN,
   ZarrJsonError,
   removeIdentifierKeys,
+  unknownRecordingMembers,
   zarrIdentifierCount,
 } from "../../../scripts/scrub/s3/zarr-json";
 
@@ -34,21 +36,20 @@ describe("removeIdentifierKeys: exact text", () => {
   }
 }
 `;
-    // `equipment` is a mirrored EDF identification field, so it goes too, and as the last member
-    // it takes the comma before it.
+    // `gender` and `equipment` are mirrored EDF fields (subject data and free text), so they go
+    // too, and the run at the end takes the comma before it.
     const expected = `{
   "zarr_format": 3,
   "node_type": "group",
   "attributes": {
     "recording_metadata": {
-      "startdate": "02.02.20",
-      "gender": "F"
+      "startdate": "02.02.20"
     }
   }
 }
 `;
     const r = cut(text);
-    expect(r.removed).toBe(3);
+    expect(r.removed).toBe(4);
     expect(r.text).toBe(expected);
   });
 
@@ -116,13 +117,15 @@ describe("removeIdentifierKeys: exact text", () => {
       "Technician",
       "recording additional",
       "PatientName",
+      "gender",
+      "Gender",
     ];
     for (const key of mirrored) {
       for (const value of ['"Marigold Thistlewood"', "7", '["x"]', '{"a":"b"}']) {
-        const text = `{"attributes":{"recording_metadata":{${JSON.stringify(key)}:${value},"gender":"F","startdate":"02.02.20"}}}`;
+        const text = `{"attributes":{"recording_metadata":{${JSON.stringify(key)}:${value},"startdate":"02.02.20"}}}`;
         const r = cut(text);
         expect(r.text, `${key}=${value}`).toBe(
-          `{"attributes":{"recording_metadata":{"gender":"F","startdate":"02.02.20"}}}`,
+          `{"attributes":{"recording_metadata":{"startdate":"02.02.20"}}}`,
         );
         expect(r.removed).toBe(1);
         expect(zarrIdentifierCount(JSON.parse(text)), key).toBe(1);
@@ -131,8 +134,8 @@ describe("removeIdentifierKeys: exact text", () => {
     // Under the older nesting too, and at any depth below `attributes`.
     const nested = `{"attributes":{"recording_info":{"technician":"W. Fairweather"},"a":[{"b":{"admincode":"A-1"}}]}}`;
     expect(cut(nested).text).toBe(`{"attributes":{"recording_info":{},"a":[{"b":{}}]}}`);
-    // Empty is kept, as it is for a scanner key; and gender and startdate stay, by decision.
-    const empty = `{"attributes":{"recording_metadata":{"technician":"","equipment":null,"admincode":[],"gender":"M","startdate":"01.01.90"}}}`;
+    // Empty is kept, as it is for a scanner key; startdate stays, by decision.
+    const empty = `{"attributes":{"recording_metadata":{"technician":"","equipment":null,"admincode":[],"gender":"","startdate":"01.01.90"}}}`;
     expect(cut(empty)).toEqual({ text: empty, removed: 0 });
     expect(zarrIdentifierCount(JSON.parse(empty))).toBe(0);
     expect([...EDF_MIRROR_MEMBERS].sort()).toEqual(
@@ -140,6 +143,7 @@ describe("removeIdentifierKeys: exact text", () => {
         "admincode",
         "birthdate",
         "equipment",
+        "gender",
         "patientadditional",
         "patientcode",
         "patientname",
@@ -147,7 +151,8 @@ describe("removeIdentifierKeys: exact text", () => {
         "technician",
       ].sort(),
     );
-    expect(EDF_MIRROR_MEMBERS.has("gender")).toBe(false);
+    // Sex is subject data: the store says nothing about the subject (decision of 2026-10-05).
+    expect(EDF_MIRROR_MEMBERS.has("gender")).toBe(true);
   });
 
   test("what the scanner does not flag is kept: empty values, review keys, similar names", () => {
@@ -367,5 +372,55 @@ describe("removeIdentifierKeys: against a structural deletion", () => {
     }
     // The generator really produced removals, or the loop above proved nothing.
     expect(removedTotal).toBeGreaterThan(1000);
+  });
+});
+
+describe("unknownRecordingMembers: what recording metadata may hold (I10)", () => {
+  const doc = (meta: unknown, at = "recording_metadata") => ({ attributes: { [at]: meta } });
+  test("technical members, removed members and scanner keys are accounted for; anything else is named", () => {
+    const known = {
+      startdate: "x",
+      filetype: "",
+      number_of_signals: 1,
+      file_duration: "",
+      datarecord_duration: "",
+      source_file: "a.bdf",
+      source_format: "bdf",
+      streamed: true,
+      channels_tsv_units: { converted: [] },
+      patientcode: "P1",
+      gender: "F",
+      email: "a@b.test",
+    };
+    expect(unknownRecordingMembers(doc(known), new Set())).toEqual([]);
+    expect(unknownRecordingMembers(doc(known, "recording_info"), new Set())).toEqual([]);
+    // Names only, as written; the value is never looked at, never returned.
+    expect(
+      unknownRecordingMembers(
+        doc({ ...known, subject_note: "Marigold", eeglab_fdt_recovered: true }),
+        new Set(),
+      ),
+    ).toEqual(["subject_note", "eeglab_fdt_recovered"]);
+    // Accepted by the operator in any spelling: the set holds canonical names.
+    expect(unknownRecordingMembers(doc({ subject_note: "x" }), new Set(["subjectnote"]))).toEqual(
+      [],
+    );
+    // Recording metadata that is not an object is itself unaccounted for.
+    expect(unknownRecordingMembers(doc("free text"), new Set())).toEqual(["recording_metadata"]);
+    // Outside recording metadata, this rule does not look.
+    expect(unknownRecordingMembers({ attributes: { other: { x: 1 } } }, new Set())).toEqual([]);
+    expect([...KNOWN_BENIGN].sort()).toEqual(
+      [
+        "channelstsvunits",
+        "datarecordduration",
+        "fileduration",
+        "filetype",
+        "numberofsignals",
+        "sourcefile",
+        "sourceformat",
+        "startdate",
+        "streamed",
+      ].sort(),
+    );
   });
 });

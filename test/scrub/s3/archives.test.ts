@@ -6,7 +6,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { statSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { ArchivesDroppedFile } from "../../../scripts/scrub/s3/archives-stage";
 import { type S3Standin, startS3Standin } from "../helpers/s3-standin";
@@ -246,6 +246,40 @@ describe("drop-archives", () => {
         markers: 0,
       });
       expect(standin.calls("DeleteObject").length).toBe(0);
+    },
+    SLOW,
+  );
+});
+
+describe("drop-archives: proofs and stage files (S2, S1)", () => {
+  test(
+    "an archives-dropped.json from an earlier run does not outlive a run that does not finish",
+    async () => {
+      const { dir } = await seeded();
+      writeFileSync(path.join(dir, "archives-dropped.json"), '{"stale":true}');
+      // A dry run proves nothing, so it leaves no proof, old or new.
+      const dry = await runScrub(standin, dropArgs(dir));
+      expect(dry.exitCode, dry.all).toBe(0);
+      expect(has(dir, "archives-dropped.json")).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
+    "a stage file that is there and cannot be read is a failure, not a missing file",
+    async () => {
+      const { dir } = await seeded();
+      const planPath = path.join(dir, "plan.json");
+      const text = readFileSync(planPath);
+      rmSync(planPath);
+      mkdirSync(planPath); // a directory where the file should be: EISDIR, not ENOENT
+      const r = await runScrub(standin, dropArgs(dir));
+      expectStopped(r, 1, "plan.json-unreadable");
+      rmSync(planPath, { recursive: true });
+      writeFileSync(planPath, text);
+      rmSync(planPath);
+      expectStopped(await runScrub(standin, dropArgs(dir)), 3, "plan.json-missing");
+      expect(standin.log.length).toBe(0);
     },
     SLOW,
   );

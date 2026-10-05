@@ -6,11 +6,14 @@
  *   assemble   --dir DIR [--execute] [--concurrency 4]
  *   verify     --dir DIR [--samples 8]
  *   delete-old --dir DIR --confirm-dataset ID [--execute] [--verified verified.json]
- *              [--hash-verified new-hash-verified.json] [--max-delete N]
+ *              [--hash-verified new-hash-verified.json] [--git-verified git-verified.json]
+ *              [--max-delete N]
  *              [--prune-noncurrent <prefix>]... [--max-prune N] [--public-base URL]
- *   zarr       --dir DIR [--execute] [--concurrency 4]
+ *   zarr       --dir DIR [--execute] [--concurrency 4] [--allow-member NAME]...
+ *              [--max-zarr-json N]
  *   drop-archives --dir DIR --confirm-dataset ID [--execute] [--concurrency 4]
- *   zarr-public --dataset ID [--public-base URL] [--bucket nemar] [--concurrency 8]
+ *   zarr-public --dataset ID --zarr-verified F [--public-base URL] [--bucket nemar]
+ *              [--concurrency 8]
  *   canary     --prefix <nm099999|xx09[0-8]NNN>/canary-<random>/ [--execute] [--multipart]
  *              [--bucket nemar]
  *
@@ -55,15 +58,20 @@ import {
   verifyStage,
 } from "./s3-stages";
 import { zarrPublicStage } from "./zarr-public";
-import { zarrStage } from "./zarr-stage";
+import { DEFAULT_MAX_ZARR_JSON, zarrStage } from "./zarr-stage";
 
 const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|zarr|drop-archives|zarr-public|canary> [options]
   plan       --dataset ID --out DIR [--tags v1,v2] [--bucket nemar] [--concurrency 8]
   assemble   --dir DIR [--execute] [--concurrency 4] [--max-part-bytes N]
   verify     --dir DIR [--samples 8] [--concurrency 4]
   delete-old --dir DIR --confirm-dataset ID [--execute] [--verified F] [--hash-verified F]
-             [--max-delete N] [--prune-noncurrent PREFIX]... [--max-prune N] [--public-base URL]
+             [--git-verified F] [--max-delete N] [--prune-noncurrent PREFIX]... [--max-prune N]
+             [--public-base URL]
              --confirm-dataset: the dataset id again, required even for the dry run.
+             --git-verified (default git-verified.json in DIR): written by
+             \`git-scrub verify --fresh-clone\` over a fresh clone of what was pushed; refused
+             unless its mode is fresh-clone, it names this keymap.json and plan.json, and the
+             keymap is this assembly's (git-proof-missing, git-proof-stale, keymap-mismatch).
              --public-base: where an anonymous HEAD proves the dataset is private
              (default ${DEFAULT_PUBLIC_BASE}); it must answer 403. It must be https and the
              plan's bucket's own S3 endpoint (virtual-hosted or path-style).
@@ -76,19 +84,29 @@ const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|zarr|drop-arc
              ID/zarr/ expect about one per store root the zarr step rewrote (zarr-plan.json counts
              them, and the dry run prints the exact number) plus any older versions a Zarr
              re-conversion left, so a large dataset needs a larger N than the default.
-  zarr       --dir DIR [--execute] [--concurrency 4]
-             removes identifier keys from every Zarr store root's attributes; reads only unless
-             --execute, and writes zarr-verified.json only when every store is clean after it.
-             Then \`delete-old --prune-noncurrent ID/zarr/\` removes the noncurrent versions.
+  zarr       --dir DIR [--execute] [--concurrency 4] [--allow-member NAME]...
+             [--max-zarr-json N]
+             removes the subject and identifier members from every zarr.json under ID/zarr/
+             (store roots, and arrays and groups inside stores, at most N documents, default
+             ${DEFAULT_MAX_ZARR_JSON}); reads only unless --execute, and writes zarr-verified.json
+             only when every document is clean after it. A recording-metadata member that no list
+             names refuses the run (unknown-recording-member; names in zarr-unknown-members.json)
+             until --allow-member names it. Then \`delete-old --prune-noncurrent ID/zarr/\` removes
+             the noncurrent versions.
   drop-archives --dir DIR --confirm-dataset ID [--execute] [--concurrency 4]
              deletes EVERY version and delete marker under ID/archives/ by version id, with no
              governance bypass, and ends with a listing that must show none. The archive holds the
              original recordings; the normal workflow rebuilds it afterwards. Writes
              archives-dropped.json. A lock refusal is reported and fails the stage.
-  zarr-public --dataset ID [--public-base URL] [--bucket nemar] [--concurrency 8]
-             after the dataset is public again: reads ID/zarr/index.json and every store root it
-             names anonymously (default base ${DEFAULT_PUBLIC_BASE}) and applies the zarr stage's
-             own rule to each. Exit 0 only when every store is clean.
+  zarr-public --dataset ID --zarr-verified F [--public-base URL] [--bucket nemar]
+             [--concurrency 8]
+             after the dataset is public again: reads ID/zarr/index.json anonymously (default base
+             ${DEFAULT_PUBLIC_BASE}) and the root of every store in the UNION of the index's stores
+             and the ones zarr-verified.json (the zarr stage's proof) names, and applies the zarr
+             stage's own rule to each. Refused when a store the proof names is not in the index,
+             or when there is no store at all and the proof does not say no-zarr. Exit 0 only when
+             at least one store was read and every one is clean, or the proof says no-zarr and
+             there is none.
   canary     --prefix ID/canary-RANDOM/ [--execute] [--multipart] [--bucket nemar]
              ID is nm099999 or a dev ephemeral sandbox id, xx090000 to xx098999; never a live
              dataset, a production sandbox or the exemplar fleet.
@@ -104,12 +122,16 @@ const OPTIONS = {
   prefix: { type: "string" },
   verified: { type: "string" },
   "hash-verified": { type: "string" },
+  "git-verified": { type: "string" },
   "max-delete": { type: "string" },
   "max-prune": { type: "string" },
   "confirm-dataset": { type: "string" },
   "public-base": { type: "string" },
   "max-part-bytes": { type: "string" },
   "prune-noncurrent": { type: "string", multiple: true },
+  "allow-member": { type: "string", multiple: true },
+  "max-zarr-json": { type: "string" },
+  "zarr-verified": { type: "string" },
   concurrency: { type: "string" },
   samples: { type: "string" },
   "timeout-sec": { type: "string" },
@@ -222,6 +244,7 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
         execute,
         verifiedFile: v.verified ?? "verified.json",
         hashVerifiedFile: v["hash-verified"] ?? "new-hash-verified.json",
+        gitVerifiedFile: v["git-verified"] ?? "git-verified.json",
         maxDelete:
           v["max-delete"] === undefined ? undefined : intFlag(v["max-delete"], "max-delete", 0),
         maxPrune: intFlag(v["max-prune"], "max-prune", 1000),
@@ -235,6 +258,8 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
         dir: need(v.dir, "dir"),
         execute,
         concurrency: concurrency(4),
+        allowMembers: v["allow-member"] ?? [],
+        maxDocs: intFlag(v["max-zarr-json"], "max-zarr-json", DEFAULT_MAX_ZARR_JSON, 1),
       });
     case "drop-archives":
       return dropArchivesStage({
@@ -249,6 +274,7 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
       checkPublicBase(publicBase, v.bucket ?? "nemar");
       return zarrPublicStage({
         dataset: need(v.dataset, "dataset"),
+        zarrVerifiedFile: need(v["zarr-verified"], "zarr-verified"),
         publicBase,
         timeoutMs: opts.timeoutMs,
         concurrency: concurrency(8),

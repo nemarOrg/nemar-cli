@@ -33,6 +33,7 @@
  *    ConditionalRequestConflict S3 documents for a conflicting write in flight is not modeled; a
  *    test injects it as a fault.
  *  - GetObjectRetention (404 NoSuchObjectLockConfiguration when a version has none).
+ *  - ListMultipartUploads (one page, by prefix).
  *  - Multipart: CreateMultipartUpload (keeps the lock and encryption headers), UploadPart,
  *    UploadPartCopy (`x-amz-copy-source` with an optional `?versionId=`, a byte range, and
  *    `x-amz-copy-source-if-match`, 412 on mismatch), CompleteMultipartUpload (validates the part
@@ -60,6 +61,7 @@ export type StandinOp =
   | "UploadPartCopy"
   | "CompleteMultipartUpload"
   | "AbortMultipartUpload"
+  | "ListMultipartUploads"
   | "DeleteObject";
 
 export interface StoredVersion {
@@ -103,6 +105,11 @@ export interface Fault {
   times?: number;
   /** Only calls for this key. */
   key?: string;
+  /**
+   * The request takes effect, THEN the error is returned: an answer lost on the way back. Only
+   * CreateMultipartUpload honors it (the upload is created and left open).
+   */
+  applied?: boolean;
 }
 
 export interface PutOptions {
@@ -165,6 +172,8 @@ export interface S3Standin {
   clearFaults(): void;
   /** Run `fn` just before the Nth call (1-based) of `op` is handled. */
   beforeOp(op: StandinOp, fn: () => void, nth?: number): void;
+  /** How many calls of `op` the stand-in has handled since it started (the log can be cleared). */
+  opCount(op: StandinOp): number;
   /** Log entries for one operation. */
   calls(op: StandinOp): StandinLogEntry[];
   stop(): void;
@@ -373,6 +382,22 @@ export function startS3Standin(): S3Standin {
             `<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>${xmlEscape(bucket)}</Name><Prefix>${xmlEscape(prefix)}</Prefix><MaxKeys>${limit}</MaxKeys>${encode ? "<EncodingType>url</EncodingType>" : ""}<IsTruncated>${truncated}</IsTruncated>${truncated && last ? `<NextKeyMarker>${keyOut(last.key, encode)}</NextKeyMarker><NextVersionIdMarker>${last.v.versionId}</NextVersionIdMarker>` : ""}${body}</ListVersionsResult>`,
           );
         }
+        if (q.has("uploads") && req.method === "GET") {
+          const fault = enter("ListMultipartUploads", prefix);
+          if (fault) return fail("ListMultipartUploads", fault);
+          const open = [...uploads.entries()]
+            .filter(([, u]) => u.bucket === bucket && u.key.startsWith(prefix))
+            .sort(([, a], [, b]) => a.key.localeCompare(b.key));
+          record({ op: "ListMultipartUploads", key: prefix, status: 200 });
+          return xml(
+            `<ListMultipartUploadsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>${xmlEscape(bucket)}</Bucket><Prefix>${xmlEscape(prefix)}</Prefix><IsTruncated>false</IsTruncated>${open
+              .map(
+                ([id, u]) =>
+                  `<Upload><Key>${keyOut(u.key, encode)}</Key><UploadId>${id}</UploadId><Initiated>${new Date().toISOString()}</Initiated></Upload>`,
+              )
+              .join("")}</ListMultipartUploadsResult>`,
+          );
+        }
         record({ op: "Unknown", key: url.search, status: 501, method: req.method });
         return s3Error("NotImplemented", 501);
       }
@@ -451,6 +476,7 @@ export function startS3Standin(): S3Standin {
           "Accept-Ranges": "bytes",
         };
         if (v.sse) headers["x-amz-server-side-encryption"] = v.sse;
+        if (v.kmsKeyId) headers["x-amz-server-side-encryption-aws-kms-key-id"] = v.kmsKeyId;
         if (v.cacheControl) headers["Cache-Control"] = v.cacheControl;
         const bodyStall = bodyStalls.findIndex((x) => key.startsWith(x.keyPrefix));
         if (bodyStall >= 0) {
@@ -484,7 +510,7 @@ export function startS3Standin(): S3Standin {
           return new Response(stream, { status: range ? 206 : 200, headers });
         }
         if (!range) {
-          record({ op: "GetObject", key, status: 200, size: v.data.length });
+          record({ op: "GetObject", key, status: 200, size: v.data.length, versionId });
           return new Response(v.data, { status: 200, headers });
         }
         const [a, b] = range;
@@ -495,6 +521,8 @@ export function startS3Standin(): S3Standin {
           status: 206,
           range: rangeHeader ?? undefined,
           size: b - a + 1,
+          versionId,
+          ifMatch,
         });
         return new Response(v.data.subarray(a, b + 1), { status: 206, headers });
       }
@@ -502,7 +530,7 @@ export function startS3Standin(): S3Standin {
       // ---- CreateMultipartUpload ----
       if (req.method === "POST" && q.has("uploads")) {
         const fault = enter("CreateMultipartUpload", key);
-        if (fault) return fail("CreateMultipartUpload", fault);
+        if (fault && !fault.applied) return fail("CreateMultipartUpload", fault);
         const lock = parseLock(req);
         if (lock === "bad") {
           record({ op: "CreateMultipartUpload", key, status: 400 });
@@ -518,6 +546,7 @@ export function startS3Standin(): S3Standin {
           lock,
           parts: new Map(),
         });
+        if (fault) return fail("CreateMultipartUpload", fault);
         record({ op: "CreateMultipartUpload", key, status: 200 });
         return xml(
           `<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>${xmlEscape(bucket)}</Bucket><Key>${xmlEscape(key)}</Key><UploadId>${id}</UploadId></InitiateMultipartUploadResult>`,
@@ -922,6 +951,7 @@ export function startS3Standin(): S3Standin {
       hooks.set(op, list);
     },
     calls: (op) => log.filter((e) => e.op === op),
+    opCount: (op) => opCounts.get(op) ?? 0,
     stop() {
       server.stop(true);
     },

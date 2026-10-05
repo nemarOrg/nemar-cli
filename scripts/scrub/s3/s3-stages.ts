@@ -10,7 +10,8 @@
  * version ids and fixed words. Header bytes are held in memory and compared, never logged.
  */
 
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   EDF_HEADER_BYTES,
@@ -27,6 +28,7 @@ import {
 import {
   type AssembledFile,
   ContractError,
+  type DeletedFile,
   GIT_KEY,
   type HashesFile,
   type KeymapFile,
@@ -35,6 +37,7 @@ import {
   type PlanKey,
   type VerifiedFile,
   parseAssembled,
+  parseGitVerified,
   parseHashes,
   parseKey,
   parseKeymap,
@@ -74,6 +77,7 @@ import {
   isoSeconds,
   listCurrentKeys,
   listKeyVersions,
+  listOpenUploads,
   listPrefixVersions,
   objectKey,
   planAssembly,
@@ -114,11 +118,22 @@ export async function withCtx<T>(
 // Working-directory files.
 // ---------------------------------------------------------------------------
 
+/** True for the error a read of a file that is not there throws; nothing else is "absent". */
+function isNotFound(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException | null)?.code === "ENOENT";
+}
+
+/**
+ * A stage file's bytes. `<name>-missing` (refused) only when the file is not there; any other
+ * read error (permissions, a directory, I/O) is `<name>-unreadable`, a failure, because a file
+ * that is there and cannot be read is not a file that was never written.
+ */
 export async function readBytes(file: string, name: string): Promise<Buffer> {
   try {
     return await readFile(file);
-  } catch {
-    throw new StageError(`${name}-missing`, EXIT.refused);
+  } catch (err) {
+    if (isNotFound(err)) throw new StageError(`${name}-missing`, EXIT.refused);
+    throw new StageError(`${name}-unreadable`, EXIT.failed);
   }
 }
 
@@ -137,21 +152,44 @@ async function loadFile<T>(dir: string, name: string, parse: (text: string) => T
   return parseFile(name, parse, bytes.toString("utf8"));
 }
 
+/**
+ * Write a stage file atomically: a temp file in the same directory, then a rename, so a reader (or
+ * a crash) sees the old file or the whole new one, never half of one. Owner-only.
+ */
 export async function writeJson(dir: string, name: string, value: unknown): Promise<void> {
-  await writeFile(path.join(dir, name), `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  const final = path.join(dir, name);
+  const tmp = path.join(dir, `.${name}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`);
+  try {
+    await writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+    await rename(tmp, final);
+  } finally {
+    await rm(tmp, { force: true });
+  }
 }
 
+/** True when the file is there. Only ENOENT is "absent"; any other error is a failure. */
 async function exists(file: string): Promise<boolean> {
   try {
-    await readFile(file);
+    await stat(file);
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    if (isNotFound(err)) return false;
+    throw new StageError(`${path.basename(file)}-unreadable`, EXIT.failed);
   }
 }
 
 export function checkDataset(dataset: string): void {
   if (!DATASET_ID.test(dataset)) throw new StageError("bad-dataset-id", EXIT.usage);
+}
+
+/**
+ * patches.json must be the one written with this plan: the plan names its sha256. A patches.json
+ * from another plan would build new objects whose keys the hashes do not describe.
+ */
+export function requirePatchesOfPlan(plan: PlanFile, patchesBytes: Buffer): void {
+  if (!plan.patchesSha256 || plan.patchesSha256 !== sha256Hex(patchesBytes)) {
+    throw new StageError("patches-stale", EXIT.refused);
+  }
 }
 
 /**
@@ -257,10 +295,12 @@ export function keysOfManifest(dataset: string, text: string): ManifestKeys {
 }
 
 /**
- * Every EDF or BDF object under `<id>/objects/`, in any letter case, from a paginated listing of
- * the objects themselves. A manifest names the files a version has; the listing finds the ones a
- * manifest does not name (a file dropped from a later version, an older tag nobody listed), which
- * hold the same bytes. `bad` counts names that look like a recording and are not annex keys.
+ * Every EDF or BDF key under `<id>/objects/`, in any letter case, from a paginated listing of
+ * every VERSION and DELETE MARKER there (`ListObjectVersions`), not only the current objects. A
+ * manifest names the files a version has; the listing finds the ones a manifest does not name (a
+ * file dropped from a later version, an older tag nobody listed), and a recording whose current
+ * entry is a delete marker still holds its bytes in a noncurrent version, locked. `bad` counts
+ * names that look like a recording and are not annex keys.
  */
 async function listObjectRecordings(
   ctx: S3Ctx,
@@ -269,7 +309,7 @@ async function listObjectRecordings(
   const prefix = `${dataset}/objects/`;
   const keys = new Set<string>();
   let bad = 0;
-  for (const full of await listCurrentKeys(ctx, prefix)) {
+  for (const full of new Set((await listPrefixVersions(ctx, prefix)).map((e) => e.key))) {
     const name = full.slice(prefix.length);
     if (!isEdfOrBdf(name)) continue;
     try {
@@ -301,13 +341,27 @@ async function planOneKey(ctx: S3Ctx, dataset: string, oldKey: string): Promise<
   });
   const obj = objectKey(dataset, oldKey);
   try {
-    const head = await headObject(ctx, obj);
-    if (!head) return unreadable("HeadObject:not-found");
     const listing = await listKeyVersions(ctx, obj);
     const versionIds = [...listing.versions, ...listing.markers].map((v) => v.versionId);
+    let head = await headObject(ctx, obj);
+    // No current object: masked by a delete marker (its bytes are in a noncurrent version), or
+    // gone. The newest version is read by its id; S3 lists a key's versions newest first.
+    let pinned: string | undefined;
+    if (!head) {
+      const newest = listing.versions[0];
+      if (!newest) {
+        return unreadable(
+          listing.markers.length > 0 ? "markers-only" : "HeadObject:not-found",
+          versionIds,
+        );
+      }
+      pinned = newest.versionId;
+      head = await headObject(ctx, obj, pinned);
+      if (!head) return unreadable("HeadObject:not-found", versionIds);
+    }
     if (head.size !== keySize) return unreadable("size-mismatch", versionIds);
     const bytes = await readRange(ctx, obj, 0, Math.min(PLAN_READ_BYTES, head.size) - 1, {
-      ifMatch: head.etag,
+      ...(pinned ? { versionId: pinned } : { ifMatch: head.etag }),
     });
     let result: ReturnType<typeof scrubEdfHeader>;
     try {
@@ -318,6 +372,10 @@ async function planOneKey(ctx: S3Ctx, dataset: string, oldKey: string): Promise<
     }
     const base = { oldKey, size: keySize, versionIds, status: "read" as const };
     if (!result.changed) return { entry: { ...base, needsScrub: false, reasons: [] } };
+    // A masked recording that needs a scrub cannot be hashed or assembled from its current
+    // object, because it has none: stop, so a person decides (remove the marker and plan again,
+    // or delete its versions), rather than leave locked identifying bytes behind.
+    if (pinned) return unreadable("masked-needs-scrub", versionIds);
     // The kinds the scrub removed: whatever the scanner finds in the old header that it no
     // longer finds in the new one. Derived from behavior, so it cannot drift from the scrub.
     const before = countByKind(scanEdfHeader(bytes.subarray(0, EDF_HEADER_BYTES)));
@@ -416,8 +474,11 @@ export async function planStage(o: PlanOptions): Promise<number> {
       keys: entries,
       totals,
     };
-    await writeJson(o.out, "plan.json", plan);
+    // patches.json first, so the plan can name its exact bytes.
     await writeJson(o.out, "patches.json", patches);
+    const patchesBytes = await readBytes(path.join(o.out, "patches.json"), "patches.json");
+    plan.patchesSha256 = sha256Hex(patchesBytes);
+    await writeJson(o.out, "plan.json", plan);
 
     o.log(
       `plan: tags=${tags.length} keys=${totals.keys} needScrub=${totals.needScrub} bytesToHash=${totals.bytesToHash} unreadable=${totals.unreadable}`,
@@ -463,9 +524,15 @@ interface AssembleInputs {
 export async function loadAssembleInputs(dir: string): Promise<AssembleInputs> {
   const plan = await loadFile(dir, "plan.json", parsePlan);
   const hashes: HashesFile = await loadFile(dir, "hashes.json", parseHashes);
-  const patches: PatchesFile = await loadFile(dir, "patches.json", parsePatches);
+  const patchesBytes = await readBytes(path.join(dir, "patches.json"), "patches.json");
+  const patches: PatchesFile = parseFile(
+    "patches.json",
+    parsePatches,
+    patchesBytes.toString("utf8"),
+  );
 
   requireCompletePlan(plan);
+  requirePatchesOfPlan(plan, patchesBytes);
   if (hashes.dataset !== plan.dataset) throw new StageError("hashes-wrong-dataset", EXIT.refused);
 
   const needing = plan.keys.filter((k) => k.needsScrub);
@@ -529,6 +596,7 @@ async function assembleOne(
   dataset: string,
   w: Work,
   maxCopyPart: number,
+  log: (line: string) => void,
 ): Promise<{ entry: AssembledEntry; how: HowAssembled }> {
   const oldObj = objectKey(dataset, w.oldKey);
   const newObj = objectKey(dataset, w.newKey);
@@ -570,7 +638,23 @@ async function assembleOne(
   } else {
     let uploadId: string | undefined;
     try {
-      uploadId = await createMultipart(ctx, newObj, meta, retainUntil);
+      uploadId = await createMultipart(ctx, newObj, meta, retainUntil).catch(async (err) => {
+        // The create may have happened with its answer lost (a timeout, a dropped connection):
+        // an upload created with the lock parameters, billed until aborted. Report it by key and
+        // upload id (neither identifies anyone), never silently.
+        const open = await listOpenUploads(ctx, newObj).catch(() => null);
+        if (open === null) {
+          log(
+            `assemble: create-multipart-upload failed and the open uploads of ${w.newKey} could not be listed: check list-multipart-uploads`,
+          );
+        } else {
+          for (const id of open)
+            log(`assemble: open upload left by a failed create: key=${w.newKey} uploadId=${id}`);
+        }
+        throw new StageError(
+          `${failureWord(err)}${open === null || open.length > 0 ? "+upload-may-be-open" : ""}`,
+        );
+      });
       const done: Array<{ ETag: string; PartNumber: number }> = [];
       for (const p of layout.parts) {
         if (p.kind === "upload") {
@@ -600,7 +684,10 @@ async function assembleOne(
       if (uploadId) {
         try {
           await abortMultipart(ctx, newObj, uploadId);
-        } catch {
+        } catch (abortErr) {
+          log(
+            `assemble: abort-failed key=${w.newKey} uploadId=${uploadId} (${failureWord(abortErr)})`,
+          );
           throw new StageError(`${failureWord(err)}+abort-failed`);
         }
       }
@@ -656,7 +743,7 @@ export async function assembleStage(o: AssembleOptions): Promise<number> {
       o.concurrency,
       async (w) => {
         try {
-          const r = await assembleOne(ctx, plan.dataset, w, o.maxCopyPart);
+          const r = await assembleOne(ctx, plan.dataset, w, o.maxCopyPart, o.log);
           entries[w.oldKey] = r.entry;
           hows.push(r.how);
         } catch (err) {
@@ -731,6 +818,10 @@ async function verifyOne(
   try {
     const head = await headObject(ctx, newObj, e.newVersionId);
     if (!head) return { ...result, words: ["new-missing"] };
+    // The version that was assembled must be what a reader gets: a newer version at the new key
+    // was written by someone else after assembly, and it is what would be served.
+    const current = await headObject(ctx, newObj);
+    if (current?.versionId !== e.newVersionId) words.push("new-not-current");
     if (head.size !== size) words.push("new-size-mismatch");
     if (head.lockMode !== "GOVERNANCE") words.push("lock-missing");
     const ret = await getRetention(ctx, newObj, e.newVersionId);
@@ -738,8 +829,12 @@ async function verifyOne(
     else if (!retentionOk(ret.mode, ret.retainUntil)) words.push("retention-short");
     if (head.size !== size) return { ...result, words };
 
-    const oldHeader = await readRange(ctx, oldObj, 0, EDF_HEADER_BYTES - 1).catch(() => null);
-    if (!oldHeader) return { ...result, words: [...words, "old-unreadable"] };
+    let oldHeader: Uint8Array;
+    try {
+      oldHeader = await readRange(ctx, oldObj, 0, EDF_HEADER_BYTES - 1);
+    } catch (err) {
+      return { ...result, words: [...words, `old-unreadable:${failureWord(err)}`] };
+    }
     const newHeader = await readRange(ctx, newObj, 0, EDF_HEADER_BYTES - 1, pinned);
     result.headersChecked = 1;
     if (!bytesEqual(newHeader, patch)) words.push("header-not-patch");
@@ -765,11 +860,16 @@ export async function verifyStage(o: VerifyOptions): Promise<number> {
   requireCompletePlan(plan);
   const assembledBytes = await readBytes(path.join(o.dir, "assembled.json"), "assembled.json");
   const assembled = parseFile("assembled.json", parseAssembled, assembledBytes.toString("utf8"));
-  const patches = await loadFile(o.dir, "patches.json", parsePatches);
+  const patchesBytes = await readBytes(path.join(o.dir, "patches.json"), "patches.json");
+  const patches = parseFile("patches.json", parsePatches, patchesBytes.toString("utf8"));
   const keymap = await loadFile(o.dir, "keymap.json", parseKeymap);
+  requirePatchesOfPlan(plan, patchesBytes);
 
-  if (assembled.dataset !== plan.dataset || assembled.bucket !== plan.bucket) {
+  if (assembled.dataset !== plan.dataset) {
     throw new StageError("assembled-wrong-dataset", EXIT.refused);
+  }
+  if (assembled.bucket !== plan.bucket) {
+    throw new StageError("assembled-wrong-bucket", EXIT.refused);
   }
   const needing = plan.keys.filter((k) => k.needsScrub).map((k) => k.oldKey);
   const have = Object.keys(assembled.entries);
@@ -852,6 +952,8 @@ export interface DeleteOptions extends CommonOptions {
   verifiedFile: string;
   /** Proof from the separate re-hash stage on another host. */
   hashVerifiedFile: string;
+  /** `git-verified.json` from `git-scrub verify --fresh-clone`: the pushed history is clean. */
+  gitVerifiedFile: string;
   /** Refuse when more versions than this would be deleted. Default: what the plan recorded. */
   maxDelete?: number;
   /** Refuse when more noncurrent versions than this would be pruned. */
@@ -889,25 +991,15 @@ export function parseHashVerified(text: string): HashVerifiedFile {
   return x as unknown as HashVerifiedFile;
 }
 
-export interface DeletedFile {
-  version: 1;
-  dataset: string;
-  deletedAt: string;
-  assembledSha256: string;
-  counts: {
-    keys: number;
-    versions: number;
-    markers: number;
-    prunedVersions: number;
-    prunedMarkers: number;
-  };
-}
+export type { DeletedFile } from "../contract";
 
 interface KeyVersions {
   oldKey: string;
   obj: string;
   versions: string[];
   markers: string[];
+  /** The size of each version (not of a marker), as the listing reported it. */
+  sizes: Array<number | undefined>;
 }
 
 /**
@@ -939,6 +1031,7 @@ async function listOldKeys(
       obj,
       versions: l.versions.map((v) => v.versionId),
       markers: l.markers.map((v) => v.versionId),
+      sizes: l.versions.map((v) => v.size),
     };
   });
   return out as KeyVersions[];
@@ -1167,6 +1260,8 @@ const formatPrefixCounts = (counts: Record<string, number>) =>
 export async function deleteOldStage(o: DeleteOptions): Promise<number> {
   const planBytes = await readBytes(path.join(o.dir, "plan.json"), "plan.json");
   const plan = parseFile("plan.json", parsePlan, planBytes.toString("utf8"));
+  // A proof from an earlier run must not outlive this one: it holds only once this run ends well.
+  await rm(path.join(o.dir, "deleted.json"), { force: true });
   // Typed again by the operator, before anything else is read: a stage that deletes names its
   // target twice. Applies to the dry run too, so a wrong working directory shows up early.
   if (o.confirmDataset !== plan.dataset) {
@@ -1179,7 +1274,12 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
   const assembled = parseFile("assembled.json", parseAssembled, assembledBytes.toString("utf8"));
   const sha = sha256Hex(assembledBytes);
   const entries = Object.entries(assembled.entries);
-  const dataset = assembled.dataset;
+  // The dataset and the bucket are the plan's, which the operator confirmed; every other file
+  // must name the same ones, each compared on its own.
+  const dataset = plan.dataset;
+  const bucket = plan.bucket;
+  if (assembled.dataset !== dataset) throw new StageError("assembled-wrong-dataset", EXIT.refused);
+  if (assembled.bucket !== bucket) throw new StageError("assembled-wrong-bucket", EXIT.refused);
 
   // Both proofs must exist and vouch for these exact bytes.
   const verified = parseFile(
@@ -1198,14 +1298,28 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
   if (hashVerified.assembledSha256 !== sha) {
     throw new StageError("new-hash-verified-stale", EXIT.refused);
   }
-  if (verified.dataset !== dataset || hashVerified.dataset !== dataset) {
-    throw new StageError("proof-wrong-dataset", EXIT.refused);
-  }
-  if (plan.dataset !== dataset || plan.bucket !== assembled.bucket) {
-    throw new StageError("assembled-wrong-dataset", EXIT.refused);
-  }
+  if (verified.dataset !== dataset) throw new StageError("proof-wrong-dataset", EXIT.refused);
+  if (hashVerified.dataset !== dataset) throw new StageError("proof-wrong-dataset", EXIT.refused);
   if (verified.counts.keys !== entries.length || hashVerified.count !== entries.length) {
     throw new StageError("proof-count-mismatch", EXIT.refused);
+  }
+
+  // The GitHub side: a verify of a FRESH clone of what was pushed, made with the keymap this
+  // assembly wrote and the plan this run reads.
+  const gitVerified = parseFile(
+    "git-proof",
+    parseGitVerified,
+    (await readBytes(path.resolve(o.dir, o.gitVerifiedFile), "git-proof")).toString("utf8"),
+  );
+  const keymapBytes = await readBytes(path.join(o.dir, "keymap.json"), "keymap.json");
+  const keymap = parseFile("keymap.json", parseKeymap, keymapBytes.toString("utf8"));
+  if (gitVerified.dataset !== dataset) throw new StageError("proof-wrong-dataset", EXIT.refused);
+  if (
+    gitVerified.mode !== "fresh-clone" ||
+    gitVerified.keymapSha256 !== sha256Hex(keymapBytes) ||
+    gitVerified.s3PlanSha256 !== sha256Hex(planBytes)
+  ) {
+    throw new StageError("git-proof-stale", EXIT.refused);
   }
 
   // Every old key has a different new key, and no old key is any new key.
@@ -1221,12 +1335,19 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
   if (oldKeys.some((k) => !planned.get(k)?.needsScrub)) {
     throw new StageError("assembled-not-in-plan", EXIT.refused);
   }
+  // The keymap the git proof names is this assembly's: old key to new key, pair for pair.
+  if (
+    Object.keys(keymap).length !== entries.length ||
+    entries.some(([k, e]) => keymap[k] !== e.newKey)
+  ) {
+    throw new StageError("keymap-mismatch", EXIT.refused);
+  }
   for (const p of o.prune) checkPrunePrefix(dataset, p);
   const prunePrefixes = [...new Set(o.prune)];
   /** Every recording key this scrub accounted for: what the plan read, and what it assembled. */
   const known = new Set([...planned.keys(), ...newKeys]);
 
-  return withCtx(o, assembled.bucket, async (ctx) => {
+  return withCtx(o, bucket, async (ctx) => {
     // The replacement must still be there before anything it replaces is touched.
     const missing = await runPool(entries, o.concurrency, async ([k, e]) => {
       const head = await headObject(ctx, objectKey(dataset, e.newKey), e.newVersionId);
@@ -1251,6 +1372,17 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
     await requirePrivate(ctx, o, dataset, oldKeys, [...newKeys]);
 
     const listed = await listOldKeys(ctx, dataset, oldKeys, o.concurrency);
+    // Every version of an old key must be the size its key declares. One that is not holds bytes
+    // that are not the recording the plan read: what it is, nobody checked. The sizes come with
+    // the listing.
+    const wrongSize = listed.reduce(
+      (n, l) => n + l.sizes.filter((size) => size !== parseKey(l.oldKey).size).length,
+      0,
+    );
+    if (wrongSize > 0) {
+      o.log(`delete-old: ${wrongSize} versions of old keys are not the size their key declares`);
+      throw new StageError("version-size-differs", EXIT.refused);
+    }
     // Only what the plan recorded may be deleted: the plan read the header of each old key, and a
     // version written since is bytes nobody checked. No flag waives this.
     const unplanned = listed.reduce((n, l) => {
@@ -1539,7 +1671,14 @@ export async function canaryStage(o: CanaryOptions): Promise<number> {
             { ETag: second, PartNumber: 2 },
           ]);
         } catch (err) {
-          await abortMultipart(ctx, mpKey, uploadId).catch(() => undefined);
+          try {
+            await abortMultipart(ctx, mpKey, uploadId);
+          } catch (abortErr) {
+            o.log(
+              `canary: abort-failed key=${mpKey} uploadId=${uploadId} (${failureWord(abortErr)})`,
+            );
+            throw new StageError(`${failureWord(err)}+abort-failed`);
+          }
           throw err;
         }
         const made = await headObject(ctx, mpKey);

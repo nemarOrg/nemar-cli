@@ -34,7 +34,10 @@ only ever hashed, never decoded, logged or put in an exception message.
 Every file it writes is owner-only (the process umask is 077), as the working directory is.
 
 Exit status: 0 everything done and verified; 1 an object failed (or an unexpected error);
-2 an input file or argument was refused; 3 ``--limit`` stopped the run with keys still to hash.
+2 usage (an argument the parser refused); 3 refused (an input file does not match the contract,
+or patches.json is not the one written with plan.json); 4 ``--limit`` stopped the run with keys
+still to hash; 129, 130, 143 ended by SIGHUP, SIGINT, SIGTERM (every running source command, its
+``aws`` child included, is killed with its process group; finished keys are saved).
 """
 
 from __future__ import annotations
@@ -83,7 +86,10 @@ PLACEHOLDER = re.compile(r"\{(dataset|key|bucket|version)\}")
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_USAGE = 2
-EXIT_INCOMPLETE = 3
+EXIT_REFUSED = 3
+EXIT_INCOMPLETE = 4
+#: 128 + the signal number, as a shell reports a process a signal ended.
+SIGNAL_EXIT = {signal.SIGINT: 130, signal.SIGTERM: 143, signal.SIGHUP: 129}
 
 
 class InputError(Exception):
@@ -429,6 +435,10 @@ def parse_plan(raw: bytes) -> dict:
         raise bad
     if "partial" in x and type(x["partial"]) is not bool:
         raise bad
+    if "patchesSha256" in x and not (
+        isinstance(x["patchesSha256"], str) and SHA256_HEX.fullmatch(x["patchesSha256"])
+    ):
+        raise bad
     seen: set[str] = set()
     need = unreadable = bytes_to_hash = 0
     for k in x["keys"]:
@@ -650,7 +660,14 @@ def _hashes_text(dataset: str, entries: dict) -> str:
 def cmd_compute(args: argparse.Namespace) -> int:
     plan = parse_plan(_read_bytes(args.plan, "plan.json"))
     _require_complete(plan)
-    patches = parse_patches(_read_bytes(args.patches, "patches.json"))
+    patches_raw = _read_bytes(args.patches, "patches.json")
+    # The plan names the exact bytes of the patches.json written with it: a patches.json from
+    # another plan would make keys for bytes the assembly will not produce.
+    if plan.get("patchesSha256") != hashlib.sha256(patches_raw).hexdigest():
+        raise InputError(
+            "patches.json is not the one written with plan.json (patches-stale)"
+        )
+    patches = parse_patches(patches_raw)
     _check_out_dir(args.out)
     dataset = _check_name(plan["dataset"], "the dataset name")
     bucket = _check_name(args.dataset_bucket or plan["bucket"], "the bucket name")
@@ -931,7 +948,7 @@ def build_parser() -> argparse.ArgumentParser:
     compute.add_argument(
         "--limit",
         type=_positive_int,
-        help="read at most this many keys, then exit with status 3 if keys remain",
+        help="read at most this many keys, then exit with status 4 if keys remain",
     )
     compute.add_argument(
         "--checkpoint-every",
@@ -959,8 +976,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _on_sigterm(signum, frame) -> None:
-    raise KeyboardInterrupt
+class Interrupted(KeyboardInterrupt):
+    """A signal ended the run; ``signum`` says which."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__()
+        self.signum = signum
+
+
+def _on_signal(signum, frame) -> None:
+    raise Interrupted(signum)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -968,16 +993,21 @@ def main(argv: list[str] | None = None) -> int:
     os.umask(0o077)
     args = build_parser().parse_args(argv)
     if threading.current_thread() is threading.main_thread():
-        signal.signal(signal.SIGTERM, _on_sigterm)
+        # SIGINT, SIGTERM and SIGHUP (a dropped terminal) all stop the run the same way: every
+        # source command's process group is killed, so no `aws` child outlives this process.
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, _on_signal)
     try:
         return args.func(args)
     except InputError as exc:
         _say(f"hash_stage: {exc}")
-        return EXIT_USAGE
-    except KeyboardInterrupt:
+        return EXIT_REFUSED
+    except KeyboardInterrupt as exc:
         kill_active()
-        _say("hash_stage: interrupted; finished keys were saved")
-        return 130
+        signum = exc.signum if isinstance(exc, Interrupted) else signal.SIGINT
+        name = signal.Signals(signum).name
+        _say(f"hash_stage: interrupted by {name}; finished keys were saved")
+        return SIGNAL_EXIT.get(signum, 130)
     except Exception as exc:  # noqa: BLE001 - last resort, and it must not echo a message
         frames = ", ".join(
             f"{os.path.basename(f.filename)}:{f.lineno} {f.name}"

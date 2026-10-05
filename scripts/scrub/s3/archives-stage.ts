@@ -13,6 +13,7 @@
  * `ListObjectVersions` that must show nothing; only then is `archives-dropped.json` written.
  */
 
+import { rm } from "node:fs/promises";
 import path from "node:path";
 import { parsePlan } from "../contract";
 import {
@@ -60,6 +61,8 @@ export async function dropArchivesStage(o: DropArchivesOptions): Promise<number>
   checkDataset(plan.dataset);
   requireCompletePlan(plan);
   const prefix = `${plan.dataset}/archives/`;
+  // A proof from an earlier run must not outlive this one: it holds only once this run ends well.
+  await rm(path.join(o.dir, "archives-dropped.json"), { force: true });
 
   return withCtx(o, plan.bucket, async (ctx) => {
     const found = await listPrefixVersions(ctx, prefix);

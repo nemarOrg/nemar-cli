@@ -218,7 +218,7 @@ describe("manifests and prefixes", () => {
   test("a prune prefix is exactly the dataset's version/, archives/ or zarr/, and nothing else", () => {
     const d = "xx090411";
     for (const ok of [`${d}/version/`, `${d}/archives/`, `${d}/zarr/`]) {
-      expect(() => checkPrunePrefix(d, ok), ok).not.toThrow();
+      expect(checkPrunePrefix(d, ok), ok).toBeUndefined();
     }
     for (const bad of [
       // The dataset root covers objects/; an empty segment is a different key space, not a safe one.
@@ -250,7 +250,17 @@ describe("manifests and prefixes", () => {
       `/${d}/version/`,
       "version/",
     ]) {
-      expect(() => checkPrunePrefix(d, bad), JSON.stringify(bad)).toThrow(StageError);
+      const err = (() => {
+        try {
+          checkPrunePrefix(d, bad);
+        } catch (e) {
+          return e;
+        }
+        return undefined;
+      })() as StageError;
+      // The exact refusal: its word and its kind, not merely "something was thrown".
+      expect(err, JSON.stringify(bad)).toBeInstanceOf(StageError);
+      expect([err.word, err.exitCode], JSON.stringify(bad)).toEqual(["bad-prune-prefix", 3]);
     }
   });
 
@@ -262,7 +272,7 @@ describe("manifests and prefixes", () => {
       "xx090411/canary-x/",
       "xx098999/canary-x/",
     ]) {
-      expect(() => checkCanaryPrefix(ok), ok).not.toThrow();
+      expect(checkCanaryPrefix(ok), ok).toBeUndefined();
     }
     for (const bad of [
       // Each side of each boundary: the top of the production sandbox band, the top of the dev
@@ -288,7 +298,16 @@ describe("manifests and prefixes", () => {
       "canary-a/",
       "",
     ]) {
-      expect(() => checkCanaryPrefix(bad), JSON.stringify(bad)).toThrow(StageError);
+      const err = (() => {
+        try {
+          checkCanaryPrefix(bad);
+        } catch (e) {
+          return e;
+        }
+        return undefined;
+      })() as StageError;
+      expect(err, JSON.stringify(bad)).toBeInstanceOf(StageError);
+      expect([err.word, err.exitCode], JSON.stringify(bad)).toEqual(["prefix-not-canary", 3]);
     }
   });
 });

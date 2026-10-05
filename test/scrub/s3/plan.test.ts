@@ -4,7 +4,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { parsePatches, parsePlan } from "../../../scripts/scrub/contract";
 import { buildKey } from "../../../scripts/scrub/contract";
@@ -19,6 +19,7 @@ import {
   dirText,
   edfFile,
   edfHeader,
+  fileSha256,
   fixtureA,
   fixtureB,
   fixtureD,
@@ -161,8 +162,12 @@ describe("plan", () => {
       expect(r.stdout).toContain("partial");
       // D is in no manifest that was read, but it is in the bucket: the objects are listed too.
       expect(plan.keys.map((k) => k.oldKey).sort()).toEqual([a.oldKey, b.oldKey, d.oldKey].sort());
-      // Naming tags skips discovery: the only listing is of the objects, never of version/.
-      expect(standin.calls("ListObjectsV2").map((c) => c.key)).toEqual([`${DATASET}/objects/`]);
+      // Naming tags skips discovery: version/ is never listed; objects/ is listed, versions and
+      // markers included (a recording masked by a delete marker still holds its bytes).
+      expect(standin.calls("ListObjectsV2")).toEqual([]);
+      expect(
+        standin.calls("ListObjectVersions").filter((c) => c.key === `${DATASET}/objects/`).length,
+      ).toBe(1);
       expect(
         standin.calls("GetObject").some((c) => c.key === `${DATASET}/version/v1.0.0.json`),
       ).toBe(false);
@@ -251,8 +256,10 @@ describe("plan", () => {
         [named, dropped, upper, mixed].map((f) => f.oldKey).sort(),
       );
       expect(plan.totals.keys).toBe(4);
-      // The listing followed every page of a two-entry page size.
-      expect(standin.calls("ListObjectsV2").length).toBeGreaterThan(2);
+      // The listing of objects/ followed every page of a two-entry page size.
+      expect(
+        standin.calls("ListObjectVersions").filter((c) => c.key === `${DATASET}/objects/`).length,
+      ).toBeGreaterThan(2);
       expect(leaksAName(`${r.all}\n${dirText(dir)}`)).toBeNull();
     },
     SLOW,
@@ -521,6 +528,98 @@ describe("plan", () => {
         expect(r.all).not.toContain(" at ");
       } finally {
         chmodSync(out, 0o700);
+      }
+    },
+    SLOW,
+  );
+});
+
+describe("plan: a recording masked by a delete marker (C3)", () => {
+  test(
+    "a clean masked recording is planned, read at its newest version, with every version and marker",
+    async () => {
+      standin = startS3Standin();
+      const [a, d] = [fixtureA(), fixtureD()];
+      seedObject(standin, a);
+      // D: no manifest names it and its current entry is a delete marker.
+      const ids = seedObject(standin, d);
+      const marker = standin.putDeleteMarker(BUCKET, objectPath(d.oldKey));
+      seedManifest(standin, "v1.0.0", [a]);
+      const dir = tempDir("plan-masked-clean");
+      const r = await runScrub(standin, planArgs(dir));
+      expect(r.exitCode, r.all).toBe(0);
+      const plan = readJson<PlanFile>(dir, "plan.json");
+      const entry = plan.keys.find((k) => k.oldKey === d.oldKey);
+      expect(entry, "the masked recording is in the plan").toBeDefined();
+      expect(entry?.status).toBe("read");
+      expect(entry?.needsScrub).toBe(false);
+      expect([...(entry?.versionIds ?? [])].sort()).toEqual([...ids, marker].sort());
+      // Its header was read by version id: the current entry is a marker.
+      expect(
+        standin.calls("GetObject").some((c) => c.key === objectPath(d.oldKey) && c.status === 206),
+      ).toBe(true);
+    },
+    SLOW,
+  );
+
+  test(
+    "a masked recording that needs a scrub stops the plan with a word a person acts on",
+    async () => {
+      standin = startS3Standin();
+      const [a, b] = [fixtureA(), fixtureB()];
+      seedObject(standin, a);
+      const ids = seedObject(standin, b);
+      const marker = standin.putDeleteMarker(BUCKET, objectPath(b.oldKey));
+      seedManifest(standin, "v1.0.0", [a]);
+      const dir = tempDir("plan-masked-dirty");
+      const r = await runScrub(standin, planArgs(dir));
+      expect(r.exitCode, r.all).toBe(4);
+      expect(r.stdout).toContain("masked-needs-scrub=1");
+      const plan = readJson<PlanFile>(dir, "plan.json");
+      const entry = plan.keys.find((k) => k.oldKey === b.oldKey);
+      expect(entry?.status).toBe("unreadable");
+      expect(entry?.reasons).toEqual(["masked-needs-scrub"]);
+      expect([...(entry?.versionIds ?? [])].sort()).toEqual([...ids, marker].sort());
+      expect(leaksAName(`${r.all}\n${dirText(dir)}`)).toBeNull();
+    },
+    SLOW,
+  );
+
+  test(
+    "plan.json names the exact bytes of the patches.json written with it, and leaves no temp file",
+    async () => {
+      standin = startS3Standin();
+      const a = fixtureA();
+      seedObject(standin, a);
+      seedManifest(standin, "v1.0.0", [a]);
+      const dir = tempDir("plan-bound");
+      const r = await runScrub(standin, planArgs(dir));
+      expect(r.exitCode, r.all).toBe(0);
+      expect(readJson<PlanFile>(dir, "plan.json").patchesSha256).toBe(
+        fileSha256(dir, "patches.json"),
+      );
+      expect(readdirSync(dir).sort()).toEqual(["patches.json", "plan.json"]);
+    },
+    SLOW,
+  );
+});
+
+describe("plan: a working directory it cannot read is not an empty one (S1)", () => {
+  test(
+    "an assembled.json that cannot be checked for is a failure, not a missing file",
+    async () => {
+      standin = startS3Standin();
+      const a = fixtureA();
+      seedObject(standin, a);
+      seedManifest(standin, "v1.0.0", [a]);
+      const dir = tempDir("plan-unreadable-dir");
+      chmodSync(dir, 0o000);
+      try {
+        const r = await runScrub(standin, planArgs(dir));
+        expectStopped(r, 1, "assembled.json-unreadable");
+        expect(standin.log.length).toBe(0);
+      } finally {
+        chmodSync(dir, 0o700);
       }
     },
     SLOW,

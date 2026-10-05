@@ -200,11 +200,20 @@ describe("stage files", () => {
       planSha256: H1,
       zarrPlanSha256: H2,
       found: "stores",
-      counts: { stores: 3, rewritten: 2, untouched: 1 },
+      stores: ["sub-01/a.zarr", "sub-01/b.zarr", "sub-02/c.zarr"],
+      allowedMembers: ["recordingnote"],
+      counts: { stores: 3, docs: 7, rewritten: 2, untouched: 5 },
     };
-    expect(parseZarrVerified(JSON.stringify(ok)).counts.stores).toBe(3);
-    const none = { ...ok, found: "no-zarr", counts: { stores: 0, rewritten: 0, untouched: 0 } };
-    expect(parseZarrVerified(JSON.stringify(none)).found).toBe("no-zarr");
+    // The whole shape, read back: not merely "it parsed".
+    expect(parseZarrVerified(JSON.stringify(ok))).toEqual(ok as never);
+    const none = {
+      ...ok,
+      found: "no-zarr",
+      stores: [],
+      allowedMembers: [],
+      counts: { stores: 0, docs: 0, rewritten: 0, untouched: 0 },
+    };
+    expect(parseZarrVerified(JSON.stringify(none))).toEqual(none as never);
     const bad = (over: Record<string, unknown>) => JSON.stringify({ ...ok, ...over });
     for (const over of [
       { version: 2 },
@@ -213,16 +222,26 @@ describe("stage files", () => {
       { verifiedAt: "yesterday" },
       { verifiedAt: undefined },
       // Never vacuous: no store under `stores`, stores under `no-zarr`, or neither word.
-      { counts: { stores: 0, rewritten: 0, untouched: 0 } },
+      { stores: [], counts: { stores: 0, docs: 0, rewritten: 0, untouched: 0 } },
       { found: "no-zarr" },
       { found: undefined },
       { found: "none" },
       { planSha256: "abc" },
       { planSha256: H1.toUpperCase() },
       { zarrPlanSha256: undefined },
-      { counts: { stores: 3, rewritten: 1, untouched: 1 } },
-      { counts: { stores: -1, rewritten: -1, untouched: 0 } },
-      { counts: { stores: 1.5, rewritten: 1.5, untouched: 0 } },
+      { counts: { stores: 3, docs: 7, rewritten: 1, untouched: 1 } },
+      { counts: { stores: 3, rewritten: 2, untouched: 1 } },
+      // Fewer documents than store roots, and a stores list that is not `stores` long.
+      { counts: { stores: 3, docs: 2, rewritten: 1, untouched: 1 } },
+      { stores: ["sub-01/a.zarr"] },
+      { stores: ["sub-01/a.zarr", "sub-01/a.zarr", "sub-02/c.zarr"] },
+      { stores: ["sub-01/a", "sub-01/b.zarr", "sub-02/c.zarr"] },
+      { stores: ["../a.zarr", "sub-01/b.zarr", "sub-02/c.zarr"] },
+      { stores: undefined },
+      { allowedMembers: ["Not Canonical"] },
+      { allowedMembers: undefined },
+      { counts: { stores: -1, docs: -1, rewritten: -1, untouched: 0 } },
+      { counts: { stores: 1.5, docs: 1.5, rewritten: 1.5, untouched: 0 } },
       { counts: null },
     ]) {
       expect(() => parseZarrVerified(bad(over)), JSON.stringify(over)).toThrow(ContractError);
@@ -306,7 +325,11 @@ describe("stage files", () => {
         ...over,
       });
     expect(parseAssembled(doc()).entries[OLD]?.newVersionId).toBe("v-new");
-    expect(parseAssembled(doc({}, { retainUntil: "2126-10-04T00:00:00.000Z" }))).toBeTruthy();
+    // Milliseconds are allowed, and the value comes back exactly as written.
+    expect(
+      parseAssembled(doc({}, { retainUntil: "2126-10-04T00:00:00.000Z" })).entries[OLD]
+        ?.retainUntil,
+    ).toBe("2126-10-04T00:00:00.000Z");
     const mutations: Array<[string, string]> = [
       // Reviewer probe T4: without it, a HEAD would check the current version instead.
       ["newVersionId absent", doc({}, { newVersionId: undefined })],

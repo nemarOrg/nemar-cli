@@ -65,6 +65,13 @@ export interface PlanFile {
    */
   partial?: boolean;
   createdAt: string;
+  /**
+   * sha256 of the exact bytes of the patches.json written beside this plan. Every stage that
+   * uses a patch (hash, assemble, verify) refuses a patches.json whose bytes are not these
+   * (`patches-stale`), so a patches.json from another plan is never applied. Absent only in a plan
+   * no patch is read with (the git stage's fixtures).
+   */
+  patchesSha256?: string;
   keys: PlanKey[];
   /** Counts only, for the report. */
   totals: { keys: number; needScrub: number; bytesToHash: number; unreadable: number };
@@ -127,6 +134,56 @@ export interface AssembledFile {
   >;
 }
 
+/**
+ * `deleted.json`: written by delete-old ONLY after an authoritative listing showed zero versions
+ * and zero markers for every old key and no history under archives/, version/ or zarr/. It is the
+ * proof the ledger's `old-versions-deleted` line takes its counts from.
+ */
+export interface DeletedFile {
+  version: 1;
+  dataset: string;
+  deletedAt: string;
+  assembledSha256: string;
+  counts: {
+    keys: number;
+    versions: number;
+    markers: number;
+    prunedVersions: number;
+    prunedMarkers: number;
+  };
+}
+
+const DELETED_COUNTS = ["keys", "versions", "markers", "prunedVersions", "prunedMarkers"];
+
+/** Read deleted.json, or refuse: exactly the contract's fields, counts that are counts. */
+export function parseDeleted(text: string): DeletedFile {
+  const x = JSON.parse(text) as unknown;
+  const bad = (): never => {
+    throw new ContractError("deleted.json does not match the contract");
+  };
+  if (!isObject(x)) return bad();
+  const fields = ["version", "dataset", "deletedAt", "assembledSha256", "counts"];
+  if (Object.keys(x).length !== fields.length || !fields.every((f) => f in x)) bad();
+  if (
+    x.version !== 1 ||
+    !isName(x.dataset) ||
+    !isIsoDate(x.deletedAt) ||
+    !isString(x.assembledSha256) ||
+    !SHA256_HEX.test(x.assembledSha256) ||
+    !isObject(x.counts)
+  ) {
+    bad();
+  }
+  const c = x.counts as Record<string, unknown>;
+  if (
+    Object.keys(c).length !== DELETED_COUNTS.length ||
+    !DELETED_COUNTS.every((f) => isCount(c[f]))
+  ) {
+    bad();
+  }
+  return x as unknown as DeletedFile;
+}
+
 /** `keymap.json`: the whole point of the exercise, handed to the history rewrite. */
 export type KeymapFile = Record<string, string>;
 
@@ -156,8 +213,20 @@ export interface ZarrVerifiedFile {
   planSha256: string;
   zarrPlanSha256: string;
   found: "stores" | "no-zarr";
-  /** Every store was clean after the run: `rewritten` had keys removed, `untouched` had none. */
-  counts: { stores: number; rewritten: number; untouched: number };
+  /**
+   * The store roots the run proved, as paths under `<id>/zarr/` (`sub-01/eeg/x.zarr`, the
+   * spelling `index.json` uses), sorted. `zarr-public` checks the union of these and the index's
+   * stores, so a store the index forgot is still checked. Paths can be built from file names, so
+   * this file is private like the rest of the working directory.
+   */
+  stores: string[];
+  /** The member names the operator accepted with `--allow-member` (canonical), sorted. */
+  allowedMembers: string[];
+  /**
+   * `stores` store roots; `docs` zarr.json documents read (roots and every array or group inside a
+   * store), every one clean after the run: `rewritten` had members removed, `untouched` had none.
+   */
+  counts: { stores: number; docs: number; rewritten: number; untouched: number };
 }
 
 /**
@@ -201,10 +270,14 @@ export interface ZarrPlanFile {
   removedMembers: number;
   totals: {
     stores: number;
+    /** zarr.json documents examined: store roots and the arrays and groups inside stores. */
+    docs: number;
     clean: number;
     needScrub: number;
     scrubbed: number;
     unreadable: number;
+    /** Documents whose recording metadata holds a member no list names. */
+    unknownMembers: number;
     failed: number;
   };
 }
@@ -299,6 +372,12 @@ export function parsePlan(text: string): PlanFile {
   // Every S3 call of every later stage names this bucket.
   if (!isName(plan.bucket)) bad();
   if (plan.tags !== undefined && !(Array.isArray(plan.tags) && plan.tags.every(isString))) bad();
+  if (
+    plan.patchesSha256 !== undefined &&
+    !(isString(plan.patchesSha256) && SHA256_HEX.test(plan.patchesSha256))
+  ) {
+    bad();
+  }
 
   const seen = new Set<string>();
   let needScrub = 0;
@@ -454,16 +533,24 @@ export function parseZarrVerified(text: string): ZarrVerifiedFile {
     typeof x.zarrPlanSha256 !== "string" ||
     !SHA256_HEX.test(x.zarrPlanSha256) ||
     (x.found !== "stores" && x.found !== "no-zarr") ||
-    !isObject(x.counts)
+    !isObject(x.counts) ||
+    !Array.isArray(x.stores) ||
+    !x.stores.every(isStorePath) ||
+    new Set(x.stores).size !== x.stores.length ||
+    !Array.isArray(x.allowedMembers) ||
+    !x.allowedMembers.every((m) => typeof m === "string" && /^[a-z0-9]+$/.test(m))
   ) {
     throw new ContractError("zarr-verified.json does not match the contract");
   }
   const c = x.counts;
   if (
     !isCount(c.stores) ||
+    !isCount(c.docs) ||
     !isCount(c.rewritten) ||
     !isCount(c.untouched) ||
-    c.rewritten + c.untouched !== c.stores
+    c.rewritten + c.untouched !== c.docs ||
+    c.docs < c.stores ||
+    x.stores.length !== c.stores
   ) {
     throw new ContractError("zarr-verified.json holds counts that do not add up");
   }
@@ -513,6 +600,12 @@ export function parseGitVerified(text: string): GitVerifiedFile {
     bad();
   }
   return x as unknown as GitVerifiedFile;
+}
+
+/** A store path as `index.json` names it: relative, no empty or dot segment, ending `.zarr`. */
+export function isStorePath(p: unknown): p is string {
+  if (typeof p !== "string" || !p.endsWith(".zarr")) return false;
+  return p.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
 }
 
 export function parseKeymap(text: string): KeymapFile {

@@ -42,6 +42,7 @@ import {
   objectPath,
   planArgs,
   readJson,
+  rebindPatches,
   runScrub,
   seedManifest,
   seedObject,
@@ -422,6 +423,10 @@ describe("assemble", () => {
       const patches = readJson<Record<string, string>>(dir, "patches.json");
       const { [a.oldKey]: _dropped, ...rest } = patches;
       writeJson(dir, "patches.json", rest);
+      // A patches.json the plan does not name is refused before anything is read from it.
+      expectStopped(await runScrub(standin, assembleArgs(dir)), 3, "patches-stale");
+      // Named by the plan, and still short of a key that needs a scrub.
+      rebindPatches(dir);
       const noPatch = await runScrub(standin, assembleArgs(dir));
       expectStopped(noPatch, 3, "patches-incomplete");
 
@@ -466,6 +471,7 @@ describe("assemble: a hash is good only for the patch it was computed for", () =
         ),
       );
       writeJson(dir, "patches.json", { ...patches, [a.oldKey]: other.toString("hex") });
+      rebindPatches(dir); // as the re-plan that wrote it would have
       for (const flag of [[], ["--execute"]]) {
         const r = await runScrub(standin, ["assemble", "--dir", dir, ...flag]);
         expectStopped(r, 3, "hashes-stale", flag.length ? "execute" : "dry run");
@@ -473,6 +479,7 @@ describe("assemble: a hash is good only for the patch it was computed for", () =
 
       // The binding itself altered, with the right patch in place.
       writeJson(dir, "patches.json", patches);
+      rebindPatches(dir);
       const altered = structuredClone(hashes);
       (altered.entries[b.oldKey] as { patchSha256: string }).patchSha256 = "0".repeat(64);
       writeJson(dir, "hashes.json", altered);
@@ -517,6 +524,80 @@ describe("assemble: the checksum a locked write needs", () => {
       const parts = standin.calls("UploadPart");
       expect(parts.length).toBe(1);
       expect([parts[0]?.status, parts[0]?.checksum]).toEqual([200, true]);
+    },
+    SLOW,
+  );
+});
+
+describe("assemble: what a failure leaves behind is said by key and upload id (S1, T6)", () => {
+  test(
+    "an abort that fails after a part failed names the key and the upload id",
+    async () => {
+      standin = startS3Standin();
+      const e = fixtureE();
+      const dir = await planned([e]);
+      standin.inject("UploadPart", { code: "InternalError", status: 500 });
+      standin.inject("AbortMultipartUpload", { code: "InternalError", status: 500 });
+      const r = await runScrub(standin, assembleArgs(dir));
+      expect(r.exitCode, r.all).toBe(1);
+      expect(r.stdout).toContain("UploadPart:failed+abort-failed=1");
+      expect(r.stdout).toMatch(
+        new RegExp(
+          `abort-failed key=${(e.newKey as string).replace(/\./g, "\\.")} uploadId=upload-standin-v\\d+ \\(AbortMultipartUpload:failed\\)`,
+        ),
+      );
+      expect(standin.openUploads()).toBe(1);
+    },
+    SLOW,
+  );
+
+  test(
+    "a create whose answer was lost leaves an upload that is found and reported",
+    async () => {
+      standin = startS3Standin();
+      const e = fixtureE();
+      const dir = await planned([e]);
+      // S3 created the upload; the answer never arrived.
+      standin.inject("CreateMultipartUpload", {
+        code: "InternalError",
+        status: 500,
+        applied: true,
+        times: 1,
+      });
+      const r = await runScrub(standin, assembleArgs(dir));
+      expect(r.exitCode, r.all).toBe(1);
+      expect(standin.openUploads()).toBe(1);
+      expect(r.stdout).toContain("CreateMultipartUpload:failed+upload-may-be-open=1");
+      expect(r.stdout).toMatch(
+        new RegExp(
+          `open upload left by a failed create: key=${(e.newKey as string).replace(/\./g, "\\.")} uploadId=upload-standin-v\\d+`,
+        ),
+      );
+    },
+    SLOW,
+  );
+
+  test(
+    "a single put reads its source pinned to the ETag it saw: a change in between fails it",
+    async () => {
+      standin = startS3Standin();
+      const a = fixtureA();
+      const dir = await planned([a]);
+      // Between the HEAD of the source and the read of its bytes, the source changes.
+      standin.beforeOp(
+        "GetObject",
+        () => {
+          const other = a.bytes.slice();
+          other[1000] ^= 0xff;
+          standin.putObject(BUCKET, objectPath(a.oldKey), other, { lockUntil: centuryFromNow() });
+        },
+        standin.opCount("GetObject") + 1,
+      );
+      const r = await runScrub(standin, assembleArgs(dir));
+      expect(r.exitCode, r.all).toBe(1);
+      expect(r.stdout).toContain("GetObject:precondition-failed=1");
+      expect(standin.calls("PutObject").length).toBe(0);
+      expect(standin.versions(BUCKET, objectPath(a.newKey as string)).length).toBe(0);
     },
     SLOW,
   );

@@ -23,6 +23,7 @@ import {
   SLOW,
   addUnreadableKey,
   buildAssembled,
+  centuryFromNow,
   copyDir,
   fileSha256,
   fixtureA,
@@ -31,6 +32,7 @@ import {
   has,
   objectPath,
   readJson,
+  rebindPatches,
   runScrub,
   sha256,
   verifyArgs,
@@ -174,6 +176,7 @@ describe("verify", () => {
         "hex",
       );
       writeJson(dir, "patches.json", patches);
+      rebindPatches(dir);
 
       const r = await runScrub(standin, verifyArgs(dir));
       expect(r.exitCode, r.all).toBe(1);
@@ -227,7 +230,8 @@ describe("verify", () => {
       standin.dropVersion(BUCKET, objectPath(b.oldKey), (only as { versionId: string }).versionId);
       const noOld = await runScrub(standin, verifyArgs(dir));
       expect(noOld.exitCode, noOld.all).toBe(1);
-      expect(noOld.stdout).toContain("old-unreadable=1");
+      // The class stays: an old object that is gone is not one that could not be reached.
+      expect(noOld.stdout).toContain("old-unreadable:GetObject:not-found=1");
     },
     SLOW,
   );
@@ -258,6 +262,51 @@ describe("verify", () => {
       const mismatch = await runScrub(standin, verifyArgs(dir));
       expectStopped(mismatch, 3, "keymap-mismatch");
       expect(has(dir, "verified.json")).toBe(false);
+    },
+    SLOW,
+  );
+});
+
+describe("verify: the version that was assembled (T6, T4)", () => {
+  test(
+    "reads the recorded version of the new object, and refuses a newer one at the key",
+    async () => {
+      // Someone writes the new key after assembly, with different bytes (a header and a body
+      // that are both wrong). Reading the recorded version finds it good; the newer version is
+      // named on its own, never as a header or range failure.
+      const other = a.bytes.slice();
+      other[20] ^= 0xff;
+      other[other.length - 1] ^= 0xff;
+      standin.putObject(BUCKET, newKeyPath(a), other, { lockUntil: centuryFromNow() });
+      const r = await runScrub(standin, verifyArgs(dir));
+      expect(r.exitCode, r.all).toBe(1);
+      expect(r.stdout).toContain("(new-not-current=1)");
+      expect(has(dir, "verified.json")).toBe(false);
+      // Every read of the new object named the recorded version.
+      const reads = standin
+        .calls("GetObject")
+        .filter((x) => x.key === newKeyPath(a) && x.status === 206);
+      expect(reads.length).toBeGreaterThan(1);
+      const recorded = newVersion(a);
+      const current = standin.current(BUCKET, newKeyPath(a))?.versionId;
+      expect(current).not.toBe(recorded);
+      expect(
+        reads.every((x) => x.versionId === recorded),
+        JSON.stringify(reads),
+      ).toBe(true);
+    },
+    SLOW,
+  );
+
+  test(
+    "an assembled.json of another dataset, or of another bucket, is refused, each on its own",
+    async () => {
+      const good = assembled();
+      writeJson(dir, "assembled.json", { ...good, dataset: "xx090412" });
+      expectStopped(await runScrub(standin, verifyArgs(dir)), 3, "assembled-wrong-dataset");
+      writeJson(dir, "assembled.json", { ...good, bucket: "other-bucket" });
+      expectStopped(await runScrub(standin, verifyArgs(dir)), 3, "assembled-wrong-bucket");
+      expect(standin.log.length).toBe(0);
     },
     SLOW,
   );

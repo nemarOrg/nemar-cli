@@ -23,6 +23,22 @@
 import { canonical, hasContent, scanJsonKeys } from "../../../shared/identifier-scan";
 
 /**
+ * What a Zarr store may say, and why the two lists below are what they are (Yahya, 2026-10-05):
+ *
+ * **A store holds the DATA and EVENTS plus channel names, types and units and technical
+ * recording metadata; it says nothing about the SUBJECT. Subject and phenotype information (age,
+ * sex/gender, patient code, birth date, name, additional patient text) lives at DATASET scope,
+ * participants.tsv is the one canonical place, and agents and people go there.**
+ *
+ * So the members removed from a store are every subject field the converter mirrors from the
+ * EDF/BDF patient identification, plus the operator and administrative free text from the
+ * recording identification ({@link EDF_MIRROR_MEMBERS}), plus anything the scanner calls an
+ * identifier. And the members a store's recording metadata may keep are exactly the technical
+ * ones ({@link KNOWN_BENIGN}); any other name is refused until a person has looked at it and named
+ * it with `--allow-member`, because a name nobody listed may hold header text.
+ */
+
+/**
  * The EDF identification fields the converter copies into a store's root attributes, in the
  * scanner's canonical spelling (lowercase, no spaces, underscores or hyphens), so `patient_name`,
  * `PatientName` and `patient-name` are one name.
@@ -32,21 +48,21 @@ import { canonical, hasContent, scanJsonKeys } from "../../../shared/identifier-
  * `gender`, `birthdate`, `patient_name`, `patient_additional`, `admincode`, `technician`,
  * `equipment` and `recording_additional` (and `startdate`), then sets every non-empty one on the
  * recording's metadata, which the Zarr exporter writes as `attributes.recording_metadata`. The
- * converter in `scripts/zarr/` adds no spelling of its own. Only the scanner's keys among them
- * (`patientcode`, `birthdate`, `patientname`) were removed before; the rest are free text from the
- * patient and recording identification fields, which is where names, record numbers and
- * technicians' names sit, so they go whatever they hold.
+ * converter in `scripts/zarr/` adds no spelling of its own. `equipment` is free text copied from
+ * the header's recording field: not data, events or channels.
  *
- * Kept on purpose: `gender` (sex is neither a name, a date nor a record number, and
- * `participants.tsv` carries it) and `startdate` (an acquisition date does not gate, ADR 0085).
+ * `gender` is removed too (decision 2026-10-05): the scrubbed header's patient field is
+ * `X X X X` (code, sex, birth date and name all unknown), and the store must say no more than the
+ * header does; participants.tsv keeps sex.
  *
- * This is the ONE list. A store whose `recording_metadata` holds an identification field under a
- * name that is not here is a store this stage does not clean, which is why the runbook reads the
- * key names of one real store per dataset before a real run.
+ * Measured on 2026-10-05 (names only): every one of nm000186's 88 store roots holds
+ * `patientcode`, `birthdate`, `gender` and `equipment`, non-empty, and none of the other five;
+ * nm000348's 153 hold none of them.
  */
 export const EDF_MIRROR_MEMBERS: ReadonlySet<string> = new Set([
   "patientcode",
   "birthdate",
+  "gender",
   "patientname",
   "patientadditional",
   "admincode",
@@ -54,6 +70,33 @@ export const EDF_MIRROR_MEMBERS: ReadonlySet<string> = new Set([
   "equipment",
   "recordingadditional",
 ]);
+
+/**
+ * The members a store's recording metadata (`recording_metadata`, or biosigio's
+ * `recording_info`) may keep, canonical spelling: recording-level technical metadata only.
+ * Transcribed from the stores biosigio 1.2.10 (the converter's pin, scripts/zarr/requirements.txt)
+ * wrote for nm000186 and nm000348 (census of 2026-10-05, names only): `startdate` (an
+ * acquisition date does not gate, ADR 0085), `filetype`, `number_of_signals`, `file_duration`,
+ * `datarecord_duration`, `source_file`, `source_format`, `streamed`, and `channels_tsv_units`
+ * with whatever it holds (a units report). The converter's own notes name four more technical
+ * flags a store can carry (`channel_labels_deduplicated`, `brainvision_header_recovered`,
+ * `eeglab_fdt_recovered`, `edf_tolerant_read`); they are NOT listed here, so a store that has
+ * one is refused until `--allow-member` names it after a look.
+ */
+export const KNOWN_BENIGN: ReadonlySet<string> = new Set([
+  "startdate",
+  "filetype",
+  "numberofsignals",
+  "fileduration",
+  "datarecordduration",
+  "sourcefile",
+  "sourceformat",
+  "streamed",
+  "channelstsvunits",
+]);
+
+/** Where a store keeps the recording's header fields: the converter's name, and biosigio's. */
+export const RECORDING_OBJECTS: readonly string[] = ["recording_metadata", "recording_info"];
 
 /** A zarr.json is a few KiB. Anything past this is not metadata and is not read. */
 export const MAX_ZARR_JSON_BYTES = 16 * 1024 * 1024;
@@ -241,6 +284,42 @@ export function zarrIdentifierCount(doc: unknown): number {
     n += isRemovableMember(key, value) ? 1 : zarrIdentifierCount(value);
   }
   return n;
+}
+
+/** True when the scanner knows a member of this name at all (an identifier or a review key). */
+function isScannerKey(key: string): boolean {
+  return scanJsonKeys({ [key]: "x" }).length > 0;
+}
+
+/**
+ * The names of the members of a document's recording metadata (`attributes.recording_metadata`
+ * or `attributes.recording_info`) that no list accounts for: not technical
+ * ({@link KNOWN_BENIGN}), not removed ({@link isRemovableMember}'s names), not a key the scanner
+ * knows, and not named by the operator (`allowed`, canonical spelling). Names only, never a value;
+ * empty is the only answer that lets a store be called clean.
+ */
+export function unknownRecordingMembers(doc: unknown, allowed: ReadonlySet<string>): string[] {
+  if (doc === null || typeof doc !== "object" || Array.isArray(doc)) return [];
+  const attributes = (doc as Record<string, unknown>).attributes;
+  if (attributes === null || typeof attributes !== "object" || Array.isArray(attributes)) return [];
+  const out: string[] = [];
+  for (const name of RECORDING_OBJECTS) {
+    const meta = (attributes as Record<string, unknown>)[name];
+    if (meta === undefined) continue;
+    // A recording-metadata member that is not an object holds something nobody can name.
+    if (meta === null || typeof meta !== "object" || Array.isArray(meta)) {
+      if (hasContent(meta)) out.push(name);
+      continue;
+    }
+    for (const key of Object.keys(meta as Record<string, unknown>)) {
+      const c = canonical(key);
+      if (KNOWN_BENIGN.has(c) || allowed.has(c) || isRemovableName(key) || isScannerKey(key)) {
+        continue;
+      }
+      out.push(key);
+    }
+  }
+  return out;
 }
 
 /**

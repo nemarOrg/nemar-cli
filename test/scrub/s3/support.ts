@@ -20,7 +20,12 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "bun";
-import { type HashesFile, type PlanFile, buildKey } from "../../../scripts/scrub/contract";
+import {
+  type HashesFile,
+  type PlanFile,
+  buildKey,
+  parseGitVerified,
+} from "../../../scripts/scrub/contract";
 import { type S3Ctx, TempArea, createAwsRunner } from "../../../scripts/scrub/s3/s3-lib";
 import { TEST_LOOPBACK_PUBLIC_BASE_ENV } from "../../../scripts/scrub/s3/s3-stages";
 import type { S3Standin } from "../helpers/s3-standin";
@@ -342,6 +347,22 @@ export function awsTestEnv(
   };
 }
 
+/**
+ * The last requests the stand-in answered, as `op status key` lines (no body, no header): what a
+ * failing assertion prints next to the CLI's own output, so a failure that happens once in a
+ * hundred runs says what the server saw.
+ */
+export function logTail(standin: S3Standin, n = 15): string {
+  return standin.log
+    .slice(-n)
+    .map((e) => `${e.op} ${e.status} ${e.key}${e.versionId ? ` v=${e.versionId}` : ""}`)
+    .join("\n");
+}
+
+/** A CLI result and the stand-in's log tail, for an assertion's message. */
+export const diag = (r: RunResult, standin: S3Standin): string =>
+  `${r.all}\n--- stand-in log tail ---\n${logTail(standin)}`;
+
 /** A library context (runner and temp area) wired to a stand-in, for tests of the operations. */
 export async function withCtx<T>(
   standin: S3Standin,
@@ -502,6 +523,40 @@ export function addUnreadableKey(dir: string): void {
 
 export const fileSha256 = (dir: string, name: string): string =>
   sha256(readFileSync(path.join(dir, name)));
+
+/**
+ * Bind plan.json to the patches.json in `dir` as the plan stage does (`patchesSha256`), for a
+ * test that rewrote patches.json on purpose and means to reach the check after that binding.
+ */
+export function rebindPatches(dir: string): void {
+  const plan = readJson<PlanFile>(dir, "plan.json");
+  plan.patchesSha256 = fileSha256(dir, "patches.json");
+  writeJson(dir, "plan.json", plan);
+}
+
+/**
+ * The proof `git-scrub verify --fresh-clone` leaves (`git-verified.json`), for the keymap.json
+ * and plan.json in `dir` as they are now. The git tests produce the real one with the real tool;
+ * the S3 tests stand in for that run here, through the contract's own parser.
+ */
+export function writeGitVerified(
+  dir: string,
+  over: Partial<{ mode: string; keymapSha256: string; s3PlanSha256: string; dataset: string }> = {},
+): void {
+  const proof = {
+    version: 1,
+    dataset: readJson<PlanFile>(dir, "plan.json").dataset,
+    mode: "fresh-clone",
+    verifiedAt: new Date().toISOString(),
+    keymapSha256: fileSha256(dir, "keymap.json"),
+    gitPlanSha256: "a".repeat(64),
+    s3PlanSha256: fileSha256(dir, "plan.json"),
+    counts: { refs: 3, commits: 3 },
+    ...over,
+  };
+  parseGitVerified(JSON.stringify(proof));
+  writeJson(dir, "git-verified.json", proof);
+}
 
 export function copyDir(from: string): string {
   const to = tempDir("copy");
