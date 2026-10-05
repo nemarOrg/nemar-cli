@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseKey } from "../../../scripts/scrub/contract";
 import { FILTER_REPO_REQUIREMENT } from "../../../scripts/scrub/git/git-lib";
+import { toolOrFail } from "../helpers/require-tools";
 
 export const CLI = join(import.meta.dir, "../../../scripts/scrub/git/git-scrub.ts");
 
@@ -39,21 +40,24 @@ function probe(cmd: string[]): boolean {
   }
 }
 
-/** The rewrite needs uv and a resolvable git-filter-repo; tests skip cleanly without them. */
+/** The rewrite needs uv and a resolvable git-filter-repo; tests skip cleanly without them, and fail when NEMAR_REQUIRE_SCRUB_TOOLS=1 (CI). */
 export const HAVE_REWRITE_TOOLS =
-  probe(["git", "--version"]) &&
-  probe(["uv", "--version"]) &&
-  probe([
-    "uv",
-    "run",
-    "--quiet",
-    "--with",
-    FILTER_REPO_REQUIREMENT,
-    "python",
-    "-c",
-    "import git_filter_repo",
-  ]);
-export const HAVE_ANNEX = probe(["git", "annex", "version"]);
+  toolOrFail("git", probe(["git", "--version"])) &&
+  toolOrFail("uv", probe(["uv", "--version"])) &&
+  toolOrFail(
+    "git-filter-repo via uv",
+    probe([
+      "uv",
+      "run",
+      "--quiet",
+      "--with",
+      FILTER_REPO_REQUIREMENT,
+      "python",
+      "-c",
+      "import git_filter_repo",
+    ]),
+  );
+export const HAVE_ANNEX = toolOrFail("git-annex", probe(["git", "annex", "version"]));
 
 const roots: string[] = [];
 
@@ -383,7 +387,7 @@ export function s3PlanFor(
     totals: {
       keys: all.length,
       needScrub: keys.scrub.length,
-      bytesToHash: 0,
+      bytesToHash: all.filter((e) => e.needsScrub).reduce((n, e) => n + e.size, 0),
       unreadable: keys.unreadable?.length ?? 0,
     },
   };
