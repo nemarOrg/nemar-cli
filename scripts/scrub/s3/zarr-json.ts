@@ -62,20 +62,27 @@ export const MAX_ZARR_JSON_BYTES = 16 * 1024 * 1024;
 export const STORE_ROOT = /\.zarr\/zarr\.json$/;
 
 export class ZarrJsonError extends Error {
-  constructor(readonly word: "zarr-json-malformed") {
+  constructor(readonly word: "zarr-json-malformed" | "zarr-json-bom") {
     super(word);
     this.name = "ZarrJsonError";
   }
 }
 
 /**
- * A zarr.json's bytes as text and as a parsed document, or `zarr-json-malformed`. Decoding is
+ * A zarr.json's bytes as text and as a parsed document, or a fixed word why not. Decoding is
  * fatal: a byte that is not UTF-8 would come back as U+FFFD, and a rewrite would then change bytes
- * that were never meant to change.
+ * that were never meant to change. A UTF-8 byte order mark is refused outright (`zarr-json-bom`):
+ * a decoder drops it silently, so the rewrite would lose three bytes that were never cut, and the
+ * claim that every byte outside the removed members is the original byte would be false.
  */
 export function parseZarrJsonBytes(bytes: Uint8Array): { text: string; doc: unknown } {
+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    throw new ZarrJsonError("zarr-json-bom");
+  }
   try {
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    // ignoreBOM keeps a mark in the text rather than eating it, so even a BOM this check missed
+    // would reach JSON.parse and be refused there.
+    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
     return { text, doc: JSON.parse(text) as unknown };
   } catch {
     throw new ZarrJsonError("zarr-json-malformed");

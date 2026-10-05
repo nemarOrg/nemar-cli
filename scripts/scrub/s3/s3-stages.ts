@@ -970,7 +970,8 @@ async function refuseManifestNamingOldKey(
 
 /**
  * The dataset's Zarr serving copy repeats header fields in every store root, so while any Zarr
- * object is current the `zarr` stage must have run for THIS plan and left a proof behind.
+ * object is current the `zarr` stage must have run for THIS plan and left a proof behind, and a
+ * proof that the prefix held nothing (`no-zarr`) is not a proof about objects that are there now.
  */
 async function requireZarrVerified(dir: string, dataset: string, planBytes: Buffer): Promise<void> {
   const refuse = () => new StageError("zarr-not-scrubbed", EXIT.refused);
@@ -984,6 +985,7 @@ async function requireZarrVerified(dir: string, dataset: string, planBytes: Buff
   }
   if (
     verified.dataset !== dataset ||
+    verified.found !== "stores" ||
     verified.planSha256 !== sha256Hex(planBytes) ||
     verified.zarrPlanSha256 !== sha256Hex(zarrPlanBytes)
   ) {

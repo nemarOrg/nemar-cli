@@ -781,6 +781,9 @@ describe("delete-old: what must be true before an old key may go", () => {
       await refused("zarr-not-scrubbed", { execute: false });
       await proveZarr({ counts: { stores: 5, rewritten: 1, untouched: 1 } });
       await refused("zarr-not-scrubbed", { execute: false });
+      // A well-formed proof that the prefix was empty says nothing about the objects there now.
+      await proveZarr({ found: "no-zarr", counts: { stores: 0, rewritten: 0, untouched: 0 } });
+      await refused("zarr-not-scrubbed", { execute: false });
       writeJson(dir, "zarr-verified.json", { version: 1 });
       await refused("zarr-not-scrubbed", { execute: false });
       // The proof without the zarr-plan.json it names, and a zarr-plan.json that was changed.

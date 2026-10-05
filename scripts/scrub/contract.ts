@@ -144,7 +144,10 @@ export interface VerifiedFile {
  * `zarr-verified.json`: proof that every Zarr store root of the dataset carries no identifier key.
  * It names the exact bytes of the two files it was made from, so a re-plan or a re-run makes an
  * older proof stale: `planSha256` is the sha256 of plan.json and `zarrPlanSha256` that of the
- * `zarr-plan.json` the same run wrote. Counts only; the store keys stay in `zarr-plan.json`.
+ * `zarr-plan.json` the same run wrote. Counts only.
+ *
+ * A proof is never vacuous: `found: "stores"` vouches for at least one store root, and the only
+ * proof with no store is `found: "no-zarr"`, which says the prefix held no current object at all.
  */
 export interface ZarrVerifiedFile {
   version: 1;
@@ -152,14 +155,15 @@ export interface ZarrVerifiedFile {
   verifiedAt: string;
   planSha256: string;
   zarrPlanSha256: string;
+  found: "stores" | "no-zarr";
   /** Every store was clean after the run: `rewritten` had keys removed, `untouched` had none. */
   counts: { stores: number; rewritten: number; untouched: number };
 }
 
 /**
- * `zarr-plan.json`: what the `zarr` stage found in each Zarr store root and, after an execute,
- * what became of it. Counts and S3 keys only. A key is a path that may be built from a file name,
- * so like every file in a working directory it stays private.
+ * `zarr-plan.json`: what the `zarr` stage found under the Zarr prefix and, after an execute, what
+ * became of it. Counts, fixed words and a digest only: no S3 key, because a key is a path that may
+ * be built from a file name, and nothing reads the keys back.
  */
 export interface ZarrPlanFile {
   version: 1;
@@ -170,8 +174,13 @@ export interface ZarrPlanFile {
   createdAt: string;
   /** False for a dry run, which writes nothing to S3. */
   executed: boolean;
-  /** `outcome` is a fixed word: clean, needs-scrub, scrubbed, or why the store was not. */
-  stores: Array<{ key: string; outcome: string; removed: number }>;
+  found: "stores" | "no-zarr";
+  /** sha256 of the sorted keys the run examined, joined by newlines: names the set, stores none. */
+  keysSha256: string;
+  /** How many examined keys ended in each outcome (clean, needs-scrub, scrubbed, or why not). */
+  outcomes: Record<string, number>;
+  /** Members removed (or, in a dry run, that would be) across every store. */
+  removedMembers: number;
   totals: {
     stores: number;
     clean: number;
@@ -242,6 +251,18 @@ function isCount(x: unknown): x is number {
 }
 
 const isString = (x: unknown): x is string => typeof x === "string";
+
+/** A non-empty string: a dataset id, a bucket, a version id. */
+const isName = (x: unknown): x is string => typeof x === "string" && x !== "";
+
+/** An ISO 8601 date and time, as every stage writes them (`toISOString`, or to the second). */
+function isIsoDate(x: unknown): x is string {
+  return (
+    typeof x === "string" &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/.test(x) &&
+    !Number.isNaN(Date.parse(x))
+  );
+}
 
 /**
  * Read plan.json's text into a typed value, or refuse. Every field a later stage trusts is
@@ -388,12 +409,13 @@ export function parseZarrVerified(text: string): ZarrVerifiedFile {
   if (
     !isObject(x) ||
     x.version !== 1 ||
-    typeof x.dataset !== "string" ||
-    typeof x.verifiedAt !== "string" ||
+    !isName(x.dataset) ||
+    !isIsoDate(x.verifiedAt) ||
     typeof x.planSha256 !== "string" ||
     !SHA256_HEX.test(x.planSha256) ||
     typeof x.zarrPlanSha256 !== "string" ||
     !SHA256_HEX.test(x.zarrPlanSha256) ||
+    (x.found !== "stores" && x.found !== "no-zarr") ||
     !isObject(x.counts)
   ) {
     throw new ContractError("zarr-verified.json does not match the contract");
@@ -406,6 +428,10 @@ export function parseZarrVerified(text: string): ZarrVerifiedFile {
     c.rewritten + c.untouched !== c.stores
   ) {
     throw new ContractError("zarr-verified.json holds counts that do not add up");
+  }
+  // Never vacuous: a proof about stores names at least one, and one about none says so.
+  if ((x.found === "stores") !== c.stores > 0) {
+    throw new ContractError("zarr-verified.json vouches for no store");
   }
   return x as unknown as ZarrVerifiedFile;
 }

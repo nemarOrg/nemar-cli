@@ -192,11 +192,15 @@ describe("zarr: a dry run", () => {
       expect(plan.executed).toBe(false);
       expect(plan.dataset).toBe(DATASET);
       expect(plan.planSha256).toBe(fileSha256(dir, "plan.json"));
-      expect(plan.stores).toEqual([
-        { key: A, outcome: "needs-scrub", removed: 10 },
-        { key: B, outcome: "needs-scrub", removed: 2 },
-        { key: C, outcome: "clean", removed: 0 },
-      ]);
+      expect(plan.found).toBe("stores");
+      expect(plan.outcomes).toEqual({ "needs-scrub": 2, clean: 1 });
+      expect(plan.removedMembers).toBe(12);
+      // The set of keys examined is named by a digest computed here; no key is stored.
+      expect(plan.keysSha256).toBe(sha256(enc([A, B, C].sort().join("\n"))));
+      const planText = readFileSync(path.join(dir, "zarr-plan.json"), "utf8");
+      for (const k of [A, B, C]) expect(planText).not.toContain(k);
+      expect(planText).not.toContain("zarr.json");
+      expect(planText).not.toContain("sub-01");
       expect(plan.totals).toEqual({
         stores: 3,
         clean: 1,
@@ -273,7 +277,7 @@ describe("zarr: --execute", () => {
       // The record of the run, and the proof bound to it.
       const plan = readJson<ZarrPlanFile>(dir, "zarr-plan.json");
       expect(plan.executed).toBe(true);
-      expect(plan.stores.map((s) => s.outcome)).toEqual(["scrubbed", "scrubbed", "clean"]);
+      expect(plan.outcomes).toEqual({ scrubbed: 2, clean: 1 });
       const proof = parseZarrVerified(readFileSync(path.join(dir, "zarr-verified.json"), "utf8"));
       expect(proof.dataset).toBe(DATASET);
       expect(proof.planSha256).toBe(fileSha256(dir, "plan.json"));
@@ -360,10 +364,10 @@ describe("zarr: --execute", () => {
       expect(r.stdout).toContain("verify-failed=1");
       expect(has(dir, "zarr-verified.json")).toBe(false);
       expect(text(A)).toBe(prettyDirty);
-      expect(readJson<ZarrPlanFile>(dir, "zarr-plan.json").stores[0]).toEqual({
-        key: A,
-        outcome: "verify-failed",
-        removed: 0,
+      expect(readJson<ZarrPlanFile>(dir, "zarr-plan.json").outcomes).toEqual({
+        "verify-failed": 1,
+        scrubbed: 1,
+        clean: 1,
       });
     },
     SLOW,
@@ -402,6 +406,8 @@ describe("zarr: --execute", () => {
         expect(r.stdout).toContain("zarr-json-too-large=1");
         expect(r.stdout).toContain("identifier-outside-attributes=1");
         expect(r.stdout).toContain("zarr-v2-metadata=1");
+        // The v2 store has no zarr.json at its root, so it is also a store without a root.
+        expect(r.stdout).toContain("store-root-missing=1");
         expect(has(dir, "zarr-verified.json")).toBe(false);
         expect(leaksAName(r.all)).toBeNull();
         expect(r.all).not.toContain("P0044");
@@ -411,7 +417,7 @@ describe("zarr: --execute", () => {
       expect(text(G)).toBe(outside);
       expect(text(A)).toBe(prettyCleaned);
       const plan = readJson<ZarrPlanFile>(dir, "zarr-plan.json");
-      expect(plan.totals.unreadable).toBe(5);
+      expect(plan.totals.unreadable).toBe(6);
       expect(plan.totals.failed).toBe(0);
     },
     SLOW,
@@ -556,6 +562,77 @@ describe("zarr-public: the check from outside after publication", () => {
   );
 });
 
+describe("zarr: a proof is never vacuous", () => {
+  test(
+    "objects under the prefix and no store root: unreadable, and no proof is written",
+    async () => {
+      const { dir, others } = await seeded();
+      // Reviewer probe T7: only a dirty zarr.json under a directory without the .zarr suffix, and
+      // an index. Before, that was "every one of 0 store roots is clean" and a proof.
+      for (const k of [A, B, C]) standin.putDeleteMarker(BUCKET, k);
+      const stray = `${DATASET}/zarr/sub-01/eeg/store-without-suffix/zarr.json`;
+      standin.putObject(BUCKET, stray, enc(prettyDirty));
+      for (const flag of [[], ["--execute"]]) {
+        const r = await runScrub(standin, zarrArgs(dir, flag));
+        expect(r.exitCode, r.all).toBe(4);
+        expect(r.stdout).toContain("stores=0");
+        expect(r.stdout).toContain("no-store-root=1");
+        expect(r.stdout).toContain("zarr-json-outside-store=1");
+        expect(has(dir, "zarr-verified.json")).toBe(false);
+      }
+      expect(text(stray)).toBe(prettyDirty);
+
+      // Nothing but the index: no zarr.json anywhere, and still not a prefix with nothing in it.
+      standin.putDeleteMarker(BUCKET, stray);
+      for (const k of Object.keys(others)) {
+        if (!k.endsWith("index.json")) standin.putDeleteMarker(BUCKET, k);
+      }
+      const r = await runScrub(standin, zarrArgs(dir, ["--execute"]));
+      expect(r.exitCode, r.all).toBe(4);
+      expect(r.stdout).toContain("not clean, by reason: no-store-root=1");
+      expect(has(dir, "zarr-verified.json")).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
+    "a zarr.json outside any store, or a store with no root, fails a run that has good stores",
+    async () => {
+      const { dir } = await seeded();
+      standin.putObject(BUCKET, `${DATASET}/zarr/zarr.json`, enc(compactDirty));
+      let r = await runScrub(standin, zarrArgs(dir, ["--execute"]));
+      expect(r.exitCode, r.all).toBe(4);
+      expect(r.stdout).toContain("zarr-json-outside-store=1");
+      expect(has(dir, "zarr-verified.json")).toBe(false);
+
+      standin.putDeleteMarker(BUCKET, `${DATASET}/zarr/zarr.json`);
+      // Chunks of a store whose root metadata is gone: nothing says what its attributes were.
+      standin.putObject(BUCKET, `${ROOT}/rootless.zarr/data/c/0/0`, new Uint8Array([1]));
+      r = await runScrub(standin, zarrArgs(dir, ["--execute"]));
+      expect(r.exitCode, r.all).toBe(4);
+      expect(r.stdout).toContain("store-root-missing=1");
+      expect(has(dir, "zarr-verified.json")).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
+    "a store root that starts with a byte order mark is refused, not rewritten without it",
+    async () => {
+      const { dir } = await seeded();
+      const bom = new Uint8Array([0xef, 0xbb, 0xbf, ...enc(compactDirty)]);
+      standin.putObject(BUCKET, B, bom);
+      const r = await runScrub(standin, zarrArgs(dir, ["--execute"]));
+      expect(r.exitCode, r.all).toBe(4);
+      expect(r.stdout).toContain("zarr-json-bom=1");
+      expect(versionsOf(B).length).toBe(2);
+      expect(Buffer.compare(standin.current(BUCKET, B)?.data as Uint8Array, bom)).toBe(0);
+      expect(has(dir, "zarr-verified.json")).toBe(false);
+    },
+    SLOW,
+  );
+});
+
 describe("zarr: preconditions", () => {
   test(
     "needs a plan to name the dataset and the bucket",
@@ -580,7 +657,7 @@ describe("zarr: preconditions", () => {
   );
 
   test(
-    "a dataset with no Zarr copy is proven vacuously, and the plan it made is the one named",
+    "a dataset with no Zarr copy is recorded as no-zarr, and the plan it made is the one named",
     async () => {
       standin = startS3Standin();
       const d = fixtureD();
@@ -591,7 +668,9 @@ describe("zarr: preconditions", () => {
       const r = await runScrub(standin, zarrArgs(dir, ["--execute"]));
       expect(r.exitCode, r.all).toBe(0);
       const proof = readJson<ZarrVerifiedFile>(dir, "zarr-verified.json");
+      expect(proof.found).toBe("no-zarr");
       expect(proof.counts).toEqual({ stores: 0, rewritten: 0, untouched: 0 });
+      expect(r.stdout).toContain("no Zarr copy");
       expect(proof.planSha256).toBe(fileSha256(dir, "plan.json"));
       const plan = readJson<PlanFile>(dir, "plan.json");
       expect(plan.dataset).toBe(DATASET);

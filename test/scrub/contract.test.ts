@@ -199,13 +199,24 @@ describe("stage files", () => {
       verifiedAt: "2026-10-04T00:00:00Z",
       planSha256: H1,
       zarrPlanSha256: H2,
+      found: "stores",
       counts: { stores: 3, rewritten: 2, untouched: 1 },
     };
     expect(parseZarrVerified(JSON.stringify(ok)).counts.stores).toBe(3);
+    const none = { ...ok, found: "no-zarr", counts: { stores: 0, rewritten: 0, untouched: 0 } };
+    expect(parseZarrVerified(JSON.stringify(none)).found).toBe("no-zarr");
     const bad = (over: Record<string, unknown>) => JSON.stringify({ ...ok, ...over });
     for (const over of [
       { version: 2 },
       { dataset: 7 },
+      { dataset: "" },
+      { verifiedAt: "yesterday" },
+      { verifiedAt: undefined },
+      // Never vacuous: no store under `stores`, stores under `no-zarr`, or neither word.
+      { counts: { stores: 0, rewritten: 0, untouched: 0 } },
+      { found: "no-zarr" },
+      { found: undefined },
+      { found: "none" },
       { planSha256: "abc" },
       { planSha256: H1.toUpperCase() },
       { zarrPlanSha256: undefined },

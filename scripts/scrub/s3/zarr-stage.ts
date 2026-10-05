@@ -12,8 +12,8 @@
  * What it does NOT do: it touches no other Zarr object (not a chunk, not an array's or a nested
  * group's metadata, not an index), it never overwrites a store root someone else changed since
  * it was read (the write is conditional on the ETag that was read), and it never prints, logs or
- * writes a value from a store. Output is counts and fixed words; `zarr-plan.json` adds the S3
- * keys, in the private working directory.
+ * writes a value from a store. Output is counts and fixed words; `zarr-plan.json` holds counts
+ * and a digest of the keys it examined, never a key.
  *
  * Zarr objects carry no Object Lock, so a rewrite makes a new version and leaves the old one
  * (identifiers and all) as a noncurrent version. `delete-old --prune-noncurrent <id>/zarr/` is
@@ -73,9 +73,13 @@ const OK = new Set(["clean", "needs-scrub", "scrubbed"]);
 /** Stores the stage cannot read or cannot clean: the plan is incomplete, nothing can be proven. */
 const UNREADABLE = new Set([
   "zarr-json-malformed",
+  "zarr-json-bom",
   "zarr-json-too-large",
   "identifier-outside-attributes",
   "zarr-v2-metadata",
+  "zarr-json-outside-store",
+  "store-root-missing",
+  "no-store-root",
 ]);
 
 /**
@@ -84,6 +88,46 @@ const UNREADABLE = new Set([
  * mean nothing. It is counted, not skipped.
  */
 const V2_METADATA = /\/\.(zattrs|zgroup|zmetadata)$/;
+/** A `zarr.json` below a store root: an array's or a nested group's, which this stage leaves. */
+const INSIDE_STORE = /\.zarr\/.+\/zarr\.json$/;
+/** The store a key belongs to: the path up to the first `.zarr` directory. */
+const STORE_DIR = /^(.*?\.zarr)\//;
+
+export interface ZarrLayout {
+  /** `no-zarr` only when the prefix holds no current object at all. */
+  found: "stores" | "no-zarr";
+  roots: string[];
+  /** Keys that say the stage cannot vouch for the prefix, each with the fixed word why. */
+  unreadable: StoreResult[];
+}
+
+/**
+ * Where the store roots of a listing of `<id>/zarr/` are, and what in it this stage cannot
+ * account for. A proof must not be vacuous: a prefix with objects and no store root, a
+ * `zarr.json` that is neither a store root nor inside a store, and a store with no root are all
+ * unreadable, because "no identifier key found" would then be said about nothing.
+ */
+export function zarrLayout(prefix: string, listed: string[]): ZarrLayout {
+  if (listed.length === 0) return { found: "no-zarr", roots: [], unreadable: [] };
+  const keys = new Set(listed);
+  const roots = listed.filter((k) => STORE_ROOT.test(k)).sort();
+  const unreadable: StoreResult[] = [];
+  const add = (key: string, outcome: string) => unreadable.push({ key, outcome, removed: 0 });
+  const stores = new Set<string>();
+  for (const k of [...listed].sort()) {
+    if (V2_METADATA.test(k)) add(k, "zarr-v2-metadata");
+    if (k.endsWith("/zarr.json") && !STORE_ROOT.test(k) && !INSIDE_STORE.test(k)) {
+      add(k, "zarr-json-outside-store");
+    }
+    const dir = STORE_DIR.exec(k)?.[1];
+    if (dir !== undefined) stores.add(dir);
+  }
+  for (const dir of [...stores].sort()) {
+    if (!keys.has(`${dir}/zarr.json`)) add(dir, "store-root-missing");
+  }
+  if (roots.length === 0) add(prefix, "no-store-root");
+  return { found: "stores", roots, unreadable };
+}
 
 async function scrubStore(ctx: S3Ctx, key: string, execute: boolean): Promise<StoreResult> {
   const result = (outcome: string, removed = 0): StoreResult => ({ key, outcome, removed });
@@ -168,25 +212,24 @@ export async function zarrStage(o: ZarrOptions): Promise<number> {
   await rm(path.join(o.dir, "zarr-verified.json"), { force: true });
 
   return withCtx(o, plan.bucket, async (ctx) => {
-    const listed = await listCurrentKeys(ctx, `${plan.dataset}/zarr/`);
-    const roots = listed.filter((k) => STORE_ROOT.test(k)).sort();
-    const v2 = listed.filter((k) => V2_METADATA.test(k)).sort();
+    const prefix = `${plan.dataset}/zarr/`;
+    const layout = zarrLayout(prefix, await listCurrentKeys(ctx, prefix));
 
-    const scrubbed = await runPool(roots, o.concurrency, (k) => scrubStore(ctx, k, o.execute));
-    const results: StoreResult[] = [
-      ...(scrubbed as StoreResult[]),
-      ...v2.map((key) => ({ key, outcome: "zarr-v2-metadata", removed: 0 })),
-    ];
+    const scrubbed = await runPool(layout.roots, o.concurrency, (k) =>
+      scrubStore(ctx, k, o.execute),
+    );
+    const results: StoreResult[] = [...(scrubbed as StoreResult[]), ...layout.unreadable];
 
     const count = (pred: (r: StoreResult) => boolean) => results.filter(pred).length;
     const totals: ZarrPlanFile["totals"] = {
-      stores: roots.length,
+      stores: layout.roots.length,
       clean: count((r) => r.outcome === "clean"),
       needScrub: count((r) => r.outcome === "needs-scrub"),
       scrubbed: count((r) => r.outcome === "scrubbed"),
       unreadable: count((r) => UNREADABLE.has(r.outcome)),
       failed: count((r) => !OK.has(r.outcome) && !UNREADABLE.has(r.outcome)),
     };
+    // Counts and one digest, never a key: a key is a path that may be built from a file name.
     const zarrPlan: ZarrPlanFile = {
       version: 1,
       dataset: plan.dataset,
@@ -194,7 +237,17 @@ export async function zarrStage(o: ZarrOptions): Promise<number> {
       planSha256: sha256Hex(planBytes),
       createdAt: new Date().toISOString(),
       executed: o.execute,
-      stores: results,
+      found: layout.found,
+      keysSha256: sha256Hex(
+        new TextEncoder().encode(
+          results
+            .map((r) => r.key)
+            .sort()
+            .join("\n"),
+        ),
+      ),
+      outcomes: countWords(results.map((r) => r.outcome)),
+      removedMembers: results.reduce((n, r) => n + r.removed, 0),
       totals,
     };
     await writeJson(o.dir, "zarr-plan.json", zarrPlan);
@@ -225,10 +278,15 @@ export async function zarrStage(o: ZarrOptions): Promise<number> {
       verifiedAt: new Date().toISOString(),
       planSha256: sha256Hex(planBytes),
       zarrPlanSha256: sha256Hex(zarrPlanBytes),
+      found: layout.found,
       counts: { stores: totals.stores, rewritten: totals.scrubbed, untouched: totals.clean },
     };
     await writeJson(o.dir, "zarr-verified.json", proof);
-    o.log(`zarr: ok; every one of ${totals.stores} store roots is clean`);
+    o.log(
+      layout.found === "no-zarr"
+        ? "zarr: ok; the dataset has no Zarr copy (no current object under the prefix)"
+        : `zarr: ok; every one of ${totals.stores} store roots is clean`,
+    );
     return 0;
   });
 }
