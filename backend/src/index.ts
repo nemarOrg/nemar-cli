@@ -63,6 +63,7 @@ import {
 } from "./services/email";
 import { isNonProductionEnv } from "./services/environment";
 import { resolveHostRoute } from "./services/host-routing";
+import { sweepIdentifierScreens } from "./services/identifier-screen";
 import {
   importCoverageSweepSummary,
   runImportCoverageSweepCron,
@@ -869,6 +870,33 @@ export default {
           ),
         ),
       );
+      // Epic #1610 phase 4: the identifier-screen watchdog. It rides this tick
+      // rather than the daily one because its deadline is 40 minutes: a screen
+      // that never reports must reach the admins within the hour, not the next
+      // day. PRODUCTION-ONLY, by AGENTS.md's default for a new cron job and for
+      // that rule's reason: it mails admins, and the dev worker shares the
+      // `users` table with production. It is therefore not in
+      // DEV_CRON_ALLOWLIST; the sweep also refuses outside production on its
+      // own, and staging recovers a stuck screen with the admin re-run route.
+      // D1 and the admin mail only: no GitHub call, so no infrastructure verdict.
+      if (!isNonProductionEnv(env)) {
+        ctx.waitUntil(
+          sweepIdentifierScreens(env)
+            .then((r) => {
+              if (r.timedOut + r.emailed + r.undelivered + r.errors > 0) {
+                console.log(
+                  `[identifier-screen-sweep] timedOut=${r.timedOut} emailed=${r.emailed} undelivered=${r.undelivered} errors=${r.errors}`,
+                );
+              }
+            })
+            .catch((err) =>
+              console.error(
+                "[identifier-screen-sweep] sweep failed:",
+                err instanceof Error ? (err.stack ?? err.message) : err,
+              ),
+            ),
+        );
+      }
       return;
     }
     // Daily (prod "0 3 * * *", dev/staging "0 4 * * *"):
