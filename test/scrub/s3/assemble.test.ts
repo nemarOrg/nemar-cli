@@ -11,6 +11,7 @@ import { rmSync } from "node:fs";
 import path from "node:path";
 import {
   type AssembledFile,
+  type HashesFile,
   type KeymapFile,
   parseAssembled,
   parseKey,
@@ -46,6 +47,7 @@ import {
   seedObject,
   sha256,
   tempDir,
+  withFields,
   writeHashes,
   writeJson,
 } from "./support";
@@ -441,6 +443,57 @@ describe("assemble", () => {
       expect(r.exitCode, r.all).toBe(1);
       expect(r.stdout).toContain("source-missing");
       expect(standin.calls("PutObject").length).toBe(0);
+    },
+    SLOW,
+  );
+});
+
+describe("assemble: a hash is good only for the patch it was computed for", () => {
+  test(
+    "refuses hashes bound to another patch, in the dry run too, and a file with no binding",
+    async () => {
+      standin = startS3Standin();
+      const [a, b] = [fixtureA(), fixtureB()];
+      const dir = await planned([a, b]);
+      const patches = readJson<Record<string, string>>(dir, "patches.json");
+      const hashes = readJson<HashesFile>(dir, "hashes.json");
+
+      // patches.json now holds another scrub for A; hashes.json is still bound to the first.
+      const other = Buffer.from(
+        withFields(a.bytes, { patient: "X X X X", recording: "Startdate X X X X" }).subarray(
+          0,
+          256,
+        ),
+      );
+      writeJson(dir, "patches.json", { ...patches, [a.oldKey]: other.toString("hex") });
+      for (const flag of [[], ["--execute"]]) {
+        const r = await runScrub(standin, ["assemble", "--dir", dir, ...flag]);
+        expectStopped(r, 3, "hashes-stale", flag.length ? "execute" : "dry run");
+      }
+
+      // The binding itself altered, with the right patch in place.
+      writeJson(dir, "patches.json", patches);
+      const altered = structuredClone(hashes);
+      (altered.entries[b.oldKey] as { patchSha256: string }).patchSha256 = "0".repeat(64);
+      writeJson(dir, "hashes.json", altered);
+      expectStopped(await runScrub(standin, assembleArgs(dir)), 3, "hashes-stale");
+
+      // No binding at all is not a hashes.json this contract accepts.
+      const unbound = structuredClone(hashes);
+      for (const e of Object.values(unbound.entries)) {
+        (e as { patchSha256?: string }).patchSha256 = undefined;
+      }
+      writeJson(dir, "hashes.json", unbound);
+      expectStopped(await runScrub(standin, assembleArgs(dir)), 3, "hashes.json-invalid");
+
+      expect(standin.calls("PutObject").length).toBe(0);
+      expect(standin.calls("CreateMultipartUpload").length).toBe(0);
+      expect(has(dir, "assembled.json")).toBe(false);
+
+      // The matching pair assembles.
+      writeJson(dir, "hashes.json", hashes);
+      const ok = await runScrub(standin, assembleArgs(dir));
+      expect(ok.exitCode, ok.all).toBe(0);
     },
     SLOW,
   );

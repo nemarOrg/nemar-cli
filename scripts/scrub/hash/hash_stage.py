@@ -54,8 +54,11 @@ CHUNK_SIZE = 8 * 1024 * 1024
 HEADER_LEN = 256
 
 # fullmatch only: Python's `$` also matches before a trailing newline, and a key reaches a shell.
-ANNEX_KEY = re.compile(r"SHA256E-s(\d+)--([0-9a-f]{64})(\.[A-Za-z0-9.+]*)?")
+# re.ASCII: without it `\d` matches any Unicode decimal digit (Arabic-Indic, fullwidth), and
+# `int()` accepts them, so a key could carry a size no other reader of the key would parse.
+ANNEX_KEY = re.compile(r"SHA256E-s(\d+)--([0-9a-f]{64})(\.[A-Za-z0-9.+]*)?", re.ASCII)
 PATCH_HEX = re.compile(r"[0-9a-f]{512}")
+SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 # A recording kept inline in git is keyed `git:<blob sha>`; the plan records it as unreadable.
 GIT_KEY = re.compile(r"git:[0-9a-f]{40}(?:[0-9a-f]{24})?")
 SAFE_NAME = re.compile(r"[A-Za-z0-9._-]+")
@@ -108,6 +111,13 @@ def parse_key(key: str) -> ParsedKey:
     if not m:
         raise InputError("a key is not a SHA256E annex key")
     return ParsedKey(size=int(m.group(1)), sha256=m.group(2), ext=m.group(3) or "")
+
+
+def patch_digest(patch_hex: str) -> str:
+    """The binding of a hashes entry to the patch it was computed for: the SHA-256 of the 512
+    lowercase hex characters as they stand in patches.json (their ASCII bytes, not the 256 bytes
+    they decode to). The assemble stage computes the same value and refuses a mismatch."""
+    return hashlib.sha256(patch_hex.encode("ascii")).hexdigest()
 
 
 def build_key(size: int, sha256: str, ext: str) -> str:
@@ -454,6 +464,12 @@ def load_existing_hashes(path: str, dataset: str, needed: list[str]) -> dict:
         new_key = e.get("newKey")
         if not isinstance(new_key, str) or not ANNEX_KEY.fullmatch(new_key):
             raise InputError("the existing hashes file holds a bad entry")
+        # Absent in a file from before entries were bound to a patch: stale, recomputed later.
+        bound = e.get("patchSha256")
+        if bound is not None and not (
+            isinstance(bound, str) and SHA256_HEX.fullmatch(bound)
+        ):
+            raise InputError("the existing hashes file holds a bad entry")
         old, new = parse_key(old_key), parse_key(new_key)
         if (
             new.size != old.size
@@ -565,7 +581,16 @@ def cmd_compute(args: argparse.Namespace) -> int:
     )
 
     needed, clean, unchecked = _plan_keys(plan)
-    entries = load_existing_hashes(args.out, dataset, needed)
+    existing = load_existing_hashes(args.out, dataset, needed)
+    # An entry is reused only for the patch it was computed for. A patch that changed since (or an
+    # entry from before entries named their patch) means the new key is for other bytes: drop the
+    # entry and read the object again.
+    entries = {
+        old_key: e
+        for old_key, e in existing.items()
+        if old_key in patches and e.get("patchSha256") == patch_digest(patches[old_key])
+    }
+    stale = len(existing) - len(entries)
     resumed = len(entries)
     failures: dict[str, str] = {}
     todo = []
@@ -584,6 +609,8 @@ def cmd_compute(args: argparse.Namespace) -> int:
         f"{resumed} already done, {len(todo)} to read now, {clean} need no scrub, "
         f"{unchecked} not checked by the plan (never read)"
     )
+    if stale:
+        _say(f"hash compute {dataset}: {stale} entries were made for another patch; recomputing")
 
     done = 0
     unsaved = 0
@@ -606,6 +633,7 @@ def cmd_compute(args: argparse.Namespace) -> int:
             "newKey": new_key,
             "size": parse_key(old_key).size,
             "sourceSha256Verified": True,
+            "patchSha256": patch_digest(patches[old_key]),
         }
         unsaved += 1
         _say(f"[{done}/{len(todo)}] hashed {old_key}")

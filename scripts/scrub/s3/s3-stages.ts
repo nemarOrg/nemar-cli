@@ -42,6 +42,7 @@ import {
   parsePlan,
   parseVerified,
   parseZarrVerified,
+  patchDigest,
 } from "../contract";
 import {
   AwsCliError,
@@ -463,6 +464,9 @@ export async function loadAssembleInputs(dir: string): Promise<AssembleInputs> {
     if (h.sourceSha256Verified !== true) throw new StageError("source-not-verified", EXIT.refused);
     const hex = patches[k.oldKey];
     if (!hex) throw new StageError("patches-incomplete", EXIT.refused);
+    // The new key is the hash of the original WITH this patch, so a hash computed for another
+    // patch names bytes this assembly would not produce.
+    if (h.patchSha256 !== patchDigest(hex)) throw new StageError("hashes-stale", EXIT.refused);
     const size = parseKey(k.oldKey).size;
     if (k.size !== size || h.size !== size) throw new StageError("size-mismatch", EXIT.refused);
     if (oldKeys.has(h.newKey)) throw new StageError("new-key-is-an-old-key", EXIT.refused);

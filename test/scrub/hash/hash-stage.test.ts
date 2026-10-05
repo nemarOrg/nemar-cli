@@ -125,6 +125,17 @@ function makeObject(size: number, ext = ".edf", patch: Buffer = SCRUBBED_HEADER)
   };
 }
 
+/** The same original, scrubbed with another patch: its new key is for other bytes. */
+function repatch(o: Obj, patch: Buffer): Obj {
+  const newContent = Buffer.concat([patch, o.content.subarray(256)]);
+  return {
+    ...o,
+    patch,
+    newContent,
+    newKey: `SHA256E-s${o.size}--${sha256(newContent)}${o.ext}`,
+  };
+}
+
 interface Workspace {
   dir: string;
   objects: string;
@@ -219,10 +230,18 @@ function stage(ws: Workspace, items: Staged[], opts: { bucket?: string } = {}): 
   writeFileSync(ws.patches, JSON.stringify(patches));
 }
 
+/** What an entry must name for a patch: the sha256 of its 512 hex characters, computed here. */
+const patchBinding = (patch: Buffer): string => sha256(Buffer.from(patch.toString("hex"), "utf8"));
+
 function expectedHashes(objs: Obj[]): HashesFile {
   const entries: HashesFile["entries"] = {};
   for (const o of objs) {
-    entries[o.oldKey] = { newKey: o.newKey, size: o.size, sourceSha256Verified: true };
+    entries[o.oldKey] = {
+      newKey: o.newKey,
+      size: o.size,
+      sourceSha256Verified: true,
+      patchSha256: patchBinding(o.patch),
+    };
   }
   return { version: 1, dataset: DATASET, entries };
 }
@@ -592,6 +611,111 @@ describe("compute: resuming and parallelism", () => {
       expect(third.code, third.stderr).toBe(0);
       expect(readLog(ws)).toHaveLength(5);
       expect(readFileSync(ws.hashes, "utf8")).toBe(before);
+    },
+    TIMEOUT_MS,
+  );
+
+  test(
+    "an entry is reused only for the patch it was computed for; any other patch is recomputed",
+    async () => {
+      const ws = workspace();
+      const a = makeObject(3000);
+      const b = makeObject(3001);
+      stage(ws, [{ obj: a }, { obj: b }]);
+      installSource(ws, LOGGING_SOURCE);
+      expect((await py(computeArgs(ws))).code).toBe(0);
+      expect(readJson<HashesFile>(ws.hashes)).toEqual(expectedHashes([a, b]));
+
+      // The patch for A changes (a different scrub), the one for B does not: only A is read again,
+      // and its new key is for the new patch.
+      const a2 = repatch(a, edfHeader("Y Y Y Y", "Startdate Y Y Y Y"));
+      expect(a2.newKey).not.toBe(a.newKey);
+      writeFileSync(
+        ws.patches,
+        JSON.stringify({
+          [a.oldKey]: a2.patch.toString("hex"),
+          [b.oldKey]: b.patch.toString("hex"),
+        }),
+      );
+      rmSync(ws.log);
+      const second = await py(computeArgs(ws));
+      expect(second.code, second.stderr).toBe(0);
+      expect(second.stderr).toContain("1 entries were made for another patch");
+      expect(readLog(ws)).toEqual([a.oldKey]);
+      expect(readJson<HashesFile>(ws.hashes)).toEqual(expectedHashes([a2, b]));
+
+      // An entry from before entries named their patch is not trusted: both are read again.
+      const old = readJson<HashesFile>(ws.hashes);
+      for (const e of Object.values(old.entries)) {
+        (e as { patchSha256?: string }).patchSha256 = undefined;
+      }
+      writeFileSync(ws.hashes, JSON.stringify(old));
+      rmSync(ws.log);
+      const third = await py(computeArgs(ws));
+      expect(third.code, third.stderr).toBe(0);
+      expect(readLog(ws).sort()).toEqual([a.oldKey, b.oldKey].sort());
+      expect(readJson<HashesFile>(ws.hashes)).toEqual(expectedHashes([a2, b]));
+
+      // A key whose patch is gone cannot keep its entry: it is dropped and reported.
+      writeFileSync(ws.patches, JSON.stringify({ [b.oldKey]: b.patch.toString("hex") }));
+      const fourth = await py(computeArgs(ws));
+      expect(fourth.code, fourth.stderr).toBe(1);
+      expect(fourth.stderr).toContain("no patch for this key");
+      expect(Object.keys(readJson<HashesFile>(ws.hashes).entries)).toEqual([b.oldKey]);
+
+      // A binding that is not a sha256 is a file this program would not have written.
+      const bad = expectedHashes([b]);
+      (bad.entries[b.oldKey] as { patchSha256: string }).patchSha256 = "nope";
+      writeFileSync(ws.hashes, JSON.stringify(bad));
+      expect((await py(computeArgs(ws))).code).toBe(2);
+    },
+    TIMEOUT_MS,
+  );
+
+  test(
+    "a key whose size is written in non-ASCII digits is refused wherever a key is read",
+    async () => {
+      const ws = workspace();
+      const o = makeObject(3000);
+      stage(ws, [{ obj: o }]);
+      const goodPlan = readJson<PlanFile>(ws.plan);
+      const patchHex = o.patch.toString("hex");
+      for (const digits of ["\u0663\u0660\u0660\u0660", "\uFF13\uFF10\uFF10\uFF10"]) {
+        // Python's int() reads these as 3000, which no other reader of the key would.
+        const bad = o.oldKey.replace("s3000", `s${digits}`);
+        expect(bad).not.toBe(o.oldKey);
+        const plan = structuredClone(goodPlan);
+        (plan.keys[0] as PlanKey).oldKey = bad;
+        writeFileSync(ws.plan, JSON.stringify(plan));
+        expect((await py(computeArgs(ws))).code, "plan").toBe(2);
+
+        writeFileSync(ws.plan, JSON.stringify(goodPlan));
+        writeFileSync(ws.patches, JSON.stringify({ [bad]: patchHex }));
+        expect((await py(computeArgs(ws))).code, "patches").toBe(2);
+        writeFileSync(ws.patches, JSON.stringify({ [o.oldKey]: patchHex }));
+
+        const assembled = join(ws.dir, "assembled.json");
+        writeFileSync(
+          assembled,
+          JSON.stringify({
+            version: 1,
+            dataset: DATASET,
+            bucket: "nemar",
+            entries: { [o.oldKey]: { newKey: bad } },
+          }),
+        );
+        const verify = await py([
+          "verify-new",
+          "--assembled",
+          assembled,
+          "--out",
+          join(ws.dir, "proof.json"),
+          "--source-cmd",
+          ws.sourceCmd,
+        ]);
+        expect(verify.code, "assembled").toBe(2);
+      }
+      expect(existsSync(ws.hashes)).toBe(false);
     },
     TIMEOUT_MS,
   );

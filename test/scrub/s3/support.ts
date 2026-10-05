@@ -20,7 +20,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "bun";
-import { buildKey } from "../../../scripts/scrub/contract";
+import { type HashesFile, buildKey } from "../../../scripts/scrub/contract";
 import { type S3Ctx, TempArea, createAwsRunner } from "../../../scripts/scrub/s3/s3-lib";
 import type { S3Standin } from "../helpers/s3-standin";
 
@@ -491,11 +491,16 @@ export function leaksAName(text: string): string | null {
 
 /** The test standing in for the hashing host: the key each scrubbed file gets. */
 export function writeHashes(dir: string, fixtures: Fixture[], dataset = DATASET): void {
-  const entries: Record<string, { newKey: string; size: number; sourceSha256Verified: boolean }> =
-    {};
+  const entries: HashesFile["entries"] = {};
   for (const f of fixtures) {
-    if (f.newKey) {
-      entries[f.oldKey] = { newKey: f.newKey, size: f.bytes.length, sourceSha256Verified: true };
+    if (f.newKey && f.expected) {
+      entries[f.oldKey] = {
+        newKey: f.newKey,
+        size: f.bytes.length,
+        sourceSha256Verified: true,
+        // The binding to the patch, computed here from the independently built expected header.
+        patchSha256: sha256(Buffer.from(Buffer.from(f.expected.subarray(0, 256)).toString("hex"))),
+      };
     }
   }
   writeJson(dir, "hashes.json", { version: 1, dataset, entries });

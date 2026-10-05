@@ -13,6 +13,8 @@
  * the identifier, so a working directory is private and deleted when the dataset is done.
  */
 
+import { createHash } from "node:crypto";
+
 /** `SHA256E-s<size>--<64 hex>[.ext]`, the only key shape the scrub handles. */
 export const ANNEX_KEY = /^SHA256E-s(\d+)--([0-9a-f]{64})(\.[A-Za-z0-9.+]*)?$/;
 
@@ -92,7 +94,26 @@ export type PatchesFile = Record<string, string>;
 export interface HashesFile {
   version: 1;
   dataset: string;
-  entries: Record<string, { newKey: string; size: number; sourceSha256Verified: boolean }>;
+  entries: Record<
+    string,
+    {
+      newKey: string;
+      size: number;
+      sourceSha256Verified: boolean;
+      /**
+       * sha256 of that key's entry in patches.json, taken over the 512 hex characters as written
+       * (their ASCII bytes, not the 256 bytes they decode to). The new key is the hash of the
+       * original with THIS patch applied, so an entry is good only for the patch it names:
+       * assemble refuses a mismatch, and the hash stage recomputes one on resume.
+       */
+      patchSha256: string;
+    }
+  >;
+}
+
+/** The value a hashes entry carries for a patch: see {@link HashesFile}. */
+export function patchDigest(patchHex: string): string {
+  return createHash("sha256").update(patchHex, "ascii").digest("hex");
 }
 
 /** `assembled.json`: oldKey -> the new object, after it was assembled and locked. */
@@ -233,7 +254,13 @@ export function parseHashes(text: string): HashesFile {
     throw new ContractError("hashes.json does not match the contract");
   }
   for (const [oldKey, e] of Object.entries(x.entries)) {
-    if (!ANNEX_KEY.test(oldKey) || !isObject(e) || typeof e.newKey !== "string") {
+    if (
+      !ANNEX_KEY.test(oldKey) ||
+      !isObject(e) ||
+      typeof e.newKey !== "string" ||
+      typeof e.patchSha256 !== "string" ||
+      !SHA256_HEX.test(e.patchSha256)
+    ) {
       throw new ContractError("hashes.json holds a bad entry");
     }
     const oldParsed = parseKey(oldKey);

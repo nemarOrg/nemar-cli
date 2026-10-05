@@ -1,6 +1,7 @@
 /** The scrub stage contract: keys, and the guards that refuse a file that does not match. */
 
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   ContractError,
   buildKey,
@@ -12,12 +13,14 @@ import {
   parsePatches,
   parsePlan,
   parseZarrVerified,
+  patchDigest,
 } from "../../scripts/scrub/contract";
 
 const H1 = "a".repeat(64);
 const H2 = "b".repeat(64);
 const OLD = `SHA256E-s1000--${H1}.bdf`;
 const NEW = `SHA256E-s1000--${H2}.bdf`;
+const BOUND = "c".repeat(64);
 
 describe("annex keys", () => {
   test("parse and build round-trip, keeping size and extension", () => {
@@ -45,20 +48,29 @@ describe("stage files", () => {
     const ok = JSON.stringify({
       version: 1,
       dataset: "nm1",
-      entries: { [OLD]: { newKey: NEW, size: 1000, sourceSha256Verified: true } },
+      entries: {
+        [OLD]: { newKey: NEW, size: 1000, sourceSha256Verified: true, patchSha256: BOUND },
+      },
     });
     expect(parseHashes(ok).entries[OLD]?.newKey).toBe(NEW);
     const sameKey = JSON.stringify({
       version: 1,
       dataset: "nm1",
-      entries: { [OLD]: { newKey: OLD, size: 1000, sourceSha256Verified: true } },
+      entries: {
+        [OLD]: { newKey: OLD, size: 1000, sourceSha256Verified: true, patchSha256: BOUND },
+      },
     });
     expect(() => parseHashes(sameKey)).toThrow("must not equal");
     const otherSize = JSON.stringify({
       version: 1,
       dataset: "nm1",
       entries: {
-        [OLD]: { newKey: `SHA256E-s999--${H2}.bdf`, size: 999, sourceSha256Verified: true },
+        [OLD]: {
+          newKey: `SHA256E-s999--${H2}.bdf`,
+          size: 999,
+          sourceSha256Verified: true,
+          patchSha256: BOUND,
+        },
       },
     });
     expect(() => parseHashes(otherSize)).toThrow("size and extension");
@@ -66,10 +78,37 @@ describe("stage files", () => {
       version: 1,
       dataset: "nm1",
       entries: {
-        [OLD]: { newKey: `SHA256E-s1000--${H2}.edf`, size: 1000, sourceSha256Verified: true },
+        [OLD]: {
+          newKey: `SHA256E-s1000--${H2}.edf`,
+          size: 1000,
+          sourceSha256Verified: true,
+          patchSha256: BOUND,
+        },
       },
     });
     expect(() => parseHashes(otherExt)).toThrow("size and extension");
+  });
+
+  test("hashes.json: every entry names the patch it was computed for, as a sha256", () => {
+    const withEntry = (e: Record<string, unknown>) =>
+      JSON.stringify({ version: 1, dataset: "nm1", entries: { [OLD]: e } });
+    const entry = { newKey: NEW, size: 1000, sourceSha256Verified: true };
+    expect(parseHashes(withEntry({ ...entry, patchSha256: BOUND })).entries[OLD]?.patchSha256).toBe(
+      BOUND,
+    );
+    for (const patchSha256 of [undefined, "", "abc", BOUND.toUpperCase(), `${BOUND}0`, 7]) {
+      expect(() => parseHashes(withEntry({ ...entry, patchSha256 })), String(patchSha256)).toThrow(
+        ContractError,
+      );
+    }
+  });
+
+  test("a patch is bound by the sha256 of its hex text, not of the bytes it decodes to", () => {
+    const hex = "ab".repeat(256);
+    const asText = createHash("sha256").update(Buffer.from(hex, "utf8")).digest("hex");
+    const asBytes = createHash("sha256").update(Buffer.from(hex, "hex")).digest("hex");
+    expect(patchDigest(hex)).toBe(asText);
+    expect(patchDigest(hex)).not.toBe(asBytes);
   });
 
   test("patches.json: exactly 256 bytes of lowercase hex per key", () => {
