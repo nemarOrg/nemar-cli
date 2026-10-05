@@ -41,8 +41,9 @@ saying so.
 - **The screen is a workflow, not the Worker.**
   It clones the dataset repository without file contents, reads every EDF and BDF header
   (256 bytes each, ranged reads of the S3 object through a presigned URL), the sidecars, the
-  participants and scans tables, small code and text files, and every path that ever existed on
-  any ref.
+  participants and scans tables, small code and text files, every path that ever existed on
+  any ref, and the headers of recordings that earlier commits held and the current tree no
+  longer does (their objects stay in the bucket and become public with the dataset).
   The Worker cannot make tens of thousands of subrequests; an Actions runner can.
   It runs the same scanner as the uploader preflight and the fleet scan
   (`shared/identifier-scan.ts`), so every surface asks one question.
@@ -90,8 +91,8 @@ saying so.
   The cost is that an extended outage holds publications; there is deliberately no break-glass
   that approves an unscreened dataset.
 - The check is best effort, and says what it did not read.
-  It does not parse formats outside EDF and BDF, it does not read the contents of earlier
-  commits, and it cannot judge free text it does not recognize as a name.
+  It does not parse formats outside EDF and BDF, it does not read the contents of sidecars and
+  tables in earlier commits, and it cannot judge free text it does not recognize as a name.
   A clean screen is not a certification; the policy text and the email say so.
 - The workflow checks out `nemarOrg/nemar-cli` at `main` for the script, so the script must be
   released before the workflow can pass; until then the failure callback produces the
