@@ -250,11 +250,26 @@ describe("manifests and prefixes", () => {
     }
   });
 
-  test("a canary prefix is the fixture's or a sandbox's id and one canary-<token>/ directory", () => {
-    for (const ok of ["nm099999/canary-a/", "xx000000/canary-Zz_9-/", "xx099999/canary-x/"]) {
+  test("a canary prefix is the fixture's or a dev sandbox's id and one canary-<token>/ directory", () => {
+    for (const ok of [
+      "nm099999/canary-a/",
+      "xx090000/canary-Zz_9-/",
+      "xx090001/canary-x/",
+      "xx090411/canary-x/",
+      "xx098999/canary-x/",
+    ]) {
       expect(() => checkCanaryPrefix(ok), ok).not.toThrow();
     }
     for (const bad of [
+      // Each side of each boundary: the top of the production sandbox band, the top of the dev
+      // range the pattern allows, and the permanent exemplar fleet.
+      "xx000000/canary-a/",
+      "xx000001/canary-a/",
+      "xx089999/canary-a/",
+      "xx099000/canary-a/",
+      "xx099899/canary-a/",
+      "xx099900/canary-a/",
+      "xx099999/canary-a/",
       "nm000103/canary-a/",
       "nm099998/canary-a/",
       "nm099999/canary-a",

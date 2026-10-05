@@ -11,7 +11,7 @@
  *   zarr       --dir DIR [--execute] [--concurrency 4]
  *   drop-archives --dir DIR --confirm-dataset ID [--execute] [--concurrency 4]
  *   zarr-public --dataset ID [--public-base URL] [--bucket nemar] [--concurrency 8]
- *   canary     --prefix <nm099999|xx0NNNNN>/canary-<random>/ [--execute] [--multipart]
+ *   canary     --prefix <nm099999|xx09[0-8]NNN>/canary-<random>/ [--execute] [--multipart]
  *              [--bucket nemar]
  *
  * Every subcommand is read-only unless it is given `--execute`; `plan`, `verify` and
@@ -83,7 +83,8 @@ const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|zarr|drop-arc
              names anonymously (default base ${DEFAULT_PUBLIC_BASE}) and applies the zarr stage's
              own rule to each. Exit 0 only when every store is clean.
   canary     --prefix ID/canary-RANDOM/ [--execute] [--multipart] [--bucket nemar]
-             ID is nm099999 or an xx0NNNNN sandbox id, never a live dataset.
+             ID is nm099999 or a dev ephemeral sandbox id, xx090000 to xx098999; never a live
+             dataset, a production sandbox or the exemplar fleet.
 common: --region us-east-2  --timeout-sec 120`;
 
 const OPTIONS = {

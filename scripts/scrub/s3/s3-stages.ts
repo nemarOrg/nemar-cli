@@ -1394,11 +1394,12 @@ export interface CanaryOptions extends CommonOptions {
 
 /**
  * The canary writes a locked object and deletes it with the bypass, so where it may do that is
- * fixed, not typed: the end-to-end fixture's id (`nm099999`) or an `xx0NNNNN` sandbox id, and one
- * directory below it. A live dataset's id, a standing fixture's (`nm099998`) and any deeper
- * prefix never match.
+ * fixed, not typed: the end-to-end fixture's id (`nm099999`) or a DEV EPHEMERAL sandbox id
+ * (`xx090000` to `xx098999`), and one directory below it. Never a live dataset, a standing
+ * fixture (`nm099998`), a real user's production sandbox (`xx000001` to `xx089999`), the
+ * permanent exemplar fleet (`xx0999NN`), or a deeper prefix.
  */
-const CANARY_PREFIX = /^(nm099999|xx0\d{5})\/canary-[A-Za-z0-9_-]+\/$/;
+const CANARY_PREFIX = /^(nm099999|xx09[0-8]\d{3})\/canary-[A-Za-z0-9_-]+\/$/;
 
 export function checkCanaryPrefix(prefix: string): void {
   if (!CANARY_PREFIX.test(prefix)) throw new StageError("prefix-not-canary", EXIT.refused);

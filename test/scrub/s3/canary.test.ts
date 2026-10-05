@@ -43,6 +43,11 @@ describe("canary", () => {
         "nm099900/canary-k3x9q2/",
         "nm099999x/canary-k3x9q2/",
         "on000001/canary-k3x9q2/",
+        // A real user's production sandbox and the permanent exemplar fleet.
+        "xx000001/canary-k3x9q2/",
+        "xx089999/canary-k3x9q2/",
+        "xx099899/canary-k3x9q2/",
+        "xx099907/canary-k3x9q2/",
         // An id outside the sandbox band, a malformed id, and a prefix nested deeper.
         "xx100000/canary-k3x9q2/",
         "xx09041/canary-k3x9q2/",
@@ -65,14 +70,14 @@ describe("canary", () => {
   );
 
   test(
-    "the end-to-end fixture's id and any sandbox id are accepted",
+    "the end-to-end fixture's id and a dev ephemeral sandbox id are accepted",
     async () => {
       standin = startS3Standin();
       for (const ok of [
         "nm099999/canary-abc/",
         "xx090411/canary-k3x9q2/",
-        "xx000001/canary-1/",
-        "xx099899/canary-A_b-9/",
+        "xx090000/canary-1/",
+        "xx098999/canary-A_b-9/",
       ]) {
         const r = await runScrub(standin, canary([], ok));
         expect(r.exitCode, `${ok}: ${r.all}`).toBe(0);
