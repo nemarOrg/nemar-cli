@@ -462,6 +462,10 @@ def repo_identity(url: str) -> str:
     return url.rstrip("/").removesuffix(".git")
 
 
+#: git-annex's cache of the index tree its keys database last read; see run().
+LAST_INDEX_REF = "refs/annex/last-index"
+
+
 def is_annex_ref(ref: str) -> bool:
     return ref.rsplit("/", 1)[-1] == "git-annex"
 
@@ -846,6 +850,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         rf.run()
     finally:
         rewriter.cat.close()
+
+    # git-annex records the tree of the index its keys database last read as
+    # `refs/annex/last-index` (10.20240129, Ubuntu 24.04's, does; 10.20260901 does not). The
+    # freshness check's `git status` runs the annex filter, so the ref names the PRE-rewrite index
+    # and keeps every old pointer blob reachable through the gc below. It is a cache git-annex
+    # rebuilds from the index, so it goes with the old history.
+    if LAST_INDEX_REF in all_refs():
+        git("update-ref", "-d", LAST_INDEX_REF)
 
     # The rewritten history is the only copy that should stay in the object store.
     git("reflog", "expire", "--expire=now", "--all")

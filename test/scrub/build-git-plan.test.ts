@@ -15,8 +15,15 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
+/** No global or system git config, as on a CI runner: the developer's own config hides gaps. */
+const GIT_ENV: Record<string, string> = {
+  ...(process.env as Record<string, string>),
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_NOSYSTEM: "1",
+};
+
 const git = (cwd: string, ...args: string[]) => {
-  const r = spawnSync("git", args, { cwd, encoding: "utf8" });
+  const r = spawnSync("git", args, { cwd, encoding: "utf8", env: GIT_ENV });
   if (r.status !== 0) throw new Error(`git ${args[0]}: ${r.stderr}`);
   return r.stdout.trim();
 };
@@ -287,6 +294,7 @@ describe("the git plan", () => {
       if (n % 100 === 0) stream += `reset refs/tags/v${n / 100}.0.0\nfrom :${tip}\n\n`;
     }
     const r = spawnSync("git", ["-C", dir, "fast-import", "--quiet"], {
+      env: GIT_ENV,
       input: stream,
       maxBuffer: 1 << 30,
     });

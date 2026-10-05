@@ -205,8 +205,16 @@ export function anyObjectContains(repo: string, needle: string): boolean {
   return r.stdout.includes(Buffer.from(needle));
 }
 
+/**
+ * Every ref and the object it names, except git-annex's own caches under `refs/annex/`: git-annex
+ * 10.20240129 (Ubuntu 24.04's) writes `refs/annex/last-index` whenever its filter runs, which a
+ * `git status` does, so it moves on a refusal too and says nothing about what the rewrite touched.
+ */
 export function refTips(repo: string): string {
-  return git(repo, "for-each-ref", "--format=%(refname) %(objectname)");
+  return git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
+    .split("\n")
+    .filter((line) => !line.startsWith("refs/annex/"))
+    .join("\n");
 }
 
 /**

@@ -352,6 +352,34 @@ SUITE("pointer-file dataset", () => {
     }
   });
 
+  test("git-annex's last-index ref, naming the pre-rewrite index, goes with the old history", async () => {
+    // What git-annex 10.20240129 (Ubuntu 24.04's) leaves after any `git status`: a ref to the
+    // tree of the index as it was. Made by hand here, so the test does not depend on the
+    // git-annex version that runs it (10.20260901 writes no such ref).
+    const repo = join(fx.root, "last-index");
+    copyTree(pristine, repo);
+    git(repo, "update-ref", "refs/annex/last-index", git(repo, "write-tree").trim());
+    const out = await cli([
+      "rewrite",
+      "--repo",
+      repo,
+      "--keymap",
+      fx.keymapPath,
+      "--plan",
+      fx.planPath,
+    ]);
+    expect(out.code, out.out).toBe(0);
+    const refs = git(repo, "for-each-ref", "--format=%(refname)").split("\n");
+    expect(refs.filter((r) => r.startsWith("refs/annex/"))).toEqual([]);
+    const all = git(repo, "cat-file", "--batch-all-objects", "--batch-check").split("\n");
+    const blobs = all.filter((l) => l.includes(" blob ")).map((l) => l.split(" ")[0] as string);
+    expect(blobs.length).toBeGreaterThan(0);
+    for (const oid of blobs) {
+      const body = git(repo, "cat-file", "-p", oid);
+      for (const key of [OLD_A, OLD_B, OLD_C]) expect(body.includes(key)).toBe(false);
+    }
+  }, 120_000);
+
   test("a second run changes nothing: no commit or ref moves and nothing is appended twice", async () => {
     const again = join(fx.root, "again");
     copyTree(fx.clone, again);

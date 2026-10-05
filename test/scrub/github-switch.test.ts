@@ -146,8 +146,24 @@ function standIn(bypassBranch: "always" | "never"): Stand {
   };
 }
 
+/**
+ * Every git the TEST runs sees no global or system config, as on a CI runner, which has no
+ * identity and no `init.defaultBranch` (so `git init` makes `master`). The developer's own
+ * config hid both on a laptop. The tool under test runs with the real environment.
+ */
+const GIT_ENV: Record<string, string> = {
+  ...(process.env as Record<string, string>),
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_AUTHOR_NAME: "t",
+  GIT_AUTHOR_EMAIL: "t@example.org",
+  GIT_COMMITTER_NAME: "t",
+  GIT_COMMITTER_EMAIL: "t@example.org",
+  GIT_TERMINAL_PROMPT: "0",
+};
+
 const run = (cwd: string, ...args: string[]) => {
-  const r = spawnSync("git", args, { cwd, encoding: "utf8" });
+  const r = spawnSync("git", args, { cwd, encoding: "utf8", env: GIT_ENV });
   if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${r.stderr}`);
   return r.stdout.trim();
 };
@@ -158,7 +174,7 @@ function gitAsync(
   ...args: string[]
 ): Promise<{ status: number | null; stderr: string }> {
   return new Promise((resolve) => {
-    const child = spawn("git", args, { cwd, stdio: ["ignore", "ignore", "pipe"] });
+    const child = spawn("git", args, { cwd, stdio: ["ignore", "ignore", "pipe"], env: GIT_ENV });
     let stderr = "";
     child.stderr.on("data", (d) => {
       stderr += d;
@@ -203,7 +219,9 @@ function build(bypassBranch: "always" | "never", blockRef = "refs/none"): World 
   const remote = join(dir, "remote.git");
   const work = join(dir, "work");
   const stand = standIn(bypassBranch);
-  run(dir, "init", "--bare", "-q", "remote.git");
+  // `-b main`: the remote's HEAD must name the branch that exists, or a clone of it checks
+  // nothing out (a runner's git defaults to `master`).
+  run(dir, "init", "--bare", "-q", "-b", "main", "remote.git");
   mkdirSync(work);
   run(work, "init", "-q", "-b", "main");
   run(work, "config", "user.email", "t@example.org");
