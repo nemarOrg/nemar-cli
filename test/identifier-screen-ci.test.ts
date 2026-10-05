@@ -234,7 +234,7 @@ const hmac = (key: string | Uint8Array, data: string) =>
 
 class S3StandIn {
   readonly objects = new Map<string, S3Object>();
-  readonly requests: { key: string; range: string | null; signed: boolean }[] = [];
+  readonly requests: { key: string; range: string | null; signed: boolean; expires: number }[] = [];
   readonly signatures = new Set<string>();
   maxInflight = 0;
   private inflight = 0;
@@ -305,7 +305,12 @@ class S3StandIn {
     const url = new URL(req.url);
     const key = decodeURIComponent(url.pathname.split("/").slice(2).join("/"));
     const signed = this.verify(req, url);
-    this.requests.push({ key, range: req.headers.get("range"), signed });
+    this.requests.push({
+      key,
+      range: req.headers.get("range"),
+      signed,
+      expires: Number(url.searchParams.get("X-Amz-Expires")),
+    });
     const signature = url.searchParams.get("X-Amz-Signature");
     if (signature) this.signatures.add(signature);
     if (!signed) return new Response("SignatureDoesNotMatch", { status: 403 });
@@ -527,6 +532,8 @@ describe("the screen: what a run reports", () => {
       expect(s3.requests).toHaveLength(3);
       expect(s3.requests.every((r) => r.signed)).toBe(true);
       expect(new Set(s3.requests.map((r) => r.range))).toEqual(new Set(["bytes=0-255"]));
+      // Each URL is minted for one read, so it lives 15 minutes and no longer.
+      expect(new Set(s3.requests.map((r) => r.expires))).toEqual(new Set([900]));
 
       // What the Worker receives is the envelope the contract names, with the token header.
       expect(result.posted).toHaveLength(1);

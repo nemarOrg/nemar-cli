@@ -92,7 +92,8 @@ const PREFETCH_BUDGET_BYTES = 2 * 1024 ** 3;
 /** Inline recordings are large, so they are fetched in small batches the budget can stop between. */
 const PREFETCH_CHUNK = 5000;
 const PREFETCH_EDF_CHUNK = 25;
-const PRESIGN_SECONDS = 3600;
+/** A URL is minted for each read, so it only has to outlive one request and its retries. */
+const PRESIGN_SECONDS = 900;
 const CALLBACK_ATTEMPTS = 3;
 
 /** A bad environment or command line. The code is a fixed word; it never quotes the input. */
