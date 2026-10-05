@@ -1133,22 +1133,30 @@ describe("delete-old: what must be true before an old key may go", () => {
     async () => {
       writeProofs();
       // The variable that admits a loopback server is the tests' alone; unset, it is refused.
+      // Through the CLI only hosts no request can reach, so a regression cannot send one to the
+      // real bucket; the rest of the rule is checked on the function itself below.
       const outside = { [TEST_LOOPBACK_PUBLIC_BASE_ENV]: "" };
       for (const base of [
         pub.url,
-        "http://nemar.s3.us-east-2.amazonaws.com",
         "https://evil.example",
         "https://nemar.s3.us-east-2.amazonaws.com.evil.example",
-        "https://xnemar.s3.us-east-2.amazonaws.com",
-        "https://s3.us-east-2.amazonaws.com/other",
-        "https://nemar.s3.us-east-2.amazonaws.com:8443",
-        "https://nemar.s3.us-east-2.amazonaws.com/?x=1",
       ]) {
         const r = await runScrub(standin, deleteArgs([], base), outside, { anyPublicBase: true });
         expectUsage(r, "bad-public-base", base);
       }
       expect(standin.log.length).toBe(0);
       expect(pub.requests.length).toBe(0);
+      for (const base of [
+        "http://nemar.s3.us-east-2.amazonaws.com",
+        "https://xnemar.s3.us-east-2.amazonaws.com",
+        "https://s3.us-east-2.amazonaws.com/other",
+        "https://nemar.s3.us-east-2.amazonaws.com:8443",
+        "https://nemar.s3.us-east-2.amazonaws.com/?x=1",
+        "https://nemar.s3.us-east-2.amazonaws.com/sub",
+        "https://user@nemar.s3.us-east-2.amazonaws.com",
+      ]) {
+        expect(() => checkPublicBase(base, "nemar"), base).toThrow(StageError);
+      }
       // What is accepted, checked without a request to it.
       for (const base of [
         DEFAULT_PUBLIC_BASE,

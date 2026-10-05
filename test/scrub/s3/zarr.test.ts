@@ -17,8 +17,9 @@ import {
   type ZarrVerifiedFile,
   parseZarrVerified,
 } from "../../../scripts/scrub/contract";
+import { TEST_LOOPBACK_PUBLIC_BASE_ENV } from "../../../scripts/scrub/s3/s3-stages";
 import { type S3Standin, startS3Standin } from "../helpers/s3-standin";
-import { expectStopped } from "./refusal";
+import { expectStopped, expectUsage } from "./refusal";
 import {
   BUCKET,
   DATASET,
@@ -537,6 +538,26 @@ describe("zarr-public: the check from outside after publication", () => {
       expect(r.exitCode, r.all).toBe(1);
       expect(r.stdout).toContain("stores=3 clean=2 identifier=1 unreadable=0");
       expect(r.all).not.toContain("Wilhelmina");
+    },
+    SLOW,
+  );
+
+  test(
+    "the public base must be the bucket's https S3 endpoint outside a test, before any request",
+    async () => {
+      await published();
+      const outside = { [TEST_LOOPBACK_PUBLIC_BASE_ENV]: "" };
+      // Only hosts no request can reach: a regression here must not send one to the real bucket.
+      for (const base of [pub?.url ?? "", "https://evil.example"]) {
+        const r = await runScrub(
+          standin,
+          ["zarr-public", "--dataset", DATASET, "--public-base", base],
+          outside,
+          { anyPublicBase: true },
+        );
+        expectUsage(r, "bad-public-base", base);
+      }
+      expect(pub?.requests.length).toBe(0);
     },
     SLOW,
   );
