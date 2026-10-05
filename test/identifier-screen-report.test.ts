@@ -267,6 +267,20 @@ describe("describeScreen", () => {
     expect(d.lines.join(" ")).toContain("never reported back");
   });
 
+  test("an unreported screen stored with its error report states the cause once", () => {
+    // The watchdog stores 'unreported' together with the `no-report-in-time`
+    // report, so both the state and the report carry the same cause.
+    const stored = parseScreenReport({
+      version: 1,
+      scanner: null,
+      head: null,
+      error: "no-report-in-time",
+    });
+    const d = describeScreen("unreported", stored);
+    expect(d.headline).toContain("DID NOT REPORT");
+    expect(d.lines.filter((l) => l.includes("never reported back"))).toHaveLength(1);
+  });
+
   test("a request with no screen is not described as clean", () => {
     const d = describeScreen(null, null);
     expect(d.tone).toBe("stop");

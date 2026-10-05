@@ -437,7 +437,10 @@ export function describeScreen(
   }
   const base = HEADLINES[state];
   const lines: string[] = [];
-  if (state === "unreported") {
+  // The Worker stores an 'unreported' screen WITH the error report that says so
+  // (`no-report-in-time`), so the cause is stated once, from the report, when
+  // there is one; the state's own cause is only for a caller with no report.
+  if (state === "unreported" && !report?.error) {
     lines.push(`Cause: ${ERROR_TEXT["no-report-in-time"]}.`);
   }
   if (report?.error) lines.push(`Cause: ${ERROR_TEXT[report.error]}.`);
