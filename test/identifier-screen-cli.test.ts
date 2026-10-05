@@ -1,0 +1,218 @@
+/**
+ * The identifier screen in the terminal (epic #1610, phase 4), driven through
+ * the real CLI entry point.
+ *
+ * Same harness as test/publish-anonymous-cli.test.ts: a real subprocess
+ * (`bun run src/index.ts ...`) pointed at a local HTTP server that answers with
+ * the backend's response shape, so what is asserted is what a person would read.
+ * The CLI derives nothing about the screen: it prints the backend's
+ * `describeScreen` words, so these tests check that the words arrive, and that
+ * an older backend that sends no screen is not printed as a screen that failed.
+ */
+
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawn } from "bun";
+
+const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
+const REPO_ROOT = join(import.meta.dir, "..");
+
+interface Recorded {
+  method: string;
+  pathname: string;
+  body: string;
+}
+
+function startServer(routes: Record<string, { status?: number; body: unknown }>) {
+  const requests: Recorded[] = [];
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/notices") return Response.json({ notices: [] });
+      if (url.pathname === "/datasets/facets") return Response.json({});
+      requests.push({ method: req.method, pathname: url.pathname, body: await req.text() });
+      const route = routes[`${req.method} ${url.pathname}`];
+      if (!route) return Response.json({ error: "not found" }, { status: 404 });
+      return Response.json(route.body, { status: route.status ?? 200 });
+    },
+  });
+  return { url: `http://localhost:${server.port}`, requests, stop: () => server.stop(true) };
+}
+
+let configDir: string;
+
+beforeEach(() => {
+  configDir = mkdtempSync(join(tmpdir(), "nemar-screen-cli-"));
+  writeFileSync(
+    join(configDir, "config.json"),
+    JSON.stringify({ activeAccount: "screencli", accounts: { screencli: { apiKey: "k" } } }),
+  );
+});
+
+afterEach(() => {
+  rmSync(configDir, { recursive: true, force: true });
+});
+
+async function runCli(args: string[], apiUrl: string) {
+  const env = {
+    ...process.env,
+    NEMAR_CONFIG_DIR: configDir,
+    TEST_API_URL: apiUrl,
+    NEMAR_NO_UPDATE_CHECK: "1",
+    NO_COLOR: "1",
+  };
+  env.FORCE_COLOR = undefined;
+  env.CLICOLOR_FORCE = undefined;
+  const proc = spawn({
+    cmd: ["bun", "run", CLI_ENTRY, ...args],
+    cwd: REPO_ROOT,
+    env,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stdout = await new Response(proc.stdout).text();
+  const stderr = await new Response(proc.stderr).text();
+  return { stdout, stderr, exitCode: await proc.exited };
+}
+
+const FOUND = {
+  state: "direct-identifiers",
+  headline: "Identifier screen: FOUND IDENTIFIERS",
+  tone: "stop",
+  lines: [
+    "Findings by kind: edf-patient-name x4.",
+    "Scanner identifier-scan@abcdef1; commit 0123456789ab.",
+  ],
+};
+
+describe("nemar dataset publish status", () => {
+  test("prints the screen's headline and every line", async () => {
+    const server = startServer({
+      "GET /datasets/nm000104/publish/status": {
+        body: {
+          dataset_id: "nm000104",
+          status: "blocked",
+          block_reason: "identifier_screen_findings",
+          message: "The identifier screen found direct identifiers.",
+          identifier_screen: FOUND,
+        },
+      },
+    });
+    try {
+      const r = await runCli(["dataset", "publish", "status", "nm000104"], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("Identifier screen: FOUND IDENTIFIERS");
+      expect(r.stdout).toContain("Findings by kind: edf-patient-name x4.");
+      expect(r.stdout).toContain("commit 0123456789ab");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("an older backend that sends no screen prints no screen line at all", async () => {
+    const server = startServer({
+      "GET /datasets/nm000104/publish/status": {
+        body: { dataset_id: "nm000104", status: "requested" },
+      },
+    });
+    try {
+      const r = await runCli(["dataset", "publish", "status", "nm000104"], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).not.toContain("Identifier screen");
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("nemar dataset publish request", () => {
+  test("a dispatched screen says the admins are mailed when it finishes", async () => {
+    const server = startServer({
+      "POST /datasets/nm000104/publish/request": {
+        body: {
+          message: "Publication request submitted",
+          dataset_id: "nm000104",
+          status: "requested",
+          anonymous: false,
+          identifier_screen: {
+            state: "pending",
+            headline: "Identifier screen: running",
+            tone: "note",
+            lines: [],
+          },
+        },
+      },
+    });
+    try {
+      const r = await runCli(["dataset", "publish", "request", "nm000104"], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("Identifier screen: running");
+      expect(r.stdout).toContain("Admins will be notified when the identifier screen finishes");
+      expect(r.stdout).not.toContain("Admins have been notified");
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("nemar dataset publish resend", () => {
+  test("a running screen is refused with the backend's sentence, not its code", async () => {
+    const server = startServer({
+      "POST /datasets/nm000104/publish/resend": {
+        status: 409,
+        body: {
+          error: "identifier_screen_pending",
+          message:
+            "The identifier screen is still running. The admins are mailed when it finishes, with its result, so there is nothing to resend yet.",
+        },
+      },
+    });
+    try {
+      const r = await runCli(["dataset", "publish", "resend", "nm000104"], server.url);
+      expect(r.exitCode).toBe(1);
+      const out = r.stdout + r.stderr;
+      expect(out).toContain("The identifier screen is still running");
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("nemar admin publish list", () => {
+  test("prints each request's screen under it", async () => {
+    const server = startServer({
+      "GET /admin/publish/requests": {
+        body: {
+          count: 1,
+          requests: [
+            {
+              id: 1,
+              dataset_id: "nm000104",
+              status: "blocked",
+              requested_at: "2026-10-05 12:00:00",
+              requested_by_username: "alice",
+              requested_by_email: "alice@example.org",
+              steps_completed: [],
+              current_step: null,
+              last_error: null,
+              identifier_screen: FOUND,
+            },
+          ],
+        },
+      },
+    });
+    try {
+      const r = await runCli(["admin", "publish", "list"], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("nm000104");
+      expect(r.stdout).toContain("Identifier screen: FOUND IDENTIFIERS");
+      expect(r.stdout).toContain("edf-patient-name x4");
+    } finally {
+      server.stop();
+    }
+  });
+});

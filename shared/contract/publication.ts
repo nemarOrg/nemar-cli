@@ -60,6 +60,20 @@ export const publicationBlockReasonSchema = z.enum([
 export type PublicationBlockReason = z.infer<typeof publicationBlockReasonSchema>;
 
 /**
+ * The codes the identifier screen's refusals carry in `error` (epic #1610,
+ * phase 4), with the human sentence in `message`. Declared here so the CLI's
+ * client knows to lead with the sentence rather than print a bare token.
+ */
+export const IDENTIFIER_SCREEN_ERROR_CODES: readonly string[] = [
+  /** Resend while the screen still runs: the admins are mailed when it finishes. */
+  "identifier_screen_pending",
+  /** An approval the screen does not allow (stale, unverifiable, not run, findings). */
+  "identifier_screen_not_clear",
+  /** A sandbox (xx) dataset, which is not screened. */
+  "identifier_screen_not_applicable",
+];
+
+/**
  * Per-user outcome of `POST /admin/users/backfill-names` (#1255).
  *
  * `no_public_name` and `lookup_failed` are deliberately distinct: the first is

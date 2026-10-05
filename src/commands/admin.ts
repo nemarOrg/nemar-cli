@@ -195,6 +195,7 @@ import {
 } from "../lib/git-annex/clone-push.js";
 import { checkDownloadPrerequisites } from "../lib/git-annex/prereq.js";
 import { getVersionCommit, listDatasetVersions } from "../lib/git-annex/repo-state.js";
+import { identifierScreenLines } from "../lib/identifier-screen-display.js";
 import {
   type RecoverDatasetEntry,
   loadRecoverDatasets,
@@ -2606,6 +2607,8 @@ Examples:
             )}`,
           );
         }
+        // Epic #1610 phase 4: the identifier screen, in the backend's words.
+        for (const line of identifierScreenLines(req.identifier_screen, 4)) console.log(line);
         if (req.current_step && req.status === "approving") {
           console.log(
             `    ${chalk.yellow(">")} ${req.current_step.replace(/_/g, " ")}${req.last_error ? chalk.red(` (${req.last_error})`) : ""}`,

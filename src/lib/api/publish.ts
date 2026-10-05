@@ -8,12 +8,18 @@
 
 import { APPROVE_RETRY_DELAY_MS } from "../../../shared/publication-retry.js";
 import { PUBLICATION_STEPS } from "../../../shared/publication-steps.js";
+import type { IdentifierScreenView } from "../identifier-screen-display.js";
 import { request } from "./client.js";
 import { ApiError } from "./errors.js";
 
 // ============================================================================
 // Publication Workflow
 // ============================================================================
+
+// `identifier_screen` (epic #1610, phase 4) is the request's identifier screen as
+// the backend's `describeScreen` worded it. Optional on every response below,
+// because an older backend does not send it.
+export type { IdentifierScreenView };
 
 export interface PublishStatusResponse {
   dataset_id: string;
@@ -45,6 +51,7 @@ export interface PublishStatusResponse {
   // Optional because an older backend does not send it -- absent means
   // unknown, never "no".
   anonymous?: boolean;
+  identifier_screen?: IdentifierScreenView;
 }
 
 export interface PublishRequestsResponse {
@@ -66,6 +73,7 @@ export interface PublishRequestsResponse {
     // wire and merely unrendered -- which left an admin approving the two
     // outcomes from an identical line.
     anonymous?: number | null;
+    identifier_screen?: IdentifierScreenView;
   }>;
   count: number;
 }
@@ -124,13 +132,25 @@ export interface PublishApproveResponse {
 export async function requestPublication(
   datasetId: string,
   options: { anonymous?: boolean } = {},
-): Promise<{ message: string; dataset_id: string; status: string; anonymous?: boolean }> {
+): Promise<{
+  message: string;
+  dataset_id: string;
+  status: string;
+  anonymous?: boolean;
+  identifier_screen?: IdentifierScreenView;
+}> {
   // `anonymous` is echoed by the server (#1408). The caller must print from
   // the ECHO rather than from `options.anonymous`: what matters to a depositor
   // is what was recorded, not what was typed, and the two diverge exactly in
   // the cases worth catching -- a dropped body, a proxy that rewrites it, an
   // older backend that does not know the flag.
-  return request<{ message: string; dataset_id: string; status: string; anonymous?: boolean }>(
+  return request<{
+    message: string;
+    dataset_id: string;
+    status: string;
+    anonymous?: boolean;
+    identifier_screen?: IdentifierScreenView;
+  }>(
     `/datasets/${datasetId}/publish/request`,
     options.anonymous
       ? {
