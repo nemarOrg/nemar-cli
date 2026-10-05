@@ -287,6 +287,10 @@ describe("delete-old: refusals", () => {
       writeFileSync(planPath, JSON.stringify(plan));
       for (const prefix of [
         `${DATASET}/objects/`,
+        // The dataset root covers objects/, and an empty segment is not a safe spelling of it.
+        `${DATASET}/`,
+        `${DATASET}//objects/`,
+        `${DATASET}//`,
         "xx090999/version/",
         `${DATASET}/version`,
         `${DATASET}/../x/`,

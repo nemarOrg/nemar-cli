@@ -203,19 +203,42 @@ describe("manifests and prefixes", () => {
     expect(r.badKeys).toBe(1);
   });
 
-  test("a prune prefix must be a dataset's own manifests or archives, never its objects", () => {
-    expect(() => checkPrunePrefix("xx090411", "xx090411/version/")).not.toThrow();
-    expect(() => checkPrunePrefix("xx090411", "xx090411/archives/")).not.toThrow();
+  test("a prune prefix is exactly the dataset's version/, archives/ or zarr/, and nothing else", () => {
+    const d = "xx090411";
+    for (const ok of [`${d}/version/`, `${d}/archives/`, `${d}/zarr/`]) {
+      expect(() => checkPrunePrefix(d, ok), ok).not.toThrow();
+    }
     for (const bad of [
-      "xx090411/objects/",
-      "xx090411/objects/sub/",
+      // The dataset root covers objects/; an empty segment is a different key space, not a safe one.
+      `${d}/`,
+      `${d}//`,
+      `${d}//objects/`,
+      `${d}//version/`,
+      `${d}/version//`,
+      `${d}/zarr//`,
+      // Anything under objects/, and the other prefixes of the dataset.
+      `${d}/objects/`,
+      `${d}/objects/sub/`,
+      `${d}/corrections/`,
+      `${d}/canary-k3x9q2/`,
+      // Not a directory, or a directory below one of the three.
+      `${d}/version`,
+      `${d}/zarr/sub/`,
+      `${d}/version/v1.0.0.json`,
+      `${d}/Version/`,
+      // Dot segments, and another dataset's.
+      `${d}/./version/`,
+      `${d}/version/../objects/`,
+      `${d}/../x/`,
       "xx090412/version/",
-      "xx090411/version",
-      "xx090411/../x/",
+      "xx090412/zarr/",
+      `${d}x/version/`,
       "",
       "/",
+      `/${d}/version/`,
+      "version/",
     ]) {
-      expect(() => checkPrunePrefix("xx090411", bad), bad).toThrow(StageError);
+      expect(() => checkPrunePrefix(d, bad), JSON.stringify(bad)).toThrow(StageError);
     }
   });
 });

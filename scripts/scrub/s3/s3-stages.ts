@@ -816,14 +816,19 @@ interface KeyVersions {
   markers: string[];
 }
 
-/** A prune prefix may name a dataset's manifests or archives, never its locked objects. */
+/**
+ * The only prefixes a prune may name, as the directory under `<dataset>/`: the manifests, the
+ * archives and the Zarr serving copy. An ALLOW-list on purpose. A deny-list ("anything but
+ * `objects/`") lets `<dataset>/` itself through, which covers `objects/`, and `<dataset>//objects/`,
+ * which S3 treats as a different key space from `objects/` but a reader may not.
+ */
+const PRUNE_DIRS = ["version", "archives", "zarr"] as const;
+
+/** A prune prefix is exactly `<dataset>/version/`, `<dataset>/archives/` or `<dataset>/zarr/`. */
 export function checkPrunePrefix(dataset: string, prefix: string): void {
-  const ok =
-    prefix.startsWith(`${dataset}/`) &&
-    prefix.endsWith("/") &&
-    !prefix.startsWith(`${dataset}/objects/`) &&
-    !prefix.split("/").some((s) => s === ".." || s === ".");
-  if (!ok) throw new StageError("bad-prune-prefix", EXIT.refused);
+  if (!PRUNE_DIRS.some((d) => prefix === `${dataset}/${d}/`)) {
+    throw new StageError("bad-prune-prefix", EXIT.refused);
+  }
 }
 
 async function listOldKeys(
