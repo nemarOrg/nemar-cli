@@ -122,11 +122,14 @@ describe("canary", () => {
       expect(hours).toBeGreaterThan(22);
       expect(hours).toBeLessThan(25);
 
-      // Without the bypass first (refused), then with it (accepted), both by version id.
+      // Without the bypass first (refused), then with it (accepted), both by version id; then the
+      // two unlocked versions of the conditional object, without the bypass.
       const deletes = standin.calls("DeleteObject");
-      expect(deletes.map((d) => [d.bypass, d.status])).toEqual([
-        [false, 403],
-        [true, 204],
+      expect(deletes.map((d) => [d.key, d.bypass, d.status])).toEqual([
+        [`${prefix}probe.txt`, false, 403],
+        [`${prefix}probe.txt`, true, 204],
+        [`${prefix}conditional.json`, false, 204],
+        [`${prefix}conditional.json`, false, 204],
       ]);
       expect(deletes.every((d) => typeof d.versionId === "string")).toBe(true);
       expect(standin.calls("ListObjectVersions").length).toBe(1);
@@ -274,7 +277,7 @@ describe("canary", () => {
         AWS_REQUEST_CHECKSUM_CALCULATION: "when_required",
       });
       expect(r.exitCode, r.all).toBe(0);
-      const puts = standin.calls("PutObject");
+      const puts = standin.calls("PutObject").filter((p) => p.key === `${prefix}probe.txt`);
       expect(puts.length).toBe(1);
       expect([puts[0]?.status, puts[0]?.checksum]).toEqual([200, true]);
 
@@ -311,7 +314,8 @@ describe("canary", () => {
         () => {
           lockSeen = standin.versions(BUCKET, `${prefix}multipart.bin`)[0]?.lock;
         },
-        3,
+        // After the probe's two deletes and the conditional object's two.
+        5,
       );
       const r = await runScrub(standin, canary(["--execute", "--multipart"]));
       expect(r.exitCode, r.all).toBe(0);
@@ -326,10 +330,13 @@ describe("canary", () => {
       expect(standin.calls("CompleteMultipartUpload")[0]?.size).toBe(7 * MIB);
       expect(lockSeen?.mode).toBe("GOVERNANCE");
 
-      // Three objects, each refused without the bypass and then deleted with it.
+      // Three locked objects, each refused without the bypass and then deleted with it, and the
+      // two unlocked versions of the conditional object after the first.
       expect(standin.calls("DeleteObject").map((d) => [d.bypass, d.status])).toEqual([
         [false, 403],
         [true, 204],
+        [false, 204],
+        [false, 204],
         [false, 403],
         [true, 204],
         [false, 403],
@@ -337,6 +344,72 @@ describe("canary", () => {
       ]);
       expect(standin.keys(BUCKET, prefix).length).toBe(0);
       expect(standin.openUploads()).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "proves the conditional writes the zarr stage relies on: the right ETag passes, a stale one is refused",
+    async () => {
+      standin = startS3Standin();
+      const r = await runScrub(standin, canary(["--execute"]));
+      expect(r.exitCode, r.all).toBe(0);
+      expect(r.stdout).toContain("a put conditional on the current ETag succeeded");
+      expect(r.stdout).toContain("a put and a get conditional on a stale ETag were refused");
+      const key = `${prefix}conditional.json`;
+      const puts = standin.calls("PutObject").filter((p) => p.key === key);
+      // Unconditional create, then the right ETag (200), then the same ETag once stale (412).
+      expect(puts.map((p) => [p.status, p.ifMatch === undefined])).toEqual([
+        [200, true],
+        [200, false],
+        [412, false],
+      ]);
+      expect(puts[1]?.ifMatch).toBe(puts[2]?.ifMatch);
+      const gets = standin.calls("GetObject").filter((g) => g.key === key);
+      expect(gets.map((g) => g.status)).toEqual([200, 200, 412, 200]);
+      expect(standin.keys(BUCKET, prefix).length).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "an endpoint that ignores If-Match fails the canary, with a fixed word",
+    async () => {
+      standin = startS3Standin();
+      standin.setIgnoreIfMatch(true);
+      const r = await runScrub(standin, canary(["--execute"]));
+      expectStopped(r, 1, "conditional-put-not-enforced");
+    },
+    SLOW,
+  );
+
+  test(
+    "a conflicting-write refusal (409) is a refusal: on the stale put it passes, on the right one it fails",
+    async () => {
+      standin = startS3Standin();
+      const key = `${prefix}conditional.json`;
+      // PutObject calls: 1 the locked probe, 2 the conditional object's create, 3 the put with the
+      // right ETag, 4 the put with the stale one.
+      standin.inject("PutObject", {
+        code: "ConditionalRequestConflict",
+        status: 409,
+        key,
+        after: 2,
+      });
+      const stale = await runScrub(standin, canary(["--execute"]));
+      expect(stale.exitCode, stale.all).toBe(0);
+
+      standin.stop();
+      standin = startS3Standin();
+      standin.inject("PutObject", {
+        code: "ConditionalRequestConflict",
+        status: 409,
+        key,
+        after: 1,
+        times: 1,
+      });
+      const right = await runScrub(standin, canary(["--execute"]));
+      expectStopped(right, 1, "conditional-put-failed:PutObject:precondition-failed");
     },
     SLOW,
   );

@@ -106,8 +106,12 @@ const CODE_BY_S3: Record<string, AwsErrorCode> = {
   NotFound: "not-found",
   "404": "not-found",
   NoSuchUpload: "no-such-upload",
+  // A conditional request whose condition did not hold (412), and one S3 refused because a
+  // conflicting write was in flight on the same key (409, documented for conditional writes).
+  // Both mean the write did not happen, and both stop the caller: one fixed word, never success.
   PreconditionFailed: "precondition-failed",
   "412": "precondition-failed",
+  ConditionalRequestConflict: "precondition-failed",
   InvalidRange: "invalid-range",
   "416": "invalid-range",
   SlowDown: "throttled",
@@ -860,6 +864,23 @@ export async function putObjectLocked(
       ...lockArgs(retainUntil),
       ...metaArgs(meta),
     ],
+    { slow: true },
+  );
+  const id = str(out.VersionId);
+  if (!id) throw new AwsCliError("bad-output", "PutObject");
+  return id;
+}
+
+/** put-object with no lock and no condition (the canary's unlocked object). Returns the version id. */
+export async function putObjectPlain(
+  ctx: S3Ctx,
+  key: string,
+  bodyFile: string,
+  meta: ObjectMeta,
+): Promise<string> {
+  const out = await ctx.aws.api(
+    "put-object",
+    ["--bucket", ctx.bucket, "--key", key, "--body", bodyFile, ...metaArgs(meta)],
     { slow: true },
   );
   const id = str(out.VersionId);

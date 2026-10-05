@@ -170,6 +170,10 @@ describe("classifying an aws failure", () => {
     const line = (code: string) =>
       `An error occurred (${code}) when calling the GetObject operation`;
     expect(classifyAwsError(line("PreconditionFailed"), "x").code).toBe("precondition-failed");
+    // A conditional write refused because another write to the key was in flight: not success.
+    expect(classifyAwsError(line("ConditionalRequestConflict"), "x").code).toBe(
+      "precondition-failed",
+    );
     expect(classifyAwsError(line("InvalidRange"), "x").code).toBe("invalid-range");
     expect(classifyAwsError(line("ExpiredToken"), "x").code).toBe("credentials");
     expect(classifyAwsError(line("SlowDown"), "x").code).toBe("throttled");

@@ -343,6 +343,20 @@ describe("zarr: --execute", () => {
   );
 
   test(
+    "a conflicting-write refusal (409) is a store changed concurrently, never a rewrite",
+    async () => {
+      const { dir } = await seeded();
+      standin.inject("PutObject", { code: "ConditionalRequestConflict", status: 409, key: A });
+      const r = await runScrub(standin, zarrArgs(dir, ["--execute"]));
+      expect(r.exitCode, r.all).toBe(1);
+      expect(r.stdout).toContain("changed-concurrently=1");
+      expect(has(dir, "zarr-verified.json")).toBe(false);
+      expect(text(A)).toBe(prettyDirty);
+    },
+    SLOW,
+  );
+
+  test(
     "a store that is dirty again when read back is not clean, and nothing is proven",
     async () => {
       const { dir } = await seeded();

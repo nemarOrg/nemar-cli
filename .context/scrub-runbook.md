@@ -28,9 +28,10 @@ Measured in the real bucket on 2026-10-04, a dataset has these:
 ## Before the first dataset
 
 1. ADR 0085 and the docs PRs are merged, the tooling PR is merged, and the owner has said go for this dataset.
-2. **Canary** proves the bypass and the multipart path on the real bucket, on the test prefix only:
+2. **Canary** proves the bypass, the multipart path and the conditional writes the zarr stage uses on the real bucket, on the test prefix only (`nm099999` or a dev ephemeral sandbox `xx090000` to `xx098999`; never a production sandbox or the exemplar fleet):
    `bun run $T/s3/s3-scrub.ts canary --prefix nm099999/canary-$RANDOM/ --execute`, then the same with `--multipart`.
    Run it again after any change to an S3 call: the stand-in encodes what its author believed, and the first multipart canary found that real S3 refuses an `UploadPart` without a checksum under Object Lock.
+   The conditional round trip (`get-object --if-match`, `put-object --if-match` with the right and a stale ETag) is what the zarr stage's rewrite depends on, and it has never run against the real bucket: run the canary after re-login and before step 10, and stop if it does not report both a success and a precondition refusal.
    Confirm with an independent `aws s3api list-object-versions` and `list-multipart-uploads` that nothing is left.
 3. The dataset is private with the bucket-policy exclusion, verified with an anonymous HEAD of one object (403) and a public control (200).
    Allow a few minutes after any bulk change.

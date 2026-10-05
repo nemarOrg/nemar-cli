@@ -77,9 +77,12 @@ import {
   listPrefixVersions,
   objectKey,
   planAssembly,
+  putObjectIfMatch,
   putObjectLocked,
+  putObjectPlain,
   readRange,
   readWhole,
+  readWholeWithMeta,
   retainUntilFrom,
   retentionOk,
   runPool,
@@ -1428,12 +1431,68 @@ async function proveAndDelete(ctx: S3Ctx, key: string, versionId: string, o: Com
   o.log("canary: a delete with the bypass succeeded");
 }
 
+/** The refusal a conditional request must meet: a fixed word, and anything else stops the canary. */
+async function expectConditionRefused(word: string, attempt: () => Promise<unknown>) {
+  try {
+    await attempt();
+  } catch (err) {
+    if (err instanceof AwsCliError && err.code === "precondition-failed") return;
+    throw new StageError(`${word}-unexpected:${failureWord(err)}`);
+  }
+  throw new StageError(`${word}-not-enforced`);
+}
+
+/**
+ * Prove the two conditional requests the zarr stage relies on, on an unlocked object: a
+ * get-object pinned to an ETag, and a put-object that replaces the object only if its ETag is
+ * still the one read. With the right ETag both succeed; with a stale one both are refused with a
+ * precondition failure (412, or 409 for a conflicting write). Then the object is removed by
+ * version id WITHOUT the bypass, as the prune removes a noncurrent Zarr version.
+ */
+async function proveConditionalWrites(ctx: S3Ctx, key: string, body: string, o: CommonOptions) {
+  const meta = { contentType: "application/json" };
+  const ids: string[] = [];
+  await writeFile(body, '{"canary":1}\n', { mode: 0o600 });
+  ids.push(await putObjectPlain(ctx, key, body, meta));
+  const read = await readWholeWithMeta(ctx, key);
+  await readWholeWithMeta(ctx, key, read.etag);
+  await writeFile(body, '{"canary":2}\n', { mode: 0o600 });
+  try {
+    ids.push(await putObjectIfMatch(ctx, key, body, meta, read.etag));
+  } catch (err) {
+    throw new StageError(`conditional-put-failed:${failureWord(err)}`);
+  }
+  o.log("canary: a put conditional on the current ETag succeeded");
+  // read.etag is stale now: both conditional requests must be refused.
+  await writeFile(body, '{"canary":3}\n', { mode: 0o600 });
+  await expectConditionRefused("conditional-put", () =>
+    putObjectIfMatch(ctx, key, body, meta, read.etag),
+  );
+  await expectConditionRefused("conditional-get", () => readWholeWithMeta(ctx, key, read.etag));
+  o.log("canary: a put and a get conditional on a stale ETag were refused (precondition)");
+  const now = await readWholeWithMeta(ctx, key);
+  if (Buffer.from(now.bytes).toString("utf8") !== '{"canary":2}\n') {
+    throw new StageError("conditional-put-content-wrong");
+  }
+  for (const id of ids) {
+    try {
+      await deleteVersion(ctx, key, id, false);
+    } catch (err) {
+      throw new StageError(`unlocked-delete-refused:${failureWord(err)}`);
+    }
+  }
+  o.log("canary: the unlocked versions were deleted by id without the bypass");
+}
+
 export async function canaryStage(o: CanaryOptions): Promise<number> {
   checkCanaryPrefix(o.prefix);
   const steps = [
     `put ${o.prefix}probe.txt with GOVERNANCE retention for 1 day`,
     "delete that version WITHOUT the bypass (expect AccessDenied)",
     "delete that version WITH the bypass (expect success)",
+    `put ${o.prefix}conditional.json unlocked, then get and put it conditional on its ETag (expect success)`,
+    "put and get it conditional on the now stale ETag (expect PreconditionFailed)",
+    "delete both versions by id WITHOUT the bypass (expect success)",
     "list the prefix (expect zero versions and zero delete markers)",
   ];
   if (o.multipart) {
@@ -1457,6 +1516,7 @@ export async function canaryStage(o: CanaryOptions): Promise<number> {
       const versionId = await putObjectLocked(ctx, key, body, {}, retainUntil);
       o.log("canary: put a locked probe object");
       await proveAndDelete(ctx, key, versionId, o);
+      await proveConditionalWrites(ctx, `${o.prefix}conditional.json`, body, o);
 
       if (o.multipart) {
         const sourceKey = `${o.prefix}multipart-source.bin`;

@@ -25,9 +25,12 @@
  *    as an UploadPart of a lock-created upload does (documented for put-object, measured only for
  *    the part).
  *  - PutObject with `If-Match`: 412 PreconditionFailed when the current version's ETag is not the
- *    one named. ASSUMED, not measured against the real bucket: S3 documents conditional writes
- *    (Nov 2024) and answers 412 on a mismatch; what it answers for a key that does not exist, or
- *    for two racing writers, is not modeled beyond 404 NoSuchKey for the former.
+ *    one named, and 404 NoSuchKey when the key has no current version, as S3 documents for
+ *    conditional writes (Nov 2024). ASSUMED, not measured against the real bucket: this encodes
+ *    what the documentation says, which is a belief until the canary (which now puts and gets
+ *    conditionally with a right and a stale ETag) has run against the real bucket. The 409
+ *    ConditionalRequestConflict S3 documents for a conflicting write in flight is not modeled; a
+ *    test injects it as a fault.
  *  - GetObjectRetention (404 NoSuchObjectLockConfiguration when a version has none).
  *  - Multipart: CreateMultipartUpload (keeps the lock and encryption headers), UploadPart,
  *    UploadPartCopy (`x-amz-copy-source` with an optional `?versionId=`, a byte range, and
@@ -141,6 +144,11 @@ export interface S3Standin {
   openUploads(): number;
   /** Operators without s3:BypassGovernanceRetention: the bypass header is refused too. */
   setDenyBypass(deny: boolean): void;
+  /**
+   * An endpoint that ignores `If-Match` on PutObject and GetObject, as one without conditional
+   * writes would: the request succeeds whatever ETag it names. What a canary must catch.
+   */
+  setIgnoreIfMatch(ignore: boolean): void;
   /** Entries per ListObjectVersions / ListObjectsV2 page. */
   setPageSize(n: number): void;
   /** Hold the next `times` requests with this HTTP method for `ms` before answering (a hung server). */
@@ -215,6 +223,7 @@ export function startS3Standin(): S3Standin {
   const hooks = new Map<StandinOp, Array<{ fn: () => void; nth: number }>>();
   const opCounts = new Map<StandinOp, number>();
   let denyBypass = false;
+  let ignoreIfMatch = false;
   let pageSize = 1000;
   const stalls: Array<{ method: string; ms: number; times: number }> = [];
 
@@ -416,7 +425,7 @@ export function startS3Standin(): S3Standin {
           record({ op: "GetObject", key, status: 404, range: rangeHeader ?? undefined });
           return s3Error("NoSuchKey", 404);
         }
-        if (ifMatch && ifMatch !== v.etag) {
+        if (ifMatch && !ignoreIfMatch && ifMatch !== v.etag) {
           record({ op: "GetObject", key, status: 412, range: rangeHeader ?? undefined, ifMatch });
           return s3Error("PreconditionFailed", 412);
         }
@@ -657,7 +666,7 @@ export function startS3Standin(): S3Standin {
           );
         }
         const ifMatch = req.headers.get("if-match") ?? undefined;
-        if (ifMatch !== undefined) {
+        if (ifMatch !== undefined && !ignoreIfMatch) {
           const now = current(bucket, key);
           if (!now) {
             record({ op: "PutObject", key, status: 404, ifMatch });
@@ -816,12 +825,16 @@ export function startS3Standin(): S3Standin {
       hooks.clear();
       opCounts.clear();
       denyBypass = false;
+      ignoreIfMatch = false;
       pageSize = 1000;
       stalls.length = 0;
     },
     openUploads: () => uploads.size,
     setDenyBypass(deny) {
       denyBypass = deny;
+    },
+    setIgnoreIfMatch(ignore) {
+      ignoreIfMatch = ignore;
     },
     setPageSize(n) {
       pageSize = n;
