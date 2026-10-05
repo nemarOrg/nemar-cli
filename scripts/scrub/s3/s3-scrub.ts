@@ -9,6 +9,7 @@
  *              [--hash-verified new-hash-verified.json] [--max-delete N]
  *              [--prune-noncurrent <prefix>]... [--max-prune N] [--public-base URL]
  *   zarr       --dir DIR [--execute] [--concurrency 4]
+ *   drop-archives --dir DIR --confirm-dataset ID [--execute] [--concurrency 4]
  *   canary     --prefix <id>/canary-<random>/ [--execute] [--multipart] [--bucket nemar]
  *
  * Every subcommand is read-only unless it is given `--execute`; `plan` and `verify` have no
@@ -24,6 +25,7 @@
 
 import { parseArgs } from "node:util";
 import { ContractError } from "../contract";
+import { dropArchivesStage } from "./archives-stage";
 import {
   DEFAULT_SAMPLES,
   DEFAULT_TIMEOUT_MS,
@@ -44,7 +46,7 @@ import {
 } from "./s3-stages";
 import { zarrStage } from "./zarr-stage";
 
-const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|zarr|canary> [options]
+const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|zarr|drop-archives|canary> [options]
   plan       --dataset ID --out DIR [--tags v1,v2] [--bucket nemar] [--concurrency 8]
   assemble   --dir DIR [--execute] [--concurrency 4] [--max-part-bytes N]
   verify     --dir DIR [--samples 8] [--concurrency 4]
@@ -62,6 +64,11 @@ const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|zarr|canary> 
              removes identifier keys from every Zarr store root's attributes; reads only unless
              --execute, and writes zarr-verified.json only when every store is clean after it.
              Then \`delete-old --prune-noncurrent ID/zarr/\` removes the noncurrent versions.
+  drop-archives --dir DIR --confirm-dataset ID [--execute] [--concurrency 4]
+             deletes EVERY version and delete marker under ID/archives/ by version id, with no
+             governance bypass, and ends with a listing that must show none. The archive holds the
+             original recordings; the normal workflow rebuilds it afterwards. Writes
+             archives-dropped.json. A lock refusal is reported and fails the stage.
   canary     --prefix ID/canary-RANDOM/ [--execute] [--multipart] [--bucket nemar]
 common: --region us-east-2  --timeout-sec 120`;
 
@@ -200,6 +207,14 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
       return zarrStage({
         ...opts,
         dir: need(v.dir, "dir"),
+        execute,
+        concurrency: concurrency(4),
+      });
+    case "drop-archives":
+      return dropArchivesStage({
+        ...opts,
+        dir: need(v.dir, "dir"),
+        confirmDataset: need(v["confirm-dataset"], "confirm-dataset"),
         execute,
         concurrency: concurrency(4),
       });
