@@ -461,6 +461,13 @@ describe("the remote is checked before anything is lifted, in a dry run too", ()
 
   test("an origin that names another repository, another host, or no repository refuses", async () => {
     const snapshot = await takeSnapshot(world.api, REPO, world.work, "origin");
+    // Every wrong URL below is mapped to a path that does not exist, so a check that failed to
+    // refuse would fail offline instead of reaching a real host.
+    const offline = join(world.dir, "no-such-remote.git");
+    const wrong = (url: string, push = false): void => {
+      run(world.work, "remote", "set-url", ...(push ? ["--push"] : []), "origin", url);
+      run(world.work, "config", "--add", `url.${offline}.insteadOf`, url);
+    };
     const refuse = async (what: string, set: () => void) => {
       set();
       for (const execute of [false, true]) {
@@ -470,30 +477,16 @@ describe("the remote is checked before anything is lifted, in a dry run too", ()
         "origin-mismatch",
       );
     };
-    const origin = `https://github.com/${REPO}`;
-    await refuse("another dataset", () =>
-      run(world.work, "remote", "set-url", "origin", "https://github.com/nemarDatasets/nm000002"),
-    );
-    await refuse("another owner", () =>
-      run(world.work, "remote", "set-url", "origin", "https://github.com/someone/nm000001"),
-    );
-    await refuse("another host", () =>
-      run(world.work, "remote", "set-url", "origin", "https://gitlab.com/nemarDatasets/nm000001"),
-    );
+    await refuse("another dataset", () => wrong("https://github.com/nemarDatasets/nm000002"));
+    await refuse("another owner", () => wrong("https://github.com/someone/nm000001"));
+    await refuse("another host", () => wrong("https://gitlab.com/nemarDatasets/nm000001"));
     await refuse("a local path", () =>
       run(world.work, "remote", "set-url", "origin", world.remote),
     );
     // A push URL elsewhere sends the push elsewhere even when the fetch URL is right.
     await refuse("a push url", () => {
-      run(world.work, "remote", "set-url", "origin", origin);
-      run(
-        world.work,
-        "remote",
-        "set-url",
-        "--push",
-        "origin",
-        "https://github.com/nemarDatasets/nm000002",
-      );
+      run(world.work, "remote", "set-url", "origin", `https://github.com/${REPO}`);
+      wrong("https://github.com/nemarDatasets/nm000003", true);
     });
     expect(world.stand.calls).toEqual([]);
   });
