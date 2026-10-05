@@ -9,6 +9,9 @@
  * protection ON.
  *
  * - `snapshot` records the live rulesets and the remote SHA of every ref to be pushed.
+ * - Before either touches anything, the remote is checked to be the repository named and to hold
+ *   nothing the push would strand: the clone's origin names `--repo`, the only remote heads are
+ *   `main` and `git-annex`, and every remote tag exists in the clone.
  * - `switchRefs` re-reads both and refuses on any drift, disables ONLY the rulesets that would
  *   block the push (a branch ruleset the pusher can bypass is left alone), pushes with a lease
  *   per ref so it overwrites only what the snapshot saw, and restores in a `finally`, verifying
@@ -163,6 +166,73 @@ export async function localRefs(cloneDir: string): Promise<Record<string, string
   return refs;
 }
 
+/** Heads the remote may hold: the branch a rewrite moves, and the annex's own. */
+const ALLOWED_REMOTE_HEADS = new Set(["refs/heads/main", "refs/heads/git-annex"]);
+/** Every ref the switch compares: all heads (so a stray one is seen) and all tags. */
+const REMOTE_PATTERNS = ["refs/heads/*", "refs/tags/*"];
+
+/** `owner/name`, lowercased, of a GitHub remote URL in https, ssh:// or scp form; else null. */
+export function githubRepoOf(url: string): string | null {
+  const m =
+    /^(?:https?:\/\/(?:[^@/]+@)?|ssh:\/\/(?:[^@/]+@)?|[^@/:]+@)github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?\/?$/i.exec(
+      url.trim(),
+    );
+  return m ? `${m[1]}/${m[2]}`.toLowerCase() : null;
+}
+
+/** git exit code 1 from `config --get-all` means "no such key", which is an answer, not a failure. */
+async function configValues(cloneDir: string, key: string): Promise<string[]> {
+  try {
+    return (await git(cloneDir, ["config", "--get-all", key])).split("\n").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Refuse unless every URL the clone would fetch from or push to for `remote` names `repo`. A clone
+ * of another dataset, or a remote renamed by hand, would otherwise take this dataset's rulesets
+ * and push another repository's history under them.
+ */
+export async function assertOriginIsRepo(
+  cloneDir: string,
+  remote: string,
+  repo: string,
+): Promise<void> {
+  const urls = await configValues(cloneDir, `remote.${remote}.url`);
+  const pushUrls = await configValues(cloneDir, `remote.${remote}.pushurl`);
+  // A bare URL given instead of a remote name stands for itself.
+  const all = urls.length > 0 ? [...urls, ...pushUrls] : /[:/]/.test(remote) ? [remote] : [];
+  const want = repo.toLowerCase();
+  if (all.length === 0 || !all.every((u) => githubRepoOf(u) === want)) {
+    throw new SwitchRefused("origin-mismatch");
+  }
+}
+
+/**
+ * The remote's heads and tags, after refusing a remote that is not the repository named, that
+ * holds a head the push would leave behind, or that has a tag the clone lacks (the rewrite would
+ * leave that tag on the old history). Read-only; runs before anything is lifted.
+ */
+export async function checkRemote(
+  cloneDir: string,
+  remote: string,
+  repo: string,
+): Promise<Record<string, string>> {
+  await assertOriginIsRepo(cloneDir, remote, repo);
+  const remoteNow = await remoteRefs(cloneDir, remote, REMOTE_PATTERNS);
+  if (
+    Object.keys(remoteNow).some((r) => r.startsWith("refs/heads/") && !ALLOWED_REMOTE_HEADS.has(r))
+  ) {
+    throw new SwitchRefused("unexpected-remote-head");
+  }
+  const local = await localRefs(cloneDir);
+  if (Object.keys(remoteNow).some((r) => r.startsWith("refs/tags/") && !(r in local))) {
+    throw new SwitchRefused("remote-only-tag");
+  }
+  return remoteNow;
+}
+
 export async function takeSnapshot(
   api: Api,
   repo: string,
@@ -170,8 +240,8 @@ export async function takeSnapshot(
   remote: string,
   now: () => Date = () => new Date(),
 ): Promise<Snapshot> {
+  const remoteNow = await checkRemote(cloneDir, remote, repo);
   const local = await localRefs(cloneDir);
-  const remoteNow = await remoteRefs(cloneDir, remote, ["refs/heads/main", "refs/tags/*"]);
   const refs: Record<string, string | null> = {};
   for (const ref of Object.keys(local)) refs[ref] = remoteNow[ref] ?? null;
   return {
@@ -244,11 +314,8 @@ export async function switchRefs(opts: SwitchOptions): Promise<SwitchReport> {
     if (!l || l.enforcement !== s.enforcement)
       throw new SwitchRefused("a ruleset changed since the snapshot");
   }
+  const remoteNow = await checkRemote(opts.cloneDir, opts.remote, repo);
   const local = await localRefs(opts.cloneDir);
-  const remoteNow = await remoteRefs(opts.cloneDir, opts.remote, [
-    "refs/heads/main",
-    "refs/tags/*",
-  ]);
   for (const ref of Object.keys(local)) {
     if ((remoteNow[ref] ?? null) !== (snapshot.refs[ref] ?? null)) {
       throw new SwitchRefused("a remote ref moved since the snapshot");
@@ -294,7 +361,7 @@ export async function switchRefs(opts: SwitchOptions): Promise<SwitchReport> {
     restoredIds = await restoreAll(opts, lifted);
     log(`restored ${restoredIds.length} ruleset(s)`);
   }
-  const after = await remoteRefs(opts.cloneDir, opts.remote, ["refs/heads/main", "refs/tags/*"]);
+  const after = await remoteRefs(opts.cloneDir, opts.remote, REMOTE_PATTERNS);
   for (const ref of pushed)
     if (after[ref] !== local[ref]) throw new SwitchRefused("a pushed ref does not match");
   return { executed: true, lifted: lifted.map((r) => r.id), pushed, restored: restoredIds };

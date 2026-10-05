@@ -202,7 +202,10 @@ function build(bypassBranch: "always" | "never", blockRef = "refs/none"): World 
   run(work, "add", ".");
   run(work, "commit", "-q", "-m", "B");
   run(work, "tag", "v1.0.1");
-  run(work, "remote", "add", "origin", remote);
+  // The clone names the GitHub repository, as a real clone does; `insteadOf` is how git itself
+  // reaches the local bare repository that stands in for it, for fetch and push alike.
+  run(work, "remote", "add", "origin", `https://github.com/${REPO}`);
+  run(work, "config", `url.${remote}.insteadOf`, `https://github.com/${REPO}`);
   run(work, "push", "-q", "origin", "main", "v1.0.0", "v1.0.1");
   writeFileSync(
     join(remote, "hooks", "pre-receive"),
@@ -392,6 +395,125 @@ describe("refusals before anything is touched", () => {
         execute: true,
       }),
     ).rejects.toThrow(SwitchRefused);
+  });
+});
+
+describe("the remote is checked before anything is lifted, in a dry run too", () => {
+  beforeEach(() => {
+    world = build("always");
+  });
+
+  /** A second clone of the remote, to put something on it the way another person would. */
+  function other(): string {
+    const dir = join(world.dir, "other");
+    run(world.dir, "clone", "-q", world.remote, dir);
+    run(dir, "config", "user.email", "t@example.org");
+    run(dir, "config", "user.name", "t");
+    return dir;
+  }
+
+  const attempt = (execute: boolean, snapshot: Awaited<ReturnType<typeof takeSnapshot>>) =>
+    switchRefs({
+      api: world.api,
+      repo: REPO,
+      cloneDir: world.work,
+      remote: "origin",
+      snapshot,
+      execute,
+    });
+
+  test("a head other than main and git-annex refuses, and nothing is lifted", async () => {
+    const snapshot = await takeSnapshot(world.api, REPO, world.work, "origin");
+    const clone = other();
+    run(clone, "checkout", "-q", "-b", "dev");
+    expect((await gitAsync(clone, "push", "-q", "origin", "dev")).status).toBe(0);
+    for (const execute of [false, true]) {
+      await expect(attempt(execute, snapshot)).rejects.toThrow("unexpected-remote-head");
+    }
+    await expect(takeSnapshot(world.api, REPO, world.work, "origin")).rejects.toThrow(
+      "unexpected-remote-head",
+    );
+    expect(world.stand.calls).toEqual([]);
+    expect(remoteRef(world, "refs/heads/main")).toBe(run(clone, "rev-parse", "origin/main"));
+  });
+
+  test("a git-annex head is expected and does not block the switch", async () => {
+    const clone = other();
+    run(clone, "checkout", "-q", "--orphan", "git-annex");
+    run(clone, "commit", "-q", "--allow-empty", "-m", "annex");
+    expect((await gitAsync(clone, "push", "-q", "origin", "git-annex")).status).toBe(0);
+    const snapshot = await takeSnapshot(world.api, REPO, world.work, "origin");
+    const report = await attempt(true, snapshot);
+    expect(report.restored).toEqual([2]);
+    expect(remoteRef(world, "refs/heads/main")).toBe(localSha(world, "refs/heads/main"));
+  });
+
+  test("a tag on the remote that the clone lacks refuses: the rewrite would strand it", async () => {
+    const snapshot = await takeSnapshot(world.api, REPO, world.work, "origin");
+    const clone = other();
+    run(clone, "tag", "v9.9.9");
+    expect((await gitAsync(clone, "push", "-q", "origin", "v9.9.9")).status).toBe(0);
+    for (const execute of [false, true]) {
+      await expect(attempt(execute, snapshot)).rejects.toThrow("remote-only-tag");
+    }
+    expect(world.stand.calls).toEqual([]);
+  });
+
+  test("an origin that names another repository, another host, or no repository refuses", async () => {
+    const snapshot = await takeSnapshot(world.api, REPO, world.work, "origin");
+    const refuse = async (what: string, set: () => void) => {
+      set();
+      for (const execute of [false, true]) {
+        await expect(attempt(execute, snapshot), what).rejects.toThrow("origin-mismatch");
+      }
+      await expect(takeSnapshot(world.api, REPO, world.work, "origin"), what).rejects.toThrow(
+        "origin-mismatch",
+      );
+    };
+    const origin = `https://github.com/${REPO}`;
+    await refuse("another dataset", () =>
+      run(world.work, "remote", "set-url", "origin", "https://github.com/nemarDatasets/nm000002"),
+    );
+    await refuse("another owner", () =>
+      run(world.work, "remote", "set-url", "origin", "https://github.com/someone/nm000001"),
+    );
+    await refuse("another host", () =>
+      run(world.work, "remote", "set-url", "origin", "https://gitlab.com/nemarDatasets/nm000001"),
+    );
+    await refuse("a local path", () =>
+      run(world.work, "remote", "set-url", "origin", world.remote),
+    );
+    // A push URL elsewhere sends the push elsewhere even when the fetch URL is right.
+    await refuse("a push url", () => {
+      run(world.work, "remote", "set-url", "origin", origin);
+      run(
+        world.work,
+        "remote",
+        "set-url",
+        "--push",
+        "origin",
+        "https://github.com/nemarDatasets/nm000002",
+      );
+    });
+    expect(world.stand.calls).toEqual([]);
+  });
+
+  test("the same repository in https, scp and ssh spellings, with or without .git, is accepted", async () => {
+    const snapshot = await takeSnapshot(world.api, REPO, world.work, "origin");
+    for (const url of [
+      `https://github.com/${REPO}.git`,
+      `https://github.com/${REPO}/`,
+      "https://x-access-token:invented@github.com/nemarDatasets/nm000001",
+      `git@github.com:${REPO}`,
+      `git@github.com:${REPO}.git`,
+      `ssh://git@github.com/${REPO}.git`,
+      "https://github.com/NEMARDATASETS/NM000001",
+    ]) {
+      run(world.work, "remote", "set-url", "origin", url);
+      run(world.work, "config", `url.${world.remote}.insteadOf`, url);
+      const report = await attempt(false, snapshot);
+      expect(report.pushed.length, url).toBe(3);
+    }
   });
 });
 
