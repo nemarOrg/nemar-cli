@@ -18,10 +18,15 @@ import {
   type ZarrVerifiedFile,
   parseKey,
 } from "../../../scripts/scrub/contract";
-import { AwsCliError, deleteVersion } from "../../../scripts/scrub/s3/s3-lib";
-import { DEFAULT_PUBLIC_BASE, type DeletedFile } from "../../../scripts/scrub/s3/s3-stages";
+import { AwsCliError, StageError, deleteVersion } from "../../../scripts/scrub/s3/s3-lib";
+import {
+  DEFAULT_PUBLIC_BASE,
+  type DeletedFile,
+  TEST_LOOPBACK_PUBLIC_BASE_ENV,
+  checkPublicBase,
+} from "../../../scripts/scrub/s3/s3-stages";
 import { type S3Standin, type Snapshot, startS3Standin } from "../helpers/s3-standin";
-import { expectStopped } from "./refusal";
+import { expectStopped, expectUsage } from "./refusal";
 import {
   type Assembled,
   BUCKET,
@@ -32,11 +37,14 @@ import {
   buildAssembled,
   centuryFromNow,
   copyDir,
+  edfFile,
+  edfHeader,
   fileSha256,
   fixtureA,
   fixtureB,
   fixtureD,
   has,
+  makeFixture,
   objectPath,
   readJson,
   runScrub,
@@ -123,6 +131,9 @@ const executeArgs = (extra: string[] = []) => deleteArgs(["--execute", ...extra]
 const versionIdsOf = (key: string) =>
   standin.versions(BUCKET, objectPath(key)).map((v) => v.versionId);
 
+/** The new key the privacy probe asks about: the first of the assembled new keys, sorted. */
+const firstNewKey = () => [a.newKey as string, b.newKey as string].sort()[0] as string;
+
 /** Nothing was deleted: every old version and marker is still there. */
 function expectOldIntact() {
   expect(standin.calls("DeleteObject").length).toBe(0);
@@ -145,8 +156,13 @@ beforeAll(async () => {
   };
   const v = await runScrub(standin, verifyArgs(built.dir));
   if (v.exitCode !== 0) throw new Error(`verify failed: ${v.all}`);
-  // Runbook step 9 has run: the manifest now names each scrubbed file by its new key.
+  // Runbook step 12 has run: the manifest now names each scrubbed file by its new key. Its older
+  // version (naming the old keys) is dropped here so the shared state has no history; the tests of
+  // history put it back on purpose.
+  const manifestKey = `${DATASET}/version/v1.0.0.json`;
+  const original = standin.versions(BUCKET, manifestKey)[0]?.versionId as string;
   seedManifest(standin, "v1.0.0", [a, b, d], {}, DATASET, true);
+  standin.dropVersion(BUCKET, manifestKey, original);
   const sha = sha256(readFileSync(path.join(built.dir, "assembled.json")));
   writeJson(built.dir, "new-hash-verified.json", {
     version: 1,
@@ -258,10 +274,10 @@ describe("delete-old: refusals", () => {
   );
 
   test(
-    "a plan that went stale cannot widen: a newer version needs a deliberate --max-delete",
+    "a version written to an old key after the plan is refused, and no --max-delete waives it",
     async () => {
       writeProofs();
-      // A version appeared on an old key after the plan recorded its ids.
+      // A version appeared on an old key after the plan recorded its ids: bytes nobody read.
       const extra = standin.putObject(BUCKET, objectPath(a.oldKey), a.bytes, {
         lockUntil: centuryFromNow(),
       });
@@ -270,16 +286,27 @@ describe("delete-old: refusals", () => {
         .keys.filter((k) => k.oldKey === a.oldKey || k.oldKey === b.oldKey)
         .reduce((n, k) => n + k.versionIds.length, 0);
       expect(recorded).toBe(6);
-      const refused = await runScrub(standin, executeArgs());
-      expectStopped(refused, 3, "over-max-delete");
-      expect(refused.stdout).toContain(`planRecorded=${recorded}`);
+      for (const flag of [[], ["--execute"]]) {
+        expectStopped(await runScrub(standin, deleteArgs(flag)), 3, "version-not-in-plan");
+        // Naming a larger number used to be the way past this; it is only a cap now.
+        const raised = await runScrub(
+          standin,
+          deleteArgs([...flag, "--max-delete", String(recorded + 100)]),
+        );
+        expectStopped(raised, 3, "version-not-in-plan", "with --max-delete raised");
+        expect(raised.stdout).toContain("1 versions or markers of old keys are not in the plan");
+      }
       expect(standin.calls("DeleteObject").length).toBe(0);
       expect(versionIdsOf(a.oldKey)).toContain(extra);
 
-      // Naming the larger number is the deliberate step; a dry run shows it is then accepted.
-      const accepted = await runScrub(standin, deleteArgs(["--max-delete", String(recorded + 1)]));
-      expect(accepted.exitCode, accepted.all).toBe(0);
-      expect(standin.calls("DeleteObject").length).toBe(0);
+      // Swapping a recorded id for an unrecorded one keeps the count and is refused all the same.
+      standin.restore(snap);
+      const plan = readJson<PlanFile>(dir, "plan.json");
+      const entry = plan.keys.find((k) => k.oldKey === a.oldKey) as PlanFile["keys"][number];
+      entry.versionIds = [...entry.versionIds.slice(1), "standin-v-not-a-real-id"];
+      writeFileSync(path.join(dir, "plan.json"), JSON.stringify(plan));
+      expectStopped(await runScrub(standin, deleteArgs()), 3, "version-not-in-plan", "swapped");
+      expectOldIntact();
     },
     SLOW,
   );
@@ -576,7 +603,8 @@ describe("delete-old: pruning noncurrent versions", () => {
         ]),
       );
       expect(r.exitCode, r.all).toBe(0);
-      expect(r.stdout).toContain("prune noncurrent versions=4 markers=1");
+      // Manifest: the regenerated version and one more below the newest, and a marker; Zarr: one.
+      expect(r.stdout).toContain("prune noncurrent versions=3 markers=1");
 
       expect(standin.versions(BUCKET, manifest).map((v) => v.versionId)).toEqual([currentManifest]);
       expect(standin.versions(BUCKET, zarrJson).map((v) => v.versionId)).toEqual([currentZarr]);
@@ -586,14 +614,15 @@ describe("delete-old: pruning noncurrent versions", () => {
       const prunes = standin
         .calls("DeleteObject")
         .filter((x) => !x.key.startsWith(`${DATASET}/objects/`));
-      expect(prunes.length).toBe(5);
+      expect(prunes.length).toBe(4);
       for (const p of prunes) {
         expect(p.versionId).toBeTruthy();
         expect(p.bypass).toBe(false);
       }
       const done = readJson<DeletedFile>(dir, "deleted.json");
-      expect(done.counts.prunedVersions).toBe(4);
+      expect(done.counts.prunedVersions).toBe(3);
       expect(done.counts.prunedMarkers).toBe(1);
+      expect(r.stdout).toContain("no history under archives/, version/, zarr/");
     },
     SLOW,
   );
@@ -609,6 +638,106 @@ describe("delete-old: pruning noncurrent versions", () => {
       expect(r.exitCode, r.all).toBe(5);
       expect(r.stdout).toContain("DeleteObject:access-denied");
       expect(standin.versions(BUCKET, zarrJson).length).toBe(2);
+      expect(has(dir, "deleted.json")).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
+    "refuses history it was not told to prune, before the first delete, and counts it per prefix",
+    async () => {
+      writeProofs();
+      // Probe T3's shape: the manifests were regenerated and the Zarr roots rewritten, so both
+      // prefixes hold old versions naming old keys and old metadata.
+      standin.putObject(BUCKET, manifest, manifestBody());
+      standin.putObject(BUCKET, manifest, manifestBody());
+      standin.putObject(BUCKET, zarrJson, body(dirtyStore));
+      await proveZarr();
+      for (const flag of [[], ["--execute"]]) {
+        const none = await runScrub(standin, deleteArgs(flag));
+        expectStopped(none, 3, "history-remains");
+        expect(none.stdout).toContain(
+          "history-remains outside --prune-noncurrent: version=2 zarr=1",
+        );
+        const half = await runScrub(
+          standin,
+          deleteArgs([...flag, "--prune-noncurrent", `${DATASET}/version/`]),
+        );
+        expectStopped(half, 3, "history-remains", "version/ only");
+        expect(half.stdout).toContain("history-remains outside --prune-noncurrent: zarr=1");
+      }
+      expectOldIntact();
+      expect(has(dir, "deleted.json")).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
+    "history that appears during the run fails it with no deleted.json, and a re-run finishes",
+    async () => {
+      writeProofs();
+      // The first delete is when a writer regenerates the manifest once more: the version that
+      // was current becomes history after the preflight has looked.
+      standin.beforeOp("DeleteObject", () => {
+        standin.putObject(BUCKET, manifest, manifestBody());
+      });
+      const pruneVersion = ["--prune-noncurrent", `${DATASET}/version/`];
+      const r = await runScrub(standin, executeArgs(pruneVersion));
+      expectStopped(r, 5, "history-remains");
+      expect(r.stdout).toContain("history-remains archives=0 version=1 zarr=0");
+      expect(has(dir, "deleted.json")).toBe(false);
+      // The old keys did go; only the history is left.
+      for (const f of [a, b]) expect(standin.versions(BUCKET, objectPath(f.oldKey)).length).toBe(0);
+
+      // A re-run has no old object left to ask about, so it asks about a new one, and finishes.
+      pub.requests.length = 0;
+      const again = await runScrub(standin, executeArgs(pruneVersion));
+      expect(again.exitCode, again.all).toBe(0);
+      expect(pub.requests.map((q) => q.path)).toEqual([`/${DATASET}/objects/${firstNewKey()}`]);
+      expect(standin.versions(BUCKET, manifest).length).toBe(1);
+      const done = readJson<DeletedFile>(dir, "deleted.json");
+      expect(done.counts).toEqual({
+        keys: 2,
+        versions: 0,
+        markers: 0,
+        prunedVersions: 1,
+        prunedMarkers: 0,
+      });
+    },
+    SLOW,
+  );
+
+  test(
+    "a key that is only history, a version under a delete marker, is pruned whole",
+    async () => {
+      writeProofs();
+      standin.putObject(BUCKET, zarrJson, body(dirtyStore));
+      standin.putDeleteMarker(BUCKET, zarrJson);
+      const r = await runScrub(standin, executeArgs(["--prune-noncurrent", `${DATASET}/zarr/`]));
+      expect(r.exitCode, r.all).toBe(0);
+      expect(r.stdout).toContain("prune noncurrent versions=1 markers=1");
+      expect(standin.versions(BUCKET, zarrJson)).toEqual([]);
+      // The version went first; the marker only once nothing was left under it.
+      const order = standin
+        .calls("DeleteObject")
+        .filter((c) => c.key === zarrJson)
+        .map((c) => c.status);
+      expect(order).toEqual([204, 204]);
+    },
+    SLOW,
+  );
+
+  test(
+    "a delete marker over a version that cannot go is kept, so no old version becomes current",
+    async () => {
+      writeProofs();
+      standin.putObject(BUCKET, zarrJson, body(dirtyStore), { lockUntil: centuryFromNow() });
+      standin.putDeleteMarker(BUCKET, zarrJson);
+      const r = await runScrub(standin, executeArgs(["--prune-noncurrent", `${DATASET}/zarr/`]));
+      expectStopped(r, 5, "history-remains");
+      expect(r.stdout).toContain("DeleteObject:access-denied");
+      expect(standin.current(BUCKET, zarrJson)).toBeUndefined();
+      expect(standin.versions(BUCKET, zarrJson).map((v) => v.deleteMarker)).toEqual([false, true]);
       expect(has(dir, "deleted.json")).toBe(false);
     },
     SLOW,
@@ -722,19 +851,21 @@ describe("delete-old: what must be true before an old key may go", () => {
   );
 
   test(
-    "the dataset must be private: an anonymous HEAD of one old object answers exactly 403",
+    "the dataset must be private: an anonymous HEAD of a new and an old object answers exactly 403",
     async () => {
       writeProofs();
-      // 403 passes, in the dry run: one request, a HEAD, anonymous, for an old key.
+      // 403 passes, in the dry run: two requests, HEADs, anonymous, a new key and an old key.
       const ok = await runScrub(standin, deleteArgs());
       expect(ok.exitCode, ok.all).toBe(0);
-      expect(pub.requests.length).toBe(1);
-      const req = pub.requests[0] as (typeof pub.requests)[number];
-      expect(req.method).toBe("HEAD");
-      expect(req.path).toBe(`/${DATASET}/objects/${firstKey}`);
-      expect(req.headers.authorization).toBeUndefined();
-      expect(req.headers.cookie).toBeUndefined();
-      expect(Object.keys(req.headers).filter((h) => h.startsWith("x-amz"))).toEqual([]);
+      expect(pub.requests.map((q) => [q.method, q.path])).toEqual([
+        ["HEAD", `/${DATASET}/objects/${firstNewKey()}`],
+        ["HEAD", `/${DATASET}/objects/${firstKey}`],
+      ]);
+      for (const req of pub.requests) {
+        expect(req.headers.authorization).toBeUndefined();
+        expect(req.headers.cookie).toBeUndefined();
+        expect(Object.keys(req.headers).filter((h) => h.startsWith("x-amz"))).toEqual([]);
+      }
 
       // 200 is a public dataset, in either mode.
       pub.status = 200;
@@ -756,20 +887,59 @@ describe("delete-old: what must be true before an old key may go", () => {
   );
 
   test(
-    "the probe is an old object that exists: a key hidden by a delete marker is skipped",
+    "the probes are objects that exist: a key hidden by a delete marker is skipped",
     async () => {
       writeProofs();
-      standin.putDeleteMarker(BUCKET, objectPath(firstKey));
-      // The marker is one more thing to delete, so the plan's own bound has to be widened.
-      const ok = await runScrub(standin, deleteArgs(["--max-delete", "100"]));
+      // A marker on an old key, recorded by the plan (so the delete may remove it).
+      const recordMarker = (key: string) => {
+        const id = standin.putDeleteMarker(BUCKET, objectPath(key));
+        const plan = readJson<PlanFile>(dir, "plan.json");
+        (plan.keys.find((k) => k.oldKey === key) as PlanFile["keys"][number]).versionIds.push(id);
+        writeFileSync(path.join(dir, "plan.json"), JSON.stringify(plan));
+      };
+      recordMarker(firstKey);
+      const ok = await runScrub(standin, deleteArgs());
       expect(ok.exitCode, ok.all).toBe(0);
-      expect(pub.requests.map((r) => r.path)).toEqual([`/${DATASET}/objects/${secondKey}`]);
+      expect(pub.requests.map((r) => r.path)).toEqual([
+        `/${DATASET}/objects/${firstNewKey()}`,
+        `/${DATASET}/objects/${secondKey}`,
+      ]);
 
-      // Every old key hidden: nothing to ask about, so nothing is proven and nothing is asked.
-      standin.putDeleteMarker(BUCKET, objectPath(secondKey));
+      // Every old key hidden: the new key alone proves it, as on a re-run after the delete.
+      recordMarker(secondKey);
+      pub.requests.length = 0;
+      const newOnly = await runScrub(standin, deleteArgs());
+      expect(newOnly.exitCode, newOnly.all).toBe(0);
+      expect(pub.requests.map((r) => r.path)).toEqual([`/${DATASET}/objects/${firstNewKey()}`]);
+
+      // And no new object current either: nothing to ask about, nothing proven, nothing asked.
+      for (const f of [a, b]) standin.putDeleteMarker(BUCKET, objectPath(f.newKey as string));
       pub.requests.length = 0;
       await refused("privacy-unproven", { execute: false, intact: false });
       expect(pub.requests.length).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "a delete that finished can be run again: the new keys prove privacy, and nothing is left",
+    async () => {
+      writeProofs();
+      const first = await runScrub(standin, executeArgs());
+      expect(first.exitCode, first.all).toBe(0);
+      rmSync(path.join(dir, "deleted.json"));
+      // Reviewer probe T1: the old keys are gone, so a re-run used to stop at privacy-unproven.
+      for (const flag of [[], ["--execute"]]) {
+        pub.requests.length = 0;
+        const again = await runScrub(standin, deleteArgs(flag));
+        expect(again.exitCode, again.all).toBe(0);
+        expect(again.stdout).toContain("keys=2 versions=0 markers=0");
+        expect(pub.requests.map((q) => q.path)).toEqual([`/${DATASET}/objects/${firstNewKey()}`]);
+      }
+      expect(readJson<DeletedFile>(dir, "deleted.json").counts.versions).toBe(0);
+      // And the public answer still decides: a re-run against a public dataset is refused.
+      pub.status = 200;
+      expectStopped(await runScrub(standin, deleteArgs()), 3, "dataset-is-public");
     },
     SLOW,
   );
@@ -783,18 +953,26 @@ describe("delete-old: what must be true before an old key may go", () => {
   );
 
   test(
-    "refuses while the dataset still has a current archive",
+    "refuses while the dataset has any archive version or marker, current or not",
     async () => {
       writeProofs();
       standin.putObject(BUCKET, `${DATASET}/archives/${DATASET}_v1.0.0.zip`, body("zip"));
       await refused("archives-not-dropped");
 
-      // An archive that is only history, or hidden by a marker, is not current; neither is a
-      // sibling prefix that merely starts the same way.
+      // Reviewer probe T3: an archive hidden by a delete marker is not current, and it is still
+      // the original recordings.
       standin.restore(snap);
       const hidden = `${DATASET}/archives/${DATASET}_v1.0.1.zip`;
       standin.putObject(BUCKET, hidden, body("zip"));
       standin.putDeleteMarker(BUCKET, hidden);
+      await refused("archives-not-dropped");
+      // A marker alone, with nothing under it, is refused too: drop-archives leaves none.
+      standin.restore(snap);
+      standin.putDeleteMarker(BUCKET, hidden);
+      await refused("archives-not-dropped", { execute: false });
+
+      // A sibling prefix that merely starts the same way is not the archive prefix.
+      standin.restore(snap);
       standin.putObject(BUCKET, `${DATASET}/archives-old/x.zip`, body("zip"));
       const ok = await runScrub(standin, deleteArgs());
       expect(ok.exitCode, ok.all).toBe(0);
@@ -810,11 +988,12 @@ describe("delete-old: what must be true before an old key may go", () => {
       await refused("zarr-not-scrubbed");
 
       // The stage's own proof is what the check accepts, and it removed the identifier key first.
+      // Its rewrite left the dirty version as history, which this run must be told to prune.
       await proveZarr();
       expect(JSON.parse(dec(standin.current(BUCKET, zarrJson)?.data as Uint8Array))).toEqual(
         JSON.parse(cleanStore),
       );
-      const ok = await runScrub(standin, deleteArgs());
+      const ok = await runScrub(standin, deleteArgs(["--prune-noncurrent", `${DATASET}/zarr/`]));
       expect(ok.exitCode, ok.all).toBe(0);
 
       // A proof for another dataset, another plan, another zarr plan, or of another shape.
@@ -846,14 +1025,140 @@ describe("delete-old: what must be true before an old key may go", () => {
   );
 
   test(
-    "a Zarr copy that is only history needs no proof",
+    "a Zarr copy that is only history needs no proof, and is pruned",
     async () => {
       writeProofs();
       standin.putObject(BUCKET, zarrJson, body("{}"));
       standin.putDeleteMarker(BUCKET, zarrJson);
-      const ok = await runScrub(standin, deleteArgs());
+      expectStopped(await runScrub(standin, deleteArgs()), 3, "history-remains");
+      const ok = await runScrub(standin, deleteArgs(["--prune-noncurrent", `${DATASET}/zarr/`]));
       expect(ok.exitCode, ok.all).toBe(0);
       expect(has(dir, "zarr-verified.json")).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
+    "refuses a recording under objects/ that the plan never read, in any letter case",
+    async () => {
+      writeProofs();
+      // An upload after the plan: an EDF the scrub never saw, so its header was never checked.
+      const late = makeFixture(
+        "L",
+        ".EDF",
+        "sub-09/eeg/late.EDF",
+        edfFile(edfHeader({ patient: "Quillfeather", recording: "x" }), 4096, 99),
+        null,
+      );
+      standin.putObject(BUCKET, objectPath(late.oldKey), late.bytes, {
+        lockUntil: centuryFromNow(),
+      });
+      await refused("unplanned-recording");
+      // A name that looks like a recording but is not an annex key is not accounted for either.
+      standin.restore(snap);
+      standin.putObject(BUCKET, `${DATASET}/objects/not-a-key.bdf`, body("x"));
+      await refused("unplanned-recording", { execute: false });
+      // Not a recording: not this check's business.
+      standin.restore(snap);
+      standin.putObject(BUCKET, `${DATASET}/objects/SHA256E-s1--${"9".repeat(64)}.json`, body("x"));
+      const ok = await runScrub(standin, deleteArgs());
+      expect(ok.exitCode, ok.all).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "refuses a current manifest that names a recording the scrub did not account for",
+    async () => {
+      writeProofs();
+      const late = `SHA256E-s4096--${"7".repeat(64)}.edf`;
+      seedManifest(
+        standin,
+        "v1.0.1",
+        [a, b, d],
+        { "sub-09/eeg/late.edf": { key: late, size: 4096 } },
+        DATASET,
+        true,
+      );
+      await refused("manifest-names-unplanned-key");
+      // A recording kept inline in git, and a recording keyed by another backend.
+      standin.restore(snap);
+      seedManifest(
+        standin,
+        "v1.0.1",
+        [a, b, d],
+        { "sub-09/eeg/inline.edf": { key: `git:${"c".repeat(40)}`, size: 10 } },
+        DATASET,
+        true,
+      );
+      await refused("manifest-names-unplanned-key", { execute: false });
+      standin.restore(snap);
+      seedManifest(
+        standin,
+        "v1.0.1",
+        [a, b, d],
+        { "sub-09/eeg/md5.bdf": { key: "MD5E-s10--abc.bdf", size: 10 } },
+        DATASET,
+        true,
+      );
+      await refused("manifest-names-unplanned-key", { execute: false });
+    },
+    SLOW,
+  );
+
+  test(
+    "refuses a plan whose dataset is not a dataset id, before any S3 call",
+    async () => {
+      writeProofs();
+      const plan = readJson<PlanFile>(dir, "plan.json");
+      writeFileSync(path.join(dir, "plan.json"), JSON.stringify({ ...plan, dataset: "nm1" }));
+      const r = await runScrub(standin, [
+        "delete-old",
+        "--dir",
+        dir,
+        "--confirm-dataset",
+        "nm1",
+        "--public-base",
+        pub.url,
+      ]);
+      expectUsage(r, "bad-dataset-id");
+      expect(standin.log.length).toBe(0);
+      expect(pub.requests.length).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "the public base must be the plan's bucket on S3 over https, outside a test",
+    async () => {
+      writeProofs();
+      // The variable that admits a loopback server is the tests' alone; unset, it is refused.
+      const outside = { [TEST_LOOPBACK_PUBLIC_BASE_ENV]: "" };
+      for (const base of [
+        pub.url,
+        "http://nemar.s3.us-east-2.amazonaws.com",
+        "https://evil.example",
+        "https://nemar.s3.us-east-2.amazonaws.com.evil.example",
+        "https://xnemar.s3.us-east-2.amazonaws.com",
+        "https://s3.us-east-2.amazonaws.com/other",
+        "https://nemar.s3.us-east-2.amazonaws.com:8443",
+        "https://nemar.s3.us-east-2.amazonaws.com/?x=1",
+      ]) {
+        const r = await runScrub(standin, deleteArgs([], base), outside, { anyPublicBase: true });
+        expectUsage(r, "bad-public-base", base);
+      }
+      expect(standin.log.length).toBe(0);
+      expect(pub.requests.length).toBe(0);
+      // What is accepted, checked without a request to it.
+      for (const base of [
+        DEFAULT_PUBLIC_BASE,
+        `${DEFAULT_PUBLIC_BASE}/`,
+        "https://nemar.s3.amazonaws.com",
+        "https://s3.us-east-2.amazonaws.com/nemar",
+      ]) {
+        expect(() => checkPublicBase(base, "nemar"), base).not.toThrow();
+      }
+      expect(() => checkPublicBase(DEFAULT_PUBLIC_BASE, "other")).toThrow(StageError);
     },
     SLOW,
   );

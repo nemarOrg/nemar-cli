@@ -22,6 +22,7 @@ import path from "node:path";
 import { spawn } from "bun";
 import { type HashesFile, type PlanFile, buildKey } from "../../../scripts/scrub/contract";
 import { type S3Ctx, TempArea, createAwsRunner } from "../../../scripts/scrub/s3/s3-lib";
+import { TEST_LOOPBACK_PUBLIC_BASE_ENV } from "../../../scripts/scrub/s3/s3-stages";
 import type { S3Standin } from "../helpers/s3-standin";
 
 export const BUCKET = "nemar";
@@ -334,6 +335,9 @@ export function awsTestEnv(
     AWS_EC2_METADATA_DISABLED: "true",
     AWS_MAX_ATTEMPTS: "1",
     AWS_ENDPOINT_URL_S3: standin.url,
+    // The anonymous requests of delete-old and zarr-public go to a loopback server in every test
+    // (`startPublicEndpoint`); outside a test the stages accept only the bucket's S3 endpoint.
+    [TEST_LOOPBACK_PUBLIC_BASE_ENV]: "1",
     ...extra,
   };
 }
@@ -367,10 +371,13 @@ export async function runScrub(
   standin: S3Standin,
   args: string[],
   extraEnv: Record<string, string> = {},
+  opts: { anyPublicBase?: boolean } = {},
 ): Promise<RunResult> {
   // delete-old and zarr-public make anonymous requests to a public base URL. A test that forgot
-  // to point one at a local server would reach the real network, so the runner refuses to start it.
-  if (args[0] === "delete-old" || args[0] === "zarr-public") {
+  // to point one at a local server would reach the real network, so the runner refuses to start
+  // it, unless the test says the stage must refuse that base before any request
+  // (`anyPublicBase`, for the tests of that refusal).
+  if ((args[0] === "delete-old" || args[0] === "zarr-public") && !opts.anyPublicBase) {
     const base = args[args.indexOf("--public-base") + 1] ?? "";
     if (!/^http:\/\/127\.0\.0\.1:\d+/.test(base)) {
       throw new Error("a delete-old test must pass --public-base with a local server");

@@ -52,6 +52,7 @@ import {
   type HeadInfo,
   MIB,
   PLAN_READ_BYTES,
+  type PrefixEntry,
   RETAIN_YEARS,
   type S3Ctx,
   StageError,
@@ -948,14 +949,19 @@ function asRefusal(err: unknown): never {
 
 /**
  * Every CURRENT manifest must already name only new keys: the manifests are regenerated after
- * the tags move (runbook step 9), and a manifest still naming an old key would serve a key that
+ * the tags move (runbook step 12), and a manifest still naming an old key would serve a key that
  * is about to stop existing. Tags are discovered now, not taken from the plan, so a manifest
  * written since the plan is read too.
+ *
+ * And every EDF or BDF a manifest names must be one this scrub accounted for (`known`: a key the
+ * plan read, or a new key it assembled). A recording that appeared since the plan, a recording
+ * kept inline in git, or a key that is not an annex key is one nobody checked.
  */
 async function refuseManifestNamingOldKey(
   ctx: S3Ctx,
   dataset: string,
   oldKeys: Set<string>,
+  known: Set<string>,
 ): Promise<void> {
   let tags: string[];
   try {
@@ -980,6 +986,28 @@ async function refuseManifestNamingOldKey(
     for (const k of found.keys) {
       if (oldKeys.has(k)) throw new StageError("manifest-names-old-key", EXIT.refused);
     }
+    const unplanned =
+      found.badKeys + found.gitInline.size + [...found.keys].filter((k) => !known.has(k)).length;
+    if (unplanned > 0) throw new StageError("manifest-names-unplanned-key", EXIT.refused);
+  }
+}
+
+/**
+ * Every EDF or BDF object under `<id>/objects/` (any letter case) must be one this scrub
+ * accounted for. One that appeared after the plan was never read, so its header was never
+ * checked, and deleting the old keys around it would leave it as the dataset's only unchecked copy.
+ */
+async function refuseUnplannedRecording(
+  ctx: S3Ctx,
+  dataset: string,
+  known: Set<string>,
+  log: (line: string) => void,
+): Promise<void> {
+  const listed = await listObjectRecordings(ctx, dataset);
+  const unplanned = listed.bad + [...listed.keys].filter((k) => !known.has(k)).length;
+  if (unplanned > 0) {
+    log(`delete-old: ${unplanned} recordings under objects/ are not in the plan or the assembly`);
+    throw new StageError("unplanned-recording", EXIT.refused);
   }
 }
 
@@ -1011,6 +1039,50 @@ async function requireZarrVerified(dir: string, dataset: string, planBytes: Buff
 /** Where an anonymous reader reaches the production bucket. */
 export const DEFAULT_PUBLIC_BASE = "https://nemar.s3.us-east-2.amazonaws.com";
 
+/**
+ * The one way a TEST points the anonymous requests at a loopback server: set to `1` only by
+ * `test/scrub/s3/support.ts`. Production never sets it, so there `--public-base` must be the
+ * bucket's own S3 endpoint.
+ */
+export const TEST_LOOPBACK_PUBLIC_BASE_ENV = "SCRUB_S3_TEST_LOOPBACK_PUBLIC_BASE";
+
+/**
+ * `--public-base` is where an anonymous request proves something (delete-old: the dataset is
+ * private; zarr-public: the published copy is clean), so it must BE the bucket: https, and the
+ * bucket's virtual-hosted endpoint (`https://<bucket>.s3[.<region>].amazonaws.com`) or its
+ * path-style one (`https://s3[.<region>].amazonaws.com/<bucket>`). A typo, a proxy or any other
+ * host that answers 403 to everything would otherwise satisfy the privacy gate.
+ */
+export function checkPublicBase(base: string, bucket: string): void {
+  const bad = (): never => {
+    throw new StageError("bad-public-base", EXIT.usage);
+  };
+  let u: URL;
+  try {
+    u = new URL(base);
+  } catch {
+    return bad();
+  }
+  if (u.username !== "" || u.password !== "" || u.search !== "" || u.hash !== "") bad();
+  const path = u.pathname.replace(/\/+$/, "");
+  if (
+    process.env[TEST_LOOPBACK_PUBLIC_BASE_ENV] === "1" &&
+    u.protocol === "http:" &&
+    u.hostname === "127.0.0.1" &&
+    path === ""
+  ) {
+    return;
+  }
+  if (u.protocol !== "https:" || u.port !== "" || !/^[a-z0-9][a-z0-9.-]*$/.test(bucket)) bad();
+  const region = "(?:[.-][a-z]{2}(?:-[a-z]+)+-\\d+)?";
+  const escaped = bucket.replace(/\./g, "\\.");
+  const virtualHosted = new RegExp(`^${escaped}\\.s3${region}\\.amazonaws\\.com$`);
+  const pathStyle = new RegExp(`^s3${region}\\.amazonaws\\.com$`);
+  if (virtualHosted.test(u.hostname) && path === "") return;
+  if (pathStyle.test(u.hostname) && path === `/${bucket}`) return;
+  bad();
+}
+
 /** The status of an anonymous HEAD, or null when there was none (network, timeout). */
 async function anonymousHeadStatus(url: string, timeoutMs: number): Promise<number | null> {
   try {
@@ -1029,30 +1101,65 @@ async function anonymousHeadStatus(url: string, timeoutMs: number): Promise<numb
 
 /**
  * The dataset must be private before its old bytes go, so there is no window in which an old key
- * is public while a new one is not yet served. The proof is one anonymous HEAD of one old object
- * that EXISTS: this bucket denies anonymous listing, so a missing key answers 403 whether or not
- * the dataset is public, and only a key known to exist makes 403 mean private.
+ * is public while a new one is not yet served. The proof is an anonymous HEAD of an object that
+ * EXISTS: this bucket denies anonymous listing, so a missing key answers 403 whether or not the
+ * dataset is public, and only a key known to exist makes 403 mean private.
+ *
+ * The probe is one NEW object (current, as an anonymous reader would get it), and, while any
+ * remains, one OLD object too. Probing the new keys is what lets a re-run finish after the old
+ * keys are gone: a delete that stopped half way (a failed prune) would otherwise be stranded,
+ * because there would be no old object left to ask about.
  */
 async function requirePrivate(
   ctx: S3Ctx,
   o: DeleteOptions,
   dataset: string,
   oldKeys: string[],
+  newKeys: string[],
 ): Promise<void> {
-  let probe: string | undefined;
-  for (const k of oldKeys) {
-    if (await headObject(ctx, objectKey(dataset, k))) {
-      probe = k;
-      break;
-    }
-  }
-  if (probe === undefined) throw new StageError("privacy-unproven", EXIT.refused);
-  const url = `${o.publicBase.replace(/\/+$/, "")}/${objectKey(dataset, probe)}`;
-  const status = await anonymousHeadStatus(url, o.timeoutMs);
-  if (status === 403) return;
-  if (status === 200) throw new StageError("dataset-is-public", EXIT.refused);
-  throw new StageError("privacy-unproven", EXIT.refused);
+  const firstPresent = async (keys: string[]): Promise<string | undefined> => {
+    for (const k of keys) if (await headObject(ctx, objectKey(dataset, k))) return k;
+    return undefined;
+  };
+  const askAnonymously = async (key: string): Promise<void> => {
+    const url = `${o.publicBase.replace(/\/+$/, "")}/${objectKey(dataset, key)}`;
+    const status = await anonymousHeadStatus(url, o.timeoutMs);
+    if (status === 403) return;
+    if (status === 200) throw new StageError("dataset-is-public", EXIT.refused);
+    throw new StageError("privacy-unproven", EXIT.refused);
+  };
+  const newProbe = await firstPresent([...newKeys].sort());
+  if (newProbe === undefined) throw new StageError("privacy-unproven", EXIT.refused);
+  await askAnonymously(newProbe);
+  const oldProbe = await firstPresent(oldKeys);
+  if (oldProbe !== undefined) await askAnonymously(oldProbe);
 }
+
+/** Every version or marker under a prefix that is not a current version: its history. */
+const historyOf = (entries: PrefixEntry[]): PrefixEntry[] =>
+  entries.filter((e) => !(e.kind === "version" && e.isLatest));
+
+/** The prefixes whose history must be gone before deleted.json may say the dataset is clean. */
+const HISTORY_DIRS = ["archives", "version", "zarr"] as const;
+
+/**
+ * What remains under each history prefix: under `archives/` every version and marker (an archive
+ * holds the original recordings, current or not), under `version/` and `zarr/` the history alone
+ * (their current objects are the regenerated manifests and the scrubbed Zarr copy).
+ */
+async function historyRemaining(ctx: S3Ctx, dataset: string): Promise<Record<string, number>> {
+  const out: Record<string, number> = {};
+  for (const d of HISTORY_DIRS) {
+    const entries = await listPrefixVersions(ctx, `${dataset}/${d}/`);
+    out[d] = (d === "archives" ? entries : historyOf(entries)).length;
+  }
+  return out;
+}
+
+const formatPrefixCounts = (counts: Record<string, number>) =>
+  Object.entries(counts)
+    .map(([d, n]) => `${d}=${n}`)
+    .join(" ");
 
 export async function deleteOldStage(o: DeleteOptions): Promise<number> {
   const planBytes = await readBytes(path.join(o.dir, "plan.json"), "plan.json");
@@ -1062,7 +1169,9 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
   if (o.confirmDataset !== plan.dataset) {
     throw new StageError("confirm-dataset-mismatch", EXIT.refused);
   }
+  checkDataset(plan.dataset);
   requireCompletePlan(plan);
+  checkPublicBase(o.publicBase, plan.bucket);
   const assembledBytes = await readBytes(path.join(o.dir, "assembled.json"), "assembled.json");
   const assembled = parseFile("assembled.json", parseAssembled, assembledBytes.toString("utf8"));
   const sha = sha256Hex(assembledBytes);
@@ -1110,6 +1219,9 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
     throw new StageError("assembled-not-in-plan", EXIT.refused);
   }
   for (const p of o.prune) checkPrunePrefix(dataset, p);
+  const prunePrefixes = [...new Set(o.prune)];
+  /** Every recording key this scrub accounted for: what the plan read, and what it assembled. */
+  const known = new Set([...planned.keys(), ...newKeys]);
 
   return withCtx(o, assembled.bucket, async (ctx) => {
     // The replacement must still be there before anything it replaces is touched.
@@ -1121,20 +1233,36 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
 
     // What must be true of the rest of the dataset before an old key may go. All of it is read
     // only, and all of it runs in the dry run, so a refusal is seen before --execute is typed.
-    await refuseManifestNamingOldKey(ctx, dataset, new Set(oldKeys));
-    if (await hasCurrentKey(ctx, `${dataset}/archives/`)) {
+    await refuseManifestNamingOldKey(ctx, dataset, new Set(oldKeys), known);
+    await refuseUnplannedRecording(ctx, dataset, known, o.log);
+    // An archive holds the original recordings, so ANY version or marker of one, current or not,
+    // is a copy the delete would leave behind.
+    const archives = await listPrefixVersions(ctx, `${dataset}/archives/`);
+    if (archives.length > 0) {
+      o.log(`delete-old: archives versions and markers=${archives.length}`);
       throw new StageError("archives-not-dropped", EXIT.refused);
     }
     if (await hasCurrentKey(ctx, `${dataset}/zarr/`)) {
       await requireZarrVerified(o.dir, dataset, planBytes);
     }
-    await requirePrivate(ctx, o, dataset, oldKeys);
+    await requirePrivate(ctx, o, dataset, oldKeys, [...newKeys]);
 
     const listed = await listOldKeys(ctx, dataset, oldKeys, o.concurrency);
+    // Only what the plan recorded may be deleted: the plan read the header of each old key, and a
+    // version written since is bytes nobody checked. No flag waives this.
+    const unplanned = listed.reduce((n, l) => {
+      const allowed = new Set((planned.get(l.oldKey) as PlanKey).versionIds);
+      return n + [...l.versions, ...l.markers].filter((id) => !allowed.has(id)).length;
+    }, 0);
+    if (unplanned > 0) {
+      o.log(`delete-old: ${unplanned} versions or markers of old keys are not in the plan`);
+      throw new StageError("version-not-in-plan", EXIT.refused);
+    }
     const totalVersions = listed.reduce((n, l) => n + l.versions.length, 0);
     const totalMarkers = listed.reduce((n, l) => n + l.markers.length, 0);
     const recorded = oldKeys.reduce((n, k) => n + (planned.get(k) as PlanKey).versionIds.length, 0);
-    const limit = o.maxDelete ?? recorded;
+    // A sanity cap below the plan's own count, never a way past it.
+    const limit = Math.min(o.maxDelete ?? recorded, recorded);
     o.log(
       `delete-old: keys=${oldKeys.length} versions=${totalVersions} markers=${totalMarkers} planRecorded=${recorded} limit=${limit}`,
     );
@@ -1142,16 +1270,25 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
       throw new StageError("over-max-delete", EXIT.refused);
     }
 
-    // Noncurrent versions and markers under the prune prefixes; never a current entry.
-    const prunes: Array<{ key: string; versionId: string; kind: "version" | "marker" }> = [];
-    for (const prefix of o.prune) {
-      for (const e of await listPrefixVersions(ctx, prefix)) {
-        if (!e.isLatest) prunes.push({ key: e.key, versionId: e.versionId, kind: e.kind });
-      }
+    // The history of the manifests and of the Zarr copy holds the old keys and the old metadata:
+    // it goes in the same run, so the operator has to name each prefix that has any.
+    const prunes: PrefixEntry[] = [];
+    const unpruned: Record<string, number> = {};
+    for (const d of ["version", "zarr"] as const) {
+      const prefix = `${dataset}/${d}/`;
+      const history = historyOf(await listPrefixVersions(ctx, prefix));
+      if (prunePrefixes.includes(prefix)) prunes.push(...history);
+      else if (history.length > 0) unpruned[d] = history.length;
+    }
+    if (Object.keys(unpruned).length > 0) {
+      o.log(
+        `delete-old: history-remains outside --prune-noncurrent: ${formatPrefixCounts(unpruned)}`,
+      );
+      throw new StageError("history-remains", EXIT.refused);
     }
     const prunedVersions = prunes.filter((p) => p.kind === "version").length;
     const prunedMarkers = prunes.length - prunedVersions;
-    if (o.prune.length > 0) {
+    if (prunePrefixes.length > 0) {
       o.log(`delete-old: prune noncurrent versions=${prunedVersions} markers=${prunedMarkers}`);
     }
     if (prunes.length > o.maxPrune) throw new StageError("over-max-prune", EXIT.refused);
@@ -1182,25 +1319,45 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
       ),
       true,
     );
-    // Pruning never bypasses the lock: a locked object is refused, not forced.
-    await removeAll(prunes, false);
+    // Pruning never bypasses the lock: a locked object is refused, not forced. Noncurrent entries
+    // first; a delete marker that is the CURRENT entry of a key goes only once the key has no
+    // version left under it, because removing it earlier would make an old version current again.
+    await removeAll(
+      prunes.filter((p) => !(p.kind === "marker" && p.isLatest)),
+      false,
+    );
+    const latestMarkers = prunes.filter((p) => p.kind === "marker" && p.isLatest);
+    if (latestMarkers.length > 0) {
+      const stillVersioned = new Set<string>();
+      for (const prefix of prunePrefixes) {
+        for (const e of await listPrefixVersions(ctx, prefix)) {
+          if (e.kind === "version") stillVersioned.add(e.key);
+        }
+      }
+      await removeAll(
+        latestMarkers.filter((m) => !stillVersioned.has(m.key)),
+        false,
+      );
+    }
 
     // The listing is the authority, not the answers to the deletes.
     const after = await listOldKeys(ctx, dataset, oldKeys, o.concurrency);
     const remaining = after.reduce((n, l) => n + l.versions.length + l.markers.length, 0);
-    let prunesRemaining = 0;
-    for (const prefix of o.prune) {
-      prunesRemaining += (await listPrefixVersions(ctx, prefix)).filter((e) => !e.isLatest).length;
-    }
+    const history = await historyRemaining(ctx, dataset);
+    const historyLeft = Object.values(history).reduce((n, c) => n + c, 0);
     if (errors.length > 0) {
       o.log(`delete-old: delete errors=${errors.length} (${formatWordCounts(countWords(errors))})`);
     }
-    if (remaining > 0 || prunesRemaining > 0) {
-      o.log(
-        `delete-old: FAILED, versions and markers remain: oldKeys=${remaining} pruned=${prunesRemaining}`,
-      );
-      o.log("delete-old: deleted.json NOT written");
-      return EXIT.remainder;
+    if (remaining > 0) {
+      o.log(`delete-old: FAILED, versions and markers remain: oldKeys=${remaining}`);
+    }
+    if (historyLeft > 0) {
+      o.log(`delete-old: FAILED, history-remains ${formatPrefixCounts(history)}`);
+    }
+    if (remaining > 0 || historyLeft > 0) {
+      o.log("delete-old: deleted.json NOT written; a re-run resumes");
+      if (remaining > 0) return EXIT.remainder;
+      throw new StageError("history-remains", EXIT.remainder);
     }
     const done: DeletedFile = {
       version: 1,
@@ -1217,7 +1374,7 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
     };
     await writeJson(o.dir, "deleted.json", done);
     o.log(
-      `delete-old: deleted versions=${totalVersions} markers=${totalMarkers}; zero versions and zero markers remain for ${oldKeys.length} keys`,
+      `delete-old: deleted versions=${totalVersions} markers=${totalMarkers}; zero versions and zero markers remain for ${oldKeys.length} keys, and no history under ${HISTORY_DIRS.join("/, ")}/`,
     );
     return 0;
   });

@@ -10,7 +10,7 @@
  *              [--prune-noncurrent <prefix>]... [--max-prune N] [--public-base URL]
  *   zarr       --dir DIR [--execute] [--concurrency 4]
  *   drop-archives --dir DIR --confirm-dataset ID [--execute] [--concurrency 4]
- *   zarr-public --dataset ID [--public-base URL] [--concurrency 8]
+ *   zarr-public --dataset ID [--public-base URL] [--bucket nemar] [--concurrency 8]
  *   canary     --prefix <nm099999|xx0NNNNN>/canary-<random>/ [--execute] [--multipart]
  *              [--bucket nemar]
  *
@@ -42,6 +42,7 @@ import {
   DEFAULT_PUBLIC_BASE,
   assembleStage,
   canaryStage,
+  checkPublicBase,
   deleteOldStage,
   planStage,
   verifyStage,
@@ -57,8 +58,13 @@ const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|zarr|drop-arc
              [--max-delete N] [--prune-noncurrent PREFIX]... [--max-prune N] [--public-base URL]
              --confirm-dataset: the dataset id again, required even for the dry run.
              --public-base: where an anonymous HEAD proves the dataset is private
-             (default ${DEFAULT_PUBLIC_BASE}); it must answer 403.
-             PREFIX is exactly ID/version/, ID/archives/ or ID/zarr/.
+             (default ${DEFAULT_PUBLIC_BASE}); it must answer 403. It must be https and the
+             plan's bucket's own S3 endpoint (virtual-hosted or path-style).
+             PREFIX is exactly ID/version/, ID/archives/ or ID/zarr/. Every one of ID/version/
+             and ID/zarr/ that has history (a noncurrent version or a delete marker) must be
+             named, or the run refuses (history-remains); ID/archives/ must already be empty.
+             --max-delete N only lowers the plan's own count; a version of an old key that the
+             plan did not record is refused whatever N is (version-not-in-plan).
              --max-prune N (default 1000) refuses to prune more noncurrent versions than N. For
              ID/zarr/ expect about one per store root the zarr step rewrote (zarr-plan.json counts
              them, and the dry run prints the exact number) plus any older versions a Zarr
@@ -72,7 +78,7 @@ const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|zarr|drop-arc
              governance bypass, and ends with a listing that must show none. The archive holds the
              original recordings; the normal workflow rebuilds it afterwards. Writes
              archives-dropped.json. A lock refusal is reported and fails the stage.
-  zarr-public --dataset ID [--public-base URL] [--concurrency 8]
+  zarr-public --dataset ID [--public-base URL] [--bucket nemar] [--concurrency 8]
              after the dataset is public again: reads ID/zarr/index.json and every store root it
              names anonymously (default base ${DEFAULT_PUBLIC_BASE}) and applies the zarr stage's
              own rule to each. Exit 0 only when every store is clean.
@@ -194,8 +200,8 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
         samples: intFlag(v.samples, "samples", DEFAULT_SAMPLES, 1),
       });
     case "delete-old": {
+      // Checked against the plan's bucket by the stage (`checkPublicBase`).
       const publicBase = v["public-base"] ?? DEFAULT_PUBLIC_BASE;
-      if (!/^https?:\/\/[^\s/?#]+(\/[^\s?#]*)?$/.test(publicBase)) usage("bad-public-base");
       return deleteOldStage({
         ...opts,
         dir: need(v.dir, "dir"),
@@ -228,7 +234,7 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
       });
     case "zarr-public": {
       const publicBase = v["public-base"] ?? DEFAULT_PUBLIC_BASE;
-      if (!/^https?:\/\/[^\s/?#]+(\/[^\s?#]*)?$/.test(publicBase)) usage("bad-public-base");
+      checkPublicBase(publicBase, v.bucket ?? "nemar");
       return zarrPublicStage({
         dataset: need(v.dataset, "dataset"),
         publicBase,

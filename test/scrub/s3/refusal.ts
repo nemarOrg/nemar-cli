@@ -12,3 +12,9 @@ export function expectStopped(r: RunResult, exitCode: number, word: string, labe
   expect(r.exitCode, `${label}: ${r.all}`).toBe(exitCode);
   expect(r.stderr.trim(), label).toBe(`s3-scrub: ${word}`);
 }
+
+/** A usage stop (exit 2) prints the same one line first, then the usage text. */
+export function expectUsage(r: RunResult, word: string, label = word): void {
+  expect(r.exitCode, `${label}: ${r.all}`).toBe(2);
+  expect(r.stderr.split("\n")[0], label).toBe(`s3-scrub: ${word}`);
+}
