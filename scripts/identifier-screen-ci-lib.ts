@@ -320,6 +320,48 @@ export function foldOddFormats(record: DatasetRecord): DatasetRecord {
   return { ...record, unscreened_formats: folded };
 }
 
+const FAILURE_KEY = /^[a-z_]{1,16}\/[a-z0-9-]{1,48}$/;
+/** The class for a read failure whose name is not a fixed word. */
+export const INTERNAL_FAILURE = "internal";
+const MAX_FAILURE_KEYS = 60;
+
+/**
+ * `read_failures` keys are `<what>/<class>`. The fleet scan names the class of a failure that is
+ * not a {@link ReadFailure} after the error (`error-RangeError`), which the contract refuses
+ * because it allows lower case only. One unexpected throw in one sidecar (a JSON nested deep
+ * enough to overflow the scanner's stack) must not turn into `workflow-failed` and drop the
+ * findings from every header, so here the class is lowercased and anything still outside the
+ * pattern becomes the fixed class `internal`. The failure stays counted, so the record is
+ * still incomplete. The fleet scan's own output is unchanged.
+ */
+export function foldOddFailures(record: DatasetRecord): DatasetRecord {
+  const failures = record?.read_failures;
+  if (typeof failures !== "object" || failures === null) return record;
+  const folded: Record<string, number> = {};
+  const add = (key: string, count: number) => {
+    folded[key] = (folded[key] ?? 0) + count;
+  };
+  for (const [key, count] of Object.entries(failures)) {
+    const lower = key.toLowerCase();
+    if (FAILURE_KEY.test(lower)) {
+      add(lower, count);
+      continue;
+    }
+    const what = lower.slice(0, Math.max(0, lower.indexOf("/")));
+    add(`${/^[a-z_]{1,16}$/.test(what) ? what : INTERNAL_FAILURE}/${INTERNAL_FAILURE}`, count);
+  }
+  // Past the contract's key limit, the smallest classes share one key.
+  const ranked = Object.entries(folded).sort(([, a], [, b]) => b - a);
+  if (ranked.length > MAX_FAILURE_KEYS) {
+    const kept: Record<string, number> = Object.fromEntries(ranked.slice(0, MAX_FAILURE_KEYS - 1));
+    const key = `${INTERNAL_FAILURE}/${INTERNAL_FAILURE}`;
+    for (const [, count] of ranked.slice(MAX_FAILURE_KEYS - 1))
+      kept[key] = (kept[key] ?? 0) + count;
+    return { ...record, read_failures: kept };
+  }
+  return { ...record, read_failures: folded };
+}
+
 /**
  * The one door a scan passes through on its way to the Worker: the contract's own parser. What it
  * returns is the parser's rebuilt object, never the input, so a field the contract does not
@@ -1170,7 +1212,7 @@ export async function screenDataset(
       }
       throw error;
     }
-    const report = finalizeScanReport(foldOddFormats(record), scannerId, head);
+    const report = finalizeScanReport(foldOddFailures(foldOddFormats(record)), scannerId, head);
     if (report.scan) {
       const f = report.scan.files;
       log(

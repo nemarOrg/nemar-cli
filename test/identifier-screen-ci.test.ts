@@ -40,6 +40,7 @@ import {
   cloneMetadata,
   deliverReport,
   finalizeScanReport,
+  foldOddFailures,
   foldOddFormats,
   historyPaths,
   listTree,
@@ -720,6 +721,34 @@ describe("the screen: what a run reports", () => {
         selected: 2,
         scanned: 2,
       });
+    },
+    T,
+  );
+
+  test(
+    "an unexpected throw in one sidecar is a counted failure, and does not drop the header findings",
+    async () => {
+      fresh();
+      const repo = new Repo();
+      repo.annexed("sub-01/eeg/sub-01_task-rest_eeg.edf", recording(named(1)), s3, "symlink");
+      // Parses, and overflows the scanner's stack: a RangeError that is not a ReadFailure.
+      repo.file("sourcedata/nested.json", "[".repeat(100_000) + "]".repeat(100_000));
+      repo.commit("nested");
+      const result = await runScript(repo);
+      const scan = scanOf(result);
+      expect(scan.status).toBe("direct-identifiers");
+      expect(scan.findings_by_kind?.["edf-patient-name"]).toBe(1);
+      expect(scan.read_failures).toEqual({ "json/error-rangeerror": 1 });
+      expect(scan.incomplete).toBe(true);
+      expect(scan.incomplete_reasons).toContain("json-unread");
+      expect(result.posted).toHaveLength(1);
+
+      // The twin without the nested file is the same verdict and nothing was lost.
+      fresh();
+      const plain = new Repo();
+      plain.annexed("sub-01/eeg/sub-01_task-rest_eeg.edf", recording(named(1)), s3, "symlink");
+      plain.commit("plain");
+      expect(scanOf(await runScript(plain)).status).toBe("direct-identifiers");
     },
     T,
   );
@@ -1425,6 +1454,78 @@ describe("foldOddFormats keeps the contract's pattern and the dataset's honesty"
 // ---------------------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------------------
+
+describe("foldOddFailures keeps the contract's pattern and the failure counted", () => {
+  const record = (failures: Record<string, number>): DatasetRecord => ({
+    id: ID,
+    version: null,
+    scanned_at: "2026-10-05T12:00:00.000Z",
+    status: "unchecked",
+    incomplete: true,
+    incomplete_reasons: ["json-unread"],
+    read_failures: failures,
+  });
+  const accepted = (failures: Record<string, number>): boolean => {
+    try {
+      parseScreenReport({
+        version: 1,
+        scanner: "identifier-scan@abcdef1",
+        head: "a".repeat(40),
+        scan: record(failures),
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  test("what the fleet scan names after an error is lowercased; anything else is internal", () => {
+    const folded = (key: string) =>
+      Object.keys(foldOddFailures(record({ [key]: 2 })).read_failures as object);
+    expect(folded("json/error-RangeError")).toEqual(["json/error-rangeerror"]);
+    expect(folded("edf/http-403")).toEqual(["edf/http-403"]);
+    expect(folded("text/error-Some$Class")).toEqual(["text/internal"]);
+    expect(folded("Bad Prefix/error-X")).toEqual(["internal/internal"]);
+    expect(folded("no-slash")).toEqual(["internal/internal"]);
+    expect(folded(`json/${"x".repeat(60)}`)).toEqual(["json/internal"]);
+  });
+
+  test("a key survives exactly when the contract's parser accepts it, and counts are conserved", () => {
+    const samples = [
+      "edf/http-403",
+      "json/error-RangeError",
+      "json/error-rangeerror",
+      "participants/deadline",
+      "text/Has Space",
+      "scans/",
+      "/class",
+      "edf/a/b",
+      `${"x".repeat(20)}/class`,
+      "edf/é",
+    ];
+    for (const key of samples) {
+      const folded = foldOddFailures(record({ [key]: 3 })).read_failures as Record<string, number>;
+      expect(accepted(folded)).toBe(true);
+      expect(Object.values(folded).reduce((a, b) => a + b, 0)).toBe(3);
+    }
+    // Same class under two spellings is one key with both counts.
+    const merged = foldOddFailures(
+      record({ "json/error-RangeError": 1, "json/error-rangeerror": 2 }),
+    ).read_failures;
+    expect(merged).toEqual({ "json/error-rangeerror": 3 });
+  });
+
+  test("more distinct classes than the contract's limit share one key, every count kept", () => {
+    const many = Object.fromEntries(
+      Array.from({ length: 90 }, (_, i) => [`json/error-e${i}`, i + 1]),
+    );
+    const folded = foldOddFailures(record(many)).read_failures as Record<string, number>;
+    expect(Object.keys(folded).length).toBeLessThanOrEqual(60);
+    expect(accepted(folded)).toBe(true);
+    const total = (o: Record<string, number>) => Object.values(o).reduce((a, b) => a + b, 0);
+    expect(total(folded)).toBe(total(many));
+  });
+});
 
 describe("configuration is checked before anything runs, and never echoed", () => {
   const base = { DATASET_ID: "nm000186" };
