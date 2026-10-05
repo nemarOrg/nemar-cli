@@ -903,6 +903,13 @@ export interface AnnexKey {
 }
 
 /**
+ * The size an annex key declares, for the scan to trust, or null. The key comes from whoever
+ * wrote the pointer, and a size of 0 would make the scan skip the file as empty, so a zero is
+ * not believed: the file is read, and what the store says is what counts.
+ */
+export const declaredSize = (key: AnnexKey): number | null => (key.size === 0 ? null : key.size);
+
+/**
  * The annex key a symlink target or a pointer file names, or null when it names none. A symlink
  * ends `.../annex/objects/<xx>/<yy>/<key>/<key>`; an unlocked pointer file holds one line,
  * `/annex/objects/<key>`.
@@ -976,7 +983,7 @@ export async function resolveEntries(
       if (edf || /\.(edf|bdf)$/i.test(t.path)) annexedEdf++;
       entries.push({
         path: t.path,
-        size: pointed.size,
+        size: declaredSize(pointed),
         url: `annex:${pointed.key}`,
         ...(edf ? { edf: true } : {}),
       });
@@ -1047,7 +1054,7 @@ export async function findSuperseded(
         ) {
           found.set(`annex:${pointed.key}`, {
             path,
-            size: pointed.size,
+            size: declaredSize(pointed),
             url: `annex:${pointed.key}`,
             edf: true,
           });

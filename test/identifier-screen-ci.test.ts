@@ -172,9 +172,10 @@ class Repo {
     s3: S3StandIn,
     how: "symlink" | "pointer" = "symlink",
     keyExt?: string,
+    declaredSize?: number,
   ): string {
     const ext = keyExt ?? path.slice(path.lastIndexOf("."));
-    const key = `SHA256E-s${bytes.length}--${sha256(bytes)}${ext}`;
+    const key = `SHA256E-s${declaredSize ?? bytes.length}--${sha256(bytes)}${ext}`;
     s3.objects.set(`${ID}/objects/${key}`, { bytes });
     if (how === "symlink") {
       const depth = path.split("/").length - 1;
@@ -680,6 +681,44 @@ describe("the screen: what a run reports", () => {
       expect(scan.files?.header_read).toBe(2);
       expect(scan.edf_bdf_files_flagged).toBe(2);
       expect(scan.status).toBe("direct-identifiers");
+    },
+    T,
+  );
+
+  test(
+    "a key that declares size 0 is not proof the file is empty: it is read",
+    async () => {
+      fresh();
+      const repo = cleanDataset();
+      // The key is whatever the uploader wrote; the object holds a table with an identifier column.
+      repo.annexed(
+        "participants.tsv",
+        new TextEncoder().encode(`participant_id\tname\nsub-01\t${NAME}\n`),
+        s3,
+        "pointer",
+        ".tsv",
+        0,
+      );
+      repo.commit("participants with a lying key");
+      const scan = scanOf(await runScript(repo));
+      expect(scan.status).toBe("direct-identifiers");
+      expect(scan.findings_by_kind?.["participants-identifier-column"]).toBe(1);
+
+      // Twin: the same key size on a file that really is what it says changes nothing.
+      fresh();
+      const clean = cleanDataset();
+      clean.annexed(
+        "participants.tsv",
+        new TextEncoder().encode("participant_id\nsub-01\n"),
+        s3,
+        "pointer",
+        ".tsv",
+        0,
+      );
+      clean.commit("participants, clean");
+      const twin = scanOf(await runScript(clean));
+      expect(twin.status).toBe("clean");
+      expect(twin.incomplete).toBe(false);
     },
     T,
   );
