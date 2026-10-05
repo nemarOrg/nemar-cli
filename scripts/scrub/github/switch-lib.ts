@@ -53,11 +53,27 @@ export class SwitchRefused extends Error {
   }
 }
 
+/**
+ * One or more rulesets could not be put back. It names EVERY one that failed, and the ones that
+ * were restored, so nothing is left to be discovered later; `pushFailure` is the fixed reason the
+ * push itself failed, when it did, so one error carries both.
+ */
 export class RestoreFailed extends Error {
-  constructor(readonly rulesetId: number) {
-    super(`restore failed for ruleset ${rulesetId}`);
+  constructor(
+    readonly rulesetIds: number[],
+    readonly restored: number[] = [],
+    readonly pushFailure?: string,
+  ) {
+    super(
+      `restore failed for ruleset ${rulesetIds.join(", ")}${pushFailure ? ` after ${pushFailure}` : ""}`,
+    );
     this.name = "RestoreFailed";
   }
+}
+
+/** What to do about a ruleset left lifted: one wording for the command line and the signal path. */
+export function restoreFailedAdvice(error: RestoreFailed): string {
+  return `RESTORE FAILED: ${error.message}. Run: switch.ts restore --execute, or fix the ruleset by hand NOW.`;
 }
 
 export interface Api {
@@ -270,8 +286,14 @@ export interface SwitchReport {
   restored: number[];
 }
 
+/**
+ * Put back EVERY lifted ruleset, whatever happens to the others: a failure is collected, not
+ * thrown, so a ruleset that cannot be restored never leaves a later one disabled. Throws one
+ * {@link RestoreFailed} naming all the failures after every ruleset has had its turn.
+ */
 async function restoreAll(opts: SwitchOptions, lifted: RulesetBody[]): Promise<number[]> {
   const restored: number[] = [];
+  const failed: number[] = [];
   for (const r of lifted) {
     const original = opts.snapshot.rulesets.find((s) => s.id === r.id) as RulesetBody;
     let ok = false;
@@ -284,9 +306,9 @@ async function restoreAll(opts: SwitchOptions, lifted: RulesetBody[]): Promise<n
         ok = false;
       }
     }
-    if (!ok) throw new RestoreFailed(r.id);
-    restored.push(r.id);
+    (ok ? restored : failed).push(r.id);
   }
+  if (failed.length > 0) throw new RestoreFailed(failed, restored);
   return restored;
 }
 
@@ -321,12 +343,25 @@ export async function switchRefs(opts: SwitchOptions): Promise<SwitchReport> {
 
   const lifted: RulesetBody[] = [];
   const pushed: string[] = [];
-  let restoredIds: number[] = [];
+  // A signal restores first and then exits: 5 when a ruleset could not be put back (act on it
+  // now), 130 otherwise. It is awaited, so the exit code says what the restore did.
   const onSignal = () => {
-    void restoreAll(opts, lifted).finally(() => process.exit(130));
+    void (async () => {
+      let code = 130;
+      try {
+        await restoreAll(opts, lifted);
+      } catch (error) {
+        if (error instanceof RestoreFailed) {
+          console.error(restoreFailedAdvice(error));
+          code = 5;
+        }
+      }
+      process.exit(code);
+    })();
   };
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
+  let failure: unknown;
   try {
     for (const r of toLift) {
       lifted.push(r);
@@ -347,19 +382,39 @@ export async function switchRefs(opts: SwitchOptions): Promise<SwitchReport> {
       pushed.push(ref);
     }
     log(`pushed ${pushed.length} ref(s)`);
-  } finally {
-    process.removeListener("SIGINT", onSignal);
-    process.removeListener("SIGTERM", onSignal);
-    restoredIds = await restoreAll(opts, lifted);
-    log(`restored ${restoredIds.length} ruleset(s)`);
+  } catch (error) {
+    failure = error;
   }
+  process.removeListener("SIGINT", onSignal);
+  process.removeListener("SIGTERM", onSignal);
+  // The restore runs whatever the push did. When both fail, the restore failure is the one that
+  // is thrown (it needs action now) and it carries the push's fixed reason too.
+  let restoredIds: number[];
+  try {
+    restoredIds = await restoreAll(opts, lifted);
+  } catch (error) {
+    if (error instanceof RestoreFailed && failure !== undefined) {
+      throw new RestoreFailed(
+        error.rulesetIds,
+        error.restored,
+        failure instanceof SwitchRefused ? failure.reason : "an unexpected error",
+      );
+    }
+    throw error;
+  }
+  log(`restored ${restoredIds.length} ruleset(s)`);
+  if (failure !== undefined) throw failure;
   const after = await remoteRefs(opts.cloneDir, opts.remote, REMOTE_PATTERNS);
   for (const ref of pushed)
     if (after[ref] !== local[ref]) throw new SwitchRefused("a pushed ref does not match");
   return { executed: true, lifted: lifted.map((r) => r.id), pushed, restored: restoredIds };
 }
 
-/** Re-apply a snapshot's enforcement to every ruleset that differs, e.g. after a crash. */
+/**
+ * Re-apply a snapshot's enforcement to every ruleset that differs, e.g. after a crash. Every
+ * drifted ruleset is tried, and a read-back decides which are restored; those that are not are
+ * all named in one {@link RestoreFailed}.
+ */
 export async function restoreSnapshot(
   api: Api,
   repo: string,
@@ -371,15 +426,30 @@ export async function restoreSnapshot(
     (s) => live.find((l) => l.id === s.id)?.enforcement !== s.enforcement,
   );
   if (!execute) return drifted.map((r) => r.id);
-  const done: number[] = [];
   for (const s of drifted) {
-    await setEnforcement(api, repo, s, s.enforcement);
-    done.push(s.id);
+    try {
+      await setEnforcement(api, repo, s, s.enforcement);
+    } catch {
+      // the read-back below says whether it took
+    }
   }
-  const check = await listRulesets(api, repo);
-  for (const s of snapshot.rulesets) {
-    if (check.find((l) => l.id === s.id)?.enforcement !== s.enforcement)
-      throw new RestoreFailed(s.id);
+  let check: RulesetBody[] = [];
+  try {
+    check = await listRulesets(api, repo);
+  } catch {
+    // unreadable is not restored: every drifted ruleset is reported
   }
-  return done;
+  const done = drifted.filter(
+    (s) => check.find((l) => l.id === s.id)?.enforcement === s.enforcement,
+  );
+  const failed = snapshot.rulesets.filter(
+    (s) => check.find((l) => l.id === s.id)?.enforcement !== s.enforcement,
+  );
+  if (failed.length > 0) {
+    throw new RestoreFailed(
+      failed.map((s) => s.id),
+      done.map((s) => s.id),
+    );
+  }
+  return done.map((s) => s.id);
 }

@@ -18,6 +18,7 @@ import {
   type Snapshot,
   SwitchRefused,
   listRulesets,
+  restoreFailedAdvice,
   restoreSnapshot,
   switchRefs,
   takeSnapshot,
@@ -95,9 +96,7 @@ try {
   }
 } catch (error) {
   if (error instanceof RestoreFailed) {
-    console.error(
-      `RESTORE FAILED: ${error.message}. Run: switch.ts restore --execute, or fix the ruleset by hand NOW.`,
-    );
+    console.error(restoreFailedAdvice(error));
     process.exit(5);
   }
   console.error(error instanceof SwitchRefused ? error.message : "failed");

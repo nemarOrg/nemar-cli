@@ -11,11 +11,20 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type Api,
+  RestoreFailed,
   type RulesetBody,
   SwitchRefused,
   listRulesets,
@@ -42,6 +51,8 @@ interface Stand {
   calls: string[];
   /** Ruleset ids whose PUT is acknowledged but silently not applied. */
   stuck: Set<number>;
+  /** Ruleset ids whose PUT is answered with a server error. */
+  failPut: Set<number>;
   /** Awaited after each applied PUT; a test uses it to act while the protection is lifted. */
   afterPut: { current: ((id: number, enforcement: string) => Promise<void>) | null };
   stop: () => void;
@@ -75,6 +86,7 @@ function standIn(bypassBranch: "always" | "never"): Stand {
   });
   const calls: string[] = [];
   const stuck = new Set<number>();
+  const failPut = new Set<number>();
   const afterPut: Stand["afterPut"] = { current: null };
   const server = Bun.serve({
     port: 0,
@@ -109,6 +121,7 @@ function standIn(bypassBranch: "always" | "never"): Stand {
           if (!(f in body)) return new Response(`missing ${f}`, { status: 422 });
         }
         calls.push(`${body.enforcement === "disabled" ? "disable" : "enable"} ${id}`);
+        if (failPut.has(id)) return new Response("down", { status: 500 });
         if (stuck.has(id)) return Response.json(current);
         rulesets.set(id, {
           ...current,
@@ -127,6 +140,7 @@ function standIn(bypassBranch: "always" | "never"): Stand {
     rulesets,
     calls,
     stuck,
+    failPut,
     afterPut,
     stop: () => server.stop(true),
   };
@@ -179,7 +193,7 @@ while read old new ref; do
       fi ;;
   esac
 done
-if [ -f ${slowFile} ]; then sleep 6; fi
+if [ -f ${slowFile} ]; then : > ${slowFile}.started; sleep 6; fi
 exit 0
 `;
 }
@@ -610,40 +624,199 @@ describe("a failure leaves the protection on", () => {
     expect(enforcement(world)).toEqual({ branch: "active", tag: "active" });
     expect(await restoreSnapshot(world.api, REPO, snapshot, true)).toEqual([]);
   });
+});
 
-  test("SIGTERM during the push restores the protection before the process exits", async () => {
-    world = build("always");
-    const snapshotPath = join(world.dir, "snapshot.json");
+/** The switch CLI as a real process, with the stand-in API and an isolated environment. */
+function cliRun(w: World, args: string[]) {
+  const cli = join(import.meta.dir, "../../scripts/scrub/github/switch.ts");
+  const child = spawn("bun", ["run", cli, ...args], {
+    env: { ...process.env, GITHUB_TOKEN: "test-token", GITHUB_API_BASE: w.stand.url },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (d) => {
+    stdout += d;
+  });
+  child.stderr.on("data", (d) => {
+    stderr += d;
+  });
+  const exited = new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) =>
+    child.on("close", (code) => resolve({ code, stdout, stderr })),
+  );
+  return { child, exited };
+}
+
+/** Take the snapshot with the CLI, over a looser existing file, so the file is the CLI's own. */
+async function cliSnapshot(w: World): Promise<string> {
+  const path = join(w.dir, "snapshot.json");
+  writeFileSync(path, "stale", { mode: 0o644 });
+  chmodSync(path, 0o644);
+  const r = await cliRun(w, ["snapshot", "--repo", REPO, "--clone", w.work, "--out", path]).exited;
+  expect(r.code, r.stderr).toBe(0);
+  return path;
+}
+
+/** Start `switch --execute` with the push held in the remote's hook, and return once it is held. */
+async function startHeldSwitch(w: World, snapshotPath: string) {
+  writeFileSync(join(w.dir, "slow"), "x");
+  const run = cliRun(w, [
+    "switch",
+    "--repo",
+    REPO,
+    "--clone",
+    w.work,
+    "--snapshot",
+    snapshotPath,
+    "--execute",
+  ]);
+  const deadline = Date.now() + 20_000;
+  while (!existsSyncPath(join(w.dir, "slow.started")) && Date.now() < deadline) await Bun.sleep(25);
+  expect(existsSyncPath(join(w.dir, "slow.started")), "the push reached the remote hook").toBe(
+    true,
+  );
+  return run;
+}
+
+function existsSyncPath(path: string): boolean {
+  try {
+    statSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+describe("every lifted ruleset gets its turn to be restored", () => {
+  const switchNow = (w: World, snapshot: Awaited<ReturnType<typeof takeSnapshot>>) =>
+    switchRefs({
+      api: w.api,
+      repo: REPO,
+      cloneDir: w.work,
+      remote: "origin",
+      snapshot,
+      execute: true,
+    });
+
+  test("a first restore that fails persistently does not leave the second ruleset disabled, and both are reported", async () => {
+    world = build("never");
     const snapshot = await takeSnapshot(world.api, REPO, world.work, "origin");
-    writeFileSync(snapshotPath, JSON.stringify(snapshot));
-    writeFileSync(join(world.dir, "slow"), "x");
-    const cli = join(import.meta.dir, "../../scripts/scrub/github/switch.ts");
-    const child = spawn(
-      "bun",
-      [
-        "run",
-        cli,
-        "switch",
-        "--repo",
-        REPO,
-        "--clone",
-        world.work,
-        "--snapshot",
-        snapshotPath,
-        "--execute",
-      ],
-      {
-        env: { ...process.env, GITHUB_TOKEN: "test-token", GITHUB_API_BASE: world.stand.url },
-        stdio: "ignore",
-      },
-    );
-    const exited = new Promise<number | null>((resolve) => child.on("close", resolve));
-    const deadline = Date.now() + 20_000;
-    while (enforcement(world).tag !== "disabled" && Date.now() < deadline) await Bun.sleep(25);
+    world.stand.afterPut.current = async (id, enforcement) => {
+      if (id === 1 && enforcement === "disabled") world.stand.stuck.add(1);
+    };
+    const error = (await switchNow(world, snapshot).catch((e) => e)) as RestoreFailed;
+    expect(error).toBeInstanceOf(RestoreFailed);
+    expect(error.rulesetIds).toEqual([1]);
+    expect(error.restored).toEqual([2]);
+    expect(error.message).toContain("restore failed for ruleset 1");
+    // Ruleset 1 is stuck and said so; ruleset 2, behind it, was still put back.
+    expect(enforcement(world)).toEqual({ branch: "disabled", tag: "active" });
+    expect(world.stand.calls.filter((c) => c === "enable 1")).toHaveLength(3);
+    expect(world.stand.calls).toContain("enable 2");
+  });
+
+  test("when every restore fails, one error names every ruleset", async () => {
+    world = build("never");
+    const snapshot = await takeSnapshot(world.api, REPO, world.work, "origin");
+    world.stand.afterPut.current = async (id, enforcement) => {
+      if (enforcement === "disabled") world.stand.stuck.add(id);
+    };
+    const error = (await switchNow(world, snapshot).catch((e) => e)) as RestoreFailed;
+    expect(error).toBeInstanceOf(RestoreFailed);
+    expect(error.rulesetIds).toEqual([1, 2]);
+    expect(error.restored).toEqual([]);
+    expect(error.message).toContain("restore failed for ruleset 1, 2");
+  });
+
+  test("a push that fails and a restore that fails arrive as one error carrying both", async () => {
+    world = build("never", "refs/tags/v1.0.1");
+    const snapshot = await takeSnapshot(world.api, REPO, world.work, "origin");
+    world.stand.afterPut.current = async (id, enforcement) => {
+      if (id === 2 && enforcement === "disabled") world.stand.stuck.add(2);
+    };
+    const error = (await switchNow(world, snapshot).catch((e) => e)) as RestoreFailed;
+    expect(error).toBeInstanceOf(RestoreFailed);
+    expect(error.rulesetIds).toEqual([2]);
+    expect(error.restored).toEqual([1]);
+    expect(error.pushFailure).toContain("git push exited");
+    expect(error.message).toContain("restore failed for ruleset 2");
+    expect(error.message).toContain("git push exited");
+  });
+
+  test("a snapshot restore tries every drifted ruleset, even when the first is refused by the server", async () => {
+    world = build("always");
+    const snapshot = await takeSnapshot(world.api, REPO, world.work, "origin");
+    for (const id of [1, 2]) {
+      const body = world.stand.rulesets.get(id) as RulesetBody;
+      world.stand.rulesets.set(id, { ...body, enforcement: "disabled" });
+    }
+    world.stand.failPut.add(1);
+    const error = (await restoreSnapshot(world.api, REPO, snapshot, true).catch(
+      (e) => e,
+    )) as RestoreFailed;
+    expect(error).toBeInstanceOf(RestoreFailed);
+    expect(error.rulesetIds).toEqual([1]);
+    expect(error.restored).toEqual([2]);
+    expect(enforcement(world)).toEqual({ branch: "disabled", tag: "active" });
+  });
+
+  test("a signal during the push restores, then exits 130, and the snapshot is what the CLI wrote", async () => {
+    world = build("always");
+    const snapshotPath = await cliSnapshot(world);
+    const written = JSON.parse(readFileSync(snapshotPath, "utf8")) as {
+      repo: string;
+      rulesets: { id: number }[];
+      refs: Record<string, string | null>;
+    };
+    expect(written.repo).toBe(REPO);
+    expect(written.rulesets.map((r) => r.id)).toEqual([1, 2]);
+    expect(Object.keys(written.refs).sort()).toEqual([
+      "refs/heads/main",
+      "refs/tags/v1.0.0",
+      "refs/tags/v1.0.1",
+    ]);
+    const run = await startHeldSwitch(world, snapshotPath);
     expect(enforcement(world).tag).toBe("disabled");
-    child.kill("SIGTERM");
-    await exited;
-    expect(existsSync(snapshotPath)).toBe(true);
+    run.child.kill("SIGTERM");
+    const result = await run.exited;
+    expect(result.code).toBe(130);
+    expect(world.stand.calls).toEqual(["disable 2", "enable 2"]);
     expect(enforcement(world)).toEqual({ branch: "active", tag: "active" });
+  }, 40_000);
+
+  test("a signal during the push exits 5, and says so, when a ruleset cannot be restored", async () => {
+    world = build("always");
+    const snapshotPath = await cliSnapshot(world);
+    world.stand.afterPut.current = async (id, enforcement) => {
+      if (enforcement === "disabled") world.stand.stuck.add(id);
+    };
+    const run = await startHeldSwitch(world, snapshotPath);
+    run.child.kill("SIGTERM");
+    const result = await run.exited;
+    expect(result.code).toBe(5);
+    expect(result.stderr).toContain("RESTORE FAILED");
+    expect(result.stderr).toContain("restore failed for ruleset 2");
+    expect(enforcement(world).tag).toBe("disabled");
+  }, 40_000);
+
+  test("the command exits 5, naming the push failure and the ruleset, when both fail", async () => {
+    world = build("always", "refs/tags/v1.0.1");
+    const snapshotPath = await cliSnapshot(world);
+    world.stand.afterPut.current = async (id, enforcement) => {
+      if (id === 2 && enforcement === "disabled") world.stand.stuck.add(2);
+    };
+    const result = await cliRun(world, [
+      "switch",
+      "--repo",
+      REPO,
+      "--clone",
+      world.work,
+      "--snapshot",
+      snapshotPath,
+      "--execute",
+    ]).exited;
+    expect(result.code).toBe(5);
+    expect(result.stderr).toContain("restore failed for ruleset 2");
+    expect(result.stderr).toContain("git push exited");
   }, 40_000);
 });
