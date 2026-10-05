@@ -29,8 +29,12 @@ import { adminRoutes } from "../src/routes/admin";
 import { datasetRoutes } from "../src/routes/datasets";
 import webhooks from "../src/routes/webhooks";
 import { signIdentifierScreenCallbackToken } from "../src/services/github";
-import { sweepBlockedBidsValidationRequests } from "../src/services/publication-sweep";
+import {
+  MAX_SCREENED_UNBLOCKS_PER_SWEEP,
+  sweepBlockedBidsValidationRequests,
+} from "../src/services/publication-sweep";
 import { hashApiKey } from "../src/services/token";
+import { issueSession } from "../src/services/web-session";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1 } from "./helpers/d1";
 import { SCREENED_HEAD, cleanScreenReportBody, markScreen } from "./helpers/identifier-screen";
@@ -163,8 +167,16 @@ function seedDataset(id: string, opts: { exemplar?: boolean } = {}) {
 }
 
 /** A request with every step done but the two no-ops, in `status`. */
+/** Validation only: an approval that stopped here changed nothing yet. */
+const PRE_PUBLICATION = ["ci_check", "enrichment_check"];
+
 function seedRequest(
-  opts: { status?: string; dataset?: string; blockReason?: string | null } = {},
+  opts: {
+    status?: string;
+    dataset?: string;
+    blockReason?: string | null;
+    steps?: readonly string[];
+  } = {},
 ): number {
   db.run(
     `INSERT INTO publication_requests
@@ -175,7 +187,7 @@ function seedRequest(
       opts.status ?? "requested",
       opts.blockReason ?? null,
       ownerId,
-      JSON.stringify(DONE),
+      JSON.stringify(opts.steps ?? DONE),
     ],
   );
   return db.query<{ id: number }, []>("SELECT MAX(id) AS id FROM publication_requests").get()
@@ -418,15 +430,78 @@ describe("the orchestrator's gate (POST /approve)", () => {
     expect((await refusal(res)).gate).toBe("unverified");
   });
 
-  test("a resumed run of a request already approving has passed the gate, and is not re-gated", async () => {
+  test("a resumed run that has started publishing is not re-gated", async () => {
     // The CLI's S3 Object Lock batches and its retries all resume an approving
-    // request; main has moved by then (the run commits the README badge).
-    const id = seedRequest({ status: "approving" });
+    // request; main has moved by then (the run commits the README badge). The
+    // fixture has every step done but the two no-ops, s3_public_read included.
+    const id = seedRequest({ status: "approving", steps: DONE });
     mainHead = MOVED_HEAD;
     const res = await approve({ resume: true });
     expect(res.status).toBe(200);
     expect(requestRow(id)?.status).toBe("published");
     expect(refReads).toBe(0);
+  });
+
+  test("a run stopped right after its first mutation resumes ungated, into its next step", async () => {
+    // s3_public_read is the first step that changes anything; once it ran the
+    // data is public and the run must be able to finish. Its next step,
+    // repo_public, fails on the stand-in's 404, which is how this test sees that
+    // the run got past the gate without reading main.
+    const id = seedRequest({
+      status: "approving",
+      steps: [...PRE_PUBLICATION, "s3_public_read"],
+    });
+    mainHead = MOVED_HEAD;
+    const res = await approve({ resume: true });
+    expect(refReads).toBe(0);
+    expect(((await res.json()) as { step?: string }).step).toBe("repo_public");
+    expect(requestRow(id)?.status).toBe("approving");
+  });
+
+  test("a resumed run that stopped before publishing is gated like a fresh one", async () => {
+    // A ci_check failure leaves the row `approving` with nothing changed; the
+    // depositor then pushes. The retry must see the new main.
+    const id = seedRequest({ status: "approving", steps: PRE_PUBLICATION });
+    markScreen(db, id, DATASET);
+    mainHead = MOVED_HEAD;
+    const res = await approve({ resume: true });
+    expect(res.status).toBe(409);
+    expect((await refusal(res)).gate).toBe("stale");
+    expect(refReads).toBe(1);
+  });
+
+  test("a resumed run that stopped before publishing, with no screen, is refused", async () => {
+    const id = seedRequest({ status: "approving", steps: PRE_PUBLICATION });
+    const res = await approve({ resume: true });
+    expect(res.status).toBe(409);
+    expect((await refusal(res)).gate).toBe("rerun");
+    expect(requestRow(id)?.status).toBe("approving");
+  });
+
+  test("an acknowledgment recorded by one admin does not carry to another", async () => {
+    const OTHER_KEY = "gate-admin2-key-0123456789abcdef0123456789abcdef";
+    await seedUser("gateadmin2", "admin", "gateadmin2@example.org", OTHER_KEY);
+    const id = seedRequest();
+    markScreen(db, id, DATASET, { status: "review" });
+    db.run(
+      `UPDATE publication_requests SET identifier_screen_ack_by = ?, identifier_screen_ack_at = datetime('now'),
+              identifier_screen_ack_reason = ? WHERE id = ?`,
+      [adminId, REASON, id],
+    );
+    const asOther = await app.request(
+      `/admin/publish/${DATASET}/approve`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OTHER_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ resume: true }),
+      },
+      env(),
+    );
+    expect(asOther.status).toBe(409);
+    expect((await refusal(asOther)).gate).toBe("acknowledge");
+    // The admin who gave the reason passes on it.
+    const asSelf = await approve({ resume: true });
+    expect(asSelf.status).toBe(200);
   });
 
   test("a sandbox exemplar is not gated", async () => {
@@ -495,11 +570,22 @@ describe("the web dispatch's gate (POST /approve-dispatch)", () => {
     expect(res.status).toBe(400);
   });
 
-  test("an approving request resumes without the gate", async () => {
-    seedRequest({ status: "approving" });
+  test("an approving request that has started publishing resumes without the gate", async () => {
+    seedRequest({ status: "approving", steps: DONE });
     const res = await dispatchApproval();
     expect(res.status).toBe(202);
     expect(refReads).toBe(0);
+  });
+
+  test("an approving request that stopped before publishing is gated, state and head", async () => {
+    const id = seedRequest({ status: "approving", steps: PRE_PUBLICATION });
+    markScreen(db, id, DATASET);
+    mainHead = MOVED_HEAD;
+    const res = await dispatchApproval();
+    expect(res.status).toBe(409);
+    expect((await refusal(res)).gate).toBe("stale");
+    expect(dispatches).toHaveLength(0);
+    expect(requestRow(id)?.approval_requested_by).toBeNull();
   });
 });
 
@@ -598,6 +684,44 @@ describe("direct identifiers block the request and tell the depositor", () => {
       const id = await requestAndReport("direct-identifiers", { "edf-patient-name": 4 });
       expect(requestRow(id)?.status).toBe("blocked");
       expect(calls).toHaveLength(0);
+    });
+  });
+
+  test("the daily BIDS sweep screens every request it unblocks, up to its cap", async () => {
+    const ids: number[] = [];
+    for (let i = 0; i < MAX_SCREENED_UNBLOCKS_PER_SWEEP + 2; i++) {
+      const id = `nm000${510 + i}`;
+      seedDataset(id);
+      ids.push(
+        seedRequest({ status: "blocked", blockReason: "bids_validation_pending", dataset: id }),
+      );
+    }
+    const result = await sweepBlockedBidsValidationRequests(env());
+    expect(result.unblocked).toBe(MAX_SCREENED_UNBLOCKS_PER_SWEEP);
+    expect(result.screened).toBe(MAX_SCREENED_UNBLOCKS_PER_SWEEP);
+    expect(dispatches).toHaveLength(MAX_SCREENED_UNBLOCKS_PER_SWEEP);
+    const rows = ids.map((id) => requestRow(id));
+    const unblocked = rows.filter((r) => r?.status === "requested");
+    expect(unblocked).toHaveLength(MAX_SCREENED_UNBLOCKS_PER_SWEEP);
+    for (const r of unblocked) expect(r?.identifier_screen_status).toBe("pending");
+    // Over the cap: still blocked, never `requested` without a screen.
+    expect(rows.filter((r) => r?.status === "blocked")).toHaveLength(2);
+  });
+
+  test("the daily BIDS sweep mails at once when a screen it starts cannot start", async () => {
+    const OTHER = "nm000462";
+    seedDataset(OTHER);
+    const id = seedRequest({
+      status: "blocked",
+      blockReason: "bids_validation_pending",
+      dataset: OTHER,
+    });
+    envOverrides = { PRESCREEN_CALLBACK_SECRET: undefined } as Partial<Bindings>;
+    await withFakeResend(async (calls) => {
+      await sweepBlockedBidsValidationRequests(env());
+      expect(requestRow(id)?.status).toBe("requested");
+      expect(requestRow(id)?.identifier_screen_status).toBe("error");
+      expect(sendsTo(calls, ADMIN_EMAIL)[0]?.subject).toEndWith("IDENTIFIER SCREEN: DID NOT RUN");
     });
   });
 
@@ -723,8 +847,142 @@ describe("the admin re-run (POST /admin/publish/:id/identifier-screen)", () => {
     );
 
     expect((await rerun()).status).toBe(404);
-    seedRequest({ status: "approving" });
-    expect((await rerun()).status).toBe(409);
+    seedRequest({ status: "approving", steps: DONE });
+    const started = await rerun();
+    expect(started.status).toBe(409);
+    expect(((await started.json()) as { error: string }).error).toBe("approval_in_progress");
     expect(dispatches).toHaveLength(0);
+  });
+
+  test("an approval that stopped before publishing can be screened again", async () => {
+    const id = seedRequest({ status: "approving", steps: PRE_PUBLICATION });
+    const res = await rerun();
+    expect(res.status).toBe(202);
+    expect(requestRow(id)?.identifier_screen_status).toBe("pending");
+    expect(dispatches).toHaveLength(1);
+  });
+
+  test("a claim refused because the request stopped being active is not reported as pending", async () => {
+    const id = seedRequest();
+    // The request is published between the route's read and its claim.
+    const racing = {
+      ...env(),
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (sql.includes("identifier_screen_status = 'pending', identifier_screen_nonce = ?")) {
+          db.run("UPDATE publication_requests SET status = 'published' WHERE id = ?", [id]);
+        }
+      }),
+    } as Bindings;
+    const res = await app.request(
+      `/admin/publish/${DATASET}/identifier-screen`,
+      { method: "POST", headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+      racing,
+    );
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error: string }).error).toBe("not_found");
+    expect(dispatches).toHaveLength(0);
+  });
+
+  test("a clean re-run lifts a block its findings put there; an earlier run's late report is refused", async () => {
+    const id = seedRequest({ status: "blocked", blockReason: "identifier_screen_findings" });
+    // An earlier run, still out there with its own nonce.
+    db.run(
+      `UPDATE publication_requests SET identifier_screen_status = 'unreported',
+              identifier_screen_nonce = 'earlier-run' WHERE id = ?`,
+      [id],
+    );
+    const earlierToken = await signIdentifierScreenCallbackToken(
+      { datasetId: DATASET, requestId: id, nonce: "earlier-run" },
+      SECRET,
+    );
+    expect((await rerun()).status).toBe(202);
+    const nonce = requestRow(id)?.identifier_screen_nonce as string;
+    expect(nonce).not.toBe("earlier-run");
+
+    const post = (token: string) =>
+      app.request(
+        "/webhooks/identifier-screen-result",
+        {
+          method: "POST",
+          headers: { "X-Webhook-Token": token, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            dataset_id: DATASET,
+            request_id: id,
+            report: cleanScreenReportBody(DATASET),
+          }),
+        },
+        env(),
+      );
+    await withFakeResend(async () => {
+      expect((await post(earlierToken)).status).toBe(401);
+      const token = await signIdentifierScreenCallbackToken(
+        { datasetId: DATASET, requestId: id, nonce },
+        SECRET,
+      );
+      expect((await post(token)).status).toBe(200);
+    });
+    const row = requestRow(id);
+    expect(row?.identifier_screen_status).toBe("clean");
+    expect(row?.status).toBe("requested");
+    expect(row?.block_reason).toBeNull();
+  });
+
+  test("a clean screen does not lift a block that is not the screen's", async () => {
+    const id = seedRequest({ status: "blocked", blockReason: "bids_validation_failed" });
+    expect((await rerun()).status).toBe(202);
+    const nonce = requestRow(id)?.identifier_screen_nonce as string;
+    const token = await signIdentifierScreenCallbackToken(
+      { datasetId: DATASET, requestId: id, nonce },
+      SECRET,
+    );
+    await withFakeResend(async () => {
+      const res = await app.request(
+        "/webhooks/identifier-screen-result",
+        {
+          method: "POST",
+          headers: { "X-Webhook-Token": token, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            dataset_id: DATASET,
+            request_id: id,
+            report: cleanScreenReportBody(DATASET),
+          }),
+        },
+        env(),
+      );
+      expect(res.status).toBe(200);
+    });
+    expect(requestRow(id)?.status).toBe("blocked");
+    expect(requestRow(id)?.block_reason).toBe("bids_validation_failed");
+  });
+
+  test("a cookie request must come from a NEMAR page; a bearer key need not", async () => {
+    seedRequest();
+    const { cookieIdRaw } = await issueSession(
+      env(),
+      adminId,
+      false,
+      "test-agent",
+      "127.0.0.1",
+      "orcid",
+    );
+    const withCookie = (origin?: string) =>
+      app.request(
+        `/admin/publish/${DATASET}/identifier-screen`,
+        {
+          method: "POST",
+          headers: {
+            Cookie: `nemar_session=${cookieIdRaw}`,
+            ...(origin ? { Origin: origin } : {}),
+          },
+        },
+        env(),
+      );
+    const foreign = await withCookie("https://evil.example");
+    expect(foreign.status).toBe(403);
+    expect(((await foreign.json()) as { error: string }).error).toBe("origin_not_allowed");
+    expect((await withCookie()).status).toBe(403);
+    expect(dispatches).toHaveLength(0);
+    expect((await withCookie("https://app.nemar.org")).status).toBe(202);
+    expect(dispatches).toHaveLength(1);
   });
 });

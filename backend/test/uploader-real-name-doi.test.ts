@@ -423,6 +423,23 @@ describe("POST /admin/publish/:id/approve name precondition", () => {
     markDatasetScreensClean(db, DATASET_ID);
   }
 
+  /**
+   * Past the screen gate AND the name gate, the run starts its first step,
+   * `ci_check`, which fails on the stand-in's 404 for the repository. Only a run
+   * that got through both gates produces this answer: a refusal by either is a
+   * 409 or a 422 that names its gate, and never reaches a step.
+   */
+  async function expectRunReachedFirstStep(res: Response): Promise<void> {
+    expect(res.status).toBe(500);
+    expect(((await res.json()) as { step?: string }).step).toBe("ci_check");
+    const row = db
+      .query<{ current_step: string | null }, [string]>(
+        "SELECT current_step FROM publication_requests WHERE dataset_id = ?",
+      )
+      .get(DATASET_ID);
+    expect(row?.current_step).toBe("ci_check");
+  }
+
   test("refuses to approve, and walks the request back to blocked", async () => {
     await seedOwner({ given: null });
     seedDataset();
@@ -485,7 +502,7 @@ describe("POST /admin/publish/:id/approve name precondition", () => {
     seedRequest();
 
     const res = await post(`/admin/publish/${DATASET_ID}/approve`, ADMIN_KEY, {});
-    expect(res.status).not.toBe(422);
+    await expectRunReachedFirstStep(res);
     const row = db
       .query<{ status: string }, [string]>(
         "SELECT status FROM publication_requests WHERE dataset_id = ?",
@@ -500,7 +517,7 @@ describe("POST /admin/publish/:id/approve name precondition", () => {
     seedRequest();
 
     const res = await post(`/admin/publish/${DATASET_ID}/approve`, ADMIN_KEY, {});
-    expect(res.status).not.toBe(422);
+    await expectRunReachedFirstStep(res);
   });
 
   test("a named owner gets past the name gate", async () => {
@@ -510,12 +527,10 @@ describe("POST /admin/publish/:id/approve name precondition", () => {
 
     const res = await post(`/admin/publish/${DATASET_ID}/approve`, ADMIN_KEY, {});
 
-    // Not the 422: the run got past the name gate and went on to its steps,
-    // whose GitHub calls the stand-in answers 404, so the run fails there.
-    // That failure is the shape of "past the gate" for a test that refuses to
-    // touch the network; what matters is that the request row was NOT walked
-    // back to blocked.
-    expect(res.status).not.toBe(422);
+    // Not the 422: the run got past the name gate and went on to its first
+    // step, whose GitHub calls the stand-in answers 404. What matters is that
+    // the request row was NOT walked back to blocked.
+    await expectRunReachedFirstStep(res);
     const row = db
       .query<{ status: string; block_reason: string | null }, [string]>(
         "SELECT status, block_reason FROM publication_requests WHERE dataset_id = ?",

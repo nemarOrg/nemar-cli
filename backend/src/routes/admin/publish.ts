@@ -20,6 +20,8 @@ import {
 } from "../../services/github/dispatch";
 import {
   RERUN_GUARD_SQL,
+  SCREEN_REPORT_DEADLINE_MINUTES,
+  hasStartedPublishing,
   isScreenExempt,
   notifyAdminsOfScreen,
   readStoredState,
@@ -39,6 +41,13 @@ import { applyObjectLockBatch } from "../../services/s3";
 import { isAllowedOrigin } from "../../services/web-session";
 import { getS3Config } from "./shared";
 import type { AdminRouter } from "./shared";
+
+/** The re-run route's answer for a request whose approval has started publishing. */
+const APPROVAL_IN_PROGRESS = {
+  error: "approval_in_progress",
+  message:
+    "An approval of this request has already started publishing, and it passed the identifier screen when it started. Resume it rather than screening again.",
+};
 
 /** The optional body of the approve-dispatch route. */
 const dispatchBodySchema = z
@@ -299,7 +308,8 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     const request = await db
       .prepare(
         `SELECT id, status, last_error, updated_at, identifier_screen_status,
-                identifier_screen_report, identifier_screen_ack_at ${ACTIVE_REQUEST_TAIL_SQL}`,
+                identifier_screen_report, identifier_screen_ack_at, identifier_screen_ack_by,
+                steps_completed ${ACTIVE_REQUEST_TAIL_SQL}`,
       )
       .bind(datasetId)
       .first<{
@@ -310,6 +320,8 @@ export function registerPublishRoutes(admin: AdminRouter): void {
         identifier_screen_status: string | null;
         identifier_screen_report: string | null;
         identifier_screen_ack_at: string | null;
+        identifier_screen_ack_by: number | null;
+        steps_completed: string | null;
       }>();
 
     if (!request) {
@@ -327,16 +339,25 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     }
 
     // A request already `approving` has done part of the work, and some of it
-    // cannot be undone: it resumes, it does not start over. A resume has
-    // passed the identifier screen when it started, so only a fresh run is
-    // gated here, the same rule the orchestrator applies.
+    // cannot be undone: it resumes, it does not start over.
     const resume = request.status === "approving";
 
-    // The identifier screen, state half: no network and no claim, so a refused
-    // click changes nothing. The head half needs a GitHub token and runs once
-    // one is in hand, below.
-    if (!resume) {
-      const stateGate = screenStateGate(datasetId, request, acknowledgment !== undefined);
+    // The identifier screen gate (ADR 0086), by the orchestrator's own rule: it
+    // is skipped only for a run that has already started publishing. A run that
+    // stopped before that (a failed ci_check leaves the row `approving`) is
+    // gated like a fresh one, because the depositor may have pushed since.
+    const gated = !(resume && hasStartedPublishing(request.steps_completed));
+
+    // The state half: no network and no claim, so a refused click changes
+    // nothing. The head half needs a GitHub token and runs once one is in hand,
+    // below. A reason recorded earlier counts only for the admin who gave it.
+    if (gated) {
+      const stateGate = screenStateGate(
+        datasetId,
+        request,
+        acknowledgment !== undefined,
+        adminUser.id,
+      );
       if (!stateGate.ok) return c.json(stateGate.refusal, 409);
     }
 
@@ -469,7 +490,7 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     // closed). Nothing has been sent, so a refusal releases the claim. A
     // reason given for a screen that needs one is recorded only once this has
     // passed, so it attaches to the verdict the admin was shown.
-    if (!resume) {
+    if (gated) {
       const headGate = await verifyScreenHead(c.env, datasetId, request, pat);
       if (!headGate.ok) {
         await releaseClaim();
@@ -579,11 +600,25 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *   202 { status: "pending" | "error", identifier_screen }
    *   400 identifier_screen_not_applicable  a sandbox (xx) dataset
    *   404 not_found             no active request
-   *   409 approval_in_progress  the request is approving; it passed the screen
-   *   409 identifier_screen_pending  a screen dispatched under 40 minutes ago
-   *                             has not reported yet
+   *   403 origin_not_allowed    a cookie request from a non-NEMAR origin
+   *   409 approval_in_progress  the request's approval has started publishing;
+   *                             it passed the screen when it started
+   *   409 identifier_screen_pending  a screen dispatched under
+   *                             SCREEN_REPORT_DEADLINE_MINUTES ago has not reported
    */
   admin.post("/publish/:id/identifier-screen", async (c) => {
+    // The same origin rule approve-dispatch applies: a session cookie rides
+    // along with a cross-site request, so anything but a bearer key must come
+    // from a NEMAR page.
+    if (c.get("authMethod") !== "token" && !isAllowedOrigin(c.req.header("Origin"))) {
+      return c.json(
+        {
+          error: "origin_not_allowed",
+          message: "This request did not come from a NEMAR page, so it was not accepted.",
+        },
+        403,
+      );
+    }
     const datasetId = c.req.param("id");
     const adminUser = c.get("user");
     const db = c.env.DB;
@@ -598,38 +633,55 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       );
     }
     const request = await db
-      .prepare(`SELECT id, status ${ACTIVE_REQUEST_TAIL_SQL}`)
+      .prepare(`SELECT id, status, steps_completed ${ACTIVE_REQUEST_TAIL_SQL}`)
       .bind(datasetId)
-      .first<{ id: number; status: string }>();
+      .first<{ id: number; status: string; steps_completed: string | null }>();
     if (!request) {
       return c.json({ error: "not_found", message: "No active publication request found" }, 404);
     }
-    if (request.status === "approving") {
-      return c.json(
-        {
-          error: "approval_in_progress",
-          message:
-            "An approval of this request has already started, and it passed the identifier screen when it did. Resume it rather than screening again.",
-        },
-        409,
-      );
+    if (request.status === "approving" && hasStartedPublishing(request.steps_completed)) {
+      return c.json(APPROVAL_IN_PROGRESS, 409);
     }
     const dataset = await db
       .prepare("SELECT github_repo FROM datasets WHERE dataset_id = ?")
       .bind(datasetId)
       .first<{ github_repo: string | null }>();
 
-    const started = await startIdentifierScreen(
-      c.env,
-      { requestId: request.id, datasetId, githubRepo: dataset?.github_repo ?? null },
-      RERUN_GUARD_SQL,
-    );
+    let started: Awaited<ReturnType<typeof startIdentifierScreen>>;
+    try {
+      started = await startIdentifierScreen(
+        c.env,
+        { requestId: request.id, datasetId, githubRepo: dataset?.github_repo ?? null },
+        RERUN_GUARD_SQL,
+      );
+    } catch (err) {
+      console.error(`[identifier-screen] re-run for ${datasetId} failed:`, errorMessage(err));
+      return c.json(
+        {
+          error: "identifier_screen_rerun_failed",
+          message: "The screen could not be started: the database refused the write. Try again.",
+        },
+        500,
+      );
+    }
     if (started === null) {
+      // The claim's guard refused. It has two halves, and the admin must be told
+      // the true one: the request may have stopped being active (or started
+      // publishing) since it was read, or a recent screen is still running.
+      const now = await db
+        .prepare("SELECT status, steps_completed FROM publication_requests WHERE id = ?")
+        .bind(request.id)
+        .first<{ status: string; steps_completed: string | null }>();
+      if (!now || !["requested", "blocked", "approving"].includes(now.status)) {
+        return c.json({ error: "not_found", message: "No active publication request found" }, 404);
+      }
+      if (now.status === "approving" && hasStartedPublishing(now.steps_completed)) {
+        return c.json(APPROVAL_IN_PROGRESS, 409);
+      }
       return c.json(
         {
           error: "identifier_screen_pending",
-          message:
-            "A screen of this request was dispatched less than 40 minutes ago and has not reported yet. The admins are mailed when it does; if it never does, it is marked unreported and can be re-run then.",
+          message: `A screen of this request was dispatched less than ${SCREEN_REPORT_DEADLINE_MINUTES} minutes ago and has not reported yet. The admins are mailed when it does; if it never does, it is marked unreported and can be re-run then.`,
         },
         409,
       );

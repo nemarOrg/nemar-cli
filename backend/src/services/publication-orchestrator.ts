@@ -68,7 +68,7 @@ import {
   setRepoVisibility,
 } from "./github";
 import { getDatasetsToken } from "./github-auth";
-import { checkApprovalScreenGate } from "./identifier-screen";
+import { checkApprovalScreenGate, hasStartedPublishing } from "./identifier-screen";
 import { generateManifest } from "./manifest";
 import { scheduleNeurobagelSync } from "./neurobagel-hooks.js";
 import { BIDS_METADATA_UNAVAILABLE, errorMessage, readRepoMetadata } from "./repo-metadata";
@@ -2481,15 +2481,20 @@ export async function runPublicationApproval(args: ApproveRunArgs): Promise<Resp
     });
   }
 
-  // The identifier screen gate (epic #1610 phase 4), before anything is
-  // marked: a request whose screen is not clear for its CURRENT content never
-  // starts approving. A resume of a request that is already `approving` has
-  // passed it (the run's own steps then commit to main, so re-checking the
-  // head would refuse the run halfway). A `resume` of a request that never
-  // started is gated like a fresh run: the import pipeline retries that way,
-  // and a flag must not be a way around the gate. Sandbox (`xx`) datasets are
-  // exempt inside the check.
-  if (!(resume && request.status === "approving")) {
+  // The identifier screen gate (epic #1610 phase 4, ADR 0086), before anything
+  // is marked: a request whose screen is not clear for its CURRENT content
+  // never starts approving. It is skipped only for a resume of a run that has
+  // already started publishing (`hasStartedPublishing`: a step after the
+  // validation-only ones completed). From then on the run must be able to
+  // finish, and its own steps commit to main, so a head check would strand it
+  // halfway. Before that point nothing is public, and the depositor may have
+  // pushed since the earlier attempt stopped (a failed ci_check leaves the row
+  // `approving`), so a resume, or the import pipeline's resume-flagged retry of
+  // a request that never started, is gated like a fresh run. Sandbox (`xx`)
+  // datasets are exempt inside the check.
+  const startedPublishing =
+    resume && request.status === "approving" && hasStartedPublishing(request.steps_completed);
+  if (!startedPublishing) {
     const gate = await checkApprovalScreenGate(env, {
       requestId: request.id,
       datasetId,
