@@ -4,8 +4,10 @@
  *
  *   bun run scripts/scrub/plan/build-git-plan.ts --repo CLONE --dataset nm000348 --out git-plan.json [--date YYYY-MM-DD]
  *
- * Read-only on the clone. It looks at the tip of `main` and at every `v*` tag, so a path or a JSON
- * key that exists only in an old version is found too:
+ * Read-only on the clone. It reads EVERY commit reachable from every ref the rewrite covers (local
+ * and remote-tracking heads and tags, never `git-annex`), not just `main` and the `v*` tips, because
+ * the rewrite changes all of them: a path or a JSON key that exists only in a commit between two
+ * tags, or only on an unreleased branch, is found too:
  *
  * - images and documents under `sourcedata/` (outside the BIDS photo convention) are dropped from
  *   every commit: a screenshot can show a name on screen and nobody can verify its pixels;
@@ -22,6 +24,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, writeFileSync } from "node:fs";
 import { scanJsonKeys, scanPaths } from "../../../shared/identifier-scan";
 import { type GitPlanFile, type JsonOp, parseGitPlan } from "../contract";
+import { isRewriteRef } from "../git/git-lib";
 import { changeLogEntry } from "../ledger";
 
 const PROVENANCE = "sourcedata/sourcedata_provenance.json";
@@ -35,38 +38,121 @@ export class PlanRefused extends Error {
   }
 }
 
-function git(repo: string, args: string[]): string {
+function gitBuffer(repo: string, args: string[], input?: string): Buffer {
   const r = spawnSync("git", ["-C", repo, ...args], {
     encoding: "buffer",
-    maxBuffer: 256 * 1024 * 1024,
+    maxBuffer: 1024 * 1024 * 1024,
+    ...(input === undefined ? {} : { input: Buffer.from(input) }),
   });
   if (r.status !== 0) throw new PlanRefused(`git ${args[0]} failed`);
-  return (r.stdout as Buffer).toString("utf8");
+  return r.stdout as Buffer;
 }
 
-interface Entry {
-  mode: string;
-  sha: string;
-  size: number;
-  path: string;
+function git(repo: string, args: string[], input?: string): string {
+  return gitBuffer(repo, args, input).toString("utf8");
 }
 
-/** Every blob of a ref's tree, with its size. `-z` keeps names with spaces or non-ASCII intact. */
-function lsTree(repo: string, ref: string): Entry[] {
-  const out = git(repo, ["ls-tree", "-r", "-l", "-z", ref]);
-  const entries: Entry[] = [];
-  for (const rec of out.split("\0")) {
-    if (rec === "") continue;
-    const tab = rec.indexOf("\t");
-    const [mode, type, sha, size] = rec.slice(0, tab).split(/\s+/);
-    if (type !== "blob" || !mode || !sha) continue;
-    entries.push({ mode, sha, size: Number(size), path: rec.slice(tab + 1) });
+const ZERO_SHA = /^0+$/;
+
+interface History {
+  commits: number;
+  /** Every path that appears in any commit's tree, as a name git recorded it. */
+  paths: Set<string>;
+  /** Inline-JSON candidates: path -> the distinct blob ids it ever had. */
+  jsonBlobs: Map<string, Set<string>>;
+}
+
+/**
+ * Every path and every distinct JSON blob of every commit reachable from `refs`.
+ *
+ * One `git log -m --raw` walk reports, per commit and per parent, the entries that differ, so the
+ * cost follows what CHANGED rather than the size of each tree times the number of commits (on a
+ * synthetic 300-commit, 3,000-file repository: 0.14 s against 3.9 s for `ls-tree -r` per commit,
+ * which also hands back 74 MB to parse). It still sees everything: a root commit lists all its
+ * files, and `-m` diffs a merge against each parent, so a blob that exists in any tree is the
+ * "new" side of some entry (or the old side of a deletion, which appeared earlier).
+ */
+function readHistory(repo: string, refs: string[]): History {
+  const stdin = `${refs.join("\n")}\n`;
+  const commits = Number(git(repo, ["rev-list", "--count", "--stdin"], stdin).trim());
+  const log = git(
+    repo,
+    ["log", "--stdin", "-m", "--raw", "-z", "--no-renames", "--no-abbrev", "--format="],
+    stdin,
+  );
+  const paths = new Set<string>();
+  const jsonBlobs = new Map<string, Set<string>>();
+  const tokens = log.split("\0");
+  // `:<old mode> <new mode> <old sha> <new sha> <status>` NUL `<path>` NUL, repeated.
+  for (let i = 0; i < tokens.length; ) {
+    const meta = (tokens[i] as string).replace(/^\n+/, "");
+    if (meta === "") {
+      i++;
+      continue;
+    }
+    const path = tokens[i + 1];
+    const fields = meta.split(" ");
+    if (!meta.startsWith(":") || path === undefined || fields.length !== 5) {
+      throw new PlanRefused("git log output not understood");
+    }
+    i += 2;
+    const [, newMode, , newSha, status] = fields as [string, string, string, string, string];
+    paths.add(path);
+    // Inline JSON only: an annex pointer is a few dozen bytes of `/annex/objects/...`, not JSON.
+    if (
+      path.toLowerCase().endsWith(".json") &&
+      newMode === "100644" &&
+      !ZERO_SHA.test(newSha) &&
+      (status === "A" || status === "M" || status === "T")
+    ) {
+      const set = jsonBlobs.get(path) ?? new Set<string>();
+      set.add(newSha);
+      jsonBlobs.set(path, set);
+    }
   }
-  return entries;
+  return { commits, paths, jsonBlobs };
+}
+
+/** Read at most this many bytes of blob content in one `cat-file` process. */
+const BATCH_BYTES = 64 * 1024 * 1024;
+
+/** The content of each blob that is at most `limit` bytes, a bounded batch at a time. */
+function readSmallBlobs(repo: string, shas: string[], limit: number): Map<string, Buffer> {
+  const out = new Map<string, Buffer>();
+  if (shas.length === 0) return out;
+  const sizes = git(repo, ["cat-file", "--batch-check"], `${shas.join("\n")}\n`).split("\n");
+  const batches: string[][] = [[]];
+  let batchBytes = 0;
+  shas.forEach((sha, i) => {
+    const size = Number((sizes[i] ?? "").split(" ")[2]);
+    if (!Number.isFinite(size) || size > limit) return;
+    if (batchBytes + size > BATCH_BYTES) {
+      batches.push([]);
+      batchBytes = 0;
+    }
+    (batches[batches.length - 1] as string[]).push(sha);
+    batchBytes += size;
+  });
+  for (const batch of batches) {
+    if (batch.length === 0) continue;
+    const raw = gitBuffer(repo, ["cat-file", "--batch"], `${batch.join("\n")}\n`);
+    let at = 0;
+    for (const sha of batch) {
+      const nl = raw.indexOf(10, at);
+      const [, type, size] = raw.subarray(at, nl).toString("latin1").split(" ");
+      if (type !== "blob" || size === undefined) throw new PlanRefused("git cat-file failed");
+      const start = nl + 1;
+      out.set(sha, raw.subarray(start, start + Number(size)));
+      at = start + Number(size) + 1;
+    }
+  }
+  return out;
 }
 
 export interface PlanReport {
   refs: number;
+  /** Commits whose trees were read: every commit reachable from the rewritten refs. */
+  commits: number;
   dropPaths: number;
   jsonFilesBlanked: number;
   jsonKeysBlanked: number;
@@ -84,25 +170,11 @@ export function buildGitPlan(
     .filter((t) => t !== "")
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   if (tags.length === 0) throw new PlanRefused("the repository has no v* tags");
-  const refs = ["refs/heads/main", ...tags.map((t) => `refs/tags/${t}`)];
-
-  const allPaths = new Set<string>();
-  const jsonBlobs = new Map<string, Set<string>>(); // path -> distinct blob shas
-  for (const ref of refs) {
-    for (const e of lsTree(repo, ref)) {
-      allPaths.add(e.path);
-      // Inline JSON only: an annex pointer is a few dozen bytes of `/annex/objects/...`, not JSON.
-      if (
-        e.path.toLowerCase().endsWith(".json") &&
-        e.size <= MAX_JSON_BYTES &&
-        e.mode === "100644"
-      ) {
-        const set = jsonBlobs.get(e.path) ?? new Set<string>();
-        set.add(e.sha);
-        jsonBlobs.set(e.path, set);
-      }
-    }
-  }
+  const refs = git(repo, ["for-each-ref", "--format=%(refname)"])
+    .split("\n")
+    .filter((r) => r !== "" && isRewriteRef(r));
+  if (!refs.includes("refs/heads/main")) throw new PlanRefused("the repository has no main branch");
+  const { commits, paths: allPaths, jsonBlobs } = readHistory(repo, refs);
 
   // Images and documents under sourcedata/ are dropped; elsewhere they are left for a person.
   const dropped: string[] = [];
@@ -112,14 +184,22 @@ export function buildGitPlan(
   }
 
   // Identifier-keyed values in inline JSON, by canonical spelling, over every distinct blob.
+  const contents = readSmallBlobs(
+    repo,
+    [...new Set([...jsonBlobs.values()].flatMap((shas) => [...shas]))],
+    MAX_JSON_BYTES,
+  );
   const blankJsonKeys: Record<string, string[]> = {};
   let keysBlanked = 0;
   for (const [path, shas] of [...jsonBlobs.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const keys = new Set<string>();
     for (const sha of shas) {
+      const bytes = contents.get(sha);
+      if (!bytes) continue;
       let doc: unknown;
       try {
-        doc = JSON.parse(git(repo, ["cat-file", "blob", sha]));
+        const text = bytes.toString("utf8");
+        doc = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
       } catch {
         continue;
       }
@@ -173,6 +253,7 @@ export function buildGitPlan(
     plan,
     report: {
       refs: refs.length,
+      commits,
       dropPaths: dropped.length,
       jsonFilesBlanked: Object.keys(blankJsonKeys).length,
       jsonKeysBlanked: keysBlanked,
