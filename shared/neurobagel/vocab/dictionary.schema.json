@@ -1,0 +1,347 @@
+{
+  "$defs": {
+    "CategoricalColumn": {
+      "description": "A BIDS column annotation for a categorical column",
+      "properties": {
+        "Annotations": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CategoricalNeurobagel"
+            },
+            {
+              "$ref": "#/$defs/ContinuousNeurobagel"
+            },
+            {
+              "$ref": "#/$defs/IdentifierNeurobagel"
+            },
+            {
+              "$ref": "#/$defs/CollectionNeurobagel"
+            }
+          ],
+          "default": null,
+          "description": "Semantic annotations",
+          "title": "Annotations"
+        },
+        "Description": {
+          "description": "Free-form natural language description",
+          "title": "Description",
+          "type": "string"
+        },
+        "Levels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "For categorical variables: An object of possible values (keys) and their descriptions (values). ",
+          "title": "Levels",
+          "type": "object"
+        }
+      },
+      "required": [
+        "Description",
+        "Levels"
+      ],
+      "title": "CategoricalColumn",
+      "type": "object"
+    },
+    "CategoricalNeurobagel": {
+      "additionalProperties": false,
+      "description": "A Neurobagel annotation for a categorical column",
+      "properties": {
+        "IsAbout": {
+          "$ref": "#/$defs/Term",
+          "description": "The concept or controlled term that describes this column"
+        },
+        "Levels": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Term"
+          },
+          "description": "For categorical variables: An object of values (keys) in the column and the semantic term (URI and label) they are unambiguously mapped to.",
+          "title": "Levels",
+          "type": "object"
+        },
+        "MissingValues": {
+          "default": [],
+          "description": "A list of unique values that represent invalid responses, typos, or missing data",
+          "items": {
+            "type": "string"
+          },
+          "title": "Missingvalues",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "VariableType": {
+          "const": "Categorical",
+          "title": "Variabletype",
+          "type": "string"
+        }
+      },
+      "required": [
+        "IsAbout",
+        "Levels",
+        "VariableType"
+      ],
+      "title": "CategoricalNeurobagel",
+      "type": "object"
+    },
+    "CollectionNeurobagel": {
+      "additionalProperties": false,
+      "description": "A Neurobagel annotation for a column that is part of a grouped collection of columns,\nsuch as items from an instrument.",
+      "properties": {
+        "IsAbout": {
+          "$ref": "#/$defs/Term",
+          "description": "The concept or controlled term that describes this column"
+        },
+        "IsPartOf": {
+          "$ref": "#/$defs/Term",
+          "description": "If the column is a subscale or item of an assessment tool then the assessment tool should be specified here."
+        },
+        "MissingValues": {
+          "default": [],
+          "description": "A list of unique values that represent invalid responses, typos, or missing data",
+          "items": {
+            "type": "string"
+          },
+          "title": "Missingvalues",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "VariableType": {
+          "const": "Collection",
+          "title": "Variabletype",
+          "type": "string"
+        }
+      },
+      "required": [
+        "IsAbout",
+        "IsPartOf",
+        "VariableType"
+      ],
+      "title": "CollectionNeurobagel",
+      "type": "object"
+    },
+    "Column": {
+      "description": "The base model for a BIDS column description",
+      "properties": {
+        "Annotations": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CategoricalNeurobagel"
+            },
+            {
+              "$ref": "#/$defs/ContinuousNeurobagel"
+            },
+            {
+              "$ref": "#/$defs/IdentifierNeurobagel"
+            },
+            {
+              "$ref": "#/$defs/CollectionNeurobagel"
+            }
+          ],
+          "default": null,
+          "description": "Semantic annotations",
+          "title": "Annotations"
+        },
+        "Description": {
+          "description": "Free-form natural language description",
+          "title": "Description",
+          "type": "string"
+        }
+      },
+      "required": [
+        "Description"
+      ],
+      "title": "Column",
+      "type": "object"
+    },
+    "ContinuousColumn": {
+      "description": "A BIDS column annotation for a continuous column",
+      "properties": {
+        "Annotations": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CategoricalNeurobagel"
+            },
+            {
+              "$ref": "#/$defs/ContinuousNeurobagel"
+            },
+            {
+              "$ref": "#/$defs/IdentifierNeurobagel"
+            },
+            {
+              "$ref": "#/$defs/CollectionNeurobagel"
+            }
+          ],
+          "default": null,
+          "description": "Semantic annotations",
+          "title": "Annotations"
+        },
+        "Description": {
+          "description": "Free-form natural language description",
+          "title": "Description",
+          "type": "string"
+        },
+        "Units": {
+          "description": "Measurement units for the values in this column. SI units in CMIXF formatting are RECOMMENDED (see Units)",
+          "title": "Units",
+          "type": "string"
+        }
+      },
+      "required": [
+        "Description",
+        "Units"
+      ],
+      "title": "ContinuousColumn",
+      "type": "object"
+    },
+    "ContinuousNeurobagel": {
+      "additionalProperties": false,
+      "description": "A Neurobagel annotation for a continuous column",
+      "oneOf": [
+        {
+          "not": {
+            "required": [
+              "Format"
+            ]
+          },
+          "required": [
+            "Transformation"
+          ]
+        },
+        {
+          "not": {
+            "required": [
+              "Transformation"
+            ]
+          },
+          "required": [
+            "Format"
+          ]
+        }
+      ],
+      "properties": {
+        "Format": {
+          "$ref": "#/$defs/Term",
+          "description": "For continuous columns this field is used to describe the format of the raw numerical values in the column. This information is used to transform the column values into the desired format of the standardized data element referenced in the IsAbout attribute."
+        },
+        "IsAbout": {
+          "$ref": "#/$defs/Term",
+          "description": "The concept or controlled term that describes this column"
+        },
+        "MissingValues": {
+          "default": [],
+          "description": "A list of unique values that represent invalid responses, typos, or missing data",
+          "items": {
+            "type": "string"
+          },
+          "title": "Missingvalues",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "Transformation": {
+          "$ref": "#/$defs/Term",
+          "description": "For continuous columns this field is used to describe the format of the raw numerical values in the column. This information is used to transform the column values into the desired format of the standardized data element referenced in the IsAbout attribute."
+        },
+        "ValueRange": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ValueRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "An optional range of valid values for this continuous column."
+        },
+        "VariableType": {
+          "const": "Continuous",
+          "title": "Variabletype",
+          "type": "string"
+        }
+      },
+      "required": [
+        "IsAbout",
+        "VariableType"
+      ],
+      "title": "ContinuousNeurobagel",
+      "type": "object"
+    },
+    "IdentifierNeurobagel": {
+      "additionalProperties": false,
+      "description": "A Neurobagel annotation for an identifier column",
+      "properties": {
+        "IsAbout": {
+          "$ref": "#/$defs/Term",
+          "description": "The concept or controlled term that describes this column"
+        },
+        "VariableType": {
+          "const": "Identifier",
+          "title": "Variabletype",
+          "type": "string"
+        }
+      },
+      "required": [
+        "IsAbout",
+        "VariableType"
+      ],
+      "title": "IdentifierNeurobagel",
+      "type": "object"
+    },
+    "Term": {
+      "description": "An identifier of a controlled term with an IRI",
+      "properties": {
+        "Label": {
+          "description": "A human readable label. If more than one label exists for the term, then the preferred label should be used.",
+          "title": "Label",
+          "type": "string"
+        },
+        "TermURL": {
+          "description": "An unambiguous identifier for the term, concept or entity that is referenced",
+          "title": "Termurl",
+          "type": "string"
+        }
+      },
+      "required": [
+        "TermURL",
+        "Label"
+      ],
+      "title": "Term",
+      "type": "object"
+    },
+    "ValueRange": {
+      "description": "A range of values for a continuous column, expressed as strings to preserve original formatting.",
+      "properties": {
+        "Max": {
+          "title": "Max",
+          "type": "number"
+        },
+        "Min": {
+          "title": "Min",
+          "type": "number"
+        }
+      },
+      "required": [
+        "Min",
+        "Max"
+      ],
+      "title": "ValueRange",
+      "type": "object"
+    }
+  },
+  "additionalProperties": {
+    "anyOf": [
+      {
+        "$ref": "#/$defs/Column"
+      },
+      {
+        "$ref": "#/$defs/ContinuousColumn"
+      },
+      {
+        "$ref": "#/$defs/CategoricalColumn"
+      }
+    ]
+  },
+  "description": "A data dictionary with human and machine readable information for a tabular data file",
+  "title": "DataDictionary",
+  "type": "object"
+}

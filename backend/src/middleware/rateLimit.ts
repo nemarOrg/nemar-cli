@@ -161,6 +161,19 @@ const DATA_MAX_REQUESTS = 100_000;
 // path-mount forms. Deliberately anchored with `(\/|$)` so it does NOT match
 // the management API at `/datasets/*` (that keeps the standard ip/token cap).
 const DATA_PATH_RE = /^\/(nemar\/)?data(\/|$)/;
+// The Neurobagel artifact store's read route (epic #1586 phase 4, ADR 0084). Its own
+// IP-keyed bucket, matched BEFORE the bearer branch, for two reasons the generic
+// branches get wrong. The route's token is one shared deployment secret that no
+// middleware validates until the handler runs, so a bearer-keyed bucket would let a
+// caller mint a fresh 1,000/min bucket per request by rotating a made-up bearer AND
+// make every novel one cost a D1 lookup (the hole `anonymousSurface` below documents
+// for /mcp). And the one legitimate client, the node's loader, fetches an index and
+// then up to three files per dataset in one run: about 2,400 requests for 800
+// datasets, which the 500/min anonymous floor would refuse halfway through a first
+// load. The loader is sequential and fetches at most a few requests a second, so
+// 1,200/min is above any rate it sustains and still bounds a runaway caller.
+const NEUROBAGEL_PATH_RE = /^\/neurobagel(\/|$)/;
+const NEUROBAGEL_MAX_REQUESTS = 1200;
 // The zarr serving gateway (#901), the highest-request-volume data-plane path,
 // which bypassed the middleware stack and went unthrottled. Two reachable path
 // shapes, because Hono's `app.route("/zarrproxy", zarrDataRoutes)` PREPENDS the
@@ -352,6 +365,9 @@ export function __readBearerTokenFromHeader(authHeader: string | undefined): str
  *    additionally charged against its own, much smaller `data-miss-ip`
  *    budget (10,000/60s, `checkDataMissBudget`/`DATA_MISS_MAX_REQUESTS`
  *    below) -- this bucket alone does not bound the expensive path.
+ *  - `neurobagel-ip` for the Neurobagel artifact store's read route
+ *    (`/neurobagel/*`). 1,200/60s, IP-keyed, checked before the bearer branch for
+ *    the reasons at NEUROBAGEL_PATH_RE.
  *  - `ip` for everything else (the unauthenticated cap).
  *
  * Admin endpoints used to be entirely exempt; that gave an admin
@@ -360,7 +376,7 @@ export function __readBearerTokenFromHeader(authHeader: string | undefined): str
  * floor without the floor being absent.
  */
 export interface __BucketSelection {
-  keyKind: "auth-ip" | "ip" | "token" | "data-ip";
+  keyKind: "auth-ip" | "ip" | "token" | "data-ip" | "neurobagel-ip";
   /** Pre-hash key material: the IP, or the raw bearer token. */
   rawKey: string;
   maxRequests: number;
@@ -406,6 +422,11 @@ export function __selectBucket(
   // a public file should not be charged against the tighter token bucket.
   if (DATA_PATH_RE.test(path) || ZARR_PATH_RE.test(path)) {
     return { keyKind: "data-ip", rawKey: ip, maxRequests: DATA_MAX_REQUESTS };
+  }
+  // The artifact store's read route: IP-keyed whatever bearer it carries, so a made-up
+  // bearer neither mints a bucket nor reaches the privileged-token lookup.
+  if (NEUROBAGEL_PATH_RE.test(path)) {
+    return { keyKind: "neurobagel-ip", rawKey: ip, maxRequests: NEUROBAGEL_MAX_REQUESTS };
   }
   const bearer = __readBearerTokenFromHeader(authHeader);
   if (bearer) {
@@ -961,6 +982,7 @@ export const __limits = {
   MAX_REQUESTS,
   DATA_MAX_REQUESTS,
   DATA_MISS_MAX_REQUESTS,
+  NEUROBAGEL_MAX_REQUESTS,
   PRIVATE_GRANT_MAX_REQUESTS,
   WINDOW_SIZE,
 };

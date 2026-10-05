@@ -36,6 +36,13 @@ import {
   isAccountKind,
 } from "../../shared/contract/index.js";
 import {
+  NEUROBAGEL_CHECKS,
+  NEUROBAGEL_REGENERATE_MAX,
+  neurobagelVerdictExitCode,
+  neurobagelVerificationState,
+} from "../../shared/contract/neurobagel-admin.js";
+import { weeklyAttention } from "../../shared/contract/weekly-attention.js";
+import {
   PUBLICATION_STEPS,
   PUBLICATION_STEP_LABELS,
   stepsForRelease,
@@ -56,6 +63,10 @@ import {
   type HedSweepBatchResponse,
   type ImportCoverageResponse,
   type ImportIssueTriageResponse,
+  type NeurobagelRunResult,
+  type NeurobagelStatus,
+  type NeurobagelVerification,
+  type NeurobagelVerifyResult,
   type RecordingStatsSweepBatchResponse,
   type ReindexBulkOptions,
   type ReindexBulkResponse,
@@ -98,6 +109,7 @@ import {
   getEmailPreferences,
   getFleetDrift,
   getImportStatus,
+  getNeurobagelStatus,
   getSummaryCoverage,
   getUserDuplicates,
   hedSweep,
@@ -107,6 +119,8 @@ import {
   importWeeklySummary,
   listKeysFor,
   listUsers,
+  neurobagelRegenerate,
+  neurobagelVerify,
   publishDataset,
   publishZarrCatalog,
   recordingStatsSweep,
@@ -8808,21 +8822,13 @@ const importWeeklyCommand = new Command("import-weekly").description(
 /**
  * Does this week need a person to look?
  *
- * Mirrors `weeklyHeadline` in backend/src/services/import-weekly-summary.ts. The CLI
- * cannot import it, so the rule is restated -- and because a restated rule drifts,
- * the exit-code tests assert each branch rather than only the aggregate.
+ * ONE rule, `weeklyAttention` in shared/contract/weekly-attention.ts, which the report's own
+ * headline (backend/src/services/import-weekly-summary.ts) also calls. It used to be restated
+ * here by hand, and the Neurobagel reasons were added to the headline and not to this exit
+ * code: the issue flagged a week and the command exited 0 for it.
  */
 function weeklyNeedsAttention(f: NonNullable<WeeklySummaryResponse["facts"]>): boolean {
-  return (
-    f.coverageStatus === "alarm" ||
-    f.coverageStatus === "unknown" ||
-    f.autoImportEnabled === false ||
-    f.dispatchLost === true ||
-    // An absence of sweep rows is itself unknown: the crons record every run, so no
-    // rows means they did not run.
-    f.issuesClosed === null ||
-    f.errors.length > 0
-  );
+  return weeklyAttention(f).attention;
 }
 
 function weeklyCount(n: number | null | undefined): string {
@@ -8933,6 +8939,12 @@ importWeeklyCommand
     }
     for (const e of f.errors) {
       console.log(`${chalk.yellow("UNKNOWN".padEnd(10))} ${e.stage}: ${e.error}`);
+    }
+    // Why the exit code is not 0, in the words of the report's own headline (one rule, shared),
+    // so a week flagged for a reason this command does not otherwise print is not a bare number.
+    const attention = weeklyAttention(f);
+    if (attention.attention) {
+      console.log(chalk.yellow(`Needs attention: ${attention.problems.join("; ")}.`));
     }
 
     console.log();
@@ -9248,3 +9260,359 @@ duplicatesCommand
   });
 
 adminCommand.addCommand(duplicatesCommand);
+
+// ============================================================================
+// Neurobagel federation artifacts (epic #1586 phase 4, ADR 0084)
+//
+// `regenerate` is a DRY RUN unless --execute is given, and the server refuses
+// --execute unless the writer is enabled (NEUROBAGEL_WRITER_ENABLED=1). `status`
+// is a read: what is eligible, written, stale, and waiting on a person. A null
+// count in either means "unknown", and is printed as unknown, never as zero.
+// ============================================================================
+
+const neurobagelCommand = new Command("neurobagel").description(
+  "Neurobagel federation artifacts: regenerate and inspect the private store (epic #1586)",
+);
+
+const neurobagelNum = (n: number | null): string =>
+  n === null ? chalk.yellow("unknown") : String(n);
+
+const neurobagelVerdict = (v: NeurobagelVerification["overall"]): string =>
+  v === "healthy"
+    ? chalk.green(v)
+    : v === "alarm"
+      ? chalk.red(v)
+      : v === "unknown"
+        ? chalk.yellow(v)
+        : chalk.dim(v);
+
+/**
+ * The verification sweep's verdicts, one line each. `unchecked` (not configured here) and
+ * `unknown` (could not be answered) are printed as themselves: neither is healthy.
+ */
+function printNeurobagelVerification(v: NeurobagelVerification): void {
+  console.log(
+    `${chalk.bold("Verification")}  ${neurobagelVerdict(v.overall)}  ${v.at} (${v.trigger})${v.failed ? chalk.red(`  the sweep itself failed: ${v.error ?? "no reason recorded"}`) : ""}`,
+  );
+  for (const name of NEUROBAGEL_CHECKS) {
+    const c = v.checks[name];
+    console.log(`  ${name.padEnd(13)}${neurobagelVerdict(c.verdict)}  ${c.reason}`);
+  }
+  for (const w of v.warnings) console.log(chalk.yellow(`  warning: ${w}`));
+}
+
+function printNeurobagelRun(res: NeurobagelRunResult): void {
+  console.log();
+  if (res.dry_run) {
+    console.log(chalk.yellow("DRY RUN: nothing was written. Re-run with --execute to write."));
+  }
+  if (res.status !== "ok") {
+    const why =
+      res.status === "disabled"
+        ? "the writer is disabled (NEUROBAGEL_WRITER_ENABLED is not 1)"
+        : res.status === "store_unconfigured"
+          ? "no NEUROBAGEL bucket is bound"
+          : (res.error ?? "the run failed");
+    console.log(chalk.red(`status=${res.status}: ${why}`));
+  }
+  console.log(
+    chalk.cyan(
+      `eligible=${neurobagelNum(res.eligible)} examined=${res.examined} limit=${res.limit} unexamined=${res.unexamined} removed=${res.removed.length} removals_pending=${res.removals_pending} index_entries=${neurobagelNum(res.index.entries)} index_written=${res.index.written} index_patched=${res.index.patched ?? 0} anonymity_findings=${res.anonymity_findings} ops=${res.ops.spent}/${res.ops.budget}`,
+    ),
+  );
+  for (const r of res.results) {
+    switch (r.outcome) {
+      case "written":
+        console.log(
+          `  ${chalk.green("written    ")} ${r.id}${r.flags.length > 0 ? `  needs review: ${r.flags.join(", ")}` : ""}`,
+        );
+        break;
+      case "would_write":
+        console.log(`  ${chalk.cyan("would write")} ${r.id}  (${r.reason})`);
+        break;
+      case "unchanged":
+        console.log(`  ${chalk.dim("unchanged  ")} ${r.id}`);
+        break;
+      case "would_remove":
+        console.log(`  ${chalk.cyan("would remove")} ${r.id}`);
+        break;
+      case "removed":
+        console.log(`  ${chalk.green("removed    ")} ${r.id}`);
+        break;
+      case "refused":
+        // A refusal is a decision not to publish; its code says why. An anonymity-class
+        // one prints no detail by design.
+        console.log(
+          `  ${chalk.red("refused    ")} ${r.id}  ${r.code}${r.detail ? `: ${r.detail}` : ""}`,
+        );
+        break;
+      case "error":
+        console.log(`  ${chalk.red("error      ")} ${r.id}  ${r.error}`);
+        break;
+    }
+  }
+  if (res.stopped === "ops_budget") {
+    console.log(
+      chalk.yellow(
+        `  the run spent its operation budget (${res.ops.spent} of ${res.ops.budget}, ${res.ops.reserved} of it held back to finish) with ${res.unexamined} dataset(s) not yet examined: run the same command again to continue`,
+      ),
+    );
+  } else if (res.unexamined > 0 && res.stopped === null) {
+    console.log(
+      chalk.yellow(
+        `  ${res.unexamined} dataset(s) are still waiting beyond this call's limit: run the same command again to continue`,
+      ),
+    );
+  }
+  if (res.index.contended) {
+    console.log(
+      chalk.red("  the index was replaced by another run during this one; re-run to settle it"),
+    );
+  }
+  for (const problem of res.index.problems ?? []) {
+    console.log(chalk.red(`  index not written: ${problem}`));
+  }
+  for (const w of res.warnings) console.log(chalk.yellow(`  warning: ${w}`));
+  if (res.anonymity_findings > 0) {
+    console.log(
+      chalk.red(
+        `  ${res.anonymity_findings} dataset(s) were refused because their data says anonymous. They are in the audit log (neurobagel_anonymity_finding); nothing was filed or mailed.`,
+      ),
+    );
+  }
+}
+
+neurobagelCommand
+  .command("regenerate")
+  .description(
+    "Examine datasets and write what changed to the Neurobagel artifact store (dry run unless --execute)",
+  )
+  .option("--execute", "Write to the store (without it, only report what would change)")
+  .option("--dataset <ids...>", "Examine exactly these dataset ids instead of the next ones due")
+  .option(
+    "--limit <n>",
+    `Datasets to examine (default: the server's per-tick bound, at most ${NEUROBAGEL_REGENERATE_MAX}); run again to continue`,
+  )
+  .option("--force", "Rewrite even when the fingerprint matches")
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(
+    async (options: {
+      execute?: boolean;
+      dataset?: string[];
+      limit?: string;
+      force?: boolean;
+      json?: boolean;
+    }) => {
+      if (!requireAuth()) return;
+
+      // A whole positive number, exactly: parseInt would read "1.5" as 1 and "5x" as 5.
+      const limit =
+        options.limit === undefined
+          ? undefined
+          : /^[1-9][0-9]*$/.test(options.limit)
+            ? Number(options.limit)
+            : Number.NaN;
+      if (limit !== undefined && !Number.isInteger(limit)) {
+        console.error(chalk.red("--limit must be a positive whole number"));
+        process.exit(1);
+        return;
+      }
+      // Refused here, before any request: the server holds the same ceiling, and a call
+      // that asks for more would only be told so after the round trip.
+      if (limit !== undefined && limit > NEUROBAGEL_REGENERATE_MAX) {
+        console.error(
+          chalk.red(
+            `--limit is at most ${NEUROBAGEL_REGENERATE_MAX} per call (each call runs inside one request); run the command again to continue`,
+          ),
+        );
+        process.exit(1);
+        return;
+      }
+      const execute = options.execute === true;
+      const spinner = ora(
+        execute ? "Regenerating Neurobagel artifacts..." : "Checking what would change...",
+      ).start();
+
+      let res: NeurobagelRunResult;
+      try {
+        res = await neurobagelRegenerate({
+          ...(execute ? { execute: true } : {}),
+          ...(options.dataset && options.dataset.length > 0 ? { datasets: options.dataset } : {}),
+          ...(limit !== undefined ? { limit } : {}),
+          ...(options.force ? { force: true } : {}),
+        });
+        spinner.stop();
+      } catch (err) {
+        handleCommandError(err, spinner, "Neurobagel regenerate failed", {
+          409: "Set NEUROBAGEL_WRITER_ENABLED=1 (and bind the bucket) to write. A dry run needs neither the switch nor --execute.",
+        });
+        process.exit(1);
+        return;
+      }
+
+      if (options.json) console.log(JSON.stringify(res, null, 2));
+      else printNeurobagelRun(res);
+
+      // Non-zero means the RUN was partial or uncertain, or that something needs a
+      // person NOW: an error, a failed or contended index, or an anonymity-class finding.
+      const errors = res.results.some((r) => r.outcome === "error");
+      if (
+        res.status !== "ok" ||
+        errors ||
+        res.index.contended ||
+        res.stopped === "index_patch" ||
+        (res.index.problems?.length ?? 0) > 0 ||
+        res.anonymity_findings > 0
+      ) {
+        process.exitCode = 1;
+      }
+    },
+  );
+
+neurobagelCommand
+  .command("status")
+  .description(
+    "What is eligible, written, stale and waiting on a person in the Neurobagel store, and the latest verification (exit 0 healthy, 1 alarm, 2 unknown)",
+  )
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(async (options: { json?: boolean }) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora("Reading the Neurobagel store...").start();
+    let s: NeurobagelStatus;
+    try {
+      s = await getNeurobagelStatus();
+      spinner.stop();
+    } catch (err) {
+      handleCommandError(err, spinner, "Neurobagel status failed");
+      process.exit(1);
+      return;
+    }
+
+    if (options.json) {
+      console.log(JSON.stringify(s, null, 2));
+      return;
+    }
+
+    const mode =
+      s.writer.mode === "enabled"
+        ? chalk.green("enabled")
+        : s.writer.mode === "disabled"
+          ? chalk.yellow("disabled (NEUROBAGEL_WRITER_ENABLED is not 1)")
+          : chalk.red("store_unconfigured (no NEUROBAGEL bucket is bound)");
+    console.log();
+    console.log(`${chalk.bold("Writer")}        ${mode}`);
+    console.log(
+      `${chalk.bold("Read route")}    ${s.read_route.token_configured ? chalk.green("token configured") : chalk.yellow("no NEUROBAGEL_READ_TOKEN: the route answers 404")}`,
+    );
+    console.log(
+      `${chalk.bold("Per tick")}      ${s.limits.reconcile_max} datasets (hard limit ${s.limits.hard_max})`,
+    );
+    console.log();
+    const c = s.counts;
+    console.log(
+      `${chalk.bold("Datasets")}      eligible=${neurobagelNum(c.eligible)} written=${neurobagelNum(c.written)} missing=${neurobagelNum(c.missing)} stale=${neurobagelNum(c.stale)} incomplete=${neurobagelNum(c.incomplete)} waiting to be removed=${neurobagelNum(c.residue)}`,
+    );
+    console.log(
+      `${chalk.bold("Store")}         objects=${neurobagelNum(s.store.objects)} bytes=${neurobagelNum(s.store.total_bytes)}${s.store.over_loader_cap ? chalk.red("  OVER the loader's total cap") : ""}${(s.store.unexpected_objects ?? 0) > 0 ? chalk.yellow(`  ${s.store.unexpected_objects} object(s) that are not the writer's`) : ""}`,
+    );
+    const matches =
+      s.index.matches_store === null
+        ? chalk.yellow("unknown")
+        : s.index.matches_store
+          ? chalk.green("matches the store")
+          : chalk.yellow(
+              "differs from what the store and eligibility imply (the next run settles it)",
+            );
+    console.log(
+      `${chalk.bold("Index")}         ${s.index.present === null ? chalk.yellow("unknown") : s.index.present ? `${neurobagelNum(s.index.entries)} entries, generated ${s.index.generated_at ?? "?"}` : chalk.dim("not written yet")}  ${matches}`,
+    );
+    const lr = s.last_reconcile;
+    console.log(
+      `${chalk.bold("Last reconcile")} ${lr ? `${lr.at} (${JSON.stringify(lr.summary)})` : chalk.dim("none recorded")}`,
+    );
+    console.log(
+      `${chalk.bold("Anonymity")}     ${s.anonymity_findings === null ? chalk.yellow("unknown") : s.anonymity_findings === 0 ? "no findings" : chalk.red(`${s.anonymity_findings} finding(s): see the audit log (neurobagel_anonymity_finding); ids are not shown here`)}`,
+    );
+    // One rule, shared with its tests: a record older than 36 hours, or none while the writer is
+    // on, is unknown. While the writer is off none is expected, and the command stays quiet.
+    const verification = neurobagelVerificationState({
+      verification: s.verification,
+      writerMode: s.writer.mode,
+      now: new Date(),
+    });
+    if (s.verification) printNeurobagelVerification(s.verification);
+    if (verification.note) {
+      console.log(
+        `${chalk.bold("Verification")}  ${neurobagelVerdict(verification.verdict)}  ${verification.note}`,
+      );
+    } else if (!s.verification) {
+      console.log(
+        `${chalk.bold("Verification")}  ${chalk.dim("none recorded; the writer is off, so none is expected")}`,
+      );
+    }
+    if (s.needs_review.length > 0) {
+      console.log();
+      console.log(chalk.bold(`Needs review (${s.needs_review.length})`));
+      for (const n of s.needs_review) {
+        console.log(
+          `  ${n.id}  ${n.source === "refusal" ? chalk.red(`refused: ${n.code}${n.since ? ` (last confirmed ${n.since})` : ""}`) : chalk.yellow((n.flags ?? []).join(", "))}`,
+        );
+      }
+    }
+    for (const w of s.warnings) console.log(chalk.yellow(`warning: ${w}`));
+
+    // The family's exit codes, the same as `verify`: 0 healthy (or nothing to check), 1 an alarm
+    // (a writer on with no bucket, a finding, an unreadable catalog, an alarming verification),
+    // 2 could not be determined (no record while the writer is on, a stale record, an unknown).
+    const alarming =
+      s.writer.mode === "store_unconfigured" ||
+      (s.anonymity_findings ?? 0) > 0 ||
+      s.counts.eligible === null ||
+      verification.verdict === "alarm";
+    process.exitCode = alarming ? 1 : neurobagelVerdictExitCode(verification.verdict);
+  })
+  .addHelpText(
+    "after",
+    "\nExit codes: 0 healthy or nothing to check, 1 an alarm, 2 could not be determined (no verification recorded while the writer is on, a record over 36 hours old, or an unknown verdict). The same as `verify`.",
+  );
+
+neurobagelCommand
+  .command("verify")
+  .description(
+    "Run the verification sweep now: the store against eligibility, the node, registration and upstream drift (reports only; exit 0 healthy, 1 alarm, 2 unknown)",
+  )
+  .option("--json", "Output raw JSON instead of the human summary")
+  .action(async (options: { json?: boolean }) => {
+    if (!requireAuth()) return;
+
+    const spinner = ora("Verifying the Neurobagel federation...").start();
+    let res: NeurobagelVerifyResult;
+    try {
+      res = await neurobagelVerify();
+      spinner.stop();
+    } catch (err) {
+      handleCommandError(err, spinner, "Neurobagel verify failed");
+      process.exit(1);
+      return;
+    }
+
+    if (options.json) console.log(JSON.stringify(res, null, 2));
+    else {
+      console.log();
+      printNeurobagelVerification(res);
+      if (!res.heartbeat_written) {
+        console.log(chalk.yellow("The heartbeat could not be written: this run is not recorded."));
+      }
+    }
+    // The family's exit codes (import-coverage, import-weekly), the same as `status`: 0 healthy or
+    // nothing to check, 1 an alarm, 2 could not be determined. An unchecked check never makes a
+    // run healthy, but it is not a failure either.
+    process.exitCode = neurobagelVerdictExitCode(res.overall);
+  })
+  .addHelpText(
+    "after",
+    "\nExit codes: 0 healthy or nothing to check, 1 an alarm, 2 could not be determined. The same as `status`.",
+  );
+
+adminCommand.addCommand(neurobagelCommand);

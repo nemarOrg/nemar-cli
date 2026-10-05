@@ -1,0 +1,30 @@
+{
+  "AccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on003568 (latest version v1.0.0).",
+  "AccessLink": "https://nemar.org/dataset/on003568",
+  "AccessType": "public",
+  "Authors": [
+    "Lucrezia Liuzzi",
+    "Katharine Chang",
+    "Hanna Keren",
+    "Charles Zheng",
+    "Dipta Saha",
+    "Dylan Nielson",
+    "Argyris Stringaris"
+  ],
+  "Keywords": [
+    "Magnetoencephalography",
+    "Adolescent",
+    "Depressive Disorder, Major",
+    "Reward",
+    "mood induction",
+    "MEG",
+    "resting state"
+  ],
+  "Name": "Mood induction in MDD and healthy adolescents",
+  "ParticipantCount": 51,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/on003568",
+    "https://doi.org/10.82901/nemar.on003568"
+  ],
+  "RepositoryURL": "https://data.nemar.org/on003568/"
+}

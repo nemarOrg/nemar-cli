@@ -16,9 +16,10 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { NEUROBAGEL_STORE_CHECK } from "../src/services/anonymity-sweep";
 import type { GitHubIssue } from "../src/services/github/issues";
 import type { ImportCoverageSweepResult } from "../src/services/import-coverage-sweep";
 import {
@@ -33,8 +34,16 @@ import {
   runWeeklyImportSummaryCron,
   weeklySummaryCronLine,
 } from "../src/services/import-weekly-summary-sweep";
+import { readLedger, recordLedgerState } from "../src/services/neurobagel-plan";
+import { neurobagelStatus } from "../src/services/neurobagel-status";
+import { runNeurobagelVerificationSweep } from "../src/services/neurobagel-verify";
 import type { Bindings } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
+import {
+  RECORDED,
+  type UpstreamStandin,
+  startUpstreamStandin,
+} from "./helpers/neurobagel-upstream";
 
 const WEEK_MS = 7 * 86_400_000;
 
@@ -1052,5 +1061,321 @@ describe("the default coverage collaborator is the read-only sweep", () => {
     expect(src).not.toContain("deps.coverage ?? runImportCoverageSweepCron");
     // And the call site must ask for a read.
     expect(src).toContain("coverage(env, { apply: false })");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The Neurobagel section (epic #1586, phase 6)
+// ---------------------------------------------------------------------------
+
+describe("the Neurobagel section of the weekly report", () => {
+  /**
+   * The rows are REAL heartbeats, written by the real sweep against a real local stand-in for
+   * upstream's public API, and then dated inside the report's window (the database stamps
+   * `now`, the report's window ends at the injected Monday). This environment has no bucket and
+   * a writer that is off, so the store, node and registration checks are `unchecked` in them.
+   */
+  let upstream: UpstreamStandin;
+  beforeAll(() => {
+    upstream = startUpstreamStandin();
+  });
+  afterAll(() => upstream.stop());
+  const moved = () => {
+    upstream.answers = {
+      ...upstream.answers,
+      "/repos/neurobagel/api/releases/latest": { tag_name: "v0.99.0" },
+    };
+  };
+  const unmoved = () => {
+    upstream.answers = { ...RECORDED };
+  };
+
+  /** Run the sweep once and move its heartbeat `daysAgo` before the report's `NOW`. */
+  async function heartbeat(
+    db: Database,
+    daysAgo: number,
+    trigger: "cron" | "admin" = "cron",
+  ): Promise<void> {
+    await runNeurobagelVerificationSweep(envFor(db), { trigger, timeoutMs: 3000 });
+    db.query(
+      "UPDATE audit_log SET timestamp = ? WHERE id = (SELECT MAX(id) FROM audit_log WHERE action = 'neurobagel_verification')",
+    ).run(sqliteUtc(new Date(NOW.getTime() - daysAgo * 86_400_000)));
+  }
+
+  /** `n` daily runs, on the `n` days before the report. */
+  async function dailyRuns(db: Database, n: number): Promise<void> {
+    for (let day = 1; day <= n; day++) await heartbeat(db, day);
+  }
+
+  async function report(db: Database) {
+    const r = await runWeeklyImportSummary(envFor(db), { force: true, now: NOW }, recordingDeps());
+    if (!r.facts) throw new Error("no facts");
+    return { facts: r.facts, body: r.renderedBody ?? "" };
+  }
+
+  test("no heartbeat in the window is unknown, not zero, and the headline asks for attention", async () => {
+    const db = freshDb();
+    unmoved();
+    const { facts, body } = await report(db);
+    expect(facts.neurobagel).toBeNull();
+    expect(body).toContain("## Neurobagel federation");
+    expect(body).toContain(
+      "No daily verification run was recorded in this window, which is unknown rather than zero",
+    );
+    expect(body).toContain("no Neurobagel verification run was recorded");
+    expect(body).not.toContain("Nothing needs attention");
+  });
+
+  test("the daily runs are counted by verdict, and by check, and an on-demand run is not the daily job", async () => {
+    const db = freshDb();
+    unmoved();
+    await heartbeat(db, 5);
+    moved();
+    await heartbeat(db, 3);
+    unmoved();
+    await heartbeat(db, 1);
+    // An admin's run an hour before the report: not evidence that the daily job ran.
+    moved();
+    await heartbeat(db, 0.04, "admin");
+    unmoved();
+
+    const { facts, body } = await report(db);
+    // Drift alone ran, so a healthy drift is "unchecked" overall, and the alarm day is an alarm.
+    expect(facts.neurobagel).toMatchObject({
+      runs: 3,
+      failedRuns: 0,
+      days: { healthy: 0, alarm: 1, unknown: 0, unchecked: 2 },
+      checkDays: {
+        store: { unchecked: 3 },
+        node: { unchecked: 3 },
+        registration: { unchecked: 3 },
+        drift: { healthy: 2, alarm: 1 },
+      },
+      latest: { overall: "unchecked" },
+    });
+    expect(body).toMatch(/Latest daily run \(.+\): \*\*UNCHECKED\*\*\./);
+    expect(body).toContain("| store | unchecked | The writer is off");
+    expect(body).toContain("| node | unchecked | NEUROBAGEL_NODE_URL is not set");
+    expect(body).toContain("| drift | healthy |");
+    expect(body).toContain(
+      "Daily runs in this window: 3 of 7 expected (healthy 0, alarm 1, unknown 0, unchecked 2; the sweep itself failed on 0).",
+    );
+    expect(body).toContain(
+      "Checks that did not run: store 3 day(s), node 3 day(s), registration 3 day(s).",
+    );
+    // The latest is not an alarm but a day alarmed, and only 3 of 7 daily runs exist: both asked for.
+    expect(body).toContain("Neurobagel verification alarmed on 1 day(s) this week");
+    expect(body).toContain("missing for 4 of 7 day(s)");
+  });
+
+  test("an alarming latest run is the headline, with the reason the sweep gave", async () => {
+    const db = freshDb();
+    moved();
+    await dailyRuns(db, 1);
+    unmoved();
+    const { body } = await report(db);
+    expect(body).toContain("**Needs attention:**");
+    expect(body).toContain("Neurobagel verification is alarming");
+    expect(body).toContain("node API v0.11.0 -> v0.99.0");
+  });
+
+  test("a run that failed outright is counted as failed and as unknown, not skipped", async () => {
+    const db = freshDb();
+    unmoved();
+    await heartbeat(db, 2);
+    const opts = {
+      trigger: "cron",
+      get timeoutMs(): number {
+        throw new Error("boom");
+      },
+    } as never;
+    const quiet = console.error;
+    console.error = () => {};
+    await runNeurobagelVerificationSweep(envFor(db), opts);
+    console.error = quiet;
+    db.query(
+      "UPDATE audit_log SET timestamp = ? WHERE id = (SELECT MAX(id) FROM audit_log WHERE action = 'neurobagel_verification')",
+    ).run(sqliteUtc(new Date(NOW.getTime() - 86_400_000)));
+    const { facts, body } = await report(db);
+    expect(facts.neurobagel).toMatchObject({
+      runs: 2,
+      failedRuns: 1,
+      days: { unchecked: 1, unknown: 1 },
+      latest: { overall: "unknown" },
+    });
+    expect(body).toContain("Neurobagel verification could not be determined");
+    expect(body).toContain("the Neurobagel sweep itself failed on 1 run(s)");
+  });
+
+  test("only the window counts: a run eight days old is not this week's", async () => {
+    const db = freshDb();
+    unmoved();
+    await heartbeat(db, 8);
+    const { facts } = await report(db);
+    expect(facts.neurobagel).toBeNull();
+  });
+
+  test("a heartbeat row that is not one is reported, and the rest are still counted", async () => {
+    const db = freshDb();
+    unmoved();
+    await heartbeat(db, 2);
+    db.query(
+      "INSERT INTO audit_log (action, resource_type, resource_id, details, timestamp) VALUES ('neurobagel_verification', 'neurobagel', 'cron', '{\"overall\":\"healthy\"}', ?)",
+    ).run(sqliteUtc(new Date(NOW.getTime() - 86_400_000)));
+    const { facts, body } = await report(db);
+    expect(facts.neurobagel?.runs).toBe(1);
+    expect(facts.errors.map((e) => e.error)).toContain(
+      "a verification heartbeat row could not be read",
+    );
+    expect(body).toContain("Parts of this report that failed");
+  });
+
+  test("a cron that stopped on day two is flagged: one missing daily run is tolerated, two are not", async () => {
+    unmoved();
+    for (const [runs, flagged] of [
+      [7, false],
+      [6, false],
+      [5, true],
+      [2, true],
+    ] as const) {
+      const db = freshDb();
+      await dailyRuns(db, runs);
+      const { body } = await report(db);
+      expect(body.includes("daily Neurobagel verification is missing for")).toBe(flagged);
+      expect(body).toContain(`Daily runs in this window: ${runs} of 7 expected`);
+    }
+  });
+
+  describe("findings are counted as findings, from every place, and never named", () => {
+    const row = (
+      db: Database,
+      action: string,
+      resourceId: string | null,
+      details: string,
+      daysAgo = 1,
+    ) =>
+      db
+        .query(
+          "INSERT INTO audit_log (action, resource_type, resource_id, details, timestamp) VALUES (?, 'dataset', ?, ?, ?)",
+        )
+        .run(
+          action,
+          resourceId,
+          details,
+          sqliteUtc(new Date(NOW.getTime() - daysAgo * 86_400_000)),
+        );
+    const storeFinding = JSON.stringify({
+      findings: [{ check: NEUROBAGEL_STORE_CHECK, severity: "invariant" }],
+    });
+    /** The writer's own ledger row, through the writer's own function. */
+    async function ledgerFinding(db: Database, id: string, daysAgo = 1): Promise<void> {
+      const d1 = realD1(db);
+      await recordLedgerState(d1, await readLedger(d1), id, { state: "anonymity" });
+      db.query(
+        "UPDATE audit_log SET timestamp = ? WHERE id = (SELECT MAX(id) FROM audit_log WHERE action = 'neurobagel_anonymity_finding')",
+      ).run(sqliteUtc(new Date(NOW.getTime() - daysAgo * 86_400_000)));
+    }
+
+    test("a dataset found on three daily runs is one finding, and a second dataset is a second", async () => {
+      const db = freshDb();
+      unmoved();
+      await dailyRuns(db, 1);
+      for (const daysAgo of [1, 2, 3])
+        row(db, "anonymity_findings", "nm099998", storeFinding, daysAgo);
+      row(db, "neurobagel_verify_anonymity_finding", "nm099997", JSON.stringify({ check: "x" }));
+      // A different check on the same dataset, and a finding from before the window.
+      row(
+        db,
+        "anonymity_findings",
+        "nm099998",
+        JSON.stringify({ findings: [{ check: "repo_public" }] }),
+      );
+      row(db, "anonymity_findings", "nm099995", storeFinding, 9);
+      const { facts, body } = await report(db);
+      expect(facts.neurobagelFindings).toBe(2);
+      expect(body).toContain("over the window and what stands: 2.");
+      expect(body).toContain("2 Neurobagel finding(s) need attention (see the audit log)");
+    });
+
+    test("the writer's standing finding is counted, as status counts it, from before the window too", async () => {
+      const db = freshDb();
+      unmoved();
+      await dailyRuns(db, 1);
+      await ledgerFinding(db, "nm099996", 40);
+      const { facts } = await report(db);
+      expect(facts.neurobagelFindings).toBe(1);
+      // The weekly and `status` say the same number.
+      const status = await neurobagelStatus(envFor(db));
+      expect(status.anonymity_findings).toBe(1);
+      expect(facts.neurobagelFindings).toBe(status.anonymity_findings as number);
+
+      // Cleared, it is gone from both.
+      const d1 = realD1(db);
+      await recordLedgerState(d1, await readLedger(d1), "nm099996", { state: "clear" });
+      const after = await report(db);
+      expect(after.facts.neurobagelFindings).toBe(0);
+      expect((await neurobagelStatus(envFor(db))).anonymity_findings).toBe(0);
+    });
+
+    test("one dataset recorded in all three places is one finding", async () => {
+      const db = freshDb();
+      unmoved();
+      await dailyRuns(db, 1);
+      await ledgerFinding(db, "nm099998");
+      row(db, "anonymity_findings", "nm099998", storeFinding);
+      row(db, "neurobagel_verify_anonymity_finding", "nm099998", JSON.stringify({ check: "x" }));
+      expect((await report(db)).facts.neurobagelFindings).toBe(1);
+    });
+
+    test("findings need attention even in a week the daily sweep never wrote a row", async () => {
+      const db = freshDb();
+      unmoved();
+      await ledgerFinding(db, "nm099998");
+      const { facts, body } = await report(db);
+      expect(facts.neurobagel).toBeNull();
+      expect(facts.neurobagelFindings).toBe(1);
+      expect(body).toContain("1 Neurobagel finding(s) need attention (see the audit log)");
+      expect(body).toContain("over the window and what stands: 1.");
+    });
+
+    test("an audit row that cannot be read makes the count unknown, never low", async () => {
+      const db = freshDb();
+      unmoved();
+      await dailyRuns(db, 1);
+      row(db, "anonymity_findings", "nm099998", "not json at all");
+      const { facts, body } = await report(db);
+      expect(facts.neurobagelFindings).toBeNull();
+      expect(body).toContain("over the window and what stands: unknown.");
+      expect(body).toContain("Neurobagel findings could not be counted");
+    });
+
+    test("none recorded is a zero, said as a zero", async () => {
+      const db = freshDb();
+      unmoved();
+      await dailyRuns(db, 1);
+      const { facts, body } = await report(db);
+      expect(facts.neurobagelFindings).toBe(0);
+      expect(body).toContain("over the window and what stands: 0.");
+    });
+
+    test("the report, in a week full of findings, names no dataset and no kind", async () => {
+      const db = freshDb();
+      moved();
+      await dailyRuns(db, 3);
+      unmoved();
+      await ledgerFinding(db, "nm099996");
+      row(db, "anonymity_findings", "nm099998", storeFinding);
+      row(db, "neurobagel_verify_anonymity_finding", "nm099997", JSON.stringify({ check: "x" }));
+      const { body } = await report(db);
+      const section = body.slice(
+        body.indexOf("## Neurobagel federation"),
+        body.indexOf("## Blocklisted datasets"),
+      );
+      for (const text of [section, body.split("\n")[2] ?? ""]) {
+        expect(text).not.toMatch(/anonym|deposit|\bclass\b/i);
+      }
+      expect(body).not.toMatch(/nm09999[5-8]/);
+      expect(body).toContain("3 Neurobagel finding(s) need attention");
+    });
   });
 });

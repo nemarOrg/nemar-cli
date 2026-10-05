@@ -1,0 +1,109 @@
+{
+  "AGE": {
+    "Annotations": {
+      "Format": {
+        "Label": "decimal",
+        "TermURL": "nb:FromFloat"
+      },
+      "IsAbout": {
+        "Label": "Age",
+        "TermURL": "nb:Age"
+      },
+      "MissingValues": [
+        "",
+        "n/a",
+        "N/A",
+        "NA"
+      ],
+      "ValueRange": {
+        "Max": 86,
+        "Min": 48
+      },
+      "VariableType": "Continuous"
+    },
+    "Description": "Age of the participant.",
+    "Units": "years"
+  },
+  "GROUP": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Diagnosis",
+        "TermURL": "nb:Diagnosis"
+      },
+      "Levels": {
+        "Control": {
+          "Label": "Healthy Control",
+          "TermURL": "ncit:C94342"
+        }
+      },
+      "MissingValues": [
+        "",
+        "n/a",
+        "N/A",
+        "NA",
+        "PD"
+      ],
+      "VariableType": "Categorical"
+    },
+    "Description": "Participant group; only healthy control values are mapped to a diagnosis term.",
+    "Levels": {
+      "Control": "Healthy Control"
+    }
+  },
+  "MOCA": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Assessment Tool",
+        "TermURL": "nb:Assessment"
+      },
+      "IsPartOf": {
+        "Label": "Montreal cognitive assessment",
+        "TermURL": "snomed:859351000000102"
+      },
+      "MissingValues": [
+        "",
+        "N/A",
+        "NA",
+        "NaN",
+        "n/a",
+        "na",
+        "nan"
+      ],
+      "VariableType": "Collection"
+    },
+    "Description": "Item of an assessment tool; only whether it was recorded is used, as mapped by a reviewed curation entry."
+  },
+  "UPDRS": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Assessment Tool",
+        "TermURL": "nb:Assessment"
+      },
+      "IsPartOf": {
+        "Label": "Unified Parkinsons disease rating scale score",
+        "TermURL": "snomed:342061000000106"
+      },
+      "MissingValues": [
+        "",
+        "N/A",
+        "NA",
+        "NaN",
+        "n/a",
+        "na",
+        "nan"
+      ],
+      "VariableType": "Collection"
+    },
+    "Description": "Item of an assessment tool; only whether it was recorded is used, as mapped by a reviewed curation entry."
+  },
+  "participant_id": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Participant ID",
+        "TermURL": "nb:ParticipantID"
+      },
+      "VariableType": "Identifier"
+    },
+    "Description": "Participant identifier, as in participants.tsv."
+  }
+}

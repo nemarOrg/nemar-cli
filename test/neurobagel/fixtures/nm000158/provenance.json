@@ -1,0 +1,41 @@
+{
+  "base": "https://data.nemar.org",
+  "dataset_id": "nm000158",
+  "documents": {
+    "metadata.json": {
+      "absent": false,
+      "bytes": 8957,
+      "etag": null,
+      "redirected": false,
+      "sha256": "7b466049c21f52aeda3cb552d59570ee320fc1ec64c4ea55558c299e63296873",
+      "skipped": false,
+      "status": 200,
+      "too_large_over_bytes": null,
+      "url": "https://data.nemar.org/nm000158/metadata.json"
+    },
+    "participants.json": {
+      "absent": false,
+      "bytes": 1123,
+      "etag": "W/\"git:62529215a6e9ca66e3addcad46edb107367b3a5d\"",
+      "redirected": false,
+      "sha256": "586ad8fdddfc31ec867012b617de7c42c8f6e34294414e036f6a21c63fba6915",
+      "skipped": false,
+      "status": 200,
+      "too_large_over_bytes": null,
+      "url": "https://data.nemar.org/nm000158/v1.0.3/participants.json"
+    },
+    "participants.tsv": {
+      "absent": false,
+      "bytes": 4563,
+      "etag": "\"git:7110f7e4a9c13ce67ee1c9510141135246c4ff30\"",
+      "redirected": false,
+      "sha256": "945f211e5cf7fa721c81ccbebf73cadda0a0d98a9bf73462dc065032e670236b",
+      "skipped": false,
+      "status": 200,
+      "too_large_over_bytes": null,
+      "url": "https://data.nemar.org/nm000158/v1.0.3/participants.tsv"
+    }
+  },
+  "fetched_at": "2026-10-02T10:33:28.672Z",
+  "latest_version": "v1.0.3"
+}

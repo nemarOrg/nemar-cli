@@ -1,0 +1,575 @@
+{
+  "bagel": "0.11.6",
+  "bagel_only_subjects": 0,
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on006434 (latest version v1.0.0).",
+    "hasAccessLink": "https://nemar.org/dataset/on006434",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Thomas J Stoll",
+      "Nathan D Vandjelovic",
+      "Melissa J Polonenko",
+      "Nadja R S Li",
+      "Adrian K C Lee",
+      "Ross K Maddox"
+    ],
+    "hasKeywords": [
+      "EEG",
+      "auditory brainstem response",
+      "selective attention",
+      "natural speech",
+      "subcortical",
+      "audiobook"
+    ],
+    "hasLabel": "The auditory brainstem response to natural speech is not affected by selective attention",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/on006434",
+      "https://doi.org/10.82901/nemar.on006434"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/on006434/"
+  },
+  "dataset_id": "on006434",
+  "imaging": {
+    "attachable_subjects": 66,
+    "modalities": {
+      "sub-dichotic02": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic03": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic04": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic05": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic06": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic07": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic08": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic09": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic10": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic11": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic12": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic13": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic14": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic15": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic16": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic17": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic18": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic19": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic20": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic21": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic22": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic23": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic24": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-dichotic25": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic01": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic02": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic03": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic04": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic05": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic06": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic07": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic08": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic09": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic10": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic11": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic12": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic13": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic14": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic16": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic17": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic18": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic19": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic20": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic21": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic22": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic23": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic24": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic25": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic26": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic27": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic28": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-diotic29": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-passive17": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-passive18": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-passive19": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-passive20": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-passive21": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-passive22": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-passive24": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-passive25": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-passive26": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-passive27": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-passive28": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-passive29": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-passive30": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-passive31": [
+        "nidm:Electroencephalography"
+      ]
+    }
+  },
+  "inputs": {
+    "annotated.json": "de57f54ce518fee8631e8ec6161b4a84a8e3219f44235e2250bffad7b2c01376",
+    "dataset_description.json": "336f827800dcd07862e546128c49058d358e78f78ada4386731190245bc5f853",
+    "participants.tsv": "d8517eeb997f48c513b8a17919f66176e21c7f5b6176284aba76c04883e5711d"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-dichotic02": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic03": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic04": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic05": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic06": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic07": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic08": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic09": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic10": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic11": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic12": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic13": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic14": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic15": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic16": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic17": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic18": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic19": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic20": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic21": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic22": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic23": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic24": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-dichotic25": {
+      "age": 0.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic01": {
+      "age": 21.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic02": {
+      "age": 20.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic03": {
+      "age": 24.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic04": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic05": {
+      "age": 27.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic06": {
+      "age": 27.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic07": {
+      "age": 29.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic08": {
+      "age": 22.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic09": {
+      "age": 20.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic10": {
+      "age": 31.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic11": {
+      "age": 26.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic12": {
+      "age": 21.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic13": {
+      "age": 21.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic14": {
+      "age": 38.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic16": {
+      "age": 23.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic17": {
+      "age": 21.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic18": {
+      "age": 20.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic19": {
+      "age": 29.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic20": {
+      "age": 23.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic21": {
+      "age": 27.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic22": {
+      "age": 29.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic23": {
+      "age": 18.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic24": {
+      "age": 18.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic25": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic26": {
+      "age": 22.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic27": {
+      "age": 25.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic28": {
+      "age": 20.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-diotic29": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-passive17": {
+      "age": 22.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-passive18": {
+      "age": 23.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-passive19": {
+      "age": 39.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-passive20": {
+      "age": 18.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-passive21": {
+      "age": 18.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-passive22": {
+      "age": 23.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-passive24": {
+      "age": 19.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-passive25": {
+      "age": 20.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-passive26": {
+      "age": 22.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-passive27": {
+      "age": 21.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-passive28": {
+      "age": 30.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-passive29": {
+      "age": 18.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-passive30": {
+      "age": 21.0,
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-passive31": {
+      "age": 21.0,
+      "diagnoses": [],
+      "sex": null
+    }
+  },
+  "transform_only_subjects": 0
+}

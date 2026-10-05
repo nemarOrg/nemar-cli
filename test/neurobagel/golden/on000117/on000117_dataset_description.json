@@ -1,0 +1,25 @@
+{
+  "AccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on000117 (latest version v1.0.0).",
+  "AccessLink": "https://nemar.org/dataset/on000117",
+  "AccessType": "public",
+  "Authors": [
+    "Wakeman, DG",
+    "Henson, RN"
+  ],
+  "Keywords": [
+    "MEG",
+    "EEG",
+    "fMRI",
+    "structural MRI",
+    "face processing",
+    "multimodal integration",
+    "Face"
+  ],
+  "Name": "Multisubject, multimodal face processing",
+  "ParticipantCount": 17,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/on000117",
+    "https://doi.org/10.82901/nemar.on000117"
+  ],
+  "RepositoryURL": "https://data.nemar.org/on000117/"
+}

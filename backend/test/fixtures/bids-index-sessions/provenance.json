@@ -1,0 +1,50 @@
+{
+  "_what": "Where each manifest under backend/test/fixtures (used by the BIDS index tests, epic #1586 Phase 2, #1588) came from. backend/test/bids-index-session-modalities.test.ts recomputes every fixture_sha256 and fails on a mismatch.",
+  "fixtures": {
+    "bids-index-sessions/manifest-on004196-v1.0.0.json": {
+      "dataset_id": "on004196",
+      "version": "v1.0.0",
+      "dataset_title": "Bimodal dataset on Inner speech",
+      "license": "CC0 (as served in metadata.json)",
+      "source_url": "https://data.nemar.org/on004196/v1.0.0/manifest.json",
+      "fetched": "2026-10-01",
+      "fetched_by": "read-only GET, User-Agent nemar-neurobagel-dev/1.0",
+      "served_body_sha256": "012452e390df60664400a456662a5fe39c15dca2ecbf1647481f56d2eba2ac66",
+      "entries": 113,
+      "derivation": "The served manifest.json is an array of {path, size, checksum_algorithm, checksum, bytes_url, url}. Each entry became files[path] = {key, size, checksum}: for algorithm git, key = checksum = 'git:<sha>'; otherwise checksum = '<algorithm>:<sha>' and key is the annex key, the last path segment of url after /objects/ (asserted to start with '<BACKEND>-s<size>--<sha>'). bytes_url and url were dropped. dataset_id and version are the dataset's; doi and concept_doi are null; created is the version row's created_at (extensions.nemar.versions / provenance.publish_date of the same dataset's metadata.json, UTC) as ISO 8601. Paths are in served order, which is ascending.",
+      "fixture_sha256": "3387eb609ce858fef658e6530fdd48ba91cfe764a0728b118f49eef4aeb8437a"
+    },
+    "bids-index-sessions/manifest-on006033-v1.0.0.json": {
+      "dataset_id": "on006033",
+      "version": "v1.0.0",
+      "dataset_title": "Synchronous EEG and fMRI dataset on inner speech",
+      "license": "CC0 (as served in metadata.json)",
+      "source_url": "https://data.nemar.org/on006033/v1.0.0/manifest.json",
+      "fetched": "2026-10-01",
+      "fetched_by": "read-only GET, User-Agent nemar-neurobagel-dev/1.0",
+      "served_body_sha256": "735c747655579158294856b8cbe981843dc8ab4559948ee0d0b729d216ba81db",
+      "entries": 67,
+      "derivation": "The served manifest.json is an array of {path, size, checksum_algorithm, checksum, bytes_url, url}. Each entry became files[path] = {key, size, checksum}: for algorithm git, key = checksum = 'git:<sha>'; otherwise checksum = '<algorithm>:<sha>' and key is the annex key, the last path segment of url after /objects/ (asserted to start with '<BACKEND>-s<size>--<sha>'). bytes_url and url were dropped. dataset_id and version are the dataset's; doi and concept_doi are null; created is the version row's created_at (extensions.nemar.versions / provenance.publish_date of the same dataset's metadata.json, UTC) as ISO 8601. Paths are in served order, which is ascending.",
+      "fixture_sha256": "a5a0e4d15ac2cb7f5ee295a6de979c09dc4cdc1b11a7b7176fe23e0833ad1269"
+    },
+    "bids-index-sessions/manifest-on007347-v1.0.0.json": {
+      "dataset_id": "on007347",
+      "version": "v1.0.0",
+      "dataset_title": "Sterotactic Focused Ultrasound Mesencephalotomy for the Treatment of Head and Neck Cancer Pain",
+      "license": "CC0 (as served in metadata.json)",
+      "source_url": "https://data.nemar.org/on007347/v1.0.0/manifest.json",
+      "fetched": "2026-10-01",
+      "fetched_by": "read-only GET, User-Agent nemar-neurobagel-dev/1.0",
+      "served_body_sha256": "33b92e59cc711df1d7f9c07e8903ec06195a0e9759d9d530fc9f929a2815a21d",
+      "entries": 70,
+      "derivation": "The served manifest.json is an array of {path, size, checksum_algorithm, checksum, bytes_url, url}. Each entry became files[path] = {key, size, checksum}: for algorithm git, key = checksum = 'git:<sha>'; otherwise checksum = '<algorithm>:<sha>' and key is the annex key, the last path segment of url after /objects/ (asserted to start with '<BACKEND>-s<size>--<sha>'). bytes_url and url were dropped. dataset_id and version are the dataset's; doi and concept_doi are null; created is the version row's created_at (extensions.nemar.versions / provenance.publish_date of the same dataset's metadata.json, UTC) as ISO 8601. Paths are in served order, which is ascending.",
+      "fixture_sha256": "5301476c5f4c9bd18f93724be887ab575e2e99f0c0a21e811c89a13cadc830e9"
+    },
+    "manifest-nm000132-v1.1.1.json": {
+      "dataset_id": "nm000132",
+      "version": "v1.1.1",
+      "note": "Pre-existing real published manifest, committed with #1502 and shared with the manifest-stream and manifest-queries tests. Not modified here.",
+      "fixture_sha256": "4105c66f172a8f22313479a66e97b9b2df2cec6145ed114c1a642781598d8e51"
+    }
+  }
+}

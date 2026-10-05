@@ -22,6 +22,6 @@
       "@/*": ["src/*"]
     }
   },
-  "include": ["src/**/*", "shared/**/*"],
+  "include": ["src/**/*", "shared/**/*", "scripts/neurobagel/**/*.ts", "test/neurobagel-*.ts"],
   "exclude": ["node_modules", "dist"]
 }

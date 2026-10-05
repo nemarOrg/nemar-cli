@@ -1,0 +1,29 @@
+{
+  "AccessInstructions": "Public access. License: CC BY 4.0. Browse and download at https://nemar.org/dataset/nm000147 (latest version v1.0.0).",
+  "AccessLink": "https://nemar.org/dataset/nm000147",
+  "AccessType": "public",
+  "Authors": [
+    "Jens Madsen",
+    "Nikhil Kuppa",
+    "Lucas Parra"
+  ],
+  "Keywords": [
+    "EEG",
+    "Electrocardiography",
+    "Eye Movements",
+    "Attention",
+    "educational videos",
+    "multimodal physiology",
+    "EOG",
+    "respiration",
+    "pupillometry",
+    "ADHD"
+  ],
+  "Name": "The Brain, Body, and Behaviour Dataset (1.0.0) - Experiment 4",
+  "ParticipantCount": 43,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/nm000147",
+    "https://doi.org/10.82901/nemar.nm000147"
+  ],
+  "RepositoryURL": "https://data.nemar.org/nm000147/"
+}

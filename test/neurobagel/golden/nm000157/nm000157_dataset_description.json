@@ -1,0 +1,27 @@
+{
+  "AccessInstructions": "Public access. License: CC-BY-4.0. Browse and download at https://nemar.org/dataset/nm000157 (latest version v1.0.2).",
+  "AccessLink": "https://nemar.org/dataset/nm000157",
+  "AccessType": "public",
+  "Authors": [
+    "Boyla Mainsah",
+    "Chance Fleeting",
+    "Thomas Balmat",
+    "Eric Sellers",
+    "Leslie Collins"
+  ],
+  "Keywords": [
+    "EEG",
+    "P300",
+    "Brain-Computer Interfaces",
+    "speller",
+    "event-related potentials",
+    "amyotrophic lateral sclerosis"
+  ],
+  "Name": "BigP3BCI Study B — 6x6 checkerboard, multi-session (19 healthy subjects)",
+  "ParticipantCount": 19,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/nm000157",
+    "https://doi.org/10.82901/nemar.nm000157"
+  ],
+  "RepositoryURL": "https://data.nemar.org/nm000157/"
+}

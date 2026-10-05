@@ -1,0 +1,83 @@
+{
+  "Age": {
+    "Annotations": {
+      "Format": {
+        "Label": "decimal",
+        "TermURL": "nb:FromFloat"
+      },
+      "IsAbout": {
+        "Label": "Age",
+        "TermURL": "nb:Age"
+      },
+      "MissingValues": [
+        "",
+        "n/a",
+        "N/A",
+        "NA"
+      ],
+      "ValueRange": {
+        "Max": 35,
+        "Min": 18
+      },
+      "VariableType": "Continuous"
+    },
+    "Description": "Age of the participant.",
+    "Units": "years"
+  },
+  "UCLA_R": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Assessment Tool",
+        "TermURL": "nb:Assessment"
+      },
+      "IsPartOf": {
+        "Label": "Revised UCLA (University of California Los Angeles) Loneliness scale",
+        "TermURL": "snomed:1103791000000109"
+      },
+      "MissingValues": [
+        "",
+        "N/A",
+        "NA",
+        "NaN",
+        "n/a",
+        "na",
+        "nan"
+      ],
+      "VariableType": "Collection"
+    },
+    "Description": "Item of an assessment tool; only whether it was recorded is used, as mapped by a reviewed curation entry."
+  },
+  "UCLA_R_screening": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Assessment Tool",
+        "TermURL": "nb:Assessment"
+      },
+      "IsPartOf": {
+        "Label": "Revised UCLA (University of California Los Angeles) Loneliness scale",
+        "TermURL": "snomed:1103791000000109"
+      },
+      "MissingValues": [
+        "",
+        "N/A",
+        "NA",
+        "NaN",
+        "n/a",
+        "na",
+        "nan"
+      ],
+      "VariableType": "Collection"
+    },
+    "Description": "Item of an assessment tool; only whether it was recorded is used, as mapped by a reviewed curation entry."
+  },
+  "participant_id": {
+    "Annotations": {
+      "IsAbout": {
+        "Label": "Participant ID",
+        "TermURL": "nb:ParticipantID"
+      },
+      "VariableType": "Identifier"
+    },
+    "Description": "Participant identifier, as in participants.tsv."
+  }
+}

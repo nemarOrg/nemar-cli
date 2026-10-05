@@ -1,0 +1,62 @@
+{
+  "bagel": "0.11.6",
+  "bagel_only_subjects": 0,
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on000246 (latest version v1.0.0).",
+    "hasAccessLink": "https://nemar.org/dataset/on000246",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Elizabeth Bock",
+      "Peter Donhauser",
+      "Francois Tadel",
+      "Guiomar Niso",
+      "Sylvain Baillet"
+    ],
+    "hasKeywords": [
+      "MEG",
+      "auditory evoked fields",
+      "oddball paradigm",
+      "Brainstorm",
+      "Magnetoencephalography",
+      "tutorial dataset"
+    ],
+    "hasLabel": "MEG-BIDS Brainstorm data sample",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/on000246",
+      "https://doi.org/10.82901/nemar.on000246"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/on000246/"
+  },
+  "dataset_id": "on000246",
+  "imaging": {
+    "attachable_subjects": 2,
+    "modalities": {
+      "sub-0001": [
+        "nidm:Magnetoencephalography"
+      ],
+      "sub-emptyroom": [
+        "nidm:Magnetoencephalography"
+      ]
+    }
+  },
+  "inputs": {
+    "annotated.json": "57c9b9372fc637b3f1c3449abbd74e7c64abdfb43b6bbb8e975246305115c9bd",
+    "dataset_description.json": "0b5f4d4ed26d43cbb4e882a5b392a428785f8844a28cf253f999204c41cafa09",
+    "participants.tsv": "885c4fea7fa081268e5f8792d0ff3cc00e986357c605f74e6638f1fa672dff7c"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-0001": {
+      "age": 25.0,
+      "diagnoses": [],
+      "sex": "snomed:248153007"
+    },
+    "sub-emptyroom": {
+      "age": null,
+      "diagnoses": [],
+      "sex": null
+    }
+  },
+  "transform_only_subjects": 0
+}

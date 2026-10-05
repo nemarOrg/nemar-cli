@@ -1,0 +1,107 @@
+{
+  "columns": {
+    "age": {
+      "counts": {
+        "cells": 60,
+        "mapped": 60,
+        "missing": 0,
+        "unmappable": 0,
+        "zero_ages": 0
+      },
+      "status": "mapped"
+    },
+    "group": {
+      "counts": {
+        "cells": 60,
+        "mapped": 0,
+        "missing": 60,
+        "unmappable": 0
+      },
+      "status": "curated"
+    },
+    "sex": {
+      "counts": {
+        "cells": 60,
+        "mapped": 60,
+        "missing": 0,
+        "unmappable": 0
+      },
+      "status": "mapped"
+    }
+  },
+  "curation": {
+    "columns_applied": 1,
+    "columns_skipped": 0,
+    "declared": {
+      "age": 0,
+      "assessment": 0,
+      "diagnosis": 1,
+      "sex": 0
+    },
+    "participants_with": {
+      "age": 0,
+      "assessment": 0,
+      "diagnosis": 0,
+      "sex": 0
+    },
+    "review": "author",
+    "status": "applied"
+  },
+  "dataset_id": "on004166",
+  "flags": [
+    "session_pairing_unknown"
+  ],
+  "graph": {
+    "acquisitions": 71,
+    "imaging_sessions": 71,
+    "phenotypic_sessions": 71,
+    "subjects": 71
+  },
+  "imaging": {
+    "datatypes_dropped_subjects": {},
+    "datatypes_mapped_subjects": {
+      "eeg": 71
+    },
+    "mapped_datatypes_supported": [
+      "eeg",
+      "meg"
+    ],
+    "session_pairing_subjects": {
+      "unknown": 71
+    }
+  },
+  "participant_count": {
+    "bids_index": 71,
+    "declared": 71,
+    "graph": 71,
+    "participants_tsv": 60,
+    "used": 71,
+    "used_from": "demographics"
+  },
+  "participants_json": {
+    "status": "present"
+  },
+  "participants_tsv": {
+    "bom_stripped": false,
+    "conflicting_ids": 0,
+    "duplicate_ids": 0,
+    "ids_prefixed": 0,
+    "rows": 158,
+    "rows_without_id": 98,
+    "status": "ok"
+  },
+  "report_version": 1,
+  "session_label_used_for_phenotype": "ses-unnamed",
+  "subjects": {
+    "graph": 71,
+    "index_without_row": 11,
+    "joined": 60,
+    "source": "bids_index",
+    "table_only": 0
+  },
+  "transform_version": 1,
+  "vocabulary": {
+    "bagel": "0.11.6",
+    "communities_commit": "0cbf82a4777a10e984253dac2b134902963c4095"
+  }
+}

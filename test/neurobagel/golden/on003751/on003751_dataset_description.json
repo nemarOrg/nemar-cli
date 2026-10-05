@@ -1,0 +1,26 @@
+{
+  "AccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on003751 (latest version v1.0.0).",
+  "AccessLink": "https://nemar.org/dataset/on003751",
+  "AccessType": "public",
+  "Authors": [
+    "Sudhakar Mishra",
+    "Md. Asif",
+    "Uma Shanker Tiwary",
+    "Narayanan Srinivasan"
+  ],
+  "Keywords": [
+    "EEG",
+    "Electrocardiography",
+    "Electromyography",
+    "Emotions",
+    "naturalistic stimuli",
+    "affective neuroscience"
+  ],
+  "Name": "Dataset on Emotion with Naturalistic Stimuli (DENS)",
+  "ParticipantCount": 40,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/on003751",
+    "https://doi.org/10.82901/nemar.on003751"
+  ],
+  "RepositoryURL": "https://data.nemar.org/on003751/"
+}

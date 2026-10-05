@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+#
+# nb-guard: the resource guard for a node that shares its host with other long-lived services.
+#
+# One sample = host memory available, load average, the usage of THIS project's containers, and
+# the state of every other container on the host (name, start time, restart count, health: state
+# only, never their data or environment). A breach is reported and, if asked, answered by
+# stopping THIS project. Nothing else on the host is ever stopped, restarted or modified.
+#
+# Usage: bin/nb-guard [--watch SECONDS] [--abort-on LIST] [--baseline] [--quiet] [--check]
+#   --watch SECONDS   keep sampling every SECONDS until a breach or interrupt. Start the watcher with
+#                     setsid nohup bin/nb-guard --watch 10 --abort-on mem,load,neighbor --quiet \
+#                       >> logs/guard-watch.out 2>&1 < /dev/null &
+#                     (bin/nb cron-line prints it as an @reboot entry). It writes state/guard-heartbeat
+#                     every sample, and `nb status` raises a problem when that goes stale.
+#   --check           exit 21 and say so if the heartbeat is missing or older than NB_GUARD_STALE_S
+#   --abort-on LIST   comma list of mem, load, neighbor: breaches that stop this project.
+#                     Default: mem. Without the flag a breach is reported (exit 20) and nothing
+#                     is stopped.
+#   --baseline        record the other containers' start times and restart counts now
+#   --quiet           print only when something is wrong
+#
+# Breach rules (all thresholds from .env):
+#   mem       MemAvailable below NB_ABORT_AVAILABLE_MB (default 1536, the epic's 1.5 GiB rule)
+#   load      1-minute load average above NB_ABORT_LOAD (default 6) in NB_ABORT_LOAD_SAMPLES
+#             consecutive samples (default 6)
+#   neighbor  another container restarted, died, or turned unhealthy since the baseline. The
+#             baseline belongs to one boot of the host: it carries the boot id, and after a reboot
+#             (a different boot id) or while the host has been up for less than
+#             NB_GUARD_BOOT_SETTLE_S (default 180 s, its containers still coming up) the baseline is
+#             taken again instead of judged, so a reboot is never read as every other container
+#             having restarted.
+#
+# Samples are appended to state/guard.log (tab separated). Exit codes: 0 fine; 20 breach.
+
+set -euo pipefail
+# shellcheck source=nb-common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/nb-common.sh"
+
+watch=0
+abort_on="mem"
+do_baseline=0
+quiet=0
+check_only=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --watch)
+      [ $# -ge 2 ] || nb_die "$NB_EX_USAGE" "--watch needs seconds"
+      watch="$2"
+      shift 2
+      ;;
+    --abort-on)
+      [ $# -ge 2 ] || nb_die "$NB_EX_USAGE" "--abort-on needs a list"
+      abort_on="$2"
+      shift 2
+      ;;
+    --baseline) do_baseline=1; shift ;;
+    --quiet) quiet=1; shift ;;
+    --check) check_only=1; shift ;;
+    -h | --help)
+      nb_usage "$0"
+      exit 0
+      ;;
+    *) nb_die "$NB_EX_USAGE" "unknown argument: $1" ;;
+  esac
+done
+
+nb_need docker
+nb_check_project_name
+nb_init_dirs
+
+if [ "$check_only" = 1 ]; then
+  hb=""
+  [ ! -f "$NB_STATE_DIR/guard-heartbeat" ] || hb="$(cat "$NB_STATE_DIR/guard-heartbeat" 2>/dev/null || true)"
+  if [ -z "$hb" ]; then
+    echo "the resource guard has never sampled (no heartbeat)"
+    exit 21
+  fi
+  msg="$(nb_guard_heartbeat_problem "$hb" "$(nb_epoch)" "$(nb_env_get NB_GUARD_STALE_S 1200)" 1)"
+  if [ -n "$msg" ]; then
+    echo "$msg"
+    exit 21
+  fi
+  exit 0
+fi
+
+abort_mb="$(nb_env_get NB_ABORT_AVAILABLE_MB 1536)"
+abort_load="$(nb_env_get NB_ABORT_LOAD 6)"
+abort_load_samples="$(nb_env_get NB_ABORT_LOAD_SAMPLES 6)"
+settle_s="$(nb_env_get NB_GUARD_BOOT_SETTLE_S 180)"
+boot_note=""
+baseline_file="$NB_STATE_DIR/guard-baseline.tsv"
+log_file="$NB_STATE_DIR/guard.log"
+high_load_streak=0
+
+# Other containers: "name<TAB>started_at<TAB>restart_count<TAB>health". State fields only.
+# A container can vanish between the listing and the inspect; that is not an error here.
+neighbors() {
+  local name proj
+  docker ps -a --format '{{.Names}}|{{.Label "com.docker.compose.project"}}' | while IFS='|' read -r name proj; do
+    [ "$proj" != "$NB_PROJECT" ] || continue
+    docker inspect --format '{{.Name}}{{"\t"}}{{.State.StartedAt}}{{"\t"}}{{.RestartCount}}{{"\t"}}{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}{{"\t"}}{{.State.Status}}' "$name" 2>/dev/null \
+      | sed 's|^/||' || true
+  done | sort
+}
+
+# The baseline is written whole to a temp file and renamed, and it carries the boot id of the host
+# (see nb_guard_baseline_render in nb-decide.sh for why).
+record_baseline() {
+  neighbors | nb_guard_baseline_render "$(nb_boot_id)" | nb_write_atomic "$baseline_file" || {
+    nb_log "could not record the baseline"
+    return 1
+  }
+  nb_log "baseline recorded for $(grep -vc '^#' "$baseline_file" | tr -d ' ') other container(s) (boot ${boot_note:-unknown})"
+}
+
+# Before the neighbours are judged: take a new baseline if the host has rebooted since the last one,
+# or has only just booted and its containers are still coming up; stamp an old baseline with the
+# boot id. A reboot must never read as every neighbour having restarted.
+settle_baseline() {
+  local present=0 action bboot=""
+  if [ -f "$baseline_file" ]; then
+    present=1
+    bboot="$(nb_guard_baseline_boot_id <"$baseline_file")"
+  fi
+  boot_note="$(nb_boot_id | cut -c1-8)"
+  action="$(nb_decide_baseline_action "$present" "$bboot" "$(nb_boot_id)" "$(nb_uptime_s)" "$settle_s")"
+  case "$action" in
+    record) record_baseline ;;
+    stamp)
+      { printf '#boot_id\t%s\n' "$(nb_boot_id)"; cat "$baseline_file"; } | nb_write_atomic "$baseline_file" \
+        && nb_log "baseline stamped with this boot's id"
+      ;;
+  esac
+}
+
+# Only long-lived containers: a one-off `compose run` container (the init step of a reload) can be
+# gone before `docker stats` reaches it, and a stats failure must never end the guard. An earlier
+# version died silently on exactly that, 36 minutes into the trial.
+project_usage() {
+  local names
+  names="$(docker ps -a --filter "label=com.docker.compose.project=$NB_PROJECT" \
+    --filter "label=com.docker.compose.oneoff=False" --format '{{.Names}}' 2>/dev/null || true)"
+  [ -n "$names" ] || return 0
+  # shellcheck disable=SC2086  # names is a newline separated list of container names
+  { docker stats --no-stream --format '{{.Name}}:{{.CPUPerc}}:{{.MemUsage}}' $names 2>/dev/null || true; } \
+    | sed 's| / [^:]*$||; s|^'"$NB_PROJECT"'-||' | tr '\n' ' '
+}
+
+breach_list=""
+add_breach() { breach_list="${breach_list:+$breach_list,}$1"; }
+
+sample() {
+  local avail load usage neighbors_bad now_neighbors rule
+  breach_list=""
+  avail="$(nb_mem_available_mb)"
+  load="$(nb_load1)"
+  usage="$(project_usage)"
+
+  if nb_decide_mem_breach "$avail" "$abort_mb"; then
+    add_breach "mem(${avail}MiB<${abort_mb}MiB)"
+  fi
+  rule="$(nb_guard_load_rule "$load" "$high_load_streak" "$abort_load" "$abort_load_samples")"
+  high_load_streak="${rule%% *}"
+  if [ "${rule##* }" = breach ]; then
+    add_breach "load(${load}>${abort_load} for ${high_load_streak} samples)"
+  fi
+
+  settle_baseline
+  now_neighbors="$(neighbors)"
+  neighbors_bad="$(printf '%s\n' "$now_neighbors" | nb_guard_neighbor_breaches "$baseline_file")"
+  [ -z "$neighbors_bad" ] || add_breach "neighbor($neighbors_bad)"
+
+  printf '%s\t%s\t%s\t%s\t%s\n' "$(nb_ts)" "${avail:-?}" "${load:-?}" "${usage:-none}" "${breach_list:-ok}" >>"$log_file"
+  if [ -f "$log_file" ] && [ "$(wc -c <"$log_file" | tr -d ' ')" -gt 5242880 ]; then
+    mv -f "$log_file" "$log_file.1"
+  fi
+  if [ "$quiet" = 0 ] || [ -n "$breach_list" ]; then
+    printf '%s avail=%sMiB load1=%s %s breach=%s\n' "$(nb_ts)" "${avail:-?}" "${load:-?}" "${usage:-}" "${breach_list:-none}"
+  fi
+}
+
+respond() {
+  local kinds="$1" acted=0 k
+  # Match on the breach kind prefix: mem(...), load(...), neighbor(...).
+  for k in $(echo "$abort_on" | tr ',' ' '); do
+    if echo "$kinds" | grep -q "$k("; then acted=1; fi
+  done
+  if [ "$acted" = 1 ]; then
+    nb_log "BREACH ($kinds): stopping project $NB_PROJECT and nothing else"
+    # The stop comes first: a full disk must not be able to stop the stop. The marker that tells
+    # `nb status` why the node is down is best effort, written afterwards.
+    nb_compose --profile '*' down --remove-orphans >&2 || nb_log "compose down failed"
+    jq -n --arg at "$(nb_ts)" --arg why "$kinds" '{at:$at, reason:$why}' \
+      | nb_write_atomic "$NB_STATE_DIR/guard-abort.json" || nb_log "could not write the abort marker"
+  else
+    nb_log "BREACH ($kinds): reported only, no abort configured for it"
+  fi
+}
+
+if [ "$do_baseline" = 1 ]; then
+  record_baseline
+  exit 0
+fi
+
+# A watcher that dies silently is worse than none, so it says when it ends and it keeps a heartbeat
+# that `nb status` reads.
+if [ "$watch" -gt 0 ]; then
+  trap 'nb_log "guard watcher ending (status $?)"' EXIT
+  while true; do
+    # In an `if`, errexit is off inside sample: one failed probe costs one sample, not the watcher.
+    if ! sample; then nb_log "guard sample failed; continuing"; fi
+    date +%s >"$NB_STATE_DIR/guard-heartbeat"
+    if [ -n "$breach_list" ]; then
+      respond "$breach_list"
+      exit 20
+    fi
+    sleep "$watch"
+  done
+fi
+
+if ! sample; then nb_log "guard sample failed"; fi
+date +%s >"$NB_STATE_DIR/guard-heartbeat"
+if [ -n "$breach_list" ]; then
+  respond "$breach_list"
+  exit 20
+fi

@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+#
+# nb-restore: put a backup made by nb-backup back, on this host or on a rebuilt one.
+#
+# It restores the INPUTS and the state, then you start the node with `nb up`, which loads the
+# restored release into a fresh graph (or into the existing graph volume, which the stock setup
+# clears and reloads anyway). The graph itself is never restored from the archive.
+#
+# Safety:
+#   * the archive's checksum list is verified before anything is written
+#   * refuses while any container of this project is running (stop it with `nb down`)
+#   * never overwrites an existing .env or secrets/ unless --overwrite-config is given:
+#     replacing the GraphDB passwords under an existing graph volume locks the node out of it
+#
+# Usage: bin/nb-restore ARCHIVE [--overwrite-config]
+# Exit codes: 0 restored; 8 refused.
+
+set -euo pipefail
+# shellcheck source=nb-common.sh
+. "$(dirname "${BASH_SOURCE[0]}")/nb-common.sh"
+
+archive=""
+overwrite=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --overwrite-config) overwrite=1; shift ;;
+    -h | --help)
+      nb_usage "$0"
+      exit 0
+      ;;
+    -*) nb_die "$NB_EX_USAGE" "unknown argument: $1" ;;
+    *) archive="$1"; shift ;;
+  esac
+done
+[ -n "$archive" ] && [ -f "$archive" ] || nb_die "$NB_EX_USAGE" "usage: nb-restore ARCHIVE [--overwrite-config]"
+
+nb_need tar gzip jq perl
+
+if command -v docker >/dev/null 2>&1; then
+  if [ -n "$(docker ps -q --filter "label=com.docker.compose.project=$NB_PROJECT" 2>/dev/null)" ]; then
+    nb_die "$NB_EX_PREFLIGHT" "containers of $NB_PROJECT are running; stop them with: nb down"
+  fi
+fi
+
+# The archive is read and verified in a scratch directory BEFORE any directory of the node is
+# created or the lock is taken, so an archive that is damaged, altered or forged leaves nothing
+# behind.
+work="$(mktemp -d "$NB_HOME/.restore.XXXXXX")"
+trap 'rm -rf "$work"' EXIT
+tar -C "$work" -xzf "$archive"
+[ -f "$work/SHA256SUMS" ] && [ -f "$work/BACKUP.json" ] || nb_die "$NB_EX_PREFLIGHT" "not an nb-backup archive"
+bad=0
+while read -r sum file; do
+  [ "$(nb_sha256 "$work/$file")" = "$sum" ] || { nb_log "checksum mismatch: $file"; bad=1; }
+done <"$work/SHA256SUMS"
+[ "$bad" = 0 ] || nb_die "$NB_EX_PREFLIGHT" "the archive is damaged; nothing was restored"
+
+release="$(jq -r .live_release "$work/BACKUP.json")"
+rollback_release="$(jq -r '.rollback_release // ""' "$work/BACKUP.json")"
+# These two names come from the archive and are used to build paths that are deleted and copied
+# over, so they must be release names and nothing else (a value such as ../.. passes a -d test).
+nb_release_name_ok "$release" || nb_die "$NB_EX_PREFLIGHT" "the archive names a live release that is not a release name; refusing"
+[ -z "$rollback_release" ] || nb_release_name_ok "$rollback_release" \
+  || nb_die "$NB_EX_PREFLIGHT" "the archive names a rollback release that is not a release name; refusing"
+
+nb_init_dirs
+nb_lock_or_exit "nb-restore"
+trap 'rm -rf "$work"; nb_lock_release' EXIT
+nb_log "restoring release $release from a backup taken $(jq -r .at "$work/BACKUP.json") on $(jq -r .host "$work/BACKUP.json")"
+
+mkdir -p "$NB_RELEASES_DIR" "$NB_MANIFESTS_DIR"
+for r in "$release" "$rollback_release"; do
+  [ -n "$r" ] && [ -d "$work/data/releases/$r" ] || continue
+  rm -rf "${NB_RELEASES_DIR:?}/$r"
+  cp -R "$work/data/releases/$r" "$NB_RELEASES_DIR/$r"
+done
+cp "$work"/data/manifests/*.json "$NB_MANIFESTS_DIR/" 2>/dev/null || true
+nb_atomic_symlink "releases/$release" "$NB_CURRENT_LINK"
+
+cfg() { # relative path
+  local f="$1"
+  [ -f "$work/$f" ] || return 0
+  if [ -e "$NB_HOME/$f" ] && [ "$overwrite" = 0 ]; then
+    nb_log "kept the existing $f (use --overwrite-config to replace it)"
+    return 0
+  fi
+  mkdir -p "$(dirname "$NB_HOME/$f")"
+  ( umask 077; cp "$work/$f" "$NB_HOME/$f" )
+  chmod 600 "$NB_HOME/$f"
+  nb_log "restored $f"
+}
+cfg .env
+if [ -d "$work/secrets" ]; then
+  mkdir -p "$NB_SECRETS_DIR"
+  chmod 700 "$NB_SECRETS_DIR"
+  for f in "$work"/secrets/*; do cfg "secrets/$(basename "$f")"; done
+fi
+for f in "$work"/state/*; do
+  [ -f "$f" ] || continue
+  b="$(basename "$f")"
+  case "$b" in
+    hold | freeze | rollback-to | reload-failed | last-load.json | reload-history.jsonl) cp "$f" "$NB_STATE_DIR/$b" ;;
+  esac
+done
+# Whatever was loaded on the old host is not loaded here yet.
+rm -f "$NB_STATE_DIR/applied.json" "$NB_STATE_DIR/degraded" "$NB_STATE_DIR/guard-abort.json"
+printf '%s\n' "$release" | nb_write_atomic "$NB_STATE_DIR/pending-reload"
+nb_log "restored. Next: bin/nb-install --check, then bin/nb up"

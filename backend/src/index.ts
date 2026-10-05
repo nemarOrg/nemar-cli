@@ -34,6 +34,7 @@ import { authWebRoutes } from "./routes/auth-web";
 import { catalogIndexResponse, dataRoutes } from "./routes/data";
 import { datasetRoutes } from "./routes/datasets";
 import { mcpRoutes } from "./routes/mcp";
+import { neurobagelRoutes } from "./routes/neurobagel";
 import { newsRoutes } from "./routes/news";
 import { openApiRoutes } from "./routes/openapi";
 import { sandboxRoutes } from "./routes/sandbox";
@@ -76,6 +77,11 @@ import {
   weeklySummaryCronLine,
 } from "./services/import-weekly-summary-sweep";
 import { manifestIntegritySweep } from "./services/manifest-sweep";
+import { runNeurobagelReconcileCron } from "./services/neurobagel-hooks";
+import {
+  runNeurobagelVerificationSweepCron,
+  verificationLogLine,
+} from "./services/neurobagel-verify";
 import { getActiveNotices } from "./services/notices";
 import { sweepBlockedBidsValidationRequests } from "./services/publication-sweep";
 import { runRecordingStatsSweepCron } from "./services/recording-stats-sweep";
@@ -172,6 +178,11 @@ api.get("/notices", optionalAuthMiddleware, async (c) => {
 // posts' images from the NEWS_MEDIA bucket. Admin writes are in
 // routes/admin/news.ts.
 api.route("/news", newsRoutes);
+
+// The Neurobagel artifact store, read side (epic #1586 phase 4, ADR 0084): the index
+// and artifacts the node's loader pulls, behind one shared bearer secret, each answer
+// re-checked against D1. Off (404) until NEUROBAGEL_READ_TOKEN and the bucket exist.
+api.route("/neurobagel", neurobagelRoutes);
 
 // Mount route handlers
 api.route("/auth", authRoutes);
@@ -1226,6 +1237,76 @@ export default {
           .catch((err) =>
             console.error(
               "[anonymity-sweep] sweep failed:",
+              err instanceof Error ? (err.stack ?? err.message) : err,
+            ),
+          ),
+      );
+
+      // Epic #1586 phase 4 (ADR 0084): the Neurobagel artifact reconcile, the safety net
+      // behind the publication and import hooks. PRODUCTION-ONLY, and deliberately NOT
+      // in DEV_CRON_ALLOWLIST: a new daily job is production-only by default, and this
+      // one reads dataset repositories through the shared nemarDatasets org. It does
+      // nothing at all unless NEUROBAGEL_WRITER_ENABLED is "1", examines at most
+      // NEUROBAGEL_RECONCILE_MAX datasets per tick (default 10) in a deterministic
+      // order, and shares this tick's subrequest budget with every job around it
+      // (ADR 0054), which is why the bound is small. The cron wrapper carries the fence
+      // so the admin route, which calls the writer directly, still works on staging.
+      ctx.waitUntil(
+        runNeurobagelReconcileCron(env, (work) => ctx.waitUntil(work))
+          .then((r) => {
+            if (!r) return;
+            const wrote = r.results.filter((d) => d.outcome === "written").length;
+            const refused = r.results.filter((d) => d.outcome === "refused").length;
+            const errors = r.results.filter((d) => d.outcome === "error").length;
+            const line =
+              `[neurobagel] reconcile status=${r.status} eligible=${r.eligible ?? "?"} ` +
+              `examined=${r.examined} written=${wrote} refused=${refused} errors=${errors} ` +
+              `removed=${r.removed.length} unexamined=${r.unexamined} ` +
+              `index_written=${r.index.written} needs_review=${r.needs_review.length}`;
+            // `disabled` is the default and is routine. A misconfiguration, a failed run,
+            // an error on any dataset, or an anonymity-class finding is not: those are
+            // logged where someone reading the logs will see them.
+            const routine =
+              (r.status === "ok" || r.status === "disabled") &&
+              errors === 0 &&
+              r.anonymity_findings === 0 &&
+              !r.index.contended;
+            if (routine) console.log(line);
+            else
+              console.error(
+                `${line} anonymity_findings=${r.anonymity_findings} error=${r.error ?? ""}`,
+              );
+          })
+          .catch((err) =>
+            console.error(
+              "[neurobagel] reconcile failed:",
+              err instanceof Error ? (err.stack ?? err.message) : err,
+            ),
+          ),
+      );
+
+      // Epic #1586 phase 6 (ADR 0067's amendment): the Neurobagel verification sweep. It
+      // REPORTS and never repairs: the store against the predicate, the node, registration
+      // with the public federation, and upstream drift. PRODUCTION-ONLY, and deliberately NOT
+      // in DEV_CRON_ALLOWLIST: a new daily job is production-only by default. It sends no
+      // mail and dispatches nothing (a source scan holds it to that), so the fence is the
+      // default and not a necessity; the cron wrapper carries it so the admin route, which
+      // calls the sweep directly, still works on staging. It writes its heartbeat on every
+      // run, even one that throws, and costs about ten outbound requests plus the store's
+      // listing pages, which is why it shares this tick (ADR 0054) rather than adding one.
+      ctx.waitUntil(
+        runNeurobagelVerificationSweepCron(env)
+          .then((r) => {
+            if (!r) return;
+            const line = verificationLogLine(r);
+            // Healthy, or nothing here to check, is routine; an alarm, an unknown or a sweep that
+            // failed is logged where someone reading the logs will see it.
+            if (r.overall === "healthy" || r.overall === "unchecked") console.log(line);
+            else console.error(line);
+          })
+          .catch((err) =>
+            console.error(
+              "[neurobagel] verification failed:",
               err instanceof Error ? (err.stack ?? err.message) : err,
             ),
           ),

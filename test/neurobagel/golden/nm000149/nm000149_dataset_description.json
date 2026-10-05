@@ -1,0 +1,29 @@
+{
+  "AccessInstructions": "Public access. License: CC-BY-4.0. Browse and download at https://nemar.org/dataset/nm000149 (latest version v1.0.2).",
+  "AccessLink": "https://nemar.org/dataset/nm000149",
+  "AccessType": "public",
+  "Authors": [
+    "Patrick Ofner",
+    "Andreas Schwarz",
+    "Joana Pereira",
+    "Daniela Wyss",
+    "Renate Wildburger",
+    "Gernot R. Müller-Putz"
+  ],
+  "Keywords": [
+    "EEG",
+    "Spinal Cord Injuries",
+    "motor imagery",
+    "attempted movement",
+    "movement-related cortical potentials",
+    "Brain-Computer Interfaces",
+    "neuroprosthetics"
+  ],
+  "Name": "BNCI 2019-001 Motor Imagery dataset for Spinal Cord Injury patients",
+  "ParticipantCount": 10,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/nm000149",
+    "https://doi.org/10.82901/nemar.nm000149"
+  ],
+  "RepositoryURL": "https://data.nemar.org/nm000149/"
+}

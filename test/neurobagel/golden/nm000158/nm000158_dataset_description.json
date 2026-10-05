@@ -1,0 +1,34 @@
+{
+  "AccessInstructions": "Public access. License: CC-BY-4.0. Browse and download at https://nemar.org/dataset/nm000158 (latest version v1.0.3).",
+  "AccessLink": "https://nemar.org/dataset/nm000158",
+  "AccessType": "public",
+  "Authors": [
+    "Haijie Liu",
+    "Penghu Wei",
+    "Haochong Wang",
+    "Xiaodong Lv",
+    "Wei Duan",
+    "Meijie Li",
+    "Yan Zhao",
+    "Qingmei Wang",
+    "Xinyuan Chen",
+    "Gaige Shi",
+    "Bo Han",
+    "Junwei Hao"
+  ],
+  "Keywords": [
+    "EEG",
+    "motor imagery",
+    "Brain-Computer Interfaces",
+    "Stroke",
+    "Rehabilitation",
+    "hand-grip imagery"
+  ],
+  "Name": "Liu, Lv et al. 2023 — EEG datasets of stroke patients (motor imagery)",
+  "ParticipantCount": 50,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/nm000158",
+    "https://doi.org/10.82901/nemar.nm000158"
+  ],
+  "RepositoryURL": "https://data.nemar.org/nm000158/"
+}

@@ -1,0 +1,34 @@
+[
+  {
+    "NodeName": "OpenNeuro",
+    "ApiURL": "https://openneuro.neurobagel.org/node/"
+  },
+  {
+    "NodeName": "TOSI Neuro",
+    "ApiURL": "https://tosi.neurobagel.org/mni_public/"
+  },
+  {
+    "NodeName": "International Neuroimaging Data-sharing Initiative",
+    "ApiURL": "https://indi.neurobagel.org/node/"
+  },
+  {
+    "NodeName": "Austrian Neurocloud",
+    "ApiURL": "https://neurobagel.anc.plus.ac.at/napi/"
+  },
+  {
+    "NodeName": "EBRAINS",
+    "ApiURL": "https://ebrains.neurobagel.org/node/"
+  },
+  {
+    "NodeName": "Ontario Brain Institute",
+    "ApiURL": "https://nb-api.obicloud.ca/"
+  },
+  {
+    "NodeName": "Shanoir",
+    "ApiURL": "https://neurobagel.irisa.fr/node/"
+  },
+  {
+    "NodeName": "PublicnEUro",
+    "ApiURL": "https://datacatalog.publicneuro.eu/neurobagel/node/"
+  }
+]

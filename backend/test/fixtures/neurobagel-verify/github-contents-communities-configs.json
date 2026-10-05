@@ -1,0 +1,22 @@
+[
+  {
+    "path": "configs/Neurobagel/assessment.json",
+    "sha": "7f945e3591d88f94af7f5581aebaefd8ed95a643"
+  },
+  {
+    "path": "configs/Neurobagel/config.json",
+    "sha": "e8fde10c2dcce3d60748bf68461136103aefe2de"
+  },
+  {
+    "path": "configs/Neurobagel/diagnosis.json",
+    "sha": "e21a7e8c74d88eb31702cf97ec79ccb422860260"
+  },
+  {
+    "path": "configs/Neurobagel/imaging_modalities.json",
+    "sha": "95c4207b2573ce0c1bc62ad1565e88257f31e547"
+  },
+  {
+    "path": "configs/Neurobagel/sex.json",
+    "sha": "2991ccfc84e1783cfeeae78cfeb6005c0d43c48f"
+  }
+]

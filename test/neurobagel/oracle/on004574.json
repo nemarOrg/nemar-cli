@@ -1,0 +1,1847 @@
+{
+  "bagel": "0.11.6",
+  "bagel_only_subjects": 0,
+  "dataset": {
+    "hasAccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on004574 (latest version v1.0.0).",
+    "hasAccessLink": "https://nemar.org/dataset/on004574",
+    "hasAccessType": "public",
+    "hasAuthors": [
+      "Arun Singh arun.singh@usd.edu",
+      "Rachel Cole rachel-cole@uiowa.edu",
+      "Arturo Espinoza arturo-espinoza@uiowa.edu",
+      "Jan R Wessel jan-wessel@uiowa.edu",
+      "Jim Cavanagh jcavanagh@unm.edu",
+      "Nandakumar Narayanan nandakumar-narayanan@uiowa.edu"
+    ],
+    "hasKeywords": [
+      "EEG",
+      "Parkinson Disease",
+      "oddball task",
+      "cross-modal",
+      "cognitive dysfunction",
+      "midfrontal activity"
+    ],
+    "hasLabel": "Cross-modal Oddball Task.",
+    "hasReferencesAndLinks": [
+      "https://nemar.org/dataset/on004574",
+      "https://doi.org/10.82901/nemar.on004574"
+    ],
+    "hasRepositoryURL": "https://data.nemar.org/on004574/"
+  },
+  "dataset_id": "on004574",
+  "imaging": {
+    "attachable_subjects": 146,
+    "modalities": {
+      "sub-001": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-002": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-003": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-004": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-005": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-006": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-007": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-008": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-009": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-010": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-011": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-012": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-013": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-014": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-015": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-016": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-017": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-018": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-019": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-020": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-021": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-022": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-023": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-024": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-025": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-026": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-027": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-028": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-029": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-030": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-031": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-032": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-033": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-034": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-035": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-036": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-037": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-038": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-039": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-040": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-041": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-042": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-043": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-044": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-045": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-046": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-047": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-048": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-049": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-050": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-051": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-052": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-053": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-054": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-055": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-056": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-057": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-058": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-059": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-060": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-061": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-062": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-063": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-064": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-065": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-066": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-067": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-068": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-069": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-070": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-071": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-072": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-073": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-074": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-075": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-076": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-077": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-078": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-079": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-080": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-081": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-082": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-083": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-084": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-085": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-086": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-087": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-088": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-089": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-090": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-091": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-092": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-093": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-094": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-095": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-096": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-097": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-098": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-099": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-100": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-101": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-102": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-103": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-104": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-105": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-106": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-107": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-108": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-109": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-110": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-111": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-112": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-113": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-114": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-115": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-116": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-117": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-118": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-119": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-120": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-121": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-122": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-123": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-124": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-125": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-126": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-127": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-128": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-129": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-130": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-131": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-132": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-133": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-134": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-135": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-136": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-137": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-138": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-139": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-140": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-141": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-142": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-143": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-144": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-145": [
+        "nidm:Electroencephalography"
+      ],
+      "sub-146": [
+        "nidm:Electroencephalography"
+      ]
+    }
+  },
+  "inputs": {
+    "annotated.json": "b0a8dabcaddfea63a01941e69b618b8815d09adaf306af9e0760900fb81a35c7",
+    "dataset_description.json": "39491903cd399fc06e6feb7d34d48435f591179868d19cad3d6ec654bd373df9",
+    "participants.tsv": "d92d779078588ec707d06247618dd2dd6ad165c3d7f55b37406f416fba5d6b1a"
+  },
+  "reason": null,
+  "status": "compared",
+  "subjects": {
+    "sub-001": {
+      "age": 80.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-002": {
+      "age": 81.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-003": {
+      "age": 68.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-004": {
+      "age": 80.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-005": {
+      "age": 56.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-006": {
+      "age": 69.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-007": {
+      "age": 66.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-008": {
+      "age": 65.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-009": {
+      "age": 53.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-010": {
+      "age": 74.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-011": {
+      "age": 70.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-012": {
+      "age": 69.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-013": {
+      "age": 78.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-014": {
+      "age": 70.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-015": {
+      "age": 65.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-016": {
+      "age": 60.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-017": {
+      "age": 56.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-018": {
+      "age": 58.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-019": {
+      "age": 74.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-020": {
+      "age": 72.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-021": {
+      "age": 61.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-022": {
+      "age": 81.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-023": {
+      "age": 57.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-024": {
+      "age": 52.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-025": {
+      "age": 71.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-026": {
+      "age": 77.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-027": {
+      "age": 70.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-028": {
+      "age": 60.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-029": {
+      "age": 84.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-030": {
+      "age": 60.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-031": {
+      "age": 82.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-032": {
+      "age": 70.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-033": {
+      "age": 64.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-034": {
+      "age": 57.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-035": {
+      "age": 84.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-036": {
+      "age": 68.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-037": {
+      "age": 65.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-038": {
+      "age": 65.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-039": {
+      "age": 66.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-040": {
+      "age": 67.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-041": {
+      "age": 71.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-042": {
+      "age": 71.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-043": {
+      "age": 80.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-044": {
+      "age": 65.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-045": {
+      "age": 66.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-046": {
+      "age": 68.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-047": {
+      "age": 70.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-048": {
+      "age": 68.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-049": {
+      "age": 68.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-050": {
+      "age": 70.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-051": {
+      "age": 58.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-052": {
+      "age": 66.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-053": {
+      "age": 66.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-054": {
+      "age": 66.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-055": {
+      "age": 73.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-056": {
+      "age": 69.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-057": {
+      "age": 71.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-058": {
+      "age": 81.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-059": {
+      "age": 67.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-060": {
+      "age": 68.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-061": {
+      "age": 62.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-062": {
+      "age": 75.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-063": {
+      "age": 79.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-064": {
+      "age": 52.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-065": {
+      "age": 72.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-066": {
+      "age": 86.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-067": {
+      "age": 61.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-068": {
+      "age": 54.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-069": {
+      "age": 60.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-070": {
+      "age": 69.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-071": {
+      "age": 76.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-072": {
+      "age": 69.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-073": {
+      "age": 68.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-074": {
+      "age": 70.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-075": {
+      "age": 74.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-076": {
+      "age": 65.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-077": {
+      "age": 66.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-078": {
+      "age": 67.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-079": {
+      "age": 74.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-080": {
+      "age": 69.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-081": {
+      "age": 61.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-082": {
+      "age": 61.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-083": {
+      "age": 71.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-084": {
+      "age": 69.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-085": {
+      "age": 64.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-086": {
+      "age": 77.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-087": {
+      "age": 48.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-088": {
+      "age": 73.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-089": {
+      "age": 73.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-090": {
+      "age": 62.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-091": {
+      "age": 68.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-092": {
+      "age": 85.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-093": {
+      "age": 78.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-094": {
+      "age": 67.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-095": {
+      "age": 71.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-096": {
+      "age": 63.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-097": {
+      "age": 73.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-098": {
+      "age": 54.0,
+      "assessments": [
+        "snomed:342061000000106",
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [],
+      "sex": null
+    },
+    "sub-099": {
+      "age": 61.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-100": {
+      "age": 80.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-101": {
+      "age": 76.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-102": {
+      "age": 71.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-103": {
+      "age": 64.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-104": {
+      "age": 66.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-105": {
+      "age": 76.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-106": {
+      "age": 77.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-107": {
+      "age": 72.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-108": {
+      "age": 70.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-109": {
+      "age": 70.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-110": {
+      "age": 64.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-111": {
+      "age": 71.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-112": {
+      "age": 71.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-113": {
+      "age": 71.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-114": {
+      "age": 58.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-115": {
+      "age": 71.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-116": {
+      "age": 77.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-117": {
+      "age": 60.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-118": {
+      "age": 80.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-119": {
+      "age": 54.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-120": {
+      "age": 57.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-121": {
+      "age": 61.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-122": {
+      "age": 80.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-123": {
+      "age": 84.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-124": {
+      "age": 71.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-125": {
+      "age": 68.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-126": {
+      "age": 64.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-127": {
+      "age": 68.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-128": {
+      "age": 73.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-129": {
+      "age": 72.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-130": {
+      "age": 73.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-131": {
+      "age": 79.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-132": {
+      "age": 74.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-133": {
+      "age": 78.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-134": {
+      "age": 74.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-135": {
+      "age": 70.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-136": {
+      "age": 76.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-137": {
+      "age": 71.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-138": {
+      "age": 86.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-139": {
+      "age": 75.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-140": {
+      "age": 69.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-141": {
+      "age": 74.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-142": {
+      "age": 64.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-143": {
+      "age": 71.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-144": {
+      "age": 78.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-145": {
+      "age": 68.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    },
+    "sub-146": {
+      "age": 52.0,
+      "assessments": [
+        "snomed:859351000000102"
+      ],
+      "diagnoses": [
+        "ncit:C94342"
+      ],
+      "sex": null
+    }
+  },
+  "transform_only_subjects": 0
+}

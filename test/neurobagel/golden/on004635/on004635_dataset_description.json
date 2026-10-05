@@ -1,0 +1,24 @@
+{
+  "AccessInstructions": "Public access. License: CC0. Browse and download at https://nemar.org/dataset/on004635 (latest version v1.0.0).",
+  "AccessLink": "https://nemar.org/dataset/on004635",
+  "AccessType": "public",
+  "Authors": [
+    "Armen Bagdasarov",
+    "Michael S. Gaffrey"
+  ],
+  "Keywords": [
+    "EEG",
+    "EEG microstates",
+    "infant",
+    "reliability",
+    "high-density EEG",
+    "Electroencephalography"
+  ],
+  "Name": "Gaffrey Lab Infant Microstates Reliability",
+  "ParticipantCount": 48,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/on004635",
+    "https://doi.org/10.82901/nemar.on004635"
+  ],
+  "RepositoryURL": "https://data.nemar.org/on004635/"
+}

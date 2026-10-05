@@ -1,0 +1,466 @@
+{
+  "datasets": {
+    "nm000119": {
+      "columns": {
+        "group": {
+          "IsAbout": {
+            "Label": "Diagnosis",
+            "TermURL": "nb:Diagnosis"
+          },
+          "Levels": {
+            "able-bodied subjects without any known neuro-muscular or mental disorders": {
+              "Label": "Healthy Control",
+              "TermURL": "ncit:C94342"
+            }
+          },
+          "MissingValues": [],
+          "VariableType": "Categorical"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "author",
+        "reviewer": "pull request author; not a domain expert, so a clinical or instrument review is still required before federation",
+        "source": "The one group value of participants.tsv names able-bodied subjects without a known neuro-muscular or mental disorder, which is the pinned vocabulary's Healthy Control; the mechanical rule recognises only the spellings healthy and control."
+      },
+      "pins": {
+        "participants_json": "4927572818012f2b1c7c181b4d63c85b4eacf0c4",
+        "participants_tsv": "eb610a87ff4dfb93efdcba2da17bfef12dce9b82"
+      }
+    },
+    "nm000149": {
+      "columns": {
+        "group": {
+          "IsAbout": {
+            "Label": "Diagnosis",
+            "TermURL": "nb:Diagnosis"
+          },
+          "Levels": {
+            "spinal cord injury": {
+              "Label": "Spinal cord injury",
+              "TermURL": "snomed:90584004"
+            }
+          },
+          "MissingValues": [],
+          "VariableType": "Categorical"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "author",
+        "reviewer": "pull request author; not a domain expert, so a clinical or instrument review is still required before federation",
+        "source": "The one group value of participants.tsv, spinal cord injury, matches the dataset title (BNCI 2019-001 motor imagery for spinal cord injury); term chosen from the pinned diagnosis vocabulary."
+      },
+      "pins": {
+        "participants_json": "66276855a370067ffecf07f735d0cd6b7a362263",
+        "participants_tsv": "82d02b4e63fe414c6473d85c0474b2d97723d153"
+      }
+    },
+    "nm000158": {
+      "columns": {
+        "group": {
+          "IsAbout": {
+            "Label": "Diagnosis",
+            "TermURL": "nb:Diagnosis"
+          },
+          "Levels": {
+            "acute stroke patients (1-30 days post-stroke)": {
+              "Label": "Cerebrovascular accident",
+              "TermURL": "snomed:230690007"
+            }
+          },
+          "MissingValues": [],
+          "VariableType": "Categorical"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "author",
+        "reviewer": "pull request author; not a domain expert, so a clinical or instrument review is still required before federation",
+        "source": "The one group value of participants.tsv names acute stroke patients, matching the dataset title (EEG datasets of stroke patients); the pinned diagnosis vocabulary holds stroke as Cerebrovascular accident."
+      },
+      "pins": {
+        "participants_json": "62529215a6e9ca66e3addcad46edb107367b3a5d",
+        "participants_tsv": "7110f7e4a9c13ce67ee1c9510141135246c4ff30"
+      }
+    },
+    "nm000210": {
+      "columns": {
+        "group": {
+          "IsAbout": {
+            "Label": "Diagnosis",
+            "TermURL": "nb:Diagnosis"
+          },
+          "Levels": {
+            "autism spectrum disorder (ASD)": {
+              "Label": "Autism spectrum disorder",
+              "TermURL": "snomed:35919005"
+            }
+          },
+          "MissingValues": [],
+          "VariableType": "Categorical"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "author",
+        "reviewer": "pull request author; not a domain expert, so a clinical or instrument review is still required before federation",
+        "source": "The one group value of participants.tsv, autism spectrum disorder, matches the dataset title (BCIAUT-P300 dataset for autism); term chosen from the pinned diagnosis vocabulary."
+      },
+      "pins": {
+        "participants_json": "66276855a370067ffecf07f735d0cd6b7a362263",
+        "participants_tsv": "212dee19cb4c1ffd1d31432b7031700f4b6456a8"
+      }
+    },
+    "on001787": {
+      "columns": {
+        "gender": {
+          "IsAbout": {
+            "Label": "Sex",
+            "TermURL": "nb:Sex"
+          },
+          "Levels": {
+            "F": {
+              "Label": "Female",
+              "TermURL": "snomed:248152002"
+            },
+            "M": {
+              "Label": "Male",
+              "TermURL": "snomed:248153007"
+            }
+          },
+          "MissingValues": [],
+          "VariableType": "Categorical"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "upstream_community",
+        "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
+        "source": "neurobagel/openneuro-annotations@116676d:ds001787.json (git blob cf03faf), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed; for a spot-check: gender is read as Sex (participants.json says: \"sex of the participant\")"
+      },
+      "pins": {
+        "participants_json": "941c1cb3010a6516b0336e3d97073a48146b0df5",
+        "participants_tsv": "ed6bc01071b75371d741593b4d8808c3168a55c0"
+      }
+    },
+    "on003474": {
+      "columns": {
+        "BDI": {
+          "IsAbout": {
+            "Label": "Assessment Tool",
+            "TermURL": "nb:Assessment"
+          },
+          "IsPartOf": {
+            "Label": "Beck depression inventory",
+            "TermURL": "snomed:273306008"
+          },
+          "MissingValues": [
+            "n/a",
+            "N/A",
+            "na",
+            "NA",
+            "nan",
+            "NaN",
+            ""
+          ],
+          "VariableType": "Collection"
+        },
+        "STAI": {
+          "IsAbout": {
+            "Label": "Assessment Tool",
+            "TermURL": "nb:Assessment"
+          },
+          "IsPartOf": {
+            "Label": "Spielberger state-trait anxiety inventory",
+            "TermURL": "snomed:273830002"
+          },
+          "MissingValues": [
+            "n/a",
+            "N/A",
+            "na",
+            "NA",
+            "nan",
+            "NaN",
+            ""
+          ],
+          "VariableType": "Collection"
+        },
+        "sex": {
+          "IsAbout": {
+            "Label": "Sex",
+            "TermURL": "nb:Sex"
+          },
+          "Levels": {
+            "1": {
+              "Label": "Female",
+              "TermURL": "snomed:248152002"
+            },
+            "2": {
+              "Label": "Male",
+              "TermURL": "snomed:248153007"
+            }
+          },
+          "MissingValues": [
+            "NaN"
+          ],
+          "VariableType": "Categorical"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "upstream_community",
+        "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
+        "source": "neurobagel/openneuro-annotations@116676d:ds003474.json (git blob 7fd184e), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed; for a spot-check: numeric sex codes are confirmed by the Levels of participants.json"
+      },
+      "pins": {
+        "participants_json": "e80c29cd06b0415881023b57c7a7538b176d152e",
+        "participants_tsv": "233a36ffddce67d8596f958b3bf8aefc54ab8ad6"
+      }
+    },
+    "on003568": {
+      "columns": {
+        "group": {
+          "IsAbout": {
+            "Label": "Diagnosis",
+            "TermURL": "nb:Diagnosis"
+          },
+          "Levels": {
+            "HV": {
+              "Label": "Healthy Control",
+              "TermURL": "ncit:C94342"
+            },
+            "MDD": {
+              "Label": "Major depressive disorder",
+              "TermURL": "snomed:370143000"
+            }
+          },
+          "MissingValues": [],
+          "VariableType": "Categorical"
+        },
+        "participant_age": {
+          "Format": {
+            "Label": "decimal",
+            "TermURL": "nb:FromFloat"
+          },
+          "IsAbout": {
+            "Label": "Age",
+            "TermURL": "nb:Age"
+          },
+          "MissingValues": [
+            "",
+            "n/a",
+            " "
+          ],
+          "VariableType": "Continuous"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "upstream_community",
+        "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
+        "source": "neurobagel/openneuro-annotations@116676d:ds003568.json (git blob 5bd83c1), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed; for a spot-check: participant_age age units: none declared, years assumed"
+      },
+      "pins": {
+        "participants_json": null,
+        "participants_tsv": "535d4ea0fba8f1f0ebd11f5c0999d16ca2f073af"
+      }
+    },
+    "on004166": {
+      "columns": {
+        "group": {
+          "IsAbout": {
+            "Label": "Diagnosis",
+            "TermURL": "nb:Diagnosis"
+          },
+          "Levels": {},
+          "MissingValues": [
+            "",
+            "Backward",
+            "Control",
+            "Forward"
+          ],
+          "VariableType": "Categorical"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "author",
+        "reviewer": "pull request author; not a domain expert, so a clinical or instrument review is still required before federation",
+        "source": "The group column of participants.tsv names the arms of a working memory training trial (Forward, Backward, Control; the dataset describes a randomized controlled trial with a no-intervention control group). The mechanical rule reads Control as healthy control, which an intervention arm is not and nothing in the documents says the participants are healthy, so every value is declared missing and no diagnosis is claimed."
+      },
+      "pins": {
+        "participants_json": "af1e086ce898d8dd3197a6b44a6735e71a214913",
+        "participants_tsv": "21113fe93b6b64b297c926361a6e7ab8f99e7625"
+      }
+    },
+    "on004574": {
+      "columns": {
+        "MOCA": {
+          "IsAbout": {
+            "Label": "Assessment Tool",
+            "TermURL": "nb:Assessment"
+          },
+          "IsPartOf": {
+            "Label": "Montreal cognitive assessment",
+            "TermURL": "snomed:859351000000102"
+          },
+          "MissingValues": [
+            "n/a",
+            "N/A",
+            "na",
+            "NA",
+            "nan",
+            "NaN",
+            ""
+          ],
+          "VariableType": "Collection"
+        },
+        "UPDRS": {
+          "IsAbout": {
+            "Label": "Assessment Tool",
+            "TermURL": "nb:Assessment"
+          },
+          "IsPartOf": {
+            "Label": "Unified Parkinsons disease rating scale score",
+            "TermURL": "snomed:342061000000106"
+          },
+          "MissingValues": [
+            "n/a",
+            "N/A",
+            "na",
+            "NA",
+            "nan",
+            "NaN",
+            ""
+          ],
+          "VariableType": "Collection"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "upstream_community",
+        "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
+        "source": "neurobagel/openneuro-annotations@116676d:ds004574.json (git blob de41b26), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed"
+      },
+      "pins": {
+        "participants_json": "5573c4a26fc1b69e687bcd35b6691f8ae4aab8a1",
+        "participants_tsv": "4c4eef0832eff4e96c1f20c84b1fc74ef908e946"
+      }
+    },
+    "on004635": {
+      "columns": {
+        "Gender": {
+          "IsAbout": {
+            "Label": "Sex",
+            "TermURL": "nb:Sex"
+          },
+          "Levels": {
+            "F": {
+              "Label": "Female",
+              "TermURL": "snomed:248152002"
+            },
+            "M": {
+              "Label": "Male",
+              "TermURL": "snomed:248153007"
+            }
+          },
+          "MissingValues": [],
+          "VariableType": "Categorical"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "upstream_community",
+        "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
+        "source": "neurobagel/openneuro-annotations@116676d:ds004635.json (git blob fcf5dd9), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed; for a spot-check: Gender is read as Sex (participants.json says: \"Participant biological sex assigned at birth\")"
+      },
+      "pins": {
+        "participants_json": "f539786e1a83d3a7b1267975833b26a56c155c9f",
+        "participants_tsv": "1ff7790d63daffa2cf697d35d9e8ab5b5b1b76b6"
+      }
+    },
+    "on006801": {
+      "columns": {
+        "group": {
+          "IsAbout": {
+            "Label": "Diagnosis",
+            "TermURL": "nb:Diagnosis"
+          },
+          "Levels": {},
+          "MissingValues": [
+            "Active",
+            "Control",
+            "Passive"
+          ],
+          "VariableType": "Categorical"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "author",
+        "reviewer": "pull request author; not a domain expert, so a clinical or instrument review is still required before federation",
+        "source": "participants.json describes the group column as the experimental arm (Active, Passive, and Control: watched the lecture without a review activity). The mechanical rule reads Control as healthy control, which an intervention arm is not, so every value is declared missing and no diagnosis is claimed; all participants are described as neurotypical students, which a reviewer may prefer to map to healthy control for every arm."
+      },
+      "pins": {
+        "participants_json": "80f7037abaabb89a537636f39065d87cb82f7063",
+        "participants_tsv": "07b2755a5007b6930186dd34dd3b83069d7d9d12"
+      }
+    },
+    "on006861": {
+      "columns": {
+        "UCLA_R": {
+          "IsAbout": {
+            "Label": "Assessment Tool",
+            "TermURL": "nb:Assessment"
+          },
+          "IsPartOf": {
+            "Label": "Revised UCLA (University of California Los Angeles) Loneliness scale",
+            "TermURL": "snomed:1103791000000109"
+          },
+          "MissingValues": [
+            "n/a",
+            "N/A",
+            "na",
+            "NA",
+            "nan",
+            "NaN",
+            ""
+          ],
+          "VariableType": "Collection"
+        },
+        "UCLA_R_screening": {
+          "IsAbout": {
+            "Label": "Assessment Tool",
+            "TermURL": "nb:Assessment"
+          },
+          "IsPartOf": {
+            "Label": "Revised UCLA (University of California Los Angeles) Loneliness scale",
+            "TermURL": "snomed:1103791000000109"
+          },
+          "MissingValues": [
+            "n/a",
+            "N/A",
+            "na",
+            "NA",
+            "nan",
+            "NaN",
+            ""
+          ],
+          "VariableType": "Collection"
+        }
+      },
+      "evidence": {
+        "date": "2026-10-02",
+        "review": "upstream_community",
+        "reviewer": "Neurobagel community annotators, upstream; NEMAR has not reviewed it beyond the loader and binder checks",
+        "source": "neurobagel/openneuro-annotations@116676d:ds006861.json (git blob 63d93fc), MIT licence; columns copied as annotated, terms re-labelled from the pinned vocabulary, ValueRange recomputed"
+      },
+      "pins": {
+        "participants_json": "16c18ebbefcdd669a33207068a2c870e4ce42533",
+        "participants_tsv": "ea8b51c8a511676a91c078f5dfc34c419552ef42"
+      }
+    }
+  },
+  "format": 1
+}

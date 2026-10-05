@@ -1,0 +1,30 @@
+{
+  "AccessInstructions": "Public access. License: ODC-By-1.0. Browse and download at https://nemar.org/dataset/nm000109 (latest version v1.0.0).",
+  "AccessLink": "https://nemar.org/dataset/nm000109",
+  "AccessType": "public",
+  "Authors": [
+    "Igor Zyma",
+    "Sergii Tukaev",
+    "Ivan Seleznov",
+    "Ken Kiyono",
+    "Anton Popov",
+    "Mariia Chernykh",
+    "Oleksii Shpenkov"
+  ],
+  "Keywords": [
+    "EEG",
+    "mental arithmetic",
+    "mental workload",
+    "cognitive stress",
+    "resting state",
+    "Electroencephalography",
+    "Mathematics"
+  ],
+  "Name": "EEG During Mental Arithmetic Tasks",
+  "ParticipantCount": 36,
+  "ReferencesAndLinks": [
+    "https://nemar.org/dataset/nm000109",
+    "https://doi.org/10.82901/nemar.nm000109"
+  ],
+  "RepositoryURL": "https://data.nemar.org/nm000109/"
+}
