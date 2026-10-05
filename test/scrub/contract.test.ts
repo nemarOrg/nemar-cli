@@ -12,6 +12,7 @@ import {
   parseKeymap,
   parsePatches,
   parsePlan,
+  parseVerified,
   parseZarrVerified,
   patchDigest,
 } from "../../scripts/scrub/contract";
@@ -21,6 +22,43 @@ const H2 = "b".repeat(64);
 const OLD = `SHA256E-s1000--${H1}.bdf`;
 const NEW = `SHA256E-s1000--${H2}.bdf`;
 const BOUND = "c".repeat(64);
+
+interface KeyOver {
+  [k: string]: unknown;
+}
+
+/** A plan key as the plan stage writes it: read, nothing to scrub, one version. */
+const planKey = (over: KeyOver = {}) => ({
+  oldKey: OLD,
+  size: 1000,
+  needsScrub: false,
+  versionIds: ["v1"],
+  reasons: [],
+  status: "read",
+  ...over,
+});
+
+/** A whole plan with totals added up here, by hand, from the keys given. */
+function planText(keys: KeyOver[], over: KeyOver = {}, totals: KeyOver = {}): string {
+  return JSON.stringify({
+    version: 1,
+    dataset: "d",
+    bucket: "nemar",
+    tags: ["v1.0.0"],
+    createdAt: "2026-10-04T00:00:00Z",
+    keys,
+    totals: {
+      keys: keys.length,
+      needScrub: keys.filter((k) => k.needsScrub === true).length,
+      bytesToHash: keys
+        .filter((k) => k.needsScrub === true)
+        .reduce((n, k) => n + Number(k.size), 0),
+      unreadable: keys.filter((k) => k.status === "unreadable").length,
+      ...totals,
+    },
+    ...over,
+  });
+}
 
 describe("annex keys", () => {
   test("parse and build round-trip, keeping size and extension", () => {
@@ -151,8 +189,7 @@ describe("stage files", () => {
     expect(() =>
       parseGitPlan(JSON.stringify({ ...gp, dataset: "d", jsonOps: { "p.json": "x" } })),
     ).toThrow(ContractError);
-    const plan = { version: 1, dataset: "d", keys: [{ oldKey: OLD }] };
-    expect(parsePlan(JSON.stringify(plan)).keys.length).toBe(1);
+    expect(parsePlan(planText([planKey()])).keys.length).toBe(1);
   });
 
   test("zarr-verified.json: bound to two files by sha256, counts that add up", () => {
@@ -182,24 +219,87 @@ describe("stage files", () => {
   });
 
   test("plan.json: partial is a boolean, and a git: key is carried only by an unreadable entry", () => {
-    const entry = (over: Record<string, unknown>) => ({
-      oldKey: OLD,
-      size: 1000,
-      needsScrub: false,
-      versionIds: [],
-      reasons: [],
-      status: "read",
-      ...over,
-    });
-    const plan = (over: Record<string, unknown>, ...keys: unknown[]) =>
-      JSON.stringify({ version: 1, dataset: "d", keys, ...over });
-    expect(parsePlan(plan({ partial: true }, entry({}))).partial).toBe(true);
-    expect(() => parsePlan(plan({ partial: "yes" }, entry({})))).toThrow(ContractError);
+    expect(parsePlan(planText([planKey()], { partial: true })).partial).toBe(true);
+    expect(() => parsePlan(planText([planKey()], { partial: "yes" }))).toThrow(ContractError);
     const git = `git:${"b".repeat(40)}`;
-    expect(parsePlan(plan({}, entry({ oldKey: git, status: "unreadable" }))).keys.length).toBe(1);
-    expect(() => parsePlan(plan({}, entry({ oldKey: git })))).toThrow(ContractError);
-    expect(() => parsePlan(plan({}, entry({ oldKey: "git:zz", status: "unreadable" })))).toThrow(
-      ContractError,
-    );
+    const inline = planKey({ oldKey: git, status: "unreadable", size: 0 });
+    expect(parsePlan(planText([inline])).keys.length).toBe(1);
+    expect(() => parsePlan(planText([planKey({ oldKey: git, size: 0 })]))).toThrow(ContractError);
+    expect(() => parsePlan(planText([{ ...inline, oldKey: "git:zz" }]))).toThrow(ContractError);
+  });
+
+  test("plan.json: every field a stage trusts is checked, and totals must match the keys", () => {
+    const other = `SHA256E-s2000--${H2}.edf`;
+    const scrub = planKey({ needsScrub: true, reasons: ["edf-patient-name"] });
+    const good = [scrub, planKey({ oldKey: other, size: 2000 })];
+    const parsed = parsePlan(planText(good));
+    expect(parsed.totals).toEqual({ keys: 2, needScrub: 1, bytesToHash: 1000, unreadable: 0 });
+
+    const mutations: Array<[string, string]> = [
+      // Totals that hide or invent something.
+      ["unreadable hidden", planText([planKey({ status: "unreadable" })], {}, { unreadable: 0 })],
+      ["unreadable invented", planText([planKey()], {}, { unreadable: 1 })],
+      ["bytes shrunk", planText(good, {}, { bytesToHash: 1 })],
+      ["bytes counted for a clean key", planText(good, {}, { bytesToHash: 3000 })],
+      ["needScrub wrong", planText(good, {}, { needScrub: 2 })],
+      ["keys wrong", planText(good, {}, { keys: 3 })],
+      ["a total negative", planText(good, {}, { keys: -2 })],
+      ["a total fractional", planText(good, {}, { keys: 2.5 })],
+      ["a total a string", planText(good, {}, { keys: "2" })],
+      ["totals absent", JSON.stringify({ ...JSON.parse(planText(good)), totals: undefined })],
+      ["totals not an object", planText(good, { totals: [] })],
+      // Fields of a key.
+      ["status unknown", planText([planKey({ status: "ok" })])],
+      ["status absent", planText([planKey({ status: undefined })])],
+      ["size absent", planText([planKey({ size: undefined })])],
+      ["size negative", planText([planKey({ size: -1 })])],
+      ["size fractional", planText([planKey({ size: 1000.5 })])],
+      ["size disagrees with the key", planText([planKey({ size: 999 })])],
+      ["size a string", planText([planKey({ size: "1000" })])],
+      ["versionIds absent", planText([planKey({ versionIds: undefined })])],
+      ["versionIds not strings", planText([planKey({ versionIds: [1] })])],
+      ["versionIds a string", planText([planKey({ versionIds: "v1" })])],
+      ["reasons not strings", planText([planKey({ reasons: [null] })])],
+      ["needsScrub absent", planText([planKey({ needsScrub: undefined })])],
+      [
+        "needsScrub on an unread key",
+        planText([planKey({ needsScrub: true, status: "unreadable" })]),
+      ],
+      ["the same key twice", planText([planKey(), planKey()])],
+      // The header.
+      ["bucket a number", planText(good, { bucket: 1 })],
+      ["tags not strings", planText(good, { tags: [1] })],
+      ["keys not a list", planText(good, { keys: {} })],
+    ];
+    for (const [label, text] of mutations) {
+      expect(() => parsePlan(text), label).toThrow(ContractError);
+    }
+  });
+
+  test("verified.json: the proof's counts are counts, and its digest is a sha256", () => {
+    const ok = {
+      version: 1,
+      dataset: "d",
+      verifiedAt: "2026-10-04T00:00:00Z",
+      assembledSha256: H1,
+      counts: { keys: 3, headersChecked: 3, rangesCompared: 27 },
+    };
+    expect(parseVerified(JSON.stringify(ok)).counts.rangesCompared).toBe(27);
+    for (const over of [
+      { dataset: 1 },
+      { verifiedAt: undefined },
+      { assembledSha256: "abc" },
+      { assembledSha256: H1.toUpperCase() },
+      { counts: undefined },
+      { counts: { keys: 3, headersChecked: 3 } },
+      { counts: { keys: -1, headersChecked: 3, rangesCompared: 0 } },
+      { counts: { keys: 3, headersChecked: 3.5, rangesCompared: 0 } },
+      { counts: { keys: "3", headersChecked: 3, rangesCompared: 0 } },
+      { counts: { keys: 3, headersChecked: 3, rangesCompared: null } },
+    ]) {
+      expect(() => parseVerified(JSON.stringify({ ...ok, ...over })), JSON.stringify(over)).toThrow(
+        ContractError,
+      );
+    }
   });
 });

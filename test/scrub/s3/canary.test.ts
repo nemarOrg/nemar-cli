@@ -48,7 +48,7 @@ describe("canary", () => {
         "xx09041/canary-k3x9q2/",
         "xx0904111/canary-k3x9q2/",
         `${DATASET}/sub/canary-k3x9q2/`,
-        `nm099999/sub/canary-k3x9q2/`,
+        "nm099999/sub/canary-k3x9q2/",
         `${DATASET}/canary-k3x9q2/x/`,
         `${DATASET}/canary-k3x9.q2/`,
         "",

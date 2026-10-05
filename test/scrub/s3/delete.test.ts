@@ -327,14 +327,22 @@ describe("delete-old: refusals", () => {
       writeProofs();
       const planPath = path.join(dir, "plan.json");
       const plan = readJson<PlanFile>(dir, "plan.json");
-      const entry = plan.keys.find((k) => k.oldKey === a.oldKey) as { needsScrub: boolean };
-      entry.needsScrub = false;
-      writeFileSync(planPath, JSON.stringify(plan));
+      const entry = plan.keys.find((k) => k.oldKey === a.oldKey) as PlanFile["keys"][number];
+      // The plan's totals must keep agreeing with its keys, or the plan is refused on its own
+      // account and the guard under test is never reached.
+      const setNeedsScrub = (on: boolean) => {
+        entry.needsScrub = on;
+        plan.totals.needScrub = plan.keys.filter((k) => k.needsScrub).length;
+        plan.totals.bytesToHash = plan.keys
+          .filter((k) => k.needsScrub)
+          .reduce((n, k) => n + k.size, 0);
+        writeFileSync(planPath, JSON.stringify(plan));
+      };
+      setNeedsScrub(false);
       const notPlanned = await runScrub(standin, executeArgs());
       expectStopped(notPlanned, 3, "assembled-not-in-plan");
 
-      entry.needsScrub = true;
-      writeFileSync(planPath, JSON.stringify(plan));
+      setNeedsScrub(true);
       for (const prefix of [
         `${DATASET}/objects/`,
         // The dataset root covers objects/, and an empty segment is not a safe spelling of it.

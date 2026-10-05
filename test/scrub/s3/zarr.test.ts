@@ -418,7 +418,12 @@ describe("zarr: preconditions", () => {
       expectStopped(await runScrub(standin, zarrArgs(empty)), 3, "plan.json-missing");
 
       const bad = tempDir("zarr-badplan");
-      writeJson(bad, "plan.json", { version: 1, dataset: "nm1", keys: [] });
+      writeJson(bad, "plan.json", {
+        version: 1,
+        dataset: "nm1",
+        keys: [],
+        totals: { keys: 0, needScrub: 0, bytesToHash: 0, unreadable: 0 },
+      });
       const r = await runScrub(standin, zarrArgs(bad));
       expect(r.exitCode).toBe(2);
       expect(r.stderr).toContain("bad-dataset-id");

@@ -241,23 +241,67 @@ function isCount(x: unknown): x is number {
   return typeof x === "number" && Number.isSafeInteger(x) && x >= 0;
 }
 
-/** Read a JSON file's text into a typed value, or refuse. `kind` names the file in the error. */
+const isString = (x: unknown): x is string => typeof x === "string";
+
+/**
+ * Read plan.json's text into a typed value, or refuse. Every field a later stage trusts is
+ * checked here, and `totals` must agree with the keys it summarizes: a plan edited by hand to
+ * hide an unreadable key (`unreadable: 0` over an unreadable entry) or to shrink the bytes to
+ * hash is a plan this refuses, not one the stages act on.
+ */
 export function parsePlan(text: string): PlanFile {
   const x = JSON.parse(text) as unknown;
-  if (!isObject(x) || x.version !== 1 || typeof x.dataset !== "string" || !Array.isArray(x.keys)) {
+  const bad = (): never => {
     throw new ContractError("plan.json does not match the contract");
-  }
-  if (x.partial !== undefined && typeof x.partial !== "boolean") {
-    throw new ContractError("plan.json does not match the contract");
-  }
-  for (const k of x.keys as unknown[]) {
-    const keyOk =
-      isObject(k) &&
-      typeof k.oldKey === "string" &&
-      (ANNEX_KEY.test(k.oldKey) || (k.status === "unreadable" && GIT_KEY.test(k.oldKey)));
-    if (!keyOk) {
+  };
+  if (!isObject(x) || x.version !== 1 || !isString(x.dataset) || !Array.isArray(x.keys)) bad();
+  const plan = x as Record<string, unknown>;
+  if (plan.partial !== undefined && typeof plan.partial !== "boolean") bad();
+  if (plan.bucket !== undefined && !isString(plan.bucket)) bad();
+  if (plan.tags !== undefined && !(Array.isArray(plan.tags) && plan.tags.every(isString))) bad();
+
+  const seen = new Set<string>();
+  let needScrub = 0;
+  let unreadable = 0;
+  let bytesToHash = 0;
+  for (const k of plan.keys as unknown[]) {
+    if (!isObject(k) || !isString(k.oldKey)) {
       throw new ContractError("plan.json holds a key that is not a SHA256E annex key");
     }
+    const annex = ANNEX_KEY.test(k.oldKey);
+    if (!annex && !(k.status === "unreadable" && GIT_KEY.test(k.oldKey))) {
+      throw new ContractError("plan.json holds a key that is not a SHA256E annex key");
+    }
+    if (k.status !== "read" && k.status !== "unreadable") bad();
+    if (typeof k.needsScrub !== "boolean") bad();
+    if (!isCount(k.size)) bad();
+    if (annex && k.size !== parseKey(k.oldKey).size) bad();
+    if (!Array.isArray(k.versionIds) || !k.versionIds.every(isString)) bad();
+    if (!Array.isArray(k.reasons) || !k.reasons.every(isString)) bad();
+    // A key that was not read cannot be said to need a scrub.
+    if (k.needsScrub && k.status !== "read") bad();
+    if (seen.has(k.oldKey)) bad();
+    seen.add(k.oldKey);
+    if (k.needsScrub) {
+      needScrub += 1;
+      bytesToHash += k.size as number;
+    }
+    if (k.status === "unreadable") unreadable += 1;
+  }
+
+  const t = plan.totals;
+  if (
+    !isObject(t) ||
+    !isCount(t.keys) ||
+    !isCount(t.needScrub) ||
+    !isCount(t.bytesToHash) ||
+    !isCount(t.unreadable) ||
+    t.keys !== (plan.keys as unknown[]).length ||
+    t.needScrub !== needScrub ||
+    t.unreadable !== unreadable ||
+    t.bytesToHash !== bytesToHash
+  ) {
+    bad();
   }
   return x as unknown as PlanFile;
 }
@@ -322,7 +366,18 @@ export function parseAssembled(text: string): AssembledFile {
 
 export function parseVerified(text: string): VerifiedFile {
   const x = JSON.parse(text) as unknown;
-  if (!isObject(x) || x.version !== 1 || typeof x.assembledSha256 !== "string") {
+  if (
+    !isObject(x) ||
+    x.version !== 1 ||
+    !isString(x.dataset) ||
+    !isString(x.verifiedAt) ||
+    !isString(x.assembledSha256) ||
+    !SHA256_HEX.test(x.assembledSha256) ||
+    !isObject(x.counts) ||
+    !isCount(x.counts.keys) ||
+    !isCount(x.counts.headersChecked) ||
+    !isCount(x.counts.rangesCompared)
+  ) {
     throw new ContractError("verified.json does not match the contract");
   }
   return x as unknown as VerifiedFile;
