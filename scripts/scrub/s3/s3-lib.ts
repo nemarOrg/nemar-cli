@@ -342,6 +342,66 @@ export function cliCredentialSource(options: CliCredentialOptions = {}): Credent
  */
 export const CHECKSUM_CALCULATION = "when_supported";
 
+/**
+ * The oldest `aws` CLI the tools run with. `AWS_REQUEST_CHECKSUM_CALCULATION`, which every call
+ * pins (see {@link CHECKSUM_CALCULATION}), does not exist before 2.23.0: an older CLI ignores the
+ * variable, sends no checksum, and real S3 refuses the locked writes. The conditional writes the
+ * zarr stage and the ledger rely on (`--if-match`, `--if-none-match` on put-object) need a recent
+ * CLI too.
+ */
+export const MIN_AWS_CLI_VERSION: readonly [number, number, number] = [2, 23, 0];
+
+/** `aws-cli/2.37.9 Python/3.14.8 Darwin/27.0.0 source/arm64` -> [2, 37, 9]; null when not one. */
+export function parseAwsCliVersion(text: string): [number, number, number] | null {
+  const m = /(?:^|\s)aws-cli\/(\d+)\.(\d+)\.(\d+)(?=\s|$)/.exec(text);
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+
+/** True when `version` is {@link MIN_AWS_CLI_VERSION} or later. */
+export function awsCliVersionOk(version: readonly [number, number, number]): boolean {
+  for (let i = 0; i < 3; i++) {
+    const have = version[i] as number;
+    const need = MIN_AWS_CLI_VERSION[i] as number;
+    if (have !== need) return have > need;
+  }
+  return true;
+}
+
+/**
+ * Refuse to start unless the `aws` on PATH is {@link MIN_AWS_CLI_VERSION} or later:
+ * `aws-cli-too-old` for an older one, `aws-cli-version-unknown` when `aws --version` cannot be
+ * run or read. Both are refusals (exit 3): nothing was attempted.
+ */
+export async function requireAwsCliVersion(timeoutMs = 30_000): Promise<void> {
+  let proc: ReturnType<typeof spawn>;
+  try {
+    proc = spawn({ cmd: ["aws", "--version"], stdout: "pipe", stderr: "pipe" });
+  } catch {
+    throw new StageError("aws-cli-version-unknown", EXIT.refused);
+  }
+  liveChildren.add(proc);
+  const timer = setTimeout(() => proc.kill("SIGKILL"), timeoutMs);
+  let out: string;
+  let code: number;
+  try {
+    // Version 1 printed it on stderr, version 2 prints it on stdout: read both.
+    const [stdout, stderr, exit] = await Promise.all([
+      new Response(proc.stdout as ReadableStream).text(),
+      new Response(proc.stderr as ReadableStream).text(),
+      proc.exited,
+    ]);
+    out = `${stdout}\n${stderr}`;
+    code = exit;
+  } finally {
+    clearTimeout(timer);
+    liveChildren.delete(proc);
+  }
+  const version = code === 0 ? parseAwsCliVersion(out) : null;
+  if (!version) throw new StageError("aws-cli-version-unknown", EXIT.refused);
+  if (!awsCliVersionOk(version)) throw new StageError("aws-cli-too-old", EXIT.refused);
+}
+
 export function createAwsRunner(cfg: AwsConfig): AwsRunner {
   const base: Record<string, string> = {};
   for (const [k, v] of Object.entries(cfg.env ?? process.env)) if (v !== undefined) base[k] = v;
@@ -1029,6 +1089,37 @@ export async function putObjectIfMatch(
       bodyFile,
       "--if-match",
       ifMatch,
+      ...metaArgs(meta),
+    ],
+    { slow: true },
+  );
+  const id = str(out.VersionId);
+  if (!id) throw new AwsCliError("bad-output", "PutObject");
+  return id;
+}
+
+/**
+ * put-object that creates the object ONLY if the key has no current version (`If-None-Match: *`):
+ * a writer that created it since it was found absent makes this fail (`precondition-failed`)
+ * rather than be overwritten. No lock is set. Returns the new version id.
+ */
+export async function putObjectIfAbsent(
+  ctx: S3Ctx,
+  key: string,
+  bodyFile: string,
+  meta: ObjectMeta,
+): Promise<string> {
+  const out = await ctx.aws.api(
+    "put-object",
+    [
+      "--bucket",
+      ctx.bucket,
+      "--key",
+      key,
+      "--body",
+      bodyFile,
+      "--if-none-match",
+      "*",
       ...metaArgs(meta),
     ],
     { slow: true },

@@ -38,6 +38,7 @@ import {
   StageError,
   cliCredentialSource,
   installSignalCleanup,
+  requireAwsCliVersion,
 } from "./s3-lib";
 import {
   type CommonOptions,
@@ -167,6 +168,10 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
   if (process.env.AWS_ACCESS_KEY_ID?.startsWith("AKIA")) {
     throw new StageError("long-lived-key-in-environment", EXIT.refused);
   }
+
+  // Every command but zarr-public (anonymous fetches, no CLI) runs `aws`, and an old CLI ignores
+  // the checksum setting the locked writes need.
+  if (command !== "zarr-public") await requireAwsCliVersion();
 
   const execute = v.execute === true;
   const opts = common(v, log);

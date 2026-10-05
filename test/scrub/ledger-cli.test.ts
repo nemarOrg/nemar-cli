@@ -9,6 +9,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
+import { extendsLedger } from "../../scripts/scrub/ledger-cli";
 import { type S3Standin, startS3Standin } from "./helpers/s3-standin";
 
 const SCRIPT = join(import.meta.dir, "../../scripts/scrub/ledger-cli.ts");
@@ -31,7 +32,7 @@ function work(): string {
   return d;
 }
 
-async function cli(args: string[]) {
+async function cli(args: string[], extraEnv: Record<string, string> = {}) {
   const proc = spawn({
     cmd: ["bun", SCRIPT, ...args],
     env: {
@@ -43,7 +44,10 @@ async function cli(args: string[]) {
       AWS_SECRET_ACCESS_KEY: "secret",
       AWS_SESSION_TOKEN: "token",
       AWS_REGION: "us-east-2",
+      AWS_EC2_METADATA_DISABLED: "true",
+      AWS_MAX_ATTEMPTS: "1",
       ...(standin ? { AWS_ENDPOINT_URL_S3: standin.url } : {}),
+      ...extraEnv,
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -234,6 +238,162 @@ describe("ledger-cli publish", () => {
       expect(wrong.exitCode).toBe(3);
       expect(wrong.stderr).toContain("ledger-other-dataset");
       expect(standin.log.length).toBe(0);
+    },
+    SLOW,
+  );
+});
+
+/** The remote ledger's text as the stand-in holds it now. */
+const remoteText = () =>
+  Buffer.from((standin?.current(BUCKET, KEY) as { data: Uint8Array }).data).toString("utf8");
+
+/** A two-line ledger already published, and a local file holding only its first line. */
+async function twoLineRemote(): Promise<{ remote: string; oneLine: string }> {
+  const file = join(work(), "ledger.jsonl");
+  await append(file, "plan");
+  await append(file, "headers-scrubbed");
+  const remote = readFileSync(file, "utf8");
+  standin?.putObject(BUCKET, KEY, new TextEncoder().encode(remote));
+  const oneLine = join(work(), "one.jsonl");
+  writeFileSync(oneLine, `${remote.split("\n")[0]}\n`);
+  return { remote, oneLine };
+}
+
+/** A local ledger one line longer than `base`, which must already be in a file. */
+async function extended(base: string): Promise<string> {
+  const file = join(work(), "ledger.jsonl");
+  writeFileSync(file, base);
+  await append(file, "history-rewritten");
+  return file;
+}
+
+describe("ledger-cli publish: only a genuine not-found is absence (C1)", () => {
+  test(
+    "an unreachable endpoint refuses, in the dry run and with --execute, and never says (new)",
+    async () => {
+      const closed = Bun.serve({ port: 0, fetch: () => new Response(null) });
+      const url = `http://127.0.0.1:${closed.port}`;
+      closed.stop(true);
+      const file = join(work(), "ledger.jsonl");
+      await append(file, "plan");
+      for (const extra of [[], ["--execute"]]) {
+        const r = await cli(["publish", "--file", file, "--dataset", DATASET, ...extra], {
+          AWS_ENDPOINT_URL_S3: url,
+        });
+        expect(r.exitCode, r.all).toBe(3);
+        expect(r.stderr.trim()).toBe("remote-ledger-unreadable (GetObject:unreachable)");
+        expect(r.stdout).not.toContain("(new)");
+      }
+    },
+    SLOW,
+  );
+
+  test(
+    "a 403 on the read refuses: a shorter local file never replaces a longer ledger",
+    async () => {
+      standin = startS3Standin();
+      const { remote, oneLine } = await twoLineRemote();
+      standin.inject("GetObject", { code: "AccessDenied", status: 403 });
+      const r = await cli(["publish", "--file", oneLine, "--dataset", DATASET, "--execute"]);
+      expect(r.exitCode, r.all).toBe(3);
+      expect(r.stderr.trim()).toBe("remote-ledger-unreadable (GetObject:access-denied)");
+      expect(standin.calls("PutObject").length).toBe(0);
+      expect(remoteText()).toBe(remote);
+    },
+    SLOW,
+  );
+
+  test(
+    "a 500 on the read refuses, and nothing is written",
+    async () => {
+      standin = startS3Standin();
+      const { remote, oneLine } = await twoLineRemote();
+      standin.inject("GetObject", { code: "InternalError", status: 500 });
+      const r = await cli(["publish", "--file", oneLine, "--dataset", DATASET, "--execute"]);
+      expect(r.exitCode, r.all).toBe(3);
+      expect(r.stderr.trim()).toBe("remote-ledger-unreadable (GetObject:failed)");
+      expect(standin.calls("PutObject").length).toBe(0);
+      expect(remoteText()).toBe(remote);
+    },
+    SLOW,
+  );
+
+  test(
+    "a first publish is conditional on absence: a writer that got in first stands",
+    async () => {
+      standin = startS3Standin();
+      const file = join(work(), "ledger.jsonl");
+      await append(file, "plan");
+      const theirs = "theirs\n";
+      // Between the read (not found) and the put, another writer creates the object.
+      standin.beforeOp("PutObject", () => {
+        standin?.putObject(BUCKET, KEY, new TextEncoder().encode(theirs));
+      });
+      const r = await cli(["publish", "--file", file, "--dataset", DATASET, "--execute"]);
+      expect(r.exitCode, r.all).toBe(3);
+      expect(r.stderr.trim()).toBe("remote-ledger-changed");
+      expect(standin.calls("PutObject")[0]?.ifNoneMatch).toBe("*");
+      expect(remoteText()).toBe(theirs);
+    },
+    SLOW,
+  );
+
+  test(
+    "an extension is conditional on the ETag read: a writer that got in between stands",
+    async () => {
+      standin = startS3Standin();
+      const { remote } = await twoLineRemote();
+      const file = await extended(remote);
+      const theirs = `${remote}theirs\n`;
+      standin.beforeOp("PutObject", () => {
+        standin?.putObject(BUCKET, KEY, new TextEncoder().encode(theirs));
+      });
+      const r = await cli(["publish", "--file", file, "--dataset", DATASET, "--execute"]);
+      expect(r.exitCode, r.all).toBe(3);
+      expect(r.stderr.trim()).toBe("remote-ledger-changed");
+      expect(standin.calls("PutObject")[0]?.ifMatch).toMatch(/^"[0-9a-f]{32}"$/);
+      expect(remoteText()).toBe(theirs);
+    },
+    SLOW,
+  );
+
+  test(
+    "a read-back that differs after the put is its own word and exit 4, not done (T7)",
+    async () => {
+      standin = startS3Standin();
+      const file = join(work(), "ledger.jsonl");
+      await append(file, "plan");
+      // GetObject 1 is the read (not found), 2 the read-back: something else is there by then.
+      standin.beforeOp(
+        "GetObject",
+        () => {
+          standin?.putObject(BUCKET, KEY, new TextEncoder().encode("other\n"));
+        },
+        2,
+      );
+      const r = await cli(["publish", "--file", file, "--dataset", DATASET, "--execute"]);
+      expect(r.exitCode, r.all).toBe(4);
+      expect(r.stderr.trim()).toBe("read-back-differs-after-write");
+      expect(r.stdout).not.toContain("read back identical");
+    },
+    SLOW,
+  );
+
+  test(
+    "a remote ledger ending in a partial line is refused as a base (T7)",
+    async () => {
+      standin = startS3Standin();
+      const { remote } = await twoLineRemote();
+      const partial = remote.slice(0, -1);
+      standin.putObject(BUCKET, KEY, new TextEncoder().encode(partial));
+      const file = await extended(remote);
+      const r = await cli(["publish", "--file", file, "--dataset", DATASET, "--execute"]);
+      expect(r.exitCode, r.all).toBe(3);
+      expect(r.stderr.trim()).toBe("remote-ledger-partial-line");
+      expect(remoteText()).toBe(partial);
+      // The rule itself: no whole-line extension of a partial line exists.
+      expect(extendsLedger(partial, remote)).toBe(false);
+      expect(extendsLedger(remote, `${remote}x\n`)).toBe(true);
     },
     SLOW,
   );

@@ -24,6 +24,7 @@
  *  - PutObject with Object Lock parameters needs `Content-MD5` or an `x-amz-checksum-*` header,
  *    as an UploadPart of a lock-created upload does (documented for put-object, measured only for
  *    the part).
+ *  - PutObject with `If-None-Match: *`: 412 PreconditionFailed when the key has a current version.
  *  - PutObject with `If-Match`: 412 PreconditionFailed when the current version's ETag is not the
  *    one named, and 404 NoSuchKey when the key has no current version, as S3 documents for
  *    conditional writes (Nov 2024). ASSUMED, not measured against the real bucket: this encodes
@@ -83,6 +84,7 @@ export interface StandinLogEntry {
   bypass?: boolean;
   range?: string;
   ifMatch?: string;
+  ifNoneMatch?: string;
   partNumber?: number;
   /** The access key id the request was signed with. */
   keyId?: string;
@@ -704,6 +706,20 @@ export function startS3Standin(): S3Standin {
           );
         }
         const ifMatch = req.headers.get("if-match") ?? undefined;
+        const ifNoneMatch = req.headers.get("if-none-match") ?? undefined;
+        // `If-None-Match: *` creates the object only when the key has no current version (a key
+        // whose newest entry is a delete marker counts as absent), else 412, as S3 documents for
+        // conditional writes (Aug 2024). ASSUMED, not measured against the real bucket.
+        if (ifNoneMatch !== undefined && !ignoreIfMatch) {
+          if (ifNoneMatch !== "*") {
+            record({ op: "PutObject", key, status: 501, ifMatch });
+            return s3Error("NotImplemented", 501);
+          }
+          if (current(bucket, key)) {
+            record({ op: "PutObject", key, status: 412, ifNoneMatch });
+            return s3Error("PreconditionFailed", 412);
+          }
+        }
         if (ifMatch !== undefined && !ignoreIfMatch) {
           const now = current(bucket, key);
           if (!now) {
@@ -728,7 +744,15 @@ export function startS3Standin(): S3Standin {
           cacheControl: req.headers.get("cache-control") ?? undefined,
           lock,
         });
-        record({ op: "PutObject", key, status: 200, size: body.length, ifMatch, checksum });
+        record({
+          op: "PutObject",
+          key,
+          status: 200,
+          size: body.length,
+          ifMatch,
+          ifNoneMatch,
+          checksum,
+        });
         return new Response(null, { status: 200, headers: { ETag: etag, "x-amz-version-id": id } });
       }
 
