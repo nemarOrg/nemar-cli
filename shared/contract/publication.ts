@@ -56,6 +56,8 @@ export const publicationBlockReasonSchema = z.enum([
   "min_requirements_failed",
   /** #1255: the owner has no researcher name, so a DOI cannot cite them. */
   "owner_name_missing",
+  /** Epic #1610 phase 4: the identifier screen found a direct identifier. */
+  "identifier_screen_findings",
 ]);
 export type PublicationBlockReason = z.infer<typeof publicationBlockReasonSchema>;
 

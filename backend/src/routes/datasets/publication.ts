@@ -84,6 +84,10 @@ const BLOCK_MESSAGES: Record<PublicationBlockReason, string> = {
   // given_name/family_name cannot be attributed at all. The message is the
   // one place a user is told how to supply it, so it lives with the reason.
   [OWNER_NAME_MISSING_REASON]: OWNER_NAME_MISSING_MESSAGE,
+  // Epic #1610 phase 4. The counts are on the status view's
+  // `identifier_screen`; the message says where to look and what clears it.
+  identifier_screen_findings:
+    "The identifier screen found information that identifies a participant (a name, birth date or record number, for example in EDF/BDF headers or sidecar files). Remove it, push the change, and request publication again; that re-runs the screen. The kinds and counts it found are listed under the identifier screen below.",
 };
 
 /**

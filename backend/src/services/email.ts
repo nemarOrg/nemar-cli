@@ -1302,6 +1302,83 @@ ${screenSection}
 }
 
 /**
+ * Tell a depositor that the identifier screen blocked their publication request
+ * (epic #1610, phase 4).
+ *
+ * Built from `describeScreen`'s lines only: finding KINDS and COUNTS, never a
+ * value. The depositor knows their own data; what they need from this mail is
+ * where to look and what clears the block, and a mail that quoted the header
+ * text it found would itself be a copy of the identifier in an inbox.
+ */
+export async function sendIdentifierScreenBlockedEmail(
+  to: string,
+  username: string,
+  datasetId: string,
+  screen: PublicationScreenSection,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<void> {
+  const lines =
+    screen.lines.length > 0
+      ? screen.lines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")
+      : "<li>The screen found a direct identifier.</li>";
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #dc2626;">Publication on hold: ${escapeHtml(datasetId)}</h1>
+
+  <p>Hello ${escapeHtml(username)},</p>
+
+  <p>Before a dataset is published, NEMAR screens it for information that identifies a
+  participant: names, birth dates and record numbers in EDF/BDF headers, identifying
+  columns and keys in sidecar files, and identifying file names. The screen of
+  <strong>${escapeHtml(datasetId)}</strong> found some, so the request is on hold and has not
+  been sent for approval. What it found, by kind and count:</p>
+
+  <ul style="background-color: #fef2f2; padding: 16px 16px 16px 36px; border-radius: 8px; margin: 16px 0; border-left: 4px solid #dc2626;">
+    ${lines}
+  </ul>
+
+  <p>Remove or replace the identifying information in your dataset (for EDF/BDF files, the
+  patient and recording fields of the header), push the change, then request publication
+  again. Requesting again re-runs the screen:</p>
+  <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
+    nemar dataset publish request ${escapeHtml(datasetId)}
+  </div>
+
+  <p style="font-size: 13px; color: #666;">The same summary is shown by
+  <code>nemar dataset publish status ${escapeHtml(datasetId)}</code>. If you believe this was
+  flagged in error, reply to this email.</p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+  `;
+
+  await sendEmail(
+    to,
+    `Publication on hold: ${datasetId} - identifying information found`,
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+    isDev,
+    deliveryEnv,
+  );
+}
+
+/**
  * Notify a dataset owner that a user has requested collaborator access to their
  * (private/unpublished) dataset and is awaiting approval.
  */

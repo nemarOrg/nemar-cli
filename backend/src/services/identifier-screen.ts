@@ -29,7 +29,8 @@
  *
  * The routes stay thin; this module owns the logic: starting a screen
  * ({@link startIdentifierScreen}), storing a result ({@link storeScreenResult}),
- * mailing it exactly once ({@link notifyAdminsOfScreen}) and the watchdog.
+ * mailing it exactly once ({@link notifyAdminsOfScreen}), the watchdog, the
+ * block on direct identifiers, and the approval gate ({@link checkApprovalScreenGate}).
  */
 
 import {
@@ -45,17 +46,23 @@ import {
   screenGate,
   stateOf,
 } from "../../../shared/identifier-screen-report.js";
+import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { isSandboxDatasetId } from "./datasetId.js";
 import {
   type PublicationScreenSection,
   getAdminEmailsForCategory,
   resolveEmailConfig,
+  sendIdentifierScreenBlockedEmail,
   sendPublicationRequestEmail,
 } from "./email.js";
 import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsAuth } from "./github-auth.js";
-import { signIdentifierScreenCallbackToken, triggerIdentifierScreenRun } from "./github.js";
+import {
+  getMainBranchSha,
+  signIdentifierScreenCallbackToken,
+  triggerIdentifierScreenRun,
+} from "./github.js";
 
 /** A screen still pending this long after its dispatch has not reported, and is mailed as such. */
 export const SCREEN_REPORT_DEADLINE_MINUTES = 40;
@@ -69,6 +76,9 @@ export const SCREEN_EMAIL_RETRY_AFTER_MINUTES = 5;
  * the auto-import, so the bound keeps a backlog from spending that tick's budget.
  */
 export const SCREEN_SWEEP_LIMIT = 10;
+
+/** The block reason a direct identifier puts on a request. */
+export const IDENTIFIER_SCREEN_BLOCK_REASON = "identifier_screen_findings";
 
 /** Where the workflow posts its report, under API_BASE_URL. */
 export const IDENTIFIER_SCREEN_CALLBACK_PATH = "/webhooks/identifier-screen-result";
@@ -104,6 +114,18 @@ export const RESET_SCREEN_COLUMNS_SQL = `identifier_screen_status = NULL,
        identifier_screen_ack_by = NULL,
        identifier_screen_ack_reason = NULL,
        identifier_screen_ack_at = NULL`;
+
+/**
+ * The admin re-run's claim guard: only an active request that can still be
+ * screened (`requested` or `blocked`), and never over a screen dispatched less
+ * than {@link SCREEN_REPORT_DEADLINE_MINUTES} ago that has not reported, which
+ * would orphan a run that may still answer. NULL-safe: a pending screen with no
+ * dispatch time is overdue. A module constant, never input.
+ */
+export const RERUN_GUARD_SQL = `AND status IN ('requested', 'blocked')
+         AND NOT (COALESCE(identifier_screen_status, '') = 'pending'
+                  AND COALESCE(identifier_screen_dispatched_at, '')
+                      >= datetime('now', '-${SCREEN_REPORT_DEADLINE_MINUTES} minutes'))`;
 
 /** A report the Worker writes itself, for a screen that produced none. */
 export function workerErrorReport(error: ScreenError): ScreenReport {
@@ -462,7 +484,9 @@ export async function startIdentifierScreen(
 // Storing a result
 // ============================================================================
 
-export type StoreOutcome = { stored: true; state: ScreenState } | { stored: false };
+export type StoreOutcome =
+  | { stored: true; state: ScreenState; blocked: boolean }
+  | { stored: false };
 
 /**
  * Store a verified callback's report on the row it was issued for.
@@ -511,7 +535,71 @@ export async function storeScreenResult(
     .bind(state, JSON.stringify(report), args.requestId, args.nonce)
     .run();
   if ((res.meta.changes ?? 0) !== 1) return { stored: false };
-  return { stored: true, state };
+
+  // A direct identifier blocks the request (and tells the depositor); every
+  // other result leaves it where it is.
+  let blocked = false;
+  if (screenGate(state) === "blocks") {
+    blocked = await blockForFindings(env, args.requestId, args.datasetId, report);
+  }
+  return { stored: true, state, blocked };
+}
+
+/**
+ * A direct identifier blocks the request, and the depositor is told what to fix
+ * in kinds and counts. Conditional on `requested`, so it blocks once and only an
+ * active request; the requester mail rides on that one transition.
+ */
+async function blockForFindings(
+  env: Bindings,
+  requestId: number,
+  datasetId: string,
+  report: ScreenReport,
+): Promise<boolean> {
+  const db = env.DB;
+  const res = await db
+    .prepare(
+      `UPDATE publication_requests
+          SET status = 'blocked', block_reason = ?, updated_at = datetime('now')
+        WHERE id = ? AND status = 'requested'`,
+    )
+    .bind(IDENTIFIER_SCREEN_BLOCK_REASON, requestId)
+    .run();
+  if ((res.meta.changes ?? 0) !== 1) return false;
+  console.log(
+    `[identifier-screen] ${datasetId} request ${requestId}: blocked (${IDENTIFIER_SCREEN_BLOCK_REASON})`,
+  );
+
+  try {
+    const requester = await db
+      .prepare(
+        `SELECT u.username, u.email FROM publication_requests pr
+           JOIN users u ON u.id = pr.requested_by WHERE pr.id = ?`,
+      )
+      .bind(requestId)
+      .first<{ username: string | null; email: string }>();
+    if (requester) {
+      const d = describeScreen(stateOf(report), report);
+      const { fromEmail, replyTo, isDev } = resolveEmailConfig(env);
+      await sendIdentifierScreenBlockedEmail(
+        requester.email,
+        requester.username ?? "there",
+        datasetId,
+        { headline: d.headline, tone: d.tone, lines: d.lines },
+        env.RESEND_API_KEY,
+        fromEmail,
+        replyTo,
+        isDev,
+        env,
+      );
+    }
+  } catch (err) {
+    // Best effort: the block and its reason are on the status view either way.
+    console.error(
+      `[identifier-screen] requester notice for request ${requestId} failed: ${errorText(err)}`,
+    );
+  }
+  return true;
 }
 
 // ============================================================================
@@ -633,6 +721,242 @@ export async function sweepIdentifierScreens(env: Bindings): Promise<ScreenSweep
     }
   }
   return result;
+}
+
+// ============================================================================
+// The approval gate
+// ============================================================================
+
+/** A refusal, shaped for a 409 body. */
+export interface ScreenGateRefusal {
+  error: "identifier_screen_not_clear";
+  /** `screenGate`'s answer, or `stale` / `unverified` for the head check. */
+  gate: ScreenGate | "stale" | "unverified";
+  headline: string;
+  message: string;
+}
+
+export type ScreenGateOutcome = { ok: true } | { ok: false; refusal: ScreenGateRefusal };
+
+/** The screen columns the gate reads. */
+interface GateRow {
+  identifier_screen_status: string | null;
+  identifier_screen_report: string | null;
+  identifier_screen_ack_at: string | null;
+}
+
+/**
+ * The state half of the gate: no network, no writes. `acknowledging` says the
+ * caller carries a reason this call may record.
+ */
+export function screenStateGate(
+  datasetId: string,
+  row: GateRow,
+  acknowledging: boolean,
+): ScreenGateOutcome {
+  const view = screenView(datasetId, row.identifier_screen_status, row.identifier_screen_report);
+  if (view.state === "exempt") return { ok: true };
+  const gate = screenGate(view.state === null ? null : view.state);
+  const refuse = (message: string): ScreenGateOutcome => ({
+    ok: false,
+    refusal: { error: "identifier_screen_not_clear", gate, headline: view.headline, message },
+  });
+  switch (gate) {
+    case "clear":
+      return { ok: true };
+    case "acknowledge":
+      if (acknowledging || row.identifier_screen_ack_at !== null) return { ok: true };
+      return refuse(
+        `${view.headline}. An admin must look at what the screen reported and approve with a recorded reason: nemar admin publish approve ${datasetId} --acknowledge-identifier-screen "<reason>".`,
+      );
+    case "blocks":
+      return refuse(
+        `${view.headline}. A direct identifier cannot be acknowledged: the depositor must remove it and request publication again, which re-runs the screen.`,
+      );
+    case "wait":
+      return refuse(
+        `${view.headline}. The screen is still running; approve once it reports (admins are mailed when it does).`,
+      );
+    case "rerun":
+      return refuse(
+        `${view.headline}. Approval waits for a screen that produced a verdict: run it again with nemar admin publish screen ${datasetId}.`,
+      );
+  }
+}
+
+/**
+ * The content half: the screened commit must be the dataset's current `main`,
+ * or the verdict is about content that is no longer the content being
+ * published. FAILS CLOSED: a report with no head, a missing token or a lookup
+ * that fails all refuse, as "could not verify", never as clear.
+ *
+ * The repository is addressed by the dataset id, as the screen workflow
+ * addresses it, so the head compared is the head the workflow would screen.
+ */
+export async function verifyScreenHead(
+  env: Bindings,
+  datasetId: string,
+  row: GateRow,
+  pat?: string,
+): Promise<ScreenGateOutcome> {
+  if (isScreenExempt(datasetId)) return { ok: true };
+  const view = screenView(datasetId, row.identifier_screen_status, row.identifier_screen_report);
+  const report = readStoredReport(row.identifier_screen_report);
+  const unverified = (why: string): ScreenGateOutcome => ({
+    ok: false,
+    refusal: {
+      error: "identifier_screen_not_clear",
+      gate: "unverified",
+      headline: view.headline,
+      message: `Could not verify that the identifier screen read the current content: ${why}. Approval is refused until it can be verified; try again, or re-run the screen with nemar admin publish screen ${datasetId}.`,
+    },
+  });
+  if (!report?.head) return unverified("the stored report names no commit");
+  let token = pat;
+  if (!token) {
+    try {
+      const auth = getDatasetsAuth(env);
+      token = auth.kind === "app" ? await auth.getToken() : auth.token;
+    } catch (err) {
+      console.error(
+        `[identifier-screen] gate: no GitHub token for ${datasetId}: ${errorText(err)}`,
+      );
+      return unverified("no GitHub credential was available");
+    }
+  }
+  let head: string;
+  try {
+    head = await getMainBranchSha(datasetId, "main", token);
+  } catch (err) {
+    console.error(
+      `[identifier-screen] gate: head lookup for ${datasetId} failed: ${errorText(err)}`,
+    );
+    return unverified("the repository's main branch could not be read");
+  }
+  if (head !== report.head) {
+    return {
+      ok: false,
+      refusal: {
+        error: "identifier_screen_not_clear",
+        gate: "stale",
+        headline: view.headline,
+        message: `The identifier screen read commit ${report.head.slice(0, 12)}, and main is now at ${head.slice(0, 12)}: its verdict is about content that has since changed. Re-run it with nemar admin publish screen ${datasetId}. If an approval already started and committed to the repository, continue it with --resume instead.`,
+      },
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * Record an admin's acknowledgment of a screen that needed one, and audit it.
+ * Conditional on the state the gate read, so an acknowledgment can only attach
+ * to the result the admin was shown. Returns false when the state moved.
+ */
+export async function recordScreenAcknowledgment(
+  db: D1Database,
+  args: {
+    requestId: number;
+    datasetId: string;
+    adminUserId: number;
+    reason: string;
+    state: string;
+  },
+): Promise<boolean> {
+  const res = await db
+    .prepare(
+      `UPDATE publication_requests
+          SET identifier_screen_ack_by = ?, identifier_screen_ack_reason = ?,
+              identifier_screen_ack_at = datetime('now')
+        WHERE id = ? AND identifier_screen_status = ?`,
+    )
+    .bind(args.adminUserId, args.reason, args.requestId, args.state)
+    .run();
+  if ((res.meta.changes ?? 0) !== 1) return false;
+  try {
+    await auditLogStatement(db, {
+      userId: args.adminUserId,
+      action: "identifier_screen_acknowledged",
+      resourceType: "dataset",
+      resourceId: args.datasetId,
+      details: JSON.stringify({
+        request_id: args.requestId,
+        screen_state: args.state,
+        reason: args.reason,
+      }),
+    }).run();
+  } catch (err) {
+    // The acknowledgment itself is on the request row; the audit row is the
+    // second record, and losing it must not refuse an approval already decided.
+    console.error(
+      `[identifier-screen] audit write for the acknowledgment on ${args.datasetId} failed: ${errorText(err)}`,
+    );
+  }
+  return true;
+}
+
+/**
+ * The whole gate, for a fresh approval run: the state, then the head, then the
+ * acknowledgment. Called before the request is marked `approving`; a resumed
+ * run has already passed it.
+ */
+export async function checkApprovalScreenGate(
+  env: Bindings,
+  args: {
+    requestId: number;
+    datasetId: string;
+    adminUserId: number;
+    acknowledgment?: string;
+    pat?: string;
+  },
+): Promise<ScreenGateOutcome> {
+  if (isScreenExempt(args.datasetId)) return { ok: true };
+  const row = await env.DB.prepare(
+    `SELECT identifier_screen_status, identifier_screen_report, identifier_screen_ack_at
+       FROM publication_requests WHERE id = ?`,
+  )
+    .bind(args.requestId)
+    .first<GateRow>();
+  if (!row) {
+    return screenStateGate(args.datasetId, emptyGateRow(), false);
+  }
+  const acknowledging = typeof args.acknowledgment === "string";
+  const state = screenStateGate(args.datasetId, row, acknowledging);
+  if (!state.ok) return state;
+  const head = await verifyScreenHead(env, args.datasetId, row, args.pat);
+  if (!head.ok) return head;
+  if (
+    acknowledging &&
+    screenGate(readStoredState(row.identifier_screen_status)) === "acknowledge"
+  ) {
+    const recorded = await recordScreenAcknowledgment(env.DB, {
+      requestId: args.requestId,
+      datasetId: args.datasetId,
+      adminUserId: args.adminUserId,
+      reason: args.acknowledgment as string,
+      state: row.identifier_screen_status as string,
+    });
+    if (!recorded) {
+      return {
+        ok: false,
+        refusal: {
+          error: "identifier_screen_not_clear",
+          gate: "wait",
+          headline: "Identifier screen: changed",
+          message:
+            "The identifier screen's result changed while this approval was being checked. Read it again before approving.",
+        },
+      };
+    }
+  }
+  return { ok: true };
+}
+
+function emptyGateRow(): GateRow {
+  return {
+    identifier_screen_status: null,
+    identifier_screen_report: null,
+    identifier_screen_ack_at: null,
+  };
 }
 
 function errorText(err: unknown): string {

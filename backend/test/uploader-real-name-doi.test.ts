@@ -27,7 +27,8 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import type { Server } from "bun";
 import { Hono } from "hono";
 import { adminRoutes } from "../src/routes/admin";
 import { datasetRoutes } from "../src/routes/datasets";
@@ -43,6 +44,7 @@ import {
 } from "../src/services/uploader-identity";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
+import { mainRefAnswer, markDatasetScreensClean } from "./helpers/identifier-screen";
 
 const OWNER_KEY = "realname-owner-key-0123456789abcdef0123456789ab";
 const ADMIN_KEY = "realname-admin-key-0123456789abcdef0123456789ab";
@@ -54,6 +56,8 @@ const ORCID = "0000-0002-1825-0097";
 
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
+/** Extra bindings for one describe block (the approve gate's GitHub read). */
+let extraEnv: Partial<Bindings> = {};
 let ownerId: number;
 
 interface NameSeed {
@@ -134,7 +138,7 @@ function ownerRow() {
 }
 
 function env(): Bindings {
-  return { DB: realD1(db), ENVIRONMENT: "test" } as Bindings;
+  return { DB: realD1(db), ENVIRONMENT: "test", ...extraEnv } as Bindings;
 }
 
 function post(path: string, key: string, body?: unknown): Promise<Response> {
@@ -389,14 +393,34 @@ describe("requiresUploaderName", () => {
 });
 
 describe("POST /admin/publish/:id/approve name precondition", () => {
+  // The identifier screen gate (epic #1610 phase 4) runs before the name gate,
+  // so each request carries a clean screen of the commit this stand-in reports
+  // as `main`, and the gate's one read needs a credential. Every other GitHub
+  // call answers 404, which the steps after the name gate fail on, as the
+  // missing token did before.
+  let github: Server;
   beforeEach(async () => {
     await seedAdmin();
+    github = Bun.serve({
+      port: 0,
+      fetch: (req) => mainRefAnswer(req) ?? new Response("not found", { status: 404 }),
+    });
+    (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL =
+      `http://127.0.0.1:${github.port}`;
+    extraEnv = { GITHUB_ADMIN_PAT: "ghp_realname_test" } as Partial<Bindings>;
+  });
+
+  afterEach(() => {
+    (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = undefined;
+    github.stop(true);
+    extraEnv = {};
   });
 
   function seedRequest() {
     db.query(
       "INSERT INTO publication_requests (dataset_id, requested_by, status) VALUES (?, ?, 'requested')",
     ).run(DATASET_ID, ownerId);
+    markDatasetScreensClean(db, DATASET_ID);
   }
 
   test("refuses to approve, and walks the request back to blocked", async () => {
@@ -486,10 +510,11 @@ describe("POST /admin/publish/:id/approve name precondition", () => {
 
     const res = await post(`/admin/publish/${DATASET_ID}/approve`, ADMIN_KEY, {});
 
-    // Not the 422: the run got past the name gate and went on to resolve a
-    // GitHub token, which is unconfigured here and throws. That 500 is the
-    // shape of "past the gate" for a test that refuses to touch the network;
-    // what matters is that the request row was NOT walked back to blocked.
+    // Not the 422: the run got past the name gate and went on to its steps,
+    // whose GitHub calls the stand-in answers 404, so the run fails there.
+    // That failure is the shape of "past the gate" for a test that refuses to
+    // touch the network; what matters is that the request row was NOT walked
+    // back to blocked.
     expect(res.status).not.toBe(422);
     const row = db
       .query<{ status: string; block_reason: string | null }, [string]>(

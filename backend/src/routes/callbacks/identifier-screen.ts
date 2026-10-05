@@ -114,6 +114,12 @@ export function registerIdentifierScreenRoutes(webhooks: WebhookRouter): void {
       }`,
     );
     const mailed = await notifyAdminsOfScreen(c.env, requestId);
-    return c.json({ ok: true, dataset_id: datasetId, state: stored.state, admin_email: mailed });
+    return c.json({
+      ok: true,
+      dataset_id: datasetId,
+      state: stored.state,
+      blocked: stored.blocked,
+      admin_email: mailed,
+    });
   });
 }
