@@ -72,6 +72,8 @@ export interface StandinLogEntry {
   range?: string;
   ifMatch?: string;
   partNumber?: number;
+  /** The access key id the request was signed with. */
+  keyId?: string;
   /** An UploadPart request that carried an `x-amz-checksum-*` header. */
   checksum?: boolean;
   size?: number;
@@ -264,7 +266,8 @@ export function startS3Standin(): S3Standin {
       const key = decodeURIComponent(segments.slice(1).join("/"));
       const q = url.searchParams;
       const versionId = q.get("versionId");
-      const record = (e: Omit<StandinLogEntry, "bucket">) => log.push({ bucket, ...e });
+      const keyId = /Credential=([^/]+)\//.exec(req.headers.get("authorization") ?? "")?.[1];
+      const record = (e: Omit<StandinLogEntry, "bucket">) => log.push({ bucket, keyId, ...e });
       const fail = (op: StandinOp, f: Fault, extra: Partial<StandinLogEntry> = {}) => {
         record({ op, key, status: f.status, ...extra });
         return s3Error(f.code, f.status, `induced ${f.code} (test)`);

@@ -30,6 +30,7 @@ import {
   MAX_COPY_PART_BYTES,
   MIN_PART_BYTES,
   StageError,
+  cliCredentialSource,
 } from "./s3-lib";
 import {
   type CommonOptions,
@@ -98,6 +99,12 @@ function common(v: Values, log: (line: string) => void): CommonOptions {
     // Tests point the CLI at a local stand-in; the CLI itself honors the variable, so this
     // only makes the override explicit.
     endpointUrl: process.env.AWS_ENDPOINT_URL_S3 || undefined,
+    // Against real S3 with no key in the environment, every call shares one serialized
+    // credential export instead of each `aws` child refreshing the login session itself.
+    credentials:
+      process.env.AWS_ENDPOINT_URL_S3 || process.env.AWS_ACCESS_KEY_ID
+        ? undefined
+        : cliCredentialSource(),
     log,
   };
 }

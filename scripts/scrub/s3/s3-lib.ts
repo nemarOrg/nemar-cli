@@ -79,6 +79,7 @@ export type AwsErrorCode =
   | "no-such-upload"
   | "throttled"
   | "credentials"
+  | "long-lived-credentials"
   | "unreachable"
   | "spawn-failed"
   | "bad-output"
@@ -163,6 +164,8 @@ export interface AwsConfig {
   timeoutMs: number;
   /** The whole environment of the child, replacing `process.env`. Tests use it to stay hermetic. */
   env?: Record<string, string>;
+  /** Fresh short-lived credentials for every call; see {@link cliCredentialSource}. */
+  credentials?: CredentialSource;
 }
 
 export const DEFAULT_TIMEOUT_MS = 120_000;
@@ -180,6 +183,105 @@ export interface AwsRunner {
   api(op: string, args: string[], opts?: ApiOptions): Promise<Record<string, unknown>>;
 }
 
+/** Short-lived credentials as the environment variables the CLI reads. */
+export interface CredentialSource {
+  env(): Promise<Record<string, string>>;
+}
+
+export interface CliCredentialOptions {
+  /** The command that prints `{AccessKeyId, SecretAccessKey, SessionToken, Expiration}` as JSON. */
+  command?: string[];
+  /** The environment that command runs in; the process environment when absent. */
+  commandEnv?: Record<string, string>;
+  /** Refresh this long before the credentials expire. */
+  skewMs?: number;
+  now?: () => number;
+  timeoutMs?: number;
+}
+
+/**
+ * Credentials for every `aws` child, from ONE serialized `aws configure export-credentials`.
+ *
+ * An `aws login` session rotates a single-use refresh token, so many `aws` processes that each
+ * resolve the session themselves race on the refresh and one of them fails
+ * (`CreateOAuth2Token`, seen on the first real plan of nm000348 at concurrency 8). Resolving once,
+ * sharing the result with every child through the environment, and refreshing under one in-flight
+ * call removes the race. Only short-lived (`ASIA`) credentials are accepted, as in the CLI's own
+ * refusal of a long-lived key. Nothing from the command's output is ever put in an error.
+ */
+export function cliCredentialSource(options: CliCredentialOptions = {}): CredentialSource {
+  const command = options.command ?? [
+    "aws",
+    "configure",
+    "export-credentials",
+    "--format",
+    "process",
+  ];
+  const skewMs = options.skewMs ?? 120_000;
+  const now = options.now ?? Date.now;
+  const timeoutMs = options.timeoutMs ?? 60_000;
+  let cached: { env: Record<string, string>; expiresAt: number } | undefined;
+  let inflight: Promise<Record<string, string>> | undefined;
+
+  async function exportOnce(): Promise<Record<string, string>> {
+    let proc: ReturnType<typeof spawn>;
+    try {
+      proc = spawn({
+        cmd: command,
+        ...(options.commandEnv ? { env: options.commandEnv } : {}),
+        stdout: "pipe",
+        stderr: "ignore",
+      });
+    } catch {
+      throw new AwsCliError("credentials", "ExportCredentials");
+    }
+    const timer = setTimeout(() => proc.kill("SIGKILL"), timeoutMs);
+    let text: string;
+    let code: number;
+    try {
+      [text, code] = await Promise.all([
+        new Response(proc.stdout as ReadableStream).text(),
+        proc.exited,
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (code !== 0) throw new AwsCliError("credentials", "ExportCredentials");
+    let doc: Record<string, unknown>;
+    try {
+      doc = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      throw new AwsCliError("bad-output", "ExportCredentials");
+    }
+    const id = typeof doc.AccessKeyId === "string" ? doc.AccessKeyId : "";
+    const secret = typeof doc.SecretAccessKey === "string" ? doc.SecretAccessKey : "";
+    const token = typeof doc.SessionToken === "string" ? doc.SessionToken : "";
+    if (!id || !secret) throw new AwsCliError("bad-output", "ExportCredentials");
+    // A long-lived key has no session token and an AKIA id; refuse it here as the CLI does.
+    if (!id.startsWith("ASIA") || !token)
+      throw new AwsCliError("long-lived-credentials", "ExportCredentials");
+    const expires = typeof doc.Expiration === "string" ? Date.parse(doc.Expiration) : Number.NaN;
+    const env = {
+      AWS_ACCESS_KEY_ID: id,
+      AWS_SECRET_ACCESS_KEY: secret,
+      AWS_SESSION_TOKEN: token,
+    };
+    // No usable expiry: trust it for one skew window only, so it is re-read soon.
+    cached = { env, expiresAt: Number.isFinite(expires) ? expires : now() + skewMs * 2 };
+    return env;
+  }
+
+  return {
+    async env() {
+      if (cached && cached.expiresAt - skewMs > now()) return cached.env;
+      inflight ??= exportOnce().finally(() => {
+        inflight = undefined;
+      });
+      return inflight;
+    },
+  };
+}
+
 export function createAwsRunner(cfg: AwsConfig): AwsRunner {
   const base: Record<string, string> = {};
   for (const [k, v] of Object.entries(cfg.env ?? process.env)) if (v !== undefined) base[k] = v;
@@ -194,11 +296,12 @@ export function createAwsRunner(cfg: AwsConfig): AwsRunner {
         .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
         .join("");
       const cmd = ["aws", "s3api", op, ...args, "--region", cfg.region, "--output", "json"];
+      const creds = cfg.credentials ? await cfg.credentials.env() : {};
       let proc: ReturnType<typeof spawn>;
       try {
         proc = spawn({
           cmd,
-          env: { ...base, ...(opts.env ?? {}) },
+          env: { ...base, ...creds, ...(opts.env ?? {}) },
           stdout: "pipe",
           stderr: "pipe",
         });
