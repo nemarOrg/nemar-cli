@@ -21,6 +21,7 @@ import {
   DATASET,
   type Fixture,
   SLOW,
+  addUnreadableKey,
   buildAssembled,
   copyDir,
   fileSha256,
@@ -88,6 +89,18 @@ describe("verify", () => {
       ).toBe(true);
       // The header comparison and the retention read are made for each new object.
       expect(standin.calls("GetObjectRetention").length).toBe(3);
+    },
+    SLOW,
+  );
+
+  test(
+    "refuses a plan with a key nobody read, even when its totals agree",
+    async () => {
+      addUnreadableKey(dir);
+      const r = await runScrub(standin, verifyArgs(dir));
+      expectStopped(r, 3, "plan-has-unreadable");
+      expect(has(dir, "verified.json")).toBe(false);
+      expect(standin.log.length).toBe(0);
     },
     SLOW,
   );

@@ -54,7 +54,7 @@ Measured in the real bucket on 2026-10-04, a dataset has these:
    Stop unless it exits 0: exit 4 means a key was unreadable, a manifest named an EDF or BDF held inline in git, or `version/` held a file that is neither a manifest nor a known sibling, and the plan is incomplete.
    The keys are the union of every manifest and a listing of `D/objects/`, so a recording that no manifest names is still found.
    Read the counts: keys, how many need a scrub, bytes to hash.
-   A plan made with `--tags` is partial and every later stage refuses it.
+   A plan made with `--tags` is partial, and a plan with any unreadable key is incomplete; assemble, verify, zarr, drop-archives and delete-old all refuse either (`plan-partial`, `plan-has-unreadable`).
 2. **Git plan** (read-only): `bun run scripts/scrub/plan/build-git-plan.ts --repo W/clone --dataset D --out W/git-plan.json`.
    It reads every commit of every ref, not only the tips.
    Read the counts (images dropped, JSON files blanked, provenance entries).

@@ -30,6 +30,7 @@ import {
   checkDataset,
   parseFile,
   readBytes,
+  requireCompletePlan,
   withCtx,
   writeJson,
 } from "./s3-stages";
@@ -57,6 +58,7 @@ export async function dropArchivesStage(o: DropArchivesOptions): Promise<number>
     throw new StageError("confirm-dataset-mismatch", EXIT.refused);
   }
   checkDataset(plan.dataset);
+  requireCompletePlan(plan);
   const prefix = `${plan.dataset}/archives/`;
 
   return withCtx(o, plan.bucket, async (ctx) => {

@@ -150,6 +150,19 @@ export function checkDataset(dataset: string): void {
   if (!DATASET_ID.test(dataset)) throw new StageError("bad-dataset-id", EXIT.usage);
 }
 
+/**
+ * Only a complete plan is acted on: one made over every manifest (`partial` is a `--tags` plan)
+ * whose every key was read. An unreadable key is one nobody looked at, so a stage that went on
+ * would vouch for, or delete around, an object the plan never checked. Every stage after `plan`
+ * that reads plan.json asks this first, so the rule is one rule.
+ */
+export function requireCompletePlan(plan: PlanFile): void {
+  if (plan.partial) throw new StageError("plan-partial", EXIT.refused);
+  if (plan.totals.unreadable > 0 || plan.keys.some((k) => k.status !== "read")) {
+    throw new StageError("plan-has-unreadable", EXIT.refused);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // plan
 // ---------------------------------------------------------------------------
@@ -448,10 +461,7 @@ export async function loadAssembleInputs(dir: string): Promise<AssembleInputs> {
   const hashes: HashesFile = await loadFile(dir, "hashes.json", parseHashes);
   const patches: PatchesFile = await loadFile(dir, "patches.json", parsePatches);
 
-  if (plan.partial) throw new StageError("plan-partial", EXIT.refused);
-  if (plan.totals.unreadable > 0 || plan.keys.some((k) => k.status !== "read")) {
-    throw new StageError("plan-has-unreadable", EXIT.refused);
-  }
+  requireCompletePlan(plan);
   if (hashes.dataset !== plan.dataset) throw new StageError("hashes-wrong-dataset", EXIT.refused);
 
   const needing = plan.keys.filter((k) => k.needsScrub);
@@ -748,7 +758,7 @@ async function verifyOne(
 
 export async function verifyStage(o: VerifyOptions): Promise<number> {
   const plan = await loadFile(o.dir, "plan.json", parsePlan);
-  if (plan.partial) throw new StageError("plan-partial", EXIT.refused);
+  requireCompletePlan(plan);
   const assembledBytes = await readBytes(path.join(o.dir, "assembled.json"), "assembled.json");
   const assembled = parseFile("assembled.json", parseAssembled, assembledBytes.toString("utf8"));
   const patches = await loadFile(o.dir, "patches.json", parsePatches);
@@ -1047,7 +1057,7 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
   if (o.confirmDataset !== plan.dataset) {
     throw new StageError("confirm-dataset-mismatch", EXIT.refused);
   }
-  if (plan.partial) throw new StageError("plan-partial", EXIT.refused);
+  requireCompletePlan(plan);
   const assembledBytes = await readBytes(path.join(o.dir, "assembled.json"), "assembled.json");
   const assembled = parseFile("assembled.json", parseAssembled, assembledBytes.toString("utf8"));
   const sha = sha256Hex(assembledBytes);

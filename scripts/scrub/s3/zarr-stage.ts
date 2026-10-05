@@ -43,6 +43,7 @@ import {
   checkDataset,
   parseFile,
   readBytes,
+  requireCompletePlan,
   withCtx,
   writeJson,
 } from "./s3-stages";
@@ -208,6 +209,7 @@ export async function zarrStage(o: ZarrOptions): Promise<number> {
   const planBytes = await readBytes(path.join(o.dir, "plan.json"), "plan.json");
   const plan = parseFile("plan.json", parsePlan, planBytes.toString("utf8"));
   checkDataset(plan.dataset);
+  requireCompletePlan(plan);
   // A proof from an earlier run must not outlive this one: it holds only once this run ends well.
   await rm(path.join(o.dir, "zarr-verified.json"), { force: true });
 

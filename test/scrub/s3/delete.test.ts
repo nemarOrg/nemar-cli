@@ -28,6 +28,7 @@ import {
   DATASET,
   type PublicEndpoint,
   SLOW,
+  addUnreadableKey,
   buildAssembled,
   centuryFromNow,
   copyDir,
@@ -225,6 +226,21 @@ describe("delete-old: refusals", () => {
       const count = await runScrub(standin, executeArgs());
       expectStopped(count, 3, "proof-count-mismatch");
       expectOldIntact();
+    },
+    SLOW,
+  );
+
+  test(
+    "refuses a plan with a key nobody read, even when its totals agree, in both modes",
+    async () => {
+      writeProofs();
+      addUnreadableKey(dir);
+      for (const flag of [[], ["--execute"]]) {
+        expectStopped(await runScrub(standin, deleteArgs(flag)), 3, "plan-has-unreadable");
+      }
+      expect(standin.log.length).toBe(0);
+      expectOldIntact();
+      expect(has(dir, "deleted.json")).toBe(false);
     },
     SLOW,
   );

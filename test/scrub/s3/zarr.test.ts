@@ -25,6 +25,7 @@ import {
   MIB,
   type PublicEndpoint,
   SLOW,
+  addUnreadableKey,
   dirText,
   fileSha256,
   fixtureD,
@@ -652,6 +653,20 @@ describe("zarr: preconditions", () => {
       expect(r.exitCode).toBe(2);
       expect(r.stderr).toContain("bad-dataset-id");
       expect(standin.log.length).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "refuses a plan with a key nobody read, before any S3 call",
+    async () => {
+      const { dir } = await seeded();
+      addUnreadableKey(dir);
+      for (const flag of [[], ["--execute"]]) {
+        expectStopped(await runScrub(standin, zarrArgs(dir, flag)), 3, "plan-has-unreadable");
+      }
+      expect(standin.log.length).toBe(0);
+      expect(has(dir, "zarr-verified.json")).toBe(false);
     },
     SLOW,
   );

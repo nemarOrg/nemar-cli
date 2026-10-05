@@ -15,6 +15,7 @@ import {
   BUCKET,
   DATASET,
   SLOW,
+  addUnreadableKey,
   centuryFromNow,
   fixtureD,
   has,
@@ -113,6 +114,19 @@ describe("drop-archives", () => {
       }
       expect(standin.log.length).toBe(0);
       expect(has(dir, "archives-dropped.json")).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
+    "refuses a plan with a key nobody read, before any S3 call",
+    async () => {
+      const { dir } = await seeded();
+      addUnreadableKey(dir);
+      for (const flag of [[], ["--execute"]]) {
+        expectStopped(await runScrub(standin, dropArgs(dir, flag)), 3, "plan-has-unreadable");
+      }
+      expect(standin.log.length).toBe(0);
     },
     SLOW,
   );

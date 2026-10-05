@@ -20,7 +20,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "bun";
-import { type HashesFile, buildKey } from "../../../scripts/scrub/contract";
+import { type HashesFile, type PlanFile, buildKey } from "../../../scripts/scrub/contract";
 import { type S3Ctx, TempArea, createAwsRunner } from "../../../scripts/scrub/s3/s3-lib";
 import type { S3Standin } from "../helpers/s3-standin";
 
@@ -471,6 +471,26 @@ export function readJson<T>(dir: string, name: string): T {
 
 export function writeJson(dir: string, name: string, value: unknown): void {
   writeFileSync(path.join(dir, name), `${JSON.stringify(value, null, 2)}\n`);
+}
+
+/**
+ * Reviewer probe T2: add to plan.json one key the plan could not read, with totals that agree, so
+ * the file still parses and only the rule that a plan must be complete can refuse it. The key is
+ * not one any other file names, so no later cross-check refuses the plan for another reason.
+ */
+export function addUnreadableKey(dir: string): void {
+  const plan = readJson<PlanFile>(dir, "plan.json");
+  plan.keys.push({
+    oldKey: buildKey(4096, "f".repeat(64), ".edf"),
+    size: 4096,
+    needsScrub: false,
+    versionIds: [],
+    reasons: ["HeadObject:access-denied"],
+    status: "unreadable",
+  });
+  plan.totals.keys += 1;
+  plan.totals.unreadable += 1;
+  writeJson(dir, "plan.json", plan);
 }
 
 export const fileSha256 = (dir: string, name: string): string =>
