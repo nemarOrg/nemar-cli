@@ -275,10 +275,11 @@ export function parsePlan(text: string): PlanFile {
   const bad = (): never => {
     throw new ContractError("plan.json does not match the contract");
   };
-  if (!isObject(x) || x.version !== 1 || !isString(x.dataset) || !Array.isArray(x.keys)) bad();
+  if (!isObject(x) || x.version !== 1 || !isName(x.dataset) || !Array.isArray(x.keys)) bad();
   const plan = x as Record<string, unknown>;
   if (plan.partial !== undefined && typeof plan.partial !== "boolean") bad();
-  if (plan.bucket !== undefined && !isString(plan.bucket)) bad();
+  // Every S3 call of every later stage names this bucket.
+  if (!isName(plan.bucket)) bad();
   if (plan.tags !== undefined && !(Array.isArray(plan.tags) && plan.tags.every(isString))) bad();
 
   const seen = new Set<string>();
@@ -366,9 +367,20 @@ export function parseHashes(text: string): HashesFile {
   return x as unknown as HashesFile;
 }
 
+/**
+ * Read assembled.json, or refuse. Every field a later stage acts on is checked: verify and
+ * delete-old HEAD the new object AT `newVersionId`, so an entry without one would make them check
+ * whatever version is current instead of the one that was assembled and verified.
+ */
 export function parseAssembled(text: string): AssembledFile {
   const x = JSON.parse(text) as unknown;
-  if (!isObject(x) || x.version !== 1 || !isObject(x.entries)) {
+  if (
+    !isObject(x) ||
+    x.version !== 1 ||
+    !isName(x.dataset) ||
+    !isName(x.bucket) ||
+    !isObject(x.entries)
+  ) {
     throw new ContractError("assembled.json does not match the contract");
   }
   for (const [oldKey, e] of Object.entries(x.entries)) {
@@ -377,8 +389,16 @@ export function parseAssembled(text: string): AssembledFile {
       !isObject(e) ||
       typeof e.newKey !== "string" ||
       !ANNEX_KEY.test(e.newKey) ||
+      !isName(e.newVersionId) ||
+      !isIsoDate(e.retainUntil) ||
       e.mode !== "GOVERNANCE"
     ) {
+      throw new ContractError("assembled.json holds a bad entry");
+    }
+    const was = parseKey(oldKey);
+    const now = parseKey(e.newKey);
+    // As in hashes.json: the scrub keeps the size and the extension, and changes the content.
+    if (was.size !== now.size || was.ext !== now.ext || was.sha256 === now.sha256) {
       throw new ContractError("assembled.json holds a bad entry");
     }
   }
@@ -390,8 +410,8 @@ export function parseVerified(text: string): VerifiedFile {
   if (
     !isObject(x) ||
     x.version !== 1 ||
-    !isString(x.dataset) ||
-    !isString(x.verifiedAt) ||
+    !isName(x.dataset) ||
+    !isIsoDate(x.verifiedAt) ||
     !isString(x.assembledSha256) ||
     !SHA256_HEX.test(x.assembledSha256) ||
     !isObject(x.counts) ||

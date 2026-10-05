@@ -245,6 +245,7 @@ describe("verify", () => {
       const extra = structuredClone(full);
       extra.entries[`SHA256E-s9--${"d".repeat(64)}.edf`] = {
         ...(full.entries[a.oldKey] as object),
+        newKey: `SHA256E-s9--${"e".repeat(64)}.edf`,
       } as never;
       writeJson(dir, "assembled.json", extra);
       const unplanned = await runScrub(standin, verifyArgs(dir));

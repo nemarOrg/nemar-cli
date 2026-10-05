@@ -288,33 +288,62 @@ describe("delete-old: refusals", () => {
     "refuses an assembly in which an old key is, or becomes, a new key",
     async () => {
       const full = readJson<AssembledFile>(dir, "assembled.json");
-      const withEntries = (mutate: (e: AssembledFile["entries"]) => void) => {
+      const withEntries = (mutate: (e: AssembledFile["entries"]) => void, count = 2) => {
         const copy = structuredClone(full);
         mutate(copy.entries);
         writeJson(dir, "assembled.json", copy);
-        writeProofs();
+        writeProofs(count);
       };
+      const entryOf = (newKey: string) => ({
+        ...(full.entries[a.oldKey] as AssembledFile["entries"][string]),
+        newKey,
+      });
 
-      // An entry whose replacement is itself.
+      // An entry whose replacement is itself, or another entry's original of another size: the
+      // contract refuses both before the stage looks at the set.
       withEntries((e) => {
         (e[a.oldKey] as { newKey: string }).newKey = a.oldKey;
       });
-      const same = await runScrub(standin, executeArgs());
-      expectStopped(same, 3, "new-key-equals-old-key");
-
-      // One entry's replacement is another entry's original.
+      expectStopped(await runScrub(standin, executeArgs()), 3, "assembled.json-invalid");
       withEntries((e) => {
         (e[a.oldKey] as { newKey: string }).newKey = b.oldKey;
       });
+      expectStopped(await runScrub(standin, executeArgs()), 3, "assembled.json-invalid");
+
+      // Keys of one size and extension, so each entry is well formed and only the set is wrong.
+      const k = (c: string) => `SHA256E-s500--${c.repeat(64)}.edf`;
+      // One entry's replacement is another entry's original.
+      withEntries((e) => {
+        e[k("1")] = entryOf(k("2"));
+        e[k("2")] = entryOf(k("3"));
+      }, 4);
       const chained = await runScrub(standin, executeArgs());
       expectStopped(chained, 3, "old-key-is-a-new-key");
 
       // Two originals share one replacement.
       withEntries((e) => {
-        (e[a.oldKey] as { newKey: string }).newKey = (e[b.oldKey] as { newKey: string }).newKey;
-      });
+        e[k("1")] = entryOf(k("3"));
+        e[k("2")] = entryOf(k("3"));
+      }, 4);
       const shared = await runScrub(standin, executeArgs());
       expectStopped(shared, 3, "duplicate-new-key");
+      expectOldIntact();
+    },
+    SLOW,
+  );
+
+  test(
+    "refuses an entry that names no new version, in both modes, before any S3 call",
+    async () => {
+      // Reviewer probe T4: without a version id the HEAD would check whatever is current.
+      const copy = readJson<AssembledFile>(dir, "assembled.json");
+      delete (copy.entries[a.oldKey] as { newVersionId?: string }).newVersionId;
+      writeJson(dir, "assembled.json", copy);
+      writeProofs();
+      for (const flag of [[], ["--execute"]]) {
+        expectStopped(await runScrub(standin, deleteArgs(flag)), 3, "assembled.json-invalid");
+      }
+      expect(standin.log.length).toBe(0);
       expectOldIntact();
     },
     SLOW,

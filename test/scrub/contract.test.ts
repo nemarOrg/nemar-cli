@@ -279,11 +279,56 @@ describe("stage files", () => {
       ["the same key twice", planText([planKey(), planKey()])],
       // The header.
       ["bucket a number", planText(good, { bucket: 1 })],
+      ["bucket absent", planText(good, { bucket: undefined })],
+      ["bucket empty", planText(good, { bucket: "" })],
+      ["dataset empty", planText(good, { dataset: "" })],
       ["tags not strings", planText(good, { tags: [1] })],
       ["keys not a list", planText(good, { keys: {} })],
     ];
     for (const [label, text] of mutations) {
       expect(() => parsePlan(text), label).toThrow(ContractError);
+    }
+  });
+
+  test("assembled.json: every field verify and delete-old act on is checked", () => {
+    const entry = {
+      newKey: NEW,
+      newVersionId: "v-new",
+      retainUntil: "2126-10-04T00:00:00Z",
+      mode: "GOVERNANCE",
+    };
+    const doc = (over: KeyOver = {}, e: KeyOver = {}) =>
+      JSON.stringify({
+        version: 1,
+        dataset: "nm000186",
+        bucket: "nemar",
+        entries: { [OLD]: { ...entry, ...e } },
+        ...over,
+      });
+    expect(parseAssembled(doc()).entries[OLD]?.newVersionId).toBe("v-new");
+    expect(parseAssembled(doc({}, { retainUntil: "2126-10-04T00:00:00.000Z" }))).toBeTruthy();
+    const mutations: Array<[string, string]> = [
+      // Reviewer probe T4: without it, a HEAD would check the current version instead.
+      ["newVersionId absent", doc({}, { newVersionId: undefined })],
+      ["newVersionId empty", doc({}, { newVersionId: "" })],
+      ["newVersionId a number", doc({}, { newVersionId: 7 })],
+      ["retainUntil absent", doc({}, { retainUntil: undefined })],
+      ["retainUntil not a date", doc({}, { retainUntil: "forever" })],
+      ["retainUntil a bare day", doc({}, { retainUntil: "2126-10-04" })],
+      ["mode COMPLIANCE", doc({}, { mode: "COMPLIANCE" })],
+      ["newKey another size", doc({}, { newKey: `SHA256E-s999--${H2}.bdf` })],
+      ["newKey another extension", doc({}, { newKey: `SHA256E-s1000--${H2}.edf` })],
+      ["newKey the old key", doc({}, { newKey: OLD })],
+      ["newKey not a key", doc({}, { newKey: "x" })],
+      ["dataset absent", doc({ dataset: undefined })],
+      ["dataset empty", doc({ dataset: "" })],
+      ["bucket absent", doc({ bucket: undefined })],
+      ["bucket empty", doc({ bucket: "" })],
+      ["entries a list", doc({ entries: [] })],
+      ["version 2", doc({ version: 2 })],
+    ];
+    for (const [label, text] of mutations) {
+      expect(() => parseAssembled(text), label).toThrow(ContractError);
     }
   });
 
@@ -298,7 +343,10 @@ describe("stage files", () => {
     expect(parseVerified(JSON.stringify(ok)).counts.rangesCompared).toBe(27);
     for (const over of [
       { dataset: 1 },
+      { dataset: "" },
       { verifiedAt: undefined },
+      { verifiedAt: "not a date" },
+      { verifiedAt: "2026-13-45T00:00:00Z" },
       { assembledSha256: "abc" },
       { assembledSha256: H1.toUpperCase() },
       { counts: undefined },

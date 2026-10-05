@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { ContractError } from "../../../scripts/scrub/contract";
 import {
   AwsCliError,
   GIB,
@@ -23,6 +24,7 @@ import {
   checkPrunePrefix,
   isEdfOrBdf,
   keysOfManifest,
+  parseHashVerified,
 } from "../../../scripts/scrub/s3/s3-stages";
 
 describe("planAssembly", () => {
@@ -269,5 +271,28 @@ describe("manifests and prefixes", () => {
     ]) {
       expect(() => checkCanaryPrefix(bad), JSON.stringify(bad)).toThrow(StageError);
     }
+  });
+});
+
+describe("new-hash-verified.json", () => {
+  test("the dataset is named, the digest is a sha256 and the count is a count", () => {
+    const ok = { version: 1, dataset: "nm000186", assembledSha256: "a".repeat(64), count: 2 };
+    expect(parseHashVerified(JSON.stringify(ok)).count).toBe(2);
+    for (const over of [
+      { dataset: "" },
+      { dataset: 7 },
+      { assembledSha256: "abc" },
+      { assembledSha256: "A".repeat(64) },
+      { count: -1 },
+      { count: 1.5 },
+      { count: "2" },
+      { version: 2 },
+    ]) {
+      expect(
+        () => parseHashVerified(JSON.stringify({ ...ok, ...over })),
+        JSON.stringify(over),
+      ).toThrow(ContractError);
+    }
+    expect(() => parseHashVerified("[]")).toThrow(ContractError);
   });
 });

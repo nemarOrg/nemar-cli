@@ -643,15 +643,20 @@ describe("zarr: preconditions", () => {
       expectStopped(await runScrub(standin, zarrArgs(empty)), 3, "plan.json-missing");
 
       const bad = tempDir("zarr-badplan");
-      writeJson(bad, "plan.json", {
+      const plan = {
         version: 1,
         dataset: "nm1",
+        bucket: BUCKET,
         keys: [],
         totals: { keys: 0, needScrub: 0, bytesToHash: 0, unreadable: 0 },
-      });
+      };
+      writeJson(bad, "plan.json", plan);
       const r = await runScrub(standin, zarrArgs(bad));
       expect(r.exitCode).toBe(2);
       expect(r.stderr).toContain("bad-dataset-id");
+      // A plan that names no bucket would send every S3 call to `--bucket undefined`.
+      writeJson(bad, "plan.json", { ...plan, dataset: DATASET, bucket: undefined });
+      expectStopped(await runScrub(standin, zarrArgs(bad)), 3, "plan.json-invalid");
       expect(standin.log.length).toBe(0);
     },
     SLOW,

@@ -870,10 +870,15 @@ export function parseHashVerified(text: string): HashVerifiedFile {
   if (
     typeof x !== "object" ||
     x === null ||
+    Array.isArray(x) ||
     x.version !== 1 ||
     typeof x.dataset !== "string" ||
+    x.dataset === "" ||
     typeof x.assembledSha256 !== "string" ||
-    typeof x.count !== "number"
+    !/^[0-9a-f]{64}$/.test(x.assembledSha256) ||
+    typeof x.count !== "number" ||
+    !Number.isSafeInteger(x.count) ||
+    x.count < 0
   ) {
     throw new ContractError("new-hash-verified.json does not match the contract");
   }
