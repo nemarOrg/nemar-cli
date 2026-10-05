@@ -23,6 +23,7 @@ import {
   BUCKET,
   DATASET,
   MIB,
+  type PublicEndpoint,
   SLOW,
   dirText,
   fileSha256,
@@ -35,12 +36,18 @@ import {
   seedManifest,
   seedObject,
   sha256,
+  startPublicEndpoint,
   tempDir,
   writeJson,
 } from "./support";
 
 let standin: S3Standin;
-afterEach(() => standin?.stop());
+let pub: PublicEndpoint | undefined;
+afterEach(() => {
+  standin?.stop();
+  pub?.stop();
+  pub = undefined;
+});
 
 const enc = (s: string) => new TextEncoder().encode(s);
 const dec = (b: Uint8Array) => new TextDecoder().decode(b);
@@ -52,8 +59,22 @@ const B = storeKey("b-compact");
 const C = storeKey("c-clean");
 
 /** Values that must appear nowhere the stage prints or writes. */
-const VALUES = ["P0042", "Marigold", "Thistlewood", "03-JUL-1971", "1971-07-03", "A-9981"];
+const VALUES = [
+  "P0042",
+  "Marigold",
+  "Thistlewood",
+  "03-JUL-1971",
+  "1971-07-03",
+  "A-9981",
+  "A-7731",
+  "Wilhelmina",
+  "BioSemi",
+];
 
+/**
+ * What biosigio's EDF importer writes into `recording_metadata` (every identification field it
+ * reads from the header), plus scanner keys elsewhere in the attributes.
+ */
 const dirtyAttributes = () => ({
   recording_metadata: {
     patientcode: "P0042 Marigold",
@@ -62,14 +83,18 @@ const dirtyAttributes = () => ({
     gender: "F",
     equipment: "BioSemi",
     patientname: "Thistlewood",
+    patient_additional: "Hieronymus",
+    admincode: "A-7731",
+    technician: "Wilhelmina Fairweather",
+    recording_additional: "Bellweather lab",
   },
   channels: [{ name: "Fz", dob: "1971-07-03" }],
   history: { mrn: "A-9981", note: "kept" },
 });
 
-/** The same attributes with the five identifier members dropped, written out by hand. */
+/** The same attributes with the ten identifier members dropped, written out by hand. */
 const cleanedAttributes = () => ({
-  recording_metadata: { startdate: "02.02.20", gender: "F", equipment: "BioSemi" },
+  recording_metadata: { startdate: "02.02.20", gender: "F" },
   channels: [{ name: "Fz" }],
   history: { note: "kept" },
 });
@@ -168,7 +193,7 @@ describe("zarr: a dry run", () => {
       expect(plan.dataset).toBe(DATASET);
       expect(plan.planSha256).toBe(fileSha256(dir, "plan.json"));
       expect(plan.stores).toEqual([
-        { key: A, outcome: "needs-scrub", removed: 5 },
+        { key: A, outcome: "needs-scrub", removed: 10 },
         { key: B, outcome: "needs-scrub", removed: 2 },
         { key: C, outcome: "clean", removed: 0 },
       ]);
@@ -215,7 +240,6 @@ describe("zarr: --execute", () => {
       expect(JSON.parse(text(A)).attributes.recording_metadata).toEqual({
         startdate: "02.02.20",
         gender: "F",
-        equipment: "BioSemi",
       });
 
       // A new version each; the original is still there, noncurrent, for the prune to remove.
@@ -305,7 +329,6 @@ describe("zarr: --execute", () => {
       expect(finalA.attributes.recording_metadata).toEqual({
         startdate: "02.02.20",
         gender: "F",
-        equipment: "BioSemi",
       });
       expect(versionsOf(A).length).toBe(3);
       expect(has(dir, "zarr-verified.json")).toBe(true);
@@ -404,6 +427,130 @@ describe("zarr: --execute", () => {
       expect(r.stdout).toContain("GetObject:failed=1");
       expect(has(dir, "zarr-verified.json")).toBe(false);
       expect(versionsOf(B).length).toBe(1);
+    },
+    SLOW,
+  );
+});
+
+describe("zarr: the EDF identification fields the converter mirrors", () => {
+  test(
+    "a store whose only identifier is a mirrored field the scanner does not know is not clean",
+    async () => {
+      const { dir } = await seeded();
+      // Reviewer probe T6: a technician's name and free text from the patient field, and nothing
+      // the scanner calls an identifier. Before the mirror list this store was "clean".
+      const T = storeKey("t-technician");
+      const doc = JSON.stringify(
+        wrap({
+          recording_metadata: {
+            gender: "F",
+            startdate: "02.02.20",
+            technician: "Wilhelmina Fairweather",
+            patient_additional: "Hieronymus",
+            admincode: "A-7731",
+            recording_additional: "Bellweather lab",
+            equipment: "BioSemi",
+          },
+        }),
+      );
+      standin.putObject(BUCKET, T, enc(doc), { contentType: "application/json" });
+
+      const dry = await runScrub(standin, zarrArgs(dir));
+      expect(dry.exitCode, dry.all).toBe(0);
+      expect(dry.stdout).toContain("stores=4 clean=1 needScrub=3");
+
+      const r = await runScrub(standin, zarrArgs(dir, ["--execute"]));
+      expect(r.exitCode, r.all).toBe(0);
+      expect(JSON.parse(text(T))).toEqual(
+        wrap({ recording_metadata: { gender: "F", startdate: "02.02.20" } }),
+      );
+      for (const v of ["Wilhelmina", "Fairweather", "Hieronymus", "A-7731", "Bellweather"]) {
+        expect(text(T), v).not.toContain(v);
+      }
+      expect(readJson<ZarrVerifiedFile>(dir, "zarr-verified.json").counts.rewritten).toBe(3);
+      expectNoValue(r.all, dir);
+    },
+    SLOW,
+  );
+});
+
+describe("zarr-public: the check from outside after publication", () => {
+  const index = (stores: string[]) =>
+    enc(JSON.stringify({ dataset_id: DATASET, stores: stores.map((zarr) => ({ zarr })) }));
+  const rel = (key: string) => key.slice(`${DATASET}/zarr/`.length, -"/zarr.json".length);
+
+  /** A public reader of the stand-in's current objects, and the dataset's index naming A, B, C. */
+  async function published(): Promise<Seeded> {
+    const s = await seeded();
+    standin.putObject(BUCKET, `${DATASET}/zarr/index.json`, index([A, B, C].map(rel)));
+    pub = startPublicEndpoint();
+    pub.serve = (key) => standin.current(BUCKET, key)?.data;
+    return s;
+  }
+  const publicArgs = () => ["zarr-public", "--dataset", DATASET, "--public-base", pub?.url ?? ""];
+
+  test(
+    "asks the zarr stage's own question of every store the index names, anonymously",
+    async () => {
+      const { dir } = await published();
+      const before = await runScrub(standin, publicArgs());
+      expect(before.exitCode, before.all).toBe(1);
+      expect(before.stdout).toContain("stores=3 clean=1 identifier=2 unreadable=0");
+      expectNoValue(before.all, dir);
+      // Anonymous GETs only: the index, then each store root.
+      for (const req of pub?.requests ?? []) {
+        expect(req.method).toBe("GET");
+        expect(req.headers.authorization).toBeUndefined();
+      }
+      expect((pub?.requests ?? []).map((q) => q.path).sort()).toEqual(
+        [`/${DATASET}/zarr/index.json`, ...[A, B, C].map((k) => `/${k}`)].sort(),
+      );
+
+      expect((await runScrub(standin, zarrArgs(dir, ["--execute"]))).exitCode).toBe(0);
+      const after = await runScrub(standin, publicArgs());
+      expect(after.exitCode, after.all).toBe(0);
+      expect(after.stdout).toContain("stores=3 clean=3 identifier=0 unreadable=0");
+    },
+    SLOW,
+  );
+
+  test(
+    "a mirrored field the scanner does not know fails the public check too",
+    async () => {
+      await published();
+      standin.putObject(
+        BUCKET,
+        A,
+        enc(
+          JSON.stringify(wrap({ recording_metadata: { technician: "Wilhelmina", gender: "F" } })),
+        ),
+      );
+      standin.putObject(BUCKET, B, enc(compactCleaned));
+      const r = await runScrub(standin, publicArgs());
+      expect(r.exitCode, r.all).toBe(1);
+      expect(r.stdout).toContain("stores=3 clean=2 identifier=1 unreadable=0");
+      expect(r.all).not.toContain("Wilhelmina");
+    },
+    SLOW,
+  );
+
+  test(
+    "a store or an index it cannot read proves nothing",
+    async () => {
+      await published();
+      standin.putObject(BUCKET, A, enc(prettyCleaned));
+      standin.putObject(BUCKET, B, enc(compactCleaned));
+      // C is named by the index and not served: 403, as for a missing key.
+      standin.putDeleteMarker(BUCKET, C);
+      const r = await runScrub(standin, publicArgs());
+      expect(r.exitCode, r.all).toBe(4);
+      expect(r.stdout).toContain("http-403=1");
+
+      standin.putDeleteMarker(BUCKET, `${DATASET}/zarr/index.json`);
+      expectStopped(await runScrub(standin, publicArgs()), 4, "index-unreadable");
+
+      standin.putObject(BUCKET, `${DATASET}/zarr/index.json`, index(["../../objects/x.zarr"]));
+      expectStopped(await runScrub(standin, publicArgs()), 4, "index-malformed");
     },
     SLOW,
   );

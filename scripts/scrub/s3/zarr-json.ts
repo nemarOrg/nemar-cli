@@ -2,10 +2,13 @@
  * Remove identifier-named keys from the `attributes` of a Zarr `zarr.json`, editing the TEXT.
  *
  * The root group of every Zarr store the pipeline writes carries the recording's header fields
- * (`attributes.recording_metadata.patientcode`, `.birthdate`, ...), so the serving copy repeats
- * what the scrub removes from the EDF. Which keys count is decided by the scanner
- * (`scanJsonKeys` in `shared/identifier-scan.ts`), not here; this module only finds the same keys
- * and cuts them out.
+ * (`attributes.recording_metadata.patientcode`, `.birthdate`, `.technician`, ...), so the serving
+ * copy repeats what the scrub removes from the EDF. Two rules decide which members go, and both
+ * live here so that what the zarr stage removes, what it re-reads to prove, and what the public
+ * check after publication looks for are one rule ({@link zarrIdentifierCount}):
+ *
+ *  - every key the scanner calls an identifier (`scanJsonKeys` in `shared/identifier-scan.ts`);
+ *  - every member that mirrors an EDF identification field ({@link EDF_MIRROR_MEMBERS}).
  *
  * Why text and not parse-and-stringify: a re-serialized document changes more than the keys it
  * was asked to drop. `1.0` becomes `1`, an integer past 2^53 loses digits, `é` becomes `é`,
@@ -17,7 +20,40 @@
  * Nothing here ever returns, logs or throws a value from the document: errors are fixed words.
  */
 
-import { scanJsonKeys } from "../../../shared/identifier-scan";
+import { canonical, hasContent, scanJsonKeys } from "../../../shared/identifier-scan";
+
+/**
+ * The EDF identification fields the converter copies into a store's root attributes, in the
+ * scanner's canonical spelling (lowercase, no spaces, underscores or hyphens), so `patient_name`,
+ * `PatientName` and `patient-name` are one name.
+ *
+ * Where they come from: biosigio's EDF importer (`biosigio/importers/edf.py`,
+ * `_extract_metadata`) reads pyedflib's header dict into `recording_info` as `patientcode`,
+ * `gender`, `birthdate`, `patient_name`, `patient_additional`, `admincode`, `technician`,
+ * `equipment` and `recording_additional` (and `startdate`), then sets every non-empty one on the
+ * recording's metadata, which the Zarr exporter writes as `attributes.recording_metadata`. The
+ * converter in `scripts/zarr/` adds no spelling of its own. Only the scanner's keys among them
+ * (`patientcode`, `birthdate`, `patientname`) were removed before; the rest are free text from the
+ * patient and recording identification fields, which is where names, record numbers and
+ * technicians' names sit, so they go whatever they hold.
+ *
+ * Kept on purpose: `gender` (sex is neither a name, a date nor a record number, and
+ * `participants.tsv` carries it) and `startdate` (an acquisition date does not gate, ADR 0085).
+ *
+ * This is the ONE list. A store whose `recording_metadata` holds an identification field under a
+ * name that is not here is a store this stage does not clean, which is why the runbook reads the
+ * key names of one real store per dataset before a real run.
+ */
+export const EDF_MIRROR_MEMBERS: ReadonlySet<string> = new Set([
+  "patientcode",
+  "birthdate",
+  "patientname",
+  "patientadditional",
+  "admincode",
+  "technician",
+  "equipment",
+  "recordingadditional",
+]);
 
 /** A zarr.json is a few KiB. Anything past this is not metadata and is not read. */
 export const MAX_ZARR_JSON_BYTES = 16 * 1024 * 1024;
@@ -29,6 +65,20 @@ export class ZarrJsonError extends Error {
   constructor(readonly word: "zarr-json-malformed") {
     super(word);
     this.name = "ZarrJsonError";
+  }
+}
+
+/**
+ * A zarr.json's bytes as text and as a parsed document, or `zarr-json-malformed`. Decoding is
+ * fatal: a byte that is not UTF-8 would come back as U+FFFD, and a rewrite would then change bytes
+ * that were never meant to change.
+ */
+export function parseZarrJsonBytes(bytes: Uint8Array): { text: string; doc: unknown } {
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return { text, doc: JSON.parse(text) as unknown };
+  } catch {
+    throw new ZarrJsonError("zarr-json-malformed");
   }
 }
 
@@ -144,22 +194,46 @@ function parseSpans(text: string): Node {
   return root;
 }
 
-/** How many keys in a parsed document the scanner calls identifiers. */
-export function identifierKeyCount(doc: unknown): number {
-  return scanJsonKeys(doc).filter((f) => f.severity === "identifier").length;
-}
-
 const nameCache = new Map<string, boolean>();
 
-/** True when the scanner would flag a key of this name, whatever it holds. */
-function isIdentifierName(key: string): boolean {
+/** True when a member of this name is removed whenever it holds something. */
+function isRemovableName(key: string): boolean {
   let hit = nameCache.get(key);
   if (hit === undefined) {
-    // A computed key defines an own property even for `__proto__`; the value is any content.
-    hit = identifierKeyCount({ [key]: "x" }) > 0;
+    // The scanner flags an identifier name exactly when its value holds content, so asking with
+    // a placeholder value asks about the name alone. A computed key defines an own property even
+    // for `__proto__`.
+    hit =
+      EDF_MIRROR_MEMBERS.has(canonical(key)) ||
+      scanJsonKeys({ [key]: "x" }).some((f) => f.severity === "identifier");
     nameCache.set(key, hit);
   }
   return hit;
+}
+
+/**
+ * True when a member of this name holding this value is removed: the scanner calls the name an
+ * identifier, or the name mirrors an EDF identification field, AND the value holds something. An
+ * empty value (`""`, `null`, `[]`, `{}`) is never removed.
+ */
+export function isRemovableMember(key: string, value: unknown): boolean {
+  return isRemovableName(key) && hasContent(value);
+}
+
+/**
+ * How many members of a parsed document {@link isRemovableMember} would remove, at any depth and
+ * anywhere in the document (not only under `attributes`), counting a removed member once however
+ * much it holds. Zero is the only clean answer: the zarr stage, its re-read after a write, its
+ * proof and the public check after publication all ask this one function.
+ */
+export function zarrIdentifierCount(doc: unknown): number {
+  if (Array.isArray(doc)) return doc.reduce((n: number, item) => n + zarrIdentifierCount(item), 0);
+  if (doc === null || typeof doc !== "object") return 0;
+  let n = 0;
+  for (const [key, value] of Object.entries(doc as Record<string, unknown>)) {
+    n += isRemovableMember(key, value) ? 1 : zarrIdentifierCount(value);
+  }
+  return n;
 }
 
 /**
@@ -193,11 +267,10 @@ export interface Removal {
 }
 
 /**
- * Cut every identifier-named member with content out of the `attributes` of a zarr.json, at any
- * depth, through objects and arrays. A member is removed exactly when `scanJsonKeys` would flag
- * it: its name is an identifier key AND it holds something. Members that merely contain one
- * deeper are kept and searched. Everything outside `attributes` is left alone, and so is every
- * key the scanner reads as `review` severity (an email, a phone).
+ * Cut every member {@link isRemovableMember} names out of the `attributes` of a zarr.json, at any
+ * depth, through objects and arrays. Members that merely contain one deeper are kept and searched.
+ * Everything outside `attributes` is left alone, and so is every key the scanner reads as `review`
+ * severity (an email, a phone).
  *
  * `text` must parse as JSON with an object at the top; anything else is `zarr-json-malformed`.
  */
@@ -220,10 +293,8 @@ export function removeIdentifierKeys(text: string): Removal {
     if (node.kind !== "object") return;
     const gone = node.members.map(
       (m) =>
-        isIdentifierName(m.key) &&
-        identifierKeyCount({
-          [m.key]: JSON.parse(text.slice(m.value.start, m.value.end)) as unknown,
-        }) > 0,
+        isRemovableName(m.key) &&
+        hasContent(JSON.parse(text.slice(m.value.start, m.value.end)) as unknown),
     );
     cuts.push(...cutsFor(node, gone));
     removed += gone.filter(Boolean).length;

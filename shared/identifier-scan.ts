@@ -729,7 +729,7 @@ export function scanEdfHeader(bytes: Uint8Array): Finding[] {
 }
 
 /** Lowercase with spaces, underscores and hyphens removed: the canonical spelling of a name. */
-const canonical = (raw: string) =>
+export const canonical = (raw: string) =>
   raw
     .trim()
     .toLowerCase()
@@ -865,7 +865,7 @@ const IDENTIFIER_KEYS = new Set([
 const REVIEW_KEYS = new Set(["address", "contact", "phone", "telephone", "email", "national"]);
 
 /** True when a JSON value holds anything at all, at any depth. */
-function hasContent(value: unknown): boolean {
+export function hasContent(value: unknown): boolean {
   if (value === null || value === undefined) return false;
   if (typeof value === "string") return value.trim() !== "";
   if (typeof value === "number" || typeof value === "boolean") return true;

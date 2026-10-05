@@ -2,11 +2,12 @@
  * The `zarr` stage of an in-place scrub: remove the identifier keys the serving copy repeats.
  *
  * Every Zarr store root, `<id>/zarr/<path>/<name>.zarr/zarr.json`, carries the recording's
- * header fields in `attributes.recording_metadata` (a patient code, a birth date, ...), copied
- * from the EDF or BDF header. Scrubbing the recording leaves them in the Zarr copy, which is a
- * second public home for the same identifiers. This stage reads each store root, cuts the keys
- * the scanner calls identifiers out of its `attributes` (`zarr-json.ts`), writes it back, and
- * reads it again to prove the result is clean.
+ * header fields in `attributes.recording_metadata` (a patient code, a birth date, a technician,
+ * ...), copied from the EDF or BDF header. Scrubbing the recording leaves them in the Zarr copy,
+ * which is a second public home for the same identifiers. This stage reads each store root, cuts
+ * the keys the scanner calls identifiers and every mirrored EDF identification field out of its
+ * `attributes` (`zarr-json.ts`, one rule), writes it back, and reads it again to prove the result
+ * is clean by the same rule.
  *
  * What it does NOT do: it touches no other Zarr object (not a chunk, not an array's or a nested
  * group's metadata, not an index), it never overwrites a store root someone else changed since
@@ -50,8 +51,9 @@ import {
   type Removal,
   STORE_ROOT,
   ZarrJsonError,
-  identifierKeyCount,
+  parseZarrJsonBytes,
   removeIdentifierKeys,
+  zarrIdentifierCount,
 } from "./zarr-json";
 
 export interface ZarrOptions extends CommonOptions {
@@ -83,11 +85,6 @@ const UNREADABLE = new Set([
  */
 const V2_METADATA = /\/\.(zattrs|zgroup|zmetadata)$/;
 
-const decode = (bytes: Uint8Array): string =>
-  // Fatal: a byte that is not UTF-8 would come back as U+FFFD, and the rewrite would change bytes
-  // that were never meant to change.
-  new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-
 async function scrubStore(ctx: S3Ctx, key: string, execute: boolean): Promise<StoreResult> {
   const result = (outcome: string, removed = 0): StoreResult => ({ key, outcome, removed });
   try {
@@ -100,12 +97,12 @@ async function scrubStore(ctx: S3Ctx, key: string, execute: boolean): Promise<St
     let text: string;
     let doc: unknown;
     try {
-      text = decode(whole.bytes);
-      doc = JSON.parse(text);
-    } catch {
-      return result("zarr-json-malformed");
+      ({ text, doc } = parseZarrJsonBytes(whole.bytes));
+    } catch (err) {
+      if (err instanceof ZarrJsonError) return result(err.word);
+      throw err;
     }
-    if (identifierKeyCount(doc) === 0) return result("clean");
+    if (zarrIdentifierCount(doc) === 0) return result("clean");
 
     let edit: Removal;
     let after: unknown;
@@ -120,7 +117,7 @@ async function scrubStore(ctx: S3Ctx, key: string, execute: boolean): Promise<St
     }
     // The edit only reaches `attributes`. A key the scanner flags anywhere else is left, and the
     // store cannot be called clean.
-    if (identifierKeyCount(after) > 0) return result("identifier-outside-attributes");
+    if (zarrIdentifierCount(after) > 0) return result("identifier-outside-attributes");
     if (!execute) return result("needs-scrub", edit.removed);
 
     const body = ctx.tmp.file();
@@ -152,11 +149,11 @@ async function scrubStore(ctx: S3Ctx, key: string, execute: boolean): Promise<St
     const back = await readWholeWithMeta(ctx, key);
     let reread: unknown;
     try {
-      reread = JSON.parse(decode(back.bytes));
+      reread = parseZarrJsonBytes(back.bytes).doc;
     } catch {
       return result("verify-failed");
     }
-    if (identifierKeyCount(reread) > 0) return result("verify-failed");
+    if (zarrIdentifierCount(reread) > 0) return result("verify-failed");
     return result("scrubbed", edit.removed);
   } catch (err) {
     return result(failureWord(err));

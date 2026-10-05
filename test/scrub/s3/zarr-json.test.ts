@@ -10,15 +10,16 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  EDF_MIRROR_MEMBERS,
   ZarrJsonError,
-  identifierKeyCount,
   removeIdentifierKeys,
+  zarrIdentifierCount,
 } from "../../../scripts/scrub/s3/zarr-json";
 
 const cut = (text: string) => removeIdentifierKeys(text);
 
 describe("removeIdentifierKeys: exact text", () => {
-  test("pretty-printed: the member and its line go, every other byte stays", () => {
+  test("pretty-printed: the members and their lines go, every other byte stays", () => {
     const text = `{
   "zarr_format": 3,
   "node_type": "group",
@@ -33,20 +34,21 @@ describe("removeIdentifierKeys: exact text", () => {
   }
 }
 `;
+    // `equipment` is a mirrored EDF identification field, so it goes too, and as the last member
+    // it takes the comma before it.
     const expected = `{
   "zarr_format": 3,
   "node_type": "group",
   "attributes": {
     "recording_metadata": {
       "startdate": "02.02.20",
-      "gender": "F",
-      "equipment": "BioSemi"
+      "gender": "F"
     }
   }
 }
 `;
     const r = cut(text);
-    expect(r.removed).toBe(2);
+    expect(r.removed).toBe(3);
     expect(r.text).toBe(expected);
   });
 
@@ -97,6 +99,57 @@ describe("removeIdentifierKeys: exact text", () => {
     }
   });
 
+  test("every EDF identification field biosigio mirrors goes, in any spelling, whatever it holds", () => {
+    // The importer's own spellings (biosigio/importers/edf.py), then other spellings of the same
+    // names. None of the non-scanner ones is a key the scanner flags, which is why the list exists.
+    const mirrored = [
+      "patientcode",
+      "birthdate",
+      "patient_name",
+      "patient_additional",
+      "admincode",
+      "technician",
+      "equipment",
+      "recording_additional",
+      "Patient-Additional",
+      "ADMIN_CODE",
+      "Technician",
+      "recording additional",
+      "PatientName",
+    ];
+    for (const key of mirrored) {
+      for (const value of ['"Marigold Thistlewood"', "7", '["x"]', '{"a":"b"}']) {
+        const text = `{"attributes":{"recording_metadata":{${JSON.stringify(key)}:${value},"gender":"F","startdate":"02.02.20"}}}`;
+        const r = cut(text);
+        expect(r.text, `${key}=${value}`).toBe(
+          `{"attributes":{"recording_metadata":{"gender":"F","startdate":"02.02.20"}}}`,
+        );
+        expect(r.removed).toBe(1);
+        expect(zarrIdentifierCount(JSON.parse(text)), key).toBe(1);
+      }
+    }
+    // Under the older nesting too, and at any depth below `attributes`.
+    const nested = `{"attributes":{"recording_info":{"technician":"W. Fairweather"},"a":[{"b":{"admincode":"A-1"}}]}}`;
+    expect(cut(nested).text).toBe(`{"attributes":{"recording_info":{},"a":[{"b":{}}]}}`);
+    // Empty is kept, as it is for a scanner key; and gender and startdate stay, by decision.
+    const empty = `{"attributes":{"recording_metadata":{"technician":"","equipment":null,"admincode":[],"gender":"M","startdate":"01.01.90"}}}`;
+    expect(cut(empty)).toEqual({ text: empty, removed: 0 });
+    expect(zarrIdentifierCount(JSON.parse(empty))).toBe(0);
+    expect([...EDF_MIRROR_MEMBERS].sort()).toEqual(
+      [
+        "admincode",
+        "birthdate",
+        "equipment",
+        "patientadditional",
+        "patientcode",
+        "patientname",
+        "recordingadditional",
+        "technician",
+      ].sort(),
+    );
+    expect(EDF_MIRROR_MEMBERS.has("gender")).toBe(false);
+  });
+
   test("what the scanner does not flag is kept: empty values, review keys, similar names", () => {
     const text = `{"attributes":{"patientcode":"","dob":null,"birthdate":[],"mrn":{},"email":"a@b.test","phone":"1","birth_year":1971,"patient":"x","startdate":"02.02.20"}}`;
     const r = cut(text);
@@ -110,7 +163,7 @@ describe("removeIdentifierKeys: exact text", () => {
     expect(r.text).toBe(text);
     expect(r.removed).toBe(0);
     // And the caller can tell: the document still has identifier keys.
-    expect(identifierKeyCount(JSON.parse(r.text))).toBe(2);
+    expect(zarrIdentifierCount(JSON.parse(r.text))).toBe(2);
   });
 
   test("bytes outside the cuts are the original bytes: numbers, escapes, key order, unicode", () => {
@@ -197,8 +250,24 @@ const IDENTIFIER_SPELLINGS = [
   "BIRTH-DATE",
   "dob",
   "MRN",
+  // Mirrored EDF identification fields that are not scanner keys.
+  "technician",
+  "Patient_Additional",
+  "admin-code",
+  "RecordingAdditional",
+  "equipment",
 ];
-const IDENTIFIER_CANON = new Set(["patientcode", "birthdate", "dob", "mrn"]);
+const IDENTIFIER_CANON = new Set([
+  "patientcode",
+  "birthdate",
+  "dob",
+  "mrn",
+  "technician",
+  "patientadditional",
+  "admincode",
+  "recordingadditional",
+  "equipment",
+]);
 const SAFE_KEYS = ["startdate", "gender", "equipment", "name", "label", "channels", "units", "n"];
 const canon = (k: string) => k.toLowerCase().replace(/[ _-]/g, "");
 
@@ -289,7 +358,7 @@ describe("removeIdentifierKeys: against a structural deletion", () => {
       for (const text of layouts) {
         const res = removeIdentifierKeys(text);
         expect(JSON.parse(res.text), text).toEqual(expected);
-        expect(identifierKeyCount(JSON.parse(res.text)), text).toBe(0);
+        expect(zarrIdentifierCount(JSON.parse(res.text)), text).toBe(0);
         removedTotal += res.removed;
         if (res.removed === 0) expect(res.text).toBe(text);
         // Idempotent: nothing left to cut.

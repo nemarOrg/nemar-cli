@@ -20,7 +20,7 @@ Measured in the real bucket on 2026-10-04, a dataset has these:
 |---|---|---|
 | `D/objects/` | the recordings, locked 100 years | steps 1 to 6, 15 |
 | GitHub history | annex pointers, inline JSON, file names | steps 7 to 9 |
-| `D/zarr/**/<store>.zarr/zarr.json` | the header fields (`patientcode`, `birthdate`) copied into `attributes.recording_metadata`, not locked | steps 10 and 15 |
+| `D/zarr/**/<store>.zarr/zarr.json` | every EDF identification field the converter copies into `attributes.recording_metadata` (`patientcode`, `birthdate`, `patient_name`, `patient_additional`, `admincode`, `technician`, `equipment`, `recording_additional`; `gender` and `startdate` stay), not locked | steps 10 and 15 |
 | `D/archives/*.zip` | the original recordings, zipped | steps 11 and 15 |
 | `D/version/<tag>.json` | keys, paths and checksums | step 12, 15 |
 | `D/version/<tag>-summary.json`, `<tag>-records.json` | entities, signal summaries, provenance; no header field (checked by key name) | not regenerated |
@@ -36,7 +36,12 @@ Measured in the real bucket on 2026-10-04, a dataset has these:
    Allow a few minutes after any bulk change.
    `delete-old` checks this itself and refuses unless the anonymous HEAD answers 403.
 4. The uploader and, for a mirror, the source archive have been told, and asked not to upload over it.
-5. Know the dispatch behavior: the Worker dispatches version-DOI on any non-delete `v*` tag push (idempotent on the ledger) and enrichment on a push to `main` (it short-circuits on an unchanged source hash).
+5. **Read the key names, not the values, of one real store per dataset**, so the zarr stage's list of mirrored fields (`EDF_MIRROR_MEMBERS` in `scripts/scrub/s3/zarr-json.ts`) is known to cover what the converter wrote:
+   `K=$(aws s3api list-objects-v2 --bucket nemar --prefix D/zarr/ --query "Contents[?ends_with(Key, '.zarr/zarr.json')].Key | [0]" --output text)`, then
+   `aws s3 cp "s3://nemar/$K" - | jq -r '.attributes.recording_metadata | keys[]'`.
+   `jq keys` prints names only; never print the object itself.
+   Stop if a name holds header text (patient or recording identification) and is not in the list or the scanner's keys: extend the list first.
+6. Know the dispatch behavior: the Worker dispatches version-DOI on any non-delete `v*` tag push (idempotent on the ledger) and enrichment on a push to `main` (it short-circuits on an unchanged source hash).
    Zarr is not dispatched from the webhook; the converter runs on the Hallu cron (ADR 0029) and can rewrite a store while this runbook edits it, so keep the dataset out of the Zarr queue until step 15.
    `zarr.nemar.org` serves only public datasets, but its edge caches chunk objects for up to a day and metadata for 60 seconds.
 
@@ -75,6 +80,7 @@ Measured in the real bucket on 2026-10-04, a dataset has these:
    If the process dies, run `restore --execute` at once; exit 5 means a ruleset could not be restored and needs a person now.
    Then push the `git-annex` branch normally.
 10. **Zarr serving copy** (not locked): `s3-scrub.ts zarr --dir W` is the dry run (stores, how many carry an identifier key); then `--execute` removes exactly those keys from each store's root metadata and re-reads every store to prove it clean.
+    The members it removes are the scanner's identifier keys and every mirrored EDF identification field (`EDF_MIRROR_MEMBERS`), and its re-read, its proof and the public check in step 16 apply the same rule through the same function.
     It writes `zarr-verified.json`.
     Wait 60 seconds for the edge's metadata TTL, or purge `D/zarr/*`.
     The noncurrent versions of every zarr object still hold the old metadata, so they are pruned in step 15 with `--prune-noncurrent D/zarr/`.
@@ -92,7 +98,7 @@ Measured in the real bucket on 2026-10-04, a dataset has these:
 15. **Delete the old bytes** (the only irreversible step): `s3-scrub.ts delete-old --dir W --confirm-dataset D --verified W/verified.json --hash-verified W/new-hash-verified.json` is the dry run (counts of versions and markers, and every refusal below evaluated); then `--execute` with `--prune-noncurrent D/version/`, `--prune-noncurrent D/zarr/` and, where archives existed, `--prune-noncurrent D/archives/`, and `--max-delete` at the dry-run number.
     It refuses unless: the plan is complete and not partial; both proofs name the exact bytes of `assembled.json`; every current manifest names no old key; the anonymous HEAD of an old object answers 403; `zarr-verified.json` exists when `D/zarr/` has objects; and no archive remains.
     It ends with an authoritative `ListObjectVersions` showing zero versions and zero markers for every old key.
-16. **Make public and verify from outside**: `nemar admin repo public D --yes`, then the fleet scan for the dataset (`identifier-fleet-scan.ts --only D`) expecting no direct finding, an anonymous download of one file per version hashing to its new key, a `zarr.json` of one store with no identifier key, and the data plane manifest naming only new keys.
+16. **Make public and verify from outside**: `nemar admin repo public D --yes`, then the fleet scan for the dataset (`identifier-fleet-scan.ts --only D`) expecting no direct finding, an anonymous download of one file per version hashing to its new key, `s3-scrub.ts zarr-public --dataset D` (anonymous reads of the Zarr index and every store root it names, by the zarr stage's own rule; exit 0 only), and the data plane manifest naming only new keys.
     If anything fails, make it private again and stop; the new objects were verified twice, so the fault is in a manifest, a cache or a route, not in the bytes.
 17. **Afterwards**: comment on the dataset issue in plain words and close it; tell the uploader and the authors; ask GitHub Support to clear cached views and pull-request refs; delete the working directory, the bundle and the local clones; record `old-versions-deleted` and `published-again` in the ledger and push it.
 

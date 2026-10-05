@@ -368,9 +368,9 @@ export async function runScrub(
   args: string[],
   extraEnv: Record<string, string> = {},
 ): Promise<RunResult> {
-  // delete-old makes one anonymous request to a public base URL. A test that forgot to point it
-  // at a local server would reach the real network, so the runner refuses to start it.
-  if (args[0] === "delete-old") {
+  // delete-old and zarr-public make anonymous requests to a public base URL. A test that forgot
+  // to point one at a local server would reach the real network, so the runner refuses to start it.
+  if (args[0] === "delete-old" || args[0] === "zarr-public") {
     const base = args[args.indexOf("--public-base") + 1] ?? "";
     if (!/^http:\/\/127\.0\.0\.1:\d+/.test(base)) {
       throw new Error("a delete-old test must pass --public-base with a local server");
@@ -406,6 +406,12 @@ export interface PublicEndpoint {
   url: string;
   /** The status every request is answered with; 403 is a private dataset. */
   status: number;
+  /**
+   * When set, a GET is answered as the public bucket answers an anonymous reader of a PUBLIC
+   * dataset: 200 with the current bytes of the key the path names, or 403 when there are none
+   * (the bucket denies anonymous listing, so a missing key is 403, not 404).
+   */
+  serve: ((key: string) => Uint8Array | undefined) | null;
   requests: PublicRequest[];
   reset(): void;
   stop(): void;
@@ -420,9 +426,11 @@ export function startPublicEndpoint(): PublicEndpoint {
   const ep: PublicEndpoint = {
     url: "",
     status: 403,
+    serve: null,
     requests: [],
     reset() {
       ep.status = 403;
+      ep.serve = null;
       ep.requests.length = 0;
     },
     stop() {
@@ -436,7 +444,12 @@ export function startPublicEndpoint(): PublicEndpoint {
       req.headers.forEach((v, k) => {
         headers[k] = v;
       });
-      ep.requests.push({ method: req.method, path: new URL(req.url).pathname, headers });
+      const pathname = new URL(req.url).pathname;
+      ep.requests.push({ method: req.method, path: pathname, headers });
+      if (ep.serve && req.method === "GET") {
+        const bytes = ep.serve(decodeURIComponent(pathname.slice(1)));
+        return bytes ? new Response(bytes, { status: 200 }) : new Response(null, { status: 403 });
+      }
       return new Response(null, { status: ep.status });
     },
   });

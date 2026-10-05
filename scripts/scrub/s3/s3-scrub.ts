@@ -10,11 +10,12 @@
  *              [--prune-noncurrent <prefix>]... [--max-prune N] [--public-base URL]
  *   zarr       --dir DIR [--execute] [--concurrency 4]
  *   drop-archives --dir DIR --confirm-dataset ID [--execute] [--concurrency 4]
+ *   zarr-public --dataset ID [--public-base URL] [--concurrency 8]
  *   canary     --prefix <nm099999|xx0NNNNN>/canary-<random>/ [--execute] [--multipart]
  *              [--bucket nemar]
  *
- * Every subcommand is read-only unless it is given `--execute`; `plan` and `verify` have no
- * `--execute` because they never write to S3. Common flags: `--region` (default us-east-2),
+ * Every subcommand is read-only unless it is given `--execute`; `plan`, `verify` and
+ * `zarr-public` have no `--execute` because they never write to S3. Common flags: `--region` (default us-east-2),
  * `--timeout-sec` (per `aws` call, default 120; transfers get five times as long).
  *
  * Credentials are the ambient `aws` CLI session. A long-lived `AKIA` key in the environment is
@@ -45,9 +46,10 @@ import {
   planStage,
   verifyStage,
 } from "./s3-stages";
+import { zarrPublicStage } from "./zarr-public";
 import { zarrStage } from "./zarr-stage";
 
-const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|zarr|drop-archives|canary> [options]
+const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|zarr|drop-archives|zarr-public|canary> [options]
   plan       --dataset ID --out DIR [--tags v1,v2] [--bucket nemar] [--concurrency 8]
   assemble   --dir DIR [--execute] [--concurrency 4] [--max-part-bytes N]
   verify     --dir DIR [--samples 8] [--concurrency 4]
@@ -70,6 +72,10 @@ const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|zarr|drop-arc
              governance bypass, and ends with a listing that must show none. The archive holds the
              original recordings; the normal workflow rebuilds it afterwards. Writes
              archives-dropped.json. A lock refusal is reported and fails the stage.
+  zarr-public --dataset ID [--public-base URL] [--concurrency 8]
+             after the dataset is public again: reads ID/zarr/index.json and every store root it
+             names anonymously (default base ${DEFAULT_PUBLIC_BASE}) and applies the zarr stage's
+             own rule to each. Exit 0 only when every store is clean.
   canary     --prefix ID/canary-RANDOM/ [--execute] [--multipart] [--bucket nemar]
              ID is nm099999 or an xx0NNNNN sandbox id, never a live dataset.
 common: --region us-east-2  --timeout-sec 120`;
@@ -220,6 +226,17 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
         execute,
         concurrency: concurrency(4),
       });
+    case "zarr-public": {
+      const publicBase = v["public-base"] ?? DEFAULT_PUBLIC_BASE;
+      if (!/^https?:\/\/[^\s/?#]+(\/[^\s?#]*)?$/.test(publicBase)) usage("bad-public-base");
+      return zarrPublicStage({
+        dataset: need(v.dataset, "dataset"),
+        publicBase,
+        timeoutMs: opts.timeoutMs,
+        concurrency: concurrency(8),
+        log,
+      });
+    }
     case "canary":
       return canaryStage({
         ...opts,
