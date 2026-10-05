@@ -15,15 +15,17 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { HashScanner } from "../../../scripts/scrub/git/git-lib";
 import {
   BINARY,
   CHANGES_TEXT,
+  CLI,
   COMPACT_NEW,
   DESCRIPTION_NEW,
   DESCRIPTION_NEW_V2,
+  ENV,
   HAVE_ANNEX,
   HAVE_REWRITE_TOOLS,
   KEEP,
@@ -380,6 +382,57 @@ SUITE("pointer-file dataset", () => {
       const body = git(repo, "cat-file", "-p", oid);
       for (const key of [OLD_A, OLD_B, OLD_C]) expect(body.includes(key)).toBe(false);
     }
+  }, 120_000);
+
+  test("a failure after the refs were rewritten is a failure that says so, not a refusal (I7)", async () => {
+    const repo = join(fx.root, "gc-fails");
+    copyTree(pristine, repo);
+    // Only `git gc` reads this, so everything up to the rewrite works and the cleanup does not.
+    git(repo, "config", "gc.packRefs", "notabool");
+    const before = git(repo, "rev-parse", "refs/heads/main").trim();
+    const r = await cli([
+      "rewrite",
+      "--repo",
+      repo,
+      "--keymap",
+      fx.keymapPath,
+      "--plan",
+      fx.planPath,
+    ]);
+    expect(r.code, r.out).toBe(1);
+    expect(r.out).toContain("failed: cleanup-after-rewrite: the refs WERE rewritten");
+    expect(r.out).toContain("git reflog expire --expire=now --all && git gc --prune=now");
+    expect(r.out).not.toContain("refused");
+    // And it is true: main moved.
+    expect(git(repo, "rev-parse", "refs/heads/main").trim()).not.toBe(before);
+  }, 120_000);
+
+  test("a relative --report names a file where the operator stands, not inside the clone (I7)", async () => {
+    const repo = join(fx.root, "report-relative");
+    copyTree(pristine, repo);
+    const here = join(fx.root, "operator-cwd");
+    sh(fx.root, ["mkdir", "-p", here]);
+    const proc = Bun.spawn(
+      [
+        "bun",
+        "run",
+        CLI,
+        "rewrite",
+        "--repo",
+        repo,
+        "--keymap",
+        fx.keymapPath,
+        "--plan",
+        fx.planPath,
+        "--report",
+        "report.json",
+      ],
+      { cwd: here, env: ENV, stdout: "pipe", stderr: "pipe" },
+    );
+    const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    expect(code, out).toBe(0);
+    expect(existsSync(join(here, "report.json"))).toBe(true);
+    expect(existsSync(join(repo, "report.json"))).toBe(false);
   }, 120_000);
 
   test("a second run changes nothing: no commit or ref moves and nothing is appended twice", async () => {

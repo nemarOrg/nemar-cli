@@ -39,7 +39,8 @@ one `M` file change for that path on the commit. No fast-export parser is hand-r
 
 Counts only are printed and written: a path or a key is never echoed, because a file name
 can be the identifier. Exit codes: 0 done, 2 bad input, 3 refused (not a fresh clone, wrong
-remote), 1 anything else.
+remote; nothing was changed), 1 anything else, including a failure AFTER the refs were rewritten
+(the message says so and what to run).
 """
 
 from __future__ import annotations
@@ -88,6 +89,10 @@ class Refused(Exception):
 
 class BadInput(Exception):
     """The keymap or plan does not match the contract. Message is a fixed word."""
+
+
+class AfterRewrite(Exception):
+    """A step after the refs were rewritten failed: not a refusal, the repository has changed."""
 
 
 # --------------------------------------------------------------------------------------
@@ -787,6 +792,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     keymap = load_keymap(args.keymap)
     with open(args.plan, encoding="utf-8") as f:
         plan = Plan(json.load(f))
+    # A relative --report names a file where the operator stands, not inside the clone.
+    report_arg = os.path.abspath(args.report) if args.report else None
     os.chdir(args.repo)
     if git("rev-parse", "--git-dir", check=False) == b"":
         raise Refused("not-a-git-repository")
@@ -818,7 +825,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             n += 1
         os.replace(commit_map, f"{commit_map}.prev{n}")
 
-    report_path = args.report or os.path.join(work, "rewrite-report.json")
+    report_path = report_arg or os.path.join(work, "rewrite-report.json")
     if os.path.exists(report_path):
         n = 1
         while os.path.exists(f"{report_path}.prev{n}"):
@@ -851,17 +858,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     finally:
         rewriter.cat.close()
 
-    # git-annex records the tree of the index its keys database last read as
-    # `refs/annex/last-index` (10.20240129, Ubuntu 24.04's, does; 10.20260901 does not). The
-    # freshness check's `git status` runs the annex filter, so the ref names the PRE-rewrite index
-    # and keeps every old pointer blob reachable through the gc below. It is a cache git-annex
-    # rebuilds from the index, so it goes with the old history.
-    if LAST_INDEX_REF in all_refs():
-        git("update-ref", "-d", LAST_INDEX_REF)
+    # From here on the refs ARE rewritten: a failure is a failure, never a refusal, and it says so.
+    try:
+        # git-annex records the tree of the index its keys database last read as
+        # `refs/annex/last-index` (10.20240129, Ubuntu 24.04's, does; 10.20260901 does not). The
+        # freshness check's `git status` runs the annex filter, so the ref names the PRE-rewrite
+        # index and keeps every old pointer blob reachable through the gc below. It is a cache
+        # git-annex rebuilds from the index, so it goes with the old history.
+        if LAST_INDEX_REF in all_refs():
+            git("update-ref", "-d", LAST_INDEX_REF)
 
-    # The rewritten history is the only copy that should stay in the object store.
-    git("reflog", "expire", "--expire=now", "--all")
-    git("gc", "--prune=now", "--quiet")
+        # The rewritten history is the only copy that should stay in the object store.
+        git("reflog", "expire", "--expire=now", "--all")
+        git("gc", "--prune=now", "--quiet")
+    except Refused as e:
+        raise AfterRewrite("cleanup-after-rewrite") from e
 
     after = all_refs()
     seen, changed = count_commit_map(commit_map)
@@ -911,6 +922,15 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout = real_stdout
         print(f"refused: {e}")
         return 3
+    except AfterRewrite as e:
+        sys.stdout = real_stdout
+        # The refs were rewritten; the old objects may still be in the store. Fixed words only.
+        print(
+            f"failed: {e}: the refs WERE rewritten; old objects may remain in the object store. "
+            "In the clone run `git update-ref -d refs/annex/last-index; git reflog expire "
+            "--expire=now --all && git gc --prune=now`, then verify."
+        )
+        return 1
     except SystemExit:
         # filter-repo ends a failed run with SystemExit; its message may name a file.
         sys.stdout = real_stdout
