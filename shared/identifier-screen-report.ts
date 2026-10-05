@@ -476,6 +476,7 @@ export function describeScreen(
     if (scan.incomplete_reasons.length > 0) {
       lines.push(`Incomplete: ${scan.incomplete_reasons.join(", ")}.`);
     }
+    lines.push("Not read: the contents of sidecars and tables in earlier commits.");
     lines.push(`Scanner ${report.scanner}; commit ${report.head?.slice(0, 12)}.`);
   }
   return { headline: base.headline, tone: base.tone, lines };

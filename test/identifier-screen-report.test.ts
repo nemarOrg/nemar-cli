@@ -316,6 +316,7 @@ describe("describeScreen", () => {
     const text = d.lines.join("\n");
     expect(text).toContain("edf-patient-name x4");
     expect(text).toContain(HEAD.slice(0, 12));
+    expect(text).toContain("earlier commits");
     expect(text).toContain(".set x3");
   });
 
