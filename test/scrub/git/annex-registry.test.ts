@@ -19,6 +19,7 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   HAVE_ANNEX,
+  annexKey,
   cleanupRoots,
   cli,
   counts,
@@ -210,6 +211,50 @@ SUITE("annex-registry on a key with two holders", () => {
     const c = await cli(["annex-registry", "--repo", fx.repo, "--keymap", fx.keymapPath]);
     expect(c.code).toBe(2);
   });
+
+  test("a key this repository never recorded is refused, not counted as dead, and nothing changes", async () => {
+    // Another dataset's keymap has old keys with no location log here. Counting them as already
+    // dead would report a clean run for a keymap that matches nothing.
+    const stranger = [
+      annexKey("never-heard-of", 4096, ".edf"),
+      annexKey("never-heard-new", 4096, ".edf"),
+    ] as [string, string];
+    const dir = join(fx.repo, "..");
+    const mixed = join(dir, "keymap-with-stranger.json");
+    const foreign = join(dir, "keymap-foreign.json");
+    await Bun.write(
+      mixed,
+      JSON.stringify({
+        ...Object.fromEntries(fx.oldKeys.map((k, i) => [k, fx.newKeys[i]])),
+        [stranger[0]]: stranger[1],
+      }),
+    );
+    await Bun.write(foreign, JSON.stringify({ [stranger[0]]: stranger[1] }));
+    const before = git(fx.repo, "rev-parse", "refs/heads/git-annex").trim();
+    for (const keymapPath of [mixed, foreign]) {
+      for (const extra of [[], ["--execute"]]) {
+        const r = await cli([
+          "annex-registry",
+          "--repo",
+          fx.repo,
+          "--keymap",
+          keymapPath,
+          "--remote-uuid",
+          fx.remoteUuid,
+          ...extra,
+        ]);
+        expect(r.code, `${keymapPath} ${extra}`).toBe(1);
+        expect(r.out).toContain("refused: old-key-unknown");
+        expect(r.out).not.toContain(sha("never-heard-of"));
+      }
+    }
+    // Refused before any write: no commit, no journal, the real keys exactly as they were.
+    expect(git(fx.repo, "rev-parse", "refs/heads/git-annex").trim()).toBe(before);
+    expect(journal(fx.repo)).toEqual([]);
+    const both = [fx.remoteUuid, fx.uploaderUuid].sort();
+    for (const key of fx.oldKeys) expect(whereis(fx.repo, key)).toEqual(both);
+    for (const key of fx.newKeys) expect(whereis(fx.repo, key)).toEqual([]);
+  }, 120_000);
 
   test("--execute retracts every holder, kills the old keys, and records the new ones only at the named remote", async () => {
     const r = await registry(fx, "--execute");

@@ -16,6 +16,12 @@
 /** `SHA256E-s<size>--<64 hex>[.ext]`, the only key shape the scrub handles. */
 export const ANNEX_KEY = /^SHA256E-s(\d+)--([0-9a-f]{64})(\.[A-Za-z0-9.+]*)?$/;
 
+/**
+ * A manifest entry for a file kept inline in git is keyed `git:<blob sha>` (SHA-1 or SHA-256).
+ * It has no S3 object, so the scrub cannot read it; the plan records it as an unreadable entry.
+ */
+export const GIT_KEY = /^git:[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+
 export interface ParsedKey {
   size: number;
   sha256: string;
@@ -50,6 +56,12 @@ export interface PlanFile {
   bucket: string;
   /** Tags planned over, in order. */
   tags: string[];
+  /**
+   * True when the plan was made over only the tags it was told about (`--tags`), so a manifest it
+   * did not read may name keys it does not hold. A partial plan can be read but never carried
+   * through assemble, verify or delete-old.
+   */
+  partial?: boolean;
   createdAt: string;
   keys: PlanKey[];
   /** Counts only, for the report. */
@@ -57,7 +69,10 @@ export interface PlanFile {
 }
 
 export interface PlanKey {
-  /** The annex key of the original object. */
+  /**
+   * The annex key of the original object. The one exception is an unreadable entry for a
+   * recording kept inline in git, whose key is `git:<blob sha>` (reason `git-inline-recording`).
+   */
   oldKey: string;
   size: number;
   /** True when its header carries identifier-severity content the scrub removes. */
@@ -185,8 +200,15 @@ export function parsePlan(text: string): PlanFile {
   if (!isObject(x) || x.version !== 1 || typeof x.dataset !== "string" || !Array.isArray(x.keys)) {
     throw new ContractError("plan.json does not match the contract");
   }
+  if (x.partial !== undefined && typeof x.partial !== "boolean") {
+    throw new ContractError("plan.json does not match the contract");
+  }
   for (const k of x.keys as unknown[]) {
-    if (!isObject(k) || typeof k.oldKey !== "string" || !ANNEX_KEY.test(k.oldKey)) {
+    const keyOk =
+      isObject(k) &&
+      typeof k.oldKey === "string" &&
+      (ANNEX_KEY.test(k.oldKey) || (k.status === "unreadable" && GIT_KEY.test(k.oldKey)));
+    if (!keyOk) {
       throw new ContractError("plan.json holds a key that is not a SHA256E annex key");
     }
   }

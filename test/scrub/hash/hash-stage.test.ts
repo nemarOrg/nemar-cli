@@ -504,6 +504,49 @@ describe("compute: which keys are read", () => {
   );
 
   test(
+    "a recording kept inline in git is accepted only as an unreadable entry, and never read",
+    async () => {
+      const ws = workspace();
+      const o = makeObject(4000);
+      stage(ws, [{ obj: o }]);
+      const plan = readJson<PlanFile>(ws.plan);
+      const inline: PlanKey = {
+        oldKey: `git:${"b".repeat(40)}`,
+        size: 0,
+        needsScrub: false,
+        versionIds: [],
+        reasons: ["git-inline-recording"],
+        status: "unreadable",
+      };
+      const withEntry = (entry: PlanKey) => {
+        const copy = { ...plan, keys: [...plan.keys, entry] };
+        writeFileSync(ws.plan, JSON.stringify(copy));
+      };
+      withEntry(inline);
+      installSource(ws, LOGGING_SOURCE);
+      const run = await py(computeArgs(ws));
+      expect(run.code, run.stderr).toBe(0);
+      expect(run.stderr).toContain("1 not checked by the plan");
+      expect(readLog(ws)).toEqual([o.oldKey]);
+
+      // The same key on an entry the plan says it READ, or not a blob sha at all: refused.
+      for (const entry of [
+        { ...inline, status: "read" as const },
+        { ...inline, oldKey: "git:zzzz" },
+        { ...inline, oldKey: `git:${"B".repeat(40)}` },
+        { ...inline, oldKey: `git:${"b".repeat(41)}` },
+      ]) {
+        withEntry(entry);
+        rmSync(ws.hashes, { force: true });
+        const refused = await py(computeArgs(ws));
+        expect(refused.code, JSON.stringify(entry)).toBe(2);
+        expect(existsSync(ws.hashes)).toBe(false);
+      }
+    },
+    TIMEOUT_MS,
+  );
+
+  test(
     "an empty plan writes an empty hashes file and succeeds",
     async () => {
       const ws = workspace();

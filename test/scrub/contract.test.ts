@@ -141,4 +141,26 @@ describe("stage files", () => {
       expect(() => parseZarrVerified(bad(over)), JSON.stringify(over)).toThrow(ContractError);
     }
   });
+
+  test("plan.json: partial is a boolean, and a git: key is carried only by an unreadable entry", () => {
+    const entry = (over: Record<string, unknown>) => ({
+      oldKey: OLD,
+      size: 1000,
+      needsScrub: false,
+      versionIds: [],
+      reasons: [],
+      status: "read",
+      ...over,
+    });
+    const plan = (over: Record<string, unknown>, ...keys: unknown[]) =>
+      JSON.stringify({ version: 1, dataset: "d", keys, ...over });
+    expect(parsePlan(plan({ partial: true }, entry({}))).partial).toBe(true);
+    expect(() => parsePlan(plan({ partial: "yes" }, entry({})))).toThrow(ContractError);
+    const git = `git:${"b".repeat(40)}`;
+    expect(parsePlan(plan({}, entry({ oldKey: git, status: "unreadable" }))).keys.length).toBe(1);
+    expect(() => parsePlan(plan({}, entry({ oldKey: git })))).toThrow(ContractError);
+    expect(() => parsePlan(plan({}, entry({ oldKey: "git:zz", status: "unreadable" })))).toThrow(
+      ContractError,
+    );
+  });
 });

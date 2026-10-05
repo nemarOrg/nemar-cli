@@ -23,6 +23,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { githubRepoOf } from "./repo-url";
 
 export interface RulesetBody {
   id: number;
@@ -170,15 +171,6 @@ export async function localRefs(cloneDir: string): Promise<Record<string, string
 const ALLOWED_REMOTE_HEADS = new Set(["refs/heads/main", "refs/heads/git-annex"]);
 /** Every ref the switch compares: all heads (so a stray one is seen) and all tags. */
 const REMOTE_PATTERNS = ["refs/heads/*", "refs/tags/*"];
-
-/** `owner/name`, lowercased, of a GitHub remote URL in https, ssh:// or scp form; else null. */
-export function githubRepoOf(url: string): string | null {
-  const m =
-    /^(?:https?:\/\/(?:[^@/]+@)?|ssh:\/\/(?:[^@/]+@)?|[^@/:]+@)github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?\/?$/i.exec(
-      url.trim(),
-    );
-  return m ? `${m[1]}/${m[2]}`.toLowerCase() : null;
-}
 
 /** git exit code 1 from `config --get-all` means "no such key", which is an answer, not a failure. */
 async function configValues(cloneDir: string, key: string): Promise<string[]> {

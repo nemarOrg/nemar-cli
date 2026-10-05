@@ -26,6 +26,9 @@ export const ENV: Record<string, string> = {
   GIT_COMMITTER_NAME: "Fixture Author",
   GIT_COMMITTER_EMAIL: "author@nemar.test",
   GIT_TERMINAL_PROMPT: "0",
+  // Clones here are named for GitHub repositories and reach local sources through `insteadOf`;
+  // this keeps any git call that missed the mapping from reaching a real host.
+  GIT_ALLOW_PROTOCOL: "file",
 };
 
 function probe(cmd: string[]): boolean {
@@ -202,8 +205,22 @@ export function refTips(repo: string): string {
   return git(repo, "for-each-ref", "--format=%(refname) %(objectname)");
 }
 
-export function cloneOf(source: string, dest: string): void {
+/**
+ * A clone of `source`. With `originUrl` the clone names the GitHub repository it stands for, as a
+ * real clone of a dataset does, and git itself reaches the local source through `insteadOf`, so
+ * `git remote get-url`-style reads give the GitHub name and every fetch and push still work.
+ */
+export function cloneOf(source: string, dest: string, originUrl?: string): void {
   sh(dirname(dest), ["git", "clone", "-q", "--no-local", source, dest]);
+  if (originUrl) {
+    git(dest, "remote", "set-url", "origin", originUrl);
+    git(dest, "config", `url.${source}.insteadOf`, originUrl);
+  }
+}
+
+/** The repository a dataset's clone is of: `nemarDatasets/<id>` on GitHub. */
+export function datasetUrl(dataset: string): string {
+  return `https://github.com/nemarDatasets/${dataset}`;
 }
 
 export function copyTree(from: string, to: string): void {
@@ -470,7 +487,7 @@ export function buildPointerFixture(): PointerFixture {
   );
 
   const clone = join(root, "clone");
-  cloneOf(src, clone);
+  cloneOf(src, clone, datasetUrl("nm000999"));
   sh(clone, ["git", "annex", "init", "--quiet", "clone"]);
 
   const keymapPath = join(root, "keymap.json");
@@ -546,7 +563,7 @@ export function buildSymlinkFixture(): SymlinkFixture {
   // X and Z are scrubbed, Y is not.
   const keymap = { [keyX]: withNew(keyX, "new-x"), [keyZ]: withNew(keyZ, "new-z") };
   const clone = join(root, "clone");
-  cloneOf(src, clone);
+  cloneOf(src, clone, datasetUrl("nm000998"));
   sh(clone, ["git", "annex", "init", "--quiet", "clone"]);
   const keymapPath = join(root, "keymap.json");
   const planPath = join(root, "git-plan.json");

@@ -27,6 +27,7 @@ import {
 import {
   type AssembledFile,
   ContractError,
+  GIT_KEY,
   type HashesFile,
   type KeymapFile,
   type PatchesFile,
@@ -195,10 +196,12 @@ export function isEdfOrBdf(filePath: string): boolean {
 
 interface ManifestKeys {
   keys: Set<string>;
+  /** Keys of EDF and BDF files kept inline in git (`git:<blob sha>`): no S3 object to scrub. */
+  gitInline: Set<string>;
   badKeys: number;
 }
 
-/** The distinct non-`git:` keys of the EDF and BDF files of one manifest. */
+/** The distinct keys of the EDF and BDF files of one manifest, sorted into what they are. */
 export function keysOfManifest(dataset: string, text: string): ManifestKeys {
   let doc: unknown;
   try {
@@ -214,12 +217,17 @@ export function keysOfManifest(dataset: string, text: string): ManifestKeys {
     throw new StageError("manifest-wrong-dataset", EXIT.unreadable);
   }
   const keys = new Set<string>();
+  const gitInline = new Set<string>();
   let badKeys = 0;
   for (const [filePath, entry] of Object.entries(m.files as Record<string, unknown>)) {
     if (!isEdfOrBdf(filePath)) continue;
     const key = (entry as { key?: unknown } | null)?.key;
     if (typeof key !== "string") throw new StageError("manifest-malformed", EXIT.unreadable);
-    if (key.startsWith("git:")) continue;
+    if (key.startsWith("git:")) {
+      if (GIT_KEY.test(key)) gitInline.add(key);
+      else badKeys += 1;
+      continue;
+    }
     try {
       parseKey(key);
       keys.add(key);
@@ -227,7 +235,33 @@ export function keysOfManifest(dataset: string, text: string): ManifestKeys {
       badKeys += 1;
     }
   }
-  return { keys, badKeys };
+  return { keys, gitInline, badKeys };
+}
+
+/**
+ * Every EDF or BDF object under `<id>/objects/`, in any letter case, from a paginated listing of
+ * the objects themselves. A manifest names the files a version has; the listing finds the ones a
+ * manifest does not name (a file dropped from a later version, an older tag nobody listed), which
+ * hold the same bytes. `bad` counts names that look like a recording and are not annex keys.
+ */
+async function listObjectRecordings(
+  ctx: S3Ctx,
+  dataset: string,
+): Promise<{ keys: Set<string>; bad: number }> {
+  const prefix = `${dataset}/objects/`;
+  const keys = new Set<string>();
+  let bad = 0;
+  for (const full of await listCurrentKeys(ctx, prefix)) {
+    const name = full.slice(prefix.length);
+    if (!isEdfOrBdf(name)) continue;
+    try {
+      parseKey(name);
+      keys.add(name);
+    } catch {
+      bad += 1;
+    }
+  }
+  return { keys, bad };
 }
 
 interface PlannedKey {
@@ -297,6 +331,7 @@ export async function planStage(o: PlanOptions): Promise<number> {
     if (tags.length === 0) throw new StageError("no-manifests", EXIT.unreadable);
 
     const keys = new Set<string>();
+    const gitInline = new Set<string>();
     let badKeys = 0;
     for (const tag of tags) {
       let bytes: Uint8Array;
@@ -310,6 +345,7 @@ export async function planStage(o: PlanOptions): Promise<number> {
       }
       const found = keysOfManifest(o.dataset, Buffer.from(bytes).toString("utf8"));
       for (const k of found.keys) keys.add(k);
+      for (const k of found.gitInline) gitInline.add(k);
       badKeys += found.badKeys;
     }
     // A key the contract cannot carry is an object the scrub cannot touch: stop, never skip.
@@ -317,10 +353,30 @@ export async function planStage(o: PlanOptions): Promise<number> {
       o.log(`plan: ${badKeys} manifest entries have a key that is not a SHA256E annex key`);
       throw new StageError("manifest-bad-key", EXIT.unreadable);
     }
+    // Then the objects themselves: whatever the manifests name, every recording that is in the
+    // bucket is planned too.
+    const listed = await listObjectRecordings(ctx, o.dataset);
+    if (listed.bad > 0) {
+      o.log(`plan: ${listed.bad} objects look like recordings but are not SHA256E annex keys`);
+      throw new StageError("objects-bad-key", EXIT.unreadable);
+    }
+    for (const k of listed.keys) keys.add(k);
 
     const sorted = [...keys].sort();
     const planned = await runPool(sorted, o.concurrency, (k) => planOneKey(ctx, o.dataset, k));
     const entries = planned.map((p) => (p as PlannedKey).entry);
+    // A recording kept inline in git has no object to read, so the scrub of its header would have
+    // to happen in the git history and the plan cannot vouch for it: it is recorded, unread.
+    for (const k of [...gitInline].sort()) {
+      entries.push({
+        oldKey: k,
+        size: 0,
+        needsScrub: false,
+        versionIds: [],
+        reasons: ["git-inline-recording"],
+        status: "unreadable",
+      });
+    }
     const patches: PatchesFile = {};
     for (const p of planned) {
       const pk = p as PlannedKey;
@@ -337,6 +393,7 @@ export async function planStage(o: PlanOptions): Promise<number> {
       dataset: o.dataset,
       bucket: o.bucket,
       tags,
+      ...(o.tags ? { partial: true } : {}),
       createdAt: new Date().toISOString(),
       keys: entries,
       totals,
@@ -347,6 +404,9 @@ export async function planStage(o: PlanOptions): Promise<number> {
     o.log(
       `plan: tags=${tags.length} keys=${totals.keys} needScrub=${totals.needScrub} bytesToHash=${totals.bytesToHash} unreadable=${totals.unreadable}`,
     );
+    if (plan.partial) {
+      o.log("plan: partial (--tags): assemble, verify and delete-old will refuse this plan");
+    }
     if (totals.unreadable > 0) {
       const words = entries.filter((e) => e.status === "unreadable").flatMap((e) => e.reasons);
       o.log(`plan: unreadable by reason: ${formatWordCounts(countWords(words))}`);
@@ -387,6 +447,7 @@ export async function loadAssembleInputs(dir: string): Promise<AssembleInputs> {
   const hashes: HashesFile = await loadFile(dir, "hashes.json", parseHashes);
   const patches: PatchesFile = await loadFile(dir, "patches.json", parsePatches);
 
+  if (plan.partial) throw new StageError("plan-partial", EXIT.refused);
   if (plan.totals.unreadable > 0 || plan.keys.some((k) => k.status !== "read")) {
     throw new StageError("plan-has-unreadable", EXIT.refused);
   }
@@ -683,6 +744,7 @@ async function verifyOne(
 
 export async function verifyStage(o: VerifyOptions): Promise<number> {
   const plan = await loadFile(o.dir, "plan.json", parsePlan);
+  if (plan.partial) throw new StageError("plan-partial", EXIT.refused);
   const assembledBytes = await readBytes(path.join(o.dir, "assembled.json"), "assembled.json");
   const assembled = parseFile("assembled.json", parseAssembled, assembledBytes.toString("utf8"));
   const patches = await loadFile(o.dir, "patches.json", parsePatches);
@@ -979,6 +1041,7 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
   if (o.confirmDataset !== plan.dataset) {
     throw new StageError("confirm-dataset-mismatch", EXIT.refused);
   }
+  if (plan.partial) throw new StageError("plan-partial", EXIT.refused);
   const assembledBytes = await readBytes(path.join(o.dir, "assembled.json"), "assembled.json");
   const assembled = parseFile("assembled.json", parseAssembled, assembledBytes.toString("utf8"));
   const sha = sha256Hex(assembledBytes);

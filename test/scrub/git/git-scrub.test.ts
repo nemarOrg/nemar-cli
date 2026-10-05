@@ -53,6 +53,7 @@ import {
   commitAll,
   copyTree,
   counts,
+  datasetUrl,
   fileAt,
   git,
   linkAt,
@@ -157,7 +158,7 @@ SUITE("pointer-file dataset", () => {
       "--plan",
       fx.planPath,
       "--expect-remote",
-      fx.src,
+      datasetUrl("nm000999"),
       "--snapshot-out",
       snapshot,
     ]);
@@ -702,12 +703,40 @@ SUITE("pointer-file dataset", () => {
     );
   });
 
-  test("rewrite refuses a remote that is not the one named, and a repository with no origin", async () => {
+  test("rewrite refuses an origin that is not the plan's dataset, with or without a flag, and a repository with no origin", async () => {
+    // No flag: the expected remote is derived from the plan's dataset (nm000999), so an origin
+    // naming any other repository is refused without anyone having to name it.
     await refused(
-      "remote",
-      () => {},
-      ["--expect-remote", "https://example.invalid/nm.git"],
+      "other-dataset",
+      (repo) => git(repo, "remote", "set-url", "origin", datasetUrl("nm000123")),
+      [],
       "refused: remote-mismatch",
+    );
+    await refused(
+      "other-host",
+      (repo) => git(repo, "remote", "set-url", "origin", "https://example.invalid/nm000999.git"),
+      [],
+      "refused: remote-mismatch",
+    );
+    // A push URL elsewhere is an origin elsewhere.
+    await refused(
+      "push-url",
+      (repo) => git(repo, "remote", "set-url", "--push", "origin", datasetUrl("nm000123")),
+      [],
+      "refused: remote-mismatch",
+    );
+    // A flag cannot name a different target than the plan's, even a perfectly good one.
+    await refused(
+      "flag",
+      () => {},
+      ["--expect-remote", datasetUrl("nm000123")],
+      "refused: expect-remote-mismatch",
+    );
+    await refused(
+      "flag-local",
+      () => {},
+      ["--expect-remote", fx.src],
+      "refused: expect-remote-mismatch",
     );
     await refused(
       "no-origin",
@@ -716,6 +745,57 @@ SUITE("pointer-file dataset", () => {
       "refused: no-origin-remote",
     );
   });
+
+  test("a keymap from another dataset is refused before anything changes: all foreign, and one foreign entry", async () => {
+    const foreign = { [annexKey("other-a", 1024, ".edf")]: annexKey("other-b", 1024, ".edf") };
+    const allForeign = join(fx.root, "keymap-foreign.json");
+    await Bun.write(allForeign, JSON.stringify(foreign));
+    const mixed = join(fx.root, "keymap-mixed.json");
+    await Bun.write(mixed, JSON.stringify({ ...KEYMAP, ...foreign }));
+    for (const [name, keymapPath] of [
+      ["foreign", allForeign],
+      ["mixed", mixed],
+    ] as const) {
+      const repo = join(fx.root, `refuse-keymap-${name}`);
+      copyTree(pristine, repo);
+      const tips = refTips(repo);
+      const r = await cli([
+        "rewrite",
+        "--repo",
+        repo,
+        "--keymap",
+        keymapPath,
+        "--plan",
+        fx.planPath,
+      ]);
+      expect(r.code, name).not.toBe(0);
+      expect(r.out, name).toContain("refused: keymap-key-never-seen");
+      expect(refTips(repo), "refused means untouched").toBe(tips);
+      expect(r.out).not.toContain(sha("other-a"));
+    }
+  });
+
+  test("an origin spelled as scp or ssh, with or without .git, is the same repository", async () => {
+    for (const [name, url] of [
+      ["scp", "git@github.com:nemarDatasets/nm000999.git"],
+      ["ssh", "ssh://git@github.com/NEMARDATASETS/nm000999"],
+    ] as const) {
+      const repo = join(fx.root, `spelling-${name}`);
+      copyTree(pristine, repo);
+      git(repo, "remote", "set-url", "origin", url);
+      const r = await cli([
+        "rewrite",
+        "--repo",
+        repo,
+        "--keymap",
+        fx.keymapPath,
+        "--plan",
+        fx.planPath,
+      ]);
+      expect(r.out, name).toContain("rewrite: ok");
+      expect(r.code, name).toBe(0);
+    }
+  }, 120_000);
 
   test("rewrite refuses to touch a git-annex ref", async () => {
     await refused("annex-ref", () => {}, ["--refs", "refs/heads/git-annex"], "bad-input");
@@ -876,8 +956,6 @@ ANNEX_SUITE("symlink dataset (real git annex add)", () => {
       fx.keymapPath,
       "--plan",
       fx.planPath,
-      "--expect-remote",
-      fx.src,
       "--snapshot-out",
       snapshot,
     ]);

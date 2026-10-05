@@ -27,6 +27,7 @@ import {
   parseKeymap,
   parsePlan,
 } from "../contract";
+import { githubRepoOf } from "../github/repo-url";
 
 /** Pinned: the rewrite script is written against this release's Python API. */
 export const FILTER_REPO_REQUIREMENT = "git-filter-repo==2.47.0";
@@ -50,11 +51,23 @@ export function canonicalKey(name: string): string {
   return name.toLowerCase().replace(/[ _-]/g, "");
 }
 
-/** What the contract's `parseGitPlan` leaves unchecked: the shape of each entry. */
+/** The ids a dataset repository can have: `nm`, `xx` and `on` followed by six digits. */
+const DATASET_ID = /^(nm|xx|on)\d{6}$/;
+
+/** The repository a dataset's history lives in, which a rewrite's clone must have as its origin. */
+export function datasetRemote(dataset: string): string {
+  if (!DATASET_ID.test(dataset)) throw new ContractError("git-plan.json holds a bad dataset id");
+  return `https://github.com/nemarDatasets/${dataset}`;
+}
+
+/** What the contract's `parseGitPlan` leaves unchecked: the dataset id and the shape of each entry. */
 export function assertGitPlanShape(plan: GitPlanFile): void {
   const bad = (reason: string): never => {
     throw new ContractError(reason);
   };
+  if (typeof plan.dataset !== "string" || !DATASET_ID.test(plan.dataset)) {
+    bad("git-plan.json holds a bad dataset id");
+  }
   const okPath = (p: unknown): p is string =>
     typeof p === "string" && p.length > 0 && !p.includes("\n") && !p.startsWith("/");
   if (!plan.dropPaths.every(okPath)) bad("git-plan.json holds a bad dropPaths entry");
@@ -430,6 +443,11 @@ export interface RewriteOptions {
   repo: string;
   keymapPath: string;
   planPath: string;
+  /**
+   * Optional, and never a way out of the check: the clone's origin must be
+   * `nemarDatasets/<plan.dataset>` whether or not this is given, and a value given here must name
+   * that same repository.
+   */
   expectRemote?: string;
   refs?: string[];
   reportPath?: string;
@@ -442,11 +460,18 @@ export interface RewriteResult {
 }
 
 /**
- * Rewrite a fresh clone. The python side refuses a clone that is not fresh or whose origin is
- * not `expectRemote`; those arrive here as GitScrubError("refused: <word>").
+ * Rewrite a fresh clone. The python side refuses, before it changes anything, a clone that is not
+ * fresh, whose origin is not `nemarDatasets/<plan.dataset>`, or whose history does not hold the
+ * keymap (another dataset's); those arrive here as GitScrubError("refused: <word>").
  */
 export async function rewriteHistory(opts: RewriteOptions): Promise<RewriteResult> {
-  readInputs(opts.keymapPath, opts.planPath);
+  const { plan } = readInputs(opts.keymapPath, opts.planPath);
+  // The target is derived from the plan, so omitting the flag cannot skip the check; a flag that
+  // names anything else is a mistake worth stopping for.
+  const remote = datasetRemote(plan.dataset);
+  if (opts.expectRemote !== undefined && githubRepoOf(opts.expectRemote) !== githubRepoOf(remote)) {
+    throw new GitScrubError("refused: expect-remote-mismatch");
+  }
   const cmd = [
     "uv",
     "run",
@@ -462,7 +487,7 @@ export async function rewriteHistory(opts: RewriteOptions): Promise<RewriteResul
     "--plan",
     opts.planPath,
   ];
-  if (opts.expectRemote) cmd.push("--expect-remote", opts.expectRemote);
+  cmd.push("--expect-remote", remote);
   if (opts.reportPath) cmd.push("--report", opts.reportPath);
   if (opts.refs && opts.refs.length > 0) cmd.push("--refs", ...opts.refs);
 
@@ -1033,6 +1058,10 @@ function isDead(log: string): boolean {
  * the `remoteUuids` and nowhere else. It writes only what is missing, so a second run changes
  * nothing.
  *
+ * A keymap this repository does not hold is refused up front (`old-key-unknown`): an old key with
+ * no location log and no holder was never recorded here, which is another dataset's keymap and
+ * not a key that is already dead (a dead key keeps its log).
+ *
  * One `setpresentkey --batch` process per direction, never one per key: parallel writers lose
  * each other's updates in the git-annex journal. `dead` runs one key at a time for the same
  * reason. The result is read back (holders from `whereis`, which sees the journal; death from
@@ -1061,6 +1090,11 @@ export async function annexRegistry(opts: AnnexRegistryOptions): Promise<AnnexRe
   const holdersOf = oldKeys.map((k, i) => [
     ...new Set([...(asked.get(k) ?? []), ...presentIn(oldLogs[i] ?? "")]),
   ]);
+  // A key this repository has no location log for, and no holder of, was never recorded here:
+  // another dataset's keymap, not a key that is already dead. A dead key keeps its log.
+  if (oldKeys.some((_k, i) => (oldLogs[i] ?? "") === "" && (holdersOf[i] ?? []).length === 0)) {
+    throw new GitScrubError("refused: old-key-unknown");
+  }
   const retractions = oldKeys.flatMap((k, i) => (holdersOf[i] ?? []).map((u) => `${k} ${u} 0`));
   const registrations = newKeys.flatMap((k) =>
     remoteUuids.filter((u) => !asked.get(k)?.has(u)).map((u) => `${k} ${u} 1`),
@@ -1088,9 +1122,7 @@ export async function annexRegistry(opts: AnnexRegistryOptions): Promise<AnnexRe
   await batch(retractions);
   for (let i = 0; i < oldKeys.length; i++) {
     const log = oldLogs[i] ?? "";
-    const alreadyDead = isDead(log) && (holdersOf[i] ?? []).length === 0;
-    // A key with no log at all is recorded nowhere; there is nothing to mark.
-    if (alreadyDead || (log === "" && (holdersOf[i] ?? []).length === 0)) continue;
+    if (isDead(log) && (holdersOf[i] ?? []).length === 0) continue;
     const r = await annex(repo, ["dead", "--quiet", "--key", oldKeys[i] as string]);
     // A refusal is counted, not thrown: the other keys still need their turn, and the
     // read-back below is what says how many are dead.
@@ -1103,7 +1135,7 @@ export async function annexRegistry(opts: AnnexRegistryOptions): Promise<AnnexRe
     const log = afterLogs[i] ?? "";
     const held = (after.get(k)?.size ?? 0) > 0 || presentIn(log).size > 0;
     if (held) result.oldStillHeld++;
-    else if (isDead(log) || log === "") result.oldDead++;
+    else if (isDead(log)) result.oldDead++;
   });
   for (const k of newKeys) {
     const holders = after.get(k) ?? new Set<string>();

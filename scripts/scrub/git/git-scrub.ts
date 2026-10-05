@@ -6,6 +6,8 @@
  *   bun run scripts/scrub/git/git-scrub.ts snapshot --repo CLONE --out before.json
  *   bun run scripts/scrub/git/git-scrub.ts rewrite  --repo CLONE --keymap keymap.json \
  *        --plan git-plan.json [--expect-remote URL] [--snapshot-out before.json]
+ *      (the clone's origin must be nemarDatasets/<the plan's dataset>; --expect-remote is
+ *       optional, and when given must name that same repository)
  *   bun run scripts/scrub/git/git-scrub.ts verify   --repo CLONE --keymap keymap.json \
  *        --plan git-plan.json --s3-plan plan.json --before before.json [--allow-unparseable-json]
  *   bun run scripts/scrub/git/git-scrub.ts annex-registry --repo ANNEX_CLONE \
@@ -32,7 +34,8 @@ import {
 
 const USAGE = `usage: git-scrub <snapshot|rewrite|verify|annex-registry> --repo PATH [options]
   snapshot        --out FILE
-  rewrite         --keymap FILE --plan FILE [--expect-remote URL] [--snapshot-out FILE]
+  rewrite         --keymap FILE --plan FILE [--expect-remote URL (must be the plan's dataset)]
+                  [--snapshot-out FILE]
                   [--refs REF...] [--report FILE]
   verify          --keymap FILE --plan FILE --s3-plan FILE --before FILE
                   [--allow-unparseable-json]

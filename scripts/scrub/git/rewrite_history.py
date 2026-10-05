@@ -445,9 +445,21 @@ def git(*args: str, check: bool = True) -> bytes:
     return proc.stdout
 
 
-def normalize_url(url: str) -> str:
-    url = url.strip().rstrip("/")
-    return url.removesuffix(".git")
+GITHUB_URL = re.compile(
+    r"^(?:https?://(?:[^@/]+@)?|ssh://(?:[^@/]+@)?|[^@/:]+@)github\.com[/:]"
+    r"([^/]+)/([^/]+?)(?:\.git)?/?$",
+    re.IGNORECASE,
+)
+
+
+def repo_identity(url: str) -> str:
+    """`owner/name`, lowercased, for a GitHub URL in https, ssh:// or scp form (a port of
+    `githubRepoOf` in github/repo-url.ts); any other URL is compared as written, sans `.git`."""
+    url = url.strip()
+    m = GITHUB_URL.match(url)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}".lower()
+    return url.rstrip("/").removesuffix(".git")
 
 
 def is_annex_ref(ref: str) -> bool:
@@ -494,8 +506,16 @@ def check_fresh(refs: dict[str, str], expect_remote: str | None) -> None:
     if "origin" not in remotes:
         raise Refused("no-origin-remote")
     if expect_remote is not None:
-        url = git("config", "--get", "remote.origin.url", check=False).decode()
-        if normalize_url(url) != normalize_url(expect_remote):
+        # Every URL a fetch or a push would use, so a push URL elsewhere does not slip past.
+        urls = [
+            u
+            for key in ("remote.origin.url", "remote.origin.pushurl")
+            for u in git("config", "--get-all", key, check=False).decode().splitlines()
+            if u.strip()
+        ]
+        if not urls or any(
+            repo_identity(u) != repo_identity(expect_remote) for u in urls
+        ):
             raise Refused("remote-mismatch")
     if "refs/stash" in refs:
         raise Refused("has-stash")
@@ -506,6 +526,47 @@ def check_fresh(refs: dict[str, str], expect_remote: str | None) -> None:
         upstream = "refs/remotes/origin/" + head[len("refs/heads/") :]
         if refs.get(upstream) != refs[head]:
             raise Refused("branch-not-matching-origin")
+
+
+def keymap_keys_in_history(refs: list[str], keymap: dict[bytes, bytes]) -> set[bytes]:
+    """The keymap keys, old or new, that a pointer-sized blob reachable from `refs` names.
+
+    Pointer files and annex symlink targets are a line long, so only blobs up to
+    POINTER_MAX_BYTES are read. Plain git, before anything is rewritten.
+    """
+    wanted = set(keymap) | set(keymap.values())
+    listing = git("rev-list", "--objects", *refs)
+    oids = [line.split(b" ", 1)[0] for line in listing.splitlines() if line]
+    if not oids:
+        return set()
+    checked = subprocess.run(
+        ["git", "cat-file", "--batch-check"],
+        input=b"\n".join(oids) + b"\n",
+        capture_output=True,
+        check=True,
+    ).stdout.splitlines()
+    small = []
+    for line in checked:
+        parts = line.split()
+        if len(parts) == 3 and parts[1] == b"blob" and int(parts[2]) <= POINTER_MAX_BYTES:
+            small.append(parts[0])
+    seen: set[bytes] = set()
+    if not small:
+        return seen
+    out = subprocess.run(
+        ["git", "cat-file", "--batch"],
+        input=b"\n".join(small) + b"\n",
+        capture_output=True,
+        check=True,
+    ).stdout
+    at = 0
+    for _ in small:
+        nl = out.index(b"\n", at)
+        size = int(out[at:nl].split()[2])
+        body = out[nl + 1 : nl + 1 + size]
+        seen.update(k for k in KEY_IN_BYTES.findall(body) if k in wanted)
+        at = nl + 1 + size + 1
+    return seen
 
 
 class CatFile:
@@ -731,6 +792,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     refs = list(args.refs) if args.refs else default_refs(before)
     if not refs or any(is_annex_ref(r) or r not in before for r in refs):
         raise BadInput("refs-empty-or-unknown-or-annex")
+
+    # A keymap that this history does not hold (another dataset's) must not rewrite anything.
+    # An old key that is gone but whose new key stands is a run already done, which stays a no-op.
+    in_history = keymap_keys_in_history(refs, keymap)
+    if any(old not in in_history and new not in in_history for old, new in keymap.items()):
+        raise Refused("keymap-key-never-seen")
 
     git_dir = git("rev-parse", "--absolute-git-dir").decode().strip()
     work = os.path.join(git_dir, "filter-repo")

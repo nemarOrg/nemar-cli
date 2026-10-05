@@ -186,7 +186,7 @@ describe("manifests and prefixes", () => {
       expect(isEdfOrBdf(p), p).toBe(false);
   });
 
-  test("a manifest yields the distinct annex keys of its EDF and BDF files, skipping git: keys", () => {
+  test("a manifest yields the distinct annex keys of its EDF and BDF files, and sets git: keys apart", () => {
     const doc = JSON.stringify({
       dataset_id: "xx090411",
       files: {
@@ -200,6 +200,7 @@ describe("manifests and prefixes", () => {
     });
     const r = keysOfManifest("xx090411", doc);
     expect([...r.keys].sort()).toEqual([key(10), key(20)].sort());
+    expect([...r.gitInline]).toEqual([`git:${"b".repeat(40)}`]);
     expect(r.badKeys).toBe(1);
   });
 

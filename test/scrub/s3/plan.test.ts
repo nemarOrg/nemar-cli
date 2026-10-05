@@ -16,12 +16,15 @@ import {
   SLOW,
   assembleArgs,
   dirText,
+  edfFile,
+  edfHeader,
   fixtureA,
   fixtureB,
   fixtureD,
   fixtureE,
   has,
   leaksAName,
+  makeFixture,
   objectPath,
   planArgs,
   readJson,
@@ -30,6 +33,7 @@ import {
   seedObject,
   sha256,
   tempDir,
+  verifyArgs,
   writeHashes,
   writeJson,
 } from "./support";
@@ -55,9 +59,8 @@ describe("plan", () => {
       seedObject(standin, b);
       seedObject(standin, d);
       seedManifest(standin, "v1.0.0", [a, d], {
-        // A file the scrub does not read, and a file kept inline in git.
+        // A file the scrub does not read.
         "sub-01/eeg/sub-01_photo.fif": { key: `SHA256E-s10--${"a".repeat(64)}.fif`, size: 10 },
-        "sub-06/eeg/sub-06_task-rest_eeg.edf": { key: `git:${"b".repeat(40)}`, size: 5 },
       });
       seedManifest(standin, "v1.0.1", [a, b]);
       // The summary file is not a manifest: its key must never reach the plan.
@@ -75,6 +78,7 @@ describe("plan", () => {
 
       const plan = parsePlan(JSON.stringify(readJson(dir, "plan.json")));
       expect(plan.tags).toEqual(["v1.0.0", "v1.0.1"]);
+      expect(plan.partial).toBeUndefined();
       expect(plan.dataset).toBe(DATASET);
       expect(plan.bucket).toBe(BUCKET);
       expect(plan.keys.map((k) => k.oldKey).sort()).toEqual([a.oldKey, b.oldKey, d.oldKey].sort());
@@ -138,7 +142,7 @@ describe("plan", () => {
   );
 
   test(
-    "--tags plans over the tags named and nothing else",
+    "--tags reads only the manifests named, marks the plan partial, and no later stage runs on it",
     async () => {
       standin = startS3Standin();
       const a = fixtureA();
@@ -152,9 +156,167 @@ describe("plan", () => {
       expect(r.exitCode, r.all).toBe(0);
       const plan = readJson<PlanFile>(dir, "plan.json");
       expect(plan.tags).toEqual(["v1.0.1"]);
-      expect(plan.keys.map((k) => k.oldKey).sort()).toEqual([a.oldKey, b.oldKey].sort());
-      // Naming tags skips discovery: no prefix listing of the manifests.
-      expect(standin.calls("ListObjectsV2").length).toBe(0);
+      expect(plan.partial).toBe(true);
+      expect(r.stdout).toContain("partial");
+      // D is in no manifest that was read, but it is in the bucket: the objects are listed too.
+      expect(plan.keys.map((k) => k.oldKey).sort()).toEqual([a.oldKey, b.oldKey, d.oldKey].sort());
+      // Naming tags skips discovery: the only listing is of the objects, never of version/.
+      expect(standin.calls("ListObjectsV2").map((c) => c.key)).toEqual([`${DATASET}/objects/`]);
+      expect(
+        standin.calls("GetObject").some((c) => c.key === `${DATASET}/version/v1.0.0.json`),
+      ).toBe(false);
+
+      // A partial plan is never carried further, however complete the rest looks.
+      writeHashes(dir, [a, b, d]);
+      for (const extra of [[], ["--execute"]]) {
+        expectStopped(
+          await runScrub(standin, ["assemble", "--dir", dir, ...extra]),
+          3,
+          "plan-partial",
+        );
+      }
+      expect(has(dir, "assembled.json")).toBe(false);
+      expectStopped(await runScrub(standin, verifyArgs(dir)), 3, "plan-partial");
+      const del = await runScrub(standin, [
+        "delete-old",
+        "--dir",
+        dir,
+        "--confirm-dataset",
+        DATASET,
+        "--public-base",
+        "http://127.0.0.1:9",
+      ]);
+      expectStopped(del, 3, "plan-partial");
+      expect(standin.calls("PutObject").length).toBe(0);
+      expect(standin.calls("DeleteObject").length).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "also plans every EDF or BDF under objects/ that no manifest names, in any letter case",
+    async () => {
+      standin = startS3Standin();
+      standin.setPageSize(2);
+      const named = fixtureA();
+      // On the bucket and in no manifest: a file a later version dropped.
+      const dropped = fixtureB();
+      const upper = makeFixture(
+        "U",
+        ".EDF",
+        "sub-07/eeg/sub-07_eeg.EDF",
+        edfFile(
+          edfHeader({ patient: "P0007 F 01-JAN-1970 Thistlewood_Marigold", recording: "X" }),
+          3000,
+          7,
+        ),
+        { patient: "X X X X" },
+      );
+      const mixed = makeFixture(
+        "M",
+        ".Bdf",
+        "sub-08/eeg/sub-08_eeg.Bdf",
+        edfFile(
+          edfHeader({
+            family: "bdf",
+            patient: "P0008 M 02-FEB-1971 Bellweather_Hieronymus",
+            recording: "X",
+          }),
+          3100,
+          8,
+        ),
+        { patient: "X X X X" },
+      );
+      for (const f of [named, dropped, upper, mixed]) seedObject(standin, f);
+      // Objects that are not recordings are not planned.
+      standin.putObject(BUCKET, objectPath(`SHA256E-s5--${"a".repeat(64)}.fif`), new Uint8Array(5));
+      standin.putObject(
+        BUCKET,
+        objectPath(`SHA256E-s5--${"b".repeat(64)}.edf.gz`),
+        new Uint8Array(5),
+      );
+      standin.putObject(BUCKET, objectPath(`SHA256E-s5--${"c".repeat(64)}`), new Uint8Array(5));
+      seedManifest(standin, "v1.0.0", [named]);
+
+      const dir = tempDir("plan-objects");
+      const r = await runScrub(standin, planArgs(dir));
+      expect(r.exitCode, r.all).toBe(0);
+      const plan = readJson<PlanFile>(dir, "plan.json");
+      expect(plan.keys.map((k) => k.oldKey).sort()).toEqual(
+        [named, dropped, upper, mixed].map((f) => f.oldKey).sort(),
+      );
+      expect(plan.keys.every((k) => k.status === "read" && k.needsScrub)).toBe(true);
+      expect(Object.keys(readJson(dir, "patches.json")).sort()).toEqual(
+        [named, dropped, upper, mixed].map((f) => f.oldKey).sort(),
+      );
+      expect(plan.totals.keys).toBe(4);
+      // The listing followed every page of a two-entry page size.
+      expect(standin.calls("ListObjectsV2").length).toBeGreaterThan(2);
+      expect(leaksAName(`${r.all}\n${dirText(dir)}`)).toBeNull();
+    },
+    SLOW,
+  );
+
+  test(
+    "an object that looks like a recording but is not an annex key stops the plan",
+    async () => {
+      standin = startS3Standin();
+      const a = fixtureA();
+      seedObject(standin, a);
+      seedManifest(standin, "v1.0.0", [a]);
+      standin.putObject(BUCKET, objectPath("notes.EDF"), new Uint8Array(5));
+      const dir = tempDir("plan-objects-bad");
+      const r = await runScrub(standin, planArgs(dir));
+      expectStopped(r, 4, "objects-bad-key");
+      expect(has(dir, "plan.json")).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
+    "a recording kept inline in git is recorded as unreadable, once, and the plan is incomplete",
+    async () => {
+      standin = startS3Standin();
+      const a = fixtureA();
+      seedObject(standin, a);
+      const inline = `git:${"b".repeat(40)}`;
+      const inline2 = `git:${"c".repeat(64)}`;
+      seedManifest(standin, "v1.0.0", [a], {
+        "sub-06/eeg/sub-06_task-rest_eeg.edf": { key: inline, size: 5 },
+        // The same blob under a second name, and a non-recording kept in git: neither adds an entry.
+        "sub-06/eeg/sub-06_copy_eeg.EDF": { key: inline, size: 5 },
+        "sub-06/sub-06_notes.txt": { key: `git:${"d".repeat(40)}`, size: 5 },
+      });
+      seedManifest(standin, "v1.0.1", [a], {
+        "sub-06/eeg/sub-06_task-rest_eeg.edf": { key: inline, size: 5 },
+        "sub-10/eeg/sub-10_eeg.bdf": { key: inline2, size: 5 },
+      });
+      const dir = tempDir("plan-inline");
+      const r = await runScrub(standin, planArgs(dir));
+      expect(r.exitCode, r.all).toBe(4);
+      const plan = parsePlan(JSON.stringify(readJson(dir, "plan.json")));
+      const inlineEntries = plan.keys.filter((k) => k.oldKey.startsWith("git:"));
+      expect(inlineEntries.map((k) => k.oldKey).sort()).toEqual([inline, inline2].sort());
+      for (const k of inlineEntries) {
+        expect(k.status).toBe("unreadable");
+        expect(k.reasons).toEqual(["git-inline-recording"]);
+        expect(k.needsScrub).toBe(false);
+      }
+      expect(plan.totals.unreadable).toBe(2);
+      expect(plan.totals.keys).toBe(3);
+      expect(r.stdout).toContain("git-inline-recording=2");
+      expect(r.stdout).toContain("incomplete");
+
+      // No later stage runs on this plan.
+      writeHashes(dir, [a]);
+      expectStopped(await runScrub(standin, assembleArgs(dir)), 3, "plan-has-unreadable");
+
+      // A git: key that is not a blob sha is a manifest the plan cannot account for.
+      seedManifest(standin, "v1.0.2", [a], {
+        "sub-11/eeg/sub-11_eeg.edf": { key: "git:not-a-sha", size: 5 },
+      });
+      const dirBad = tempDir("plan-inline-bad");
+      expectStopped(await runScrub(standin, planArgs(dirBad)), 4, "manifest-bad-key");
     },
     SLOW,
   );

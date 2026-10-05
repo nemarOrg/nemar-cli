@@ -56,6 +56,8 @@ HEADER_LEN = 256
 # fullmatch only: Python's `$` also matches before a trailing newline, and a key reaches a shell.
 ANNEX_KEY = re.compile(r"SHA256E-s(\d+)--([0-9a-f]{64})(\.[A-Za-z0-9.+]*)?")
 PATCH_HEX = re.compile(r"[0-9a-f]{512}")
+# A recording kept inline in git is keyed `git:<blob sha>`; the plan records it as unreadable.
+GIT_KEY = re.compile(r"git:[0-9a-f]{40}(?:[0-9a-f]{24})?")
 SAFE_NAME = re.compile(r"[A-Za-z0-9._-]+")
 
 DEFAULT_BUCKET = "nemar"
@@ -385,7 +387,10 @@ def parse_plan(raw: bytes) -> dict:
         raise InputError("plan.json does not match the contract")
     for k in x["keys"]:
         old_key = k.get("oldKey") if isinstance(k, dict) else None
-        if not isinstance(old_key, str) or not ANNEX_KEY.fullmatch(old_key):
+        if not isinstance(old_key, str):
+            raise InputError("plan.json holds a key that is not a SHA256E annex key")
+        inline = k.get("status") == "unreadable" and GIT_KEY.fullmatch(old_key)
+        if not ANNEX_KEY.fullmatch(old_key) and not inline:
             raise InputError("plan.json holds a key that is not a SHA256E annex key")
     return x
 
