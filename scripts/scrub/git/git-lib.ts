@@ -183,6 +183,70 @@ export function isRewriteRef(name: string): boolean {
 }
 
 // ---------------------------------------------------------------------------------------
+// The raw log: every entry of every commit
+// ---------------------------------------------------------------------------------------
+
+/**
+ * Arguments of the one walk that sees every path and blob of every commit reachable from the
+ * refs given on stdin, one name per line. `-m` diffs a merge against each parent, a root commit
+ * lists all its files, and `--no-renames` keeps each entry a single path, so every blob in any
+ * tree is the new side of some entry (or the old side of a deletion that appeared earlier).
+ */
+export const RAW_LOG_ARGS = [
+  "log",
+  "--stdin",
+  "-m",
+  "--raw",
+  "-z",
+  "--no-renames",
+  "--no-abbrev",
+  "--format=",
+];
+
+export interface RawEntry {
+  oldMode: string;
+  newMode: string;
+  oldSha: string;
+  newSha: string;
+  /** A added, M modified, D deleted, T type change. */
+  status: string;
+  path: string;
+}
+
+/** True for the all-zero object id git uses for "no object on this side". */
+export function isZeroSha(sha: string): boolean {
+  return /^0+$/.test(sha);
+}
+
+/** Parse `git log --raw -z --format=` output: `:om nm os ns S` NUL path NUL, repeated. */
+export function parseRawLog(text: string): RawEntry[] {
+  const out: RawEntry[] = [];
+  const tokens = text.split("\0");
+  for (let i = 0; i < tokens.length; ) {
+    const meta = (tokens[i] as string).replace(/^\n+/, "");
+    if (meta === "") {
+      i++;
+      continue;
+    }
+    const path = tokens[i + 1];
+    const f = meta.split(" ");
+    if (!meta.startsWith(":") || path === undefined || f.length !== 5) {
+      throw new GitScrubError("git-log-not-understood");
+    }
+    i += 2;
+    out.push({
+      oldMode: (f[0] as string).slice(1),
+      newMode: f[1] as string,
+      oldSha: f[2] as string,
+      newSha: f[3] as string,
+      status: f[4] as string,
+      path,
+    });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------------------
 // Streaming `git cat-file`
 // ---------------------------------------------------------------------------------------
 

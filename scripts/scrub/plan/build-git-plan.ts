@@ -24,7 +24,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, writeFileSync } from "node:fs";
 import { scanJsonKeys, scanPaths } from "../../../shared/identifier-scan";
 import { type GitPlanFile, type JsonOp, parseGitPlan } from "../contract";
-import { isRewriteRef } from "../git/git-lib";
+import { RAW_LOG_ARGS, type RawEntry, isRewriteRef, isZeroSha, parseRawLog } from "../git/git-lib";
 import { changeLogEntry } from "../ledger";
 
 const PROVENANCE = "sourcedata/sourcedata_provenance.json";
@@ -52,8 +52,6 @@ function git(repo: string, args: string[], input?: string): string {
   return gitBuffer(repo, args, input).toString("utf8");
 }
 
-const ZERO_SHA = /^0+$/;
-
 interface History {
   commits: number;
   /** Every path that appears in any commit's tree, as a name git recorded it. */
@@ -75,34 +73,22 @@ interface History {
 function readHistory(repo: string, refs: string[]): History {
   const stdin = `${refs.join("\n")}\n`;
   const commits = Number(git(repo, ["rev-list", "--count", "--stdin"], stdin).trim());
-  const log = git(
-    repo,
-    ["log", "--stdin", "-m", "--raw", "-z", "--no-renames", "--no-abbrev", "--format="],
-    stdin,
-  );
+  const log = git(repo, RAW_LOG_ARGS, stdin);
   const paths = new Set<string>();
   const jsonBlobs = new Map<string, Set<string>>();
-  const tokens = log.split("\0");
-  // `:<old mode> <new mode> <old sha> <new sha> <status>` NUL `<path>` NUL, repeated.
-  for (let i = 0; i < tokens.length; ) {
-    const meta = (tokens[i] as string).replace(/^\n+/, "");
-    if (meta === "") {
-      i++;
-      continue;
-    }
-    const path = tokens[i + 1];
-    const fields = meta.split(" ");
-    if (!meta.startsWith(":") || path === undefined || fields.length !== 5) {
-      throw new PlanRefused("git log output not understood");
-    }
-    i += 2;
-    const [, newMode, , newSha, status] = fields as [string, string, string, string, string];
+  let entries: RawEntry[];
+  try {
+    entries = parseRawLog(log);
+  } catch {
+    throw new PlanRefused("git log output not understood");
+  }
+  for (const { path, newMode, newSha, status } of entries) {
     paths.add(path);
     // Inline JSON only: an annex pointer is a few dozen bytes of `/annex/objects/...`, not JSON.
     if (
       path.toLowerCase().endsWith(".json") &&
       newMode === "100644" &&
-      !ZERO_SHA.test(newSha) &&
+      !isZeroSha(newSha) &&
       (status === "A" || status === "M" || status === "T")
     ) {
       const set = jsonBlobs.get(path) ?? new Set<string>();
