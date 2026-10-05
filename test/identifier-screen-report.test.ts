@@ -169,6 +169,28 @@ describe("parseScreenReport: what is refused, without quoting it", () => {
     expect(refusal(report({ scan: scan({ finding_fields: [LEAK] }) }))).toBe("scan-fields");
   });
 
+  test("a field is the scanner's alphabet, so header text cannot ride after a real kind", () => {
+    // The kind half is well formed here; only the field half carries the text.
+    expect(refusal(report({ scan: scan({ finding_fields: [`edf-patient-name:${LEAK}`] }) }))).toBe(
+      "scan-fields",
+    );
+    expect(
+      refusal(report({ scan: scan({ finding_fields: ["edf-patient-name:Smith (1971)"] }) })),
+    ).toBe("scan-fields");
+    // What the scanner really emits still passes: header fields and canonical keys.
+    for (const field of [
+      "edf-patient-birthdate:patient.birthdate",
+      "participants-identifier-column:patientname",
+      "json-identifier-key:mrn",
+      "acq-time-dated:acq_time",
+    ]) {
+      expect(
+        parseScreenReport(report({ scan: scan({ finding_fields: [field] }) })).scan
+          ?.finding_fields,
+      ).toEqual([field]);
+    }
+  });
+
   test("exactly one of scan and error", () => {
     expect(refusal(report({ error: "workflow-failed" }))).toBe("report-outcome");
     expect(refusal({ version: 1, scanner: "identifier-scan@abcdef1", head: null })).toBe(

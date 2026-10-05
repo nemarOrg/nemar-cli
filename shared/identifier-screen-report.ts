@@ -168,7 +168,14 @@ const FAILURE_KEY = /^[a-z_]{1,16}\/[a-z0-9-]{1,48}$/;
 const SCANNER = /^identifier-scan@[0-9a-f]{7,40}$/;
 const HEAD = /^[0-9a-f]{40}$/;
 const DATASET_ID = /^(nm|on|xx)\d{6}$/;
-const FIELD = /^[a-z][a-z0-9-]*:[A-Za-z0-9_. ()-]{1,48}$/;
+/**
+ * `<kind>:<field>`. The field half is the scanner's own alphabet: a header field
+ * (`patient.birthdate`) or the CANONICAL spelling of a matched column or key,
+ * which `canonical()` in identifier-scan.ts lowercases and strips of spaces. Upper
+ * case, spaces and punctuation are therefore never a field, and refusing them is
+ * what keeps a header's text (`JOHN SMITH`) from riding in this list.
+ */
+const FIELD = /^[a-z][a-z0-9-]*:[a-z0-9_.]{1,48}$/;
 const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
 
 function parseRecord(x: unknown): DatasetRecord {
