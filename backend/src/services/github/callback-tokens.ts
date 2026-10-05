@@ -148,3 +148,70 @@ export async function verifyPrescreenCallbackToken(
   const expected = await signPrescreenCallbackToken(payload, secret);
   return timingSafeEqual(token, expected);
 }
+
+// ============================================================================
+// Identifier-screen callback HMAC tokens (epic #1610, phase 4)
+// ============================================================================
+//
+// The same one-shot handshake as the pre-screen token above, over the same
+// {dataset_id, request_id, nonce}, and signed with the SAME secret
+// (PRESCREEN_CALLBACK_SECRET): a second Worker secret would be one more thing to
+// provision on two Workers and forget on one. Sharing the key is safe only
+// because the signed message is DOMAIN-SEPARATED: it begins with a fixed tag
+// that no pre-screen message can begin with (a pre-screen message begins with a
+// dataset id, and its request id is a number, so it can never reproduce the
+// tag line followed by a dataset id line). Without the tag, a pre-screen token
+// for a request would also be a valid identifier-screen token for the same
+// request and nonce, and one workflow could answer for the other.
+//
+// Single-use is enforced by the row (`identifier_screen_status = 'pending'` and
+// the nonce, both cleared when a result is stored), not by the HMAC.
+
+/** The first line of every identifier-screen message. Never shared with another token kind. */
+export const IDENTIFIER_SCREEN_TOKEN_DOMAIN = "identifier-screen";
+
+export interface IdentifierScreenCallbackPayload {
+  datasetId: string;
+  requestId: number;
+  nonce: string;
+}
+
+/** Canonical, domain-tagged payload encoding -- pinned so signer and verifier agree. */
+function encodeIdentifierScreenCallbackPayload(payload: IdentifierScreenCallbackPayload): string {
+  return `${IDENTIFIER_SCREEN_TOKEN_DOMAIN}\n${payload.datasetId}\n${payload.requestId}\n${payload.nonce}`;
+}
+
+/** Sign an identifier-screen callback payload with HMAC-SHA256 (hex digest). */
+export async function signIdentifierScreenCallbackToken(
+  payload: IdentifierScreenCallbackPayload,
+  secret: string,
+): Promise<string> {
+  if (!secret) {
+    throw new Error("signIdentifierScreenCallbackToken: secret is required");
+  }
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    encoder.encode(encodeIdentifierScreenCallbackPayload(payload)),
+  );
+  return toHex(signature);
+}
+
+/** Verify an identifier-screen callback token (constant-time). */
+export async function verifyIdentifierScreenCallbackToken(
+  token: string,
+  payload: IdentifierScreenCallbackPayload,
+  secret: string,
+): Promise<boolean> {
+  if (!token || !secret) return false;
+  const expected = await signIdentifierScreenCallbackToken(payload, secret);
+  return timingSafeEqual(token, expected);
+}

@@ -423,6 +423,55 @@ export async function triggerPrescreenRun(
 }
 
 /**
+ * Start the identifier screen of a publication request on `nemarDatasets/.github`
+ * via `repository_dispatch[run-identifier-screen]` (epic #1610, phase 4). The
+ * workflow screens the dataset's `ref` for identifying information and POSTs a
+ * report (`shared/identifier-screen-report.ts`) to `callbackUrl`
+ * (/webhooks/identifier-screen-result) with `callbackToken` in X-Webhook-Token.
+ *
+ * A 2xx proves nothing about the workflow running: GitHub answers 204 for an
+ * `event_type` no workflow listens for. That is why the caller marks the screen
+ * `pending` with a dispatch time and a watchdog turns a screen that never
+ * reports into `unreported`; this function only reports whether GitHub took
+ * the request. Mirrors `triggerPrescreenRun`. `pat` must carry write access on
+ * the central repo's dispatch endpoint -- use `getDatasetsToken()`.
+ */
+export async function triggerIdentifierScreenRun(
+  datasetId: string,
+  ref: string,
+  requestId: number,
+  callbackToken: string,
+  callbackUrl: string,
+  pat: string,
+): Promise<void> {
+  const response = await fetch(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${pat}`,
+      Accept: "application/vnd.github.v3+json",
+      "User-Agent": "NEMAR-API",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      event_type: "run-identifier-screen",
+      client_payload: {
+        dataset_id: datasetId,
+        ref,
+        request_id: requestId,
+        callback_token: callbackToken,
+        callback_url: callbackUrl,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    // The status only. GitHub's body is not ours to forward, and this message is
+    // logged by the caller.
+    throw new Error(`Failed to trigger identifier screen run: HTTP ${response.status}`);
+  }
+}
+
+/**
  * Which backend the approval workflow should talk to. The central repo is
  * shared by every environment, so the dispatch has to say; and it says it as a
  * NAME, never a URL or a credential, so the workflow maps the name to an API
