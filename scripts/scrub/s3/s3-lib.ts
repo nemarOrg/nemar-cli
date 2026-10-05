@@ -700,10 +700,68 @@ function entriesOf(raw: unknown, key: string): VersionEntry[] {
   return out;
 }
 
-/** Every Version and DeleteMarker of EXACTLY `key`. The CLI follows every page. */
-export async function listKeyVersions(ctx: S3Ctx, key: string): Promise<VersionListing> {
-  const out = await ctx.aws.api("list-object-versions", ["--bucket", ctx.bucket, "--prefix", key]);
-  return { versions: entriesOf(out.Versions, key), markers: entriesOf(out.DeleteMarkers, key) };
+/**
+ * Items per `aws` call of a listing, which is one S3 request. A listing is many calls, each one
+ * S3 page, so each call's time is bounded by one page and the per-call timeout applies to a page,
+ * not to the whole prefix: a dataset with a large Zarr copy (tens of thousands of chunks and
+ * their versions) would otherwise have to list in ONE call inside the timeout, buffered as one
+ * JSON document. 1000 is S3's own page limit.
+ */
+export const LIST_PAGE_ITEMS = 1000;
+
+/**
+ * A listing's pages, ONE S3 request per `aws` call (`--no-paginate`), following S3's own markers
+ * (`NextContinuationToken`, or `NextKeyMarker` and `NextVersionIdMarker`) until a page says it is
+ * the last. Not the CLI's `--max-items`/`--starting-token`: for list-object-versions it counts only
+ * `Versions`, and a page it truncates hands its delete markers out twice.
+ */
+async function listPages(
+  ctx: S3Ctx,
+  op: "list-objects-v2" | "list-object-versions",
+  prefix: string,
+  pageItems: number,
+): Promise<Array<Record<string, unknown>>> {
+  const name = op === "list-objects-v2" ? "ListObjectsV2" : "ListObjectVersions";
+  const bad = () => new AwsCliError("bad-output", name);
+  const pages: Array<Record<string, unknown>> = [];
+  const seen = new Set<string>();
+  let next: string[] = [];
+  for (;;) {
+    const args = ["--bucket", ctx.bucket, "--prefix", prefix, "--max-keys", String(pageItems)];
+    const out = await ctx.aws.api(op, [...args, "--no-paginate", ...next]);
+    pages.push(out);
+    if (out.IsTruncated !== true) {
+      if (out.IsTruncated !== false && out.IsTruncated !== undefined) throw bad();
+      return pages;
+    }
+    if (op === "list-objects-v2") {
+      const token = str(out.NextContinuationToken);
+      if (!token) throw bad();
+      next = ["--continuation-token", token];
+    } else {
+      const key = str(out.NextKeyMarker);
+      const id = str(out.NextVersionIdMarker);
+      if (!key) throw bad();
+      next = ["--key-marker", key, ...(id ? ["--version-id-marker", id] : [])];
+    }
+    // A marker that does not move on would list forever.
+    const at = next.join("\u0000");
+    if (seen.has(at)) throw bad();
+    seen.add(at);
+  }
+}
+
+/** Every Version and DeleteMarker of EXACTLY `key`, page by page. */
+export async function listKeyVersions(
+  ctx: S3Ctx,
+  key: string,
+  pageItems: number = LIST_PAGE_ITEMS,
+): Promise<VersionListing> {
+  const pages = await listPages(ctx, "list-object-versions", key, pageItems);
+  return {
+    versions: pages.flatMap((p) => entriesOf(p.Versions, key)),
+    markers: pages.flatMap((p) => entriesOf(p.DeleteMarkers, key)),
+  };
 }
 
 export interface PrefixEntry extends VersionEntry {
@@ -711,14 +769,13 @@ export interface PrefixEntry extends VersionEntry {
   kind: "version" | "marker";
 }
 
-/** Every Version and DeleteMarker under a PREFIX, with its key. */
-export async function listPrefixVersions(ctx: S3Ctx, prefix: string): Promise<PrefixEntry[]> {
-  const out = await ctx.aws.api("list-object-versions", [
-    "--bucket",
-    ctx.bucket,
-    "--prefix",
-    prefix,
-  ]);
+/** Every Version and DeleteMarker under a PREFIX, with its key, page by page. */
+export async function listPrefixVersions(
+  ctx: S3Ctx,
+  prefix: string,
+  pageItems: number = LIST_PAGE_ITEMS,
+): Promise<PrefixEntry[]> {
+  const pages = await listPages(ctx, "list-object-versions", prefix, pageItems);
   const collect = (raw: unknown, kind: "version" | "marker"): PrefixEntry[] => {
     if (raw === undefined || raw === null) return [];
     if (!Array.isArray(raw)) throw new AwsCliError("bad-output", "ListObjectVersions");
@@ -731,19 +788,28 @@ export async function listPrefixVersions(ctx: S3Ctx, prefix: string): Promise<Pr
       return { key, versionId: id, isLatest: e.IsLatest === true, kind };
     });
   };
-  return [...collect(out.Versions, "version"), ...collect(out.DeleteMarkers, "marker")];
+  return pages.flatMap((p) => [
+    ...collect(p.Versions, "version"),
+    ...collect(p.DeleteMarkers, "marker"),
+  ]);
 }
 
-/** Current object keys under a prefix (list-objects-v2; the CLI follows every page). */
-export async function listCurrentKeys(ctx: S3Ctx, prefix: string): Promise<string[]> {
-  const out = await ctx.aws.api("list-objects-v2", ["--bucket", ctx.bucket, "--prefix", prefix]);
-  const raw = out.Contents;
-  if (raw === undefined || raw === null) return [];
-  if (!Array.isArray(raw)) throw new AwsCliError("bad-output", "ListObjectsV2");
-  return (raw as Array<Record<string, unknown>>).map((e) => {
-    const k = str(e.Key);
-    if (k === undefined) throw new AwsCliError("bad-output", "ListObjectsV2");
-    return k;
+/** Current object keys under a prefix (list-objects-v2), page by page. */
+export async function listCurrentKeys(
+  ctx: S3Ctx,
+  prefix: string,
+  pageItems: number = LIST_PAGE_ITEMS,
+): Promise<string[]> {
+  const pages = await listPages(ctx, "list-objects-v2", prefix, pageItems);
+  return pages.flatMap((p) => {
+    const raw = p.Contents;
+    if (raw === undefined || raw === null) return [];
+    if (!Array.isArray(raw)) throw new AwsCliError("bad-output", "ListObjectsV2");
+    return (raw as Array<Record<string, unknown>>).map((e) => {
+      const k = str(e.Key);
+      if (k === undefined) throw new AwsCliError("bad-output", "ListObjectsV2");
+      return k;
+    });
   });
 }
 
