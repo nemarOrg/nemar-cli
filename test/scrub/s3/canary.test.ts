@@ -4,9 +4,13 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
+import { createAwsRunner, isoSeconds, putObjectLocked } from "../../../scripts/scrub/s3/s3-lib";
 import { type S3Standin, startS3Standin } from "../helpers/s3-standin";
 import { expectStopped } from "./refusal";
-import { BUCKET, DATASET, MIB, SLOW, runScrub } from "./support";
+import { BUCKET, DATASET, MIB, SLOW, awsTestEnv, runScrub, tempDir, withCtx } from "./support";
 
 let standin: S3Standin;
 afterEach(() => standin?.stop());
@@ -161,6 +165,98 @@ describe("canary", () => {
       expect(await bare.text()).toContain("InvalidRequest");
       const withChecksum = await part({ "x-amz-checksum-crc64nvme": "AAAAAAAAAAA=" });
       expect(withChecksum.status).toBe(200);
+    },
+    SLOW,
+  );
+
+  test(
+    "the stand-in refuses a put with lock parameters and no checksum, and the bare CLI sends none",
+    async () => {
+      standin = startS3Standin();
+      const lock = {
+        "x-amz-object-lock-mode": "GOVERNANCE",
+        "x-amz-object-lock-retain-until-date": new Date(Date.now() + 86_400_000).toISOString(),
+      };
+      const put = (headers: Record<string, string>) =>
+        fetch(`${standin.url}/${BUCKET}/${prefix}raw.txt`, {
+          method: "PUT",
+          headers,
+          body: new Uint8Array(16),
+        });
+      const bare = await put(lock);
+      expect(bare.status).toBe(400);
+      expect(await bare.text()).toContain("InvalidRequest");
+      expect((await put({ ...lock, "x-amz-checksum-crc64nvme": "AAAAAAAAAAA=" })).status).toBe(200);
+      // No lock, no requirement.
+      expect((await put({})).status).toBe(200);
+
+      // The control that makes the pin worth testing: with the operator's setting left alone,
+      // the REAL CLI sends no checksum on a locked put-object, and is refused.
+      const dir = tempDir("canary-raw");
+      const file = path.join(dir, "body");
+      writeFileSync(file, "x");
+      const proc = Bun.spawn(
+        [
+          "aws",
+          "s3api",
+          "put-object",
+          "--bucket",
+          BUCKET,
+          "--key",
+          `${prefix}cli.txt`,
+          "--body",
+          file,
+          "--object-lock-mode",
+          "GOVERNANCE",
+          "--object-lock-retain-until-date",
+          isoSeconds(new Date(Date.now() + 86_400_000)),
+          "--region",
+          "us-east-2",
+        ],
+        {
+          env: awsTestEnv(standin, { AWS_REQUEST_CHECKSUM_CALCULATION: "when_required" }),
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      expect(await proc.exited).not.toBe(0);
+      const refused = standin.calls("PutObject").filter((c) => c.key === `${prefix}cli.txt`);
+      expect(refused.map((c) => [c.status, c.checksum])).toEqual([[400, false]]);
+    },
+    SLOW,
+  );
+
+  test(
+    "a locked put-object sends a checksum whatever the operator's environment asks for",
+    async () => {
+      standin = startS3Standin();
+      const r = await runScrub(standin, canary(["--execute"]), {
+        AWS_REQUEST_CHECKSUM_CALCULATION: "when_required",
+      });
+      expect(r.exitCode, r.all).toBe(0);
+      const puts = standin.calls("PutObject");
+      expect(puts.length).toBe(1);
+      expect([puts[0]?.status, puts[0]?.checksum]).toEqual([200, true]);
+
+      // The same through the library, with the setting in the runner's own environment.
+      const key = `${prefix}lib.txt`;
+      await withCtx(standin, async (ctx) => {
+        const aws = createAwsRunner({
+          region: "us-east-2",
+          timeoutMs: 60_000,
+          env: awsTestEnv(standin, { AWS_REQUEST_CHECKSUM_CALCULATION: "when_required" }),
+        });
+        const body = ctx.tmp.file();
+        await writeFile(body, "x");
+        await putObjectLocked(
+          { ...ctx, aws },
+          key,
+          body,
+          {},
+          isoSeconds(new Date(Date.now() + 86_400_000)),
+        );
+      });
+      expect(standin.calls("PutObject").at(-1)?.checksum).toBe(true);
     },
     SLOW,
   );

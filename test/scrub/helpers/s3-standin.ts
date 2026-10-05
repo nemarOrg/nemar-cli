@@ -21,6 +21,9 @@
  *  - GET and HEAD, with Range (206 and Content-Range, 416 past the end), If-Match (412), and
  *    `versionId`. HEAD returns the version id, the lock mode and date, the encryption fields and
  *    Cache-Control.
+ *  - PutObject with Object Lock parameters needs `Content-MD5` or an `x-amz-checksum-*` header,
+ *    as an UploadPart of a lock-created upload does (documented for put-object, measured only for
+ *    the part).
  *  - PutObject with `If-Match`: 412 PreconditionFailed when the current version's ETag is not the
  *    one named. ASSUMED, not measured against the real bucket: S3 documents conditional writes
  *    (Nov 2024) and answers 412 on a mismatch; what it answers for a key that does not exist, or
@@ -80,7 +83,7 @@ export interface StandinLogEntry {
   partNumber?: number;
   /** The access key id the request was signed with. */
   keyId?: string;
-  /** An UploadPart request that carried an `x-amz-checksum-*` header. */
+  /** A PutObject or UploadPart request that carried an `x-amz-checksum-*` header (or Content-MD5). */
   checksum?: boolean;
   size?: number;
   method?: string;
@@ -640,6 +643,19 @@ export function startS3Standin(): S3Standin {
           record({ op: "PutObject", key, status: 400 });
           return s3Error("InvalidArgument", 400);
         }
+        // S3 documents the same rule for a put with lock parameters as for a part of an upload
+        // created with them (the part rule is measured; this one is documented, not measured).
+        const checksum =
+          [...req.headers.keys()].some((h) => h.startsWith("x-amz-checksum-")) ||
+          req.headers.has("content-md5");
+        if (lock && !checksum) {
+          record({ op: "PutObject", key, status: 400, checksum: false });
+          return s3Error(
+            "InvalidRequest",
+            400,
+            "Content-MD5 OR x-amz-checksum- HTTP header is required for requests with Object Lock parameters",
+          );
+        }
         const ifMatch = req.headers.get("if-match") ?? undefined;
         if (ifMatch !== undefined) {
           const now = current(bucket, key);
@@ -665,7 +681,7 @@ export function startS3Standin(): S3Standin {
           cacheControl: req.headers.get("cache-control") ?? undefined,
           lock,
         });
-        record({ op: "PutObject", key, status: 200, size: body.length, ifMatch });
+        record({ op: "PutObject", key, status: 200, size: body.length, ifMatch, checksum });
         return new Response(null, { status: 200, headers: { ETag: etag, "x-amz-version-id": id } });
       }
 

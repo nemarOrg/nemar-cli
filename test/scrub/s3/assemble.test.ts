@@ -498,3 +498,26 @@ describe("assemble: a hash is good only for the patch it was computed for", () =
     SLOW,
   );
 });
+
+describe("assemble: the checksum a locked write needs", () => {
+  test(
+    "put-object and every part carry one whatever the operator's environment asks for",
+    async () => {
+      standin = startS3Standin();
+      const [a, c] = [fixtureA(), fixtureC()];
+      const dir = await planned([a, c]);
+      standin.log.length = 0;
+      const r = await runScrub(standin, assembleArgs(dir), {
+        AWS_REQUEST_CHECKSUM_CALCULATION: "when_required",
+      });
+      expect(r.exitCode, r.all).toBe(0);
+      const puts = standin.calls("PutObject");
+      expect(puts.length).toBe(1);
+      expect([puts[0]?.status, puts[0]?.checksum]).toEqual([200, true]);
+      const parts = standin.calls("UploadPart");
+      expect(parts.length).toBe(1);
+      expect([parts[0]?.status, parts[0]?.checksum]).toEqual([200, true]);
+    },
+    SLOW,
+  );
+});

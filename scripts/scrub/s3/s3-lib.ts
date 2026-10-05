@@ -174,8 +174,6 @@ export const SLOW_FACTOR = 5;
 export interface ApiOptions {
   /** A transfer or a completion: allowed {@link SLOW_FACTOR} times the base timeout. */
   slow?: boolean;
-  /** Extra environment for this one call. */
-  env?: Record<string, string>;
 }
 
 export interface AwsRunner {
@@ -282,10 +280,26 @@ export function cliCredentialSource(options: CliCredentialOptions = {}): Credent
   };
 }
 
+/**
+ * Real S3 refuses an UploadPart on a multipart upload created with Object Lock parameters unless
+ * the request carries `Content-MD5` or an `x-amz-checksum-*` header ("Content-MD5 OR
+ * x-amz-checksum- HTTP header is required for Put Part requests with Object Lock parameters",
+ * measured against the real bucket on 2026-10-04 with aws-cli 2.36.47). The CLI's default,
+ * `when_supported`, sends a CRC64NVME header and is accepted even though the upload was created
+ * with no checksum type. S3 documents the same requirement for a put-object with lock parameters
+ * (not measured here), and `when_required` would turn the header off for both.
+ */
+export const CHECKSUM_CALCULATION = "when_supported";
+
 export function createAwsRunner(cfg: AwsConfig): AwsRunner {
   const base: Record<string, string> = {};
   for (const [k, v] of Object.entries(cfg.env ?? process.env)) if (v !== undefined) base[k] = v;
   base.AWS_PAGER = "";
+  // Pinned for EVERY call, over whatever the operator's environment says: real S3 refuses a
+  // put-object, or a part of an upload, that carries Object Lock parameters unless the request has
+  // `Content-MD5` or an `x-amz-checksum-*` header (see {@link CHECKSUM_CALCULATION}). Only the CLI
+  // default sends one, and `when_required`, which is what some operators set, does not.
+  base.AWS_REQUEST_CHECKSUM_CALCULATION = CHECKSUM_CALCULATION;
   if (cfg.endpointUrl) base.AWS_ENDPOINT_URL_S3 = cfg.endpointUrl;
 
   return {
@@ -301,7 +315,7 @@ export function createAwsRunner(cfg: AwsConfig): AwsRunner {
       try {
         proc = spawn({
           cmd,
-          env: { ...base, ...creds, ...(opts.env ?? {}) },
+          env: { ...base, ...creds },
           stdout: "pipe",
           stderr: "pipe",
         });
@@ -904,17 +918,6 @@ export async function createMultipart(
   return id;
 }
 
-/**
- * Real S3 refuses an UploadPart on a multipart upload created with Object Lock parameters unless
- * the request carries `Content-MD5` or an `x-amz-checksum-*` header ("Content-MD5 OR
- * x-amz-checksum- HTTP header is required for Put Part requests with Object Lock parameters",
- * measured against the real bucket on 2026-10-04 with aws-cli 2.36.47). The CLI's default,
- * `when_supported`, sends a CRC64NVME header and is accepted even though the upload was created
- * with no checksum type. This pins that default for the one call, so an ambient
- * `AWS_REQUEST_CHECKSUM_CALCULATION=when_required` cannot turn the header off.
- */
-const PART_CHECKSUM = { AWS_REQUEST_CHECKSUM_CALCULATION: "when_supported" };
-
 export async function uploadPart(
   ctx: S3Ctx,
   key: string,
@@ -936,7 +939,7 @@ export async function uploadPart(
       "--body",
       bodyFile,
     ],
-    { slow: true, env: PART_CHECKSUM },
+    { slow: true },
   );
   const etag = str(out.ETag);
   if (!etag) throw new AwsCliError("bad-output", "UploadPart");
