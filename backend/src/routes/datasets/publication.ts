@@ -34,10 +34,9 @@ import {
   RESET_SCREEN_COLUMNS_SQL,
   type ScreenView,
   mailPublicationRequest,
-  notifyAdminsOfScreen,
   screenEmailSection,
   screenView,
-  startIdentifierScreen,
+  startScreenAndNotify,
 } from "../../services/identifier-screen";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
 import { markDatasetPrivate, markDatasetPublic } from "../../services/s3";
@@ -583,36 +582,35 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     // screen that could not be started is mailed NOW, saying so. A sandbox
     // exemplar is not screened and is mailed now, as before. Never gated on
     // PRESCREEN_ENABLED: the screen must not be silently switchable off.
+    //
+    // `startScreenAndNotify` never throws: a start that throws before anything
+    // is recorded (a database error) is mailed there as NOT RUN.
     let screen: ScreenView;
-    try {
-      const started =
-        prId === null
-          ? null
-          : await startIdentifierScreen(c.env, {
-              requestId: prId,
-              datasetId,
-              githubRepo: dataset.github_repo,
-            });
-      if (started?.kind === "failed" && prId !== null) {
-        await notifyAdminsOfScreen(c.env, prId);
-      } else if (started?.kind !== "dispatched") {
-        // Exempt, or (prId null) a request the screen cannot be tied to: the
-        // mail goes now, and the section says which ("not applicable
-        // (sandbox)" for an exempt dataset, "NOT RUN" otherwise).
+    const started =
+      prId === null
+        ? null
+        : await startScreenAndNotify(c.env, {
+            requestId: prId,
+            datasetId,
+            githubRepo: dataset.github_repo,
+          });
+    if (started === null || started.kind === "exempt") {
+      // Exempt, or (prId null) a request the screen cannot be tied to: the
+      // mail goes now, and the section says which ("not applicable (sandbox)"
+      // for an exempt dataset, "NOT RUN" otherwise).
+      try {
         await mailPublicationRequest(c.env, {
           datasetId,
           username: currentUser.username,
           anonymous: anonymousRequested,
           screen: screenEmailSection(datasetId, null, null),
         });
+      } catch (mailError) {
+        console.error(
+          `[publish-request] admin mail failed for ${datasetId}:`,
+          mailError instanceof Error ? mailError.message : mailError,
+        );
       }
-    } catch (screenError) {
-      // The request is recorded either way; what failed here is logged, and an
-      // unmailed result is retried by the watchdog.
-      console.error(
-        `[publish-request] identifier screen start or admin mail failed for ${datasetId}:`,
-        screenError instanceof Error ? screenError.message : screenError,
-      );
     }
     if (prId !== null) {
       const row = await db
@@ -992,6 +990,10 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
    * 2. Updates S3 bucket policy for public read
    * 3. Sets visibility='public' in database
    * 4. Logs action in audit_log
+   *
+   * A break-glass admin tool: it does NOT pass the identifier screen gate a
+   * publication approval does (ADR 0086 states the exception). Use the
+   * publication request flow for a dataset that has not been screened.
    */
   datasetRoutes.post("/:id/publish", authMiddleware, async (c) => {
     const datasetId = c.req.param("id");

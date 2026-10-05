@@ -23,16 +23,40 @@ import { verifyIdentifierScreenCallbackToken } from "../../services/github.js";
 import { notifyAdminsOfScreen, storeScreenResult } from "../../services/identifier-screen.js";
 import type { WebhookRouter } from "../webhooks/shared.js";
 
+/**
+ * The largest body this route reads. A real report is a few kilobytes (closed
+ * vocabularies and counts); anything near this is not a report, and reading it
+ * would only spend the Worker's memory on an attacker's payload.
+ */
+export const MAX_CALLBACK_BODY_BYTES = 256 * 1024;
+
+/**
+ * Every refusal of the token says the same bytes, whether no screen was in
+ * flight for the request or the token did not verify, so the answer does not
+ * tell a caller which requests have a screen running.
+ */
+const UNAUTHORIZED = { error: "Invalid or expired callback token" } as const;
+
 export function registerIdentifierScreenRoutes(webhooks: WebhookRouter): void {
   webhooks.post("/identifier-screen-result", async (c) => {
     const token = c.req.header("X-Webhook-Token");
     if (!token) {
-      return c.json({ error: "Missing X-Webhook-Token header" }, 401);
+      return c.json(UNAUTHORIZED, 401);
     }
 
+    // Bounded before parsing: by the declared length, and by the bytes that
+    // actually arrived (a declared length can be absent or wrong).
+    const declared = Number(c.req.header("Content-Length") ?? "0");
+    if (Number.isFinite(declared) && declared > MAX_CALLBACK_BODY_BYTES) {
+      return c.json({ error: "Body too large" }, 413);
+    }
     let body: unknown;
     try {
-      body = await c.req.json();
+      const raw = new Uint8Array(await c.req.arrayBuffer());
+      if (raw.byteLength > MAX_CALLBACK_BODY_BYTES) {
+        return c.json({ error: "Body too large" }, 413);
+      }
+      body = JSON.parse(new TextDecoder().decode(raw));
     } catch {
       return c.json({ error: "Invalid JSON in request body" }, 400);
     }
@@ -65,11 +89,15 @@ export function registerIdentifierScreenRoutes(webhooks: WebhookRouter): void {
       return c.json({ error: "Server misconfigured: callback secret unset" }, 500);
     }
 
-    // The nonce of the in-flight screen. Only a PENDING screen is found, so a
-    // replay against a stored result cannot re-store or re-mail it.
+    // The nonce of the in-flight screen. Only a screen still waiting for its
+    // report is found: `pending`, or `unreported` (the watchdog gave up on it,
+    // but kept its nonce so a late report still lands). A stored result has no
+    // nonce, so a replay cannot re-store or re-mail it, and a re-run replaced
+    // the nonce, so an earlier run cannot answer for the new one.
     const row = await c.env.DB.prepare(
       `SELECT identifier_screen_nonce FROM publication_requests
-        WHERE id = ? AND dataset_id = ? AND identifier_screen_status = 'pending'
+        WHERE id = ? AND dataset_id = ?
+          AND identifier_screen_status IN ('pending', 'unreported')
         LIMIT 1`,
     )
       .bind(requestId, datasetId)
@@ -78,7 +106,7 @@ export function registerIdentifierScreenRoutes(webhooks: WebhookRouter): void {
       console.warn(
         `[identifier-screen-result] no pending screen for request ${requestId} (${datasetId})`,
       );
-      return c.json({ error: "No in-flight identifier screen for this request" }, 401);
+      return c.json(UNAUTHORIZED, 401);
     }
 
     const ok = await verifyIdentifierScreenCallbackToken(
@@ -90,7 +118,7 @@ export function registerIdentifierScreenRoutes(webhooks: WebhookRouter): void {
       console.warn(
         `[identifier-screen-result] callback token mismatch for request ${requestId} (${datasetId})`,
       );
-      return c.json({ error: "Invalid callback token" }, 401);
+      return c.json(UNAUTHORIZED, 401);
     }
 
     const stored = await storeScreenResult(c.env, {
@@ -113,13 +141,25 @@ export function registerIdentifierScreenRoutes(webhooks: WebhookRouter): void {
         runId ? ` run=${runId}` : ""
       }`,
     );
-    const mailed = await notifyAdminsOfScreen(c.env, requestId);
+    // The mail goes after the answer: the result is stored, and the mail lease
+    // makes the send safe to finish in the background (a send that dies is
+    // retried by the watchdog once the lease expires). The workflow's callback
+    // does not wait on Resend. A test harness has no execution context, so the
+    // send is awaited there instead.
+    const mail = notifyAdminsOfScreen(c.env, requestId);
+    let deferred = false;
+    try {
+      c.executionCtx.waitUntil(mail);
+      deferred = true;
+    } catch {
+      // No ExecutionContext (in-process tests).
+    }
+    if (!deferred) await mail;
     return c.json({
       ok: true,
       dataset_id: datasetId,
       state: stored.state,
       blocked: stored.blocked,
-      admin_email: mailed,
     });
   });
 }

@@ -63,13 +63,14 @@ async function screenRow(d1: D1Database) {
   return d1
     .prepare(
       `SELECT identifier_screen_status, identifier_screen_nonce, identifier_screen_emailed_at,
-              identifier_screen_ack_by
+              identifier_screen_mail_claimed_at, identifier_screen_ack_by
          FROM publication_requests WHERE id = 1`,
     )
     .first<{
       identifier_screen_status: string | null;
       identifier_screen_nonce: string | null;
       identifier_screen_emailed_at: string | null;
+      identifier_screen_mail_claimed_at: string | null;
       identifier_screen_ack_by: number | null;
     }>();
 }
@@ -79,7 +80,7 @@ beforeAll(() => {
     modules: true,
     script: "export default { fetch() { return new Response(null, { status: 204 }); } };",
     compatibilityDate: "2024-12-01",
-    d1Databases: ["DB1", "DB2", "DB3", "DB4"],
+    d1Databases: ["DB1", "DB2", "DB3", "DB4", "DB5", "DB6"],
   });
 });
 
@@ -132,6 +133,35 @@ describe("the screen's statements on D1", () => {
       { status: 500 },
     );
     expect((await screenRow(d1))?.identifier_screen_emailed_at).toBeNull();
+    expect((await screenRow(d1))?.identifier_screen_mail_claimed_at).toBeNull();
+  });
+
+  test("a live lease holds off a second sender; an expired one is taken", async () => {
+    const d1 = await seededD1();
+    await storeScreenResult(env(d1), {
+      requestId: 1,
+      datasetId: DATASET,
+      nonce: "n1",
+      body: cleanScreenReportBody(DATASET),
+    });
+    await d1
+      .prepare(
+        "UPDATE publication_requests SET identifier_screen_mail_claimed_at = strftime('%Y-%m-%d %H:%M:%f', 'now') WHERE id = 1",
+      )
+      .run();
+    await withFakeResend(async (calls) => {
+      expect(await notifyAdminsOfScreen(env(d1), 1)).toBe("not-claimed");
+      await d1
+        .prepare(
+          "UPDATE publication_requests SET identifier_screen_mail_claimed_at = strftime('%Y-%m-%d %H:%M:%f', 'now', '-6 minutes') WHERE id = 1",
+        )
+        .run();
+      expect(await notifyAdminsOfScreen(env(d1), 1)).toBe("sent");
+      expect(calls.filter((c) => c.path === "/emails")).toHaveLength(1);
+      const row = await screenRow(d1);
+      expect(row?.identifier_screen_emailed_at).not.toBeNull();
+      expect(row?.identifier_screen_mail_claimed_at).toBeNull();
+    });
   });
 
   test("the watchdog's two passes: overdue becomes unreported and mailed; a lost mail is retried", async () => {
@@ -145,6 +175,8 @@ describe("the screen's statements on D1", () => {
       const first = await sweepIdentifierScreens(env(d1));
       expect(first).toMatchObject({ timedOut: 1, emailed: 1, errors: 0 });
       expect((await screenRow(d1))?.identifier_screen_status).toBe("unreported");
+      // The nonce stays, so the run's late report is still accepted.
+      expect((await screenRow(d1))?.identifier_screen_nonce).toBe("n1");
 
       // Lose the mail, age the result, and the second pass sends it again.
       await d1
@@ -156,6 +188,17 @@ describe("the screen's statements on D1", () => {
       const second = await sweepIdentifierScreens(env(d1));
       expect(second).toMatchObject({ timedOut: 0, emailed: 1, errors: 0 });
       expect(calls.filter((c) => c.path === "/emails")).toHaveLength(2);
+
+      const late = await storeScreenResult(env(d1), {
+        requestId: 1,
+        datasetId: DATASET,
+        nonce: "n1",
+        body: cleanScreenReportBody(DATASET),
+      });
+      expect(late).toEqual({ stored: true, state: "clean", blocked: false });
+      const row = await screenRow(d1);
+      expect(row?.identifier_screen_emailed_at).toBeNull();
+      expect(row?.identifier_screen_nonce).toBeNull();
     });
   });
 

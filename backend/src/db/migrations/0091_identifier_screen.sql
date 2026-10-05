@@ -21,16 +21,21 @@
 --   * `identifier_screen_nonce`: the nonce signed into the callback token, the
 --     same one-shot handshake as `prescreen_nonce` (migration 0028). Cleared
 --     when a result is stored, so a replayed callback finds nothing to verify.
+--     KEPT when the watchdog marks a screen 'unreported', so a late but valid
+--     report is still accepted; a re-run replaces it.
 --   * `identifier_screen_dispatched_at`: when the screen was handed to GitHub.
---     The watchdog turns a screen still pending 40 minutes later into
+--     The watchdog turns a screen still pending 50 minutes later into
 --     'unreported', because GitHub answers a dispatch 204 even when no
 --     workflow listens for it.
 --   * `identifier_screen_at`: when the result (or the failure to get one) was
 --     recorded.
 --   * `identifier_screen_report`: the parsed report, re-serialized JSON.
---   * `identifier_screen_emailed_at`: the admin email for this result was
---     claimed. Claimed before the send and released when no recipient could be
---     reached, so a result is mailed at most once and a lost mail is retried.
+--   * `identifier_screen_emailed_at`: the admin email for this result reached at
+--     least one admin. Set only after a send that landed.
+--   * `identifier_screen_mail_claimed_at`: a five-minute lease on sending that
+--     email, taken before the send and released when nobody received it. A
+--     process that dies between claim and send, or a release that fails, leaves
+--     a lease that expires, and the watchdog retries the mail then.
 --   * `identifier_screen_ack_by` / `_ack_reason` / `_ack_at`: an admin approved
 --     over a screen that needed a person to look (users.id, their stated
 --     reason, when). No FOREIGN KEY, matching `approved_by` and `denied_by`:
@@ -50,6 +55,7 @@ ALTER TABLE publication_requests ADD COLUMN identifier_screen_dispatched_at TEXT
 ALTER TABLE publication_requests ADD COLUMN identifier_screen_at TEXT;
 ALTER TABLE publication_requests ADD COLUMN identifier_screen_report TEXT;
 ALTER TABLE publication_requests ADD COLUMN identifier_screen_emailed_at TEXT;
+ALTER TABLE publication_requests ADD COLUMN identifier_screen_mail_claimed_at TEXT;
 ALTER TABLE publication_requests ADD COLUMN identifier_screen_ack_by INTEGER;
 ALTER TABLE publication_requests ADD COLUMN identifier_screen_ack_reason TEXT;
 ALTER TABLE publication_requests ADD COLUMN identifier_screen_ack_at TEXT;

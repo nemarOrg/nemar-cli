@@ -871,8 +871,8 @@ export default {
         ),
       );
       // Epic #1610 phase 4: the identifier-screen watchdog. It rides this tick
-      // rather than the daily one because its deadline is 40 minutes: a screen
-      // that never reports must reach the admins within the hour, not the next
+      // rather than the daily one because its deadline is 50 minutes: a screen
+      // that never reports must reach the admins within about an hour, not the next
       // day. PRODUCTION-ONLY, by AGENTS.md's default for a new cron job and for
       // that rule's reason: it mails admins, and the dev worker shares the
       // `users` table with production. It is therefore not in

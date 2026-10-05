@@ -26,6 +26,7 @@ const COLUMNS: Record<string, string> = {
   identifier_screen_at: "TEXT",
   identifier_screen_report: "TEXT",
   identifier_screen_emailed_at: "TEXT",
+  identifier_screen_mail_claimed_at: "TEXT",
   identifier_screen_ack_by: "INTEGER",
   identifier_screen_ack_reason: "TEXT",
   identifier_screen_ack_at: "TEXT",

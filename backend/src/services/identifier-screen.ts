@@ -46,6 +46,7 @@ import {
   screenGate,
   stateOf,
 } from "../../../shared/identifier-screen-report.js";
+import { PUBLICATION_STEPS } from "../../../shared/publication-steps.js";
 import { auditLogStatement } from "../db/audit-log.js";
 import type { Bindings } from "../types/bindings.js";
 import { isSandboxDatasetId } from "./datasetId.js";
@@ -64,11 +65,51 @@ import {
   triggerIdentifierScreenRun,
 } from "./github.js";
 
-/** A screen still pending this long after its dispatch has not reported, and is mailed as such. */
-export const SCREEN_REPORT_DEADLINE_MINUTES = 40;
+/**
+ * A screen still pending this long after its dispatch has not reported, and is
+ * mailed as such. Above the workflow's own budget (a 35-minute script deadline
+ * inside a 45-minute job, plus queueing and callback retries), so the watchdog
+ * does not overtake a run that is merely slow. A report that arrives later still
+ * lands: marking a screen `unreported` keeps its nonce.
+ */
+export const SCREEN_REPORT_DEADLINE_MINUTES = 50;
 
-/** A stored result whose email has not gone out this long after it landed is retried by the watchdog. */
+/**
+ * How long the admin-mail lease holds: a stored result whose mail has not gone
+ * out, and whose lease is free or this old, is retried by the watchdog. Also the
+ * grace the watchdog gives the path that stored a result before it steps in.
+ */
 export const SCREEN_EMAIL_RETRY_AFTER_MINUTES = 5;
+
+/**
+ * The steps an approval runs BEFORE it changes anything: validation only. The
+ * first step after them, `s3_public_read`, is the first mutation (it makes the
+ * data publicly readable; shared/publication-steps.ts says so where it orders
+ * it). A resumed approval skips the identifier screen gate only once a step
+ * outside this list has completed: from then on the publication is underway and
+ * its own later steps commit to `main`, so a head check would refuse it halfway,
+ * stranding a half-published dataset. Before then nothing is public, and a
+ * resume, or a re-dispatch, is gated exactly like a fresh run, because the
+ * depositor may have pushed new content after the earlier attempt stopped.
+ */
+export const PRE_PUBLICATION_STEPS: readonly string[] = PUBLICATION_STEPS.slice(
+  0,
+  PUBLICATION_STEPS.indexOf("s3_public_read"),
+);
+
+/** True once an approval has completed a step that changed something (see {@link PRE_PUBLICATION_STEPS}). */
+export function hasStartedPublishing(stepsCompletedJson: string | null | undefined): boolean {
+  let steps: unknown;
+  try {
+    steps = JSON.parse(stepsCompletedJson || "[]");
+  } catch {
+    return false;
+  }
+  return (
+    Array.isArray(steps) &&
+    steps.some((s) => typeof s === "string" && !PRE_PUBLICATION_STEPS.includes(s))
+  );
+}
 
 /**
  * Rows the watchdog handles per tick, in EACH of its two passes. Each row costs a
@@ -89,7 +130,9 @@ export const IDENTIFIER_SCREEN_CALLBACK_PATH = "/webhooks/identifier-screen-resu
  * `isSandboxDatasetId` states, used by name so the exemption reads as a policy.
  */
 export function isScreenExempt(datasetId: string): boolean {
-  return isSandboxDatasetId(datasetId);
+  // A well-formed `xx` id only: anything else is screened, never waved through
+  // because it happens to start with the letters.
+  return /^xx\d{6}$/.test(datasetId) && isSandboxDatasetId(datasetId);
 }
 
 /** What an exempt dataset's email and status say about the screen. Worker-fixed words. */
@@ -111,18 +154,20 @@ export const RESET_SCREEN_COLUMNS_SQL = `identifier_screen_status = NULL,
        identifier_screen_at = NULL,
        identifier_screen_report = NULL,
        identifier_screen_emailed_at = NULL,
+       identifier_screen_mail_claimed_at = NULL,
        identifier_screen_ack_by = NULL,
        identifier_screen_ack_reason = NULL,
        identifier_screen_ack_at = NULL`;
 
 /**
  * The admin re-run's claim guard: only an active request that can still be
- * screened (`requested` or `blocked`), and never over a screen dispatched less
- * than {@link SCREEN_REPORT_DEADLINE_MINUTES} ago that has not reported, which
- * would orphan a run that may still answer. NULL-safe: a pending screen with no
+ * screened (`requested`, `blocked`, or `approving` before it started publishing,
+ * which the route checks first), and never over a screen dispatched less than
+ * {@link SCREEN_REPORT_DEADLINE_MINUTES} ago that has not reported, which would
+ * orphan a run that may still answer. NULL-safe: a pending screen with no
  * dispatch time is overdue. A module constant, never input.
  */
-export const RERUN_GUARD_SQL = `AND status IN ('requested', 'blocked')
+export const RERUN_GUARD_SQL = `AND status IN ('requested', 'blocked', 'approving')
          AND NOT (COALESCE(identifier_screen_status, '') = 'pending'
                   AND COALESCE(identifier_screen_dispatched_at, '')
                       >= datetime('now', '-${SCREEN_REPORT_DEADLINE_MINUTES} minutes'))`;
@@ -236,19 +281,30 @@ export async function mailPublicationRequest(
 
 export type NotifyOutcome = "sent" | "not-claimed" | "undelivered";
 
+/** A lease value: SQLite's clock to the millisecond, so two claims never compare equal. */
+const LEASE_NOW_SQL = "strftime('%Y-%m-%d %H:%M:%f', 'now')";
+/** The instant before which a lease has expired. */
+const LEASE_EXPIRED_SQL = `strftime('%Y-%m-%d %H:%M:%f', 'now', '-${SCREEN_EMAIL_RETRY_AFTER_MINUTES} minutes')`;
+
 /**
  * Mail the admins the publication request with its screen result, at most once
- * per result, and never lose it.
+ * per result in the normal case, and never lose it.
  *
- * The claim comes FIRST: one conditional UPDATE stamps `identifier_screen_emailed_at`
- * only while it is NULL, the result is in (not pending, not NULL) and the request
- * is still active, so of two triggers racing for the same result (the callback
- * and the watchdog, or two watchdog ticks) exactly one sends. When no recipient
- * could be reached the claim is RELEASED, compare-and-set on the value this call
- * wrote so it can never release somebody else's, and the watchdog's second pass
- * retries it. A send that reached at least one admin keeps the claim.
+ * A LEASE, not a stamp: one conditional UPDATE takes
+ * `identifier_screen_mail_claimed_at` only while the mail has not gone out
+ * (`emailed_at` NULL), the lease is free or expired, the result is in (not
+ * pending, not NULL) and the request is still active. Of two triggers racing for
+ * one result (the callback and the watchdog, or two ticks) exactly one holds it.
+ * After the send:
+ *   - at least one admin accepted it: `emailed_at` is set and the lease cleared;
+ *   - nobody did: the lease is released, and the watchdog retries.
+ * Both are compare-and-set on the lease this call took, so neither can touch a
+ * row that has since been re-screened (a reset clears the lease). A process that
+ * dies between claim and send, or a write that fails after it, leaves a lease
+ * that expires after {@link SCREEN_EMAIL_RETRY_AFTER_MINUTES}, and the watchdog
+ * takes it then. That last case can mail twice; losing the mail is the worse one.
  *
- * Exported for the route and the watchdog; it never throws.
+ * Exported for the routes and the watchdog; it never throws.
  */
 export async function notifyAdminsOfScreen(
   env: Bindings,
@@ -267,14 +323,16 @@ export async function notifyAdminsOfScreen(
     claim = await db
       .prepare(
         `UPDATE publication_requests
-            SET identifier_screen_emailed_at = strftime('%Y-%m-%d %H:%M:%f', 'now')
+            SET identifier_screen_mail_claimed_at = ${LEASE_NOW_SQL}
           WHERE id = ?
             AND identifier_screen_emailed_at IS NULL
+            AND (identifier_screen_mail_claimed_at IS NULL
+                 OR identifier_screen_mail_claimed_at < ${LEASE_EXPIRED_SQL})
             AND identifier_screen_status IS NOT NULL
             AND identifier_screen_status != 'pending'
             AND status IN ('requested', 'blocked')
-          RETURNING identifier_screen_emailed_at AS claim, dataset_id, requested_by, anonymous,
-                    identifier_screen_status, identifier_screen_report`,
+          RETURNING identifier_screen_mail_claimed_at AS claim, dataset_id, requested_by,
+                    anonymous, identifier_screen_status, identifier_screen_report`,
       )
       .bind(requestId)
       .first();
@@ -308,27 +366,91 @@ export async function notifyAdminsOfScreen(
       `[identifier-screen] admin email for request ${requestId} failed: ${errorText(err)}`,
     );
   }
-  if (delivered > 0) return "sent";
 
   try {
     await db
       .prepare(
-        `UPDATE publication_requests SET identifier_screen_emailed_at = NULL
-          WHERE id = ? AND identifier_screen_emailed_at = ?`,
+        delivered > 0
+          ? `UPDATE publication_requests
+                SET identifier_screen_emailed_at = datetime('now'),
+                    identifier_screen_mail_claimed_at = NULL
+              WHERE id = ? AND identifier_screen_mail_claimed_at = ?`
+          : `UPDATE publication_requests SET identifier_screen_mail_claimed_at = NULL
+              WHERE id = ? AND identifier_screen_mail_claimed_at = ?`,
       )
       .bind(requestId, claim.claim)
       .run();
   } catch (err) {
-    // The claim stays, so this result is not retried. Loud, because it is the
-    // one way a result can go unmailed.
+    // The lease stays and expires; the watchdog then retries (and, if the send
+    // had landed, mails twice rather than not at all).
     console.error(
-      `[identifier-screen] RELEASE FAILED for request ${requestId}: its result was not mailed and will not be retried: ${errorText(err)}`,
+      `[identifier-screen] could not record the admin email for request ${requestId}; the lease will expire and be retried: ${errorText(err)}`,
     );
   }
+  if (delivered > 0) return "sent";
   console.warn(
     `[identifier-screen] admin email for request ${requestId} reached nobody; released for retry`,
   );
   return "undelivered";
+}
+
+/**
+ * Mail the admins a request whose screen could not even be recorded (a database
+ * error before the screen's own claim committed): the request exists, so the
+ * admins must hear about it, with the screen stated as NOT RUN. No lease: there
+ * is no stored result for one to protect, and the approval gate refuses the
+ * request until the screen is re-run.
+ */
+export async function mailScreenNotStarted(env: Bindings, requestId: number): Promise<void> {
+  try {
+    const row = await env.DB.prepare(
+      `SELECT pr.dataset_id, pr.anonymous, u.username, pr.requested_by
+         FROM publication_requests pr JOIN users u ON u.id = pr.requested_by
+        WHERE pr.id = ?`,
+    )
+      .bind(requestId)
+      .first<{
+        dataset_id: string;
+        anonymous: number | null;
+        username: string | null;
+        requested_by: number;
+      }>();
+    if (!row) return;
+    await mailPublicationRequest(env, {
+      datasetId: row.dataset_id,
+      username: row.username ?? `user ${row.requested_by}`,
+      anonymous: row.anonymous === 1,
+      screen: screenEmailSection(row.dataset_id, null, null),
+    });
+  } catch (err) {
+    console.error(
+      `[identifier-screen] NOT RUN mail for request ${requestId} failed: ${errorText(err)}`,
+    );
+  }
+}
+
+/**
+ * Start a request's screen and mail what the admins must hear now: a screen
+ * that could not start is mailed with its result, one whose start threw before
+ * anything was recorded is mailed as NOT RUN. A dispatched screen is mailed when
+ * it reports, and an exempt one is left to the caller. Never throws.
+ */
+export async function startScreenAndNotify(
+  env: Bindings,
+  args: { requestId: number; datasetId: string; githubRepo: string | null },
+): Promise<StartScreenOutcome | { kind: "threw" }> {
+  let started: StartScreenOutcome | null;
+  try {
+    started = await startIdentifierScreen(env, args);
+  } catch (err) {
+    console.error(
+      `[identifier-screen] starting the screen of request ${args.requestId} threw: ${errorText(err)}`,
+    );
+    await mailScreenNotStarted(env, args.requestId);
+    return { kind: "threw" };
+  }
+  if (started?.kind === "failed") await notifyAdminsOfScreen(env, args.requestId);
+  return started ?? { kind: "threw" };
 }
 
 // ============================================================================
@@ -525,22 +647,39 @@ export async function storeScreenResult(
   }
   const state = stateOf(report);
 
+  // A late report is a real report: a screen the watchdog marked `unreported`
+  // keeps its nonce, so the run it was issued for can still answer. Its mail is
+  // re-armed (emailed and lease cleared), because the mail already sent said it
+  // did not report. A re-run replaces the nonce, so an older run cannot.
   const res = await db
     .prepare(
       `UPDATE publication_requests
           SET identifier_screen_status = ?, identifier_screen_report = ?,
-              identifier_screen_at = datetime('now'), identifier_screen_nonce = NULL
-        WHERE id = ? AND identifier_screen_status = 'pending' AND identifier_screen_nonce = ?`,
+              identifier_screen_at = datetime('now'), identifier_screen_nonce = NULL,
+              identifier_screen_emailed_at = NULL, identifier_screen_mail_claimed_at = NULL
+        WHERE id = ? AND identifier_screen_status IN ('pending', 'unreported')
+          AND identifier_screen_nonce = ?`,
     )
     .bind(state, JSON.stringify(report), args.requestId, args.nonce)
     .run();
   if ((res.meta.changes ?? 0) !== 1) return { stored: false };
 
-  // A direct identifier blocks the request (and tells the depositor); every
-  // other result leaves it where it is.
+  // A direct identifier blocks the request (and tells the depositor). A clear
+  // result lifts a block that an earlier screen's findings put there (an admin
+  // re-ran it after the data was fixed). Anything else leaves it where it is.
   let blocked = false;
-  if (screenGate(state) === "blocks") {
+  const gate = screenGate(state);
+  if (gate === "blocks") {
     blocked = await blockForFindings(env, args.requestId, args.datasetId, report);
+  } else if (gate === "clear") {
+    await db
+      .prepare(
+        `UPDATE publication_requests
+            SET status = 'requested', block_reason = NULL, updated_at = datetime('now')
+          WHERE id = ? AND status = 'blocked' AND block_reason = ?`,
+      )
+      .bind(args.requestId, IDENTIFIER_SCREEN_BLOCK_REASON)
+      .run();
   }
   return { stored: true, state, blocked };
 }
@@ -626,12 +765,17 @@ export const OVERDUE_SCREENS_SQL = `SELECT id FROM publication_requests
           OR identifier_screen_dispatched_at < datetime('now', '-${SCREEN_REPORT_DEADLINE_MINUTES} minutes'))
    ORDER BY id LIMIT ?`;
 
-/** Stored results on active requests whose admin email never went out. */
+/**
+ * Stored results on active requests whose admin email never went out, and whose
+ * mail lease is free or expired (a sender that died, or a release that failed).
+ */
 export const UNMAILED_SCREENS_SQL = `SELECT id FROM publication_requests
    WHERE status IN ('requested', 'blocked')
      AND identifier_screen_status IS NOT NULL
      AND identifier_screen_status != 'pending'
      AND identifier_screen_emailed_at IS NULL
+     AND (identifier_screen_mail_claimed_at IS NULL
+          OR identifier_screen_mail_claimed_at < ${LEASE_EXPIRED_SQL})
      AND COALESCE(identifier_screen_at, identifier_screen_dispatched_at, '')
          < datetime('now', '-${SCREEN_EMAIL_RETRY_AFTER_MINUTES} minutes')
    ORDER BY id LIMIT ?`;
@@ -685,9 +829,11 @@ export async function sweepIdentifierScreens(env: Bindings): Promise<ScreenSweep
     try {
       const res = await db
         .prepare(
+          // The nonce is KEPT: a report that arrives after this is still the
+          // run's own answer, and storeScreenResult accepts it.
           `UPDATE publication_requests
               SET identifier_screen_status = 'unreported', identifier_screen_report = ?,
-                  identifier_screen_at = datetime('now'), identifier_screen_nonce = NULL
+                  identifier_screen_at = datetime('now')
             WHERE id = ? AND identifier_screen_status = 'pending'
               AND (identifier_screen_dispatched_at IS NULL
                    OR identifier_screen_dispatched_at < datetime('now', '-${SCREEN_REPORT_DEADLINE_MINUTES} minutes'))`,
@@ -743,16 +889,22 @@ interface GateRow {
   identifier_screen_status: string | null;
   identifier_screen_report: string | null;
   identifier_screen_ack_at: string | null;
+  identifier_screen_ack_by: number | null;
 }
 
 /**
  * The state half of the gate: no network, no writes. `acknowledging` says the
- * caller carries a reason this call may record.
+ * caller carries a reason this call may record. A reason already recorded on
+ * the request satisfies the gate only for the admin who recorded it
+ * (`approverId`, the approver the run is attributed to): a web click records
+ * the clicker's reason and the executor's run is attributed to that clicker, so
+ * it passes, while a different admin approving later must state their own.
  */
 export function screenStateGate(
   datasetId: string,
   row: GateRow,
   acknowledging: boolean,
+  approverId: number,
 ): ScreenGateOutcome {
   const view = screenView(datasetId, row.identifier_screen_status, row.identifier_screen_report);
   if (view.state === "exempt") return { ok: true };
@@ -765,7 +917,12 @@ export function screenStateGate(
     case "clear":
       return { ok: true };
     case "acknowledge":
-      if (acknowledging || row.identifier_screen_ack_at !== null) return { ok: true };
+      if (
+        acknowledging ||
+        (row.identifier_screen_ack_at !== null && row.identifier_screen_ack_by === approverId)
+      ) {
+        return { ok: true };
+      }
       return refuse(
         `${view.headline}. An admin must look at what the screen reported and approve with a recorded reason: nemar admin publish approve ${datasetId} --acknowledge-identifier-screen "<reason>".`,
       );
@@ -911,16 +1068,17 @@ export async function checkApprovalScreenGate(
 ): Promise<ScreenGateOutcome> {
   if (isScreenExempt(args.datasetId)) return { ok: true };
   const row = await env.DB.prepare(
-    `SELECT identifier_screen_status, identifier_screen_report, identifier_screen_ack_at
+    `SELECT identifier_screen_status, identifier_screen_report, identifier_screen_ack_at,
+            identifier_screen_ack_by
        FROM publication_requests WHERE id = ?`,
   )
     .bind(args.requestId)
     .first<GateRow>();
   if (!row) {
-    return screenStateGate(args.datasetId, emptyGateRow(), false);
+    return screenStateGate(args.datasetId, emptyGateRow(), false, args.adminUserId);
   }
   const acknowledging = typeof args.acknowledgment === "string";
-  const state = screenStateGate(args.datasetId, row, acknowledging);
+  const state = screenStateGate(args.datasetId, row, acknowledging, args.adminUserId);
   if (!state.ok) return state;
   const head = await verifyScreenHead(env, args.datasetId, row, args.pat);
   if (!head.ok) return head;
@@ -956,6 +1114,7 @@ function emptyGateRow(): GateRow {
     identifier_screen_status: null,
     identifier_screen_report: null,
     identifier_screen_ack_at: null,
+    identifier_screen_ack_by: null,
   };
 }
 

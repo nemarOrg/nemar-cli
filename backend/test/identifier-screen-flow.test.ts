@@ -27,6 +27,7 @@ import {
 } from "../src/services/github";
 import {
   SCREEN_REPORT_DEADLINE_MINUTES,
+  isScreenExempt,
   notifyAdminsOfScreen,
   sweepIdentifierScreens,
 } from "../src/services/identifier-screen";
@@ -212,6 +213,7 @@ interface ScreenRow {
   identifier_screen_at: string | null;
   identifier_screen_report: string | null;
   identifier_screen_emailed_at: string | null;
+  identifier_screen_mail_claimed_at: string | null;
   identifier_screen_ack_by: number | null;
   identifier_screen_ack_reason: string | null;
   identifier_screen_ack_at: string | null;
@@ -222,7 +224,8 @@ function row(id = DATASET): ScreenRow {
     .query<ScreenRow, [string]>(
       `SELECT id, status, block_reason, identifier_screen_status, identifier_screen_nonce,
               identifier_screen_dispatched_at, identifier_screen_at, identifier_screen_report,
-              identifier_screen_emailed_at, identifier_screen_ack_by,
+              identifier_screen_emailed_at, identifier_screen_mail_claimed_at,
+              identifier_screen_ack_by,
               identifier_screen_ack_reason, identifier_screen_ack_at
          FROM publication_requests WHERE dataset_id = ? ORDER BY id DESC LIMIT 1`,
     )
@@ -479,7 +482,7 @@ describe("every way of not getting a report still mails the admins, and says so"
     });
   });
 
-  test("the workflow never reports: the watchdog marks it unreported and mails it", async () => {
+  test("the workflow never reports: the watchdog marks it unreported and mails it; a late report still lands", async () => {
     await withFakeResend(async (calls) => {
       await requestPublication();
       const r0 = row();
@@ -498,25 +501,44 @@ describe("every way of not getting a report still mails the admins, and says so"
       expect(result).toMatchObject({ timedOut: 1, emailed: 1, errors: 0, skipped: false });
       const r = row();
       expect(r.identifier_screen_status).toBe("unreported");
-      expect(r.identifier_screen_nonce).toBeNull();
+      // The nonce is kept, so the run can still answer.
+      expect(r.identifier_screen_nonce).toBe(r0.identifier_screen_nonce);
       expect(JSON.parse(r.identifier_screen_report ?? "{}").error).toBe("no-report-in-time");
       const mail = sendsTo(calls, ADMIN_EMAIL);
       expect(mail).toHaveLength(1);
       expect(mail[0].subject).toEndWith("IDENTIFIER SCREEN: DID NOT REPORT");
 
-      // A late callback finds no pending screen: 401, nothing overwritten, no mail.
+      // The next tick does not mail it again.
+      result = await sweepIdentifierScreens(env());
+      expect(result.emailed + result.timedOut).toBe(0);
+
+      // A late but valid report is the run's own answer: stored, and mailed,
+      // because the mail already sent said it did not report.
       const late = await postCallback(
         { dataset_id: DATASET, request_id: r0.id, report: cleanScreenReportBody(DATASET) },
         dispatches[0].client_payload.callback_token,
       );
-      expect(late.status).toBe(401);
-      expect(row().identifier_screen_status).toBe("unreported");
-      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(1);
+      expect(late.status).toBe(200);
+      expect(row().identifier_screen_status).toBe("clean");
+      expect(row().identifier_screen_nonce).toBeNull();
+      const mails = sendsTo(calls, ADMIN_EMAIL);
+      expect(mails).toHaveLength(2);
+      expect(mails[1].subject).toEndWith("IDENTIFIER SCREEN: clean");
 
-      // And the next tick does not mail it again.
-      result = await sweepIdentifierScreens(env());
-      expect(result.emailed + result.timedOut).toBe(0);
+      // And a replay of it is refused.
+      const replay = await postCallback(
+        { dataset_id: DATASET, request_id: r0.id, report: cleanScreenReportBody(DATASET) },
+        dispatches[0].client_payload.callback_token,
+      );
+      expect(replay.status).toBe(401);
+      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(2);
     });
+  });
+
+  test("the watchdog's deadline outlasts the workflow's own 45-minute job timeout", () => {
+    // Overtaking a run that is merely slow mails a false DID NOT REPORT; the
+    // late report would still land, but the admin would have been told wrong.
+    expect(SCREEN_REPORT_DEADLINE_MINUTES).toBeGreaterThan(45);
   });
 
   test("a pending row with no dispatch time is overdue, not stuck forever", async () => {
@@ -545,12 +567,13 @@ describe("the email is sent at most once per result, and never lost", () => {
           { dataset_id: DATASET, request_id: r0.id, report: cleanScreenReportBody(DATASET) },
           token,
         );
-        expect(((await res.json()) as { admin_email: string }).admin_email).toBe("undelivered");
+        expect(res.status).toBe(200);
       },
       { status: 500 },
     );
     expect(row().identifier_screen_status).toBe("clean");
     expect(row().identifier_screen_emailed_at).toBeNull();
+    expect(row().identifier_screen_mail_claimed_at).toBeNull();
 
     await withFakeResend(async (calls) => {
       // Too fresh: the path that stored it gets its chance first.
@@ -592,7 +615,7 @@ describe("the email is sent at most once per result, and never lost", () => {
     });
   });
 
-  test("a callback that loses the race to the watchdog stores nothing and mails nothing", async () => {
+  test("a report racing the watchdog is still stored, and mailed after the DID NOT REPORT mail", async () => {
     await withFakeResend(async (calls) => {
       await requestPublication();
       const r0 = row();
@@ -623,11 +646,118 @@ describe("the email is sent at most once per result, and never lost", () => {
       );
       expect(fired).toBe(true);
       expect(res.status).toBe(200);
-      expect(((await res.json()) as { duplicate?: boolean }).duplicate).toBe(true);
-      expect(row().identifier_screen_status).toBe("unreported");
+      expect(row().identifier_screen_status).toBe("clean");
       const mails = sendsTo(calls, ADMIN_EMAIL);
-      expect(mails).toHaveLength(1);
-      expect(mails[0].subject).toEndWith("DID NOT REPORT");
+      expect(mails.map((m) => m.subject.split(" - ")[1])).toEqual([
+        "IDENTIFIER SCREEN: DID NOT REPORT",
+        "IDENTIFIER SCREEN: clean",
+      ]);
+    });
+  });
+
+  test("two copies of one callback store once and mail once", async () => {
+    await withFakeResend(async (calls) => {
+      await requestPublication();
+      const r0 = row();
+      const token = dispatches[0].client_payload.callback_token;
+      const racing = { ...env(), DB: yieldingD1(realD1(db)) } as Bindings;
+      const body = {
+        dataset_id: DATASET,
+        request_id: r0.id,
+        report: cleanScreenReportBody(DATASET),
+      };
+      const [a, b] = await Promise.all([
+        postCallback(body, token, racing),
+        postCallback(body, token, racing),
+      ]);
+      const texts = [await a.text(), await b.text()];
+      // One stores; the other loses the conditional UPDATE (or finds the nonce gone).
+      expect(texts.filter((t) => t.includes('"state":"clean"'))).toHaveLength(1);
+      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(1);
+    });
+  });
+
+  test("a sender that died after its claim: the lease holds, then expires, and the watchdog mails", async () => {
+    await requestPublication();
+    const r0 = row();
+    db.run(
+      `UPDATE publication_requests SET identifier_screen_status = 'clean',
+              identifier_screen_report = ?, identifier_screen_nonce = NULL,
+              identifier_screen_at = datetime('now', '-10 minutes'),
+              identifier_screen_mail_claimed_at = strftime('%Y-%m-%d %H:%M:%f', 'now')
+        WHERE id = ?`,
+      [JSON.stringify(cleanScreenReportBody(DATASET)), r0.id],
+    );
+    await withFakeResend(async (calls) => {
+      // A live lease: nobody else sends.
+      expect(await notifyAdminsOfScreen(env(), r0.id)).toBe("not-claimed");
+      expect((await sweepIdentifierScreens(env())).emailed).toBe(0);
+      expect(calls).toHaveLength(0);
+
+      // The lease outlives its holder: the watchdog takes it and sends.
+      db.run(
+        `UPDATE publication_requests
+            SET identifier_screen_mail_claimed_at = strftime('%Y-%m-%d %H:%M:%f', 'now', '-6 minutes')
+          WHERE id = ?`,
+        [r0.id],
+      );
+      expect((await sweepIdentifierScreens(env())).emailed).toBe(1);
+      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(1);
+      expect(row().identifier_screen_emailed_at).not.toBeNull();
+      expect(row().identifier_screen_mail_claimed_at).toBeNull();
+    });
+  });
+
+  test("a send that reached some admins counts as sent and is not retried", async () => {
+    // Outside production, only an allowlisted address is delivered to: one of
+    // the two admins receives it, the other is fenced.
+    const SECOND = "screenadmin2@example.org";
+    await seedUser(
+      "screenadmin2",
+      "admin",
+      SECOND,
+      "screen-admin2-key-0123456789abcdef0123456789ab",
+    );
+    envOverrides = {
+      ENVIRONMENT: "staging",
+      DEV_ADMIN_NOTIFICATIONS: "1",
+      DEV_EMAIL_ALLOWLIST: ADMIN_EMAIL,
+    } as Partial<Bindings>;
+    await requestPublication();
+    const r0 = row();
+    db.run(
+      `UPDATE publication_requests SET identifier_screen_status = 'clean',
+              identifier_screen_report = ?, identifier_screen_nonce = NULL WHERE id = ?`,
+      [JSON.stringify(cleanScreenReportBody(DATASET)), r0.id],
+    );
+    await withFakeResend(async (calls) => {
+      expect(await notifyAdminsOfScreen(env(), r0.id)).toBe("sent");
+      expect(sendsTo(calls, ADMIN_EMAIL)).toHaveLength(1);
+      expect(sendsTo(calls, SECOND)).toHaveLength(0);
+      expect(row().identifier_screen_emailed_at).not.toBeNull();
+      expect(await notifyAdminsOfScreen(env(), r0.id)).toBe("not-claimed");
+    });
+  });
+
+  test("a screen start that throws before anything is recorded still mails NOT RUN", async () => {
+    // The database refuses the pending claim: no screen row exists, but the
+    // request does, and the admins must hear about it.
+    const failing = {
+      ...env(),
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (sql.includes("identifier_screen_status = 'pending', identifier_screen_nonce = ?")) {
+          throw new Error("D1_ERROR: simulated");
+        }
+      }),
+    } as Bindings;
+    await withFakeResend(async (calls) => {
+      const res = await requestPublication(DATASET, failing);
+      expect(res.status).toBe(200);
+      expect(dispatches).toHaveLength(0);
+      const mail = sendsTo(calls, ADMIN_EMAIL);
+      expect(mail).toHaveLength(1);
+      expect(mail[0].subject).toEndWith("IDENTIFIER SCREEN: NOT RUN for this request");
+      expect(mail[0].html).toContain("Approval is held until the screen is re-run");
     });
   });
 
@@ -708,6 +838,46 @@ describe("the callback admits only the token minted for that row", () => {
     expect(row().identifier_screen_status).toBe("review");
   });
 
+  test("no in-flight screen and a bad token are refused with the same bytes", async () => {
+    await requestPublication();
+    const r0 = row();
+    const body = { dataset_id: DATASET, request_id: r0.id, report: cleanScreenReportBody(DATASET) };
+    const badToken = await postCallback(body, "0".repeat(64));
+    const noScreen = await postCallback({ ...body, request_id: r0.id + 1000 }, "0".repeat(64));
+    expect(badToken.status).toBe(401);
+    expect(noScreen.status).toBe(401);
+    expect(await badToken.text()).toBe(await noScreen.text());
+  });
+
+  test("a body over 256 KB is refused before it is parsed, by its declared and its real length", async () => {
+    await requestPublication();
+    const r0 = row();
+    const token = dispatches[0].client_payload.callback_token;
+    const huge = JSON.stringify({
+      dataset_id: DATASET,
+      request_id: r0.id,
+      report: cleanScreenReportBody(DATASET),
+      pad: "x".repeat(300 * 1024),
+    });
+    expect((await postCallback(huge, token)).status).toBe(413);
+    // A declared length that lies low does not let it through either.
+    const lying = await app.request(
+      "/webhooks/identifier-screen-result",
+      {
+        method: "POST",
+        headers: {
+          "X-Webhook-Token": token,
+          "Content-Type": "application/json",
+          "Content-Length": "100",
+        },
+        body: huge,
+      },
+      env(),
+    );
+    expect(lying.status).toBe(413);
+    expect(row().identifier_screen_status).toBe("pending");
+  });
+
   test("no token, or the wrong one, is 401", async () => {
     await requestPublication();
     const r0 = row();
@@ -776,6 +946,29 @@ describe("no value reaches D1, a mail, a log line or a response except through t
             scan: { ...scan, incomplete_reasons: [`JOHN ${LEAK}`] },
           },
           { ...cleanScreenReportBody(DATASET), scan: { ...scan, files: { total: `${LEAK}` } } },
+          // Lowercase, hyphenated: the shape a pattern-based vocabulary let through.
+          {
+            ...cleanScreenReportBody(DATASET),
+            scan: {
+              ...scan,
+              status: "unchecked",
+              incomplete: true,
+              incomplete_reasons: [`john-${LEAK.toLowerCase()}`],
+            },
+          },
+          {
+            ...cleanScreenReportBody(DATASET),
+            scan: { ...scan, read_failures: { [`edf/john-${LEAK.toLowerCase()}`]: 1 } },
+          },
+          // A status cleaner than its own counts: "clean" with a name finding.
+          {
+            ...cleanScreenReportBody(DATASET),
+            scan: {
+              ...scan,
+              findings_by_kind: { "edf-patient-name": 3 },
+              edf_bdf_files_flagged: 3,
+            },
+          },
           { version: 1, scanner: null, head: null, error: `JOHN ${LEAK}` },
           `JOHN ${LEAK}`,
         ];
@@ -822,6 +1015,7 @@ describe("no value reaches D1, a mail, a log line or a response except through t
         responses.join("\n"),
       ].join("\n");
       expect(everything).not.toContain(LEAK);
+      expect(everything).not.toContain(`john-${LEAK.toLowerCase()}`);
       // The control: the capture did see the traffic it claims to have checked.
       expect(logged.join("\n")).toContain("outside the contract");
       expect(calls.length).toBeGreaterThan(0);
@@ -870,6 +1064,28 @@ describe("status surfaces show describeScreen's words and nothing stored", () =>
         "Identifier screen: running",
       );
     });
+  });
+
+  test("the uploader's status never carries an admin's acknowledgment", async () => {
+    await requestPublication();
+    const REASON = "Reviewed by the curator: the free text is a device serial.";
+    db.run(
+      `UPDATE publication_requests SET identifier_screen_status = 'review',
+              identifier_screen_report = ?, identifier_screen_ack_by = 2,
+              identifier_screen_ack_reason = ?, identifier_screen_ack_at = datetime('now')
+        WHERE dataset_id = ?`,
+      [JSON.stringify(cleanScreenReportBody(DATASET, SCREENED_HEAD, "review")), REASON, DATASET],
+    );
+    const res = await app.request(
+      `/datasets/${DATASET}/publish/status`,
+      { headers: { Authorization: `Bearer ${OWNER_KEY}` } },
+      env(),
+    );
+    const text = await res.text();
+    expect(res.status).toBe(200);
+    expect(text).toContain("needs review");
+    expect(text).not.toContain(REASON);
+    expect(text).not.toContain("identifier_screen_ack");
   });
 
   test("a stored value that is not a state reads as NOT RUN, never clean", async () => {
@@ -988,6 +1204,28 @@ describe("re-requesting a blocked request resets the screen", () => {
     expect(r.identifier_screen_ack_by).toBeNull();
     expect(r.identifier_screen_ack_at).toBeNull();
     expect(r.identifier_screen_emailed_at).toBeNull();
+  });
+});
+
+describe("what the screen exempts", () => {
+  test("only a well-formed xx id is exempt; OpenNeuro mirrors are screened", () => {
+    // `on` datasets are screened like any other. The importer requests and
+    // approves in one run and will meet the gate; making it scrub in place and
+    // wait for the screen is Phase 7's (#1618), not an exemption here.
+    expect(isScreenExempt("xx000001")).toBe(true);
+    expect(isScreenExempt("xx099950")).toBe(true);
+    for (const id of [
+      "on000001",
+      "nm000001",
+      "xx00001",
+      "xxx00001",
+      "xx0000011",
+      "XX000001",
+      "nmxx0001",
+      "",
+    ]) {
+      expect(isScreenExempt(id)).toBe(false);
+    }
   });
 });
 
