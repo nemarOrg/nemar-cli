@@ -1265,13 +1265,21 @@ describe("the callback: retry rules", () => {
   );
 
   test(
-    "a 401 is retried (a token-rotation race), a 403 and a 404 are final",
+    "401, 408 and 429 are retried (a rotation race, a timeout, a rate limit)",
     async () => {
-      const rotation = await post([401, 200]);
-      expect(rotation.attempts).toBe(2);
-      expect(rotation.result.code).toBe(0);
+      for (const status of [401, 408, 429]) {
+        const retried = await post([status, 200]);
+        expect(retried.attempts).toBe(2);
+        expect(retried.result.code).toBe(0);
+      }
+    },
+    T,
+  );
 
-      for (const status of [400, 403, 404, 409, 422]) {
+  test(
+    "any other 4xx and any redirect are final",
+    async () => {
+      for (const status of [400, 403, 404, 409, 422, 301, 302, 307, 308]) {
         const final = await post([status, 200]);
         expect(final.attempts).toBe(1);
         expect(final.result.code).toBe(1);
@@ -1281,10 +1289,20 @@ describe("the callback: retry rules", () => {
   );
 
   test(
-    "three failures are undelivered and exit 1; the token header is on every attempt",
+    "a Worker that comes back on the sixth attempt is delivered; six failures are not",
     async () => {
-      const { result, attempts } = await post([500, 502, 503, 200]);
-      expect(attempts).toBe(3);
+      const late = await post([500, 502, 503, 504, 500, 200]);
+      expect(late.attempts).toBe(6);
+      expect(late.result.code).toBe(0);
+    },
+    T,
+  );
+
+  test(
+    "six failures are undelivered and exit 1; the token header is on every attempt",
+    async () => {
+      const { result, attempts } = await post([500, 502, 503, 504, 500, 502, 200]);
+      expect(attempts).toBe(6);
       expect(result.code).toBe(1);
       expect(callback.posted.every((p) => p.token === TOKEN)).toBe(true);
       // The report is still on disk for whoever reads the run.
@@ -1294,16 +1312,32 @@ describe("the callback: retry rules", () => {
   );
 
   test(
-    "a callback nobody listens on is three attempts and exit 1, not a hang",
+    "a callback nobody listens on is six attempts and exit 1, not a hang",
     async () => {
       const { result } = await post([], {
         env: { CALLBACK_URL: "http://127.0.0.1:9/webhooks/identifier-screen" },
       });
       expect(result.code).toBe(1);
-      expect(result.stdout.match(/callback attempt \d: HTTP 0/g)).toHaveLength(3);
+      expect(result.stdout.match(/callback attempt \d: HTTP 0/g)).toHaveLength(6);
     },
     T,
   );
+
+  test("the waits between attempts are 5, 10, 20, 30 and 45 seconds", async () => {
+    fresh();
+    callback.statuses = [500, 500, 500, 500, 500, 500];
+    const waits: number[] = [];
+    const delivered = await deliverReport({
+      url: callback.url,
+      token: TOKEN,
+      body: {},
+      backoffMs: 5000,
+      sleep: async (ms) => void waits.push(ms),
+    });
+    expect(delivered).toBe(false);
+    expect(callback.posted).toHaveLength(6);
+    expect(waits).toEqual([5000, 10_000, 20_000, 30_000, 45_000]);
+  });
 
   test(
     "--no-callback and an empty CALLBACK_URL post nothing and exit 0",
@@ -2054,6 +2088,7 @@ describe("the prefetch of blobs the clone left behind", () => {
 describe("deliverReport", () => {
   test("does not follow a redirect, so the token goes where it was sent and nowhere else", async () => {
     let followed = false;
+    let asked = 0;
     const target = Bun.serve({
       port: 0,
       hostname: "127.0.0.1",
@@ -2065,11 +2100,13 @@ describe("deliverReport", () => {
     const redirector = Bun.serve({
       port: 0,
       hostname: "127.0.0.1",
-      fetch: () =>
-        new Response("", {
+      fetch: () => {
+        asked++;
+        return new Response("", {
           status: 307,
           headers: { Location: `http://127.0.0.1:${target.port}/x` },
-        }),
+        });
+      },
     });
     try {
       const delivered = await deliverReport({
@@ -2080,6 +2117,8 @@ describe("deliverReport", () => {
       });
       expect(delivered).toBe(false);
       expect(followed).toBe(false);
+      // A redirect is final: asked once, not retried against a URL that will not change its mind.
+      expect(asked).toBe(1);
     } finally {
       redirector.stop(true);
       target.stop(true);

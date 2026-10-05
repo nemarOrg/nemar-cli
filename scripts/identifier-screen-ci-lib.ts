@@ -94,7 +94,10 @@ const PREFETCH_CHUNK = 5000;
 const PREFETCH_EDF_CHUNK = 25;
 /** A URL is minted for each read, so it only has to outlive one request and its retries. */
 const PRESIGN_SECONDS = 900;
-const CALLBACK_ATTEMPTS = 3;
+/** Six attempts over about two minutes: a Worker deploy or a cold start outlasts three quick tries. */
+const CALLBACK_ATTEMPTS = 6;
+/** Waits between attempts in units of the configured backoff (5 s in the workflow): 5, 10, 20, 30, 45 s. */
+const CALLBACK_BACKOFF_STEPS = [1, 2, 4, 6, 9];
 
 /** A bad environment or command line. The code is a fixed word; it never quotes the input. */
 export class ScreenUsageError extends Error {
@@ -1173,11 +1176,12 @@ export interface DeliverOptions {
 }
 
 /**
- * POST the report, with the pre-screen workflow's rules: three attempts, a 2xx delivers, a 4xx
- * other than 401 is final (a bad token, no request in flight or a refused body will not improve),
- * and everything else (401 during a token rotation, 5xx, a dropped connection) waits and tries
- * again. Redirects are not followed, so the token header goes to the URL it was given and no
- * further. Nothing from the response is printed.
+ * POST the report. A 2xx delivers. A redirect is final (it is not followed, so the token header
+ * goes to the URL it was given and no further). A 4xx is final too, since a bad token, no request
+ * in flight or a refused body will not improve, except 401 (a token-rotation race across Worker
+ * instances), 408 and 429, which are the server asking for another try. Everything else (5xx, a
+ * dropped connection, a timeout) waits and tries again, up to six attempts in all. Nothing from the
+ * response is printed.
  */
 export async function deliverReport(options: DeliverOptions): Promise<boolean> {
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -1204,8 +1208,11 @@ export async function deliverReport(options: DeliverOptions): Promise<boolean> {
     }
     log(`callback attempt ${attempt}: HTTP ${status}`);
     if (status >= 200 && status < 300) return true;
-    if (status >= 400 && status < 500 && status !== 401) return false;
-    if (attempt < CALLBACK_ATTEMPTS) await sleep(attempt * options.backoffMs);
+    if (status >= 300 && status < 400) return false;
+    if (status >= 400 && status < 500 && ![401, 408, 429].includes(status)) return false;
+    if (attempt < CALLBACK_ATTEMPTS) {
+      await sleep((CALLBACK_BACKOFF_STEPS[attempt - 1] as number) * options.backoffMs);
+    }
   }
   return false;
 }
