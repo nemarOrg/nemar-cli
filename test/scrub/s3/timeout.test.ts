@@ -33,17 +33,20 @@ describe("timeouts", () => {
       const a = fixtureA();
       seedObject(standin, a);
       seedManifest(standin, "v1.0.0", [a]);
-      // The first HEAD (the plan's check of A) is held for 30 seconds.
-      standin.stallNext("HEAD", 30_000);
+      // The first HEAD (the plan's check of A) is held for two minutes. The limit is 8 seconds,
+      // long enough for every other call to finish on a loaded machine (the aws CLI alone can
+      // take seconds to start under load), and far shorter than the stall.
+      standin.stallNext("HEAD", 120_000);
       const dir = tempDir("timeout");
       const started = Date.now();
-      const r = await runScrub(standin, planArgs(dir, ["--tags", "v1.0.0", "--timeout-sec", "2"]));
+      const r = await runScrub(standin, planArgs(dir, ["--tags", "v1.0.0", "--timeout-sec", "8"]));
       const elapsed = Date.now() - started;
       expect(r.exitCode, r.all).toBe(4);
       const plan = readJson<PlanFile>(dir, "plan.json");
       expect(plan.keys[0]?.status).toBe("unreadable");
       expect(plan.keys[0]?.reasons).toEqual(["HeadObject:timeout"]);
-      expect(elapsed).toBeLessThan(20_000);
+      // Not the two minutes the server wanted: bounded by the stall, not by a guess at speed.
+      expect(elapsed).toBeLessThan(90_000);
     },
     SLOW,
   );

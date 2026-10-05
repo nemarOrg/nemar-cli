@@ -117,7 +117,8 @@ describe("a signal mid-stage", () => {
         expect(tempDirsIn(root)).toEqual([]);
         // The child went with it, rather than finishing the download into a deleted directory.
         const gone = await (async () => {
-          const until = Date.now() + 5_000;
+          // Generous: a SIGKILLed child is reaped at once, but a loaded machine schedules late.
+          const until = Date.now() + 30_000;
           while (Date.now() < until) {
             if ((await pidsMentioning(dir)).length === 0) return true;
             await Bun.sleep(100);

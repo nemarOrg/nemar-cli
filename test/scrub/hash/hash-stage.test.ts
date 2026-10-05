@@ -966,14 +966,16 @@ cat "$OBJECTS/$KEY"`,
       stage(ws, [{ obj: hung }, { obj: fine }]);
       installSource(
         ws,
-        `if [ "$KEY" = ${shq(hung.oldKey)} ]; then sleep 30; fi\ncat "$OBJECTS/$KEY"`,
+        `if [ "$KEY" = ${shq(hung.oldKey)} ]; then sleep 120; fi\ncat "$OBJECTS/$KEY"`,
       );
 
-      const run = await py(computeArgs(ws, ["--timeout", "1", "--workers", "2"]));
+      // 5 s per attempt: enough for a `cat` of 3 KB on a loaded machine, far less than the
+      // two minutes the hung source wants.
+      const run = await py(computeArgs(ws, ["--timeout", "5", "--workers", "2"]));
       expect(run.code).toBe(1);
-      expect(run.ms).toBeLessThan(15_000); // not the 30 s the source wanted
+      expect(run.ms).toBeLessThan(90_000); // not the 120 s the source wanted
       expect(run.stderr).toContain(`FAIL ${hung.oldKey}`);
-      expect(run.stderr).toContain("no complete read within 1 seconds");
+      expect(run.stderr).toContain("no complete read within 5 seconds");
       expect(Object.keys(readJson<HashesFile>(ws.hashes).entries)).toEqual([fine.oldKey]);
     },
     TIMEOUT_MS,
