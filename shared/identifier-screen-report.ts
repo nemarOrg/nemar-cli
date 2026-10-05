@@ -15,7 +15,7 @@
  * own state with its own answer, never "clean" and never "no findings".
  */
 
-import type { FindingKind } from "./identifier-scan";
+import { DATE_KINDS, type FindingKind } from "./identifier-scan";
 
 export const REPORT_VERSION = 1;
 
@@ -97,6 +97,7 @@ export interface DatasetRecord {
   edf_bdf_files_by_kind?: Partial<Record<FindingKind, number>>;
   unscreened_formats?: Record<string, number>;
   side_reads_failed?: number;
+  /** The fleet scan writes this; the publication report does not carry it (a pattern is not a vocabulary). */
   finding_fields?: string[];
 }
 
@@ -163,8 +164,78 @@ function countMap(x: unknown, accepts: (key: string) => boolean, max: number, co
 }
 
 const FORMAT_KEY = /^(\.[a-z0-9]{1,12}(\.[a-z0-9]{1,12})?\/?|\(no extension\))$/;
-const REASON = /^[a-z][a-z0-9-]{0,47}$/;
-const FAILURE_KEY = /^[a-z_]{1,16}\/[a-z0-9-]{1,48}$/;
+/**
+ * Why a scan fell short, as the scanner names it. A closed list, not a pattern: a pattern lets
+ * a lowercase name through as a "reason" and into the admin mail.
+ */
+export const INCOMPLETE_REASONS = [
+  "edf-headers-oversize",
+  "edf-headers-sampled",
+  "edf-headers-unread",
+  "json-oversize",
+  "json-sampled",
+  "json-unread",
+  "text-oversize",
+  "text-sampled",
+  "text-unread",
+  "scans-unread",
+  "participants-unread",
+  "participants-truncated",
+  "history-unread",
+  "submodule-unread",
+  "no-latest-version",
+  "manifest-shape",
+  "tree-truncated",
+  "credentials-missing",
+  "deadline",
+] as const;
+const REASON_SET: ReadonlySet<string> = new Set(INCOMPLETE_REASONS);
+
+/** What a failed read was reading, and the fixed classes a failure can have. */
+const READ_WHAT: ReadonlySet<string> = new Set([
+  "edf",
+  "participants",
+  "scans",
+  "json",
+  "text",
+  "internal",
+]);
+const READ_CLASS: ReadonlySet<string> = new Set([
+  "timeout",
+  "network",
+  "deadline",
+  "credentials-missing",
+  "header-truncated",
+  "json-parse",
+  "no-body",
+  "short-body",
+  "unreadable-entry",
+  "superseded-absent",
+  "blob-missing",
+  "blob-closed",
+  "internal",
+  // A thrown error that is not a read failure, named by its built-in class (lowercase).
+  "error-error",
+  "error-rangeerror",
+  "error-typeerror",
+  "error-syntaxerror",
+  "error-referenceerror",
+  "error-evalerror",
+  "error-urierror",
+  "error-aborterror",
+  "error-timeouterror",
+]);
+const HTTP_CLASS = /^http-[1-5]\d\d$/;
+
+/** Is this a `<what>/<class>` failure key from the closed vocabulary? */
+export function isReadFailureKey(key: string): boolean {
+  const slash = key.indexOf("/");
+  if (slash < 0) return false;
+  const what = key.slice(0, slash);
+  const cls = key.slice(slash + 1);
+  return READ_WHAT.has(what) && (READ_CLASS.has(cls) || HTTP_CLASS.test(cls));
+}
+
 const SCANNER = /^identifier-scan@[0-9a-f]{7,40}$/;
 const HEAD = /^[0-9a-f]{40}$/;
 const DATASET_ID = /^(nm|on|xx)\d{6}$/;
@@ -175,8 +246,39 @@ const DATASET_ID = /^(nm|on|xx)\d{6}$/;
  * case, spaces and punctuation are therefore never a field, and refusing them is
  * what keeps a header's text (`JOHN SMITH`) from riding in this list.
  */
-const FIELD = /^[a-z][a-z0-9-]*:[a-z0-9_.]{1,48}$/;
 const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
+
+/**
+ * A report may not claim a cleaner status than its own counts allow. The status is the
+ * workflow's word, and the gate reads only the status, so a record that says `clean` while its
+ * counts say 3 name findings, an unread header or an unparsed format would otherwise be
+ * believed. This is a one-way check: it refuses a record that is too clean for its counts, and
+ * does not re-derive the scanner's verdict (a review-severity hit of a direct kind is legitimate
+ * and the counts cannot tell it apart from a direct one).
+ */
+function checkStatus(r: DatasetRecord): void {
+  const kinds = Object.keys(r.findings_by_kind ?? {}) as FindingKind[];
+  const unscreened = Object.values(r.unscreened_formats ?? {}).reduce((a, b) => a + b, 0);
+  const files = r.files;
+  if (files) {
+    const shortfall = files.header_read !== files.edf_bdf || r.incomplete_reasons.length > 0;
+    if (r.incomplete !== shortfall) bad("scan-status");
+  }
+  const clear = r.status === "clean" || r.status === "dates-only" || r.status === "no-recordings";
+  if (clear) {
+    if (!files || r.incomplete || unscreened > 0 || (r.edf_bdf_files_flagged ?? 0) > 0) {
+      bad("scan-status");
+    }
+    if (r.status === "no-recordings") {
+      if (files.edf_bdf !== 0) bad("scan-status");
+    } else if (files.edf_bdf === 0) {
+      bad("scan-status");
+    }
+    if (r.status === "clean" && kinds.length > 0) bad("scan-status");
+    if (r.status !== "clean" && !kinds.every((k) => DATE_KINDS.has(k))) bad("scan-status");
+  }
+  if (r.status === "unchecked" && !r.incomplete) bad("scan-status");
+}
 
 function parseRecord(x: unknown): DatasetRecord {
   if (!isObject(x)) return bad("scan-shape");
@@ -204,7 +306,6 @@ function parseRecord(x: unknown): DatasetRecord {
       "edf_bdf_files_by_kind",
       "unscreened_formats",
       "side_reads_failed",
-      "finding_fields",
     ],
     "scan-key",
   );
@@ -221,7 +322,7 @@ function parseRecord(x: unknown): DatasetRecord {
   if (
     !Array.isArray(x.incomplete_reasons) ||
     x.incomplete_reasons.length > 40 ||
-    !x.incomplete_reasons.every((r) => typeof r === "string" && REASON.test(r))
+    !x.incomplete_reasons.every((r) => typeof r === "string" && REASON_SET.has(r))
   ) {
     bad("scan-reasons");
   }
@@ -267,7 +368,7 @@ function parseRecord(x: unknown): DatasetRecord {
     out.sampling = sampling;
   }
   if (x.read_failures !== undefined) {
-    out.read_failures = countMap(x.read_failures, (k) => FAILURE_KEY.test(k), 60, "scan-failures");
+    out.read_failures = countMap(x.read_failures, isReadFailureKey, 60, "scan-failures");
   }
   for (const k of [
     "edf_bdf_files_flagged",
@@ -295,17 +396,9 @@ function parseRecord(x: unknown): DatasetRecord {
       "scan-formats",
     );
   }
-  if (x.finding_fields !== undefined) {
-    if (
-      !Array.isArray(x.finding_fields) ||
-      x.finding_fields.length > 60 ||
-      !x.finding_fields.every((f) => typeof f === "string" && FIELD.test(f))
-    ) {
-      bad("scan-fields");
-    }
-    out.finding_fields = x.finding_fields;
-  }
-  return out as unknown as DatasetRecord;
+  const record = out as unknown as DatasetRecord;
+  checkStatus(record);
+  return record;
 }
 
 /** Validate a report from the wire. Throws {@link ReportError} with a fixed word, never the input. */

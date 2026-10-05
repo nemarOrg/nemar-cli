@@ -46,7 +46,6 @@ function scan(overrides: Record<string, unknown> = {}): Record<string, unknown> 
     edf_bdf_files_by_kind: { "edf-patient-name": 4 },
     unscreened_formats: { ".set": 3, ".ds/": 1, "(no extension)": 1 },
     side_reads_failed: 0,
-    finding_fields: ["edf-patient-name:patient"],
     ...overrides,
   };
 }
@@ -99,8 +98,40 @@ describe("parseScreenReport: what passes", () => {
   });
 
   test("every status the scanner can conclude is a state a report can carry", () => {
+    // One coherent record per status: the parser refuses a status cleaner than its counts.
+    const base = {
+      findings_by_kind: {},
+      edf_bdf_files_by_kind: {},
+      edf_bdf_files_flagged: 0,
+      unscreened_formats: {},
+      incomplete: false,
+      incomplete_reasons: [],
+      files: { total: 10, edf_bdf: 4, header_read: 4, header_read_failed: 0 },
+    };
+    const byStatus: Record<(typeof DATASET_STATUSES)[number], Record<string, unknown>> = {
+      clean: {},
+      "dates-only": { findings_by_kind: { "edf-startdate": 4 } },
+      "no-recordings": { files: { total: 3, edf_bdf: 0, header_read: 0, header_read_failed: 0 } },
+      "direct-identifiers": {
+        findings_by_kind: { "edf-patient-name": 4 },
+        edf_bdf_files_flagged: 4,
+      },
+      review: { findings_by_kind: { "tooling-debris": 1 } },
+      unchecked: {
+        incomplete: true,
+        incomplete_reasons: ["edf-headers-unread"],
+        files: { total: 10, edf_bdf: 4, header_read: 2, header_read_failed: 2 },
+      },
+      "not-screened": {
+        unscreened_formats: { ".set": 2 },
+        files: { total: 3, edf_bdf: 0, header_read: 0, header_read_failed: 0 },
+      },
+      "clean-edf-only-others-unscreened": { unscreened_formats: { ".set": 2 } },
+    };
     for (const status of DATASET_STATUSES) {
-      const parsed = parseScreenReport(report({ scan: scan({ status }) }));
+      const parsed = parseScreenReport(
+        report({ scan: scan({ ...base, status, ...byStatus[status] }) }),
+      );
       expect(stateOf(parsed)).toBe(status);
     }
   });
@@ -160,35 +191,116 @@ describe("parseScreenReport: what is refused, without quoting it", () => {
     }
   });
 
-  test("a reason, a failure key and a field must match their narrow patterns", () => {
-    expect(refusal(report({ scan: scan({ incomplete_reasons: [LEAK] }) }))).toBe("scan-reasons");
+  test("a reason and a failure key come from closed lists, not from a pattern", () => {
+    // Lowercase and hyphenated, so a pattern would let every one of these through.
+    for (const word of [
+      LEAK.toLowerCase().replace(/ /g, "-"),
+      "john-smith-1971",
+      "edf-headers-unreadable",
+    ]) {
+      expect(refusal(report({ scan: scan({ incomplete_reasons: [word] }) }))).toBe("scan-reasons");
+    }
     expect(refusal(report({ scan: scan({ incomplete_reasons: ["Has Space"] }) }))).toBe(
       "scan-reasons",
     );
-    expect(refusal(report({ scan: scan({ read_failures: { [LEAK]: 1 } }) }))).toBe("scan-failures");
-    expect(refusal(report({ scan: scan({ finding_fields: [LEAK] }) }))).toBe("scan-fields");
+    for (const key of [
+      LEAK,
+      "read/johnsmith",
+      "edf/johnsmith",
+      "johnsmith/internal",
+      "edf/http-99",
+      "edf/error-johnsmith",
+    ]) {
+      expect(refusal(report({ scan: scan({ read_failures: { [key]: 1 } }) }))).toBe(
+        "scan-failures",
+      );
+    }
+    // What the producers really emit still passes.
+    const ok = parseScreenReport(
+      report({
+        scan: scan({
+          incomplete_reasons: ["edf-headers-unread", "history-unread", "submodule-unread"],
+          files: { total: 10, edf_bdf: 4, header_read: 3, header_read_failed: 1 },
+          incomplete: true,
+          read_failures: {
+            "edf/http-403": 1,
+            "json/error-rangeerror": 1,
+            "edf/superseded-absent": 1,
+            "scans/timeout": 1,
+          },
+        }),
+      }),
+    );
+    expect(Object.keys(ok.scan?.read_failures ?? {}).length).toBe(4);
   });
 
-  test("a field is the scanner's alphabet, so header text cannot ride after a real kind", () => {
-    // The kind half is well formed here; only the field half carries the text.
-    expect(refusal(report({ scan: scan({ finding_fields: [`edf-patient-name:${LEAK}`] }) }))).toBe(
-      "scan-fields",
+  test("finding_fields is the fleet scan's field, not the report's", () => {
+    expect(refusal(report({ scan: scan({ finding_fields: ["edf-patient-name:patient"] }) }))).toBe(
+      "scan-key",
     );
-    expect(
-      refusal(report({ scan: scan({ finding_fields: ["edf-patient-name:Smith (1971)"] }) })),
-    ).toBe("scan-fields");
-    // What the scanner really emits still passes: header fields and canonical keys.
-    for (const field of [
-      "edf-patient-birthdate:patient.birthdate",
-      "participants-identifier-column:patientname",
-      "json-identifier-key:mrn",
-      "acq-time-dated:acq_time",
-    ]) {
-      expect(
-        parseScreenReport(report({ scan: scan({ finding_fields: [field] }) })).scan
-          ?.finding_fields,
-      ).toEqual([field]);
+  });
+
+  test("a status cannot be cleaner than its own counts", () => {
+    const clean = (over: Record<string, unknown>) =>
+      scan({
+        status: "clean",
+        findings_by_kind: {},
+        edf_bdf_files_by_kind: {},
+        edf_bdf_files_flagged: 0,
+        unscreened_formats: {},
+        incomplete: false,
+        incomplete_reasons: [],
+        files: { total: 10, edf_bdf: 4, header_read: 4, header_read_failed: 0 },
+        ...over,
+      });
+    expect(parseScreenReport(report({ scan: clean({}) })).scan?.status).toBe("clean");
+    const lies: Record<string, unknown>[] = [
+      { findings_by_kind: { "edf-patient-name": 3 } },
+      { incomplete: true },
+      { incomplete_reasons: ["json-unread"] },
+      { files: { total: 10, edf_bdf: 4, header_read: 0, header_read_failed: 4 } },
+      { unscreened_formats: { ".set": 2 } },
+      { edf_bdf_files_flagged: 1 },
+      { files: { total: 10, edf_bdf: 0, header_read: 0, header_read_failed: 0 } },
+      { files: undefined },
+    ];
+    for (const lie of lies) {
+      expect(refusal(report({ scan: clean(lie) }))).toBe("scan-status");
     }
+    // dates-only may carry dates and nothing else; no-recordings needs no EDF and nothing unparsed.
+    const dates = clean({ status: "dates-only", findings_by_kind: { "edf-startdate": 4 } });
+    expect(parseScreenReport(report({ scan: dates })).scan?.status).toBe("dates-only");
+    expect(
+      refusal(
+        report({
+          scan: clean({ status: "dates-only", findings_by_kind: { "edf-patient-name": 1 } }),
+        }),
+      ),
+    ).toBe("scan-status");
+    expect(
+      parseScreenReport(
+        report({
+          scan: clean({
+            status: "no-recordings",
+            files: { total: 3, edf_bdf: 0, header_read: 0, header_read_failed: 0 },
+          }),
+        }),
+      ).scan?.status,
+    ).toBe("no-recordings");
+    expect(refusal(report({ scan: clean({ status: "no-recordings" }) }))).toBe("scan-status");
+    // A scan that fell short cannot call itself finished, and cannot hide the shortfall in `incomplete`.
+    expect(refusal(report({ scan: clean({ status: "unchecked" }) }))).toBe("scan-status");
+    expect(
+      refusal(
+        report({
+          scan: clean({
+            status: "review",
+            incomplete: false,
+            incomplete_reasons: ["json-unread"],
+          }),
+        }),
+      ),
+    ).toBe("scan-status");
   });
 
   test("exactly one of scan and error", () => {

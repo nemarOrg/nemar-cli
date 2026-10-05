@@ -57,6 +57,7 @@ import {
   ReportError,
   type ScreenError,
   type ScreenReport,
+  isReadFailureKey,
   parseScreenReport,
 } from "../shared/identifier-screen-report";
 import {
@@ -329,7 +330,6 @@ export function foldOddFormats(record: DatasetRecord): DatasetRecord {
   return { ...record, unscreened_formats: folded };
 }
 
-const FAILURE_KEY = /^[a-z_]{1,16}\/[a-z0-9-]{1,48}$/;
 /** The class for a read failure whose name is not a fixed word. */
 export const INTERNAL_FAILURE = "internal";
 const MAX_FAILURE_KEYS = 60;
@@ -352,12 +352,15 @@ export function foldOddFailures(record: DatasetRecord): DatasetRecord {
   };
   for (const [key, count] of Object.entries(failures)) {
     const lower = key.toLowerCase();
-    if (FAILURE_KEY.test(lower)) {
+    if (isReadFailureKey(lower)) {
       add(lower, count);
       continue;
     }
     const what = lower.slice(0, Math.max(0, lower.indexOf("/")));
-    add(`${/^[a-z_]{1,16}$/.test(what) ? what : INTERNAL_FAILURE}/${INTERNAL_FAILURE}`, count);
+    add(
+      `${isReadFailureKey(`${what}/${INTERNAL_FAILURE}`) ? what : INTERNAL_FAILURE}/${INTERNAL_FAILURE}`,
+      count,
+    );
   }
   // Past the contract's key limit, the smallest classes share one key.
   const ranked = Object.entries(folded).sort(([, a], [, b]) => b - a);
@@ -379,11 +382,13 @@ export function foldOddFailures(record: DatasetRecord): DatasetRecord {
  */
 export function finalizeScanReport(record: unknown, scanner: string, head: string): ScreenReport {
   try {
+    // `finding_fields` is the fleet scan's own output; the report carries kinds and counts only.
+    const { finding_fields: _omitted, ...scan } = (record ?? {}) as Record<string, unknown>;
     return parseScreenReport({
       version: REPORT_VERSION,
       scanner,
       head,
-      scan: record,
+      scan,
     });
   } catch (error) {
     if (error instanceof ReportError) return errorReport("workflow-failed", scanner, head);

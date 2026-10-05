@@ -1692,7 +1692,6 @@ describe("a report is never posted with anything the contract does not declare",
     ["a value as a kind", (r) => ({ ...r, findings_by_kind: { [NAME]: 1 } })],
     ["a value as a reason", (r) => ({ ...r, incomplete_reasons: [NAME] })],
     ["a string where a count belongs", (r) => ({ ...r, edf_bdf_files_flagged: NAME })],
-    ["a value as a field name", (r) => ({ ...r, finding_fields: [NAME] })],
   ];
 
   for (const [label, corrupt] of hostile) {
@@ -1746,7 +1745,11 @@ describe("a report is never posted with anything the contract does not declare",
           scannerRevision: "abcdef1",
           scan: async (...args) => {
             const real = await scanDatasetFromManifest(...args);
-            return { ...real, unscreened_formats: { [`.${NAME}`]: 2 } };
+            return {
+              ...real,
+              status: "clean-edf-only-others-unscreened" as const,
+              unscreened_formats: { [`.${NAME}`]: 2 },
+            };
           },
         },
       );
@@ -1757,6 +1760,23 @@ describe("a report is never posted with anything the contract does not declare",
     T,
   );
 
+  test("the fleet scan's finding_fields never reaches a report", () => {
+    const record = {
+      id: ID,
+      version: null,
+      scanned_at: "2026-10-05T12:00:00.000Z",
+      status: "clean",
+      incomplete: false,
+      incomplete_reasons: [],
+      files: { total: 4, edf_bdf: 4, header_read: 4, header_read_failed: 0 },
+      finding_fields: [`edf-patient-name:${NAME}`],
+    };
+    const report = finalizeScanReport(record, "identifier-scan@abcdef1", "a".repeat(40));
+    expect(report.error).toBeUndefined();
+    expect(JSON.stringify(report)).not.toContain(NAME);
+    expect(report.scan && "finding_fields" in report.scan).toBe(false);
+  });
+
   test("finalizeScanReport returns the parser's object, so an extra key cannot ride along", () => {
     const record = {
       id: ID,
@@ -1765,6 +1785,7 @@ describe("a report is never posted with anything the contract does not declare",
       status: "clean",
       incomplete: false,
       incomplete_reasons: [],
+      files: { total: 4, edf_bdf: 4, header_read: 4, header_read_failed: 0 },
     };
     const report = finalizeScanReport(record, "identifier-scan@abcdef1", "a".repeat(40));
     expect(report.scan).toEqual(record as unknown as DatasetRecord);
