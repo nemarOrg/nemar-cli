@@ -122,3 +122,46 @@ describe("the change-log sentence", () => {
     expect(() => changeLogEntry("2026-10-04", ["latest"])).toThrow(LedgerRefused);
   });
 });
+
+describe("a deletion line carries its proof (I9)", () => {
+  const proof = "+proof-0123456789abcdef";
+  test("old-versions-deleted needs the listing's word and a proof hash; nothing else may claim them", () => {
+    const ok = entry({
+      action: "old-versions-deleted",
+      verification: `authoritative-listing-empty${proof}`,
+    });
+    expect(validateLedgerEntry(ok)).toEqual(ok);
+    for (const [label, over] of [
+      [
+        "deletion without proof",
+        { action: "old-versions-deleted", verification: "authoritative-listing-empty" },
+      ],
+      [
+        "deletion, another word",
+        { action: "old-versions-deleted", verification: `scanner-clean${proof}` },
+      ],
+      ["deletion, no word", { action: "old-versions-deleted", verification: "none" }],
+      [
+        "listing claimed by another action",
+        { verification: `authoritative-listing-empty${proof}` },
+      ],
+      ["listing without proof elsewhere", { verification: "authoritative-listing-empty" }],
+      ["proof on another word", { verification: `scanner-clean${proof}` }],
+      [
+        "proof not hex",
+        {
+          action: "old-versions-deleted",
+          verification: "authoritative-listing-empty+proof-zzzzzzzzzzzzzzzz",
+        },
+      ],
+      [
+        "proof too long",
+        { action: "old-versions-deleted", verification: `authoritative-listing-empty${proof}00` },
+      ],
+    ] as const) {
+      expect(() => validateLedgerEntry(entry(over as Partial<LedgerEntry>)), label).toThrow(
+        LedgerRefused,
+      );
+    }
+  });
+});

@@ -57,6 +57,16 @@ const VERIFICATIONS: ReadonlySet<string> = new Set([
   "public-surface-clean",
   "authoritative-listing-empty",
 ]);
+/**
+ * A verification may end with `+proof-<16 hex>`: the first 16 hex digits of the sha256 of the
+ * proof file the line's counts were taken from (deleted.json for `old-versions-deleted`). Hex
+ * only, so it can carry no value.
+ */
+const PROOF_SUFFIX = /\+proof-([0-9a-f]{16})$/;
+
+/** The verification word a deletion line must carry: the authoritative listing, and its proof. */
+export const DELETION_VERIFICATION = "authoritative-listing-empty";
+
 /** `identifier-scan@<commit>`: a code revision, never text a person typed. */
 const SCANNER = /^identifier-scan@[0-9a-f]{7,40}$/;
 /** A GitHub handle: the operator, not a participant. */
@@ -93,7 +103,14 @@ export function validateLedgerEntry(entry: LedgerEntry): LedgerEntry {
   }
   if (typeof entry.scanner !== "string" || !SCANNER.test(entry.scanner))
     throw new LedgerRefused("scanner");
-  if (typeof entry.verification !== "string" || !VERIFICATIONS.has(entry.verification)) {
+  if (typeof entry.verification !== "string") throw new LedgerRefused("verification");
+  const proofed = PROOF_SUFFIX.test(entry.verification);
+  const base = entry.verification.replace(PROOF_SUFFIX, "");
+  if (!VERIFICATIONS.has(base)) throw new LedgerRefused("verification");
+  // What deleted the old versions is said only with the proof it was read from, and the proof's
+  // claim is said only of that action: neither is a word anyone can type on its own.
+  const deletion = entry.action === "old-versions-deleted";
+  if (deletion !== (base === DELETION_VERIFICATION) || deletion !== proofed) {
     throw new LedgerRefused("verification");
   }
   if (typeof entry.actor !== "string" || !ACTOR.test(entry.actor)) throw new LedgerRefused("actor");

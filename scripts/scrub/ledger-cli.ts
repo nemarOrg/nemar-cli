@@ -9,7 +9,13 @@
  *   ledger-cli.ts publish --file F --dataset nm000186 [--execute] [--timeout-sec 120]
  *
  * `append` validates the line (a closed vocabulary, counts only, no free text) and appends it to a
- * local file; the scanner revision is the last commit that touched the scanner unless given.
+ * local file. The scanner revision is the last commit that touched ANY of the files whose rules
+ * decided what was removed ({@link SCANNER_RULE_FILES}), unless given.
+ *
+ * `old-versions-deleted` is not typed, it is read: it needs `--proof W/deleted.json` (the file
+ * delete-old writes only after an authoritative listing showed nothing left), takes its counts from
+ * it (`--counts` is refused beside it), checks it names this dataset, and records
+ * `authoritative-listing-empty+proof-<first 16 hex of its sha256>` as the verification.
  * `publish` copies the file to `s3://nemar/<id>/corrections/ledger.jsonl`. It is a dry run unless
  * `--execute`, and it refuses unless the local file is a strict extension of the object already
  * there: the ledger is append-only, and an upload that would drop a line is refused.
@@ -27,13 +33,20 @@
  * not be made: look at the object now).
  */
 
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { spawnSync } from "bun";
-import type { LedgerEntry } from "./contract";
-import { LedgerRefused, appendLedger, ledgerS3Key, readLedger } from "./ledger";
+import { ContractError, type LedgerEntry, parseDeleted } from "./contract";
+import {
+  DELETION_VERIFICATION,
+  LedgerRefused,
+  appendLedger,
+  ledgerS3Key,
+  readLedger,
+} from "./ledger";
 import {
   AwsCliError,
   DEFAULT_TIMEOUT_MS,
@@ -69,6 +82,7 @@ const OPTIONS = {
   bucket: { type: "string" },
   region: { type: "string" },
   "timeout-sec": { type: "string" },
+  proof: { type: "string" },
   execute: { type: "boolean" },
 } as const;
 
@@ -89,14 +103,59 @@ export function parseCounts(text: string | undefined): Record<string, number> {
   return counts;
 }
 
-function scannerRevision(): string {
-  const r = spawnSync(["git", "log", "-1", "--format=%h", "--", "shared/identifier-scan.ts"], {
-    cwd: join(import.meta.dir, "../.."),
+/**
+ * The files whose rules decided what a scrub removed: the scanner, the header scrub, and the Zarr
+ * member lists. A change to any of them is a change of the rules a ledger line ran under.
+ */
+export const SCANNER_RULE_FILES = [
+  "shared/identifier-scan.ts",
+  "shared/identifier-scrub.ts",
+  "scripts/scrub/s3/zarr-json.ts",
+] as const;
+
+/** `identifier-scan@<short sha>` of the last commit in `repoRoot` that touched any rule file. */
+export function scannerRevision(repoRoot: string = join(import.meta.dir, "../..")): string {
+  const r = spawnSync(["git", "log", "-1", "--format=%h", "--", ...SCANNER_RULE_FILES], {
+    cwd: repoRoot,
   });
   const rev = new TextDecoder().decode(r.stdout).trim();
   if (!/^[0-9a-f]{7,40}$/.test(rev))
     throw new Usage("cannot derive the scanner revision; pass --scanner");
   return `identifier-scan@${rev}`;
+}
+
+/** Counts and the verification word of an `old-versions-deleted` line, from deleted.json. */
+function fromDeletionProof(
+  path: string,
+  dataset: string,
+): { counts: Record<string, number>; verification: string } {
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(path);
+  } catch {
+    throw new Refused("proof-missing");
+  }
+  let proof: ReturnType<typeof parseDeleted>;
+  try {
+    proof = parseDeleted(bytes.toString("utf8"));
+  } catch (err) {
+    if (err instanceof ContractError || err instanceof SyntaxError) {
+      throw new Refused("proof-invalid");
+    }
+    throw err;
+  }
+  if (proof.dataset !== dataset) throw new Refused("proof-wrong-dataset");
+  const c = proof.counts;
+  return {
+    counts: {
+      keys: c.keys,
+      versions: c.versions,
+      markers: c.markers,
+      pruned_versions: c.prunedVersions,
+      pruned_markers: c.prunedMarkers,
+    },
+    verification: `${DELETION_VERIFICATION}+proof-${createHash("sha256").update(bytes).digest("hex").slice(0, 16)}`,
+  };
 }
 
 interface Remote {
@@ -142,15 +201,33 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
   const [command] = parsed.positionals;
   const file = need(v.file, "file");
   if (command === "append") {
+    const dataset = need(v.dataset, "dataset");
+    const action = need(v.action, "action") as LedgerEntry["action"];
+    let counts: Record<string, number>;
+    let verification: string;
+    if (action === "old-versions-deleted" || v.verification === DELETION_VERIFICATION) {
+      // Read, never typed: the counts and the claim come from the proof delete-old wrote.
+      if (action !== "old-versions-deleted") throw new Refused("verification-needs-deletion");
+      if (!v.proof) throw new Usage("missing --proof (old-versions-deleted reads deleted.json)");
+      if (v.counts) throw new Usage("--counts is read from --proof for old-versions-deleted");
+      if (v.verification !== undefined && v.verification !== DELETION_VERIFICATION) {
+        throw new Refused("verification-contradicts-proof");
+      }
+      ({ counts, verification } = fromDeletionProof(v.proof, dataset));
+    } else {
+      if (v.proof) throw new Usage("--proof is only for old-versions-deleted");
+      counts = parseCounts(v.counts);
+      verification = need(v.verification, "verification");
+    }
     const entry: LedgerEntry = {
       version: 1,
       at: v.at ?? new Date().toISOString(),
-      dataset: need(v.dataset, "dataset"),
-      action: need(v.action, "action") as LedgerEntry["action"],
+      dataset,
+      action,
       versions: (v.versions ?? "").split(",").filter((s) => s !== ""),
-      counts: parseCounts(v.counts),
+      counts,
       scanner: v.scanner ?? scannerRevision(),
-      verification: need(v.verification, "verification"),
+      verification,
       actor: need(v.actor, "actor"),
     } as LedgerEntry;
     appendLedger(file, entry);

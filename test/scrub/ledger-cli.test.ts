@@ -5,11 +5,11 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
-import { extendsLedger } from "../../scripts/scrub/ledger-cli";
+import { SCANNER_RULE_FILES, extendsLedger, scannerRevision } from "../../scripts/scrub/ledger-cli";
 import { type S3Standin, startS3Standin } from "./helpers/s3-standin";
 
 const SCRIPT = join(import.meta.dir, "../../scripts/scrub/ledger-cli.ts");
@@ -397,4 +397,124 @@ describe("ledger-cli publish: only a genuine not-found is absence (C1)", () => {
     },
     SLOW,
   );
+});
+
+describe("ledger-cli: what a line says is read from a proof, and the rules are versioned (I9)", () => {
+  const deleted = (dataset = DATASET) => ({
+    version: 1,
+    dataset,
+    deletedAt: "2026-10-05T00:00:00.000Z",
+    assembledSha256: "a".repeat(64),
+    counts: { keys: 2, versions: 5, markers: 2, prunedVersions: 3, prunedMarkers: 1 },
+  });
+  const deletion = (file: string, extra: string[]) =>
+    cli([
+      "append",
+      "--file",
+      file,
+      "--dataset",
+      DATASET,
+      "--action",
+      "old-versions-deleted",
+      "--actor",
+      "someone",
+      "--scanner",
+      "identifier-scan@abcdef1",
+      ...extra,
+    ]);
+
+  test(
+    "old-versions-deleted takes its counts and its verification from deleted.json, never from typing",
+    async () => {
+      const dir = work();
+      const file = join(dir, "ledger.jsonl");
+      const proofPath = join(dir, "deleted.json");
+      const text = `${JSON.stringify(deleted())}\n`;
+      writeFileSync(proofPath, text);
+      const ok = await deletion(file, ["--proof", proofPath]);
+      expect(ok.exitCode, ok.all).toBe(0);
+      const line = JSON.parse(readFileSync(file, "utf8").trim());
+      expect(line.counts).toEqual({
+        keys: 2,
+        versions: 5,
+        markers: 2,
+        pruned_versions: 3,
+        pruned_markers: 1,
+      });
+      const sha = new Bun.CryptoHasher("sha256").update(text).digest("hex").slice(0, 16);
+      expect(line.verification).toBe(`authoritative-listing-empty+proof-${sha}`);
+
+      // Typed counts, no proof, a proof of another dataset, a malformed proof, a contradicting word.
+      const before = readFileSync(file, "utf8");
+      const noProof = await deletion(file, ["--verification", "authoritative-listing-empty"]);
+      expect(noProof.exitCode).toBe(2);
+      expect(noProof.stderr).toContain("missing --proof");
+      const typed = await deletion(file, ["--proof", proofPath, "--counts", "keys=99"]);
+      expect(typed.exitCode).toBe(2);
+      writeFileSync(proofPath, JSON.stringify(deleted("xx090412")));
+      const other = await deletion(file, ["--proof", proofPath]);
+      expect([other.exitCode, other.stderr.trim()]).toEqual([3, "proof-wrong-dataset"]);
+      writeFileSync(proofPath, JSON.stringify({ ...deleted(), extra: 1 }));
+      const bad = await deletion(file, ["--proof", proofPath]);
+      expect([bad.exitCode, bad.stderr.trim()]).toEqual([3, "proof-invalid"]);
+      writeFileSync(proofPath, text);
+      const contradicts = await deletion(file, [
+        "--proof",
+        proofPath,
+        "--verification",
+        "scanner-clean",
+      ]);
+      expect([contradicts.exitCode, contradicts.stderr.trim()]).toEqual([
+        3,
+        "verification-contradicts-proof",
+      ]);
+      // And the listing's word cannot be claimed by another action, with or without a proof.
+      const claimed = await append(file, "plan", ["--verification", "authoritative-listing-empty"]);
+      expect([claimed.exitCode, claimed.stderr.trim()]).toEqual([3, "verification-needs-deletion"]);
+      expect(readFileSync(file, "utf8")).toBe(before);
+    },
+    SLOW,
+  );
+
+  test("the scanner revision is the last commit that touched ANY rule file", () => {
+    const repo = work();
+    const env = {
+      ...process.env,
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_AUTHOR_NAME: "t",
+      GIT_AUTHOR_EMAIL: "t@example.org",
+      GIT_COMMITTER_NAME: "t",
+      GIT_COMMITTER_EMAIL: "t@example.org",
+    };
+    const g = (...args: string[]) => {
+      const r = Bun.spawnSync(["git", ...args], { cwd: repo, env });
+      if (r.exitCode !== 0) throw new Error(`git ${args[0]} failed`);
+      return new TextDecoder().decode(r.stdout).trim();
+    };
+    g("init", "-q", "-b", "main");
+    // Written out here, not taken from the module: a list that lost a file must fail this.
+    const RULES = [
+      "shared/identifier-scan.ts",
+      "shared/identifier-scrub.ts",
+      "scripts/scrub/s3/zarr-json.ts",
+    ];
+    expect([...SCANNER_RULE_FILES] as string[]).toEqual(RULES);
+    for (const f of RULES) {
+      mkdirSync(join(repo, f, ".."), { recursive: true });
+      writeFileSync(join(repo, f), "1\n");
+    }
+    writeFileSync(join(repo, "other.txt"), "1\n");
+    g("add", ".");
+    g("commit", "-q", "-m", "all");
+    // Each rule file touched last in turn; a commit touching no rule file after it changes nothing.
+    for (const f of [...RULES].reverse()) {
+      writeFileSync(join(repo, f), `changed ${f}\n`);
+      g("commit", "-q", "-am", `touch ${f}`);
+      const want = g("rev-parse", "--short", "HEAD");
+      writeFileSync(join(repo, "other.txt"), `${f}\n`);
+      g("commit", "-q", "-am", "unrelated");
+      expect(scannerRevision(repo), f).toBe(`identifier-scan@${want}`);
+    }
+  });
 });
