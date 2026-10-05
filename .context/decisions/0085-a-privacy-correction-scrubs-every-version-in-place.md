@@ -135,3 +135,31 @@ acknowledgement can pass.
 - `scripts/identifier-fleet-scan.ts` and its results, `shared/identifier-scan.ts`,
   `shared/identifier-scrub.ts`.
 - ADRs amended today: 0006, 0010, 0016, 0060, 0061, 0063, 0064, 0067.
+
+## Amendment 2026-10-05 (#1612): the other copies, and what a successful run proves
+
+A review of the Phase 2 tooling and a first read of the real bucket found things the procedure above did not name.
+
+**Two more copies of the identifiers.**
+The Zarr serving copy repeats header fields:
+every store's root metadata (`<id>/zarr/<path>.zarr/zarr.json`) carries `attributes.recording_metadata.patientcode` and `.birthdate`, copied from the EDF or BDF header by the converter.
+Those objects are not Object Locked, so the `zarr` stage removes exactly the identifier keys in place and re-reads every store; the noncurrent versions of every zarr object are then pruned, because the bucket is versioned.
+The archive zip under `<id>/archives/` contains the original recordings, so `drop-archives` deletes every version of it and the normal archive workflow regenerates it from the scrubbed tree.
+`<tag>-summary.json` and `<tag>-records.json` were checked by key name and hold entities, signal summaries and provenance, no header field; they are not regenerated.
+
+**Verification before deletion is by admin reads.**
+Step 6 says to verify through the public surface, but the dataset is private until the old bytes are gone, which is what keeps any old key from being publicly readable.
+What is verified before deletion is therefore the pushed refs in a fresh clone, every regenerated manifest and every new object re-hashed from S3, all by an administrator.
+The public surface is checked after the dataset is made public again, and a failure there makes it private again; the new objects were verified twice, so the fault would be in a manifest, a cache or a route.
+
+**The irreversible step checks for itself.**
+`delete-old` refuses unless the plan is complete and not partial, both proofs name the exact bytes of `assembled.json`, no current manifest names an old key, an anonymous request for an old object is refused (the dataset is private), the Zarr stage has verified, and no archive remains.
+A prune prefix is an allow-list (`<id>/version/`, `<id>/archives/`, `<id>/zarr/`), never a deny-list, because a deny-list let the dataset root through in review.
+
+**A successful run is not proof that nothing was missed.**
+The plan's keys are the union of every manifest and a listing of `<id>/objects/`, the git plan reads every commit rather than the tag tips, and `verify` requires every EDF and BDF key in any commit to be a new key or one the plan found clean.
+The hash stage binds each digest to the patch it was computed for, so a re-plan cannot reuse a stale one.
+
+**The stand-in is not S3.**
+On first contact with the real bucket the tools disagreed with their stand-in twice: S3 requires a checksum header on an `UploadPart` of a multipart upload created with Object Lock parameters, and `<id>/version/` holds `<tag>-records.json` beside the manifest.
+Both were fixed, and the canary, which runs on the real bucket against a test prefix, is run again after any change to an S3 call.
