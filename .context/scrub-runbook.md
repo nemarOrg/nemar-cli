@@ -63,12 +63,13 @@ Measured in the real bucket on 2026-10-04, a dataset has these:
 3. **Hash** (reads every object once; the original is verified against its own key in the same pass):
    `python3 hash_stage.py compute --plan plan.json --patches patches.json --out hashes.json --workers 16`, on this machine for a small dataset and on Hallu (detached launch form, memory `hallu-launch-and-self-deploy-lag`) for a large one.
    Each entry is bound to its patch, so a re-plan with different scanner rules recomputes rather than reusing a stale digest.
-   Exit 0 only.
+   Exit 0 only. It refuses a partial plan, a plan with an unreadable key, and totals that disagree with the keys, as the TypeScript stages do.
 4. **Assemble** (admin credentials): `s3-scrub.ts assemble --dir W` is the dry run (object count, bytes uploaded versus copied server side); then `--execute`.
    New keys are created with GOVERNANCE retention at creation.
    Nothing is deleted.
    It writes `assembled.json` and `keymap.json`.
-5. **Verify**: `s3-scrub.ts verify --dir W` (sizes, patched header, sampled ranges, retention) writes `verified.json`; on the hash host `python3 hash_stage.py verify-new --assembled assembled.json --out new-hash-verified.json` re-reads every NEW object and checks its key.
+5. **Verify**: `s3-scrub.ts verify --dir W` (sizes, patched header, sampled ranges, retention) writes `verified.json`; on the hash host `python3 hash_stage.py verify-new --assembled assembled.json --out new-hash-verified.json` re-reads every NEW object at the version assembly recorded (`newVersionId`, through `aws s3api get-object --version-id`, the body on `/dev/fd/3`) and checks its key.
+   That default source is new: run it once on a small dataset on the host it will run on before trusting it on a large one, since a Linux `/dev/fd` behaves differently from macOS in edge cases.
    Both must pass.
 6. **Sanity**: compare the plan's counts with the fleet scan for the dataset (`identifier-fleet-scan.ts --only D`): every recording the scan flagged is in the plan.
 7. **Rewrite history** in the clone: `git-scrub.ts snapshot --repo W/clone --out W/before.json`, `git-scrub.ts rewrite --repo W/clone --keymap W/keymap.json --plan W/git-plan.json`, then `git-scrub.ts verify --repo W/clone --keymap W/keymap.json --plan W/git-plan.json --s3-plan W/plan.json --before W/before.json`.

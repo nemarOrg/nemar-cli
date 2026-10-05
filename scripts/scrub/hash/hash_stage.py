@@ -19,15 +19,19 @@ Two modes:
     ``hashes.json`` is rewritten atomically as keys finish, so a run can be stopped and resumed.
 
 ``verify-new``
-    For every entry of ``assembled.json`` stream the NEW object and require its SHA-256 and byte
-    count to equal what the new key says. Only if all of them do, write ``new-hash-verified.json``,
-    which names the exact bytes of ``assembled.json`` it vouches for. On any mismatch no such file
-    exists afterwards: a proof left over from an earlier run is removed first.
+    For every entry of ``assembled.json`` stream the NEW object AT THE VERSION assembly recorded
+    (``newVersionId``) and require its SHA-256 and byte count to equal what the new key says. The
+    version matters: delete-old trusts that exact version, and a later write to the key would
+    otherwise be what this hashes. Only if all of them do, write ``new-hash-verified.json``, which
+    names the exact bytes of ``assembled.json`` it vouches for. On any mismatch no such file exists
+    afterwards: a proof left over from an earlier run is removed first.
 
 Privacy: no participant value is ever printed or written. Output holds annex keys, byte counts
 and fixed phrases. The one text that is not ours is the tail of the source command's own
 standard error when it fails (an ``aws`` error names a bucket and a key); the stream itself is
 only ever hashed, never decoded, logged or put in an exception message.
+
+Every file it writes is owner-only (the process umask is 077), as the working directory is.
 
 Exit status: 0 everything done and verified; 1 an object failed (or an unexpected error);
 2 an input file or argument was refused; 3 ``--limit`` stopped the run with keys still to hash.
@@ -67,7 +71,14 @@ DEFAULT_BUCKET = "nemar"
 DEFAULT_SOURCE_CMD = (
     "aws s3 cp s3://{bucket}/{dataset}/objects/{key} - --only-show-errors"
 )
-PLACEHOLDER = re.compile(r"\{(dataset|key|bucket)\}")
+# verify-new reads one VERSION, which `aws s3 cp` cannot name. `get-object` writes the body to the
+# file it is given and its JSON reply to standard output, so the body goes to a copy of the pipe on
+# descriptor 3 and the reply to /dev/null.
+DEFAULT_VERIFY_SOURCE_CMD = (
+    "aws s3api get-object --bucket {bucket} --key {dataset}/objects/{key} "
+    "--version-id {version} /dev/fd/3 3>&1 >/dev/null"
+)
+PLACEHOLDER = re.compile(r"\{(dataset|key|bucket|version)\}")
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -168,13 +179,16 @@ _ACTIVE_LOCK = threading.Lock()
 _ABORT = threading.Event()
 
 
-def build_source_command(template: str, dataset: str, bucket: str, key: str) -> str:
-    """Fill the template's ``{dataset}``, ``{key}`` and ``{bucket}``, each value shell-quoted.
+def build_source_command(
+    template: str, dataset: str, bucket: str, key: str, version: str = ""
+) -> str:
+    """Fill the template's ``{dataset}``, ``{key}``, ``{bucket}`` and ``{version}``, each value
+    shell-quoted.
 
     Done in one pass so a value is never itself scanned for placeholders, and without
     ``str.format`` so a template may carry other braces (an ``awk`` program, say).
     """
-    values = {"dataset": dataset, "bucket": bucket, "key": key}
+    values = {"dataset": dataset, "bucket": bucket, "key": key, "version": version}
     return PLACEHOLDER.sub(lambda m: shlex.quote(values[m.group(1)]), template)
 
 
@@ -326,8 +340,12 @@ class Fetch:
     retries: int
     backoff: float
 
-    def digests(self, key: str, expected_size: int, patch: bytes | None) -> Digests:
-        command = build_source_command(self.template, self.dataset, self.bucket, key)
+    def digests(
+        self, key: str, expected_size: int, patch: bytes | None, version: str = ""
+    ) -> Digests:
+        command = build_source_command(
+            self.template, self.dataset, self.bucket, key, version
+        )
         return fetch_with_retry(
             command, self.timeout, self.retries, self.backoff, expected_size, patch
         )
@@ -352,10 +370,11 @@ def hash_object(fetch: Fetch, old_key: str, patch: bytes) -> str:
     return build_key(parsed.size, d.patched, parsed.ext)
 
 
-def check_new_object(fetch: Fetch, new_key: str) -> None:
-    """Stream a new object and require its size and SHA-256 to be what its key says."""
+def check_new_object(fetch: Fetch, new_key: str, version: str) -> None:
+    """Stream one version of a new object and require its size and SHA-256 to be what its key
+    says."""
     parsed = parse_key(new_key)
-    d = fetch.digests(new_key, parsed.size, None)
+    d = fetch.digests(new_key, parsed.size, None, version)
     if d.total != parsed.size:
         raise ObjectFailure(f"read {d.total} bytes but the key says {parsed.size}")
     if d.original != parsed.sha256:
@@ -386,22 +405,75 @@ def _load_json(raw: bytes, what: str):
         raise InputError(f"{what} is not valid JSON") from None
 
 
+def _is_count(value) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _is_name(value) -> bool:
+    return isinstance(value, str) and value != ""
+
+
 def parse_plan(raw: bytes) -> dict:
+    """plan.json, checked as ``parsePlan`` in contract.ts checks it: every field this program or a
+    later stage trusts, and totals that agree with the keys they summarize. A plan edited to hide
+    an unreadable key (``unreadable: 0`` over an unreadable entry) is refused, not acted on."""
     x = _load_json(raw, "plan.json")
+    bad = InputError("plan.json does not match the contract")
     if (
         not isinstance(x, dict)
         or not _is_version_1(x.get("version"))
-        or not isinstance(x.get("dataset"), str)
+        or not _is_name(x.get("dataset"))
+        or not _is_name(x.get("bucket"))
         or not isinstance(x.get("keys"), list)
     ):
-        raise InputError("plan.json does not match the contract")
+        raise bad
+    if "partial" in x and type(x["partial"]) is not bool:
+        raise bad
+    seen: set[str] = set()
+    need = unreadable = bytes_to_hash = 0
     for k in x["keys"]:
         old_key = k.get("oldKey") if isinstance(k, dict) else None
         if not isinstance(old_key, str):
             raise InputError("plan.json holds a key that is not a SHA256E annex key")
+        annex = ANNEX_KEY.fullmatch(old_key)
         inline = k.get("status") == "unreadable" and GIT_KEY.fullmatch(old_key)
-        if not ANNEX_KEY.fullmatch(old_key) and not inline:
+        if not annex and not inline:
             raise InputError("plan.json holds a key that is not a SHA256E annex key")
+        status, needs, size = k.get("status"), k.get("needsScrub"), k.get("size")
+        if status not in ("read", "unreadable") or type(needs) is not bool:
+            raise bad
+        if not _is_count(size) or (annex and size != parse_key(old_key).size):
+            raise bad
+        for field in ("versionIds", "reasons"):
+            value = k.get(field)
+            if not isinstance(value, list) or not all(
+                isinstance(v, str) for v in value
+            ):
+                raise bad
+        # A key that was not read cannot be said to need a scrub.
+        if needs and status != "read":
+            raise bad
+        if old_key in seen:
+            raise bad
+        seen.add(old_key)
+        if needs:
+            need += 1
+            bytes_to_hash += size
+        if status == "unreadable":
+            unreadable += 1
+    t = x.get("totals")
+    if (
+        not isinstance(t, dict)
+        or not all(
+            _is_count(t.get(f))
+            for f in ("keys", "needScrub", "bytesToHash", "unreadable")
+        )
+        or t["keys"] != len(x["keys"])
+        or t["needScrub"] != need
+        or t["unreadable"] != unreadable
+        or t["bytesToHash"] != bytes_to_hash
+    ):
+        raise bad
     return x
 
 
@@ -432,6 +504,8 @@ def parse_assembled(raw: bytes) -> dict:
             not ANNEX_KEY.fullmatch(old_key)
             or not isinstance(new_key, str)
             or not ANNEX_KEY.fullmatch(new_key)
+            # The version assembly made, which is the one this program must hash.
+            or not _is_name(e.get("newVersionId"))
         ):
             raise InputError("assembled.json holds a bad entry")
     return x
@@ -491,7 +565,10 @@ def load_existing_hashes(path: str, dataset: str, needed: list[str]) -> dict:
 def write_atomic(path: str, text: str) -> None:
     """Write ``text`` to ``path`` so a reader sees the old file or the new one, never half."""
     tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
+    # Owner-only whatever the umask: a file the working directory's other files are not.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)
+    with open(fd, "w", encoding="utf-8") as fh:
         fh.write(text)
         fh.flush()
         os.fsync(fh.fileno())
@@ -541,20 +618,28 @@ def run_jobs(jobs: list, work, workers: int, on_result) -> None:
 # --- compute ------------------------------------------------------------------------------------
 
 
-def _plan_keys(plan: dict) -> tuple[list[str], int, int]:
-    """(keys to hash in plan order, keys that need no scrub, keys not checked at all)."""
+def _plan_keys(plan: dict) -> tuple[list[str], int]:
+    """(keys to hash in plan order, keys that need no scrub). The plan is complete: see
+    ``_require_complete``."""
     needed: list[str] = []
-    seen: set[str] = set()
-    clean = unchecked = 0
+    clean = 0
     for k in plan["keys"]:
-        if k.get("status") != "read":
-            unchecked += 1
-        elif k.get("needsScrub") is not True:
-            clean += 1
-        elif k["oldKey"] not in seen:
-            seen.add(k["oldKey"])
+        if k["needsScrub"]:
             needed.append(k["oldKey"])
-    return needed, clean, unchecked
+        else:
+            clean += 1
+    return needed, clean
+
+
+def _require_complete(plan: dict) -> None:
+    """Only a complete plan is hashed, as only a complete one is assembled: one made over every
+    manifest, whose every key was read. A key nobody read is a header nobody checked."""
+    if plan.get("partial") is True:
+        raise InputError(
+            "plan.json is partial (made with --tags); make a complete plan"
+        )
+    if plan["totals"]["unreadable"] > 0:
+        raise InputError("plan.json has keys it could not read; the plan is incomplete")
 
 
 def _hashes_text(dataset: str, entries: dict) -> str:
@@ -564,13 +649,11 @@ def _hashes_text(dataset: str, entries: dict) -> str:
 
 def cmd_compute(args: argparse.Namespace) -> int:
     plan = parse_plan(_read_bytes(args.plan, "plan.json"))
+    _require_complete(plan)
     patches = parse_patches(_read_bytes(args.patches, "patches.json"))
     _check_out_dir(args.out)
     dataset = _check_name(plan["dataset"], "the dataset name")
-    plan_bucket = plan.get("bucket") if isinstance(plan.get("bucket"), str) else None
-    bucket = _check_name(
-        args.dataset_bucket or plan_bucket or DEFAULT_BUCKET, "the bucket name"
-    )
+    bucket = _check_name(args.dataset_bucket or plan["bucket"], "the bucket name")
     fetch = Fetch(
         args.source_cmd or DEFAULT_SOURCE_CMD,
         dataset,
@@ -580,7 +663,7 @@ def cmd_compute(args: argparse.Namespace) -> int:
         args.retry_backoff,
     )
 
-    needed, clean, unchecked = _plan_keys(plan)
+    needed, clean = _plan_keys(plan)
     existing = load_existing_hashes(args.out, dataset, needed)
     # An entry is reused only for the patch it was computed for. A patch that changed since (or an
     # entry from before entries named their patch) means the new key is for other bytes: drop the
@@ -606,11 +689,12 @@ def cmd_compute(args: argparse.Namespace) -> int:
 
     _say(
         f"hash compute {dataset} from bucket {bucket}: {len(needed)} keys to hash, "
-        f"{resumed} already done, {len(todo)} to read now, {clean} need no scrub, "
-        f"{unchecked} not checked by the plan (never read)"
+        f"{resumed} already done, {len(todo)} to read now, {clean} need no scrub"
     )
     if stale:
-        _say(f"hash compute {dataset}: {stale} entries were made for another patch; recomputing")
+        _say(
+            f"hash compute {dataset}: {stale} entries were made for another patch; recomputing"
+        )
 
     done = 0
     unsaved = 0
@@ -672,8 +756,12 @@ def cmd_verify_new(args: argparse.Namespace) -> int:
     bucket = _check_name(
         args.dataset_bucket or file_bucket or DEFAULT_BUCKET, "the bucket name"
     )
+    template = args.source_cmd or DEFAULT_VERIFY_SOURCE_CMD
+    # A source that does not name the version would hash whatever is current at the key.
+    if "{version}" not in template:
+        raise InputError("verify-new needs a --source-cmd that names {version}")
     fetch = Fetch(
-        args.source_cmd or DEFAULT_SOURCE_CMD,
+        template,
         dataset,
         bucket,
         args.timeout,
@@ -688,31 +776,32 @@ def cmd_verify_new(args: argparse.Namespace) -> int:
         pass
 
     entries = assembled["entries"]
-    new_keys = list(dict.fromkeys(e["newKey"] for e in entries.values()))
-    _say(
-        f"hash verify-new {dataset} from bucket {bucket}: {len(new_keys)} objects to read"
+    # Each new object at the version assembly recorded for it.
+    jobs = list(
+        dict.fromkeys((e["newKey"], e["newVersionId"]) for e in entries.values())
     )
+    _say(f"hash verify-new {dataset} from bucket {bucket}: {len(jobs)} objects to read")
 
     failures: dict[str, str] = {}
     done = 0
 
-    def work(new_key: str):
+    def work(job: tuple[str, str]):
         try:
-            check_new_object(fetch, new_key)
+            check_new_object(fetch, job[0], job[1])
             return None
         except ObjectFailure as exc:
             return str(exc)
 
-    def on_result(new_key: str, reason) -> None:
+    def on_result(job: tuple[str, str], reason) -> None:
         nonlocal done
         done += 1
         if reason is None:
-            _say(f"[{done}/{len(new_keys)}] verified {new_key}")
+            _say(f"[{done}/{len(jobs)}] verified {job[0]}")
         else:
-            failures[new_key] = reason
-            _say(f"[{done}/{len(new_keys)}] FAILED {new_key}: {reason}")
+            failures[job[0]] = reason
+            _say(f"[{done}/{len(jobs)}] FAILED {job[0]}: {reason}")
 
-    run_jobs(new_keys, work, args.workers, on_result)
+    run_jobs(jobs, work, args.workers, on_result)
 
     if failures:
         for new_key in sorted(failures):
@@ -780,8 +869,12 @@ def _add_read_options(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--source-cmd",
         metavar="TEMPLATE",
-        help="shell command that writes one object to standard output; {dataset}, {key} and "
-        "{bucket} are filled in, shell-quoted. Default: " + DEFAULT_SOURCE_CMD,
+        help="shell command that writes one object to standard output; {dataset}, {key}, "
+        "{bucket} and (verify-new, where it is required) {version} are filled in, "
+        "shell-quoted. Default: "
+        + DEFAULT_SOURCE_CMD
+        + "; for verify-new: "
+        + DEFAULT_VERIFY_SOURCE_CMD,
     )
     p.add_argument(
         "--dataset-bucket",
@@ -871,6 +964,8 @@ def _on_sigterm(signum, frame) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Owner-only for every file this process and its source commands create.
+    os.umask(0o077)
     args = build_parser().parse_args(argv)
     if threading.current_thread() is threading.main_thread():
         signal.signal(signal.SIGTERM, _on_sigterm)

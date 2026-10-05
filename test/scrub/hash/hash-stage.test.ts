@@ -17,7 +17,15 @@
 
 import { afterAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { which } from "bun";
@@ -30,6 +38,7 @@ import {
   parseHashes,
 } from "../../../scripts/scrub/contract";
 import { toolOrFail } from "../helpers/require-tools";
+import { startS3Standin } from "../helpers/s3-standin";
 
 const SCRIPT = join(import.meta.dir, "..", "..", "..", "scripts", "scrub", "hash", "hash_stage.py");
 const SCRIPT_DIR = join(import.meta.dir, "..", "..", "..", "scripts", "scrub", "hash");
@@ -168,14 +177,17 @@ function store(ws: Workspace, key: string, bytes: Uint8Array): void {
   writeFileSync(join(ws.objects, key), bytes);
 }
 
-/** A source script. It sees $KEY, $LOG, $OBJECTS and $HASHES; `body` is its text. */
-function installSource(ws: Workspace, body: string): void {
+/**
+ * A source script. It sees $KEY, $VERSION, $LOG, $OBJECTS and $HASHES; `body` is its text and
+ * `args` what the template passes it (verify-new must name `{version}`).
+ */
+function installSource(ws: Workspace, body: string, args = "{key}"): void {
   const script = join(ws.dir, "src.sh");
   writeFileSync(
     script,
-    `#!/bin/sh\nLOG=${shq(ws.log)}\nOBJECTS=${shq(ws.objects)}\nHASHES=${shq(ws.hashes)}\nKEY="$1"\n${body}\n`,
+    `#!/bin/sh\nLOG=${shq(ws.log)}\nOBJECTS=${shq(ws.objects)}\nHASHES=${shq(ws.hashes)}\nKEY="$1"\nVERSION="$2"\n${body}\n`,
   );
-  ws.sourceCmd = `sh ${shq(script)} {key}`;
+  ws.sourceCmd = `sh ${shq(script)} ${args}`;
 }
 
 const LOGGING_SOURCE = 'echo "$KEY" >> "$LOG"\ncat "$OBJECTS/$KEY"';
@@ -218,7 +230,7 @@ function stage(ws: Workspace, items: Staged[], opts: { bucket?: string } = {}): 
     totals: {
       keys: keys.length,
       needScrub: keys.filter((k) => k.needsScrub).length,
-      bytesToHash: 0,
+      bytesToHash: keys.filter((k) => k.needsScrub).reduce((n, k) => n + k.size, 0),
       unreadable: keys.filter((k) => k.status !== "read").length,
     },
   };
@@ -500,19 +512,12 @@ describe("compute: the original must be what its key says", () => {
 
 describe("compute: which keys are read", () => {
   test(
-    "keys that need no scrub, or were not read by the plan, are never read",
+    "keys that need no scrub are never read",
     async () => {
       const ws = workspace();
       const needed = makeObject(4000);
       const clean = makeObject(4000);
-      const unread = makeObject(4000);
-      const both = makeObject(4000);
-      stage(ws, [
-        { obj: needed },
-        { obj: clean, needsScrub: false, absent: true },
-        { obj: unread, status: "unreadable", absent: true },
-        { obj: both, needsScrub: false, status: "unreadable", absent: true },
-      ]);
+      stage(ws, [{ obj: needed }, { obj: clean, needsScrub: false, absent: true }]);
       installSource(ws, LOGGING_SOURCE);
 
       const run = await py(computeArgs(ws));
@@ -524,7 +529,82 @@ describe("compute: which keys are read", () => {
   );
 
   test(
-    "a recording kept inline in git is accepted only as an unreadable entry, and never read",
+    "a plan with a key it could not read, or a partial plan, is refused: nothing read or written",
+    async () => {
+      const ws = workspace();
+      const needed = makeObject(4000);
+      const unread = makeObject(4000);
+      stage(ws, [{ obj: needed }, { obj: unread, needsScrub: false, status: "unreadable" }]);
+      installSource(ws, LOGGING_SOURCE);
+      const run = await py(computeArgs(ws));
+      expect(run.code, run.stderr).toBe(2);
+      expect(run.stderr).toContain("the plan is incomplete");
+      expect(readLog(ws)).toEqual([]);
+      expect(existsSync(ws.hashes)).toBe(false);
+
+      stage(ws, [{ obj: needed }]);
+      writeFileSync(ws.plan, JSON.stringify({ ...readJson<PlanFile>(ws.plan), partial: true }));
+      const partial = await py(computeArgs(ws));
+      expect(partial.code, partial.stderr).toBe(2);
+      expect(partial.stderr).toContain("partial");
+      expect(readLog(ws)).toEqual([]);
+    },
+    TIMEOUT_MS,
+  );
+
+  test(
+    "a plan whose totals disagree with its keys, or that names no bucket, is refused",
+    async () => {
+      const ws = workspace();
+      const o = makeObject(4000);
+      stage(ws, [{ obj: o }]);
+      const plan = readJson<PlanFile>(ws.plan);
+      const key = plan.keys[0] as PlanKey;
+      const other: PlanKey = {
+        ...key,
+        oldKey: `SHA256E-s9--${"e".repeat(64)}.edf`,
+        size: 9,
+        needsScrub: false,
+        status: "unreadable",
+      };
+      const cases: Array<[string, unknown]> = [
+        // Hiding an unreadable key, or shrinking the bytes to hash: the TS parser refuses both.
+        ["unreadable hidden", { ...plan, keys: [key, other], totals: { ...plan.totals, keys: 2 } }],
+        ["bytes shrunk", { ...plan, totals: { ...plan.totals, bytesToHash: 1 } }],
+        ["needScrub wrong", { ...plan, totals: { ...plan.totals, needScrub: 0 } }],
+        ["keys wrong", { ...plan, totals: { ...plan.totals, keys: 5 } }],
+        ["size disagrees with the key", { ...plan, keys: [{ ...key, size: 3999 }] }],
+        [
+          "needsScrub on an unread key",
+          {
+            ...plan,
+            keys: [{ ...key, status: "unreadable" }],
+            totals: { ...plan.totals, unreadable: 1 },
+          },
+        ],
+        [
+          "the same key twice",
+          {
+            ...plan,
+            keys: [key, key],
+            totals: { ...plan.totals, keys: 2, needScrub: 2, bytesToHash: 8000 },
+          },
+        ],
+        ["no bucket", { ...plan, bucket: undefined }],
+        ["empty dataset", { ...plan, dataset: "" }],
+      ];
+      for (const [label, edited] of cases) {
+        writeFileSync(ws.plan, JSON.stringify(edited));
+        const run = await py(computeArgs(ws));
+        expect(run.code, label).toBe(2);
+        expect(existsSync(ws.hashes), label).toBe(false);
+      }
+    },
+    TIMEOUT_MS,
+  );
+
+  test(
+    "a recording kept inline in git is carried only as an unreadable entry, so the plan is refused",
     async () => {
       const ws = workspace();
       const o = makeObject(4000);
@@ -539,15 +619,21 @@ describe("compute: which keys are read", () => {
         status: "unreadable",
       };
       const withEntry = (entry: PlanKey) => {
-        const copy = { ...plan, keys: [...plan.keys, entry] };
-        writeFileSync(ws.plan, JSON.stringify(copy));
+        const keys = [...plan.keys, entry];
+        const totals = {
+          ...plan.totals,
+          keys: keys.length,
+          unreadable: keys.filter((k) => k.status === "unreadable").length,
+        };
+        writeFileSync(ws.plan, JSON.stringify({ ...plan, keys, totals }));
       };
-      withEntry(inline);
       installSource(ws, LOGGING_SOURCE);
-      const run = await py(computeArgs(ws));
-      expect(run.code, run.stderr).toBe(0);
-      expect(run.stderr).toContain("1 not checked by the plan");
-      expect(readLog(ws)).toEqual([o.oldKey]);
+      // A well-formed inline entry: the plan parses, and is incomplete, so nothing is read.
+      withEntry(inline);
+      const incomplete = await py(computeArgs(ws));
+      expect(incomplete.code, incomplete.stderr).toBe(2);
+      expect(incomplete.stderr).toContain("the plan is incomplete");
+      expect(readLog(ws)).toEqual([]);
 
       // The same key on an entry the plan says it READ, or not a blob sha at all: refused.
       for (const entry of [
@@ -938,10 +1024,19 @@ interface AssembledSetup {
 
 /** New objects stored under their new keys, and an assembled.json formatted with TABS so that its
  * exact bytes differ from any re-serialization a careless program might hash instead. */
+/** The version assembly recorded for every new object in these fixtures. */
+const NEW_VERSION = "v-new";
+
+/** Store bytes as the recorded version of a new object: verify-new reads `<key>@<version>`. */
+const storeNew = (ws: Workspace, key: string, bytes: Uint8Array) =>
+  store(ws, `${key}@${NEW_VERSION}`, bytes);
+
 function assembledSetup(count = 4): AssembledSetup {
   const ws = workspace();
+  // verify-new must name the version; this source reads exactly that version's file.
+  ws.sourceCmd = `cat ${shq(ws.objects)}/{key}@{version}`;
   const objs = Array.from({ length: count }, (_, n) => makeObject(5000 + n * 777));
-  for (const o of objs) store(ws, o.newKey, o.newContent);
+  for (const o of objs) storeNew(ws, o.newKey, o.newContent);
   const file: AssembledFile = {
     version: 1,
     dataset: DATASET,
@@ -951,7 +1046,7 @@ function assembledSetup(count = 4): AssembledSetup {
         o.oldKey,
         {
           newKey: o.newKey,
-          newVersionId: "v-new",
+          newVersionId: NEW_VERSION,
           retainUntil: "2027-01-01T00:00:00Z",
           mode: "GOVERNANCE" as const,
         },
@@ -993,7 +1088,7 @@ describe("verify-new", () => {
     "correct objects write a proof naming the sha256 of the exact bytes of assembled.json",
     async () => {
       const s = assembledSetup();
-      installSource(s.ws, LOGGING_SOURCE);
+      installSource(s.ws, 'echo "$KEY" >> "$LOG"\ncat "$OBJECTS/$KEY@$VERSION"', "{key} {version}");
       const reserialized = JSON.stringify(JSON.parse(s.assembledBytes.toString("utf8")), null, 2);
       expect(sha256(Buffer.from(`${reserialized}\n`))).not.toBe(sha256(s.assembledBytes));
 
@@ -1019,7 +1114,7 @@ describe("verify-new", () => {
       const flipped = Buffer.from(victim.newContent);
       const mid = Math.floor(flipped.length / 2);
       flipped[mid] = (flipped[mid] ?? 0) ^ 0x01;
-      store(s.ws, victim.newKey, flipped);
+      storeNew(s.ws, victim.newKey, flipped);
       // A proof left by an earlier, successful run must not survive a failing one.
       writeFileSync(s.proof, JSON.stringify({ stale: true }));
 
@@ -1050,8 +1145,8 @@ describe("verify-new", () => {
         const s = assembledSetup(2);
         const victim = s.objs[0] as Obj;
         const damaged = damage(victim);
-        if (damaged) store(s.ws, victim.newKey, damaged);
-        else rmSync(join(s.ws.objects, victim.newKey));
+        if (damaged) storeNew(s.ws, victim.newKey, damaged);
+        else rmSync(join(s.ws.objects, `${victim.newKey}@${NEW_VERSION}`));
 
         const run = await py(verifyArgs(s));
         expect(run.code, label).toBe(1);
@@ -1068,7 +1163,7 @@ describe("verify-new", () => {
     async () => {
       const s = assembledSetup(2);
       const victim = s.objs[1] as Obj;
-      store(s.ws, victim.newKey, victim.content); // the old bytes, same size, wrong hash
+      storeNew(s.ws, victim.newKey, victim.content); // the old bytes, same size, wrong hash
       const run = await py(verifyArgs(s));
       expect(run.code).toBe(1);
       expect(existsSync(s.proof)).toBe(false);
@@ -1100,6 +1195,110 @@ describe("verify-new", () => {
       rmSync(s.proof);
       expect((await py(verifyArgs(s, ["--workers", "4"]))).code).toBe(0);
       expect(readFileSync(s.proof, "utf8")).toBe(serial);
+    },
+    TIMEOUT_MS,
+  );
+});
+
+describe("verify-new: the recorded version", () => {
+  test(
+    "reads the version assembly recorded, not whatever is current at the key",
+    async () => {
+      const s = assembledSetup(2);
+      const victim = s.objs[0] as Obj;
+      // The recorded version is damaged; a later, correct write sits beside it under another id.
+      const flipped = Buffer.from(victim.newContent);
+      flipped[100] = (flipped[100] ?? 0) ^ 0x01;
+      storeNew(s.ws, victim.newKey, flipped);
+      store(s.ws, `${victim.newKey}@v-later`, victim.newContent);
+      const run = await py(verifyArgs(s));
+      expect(run.code).toBe(1);
+      expect(run.stderr).toContain(`FAIL ${victim.newKey}: the object does not hash to its key`);
+      expect(existsSync(s.proof)).toBe(false);
+    },
+    TIMEOUT_MS,
+  );
+
+  test(
+    "a source that does not name the version, or an entry without one, is refused",
+    async () => {
+      const s = assembledSetup(1);
+      const run = await py(verifyArgs(s, ["--source-cmd", `cat ${shq(s.ws.objects)}/{key}`]));
+      expect(run.code).toBe(2);
+      expect(run.stderr).toContain("names {version}");
+      const doc = readJson<AssembledFile>(s.assembled);
+      delete (Object.values(doc.entries)[0] as { newVersionId?: string }).newVersionId;
+      writeFileSync(s.assembled, JSON.stringify(doc));
+      expect((await py(verifyArgs(s))).code).toBe(2);
+      expect(existsSync(s.proof)).toBe(false);
+    },
+    TIMEOUT_MS,
+  );
+});
+
+describe("file modes", () => {
+  test(
+    "hashes.json and the proof are owner-only, whatever umask the program was started with",
+    async () => {
+      const ws = workspace();
+      const o = makeObject(4000);
+      stage(ws, [{ obj: o }]);
+      const run = async (args: string[]) => {
+        const proc = Bun.spawn(
+          ["sh", "-c", `umask 022; exec python3 ${[SCRIPT, ...args].map(shq).join(" ")}`],
+          {
+            stdout: "pipe",
+            stderr: "pipe",
+            env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+          },
+        );
+        const err = await new Response(proc.stderr).text();
+        return { code: await proc.exited, err };
+      };
+      const compute = await run(computeArgs(ws));
+      expect(compute.code, compute.err).toBe(0);
+      expect(statSync(ws.hashes).mode & 0o777).toBe(0o600);
+      const s = assembledSetup(1);
+      const verify = await run(verifyArgs(s));
+      expect(verify.code, verify.err).toBe(0);
+      expect(statSync(s.proof).mode & 0o777).toBe(0o600);
+
+      // The umask reaches the source command too: a file it creates is owner-only.
+      const marker = join(ws.dir, "made-by-source");
+      rmSync(ws.hashes);
+      ws.sourceCmd = `touch ${shq(marker)}; cat ${shq(ws.objects)}/{key}`;
+      const withChild = await run(computeArgs(ws));
+      expect(withChild.code, withChild.err).toBe(0);
+      expect(statSync(marker).mode & 0o777).toBe(0o600);
+    },
+    TIMEOUT_MS,
+  );
+
+  test(
+    "write_atomic makes the file and its .tmp owner-only on its own, under any umask",
+    async () => {
+      const ws = workspace();
+      const target = join(ws.dir, "out.json");
+      const code = `
+import os, sys
+sys.path.insert(0, ${JSON.stringify(SCRIPT_DIR)})
+import hash_stage
+os.umask(0o022)
+hash_stage.write_atomic(${JSON.stringify(target)}, "{}\\n")
+print(oct(os.stat(${JSON.stringify(target)}).st_mode & 0o777))
+`;
+      const proc = Bun.spawn(["python3", "-c", code], {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+      });
+      const [out, err, status] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      expect(status, err).toBe(0);
+      expect(out.trim()).toBe("0o600");
     },
     TIMEOUT_MS,
   );
@@ -1137,7 +1336,7 @@ describe("no participant value leaves the program", () => {
       const ok = assembledSetup(2);
       const okRun = await py(verifyArgs(ok));
       const bad = assembledSetup(2);
-      store(bad.ws, (bad.objs[0] as Obj).newKey, (bad.objs[0] as Obj).content);
+      storeNew(bad.ws, (bad.objs[0] as Obj).newKey, (bad.objs[0] as Obj).content);
       const badRun = await py(verifyArgs(bad));
       expect(okRun.code).toBe(0);
       expect(badRun.code).toBe(1);
@@ -1483,6 +1682,57 @@ describe.skipIf(!awsInstalled)("default source: the real aws CLI, stand-in S3", 
         expect(s3.log).toContain(`GET /nemar/${DATASET}/objects/${small.newKey}`);
       } finally {
         s3.stop();
+      }
+    },
+    TIMEOUT_MS,
+  );
+
+  test(
+    "verify-new with no --source-cmd reads the recorded version through aws, not the current one",
+    async () => {
+      // The real stand-in keeps versions; the small server above does not.
+      const standin = startS3Standin();
+      try {
+        const key = `${DATASET}/objects/${small.newKey}`;
+        const damaged = Buffer.from(small.newContent);
+        damaged[200] = (damaged[200] ?? 0) ^ 0x01;
+        const recordedGood = standin.putObject("nemar", key, small.newContent);
+        const laterBad = standin.putObject("nemar", key, damaged);
+        const ws = workspace();
+        const assembled = join(ws.dir, "assembled.json");
+        const proof = join(ws.dir, "new-hash-verified.json");
+        const write = (versionId: string) =>
+          writeFileSync(
+            assembled,
+            JSON.stringify({
+              version: 1,
+              dataset: DATASET,
+              bucket: "nemar",
+              entries: {
+                [small.oldKey]: {
+                  newKey: small.newKey,
+                  newVersionId: versionId,
+                  retainUntil: "2127-01-01T00:00:00Z",
+                  mode: "GOVERNANCE",
+                },
+              },
+            }),
+          );
+        const args = ["verify-new", "--assembled", assembled, "--out", proof, "--retries", "0"];
+        // The recorded version is good and a damaged one is current: the proof is written.
+        write(recordedGood);
+        const good = await runWithAws(args, standin.url);
+        expect(good.code, good.stderr).toBe(0);
+        expect(existsSync(proof)).toBe(true);
+        // The recorded version is the damaged one, though a good one is current: no proof.
+        write(laterBad);
+        standin.putObject("nemar", key, small.newContent);
+        const bad = await runWithAws(args, standin.url);
+        expect(bad.code, bad.stderr).toBe(1);
+        expect(bad.stderr).toContain("the object does not hash to its key");
+        expect(existsSync(proof)).toBe(false);
+      } finally {
+        standin.stop();
       }
     },
     TIMEOUT_MS,
