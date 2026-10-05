@@ -19,7 +19,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { chmodSync, writeFileSync } from "node:fs";
 import { scanJsonKeys, scanPaths } from "../../../shared/identifier-scan";
 import { type GitPlanFile, type JsonOp, parseGitPlan } from "../contract";
 import { changeLogEntry } from "../ledger";
@@ -202,7 +202,9 @@ if (import.meta.main) {
       dataset,
       arg("date") ?? new Date().toISOString().slice(0, 10),
     );
-    writeFileSync(out, `${JSON.stringify(plan, null, 1)}\n`);
+    // File names in the plan can be the identifier: owner-only, even over a looser existing file.
+    writeFileSync(out, `${JSON.stringify(plan, null, 1)}\n`, { mode: 0o600 });
+    chmodSync(out, 0o600);
     console.log(JSON.stringify(report));
   } catch (error) {
     console.error(error instanceof PlanRefused ? error.message : "failed");

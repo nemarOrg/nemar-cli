@@ -5,7 +5,7 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PlanRefused, buildGitPlan } from "../../scripts/scrub/plan/build-git-plan";
@@ -160,5 +160,29 @@ describe("the git plan", () => {
     const dir = repo();
     commit(dir, { "a.txt": "a" }, "v1");
     expect(() => buildGitPlan(dir, "nm000001", "2026-10-04")).toThrow(PlanRefused);
+  });
+  test("the CLI writes the plan owner-only, even over a looser existing file", () => {
+    const dir = repo();
+    commit(dir, { "dataset_description.json": "{}", CHANGES: "x\n" }, "one", "v1.0.0");
+    const out = join(mkdtempSync(join(tmpdir(), "plan-out-")), "git-plan.json");
+    dirs.push(dirname(out));
+    writeFileSync(out, "old", { mode: 0o644 });
+    chmodSync(out, 0o644);
+    const r = spawnSync(
+      "bun",
+      [
+        "run",
+        join(import.meta.dir, "../../scripts/scrub/plan/build-git-plan.ts"),
+        "--repo",
+        dir,
+        "--dataset",
+        "nm099999",
+        "--out",
+        out,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(r.status, r.stderr).toBe(0);
+    expect(statSync(out).mode & 0o777).toBe(0o600);
   });
 });
