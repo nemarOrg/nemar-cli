@@ -34,6 +34,14 @@ import {
   scanTableColumns,
   scanTextForLocalPaths,
 } from "../shared/identifier-scan";
+import type {
+  DatasetRecord,
+  DatasetStatus,
+  ManifestSource,
+  SamplingStat,
+} from "../shared/identifier-screen-report";
+
+export type { DatasetRecord, DatasetStatus, ManifestSource, SamplingStat };
 
 export const USER_AGENT = "nemar-identifier-scan/1.0 (+https://docs.nemar.org/policies/takedown/)";
 export const DEFAULT_API = "https://api.nemar.org";
@@ -733,8 +741,6 @@ export interface ManifestEntry {
   url: string;
 }
 
-export type ManifestSource = "manifest.json" | "s3-version-manifest" | "git-tree";
-
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 
@@ -937,16 +943,6 @@ export function sampleEvenly<T>(
 // Status
 // ---------------------------------------------------------------------------------------
 
-export type DatasetStatus =
-  | "direct-identifiers"
-  | "dates-only"
-  | "review"
-  | "clean"
-  | "clean-edf-only-others-unscreened"
-  | "not-screened"
-  | "no-recordings"
-  | "unchecked";
-
 /** An identifier-severity finding of a kind that names a person or a clinical record. */
 export const isDirectFinding = (f: Finding): boolean =>
   f.severity === "identifier" && DIRECT_KINDS.has(f.kind);
@@ -997,43 +993,6 @@ export function classifyDataset(input: ClassifyInput): DatasetStatus {
 // ---------------------------------------------------------------------------------------
 // One dataset
 // ---------------------------------------------------------------------------------------
-
-export interface SamplingStat {
-  /** Files that matched before any size or count cap. */
-  candidates: number;
-  /** Candidates above the size cap, which are not read. */
-  oversize: number;
-  /** Files chosen to read after the caps. */
-  selected: number;
-  /** Files read and scanned successfully. */
-  scanned: number;
-}
-
-export interface DatasetRecord {
-  id: string;
-  version: string | null;
-  scanned_at: string;
-  status: DatasetStatus;
-  incomplete: boolean;
-  incomplete_reasons: string[];
-  manifest_source?: ManifestSource;
-  files?: { total: number; edf_bdf: number; header_read: number; header_read_failed: number };
-  sampling?: Record<"edf_headers" | "scans_tables" | "json_files" | "text_files", SamplingStat>;
-  /** Failures by `<what>/<class>`, counts only. */
-  read_failures?: Record<string, number>;
-  edf_bdf_files_flagged?: number;
-  distinct_patient_field_values?: number;
-  distinct_subjects_with_edf_bdf?: number;
-  distinct_patient_code_subfield?: number;
-  distinct_patient_name_subfield?: number;
-  distinct_patient_birth_subfield?: number;
-  distinct_patient_field_values_in_flagged_files?: number;
-  findings_by_kind?: Partial<Record<FindingKind, number>>;
-  edf_bdf_files_by_kind?: Partial<Record<FindingKind, number>>;
-  unscreened_formats?: Record<string, number>;
-  side_reads_failed?: number;
-  finding_fields?: string[];
-}
 
 const EDF_FILE = /\.(edf|bdf)$/i;
 const BIDS_SIDECAR =
