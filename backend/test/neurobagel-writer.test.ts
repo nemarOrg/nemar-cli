@@ -14,7 +14,15 @@
  * writes nothing" and the ordering of writes against deletes are proven.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  setDefaultTimeout,
+  test,
+} from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import Ajv from "ajv";
@@ -86,6 +94,11 @@ import {
   startHarness,
   storeKeys,
 } from "./helpers/neurobagel-harness";
+
+// These tests run a real D1 and an R2 simulator, and several loop over budgets or seed a few
+// hundred objects. The budget loop took about 9 s on a CI runner and tripped bun's 5 s default,
+// which also left a dangling process that failed the next test.
+setDefaultTimeout(60_000);
 
 let h: Harness;
 const quiet = { error: console.error, warn: console.warn, log: console.log };
