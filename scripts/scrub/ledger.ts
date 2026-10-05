@@ -62,7 +62,9 @@ const SCANNER = /^identifier-scan@[0-9a-f]{7,40}$/;
 /** A GitHub handle: the operator, not a participant. */
 const ACTOR = /^[a-z0-9][a-z0-9-]{0,38}$/i;
 const DATASET = /^(nm|xx|on)\d{6}$/;
-const VERSION = /^v\d+\.\d+\.\d+(-[A-Za-z0-9.]+)?$/;
+/** A version tag the ledger and the change log take: `vX.Y.Z` with an optional pre-release. */
+export const VERSION_TAG = /^v\d+\.\d+\.\d+(-[A-Za-z0-9.]+)?$/;
+const VERSION = VERSION_TAG;
 
 /** Refuse anything that could carry a value, then return the entry unchanged. */
 export function validateLedgerEntry(entry: LedgerEntry): LedgerEntry {

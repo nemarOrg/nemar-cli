@@ -120,6 +120,13 @@ export function assertGitPlanShape(plan: GitPlanFile): void {
   for (const [path, ops] of Object.entries(plan.jsonOps ?? {})) {
     if (!okPath(path) || !ops.every(validJsonOp)) bad("git-plan.json holds a bad jsonOps entry");
   }
+  if (plan.skippedJson !== undefined) {
+    const sj = plan.skippedJson as unknown as Record<string, unknown>;
+    const list = (x: unknown) => Array.isArray(x) && x.every(okPath);
+    if (typeof sj !== "object" || sj === null || !list(sj.oversize) || !list(sj.unparseable)) {
+      bad("git-plan.json holds a bad skippedJson entry");
+    }
+  }
   const dropped = new Set(plan.dropPaths);
   if (
     [...Object.keys(plan.appendText), ...Object.keys(plan.jsonOps ?? {})].some((p) =>

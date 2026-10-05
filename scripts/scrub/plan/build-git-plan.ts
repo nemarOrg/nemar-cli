@@ -2,7 +2,8 @@
 /**
  * Build `git-plan.json` for a dataset repository from what its history actually holds.
  *
- *   bun run scripts/scrub/plan/build-git-plan.ts --repo CLONE --dataset nm000348 --out git-plan.json [--date YYYY-MM-DD]
+ *   bun run scripts/scrub/plan/build-git-plan.ts --repo CLONE --dataset nm000348 --out git-plan.json \
+ *        [--date YYYY-MM-DD] [--s3-plan plan.json] [--allow-skipped-json]
  *
  * Read-only on the clone. It reads EVERY commit reachable from every ref the rewrite covers (local
  * and remote-tracking heads and tags, never `git-annex`), not just `main` and the `v*` tips, because
@@ -18,14 +19,26 @@
  *
  * The plan holds file NAMES, which can be the identifier, so it is private and deleted with the rest
  * of the working directory. The report on stdout is counts only.
+ *
+ * It refuses, and says why with a fixed word and a count, rather than leave something unread:
+ * - an inline JSON file it could not read in some commit, because it is over
+ *   {@link MAX_JSON_BYTES} or not UTF-8 JSON (`skipped-json`): its identifier keys would never be
+ *   blanked. The paths go to `<out>.skipped.json` (0600) and no plan is written, unless
+ *   `--allow-skipped-json` says a person looked; the plan then lists them under `skippedJson`;
+ * - a `v*` tag that is not `vX.Y.Z[-pre]` (`tag-not-semver`): the change-log sentence and the
+ *   ledger take only those;
+ * - with `--s3-plan`, a key the S3 plan scrubs that no commit of the history names
+ *   (`orphan-key`): the history rewrite would refuse its keymap entry (`keymap-key-never-seen`).
+ *
+ * Exit: 0 plan written, 1 failed, 2 usage, 3 refused.
  */
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { scanJsonKeys, scanPaths } from "../../../shared/identifier-scan";
-import { type GitPlanFile, type JsonOp, parseGitPlan } from "../contract";
+import { type GitPlanFile, type JsonOp, parseGitPlan, parsePlan } from "../contract";
 import { RAW_LOG_ARGS, type RawEntry, isRewriteRef, isZeroSha, parseRawLog } from "../git/git-lib";
-import { changeLogEntry } from "../ledger";
+import { VERSION_TAG, changeLogEntry } from "../ledger";
 
 const PROVENANCE = "sourcedata/sourcedata_provenance.json";
 const PROVENANCE_README = "sourcedata/README_sourcedata_provenance.md";
@@ -38,13 +51,21 @@ export class PlanRefused extends Error {
   }
 }
 
+/** git itself failed (not a refusal): exit 1. The reason names the command, never its output. */
+export class PlanFailed extends Error {
+  constructor(readonly reason: string) {
+    super(`git plan failed: ${reason}`);
+    this.name = "PlanFailed";
+  }
+}
+
 function gitBuffer(repo: string, args: string[], input?: string): Buffer {
   const r = spawnSync("git", ["-C", repo, ...args], {
     encoding: "buffer",
     maxBuffer: 1024 * 1024 * 1024,
     ...(input === undefined ? {} : { input: Buffer.from(input) }),
   });
-  if (r.status !== 0) throw new PlanRefused(`git ${args[0]} failed`);
+  if (r.status !== 0) throw new PlanFailed(`git ${args[0]}`);
   return r.stdout as Buffer;
 }
 
@@ -58,6 +79,8 @@ interface History {
   paths: Set<string>;
   /** Inline-JSON candidates: path -> the distinct blob ids it ever had. */
   jsonBlobs: Map<string, Set<string>>;
+  /** Every blob a regular file or a symlink ever held: where annex pointers are. */
+  fileBlobs: Set<string>;
 }
 
 /**
@@ -76,14 +99,16 @@ function readHistory(repo: string, refs: string[]): History {
   const log = git(repo, RAW_LOG_ARGS, stdin);
   const paths = new Set<string>();
   const jsonBlobs = new Map<string, Set<string>>();
+  const fileBlobs = new Set<string>();
   let entries: RawEntry[];
   try {
     entries = parseRawLog(log);
   } catch {
-    throw new PlanRefused("git log output not understood");
+    throw new PlanFailed("git log output not understood");
   }
   for (const { path, newMode, newSha, status } of entries) {
     paths.add(path);
+    if (!isZeroSha(newSha) && /^(100644|100755|120000)$/.test(newMode)) fileBlobs.add(newSha);
     // Inline JSON only: an annex pointer is a few dozen bytes of `/annex/objects/...`, not JSON.
     if (
       path.toLowerCase().endsWith(".json") &&
@@ -96,22 +121,34 @@ function readHistory(repo: string, refs: string[]): History {
       jsonBlobs.set(path, set);
     }
   }
-  return { commits, paths, jsonBlobs };
+  return { commits, paths, jsonBlobs, fileBlobs };
 }
 
 /** Read at most this many bytes of blob content in one `cat-file` process. */
 const BATCH_BYTES = 64 * 1024 * 1024;
 
-/** The content of each blob that is at most `limit` bytes, a bounded batch at a time. */
-function readSmallBlobs(repo: string, shas: string[], limit: number): Map<string, Buffer> {
+/**
+ * The content of each blob that is at most `limit` bytes, a bounded batch at a time. A blob over
+ * the limit is not read: it is in `oversize`, so the caller can say so instead of skipping it.
+ */
+function readSmallBlobs(
+  repo: string,
+  shas: string[],
+  limit: number,
+): { contents: Map<string, Buffer>; oversize: Set<string> } {
   const out = new Map<string, Buffer>();
-  if (shas.length === 0) return out;
+  const oversize = new Set<string>();
+  if (shas.length === 0) return { contents: out, oversize };
   const sizes = git(repo, ["cat-file", "--batch-check"], `${shas.join("\n")}\n`).split("\n");
   const batches: string[][] = [[]];
   let batchBytes = 0;
   shas.forEach((sha, i) => {
     const size = Number((sizes[i] ?? "").split(" ")[2]);
-    if (!Number.isFinite(size) || size > limit) return;
+    if (!Number.isFinite(size)) throw new PlanFailed("git cat-file");
+    if (size > limit) {
+      oversize.add(sha);
+      return;
+    }
     if (batchBytes + size > BATCH_BYTES) {
       batches.push([]);
       batchBytes = 0;
@@ -126,13 +163,13 @@ function readSmallBlobs(repo: string, shas: string[], limit: number): Map<string
     for (const sha of batch) {
       const nl = raw.indexOf(10, at);
       const [, type, size] = raw.subarray(at, nl).toString("latin1").split(" ");
-      if (type !== "blob" || size === undefined) throw new PlanRefused("git cat-file failed");
+      if (type !== "blob" || size === undefined) throw new PlanFailed("git cat-file");
       const start = nl + 1;
       out.set(sha, raw.subarray(start, start + Number(size)));
       at = start + Number(size) + 1;
     }
   }
-  return out;
+  return { contents: out, oversize };
 }
 
 export interface PlanReport {
@@ -143,24 +180,55 @@ export interface PlanReport {
   jsonFilesBlanked: number;
   jsonKeysBlanked: number;
   provenanceEntriesDropped: number;
+  /** Inline JSON paths with a blob over {@link MAX_JSON_BYTES} in some commit: not read. */
+  skippedOversizeJson: number;
+  /** Inline JSON paths with a blob that is not UTF-8 JSON in some commit: not read. */
+  skippedUnparseableJson: number;
+  /** With an S3 plan: keys it scrubs that no commit names (`orphan-key`). -1 without one. */
+  orphanKeys: number;
   versions: string[];
 }
+
+export interface BuildOptions {
+  /** Accept inline JSON that could not be read; the plan lists the paths under `skippedJson`. */
+  allowSkippedJson?: boolean;
+  /** The S3 stage's plan, to find keys it scrubs that the history never names. */
+  s3PlanPath?: string;
+}
+
+/** A refusal that also carries what a person needs to look at (paths, which are private). */
+export class SkippedJsonRefused extends PlanRefused {
+  constructor(
+    readonly oversize: string[],
+    readonly unparseable: string[],
+  ) {
+    super(`skipped-json (oversize=${oversize.length} unparseable=${unparseable.length})`);
+  }
+}
+
+const ANNEX_KEY_IN_TEXT = /SHA256E-s\d+--[0-9a-f]{64}(?:\.[A-Za-z0-9.+]*)?/g;
+/** A pointer file or a symlink target is a line long. */
+const POINTER_MAX_BYTES = 1024;
 
 export function buildGitPlan(
   repo: string,
   dataset: string,
   date: string,
+  opts: BuildOptions = {},
 ): { plan: GitPlanFile; report: PlanReport } {
   const tags = git(repo, ["tag", "--list", "v*"])
     .split("\n")
     .filter((t) => t !== "")
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   if (tags.length === 0) throw new PlanRefused("the repository has no v* tags");
+  // The change-log sentence and the ledger take only vX.Y.Z[-pre]; say so, never filter.
+  const notSemver = tags.filter((t) => !VERSION_TAG.test(t)).length;
+  if (notSemver > 0) throw new PlanRefused(`tag-not-semver (${notSemver})`);
   const refs = git(repo, ["for-each-ref", "--format=%(refname)"])
     .split("\n")
     .filter((r) => r !== "" && isRewriteRef(r));
   if (!refs.includes("refs/heads/main")) throw new PlanRefused("the repository has no main branch");
-  const { commits, paths: allPaths, jsonBlobs } = readHistory(repo, refs);
+  const { commits, paths: allPaths, jsonBlobs, fileBlobs } = readHistory(repo, refs);
 
   // Images and documents under sourcedata/ are dropped; elsewhere they are left for a person.
   const dropped: string[] = [];
@@ -170,23 +238,30 @@ export function buildGitPlan(
   }
 
   // Identifier-keyed values in inline JSON, by canonical spelling, over every distinct blob.
-  const contents = readSmallBlobs(
+  const { contents, oversize } = readSmallBlobs(
     repo,
     [...new Set([...jsonBlobs.values()].flatMap((shas) => [...shas]))],
     MAX_JSON_BYTES,
   );
   const blankJsonKeys: Record<string, string[]> = {};
+  const skippedOversize = new Set<string>();
+  const skippedUnparseable = new Set<string>();
   let keysBlanked = 0;
   for (const [path, shas] of [...jsonBlobs.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const keys = new Set<string>();
     for (const sha of shas) {
+      if (oversize.has(sha)) {
+        skippedOversize.add(path);
+        continue;
+      }
       const bytes = contents.get(sha);
-      if (!bytes) continue;
+      if (!bytes) throw new PlanFailed("git cat-file");
       let doc: unknown;
       try {
-        const text = bytes.toString("utf8");
+        const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
         doc = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
       } catch {
+        skippedUnparseable.add(path);
         continue;
       }
       for (const f of scanJsonKeys(doc)) if (f.severity === "identifier") keys.add(f.field);
@@ -226,6 +301,27 @@ export function buildGitPlan(
       `\nPrivacy correction ${date}: identification fields in the headers of the recording files were removed in place, and files that identify a person were removed. The checksums in the provenance file describe the original upstream files, not the scrubbed copies.\n`;
   }
 
+  // With the S3 plan: every key it scrubs must be named by some commit, or the rewrite cannot
+  // map it (it refuses a keymap entry the history never held).
+  let orphanKeys = -1;
+  if (opts.s3PlanPath) {
+    const s3Plan = parsePlan(readFileSync(opts.s3PlanPath, "utf8"));
+    if (s3Plan.dataset !== dataset) throw new PlanRefused("s3-plan-dataset-mismatch");
+    const named = new Set<string>();
+    const small = readSmallBlobs(repo, [...fileBlobs], POINTER_MAX_BYTES).contents;
+    for (const bytes of small.values()) {
+      for (const m of bytes.toString("latin1").matchAll(ANNEX_KEY_IN_TEXT)) named.add(m[0]);
+    }
+    orphanKeys = s3Plan.keys.filter((k) => k.needsScrub && !named.has(k.oldKey)).length;
+    if (orphanKeys > 0) throw new PlanRefused(`orphan-key (${orphanKeys})`);
+  }
+
+  const oversizePaths = [...skippedOversize].sort();
+  const unparseablePaths = [...skippedUnparseable].sort();
+  if ((oversizePaths.length > 0 || unparseablePaths.length > 0) && !opts.allowSkippedJson) {
+    throw new SkippedJsonRefused(oversizePaths, unparseablePaths);
+  }
+
   const plan: GitPlanFile = {
     version: 1,
     dataset,
@@ -233,6 +329,9 @@ export function buildGitPlan(
     blankJsonKeys,
     appendText,
     ...(Object.keys(jsonOps).length > 0 ? { jsonOps } : {}),
+    ...(oversizePaths.length > 0 || unparseablePaths.length > 0
+      ? { skippedJson: { oversize: oversizePaths, unparseable: unparseablePaths } }
+      : {}),
   };
   parseGitPlan(JSON.stringify(plan));
   return {
@@ -244,9 +343,18 @@ export function buildGitPlan(
       jsonFilesBlanked: Object.keys(blankJsonKeys).length,
       jsonKeysBlanked: keysBlanked,
       provenanceEntriesDropped: provenanceDropped,
+      skippedOversizeJson: oversizePaths.length,
+      skippedUnparseableJson: unparseablePaths.length,
+      orphanKeys,
       versions: tags,
     },
   };
+}
+
+/** Owner-only, even over a looser existing file: names in it can be the identifier. */
+function writePrivate(path: string, value: unknown): void {
+  writeFileSync(path, `${JSON.stringify(value, null, 1)}\n`, { mode: 0o600 });
+  chmodSync(path, 0o600);
 }
 
 if (import.meta.main) {
@@ -262,22 +370,43 @@ if (import.meta.main) {
   const out = arg("out");
   if (!repo || !dataset || !out) {
     console.error(
-      "usage: build-git-plan.ts --repo CLONE --dataset ID --out FILE [--date YYYY-MM-DD]",
+      "usage: build-git-plan.ts --repo CLONE --dataset ID --out FILE [--date YYYY-MM-DD] [--s3-plan plan.json] [--allow-skipped-json]",
     );
     process.exit(2);
   }
+  const skippedFile = `${out}.skipped.json`;
   try {
+    rmSync(skippedFile, { force: true });
     const { plan, report } = buildGitPlan(
       repo,
       dataset,
       arg("date") ?? new Date().toISOString().slice(0, 10),
+      {
+        allowSkippedJson: process.argv.includes("--allow-skipped-json"),
+        ...(arg("s3-plan") ? { s3PlanPath: arg("s3-plan") as string } : {}),
+      },
     );
-    // File names in the plan can be the identifier: owner-only, even over a looser existing file.
-    writeFileSync(out, `${JSON.stringify(plan, null, 1)}\n`, { mode: 0o600 });
-    chmodSync(out, 0o600);
+    writePrivate(out, plan);
     console.log(JSON.stringify(report));
   } catch (error) {
-    console.error(error instanceof PlanRefused ? error.message : "failed");
+    if (error instanceof SkippedJsonRefused) {
+      // The paths, for a person, in a private file beside where the plan would have gone; no plan.
+      writePrivate(skippedFile, {
+        version: 1,
+        dataset,
+        oversize: error.oversize,
+        unparseable: error.unparseable,
+      });
+      rmSync(out, { force: true });
+      console.error(`${error.message}; the paths are in ${skippedFile}; no plan written`);
+      console.error("look at them, then pass --allow-skipped-json to plan with them unread");
+      process.exit(3);
+    }
+    if (error instanceof PlanRefused) {
+      console.error(error.message);
+      process.exit(3);
+    }
+    console.error(error instanceof PlanFailed ? error.message : "failed");
     process.exit(1);
   }
 }

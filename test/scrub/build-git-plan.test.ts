@@ -5,7 +5,16 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PlanRefused, buildGitPlan } from "../../scripts/scrub/plan/build-git-plan";
@@ -117,6 +126,9 @@ describe("the git plan", () => {
       jsonFilesBlanked: 1,
       jsonKeysBlanked: 1,
       provenanceEntriesDropped: 1,
+      skippedOversizeJson: 0,
+      skippedUnparseableJson: 0,
+      orphanKeys: -1,
       versions: ["v1.0.1", "v1.0.2"],
     });
   });
@@ -328,5 +340,120 @@ describe("the git plan", () => {
     );
     expect(r.status, r.stderr).toBe(0);
     expect(statSync(out).mode & 0o777).toBe(0o600);
+  });
+});
+
+const CLI = join(import.meta.dir, "../../scripts/scrub/plan/build-git-plan.ts");
+const cliPlan = (dir: string, out: string, extra: string[] = []) =>
+  spawnSync("bun", ["run", CLI, "--repo", dir, "--dataset", "nm099999", "--out", out, ...extra], {
+    encoding: "utf8",
+    // Bun colors console.error under FORCE_COLOR; the tests read the exact words.
+    env: { ...GIT_ENV, FORCE_COLOR: "0", NO_COLOR: "1" },
+  });
+
+describe("the git plan refuses what it could not read (I4, S5, S6)", () => {
+  test("inline JSON over the size limit, or not JSON, is counted, named privately, and refused", () => {
+    const dir = repo();
+    // 1.1 MiB of JSON holding an identifier key, and a malformed one: neither can be scanned.
+    const big = JSON.stringify({ PatientName: "Marigold", pad: "x".repeat(1_150_000) });
+    commit(
+      dir,
+      { "sub-01/big.json": big, "sub-01/bad.json": '{"PatientName": "Marigold"', CHANGES: "x\n" },
+      "one",
+      "v1.0.0",
+    );
+    expect(() => buildGitPlan(dir, "nm099999", "2026-10-04")).toThrow(
+      "skipped-json (oversize=1 unparseable=1)",
+    );
+    const outDir = mkdtempSync(join(tmpdir(), "plan-skipped-"));
+    dirs.push(outDir);
+    const out = join(outDir, "git-plan.json");
+    const r = cliPlan(dir, out);
+    expect(r.status, r.stderr).toBe(3);
+    expect(r.stderr).toContain("git plan refused: skipped-json (oversize=1 unparseable=1)");
+    // Counts on the terminal; the names only in the private file; no plan to run on.
+    expect(r.stderr).not.toContain("big.json");
+    expect(existsSync(out)).toBe(false);
+    const skipped = JSON.parse(readFileSync(`${out}.skipped.json`, "utf8"));
+    expect(skipped).toEqual({
+      version: 1,
+      dataset: "nm099999",
+      oversize: ["sub-01/big.json"],
+      unparseable: ["sub-01/bad.json"],
+    });
+    expect(statSync(`${out}.skipped.json`).mode & 0o777).toBe(0o600);
+
+    // A person looked: the plan is written, says what it did not read, and the counts say so.
+    const ok = cliPlan(dir, out, ["--allow-skipped-json"]);
+    expect(ok.status, ok.stderr).toBe(0);
+    expect(JSON.parse(ok.stdout)).toMatchObject({
+      skippedOversizeJson: 1,
+      skippedUnparseableJson: 1,
+    });
+    expect(JSON.parse(readFileSync(out, "utf8")).skippedJson).toEqual({
+      oversize: ["sub-01/big.json"],
+      unparseable: ["sub-01/bad.json"],
+    });
+    expect(existsSync(`${out}.skipped.json`)).toBe(false);
+  });
+
+  test("a v* tag that is not vX.Y.Z is refused with a count, never filtered", () => {
+    const dir = repo();
+    commit(dir, { CHANGES: "x\n" }, "one", "v1.0.0");
+    commit(dir, { CHANGES: "y\n" }, "two", "v1.1");
+    commit(dir, { CHANGES: "z\n" }, "three", "v2-beta");
+    expect(() => buildGitPlan(dir, "nm099999", "2026-10-04")).toThrow("tag-not-semver (2)");
+    const outDir = mkdtempSync(join(tmpdir(), "plan-semver-"));
+    dirs.push(outDir);
+    const r = cliPlan(dir, join(outDir, "git-plan.json"));
+    expect(r.status).toBe(3);
+    expect(r.stderr.trim()).toBe("git plan refused: tag-not-semver (2)");
+  });
+
+  test("with the S3 plan, a key it scrubs that no commit names is refused as an orphan", () => {
+    const dir = repo();
+    const named = `SHA256E-s10--${"a".repeat(64)}.bdf`;
+    const orphan = `SHA256E-s10--${"b".repeat(64)}.edf`;
+    commit(
+      dir,
+      { "sub-01/eeg/x.bdf": `/annex/objects/${named}\n`, CHANGES: "x\n" },
+      "one",
+      "v1.0.0",
+    );
+    const outDir = mkdtempSync(join(tmpdir(), "plan-orphan-"));
+    dirs.push(outDir);
+    const s3Plan = (keys: string[]) => {
+      const path = join(outDir, "plan.json");
+      writeFileSync(
+        path,
+        JSON.stringify({
+          version: 1,
+          dataset: "nm099999",
+          bucket: "nemar",
+          tags: ["v1.0.0"],
+          createdAt: "2026-10-04T00:00:00Z",
+          keys: keys.map((k) => ({
+            oldKey: k,
+            size: 10,
+            needsScrub: true,
+            versionIds: [],
+            reasons: ["x"],
+            status: "read",
+          })),
+          totals: {
+            keys: keys.length,
+            needScrub: keys.length,
+            bytesToHash: 10 * keys.length,
+            unreadable: 0,
+          },
+        }),
+      );
+      return path;
+    };
+    const fine = buildGitPlan(dir, "nm099999", "2026-10-04", { s3PlanPath: s3Plan([named]) });
+    expect(fine.report.orphanKeys).toBe(0);
+    expect(() =>
+      buildGitPlan(dir, "nm099999", "2026-10-04", { s3PlanPath: s3Plan([named, orphan]) }),
+    ).toThrow("orphan-key (1)");
   });
 });

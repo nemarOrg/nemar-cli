@@ -299,6 +299,12 @@ export interface GitPlanFile {
    * file. Needed for a provenance file that lists the files being removed.
    */
   jsonOps?: Record<string, JsonOp[]>;
+  /**
+   * Inline JSON paths the plan builder could not read in some commit (over its size limit, or not
+   * UTF-8 JSON), present only when a person accepted them (`--allow-skipped-json`): their keys
+   * were not scanned, so nothing in this plan blanks them.
+   */
+  skippedJson?: { oversize: string[]; unparseable: string[] };
 }
 
 export type JsonOp =
