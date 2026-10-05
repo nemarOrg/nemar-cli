@@ -1438,45 +1438,52 @@ describe("log discipline: the Actions log is public", () => {
     },
     T,
   );
-
-  test(
-    "the GitHub token is in no git argument, even though the clone needs it",
-    async () => {
-      fresh();
-      const shims = tempDir("shim");
-      const log = join(shims, "argv.log");
-      const real = Bun.which("git") as string;
-      writeFileSync(
-        join(shims, "git"),
-        `#!/bin/sh\nprintf '%s\\n' "$@" >> "${log}"\nprintf -- '--\\n' >> "${log}"\nexec "${real}" "$@"\n`,
-      );
-      chmodSync(join(shims, "git"), 0o755);
-      const result = await runScript(cleanDataset(), {
-        env: { PATH: `${shims}:${process.env.PATH}` },
-      });
-      expect(scanOf(result).status).toBe("clean");
-      const argv = readFileSync(log, "utf8");
-      // The shim saw the clone, the tree walk and the history walk...
-      expect(argv).toContain("clone");
-      expect(argv).toContain("ls-tree");
-      expect(argv).toContain("log");
-      // ...and not the token, in any form.
-      expect(argv).not.toContain(GH_TOKEN);
-      expect(argv).not.toContain(btoa(`x-access-token:${GH_TOKEN}`));
-      expect(argv).not.toContain("extraheader");
-      expect(argv).not.toContain(TOKEN);
-    },
-    T,
-  );
 });
 
 // ---------------------------------------------------------------------------------------
 // The clone authenticates over HTTP with the token, or fails
 // ---------------------------------------------------------------------------------------
 
+/** A `git` first on PATH that records every argument it is given, then runs the real one. */
+function gitArgvShim(): { dir: string; log: string } {
+  const dir = tempDir("shim");
+  const log = join(dir, "argv.log");
+  const real = Bun.which("git") as string;
+  writeFileSync(
+    join(dir, "git"),
+    `#!/bin/sh\nprintf '%s\\n' "$@" >> "${log}"\nprintf -- '--\\n' >> "${log}"\nexec "${real}" "$@"\n`,
+  );
+  chmodSync(join(dir, "git"), 0o755);
+  return { dir, log };
+}
+
+/**
+ * The argument list of every process on the machine, sampled while `during` runs. Async on
+ * purpose: the stand-ins live on this event loop, so a blocking `ps` would stall the run.
+ */
+async function sampleProcessArgv<T>(during: () => Promise<T>): Promise<{ value: T; argv: string }> {
+  let running = true;
+  const samples: string[] = [];
+  const poller = (async () => {
+    while (running) {
+      const proc = Bun.spawn(["ps", "axww", "-o", "args="], { stdout: "pipe", stderr: "ignore" });
+      samples.push(await new Response(proc.stdout).text());
+      await Bun.sleep(25);
+    }
+  })();
+  try {
+    return { value: await during(), argv: samples.join("\n") };
+  } finally {
+    running = false;
+    await poller;
+  }
+}
+
 class GitHttpServer {
   authenticated = 0;
   refused = 0;
+  /** POSTs to git-upload-pack: the clone's fetch, then each by-object-id fetch of a blob. */
+  uploadPackPosts = 0;
   private readonly server: ReturnType<typeof Bun.serve>;
   readonly base: string;
 
@@ -1500,6 +1507,7 @@ class GitHttpServer {
     }
     this.authenticated++;
     const url = new URL(req.url);
+    if (req.method === "POST" && url.pathname.endsWith("/git-upload-pack")) this.uploadPackPosts++;
     const body = Buffer.from(await req.arrayBuffer());
     const env: Record<string, string> = {
       ...GIT_ENV,
@@ -1542,25 +1550,86 @@ class GitHttpServer {
 }
 
 describe("the clone authenticates through the environment", () => {
+  function served(files: (repo: Repo) => void): {
+    repo: Repo;
+    server: GitHttpServer;
+    origin: string;
+  } {
+    const repo = cleanDataset();
+    files(repo);
+    const root = tempDir("http-root");
+    git(root, "clone", "-q", "--bare", repo.origin, `${ID}.git`);
+    git(join(root, `${ID}.git`), "config", "uploadpack.allowFilter", "true");
+    git(join(root, `${ID}.git`), "config", "uploadpack.allowAnySHA1InWant", "true");
+    const server = new GitHttpServer(root, GH_TOKEN);
+    return { repo, server, origin: `${server.base}/${ID}.git` };
+  }
+
   test(
-    "the token reaches an HTTP git server as a header, and a wrong token is clone-failed",
+    "the token authenticates the clone and the by-object-id fetch over HTTP and is in no argv or output",
     async () => {
       fresh();
-      const repo = cleanDataset();
-      const root = tempDir("http-root");
-      git(root, "clone", "-q", "--bare", repo.origin, `${ID}.git`);
-      git(join(root, `${ID}.git`), "config", "uploadpack.allowFilter", "true");
-      git(join(root, `${ID}.git`), "config", "uploadpack.allowAnySHA1InWant", "true");
-      const server = new GitHttpServer(root, GH_TOKEN);
+      // A blob over the 1 KB clone bound, so a second authenticated fetch must bring it.
+      const { server, origin } = served((repo) => {
+        repo
+          .file("sourcedata/bulk.json", `{"pad":"${"x".repeat(3000)}","patient_name":"q"}\n`)
+          .commit("bulk");
+      });
+      const shim = gitArgvShim();
       try {
-        const origin = `${server.base}/${ID}.git`;
-        const ok = await runScript(null, { origin });
-        expect(scanOf(ok).status).toBe("clean");
-        expect(server.authenticated).toBeGreaterThan(0);
-        expect(server.refused).toBe(0);
-        expect(ok.stdout + ok.stderr).not.toContain(GH_TOKEN);
+        const { value: ok, argv: processes } = await sampleProcessArgv(() =>
+          runScript(null, { origin, env: { PATH: `${shim.dir}:${process.env.PATH}` } }),
+        );
 
-        fresh();
+        // The network path ran for real: the server only answers a request that carries the
+        // header, and the finding can only come from the blob the second fetch brought.
+        const scan = scanOf(ok);
+        expect(scan.status).toBe("direct-identifiers");
+        expect(scan.findings_by_kind?.["json-identifier-key"]).toBe(1);
+        expect(server.refused).toBe(0);
+        expect(server.authenticated).toBeGreaterThan(0);
+        expect(server.uploadPackPosts).toBeGreaterThanOrEqual(2);
+
+        // Every git command the script ran, as git received it.
+        const argv = readFileSync(shim.log, "utf8");
+        expect(argv).toContain("clone");
+        expect(argv).toContain("fetch");
+        expect(argv).toContain("--stdin");
+        // Every process on the machine while it ran: the script itself is among them.
+        expect(processes.includes(SCRIPT)).toBe(true);
+
+        const b64 = btoa(`x-access-token:${GH_TOKEN}`);
+        const secrets = [GH_TOKEN, b64];
+        // Machine-wide, so only what is unique to this test can be asserted about it. The
+        // comparison is on booleans: a failure must not print every process on the machine.
+        const sources: Record<string, string> = {
+          "git argv": argv,
+          "process list": processes,
+          stdout: ok.stdout,
+          stderr: ok.stderr,
+          "report file": readFileSync(ok.outFile, "utf8"),
+          callback: JSON.stringify(ok.posted.map((p) => p.body)),
+        };
+        for (const [name, text] of Object.entries(sources)) {
+          for (const secret of secrets)
+            expect([name, text.includes(secret)]).toEqual([name, false]);
+        }
+        // And of git's own arguments, which are only the script's: no config or header either.
+        expect(argv).not.toContain("extraheader");
+        expect(argv.toLowerCase()).not.toContain("authorization");
+      } finally {
+        server.stop();
+      }
+    },
+    T,
+  );
+
+  test(
+    "a wrong token, or none, is clone-failed",
+    async () => {
+      fresh();
+      const { server, origin } = served(() => undefined);
+      try {
         const refused = await runScript(null, { origin, env: { GH_TOKEN: "ghs_WrongToken" } });
         expect(refused.report?.error).toBe("clone-failed");
         expect(server.refused).toBeGreaterThan(0);
