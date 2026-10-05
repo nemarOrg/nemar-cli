@@ -29,6 +29,7 @@ import {
   parseAssembled,
   parseHashes,
 } from "../../../scripts/scrub/contract";
+import { toolOrFail } from "../helpers/require-tools";
 
 const SCRIPT = join(import.meta.dir, "..", "..", "..", "scripts", "scrub", "hash", "hash_stage.py");
 const SCRIPT_DIR = join(import.meta.dir, "..", "..", "..", "scripts", "scrub", "hash");
@@ -1304,7 +1305,7 @@ print(hash_stage.CHUNK_SIZE, hash_stage.HEADER_LEN, callable(hash_stage.main))
 
 // --- the default source: the real aws CLI against a local S3 stand-in ---------------------------
 
-const awsInstalled = which("aws") !== null;
+const awsInstalled = toolOrFail("aws", which("aws") !== null);
 
 describe.skipIf(!awsInstalled)("default source: the real aws CLI, stand-in S3", () => {
   function startS3(objects: Map<string, Uint8Array>) {
