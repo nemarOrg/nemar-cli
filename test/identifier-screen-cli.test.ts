@@ -216,3 +216,154 @@ describe("nemar admin publish list", () => {
     }
   });
 });
+
+describe("nemar admin publish approve --acknowledge-identifier-screen", () => {
+  const routes = {
+    "GET /datasets/nm000104/publish/status": {
+      body: { dataset_id: "nm000104", status: "requested", anonymous: false },
+    },
+    "POST /admin/publish/nm000104/approve": {
+      body: { message: "Dataset published successfully", dataset_id: "nm000104" },
+    },
+  };
+
+  test("sends the reason, trimmed, with the approval", async () => {
+    const server = startServer(routes);
+    try {
+      const r = await runCli(
+        [
+          "admin",
+          "publish",
+          "approve",
+          "nm000104",
+          "--yes",
+          "--acknowledge-identifier-screen",
+          "  Free text is a device serial number.  ",
+        ],
+        server.url,
+      );
+      expect(r.exitCode).toBe(0);
+      const posted = server.requests.filter((q) => q.pathname.endsWith("/approve"));
+      expect(posted).toHaveLength(1);
+      expect(JSON.parse(posted[0].body).acknowledge_identifier_screen).toBe(
+        "Free text is a device serial number.",
+      );
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("without the flag the approval carries no acknowledgment", async () => {
+    const server = startServer(routes);
+    try {
+      const r = await runCli(["admin", "publish", "approve", "nm000104", "--yes"], server.url);
+      expect(r.exitCode).toBe(0);
+      const posted = server.requests.filter((q) => q.pathname.endsWith("/approve"));
+      expect("acknowledge_identifier_screen" in JSON.parse(posted[0].body)).toBe(false);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a reason under 10 characters is refused before anything is sent", async () => {
+    const server = startServer(routes);
+    try {
+      const r = await runCli(
+        [
+          "admin",
+          "publish",
+          "approve",
+          "nm000104",
+          "--yes",
+          "--acknowledge-identifier-screen",
+          "ok",
+        ],
+        server.url,
+      );
+      expect(r.exitCode).toBe(1);
+      expect(server.requests.filter((q) => q.pathname.endsWith("/approve"))).toHaveLength(0);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a refusal by the screen prints the backend's sentence", async () => {
+    const server = startServer({
+      ...routes,
+      "POST /admin/publish/nm000104/approve": {
+        status: 409,
+        body: {
+          error: "identifier_screen_not_clear",
+          gate: "rerun",
+          headline: "Identifier screen: DID NOT RUN",
+          message:
+            "Identifier screen: DID NOT RUN. Approval waits for a screen that produced a verdict: run it again with nemar admin publish screen nm000104.",
+        },
+      },
+    });
+    try {
+      const r = await runCli(["admin", "publish", "approve", "nm000104", "--yes"], server.url);
+      expect(r.stdout + r.stderr).toContain("nemar admin publish screen nm000104");
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("nemar admin publish screen", () => {
+  test("posts the re-run and says the admins are mailed when it reports", async () => {
+    const server = startServer({
+      "POST /admin/publish/nm000104/identifier-screen": {
+        status: 202,
+        body: {
+          dataset_id: "nm000104",
+          request_id: 7,
+          status: "pending",
+          identifier_screen: {
+            state: "pending",
+            headline: "Identifier screen: running",
+            tone: "note",
+            lines: [],
+          },
+        },
+      },
+    });
+    try {
+      const r = await runCli(["admin", "publish", "screen", "nm000104"], server.url);
+      expect(r.exitCode).toBe(0);
+      expect(server.requests.map((q) => `${q.method} ${q.pathname}`)).toContain(
+        "POST /admin/publish/nm000104/identifier-screen",
+      );
+      expect(r.stdout + r.stderr).toContain("mailed when it reports");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a screen that could not start shows the result the admins were mailed", async () => {
+    const server = startServer({
+      "POST /admin/publish/nm000104/identifier-screen": {
+        status: 202,
+        body: {
+          dataset_id: "nm000104",
+          request_id: 7,
+          status: "error",
+          identifier_screen: {
+            state: "error",
+            headline: "Identifier screen: DID NOT RUN",
+            tone: "stop",
+            lines: ["Cause: GitHub refused to start the screen workflow."],
+          },
+        },
+      },
+    });
+    try {
+      const r = await runCli(["admin", "publish", "screen", "nm000104"], server.url);
+      const out = r.stdout + r.stderr;
+      expect(out).toContain("Identifier screen: DID NOT RUN");
+      expect(out).toContain("GitHub refused to start the screen workflow");
+    } finally {
+      server.stop();
+    }
+  });
+});

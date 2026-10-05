@@ -208,6 +208,19 @@ export async function denyPublication(
 }
 
 /**
+ * Re-run the identifier screen of a dataset's active publication request
+ * (admin; epic #1610, phase 4). The admins are mailed when it reports.
+ */
+export async function rerunIdentifierScreen(datasetId: string): Promise<{
+  dataset_id: string;
+  request_id: number;
+  status: string;
+  identifier_screen: IdentifierScreenView;
+}> {
+  return request(`/admin/publish/${datasetId}/identifier-screen`, { method: "POST" }, true);
+}
+
+/**
  * Info passed to `onRetry` when the orchestrator hits a transient failure
  * and the CLI is about to wait and re-invoke.
  */
@@ -334,6 +347,7 @@ export async function approvePublication(
   skipCiCheck = false,
   onRetry?: (info: PublishRetryInfo) => void,
   onProgress?: (info: PublishProgressInfo) => void,
+  acknowledgeIdentifierScreen?: string,
 ): Promise<PublishApproveResponse> {
   const MAX_ATTEMPTS = 5;
   const RETRY_DELAY_MS = APPROVE_RETRY_DELAY_MS;
@@ -401,6 +415,13 @@ export async function approvePublication(
               s3_lock_continuation_token,
               s3_lock_total,
               skip_ci_check: skipCiCheck,
+              // Epic #1610 phase 4: the admin's recorded reason for approving
+              // over a screen that needs a person to look. Sent on every call:
+              // a retry that lands before the run is marked approving passes
+              // the gate again, and must carry the same reason.
+              ...(acknowledgeIdentifierScreen !== undefined
+                ? { acknowledge_identifier_screen: acknowledgeIdentifierScreen }
+                : {}),
             }),
           },
           true,
