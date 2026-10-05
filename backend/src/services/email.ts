@@ -1152,7 +1152,46 @@ export async function sendRevocationEmail(
 }
 
 /**
- * Notify admins that a user has requested publication of a dataset
+ * The identifier screen's part of the publication-request email (epic #1610,
+ * phase 4). Built ONLY from `describeScreen` (shared/identifier-screen-report.ts)
+ * plus Worker-fixed sentences, so nothing a workflow wrote reaches the mail
+ * except the counts and fixed words that module emits.
+ */
+export interface PublicationScreenSection {
+  /** `describeScreen`'s headline, e.g. "Identifier screen: FOUND IDENTIFIERS". */
+  headline: string;
+  tone: "ok" | "note" | "warn" | "stop";
+  /** `describeScreen`'s lines: counts and fixed words, never a value. */
+  lines: string[];
+  /** What approval may do next, in a Worker-fixed sentence. */
+  next?: string;
+}
+
+const SCREEN_TONE_COLOR: Record<PublicationScreenSection["tone"], string> = {
+  ok: "#16a34a",
+  note: "#2563eb",
+  warn: "#d97706",
+  stop: "#dc2626",
+};
+
+/**
+ * The verdict as it appears at the end of the subject line:
+ * "IDENTIFIER SCREEN: FOUND IDENTIFIERS", "IDENTIFIER SCREEN: clean". The
+ * prefix is shouted so the verdict survives an inbox that truncates subjects.
+ */
+export function screenSubjectSuffix(headline: string): string {
+  return headline.replace(/^Identifier screen:/, "IDENTIFIER SCREEN:");
+}
+
+/**
+ * Notify admins that a user has requested publication of a dataset.
+ *
+ * Returns per-recipient results (#1610 phase 4), the same shape
+ * `sendUploadAccessRequestEmail` returns, for the same reason: the identifier
+ * screen's email is claimed before it is sent and must be released when nobody
+ * received it, so the caller has to know whether anybody did. Recipients are
+ * still tried independently, so one bad address does not cost the others their
+ * copy. Callers that do not need the outcome may ignore it.
  */
 export async function sendPublicationRequestEmail(
   adminEmails: string[],
@@ -1163,8 +1202,8 @@ export async function sendPublicationRequestEmail(
   replyTo?: string,
   isDev?: boolean,
   deliveryEnv?: EmailDeliveryEnv,
-  opts?: { anonymous?: boolean },
-): Promise<void> {
+  opts?: { anonymous?: boolean; screen?: PublicationScreenSection },
+): Promise<AdminNotificationOutcome> {
   // #1408: an anonymous release and a publication are different runs with
   // different outcomes -- one keeps the repository private and the DOI
   // reserved, the other makes both public and permanent. The admin approving
@@ -1180,6 +1219,21 @@ export async function sendPublicationRequestEmail(
     <code>--anonymous</code>.
   </div>`
     : "";
+  const screen = opts?.screen;
+  const screenSection = screen
+    ? `
+  <div style="border-left: 4px solid ${SCREEN_TONE_COLOR[screen.tone]}; background: #f9fafb; padding: 12px 16px; border-radius: 4px; margin: 16px 0;">
+    <strong style="color: ${SCREEN_TONE_COLOR[screen.tone]};">${escapeHtml(screen.headline)}</strong>
+    ${
+      screen.lines.length > 0
+        ? `<ul style="margin: 8px 0 0 0; padding-left: 20px;">${screen.lines
+            .map((line) => `<li>${escapeHtml(line)}</li>`)
+            .join("")}</ul>`
+        : ""
+    }
+    ${screen.next ? `<p style="margin: 8px 0 0 0;"><strong>${escapeHtml(screen.next)}</strong></p>` : ""}
+  </div>`
+    : "";
   const html = `
 <!DOCTYPE html>
 <html>
@@ -1192,6 +1246,7 @@ export async function sendPublicationRequestEmail(
 
   <p>User <strong>${escapeHtml(username)}</strong> has requested ${anonymous ? "an anonymous release" : "publication"} of dataset <strong>${escapeHtml(datasetId)}</strong>.</p>
 ${anonymousNotice}
+${screenSection}
 
   <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Action Required</h2>
   <p>Review the dataset and approve or deny the request:</p>
@@ -1214,11 +1269,19 @@ ${anonymousNotice}
 </html>
   `;
 
+  const subject = `[NEMAR] ${anonymous ? "Anonymous release" : "Publication"} request: ${datasetId} by ${username}${
+    screen ? ` - ${screenSubjectSuffix(screen.headline)}` : ""
+  }`;
+  const outcome: AdminNotificationOutcome = {
+    attempted: adminEmails.length,
+    delivered: 0,
+    failures: [],
+  };
   for (const adminEmail of adminEmails) {
     try {
       await sendEmail(
         adminEmail,
-        `[NEMAR] ${anonymous ? "Anonymous release" : "Publication"} request: ${datasetId} by ${username}`,
+        subject,
         html,
         resendApiKey,
         fromEmail,
@@ -1226,10 +1289,16 @@ ${anonymousNotice}
         isDev,
         deliveryEnv,
       );
+      outcome.delivered++;
     } catch (error) {
-      console.error(`Failed to send publication request email to ${adminEmail}:`, error);
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error(
+        `Failed to send publication request email to ${redactRecipient(adminEmail)}: ${detail}`,
+      );
+      outcome.failures.push({ recipient: redactRecipient(adminEmail), error: detail });
     }
   }
+  return outcome;
 }
 
 /**
