@@ -21,6 +21,8 @@
  * Credentials are the ambient `aws` CLI session. A long-lived `AKIA` key in the environment is
  * refused (docs.nemar.org access policies). Nothing printed or written is a participant value.
  *
+ * An `aws` failure no stage accounted for prints `s3-scrub: failed <Op>:<class>` (exit 1).
+ *
  * Exit codes: 0 ok; 1 a stage failed; 2 usage; 3 refused (a precondition or proof is missing or
  * stale); 4 unreadable (the plan is incomplete); 5 versions or markers remain after a delete;
  * 129, 130, 143 ended by SIGHUP, SIGINT, SIGTERM (the `aws` children killed, temp files removed).
@@ -30,6 +32,7 @@ import { parseArgs } from "node:util";
 import { ContractError } from "../contract";
 import { dropArchivesStage } from "./archives-stage";
 import {
+  AwsCliError,
   DEFAULT_SAMPLES,
   DEFAULT_TIMEOUT_MS,
   EXIT,
@@ -37,6 +40,7 @@ import {
   MIN_PART_BYTES,
   StageError,
   cliCredentialSource,
+  failureWord,
   installSignalCleanup,
   requireAwsCliVersion,
 } from "./s3-lib";
@@ -281,6 +285,12 @@ if (import.meta.main) {
     if (err instanceof ContractError) {
       console.error(`s3-scrub: ${err.message}`);
       process.exit(EXIT.refused);
+    }
+    // An `aws` call that failed outside a stage's own accounting: its operation and fixed class
+    // (`failureWord`), never the CLI's message.
+    if (err instanceof AwsCliError) {
+      console.error(`s3-scrub: failed ${failureWord(err)}`);
+      process.exit(EXIT.failed);
     }
     // Anything else could carry a message with a value in it (a parse error quotes the text it
     // choked on, a file error names the path): name the class only. SCRUB_S3_DEBUG=1 adds no

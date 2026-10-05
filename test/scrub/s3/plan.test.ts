@@ -488,6 +488,19 @@ describe("plan", () => {
   );
 
   test(
+    "an aws failure no stage accounted for prints its operation and fixed class, never a message",
+    async () => {
+      standin = startS3Standin();
+      // The listing that discovers the manifests is refused: nothing in the plan stage counts it.
+      standin.inject("ListObjectsV2", { code: "AccessDenied", status: 403 });
+      const r = await runScrub(standin, planArgs(tempDir("plan-aws-escape")));
+      expect(r.exitCode, r.all).toBe(1);
+      expect(r.stderr.trim()).toBe("s3-scrub: failed ListObjectsV2:access-denied");
+    },
+    SLOW,
+  );
+
+  test(
     "an unexpected error names its class only, and SCRUB_S3_DEBUG=1 adds no message or stack",
     async () => {
       standin = startS3Standin();
