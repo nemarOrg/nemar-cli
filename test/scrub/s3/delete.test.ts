@@ -14,6 +14,7 @@ import path from "node:path";
 import {
   type AssembledFile,
   type PlanFile,
+  type ZarrPlanFile,
   type ZarrVerifiedFile,
   parseKey,
 } from "../../../scripts/scrub/contract";
@@ -77,21 +78,32 @@ function writeProofs(count = 2) {
 }
 
 /**
- * The proof the `zarr` stage leaves, written by hand here and bound to plan.json and to the
- * zarr-plan.json beside it, as the stage binds it. `over` replaces fields to make it stale.
+ * The proof the `zarr` stage leaves, made by the REAL stage over whatever Zarr objects the test
+ * put in the stand-in, so the binding it checks is the binding the stage writes. `over` then
+ * replaces fields of the proof, to make it stale.
  */
-function writeZarrProof(over: Partial<ZarrVerifiedFile> = {}) {
-  writeJson(dir, "zarr-plan.json", { version: 1, dataset: DATASET, stores: [] });
-  writeJson(dir, "zarr-verified.json", {
-    version: 1,
-    dataset: DATASET,
-    verifiedAt: new Date().toISOString(),
-    planSha256: fileSha256(dir, "plan.json"),
-    zarrPlanSha256: fileSha256(dir, "zarr-plan.json"),
-    counts: { stores: 1, rewritten: 1, untouched: 0 },
-    ...over,
-  });
+async function proveZarr(over: Partial<ZarrVerifiedFile> = {}) {
+  const r = await runScrub(standin, ["zarr", "--dir", dir, "--execute"]);
+  if (r.exitCode !== 0) throw new Error(`the zarr stage failed: ${r.all}`);
+  if (Object.keys(over).length > 0) {
+    writeJson(dir, "zarr-verified.json", {
+      ...readJson<ZarrVerifiedFile>(dir, "zarr-verified.json"),
+      ...over,
+    });
+  }
 }
+
+/** A store root with an identifier key in it: the zarr stage rewrites it before it proves it. */
+const dirtyStore = JSON.stringify({
+  zarr_format: 3,
+  node_type: "group",
+  attributes: { recording_metadata: { patientcode: "P0042", gender: "F" } },
+});
+const cleanStore = JSON.stringify({
+  zarr_format: 3,
+  node_type: "group",
+  attributes: { recording_metadata: { gender: "F" } },
+});
 
 const deleteArgs = (extra: string[] = [], publicBase: string = pub.url) => [
   "delete-old",
@@ -490,14 +502,14 @@ describe("delete-old: pruning noncurrent versions", () => {
     "deletes only noncurrent versions and markers, by id, without the bypass; never a current one",
     async () => {
       writeProofs();
-      writeZarrProof();
       // Manifest: seeded, regenerated, then one more version and a marker below the newest.
       standin.putObject(BUCKET, manifest, manifestBody());
       standin.putDeleteMarker(BUCKET, manifest);
       standin.putObject(BUCKET, manifest, manifestBody());
-      // A Zarr store root: two versions.
-      standin.putObject(BUCKET, zarrJson, body("zarr one"));
-      standin.putObject(BUCKET, zarrJson, body("zarr two"));
+      // A Zarr store root: an older version and a current one, which the zarr stage has proven.
+      standin.putObject(BUCKET, zarrJson, body("an older zarr.json"));
+      standin.putObject(BUCKET, zarrJson, body(cleanStore));
+      await proveZarr();
       const currentManifest = standin.current(BUCKET, manifest)?.versionId as string;
       const currentZarr = standin.current(BUCKET, zarrJson)?.versionId as string;
 
@@ -537,9 +549,9 @@ describe("delete-old: pruning noncurrent versions", () => {
     "never forces a lock: a locked noncurrent version stays and the stage fails",
     async () => {
       writeProofs();
-      writeZarrProof();
       standin.putObject(BUCKET, zarrJson, body("locked"), { lockUntil: centuryFromNow() });
-      standin.putObject(BUCKET, zarrJson, body("current"));
+      standin.putObject(BUCKET, zarrJson, body(cleanStore));
+      await proveZarr();
       const r = await runScrub(standin, executeArgs(["--prune-noncurrent", `${DATASET}/zarr/`]));
       expect(r.exitCode, r.all).toBe(5);
       expect(r.stdout).toContain("DeleteObject:access-denied");
@@ -568,6 +580,7 @@ describe("delete-old: pruning noncurrent versions", () => {
 
 describe("delete-old: what must be true before an old key may go", () => {
   const body = (s: string) => new TextEncoder().encode(s);
+  const dec = (b: Uint8Array) => new TextDecoder().decode(b);
   const zarrJson = `${DATASET}/zarr/sub-01/x.zarr/zarr.json`;
   const [firstKey, secondKey] = [a.oldKey, b.oldKey].sort() as [string, string];
 
@@ -740,26 +753,36 @@ describe("delete-old: what must be true before an old key may go", () => {
     "refuses a current Zarr object until the zarr stage has proven this plan",
     async () => {
       writeProofs();
-      standin.putObject(BUCKET, zarrJson, body("{}"));
+      standin.putObject(BUCKET, zarrJson, body(dirtyStore));
       await refused("zarr-not-scrubbed");
 
-      writeZarrProof();
+      // The stage's own proof is what the check accepts, and it removed the identifier key first.
+      await proveZarr();
+      expect(JSON.parse(dec(standin.current(BUCKET, zarrJson)?.data as Uint8Array))).toEqual(
+        JSON.parse(cleanStore),
+      );
       const ok = await runScrub(standin, deleteArgs());
       expect(ok.exitCode, ok.all).toBe(0);
 
       // A proof for another dataset, another plan, another zarr plan, or of another shape.
-      writeZarrProof({ dataset: "xx090999" });
+      await proveZarr({ dataset: "xx090999" });
       await refused("zarr-not-scrubbed", { execute: false });
-      writeZarrProof({ planSha256: "0".repeat(64) });
+      await proveZarr({ planSha256: "0".repeat(64) });
       await refused("zarr-not-scrubbed", { execute: false });
-      writeZarrProof({ zarrPlanSha256: "0".repeat(64) });
+      await proveZarr({ zarrPlanSha256: "0".repeat(64) });
       await refused("zarr-not-scrubbed", { execute: false });
-      writeZarrProof({ counts: { stores: 5, rewritten: 1, untouched: 1 } });
+      await proveZarr({ counts: { stores: 5, rewritten: 1, untouched: 1 } });
       await refused("zarr-not-scrubbed", { execute: false });
       writeJson(dir, "zarr-verified.json", { version: 1 });
       await refused("zarr-not-scrubbed", { execute: false });
-      // The proof without the zarr-plan.json it names.
-      writeZarrProof();
+      // The proof without the zarr-plan.json it names, and a zarr-plan.json that was changed.
+      await proveZarr();
+      writeJson(dir, "zarr-plan.json", {
+        ...readJson<ZarrPlanFile>(dir, "zarr-plan.json"),
+        executed: false,
+      });
+      await refused("zarr-not-scrubbed", { execute: false });
+      await proveZarr();
       rmSync(path.join(dir, "zarr-plan.json"));
       await refused("zarr-not-scrubbed", { execute: false });
     },

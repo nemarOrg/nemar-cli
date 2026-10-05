@@ -93,7 +93,7 @@ export interface CommonOptions extends AwsConfig {
   log: (line: string) => void;
 }
 
-async function withCtx<T>(
+export async function withCtx<T>(
   o: CommonOptions,
   bucket: string,
   fn: (ctx: S3Ctx) => Promise<T>,
@@ -110,7 +110,7 @@ async function withCtx<T>(
 // Working-directory files.
 // ---------------------------------------------------------------------------
 
-async function readBytes(file: string, name: string): Promise<Buffer> {
+export async function readBytes(file: string, name: string): Promise<Buffer> {
   try {
     return await readFile(file);
   } catch {
@@ -119,7 +119,7 @@ async function readBytes(file: string, name: string): Promise<Buffer> {
 }
 
 /** Parse a stage file's text with the contract's guard; the error is a fixed word. */
-function parseFile<T>(name: string, parse: (text: string) => T, text: string): T {
+export function parseFile<T>(name: string, parse: (text: string) => T, text: string): T {
   try {
     return parse(text);
   } catch (err) {
@@ -133,7 +133,7 @@ async function loadFile<T>(dir: string, name: string, parse: (text: string) => T
   return parseFile(name, parse, bytes.toString("utf8"));
 }
 
-async function writeJson(dir: string, name: string, value: unknown): Promise<void> {
+export async function writeJson(dir: string, name: string, value: unknown): Promise<void> {
   await writeFile(path.join(dir, name), `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
 }
 
@@ -146,7 +146,7 @@ async function exists(file: string): Promise<boolean> {
   }
 }
 
-function checkDataset(dataset: string): void {
+export function checkDataset(dataset: string): void {
   if (!DATASET_ID.test(dataset)) throw new StageError("bad-dataset-id", EXIT.usage);
 }
 

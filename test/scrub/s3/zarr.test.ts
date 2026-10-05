@@ -1,0 +1,450 @@
+/**
+ * The zarr stage, run as the real CLI with the real `aws` CLI against the S3 stand-in.
+ *
+ * Every store, key and value is invented. The stores carry identifier keys with content on
+ * purpose, so a test can look for them in whatever the stage printed or wrote and fail if one
+ * appears, and can compare what the stage left in S3 with an expectation built independently, by
+ * structure, from the same document.
+ */
+
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import {
+  type PlanFile,
+  type ZarrPlanFile,
+  type ZarrVerifiedFile,
+  parseZarrVerified,
+} from "../../../scripts/scrub/contract";
+import { type S3Standin, startS3Standin } from "../helpers/s3-standin";
+import { expectStopped } from "./refusal";
+import {
+  BUCKET,
+  DATASET,
+  MIB,
+  SLOW,
+  dirText,
+  fileSha256,
+  fixtureD,
+  has,
+  leaksAName,
+  planArgs,
+  readJson,
+  runScrub,
+  seedManifest,
+  seedObject,
+  sha256,
+  tempDir,
+  writeJson,
+} from "./support";
+
+let standin: S3Standin;
+afterEach(() => standin?.stop());
+
+const enc = (s: string) => new TextEncoder().encode(s);
+const dec = (b: Uint8Array) => new TextDecoder().decode(b);
+
+const ROOT = `${DATASET}/zarr/sub-01/eeg`;
+const storeKey = (name: string) => `${ROOT}/${name}.zarr/zarr.json`;
+const A = storeKey("a-pretty");
+const B = storeKey("b-compact");
+const C = storeKey("c-clean");
+
+/** Values that must appear nowhere the stage prints or writes. */
+const VALUES = ["P0042", "Marigold", "Thistlewood", "03-JUL-1971", "1971-07-03", "A-9981"];
+
+const dirtyAttributes = () => ({
+  recording_metadata: {
+    patientcode: "P0042 Marigold",
+    birthdate: "03-JUL-1971",
+    startdate: "02.02.20",
+    gender: "F",
+    equipment: "BioSemi",
+    patientname: "Thistlewood",
+  },
+  channels: [{ name: "Fz", dob: "1971-07-03" }],
+  history: { mrn: "A-9981", note: "kept" },
+});
+
+/** The same attributes with the five identifier members dropped, written out by hand. */
+const cleanedAttributes = () => ({
+  recording_metadata: { startdate: "02.02.20", gender: "F", equipment: "BioSemi" },
+  channels: [{ name: "Fz" }],
+  history: { note: "kept" },
+});
+
+const wrap = (attributes: unknown) => ({ zarr_format: 3, node_type: "group", attributes });
+
+const prettyDirty = `${JSON.stringify(wrap(dirtyAttributes()), null, 2)}\n`;
+const prettyCleaned = `${JSON.stringify(wrap(cleanedAttributes()), null, 2)}\n`;
+const compactDirty = JSON.stringify(
+  wrap({
+    recording_metadata: { patientcode: "P0043 Marigold", birthdate: "04-AUG-1972", gender: "M" },
+  }),
+);
+const compactCleaned = JSON.stringify(wrap({ recording_metadata: { gender: "M" } }));
+const cleanDoc = JSON.stringify(
+  wrap({ recording_metadata: { startdate: "02.02.20", gender: "F", email: "a@b.test" } }),
+);
+
+interface Seeded {
+  dir: string;
+  /** The other objects of the Zarr copy, which the stage must never touch. */
+  others: Record<string, Uint8Array>;
+}
+
+/** A dataset with a plan, and a Zarr copy: two dirty store roots, one clean, and other objects. */
+async function seeded(): Promise<Seeded> {
+  standin = startS3Standin();
+  const d = fixtureD();
+  seedObject(standin, d);
+  seedManifest(standin, "v1.0.0", [d]);
+  const dir = tempDir("zarr");
+  const plan = await runScrub(standin, planArgs(dir));
+  expect(plan.exitCode, plan.all).toBe(0);
+
+  standin.putObject(BUCKET, A, enc(prettyDirty), {
+    contentType: "application/json",
+    cacheControl: "max-age=60",
+    sse: "AES256",
+  });
+  standin.putObject(BUCKET, B, enc(compactDirty), { contentType: "application/json" });
+  standin.putObject(BUCKET, C, enc(cleanDoc), { contentType: "application/json" });
+  const others: Record<string, Uint8Array> = {
+    // An array's own metadata, deeper in a store: not a store root, so never read or rewritten.
+    [`${ROOT}/a-pretty.zarr/data/zarr.json`]: enc(
+      JSON.stringify({ zarr_format: 3, node_type: "array", attributes: { patientcode: "P9999" } }),
+    ),
+    [`${ROOT}/a-pretty.zarr/data/c/0/0`]: new Uint8Array([1, 2, 3, 4]),
+    [`${DATASET}/zarr/index.json`]: enc(JSON.stringify({ stores: 3 })),
+  };
+  for (const [k, v] of Object.entries(others)) standin.putObject(BUCKET, k, v);
+  standin.log.length = 0;
+  return { dir, others };
+}
+
+const zarrArgs = (dir: string, extra: string[] = []) => [
+  "zarr",
+  "--dir",
+  dir,
+  "--concurrency",
+  "1",
+  ...extra,
+];
+
+const text = (key: string) => dec((standin.current(BUCKET, key) as { data: Uint8Array }).data);
+const versionsOf = (key: string) => standin.versions(BUCKET, key);
+const mode = (dir: string, name: string) => statSync(path.join(dir, name)).mode & 0o777;
+
+function expectNoValue(output: string, dir: string) {
+  const everything = `${output}\n${dirText(dir)}`;
+  expect(leaksAName(everything)).toBeNull();
+  for (const v of VALUES) expect(everything, v).not.toContain(v);
+}
+
+describe("zarr: a dry run", () => {
+  test(
+    "reads, reports what it would remove, writes a private plan, and changes nothing",
+    async () => {
+      const { dir } = await seeded();
+      // A proof from an earlier run is not left standing by a run that did not re-prove.
+      writeFileSync(path.join(dir, "zarr-verified.json"), "{}");
+
+      const r = await runScrub(standin, zarrArgs(dir));
+      expect(r.exitCode, r.all).toBe(0);
+      expect(r.stdout).toContain("zarr dry run (nothing written to S3)");
+      expect(r.stdout).toContain("stores=3 clean=1 needScrub=2 unreadable=0 failed=0");
+
+      // Only reads: a listing, a HEAD and a GET per store, never a write.
+      expect([...new Set<string>(standin.log.map((x) => x.op))].sort()).toEqual(
+        ["GetObject", "HeadObject", "ListObjectsV2"].sort(),
+      );
+      expect(standin.calls("GetObject").map((c) => c.key)).toEqual([A, B, C]);
+      for (const k of [A, B, C]) expect(versionsOf(k).length).toBe(1);
+
+      const plan = readJson<ZarrPlanFile>(dir, "zarr-plan.json");
+      expect(plan.executed).toBe(false);
+      expect(plan.dataset).toBe(DATASET);
+      expect(plan.planSha256).toBe(fileSha256(dir, "plan.json"));
+      expect(plan.stores).toEqual([
+        { key: A, outcome: "needs-scrub", removed: 5 },
+        { key: B, outcome: "needs-scrub", removed: 2 },
+        { key: C, outcome: "clean", removed: 0 },
+      ]);
+      expect(plan.totals).toEqual({
+        stores: 3,
+        clean: 1,
+        needScrub: 2,
+        scrubbed: 0,
+        unreadable: 0,
+        failed: 0,
+      });
+      expect(has(dir, "zarr-verified.json")).toBe(false);
+      expect(mode(dir, "zarr-plan.json")).toBe(0o600);
+      expectNoValue(r.all, dir);
+    },
+    SLOW,
+  );
+});
+
+describe("zarr: --execute", () => {
+  test(
+    "removes exactly the identifier keys, conditionally, and leaves every other object alone",
+    async () => {
+      const { dir, others } = await seeded();
+      const before = {
+        a: versionsOf(A)[0]?.etag as string,
+        b: versionsOf(B)[0]?.etag as string,
+        c: versionsOf(C)[0]?.etag as string,
+      };
+
+      const r = await runScrub(standin, zarrArgs(dir, ["--execute"]));
+      expect(r.exitCode, r.all).toBe(0);
+      expect(r.stdout).toContain("stores=3 clean=1 scrubbed=2 unreadable=0 failed=0");
+      expect(r.stdout).toContain("zarr: ok");
+
+      // The rewritten roots are the original minus the identifier members, in the original layout.
+      expect(text(A)).toBe(prettyCleaned);
+      expect(text(B)).toBe(compactCleaned);
+      for (const v of VALUES) {
+        expect(text(A), v).not.toContain(v);
+        expect(text(B), v).not.toContain(v);
+      }
+      // The fields that stay are the ones that were not identifiers.
+      expect(JSON.parse(text(A)).attributes.recording_metadata).toEqual({
+        startdate: "02.02.20",
+        gender: "F",
+        equipment: "BioSemi",
+      });
+
+      // A new version each; the original is still there, noncurrent, for the prune to remove.
+      for (const k of [A, B]) {
+        expect(versionsOf(k).length, k).toBe(2);
+        expect(versionsOf(k)[1]?.deleteMarker).toBe(false);
+      }
+      expect(dec((versionsOf(A)[0] as { data: Uint8Array }).data)).toBe(prettyDirty);
+
+      // Each write named the ETag it read, so a writer in between would have been refused.
+      const puts = standin.calls("PutObject");
+      expect(puts.map((p) => [p.key, p.status, p.ifMatch])).toEqual([
+        [A, 200, before.a],
+        [B, 200, before.b],
+      ]);
+      // The metadata the object had is the metadata it keeps.
+      const rewritten = standin.current(BUCKET, A);
+      expect(rewritten?.contentType).toBe("application/json");
+      expect(rewritten?.cacheControl).toBe("max-age=60");
+      expect(rewritten?.sse).toBe("AES256");
+
+      // The clean root and every other object of the Zarr copy: no new version, same bytes.
+      expect(versionsOf(C).length).toBe(1);
+      expect(versionsOf(C)[0]?.etag).toBe(before.c);
+      for (const [k, v] of Object.entries(others)) {
+        expect(versionsOf(k).length, k).toBe(1);
+        expect(Buffer.compare(standin.current(BUCKET, k)?.data as Uint8Array, v), k).toBe(0);
+      }
+      expect(standin.calls("DeleteObject").length).toBe(0);
+
+      // The record of the run, and the proof bound to it.
+      const plan = readJson<ZarrPlanFile>(dir, "zarr-plan.json");
+      expect(plan.executed).toBe(true);
+      expect(plan.stores.map((s) => s.outcome)).toEqual(["scrubbed", "scrubbed", "clean"]);
+      const proof = parseZarrVerified(readFileSync(path.join(dir, "zarr-verified.json"), "utf8"));
+      expect(proof.dataset).toBe(DATASET);
+      expect(proof.planSha256).toBe(fileSha256(dir, "plan.json"));
+      expect(proof.zarrPlanSha256).toBe(fileSha256(dir, "zarr-plan.json"));
+      expect(proof.counts).toEqual({ stores: 3, rewritten: 2, untouched: 1 });
+      expect(mode(dir, "zarr-plan.json")).toBe(0o600);
+      expect(mode(dir, "zarr-verified.json")).toBe(0o600);
+      expectNoValue(r.all, dir);
+
+      // Run again: nothing is left to remove, so nothing is written, and the proof is renewed.
+      standin.log.length = 0;
+      const again = await runScrub(standin, zarrArgs(dir, ["--execute"]));
+      expect(again.exitCode, again.all).toBe(0);
+      expect(standin.calls("PutObject").length).toBe(0);
+      for (const k of [A, B, C]) expect(versionsOf(k).length).toBe(k === C ? 1 : 2);
+      const renewed = readJson<ZarrVerifiedFile>(dir, "zarr-verified.json");
+      expect(renewed.counts).toEqual({ stores: 3, rewritten: 0, untouched: 3 });
+    },
+    SLOW,
+  );
+
+  test(
+    "a store root changed since it was read is never overwritten, and a re-run finishes the job",
+    async () => {
+      const { dir } = await seeded();
+      // Just as the first write begins, another writer replaces A with a newer version that still
+      // has identifiers (and a key of its own).
+      const newer = JSON.stringify(
+        wrap({ ...dirtyAttributes(), later: { added: "by another writer" } }),
+      );
+      standin.beforeOp("PutObject", () => {
+        standin.putObject(BUCKET, A, enc(newer), { contentType: "application/json" });
+      });
+
+      const r = await runScrub(standin, zarrArgs(dir, ["--execute"]));
+      expect(r.exitCode, r.all).toBe(1);
+      expect(r.stdout).toContain("changed-concurrently=1");
+      expect(r.stdout).toContain("zarr-verified.json NOT written");
+      expect(has(dir, "zarr-verified.json")).toBe(false);
+
+      // The other writer's version stands: our stale write was refused, not applied on top.
+      expect(text(A)).toBe(newer);
+      expect(versionsOf(A).length).toBe(2);
+      expect(standin.calls("PutObject").find((p) => p.key === A)?.status).toBe(412);
+      // The other store was independent of it and was scrubbed.
+      expect(text(B)).toBe(compactCleaned);
+
+      // Nothing blocks a second run: it reads what is there now, removes the keys, keeps theirs.
+      const again = await runScrub(standin, zarrArgs(dir, ["--execute"]));
+      expect(again.exitCode, again.all).toBe(0);
+      const finalA = JSON.parse(text(A));
+      expect(finalA.attributes.later).toEqual({ added: "by another writer" });
+      expect(finalA.attributes.recording_metadata).toEqual({
+        startdate: "02.02.20",
+        gender: "F",
+        equipment: "BioSemi",
+      });
+      expect(versionsOf(A).length).toBe(3);
+      expect(has(dir, "zarr-verified.json")).toBe(true);
+    },
+    SLOW,
+  );
+
+  test(
+    "a store that is dirty again when read back is not clean, and nothing is proven",
+    async () => {
+      const { dir } = await seeded();
+      // Reads, in order with one worker: A, then A again after its write. Just before that second
+      // read, a writer puts a dirty version back.
+      // The stand-in counts every GET since it started (the plan's too), so the hook is armed
+      // for each of the next few and fires on the second of the ones the stage makes.
+      let reads = 0;
+      for (let nth = 1; nth <= 40; nth++) {
+        standin.beforeOp(
+          "GetObject",
+          () => {
+            reads += 1;
+            if (reads === 2) standin.putObject(BUCKET, A, enc(prettyDirty));
+          },
+          nth,
+        );
+      }
+      const r = await runScrub(standin, zarrArgs(dir, ["--execute"]));
+      expect(r.exitCode, r.all).toBe(1);
+      expect(r.stdout).toContain("verify-failed=1");
+      expect(has(dir, "zarr-verified.json")).toBe(false);
+      expect(text(A)).toBe(prettyDirty);
+      expect(readJson<ZarrPlanFile>(dir, "zarr-plan.json").stores[0]).toEqual({
+        key: A,
+        outcome: "verify-failed",
+        removed: 0,
+      });
+    },
+    SLOW,
+  );
+
+  test(
+    "a store that cannot be read or cleaned is counted, the plan is incomplete, and nothing is proven",
+    async () => {
+      const { dir } = await seeded();
+      const D = storeKey("d-malformed");
+      const E = storeKey("e-not-utf8");
+      const F = storeKey("f-too-large");
+      const G = storeKey("g-outside");
+      const V2 = `${DATASET}/zarr/sub-02/old.zarr/.zattrs`;
+      standin.putObject(BUCKET, D, enc("Marigold Thistlewood is not json"));
+      standin.putObject(BUCKET, E, new Uint8Array([0x7b, 0xff, 0xfe, 0x7d]));
+      // A zarr.json is a few KiB; this one is not metadata and is never read.
+      const huge = new Uint8Array(17 * MIB).fill(0x20);
+      huge.set(enc('{"attributes":{}}'), 0);
+      standin.putObject(BUCKET, F, huge);
+      // An identifier key outside `attributes`, which the stage does not reach, beside one inside.
+      const outside = JSON.stringify({
+        zarr_format: 3,
+        patientcode: "P0044",
+        attributes: { mrn: "A-9981" },
+      });
+      standin.putObject(BUCKET, G, enc(outside));
+      standin.putObject(BUCKET, V2, enc("{}"));
+      standin.log.length = 0;
+
+      for (const flag of [[], ["--execute"]]) {
+        const r = await runScrub(standin, zarrArgs(dir, flag));
+        expect(r.exitCode, r.all).toBe(4);
+        expect(r.stdout).toContain("incomplete");
+        expect(r.stdout).toContain("zarr-json-malformed=2");
+        expect(r.stdout).toContain("zarr-json-too-large=1");
+        expect(r.stdout).toContain("identifier-outside-attributes=1");
+        expect(r.stdout).toContain("zarr-v2-metadata=1");
+        expect(has(dir, "zarr-verified.json")).toBe(false);
+        expect(leaksAName(r.all)).toBeNull();
+        expect(r.all).not.toContain("P0044");
+      }
+      // The ones it could not clean are exactly as they were; the one it could was cleaned.
+      for (const k of [D, E, F, G, V2]) expect(versionsOf(k).length, k).toBe(1);
+      expect(text(G)).toBe(outside);
+      expect(text(A)).toBe(prettyCleaned);
+      const plan = readJson<ZarrPlanFile>(dir, "zarr-plan.json");
+      expect(plan.totals.unreadable).toBe(5);
+      expect(plan.totals.failed).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "a store that cannot be read at all is a failure, not a clean store",
+    async () => {
+      const { dir } = await seeded();
+      standin.inject("GetObject", { code: "InternalError", status: 500, key: B });
+      const r = await runScrub(standin, zarrArgs(dir, ["--execute"]));
+      expect(r.exitCode, r.all).toBe(1);
+      expect(r.stdout).toContain("GetObject:failed=1");
+      expect(has(dir, "zarr-verified.json")).toBe(false);
+      expect(versionsOf(B).length).toBe(1);
+    },
+    SLOW,
+  );
+});
+
+describe("zarr: preconditions", () => {
+  test(
+    "needs a plan to name the dataset and the bucket",
+    async () => {
+      standin = startS3Standin();
+      const empty = mkdtempSync(path.join(tmpdir(), "s3-scrub-zarr-empty-"));
+      expectStopped(await runScrub(standin, zarrArgs(empty)), 3, "plan.json-missing");
+
+      const bad = tempDir("zarr-badplan");
+      writeJson(bad, "plan.json", { version: 1, dataset: "nm1", keys: [] });
+      const r = await runScrub(standin, zarrArgs(bad));
+      expect(r.exitCode).toBe(2);
+      expect(r.stderr).toContain("bad-dataset-id");
+      expect(standin.log.length).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "a dataset with no Zarr copy is proven vacuously, and the plan it made is the one named",
+    async () => {
+      standin = startS3Standin();
+      const d = fixtureD();
+      seedObject(standin, d);
+      seedManifest(standin, "v1.0.0", [d]);
+      const dir = tempDir("zarr-none");
+      expect((await runScrub(standin, planArgs(dir))).exitCode).toBe(0);
+      const r = await runScrub(standin, zarrArgs(dir, ["--execute"]));
+      expect(r.exitCode, r.all).toBe(0);
+      const proof = readJson<ZarrVerifiedFile>(dir, "zarr-verified.json");
+      expect(proof.counts).toEqual({ stores: 0, rewritten: 0, untouched: 0 });
+      expect(proof.planSha256).toBe(fileSha256(dir, "plan.json"));
+      const plan = readJson<PlanFile>(dir, "plan.json");
+      expect(plan.dataset).toBe(DATASET);
+      expect(sha256(readFileSync(path.join(dir, "zarr-plan.json")))).toBe(proof.zarrPlanSha256);
+    },
+    SLOW,
+  );
+});

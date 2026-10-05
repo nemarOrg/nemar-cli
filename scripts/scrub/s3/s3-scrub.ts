@@ -8,6 +8,7 @@
  *   delete-old --dir DIR --confirm-dataset ID [--execute] [--verified verified.json]
  *              [--hash-verified new-hash-verified.json] [--max-delete N]
  *              [--prune-noncurrent <prefix>]... [--max-prune N] [--public-base URL]
+ *   zarr       --dir DIR [--execute] [--concurrency 4]
  *   canary     --prefix <id>/canary-<random>/ [--execute] [--multipart] [--bucket nemar]
  *
  * Every subcommand is read-only unless it is given `--execute`; `plan` and `verify` have no
@@ -41,8 +42,9 @@ import {
   planStage,
   verifyStage,
 } from "./s3-stages";
+import { zarrStage } from "./zarr-stage";
 
-const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|canary> [options]
+const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|zarr|canary> [options]
   plan       --dataset ID --out DIR [--tags v1,v2] [--bucket nemar] [--concurrency 8]
   assemble   --dir DIR [--execute] [--concurrency 4] [--max-part-bytes N]
   verify     --dir DIR [--samples 8] [--concurrency 4]
@@ -52,6 +54,14 @@ const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|canary> [opti
              --public-base: where an anonymous HEAD proves the dataset is private
              (default ${DEFAULT_PUBLIC_BASE}); it must answer 403.
              PREFIX is exactly ID/version/, ID/archives/ or ID/zarr/.
+             --max-prune N (default 1000) refuses to prune more noncurrent versions than N. For
+             ID/zarr/ expect about one per store root the zarr step rewrote (zarr-plan.json counts
+             them, and the dry run prints the exact number) plus any older versions a Zarr
+             re-conversion left, so a large dataset needs a larger N than the default.
+  zarr       --dir DIR [--execute] [--concurrency 4]
+             removes identifier keys from every Zarr store root's attributes; reads only unless
+             --execute, and writes zarr-verified.json only when every store is clean after it.
+             Then \`delete-old --prune-noncurrent ID/zarr/\` removes the noncurrent versions.
   canary     --prefix ID/canary-RANDOM/ [--execute] [--multipart] [--bucket nemar]
 common: --region us-east-2  --timeout-sec 120`;
 
@@ -186,6 +196,13 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
         concurrency: concurrency(4),
       });
     }
+    case "zarr":
+      return zarrStage({
+        ...opts,
+        dir: need(v.dir, "dir"),
+        execute,
+        concurrency: concurrency(4),
+      });
     case "canary":
       return canaryStage({
         ...opts,

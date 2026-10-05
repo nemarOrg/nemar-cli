@@ -157,6 +157,32 @@ export interface ZarrVerifiedFile {
 }
 
 /**
+ * `zarr-plan.json`: what the `zarr` stage found in each Zarr store root and, after an execute,
+ * what became of it. Counts and S3 keys only. A key is a path that may be built from a file name,
+ * so like every file in a working directory it stays private.
+ */
+export interface ZarrPlanFile {
+  version: 1;
+  dataset: string;
+  bucket: string;
+  /** sha256 of the exact bytes of plan.json this run was bound to. */
+  planSha256: string;
+  createdAt: string;
+  /** False for a dry run, which writes nothing to S3. */
+  executed: boolean;
+  /** `outcome` is a fixed word: clean, needs-scrub, scrubbed, or why the store was not. */
+  stores: Array<{ key: string; outcome: string; removed: number }>;
+  totals: {
+    stores: number;
+    clean: number;
+    needScrub: number;
+    scrubbed: number;
+    unreadable: number;
+    failed: number;
+  };
+}
+
+/**
  * `git-plan.json`: the rewrite of the dataset's git history. Names here may be identifying.
  * `dropPaths` are exact repository paths removed from every commit. `blankJsonKeys` maps an exact
  * path to canonical key spellings (lowercase, no separators) whose values become empty strings.

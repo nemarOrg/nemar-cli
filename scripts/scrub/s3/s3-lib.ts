@@ -734,6 +734,42 @@ export async function readWhole(ctx: S3Ctx, key: string): Promise<Uint8Array> {
   }
 }
 
+export interface WholeObject extends ObjectMeta {
+  bytes: Uint8Array;
+  /** The ETag the bytes belong to, quoted as S3 sends it; what a conditional write names. */
+  etag: string;
+}
+
+/**
+ * A whole object and the metadata a rewrite must carry, in ONE get-object, so the bytes and the
+ * ETag are the same version. `ifMatch` pins the read to an ETag seen earlier.
+ */
+export async function readWholeWithMeta(
+  ctx: S3Ctx,
+  key: string,
+  ifMatch?: string,
+): Promise<WholeObject> {
+  const file = ctx.tmp.file();
+  try {
+    const args = ["--bucket", ctx.bucket, "--key", key];
+    if (ifMatch) args.push("--if-match", ifMatch);
+    args.push(file);
+    const out = await ctx.aws.api("get-object", args, { slow: true });
+    const etag = str(out.ETag);
+    if (etag === undefined) throw new AwsCliError("bad-output", "GetObject");
+    return {
+      bytes: new Uint8Array(await readFile(file)),
+      etag,
+      contentType: str(out.ContentType),
+      sse: str(out.ServerSideEncryption),
+      kmsKeyId: str(out.SSEKMSKeyId),
+      cacheControl: str(out.CacheControl),
+    };
+  } finally {
+    await ctx.tmp.remove(file);
+  }
+}
+
 export interface Retention {
   mode: string;
   /** ISO 8601. */
@@ -771,11 +807,13 @@ export interface ObjectMeta {
   contentType?: string;
   sse?: string;
   kmsKeyId?: string;
+  cacheControl?: string;
 }
 
 function metaArgs(meta: ObjectMeta): string[] {
   const a: string[] = [];
   if (meta.contentType) a.push("--content-type", meta.contentType);
+  if (meta.cacheControl) a.push("--cache-control", meta.cacheControl);
   if (meta.sse) a.push("--server-side-encryption", meta.sse);
   if (meta.kmsKeyId) a.push("--ssekms-key-id", meta.kmsKeyId);
   return a;
@@ -806,6 +844,38 @@ export async function putObjectLocked(
       "--body",
       bodyFile,
       ...lockArgs(retainUntil),
+      ...metaArgs(meta),
+    ],
+    { slow: true },
+  );
+  const id = str(out.VersionId);
+  if (!id) throw new AwsCliError("bad-output", "PutObject");
+  return id;
+}
+
+/**
+ * put-object that replaces the object ONLY if its current ETag is `ifMatch`: a writer that got
+ * in since the read makes this fail (`precondition-failed`) rather than be overwritten. No lock
+ * is set; this is for objects that carry none. Returns the new version id.
+ */
+export async function putObjectIfMatch(
+  ctx: S3Ctx,
+  key: string,
+  bodyFile: string,
+  meta: ObjectMeta,
+  ifMatch: string,
+): Promise<string> {
+  const out = await ctx.aws.api(
+    "put-object",
+    [
+      "--bucket",
+      ctx.bucket,
+      "--key",
+      key,
+      "--body",
+      bodyFile,
+      "--if-match",
+      ifMatch,
       ...metaArgs(meta),
     ],
     { slow: true },

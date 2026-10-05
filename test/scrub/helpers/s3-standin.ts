@@ -19,7 +19,12 @@
  *    configurable page size, and `encoding-type=url` (the CLI sends it and decodes the keys).
  *  - ListObjectsV2 (current objects only, with continuation tokens).
  *  - GET and HEAD, with Range (206 and Content-Range, 416 past the end), If-Match (412), and
- *    `versionId`. HEAD returns the version id, the lock mode and date, and the encryption fields.
+ *    `versionId`. HEAD returns the version id, the lock mode and date, the encryption fields and
+ *    Cache-Control.
+ *  - PutObject with `If-Match`: 412 PreconditionFailed when the current version's ETag is not the
+ *    one named. ASSUMED, not measured against the real bucket: S3 documents conditional writes
+ *    (Nov 2024) and answers 412 on a mismatch; what it answers for a key that does not exist, or
+ *    for two racing writers, is not modeled beyond 404 NoSuchKey for the former.
  *  - GetObjectRetention (404 NoSuchObjectLockConfiguration when a version has none).
  *  - Multipart: CreateMultipartUpload (keeps the lock and encryption headers), UploadPart,
  *    UploadPartCopy (`x-amz-copy-source` with an optional `?versionId=`, a byte range, and
@@ -59,6 +64,7 @@ export interface StoredVersion {
   contentType: string;
   sse?: string;
   kmsKeyId?: string;
+  cacheControl?: string;
   lock?: { mode: string; until: Date };
 }
 
@@ -97,6 +103,7 @@ export interface PutOptions {
   contentType?: string;
   sse?: string;
   kmsKeyId?: string;
+  cacheControl?: string;
 }
 
 /** An opaque copy of the stand-in's contents. */
@@ -372,6 +379,7 @@ export function startS3Standin(): S3Standin {
         }
         if (v.sse) headers["x-amz-server-side-encryption"] = v.sse;
         if (v.kmsKeyId) headers["x-amz-server-side-encryption-aws-kms-key-id"] = v.kmsKeyId;
+        if (v.cacheControl) headers["Cache-Control"] = v.cacheControl;
         return new Response(null, { status: 200, headers });
       }
 
@@ -422,6 +430,7 @@ export function startS3Standin(): S3Standin {
           "Accept-Ranges": "bytes",
         };
         if (v.sse) headers["x-amz-server-side-encryption"] = v.sse;
+        if (v.cacheControl) headers["Cache-Control"] = v.cacheControl;
         if (!range) {
           record({ op: "GetObject", key, status: 200, size: v.data.length });
           return new Response(v.data, { status: 200, headers });
@@ -631,6 +640,18 @@ export function startS3Standin(): S3Standin {
           record({ op: "PutObject", key, status: 400 });
           return s3Error("InvalidArgument", 400);
         }
+        const ifMatch = req.headers.get("if-match") ?? undefined;
+        if (ifMatch !== undefined) {
+          const now = current(bucket, key);
+          if (!now) {
+            record({ op: "PutObject", key, status: 404, ifMatch });
+            return s3Error("NoSuchKey", 404);
+          }
+          if (now.etag !== ifMatch) {
+            record({ op: "PutObject", key, status: 412, ifMatch });
+            return s3Error("PreconditionFailed", 412);
+          }
+        }
         const etag = `"${md5hex(body)}"`;
         const id = push(bucket, key, {
           versionId: nextVersionId(),
@@ -641,9 +662,10 @@ export function startS3Standin(): S3Standin {
           contentType: req.headers.get("content-type") ?? "binary/octet-stream",
           sse: req.headers.get("x-amz-server-side-encryption") ?? undefined,
           kmsKeyId: req.headers.get("x-amz-server-side-encryption-aws-kms-key-id") ?? undefined,
+          cacheControl: req.headers.get("cache-control") ?? undefined,
           lock,
         });
-        record({ op: "PutObject", key, status: 200, size: body.length });
+        record({ op: "PutObject", key, status: 200, size: body.length, ifMatch });
         return new Response(null, { status: 200, headers: { ETag: etag, "x-amz-version-id": id } });
       }
 
@@ -709,6 +731,7 @@ export function startS3Standin(): S3Standin {
         contentType: opts.contentType ?? "binary/octet-stream",
         sse: opts.sse,
         kmsKeyId: opts.kmsKeyId,
+        cacheControl: opts.cacheControl,
         lock: opts.lockUntil
           ? { mode: opts.lockMode ?? "GOVERNANCE", until: opts.lockUntil }
           : undefined,

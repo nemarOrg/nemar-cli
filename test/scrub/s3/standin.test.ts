@@ -15,7 +15,9 @@ import {
   headObject,
   listKeyVersions,
   listPrefixVersions,
+  putObjectIfMatch,
   readRange,
+  readWholeWithMeta,
   uploadPart,
   uploadPartCopy,
 } from "../../../scripts/scrub/s3/s3-lib";
@@ -240,6 +242,53 @@ describe("S3 stand-in", () => {
         ).toBe("failed");
         expect(standin.current(BUCKET, "xx090411/objects/small")).toBeUndefined();
         expect(standin.openUploads()).toBe(1);
+      });
+    },
+    SLOW,
+  );
+
+  test(
+    "a conditional put replaces the object only if its ETag is the one named",
+    async () => {
+      standin = startS3Standin();
+      const key = "xx090411/zarr/a.zarr/zarr.json";
+      standin.putObject(BUCKET, key, bytes(5, 1), {
+        contentType: "application/json",
+        cacheControl: "max-age=60",
+      });
+      await withCtx(standin, async (ctx) => {
+        const first = await readWholeWithMeta(ctx, key);
+        expect(first.contentType).toBe("application/json");
+        expect(first.cacheControl).toBe("max-age=60");
+        const body = ctx.tmp.file();
+        await writeFile(body, bytes(7, 2));
+
+        // A writer gets in after the read: the put that names the old ETag is refused, and the
+        // stand-in kept their version, not ours.
+        standin.putObject(BUCKET, key, bytes(6, 3));
+        expect(await code(putObjectIfMatch(ctx, key, body, {}, first.etag))).toBe(
+          "precondition-failed",
+        );
+        expect(standin.versions(BUCKET, key).length).toBe(2);
+        expect(standin.current(BUCKET, key)?.data.length).toBe(6);
+        expect(standin.calls("PutObject").at(-1)?.status).toBe(412);
+
+        // Naming the current ETag succeeds, makes a new version, and carries the metadata given.
+        const now = await readWholeWithMeta(ctx, key);
+        const id = await putObjectIfMatch(
+          ctx,
+          key,
+          body,
+          { contentType: "text/plain", cacheControl: "no-cache" },
+          now.etag,
+        );
+        expect(standin.versions(BUCKET, key).length).toBe(3);
+        expect(standin.current(BUCKET, key)?.versionId).toBe(id);
+        expect(standin.current(BUCKET, key)?.data.length).toBe(7);
+        expect(standin.current(BUCKET, key)?.contentType).toBe("text/plain");
+        expect(standin.current(BUCKET, key)?.cacheControl).toBe("no-cache");
+        // A pinned read of an ETag that is no longer current is refused as well.
+        expect(await code(readWholeWithMeta(ctx, key, first.etag))).toBe("precondition-failed");
       });
     },
     SLOW,
