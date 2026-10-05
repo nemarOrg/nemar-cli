@@ -4,7 +4,8 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
+import path from "node:path";
 import { parsePatches, parsePlan } from "../../../scripts/scrub/contract";
 import { buildKey } from "../../../scripts/scrub/contract";
 import type { PlanFile } from "../../../scripts/scrub/contract";
@@ -482,6 +483,32 @@ describe("plan", () => {
       });
       expectStopped(akia, 3, "long-lived-key-in-environment");
       expect(standin.log.length).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "an unexpected error names its class only, and SCRUB_S3_DEBUG=1 adds no message or stack",
+    async () => {
+      standin = startS3Standin();
+      const d = fixtureD();
+      seedObject(standin, d);
+      seedManifest(standin, "v1.0.0", [d]);
+      // A working directory it cannot write: the file error's message names the path, and the
+      // path carries an invented name, as a real one could.
+      const out = path.join(tempDir("plan-debug"), "Marigold-Thistlewood");
+      mkdirSync(out, { mode: 0o500 });
+      try {
+        const r = await runScrub(standin, planArgs(out), { SCRUB_S3_DEBUG: "1" });
+        expect(r.exitCode, r.all).toBe(1);
+        expect(r.stderr).toContain("s3-scrub: unexpected");
+        expect(r.stderr).toContain("message and stack withheld");
+        expect(leaksAName(r.all)).toBeNull();
+        expect(r.all).not.toContain("EACCES");
+        expect(r.all).not.toContain(" at ");
+      } finally {
+        chmodSync(out, 0o700);
+      }
     },
     SLOW,
   );

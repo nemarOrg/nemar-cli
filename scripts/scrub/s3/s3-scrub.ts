@@ -277,9 +277,14 @@ if (import.meta.main) {
       console.error(`s3-scrub: ${err.message}`);
       process.exit(EXIT.refused);
     }
-    // Anything else could carry a message with a value in it: name the class only.
-    console.error(`s3-scrub: unexpected ${err instanceof Error ? err.name : "error"}`);
-    if (process.env.SCRUB_S3_DEBUG === "1" && err instanceof Error) console.error(err.stack);
+    // Anything else could carry a message with a value in it (a parse error quotes the text it
+    // choked on, a file error names the path): name the class only. SCRUB_S3_DEBUG=1 adds no
+    // message and no stack either, only a fixed word that says so.
+    const cls = err instanceof Error ? err.name : "error";
+    console.error(`s3-scrub: unexpected ${cls}`);
+    if (process.env.SCRUB_S3_DEBUG === "1") {
+      console.error(`s3-scrub: debug: ${cls}; message and stack withheld`);
+    }
     process.exit(EXIT.failed);
   }
 }
