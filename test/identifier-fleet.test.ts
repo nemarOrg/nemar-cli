@@ -2473,3 +2473,118 @@ describe("the summary and the pause, edge cases", () => {
     expect(existsSync(join(out, "_summary.json"))).toBe(false);
   });
 });
+
+/**
+ * The publication screen reads a metadata-only clone through `readEntryHead`: git blobs and
+ * presigned S3 objects, never a URL. The URLs below point at nothing, so a read that bypassed the
+ * hook would fail and the test would say so.
+ */
+describe("reading through a caller-supplied reader, and a clone source", () => {
+  const header = CLEAN;
+  const ctxWith = (read: NonNullable<FleetContext["readEntryHead"]>): FleetContext =>
+    createContext({ readEntryHead: read, retryBaseMs: 0, fileConcurrency: 4 });
+  // A URL nothing listens on: if the hook is bypassed, the read fails and the test says so.
+  const never = (path: string, extra: Record<string, unknown> = {}) => ({
+    path,
+    size: 300,
+    url: "http://127.0.0.1:9/never",
+    ...extra,
+  });
+
+  test("an entry is read through the hook, not through its URL", async () => {
+    const calls: string[] = [];
+    const ctx = ctxWith(async (entry) => {
+      calls.push(entry.path);
+      return header;
+    });
+    const record = await scanDatasetFromManifest(
+      ctx,
+      ID,
+      null,
+      [never("sub-01/eeg/sub-01_task-rest_eeg.edf")],
+      "clone",
+    );
+    expect(calls).toEqual(["sub-01/eeg/sub-01_task-rest_eeg.edf"]);
+    expect(record.files?.header_read).toBe(1);
+    expect(record.status).toBe("clean");
+  });
+
+  test("a hook failure is a counted, unread file and never a clean one", async () => {
+    const ctx = ctxWith(async () => {
+      throw new ReadFailure("blob-missing");
+    });
+    const record = await scanDatasetFromManifest(
+      ctx,
+      ID,
+      null,
+      [never("a.edf"), never("b.edf")],
+      "clone",
+    );
+    expect(record.status).toBe("unchecked");
+    expect(record.read_failures).toEqual({ "edf/blob-missing": 2 });
+    expect(record.incomplete_reasons).toContain("edf-headers-unread");
+  });
+
+  test("a clone reads every candidate; a manifest source samples the same list", async () => {
+    const entries = Array.from({ length: 350 }, (_, i) =>
+      never(`sourcedata/s${String(i).padStart(3, "0")}.json`, { size: 2 }),
+    );
+    const ctx = ctxWith(async () => new TextEncoder().encode("{}"));
+    const cloned = await scanDatasetFromManifest(ctx, ID, null, entries, "clone");
+    expect(cloned.sampling?.json_files).toEqual({
+      candidates: 350,
+      oversize: 0,
+      selected: 350,
+      scanned: 350,
+    });
+    expect(cloned.incomplete_reasons).not.toContain("json-sampled");
+    const sampled = await scanDatasetFromManifest(ctx, ID, null, entries, "manifest.json");
+    expect(sampled.sampling?.json_files.scanned).toBe(300);
+    expect(sampled.incomplete_reasons).toContain("json-sampled");
+  });
+
+  test("scans tables are all read in a clone, one in a manifest source", async () => {
+    const entries = Array.from({ length: 5 }, (_, i) =>
+      never(`sub-0${i}/sub-0${i}_scans.tsv`, { size: 20 }),
+    );
+    const ctx = ctxWith(async () => new TextEncoder().encode("filename\tacq_time\n"));
+    expect(
+      (await scanDatasetFromManifest(ctx, ID, null, entries, "clone")).sampling?.scans_tables
+        .scanned,
+    ).toBe(5);
+    expect(
+      (await scanDatasetFromManifest(ctx, ID, null, entries, "manifest.json")).sampling
+        ?.scans_tables.scanned,
+    ).toBe(1);
+  });
+
+  test("an entry flagged edf is an EDF whatever its path", async () => {
+    const ctx = ctxWith(async () => NAMED);
+    const record = await scanDatasetFromManifest(
+      ctx,
+      ID,
+      null,
+      [never("data/recording.dat", { edf: true }), never("data/other.dat")],
+      "clone",
+    );
+    expect(record.files?.edf_bdf).toBe(1);
+    expect(record.edf_bdf_files_flagged).toBe(1);
+  });
+
+  test("extra paths get the path rules only; extra reasons make the scan incomplete", async () => {
+    const ctx = ctxWith(async () => header);
+    const entries = [never("sub-01/eeg/sub-01_task-rest_eeg.edf")];
+    const plain = await scanDatasetFromManifest(ctx, ID, null, entries, "clone");
+    expect(plain.status).toBe("clean");
+    const withHistory = await scanDatasetFromManifest(ctx, ID, null, entries, "clone", {
+      extraPaths: ["old/photo.jpg"],
+    });
+    expect(withHistory.findings_by_kind?.["image-or-document-file"]).toBe(1);
+    expect(withHistory.files?.total).toBe(1);
+    const unread = await scanDatasetFromManifest(ctx, ID, null, entries, "clone", {
+      extraIncompleteReasons: ["history-unread"],
+    });
+    expect(unread.status).toBe("unchecked");
+    expect(unread.incomplete_reasons).toEqual(["history-unread"]);
+  });
+});

@@ -473,7 +473,27 @@ export interface FleetContext {
   readVersionManifest: (id: string, version: string) => Promise<string>;
   /** A GitHub token for the git-tree fallback, or null. */
   githubToken: () => Promise<string | null>;
+  /**
+   * Reads the first bytes of an entry in place of `readHead(entry.url)`. The publication screen
+   * reads a git blob or a presigned S3 object through it. It runs inside the same retry,
+   * breaker and pool as the HTTP read, so it must throw {@link ReadFailure} for a read that
+   * failed (never return fewer than `minBytes`), and it never sees a Worker URL.
+   */
+  readEntryHead?: EntryReader;
 }
+
+/** What {@link FleetContext.readEntryHead} receives besides the entry and the byte count. */
+export interface EntryReadOptions {
+  minBytes: number;
+  userAgent: string;
+  timeoutMs: number;
+}
+
+export type EntryReader = (
+  entry: ManifestEntry,
+  n: number,
+  options: EntryReadOptions,
+) => Promise<Uint8Array>;
 
 export interface ContextOptions
   extends Partial<Omit<FleetContext, "workerLimit" | "limits" | "fileConcurrency" | "breakers">> {
@@ -599,6 +619,7 @@ export function createContext(options: ContextOptions = {}): FleetContext {
       ((id, version) =>
         readVersionManifestViaAws(id, version, { timeoutMs: awsTimeoutMs, env: options.awsEnv })),
     githubToken: options.githubToken ?? createGithubTokenReader(),
+    ...(options.readEntryHead ? { readEntryHead: options.readEntryHead } : {}),
   };
 }
 
@@ -739,6 +760,12 @@ export interface ManifestEntry {
   /** Null when the manifest did not say; only a size of exactly 0 means "empty". */
   size: number | null;
   url: string;
+  /**
+   * True when something other than the path says this is an EDF or BDF recording (a clone entry
+   * whose annex key ends `.edf` or `.bdf` in any letter case, though the file was renamed since).
+   * A path that ends `.edf` or `.bdf` is one without this flag.
+   */
+  edf?: boolean;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
@@ -995,6 +1022,36 @@ export function classifyDataset(input: ClassifyInput): DatasetStatus {
 // ---------------------------------------------------------------------------------------
 
 const EDF_FILE = /\.(edf|bdf)$/i;
+const isEdfEntry = (e: ManifestEntry): boolean => e.edf === true || EDF_FILE.test(e.path);
+
+/** The entries a scan may read, by kind. The byte limit on side files is applied by the scan. */
+export interface ReadCandidates {
+  edf: ManifestEntry[];
+  participants: ManifestEntry | undefined;
+  scans: ManifestEntry[];
+  json: ManifestEntry[];
+  text: ManifestEntry[];
+}
+
+/**
+ * Which entries of a manifest {@link scanDatasetFromManifest} would read. One definition, so a
+ * caller that must fetch content before the scan (the publication screen prefetches the git
+ * blobs a partial clone left behind) asks for exactly what the scan will ask for.
+ */
+export function readCandidates(manifest: readonly ManifestEntry[]): ReadCandidates {
+  return {
+    edf: manifest.filter(isEdfEntry),
+    participants: manifest.find((e) => e.path === "participants.tsv"),
+    scans: manifest.filter((e) => e.path.endsWith("_scans.tsv")),
+    json: manifest
+      .filter((e) => e.path.endsWith(".json"))
+      .filter((e) => e.path.startsWith("sourcedata/") || !BIDS_SIDECAR.test(e.path))
+      .filter((e) => !JSON_EXCLUDED.test(e.path)),
+    text: manifest
+      .filter((e) => TEXT_FILE.test(e.path))
+      .filter((e) => e.path.startsWith("sourcedata/") || e.path.startsWith("code/")),
+  };
+}
 const BIDS_SIDECAR =
   /_(eeg|ieeg|meg|emg|nirs|beh|events|channels|electrodes|coordsystem|scans|physio|stim|photo|T1w|bold)\.(json|tsv)$/;
 const JSON_EXCLUDED = /(^|\/)(dataset_description|participants|genetic_info)\.json$/;
@@ -1008,9 +1065,12 @@ function readEntry(
   minBytes = 0,
 ): Promise<Uint8Array> {
   const attempt = () =>
-    guarded(ctx, entry.url, () =>
-      readHead(entry.url, n, { minBytes, userAgent: ctx.userAgent, timeoutMs: ctx.timeoutMs }),
-    );
+    guarded(ctx, entry.url, () => {
+      const options = { minBytes, userAgent: ctx.userAgent, timeoutMs: ctx.timeoutMs };
+      return ctx.readEntryHead
+        ? ctx.readEntryHead(entry, n, options)
+        : readHead(entry.url, n, options);
+    });
   return withRetry(
     () => (isWorkerUrl(ctx, entry.url) ? ctx.workerLimit(attempt) : attempt()),
     retryOptions(ctx),
@@ -1034,9 +1094,26 @@ function unchecked(
   return { ...base, status: "unchecked", incomplete: true, incomplete_reasons: [reason] };
 }
 
+/** What a caller adds to a scan of a tree that the tree itself cannot say. */
+export interface ScanExtras {
+  /**
+   * Paths that existed on some ref but are not in the scanned tree. They get the path rules
+   * and nothing else: their content is never read, they are not counted in `files`, and they
+   * do not count toward format coverage.
+   */
+  extraPaths?: readonly string[];
+  /** Reasons the caller already knows the scan fell short, for example `history-unread`. */
+  extraIncompleteReasons?: readonly string[];
+}
+
 /**
- * Scan one dataset from its manifest: EDF/BDF headers, the participants table, a scans table,
+ * Scan one dataset from its manifest: EDF/BDF headers, the participants table, scans tables,
  * non-BIDS JSON and small code and text files. Reads only the first bytes of each file.
+ *
+ * `source: "clone"` is a local read of a metadata-only clone, so it is uncapped: every EDF/BDF
+ * header, every scans table and every candidate JSON and text file is read. Any cap would make
+ * a screen `unchecked` for a reason that costs nothing to remove. The byte limit on one side
+ * file (`limits.sideFileBytes`) is still the caller's, and a file over it is still counted.
  */
 export async function scanDatasetFromManifest(
   ctx: FleetContext,
@@ -1044,9 +1121,13 @@ export async function scanDatasetFromManifest(
   version: string | null,
   manifest: readonly ManifestEntry[],
   source: ManifestSource,
+  extras: ScanExtras = {},
 ): Promise<DatasetRecord> {
   const paths = manifest.map((e) => e.path);
-  const findings: Finding[] = [...scanPaths(paths)];
+  const uncapped = source === "clone";
+  const pick = <T>(items: readonly T[], max: number, groupOf: (item: T) => string): T[] =>
+    uncapped ? [...items] : sampleEvenly(items, max, groupOf);
+  const findings: Finding[] = [...scanPaths([...paths, ...(extras.extraPaths ?? [])])];
   const coverage = formatCoverage(paths);
   const unscreenedCount = Object.values(coverage.unscreened).reduce((a, b) => a + b, 0);
   const failures: Record<string, number> = {};
@@ -1060,7 +1141,13 @@ export async function scanDatasetFromManifest(
 
   // EDF/BDF headers: 256 bytes each. A tree-sourced manifest reads everything through the
   // Worker, so it is sampled; every other source reads every header.
-  const edfAll = manifest.filter((e) => EDF_FILE.test(e.path));
+  const {
+    edf: edfAll,
+    participants,
+    scans: scansAll,
+    json: jsonCandidates,
+    text: textCandidates,
+  } = readCandidates(manifest);
   const edfSelected =
     source === "git-tree"
       ? sampleEvenly(edfAll, ctx.limits.treeHeaderSample, subjectKey)
@@ -1109,7 +1196,6 @@ export async function scanDatasetFromManifest(
   // participants.tsv: identifier columns in the header row, name-like participant labels below.
   let participantsUnread = false;
   let participantsTruncated = false;
-  const participants = manifest.find((e) => e.path === "participants.tsv");
   if (participants && participants.size !== 0) {
     try {
       const { text, truncated } = await readText(ctx, participants, ctx.limits.participantsBytes);
@@ -1125,13 +1211,12 @@ export async function scanDatasetFromManifest(
   }
 
   // Scans tables: the dated `acq_time` values.
-  const scansAll = manifest.filter((e) => e.path.endsWith("_scans.tsv"));
-  const scansSelected = sampleEvenly(scansAll, ctx.limits.scansTables, subjectKey);
+  const scansSelected = pick(scansAll, ctx.limits.scansTables, subjectKey);
   let scansScanned = 0;
-  for (const entry of scansSelected) {
+  await pool(scansSelected, ctx.fileConcurrency, async (entry) => {
     if (entry.size === 0) {
       scansScanned++;
-      continue;
+      return;
     }
     try {
       const { text } = await readText(ctx, entry, ctx.limits.sideFileBytes);
@@ -1147,24 +1232,17 @@ export async function scanDatasetFromManifest(
     } catch (error) {
       fail("scans", error);
     }
-  }
+  });
 
   // Non-BIDS JSON (acquisition-software exports) and small code and text files.
   const sideBytes = ctx.limits.sideFileBytes;
   const tooBig = (e: ManifestEntry) => e.size !== null && e.size > sideBytes;
-  const jsonCandidates = manifest
-    .filter((e) => e.path.endsWith(".json"))
-    .filter((e) => e.path.startsWith("sourcedata/") || !BIDS_SIDECAR.test(e.path))
-    .filter((e) => !JSON_EXCLUDED.test(e.path));
-  const textCandidates = manifest
-    .filter((e) => TEXT_FILE.test(e.path))
-    .filter((e) => e.path.startsWith("sourcedata/") || e.path.startsWith("code/"));
-  const jsonSelected = sampleEvenly(
+  const jsonSelected = pick(
     jsonCandidates.filter((e) => !tooBig(e)),
     ctx.limits.jsonFiles,
     subjectKey,
   );
-  const textSelected = sampleEvenly(
+  const textSelected = pick(
     textCandidates.filter((e) => !tooBig(e)),
     ctx.limits.textFiles,
     subjectKey,
@@ -1248,6 +1326,7 @@ export async function scanDatasetFromManifest(
   if (sampling.scans_tables.scanned < sampling.scans_tables.selected) reasons.add("scans-unread");
   if (participantsUnread) reasons.add("participants-unread");
   if (participantsTruncated) reasons.add("participants-truncated");
+  for (const reason of extras.extraIncompleteReasons ?? []) reasons.add(reason);
   const incompleteReasons = [...reasons].sort();
 
   const classify: ClassifyInput = {
