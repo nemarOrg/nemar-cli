@@ -57,11 +57,18 @@ saying so.
   status view and the CLI cannot disagree.
 - **The email waits, and cannot be lost.**
   A held request has a state of its own (`pending`).
-  The email is claimed with a conditional write before it is sent and the claim is released if
-  nobody could be reached, and a production-only sweep on the half-hourly tick both marks a
-  screen that did not report within 40 minutes as `unreported` and sends any email that is due
-  and was lost.
+  The email is claimed with a five-minute lease before it is sent, marked sent only when at least
+  one recipient accepted it, and released when none did, so a process that dies between claim and
+  send, or a failed release, is retried.
+  A production-only sweep on the half-hourly tick marks a screen that did not report within 50
+  minutes (the workflow's own deadline is 35, its job timeout 45) as `unreported` and mails any
+  result whose lease is free and whose mail has not gone.
+  An `unreported` request keeps its one-shot token, so a late but valid report is still stored
+  and mailed (a second mail, because the first said the screen did not report); a re-run
+  replaces the token, so an earlier run's report is refused.
   Resend says the screen is still running instead of sending a mail that contradicts the gate.
+  A request the BIDS sweep unblocks starts its screen then, so nothing waits on a person
+  remembering to run it.
 - **Unknown is never clear.**
   `screenGate` maps every state to what may happen next.
   A screen that did not run, did not report, or whose request predates the screen is `rerun`,
@@ -78,6 +85,16 @@ saying so.
   The report names the commit of `main` it screened, and approval refuses if `main` has moved or
   if GitHub cannot say where it is.
   Sandbox datasets (`xx`) never publish real data and are exempt.
+- **Resuming an approval does not skip the gate until it has published.**
+  A resumed or re-dispatched approval is gated like a fresh one (state and head) until a step at
+  or after `s3_public_read`, the first mutation, is complete; before that, a failed check
+  (BIDS validation red) followed by the depositor's fix would otherwise publish a commit nobody
+  screened.
+  A recorded acknowledgment satisfies a later run only for the same approver.
+- **OpenNeuro mirrors are screened like any deposit.**
+  Only well-formed `xx` ids are exempt.
+  The importer requests and approves in one run and meets the gate; making it scrub in place and
+  wait for the screen is Phase 7's work (#1618), and the epic is not released before it.
 - **Nothing is repaired and nothing is filed.**
   The screen reports and gates; it never edits a dataset, and it opens no GitHub issue
   (`nemarDatasets` is public-facing).
@@ -89,7 +106,10 @@ saying so.
 - A workflow outage no longer slows publication silently: it produces a "did not run" email and
   holds approval until a run succeeds (an admin can start one).
   The cost is that an extended outage holds publications; there is deliberately no break-glass
-  that approves an unscreened dataset.
+  in the approval path that approves an unscreened dataset.
+  Two administrator tools can still make a dataset public without the screen
+  (`POST /datasets/:id/publish`, `PATCH /admin/datasets/:id/visibility`); they are operations on
+  datasets that already exist, they write audit rows, and each carries a comment pointing here.
 - The check is best effort, and says what it did not read.
   It does not parse formats outside EDF and BDF, it does not read the contents of sidecars and
   tables in earlier commits, and it cannot judge free text it does not recognize as a name.
