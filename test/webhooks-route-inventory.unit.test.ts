@@ -61,7 +61,7 @@ describe("webhooks route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(webhooks.routes.length).toBe(11);
+    expect(webhooks.routes.length).toBe(12);
   });
 
   // The webhooks router has NO router-level middleware: every route does its
