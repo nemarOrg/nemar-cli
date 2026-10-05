@@ -51,6 +51,7 @@ import {
   buildSymlinkFixture,
   cleanupRoots,
   cli,
+  cloneOf,
   commitAll,
   copyTree,
   counts,
@@ -58,6 +59,7 @@ import {
   fileAt,
   git,
   linkAt,
+  makeRoot,
   pointer,
   refTips,
   s3PlanFor,
@@ -459,7 +461,7 @@ SUITE("pointer-file dataset", () => {
       git(repo, "update-ref", "-d", "refs/heads/old-main");
       expect(git(repo, "ls-tree", "-r", "--name-only", "stale")).not.toContain("photo-A");
     });
-    expect(r.code).not.toBe(0);
+    expect(r.code).toBe(4);
     expect(r.out).toContain("reason=old-key-present");
     expect(r.out).toContain("reason=dropped-path-present");
   });
@@ -491,6 +493,36 @@ SUITE("pointer-file dataset", () => {
       git(repo, "commit", "-q", "--allow-empty", "-m", `mentions ${sha("old-b")}`);
     });
     expect(r.out).toContain("reason=old-key-in-message");
+  });
+
+  test("verify fails on an old key in an annotated tag's message, and only there (T9)", async () => {
+    const r = await verifyDamaged("tag-message", (repo) => {
+      // A clean commit, tagged with a message that names an old key: only the tag object holds it.
+      git(repo, "tag", "-a", "v9.9.9", "-m", `release notes ${sha("old-c")}`, "main");
+    });
+    expect(r.code, r.out).toBe(4);
+    expect(r.out).toContain("reason=old-key-in-message count=1");
+    expect(r.out).not.toContain("reason=old-key-present");
+  });
+
+  test("a failed git command names the command from a closed list, never its stderr (I8)", async () => {
+    const notARepo = join(fx.root, "not-a-repo");
+    sh(fx.root, ["mkdir", "-p", notARepo]);
+    const r = await cli([
+      "verify",
+      "--repo",
+      notARepo,
+      "--keymap",
+      fx.keymapPath,
+      "--plan",
+      fx.planPath,
+      "--s3-plan",
+      fx.s3PlanPath,
+      "--before",
+      snapshot,
+    ]);
+    expect(r.code, r.out).toBe(1);
+    expect(r.out.trim()).toBe("failed: git-command-failed (git for-each-ref)");
   });
 
   test("verify fails when a tag is gone, or the kind of a tag changed", async () => {
@@ -585,7 +617,7 @@ SUITE("pointer-file dataset", () => {
       git(repo, "rm", "-q", "sub-05/eeg/sub-05_eeg.edf");
       git(repo, "commit", "-q", "-m", "stranger leaves");
     });
-    expect(r.code).not.toBe(0);
+    expect(r.code).toBe(4);
     expect(r.out).toContain("reason=edf-key-unaccounted count=1");
     // Only that: the keys the rewrite produced and the clean one are accounted for.
     expect(r.out).not.toContain("reason=old-key-present");
@@ -664,7 +696,7 @@ SUITE("pointer-file dataset", () => {
       JSON.stringify(s3PlanFor("nm000123", { scrub: [OLD_A, OLD_B, OLD_C], clean: [KEEP] })),
     );
     const r = await verifyDamaged("plan-dataset", () => {}, undefined, other);
-    expect(r.code).toBe(1);
+    expect(r.code).toBe(3);
     expect(r.out).toContain("refused: s3-plan-dataset-mismatch");
     const none = await cli([
       "verify",
@@ -683,7 +715,7 @@ SUITE("pointer-file dataset", () => {
 
   test("verify refuses plan files it cannot parse unless told to accept them", async () => {
     const r = await verifyDamaged("unparseable", () => {}, []);
-    expect(r.code).not.toBe(0);
+    expect(r.code).toBe(4);
     expect(r.out).toContain("reason=json-unparseable count=16");
   });
 
@@ -709,7 +741,7 @@ SUITE("pointer-file dataset", () => {
       fx.planPath,
       ...args,
     ]);
-    expect(r.code).not.toBe(0);
+    expect(r.code).toBe(3);
     expect(r.out).toContain(word);
     expect(refTips(repo), "refused means untouched").toBe(tips);
   }
@@ -729,6 +761,18 @@ SUITE("pointer-file dataset", () => {
       (repo) => write(repo, "README", "edited, not committed"),
       [],
       "refused: working-tree-not-clean",
+    );
+  });
+
+  test("rewrite refuses a clone with a stash, whose commits would keep the old history (T9)", async () => {
+    await refused(
+      "stash",
+      (repo) => {
+        write(repo, "README", "stashed edit");
+        git(repo, "stash", "-q");
+      },
+      [],
+      "refused: has-stash",
     );
   });
 
@@ -797,7 +841,7 @@ SUITE("pointer-file dataset", () => {
         "--plan",
         fx.planPath,
       ]);
-      expect(r.code, name).not.toBe(0);
+      expect(r.code, name).toBe(3);
       expect(r.out, name).toContain("refused: keymap-key-never-seen");
       expect(refTips(repo), "refused means untouched").toBe(tips);
       expect(r.out).not.toContain(sha("other-a"));
@@ -877,7 +921,7 @@ SUITE("pointer-file dataset", () => {
       dropAndEdit,
     ]);
     for (const r of [a, b, c, d, e]) {
-      expect(r.code).not.toBe(0);
+      expect(r.code).toBe(3);
       expect(r.out).toContain("refused: contract");
     }
     expect(refTips(repo)).toBe(tips);
@@ -915,7 +959,7 @@ SUITE("pointer-file dataset", () => {
       snapshot,
       "--allow-unparseable-json",
     ]);
-    expect(v.code).not.toBe(0);
+    expect(v.code).toBe(4);
     expect(v.out).toContain("reason=old-key-present");
   });
 
@@ -1149,4 +1193,41 @@ ANNEX_SUITE("symlink dataset (real git annex add)", () => {
     }
     expect(git(fx.clone, "rev-parse", "refs/heads/git-annex").trim()).toBe(beforeAnnex);
   });
+});
+
+SUITE("an executable pointer file (mode 100755) is rewritten like any other (T9)", () => {
+  test("the new key replaces the old one and the mode is kept", async () => {
+    const root = makeRoot();
+    const src = join(root, "src");
+    sh(root, ["mkdir", "-p", src]);
+    git(src, "init", "-q", "-b", "main");
+    write(src, "sub-01/eeg/sub-01_eeg.edf", pointer(OLD_A));
+    chmodSync(join(src, "sub-01/eeg/sub-01_eeg.edf"), 0o755);
+    write(src, "README", "x");
+    commitAll(src, "one");
+    git(src, "tag", "v1.0.0");
+    expect(git(src, "ls-tree", "main", "sub-01/eeg/sub-01_eeg.edf")).toStartWith("100755 blob");
+    const clone = join(root, "clone");
+    cloneOf(src, clone, datasetUrl("nm000999"));
+    const keymap = join(root, "keymap.json");
+    const plan = join(root, "git-plan.json");
+    writeFileSync(keymap, JSON.stringify({ [OLD_A]: NEW_A }));
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        version: 1,
+        dataset: "nm000999",
+        dropPaths: [],
+        blankJsonKeys: {},
+        appendText: {},
+      }),
+    );
+    const r = await cli(["rewrite", "--repo", clone, "--keymap", keymap, "--plan", plan]);
+    expect(r.code, r.out).toBe(0);
+    for (const ref of ["main", "v1.0.0"]) {
+      expect(git(clone, "ls-tree", ref, "sub-01/eeg/sub-01_eeg.edf")).toStartWith("100755 blob");
+      expect(fileAt(clone, ref, "sub-01/eeg/sub-01_eeg.edf")).toBe(pointer(NEW_A));
+    }
+    expect(anyObjectContains(clone, OLD_A)).toBe(false);
+  }, 120_000);
 });

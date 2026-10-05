@@ -161,6 +161,24 @@ export interface ZarrVerifiedFile {
 }
 
 /**
+ * `git-verified.json`: written by `git-scrub verify` ONLY when every check passed, and removed at
+ * the start of every verify run. It names the exact bytes it vouches for: the keymap, the git plan
+ * and the S3 plan, by sha256. `delete-old` requires one in `fresh-clone` mode whose keymap is the
+ * keymap it is using, because only a verify of a fresh clone looked at what was PUSHED.
+ */
+export interface GitVerifiedFile {
+  version: 1;
+  dataset: string;
+  mode: "local" | "fresh-clone";
+  verifiedAt: string;
+  keymapSha256: string;
+  gitPlanSha256: string;
+  s3PlanSha256: string;
+  /** The verify run's own counts (refs, commits, objects scanned, ...). */
+  counts: Record<string, number>;
+}
+
+/**
  * `zarr-plan.json`: what the `zarr` stage found under the Zarr prefix and, after an execute, what
  * became of it. Counts, fixed words and a digest only: no S3 key, because a key is a path that may
  * be built from a file name, and nothing reads the keys back.
@@ -454,6 +472,47 @@ export function parseZarrVerified(text: string): ZarrVerifiedFile {
     throw new ContractError("zarr-verified.json vouches for no store");
   }
   return x as unknown as ZarrVerifiedFile;
+}
+
+const GIT_VERIFIED_FIELDS = [
+  "version",
+  "dataset",
+  "mode",
+  "verifiedAt",
+  "keymapSha256",
+  "gitPlanSha256",
+  "s3PlanSha256",
+  "counts",
+];
+
+/** Read git-verified.json, or refuse: every field checked, and no field the contract does not name. */
+export function parseGitVerified(text: string): GitVerifiedFile {
+  const x = JSON.parse(text) as unknown;
+  const bad = (): never => {
+    throw new ContractError("git-verified.json does not match the contract");
+  };
+  if (!isObject(x)) return bad();
+  const keys = Object.keys(x);
+  if (keys.length !== GIT_VERIFIED_FIELDS.length || !GIT_VERIFIED_FIELDS.every((f) => f in x)) {
+    bad();
+  }
+  if (
+    x.version !== 1 ||
+    !isName(x.dataset) ||
+    (x.mode !== "local" && x.mode !== "fresh-clone") ||
+    !isIsoDate(x.verifiedAt) ||
+    !isString(x.keymapSha256) ||
+    !SHA256_HEX.test(x.keymapSha256) ||
+    !isString(x.gitPlanSha256) ||
+    !SHA256_HEX.test(x.gitPlanSha256) ||
+    !isString(x.s3PlanSha256) ||
+    !SHA256_HEX.test(x.s3PlanSha256) ||
+    !isObject(x.counts) ||
+    !Object.values(x.counts).every(isCount)
+  ) {
+    bad();
+  }
+  return x as unknown as GitVerifiedFile;
 }
 
 export function parseKeymap(text: string): KeymapFile {

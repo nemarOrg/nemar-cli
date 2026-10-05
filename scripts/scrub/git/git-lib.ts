@@ -4,8 +4,9 @@
  *
  * Every function here works on a LOCAL clone and never contacts a remote. **Nothing
  * identifying leaves this module**: a failure is a fixed word and a count, because a file
- * name or a key can be the identifier. Raw git stderr is kept on the error object for a
- * developer and is never printed by the CLI.
+ * name or a key can be the identifier. A failure's `detail` is the subcommand that failed, from a
+ * closed list ({@link DETAIL_WORDS}); raw stderr is kept on the error object for a developer and
+ * is never printed by the CLI.
  *
  * `rewrite` runs `rewrite_history.py` (git-filter-repo, driven through its Python API) and
  * leaves the `git-annex` branch alone. `verifyRewrite` is written independently of that
@@ -13,7 +14,8 @@
  * a bug in the rewrite cannot also hide in the check.
  */
 
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   ANNEX_KEY,
@@ -21,6 +23,7 @@ import {
   type GitPlanFile,
   type JsonOp,
   type KeymapFile,
+  type LedgerEntry,
   type PlanFile,
   parseGitPlan,
   parseKey,
@@ -28,17 +31,50 @@ import {
   parsePlan,
 } from "../contract";
 import { githubRepoOf } from "../github/repo-url";
+import { validateLedgerEntry } from "../ledger";
 
 /** Pinned: the rewrite script is written against this release's Python API. */
 export const FILTER_REPO_REQUIREMENT = "git-filter-repo==2.47.0";
 export const REWRITE_SCRIPT = join(import.meta.dir, "rewrite_history.py");
 
+/**
+ * The subcommands this tool runs, as the fixed words a failure may name. A CLOSED list: a detail
+ * that is not one of these is printed as `other`, so nothing a caller passes (a path, a key,
+ * stderr) can reach the terminal through it.
+ */
+export const DETAIL_WORDS: ReadonlySet<string> = new Set([
+  "git cat-file",
+  "git config",
+  "git for-each-ref",
+  "git log",
+  "git ls-tree",
+  "git rev-list",
+  "git rev-parse",
+  "git show",
+  "git other",
+  "annex examinekey",
+  "annex whereis",
+  "annex setpresentkey",
+  "annex dead",
+  "rewrite script",
+]);
+
+/** The detail word for a failed `git <args>`: the subcommand, when it is one of {@link DETAIL_WORDS}. */
+export function gitDetail(args: readonly string[]): string {
+  const word = `git ${args[0] ?? ""}`;
+  return DETAIL_WORDS.has(word) ? word : "git other";
+}
+
 export class GitScrubError extends Error {
+  /** A fixed word from {@link DETAIL_WORDS} saying which command failed; "" when none applies. */
   readonly detail: string;
-  constructor(reason: string, detail = "") {
+  /** Raw stderr of the failed command, for a developer in a debugger. Never printed. */
+  readonly stderr: string;
+  constructor(reason: string, detail = "", stderr = "") {
     super(reason);
     this.name = "GitScrubError";
-    this.detail = detail;
+    this.detail = DETAIL_WORDS.has(detail) ? detail : detail === "" ? "" : "git other";
+    this.stderr = stderr;
   }
 }
 
@@ -167,7 +203,7 @@ export async function gitRaw(
 /** Run git and return stdout as text, or throw a fixed-word error. */
 export async function git(repo: string, args: string[], stdin?: string): Promise<string> {
   const r = await gitRaw(repo, args, stdin);
-  if (r.exitCode !== 0) throw new GitScrubError("git-command-failed", r.stderr);
+  if (r.exitCode !== 0) throw new GitScrubError("git-command-failed", gitDetail(args), r.stderr);
   return r.stdout.toString("utf8");
 }
 
@@ -360,7 +396,7 @@ export async function catBatch(
   const exitCode = await proc.exited;
   const err = await errText;
   if (exitCode !== 0 || answers !== specs.length) {
-    throw new GitScrubError("git-command-failed", err);
+    throw new GitScrubError("git-command-failed", "git cat-file", err);
   }
 }
 
@@ -396,18 +432,43 @@ export interface Snapshot {
   tags: Record<string, string>;
   /** git-annex refs -> commit id: the rewrite must not move them. */
   annexRefs: Record<string, string>;
+  /**
+   * What the clone knew of `origin` before any rewrite, as the REMOTE names its refs: every head
+   * (`refs/heads/<b>`, from `refs/remotes/origin/<b>`) and every tag (`refs/tags/<t>`, the object
+   * the tag ref names, as `ls-remote` shows it). The switch refuses unless the remote still
+   * holds exactly these (`remote-moved-since-clone`) and pushes with them as its leases, so a push
+   * an uploader made after the clone is never erased by the force-push.
+   */
+  originTips: Record<string, string>;
 }
 
 async function tipPaths(repo: string, ref: string): Promise<string[]> {
   const out = await gitRaw(repo, ["ls-tree", "-r", "-z", "--name-only", `${ref}^{tree}`]);
-  if (out.exitCode !== 0) throw new GitScrubError("git-command-failed", out.stderr);
+  if (out.exitCode !== 0) throw new GitScrubError("git-command-failed", "git ls-tree", out.stderr);
   return out.stdout.toString("utf8").split("\0").filter(Boolean).sort();
 }
 
-/** Per ref: commit count and tip path list; the tag names; the git-annex refs. No contents. */
+/** True when filter-repo has already rewritten this clone (its commit map is there). */
+async function alreadyRewritten(repo: string): Promise<boolean> {
+  const gitDir = (await git(repo, ["rev-parse", "--absolute-git-dir"])).trim();
+  return existsSync(join(gitDir, "filter-repo", "commit-map"));
+}
+
+/**
+ * Per ref: commit count and tip path list; the tag names; the git-annex refs; the origin tips the
+ * clone knew. No contents. Refused in a clone the rewrite already ran in
+ * (`refused: snapshot-after-rewrite`): its remote-tracking refs and tags are rewritten ones, so
+ * they would say nothing about what the remote held, and the switch leases on them.
+ */
 export async function takeSnapshot(repo: string): Promise<Snapshot> {
-  const snapshot: Snapshot = { version: 1, refs: {}, tags: {}, annexRefs: {} };
+  if (await alreadyRewritten(repo)) throw new GitScrubError("refused: snapshot-after-rewrite");
+  const snapshot: Snapshot = { version: 1, refs: {}, tags: {}, annexRefs: {}, originTips: {} };
   for (const ref of await listRefs(repo)) {
+    const remoteHead = /^refs\/remotes\/origin\/(.+)$/.exec(ref.name)?.[1];
+    if (remoteHead !== undefined && remoteHead !== "HEAD") {
+      snapshot.originTips[`refs/heads/${remoteHead}`] = ref.sha;
+    }
+    if (ref.name.startsWith("refs/tags/")) snapshot.originTips[ref.name] = ref.sha;
     if (isAnnexRef(ref.name)) {
       snapshot.annexRefs[ref.name] = ref.sha;
       continue;
@@ -434,7 +495,17 @@ export function writeJson(path: string, value: unknown): void {
 
 export function readSnapshot(path: string): Snapshot {
   const x = JSON.parse(readFileSync(path, "utf8")) as Snapshot;
-  if (x.version !== 1 || typeof x.refs !== "object" || typeof x.tags !== "object") {
+  const isMap = (m: unknown) => typeof m === "object" && m !== null && !Array.isArray(m);
+  if (
+    x.version !== 1 ||
+    !isMap(x.refs) ||
+    !isMap(x.tags) ||
+    !isMap(x.annexRefs) ||
+    !isMap(x.originTips) ||
+    !Object.entries(x.originTips).every(
+      ([ref, sha]) => /^refs\/(heads|tags)\/./.test(ref) && /^[0-9a-f]{40,64}$/.test(String(sha)),
+    )
+  ) {
     throw new ContractError("snapshot does not match the contract");
   }
   return x;
@@ -505,7 +576,11 @@ export async function rewriteHistory(opts: RewriteOptions): Promise<RewriteResul
   if (exitCode !== 0) {
     // The word is on stdout ("refused: ...", "bad-input: ...", "failed: ..."); stderr is
     // filter-repo's own output and may name a file, so it is kept for a developer only.
-    throw new GitScrubError(stdout.trim().split("\n").pop() || "failed: no-output", stderr);
+    throw new GitScrubError(
+      stdout.trim().split("\n").pop() || "failed: no-output",
+      "rewrite script",
+      stderr,
+    );
   }
   const line = stdout.trim().split("\n").pop() ?? "";
   const parsed = JSON.parse(line) as {
@@ -536,7 +611,25 @@ export type VerifyReason =
   | "tip-paths-mismatch"
   | "annex-branch-changed"
   | "edf-key-unaccounted"
-  | "edf-path-not-a-pointer";
+  | "edf-path-not-a-pointer"
+  // fresh-clone mode only:
+  | "tag-names-not-plan"
+  | "ledger-commit-not-alone"
+  | "ledger-invalid"
+  | "annex-branch-missing"
+  | "annex-old-key-held"
+  | "annex-old-key-not-dead"
+  | "annex-new-key-unregistered";
+
+/** The one path a commit made after the rewrite may add, and the only one it may touch. */
+export const LEDGER_PATH = ".nemar/corrections.jsonl";
+
+/**
+ * `local`: the clone the rewrite ran in, compared with the snapshot taken before it.
+ * `fresh-clone`: a new clone of the PUSHED repository; every invariant that does not depend on the
+ * snapshot, plus the pushed `git-annex` branch (read from `refs/remotes/origin/git-annex`).
+ */
+export type VerifyMode = "local" | "fresh-clone";
 
 export interface VerifyFailure {
   reason: VerifyReason;
@@ -555,7 +648,10 @@ export interface VerifyOptions {
   plan: GitPlanFile;
   /** The S3 stage's plan: its clean keys, with the keymap's new keys, are the only EDF/BDF keys allowed. */
   s3Plan: PlanFile;
-  before: Snapshot;
+  /** Default `local`. */
+  mode?: VerifyMode;
+  /** The snapshot from before the rewrite: required in `local` mode, refused in `fresh-clone`. */
+  before?: Snapshot;
   /**
    * Accept a plan path whose content in some commit is not UTF-8 JSON. Off by default: a
    * file the rewrite could not parse is a file whose named keys may still hold a value.
@@ -745,21 +841,37 @@ export function annexKeyOfBlob(content: Uint8Array): string | null {
 /**
  * Prove a rewrite, over EVERY ref and EVERY commit, using plain git only.
  *
+ * In both modes:
  * - no object reachable from any non-git-annex ref holds an old key's sha256 (every blob,
- *   plus commit and tag messages), not only the tips;
+ *   plus commit and annotated-tag messages), not only the tips;
  * - no dropped path in any commit's tree;
- * - every blanked key is empty in every commit that has the file;
- * - every ref keeps its commit count and every tag its name and kind;
- * - each ref's tip paths equal the snapshot's, minus dropped, plus appended;
+ * - every blanked key is empty in every commit that has the file, and every structural edit holds;
  * - the appended text is in every commit exactly once, at the end of the file;
- * - the git-annex branch is where it was;
  * - every EDF or BDF path, in every commit of every ref, is an annex pointer or link whose key
  *   is a NEW key of the keymap or a key the S3 plan marked clean: no key goes unaccounted for.
+ *
+ * `local` mode, against the snapshot taken before the rewrite:
+ * - every ref keeps its commit count and every tag its name and kind;
+ * - each ref's tip paths equal the snapshot's, minus dropped, plus appended;
+ * - the git-annex branch is where it was.
+ *
+ * `fresh-clone` mode, against the plans and the pushed git-annex branch instead:
+ * - the tag names are the S3 plan's tags;
+ * - a commit that touches {@link LEDGER_PATH} touches nothing else, and the ledger at every head
+ *   tip is a valid ledger of this dataset (the ledger commit on top of the rewrite is the one
+ *   extra path and the only extra commits it tolerates; nothing else is compared with a before);
+ * - in `refs/remotes/origin/git-annex`: no repository holds an old key, every old key is dead,
+ *   and every new key is recorded present somewhere.
  */
 export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> {
-  const { repo, keymap, plan, before, s3Plan } = opts;
+  const { repo, keymap, plan, s3Plan } = opts;
+  const mode = opts.mode ?? "local";
   // A plan from another dataset would vouch for keys that are not this repository's.
   if (s3Plan.dataset !== plan.dataset) throw new GitScrubError("refused: s3-plan-dataset-mismatch");
+  if (mode === "local" && !opts.before) throw new GitScrubError("refused: before-required");
+  if (mode === "fresh-clone" && opts.before) {
+    throw new GitScrubError("refused: before-not-for-fresh-clone");
+  }
   const failures: VerifyFailure[] = [];
   const counts: Record<string, number> = {};
   const fail = (reason: VerifyReason, count: number): void => {
@@ -770,28 +882,34 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
   const byName = new Map(refs.map((r) => [r.name, r]));
   const scanRefs = refs.filter((r) => !isAnnexRef(r.name)).map((r) => r.name);
   if (scanRefs.length === 0) throw new GitScrubError("no-refs");
-
-  // Refs, tags, commit counts.
-  const beforeRefs = Object.keys(before.refs);
-  fail("refs-missing", beforeRefs.filter((r) => !byName.has(r)).length);
   const nowTags = new Set(
     refs.filter((r) => r.name.startsWith("refs/tags/")).map((r) => r.name.slice(10)),
   );
-  fail("tag-names-changed", setDiffSize(nowTags, new Set(Object.keys(before.tags))));
-  let kindChanges = 0;
-  for (const [name, type] of Object.entries(before.tags)) {
-    const now = byName.get(`refs/tags/${name}`);
-    if (now && now.type !== type) kindChanges++;
+
+  // Refs, tags, commit counts.
+  const before = opts.before;
+  const beforeRefs = before ? Object.keys(before.refs) : [];
+  if (before) {
+    fail("refs-missing", beforeRefs.filter((r) => !byName.has(r)).length);
+    fail("tag-names-changed", setDiffSize(nowTags, new Set(Object.keys(before.tags))));
+    let kindChanges = 0;
+    for (const [name, type] of Object.entries(before.tags)) {
+      const now = byName.get(`refs/tags/${name}`);
+      if (now && now.type !== type) kindChanges++;
+    }
+    fail("tag-kind-changed", kindChanges);
+    let countChanges = 0;
+    for (const ref of beforeRefs) {
+      if (!byName.has(ref)) continue;
+      const n = Number((await git(repo, ["rev-list", "--count", ref])).trim());
+      if (n !== before.refs[ref]?.commits) countChanges++;
+    }
+    fail("commit-count-changed", countChanges);
+    counts.refs = beforeRefs.length;
+  } else {
+    fail("tag-names-not-plan", setDiffSize(nowTags, new Set(s3Plan.tags)));
+    counts.refs = scanRefs.length;
   }
-  fail("tag-kind-changed", kindChanges);
-  let countChanges = 0;
-  for (const ref of beforeRefs) {
-    if (!byName.has(ref)) continue;
-    const n = Number((await git(repo, ["rev-list", "--count", ref])).trim());
-    if (n !== before.refs[ref]?.commits) countChanges++;
-  }
-  fail("commit-count-changed", countChanges);
-  counts.refs = beforeRefs.length;
 
   // Old keys in every object reachable from any non-annex ref.
   const oldHashes = new Set(Object.keys(keymap).map((k) => parseKey(k).sha256));
@@ -895,15 +1013,17 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
   fail("append-duplicated", appendDuplicated);
 
   // Tip paths.
-  const dropped = new Set(plan.dropPaths);
-  let pathDiffs = 0;
-  for (const ref of beforeRefs) {
-    if (!byName.has(ref)) continue;
-    const expected = new Set((before.refs[ref]?.tipPaths ?? []).filter((p) => !dropped.has(p)));
-    for (const p of appendPaths) expected.add(p);
-    pathDiffs += setDiffSize(expected, new Set(await tipPaths(repo, ref)));
+  if (before) {
+    const dropped = new Set(plan.dropPaths);
+    let pathDiffs = 0;
+    for (const ref of beforeRefs) {
+      if (!byName.has(ref)) continue;
+      const expected = new Set((before.refs[ref]?.tipPaths ?? []).filter((p) => !dropped.has(p)));
+      for (const p of appendPaths) expected.add(p);
+      pathDiffs += setDiffSize(expected, new Set(await tipPaths(repo, ref)));
+    }
+    fail("tip-paths-mismatch", pathDiffs);
   }
-  fail("tip-paths-mismatch", pathDiffs);
 
   // Every EDF/BDF key in every commit of every ref is accounted for. A key counts when it is a
   // NEW key, or the S3 plan READ its header and found nothing to scrub; an old key, a key the
@@ -937,14 +1057,114 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
   fail("edf-key-unaccounted", [...edfKeys].filter((k) => !accounted.has(k)).length);
   counts.edfKeys = edfKeys.size;
 
-  // The git-annex branch is not ours to move.
-  let annexMoved = 0;
-  for (const [name, sha] of Object.entries(before.annexRefs)) {
-    if (byName.get(name)?.sha !== sha) annexMoved++;
+  if (before) {
+    // The git-annex branch is not ours to move.
+    let annexMoved = 0;
+    for (const [name, sha] of Object.entries(before.annexRefs)) {
+      if (byName.get(name)?.sha !== sha) annexMoved++;
+    }
+    fail("annex-branch-changed", annexMoved);
+  } else {
+    const ledger = await ledgerChecks(repo, scanRefs, plan.dataset);
+    fail("ledger-commit-not-alone", ledger.notAlone);
+    fail("ledger-invalid", ledger.invalid);
+    counts.ledgerCommits = ledger.commits;
+    const annexRef = "refs/remotes/origin/git-annex";
+    if (!byName.has(annexRef)) {
+      fail("annex-branch-missing", 1);
+    } else {
+      const pushed = await pushedRegistration(repo, annexRef, keymap);
+      fail("annex-old-key-held", pushed.oldHeld);
+      fail("annex-old-key-not-dead", pushed.oldNotDead);
+      fail("annex-new-key-unregistered", pushed.newUnregistered);
+    }
   }
-  fail("annex-branch-changed", annexMoved);
 
   return { ok: failures.length === 0, failures, counts };
+}
+
+/**
+ * The commits that touch {@link LEDGER_PATH}: how many there are, how many touch anything else
+ * too, and at how many head tips the ledger is not a valid ledger of `dataset`.
+ */
+async function ledgerChecks(
+  repo: string,
+  scanRefs: string[],
+  dataset: string,
+): Promise<{ commits: number; notAlone: number; invalid: number }> {
+  const out = await git(
+    repo,
+    ["log", "--stdin", "--no-renames", "--format=%x00%H", "--name-only", "-m", "--first-parent"],
+    `${scanRefs.join("\n")}\n`,
+  );
+  let commits = 0;
+  let notAlone = 0;
+  const seen = new Set<string>();
+  for (const block of out.split("\0").slice(1)) {
+    const [sha, ...rest] = block.split("\n");
+    if (!sha || seen.has(sha)) continue;
+    seen.add(sha);
+    const paths = rest.filter((p) => p !== "");
+    if (!paths.includes(LEDGER_PATH)) continue;
+    commits++;
+    if (paths.some((p) => p !== LEDGER_PATH)) notAlone++;
+  }
+  let invalid = 0;
+  for (const ref of scanRefs.filter(
+    (r) => r.startsWith("refs/heads/") || r.startsWith("refs/remotes/"),
+  )) {
+    const r = await gitRaw(repo, ["cat-file", "blob", `${ref}:${LEDGER_PATH}`]);
+    if (r.exitCode !== 0) continue; // no ledger at this tip
+    try {
+      const lines = r.stdout
+        .toString("utf8")
+        .split("\n")
+        .filter((l) => l.trim() !== "");
+      for (const line of lines) {
+        const entry = validateLedgerEntry(JSON.parse(line) as LedgerEntry);
+        if (entry.dataset !== dataset) throw new Error("other dataset");
+      }
+    } catch {
+      invalid++;
+    }
+  }
+  return { commits, notAlone, invalid };
+}
+
+/** git-annex's `hashdirlower` for a key: the `abc/def/` its location log lives under. */
+export function hashDirLower(key: string): string {
+  const h = createHash("md5").update(key).digest("hex");
+  return `${h.slice(0, 3)}/${h.slice(3, 6)}/`;
+}
+
+/**
+ * What the PUSHED git-annex branch says about the keymap: old keys some repository still holds,
+ * old keys not marked dead, and new keys no repository is recorded holding. Read from the ref
+ * itself with plain git (no journal exists in a fresh clone, and nothing is merged).
+ */
+async function pushedRegistration(
+  repo: string,
+  annexRef: string,
+  keymap: KeymapFile,
+): Promise<{ oldHeld: number; oldNotDead: number; newUnregistered: number }> {
+  const oldKeys = [...new Set(Object.keys(keymap))];
+  const newKeys = [...new Set(Object.values(keymap))];
+  const logs = await readObjects(
+    repo,
+    [...oldKeys, ...newKeys].map((k) => `${annexRef}:${hashDirLower(k)}${k}.log`),
+  );
+  const text = (i: number) => logs[i]?.toString("utf8") ?? "";
+  let oldHeld = 0;
+  let oldNotDead = 0;
+  oldKeys.forEach((_k, i) => {
+    if (presentIn(text(i)).size > 0) oldHeld++;
+    else if (!isDead(text(i))) oldNotDead++;
+  });
+  let newUnregistered = 0;
+  newKeys.forEach((_k, j) => {
+    if (presentIn(text(oldKeys.length + j)).size === 0) newUnregistered++;
+  });
+  return { oldHeld, oldNotDead, newUnregistered };
 }
 
 // ---------------------------------------------------------------------------------------
@@ -954,9 +1174,64 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
 export interface AnnexRegistryOptions {
   repo: string;
   keymap: KeymapFile;
-  /** The only repositories a NEW key is recorded present at (the S3 special remote). */
+  /**
+   * The only repositories a NEW key is recorded present at (the S3 special remote). Empty: the
+   * uuid of the special remote named {@link S3_REMOTE_NAME} in this clone's `remote.log`. Every
+   * uuid, given or derived, must be a special remote of THIS clone (`remote-uuid-unknown`):
+   * `initremote` gives each repository's remote its own uuid, so one pasted from another dataset
+   * would record the new keys at a remote this repository does not have.
+   */
   remoteUuids: string[];
   execute: boolean;
+}
+
+/** The name NEMAR's S3 special remote has in every dataset repository (`buildS3RemoteArgs`). */
+export const S3_REMOTE_NAME = "nemar-s3";
+
+/**
+ * The special remotes `git-annex:remote.log` records, uuid -> name (the newest line per uuid).
+ * Read the way `resolveRemoteUuid` (src/lib/fleet-key-registration.ts) reads it: `name=` as an
+ * exact field, never a substring, because `nemar-s3` and `nemar-s3-dev` sit side by side.
+ */
+export async function remoteLogNames(repo: string): Promise<Map<string, string>> {
+  const r = await gitRaw(repo, ["cat-file", "blob", "git-annex:remote.log"]);
+  const names = new Map<string, { at: number; name: string }>();
+  if (r.exitCode !== 0) return new Map();
+  for (const line of r.stdout.toString("utf8").split("\n")) {
+    const fields = line.trim().split(/\s+/);
+    const uuid = fields[0];
+    if (!uuid || !UUID.test(uuid)) continue;
+    const name = fields.find((f) => f.startsWith("name="))?.slice("name=".length) ?? "";
+    const stamp = fields.find((f) => f.startsWith("timestamp="))?.slice("timestamp=".length) ?? "0";
+    const at = Number.parseFloat(stamp);
+    const prior = names.get(uuid);
+    if (!prior || at >= prior.at) names.set(uuid, { at: Number.isFinite(at) ? at : 0, name });
+  }
+  return new Map([...names].map(([uuid, v]) => [uuid, v.name]));
+}
+
+/**
+ * The uuids an annex-registry run records new keys at: the ones given, or the one special remote
+ * named {@link S3_REMOTE_NAME} (from `remote.log`, else `git config remote.nemar-s3.annex-uuid`).
+ * Every one must be a special remote in this clone's `remote.log`.
+ */
+export async function resolveRegistryUuids(repo: string, given: string[]): Promise<string[]> {
+  const known = await remoteLogNames(repo);
+  let uuids = given;
+  if (uuids.length === 0) {
+    const named = [...known].filter(([, name]) => name === S3_REMOTE_NAME).map(([u]) => u);
+    if (named.length > 1) throw new GitScrubError("refused: remote-uuid-ambiguous");
+    if (named.length === 1) uuids = named;
+    else {
+      const r = await gitRaw(repo, ["config", "--get", `remote.${S3_REMOTE_NAME}.annex-uuid`]);
+      const fromConfig = r.exitCode === 0 ? r.stdout.toString("utf8").trim() : "";
+      if (!fromConfig) throw new GitScrubError("refused: no-nemar-s3-remote");
+      uuids = [fromConfig];
+    }
+  }
+  if (!uuids.every((u) => UUID.test(u))) throw new ContractError("remote uuid is not a uuid");
+  if (!uuids.every((u) => known.has(u))) throw new GitScrubError("refused: remote-uuid-unknown");
+  return uuids;
 }
 
 export interface AnnexRegistryResult {
@@ -1010,9 +1285,12 @@ async function locationLogs(repo: string, keys: string[]): Promise<string[]> {
     ["examinekey", "--batch", "--format=${hashdirlower}${key}.log\\n"],
     `${keys.join("\n")}\n`,
   );
-  if (paths.exitCode !== 0) throw new GitScrubError("annex-command-failed", paths.stderr);
+  if (paths.exitCode !== 0) {
+    throw new GitScrubError("annex-command-failed", "annex examinekey", paths.stderr);
+  }
   const lines = paths.stdout.toString("utf8").split("\n").filter(Boolean);
-  if (lines.length !== keys.length) throw new GitScrubError("annex-command-failed");
+  if (lines.length !== keys.length)
+    throw new GitScrubError("annex-command-failed", "annex examinekey");
   const contents = await readObjects(
     repo,
     lines.map((p) => `git-annex:${p}`),
@@ -1039,7 +1317,9 @@ async function whereisHolders(repo: string, keys: string[]): Promise<Map<string,
   }
   // A run that answered for fewer keys than it was asked about did not answer: "no holders"
   // for a key it never examined is the dangerous reading.
-  if (!keys.every((k) => out.has(k))) throw new GitScrubError("annex-command-failed", r.stderr);
+  if (!keys.every((k) => out.has(k))) {
+    throw new GitScrubError("annex-command-failed", "annex whereis", r.stderr);
+  }
   return out;
 }
 
@@ -1073,15 +1353,16 @@ function isDead(log: string): boolean {
  * the location log, which `dead` commits), and an exit code is not evidence.
  */
 export async function annexRegistry(opts: AnnexRegistryOptions): Promise<AnnexRegistryResult> {
-  const { repo, keymap, remoteUuids } = opts;
-  if (remoteUuids.length === 0 || !remoteUuids.every((u) => UUID.test(u))) {
+  const { repo, keymap } = opts;
+  if (!opts.remoteUuids.every((u) => UUID.test(u))) {
     throw new ContractError("remote uuid is not a uuid");
   }
   for (const [a, b] of Object.entries(keymap)) {
     if (!ANNEX_KEY.test(a) || !ANNEX_KEY.test(b)) throw new ContractError("keymap holds a bad key");
   }
   const own = await git(repo, ["config", "--get", "annex.uuid"]).catch(() => "");
-  if (!own.trim()) throw new GitScrubError("annex-not-initialized");
+  if (!own.trim()) throw new GitScrubError("refused: annex-not-initialized");
+  const remoteUuids = await resolveRegistryUuids(repo, opts.remoteUuids);
 
   const named = new Set(remoteUuids);
   const oldKeys = [...new Set(Object.keys(keymap))];
@@ -1121,7 +1402,9 @@ export async function annexRegistry(opts: AnnexRegistryOptions): Promise<AnnexRe
   const batch = async (lines: string[]): Promise<void> => {
     if (lines.length === 0) return;
     const r = await annex(repo, ["setpresentkey", "--batch"], `${lines.join("\n")}\n`);
-    if (r.exitCode !== 0) throw new GitScrubError("annex-command-failed", r.stderr);
+    if (r.exitCode !== 0) {
+      throw new GitScrubError("annex-command-failed", "annex setpresentkey", r.stderr);
+    }
   };
   await batch(registrations);
   await batch(retractions);

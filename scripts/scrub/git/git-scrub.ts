@@ -10,15 +10,28 @@
  *       optional, and when given must name that same repository)
  *   bun run scripts/scrub/git/git-scrub.ts verify   --repo CLONE --keymap keymap.json \
  *        --plan git-plan.json --s3-plan plan.json --before before.json [--allow-unparseable-json]
+ *        [--proof-out git-verified.json]
+ *   bun run scripts/scrub/git/git-scrub.ts verify --fresh-clone --repo FRESH_CLONE \
+ *        --keymap keymap.json --plan git-plan.json --s3-plan plan.json [--proof-out F]
  *   bun run scripts/scrub/git/git-scrub.ts annex-registry --repo ANNEX_CLONE \
- *        --keymap keymap.json --remote-uuid UUID [--remote-uuid UUID ...] [--execute]
+ *        --keymap keymap.json [--remote-uuid UUID ...] [--execute]
  *
- * Output is counts and fixed words only: a path, a key or a file name can be the identifier.
- * Exit codes: 0 done, 1 refused or failed, 2 usage.
+ * `verify` removes the proof file (default: `git-verified.json` beside the keymap) when it starts
+ * and writes it again only when every check passed; `delete-old` requires one made by
+ * `--fresh-clone`. `annex-registry` with no `--remote-uuid` uses this clone's `nemar-s3` remote.
+ *
+ * Output is counts and fixed words only: a path, a key or a file name can be the identifier. A
+ * failure names the command that failed from a closed list (`failed: <word> (git rev-list)`).
+ * Exit codes: 0 done; 1 failed (a command or the tool broke); 2 usage; 3 refused (an input or
+ * the repository is not one this may act on; nothing was changed by the tool); 4 checked and not
+ * clean (verify found failures, or annex-registry's read-back disagrees after --execute).
  */
 
+import { createHash } from "node:crypto";
+import { readFileSync, renameSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
-import { ContractError } from "../contract";
+import { ContractError, type GitVerifiedFile } from "../contract";
 import {
   GitScrubError,
   annexRegistry,
@@ -32,14 +45,19 @@ import {
   writeJson,
 } from "./git-lib";
 
+export const EXIT = { failed: 1, usage: 2, refused: 3, notClean: 4 } as const;
+
 const USAGE = `usage: git-scrub <snapshot|rewrite|verify|annex-registry> --repo PATH [options]
   snapshot        --out FILE
   rewrite         --keymap FILE --plan FILE [--expect-remote URL (must be the plan's dataset)]
                   [--snapshot-out FILE]
                   [--refs REF...] [--report FILE]
   verify          --keymap FILE --plan FILE --s3-plan FILE --before FILE
-                  [--allow-unparseable-json]
-  annex-registry  --keymap FILE --remote-uuid UUID [--remote-uuid UUID ...] [--execute]`;
+                  [--allow-unparseable-json] [--proof-out FILE]
+  verify          --fresh-clone --keymap FILE --plan FILE --s3-plan FILE
+                  [--allow-unparseable-json] [--proof-out FILE]
+  annex-registry  --keymap FILE [--remote-uuid UUID ...] [--execute]
+exit: 0 done, 1 failed, 2 usage, 3 refused, 4 checked and not clean`;
 
 class UsageError extends Error {}
 
@@ -55,35 +73,30 @@ function fmt(counts: Record<string, number>): string {
     .join(" ");
 }
 
+const fileSha256 = (path: string): string =>
+  createHash("sha256").update(readFileSync(path)).digest("hex");
+
+/** Write the proof atomically, owner-only: a reader sees the old file or the whole new one. */
+function writeProof(path: string, proof: GitVerifiedFile): void {
+  const tmp = `${path}.tmp-${process.pid}`;
+  writeJson(tmp, proof);
+  renameSync(tmp, path);
+}
+
 export async function main(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
   if (!command || command === "--help" || command === "-h") {
     console.log(USAGE);
-    return command ? 0 : 2;
+    return command ? 0 : EXIT.usage;
   }
-  const { values, positionals } = parseArgs({
-    args: rest,
-    options: {
-      repo: { type: "string" },
-      keymap: { type: "string" },
-      plan: { type: "string" },
-      "s3-plan": { type: "string" },
-      before: { type: "string" },
-      out: { type: "string" },
-      "expect-remote": { type: "string" },
-      "snapshot-out": { type: "string" },
-      report: { type: "string" },
-      refs: { type: "string", multiple: true },
-      "remote-uuid": { type: "string", multiple: true },
-      execute: { type: "boolean", default: false },
-      "allow-unparseable-json": { type: "boolean", default: false },
-    },
-    // `--refs a b` lists several refs; the extras arrive as positionals.
-    allowPositionals: true,
-    strict: true,
-  });
-
   try {
+    let parsed: ReturnType<typeof parse>;
+    try {
+      parsed = parse(rest);
+    } catch {
+      throw new UsageError("bad arguments");
+    }
+    const { values, positionals } = parsed;
     const repo = need(values.repo, "--repo");
     if (positionals.length > 0 && !(command === "rewrite" && values.refs)) {
       throw new UsageError("unexpected argument");
@@ -93,7 +106,7 @@ export async function main(argv: string[]): Promise<number> {
         const snapshot = await takeSnapshot(repo);
         writeJson(need(values.out, "--out"), snapshot);
         console.log(
-          `snapshot: ok refs=${Object.keys(snapshot.refs).length} tags=${Object.keys(snapshot.tags).length}`,
+          `snapshot: ok refs=${Object.keys(snapshot.refs).length} tags=${Object.keys(snapshot.tags).length} originTips=${Object.keys(snapshot.originTips).length}`,
         );
         return 0;
       }
@@ -117,32 +130,49 @@ export async function main(argv: string[]): Promise<number> {
       case "verify": {
         const keymapPath = need(values.keymap, "--keymap");
         const planPath = need(values.plan, "--plan");
+        const s3PlanPath = need(values["s3-plan"], "--s3-plan");
+        const fresh = values["fresh-clone"] === true;
+        if (fresh && values.before) throw new UsageError("--fresh-clone takes no --before");
+        const proofPath = values["proof-out"] ?? join(dirname(keymapPath), "git-verified.json");
+        // A proof from an earlier run must not outlive a run that does not pass.
+        rmSync(proofPath, { force: true });
         const { keymap, plan } = readInputs(keymapPath, planPath);
+        const s3Plan = readS3Plan(s3PlanPath);
         const result = await verifyRewrite({
           repo,
           keymap,
           plan,
-          s3Plan: readS3Plan(need(values["s3-plan"], "--s3-plan")),
-          before: readSnapshot(need(values.before, "--before")),
+          s3Plan,
+          mode: fresh ? "fresh-clone" : "local",
+          ...(fresh ? {} : { before: readSnapshot(need(values.before, "--before")) }),
           allowUnparseableJson: values["allow-unparseable-json"] === true,
         });
+        const mode = fresh ? "fresh-clone" : "local";
         if (result.ok) {
-          console.log(`verify: ok ${fmt(result.counts)}`);
+          writeProof(proofPath, {
+            version: 1,
+            dataset: plan.dataset,
+            mode,
+            verifiedAt: new Date().toISOString(),
+            keymapSha256: fileSha256(keymapPath),
+            gitPlanSha256: fileSha256(planPath),
+            s3PlanSha256: fileSha256(s3PlanPath),
+            counts: result.counts,
+          });
+          console.log(`verify: ok mode=${mode} ${fmt(result.counts)}`);
           return 0;
         }
         for (const f of result.failures)
           console.log(`verify: FAIL reason=${f.reason} count=${f.count}`);
-        console.log(`verify: failed ${fmt(result.counts)}`);
-        return 1;
+        console.log(`verify: failed mode=${mode} ${fmt(result.counts)}`);
+        return EXIT.notClean;
       }
       case "annex-registry": {
         const keymap = readKeymap(need(values.keymap, "--keymap"));
-        const remoteUuids = values["remote-uuid"] ?? [];
-        if (remoteUuids.length === 0) throw new UsageError("missing --remote-uuid");
         const result = await annexRegistry({
           repo,
           keymap,
-          remoteUuids,
+          remoteUuids: values["remote-uuid"] ?? [],
           execute: values.execute === true,
         });
         if (!result.executed) {
@@ -157,11 +187,11 @@ export async function main(argv: string[]): Promise<number> {
           result.newPresent === result.newKeys &&
           result.newForeignHolders === 0 &&
           result.deadRefused === 0;
-        const { holders, newToRegister, ...rest } = result;
+        const { holders, newToRegister, ...others } = result;
         console.log(
-          `annex-registry: ${good ? "ok" : "FAILED"} ${fmt({ ...rest, holdersRetracted: holders, newRegistered: newToRegister, executed: 1 })}`,
+          `annex-registry: ${good ? "ok" : "FAILED"} ${fmt({ ...others, holdersRetracted: holders, newRegistered: newToRegister, executed: 1 })}`,
         );
-        return good ? 0 : 1;
+        return good ? 0 : EXIT.notClean;
       }
       default:
         throw new UsageError("unknown command");
@@ -169,19 +199,53 @@ export async function main(argv: string[]): Promise<number> {
   } catch (e) {
     if (e instanceof UsageError) {
       console.error(`${e.message}\n${USAGE}`);
-      return 2;
+      return EXIT.usage;
     }
     if (e instanceof ContractError) {
       console.log(`refused: contract (${e.message})`);
-      return 1;
+      return EXIT.refused;
     }
     if (e instanceof GitScrubError) {
-      console.log(e.message.startsWith("refused") ? e.message : `failed: ${e.message}`);
-      return 1;
+      // The message is a fixed word ("refused: <word>", "bad-input: <word>", "failed: <word>",
+      // or a bare word); the detail is the failed command, from a closed list.
+      const detail = e.detail ? ` (${e.detail})` : "";
+      if (e.message.startsWith("refused") || e.message.startsWith("bad-input")) {
+        console.log(`${e.message}${detail}`);
+        return EXIT.refused;
+      }
+      const word = e.message.startsWith("failed") ? e.message : `failed: ${e.message}`;
+      console.log(`${word}${detail}`);
+      return EXIT.failed;
     }
     console.log(`failed: ${e instanceof Error ? e.name : "unknown"}`);
-    return 1;
+    return EXIT.failed;
   }
+}
+
+function parse(args: string[]) {
+  return parseArgs({
+    args,
+    options: {
+      repo: { type: "string" },
+      keymap: { type: "string" },
+      plan: { type: "string" },
+      "s3-plan": { type: "string" },
+      before: { type: "string" },
+      out: { type: "string" },
+      "expect-remote": { type: "string" },
+      "snapshot-out": { type: "string" },
+      "proof-out": { type: "string" },
+      report: { type: "string" },
+      refs: { type: "string", multiple: true },
+      "remote-uuid": { type: "string", multiple: true },
+      execute: { type: "boolean", default: false },
+      "fresh-clone": { type: "boolean", default: false },
+      "allow-unparseable-json": { type: "boolean", default: false },
+    },
+    // `--refs a b` lists several refs; the extras arrive as positionals.
+    allowPositionals: true,
+    strict: true,
+  });
 }
 
 if (import.meta.main) {

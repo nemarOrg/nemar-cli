@@ -2,7 +2,7 @@
  * `git-scrub annex-registry`, run as the real program on real git-annex repositories.
  *
  * The shape mirrors the dataset it is for: an origin repository (A) with a `type=directory`
- * special remote standing in for `nemar-s3`, an uploader's own clone (B) that fetched the
+ * special remote named `nemar-s3` standing in for the real one (and an empty `nemar-s3-dev`), an uploader's own clone (B) that fetched the
  * content from that remote, and the operator's fresh clone (C) where the command runs. A key
  * therefore has TWO holders, the special remote and B, which is what the real dataset has, and
  * git-annex refuses `dead` while either remains.
@@ -42,6 +42,9 @@ interface Registry {
   /** The special remote, and the uploader's clone: the two holders of every old key. */
   remoteUuid: string;
   uploaderUuid: string;
+  /** A second special remote, `nemar-s3-dev`, that holds nothing: a name that contains `nemar-s3`. */
+  devUuid: string;
+  root: string;
   oldKeys: string[];
   newKeys: string[];
   /** A key outside the keymap held by both: it must not be touched. */
@@ -82,16 +85,26 @@ function build(): Registry {
   // A: the published repository. Its content lives only at the special remote.
   git(a, "init", "-q", "-b", "main");
   sh(a, ["git", "annex", "init", "--quiet", "origin"]);
-  sh(a, [
-    "git",
-    "annex",
-    "initremote",
-    "stand-in",
-    "type=directory",
-    `directory=${store}`,
-    "encryption=none",
-  ]);
-  const remoteUuid = git(a, "config", "remote.stand-in.annex-uuid").trim();
+  // Named as the real one is, so the command finds it without being told its uuid; and a dev
+  // remote whose name CONTAINS that name, which a substring match would confuse with it.
+  const devStore = join(root, "dev-store");
+  sh(root, ["mkdir", "-p", devStore]);
+  for (const [name, dir] of [
+    ["nemar-s3-dev", devStore],
+    ["nemar-s3", store],
+  ] as const) {
+    sh(a, [
+      "git",
+      "annex",
+      "initremote",
+      name,
+      "type=directory",
+      `directory=${dir}`,
+      "encryption=none",
+    ]);
+  }
+  const remoteUuid = git(a, "config", "remote.nemar-s3.annex-uuid").trim();
+  const devUuid = git(a, "config", "remote.nemar-s3-dev.annex-uuid").trim();
   const oldKeys: string[] = [];
   for (let i = 0; i < 3; i++) {
     write(a, `sub-0${i}/eeg/rec.edf`, `recording-${i}-`.repeat(50));
@@ -102,14 +115,14 @@ function build(): Registry {
   sh(a, ["git", "annex", "add", "--quiet", "bystander.edf"]);
   const bystander = sh(a, ["git", "annex", "lookupkey", "bystander.edf"]).trim();
   git(a, "commit", "-q", "-m", "data");
-  sh(a, ["git", "annex", "copy", "--quiet", "--to", "stand-in", "."]);
+  sh(a, ["git", "annex", "copy", "--quiet", "--to", "nemar-s3", "."]);
   sh(a, ["git", "annex", "drop", "--quiet", "."]);
 
   // B: the uploader's own clone. It fetches the content from the special remote, which makes it
   // a second holder, and its record reaches A's git-annex branch the way a push would.
   sh(root, ["git", "clone", "-q", "--no-local", a, b]);
   sh(b, ["git", "annex", "init", "--quiet", "uploader"]);
-  sh(b, ["git", "annex", "enableremote", "stand-in", `directory=${store}`]);
+  sh(b, ["git", "annex", "enableremote", "nemar-s3", `directory=${store}`]);
   sh(b, ["git", "annex", "get", "--quiet", "."]);
   sh(b, ["git", "annex", "merge"]);
   const uploaderUuid = git(b, "config", "annex.uuid").trim();
@@ -130,6 +143,8 @@ function build(): Registry {
     keymapPath: join(root, "keymap.json"),
     remoteUuid,
     uploaderUuid,
+    devUuid,
+    root,
     oldKeys,
     newKeys,
     bystander,
@@ -195,8 +210,8 @@ SUITE("annex-registry on a key with two holders", () => {
       "--remote-uuid",
       fx.remoteUuid,
     ]);
-    expect(a.code).not.toBe(0);
-    expect(a.out).toContain("annex-not-initialized");
+    expect(a.code).toBe(3);
+    expect(a.out).toContain("refused: annex-not-initialized");
     const b = await cli([
       "annex-registry",
       "--repo",
@@ -206,10 +221,56 @@ SUITE("annex-registry on a key with two holders", () => {
       "--remote-uuid",
       "nemar-s3",
     ]);
-    expect(b.code).not.toBe(0);
+    expect(b.code).toBe(3);
     expect(b.out).toContain("refused: contract");
-    const c = await cli(["annex-registry", "--repo", fx.repo, "--keymap", fx.keymapPath]);
-    expect(c.code).toBe(2);
+  });
+
+  test("with no --remote-uuid it uses this clone's nemar-s3 remote, not nemar-s3-dev (I2)", async () => {
+    const before = git(fx.repo, "rev-parse", "refs/heads/git-annex").trim();
+    const derived = await cli(["annex-registry", "--repo", fx.repo, "--keymap", fx.keymapPath]);
+    expect(derived.code, derived.out).toBe(0);
+    // Three new keys to record at ONE remote: the derived uuid is one uuid.
+    expect(counts(derived.out, "annex-registry: dry-run")).toMatchObject({ newToRegister: 3 });
+    expect(git(fx.repo, "rev-parse", "refs/heads/git-annex").trim()).toBe(before);
+    expect(derived.out).not.toContain(fx.remoteUuid);
+  });
+
+  test("a uuid that is not a special remote of THIS clone is refused before anything (I2)", async () => {
+    // Another dataset's remote: initremote gives every repository its own uuid.
+    const elsewhere = join(fx.root, "elsewhere");
+    sh(fx.root, ["mkdir", "-p", elsewhere, join(fx.root, "elsewhere-store")]);
+    git(elsewhere, "init", "-q", "-b", "main");
+    sh(elsewhere, ["git", "annex", "init", "--quiet", "elsewhere"]);
+    sh(elsewhere, [
+      "git",
+      "annex",
+      "initremote",
+      "nemar-s3",
+      "type=directory",
+      `directory=${join(fx.root, "elsewhere-store")}`,
+      "encryption=none",
+    ]);
+    const foreign = git(elsewhere, "config", "remote.nemar-s3.annex-uuid").trim();
+    const before = git(fx.repo, "rev-parse", "refs/heads/git-annex").trim();
+    // A pasted uuid from another repository, and a regular clone's uuid (not a special remote).
+    for (const uuid of [foreign, fx.uploaderUuid]) {
+      for (const extra of [[], ["--execute"]]) {
+        const r = await cli([
+          "annex-registry",
+          "--repo",
+          fx.repo,
+          "--keymap",
+          fx.keymapPath,
+          "--remote-uuid",
+          uuid,
+          ...extra,
+        ]);
+        expect(r.code, r.out).toBe(3);
+        expect(r.out.trim()).toBe("refused: remote-uuid-unknown");
+      }
+    }
+    expect(git(fx.repo, "rev-parse", "refs/heads/git-annex").trim()).toBe(before);
+    expect(journal(fx.repo)).toEqual([]);
   });
 
   test("a key this repository never recorded is refused, not counted as dead, and nothing changes", async () => {
@@ -243,7 +304,7 @@ SUITE("annex-registry on a key with two holders", () => {
           fx.remoteUuid,
           ...extra,
         ]);
-        expect(r.code, `${keymapPath} ${extra}`).toBe(1);
+        expect(r.code, `${keymapPath} ${extra}`).toBe(3);
         expect(r.out).toContain("refused: old-key-unknown");
         expect(r.out).not.toContain(sha("never-heard-of"));
       }
@@ -339,7 +400,7 @@ SUITE("annex-registry with more than one named remote", () => {
       "--remote-uuid",
       fx.remoteUuid,
       "--remote-uuid",
-      fx.uploaderUuid,
+      fx.devUuid,
       "--execute",
     ]);
     expect(r.out).toContain("annex-registry: ok");
@@ -349,7 +410,7 @@ SUITE("annex-registry with more than one named remote", () => {
       newForeignHolders: 0,
     });
     for (const key of fx.newKeys) {
-      expect(whereis(fx.repo, key)).toEqual([fx.remoteUuid, fx.uploaderUuid].sort());
+      expect(whereis(fx.repo, key)).toEqual([fx.remoteUuid, fx.devUuid].sort());
     }
     for (const key of fx.oldKeys) expect(whereis(fx.repo, key)).toEqual([]);
   }, 180_000);
@@ -370,7 +431,7 @@ SUITE("annex-registry with more than one named remote", () => {
       fx.remoteUuid,
       "--execute",
     ]);
-    expect(r.code).not.toBe(0);
+    expect(r.code).toBe(4);
     expect(r.out).toContain("annex-registry: FAILED");
     expect(counts(r.out, "annex-registry: FAILED")).toMatchObject({
       newForeignHolders: 1,
