@@ -44,6 +44,7 @@ import {
   README_TEXT,
   type SymlinkFixture,
   allCommits,
+  annexKey,
   anyObjectContains,
   buildPointerFixture,
   buildSymlinkFixture,
@@ -57,6 +58,7 @@ import {
   linkAt,
   pointer,
   refTips,
+  s3PlanFor,
   sh,
   shAny,
   sha,
@@ -169,6 +171,8 @@ SUITE("pointer-file dataset", () => {
       fx.keymapPath,
       "--plan",
       fx.planPath,
+      "--s3-plan",
+      fx.s3PlanPath,
       "--before",
       snapshot,
       "--allow-unparseable-json",
@@ -377,6 +381,8 @@ SUITE("pointer-file dataset", () => {
       fx.keymapPath,
       "--plan",
       fx.planPath,
+      "--s3-plan",
+      fx.s3PlanPath,
       "--before",
       snapshot,
       "--allow-unparseable-json",
@@ -390,6 +396,7 @@ SUITE("pointer-file dataset", () => {
     name: string,
     damage: (repo: string) => void,
     extra: string[] = ["--allow-unparseable-json"],
+    s3PlanPath: string = fx.s3PlanPath,
   ): Promise<{ code: number; out: string }> {
     const repo = join(fx.root, `damaged-${name}`);
     copyTree(fx.clone, repo);
@@ -402,6 +409,8 @@ SUITE("pointer-file dataset", () => {
       fx.keymapPath,
       "--plan",
       fx.planPath,
+      "--s3-plan",
+      s3PlanPath,
       "--before",
       snapshot,
       ...extra,
@@ -535,6 +544,113 @@ SUITE("pointer-file dataset", () => {
     expect(r.out).toContain("reason=annex-branch-changed");
   });
 
+  // ---- every EDF/BDF key is accounted for: a NEW key, or one the S3 plan read and found clean ----
+
+  const STRANGER = annexKey("stranger", 4096, ".edf");
+
+  test("verify fails on an EDF key the S3 plan never saw, in a commit that is not a tip", async () => {
+    const r = await verifyDamaged("edf-stranger", (repo) => {
+      write(repo, "sub-05/eeg/sub-05_eeg.edf", pointer(STRANGER));
+      commitAll(repo, "stranger arrives");
+      git(repo, "rm", "-q", "sub-05/eeg/sub-05_eeg.edf");
+      git(repo, "commit", "-q", "-m", "stranger leaves");
+    });
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain("reason=edf-key-unaccounted count=1");
+    // Only that: the keys the rewrite produced and the clean one are accounted for.
+    expect(r.out).not.toContain("reason=old-key-present");
+  });
+
+  test("a key that only a merge's own result carries is found", async () => {
+    const r = await verifyDamaged("edf-merge", (repo) => {
+      git(repo, "checkout", "-q", "-b", "side2");
+      write(repo, "side2.txt", "s");
+      commitAll(repo, "side two");
+      git(repo, "checkout", "-q", "main");
+      write(repo, "main-only.txt", "m");
+      commitAll(repo, "main only");
+      git(repo, "merge", "-q", "--no-commit", "--no-ff", "side2");
+      write(repo, "sub-09/eeg/sub-09_eeg.edf", pointer(annexKey("stranger-m", 512, ".edf")));
+      git(repo, "add", "-A");
+      git(repo, "commit", "-q", "-m", "merge with an extra recording");
+      git(repo, "rm", "-q", "sub-09/eeg/sub-09_eeg.edf");
+      git(repo, "commit", "-q", "-m", "recording removed again");
+    });
+    expect(r.out).toContain("reason=edf-key-unaccounted count=1");
+  });
+
+  test("a BDF path in capitals is an EDF path, and a key no pointer rewrote is still unaccounted", async () => {
+    const r = await verifyDamaged("edf-capitals", (repo) => {
+      write(repo, "sub-06/eeg/SUB-06_EEG.BDF", pointer(annexKey("stranger-b", 2048, ".BDF")));
+      commitAll(repo, "stranger in capitals");
+    });
+    expect(r.out).toContain("reason=edf-key-unaccounted count=1");
+  });
+
+  test("an OLD key left at an EDF path is unaccounted, not merely present", async () => {
+    const r = await verifyDamaged("edf-old", (repo) => {
+      write(repo, "sub-01/eeg/sub-01_eeg.edf", pointer(OLD_A));
+      commitAll(repo, "old key returns");
+    });
+    expect(r.out).toContain("reason=edf-key-unaccounted count=1");
+    expect(r.out).toContain("reason=old-key-present");
+  });
+
+  test("a clean key counts only when the S3 plan lists it as read and clean", async () => {
+    const missing = join(fx.root, "plan-without-keep.json");
+    await Bun.write(
+      missing,
+      JSON.stringify(s3PlanFor("nm000999", { scrub: [OLD_A, OLD_B, OLD_C], clean: [] })),
+    );
+    const never = await verifyDamaged("plan-missing", () => {}, undefined, missing);
+    expect(never.out).toContain("reason=edf-key-unaccounted count=1");
+    const unread = join(fx.root, "plan-unreadable.json");
+    await Bun.write(
+      unread,
+      JSON.stringify(
+        s3PlanFor("nm000999", { scrub: [OLD_A, OLD_B, OLD_C], clean: [], unreadable: [KEEP] }),
+      ),
+    );
+    const unchecked = await verifyDamaged("plan-unreadable", () => {}, undefined, unread);
+    expect(unchecked.out).toContain("reason=edf-key-unaccounted count=1");
+    const ok = await verifyDamaged("plan-ok", () => {});
+    expect(ok.code).toBe(0);
+  });
+
+  test("an EDF path that holds content, not a pointer, fails: its header is in the history", async () => {
+    const r = await verifyDamaged("edf-inline", (repo) => {
+      write(repo, "sub-07/eeg/sub-07_eeg.edf", Buffer.alloc(4096, 0x20));
+      write(repo, "sub-08/eeg/sub-08_eeg.bdf", "tiny, but not a pointer");
+      commitAll(repo, "inline recordings");
+    });
+    expect(r.out).toContain("reason=edf-path-not-a-pointer count=2");
+    expect(r.out).not.toContain("reason=edf-key-unaccounted");
+  });
+
+  test("verify refuses an S3 plan from another dataset, and needs one", async () => {
+    const other = join(fx.root, "plan-other-dataset.json");
+    await Bun.write(
+      other,
+      JSON.stringify(s3PlanFor("nm000123", { scrub: [OLD_A, OLD_B, OLD_C], clean: [KEEP] })),
+    );
+    const r = await verifyDamaged("plan-dataset", () => {}, undefined, other);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("refused: s3-plan-dataset-mismatch");
+    const none = await cli([
+      "verify",
+      "--repo",
+      fx.clone,
+      "--keymap",
+      fx.keymapPath,
+      "--plan",
+      fx.planPath,
+      "--before",
+      snapshot,
+    ]);
+    expect(none.code).toBe(2);
+    expect(none.out).toContain("missing --s3-plan");
+  });
+
   test("verify refuses plan files it cannot parse unless told to accept them", async () => {
     const r = await verifyDamaged("unparseable", () => {}, []);
     expect(r.code).not.toBe(0);
@@ -636,6 +752,8 @@ SUITE("pointer-file dataset", () => {
       badKeymap,
       "--plan",
       fx.planPath,
+      "--s3-plan",
+      fx.s3PlanPath,
       "--before",
       snapshot,
     ]);
@@ -682,6 +800,8 @@ SUITE("pointer-file dataset", () => {
       fx.keymapPath,
       "--plan",
       fx.planPath,
+      "--s3-plan",
+      fx.s3PlanPath,
       "--before",
       snapshot,
       "--allow-unparseable-json",
@@ -769,6 +889,8 @@ ANNEX_SUITE("symlink dataset (real git annex add)", () => {
       fx.keymapPath,
       "--plan",
       fx.planPath,
+      "--s3-plan",
+      fx.s3PlanPath,
       "--before",
       snapshot,
     ]);
@@ -822,6 +944,53 @@ ANNEX_SUITE("symlink dataset (real git annex add)", () => {
       );
     }
   });
+
+  test("verify accounts for symlinks too: a key the plan never saw fails, a link to a stranger fails", async () => {
+    const verifyWith = async (name: string, plan: object, damage: (repo: string) => void) => {
+      const repo = join(fx.root, `damaged-${name}`);
+      copyTree(fx.clone, repo);
+      damage(repo);
+      const planPath = join(fx.root, `plan-${name}.json`);
+      await Bun.write(planPath, JSON.stringify(plan));
+      return cli([
+        "verify",
+        "--repo",
+        repo,
+        "--keymap",
+        fx.keymapPath,
+        "--plan",
+        fx.planPath,
+        "--s3-plan",
+        planPath,
+        "--before",
+        snapshot,
+      ]);
+    };
+    // The plan that does not list the unscrubbed key (one key, linked from two paths).
+    const noClean = await verifyWith(
+      "no-clean",
+      s3PlanFor("nm000998", { scrub: Object.keys(fx.keymap), clean: [] }),
+      () => {},
+    );
+    expect(noClean.out).toContain("reason=edf-key-unaccounted count=1");
+    // A real annex symlink to a key the plan never heard of.
+    const stranger = await verifyWith(
+      "stranger",
+      JSON.parse(await Bun.file(fx.s3PlanPath).text()) as object,
+      (repo) => {
+        write(repo, "extra/stranger.edf", "stranger-content-".repeat(20));
+        sh(repo, ["git", "annex", "add", "--quiet", "extra/stranger.edf"]);
+        git(repo, "commit", "-q", "-m", "stranger");
+      },
+    );
+    expect(stranger.out).toContain("reason=edf-key-unaccounted count=1");
+    const fine = await verifyWith(
+      "fine",
+      JSON.parse(await Bun.file(fx.s3PlanPath).text()) as object,
+      () => {},
+    );
+    expect(fine.code).toBe(0);
+  }, 120_000);
 
   test("tags, counts, the dropped image, the appended text and the git-annex branch", () => {
     expect(git(fx.clone, "tag", "-l")).toBe(beforeTags);

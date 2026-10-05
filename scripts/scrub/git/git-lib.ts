@@ -21,9 +21,11 @@ import {
   type GitPlanFile,
   type JsonOp,
   type KeymapFile,
+  type PlanFile,
   parseGitPlan,
   parseKey,
   parseKeymap,
+  parsePlan,
 } from "../contract";
 
 /** Pinned: the rewrite script is written against this release's Python API. */
@@ -101,6 +103,11 @@ export interface ScrubInputs {
 
 export function readKeymap(keymapPath: string): KeymapFile {
   return parseKeymap(readFileSync(keymapPath, "utf8"));
+}
+
+/** The S3 stage's `plan.json`, which says which keys are clean and which were scrubbed. */
+export function readS3Plan(planPath: string): PlanFile {
+  return parsePlan(readFileSync(planPath, "utf8"));
 }
 
 /** Read and guard the two stage files. Throws ContractError on anything that does not match. */
@@ -497,7 +504,9 @@ export type VerifyReason =
   | "append-missing"
   | "append-duplicated"
   | "tip-paths-mismatch"
-  | "annex-branch-changed";
+  | "annex-branch-changed"
+  | "edf-key-unaccounted"
+  | "edf-path-not-a-pointer";
 
 export interface VerifyFailure {
   reason: VerifyReason;
@@ -514,6 +523,8 @@ export interface VerifyOptions {
   repo: string;
   keymap: KeymapFile;
   plan: GitPlanFile;
+  /** The S3 stage's plan: its clean keys, with the keymap's new keys, are the only EDF/BDF keys allowed. */
+  s3Plan: PlanFile;
   before: Snapshot;
   /**
    * Accept a plan path whose content in some commit is not UTF-8 JSON. Off by default: a
@@ -682,6 +693,25 @@ function setDiffSize(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
   return n;
 }
 
+const EDF_PATH = /\.(edf|bdf)$/i;
+/** Regular files and symlinks: the modes an annex pointer or an annexed link can have. */
+const POINTER_MODES = new Set(["100644", "100755", "120000"]);
+/** A pointer file or a symlink target is a line long; a bigger blob at an EDF path is content. */
+const POINTER_MAX_BYTES = 1024;
+
+/**
+ * The key an annex pointer file (`/annex/objects/KEY`) or an annex symlink target
+ * (`.../annex/objects/xx/yy/KEY/KEY`) names, or null when the content is neither.
+ */
+export function annexKeyOfBlob(content: Uint8Array): string | null {
+  const text = Buffer.from(content).toString("latin1");
+  const prefix = "/annex/objects/";
+  let key: string | undefined;
+  if (text.startsWith(prefix)) key = text.slice(prefix.length).split(/\s/)[0];
+  else if (text.includes(prefix)) key = text.trim().split("/").pop();
+  return key ? key : null;
+}
+
 /**
  * Prove a rewrite, over EVERY ref and EVERY commit, using plain git only.
  *
@@ -692,10 +722,14 @@ function setDiffSize(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
  * - every ref keeps its commit count and every tag its name and kind;
  * - each ref's tip paths equal the snapshot's, minus dropped, plus appended;
  * - the appended text is in every commit exactly once, at the end of the file;
- * - the git-annex branch is where it was.
+ * - the git-annex branch is where it was;
+ * - every EDF or BDF path, in every commit of every ref, is an annex pointer or link whose key
+ *   is a NEW key of the keymap or a key the S3 plan marked clean: no key goes unaccounted for.
  */
 export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> {
-  const { repo, keymap, plan, before } = opts;
+  const { repo, keymap, plan, before, s3Plan } = opts;
+  // A plan from another dataset would vouch for keys that are not this repository's.
+  if (s3Plan.dataset !== plan.dataset) throw new GitScrubError("refused: s3-plan-dataset-mismatch");
   const failures: VerifyFailure[] = [];
   const counts: Record<string, number> = {};
   const fail = (reason: VerifyReason, count: number): void => {
@@ -840,6 +874,38 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
     pathDiffs += setDiffSize(expected, new Set(await tipPaths(repo, ref)));
   }
   fail("tip-paths-mismatch", pathDiffs);
+
+  // Every EDF/BDF key in every commit of every ref is accounted for. A key counts when it is a
+  // NEW key, or the S3 plan READ its header and found nothing to scrub; an old key, a key the
+  // plan never saw and one it could not read all fail, and so does an EDF path that is content.
+  const accounted = new Set([
+    ...Object.values(keymap),
+    ...s3Plan.keys.filter((k) => !k.needsScrub && k.status === "read").map((k) => k.oldKey),
+  ]);
+  const edfBlobs = new Set<string>();
+  const log = await git(repo, RAW_LOG_ARGS, `${scanRefs.join("\n")}\n`);
+  for (const e of parseRawLog(log)) {
+    if (!EDF_PATH.test(e.path) || isZeroSha(e.newSha)) continue;
+    if (e.status !== "D" && POINTER_MODES.has(e.newMode)) edfBlobs.add(e.newSha);
+  }
+  const edfShas = [...edfBlobs];
+  const edfSizes: (number | null)[] = [];
+  await catBatch(repo, edfShas, "check", {
+    header: (i, info) => edfSizes.push(info?.size ?? null),
+  });
+  const pointerShas = edfShas.filter(
+    (_sha, i) => (edfSizes[i] ?? Number.POSITIVE_INFINITY) <= POINTER_MAX_BYTES,
+  );
+  const edfKeys = new Set<string>();
+  let notPointers = edfShas.length - pointerShas.length;
+  for (const content of await readObjects(repo, pointerShas)) {
+    const key = content ? annexKeyOfBlob(content) : null;
+    if (key === null) notPointers++;
+    else edfKeys.add(key);
+  }
+  fail("edf-path-not-a-pointer", notPointers);
+  fail("edf-key-unaccounted", [...edfKeys].filter((k) => !accounted.has(k)).length);
+  counts.edfKeys = edfKeys.size;
 
   // The git-annex branch is not ours to move.
   let annexMoved = 0;

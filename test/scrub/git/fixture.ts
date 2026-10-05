@@ -12,6 +12,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { parseKey } from "../../../scripts/scrub/contract";
 import { FILTER_REPO_REQUIREMENT } from "../../../scripts/scrub/git/git-lib";
 
 export const CLI = join(import.meta.dir, "../../../scripts/scrub/git/git-scrub.ts");
@@ -334,6 +335,43 @@ export const PLAN = {
   },
 };
 
+/**
+ * The S3 stage's `plan.json` for a dataset, as the contract has it: every key it read, the ones
+ * that need a scrub, and the ones it found clean. `unreadable` keys are listed as not checked.
+ */
+export function s3PlanFor(
+  dataset: string,
+  keys: { scrub: string[]; clean: string[]; unreadable?: string[] },
+): object {
+  const entry = (oldKey: string, needsScrub: boolean, status: "read" | "unreadable") => ({
+    oldKey,
+    size: parseKey(oldKey).size,
+    needsScrub,
+    versionIds: [],
+    reasons: needsScrub ? ["patient-name"] : [],
+    status,
+  });
+  const all = [
+    ...keys.scrub.map((k) => entry(k, true, "read")),
+    ...keys.clean.map((k) => entry(k, false, "read")),
+    ...(keys.unreadable ?? []).map((k) => entry(k, false, "unreadable")),
+  ];
+  return {
+    version: 1,
+    dataset,
+    bucket: "nemar-fixture",
+    tags: ["v1.0.1"],
+    createdAt: "2026-10-04T00:00:00.000Z",
+    keys: all,
+    totals: {
+      keys: all.length,
+      needScrub: keys.scrub.length,
+      bytesToHash: 0,
+      unreadable: keys.unreadable?.length ?? 0,
+    },
+  };
+}
+
 export const BINARY = Buffer.concat([
   Buffer.from([0, 1, 2, 255, 254, 0]),
   Buffer.from("SHA256E-s9--not-a-key"),
@@ -348,6 +386,8 @@ export interface PointerFixture {
   clone: string;
   keymapPath: string;
   planPath: string;
+  /** The S3 plan: OLD_A, OLD_B and OLD_C need a scrub, KEEP was read and is clean. */
+  s3PlanPath: string;
   /** Commit ids in `src`, by name. */
   commits: Record<string, string>;
   uuid: string;
@@ -437,7 +477,9 @@ export function buildPointerFixture(): PointerFixture {
   const planPath = join(root, "git-plan.json");
   writeJson(keymapPath, KEYMAP);
   writeJson(planPath, PLAN);
-  return { root, src, clone, keymapPath, planPath, commits, uuid };
+  const s3PlanPath = join(root, "plan.json");
+  writeJson(s3PlanPath, s3PlanFor("nm000999", { scrub: [OLD_A, OLD_B, OLD_C], clean: [KEEP] }));
+  return { root, src, clone, keymapPath, planPath, s3PlanPath, commits, uuid };
 }
 
 // ---------------------------------------------------------------------------------------
@@ -450,6 +492,8 @@ export interface SymlinkFixture {
   clone: string;
   keymapPath: string;
   planPath: string;
+  /** The S3 plan: the two keys in the keymap need a scrub, the third was read and is clean. */
+  s3PlanPath: string;
   /** old key -> new key, and the paths each key is linked from. */
   keymap: Record<string, string>;
   paths: Record<string, string[]>;
@@ -514,12 +558,15 @@ export function buildSymlinkFixture(): SymlinkFixture {
     blankJsonKeys: {},
     appendText: { CHANGES: "1.0.1\n  - scrubbed\n" },
   });
+  const s3PlanPath = join(root, "plan.json");
+  writeJson(s3PlanPath, s3PlanFor("nm000998", { scrub: [keyX, keyZ], clean: [keyY] }));
   return {
     root,
     src,
     clone,
     keymapPath,
     planPath,
+    s3PlanPath,
     keymap,
     paths: { [keyX]: ["sub-01/eeg/a.edf", "sub-02/eeg/c.edf"], [keyZ]: ["top.bdf"] },
   };

@@ -7,7 +7,7 @@
  *   bun run scripts/scrub/git/git-scrub.ts rewrite  --repo CLONE --keymap keymap.json \
  *        --plan git-plan.json [--expect-remote URL] [--snapshot-out before.json]
  *   bun run scripts/scrub/git/git-scrub.ts verify   --repo CLONE --keymap keymap.json \
- *        --plan git-plan.json --before before.json [--allow-unparseable-json]
+ *        --plan git-plan.json --s3-plan plan.json --before before.json [--allow-unparseable-json]
  *   bun run scripts/scrub/git/git-scrub.ts annex-registry --repo ANNEX_CLONE \
  *        --keymap keymap.json --remote-uuid UUID [--remote-uuid UUID ...] [--execute]
  *
@@ -22,6 +22,7 @@ import {
   annexRegistry,
   readInputs,
   readKeymap,
+  readS3Plan,
   readSnapshot,
   rewriteHistory,
   takeSnapshot,
@@ -33,7 +34,8 @@ const USAGE = `usage: git-scrub <snapshot|rewrite|verify|annex-registry> --repo 
   snapshot        --out FILE
   rewrite         --keymap FILE --plan FILE [--expect-remote URL] [--snapshot-out FILE]
                   [--refs REF...] [--report FILE]
-  verify          --keymap FILE --plan FILE --before FILE [--allow-unparseable-json]
+  verify          --keymap FILE --plan FILE --s3-plan FILE --before FILE
+                  [--allow-unparseable-json]
   annex-registry  --keymap FILE --remote-uuid UUID [--remote-uuid UUID ...] [--execute]`;
 
 class UsageError extends Error {}
@@ -62,6 +64,7 @@ export async function main(argv: string[]): Promise<number> {
       repo: { type: "string" },
       keymap: { type: "string" },
       plan: { type: "string" },
+      "s3-plan": { type: "string" },
       before: { type: "string" },
       out: { type: "string" },
       "expect-remote": { type: "string" },
@@ -116,6 +119,7 @@ export async function main(argv: string[]): Promise<number> {
           repo,
           keymap,
           plan,
+          s3Plan: readS3Plan(need(values["s3-plan"], "--s3-plan")),
           before: readSnapshot(need(values.before, "--before")),
           allowUnparseableJson: values["allow-unparseable-json"] === true,
         });
