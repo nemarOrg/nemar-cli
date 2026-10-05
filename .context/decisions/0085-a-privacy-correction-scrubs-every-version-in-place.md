@@ -143,7 +143,7 @@ A review of the Phase 2 tooling and a first read of the real bucket found things
 **Two more copies of the identifiers.**
 The Zarr serving copy repeats header fields:
 every store's root metadata (`<id>/zarr/<path>.zarr/zarr.json`) carries `attributes.recording_metadata.patientcode` and `.birthdate`, copied from the EDF or BDF header by the converter.
-Those objects are not Object Locked, so the `zarr` stage removes exactly the identifier keys in place and re-reads every store; the noncurrent versions of every zarr object are then pruned, because the bucket is versioned.
+Those objects are not Object Locked, so the `zarr` stage removes the identifier keys in place and re-reads every store; the noncurrent versions of every zarr object are then pruned, because the bucket is versioned.
 The archive zip under `<id>/archives/` contains the original recordings, so `drop-archives` deletes every version of it and the normal archive workflow regenerates it from the scrubbed tree.
 `<tag>-summary.json` and `<tag>-records.json` were checked by key name and hold entities, signal summaries and provenance, no header field; they are not regenerated.
 
@@ -163,3 +163,10 @@ The hash stage binds each digest to the patch it was computed for, so a re-plan 
 **The stand-in is not S3.**
 On first contact with the real bucket the tools disagreed with their stand-in twice: S3 requires a checksum header on an `UploadPart` of a multipart upload created with Object Lock parameters, and `<id>/version/` holds `<tag>-records.json` beside the manifest.
 Both were fixed, and the canary, which runs on the real bucket against a test prefix, is run again after any change to an S3 call.
+
+**Second review of the same day: what a "clean" Zarr store means.**
+The first version of the `zarr` stage removed only the members the scanner calls identifiers, but the converter mirrors the whole EDF identification fields into the store, including `technician`, `admincode`, `patient_additional`, `equipment` and `recording_additional`, which the EDF scrub rewrites and the scanner does not name as keys.
+A store holding a technician's name came out "clean" and was proven clean.
+The stage, its re-read, its proof and the public check (`zarr-public`, runbook step 16) now share one list of the mirrored members (`EDF_MIRROR_MEMBERS`), so what one removes the other checks; `gender` is kept because sex is neither a name, a date nor a record number.
+The same review made `delete-old` finish clean or refuse: any version or marker left under `archives/`, `version/` or `zarr/` is refused before a delete, history found afterwards writes no `deleted.json`, every live version must be in the plan, and the privacy probe also covers the new keys so a failed prune can be re-run.
+Signals (`SIGINT`, `SIGTERM`, `SIGHUP`) remove the temp directory and kill the `aws` children, because `finally` does not run on a signal and the directory can hold raw header bytes.
