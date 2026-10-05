@@ -417,10 +417,12 @@ jobs:
       - name: Lint the scrub toolchain
         run: bun run lint:scrub
 
+      # `bun run test:scrub`, not a bare `bun test`: bunfig.toml keeps test/scrub out of a bare run,
+      # and the script's --path-ignore-patterns puts it back.
       - name: Scrub toolchain and scanner suites
         env:
           NEMAR_REQUIRE_SCRUB_TOOLS: "1"
-        run: bun test test/scrub test/identifier-scan.test.ts test/identifier-scrub.test.ts test/identifier-fleet.test.ts
+        run: bun run test:scrub
 
   lint:
     runs-on: ubuntu-latest

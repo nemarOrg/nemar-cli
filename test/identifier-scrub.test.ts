@@ -21,6 +21,7 @@ import {
   scrubEdfHeader,
   verifyScrub,
 } from "../shared/identifier-scrub";
+import { toolOrFail } from "./scrub/helpers/require-tools";
 
 interface HeaderFields {
   family?: "edf" | "bdf";
@@ -355,7 +356,8 @@ describe("a header written by an independent EDF+ tool", () => {
     expect(scrubEdfHeader(clean).changed).toBe(false);
   });
 
-  const uvAvailable = spawnSync("uv", ["--version"]).status === 0;
+  // Skipped on a machine without uv, and a FAILURE where NEMAR_REQUIRE_SCRUB_TOOLS=1 (CI).
+  const uvAvailable = toolOrFail("uv", spawnSync("uv", ["--version"]).status === 0);
   test.skipIf(!uvAvailable)(
     "the independent tool reads the scrubbed file back with no name and no birth date",
     () => {
