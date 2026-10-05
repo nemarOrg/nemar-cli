@@ -17,6 +17,7 @@ import {
   approvalDispatchEnvironment,
   triggerApprovePublication,
 } from "../../services/github/dispatch";
+import { screenView } from "../../services/identifier-screen";
 import { approveSchema, runPublicationApproval } from "../../services/publication-orchestrator";
 import { errorMessage } from "../../services/repo-metadata";
 import { applyObjectLockBatch } from "../../services/s3";
@@ -76,14 +77,32 @@ export function registerPublishRoutes(admin: AdminRouter): void {
         approval_requested_by: number | null;
         approval_dispatched_at: string | null;
         approval_in_flight: number;
+        prescreen_nonce?: string | null;
+        identifier_screen_status: string | null;
+        identifier_screen_nonce?: string | null;
+        identifier_screen_report?: string | null;
       }>();
 
     return c.json({
-      requests: requests.results.map((r) => ({
-        ...r,
-        steps_completed: JSON.parse(r.steps_completed || "[]"),
-        approval_in_flight: r.approval_in_flight === 1,
-      })),
+      requests: requests.results.map((r) => {
+        // `pr.*` puts every column on the wire without naming it. The two
+        // callback nonces are credentials (each one verifies a workflow's
+        // callback), and the stored screen report is shown ONLY through
+        // describeScreen's words below, so all three are withheld here, from
+        // everyone (epic #1610 phase 4).
+        const {
+          prescreen_nonce: _prescreenNonce,
+          identifier_screen_nonce: _screenNonce,
+          identifier_screen_report: screenReport,
+          ...rest
+        } = r;
+        return {
+          ...rest,
+          steps_completed: JSON.parse(r.steps_completed || "[]"),
+          approval_in_flight: r.approval_in_flight === 1,
+          identifier_screen: screenView(r.dataset_id, r.identifier_screen_status, screenReport),
+        };
+      }),
       count: requests.results.length,
     });
   });

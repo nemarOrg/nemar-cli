@@ -32,6 +32,9 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   // Publication prescreen callback (PRESCREEN_CALLBACK_SECRET token)
   "POST /prescreen-result": 1,
 
+  // Publication identifier-screen callback (domain-tagged token, same secret)
+  "POST /identifier-screen-result": 1,
+
   // OpenNeuro import state callback (bearer token)
   "POST /import-state": 1,
 
