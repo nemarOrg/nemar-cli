@@ -116,8 +116,11 @@ const ERROR_SET: ReadonlySet<string> = new Set(SCREEN_ERRORS);
 /** What the workflow posts. Exactly one of `scan` and `error`. */
 export interface ScreenReport {
   version: typeof REPORT_VERSION;
-  /** `identifier-scan@<revision>` of the scanner that ran. */
-  scanner: string;
+  /**
+   * `identifier-scan@<revision>` of the scanner that ran; null only on an error report, where
+   * the workflow failed before (or without) knowing which scanner it had.
+   */
+  scanner: string | null;
   /** The commit of the dataset's `main` that was screened; null when the screen never got that far. */
   head: string | null;
   scan?: DatasetRecord;
@@ -303,20 +306,23 @@ export function parseScreenReport(x: unknown): ScreenReport {
   if (!isObject(x)) return bad("report-shape");
   onlyKeys(x, ["version", "scanner", "head", "scan", "error"], "report-key");
   if (x.version !== REPORT_VERSION) bad("report-version");
-  if (typeof x.scanner !== "string" || !SCANNER.test(x.scanner)) bad("report-scanner");
+  if (x.scanner !== null && !(typeof x.scanner === "string" && SCANNER.test(x.scanner))) {
+    bad("report-scanner");
+  }
   if (x.head !== null && !(typeof x.head === "string" && HEAD.test(x.head))) bad("report-head");
   const hasScan = x.scan !== undefined;
   const hasError = x.error !== undefined;
   if (hasScan === hasError) bad("report-outcome");
   const report: ScreenReport = {
     version: REPORT_VERSION,
-    scanner: x.scanner as string,
+    scanner: x.scanner as string | null,
     head: x.head as string | null,
   };
   if (hasScan) {
     // A scan is a scan OF a commit: a report that claims findings about no commit cannot be
     // matched to the content it describes, so the approval gate could never tell it was stale.
     if (x.head === null) bad("report-head");
+    if (x.scanner === null) bad("report-scanner");
     report.scan = parseRecord(x.scan);
   } else {
     if (typeof x.error !== "string" || !ERROR_SET.has(x.error)) bad("report-error");

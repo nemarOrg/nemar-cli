@@ -90,6 +90,14 @@ describe("parseScreenReport: what passes", () => {
     }
   });
 
+  test("an error report may have no scanner; a scan report may not", () => {
+    expect(
+      parseScreenReport({ version: 1, scanner: null, head: null, error: "workflow-failed" })
+        .scanner,
+    ).toBeNull();
+    expect(refusal(report({ scanner: null }))).toBe("report-scanner");
+  });
+
   test("every status the scanner can conclude is a state a report can carry", () => {
     for (const status of DATASET_STATUSES) {
       const parsed = parseScreenReport(report({ scan: scan({ status }) }));
