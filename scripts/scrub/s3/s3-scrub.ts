@@ -22,7 +22,8 @@
  * refused (docs.nemar.org access policies). Nothing printed or written is a participant value.
  *
  * Exit codes: 0 ok; 1 a stage failed; 2 usage; 3 refused (a precondition or proof is missing or
- * stale); 4 unreadable (the plan is incomplete); 5 versions or markers remain after a delete.
+ * stale); 4 unreadable (the plan is incomplete); 5 versions or markers remain after a delete;
+ * 129, 130, 143 ended by SIGHUP, SIGINT, SIGTERM (the `aws` children killed, temp files removed).
  */
 
 import { parseArgs } from "node:util";
@@ -36,6 +37,7 @@ import {
   MIN_PART_BYTES,
   StageError,
   cliCredentialSource,
+  installSignalCleanup,
 } from "./s3-lib";
 import {
   type CommonOptions,
@@ -258,6 +260,10 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
 }
 
 if (import.meta.main) {
+  // Owner-only for every file this process and its `aws` children create: the temp files can hold
+  // raw original bytes, and the working directory holds paths that may be identifying.
+  process.umask(0o077);
+  installSignalCleanup("s3-scrub");
   const log = (line: string) => console.log(line);
   try {
     process.exit(await run(Bun.argv.slice(2), log));

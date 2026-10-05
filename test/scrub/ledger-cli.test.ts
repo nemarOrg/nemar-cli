@@ -5,7 +5,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
@@ -110,6 +110,44 @@ describe("ledger-cli append", () => {
       const badCount = await append(file, "plan", ["--counts", "objects=lots"]);
       expect(badCount.exitCode).toBe(2);
       expect(readFileSync(file, "utf8").trim().split("\n").length).toBe(1);
+    },
+    SLOW,
+  );
+});
+
+describe("ledger-cli file modes", () => {
+  test(
+    "the ledger it creates is owner-only, whatever umask it was started with",
+    async () => {
+      const file = join(work(), "ledger.jsonl");
+      const args = [
+        "append",
+        "--file",
+        file,
+        "--dataset",
+        DATASET,
+        "--action",
+        "plan",
+        "--verification",
+        "scanner-clean",
+        "--actor",
+        "someone",
+        "--scanner",
+        "identifier-scan@abcdef1",
+      ];
+      const proc = spawn({
+        cmd: [
+          "sh",
+          "-c",
+          `umask 022; exec bun ${[SCRIPT, ...args].map((a) => `'${a}'`).join(" ")}`,
+        ],
+        env: { PATH: process.env.PATH ?? "", HOME: "/nonexistent" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const err = await new Response(proc.stderr).text();
+      expect(await proc.exited, err).toBe(0);
+      expect(statSync(file).mode & 0o777).toBe(0o600);
     },
     SLOW,
   );

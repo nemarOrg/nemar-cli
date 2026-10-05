@@ -8,13 +8,15 @@
  * (`test/scrub/helpers/s3-standin.ts`), so the production code path is the one that runs.
  *
  * **No participant value is ever held anywhere it could be printed.** A header read from S3
- * exists only in memory and in a temp file that is deleted in a `finally`; errors are classes
+ * exists only in memory and in a temp file that is deleted in a `finally`, or by the signal
+ * handler ({@link installSignalCleanup}) when a signal ends the process; errors are classes
  * with fixed words (`AwsCliError`, `StageError`), never the CLI's own stderr, which can carry a
  * key, a URL or a header. The only strings that leave this module are annex keys, sizes, version
  * ids, counts and fixed words.
  */
 
 import { createHash, randomBytes } from "node:crypto";
+import { rmSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -157,6 +159,49 @@ export function failureWord(err: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
+// What a signal must clean up.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every temp directory that exists and every `aws` child that runs, so a signal can remove the
+ * one and kill the other. Bun does not run a `finally` when a signal ends the process, and a temp
+ * file can hold raw original bytes for as long as a get-object takes (8 KiB of a recording in
+ * plan, its 256-byte header in verify, up to the first 8 MiB of it in assemble, a whole zarr.json
+ * in zarr).
+ */
+const liveDirs = new Set<string>();
+const liveChildren = new Set<ReturnType<typeof spawn>>();
+
+/** Kill every running `aws` child and remove every temp directory, synchronously. */
+export function cleanupNow(): void {
+  for (const child of liveChildren) {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  }
+  for (const dir of liveDirs) rmSync(dir, { recursive: true, force: true });
+}
+
+/** The exit status of a process ended by each signal it cleans up after: 128 + the number. */
+export const SIGNAL_EXIT = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 } as const;
+
+/**
+ * On SIGINT, SIGTERM or SIGHUP: kill the `aws` children, remove the temp directories, say which
+ * signal it was, and exit with 128 plus its number. Installed once by the CLI entry point.
+ */
+export function installSignalCleanup(name: string): void {
+  for (const [signal, code] of Object.entries(SIGNAL_EXIT)) {
+    process.once(signal as NodeJS.Signals, () => {
+      cleanupNow();
+      console.error(`${name}: interrupted by ${signal}; temp files removed`);
+      process.exit(code);
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The runner.
 // ---------------------------------------------------------------------------
 
@@ -237,6 +282,7 @@ export function cliCredentialSource(options: CliCredentialOptions = {}): Credent
     } catch {
       throw new AwsCliError("credentials", "ExportCredentials");
     }
+    liveChildren.add(proc);
     const timer = setTimeout(() => proc.kill("SIGKILL"), timeoutMs);
     let text: string;
     let code: number;
@@ -247,6 +293,7 @@ export function cliCredentialSource(options: CliCredentialOptions = {}): Credent
       ]);
     } finally {
       clearTimeout(timer);
+      liveChildren.delete(proc);
     }
     if (code !== 0) throw new AwsCliError("credentials", "ExportCredentials");
     let doc: Record<string, unknown>;
@@ -326,6 +373,7 @@ export function createAwsRunner(cfg: AwsConfig): AwsRunner {
       } catch {
         throw new AwsCliError("spawn-failed", name);
       }
+      liveChildren.add(proc);
       const limit = cfg.timeoutMs * (opts.slow ? SLOW_FACTOR : 1);
       let timedOut = false;
       const timer = setTimeout(() => {
@@ -354,6 +402,7 @@ export function createAwsRunner(cfg: AwsConfig): AwsRunner {
         }
       } finally {
         clearTimeout(timer);
+        liveChildren.delete(proc);
       }
     },
   };
@@ -369,7 +418,9 @@ export class TempArea {
   private constructor(readonly dir: string) {}
 
   static async create(): Promise<TempArea> {
-    return new TempArea(await mkdtemp(path.join(tmpdir(), "scrub-s3-")));
+    const dir = await mkdtemp(path.join(tmpdir(), "scrub-s3-"));
+    liveDirs.add(dir);
+    return new TempArea(dir);
   }
 
   file(): string {
@@ -383,6 +434,7 @@ export class TempArea {
 
   async dispose(): Promise<void> {
     await rm(this.dir, { recursive: true, force: true });
+    liveDirs.delete(this.dir);
   }
 }
 

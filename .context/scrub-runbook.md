@@ -106,6 +106,20 @@ Measured in the real bucket on 2026-10-04, a dataset has these:
     If anything fails, make it private again and stop; the new objects were verified twice, so the fault is in a manifest, a cache or a route, not in the bytes.
 17. **Afterwards**: comment on the dataset issue in plain words and close it; tell the uploader and the authors; ask GitHub Support to clear cached views and pull-request refs; delete the working directory, the bundle and the local clones; record `old-versions-deleted` and `published-again` in the ledger and push it.
 
+## If a stage is killed
+
+A signal (Ctrl-C, `kill`, a dropped terminal) makes `s3-scrub.ts` kill its `aws` children, remove its private temp directory (which can hold raw original bytes mid-download) and exit 130 (SIGINT), 143 (SIGTERM) or 129 (SIGHUP).
+A `kill -9` does none of that: then remove `$TMPDIR/scrub-s3-*` by hand.
+What a signal cannot undo is in S3, and none of it shows in `list-object-versions`:
+
+- **assemble**: an open multipart upload for each object in progress, created with the lock parameters and billed until aborted.
+  Find them with `aws s3api list-multipart-uploads --bucket nemar --prefix D/objects/` and abort each with `aws s3api abort-multipart-upload --bucket nemar --key <Key> --upload-id <UploadId>`; confirm the listing is empty.
+  A new object that was completed but never reached `assembled.json` is found and kept by a re-run, so re-run assemble rather than deleting it.
+- **canary**: up to three locked objects under the canary prefix (`probe.txt`, `multipart-source.bin`, `multipart.bin`, GOVERNANCE for one day), an open multipart upload, and up to two unlocked versions of `conditional.json`.
+  List with `aws s3api list-object-versions --bucket nemar --prefix <prefix>` and `list-multipart-uploads --prefix <prefix>`; delete each version by id (`--bypass-governance-retention` for the locked ones), abort each upload, and confirm both listings are empty.
+- **zarr**, **drop-archives**, **delete-old**: some objects changed or deleted; each stage resumes on a re-run (delete-old proves privacy from the new keys once the old ones are gone).
+- **hash stage**: `hashes.json` holds every key finished before the signal, and a `hashes.json.tmp` (keys only) may remain; a re-run resumes.
+
 ## Abort points and rollback
 
 - Steps 0 to 6 change nothing but add new objects; abandoning leaves extra locked objects that are deleted later by version id with bypass (the canary shows it works, and a failed canary is cleaned the same way).

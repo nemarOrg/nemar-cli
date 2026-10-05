@@ -250,6 +250,9 @@ export function buildGitPlan(
 }
 
 if (import.meta.main) {
+  // Owner-only for every file this process creates: the git plan holds paths that may be
+  // identifying.
+  process.umask(0o077);
   const arg = (n: string) => {
     const i = process.argv.indexOf(`--${n}`);
     return i >= 0 ? process.argv[i + 1] : undefined;

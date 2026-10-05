@@ -175,6 +175,8 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
 }
 
 if (import.meta.main) {
+  // Owner-only for every file this process and its children create.
+  process.umask(0o077);
   try {
     process.exit(await run(process.argv.slice(2), (l) => console.log(l)));
   } catch (error) {

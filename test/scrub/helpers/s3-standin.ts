@@ -153,6 +153,12 @@ export interface S3Standin {
   setPageSize(n: number): void;
   /** Hold the next `times` requests with this HTTP method for `ms` before answering (a hung server). */
   stallNext(method: string, ms: number, times?: number): void;
+  /**
+   * Answer the next GetObject of a key under `keyPrefix` with its headers and the first `bytes`
+   * of its body, then hold the rest for `ms` (or until the client goes away): a download caught
+   * half way, with the client's output file already open.
+   */
+  stallBodyNext(opts: { keyPrefix: string; bytes: number; ms: number }): void;
   inject(op: StandinOp, fault: Fault): void;
   clearFaults(): void;
   /** Run `fn` just before the Nth call (1-based) of `op` is handled. */
@@ -226,6 +232,7 @@ export function startS3Standin(): S3Standin {
   let ignoreIfMatch = false;
   let pageSize = 1000;
   const stalls: Array<{ method: string; ms: number; times: number }> = [];
+  const bodyStalls: Array<{ keyPrefix: string; bytes: number; ms: number }> = [];
 
   const slot = (bucket: string, key: string) => `${bucket}/${key}`;
   const versionsOf = (bucket: string, key: string) => store.get(slot(bucket, key)) ?? [];
@@ -443,6 +450,37 @@ export function startS3Standin(): S3Standin {
         };
         if (v.sse) headers["x-amz-server-side-encryption"] = v.sse;
         if (v.cacheControl) headers["Cache-Control"] = v.cacheControl;
+        const bodyStall = bodyStalls.findIndex((x) => key.startsWith(x.keyPrefix));
+        if (bodyStall >= 0) {
+          const { bytes, ms } = bodyStalls.splice(bodyStall, 1)[0] as (typeof bodyStalls)[number];
+          const [a, b] = range ?? [0, v.data.length - 1];
+          const body = v.data.slice(a, b + 1);
+          if (range) headers["Content-Range"] = `bytes ${a}-${b}/${v.data.length}`;
+          headers["Content-Length"] = String(body.length);
+          record({
+            op: "GetObject",
+            key,
+            status: range ? 206 : 200,
+            range: rangeHeader ?? undefined,
+          });
+          // start() must not wait: the server sends nothing until it returns.
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(body.slice(0, Math.min(bytes, body.length - 1)));
+              const rest = () => {
+                try {
+                  controller.enqueue(body.slice(Math.min(bytes, body.length - 1)));
+                  controller.close();
+                } catch {
+                  // The client went away.
+                }
+              };
+              const timer = setTimeout(rest, ms);
+              req.signal.addEventListener("abort", () => clearTimeout(timer));
+            },
+          });
+          return new Response(stream, { status: range ? 206 : 200, headers });
+        }
         if (!range) {
           record({ op: "GetObject", key, status: 200, size: v.data.length });
           return new Response(v.data, { status: 200, headers });
@@ -828,6 +866,7 @@ export function startS3Standin(): S3Standin {
       ignoreIfMatch = false;
       pageSize = 1000;
       stalls.length = 0;
+      bodyStalls.length = 0;
     },
     openUploads: () => uploads.size,
     setDenyBypass(deny) {
@@ -841,6 +880,9 @@ export function startS3Standin(): S3Standin {
     },
     stallNext(method, ms, times = 1) {
       stalls.push({ method, ms, times });
+    },
+    stallBodyNext(opts) {
+      bodyStalls.push(opts);
     },
     inject(op, fault) {
       const list = faults.get(op) ?? [];

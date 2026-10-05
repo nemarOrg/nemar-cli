@@ -185,5 +185,8 @@ export async function main(argv: string[]): Promise<number> {
 }
 
 if (import.meta.main) {
+  // Owner-only for every file this process and its children (git, git-filter-repo) create: the
+  // clone and the reports hold paths that may be identifying.
+  process.umask(0o077);
   process.exit(await main(process.argv.slice(2)));
 }

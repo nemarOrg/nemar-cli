@@ -24,6 +24,9 @@ import {
   takeSnapshot,
 } from "./switch-lib";
 
+// Owner-only for every file this process and its children (git) create.
+process.umask(0o077);
+
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
   return i >= 0 ? process.argv[i + 1] : undefined;
