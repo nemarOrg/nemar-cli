@@ -134,11 +134,6 @@ export function classifyPushError(stderr: string): PushFailure {
 /** The one line printed whenever the process may end with a ruleset still lifted. */
 export const RESTORE_ADVICE = "RESTORE FAILED: run switch.ts restore --execute now";
 
-/** What to do about a ruleset left lifted: one wording for the command line and the signal path. */
-export function restoreFailedAdvice(error: RestoreFailed): string {
-  return `${RESTORE_ADVICE}\n(${error.message})`;
-}
-
 /** Exit status of a process ended by each signal the switch restores on: 128 + the number. */
 export const SWITCH_SIGNAL_EXIT = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 } as const;
 
@@ -439,8 +434,11 @@ async function restoreAll(opts: SwitchOptions, lifted: RulesetBody[]): Promise<n
 /** Whether the process may end with a ruleset lifted, and whether the advice was printed. */
 const lifting = { mayBeLifted: false, advised: false, hooked: false };
 
-/** Print {@link RESTORE_ADVICE} once, whichever exit path gets there first. */
-function adviseRestore(detail?: string): void {
+/**
+ * Print {@link RESTORE_ADVICE} once, whichever exit path gets there first (the CLI's catch, the
+ * signal path, or the exit hook), with the ruleset ids when known.
+ */
+export function adviseRestore(detail?: string): void {
   if (lifting.advised) return;
   lifting.advised = true;
   console.error(detail ? `${RESTORE_ADVICE}\n(${detail})` : RESTORE_ADVICE);

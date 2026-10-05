@@ -31,8 +31,8 @@ import {
   RestoreFailed,
   type Snapshot,
   SwitchRefused,
+  adviseRestore,
   listRulesets,
-  restoreFailedAdvice,
   restoreSnapshot,
   switchRefs,
   takeSnapshot,
@@ -167,7 +167,7 @@ try {
   }
 } catch (error) {
   if (error instanceof RestoreFailed) {
-    console.error(restoreFailedAdvice(error));
+    adviseRestore(error.message);
     process.exit(EXIT.restoreFailed);
   }
   if (error instanceof PushFailed) {

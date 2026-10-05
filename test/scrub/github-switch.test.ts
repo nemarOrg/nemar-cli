@@ -1091,7 +1091,7 @@ describe("every lifted ruleset gets its turn to be restored", () => {
     run.child.kill("SIGTERM");
     const result = await run.exited;
     expect(result.code).toBe(5);
-    expect(result.stderr).toContain(RESTORE_ADVICE);
+    expect(result.stderr.split(RESTORE_ADVICE).length - 1, result.stderr).toBe(1);
     expect(result.stderr).toContain("restore failed for ruleset 2");
     expect(enforcement(world).tag).toBe("disabled");
   }, 90_000);
@@ -1113,7 +1113,8 @@ describe("every lifted ruleset gets its turn to be restored", () => {
       "--execute",
     ]).exited;
     expect(result.code).toBe(5);
-    expect(result.stderr).toContain(RESTORE_ADVICE);
+    // Said once, however many exit paths saw the ruleset lifted.
+    expect(result.stderr.split(RESTORE_ADVICE).length - 1, result.stderr).toBe(1);
     expect(result.stderr).toContain("restore failed for ruleset 2");
     expect(result.stderr).toContain("push failed: hook-declined");
   }, 60_000);
