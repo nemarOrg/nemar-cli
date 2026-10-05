@@ -820,6 +820,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         while os.path.exists(f"{report_path}.prev{n}"):
             n += 1
         os.replace(report_path, f"{report_path}.prev{n}")
+        os.chmod(f"{report_path}.prev{n}", 0o600)
 
     rewriter = Rewriter(keymap, plan)
     fr_args = fr.FilteringOptions.parse_args(
@@ -863,7 +864,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         }
     )
     report = {"version": 1, "counts": counts, "commitMap": commit_map}
-    with open(report_path, "w", encoding="utf-8") as f:
+    # Owner-only from creation, whatever the umask: the report sits in a working directory beside
+    # files whose names can be the identifier. An earlier report was moved aside above, so this
+    # is always a new file and no mode of an old one carries over.
+    fd = os.open(report_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, sort_keys=True)
         f.write("\n")
     report["reportPath"] = report_path

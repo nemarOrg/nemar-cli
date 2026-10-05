@@ -11,7 +11,7 @@
  * Exit codes: 0 done, 1 refused or failed, 5 a ruleset could NOT be restored (act on it now).
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import {
   type Api,
   RestoreFailed,
@@ -60,7 +60,10 @@ const load = (): Snapshot => JSON.parse(readFileSync(need("snapshot"), "utf8")) 
 try {
   if (command === "snapshot") {
     const snap = await takeSnapshot(api, repo, need("clone"), arg("remote") ?? "origin");
-    writeFileSync(need("out"), `${JSON.stringify(snap, null, 1)}\n`);
+    // Owner-only, even over a looser existing file: the snapshot names the clone's refs and is
+    // what a restore is run from.
+    writeFileSync(need("out"), `${JSON.stringify(snap, null, 1)}\n`, { mode: 0o600 });
+    chmodSync(need("out"), 0o600);
     console.log(
       `snapshot: ${snap.rulesets.length} ruleset(s), ${Object.keys(snap.refs).length} ref(s)`,
     );

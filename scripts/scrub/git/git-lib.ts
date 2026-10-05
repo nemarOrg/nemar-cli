@@ -13,7 +13,7 @@
  * a bug in the rewrite cannot also hide in the check.
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   ANNEX_KEY,
@@ -422,9 +422,14 @@ export async function takeSnapshot(repo: string): Promise<Snapshot> {
   return snapshot;
 }
 
+/**
+ * Write a file the scrub leaves in a working directory. A snapshot lists tip paths and a path can
+ * be the identifier, so the file is owner-only, even over an existing file with looser modes.
+ */
 export function writeJson(path: string, value: unknown): void {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(path, 0o600);
 }
 
 export function readSnapshot(path: string): Snapshot {

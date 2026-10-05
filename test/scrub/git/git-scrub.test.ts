@@ -15,6 +15,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { chmodSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { HashScanner } from "../../../scripts/scrub/git/git-lib";
 import {
@@ -889,6 +890,43 @@ SUITE("pointer-file dataset", () => {
     expect(v.code).not.toBe(0);
     expect(v.out).toContain("reason=old-key-present");
   });
+
+  test("snapshot, before.json and the rewrite report are owner-only, even over a looser existing file", async () => {
+    const loose = (name: string): string => {
+      const path = join(fx.root, name);
+      writeFileSync(path, "stale", { mode: 0o644 });
+      chmodSync(path, 0o644);
+      expect(statSync(path).mode & 0o777).toBe(0o644);
+      return path;
+    };
+    const mode = (path: string): number => statSync(path).mode & 0o777;
+    const snap = loose("snap-loose.json");
+    expect((await cli(["snapshot", "--repo", pristine, "--out", snap])).code).toBe(0);
+    expect(mode(snap)).toBe(0o600);
+    // The snapshot a rewrite takes first, and the report it leaves, over looser files; the
+    // report that was there is kept beside the new one, and is tightened too.
+    const repo = join(fx.root, "modes");
+    copyTree(pristine, repo);
+    const before = loose("before-loose.json");
+    const report = loose("report-loose.json");
+    const r = await cli([
+      "rewrite",
+      "--repo",
+      repo,
+      "--keymap",
+      fx.keymapPath,
+      "--plan",
+      fx.planPath,
+      "--snapshot-out",
+      before,
+      "--report",
+      report,
+    ]);
+    expect(r.code, r.out).toBe(0);
+    expect(mode(before)).toBe(0o600);
+    expect(mode(report)).toBe(0o600);
+    expect(mode(`${report}.prev1`)).toBe(0o600);
+  }, 120_000);
 
   test("snapshot records counts, tags and the git-annex refs, never contents", async () => {
     const out = join(fx.root, "snap2.json");

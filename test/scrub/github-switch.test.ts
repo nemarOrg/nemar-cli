@@ -775,6 +775,8 @@ describe("every lifted ruleset gets its turn to be restored", () => {
       "refs/tags/v1.0.0",
       "refs/tags/v1.0.1",
     ]);
+    // The file was a looser one the test wrote; the CLI replaced its content and tightened it.
+    expect(statSync(snapshotPath).mode & 0o777).toBe(0o600);
     const run = await startHeldSwitch(world, snapshotPath);
     expect(enforcement(world).tag).toBe("disabled");
     run.child.kill("SIGTERM");
