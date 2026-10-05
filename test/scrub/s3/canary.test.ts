@@ -34,6 +34,23 @@ describe("canary", () => {
         "../canary-k3x9q2/",
         `${DATASET}/../canary-k3x9q2/`,
         `${DATASET}/canary-k3x9q2/../objects/`,
+        // A live dataset, a standing fixture, the id live tests rely on never resolving, and a
+        // mirror: none is a place to write a locked object and delete it with the bypass.
+        "nm000103/canary-k3x9q2/",
+        "nm000348/canary-k3x9q2/",
+        "nm099998/canary-k3x9q2/",
+        "nm099997/canary-k3x9q2/",
+        "nm099900/canary-k3x9q2/",
+        "nm099999x/canary-k3x9q2/",
+        "on000001/canary-k3x9q2/",
+        // An id outside the sandbox band, a malformed id, and a prefix nested deeper.
+        "xx100000/canary-k3x9q2/",
+        "xx09041/canary-k3x9q2/",
+        "xx0904111/canary-k3x9q2/",
+        `${DATASET}/sub/canary-k3x9q2/`,
+        `nm099999/sub/canary-k3x9q2/`,
+        `${DATASET}/canary-k3x9q2/x/`,
+        `${DATASET}/canary-k3x9.q2/`,
         "",
       ]) {
         for (const extra of [[], ["--execute"]]) {
@@ -41,6 +58,24 @@ describe("canary", () => {
           expect(r.exitCode, `${JSON.stringify(bad)} ${extra}: ${r.all}`).not.toBe(0);
           expect([2, 3]).toContain(r.exitCode);
         }
+      }
+      expect(standin.log.length).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "the end-to-end fixture's id and any sandbox id are accepted",
+    async () => {
+      standin = startS3Standin();
+      for (const ok of [
+        "nm099999/canary-abc/",
+        "xx090411/canary-k3x9q2/",
+        "xx000001/canary-1/",
+        "xx099899/canary-A_b-9/",
+      ]) {
+        const r = await runScrub(standin, canary([], ok));
+        expect(r.exitCode, `${ok}: ${r.all}`).toBe(0);
       }
       expect(standin.log.length).toBe(0);
     },

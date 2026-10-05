@@ -10,7 +10,8 @@
  *              [--prune-noncurrent <prefix>]... [--max-prune N] [--public-base URL]
  *   zarr       --dir DIR [--execute] [--concurrency 4]
  *   drop-archives --dir DIR --confirm-dataset ID [--execute] [--concurrency 4]
- *   canary     --prefix <id>/canary-<random>/ [--execute] [--multipart] [--bucket nemar]
+ *   canary     --prefix <nm099999|xx0NNNNN>/canary-<random>/ [--execute] [--multipart]
+ *              [--bucket nemar]
  *
  * Every subcommand is read-only unless it is given `--execute`; `plan` and `verify` have no
  * `--execute` because they never write to S3. Common flags: `--region` (default us-east-2),
@@ -70,6 +71,7 @@ const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|zarr|drop-arc
              original recordings; the normal workflow rebuilds it afterwards. Writes
              archives-dropped.json. A lock refusal is reported and fails the stage.
   canary     --prefix ID/canary-RANDOM/ [--execute] [--multipart] [--bucket nemar]
+             ID is nm099999 or an xx0NNNNN sandbox id, never a live dataset.
 common: --region us-east-2  --timeout-sec 120`;
 
 const OPTIONS = {

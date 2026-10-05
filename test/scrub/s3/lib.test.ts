@@ -18,7 +18,12 @@ import {
   retentionOk,
   sampleRanges,
 } from "../../../scripts/scrub/s3/s3-lib";
-import { checkPrunePrefix, isEdfOrBdf, keysOfManifest } from "../../../scripts/scrub/s3/s3-stages";
+import {
+  checkCanaryPrefix,
+  checkPrunePrefix,
+  isEdfOrBdf,
+  keysOfManifest,
+} from "../../../scripts/scrub/s3/s3-stages";
 
 describe("planAssembly", () => {
   const sizes = [
@@ -240,6 +245,29 @@ describe("manifests and prefixes", () => {
       "version/",
     ]) {
       expect(() => checkPrunePrefix(d, bad), JSON.stringify(bad)).toThrow(StageError);
+    }
+  });
+
+  test("a canary prefix is the fixture's or a sandbox's id and one canary-<token>/ directory", () => {
+    for (const ok of ["nm099999/canary-a/", "xx000000/canary-Zz_9-/", "xx099999/canary-x/"]) {
+      expect(() => checkCanaryPrefix(ok), ok).not.toThrow();
+    }
+    for (const bad of [
+      "nm000103/canary-a/",
+      "nm099998/canary-a/",
+      "nm099999/canary-a",
+      "nm099999/canary-/",
+      "nm099999//canary-a/",
+      "nm099999/canary-a//",
+      "xx100000/canary-a/",
+      "xx0000000/canary-a/",
+      "XX090411/canary-a/",
+      "xx090411/Canary-a/",
+      "xx090411/canary-a/../",
+      "canary-a/",
+      "",
+    ]) {
+      expect(() => checkCanaryPrefix(bad), JSON.stringify(bad)).toThrow(StageError);
     }
   });
 });

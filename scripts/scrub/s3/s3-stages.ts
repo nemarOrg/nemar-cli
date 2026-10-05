@@ -1218,12 +1218,16 @@ export interface CanaryOptions extends CommonOptions {
   multipart: boolean;
 }
 
-const CANARY_PREFIX = /^([A-Za-z0-9_.-]+\/)*canary-[A-Za-z0-9_-]+\/$/;
+/**
+ * The canary writes a locked object and deletes it with the bypass, so where it may do that is
+ * fixed, not typed: the end-to-end fixture's id (`nm099999`) or an `xx0NNNNN` sandbox id, and one
+ * directory below it. A live dataset's id, a standing fixture's (`nm099998`) and any deeper
+ * prefix never match.
+ */
+const CANARY_PREFIX = /^(nm099999|xx0\d{5})\/canary-[A-Za-z0-9_-]+\/$/;
 
 export function checkCanaryPrefix(prefix: string): void {
-  if (!CANARY_PREFIX.test(prefix) || prefix.split("/").some((s) => s === ".." || s === ".")) {
-    throw new StageError("prefix-not-canary", EXIT.refused);
-  }
+  if (!CANARY_PREFIX.test(prefix)) throw new StageError("prefix-not-canary", EXIT.refused);
 }
 
 /** Prove the lock holds without the bypass and gives way with it, then remove the object. */
