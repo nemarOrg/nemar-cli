@@ -6,8 +6,12 @@
  * not an object the scrub swaps for a new key: nothing can be patched inside a zip. The remedy is
  * to delete it, every VERSION and every delete marker, and let the normal workflow build a fresh
  * archive from the scrubbed tree afterwards (runbook step 16, not this stage's). The drop itself is
- * runbook step 15a, after the pushed history has been verified from a fresh clone, because it
- * cannot be undone.
+ * runbook step 15a, and it cannot be undone, so the stage checks for itself that the scrub has been
+ * verified everywhere before it deletes anything: the proofs of the S3 objects (`verified.json`,
+ * `new-hash-verified.json`), of the pushed history (`git-verified.json` from a fresh clone) and of
+ * the Zarr copy (`zarr-verified.json`) must all be in the working directory, parse, and name this
+ * plan, by the same rule `delete-old` applies (`checkScrubProofs`, `checkZarrProof`). Every missing
+ * or stale proof is reported, in the dry run too, beside what the run would delete.
  *
  * Deletes are by version id and never use the governance bypass. Archives carry no lock, so a
  * refusal means something is locked that should not be: it is reported and the stage fails, and
@@ -24,13 +28,18 @@ import {
   deleteVersion,
   failureWord,
   formatWordCounts,
+  hasCurrentKey,
   listPrefixVersions,
   runPool,
 } from "./s3-lib";
 import { StageError } from "./s3-lib";
 import {
   type CommonOptions,
+  type ProofFiles,
+  Refusals,
   checkDataset,
+  checkScrubProofs,
+  checkZarrProof,
   parseFile,
   readBytes,
   requireCompletePlan,
@@ -38,7 +47,7 @@ import {
   writeJson,
 } from "./s3-stages";
 
-export interface DropArchivesOptions extends CommonOptions {
+export interface DropArchivesOptions extends CommonOptions, ProofFiles {
   dir: string;
   /** The dataset id, typed again by the operator; must equal the plan's. Required, dry run too. */
   confirmDataset: string;
@@ -62,11 +71,20 @@ export async function dropArchivesStage(o: DropArchivesOptions): Promise<number>
   }
   checkDataset(plan.dataset);
   requireCompletePlan(plan);
-  const prefix = `${plan.dataset}/archives/`;
+  const dataset = plan.dataset;
+  const prefix = `${dataset}/archives/`;
   // A proof from an earlier run must not outlive this one: it holds only once this run ends well.
   await rm(path.join(o.dir, "archives-dropped.json"), { force: true });
 
+  // The originals go only once the scrub is proven for this plan: every proof is evaluated, and
+  // every one that is missing or stale is reported together.
+  const refusals: Refusals = new Refusals();
+  await checkScrubProofs(o.dir, plan, planBytes, o, refusals);
+
   return withCtx(o, plan.bucket, async (ctx) => {
+    const zarrCurrent = await hasCurrentKey(ctx, `${dataset}/zarr/`);
+    await checkZarrProof(o.dir, dataset, planBytes, zarrCurrent, refusals);
+
     const found = await listPrefixVersions(ctx, prefix);
     const counts = {
       keys: new Set(found.map((e) => e.key)).size,
@@ -76,12 +94,14 @@ export async function dropArchivesStage(o: DropArchivesOptions): Promise<number>
     o.log(
       `drop-archives: keys=${counts.keys} versions=${counts.versions} markers=${counts.markers}`,
     );
+    // The dry run says what it would delete even when it refuses, so the operator sees both.
     if (!o.execute) {
       o.log(
         `drop-archives dry run: would delete versions=${counts.versions} markers=${counts.markers} across ${counts.keys} keys`,
       );
-      return 0;
     }
+    refusals.stopIfAny("drop-archives", o.log);
+    if (!o.execute) return 0;
 
     const errors: string[] = [];
     await runPool(found, o.concurrency, async (e) => {
@@ -107,7 +127,7 @@ export async function dropArchivesStage(o: DropArchivesOptions): Promise<number>
     }
     const done: ArchivesDroppedFile = {
       version: 1,
-      dataset: plan.dataset,
+      dataset,
       droppedAt: new Date().toISOString(),
       counts,
     };

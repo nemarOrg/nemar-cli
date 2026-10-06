@@ -12,6 +12,8 @@
  *   zarr       --dir DIR [--execute] [--concurrency 4] [--allow-member NAME]...
  *              [--max-zarr-json N]
  *   drop-archives --dir DIR --confirm-dataset ID [--execute] [--concurrency 4]
+ *              [--verified verified.json] [--hash-verified new-hash-verified.json]
+ *              [--git-verified git-verified.json]
  *   zarr-public --dataset ID --zarr-verified F [--public-base URL] [--bucket nemar]
  *              [--concurrency 8]
  *   canary     --prefix <nm099999|xx09[0-8]NNN>/canary-<random>/ [--execute] [--multipart]
@@ -30,7 +32,7 @@
  * stale); 4 unreadable (the plan is incomplete); 5 versions or markers remain after a delete;
  * 129, 130, 143 ended by SIGHUP, SIGINT, SIGTERM (the `aws` children killed, temp files removed).
  *
- * `delete-old` evaluates every refusal before it stops: stdout has one
+ * `drop-archives` and `delete-old` evaluate every refusal before they stop: stdout has one
  * `<stage>: refused <word>: <what triggered it>` line per refusal, and the stop line joins every
  * word with `+` (`s3-scrub: archives-not-dropped+history-remains`), which with one refusal is the
  * word alone.
@@ -102,10 +104,16 @@ const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|zarr|drop-arc
              until --allow-member names it. Then \`delete-old --prune-noncurrent ID/zarr/\` removes
              the noncurrent versions.
   drop-archives --dir DIR --confirm-dataset ID [--execute] [--concurrency 4]
+             [--verified F] [--hash-verified F] [--git-verified F]
              deletes EVERY version and delete marker under ID/archives/ by version id, with no
              governance bypass, and ends with a listing that must show none. The archive holds the
-             original recordings; the normal workflow rebuilds it afterwards. Writes
-             archives-dropped.json. A lock refusal is reported and fails the stage.
+             original recordings, so it refuses, the dry run too, until every proof is in DIR and
+             names this plan, as delete-old checks them: verified.json and new-hash-verified.json
+             (this assembled.json), git-verified.json (fresh-clone, this keymap.json and
+             plan.json) and zarr-verified.json (this plan.json and zarr-plan.json; no-zarr only
+             while no Zarr object is current). Every refusal is listed, and the dry run still
+             counts what it would delete. The normal workflow rebuilds the archive afterwards.
+             Writes archives-dropped.json. A lock refusal is reported and fails the stage.
   zarr-public --dataset ID --zarr-verified F [--public-base URL] [--bucket nemar]
              [--concurrency 8]
              after the dataset is public again: reads ID/zarr/index.json anonymously (default base
@@ -283,6 +291,7 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
         confirmDataset: need(v["confirm-dataset"], "confirm-dataset"),
         execute,
         concurrency: concurrency(4),
+        ...proofFiles(v),
       });
     case "zarr-public": {
       const publicBase = v["public-base"] ?? DEFAULT_PUBLIC_BASE;

@@ -9,8 +9,9 @@
  * does so only behind the proofs of the earlier stages: two that name the exact bytes of
  * `assembled.json` they vouch for (`verified.json`, `new-hash-verified.json`), and the proof that a
  * fresh clone of the pushed repository verified (`git-verified.json`, which names the keymap and
- * the plan). It evaluates every refusal before it stops (`Refusals`), so one dry run lists them
- * all.
+ * the plan). `drop-archives` stands behind the same proofs, plus the Zarr stage's
+ * (`checkScrubProofs`, `checkZarrProof`). Both evaluate every refusal before they stop
+ * (`Refusals`), so one dry run lists them all.
  *
  * **Nothing printed or written here is a participant value.** Output is counts, annex keys, sizes,
  * version ids and fixed words. Header bytes are held in memory and compared, never logged.
@@ -1133,7 +1134,8 @@ export interface ProvenAssembly {
  * - `git-verified.json` is a verify of a FRESH clone of what was pushed, for this dataset, made
  *   with this `keymap.json` and this `plan.json`, and that keymap is this assembly's, pair for pair.
  *
- * `delete-old` (runbook step 15b) asks this before it reads the bucket. Every check runs and records its refusal; a check whose file could not be read or parsed
+ * `drop-archives` (runbook step 15a) and `delete-old` (step 15b) both ask this, so the rule is one
+ * rule. Every check runs and records its refusal; a check whose file could not be read or parsed
  * does not run, because that file's own refusal already stands. A file that is there and cannot be
  * read is a failure (exit 1), not a refusal, and stops at once. Returns the assembly when
  * `assembled.json` was read.
@@ -1324,8 +1326,10 @@ async function checkUnplannedRecordings(
  * must have run for THIS plan and left its proof (`zarr-verified.json`, which names the exact bytes
  * of plan.json and of the zarr-plan.json its run wrote), and a proof that the prefix held nothing
  * (`no-zarr`) is not a proof about Zarr objects that are current now (`zarrCurrent`). Refuses
- * `zarr-not-scrubbed`, with every reason it does not hold. `delete-old` asks only while a Zarr
- * object is current.
+ * `zarr-not-scrubbed`, with every reason it does not hold.
+ *
+ * `delete-old` asks only while a Zarr object is current; `drop-archives` always asks, because step
+ * 10 runs for every dataset and proves `no-zarr` for one without a Zarr copy.
  */
 export async function checkZarrProof(
   dir: string,

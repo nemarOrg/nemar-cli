@@ -27,7 +27,10 @@ import {
   parseGitVerified,
 } from "../../../scripts/scrub/contract";
 import { type S3Ctx, TempArea, createAwsRunner } from "../../../scripts/scrub/s3/s3-lib";
-import { TEST_LOOPBACK_PUBLIC_BASE_ENV } from "../../../scripts/scrub/s3/s3-stages";
+import {
+  TEST_LOOPBACK_PUBLIC_BASE_ENV,
+  parseHashVerified,
+} from "../../../scripts/scrub/s3/s3-stages";
 import type { S3Standin } from "../helpers/s3-standin";
 
 export const BUCKET = "nemar";
@@ -561,6 +564,30 @@ export function writeGitVerified(
   };
   parseGitVerified(JSON.stringify(proof));
   writeJson(dir, "git-verified.json", proof);
+}
+
+/**
+ * The proof `hash_stage.py verify-new` leaves on the hash host (`new-hash-verified.json`), for the
+ * assembled.json in `dir` as it is now. The pipeline test produces the real one with the real
+ * stage; the S3 tests stand in for that run here, through the contract's own parser.
+ */
+export function writeHashVerified(
+  dir: string,
+  over: Partial<{ assembledSha256: string; dataset: string; count: number }> = {},
+): void {
+  const assembled = readJson<{ dataset: string; entries: Record<string, unknown> }>(
+    dir,
+    "assembled.json",
+  );
+  const proof = {
+    version: 1,
+    dataset: assembled.dataset,
+    assembledSha256: fileSha256(dir, "assembled.json"),
+    count: Object.keys(assembled.entries).length,
+    ...over,
+  };
+  parseHashVerified(JSON.stringify(proof));
+  writeJson(dir, "new-hash-verified.json", proof);
 }
 
 export function copyDir(from: string): string {

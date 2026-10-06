@@ -17,8 +17,8 @@
  *        --keymap keymap.json [--remote-uuid UUID ...] [--execute]
  *
  * `verify` removes the proof file (default: `git-verified.json` beside the keymap) when it starts
- * and writes it again only when every check passed; `delete-old` requires one made by
- * `--fresh-clone`. `annex-registry` with no `--remote-uuid` uses this clone's `nemar-s3` remote.
+ * and writes it again only when every check passed; `drop-archives` and `delete-old` require one
+ * made by `--fresh-clone`. `annex-registry` with no `--remote-uuid` uses this clone's `nemar-s3` remote.
  *
  * Output is counts and fixed words only: a path, a key or a file name can be the identifier. A
  * failure names the command that failed from a closed list (`failed: <word> (git rev-list)`).

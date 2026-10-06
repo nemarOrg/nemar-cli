@@ -232,8 +232,9 @@ export interface ZarrVerifiedFile {
 /**
  * `git-verified.json`: written by `git-scrub verify` ONLY when every check passed, and removed at
  * the start of every verify run. It names the exact bytes it vouches for: the keymap, the git plan
- * and the S3 plan, by sha256. `delete-old` requires one in `fresh-clone` mode whose keymap is the
- * keymap it is using, because only a verify of a fresh clone looked at what was PUSHED.
+ * and the S3 plan, by sha256. `drop-archives` and `delete-old` require one in `fresh-clone` mode
+ * whose keymap is the keymap they are using, because only a verify of a fresh clone looked at what
+ * was PUSHED.
  */
 export interface GitVerifiedFile {
   version: 1;
