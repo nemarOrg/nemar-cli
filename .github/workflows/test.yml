@@ -156,6 +156,11 @@ jobs:
               # materialize_recording), so it moved here with it (#1109).
               - 'scripts/patch_duration.py'
               - 'scripts/test_patch_duration.py'
+              # test_generate_zarr.py scans every non-test script under
+              # scripts/ for a biosigIO store writer called outside
+              # generate_zarr.write_store (#1626), so a new script anywhere
+              # under scripts/ must run that scan on the pull request adding it.
+              - 'scripts/**/*.py'
               # Self-reference, mirroring the `email` filter above: without it,
               # editing only these jobs (a python bump, a new step, a typo in the
               # install line) leaves zarr == 'false' and skips them silently.

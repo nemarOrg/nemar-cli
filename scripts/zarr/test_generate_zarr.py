@@ -12330,11 +12330,16 @@ class TestWriteStore(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
 
-# The biosigIO store writers, by how a call reaches them: an attribute
-# (`rec.to_zarr`, `biosigio.stream_to_zarr`, `module.ZarrExporter`) or a bare
-# name (`stream_to_zarr`, `ZarrExporter`).
+# The biosigIO store writers, by how a reference reaches them: an attribute
+# (`rec.to_zarr`, `biosigio.stream_to_zarr`, `module.ZarrExporter`), a bare
+# name (`stream_to_zarr`, `ZarrExporter`), a name bound by an aliased import
+# (`from biosigio import stream_to_zarr as s2z`), or a `getattr` with a literal
+# name. A name computed at run time is out of reach of any static scan.
 _WRITER_ATTRS = frozenset({"to_zarr", "stream_to_zarr", "ZarrExporter"})
 _WRITER_NAMES = frozenset({"stream_to_zarr", "ZarrExporter"})
+# The one function allowed to look writers up by name, to INSPECT them for the
+# startup check; it never calls one.
+_WRITER_INSPECTORS = frozenset({"biosigio_subject_info_problems"})
 
 
 def writer_references(source: str) -> tuple[list[str], set[str]]:
@@ -12345,8 +12350,11 @@ def writer_references(source: str) -> tuple[list[str], set[str]]:
 
     tree = ast.parse(source)
     allowed: set[int] = set()
+    inspector: set[int] = set()
     through_write_store: set[str] = set()
     for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name in _WRITER_INSPECTORS:
+            inspector |= {id(inner) for inner in ast.walk(node)}
         if not isinstance(node, ast.Call) or not node.args:
             continue
         func = node.func
@@ -12355,11 +12363,27 @@ def writer_references(source: str) -> tuple[list[str], set[str]]:
             for inner in ast.walk(node.args[0]):
                 allowed.add(id(inner))
     stray: list[str] = []
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name in _WRITER_NAMES and alias.asname:
+                    # Rebinding a writer under another name hides every later
+                    # use of it from the name and attribute rules below.
+                    stray.append(f"{node.lineno}:{alias.name} as {alias.asname}")
+                    aliases.add(alias.asname)
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr in _WRITER_ATTRS:
             name = node.attr
-        elif isinstance(node, ast.Name) and node.id in _WRITER_NAMES:
+        elif isinstance(node, ast.Name) and (node.id in _WRITER_NAMES or node.id in aliases):
             name = node.id
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+              and node.func.id == "getattr" and len(node.args) >= 2
+              and isinstance(node.args[1], ast.Constant)
+              and node.args[1].value in _WRITER_ATTRS):
+            if id(node) in inspector:
+                continue
+            name = f"getattr {node.args[1].value}"
         else:
             continue
         if id(node) in allowed:
@@ -12371,9 +12395,10 @@ def writer_references(source: str) -> tuple[list[str], set[str]]:
 
 class TestEveryStoreWriteExcludesSubjectInfo(unittest.TestCase):
     """No script writes a store except through `write_store`. A new direct call
-    (`rec.to_zarr(...)`, `stream_to_zarr(...)`, `ZarrExporter.export(...)`), or
-    a writer bound to another name first, fails here. Test files are exempt:
-    they build fixture stores, which are never served."""
+    (`rec.to_zarr(...)`, `stream_to_zarr(...)`, `ZarrExporter.export(...)`), a
+    writer bound to another name, imported under an alias, or fetched by
+    `getattr` with a literal name fails here. Test files are exempt: they build
+    fixture stores, which are never served."""
 
     SCRIPTS = Path(__file__).resolve().parent.parent
 
@@ -12401,10 +12426,19 @@ class TestEveryStoreWriteExcludesSubjectInfo(unittest.TestCase):
             "write = rec.to_zarr\n"
             "biosigio.stream_to_zarr(src, path, exclude_subject_info=True)\n"
             "write_store(rec.to_zarr, path)\n"
+            "from biosigio import stream_to_zarr as s2z\n"
+            "s2z(src, path)\n"
+            "from biosigio.exporters.zarr import ZarrExporter as ZE\n"
+            "getattr(rec, 'to_zarr')(path)\n"
+            "getattr(importlib.import_module('biosigio'), 'stream_to_zarr')(src, path)\n"
+            "def biosigio_subject_info_problems():\n"
+            "    return getattr(rec, 'to_zarr', None)\n"
         )
         self.assertEqual(
             sorted(stray, key=lambda s: int(s.split(":")[0])),
-            ["1:to_zarr", "2:stream_to_zarr", "3:ZarrExporter", "4:to_zarr", "5:stream_to_zarr"],
+            ["1:to_zarr", "2:stream_to_zarr", "3:ZarrExporter", "4:to_zarr",
+             "5:stream_to_zarr", "7:stream_to_zarr as s2z", "8:s2z",
+             "9:ZarrExporter as ZE", "10:getattr to_zarr", "11:getattr stream_to_zarr"],
         )
         self.assertEqual(through, {"to_zarr"})
 
