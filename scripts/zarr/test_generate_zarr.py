@@ -12588,28 +12588,41 @@ class TestOnlySyncStoreUploadsAStore(unittest.TestCase):
 # The biosigIO store writers, by how a reference reaches them: an attribute
 # (`rec.to_zarr`, `biosigio.stream_to_zarr`, `module.ZarrExporter`), a bare
 # name (`stream_to_zarr`, `ZarrExporter`), a name bound by an aliased import
-# (`from biosigio import stream_to_zarr as s2z`), or a `getattr` with a literal
-# name. A name computed at run time is out of reach of any static scan.
+# (`from biosigio import stream_to_zarr as s2z`), or a string equal to a writer's
+# name, which is how `getattr`, `__dict__[...]`, `__getattribute__`,
+# `operator.attrgetter` and `operator.methodcaller` reach one. A name computed at
+# run time (`"to_" + "zarr"`) is out of reach of any static scan.
 _WRITER_ATTRS = frozenset({"to_zarr", "stream_to_zarr", "ZarrExporter"})
 _WRITER_NAMES = frozenset({"stream_to_zarr", "ZarrExporter"})
-# The one function allowed to look writers up by name, to INSPECT them for the
-# startup check; it never calls one.
-_WRITER_INSPECTORS = frozenset({"biosigio_subject_info_problems"})
+# What generate_zarr.py, and only generate_zarr.py, may hold by name: the one
+# function that looks writers up to INSPECT them for the startup check (it never
+# calls one), and the tuple naming them.
+_WRITER_INSPECTOR = "biosigio_subject_info_problems"
+_WRITER_NAMES_CONSTANT = "BIOSIGIO_STORE_WRITERS"
 
 
-def writer_references(source: str) -> tuple[list[str], set[str]]:
+def writer_references(
+    source: str, *, inspector_allowed: bool = False
+) -> tuple[list[str], set[str]]:
     """Scan Python source for biosigIO store writers. Returns the references
     that are NOT the first argument of a `write_store(...)` call, as
-    `line:name`, and the names that are."""
+    `line:name`, and the names that are. `inspector_allowed` is for
+    generate_zarr.py alone: it exempts `biosigio_subject_info_problems` and the
+    `BIOSIGIO_STORE_WRITERS` tuple there, and nowhere else."""
     import ast
 
     tree = ast.parse(source)
     allowed: set[int] = set()
-    inspector: set[int] = set()
+    exempt: set[int] = set()
     through_write_store: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name in _WRITER_INSPECTORS:
-            inspector |= {id(inner) for inner in ast.walk(node)}
+        if inspector_allowed and (
+            (isinstance(node, ast.FunctionDef) and node.name == _WRITER_INSPECTOR)
+            or (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == _WRITER_NAMES_CONSTANT
+                        for t in node.targets))
+        ):
+            exempt |= {id(inner) for inner in ast.walk(node)}
         if not isinstance(node, ast.Call) or not node.args:
             continue
         func = node.func
@@ -12628,17 +12641,14 @@ def writer_references(source: str) -> tuple[list[str], set[str]]:
                     stray.append(f"{node.lineno}:{alias.name} as {alias.asname}")
                     aliases.add(alias.asname)
     for node in ast.walk(tree):
+        if id(node) in exempt:
+            continue
         if isinstance(node, ast.Attribute) and node.attr in _WRITER_ATTRS:
             name = node.attr
         elif isinstance(node, ast.Name) and (node.id in _WRITER_NAMES or node.id in aliases):
             name = node.id
-        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-              and node.func.id == "getattr" and len(node.args) >= 2
-              and isinstance(node.args[1], ast.Constant)
-              and node.args[1].value in _WRITER_ATTRS):
-            if id(node) in inspector:
-                continue
-            name = f"getattr {node.args[1].value}"
+        elif isinstance(node, ast.Constant) and node.value in _WRITER_ATTRS:
+            name = repr(node.value)
         else:
             continue
         if id(node) in allowed:
@@ -12651,18 +12661,22 @@ def writer_references(source: str) -> tuple[list[str], set[str]]:
 class TestEveryStoreWriteExcludesSubjectInfo(unittest.TestCase):
     """No script writes a store except through `write_store`. A new direct call
     (`rec.to_zarr(...)`, `stream_to_zarr(...)`, `ZarrExporter.export(...)`), a
-    writer bound to another name, imported under an alias, or fetched by
-    `getattr` with a literal name fails here. Test files are exempt: they build
+    writer bound to another name, imported under an alias, or reached through a
+    string holding its name fails here. Test files are exempt: they build
     fixture stores, which are never served."""
 
     SCRIPTS = Path(__file__).resolve().parent.parent
+    CONVERTER = Path(generate_zarr.__file__).resolve()
 
     def test_no_script_references_a_writer_outside_write_store(self):
         offenders = {}
         for path in sorted(self.SCRIPTS.rglob("*.py")):
             if path.name.startswith("test_"):
                 continue
-            stray, _ = writer_references(path.read_text(encoding="utf-8"))
+            stray, _ = writer_references(
+                path.read_text(encoding="utf-8"),
+                inspector_allowed=path.resolve() == self.CONVERTER,
+            )
             if stray:
                 offenders[str(path.relative_to(self.SCRIPTS))] = stray
         self.assertEqual(offenders, {}, "write a store through generate_zarr.write_store")
@@ -12670,8 +12684,16 @@ class TestEveryStoreWriteExcludesSubjectInfo(unittest.TestCase):
     def test_both_exporters_go_through_write_store(self):
         # The positive control: the scan finds the two real call sites, so an
         # empty offender list above is not a scan that sees nothing.
-        _, through = writer_references(Path(generate_zarr.__file__).read_text(encoding="utf-8"))
+        _, through = writer_references(
+            self.CONVERTER.read_text(encoding="utf-8"), inspector_allowed=True
+        )
         self.assertEqual(through, {"to_zarr", "stream_to_zarr"})
+
+    def test_the_converter_is_clean_only_because_of_its_exemption(self):
+        # And the exemption is what admits the inspector: without it the same
+        # file is flagged, so the exemption is doing work and is scoped.
+        stray, _ = writer_references(self.CONVERTER.read_text(encoding="utf-8"))
+        self.assertTrue(stray)
 
     def test_the_scan_catches_every_shape_of_direct_use(self):
         stray, through = writer_references(
@@ -12686,14 +12708,23 @@ class TestEveryStoreWriteExcludesSubjectInfo(unittest.TestCase):
             "from biosigio.exporters.zarr import ZarrExporter as ZE\n"
             "getattr(rec, 'to_zarr')(path)\n"
             "getattr(importlib.import_module('biosigio'), 'stream_to_zarr')(src, path)\n"
+            "m.__dict__['stream_to_zarr'](src, path)\n"
+            "operator.attrgetter('to_zarr')(rec)(path)\n"
+            "rec.__getattribute__('to_zarr')(path)\n"
+            "operator.methodcaller('to_zarr', path)(rec)\n"
             "def biosigio_subject_info_problems():\n"
             "    return getattr(rec, 'to_zarr', None)\n"
+            "BIOSIGIO_STORE_WRITERS = ('stream_to_zarr',)\n"
         )
         self.assertEqual(
             sorted(stray, key=lambda s: int(s.split(":")[0])),
             ["1:to_zarr", "2:stream_to_zarr", "3:ZarrExporter", "4:to_zarr",
              "5:stream_to_zarr", "7:stream_to_zarr as s2z", "8:s2z",
-             "9:ZarrExporter as ZE", "10:getattr to_zarr", "11:getattr stream_to_zarr"],
+             "9:ZarrExporter as ZE", "10:'to_zarr'", "11:'stream_to_zarr'",
+             "12:'stream_to_zarr'", "13:'to_zarr'", "14:'to_zarr'", "15:'to_zarr'",
+             # Outside generate_zarr.py the inspector's name and the tuple's
+             # name buy nothing.
+             "17:'to_zarr'", "18:'stream_to_zarr'"],
         )
         self.assertEqual(through, {"to_zarr"})
 
