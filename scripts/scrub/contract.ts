@@ -130,17 +130,32 @@ export function rawKindOf(name: string): RawCopy["kind"] {
 }
 
 /**
+ * True when a name holds a control character (U+0000 to U+001F, U+007F to U+009F) or U+FFFE or
+ * U+FFFF. XML 1.0 cannot carry most of them, and a carriage return it reads back as a line feed,
+ * so a `DeleteObjects` body cannot name such a key: it would stay behind every run, and the
+ * final listing would stop each one with exit 5. As `has_control_character` in hash_stage.py.
+ */
+export function hasControlCharacter(name: string): boolean {
+  for (let i = 0; i < name.length; i++) {
+    const c = name.charCodeAt(i);
+    if (c < 0x20 || (c >= 0x7f && c <= 0x9f) || c === 0xfffe || c === 0xffff) return true;
+  }
+  return false;
+}
+
+/**
  * True for a name under `<dataset>/objects/` that is a raw copy: not the special remote's marker,
  * not in the annex key space (`SHA256E-`; one there that does not parse is refused, not a raw
- * copy), not empty, and with no NUL and no lone surrogate (no shell or S3 call can carry either;
- * an S3 key is UTF-8).
+ * copy), not empty, with no lone surrogate (no shell or S3 call can carry one; an S3 key is
+ * UTF-8), and with no control character ({@link hasControlCharacter}; NUL among them). A name that
+ * fails is a bad key, which stops the plan (`objects-bad-key`).
  */
 export function isRawCopyName(name: string): boolean {
   return (
     name !== "" &&
     name !== ANNEX_UUID_OBJECT &&
     !name.startsWith("SHA256E-") &&
-    !name.includes("\u0000") &&
+    !hasControlCharacter(name) &&
     !/\p{Cs}/u.test(name)
   );
 }
@@ -168,7 +183,8 @@ export type RawHashEntry =
  * names is proven to duplicate content NEMAR keeps: a raw recording is byte for byte an annex key
  * of the plan (its sha256 and size), and any other raw file is a blob of the repository's history
  * from before the rewrite. It names the exact bytes it was made from: plan.json, raw-hashes.json and
- * the git blob list. Counts only. `delete-old` refuses a plan with raw copies without it.
+ * the git blob list. Counts, and the annex keys the raw recordings matched (content hashes, never a
+ * name or a value). `delete-old` refuses a plan with raw copies without it.
  */
 export interface RawVerifiedFile {
   version: 1;
@@ -177,6 +193,13 @@ export interface RawVerifiedFile {
   planSha256: string;
   rawHashesSha256: string;
   gitBlobsSha256: string;
+  /**
+   * Every annex key of the plan whose sha256 and size a raw recording version has, sorted and
+   * unique; empty exactly when no raw recording was matched. `delete-old` requires each one it
+   * does not replace to be current at its size, because the raw recording goes on the strength of
+   * that key keeping its bytes.
+   */
+  matchedKeys: string[];
   counts: {
     names: number;
     versions: number;
@@ -674,14 +697,16 @@ const RAW_VERIFIED_FIELDS = [
   "planSha256",
   "rawHashesSha256",
   "gitBlobsSha256",
+  "matchedKeys",
   "counts",
 ];
 const RAW_VERIFIED_COUNTS = ["names", "versions", "markers", "matchedRecordings", "matchedOther"];
 
 /**
- * Read raw-verified.json, or refuse: exactly the contract's fields, three sha256 bindings, counts
- * that are counts, every version matched one way or the other, and never vacuous (it vouches for
- * at least one raw name).
+ * Read raw-verified.json, or refuse: exactly the contract's fields, three sha256 bindings, matched
+ * keys that are annex keys, strictly sorted (so none twice), and present exactly when a raw
+ * recording was matched, counts that are counts, every version matched one way or the other, and
+ * never vacuous (it vouches for at least one raw name).
  */
 export function parseRawVerified(text: string): RawVerifiedFile {
   const x = JSON.parse(text) as unknown;
@@ -711,6 +736,14 @@ export function parseRawVerified(text: string): RawVerifiedFile {
   }
   const n = c as RawVerifiedFile["counts"];
   if (n.matchedRecordings + n.matchedOther !== n.versions || n.names === 0) bad();
+  const keys = x.matchedKeys;
+  if (!Array.isArray(keys) || (keys.length === 0) !== (n.matchedRecordings === 0)) return bad();
+  let previous: string | undefined;
+  for (const k of keys as unknown[]) {
+    if (!isString(k) || !ANNEX_KEY.test(k)) return bad();
+    if (previous !== undefined && !(previous < k)) bad();
+    previous = k;
+  }
   return x as unknown as RawVerifiedFile;
 }
 

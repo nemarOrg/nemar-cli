@@ -556,14 +556,25 @@ def is_edf_or_bdf(name: str) -> bool:
     return name.lower().endswith((".edf", ".bdf"))
 
 
+#: Control characters, and U+FFFE and U+FFFF: no DeleteObjects body can name a key holding one
+#: (contract.ts hasControlCharacter).
+CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f-\x9f\ufffe\uffff]")
+
+
+def has_control_character(name: str) -> bool:
+    """As ``hasControlCharacter`` in contract.ts."""
+    return CONTROL_CHARACTER.search(name) is not None
+
+
 def is_raw_copy_name(name) -> bool:
-    """As ``isRawCopyName`` in contract.ts: a name the plan stage lists as a raw copy. Also one
-    UTF-8 can carry: a lone surrogate cannot reach a shell or S3, so it is refused here."""
+    """As ``isRawCopyName`` in contract.ts: a name the plan stage lists as a raw copy, with no
+    control character (NUL among them). Also one UTF-8 can carry: a lone surrogate cannot reach a
+    shell or S3, so it is refused here."""
     if (
         not isinstance(name, str)
         or name in ("", ANNEX_UUID_OBJECT)
         or name.startswith("SHA256E-")
-        or "\0" in name
+        or has_control_character(name)
     ):
         return False
     try:
@@ -1217,7 +1228,9 @@ def _add_read_options(p: argparse.ArgumentParser) -> None:
         metavar="TEMPLATE",
         help="shell command that writes one object to standard output; {dataset}, {key}, "
         "{bucket} and (verify-new and raw-hash, where it is required) {version} are filled in, "
-        "shell-quoted. Default: "
+        "shell-quoted for the shell that runs the template, once. A template that hands them "
+        "to another shell (ssh, sh -c) must quote them again for that one: a raw copy's {key} "
+        "is a file path and may hold a quote, a space, $ or a backtick. Default: "
         + DEFAULT_SOURCE_CMD
         + "; for verify-new and raw-hash: "
         + DEFAULT_VERIFY_SOURCE_CMD,

@@ -478,6 +478,14 @@ describe("raw copies (ADR 0085, amendment of 2026-10-06)", () => {
       ["an empty name", rawPlan([{ ...tsv, name: "" }])],
       ["a NUL", rawPlan([{ ...tsv, name: "a\u0000b" }])],
       ["a lone surrogate", rawPlan([{ ...tsv, name: "a\ud800b" }])],
+      ["a carriage return", rawPlan([{ ...tsv, name: "a\rb.tsv" }])],
+      ["a tab", rawPlan([{ ...tsv, name: "a\tb.tsv" }])],
+      ["a line feed", rawPlan([{ ...tsv, name: "a\nb.tsv" }])],
+      ["U+001F", rawPlan([{ ...tsv, name: "a\u001fb.tsv" }])],
+      ["DEL", rawPlan([{ ...tsv, name: "a\u007fb.tsv" }])],
+      ["a C1 control", rawPlan([{ ...tsv, name: "a\u0085b.tsv" }])],
+      ["U+FFFE", rawPlan([{ ...tsv, name: "a\ufffeb.tsv" }])],
+      ["U+FFFF", rawPlan([{ ...tsv, name: "a\uffffb.tsv" }])],
       ["out of order", rawPlan([tsv, folder])],
       ["a name twice", rawPlan([tsv, tsv])],
       ["nothing under the name", rawPlan([{ ...tsv, versions: [] }])],
@@ -541,12 +549,14 @@ describe("raw copies (ADR 0085, amendment of 2026-10-06)", () => {
       planSha256: H1,
       rawHashesSha256: H2,
       gitBlobsSha256: BOUND,
+      matchedKeys: [`SHA256E-s1000--${H1}.bdf`, `SHA256E-s9--${H2}.edf`],
       counts: { names: 3, versions: 4, markers: 2, matchedRecordings: 1, matchedOther: 3 },
     };
     expect(parseRawVerified(JSON.stringify(ok)).counts.matchedOther).toBe(3);
     // Only markers left under the names: no version to match, still a proof about names.
     const markersOnly = {
       ...ok,
+      matchedKeys: [],
       counts: { ...ok.counts, versions: 0, matchedRecordings: 0, matchedOther: 0 },
     };
     expect(parseRawVerified(JSON.stringify(markersOnly)).counts.versions).toBe(0);
@@ -559,6 +569,15 @@ describe("raw copies (ADR 0085, amendment of 2026-10-06)", () => {
       { counts: { ...ok.counts, names: 0 } },
       { counts: { ...ok.counts, extra: 1 } },
       { counts: { ...ok.counts, markers: -1 } },
+      // The matched keys: annex keys, strictly sorted, there exactly when a recording matched.
+      { matchedKeys: undefined },
+      { matchedKeys: "SHA256E-s9" },
+      { matchedKeys: [...ok.matchedKeys].reverse() },
+      { matchedKeys: [ok.matchedKeys[0], ok.matchedKeys[0]] },
+      { matchedKeys: ["participants.tsv"] },
+      { matchedKeys: [`git:${"a".repeat(40)}`] },
+      { matchedKeys: [] },
+      { ...markersOnly, matchedKeys: [ok.matchedKeys[0]] },
     ]) {
       expect(
         () => parseRawVerified(JSON.stringify({ ...ok, ...over })),

@@ -104,8 +104,9 @@ const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|raw-verify|delete-old|za
              plan did not record is refused whatever N is (version-not-in-plan). The count
              covers the raw copies too: a plan with raw copies deletes every raw version (with
              the bypass) and then every raw delete marker, only behind raw-verified.json for this
-             plan (raw-copies-unverified), and refuses any raw version or marker it did not
-             record (raw-copy-not-in-plan).
+             plan (raw-copies-unverified), only while every annex key a raw recording matched
+             and this run does not replace is current at its size (raw-duplicate-missing), and
+             refuses any raw version or marker it did not record (raw-copy-not-in-plan).
              --max-prune N (default 1000) refuses to prune more noncurrent versions than N. For
              ID/zarr/ expect about one per store root the zarr step rewrote (zarr-plan.json counts
              them, and the dry run prints the exact number) plus any older versions a Zarr

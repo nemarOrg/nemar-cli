@@ -5,8 +5,9 @@
  *
  * Raw copies (objects under `<id>/objects/` stored by their path, not by an annex key; ADR 0085,
  * amendment of 2026-10-06) are recorded by the plan and deleted by delete-old, every version
- * before every marker, only behind `raw-verified.json` for the plan (`checkRawCopiesProof`), and
- * never one the plan did not record (`checkRawCopiesInBucket`).
+ * before every marker, only behind `raw-verified.json` for the plan (`checkRawCopiesProof`), only
+ * while every annex key a raw recording matched is still there (`raw-duplicate-missing`), and never
+ * one the plan did not record (`checkRawCopiesInBucket`).
  *
  * Each stage reads the previous stage's JSON from a working directory (the contract in
  * `../contract.ts`) and refuses a file that does not match. Every stage is read-only unless it
@@ -376,8 +377,8 @@ export interface ObjectsListing {
   recordings: Set<string>;
   /**
    * Names in the annex key space (`SHA256E-`) that do not parse as an annex key, and names no
-   * call can carry (empty, or with a NUL). The plan stops on any (`objects-bad-key`); counted,
-   * never printed.
+   * call can carry (empty, a lone surrogate, or a control character, NUL and carriage return among
+   * them: `isRawCopyName`). The plan stops on any (`objects-bad-key`); counted, never printed.
    */
   badKeys: string[];
   /** Every raw copy with every version and delete marker, sorted by name: the plan's `rawCopies`. */
@@ -393,8 +394,8 @@ export interface ObjectsListing {
  * - exactly {@link ANNEX_UUID_OBJECT}, the special remote's marker: ignored, and never deleted;
  * - any other name is a RAW copy (a file stored by its path, a zero-byte "folder" key ending in
  *   `/` included), recorded with every version (id and size) and every delete marker, in the
- *   listing's order, newest first. A name in the annex key space that does not parse is not one:
- *   it is a bad key.
+ *   listing's order, newest first. A name in the annex key space that does not parse is not one,
+ *   nor is a name no call can carry (`isRawCopyName`): each is a bad key.
  *
  * A manifest names the files a version has; the listing finds the ones a manifest does not name (a
  * file dropped from a later version, an older tag nobody listed), and a recording whose current
@@ -570,7 +571,7 @@ export async function planStage(o: PlanOptions): Promise<number> {
     const listed = await listObjects(ctx, o.dataset);
     if (listed.badKeys.length > 0) {
       o.log(
-        `plan: ${listed.badKeys.length} objects are named in the annex key space (SHA256E-) but are not SHA256E annex keys`,
+        `plan: ${listed.badKeys.length} objects under objects/ have a bad key: in the annex key space (SHA256E-) but not a SHA256E annex key, or a name no S3 call can carry (a control character)`,
       );
       throw new StageError("objects-bad-key", EXIT.unreadable);
     }
@@ -1430,7 +1431,7 @@ function checkUnplannedRecordings(
   if (badOther > 0) {
     refusals.add(
       "objects-bad-key",
-      `${badOther} objects under objects/ are named in the annex key space but are not annex keys`,
+      `${badOther} objects under objects/ have a bad key (not an annex key in the annex key space, or a control character)`,
     );
   }
 }
@@ -1503,15 +1504,19 @@ function checkRawCopiesInBucket(
  * raw names, versions and markers: every raw version was shown to duplicate an annex key of the plan
  * or a blob of the repository's history. Refuses `raw-copies-unverified`, with every reason it does
  * not hold. A proof that is there and cannot be read is a failure (exit 1), as for every file.
+ *
+ * It reads working files only, so it runs with the other proofs, before the bucket is read. It
+ * returns the annex keys the raw recordings matched when the proof holds (none otherwise), for the
+ * bucket check that each one survives (`raw-duplicate-missing`).
  */
 export async function checkRawCopiesProof(
   dir: string,
   plan: PlanFile,
   planBytes: Buffer,
   refusals: Refusals,
-): Promise<void> {
+): Promise<string[]> {
   const raw = plan.rawCopies ?? [];
-  if (raw.length === 0) return;
+  if (raw.length === 0) return [];
   const problems: string[] = [];
   let bytes: Buffer | undefined;
   try {
@@ -1538,8 +1543,15 @@ export async function checkRawCopiesProof(
         `counts names=${c.names} versions=${c.versions} markers=${c.markers}, the plan has names=${want.names} versions=${want.versions} markers=${want.markers}`,
       );
     }
+    const planKeys = new Set(plan.keys.map((k) => k.oldKey));
+    const foreign = proof.matchedKeys.filter((k) => !planKeys.has(k)).length;
+    if (foreign > 0) problems.push(`${foreign} matched keys are not keys of the plan`);
   }
-  if (problems.length > 0) refusals.add("raw-copies-unverified", problems.join(", "));
+  if (problems.length > 0) {
+    refusals.add("raw-copies-unverified", problems.join(", "));
+    return [];
+  }
+  return proof?.matchedKeys ?? [];
 }
 
 /**
@@ -1740,6 +1752,7 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
   // first: the proofs, the assembly and the flags.
   const refusals: Refusals = new Refusals();
   const proven = await checkScrubProofs(o.dir, plan, planBytes, o, refusals);
+  const rawMatchedKeys = await checkRawCopiesProof(o.dir, plan, planBytes, refusals);
   for (const p of o.prune) {
     await refusals.attempt(
       () => checkPrunePrefix(dataset, p),
@@ -1793,7 +1806,21 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
     if (await hasCurrentKey(ctx, `${dataset}/zarr/`)) {
       await checkZarrProof(o.dir, dataset, planBytes, true, refusals);
     }
-    await checkRawCopiesProof(o.dir, plan, planBytes, refusals);
+    // A raw recording goes because an annex key holds its bytes: each key it matched that this run
+    // does not replace must still be current at its size (a replaced one is `new-object-missing`'s).
+    const replaced = new Set(oldKeys);
+    const kept = rawMatchedKeys.filter((k) => !replaced.has(k));
+    const keptPresent = await runPool(kept, o.concurrency, async (k) => {
+      const head = await headObject(ctx, objectKey(dataset, k));
+      return head !== null && head.size === parseKey(k).size;
+    });
+    const keptMissing = keptPresent.filter((ok) => ok !== true).length;
+    if (keptMissing > 0) {
+      refusals.add(
+        "raw-duplicate-missing",
+        `${keptMissing} of ${kept.length} annex keys the raw recordings duplicate are not current at their size`,
+      );
+    }
     await checkPrivate(ctx, o, dataset, oldKeys, [...newKeys], refusals);
 
     const listed = await listOldKeys(ctx, dataset, oldKeys, o.concurrency);

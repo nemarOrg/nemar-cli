@@ -392,6 +392,45 @@ describe("raw-hash: resuming, limits and refusals", () => {
   );
 
   test(
+    "rewrites raw-hashes.json every --checkpoint-every versions, while the run is still going",
+    async () => {
+      const ws = workspace();
+      stage(ws, seeds());
+      // NOTES waits for a release; with one worker the versions before it (in name order:
+      // code/ and participants.tsv) are hashed first, and one checkpoint each is on disk.
+      const release = join(ws.dir, "release");
+      const waiting = join(ws.dir, "waiting");
+      installSource(
+        ws,
+        `if [ "$KEY" = ${shq(NOTES)} ]; then : > ${shq(waiting)}; while [ ! -e ${shq(release)} ]; do sleep 0.05; done; fi`,
+      );
+      const proc = Bun.spawn(
+        ["python3", SCRIPT, ...rawArgs(ws, ["--workers", "1", "--checkpoint-every", "1"])],
+        { stdout: "pipe", stderr: "pipe", env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } },
+      );
+      const done = Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      try {
+        for (let i = 0; i < 300 && !existsSync(waiting); i++) await Bun.sleep(100);
+        expect(existsSync(waiting)).toBe(true);
+        // The run is blocked on NOTES: what is on disk now was written by a checkpoint.
+        const during = readOut(ws).entries;
+        expect(during.map((e) => e.name).sort()).toEqual([FOLDER, TSV].sort());
+        expect(during.every((e) => !("failure" in e))).toBe(true);
+      } finally {
+        writeFileSync(release, "");
+      }
+      const [, stderr, exit] = await done;
+      expect(exit, stderr).toBe(0);
+      expect(readOut(ws).entries).toEqual(expected(seeds()));
+    },
+    TIMEOUT_MS,
+  );
+
+  test(
     "an existing file of another plan, another dataset, or a version the plan does not record is refused",
     async () => {
       const ws = workspace();
@@ -413,6 +452,54 @@ describe("raw-hash: resuming, limits and refusals", () => {
           "would not write",
         ],
         ["twice", { ...doc, entries: [doc.entries[0], ...doc.entries] }, "would not write"],
+        ["a member more", { ...doc, more: 1 }, "is not this dataset's"],
+        ["version 2", { ...doc, version: 2 }, "is not this dataset's"],
+        ["entries an object", { ...doc, entries: {} }, "is not this dataset's"],
+        ["not an object", [doc], "is not this dataset's"],
+        [
+          "an entry not an object",
+          { ...doc, entries: ["x", ...doc.entries.slice(1)] },
+          "would not write",
+        ],
+        [
+          "another size",
+          {
+            ...doc,
+            entries: [
+              { ...doc.entries[0], size: (doc.entries[0] as { size: number }).size + 1 },
+              ...doc.entries.slice(1),
+            ],
+          },
+          "would not write",
+        ],
+        [
+          "a blob id of SHA-256 length",
+          {
+            ...doc,
+            entries: [{ ...doc.entries[0], gitBlobSha1: "a".repeat(64) }, ...doc.entries.slice(1)],
+          },
+          "would not write",
+        ],
+        [
+          "an entry with more",
+          { ...doc, entries: [{ ...doc.entries[0], more: 1 }, ...doc.entries.slice(1)] },
+          "would not write",
+        ],
+        [
+          "another failure word",
+          {
+            ...doc,
+            entries: [
+              {
+                name: (doc.entries[0] as { name: string }).name,
+                versionId: (doc.entries[0] as { versionId: string }).versionId,
+                failure: "read-failed",
+              },
+              ...doc.entries.slice(1),
+            ],
+          },
+          "would not write",
+        ],
       ];
       for (const [label, file, message] of cases) {
         const text = JSON.stringify(file);
@@ -513,6 +600,48 @@ describe("raw-hash: resuming, limits and refusals", () => {
         "nothing under a name",
       );
       await refused(withRaw(raw, { rawCopyVersions: 99 }), "totals that disagree");
+      await refused({ ...plan, rawCopies: {} }, "rawCopies an object");
+      await refused(withRaw(["x", ...raw.slice(1)]), "an entry not an object");
+      const tsvAt = raw.findIndex((r) => r.name === TSV);
+      const replaceTsv = (entry: unknown) => raw.map((r, i) => (i === tsvAt ? entry : r));
+      const tsvEntry = raw[tsvAt] as RawCopy;
+      await refused(withRaw(replaceTsv({ ...tsvEntry, versions: {} })), "versions an object");
+      for (const [label, v] of [
+        ["a version with more", { id: "v-tsv", size: 1, x: 1 }],
+        ["an empty version id", { id: "", size: 1 }],
+        ["a negative size", { id: "v-tsv", size: -1 }],
+        ["a fractional size", { id: "v-tsv", size: 1.5 }],
+        ["a size a string", { id: "v-tsv", size: "1" }],
+      ] as Array<[string, unknown]>) {
+        await refused(withRaw(replaceTsv({ ...tsvEntry, versions: [v] })), label);
+      }
+      await refused(withRaw(replaceTsv({ ...tsvEntry, markers: [""] })), "an empty marker");
+      // A name no call can carry: empty, a NUL, a lone surrogate, or a control character
+      // (contract.ts hasControlCharacter), placed where it sorts, so only the name is wrong.
+      for (const name of [
+        "",
+        "\u0000x",
+        "\ud800x",
+        "\rx.tsv",
+        "\tx.tsv",
+        "\nx.tsv",
+        "\u0001x.tsv",
+        "\u007fx.tsv",
+        "\u0085x.tsv",
+        "\uffffx.tsv",
+      ]) {
+        const entry = { name, kind: "other", versions: [{ id: "c", size: 1 }], markers: [] };
+        await refused(
+          withRaw(
+            [...raw, entry].sort((x, y) => (x.name < y.name ? -1 : 1)),
+            {
+              rawCopyNames: raw.length + 1,
+              rawCopyVersions: (plan.totals.rawCopyVersions as number) + 1,
+            },
+          ),
+          `the name ${JSON.stringify(name)}`,
+        );
+      }
       const { rawCopies: _, ...bare } = plan;
       await refused(bare, "raw totals without raw copies");
       // A key nobody read makes a plan incomplete, raw copies or not.

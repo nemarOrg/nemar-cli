@@ -9,7 +9,9 @@
  * delete marker (one with two versions), raw text locked like the recordings (a TSV, a JSON whose
  * value the git rewrite would blank, an AppleDouble `._` file, a file whose path holds an invented
  * name), a zero-byte "folder" key, a name that is only a delete marker, and the special remote's
- * `annex-uuid`, which stays. Each test restores that state and a pristine working directory.
+ * `annex-uuid`, which stays. Beside them, near misses of the two exact-name rules (`annex-uuid`,
+ * `SHA256E-`) and names a shell would read as code or as an option, each an ordinary raw copy.
+ * Each test restores that state and a pristine working directory.
  *
  * The digests the tests expect are computed here, independently, with node:crypto: a raw
  * recording's bytes ARE an annex fixture's bytes, and a git blob id is SHA-1 over
@@ -29,7 +31,8 @@ import {
   parseRawHashes,
   parseRawVerified,
 } from "../../../scripts/scrub/contract";
-import type { DeletedFile } from "../../../scripts/scrub/s3/s3-stages";
+import { AwsCliError, type PrefixEntry } from "../../../scripts/scrub/s3/s3-lib";
+import { type DeletedFile, classifyObjects } from "../../../scripts/scrub/s3/s3-stages";
 import { type S3Standin, type Snapshot, startS3Standin } from "../helpers/s3-standin";
 import { expectStopped } from "./refusal";
 import {
@@ -89,6 +92,25 @@ const NOTES = "sourcedata/Wilhelmina_notes.txt";
 const FOLDER = "code/";
 const MARKED = "CHANGES";
 const UUID = "annex-uuid";
+/** Near misses of the exact names: each is a raw copy, planned, hashed, verified and deleted. */
+const NEAR_MISS = [
+  "annex-uuid.bak",
+  "sub-01/annex-uuid",
+  "Annex-UUID",
+  `SHA256-s5--${"c".repeat(64)}`,
+  "sha256e-x",
+];
+/**
+ * Names a shell would read as code or as an option. Each goes through the plan, raw-hash's source
+ * command and the delete as data: a name a shell interpreted would name another key, and its read
+ * would fail.
+ */
+const HOSTILE = [
+  `sub-05/it's "quoted" here.tsv`,
+  "sub-05/$(exit 7).txt",
+  "sub-05/`false`.json",
+  "-rf --help.md",
+];
 
 interface RawSeed {
   name: string;
@@ -113,8 +135,14 @@ const RAW: RawSeed[] = [
   { name: NOTES, versions: [{ bytes: enc("notes\n"), lock: true }] },
   { name: FOLDER, versions: [{ bytes: new Uint8Array(0) }] },
   { name: MARKED, versions: [], marker: true },
+  ...[...NEAR_MISS, ...HOSTILE].map((name, i) => ({
+    name,
+    versions: [{ bytes: enc(`text ${i}\n`), lock: true }],
+  })),
 ];
 const RAW_NAMES = RAW.map((r) => r.name);
+/** The names whose versions are locked, as the raw text is on nm000112. */
+const LOCKED = RAW.filter((r) => r.versions.some((v) => v.lock)).map((r) => r.name);
 const OTHER_TEXT = RAW.filter((r) => !/\.(edf|bdf)$/i.test(r.name)).flatMap((r) =>
   r.versions.map((v) => v.bytes),
 );
@@ -288,7 +316,11 @@ describe("plan: raw copies", () => {
         kind: "other",
       });
       expect(plan.rawCopies?.map((c) => c.name)).not.toContain(UUID);
-      expect(plan.totals).toMatchObject({ rawCopyNames: 8, rawCopyVersions: 8, rawCopyMarkers: 3 });
+      expect(plan.totals).toMatchObject({
+        rawCopyNames: 17,
+        rawCopyVersions: 17,
+        rawCopyMarkers: 3,
+      });
       // The raw copies change nothing about the keys: the annex recordings under objects/ (the
       // three originals and, after the assembly, the two new keys), all read, as without them.
       expect(plan.keys.map((k) => k.oldKey).sort()).toEqual(
@@ -296,10 +328,35 @@ describe("plan: raw copies", () => {
       );
       expect(plan.totals).toMatchObject({ keys: 5, needScrub: 2, unreadable: 0 });
       expect(r.stdout).toContain(
-        "unreadable=0 rawCopies=8 versions=8 markers=3\nplan: raw copies under objects/ by kind: recording=2 other=6",
+        "unreadable=0 rawCopies=17 versions=17 markers=3\nplan: raw copies under objects/ by kind: recording=2 other=15",
       );
       // Counts only: no raw name and no invented name on the terminal.
       expectNoName(r.all);
+    },
+    SLOW,
+  );
+
+  test(
+    "a name with a control character is a bad key: the plan stops, and delete-old refuses before deleting",
+    async () => {
+      // No DeleteObjects body can name such a key (XML reads a carriage return back as a line
+      // feed, and cannot hold U+0001 at all), so it would stay behind every run.
+      for (const name of ["sourcedata/notes\r.tsv", "sub-01/\u0001x.json"]) {
+        standin.restore(snap);
+        standin.putObject(BUCKET, objectPath(name), enc("x\n"));
+        const out = tempDir("raw-control");
+        const label = JSON.stringify(name);
+        const r = await runScrub(standin, ["plan", "--dataset", DATASET, "--out", out]);
+        expectStopped(r, 4, "objects-bad-key", label);
+        expect(r.stdout, label).toContain("plan: 1 objects under objects/ have a bad key");
+        expect(has(out, "plan.json"), label).toBe(false);
+        for (const flag of [[], ["--execute"]]) {
+          const del = await runScrub(standin, deleteArgs(flag));
+          expectStopped(del, 3, "objects-bad-key", label);
+        }
+        expect(deleteRequests(standin), label).toBe(0);
+        expect(`${r.all}`, label).not.toContain(name);
+      }
     },
     SLOW,
   );
@@ -356,7 +413,7 @@ describe("raw-hash and raw-verify: every raw version is proven to be a duplicate
       const r = await rawVerify();
       expect(r.exitCode, r.all).toBe(0);
       expect(r.stdout.trim()).toBe(
-        "raw-verify: ok names=8 versions=8 markers=3 matchedRecordings=3 matchedOther=5",
+        "raw-verify: ok names=17 versions=17 markers=3 matchedRecordings=3 matchedOther=14",
       );
       const proof = parseRawVerified(readFileSync(path.join(dir, "raw-verified.json"), "utf8"));
       expect(proof).toMatchObject({
@@ -364,7 +421,9 @@ describe("raw-hash and raw-verify: every raw version is proven to be a duplicate
         planSha256: fileSha256(dir, "plan.json"),
         rawHashesSha256: fileSha256(dir, "raw-hashes.json"),
         gitBlobsSha256: fileSha256(dir, "git-blobs.txt"),
-        counts: { names: 8, versions: 8, markers: 3, matchedRecordings: 3, matchedOther: 5 },
+        // REC1 is A's bytes and REC2's two versions B's and D's: the three keys, sorted.
+        matchedKeys: [a.oldKey, b.oldKey, d.oldKey].sort(),
+        counts: { names: 17, versions: 17, markers: 3, matchedRecordings: 3, matchedOther: 14 },
       });
       expect(statSync(path.join(dir, "raw-verified.json")).mode & 0o777).toBe(0o600);
       expect(has(dir, "raw-unmatched.json")).toBe(false);
@@ -410,7 +469,7 @@ describe("raw-hash and raw-verify: every raw version is proven to be a duplicate
       writeBlobs(BLOBS.filter((x) => x !== gitBlob(tsv)));
       const r = await rawVerify();
       expect(r.exitCode, r.all).toBe(1);
-      expect(r.stdout).toContain("matchedRecordings=3 matchedOther=4 (raw-other-unmatched=1)");
+      expect(r.stdout).toContain("matchedRecordings=3 matchedOther=13 (raw-other-unmatched=1)");
       expect(
         Object.keys(readJson<{ unmatched: object }>(dir, "raw-unmatched.json").unmatched),
       ).toEqual(["raw-other-unmatched"]);
@@ -550,12 +609,85 @@ describe("raw-hash and raw-verify: every raw version is proven to be a duplicate
   );
 
   test(
+    "a raw text file is never matched by an annex key: the bytes of D under a text name, blob absent, fail",
+    async () => {
+      // A text name holding a recording's bytes, written before the plan, so the plan records it.
+      standin.putObject(BUCKET, objectPath("sourcedata/d-copy.txt"), d.bytes);
+      const out = tempDir("raw-textkey");
+      const plan = await runScrub(standin, ["plan", "--dataset", DATASET, "--out", out]);
+      expect(plan.exitCode, plan.all).toBe(0);
+      writeFileSync(path.join(out, "git-blobs.txt"), `${BLOBS.join("\n")}\n`);
+      const hashed = await runHashStage(standin, [
+        "raw-hash",
+        "--plan",
+        path.join(out, "plan.json"),
+        "--out",
+        path.join(out, "raw-hashes.json"),
+      ]);
+      expect(hashed.exitCode, hashed.all).toBe(0);
+      const r = await runScrub(standin, ["raw-verify", "--dir", out]);
+      expect(r.exitCode, r.all).toBe(1);
+      // Its sha256 and size ARE D's key; a text file is compared with the blob list only.
+      expect(r.stdout).toContain("matchedRecordings=3 matchedOther=14 (raw-other-unmatched=1)");
+      expect(
+        readJson<{ unmatched: Record<string, Array<{ name: string; versionId: string }>> }>(
+          out,
+          "raw-unmatched.json",
+        ).unmatched,
+      ).toEqual({
+        "raw-other-unmatched": [
+          {
+            name: "sourcedata/d-copy.txt",
+            versionId: standin.current(BUCKET, objectPath("sourcedata/d-copy.txt"))
+              ?.versionId as string,
+          },
+        ],
+      });
+      // With its blob in the list it passes.
+      writeFileSync(
+        path.join(out, "git-blobs.txt"),
+        `${[...BLOBS, gitBlob(d.bytes)].sort().join("\n")}\n`,
+      );
+      const ok = await runScrub(standin, ["raw-verify", "--dir", out]);
+      expect(ok.exitCode, ok.all).toBe(0);
+      expect(readJson<RawVerifiedFile>(out, "raw-verified.json").counts).toMatchObject({
+        matchedRecordings: 3,
+        matchedOther: 15,
+      });
+    },
+    SLOW,
+  );
+
+  test(
+    "a raw recording whose sha256 is a key's but whose size is not that key's is unmatched",
+    async () => {
+      // Only a crafted file says this (sha256 fixes the size), so the plan and the digests are
+      // edited together and bound again: the rule compared is sha256 AND size.
+      const plan = readJson<PlanFile>(dir, "plan.json");
+      const rec = plan.rawCopies?.find((c) => c.name === REC1) as RawCopy;
+      const v = rec.versions[0] as { id: string; size: number };
+      v.size += 7;
+      writeJson(dir, "plan.json", plan);
+      const hashes = readJson<RawHashesFile>(dir, "raw-hashes.json");
+      const e = hashes.entries.find((x) => x.name === REC1) as { size: number; sha256: string };
+      expect(e.sha256).toBe(sha256(a.bytes));
+      e.size = v.size;
+      writeJson(dir, "raw-hashes.json", { ...hashes, planSha256: fileSha256(dir, "plan.json") });
+      const r = await rawVerify();
+      expect(r.exitCode, r.all).toBe(1);
+      expect(r.stdout).toContain("matchedRecordings=2 matchedOther=14 (raw-recording-unmatched=1)");
+      expect(has(dir, "raw-verified.json")).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
     "a plan without raw copies has nothing to prove and gets no proof",
     async () => {
       const plan = readJson<PlanFile>(dir, "plan.json");
       const { rawCopies: _, ...rest } = plan;
       const { rawCopyNames, rawCopyVersions, rawCopyMarkers, ...totals } = plan.totals;
-      expect([rawCopyNames, rawCopyVersions, rawCopyMarkers]).toEqual([8, 8, 3]);
+      expect([rawCopyNames, rawCopyVersions, rawCopyMarkers]).toEqual([17, 17, 3]);
       writeJson(dir, "plan.json", { ...rest, totals });
       const r = await rawVerify();
       expect(r.exitCode, r.all).toBe(0);
@@ -574,11 +706,11 @@ describe("delete-old: raw copies", () => {
       expect(r.exitCode, r.all).toBe(0);
       // Two old keys of one version each, plus 8 raw versions and 3 raw markers.
       expect(r.stdout).toContain(
-        "delete-old: keys=2 versions=2 markers=0 planRecorded=13 limit=13",
+        "delete-old: keys=2 versions=2 markers=0 planRecorded=22 limit=22",
       );
-      expect(r.stdout).toContain("delete-old: raw copies names=8 versions=8 markers=3");
+      expect(r.stdout).toContain("delete-old: raw copies names=17 versions=17 markers=3");
       expect(r.stdout).toContain(
-        "delete-old dry run: would delete raw copies versions=8 markers=3 across 8 names",
+        "delete-old dry run: would delete raw copies versions=17 markers=3 across 17 names",
       );
       expect(deleteRequests(standin)).toBe(0);
       expectRawIntact(rawBefore);
@@ -595,7 +727,7 @@ describe("delete-old: raw copies", () => {
       const r = await runScrub(standin, executeArgs());
       expect(r.exitCode, r.all).toBe(0);
       expect(r.stdout).toContain(
-        "delete-old: deleted raw copies versions=8 markers=3; zero versions and zero markers remain under the 8 raw names, and no object under objects/ but annex keys and annex-uuid",
+        "delete-old: deleted raw copies versions=17 markers=3; zero versions and zero markers remain under the 17 raw names, and no object under objects/ but annex keys and annex-uuid",
       );
       // Nothing is left under any raw name, and the special remote's marker is as it was.
       for (const n of RAW_NAMES) expect(standin.versions(BUCKET, objectPath(n)), n).toEqual([]);
@@ -618,7 +750,7 @@ describe("delete-old: raw copies", () => {
       const lastVersion = Math.max(...versionRequests.map(({ i }) => i));
       expect(Math.min(...markerRequests.map(({ i }) => i))).toBeGreaterThan(lastVersion);
       const named = batchDeleted(standin).map((x) => x.versionId);
-      expect(named.filter((id) => versions.has(id as string)).length).toBe(8);
+      expect(named.filter((id) => versions.has(id as string)).length).toBe(17);
       expect(named.filter((id) => markers.has(id as string)).length).toBe(3);
 
       const done = readJson<DeletedFile>(dir, "deleted.json");
@@ -628,7 +760,7 @@ describe("delete-old: raw copies", () => {
         markers: 0,
         prunedVersions: 0,
         prunedMarkers: 0,
-        rawVersions: 8,
+        rawVersions: 17,
         rawMarkers: 3,
       });
       expect(JSON.stringify(done)).not.toContain("sub-");
@@ -638,7 +770,7 @@ describe("delete-old: raw copies", () => {
       rmSync(path.join(dir, "deleted.json"));
       const again = await runScrub(standin, executeArgs());
       expect(again.exitCode, again.all).toBe(0);
-      expect(again.stdout).toContain("delete-old: raw copies names=8 versions=0 markers=0");
+      expect(again.stdout).toContain("delete-old: raw copies names=17 versions=0 markers=0");
       expect(readJson<DeletedFile>(dir, "deleted.json").counts).toMatchObject({
         rawVersions: 0,
         rawMarkers: 0,
@@ -655,18 +787,17 @@ describe("delete-old: raw copies", () => {
       const r = await runScrub(standin, executeArgs());
       expect(r.exitCode, r.all).toBe(5);
       expect(r.stdout).toContain("DeleteObjects:access-denied");
-      // The four locked text versions stay; the unlocked recordings, the folder key and every
-      // marker went (markers are never locked, and no recording version is left under one).
+      // The locked text versions stay; the unlocked recordings, the folder key and every marker
+      // went (markers are never locked, and no recording version is left under one).
       expect(r.stdout).toContain(
-        "versions and markers remain: rawCopies=4 versions=4 markers=0 badKeys=0",
+        "versions and markers remain: rawCopies=13 versions=13 markers=0 badKeys=0",
       );
-      for (const n of [TSV, JSONF, APPLE, NOTES]) {
-        expect(standin.versions(BUCKET, objectPath(n)).length, n).toBe(1);
-      }
+      for (const n of LOCKED) expect(standin.versions(BUCKET, objectPath(n)).length, n).toBe(1);
       for (const n of [REC1, REC2, FOLDER, MARKED]) {
         expect(standin.versions(BUCKET, objectPath(n)), n).toEqual([]);
       }
       expect(has(dir, "deleted.json")).toBe(false);
+      expectNoName(r.all);
     },
     SLOW,
   );
@@ -694,6 +825,7 @@ describe("delete-old: raw copies", () => {
       // REC2's versions went, so its marker went too.
       expect(standin.versions(BUCKET, objectPath(REC2))).toEqual([]);
       expect(has(dir, "deleted.json")).toBe(false);
+      expectNoName(r.all);
     },
     SLOW,
   );
@@ -701,12 +833,12 @@ describe("delete-old: raw copies", () => {
   test(
     "--max-delete covers the raw versions and markers: the plan's count passes, one less refuses",
     async () => {
-      const exact = await runScrub(standin, deleteArgs(["--max-delete", "13"]));
+      const exact = await runScrub(standin, deleteArgs(["--max-delete", "22"]));
       expect(exact.exitCode, exact.all).toBe(0);
-      const tight = await runScrub(standin, executeArgs(["--max-delete", "12"]));
+      const tight = await runScrub(standin, executeArgs(["--max-delete", "21"]));
       expectStopped(tight, 3, "over-max-delete");
       expect(refusedLines(tight.stdout)).toEqual([
-        "delete-old: refused over-max-delete: versions+markers=13 over limit=12",
+        "delete-old: refused over-max-delete: versions+markers=22 over limit=21",
       ]);
       expect(deleteRequests(standin)).toBe(0);
       expectRawIntact(rawBefore);
@@ -741,9 +873,27 @@ describe("delete-old: raw copies", () => {
           () =>
             writeJson(dir, "raw-verified.json", {
               ...proof,
-              counts: { ...proof.counts, versions: 7, matchedOther: 4 },
+              counts: { ...proof.counts, versions: 16, matchedOther: 13 },
             }),
-          "counts names=8 versions=7 markers=3, the plan has names=8 versions=8 markers=3",
+          "counts names=17 versions=16 markers=3, the plan has names=17 versions=17 markers=3",
+        ],
+        [
+          "other names",
+          () =>
+            writeJson(dir, "raw-verified.json", {
+              ...proof,
+              counts: { ...proof.counts, names: 16 },
+            }),
+          "counts names=16 versions=17 markers=3, the plan has names=17 versions=17 markers=3",
+        ],
+        [
+          "other markers",
+          () =>
+            writeJson(dir, "raw-verified.json", {
+              ...proof,
+              counts: { ...proof.counts, markers: 2 },
+            }),
+          "counts names=17 versions=17 markers=2, the plan has names=17 versions=17 markers=3",
         ],
       ];
       for (const [label, damage, detail] of cases) {
@@ -837,27 +987,153 @@ describe("delete-old: raw copies", () => {
   );
 
   test(
-    "every refusal at once: the raw proof and a raw name beside the archives, in a fixed order",
+    "the raw proof is a working file: without it the bucket is not read at all",
     async () => {
-      standin.putObject(
-        BUCKET,
-        `${DATASET}/archives/${DATASET}_v1.0.0.zip`,
-        new TextEncoder().encode("zip"),
-      );
-      rmSync(path.join(dir, "raw-verified.json"));
+      // Beside a raw name and an archive the bucket would refuse: neither is looked at.
+      standin.putObject(BUCKET, `${DATASET}/archives/${DATASET}_v1.0.0.zip`, enc("zip"));
       standin.putObject(BUCKET, objectPath("late.tsv"), enc("x\n"));
-      const words = "archives-not-dropped+raw-copies-unverified+raw-copy-not-in-plan";
+      rmSync(path.join(dir, "raw-verified.json"));
+      for (const flag of [[], ["--execute"]]) {
+        const r = await runScrub(standin, deleteArgs(flag));
+        expectStopped(r, 3, "raw-copies-unverified");
+        expect(refusedLines(r.stdout)).toEqual([
+          "delete-old: refused raw-copies-unverified: raw-verified.json missing",
+        ]);
+        expect(r.stdout).toContain("the bucket was not read");
+      }
+      expect(standin.log.length).toBe(0);
+      expect(pub.requests.length).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "every refusal of the bucket at once: a raw name, a missing duplicate, beside the archives, in a fixed order",
+    async () => {
+      standin.putObject(BUCKET, `${DATASET}/archives/${DATASET}_v1.0.0.zip`, enc("zip"));
+      standin.putObject(BUCKET, objectPath("late.tsv"), enc("x\n"));
+      standin.putDeleteMarker(BUCKET, objectPath(d.oldKey));
+      const words = "archives-not-dropped+raw-duplicate-missing+raw-copy-not-in-plan";
       for (const flag of [[], ["--execute"]]) {
         const r = await runScrub(standin, deleteArgs(flag));
         expectStopped(r, 3, words);
         expect(refusedLines(r.stdout)).toEqual([
           "delete-old: refused archives-not-dropped: versions and markers=1 under archives/",
-          "delete-old: refused raw-copies-unverified: raw-verified.json missing",
+          "delete-old: refused raw-duplicate-missing: 1 of 1 annex keys the raw recordings duplicate are not current at their size",
           "delete-old: refused raw-copy-not-in-plan: 1 versions or markers of raw copies under objects/ are not in the plan",
         ]);
-        expect(r.stdout).toContain("delete-old: raw copies names=8 versions=8 markers=3");
+        expect(r.stdout).toContain("delete-old: raw copies names=17 versions=17 markers=3");
+        expectNoName(r.all);
       }
       expect(deleteRequests(standin)).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "a raw recording goes only while the clean key it duplicates is current at its size",
+    async () => {
+      // The proof names A, B and D; A and B are replaced (new-object-missing guards their new
+      // keys), so D, the clean one, is the key each run asks about, by HEAD and at no version.
+      const proof = readJson<RawVerifiedFile>(dir, "raw-verified.json");
+      expect(proof.matchedKeys).toEqual([a.oldKey, b.oldKey, d.oldKey].sort());
+      const refusedFor = async (label: string) => {
+        for (const flag of [[], ["--execute"]]) {
+          const r = await runScrub(standin, deleteArgs(flag));
+          expectStopped(r, 3, "raw-duplicate-missing", label);
+          expect(refusedLines(r.stdout), label).toEqual([
+            "delete-old: refused raw-duplicate-missing: 1 of 1 annex keys the raw recordings duplicate are not current at their size",
+          ]);
+          expectNoName(r.all, label);
+        }
+        expect(deleteRequests(standin), label).toBe(0);
+        expectRawIntact(rawBefore);
+      };
+      // Hidden by a delete marker: its bytes are history, and no reader gets them.
+      standin.putDeleteMarker(BUCKET, objectPath(d.oldKey));
+      await refusedFor("a marker on the clean key");
+      // A current version of another size: not the bytes the key names.
+      standin.restore(snap);
+      standin.putObject(BUCKET, objectPath(d.oldKey), d.bytes.subarray(0, 1000));
+      await refusedFor("another size");
+      // Gone altogether.
+      standin.restore(snap);
+      for (const v of standin.versions(BUCKET, objectPath(d.oldKey))) {
+        standin.dropVersion(BUCKET, objectPath(d.oldKey), v.versionId);
+      }
+      await refusedFor("no version at all");
+      // Each HEAD named the key and no version id.
+      const heads = standin.calls("HeadObject").filter((c) => c.key === objectPath(d.oldKey));
+      expect(heads.length).toBeGreaterThan(0);
+      expect(heads.every((c) => c.versionId === undefined || c.versionId === null)).toBe(true);
+    },
+    SLOW,
+  );
+
+  test(
+    "refuses a proof that matched a key the plan does not have",
+    async () => {
+      const proof = readJson<RawVerifiedFile>(dir, "raw-verified.json");
+      const foreign = makeFixture("F", ".edf", "x.edf", d.bytes.subarray(0, 4096), null).oldKey;
+      writeJson(dir, "raw-verified.json", {
+        ...proof,
+        matchedKeys: [...proof.matchedKeys, foreign].sort(),
+      });
+      const r = await runScrub(standin, deleteArgs());
+      expectStopped(r, 3, "raw-copies-unverified");
+      expect(refusedLines(r.stdout)).toEqual([
+        "delete-old: refused raw-copies-unverified: 1 matched keys are not keys of the plan",
+      ]);
+      expect(standin.log.length).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "a resumed deletion: a run without the bypass, then one with it; deleted.json counts the second",
+    async () => {
+      standin.setDenyBypass(true);
+      const first = await runScrub(standin, executeArgs());
+      expect(first.exitCode, first.all).toBe(5);
+      expect(has(dir, "deleted.json")).toBe(false);
+      expectNoName(first.all, "first run");
+      standin.setDenyBypass(false);
+      const second = await runScrub(standin, executeArgs());
+      expect(second.exitCode, second.all).toBe(0);
+      expectNoName(second.all, "second run");
+      for (const n of RAW_NAMES) expect(standin.versions(BUCKET, objectPath(n)), n).toEqual([]);
+      // The first run removed the unlocked raw versions and every marker; the locked text and the
+      // locked old keys were left for the second, and that is what its proof counts.
+      expect(readJson<DeletedFile>(dir, "deleted.json").counts).toEqual({
+        keys: 2,
+        versions: 2,
+        markers: 0,
+        prunedVersions: 0,
+        prunedMarkers: 0,
+        rawVersions: LOCKED.length,
+        rawMarkers: 0,
+      });
+    },
+    SLOW,
+  );
+
+  test(
+    "a bad key that appears during the run is found by the final listing: exit 5, no deleted.json",
+    async () => {
+      for (const name of [`SHA256E-s1--${"z".repeat(64)}.json`, "late\rname.tsv"]) {
+        standin.restore(snap);
+        dir = copyDir(built);
+        standin.beforeOp("DeleteObjects", () => {
+          standin.putObject(BUCKET, objectPath(name), enc("x"));
+        });
+        const r = await runScrub(standin, executeArgs());
+        expect(r.exitCode, r.all).toBe(5);
+        expect(r.stdout).toContain(
+          "versions and markers remain: rawCopies=0 versions=0 markers=0 badKeys=1",
+        );
+        expect(has(dir, "deleted.json")).toBe(false);
+        expect(r.all).not.toContain(name);
+      }
     },
     SLOW,
   );
@@ -904,4 +1180,67 @@ describe("the recording a raw copy duplicates", () => {
     },
     SLOW,
   );
+});
+
+describe("classifyObjects, as a unit", () => {
+  const prefix = `${DATASET}/objects/`;
+  const version = (name: string): PrefixEntry => ({
+    key: `${prefix}${name}`,
+    kind: "version",
+    versionId: `v-${name.length}`,
+    isLatest: true,
+    size: 1,
+  });
+  /** The same entry as the listing gives it with no size. */
+  const sizeless = (e: PrefixEntry): PrefixEntry => {
+    const { size: _, ...rest } = e;
+    return rest;
+  };
+
+  test("near misses of the exact names are raw copies; the exact names are not", () => {
+    const edf = `SHA256E-s9--${"a".repeat(64)}.edf`;
+    const json = `SHA256E-s9--${"b".repeat(64)}.json`;
+    const listed = classifyObjects(
+      DATASET,
+      [...NEAR_MISS, ...HOSTILE, UUID, edf, json].map((n) => version(n)),
+    );
+    expect(listed.raw.map((r) => r.name)).toEqual([...NEAR_MISS, ...HOSTILE].sort());
+    expect([...listed.recordings]).toEqual([edf]);
+    expect(listed.badKeys).toEqual([]);
+  });
+
+  test("a control character, U+FFFE or U+FFFF, or a malformed annex key is a bad key", () => {
+    const controls = [
+      "\u0000a",
+      "a\tb",
+      "a\nb",
+      "a\rb",
+      "\u001fx",
+      "del\u007f",
+      "c1\u0080",
+      "c1\u009f",
+      "x\ufffe",
+      "x\uffff",
+    ];
+    const ok = ["nbsp\u00a0", "e\u00e9", "cjk\u4e00", "x\ufffd"];
+    const malformed = `SHA256E-s9--${"z".repeat(64)}.edf`;
+    const listed = classifyObjects(
+      DATASET,
+      [...controls, ...ok, malformed].map((n) => version(n)),
+    );
+    expect(listed.badKeys).toEqual([...controls, malformed].sort());
+    expect(listed.raw.map((r) => r.name)).toEqual([...ok].sort());
+  });
+
+  test("a key outside the prefix, or a version with no size, is a bad answer", () => {
+    expect(() =>
+      classifyObjects(DATASET, [{ ...version("x.tsv"), key: "xx090999/objects/x.tsv" }]),
+    ).toThrow(AwsCliError);
+    expect(() => classifyObjects(DATASET, [sizeless(version("x.tsv"))])).toThrow(AwsCliError);
+    // A marker needs no size.
+    const marker: PrefixEntry = { ...sizeless(version("y.tsv")), kind: "marker" };
+    expect(classifyObjects(DATASET, [marker]).raw).toEqual([
+      { name: "y.tsv", kind: "other", versions: [], markers: [marker.versionId] },
+    ]);
+  });
 });

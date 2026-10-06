@@ -8,9 +8,13 @@
  * each raw VERSION must match, by what its kind can be compared with:
  *
  * - a raw recording (`.edf`, `.bdf`) is byte for byte an annex key of the plan: its sha256 is the
- *   sha256 a key of `plan.keys` names, and its size is that key's size. The plan read every one of
- *   those keys, scrubbed or clean, so the bytes survive the deletion as that key (or, scrubbed, as
- *   its replacement);
+ *   sha256 a key of `plan.keys` names, and its size is that key's size. An annex key names its
+ *   bytes (git-annex stores content under the sha256 and size of the content), and that is what
+ *   this rests on: the plan read a clean key's header and size, not its whole body, and only a key
+ *   that needs a scrub was read whole (`compute`). The proof records the keys it matched
+ *   (`matchedKeys`), and `delete-old` requires each one it does not replace to be current at its
+ *   size, so the bytes survive the deletion as that key (or, scrubbed, as its replacement, which
+ *   `verify` proved);
  * - any other raw file is a blob of the dataset repository's history from before the rewrite: its
  *   git blob id is in the list the operator took from the clone at step 0 (`git-blobs.txt`). That
  *   history holds the text as it was, so the raw copy holds nothing the repository did not.
@@ -76,15 +80,16 @@ export function parseGitBlobs(text: string): Set<string> {
   return new Set(lines);
 }
 
-/** sha256 -> the sizes of the plan's annex keys that carry it (scrubbed or clean, all read). */
-function annexDigests(plan: PlanFile): Map<string, Set<number>> {
-  const out = new Map<string, Set<number>>();
+const digestAt = (sha256: string, size: number) => `${sha256} ${size}`;
+
+/** sha256 and size -> the plan's annex keys that carry them (scrubbed or clean). */
+function annexDigests(plan: PlanFile): Map<string, string[]> {
+  const out = new Map<string, string[]>();
   for (const k of plan.keys) {
     if (k.oldKey.startsWith("git:")) continue;
     const { sha256, size } = parseKey(k.oldKey);
-    const sizes = out.get(sha256) ?? new Set<number>();
-    sizes.add(size);
-    out.set(sha256, sizes);
+    const at = digestAt(sha256, size);
+    out.set(at, [...(out.get(at) ?? []), k.oldKey]);
   }
   return out;
 }
@@ -129,6 +134,7 @@ export async function rawVerifyStage(o: RawVerifyOptions): Promise<number> {
   };
   let matchedRecordings = 0;
   let matchedOther = 0;
+  const matchedKeys = new Set<string>();
   const planned = new Set<string>();
   for (const r of raw) {
     for (const v of r.versions) {
@@ -141,8 +147,13 @@ export async function rawVerifyStage(o: RawVerifyOptions): Promise<number> {
         // raw-hash read a byte count other than the plan's size, or the entry says another size.
         fail("raw-size-differs", r.name, v.id);
       } else if (r.kind === "recording") {
-        if (digests.get(e.sha256)?.has(v.size)) matchedRecordings += 1;
-        else fail("raw-recording-unmatched", r.name, v.id);
+        const keys = digests.get(digestAt(e.sha256, v.size));
+        if (keys === undefined) {
+          fail("raw-recording-unmatched", r.name, v.id);
+        } else {
+          matchedRecordings += 1;
+          for (const k of keys) matchedKeys.add(k);
+        }
       } else if (blobs.has(e.gitBlobSha1)) {
         matchedOther += 1;
       } else {
@@ -189,6 +200,7 @@ export async function rawVerifyStage(o: RawVerifyOptions): Promise<number> {
     planSha256: planSha,
     rawHashesSha256: sha256Hex(hashesBytes),
     gitBlobsSha256: sha256Hex(blobsBytes),
+    matchedKeys: [...matchedKeys].sort(),
     counts: { ...want, matchedRecordings, matchedOther },
   };
   await writeJson(o.dir, "raw-verified.json", proof);
