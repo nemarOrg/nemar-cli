@@ -217,10 +217,10 @@ SUITE("a sourcedata mirror scrubbed in place keeps its upstream checksums (ADR 0
     expect(plan.dropPaths).toEqual([]);
     expect(plan.jsonOps).toEqual({
       [MIRROR_PROVENANCE]: [
-        { op: "set", key: "privacy_correction", value: provenanceNote(DATE, true, false) },
+        { op: "set", key: "privacy_correction", value: provenanceNote(DATE, "scrubbed-in-place") },
       ],
     });
-    expect(plan.appendText[MIRROR_README]).toBe(provenanceReadmeNote(DATE, true, false));
+    expect(plan.appendText[MIRROR_README]).toBe(provenanceReadmeNote(DATE, "scrubbed-in-place"));
     expect(report).toMatchObject({
       dropPaths: 0,
       provenanceEntriesDropped: 0,
@@ -255,9 +255,11 @@ SUITE("a sourcedata mirror scrubbed in place keeps its upstream checksums (ADR 0
         doc.files.map((f) => f.sha256),
         ref,
       ).toEqual(ns.map(mirrorChecksum));
-      expect(doc.privacy_correction, ref).toBe(provenanceNote(DATE, true, false));
+      expect(doc.privacy_correction, ref).toBe(provenanceNote(DATE, "scrubbed-in-place"));
       expect(
-        fileAt(fx.clone, ref, MIRROR_README)?.endsWith(provenanceReadmeNote(DATE, true, false)),
+        fileAt(fx.clone, ref, MIRROR_README)?.endsWith(
+          provenanceReadmeNote(DATE, "scrubbed-in-place"),
+        ),
       ).toBe(true);
     }
     // The positive control: the source holds every old key, the rewrite holds none of them, and

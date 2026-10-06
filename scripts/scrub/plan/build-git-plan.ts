@@ -23,8 +23,8 @@
  * - a change-log sentence is appended to `CHANGES`, and, on the same condition as the provenance
  *   sentence, a note to the provenance README.
  *
- * Whether the S3 plan scrubs anything is known only with `--s3-plan`, which the runbook always
- * passes; without it a provenance file is annotated only when files are dropped.
+ * Whether the S3 plan scrubs anything is known only with `--s3-plan`, so a history that has the
+ * provenance file or its README is refused without one (`s3-plan-required`).
  *
  * The plan holds file NAMES, which can be the identifier, so it is private and deleted with the rest
  * of the working directory. The report on stdout is counts only.
@@ -37,7 +37,9 @@
  * - a `v*` tag that is not `vX.Y.Z[-pre]` (`tag-not-semver`): the change-log sentence and the
  *   ledger take only those;
  * - with `--s3-plan`, a key the S3 plan scrubs that no commit of the history names
- *   (`orphan-key`): the history rewrite would refuse its keymap entry (`keymap-key-never-seen`).
+ *   (`orphan-key`): the history rewrite would refuse its keymap entry (`keymap-key-never-seen`);
+ * - without `--s3-plan`, a history that has the provenance file or its README
+ *   (`s3-plan-required`): the sentence would not know whether headers were scrubbed in place.
  *
  * Exit: 0 plan written, 1 failed, 2 usage, 3 refused.
  */
@@ -61,48 +63,37 @@ const PROVENANCE_README = "sourcedata/README_sourcedata_provenance.md";
 const MAX_JSON_BYTES = 1024 * 1024;
 
 /**
+ * What the scrub changed in the files a provenance file describes. There is no value for
+ * "nothing", so no sentence can be built that claims a change nobody made.
+ */
+export type ProvenanceChange = "scrubbed-in-place" | "files-removed" | "both";
+
+const SCRUBBED_IN_PLACE =
+  "identification fields in the headers of the recording files were scrubbed in place";
+
+/**
  * The `privacy_correction` sentence of the provenance file: what the scrub changed, and what its
  * checksums still describe. It names removed files only when some were removed.
  */
-export function provenanceNote(
-  date: string,
-  headersScrubbed: boolean,
-  filesRemoved: boolean,
-): string {
-  const done = [
-    ...(filesRemoved
-      ? [
-          "files whose names or contents identify a person were removed, with their entries in this file",
-        ]
-      : []),
-    ...(headersScrubbed
-      ? ["identification fields in the headers of the recording files were scrubbed in place"]
-      : []),
-  ].join(", and ");
-  const checksums = headersScrubbed
-    ? "the checksums in this file describe the original upstream files, not the scrubbed copies in this dataset"
-    : "the remaining checksums describe the original upstream files";
-  return `${date}: ${done}; ${checksums}.`;
+export function provenanceNote(date: string, change: ProvenanceChange): string {
+  const removed =
+    "files whose names or contents identify a person were removed, with their entries in this file";
+  if (change === "files-removed") {
+    return `${date}: ${removed}; the remaining checksums describe the original upstream files.`;
+  }
+  const done = change === "both" ? `${removed}, and ${SCRUBBED_IN_PLACE}` : SCRUBBED_IN_PLACE;
+  return `${date}: ${done}; the checksums in this file describe the original upstream files, not the scrubbed copies in this dataset.`;
 }
 
 /** The note appended to the provenance README, on the same terms as {@link provenanceNote}. */
-export function provenanceReadmeNote(
-  date: string,
-  headersScrubbed: boolean,
-  filesRemoved: boolean,
-): string {
-  const done = [
-    ...(headersScrubbed
-      ? ["identification fields in the headers of the recording files were scrubbed in place"]
-      : []),
-    ...(filesRemoved
-      ? ["files that identify a person were removed, with their entries in the provenance file"]
-      : []),
-  ].join(", and ");
-  const checksums = headersScrubbed
-    ? "The checksums in the provenance file describe the original upstream files, not the scrubbed copies."
-    : "The remaining checksums in the provenance file describe the original upstream files.";
-  return `\nPrivacy correction ${date}: ${done}. ${checksums}\n`;
+export function provenanceReadmeNote(date: string, change: ProvenanceChange): string {
+  const removed =
+    "files that identify a person were removed, with their entries in the provenance file";
+  if (change === "files-removed") {
+    return `\nPrivacy correction ${date}: ${removed}. The remaining checksums in the provenance file describe the original upstream files.\n`;
+  }
+  const done = change === "both" ? `${SCRUBBED_IN_PLACE}, and ${removed}` : SCRUBBED_IN_PLACE;
+  return `\nPrivacy correction ${date}: ${done}. The checksums in the provenance file describe the original upstream files, not the scrubbed copies.\n`;
 }
 
 export class PlanRefused extends Error {
@@ -245,7 +236,7 @@ export interface PlanReport {
   provenanceAnnotated: number;
   /** 1 when the provenance README gets the privacy-correction note, else 0. */
   provenanceReadmeAnnotated: number;
-  /** With an S3 plan: the keys it scrubs in place. -1 without one (and none is assumed). */
+  /** With an S3 plan: the keys it scrubs in place. -1 without one (no provenance file then). */
   s3KeysScrubbed: number;
   /** Inline JSON paths with a blob over {@link MAX_JSON_BYTES} in some commit: not read. */
   skippedOversizeJson: number;
@@ -339,19 +330,30 @@ export function buildGitPlan(
     }
   }
 
-  // The S3 plan says whether recordings are scrubbed in place; without it, none is assumed.
+  // The S3 plan says whether recordings are scrubbed in place. Without it the provenance file's
+  // sentence could not say so, so a history that has the file, or its README, needs one.
   const s3Plan = opts.s3PlanPath ? parsePlan(readFileSync(opts.s3PlanPath, "utf8")) : undefined;
   if (s3Plan && s3Plan.dataset !== dataset) throw new PlanRefused("s3-plan-dataset-mismatch");
+  if (!s3Plan && (allPaths.has(PROVENANCE_PATH) || allPaths.has(PROVENANCE_README))) {
+    throw new PlanRefused("s3-plan-required");
+  }
   const s3KeysScrubbed = s3Plan ? s3Plan.keys.filter((k) => k.needsScrub).length : -1;
   const headersScrubbed = s3KeysScrubbed > 0;
   const filesRemoved = dropped.length > 0;
+  const change: ProvenanceChange | undefined = headersScrubbed
+    ? filesRemoved
+      ? "both"
+      : "scrubbed-in-place"
+    : filesRemoved
+      ? "files-removed"
+      : undefined;
 
   // The provenance file keeps its upstream checksums (ADR 0085), so whenever the scrub changes a
   // file it describes, it says so; only removed files also lose their entries and the counts.
   const jsonOps: Record<string, JsonOp[]> = {};
   let provenanceDropped = 0;
   let provenanceAnnotated = 0;
-  if ((headersScrubbed || filesRemoved) && allPaths.has(PROVENANCE_PATH)) {
+  if (change && allPaths.has(PROVENANCE_PATH)) {
     const ops: JsonOp[] = [];
     if (filesRemoved) {
       const rel = dropped.map((p) => p.slice("sourcedata/".length));
@@ -370,7 +372,7 @@ export function buildGitPlan(
     ops.push({
       op: "set",
       key: PROVENANCE_NOTE_KEY,
-      value: provenanceNote(date, headersScrubbed, filesRemoved),
+      value: provenanceNote(date, change),
     });
     jsonOps[PROVENANCE_PATH] = ops;
     provenanceAnnotated = 1;
@@ -378,8 +380,8 @@ export function buildGitPlan(
 
   const appendText: Record<string, string> = { CHANGES: `\n${changeLogEntry(date, tags)}\n` };
   let provenanceReadmeAnnotated = 0;
-  if ((headersScrubbed || filesRemoved) && allPaths.has(PROVENANCE_README)) {
-    appendText[PROVENANCE_README] = provenanceReadmeNote(date, headersScrubbed, filesRemoved);
+  if (change && allPaths.has(PROVENANCE_README)) {
+    appendText[PROVENANCE_README] = provenanceReadmeNote(date, change);
     provenanceReadmeAnnotated = 1;
   }
 
