@@ -106,7 +106,7 @@ The stop line on stderr joins the words with `+`, for example `s3-scrub: archive
 | `assembled.json`, `keymap.json` | step 4 | steps 5, 7, 8, 14, 15a, 15b |
 | `verified.json` | step 5 | steps 15a and 15b |
 | `new-hash-verified.json` | step 5, on the hash host | steps 15a and 15b |
-| `git-plan.json`, `git-plan.json.skipped.json`, `git-plan.report.json` | step 2 | steps 7, 13, 14 |
+| `git-plan.json`, `git-plan.json.skipped.json`, `git-plan.report.json` | step 2 | steps 7, 13, 14; steps 15a and 15b compare `git-plan.json`, when it is here, with the git proof |
 | `before.json` | step 7 | steps 7 (local verify) and 9 (snapshot) |
 | `git-verified.json` | step 7 (mode `local`), then step 14 (mode `fresh-clone`, which overwrites it) | steps 15a and 15b need the `fresh-clone` one |
 | `ruleset.json` | step 9 | step 9 (switch, check, restore) |
@@ -438,8 +438,11 @@ A dataset that mirrors upstream recordings under `sourcedata/` has `sourcedata/s
 Those checksums stay, as provenance (ADR 0085), and they are also the hashes of old keys the S3 plan scrubs, because the mirrored copies were the upstream bytes.
 Whenever the S3 plan scrubs any key, or a file is dropped, the plan sets `privacy_correction` in that file to a sentence saying what changed and that the checksums describe the original upstream files, not the scrubbed copies, and appends a note on the same terms to `sourcedata/README_sourcedata_provenance.md`.
 The sentence and the note say files were removed only when some are dropped, and only then are entries dropped from `files` and the counts recomputed.
+The three cases read: scrubbed in place only (the headers were scrubbed in place; the checksums describe the original upstream files, not the scrubbed copies), files removed only (which files went; the remaining checksums describe the original upstream files), and both.
 `provenanceAnnotated` and `provenanceReadmeAnnotated` are 1 when the plan did so, and `s3KeysScrubbed` is how many keys the S3 plan scrubs.
-Without `--s3-plan` it is `-1` and only a dropped file sets the sentence, so always pass `--s3-plan`: step 7's verify refuses a provenance file that keeps old hashes without the sentence (`provenance-unannotated`).
+Without `--s3-plan` the plan cannot know whether a header was scrubbed, so it refuses a history that has the provenance file or its README (`s3-plan-required`); `s3KeysScrubbed` is `-1` only for a dataset with neither.
+Step 7's verify refuses a provenance file that keeps old hashes without a sentence (`provenance-unannotated`); it checks that a sentence is there, not what it says, and the plan's own `set` operation is what binds its words (`json-ops-not-applied`).
+Like every appended text, the README note is created in each commit that has no README file yet, including commits from before `sourcedata/` existed, where the file holds only the note (as `CHANGES` is created where it is absent); that is cosmetic and expected.
 Exit 3 is a refusal that writes no plan:
 
 - `skipped-json (oversize=N unparseable=M)`: an inline JSON file could not be read in some commit (over 1 MiB, or not UTF-8 JSON), so its identifier keys would never be blanked.
@@ -449,6 +452,7 @@ Exit 3 is a refusal that writes no plan:
 - `orphan-key (N)`: a key the S3 plan scrubs that no commit's pointer or symlink names, so the rewrite would refuse its keymap entry.
   Assembling such a key (an orphan, with `gitReferenced: false` in the keymap) is not built (ADR 0085, deferred items); stop and ask.
 - `s3-plan-dataset-mismatch`.
+- `s3-plan-required`: the history has `sourcedata/sourcedata_provenance.json` or its README and no `--s3-plan` was given.
 
 Anything outside `sourcedata/` that the scanner flags is for a person to decide, not for the plan.
 Read the counts (files dropped, JSON files blanked, provenance entries, and whether the provenance file and its README are annotated).
@@ -533,19 +537,26 @@ It refuses a clone that is not clean or has a stash, whose branches do not match
 A relative `--report` is resolved from where you stand.
 Its refusals are exit 3 (`bad-input: ...` too), and failures are exit 1.
 A failure after the refs were rewritten prints `failed: cleanup-after-rewrite: the refs WERE rewritten; old objects may remain in the object store. In the clone run ...`: run the two commands it names in the clone, then verify.
-The rewrite deletes `refs/annex/last-index`, a cache that git-annex 10.20240129 writes and that names the pre-rewrite index (it would keep every old pointer blob reachable); a later `git status` can recreate it, naming the new index, which is harmless.
+The rewrite deletes `refs/annex/last-index`, a cache git-annex writes that names the pre-rewrite index (it would keep every old pointer blob reachable).
+git-annex recreates it, naming the new index, after a later command in the clone: `git status` with 10.20240129, and `git checkout` with 10.20260901 (measured on the test fixture).
+Verify reads it like every ref: it names a root tree, so it keeps the provenance exception, and it fails `old-key-present` only if that tree still holds an old key.
+The verify of commit ad419189 turned the exception off for any ref to a tree, so with that version the recreated ref fails `old-key-present` on the provenance file with `provenanceBlobsKept=0`; delete it first (`git -C $W/clone update-ref -d refs/annex/last-index`), which is safe because the next git-annex command writes it again.
 
 Verify must exit 0: no old key in any blob, commit message or annotated-tag message of any ref (except the upstream checksums of the provenance file, below), every EDF and BDF key in any commit is a new key or one the plan found clean, no dropped path, JSON blanked and structural edits applied, commit counts and tag names unchanged.
 It prints `verify: ok mode=local <counts>`, the counts in alphabetical order: `blobsScanned`, `commits`, `edfKeys`, `jsonChecked`, `jsonUnparseable`, `objectsScanned`, `provenanceBlobsKept`, `provenanceHashesKept`, `refs`.
 Exit 4 prints `verify: FAIL reason=... count=...` for each reason, then `verify: failed mode=local <counts>`.
-The reasons in this mode: `refs-missing`, `tag-names-changed`, `tag-kind-changed`, `commit-count-changed`, `old-key-present`, `old-key-in-message`, `provenance-unannotated`, `dropped-path-present`, `blank-key-not-empty`, `json-ops-not-applied`, `json-unparseable`, `append-missing`, `append-duplicated`, `tip-paths-mismatch`, `annex-branch-changed`, `edf-key-unaccounted`, `edf-path-not-a-pointer`.
+The reasons in this mode: `refs-missing`, `tag-names-changed`, `tag-kind-changed`, `commit-count-changed`, `old-key-present`, `old-key-in-message`, `provenance-unannotated`, `provenance-too-large`, `dropped-path-present`, `blank-key-not-empty`, `json-ops-not-applied`, `json-unparseable`, `append-missing`, `append-duplicated`, `tip-paths-mismatch`, `annex-branch-changed`, `edf-key-unaccounted`, `edf-path-not-a-pointer`.
 
 **The provenance file keeps its upstream checksums (ADR 0085).**
 An old key's hash may stay in one place only: `sourcedata/sourcedata_provenance.json`, as the whole string value of a `sha256` member of an object in its top-level `files` array.
-A blob is that file only when it is that path, and no other, in every commit of every ref; while any ref names a tree or a blob rather than a commit, nothing is exempt.
+A blob is that file only when it is that path, as a regular file (mode `100644` or `100755`, never a symlink), and nothing else, in every commit of every ref and in every tree a ref names directly.
+A ref that names a tree, as `refs/annex/last-index` does, has its blobs listed under that tree's own paths: a root tree, which is what git-annex writes, keeps the exception, and a subtree, or a tree that also holds the blob at another path, does not.
+While any ref names a blob, or anything but a commit or a tree, that blob has no path to check, and nothing is exempt.
 An old hash anywhere else in that blob (in the `privacy_correction` sentence, in another field, nested deeper, in another array, as a key) is `old-key-present`, and so is one in any other file, a copy of the provenance file at another path included.
 A blob whose old hashes all sit where they may, but which has no non-empty `privacy_correction`, is `provenance-unannotated`: it would claim upstream checksums with no word that the copies differ, which is what a plan made before 2026-10-06 leaves on a dataset scrubbed only in place.
-`provenanceHashesKept` counts the distinct old hashes kept and `provenanceBlobsKept` the blobs that kept them; both are 0 for a dataset without the file.
+A provenance blob over 16 MiB (about 100,000 entries) is not read and is `provenance-too-large`; nm000186's file is tens of KiB.
+One nested deeper than the walk can follow (tens of thousands of levels) is not placed, and is `old-key-present`.
+`provenanceHashesKept` counts the distinct old hashes kept, not the other checksums the file lists, and `provenanceBlobsKept` the blobs that kept them; both are 0 for a dataset without the file.
 On nm000186 the file has two versions listing 88 checksums, so expect `provenanceBlobsKept=2` and at most 88 hashes kept; a count you cannot explain from the file's history is a stop.
 `--allow-unparseable-json` accepts a plan path whose content is not JSON in some commit; it is about plan paths and is unrelated to step 2's `--allow-skipped-json`.
 A passing verify writes `$W/git-verified.json` in mode `local`; steps 15a and 15b need the one that step 14 writes.
@@ -892,7 +903,7 @@ It does not compare commit counts, tip paths or annex refs, so the ledger commit
 Exit 0 prints `verify: ok mode=fresh-clone <counts>` (step 7's counts and `ledgerCommits`) and writes `$W/git-verified.json` in mode `fresh-clone` (overwriting step 7's), which steps 15a and 15b require, with this same `keymap.json` and `plan.json`.
 Its `provenanceHashesKept` and `provenanceBlobsKept` must equal step 7's: the pushed history is the one verified there.
 Exit 4 prints `verify: FAIL reason=... count=...` for each reason and removes any earlier proof.
-The reasons in this mode: `tag-names-not-plan`, `old-key-present`, `old-key-in-message`, `provenance-unannotated`, `dropped-path-present`, `blank-key-not-empty`, `json-ops-not-applied`, `json-unparseable`, `append-missing`, `append-duplicated`, `edf-key-unaccounted`, `edf-path-not-a-pointer`, `ledger-commit-not-alone`, `ledger-invalid`, `annex-branch-missing`, `annex-old-key-held`, `annex-old-key-not-dead`, `annex-new-key-unregistered`.
+The reasons in this mode: `tag-names-not-plan`, `old-key-present`, `old-key-in-message`, `provenance-unannotated`, `provenance-too-large`, `dropped-path-present`, `blank-key-not-empty`, `json-ops-not-applied`, `json-unparseable`, `append-missing`, `append-duplicated`, `edf-key-unaccounted`, `edf-path-not-a-pointer`, `ledger-commit-not-alone`, `ledger-invalid`, `annex-branch-missing`, `annex-old-key-held`, `annex-old-key-not-dead`, `annex-new-key-unregistered`.
 
 Then read every regenerated manifest again (step 12's check).
 `verify-new` (step 5) already hashed every new object.
@@ -957,7 +968,7 @@ The live host's path and its `sqlite3` binary are UNVERIFIED; if either differs,
 > - the plan is complete and not partial, and `--confirm-dataset` matches (`plan-partial`, `plan-has-unreadable`, `confirm-dataset-mismatch`); these stop before anything else is read;
 > - `assembled.json` exists, names this dataset and bucket, and holds only keys the plan marked for a scrub, each with a new key of its own (`assembled.json-missing`, `assembled-wrong-dataset`, `assembled-wrong-bucket`, `assembled-not-in-plan`, `duplicate-new-key`, `old-key-is-a-new-key`);
 > - `verified.json` and `new-hash-verified.json` (step 5) exist, parse, and name the exact bytes of `assembled.json`, this dataset and its number of entries (`verified.json-missing`, `new-hash-verified.json-missing`, `verified.json-invalid`, `new-hash-verified.json-invalid`, `verified-stale`, `new-hash-verified-stale`, `proof-wrong-dataset`, `proof-count-mismatch`);
-> - `git-verified.json` (step 14) exists, parses, is mode `fresh-clone`, and names this `keymap.json` and `plan.json`, and the keymap is this assembly's (`git-proof-missing`, `git-proof-invalid`, `git-proof-stale`, `keymap.json-missing`, `keymap-mismatch`);
+> - `git-verified.json` (step 14) exists, parses, is mode `fresh-clone`, and names this `keymap.json` and `plan.json`, and, when `git-plan.json` is in `$W`, that git plan, and the keymap is this assembly's (`git-proof-missing`, `git-proof-invalid`, `git-proof-stale`, `keymap.json-missing`, `keymap-mismatch`);
 > - `zarr-verified.json` (step 10) exists, parses, and names this `plan.json` and the `zarr-plan.json` beside it, and while Zarr objects are current it proves stores, not `no-zarr` (`zarr-not-scrubbed`, with the reason).
 >
 > These are step 15b's checks of the same files, with the same words, except that step 15b asks for the Zarr proof only while Zarr objects are current.
@@ -999,7 +1010,7 @@ The live host's path and its `sqlite3` binary are UNVERIFIED; if either differs,
 > **It refuses unless** (all exit 3, all in the dry run, and every one that applies is listed):
 > - the plan is complete and not partial, and `--confirm-dataset` matches (`plan-partial`, `plan-has-unreadable`, `confirm-dataset-mismatch`); these stop before anything else is read;
 > - both S3 proofs exist, parse, and name the exact bytes of `assembled.json` (`verified.json-missing`, `new-hash-verified.json-missing`, `verified-stale`, `new-hash-verified-stale`, `proof-wrong-dataset`, `proof-count-mismatch`), and `assembled.json` names this dataset and bucket (`assembled-wrong-dataset`, `assembled-wrong-bucket`);
-> - the git proof exists, parses, is mode `fresh-clone`, and names this `keymap.json` and `plan.json` (`git-proof-missing`, `git-proof-invalid`, `git-proof-stale`), and the keymap is this assembly's (`keymap-mismatch`);
+> - the git proof exists, parses, is mode `fresh-clone`, and names this `keymap.json` and `plan.json`, and, when `git-plan.json` is in `$W`, that git plan (`git-proof-missing`, `git-proof-invalid`, `git-proof-stale`), and the keymap is this assembly's (`keymap-mismatch`);
 > - every current manifest names no old key and no recording the scrub did not account for (`manifest-names-old-key`, `manifest-names-unplanned-key`, `manifest-unreadable`, `no-manifests`);
 > - every EDF and BDF under `D/objects/`, a version or a marker included, is a planned or an assembled key (`unplanned-recording`);
 > - `D/archives/` holds no version or marker at all (`archives-not-dropped`);

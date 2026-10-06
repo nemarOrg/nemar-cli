@@ -119,7 +119,8 @@ Phase 2 builds the tools an administrator runs by hand, and the shared header sc
   bytes are identical.
 - A mirror diverges from upstream. The provenance text that said sourcedata is byte-for-byte
   unmodified is corrected for any dataset scrubbed, and upstream archives are told.
-  The provenance file keeps the `sha256` of each original upstream file, which is also the hash of an old key the scrub replaced; it says, in `privacy_correction`, that those checksums describe the original upstream files and not the scrubbed copies, whenever any key is scrubbed or any file is removed, and names removed files only when some were.
+  The provenance file keeps the `sha256` of each original upstream file, which is also the hash of an old key the scrub replaced.
+  Whenever any key is scrubbed or any file is removed, it says in `privacy_correction` what changed and that its checksums describe the original upstream files; it adds "not the scrubbed copies" only when keys were scrubbed in place, and names removed files only when some were.
   `git-scrub verify` lets an old hash stand there and nowhere else (amendment of 2026-10-06, "A mirror's provenance file keeps the upstream checksums").
 - Scrubbing re-reads every affected file once (about 345 GB across the first 16 datasets), which is
   why hashing runs on a host with fast S3 reads and assembly never moves the payload.
@@ -181,7 +182,7 @@ The fleet scan lists only public datasets, so it cannot screen a private one, an
 The public surface is checked after the dataset is made public again, and a failure there makes it private again; the new objects were verified twice, so the fault would be in a manifest, a cache or a route.
 
 **The irreversible steps check for themselves.**
-`delete-old` refuses unless the plan is complete and not partial, both S3 proofs name the exact bytes of `assembled.json`, the verification of a fresh clone of the pushed repository (`git-verified.json`, mode `fresh-clone`) names this keymap and plan, no current manifest names an old key, an anonymous request for a new object, and for an old one while any remains, is refused (the dataset is private), the Zarr stage has verified for this plan, and no archive remains.
+`delete-old` refuses unless the plan is complete and not partial, both S3 proofs name the exact bytes of `assembled.json`, the verification of a fresh clone of the pushed repository (`git-verified.json`, mode `fresh-clone`) names this keymap and plan (and, from 2026-10-06, the `git-plan.json` in the working directory when one is there), no current manifest names an old key, an anonymous request for a new object, and for an old one while any remains, is refused (the dataset is private), the Zarr stage has verified for this plan, and no archive remains.
 `drop-archives` refuses unless the plan is complete and not partial, and the same proofs of the working directory hold: both S3 proofs, the fresh-clone git proof with its keymap, and the Zarr stage's proof for this plan (a `no-zarr` proof only while no Zarr object is current).
 It checks them with the same code and the same words as `delete-old`.
 Both stages evaluate every refusal before they stop and list them all, so the dry run of `delete-old` before the archives are dropped shows everything that would stop the deletion, not only that the archives remain.
@@ -289,22 +290,24 @@ The git plan said, in the file and in its README, that the checksums describe th
 Ten of the sixteen datasets carry the same mirror and the same file.
 
 **The plan.**
-Whenever the provenance file is in any commit and the S3 plan scrubs any key, or any file is dropped, the plan sets `privacy_correction` in that file to a sentence saying what changed and that its checksums describe the original upstream files, not the scrubbed copies.
+Whenever the provenance file is in any commit and the S3 plan scrubs any key, or any file is dropped, the plan sets `privacy_correction` in that file to a sentence saying what changed and that its checksums describe the original upstream files, adding "not the scrubbed copies" when keys were scrubbed in place.
 When `sourcedata/README_sourcedata_provenance.md` exists, it appends a note on the same terms.
 Both say files were removed only when some were, and only then are entries dropped from `files` and the counts recomputed.
 The report counts what it did (`provenanceAnnotated`, `provenanceReadmeAnnotated`, and `s3KeysScrubbed`, the keys the S3 plan scrubs).
-Without `--s3-plan` the plan cannot know that a key is scrubbed and annotates only for dropped files; the runbook always passes it, and verify refuses what that would leave.
+Without `--s3-plan` the plan cannot know whether a key is scrubbed, so it refuses (`s3-plan-required`) a history that has the provenance file or its README, rather than write a sentence that might leave out the scrub; the runbook always passes it.
+Verify requires a sentence, not particular words: what it says is bound by the plan's own `set` operation, which verify checks in every commit (`json-ops-not-applied`).
 
 **The verify rule.**
 In both modes, `--before` and `--fresh-clone`, which share one code path, an old hash found in a blob is not `old-key-present` only if all of these hold:
 
-- the blob is `sourcedata/sourcedata_provenance.json`, and no other path, in every commit of every ref, and every ref names a commit (a ref to a tree or a blob turns the exception off, because a tree names its blobs under paths no commit shows);
+- the blob is `sourcedata/sourcedata_provenance.json` as a regular file (mode `100644` or `100755`, never a symlink), and nothing else, in every commit of every ref and in every tree a ref names directly (a ref to a tree, such as git-annex's `refs/annex/last-index`, has its blobs listed under that tree's paths, so a root tree keeps the exception and a subtree does not), and no ref names a blob or anything but a commit or a tree (that blob has no path to check, so then nothing is exempt);
 - the blob is a UTF-8 JSON object, and every old hash in it is the whole string value of a `sha256` member of an object in the top-level `files` array; one anywhere else in the file (in the sentence, in another field, nested deeper, in another array, as a key) is a hit, found by the same scan as before with only those values masked;
 - the blob carries `privacy_correction` as a non-empty string.
 
 A blob that meets the first two and not the third fails with a reason of its own, `provenance-unannotated`, with a count.
+A provenance blob over 16 MiB is not read, and fails as `provenance-too-large`; one nested deeper than the walk can follow is not placed, and is `old-key-present`.
 A hash in any other file, a copy of the provenance file at another path included, is `old-key-present` as before.
-The verify line and the proof's `counts` carry `provenanceHashesKept` (distinct hashes) and `provenanceBlobsKept`, both 0 for a dataset without the file.
+The verify line and the proof's `counts` carry `provenanceHashesKept` (distinct old hashes; a checksum that is no old key's is not counted) and `provenanceBlobsKept`, both 0 for a dataset without the file.
 The proof's schema already takes any count, so a `git-verified.json` from before has neither and is still accepted: that verify allowed no old hash anywhere, which is stricter.
 A kept checksum is a digest of a file in the upstream release and carries none of its header text.
 
