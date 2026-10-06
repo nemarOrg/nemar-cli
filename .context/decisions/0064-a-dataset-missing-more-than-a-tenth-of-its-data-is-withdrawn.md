@@ -203,3 +203,8 @@ data nobody can supply, which is what withdrawal is for.
 - #1396; the two-route measurement of all 600 imported datasets, 2026-09-15
 - ADR 0005 (narrowed here), ADR 0015 (why the denominator is data only)
 - Per-dataset ratios in the #1396 PR description
+
+## Amendment 2026-10-04 (#1610): privacy corrections
+
+A key on the purge list is not missing: it is excluded from both the numerator and the denominator of the availability ratio ([ADR 0085](0085-a-privacy-correction-scrubs-every-version-in-place.md)).
+**Not built in Phase 2 of #1610:** there is no purge list yet, and the availability count does not read one ([ADR 0085](0085-a-privacy-correction-scrubs-every-version-in-place.md), "Build status").

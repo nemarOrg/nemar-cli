@@ -939,3 +939,19 @@ describe("fifth pass: group words, localized months, asterisk, units, survivors"
     expect(pat("dob september 1993")).toContain("edf-patient-birthdate");
   });
 });
+
+describe("a birth date is reported once per field", () => {
+  test("a birth date in the patient field does not hide one in the recording field", () => {
+    const found = scanEdfHeader(
+      buildHeader({ patient: "P01 F 14-MAR-1993 X", recording: "Startdate X X X dob=14.03.1993" }),
+    ).filter((f) => f.kind === "edf-patient-birthdate");
+    expect(found.map((f) => f.field).sort()).toEqual(["patient.birthdate", "recording.birthdate"]);
+  });
+
+  test("two birth dates in one field are one finding", () => {
+    const found = scanEdfHeader(
+      buildHeader({ patient: "P01 F 14-MAR-1993 dob=14.03.1993" }),
+    ).filter((f) => f.kind === "edf-patient-birthdate");
+    expect(found.length).toBe(1);
+  });
+});
