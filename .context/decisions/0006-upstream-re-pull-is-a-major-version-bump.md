@@ -36,3 +36,7 @@ Pulling new upstream content bumps the **major** version: `1.0.0` -> `2.0.0`. Mi
 - Epic #1046
 - `backend/src/services/openneuro-discovery.ts` — `diffNewDatasets` is id-only today
 - Measured drift 2026-07-31: 2/60 sampled mirrors stale (~3%, roughly 15-20 of 561)
+
+## Amendment 2026-10-04 (#1610): privacy corrections
+
+A privacy correction under [ADR 0085](0085-a-privacy-correction-scrubs-every-version-in-place.md) changes bytes under an existing version and issues no new version at all, so it is the one exception to "minor and patch are NEMAR's own corrections". The ledger and the dataset's change log, not the version number, are its record.

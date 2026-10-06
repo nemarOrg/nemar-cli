@@ -33,7 +33,10 @@
     "test/neurobagel-*.ts",
     "test/identifier-fleet.test.ts",
     "test/identifier-scan.test.ts",
-    "test/identifier-screen-ci.test.ts"
+    "test/identifier-screen-ci.test.ts",
+    "test/identifier-scrub.test.ts",
+    "scripts/scrub/**/*.ts",
+    "test/scrub/**/*.ts"
   ],
   "exclude": ["node_modules", "dist"]
 }

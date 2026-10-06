@@ -41,6 +41,7 @@ import {
   withRetry,
 } from "../scripts/identifier-fleet-lib";
 import { shapeOf } from "../shared/identifier-scan";
+import { toolOrFail } from "./scrub/helpers/require-tools";
 
 // ---------------------------------------------------------------------------------------
 // EDF headers
@@ -2241,8 +2242,9 @@ describe("a streak of failures stops the run", () => {
 // ---------------------------------------------------------------------------------------
 
 describe("the aws fallback runs the real aws CLI against an S3 stand-in", () => {
-  // `aws` is not installed everywhere; where it is missing these skip rather than pass.
-  const awsTest = Bun.which("aws") ? test : test.skip;
+  // `aws` is not installed everywhere; where it is missing these skip rather than pass, and
+  // under NEMAR_REQUIRE_SCRUB_TOOLS=1 (the scrub-tools CI job) a missing `aws` is a failure.
+  const awsTest = toolOrFail("aws", Bun.which("aws") !== null) ? test : test.skip;
   const doc = { files: { [EDF]: { key: "MD5E-s256--aa11.edf", size: 256 } } };
 
   /** Bun's spawn `env` REPLACES the environment: PATH and a private HOME are passed on purpose. */
