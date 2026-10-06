@@ -337,19 +337,23 @@ But only once each raw VERSION is proven to duplicate content NEMAR keeps elsewh
 
 **What "match" means, and why it differs by kind.**
 A raw recording (`.edf` or `.bdf`, any letter case) must be byte for byte an annex key of the plan: its sha256 is the one some key of `plan.keys` names, scrubbed or clean, and its size is that key's.
-The plan read every one of those keys, so what the raw copy holds survives as that key, or, for a key the scrub replaces, as its replacement, which differs only in the header the scrub exists to remove.
+This rests on content addressing: an annex key names the sha256 and size of its content, and git-annex stores the content under that name, so a key of the same sha256 and size holds the same bytes.
+The plan did not read every such key whole: a key the scrub replaces was read whole by the hash stage (`compute` checks its stored bytes against its name), but a clean key was read for its header and size only.
+So `raw-verified.json` records the annex keys the raw recordings matched (`matchedKeys`, content hashes and no value), and `delete-old` requires each one it does not replace to be current at its declared size (`raw-duplicate-missing` otherwise, with a count).
+What the raw copy holds then survives as that key, or, for a key the scrub replaces, as its replacement, which differs only in the header the scrub exists to remove and which `verify` and `verify-new` proved.
 Any other raw file must be a blob of the dataset repository's history from BEFORE the rewrite: its git blob id (SHA-1 of `blob <size>\0` and the bytes) is in the list the operator takes from the clone at runbook step 0.
 That history held the same text, so the raw copy holds nothing the repository did not; it must be taken before the rewrite, because the rewrite is exactly what removes the original text from the history.
 A recording is never matched by a blob and a text file never by an annex key: a recording is not text in the history (it is an annex pointer there), and a text file is no annex key.
 On nm000112 every raw recording version has the size of an annex key and every raw text version was measured to hash to a blob of the history, so the rule is expected to pass there; nm000114's text was not measured.
 
 **How it is built.**
-The plan records every raw copy with every version (id and size) and every delete marker (`rawCopies`), sorted by name and counted on its line (`rawCopies=N versions=V markers=M`, there even when 0, which is how the screen from inside after the deletion, runbook step 16, shows that none is left); a name in the annex key space that does not parse is still `objects-bad-key`.
+The plan records every raw copy with every version (id and size) and every delete marker (`rawCopies`), sorted by name and counted on its line (`rawCopies=N versions=V markers=M`, there even when 0, which is how the screen from inside after the deletion, runbook step 16, shows that none is left); a name in the annex key space that does not parse is `objects-bad-key`, now for any extension (it used to be checked for recordings only), and so is a name no S3 call can carry: one with a control character (U+0000 to U+001F, U+007F to U+009F, U+FFFE, U+FFFF; carriage return among them), which no `DeleteObjects` body can name, or a lone surrogate (neither occurs on nm000112 or nm000114, read on 2026-10-06).
 The hash stage's `raw-hash` streams each raw version at its version id on the hash host and records its sha256 and git blob id (`raw-hashes.json`, bound to the plan by sha256); a byte count other than the plan's size is recorded as a fixed word, never with a digest, and no name is ever printed, because a name is a file path.
 `s3-scrub raw-verify` compares and writes `raw-verified.json`, bound to the plan, the digests and the blob list, only when every raw version matches; the names that do not match go to a private file, never to the terminal.
 
 **Deletion order, and what refuses.**
-`delete-old` requires `raw-verified.json` for this plan, with the plan's own counts, for a plan with raw copies (`raw-copies-unverified`), in the dry run too and listed with every other refusal.
+`delete-old` requires `raw-verified.json` for this plan, with the plan's own counts and with matched keys that are keys of the plan, for a plan with raw copies (`raw-copies-unverified`), in the dry run too; it reads working files only, so it is checked with the other proofs, before the bucket is read.
+Each matched key the run does not replace must be current at its size (`raw-duplicate-missing`), listed with every other refusal of the bucket.
 It refuses any raw version or marker the plan did not record, and any non-annex name it did not list (`raw-copy-not-in-plan`; a raw recording it did not list is `unplanned-recording`), because their bytes were never compared; a plan made without raw copies refuses a raw object the same way.
 It deletes every raw version first, with the governance bypass (the raw text is locked like the recordings), and every raw delete marker after, in requests of their own and only for a name with no version left: a raw recording is an original hidden by its marker, and removing the marker while a version stays would make the original current.
 `--max-delete` and the plan's own count cover the raw versions and markers with the old keys'.

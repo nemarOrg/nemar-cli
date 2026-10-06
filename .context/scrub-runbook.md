@@ -448,6 +448,7 @@ wc -l < $W/git-blobs.txt          # a count, never zero
 ```
 
 It holds 40-hex blob ids and nothing else, one per line.
+It must come from THIS dataset's clone: `raw-verify` cannot tell whose history a list is, and another dataset's blobs could match a text file this history never held.
 Taking it for a dataset without raw copies does no harm; step 5b does not run for one.
 
 ### Step 1: Plan (read-only)
@@ -461,7 +462,7 @@ The line reads `plan: tags=T keys=K needScrub=N bytesToHash=B unreadable=U rawCo
 A raw copy is an object under `D/objects/` stored by its path instead of an annex key ("What a copy of a recording can be"); `annex-uuid` is not one and is never counted.
 The plan records every raw name with every version (id and size) and every delete marker in `plan.json` (`rawCopies`), and prints counts only, never a name, and with any it adds `plan: raw copies under objects/ by kind: recording=N other=M; ...`.
 Raw copies never make the plan incomplete and change nothing about the keys; a plan with any needs step 5b, and the blob list of step 0.
-Exit 4 means the plan is incomplete, and no later stage runs on it: a key was unreadable, a manifest named an EDF or BDF held inline in git (`git-inline-recording`), `version/` held a file that is neither a manifest nor a known sibling (`version-dir-unknown-file`), an object under `objects/` is named in the annex key space (`SHA256E-`) but is not an annex key (`objects-bad-key`, whatever its extension), or a recording hidden by a delete marker needs a scrub (`masked-needs-scrub`; a recording with markers and no version at all is `markers-only`).
+Exit 4 means the plan is incomplete, and no later stage runs on it: a key was unreadable, a manifest named an EDF or BDF held inline in git (`git-inline-recording`), `version/` held a file that is neither a manifest nor a known sibling (`version-dir-unknown-file`), an object under `objects/` is named in the annex key space (`SHA256E-`) but is not an annex key, or has a name no S3 call can carry, a control character such as a carriage return (`objects-bad-key`, whatever its extension; no `DeleteObjects` body can name such a key, so it is a person's to deal with; none on nm000112 or nm000114), or a recording hidden by a delete marker needs a scrub (`masked-needs-scrub`; a recording with markers and no version at all is `markers-only`).
 A masked recording (`masked-needs-scrub`, `markers-only`) is a person's decision: the tools never remove a delete marker, so remove it and plan again, or deal with its versions.
 The line `plan: unreadable by reason: ...` names each reason with its count.
 The keys are the union of every manifest and of a listing of every version and delete marker under `D/objects/`, so a recording that no manifest names, or whose current entry is a delete marker, is still found.
@@ -572,6 +573,8 @@ scp $H:scrub-work/$D/raw-hashes.json $W/raw-hashes.json
 bun run $T/s3/s3-scrub.ts raw-verify --dir $W                      # reads $W/git-blobs.txt; --git-blobs F names another file
 ```
 
+A `--source-cmd` template (as step 3 can use) gets each value shell-quoted once, for the shell that runs it; a template that hands `{key}` to another shell (`ssh`, `sh -c`) must quote it again for that one, because a raw name is a file path and may hold a quote, a space, `$` or a backtick.
+
 `raw-hash` streams every raw version at its version id (`aws s3api get-object --version-id`, the body on `/dev/fd/3`, as `verify-new` reads; a delete marker holds no bytes and is never read) and records its sha256 and its git blob id, the SHA-1 of `blob <size>\0` and the bytes with the plan's size, computed in the same pass.
 A byte count that is not the plan's size is recorded as `size-differs`, never with a digest.
 It prints counts and fixed words only (`[i/N] hashed`, `[i/N] FAILED read-failed` or `size-differs`, and `failed by reason: ...`), never a name, and never a read failure's own text, because an `aws` error quotes the key.
@@ -579,9 +582,10 @@ It prints counts and fixed words only (`[i/N] hashed`, `[i/N] FAILED read-failed
 Its exits are `compute`'s: 0 every version hashed, 1 a version failed, 3 refused (a plan that is partial or has an unreadable key, raw copies off the contract, a `--source-cmd` that does not name `{version}`), 4 `--limit` stopped with versions left; 129, 130, 143 on a signal, with the finished versions saved.
 
 `raw-verify` reads no S3 object and calls no `aws`.
-It prints `raw-verify: ok names=N versions=V markers=M matchedRecordings=R matchedOther=O` and writes `raw-verified.json` (names, versions and markers equal to step 1's; it names the sha256 of `plan.json`, `raw-hashes.json` and `git-blobs.txt`) only when every raw version matched, and removes an earlier proof first.
+It prints `raw-verify: ok names=N versions=V markers=M matchedRecordings=R matchedOther=O` and writes `raw-verified.json` (names, versions and markers equal to step 1's; it names the sha256 of `plan.json`, `raw-hashes.json` and `git-blobs.txt`, and lists the annex keys the raw recordings matched, `matchedKeys`, which step 15b checks are still there) only when every raw version matched, and removes an earlier proof first.
 Otherwise it exits 1 with `raw-verify: FAILED ... (<reason>=<count>, ...)`, and the names and version ids that did not match go to `$W/raw-unmatched.json` (0600), never to the terminal.
-The reasons: `raw-recording-unmatched` (no annex key of the plan has those bytes), `raw-other-unmatched` (the blob is not in the history's list), `raw-hash-missing` (no digest for a version the plan records: run `raw-hash` again), `raw-size-differs` (the bytes read were not the plan's size), `raw-hash-not-in-plan` (a digest of a version the plan does not record).
+The reasons: `raw-recording-unmatched` (no annex key of the plan has those bytes; an AppleDouble fork of a recording, `._x.bdf`, is kind recording by its name and lands here, because its bytes are no recording's: none on nm000112 or nm000114, whose `._` files are `._.git`, `._.gitignore`, `._README.md` and `._.nemar`), `raw-other-unmatched` (the blob is not in the history's list), `raw-hash-missing` (no digest for a version the plan records: run `raw-hash` again), `raw-size-differs` (the bytes read were not the plan's size), `raw-hash-not-in-plan` (a digest of a version the plan does not record).
+A zero-byte raw file (a "folder" key such as `code/`) matches only when the history holds the empty blob (`e69de29bb2d1d6434b8b29ae775ad8c2e48c5391`), that is, when some commit had an empty file; no zero-byte raw object is on nm000112 or nm000114.
 It refuses (exit 3) `raw-hashes-stale` (made for another `plan.json`: run `raw-hash` again), `raw-hashes-wrong-dataset`, `raw-hashes.json-missing`, `raw-hashes.json-invalid`, `git-blobs-missing` and `git-blobs-invalid` (a line that is not 40 lowercase hex, a blank line, or no blob at all); `git-blobs-unreadable` is a failure (exit 1).
 **Any unmatched version is a stop for a person, with the maintainer**: the decision deletes copies that match, and nothing here deletes one that does not.
 On nm000112 every raw text version was measured, read only, to hash to a blob of the history (624 of 624), and every raw recording version has the size of an annex key; nm000114's text has not been measured.
@@ -1106,7 +1110,8 @@ If the path differs, ask the maintainer to read the row.
 > - every EDF and BDF under `D/objects/`, a version or a marker included, is a planned or an assembled key, or a raw recording the plan recorded (`unplanned-recording`, which also counts a raw recording the plan never listed), and no name in the annex key space is a bad key (`objects-bad-key`);
 > - `D/archives/` holds no version or marker at all (`archives-not-dropped`);
 > - while Zarr objects are current, `zarr-verified.json` exists, names stores, and belongs to this plan (`zarr-not-scrubbed`);
-> - for a plan with raw copies, `raw-verified.json` (step 5b) exists, parses, names this `plan.json` and this dataset, and counts the plan's raw names, versions and markers (`raw-copies-unverified`, with the reason; a proof that is there and cannot be read is `raw-verified.json-unreadable`, exit 1);
+> - for a plan with raw copies, `raw-verified.json` (step 5b) exists, parses, names this `plan.json` and this dataset, counts the plan's raw names, versions and markers, and matched only keys of the plan (`raw-copies-unverified`, with the reason; a proof that is there and cannot be read is `raw-verified.json-unreadable`, exit 1); it is a working file, so it is checked with the proofs, before the bucket is read;
+> - every annex key a raw recording matched (step 5b), other than one this run replaces, is current at the size its key declares (`raw-duplicate-missing`, with the count: the raw recording goes because that key keeps its bytes, and a clean key's whole body was never read, only its header and size);
 > - an anonymous `HEAD` of a new object, and of an old one while any remains, answers 403 (`dataset-is-public` on 200, `privacy-unproven` otherwise), and `--public-base` is the plan's bucket's own S3 endpoint over https (`bad-public-base`, exit 2);
 > - every version of an old key is the size its key declares (`version-size-differs`) and one the plan recorded (`version-not-in-plan`: someone wrote to an old key after the plan, so stop and find out why);
 > - every version and marker under a raw name is one the plan recorded, at the size recorded, and every non-annex name under `D/objects/` but `annex-uuid` is one the plan listed (`raw-copy-not-in-plan`: a raw object written after the plan, whose bytes step 5b never compared; a plan made without raw copies refuses any raw object the same way);
