@@ -1230,11 +1230,22 @@ describe("delete-old: every file names the same dataset, bucket and bytes (I11, 
       expectStopped(await runScrub(standin, executeArgs()), 3, "git-proof-stale", "plan");
       writeGitVerified(dir, { dataset: "xx090412" });
       expectStopped(await runScrub(standin, executeArgs()), 3, "proof-wrong-dataset", "dataset");
+      // Another git plan, when one is in the working directory (none is anywhere above).
+      const gitPlan = path.join(dir, "git-plan.json");
+      writeFileSync(gitPlan, '{"version":1}\n');
+      writeGitVerified(dir);
+      const otherGitPlan = await runScrub(standin, executeArgs());
+      expectStopped(otherGitPlan, 3, "git-proof-stale", "git plan");
+      expect(otherGitPlan.stdout).toContain("names another git-plan.json");
       // The keymap the proof names must be this assembly's.
       const keymap = readJson<Record<string, string>>(dir, "keymap.json");
       writeJson(dir, "keymap.json", { ...keymap, [a.oldKey]: b.newKey });
-      writeGitVerified(dir);
-      expectStopped(await runScrub(standin, executeArgs()), 3, "keymap-mismatch");
+      // ...with the git plan the proof names in the directory, which is no refusal of its own.
+      writeGitVerified(dir, { gitPlanSha256: sha256(readFileSync(gitPlan)) });
+      const sameGitPlan = await runScrub(standin, executeArgs());
+      expectStopped(sameGitPlan, 3, "keymap-mismatch");
+      expect(sameGitPlan.all).not.toContain("git-proof-stale");
+      rmSync(gitPlan);
       expectOldIntact();
       expect(standin.log.length).toBe(0);
     },

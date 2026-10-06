@@ -13,9 +13,18 @@
  * - images and documents under `sourcedata/` (outside the BIDS photo convention) are dropped from
  *   every commit: a screenshot can show a name on screen and nobody can verify its pixels;
  * - an inline JSON file with an identifier-keyed value has those keys blanked, by canonical spelling;
- * - a provenance file that lists the dropped files (`sourcedata/sourcedata_provenance.json`, an array
- *   `files` of `{file, bytes, ...}`) loses those entries and its counts are recomputed;
- * - a change-log sentence is appended to `CHANGES`, and a note to the provenance README.
+ * - a provenance file (`sourcedata/sourcedata_provenance.json`, an array `files` of
+ *   `{file, bytes, sha256, ...}` whose checksums are the ORIGINAL upstream files') gets a
+ *   `privacy_correction` sentence whenever the scrub changes anything it describes: the S3 plan
+ *   scrubs a recording in place, or a file is dropped. It says what changed and that the checksums
+ *   describe the upstream files, not the scrubbed copies; the checksums stay (ADR 0085), and
+ *   `git-scrub verify` keeps them only in a file that carries the sentence. Only when files are
+ *   dropped does it also lose their entries and have its counts recomputed;
+ * - a change-log sentence is appended to `CHANGES`, and, on the same condition as the provenance
+ *   sentence, a note to the provenance README.
+ *
+ * Whether the S3 plan scrubs anything is known only with `--s3-plan`, so a history that has the
+ * provenance file or its README is refused without one (`s3-plan-required`).
  *
  * The plan holds file NAMES, which can be the identifier, so it is private and deleted with the rest
  * of the working directory. The report on stdout is counts only.
@@ -28,7 +37,9 @@
  * - a `v*` tag that is not `vX.Y.Z[-pre]` (`tag-not-semver`): the change-log sentence and the
  *   ledger take only those;
  * - with `--s3-plan`, a key the S3 plan scrubs that no commit of the history names
- *   (`orphan-key`): the history rewrite would refuse its keymap entry (`keymap-key-never-seen`).
+ *   (`orphan-key`): the history rewrite would refuse its keymap entry (`keymap-key-never-seen`);
+ * - without `--s3-plan`, a history that has the provenance file or its README
+ *   (`s3-plan-required`): the sentence would not know whether headers were scrubbed in place.
  *
  * Exit: 0 plan written, 1 failed, 2 usage, 3 refused.
  */
@@ -37,12 +48,53 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { scanJsonKeys, scanPaths } from "../../../shared/identifier-scan";
 import { type GitPlanFile, type JsonOp, parseGitPlan, parsePlan } from "../contract";
-import { RAW_LOG_ARGS, type RawEntry, isRewriteRef, isZeroSha, parseRawLog } from "../git/git-lib";
+import {
+  PROVENANCE_NOTE_KEY,
+  PROVENANCE_PATH,
+  RAW_LOG_ARGS,
+  type RawEntry,
+  isRewriteRef,
+  isZeroSha,
+  parseRawLog,
+} from "../git/git-lib";
 import { VERSION_TAG, changeLogEntry } from "../ledger";
 
-const PROVENANCE = "sourcedata/sourcedata_provenance.json";
 const PROVENANCE_README = "sourcedata/README_sourcedata_provenance.md";
 const MAX_JSON_BYTES = 1024 * 1024;
+
+/**
+ * What the scrub changed in the files a provenance file describes. There is no value for
+ * "nothing", so no sentence can be built that claims a change nobody made.
+ */
+export type ProvenanceChange = "scrubbed-in-place" | "files-removed" | "both";
+
+const SCRUBBED_IN_PLACE =
+  "identification fields in the headers of the recording files were scrubbed in place";
+
+/**
+ * The `privacy_correction` sentence of the provenance file: what the scrub changed, and what its
+ * checksums still describe. It names removed files only when some were removed.
+ */
+export function provenanceNote(date: string, change: ProvenanceChange): string {
+  const removed =
+    "files whose names or contents identify a person were removed, with their entries in this file";
+  if (change === "files-removed") {
+    return `${date}: ${removed}; the remaining checksums describe the original upstream files.`;
+  }
+  const done = change === "both" ? `${removed}, and ${SCRUBBED_IN_PLACE}` : SCRUBBED_IN_PLACE;
+  return `${date}: ${done}; the checksums in this file describe the original upstream files, not the scrubbed copies in this dataset.`;
+}
+
+/** The note appended to the provenance README, on the same terms as {@link provenanceNote}. */
+export function provenanceReadmeNote(date: string, change: ProvenanceChange): string {
+  const removed =
+    "files that identify a person were removed, with their entries in the provenance file";
+  if (change === "files-removed") {
+    return `\nPrivacy correction ${date}: ${removed}. The remaining checksums in the provenance file describe the original upstream files.\n`;
+  }
+  const done = change === "both" ? `${SCRUBBED_IN_PLACE}, and ${removed}` : SCRUBBED_IN_PLACE;
+  return `\nPrivacy correction ${date}: ${done}. The checksums in the provenance file describe the original upstream files, not the scrubbed copies.\n`;
+}
 
 export class PlanRefused extends Error {
   constructor(readonly reason: string) {
@@ -180,6 +232,12 @@ export interface PlanReport {
   jsonFilesBlanked: number;
   jsonKeysBlanked: number;
   provenanceEntriesDropped: number;
+  /** 1 when the provenance file gets the `privacy_correction` sentence, else 0. */
+  provenanceAnnotated: number;
+  /** 1 when the provenance README gets the privacy-correction note, else 0. */
+  provenanceReadmeAnnotated: number;
+  /** With an S3 plan: the keys it scrubs in place. -1 without one (no provenance file then). */
+  s3KeysScrubbed: number;
   /** Inline JSON paths with a blob over {@link MAX_JSON_BYTES} in some commit: not read. */
   skippedOversizeJson: number;
   /** Inline JSON paths with a blob that is not UTF-8 JSON in some commit: not read. */
@@ -272,41 +330,65 @@ export function buildGitPlan(
     }
   }
 
-  // The provenance file lists every file; drop the entries of the files being removed.
+  // The S3 plan says whether recordings are scrubbed in place. Without it the provenance file's
+  // sentence could not say so, so a history that has the file, or its README, needs one.
+  const s3Plan = opts.s3PlanPath ? parsePlan(readFileSync(opts.s3PlanPath, "utf8")) : undefined;
+  if (s3Plan && s3Plan.dataset !== dataset) throw new PlanRefused("s3-plan-dataset-mismatch");
+  if (!s3Plan && (allPaths.has(PROVENANCE_PATH) || allPaths.has(PROVENANCE_README))) {
+    throw new PlanRefused("s3-plan-required");
+  }
+  const s3KeysScrubbed = s3Plan ? s3Plan.keys.filter((k) => k.needsScrub).length : -1;
+  const headersScrubbed = s3KeysScrubbed > 0;
+  const filesRemoved = dropped.length > 0;
+  const change: ProvenanceChange | undefined = headersScrubbed
+    ? filesRemoved
+      ? "both"
+      : "scrubbed-in-place"
+    : filesRemoved
+      ? "files-removed"
+      : undefined;
+
+  // The provenance file keeps its upstream checksums (ADR 0085), so whenever the scrub changes a
+  // file it describes, it says so; only removed files also lose their entries and the counts.
   const jsonOps: Record<string, JsonOp[]> = {};
   let provenanceDropped = 0;
-  if (dropped.length > 0 && allPaths.has(PROVENANCE)) {
-    const rel = dropped.map((p) => p.slice("sourcedata/".length));
-    jsonOps[PROVENANCE] = [
-      { op: "drop-array-entries", array: "files", matchField: "file", matchValues: rel },
-      {
-        op: "recount",
-        array: "files",
-        countKey: "n_files",
-        sumKey: "total_bytes",
-        sumField: "bytes",
-      },
-      {
-        op: "set",
-        key: "privacy_correction",
-        value: `${date}: files whose names or contents identify a person were removed, and identification fields in recording headers were scrubbed in place; checksums above describe the original upstream files.`,
-      },
-    ];
-    provenanceDropped = rel.length;
+  let provenanceAnnotated = 0;
+  if (change && allPaths.has(PROVENANCE_PATH)) {
+    const ops: JsonOp[] = [];
+    if (filesRemoved) {
+      const rel = dropped.map((p) => p.slice("sourcedata/".length));
+      ops.push(
+        { op: "drop-array-entries", array: "files", matchField: "file", matchValues: rel },
+        {
+          op: "recount",
+          array: "files",
+          countKey: "n_files",
+          sumKey: "total_bytes",
+          sumField: "bytes",
+        },
+      );
+      provenanceDropped = rel.length;
+    }
+    ops.push({
+      op: "set",
+      key: PROVENANCE_NOTE_KEY,
+      value: provenanceNote(date, change),
+    });
+    jsonOps[PROVENANCE_PATH] = ops;
+    provenanceAnnotated = 1;
   }
 
   const appendText: Record<string, string> = { CHANGES: `\n${changeLogEntry(date, tags)}\n` };
-  if (allPaths.has(PROVENANCE_README)) {
-    appendText[PROVENANCE_README] =
-      `\nPrivacy correction ${date}: identification fields in the headers of the recording files were removed in place, and files that identify a person were removed. The checksums in the provenance file describe the original upstream files, not the scrubbed copies.\n`;
+  let provenanceReadmeAnnotated = 0;
+  if (change && allPaths.has(PROVENANCE_README)) {
+    appendText[PROVENANCE_README] = provenanceReadmeNote(date, change);
+    provenanceReadmeAnnotated = 1;
   }
 
   // With the S3 plan: every key it scrubs must be named by some commit, or the rewrite cannot
   // map it (it refuses a keymap entry the history never held).
   let orphanKeys = -1;
-  if (opts.s3PlanPath) {
-    const s3Plan = parsePlan(readFileSync(opts.s3PlanPath, "utf8"));
-    if (s3Plan.dataset !== dataset) throw new PlanRefused("s3-plan-dataset-mismatch");
+  if (s3Plan) {
     const named = new Set<string>();
     const small = readSmallBlobs(repo, [...fileBlobs], POINTER_MAX_BYTES).contents;
     for (const bytes of small.values()) {
@@ -343,6 +425,9 @@ export function buildGitPlan(
       jsonFilesBlanked: Object.keys(blankJsonKeys).length,
       jsonKeysBlanked: keysBlanked,
       provenanceEntriesDropped: provenanceDropped,
+      provenanceAnnotated,
+      provenanceReadmeAnnotated,
+      s3KeysScrubbed,
       skippedOversizeJson: oversizePaths.length,
       skippedUnparseableJson: unparseablePaths.length,
       orphanKeys,

@@ -619,6 +619,8 @@ export type VerifyReason =
   | "annex-branch-changed"
   | "edf-key-unaccounted"
   | "edf-path-not-a-pointer"
+  | "provenance-unannotated"
+  | "provenance-too-large"
   // fresh-clone mode only:
   | "tag-names-not-plan"
   | "ledger-commit-not-alone"
@@ -630,6 +632,17 @@ export type VerifyReason =
 
 /** The one path a commit made after the rewrite may add, and the only one it may touch. */
 export const LEDGER_PATH = ".nemar/corrections.jsonl";
+
+/**
+ * The provenance file of a dataset that mirrors upstream recordings under `sourcedata/`: a JSON
+ * object whose top-level `files` array lists each mirrored file, with the `sha256` of the ORIGINAL
+ * upstream file. Those checksums are kept as provenance (ADR 0085), so they are the one place an
+ * old key's hash may remain, under the rule of {@link provenanceHashUse}.
+ */
+export const PROVENANCE_PATH = "sourcedata/sourcedata_provenance.json";
+
+/** The top-level key whose sentence says the checksums describe the files before the correction. */
+export const PROVENANCE_NOTE_KEY = "privacy_correction";
 
 /**
  * `local`: the clone the rewrite ran in, compared with the snapshot taken before it.
@@ -819,6 +832,121 @@ export class HashScanner {
   }
 }
 
+/** What an old key's hash is doing in a provenance blob; see {@link provenanceHashUse}. */
+export type ProvenanceUse =
+  /** Every old hash is the `sha256` of a `files` entry, and the file says the checksums are upstream's. */
+  | { use: "kept"; hashes: Set<string> }
+  /** Every old hash is the `sha256` of a `files` entry, but nothing says the copies now differ. */
+  | { use: "unannotated"; hashes: Set<string> }
+  /** An old hash somewhere else in the file, or the file is not a UTF-8 JSON object. */
+  | { use: "elsewhere" };
+
+const SHA256_VALUE = /^"([0-9a-fA-F]{64})"$/;
+
+/**
+ * Where the old hashes in one blob of {@link PROVENANCE_PATH} sit.
+ *
+ * An old hash may stay only as the whole string value of a `sha256` member of an object in the
+ * top-level `files` array, written without escapes. The blob is walked as text, so every
+ * occurrence is placed, a duplicated key included; the bytes of those values are masked, and the
+ * same scan `old-key-present` runs then reads the rest: a hash anywhere else (in another field, in
+ * the note, nested deeper, as a key) makes the blob `elsewhere`. When nothing else holds one, the
+ * blob is `kept` only if it carries a non-empty string {@link PROVENANCE_NOTE_KEY}, and
+ * `unannotated` otherwise.
+ */
+export function provenanceHashUse(raw: Uint8Array, oldHashes: ReadonlySet<string>): ProvenanceUse {
+  let text: string;
+  let doc: unknown;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(raw);
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    doc = JSON.parse(text);
+  } catch {
+    return { use: "elsewhere" };
+  }
+  if (typeof doc !== "object" || doc === null || Array.isArray(doc)) return { use: "elsewhere" };
+
+  // The text is valid JSON from here; the only way the walk can throw is nesting deeper than its
+  // stack, which JSON.parse accepts (measured: 50,000 levels), and then nothing is placed.
+  const ws = (i: number): number => {
+    let j = i;
+    while (j < text.length && " \t\n\r".includes(text[j] as string)) j++;
+    return j;
+  };
+  const str = (i: number): number => {
+    let j = i + 1;
+    while (text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+    return j + 1;
+  };
+  const members = (i: number, on: (key: string, at: number) => number): number => {
+    let j = ws(i + 1);
+    if (text[j] === "}") return j + 1;
+    for (;;) {
+      const keyEnd = str(j);
+      const key = JSON.parse(text.slice(j, keyEnd)) as string;
+      j = ws(on(key, ws(ws(keyEnd) + 1)));
+      if (text[j] !== ",") return j + 1;
+      j = ws(j + 1);
+    }
+  };
+  const elements = (i: number, on: (at: number) => number): number => {
+    let j = ws(i + 1);
+    if (text[j] === "]") return j + 1;
+    for (;;) {
+      j = ws(on(j));
+      if (text[j] !== ",") return j + 1;
+      j = ws(j + 1);
+    }
+  };
+  const skip = (i: number): number => {
+    const c = text[i];
+    if (c === "{") return members(i, (_key, at) => skip(at));
+    if (c === "[") return elements(i, skip);
+    if (c === '"') return str(i);
+    let j = i;
+    while (j < text.length && !",]} \t\n\r".includes(text[j] as string)) j++;
+    return j;
+  };
+
+  const spans: [number, number][] = [];
+  const kept = new Set<string>();
+  try {
+    members(ws(0), (key, at) => {
+      if (key !== "files" || text[at] !== "[") return skip(at);
+      return elements(at, (entry) => {
+        if (text[entry] !== "{") return skip(entry);
+        return members(entry, (field, value) => {
+          const end = skip(value);
+          if (field !== "sha256") return end;
+          const hash = SHA256_VALUE.exec(text.slice(value, end))?.[1]?.toLowerCase();
+          if (hash !== undefined && oldHashes.has(hash)) {
+            spans.push([value + 1, end - 1]);
+            kept.add(hash);
+          }
+          return end;
+        });
+      });
+    });
+  } catch {
+    return { use: "elsewhere" };
+  }
+
+  let rest = "";
+  let from = 0;
+  for (const [a, b] of spans) {
+    rest += `${text.slice(from, a)}${"-".repeat(b - a)}`;
+    from = b;
+  }
+  rest += text.slice(from);
+  const scanner = new HashScanner(oldHashes);
+  scanner.push(Buffer.from(rest, "utf8"));
+  if (scanner.found || kept.size === 0) return { use: "elsewhere" };
+  const note = (doc as Record<string, unknown>)[PROVENANCE_NOTE_KEY];
+  return typeof note === "string" && note.trim() !== ""
+    ? { use: "kept", hashes: kept }
+    : { use: "unannotated", hashes: kept };
+}
+
 function setDiffSize(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
   let n = 0;
   for (const x of a) if (!b.has(x)) n++;
@@ -831,6 +959,15 @@ const EDF_PATH = /\.(edf|bdf)$/i;
 const POINTER_MODES = new Set(["100644", "100755", "120000"]);
 /** A pointer file or a symlink target is a line long; a bigger blob at an EDF path is content. */
 const POINTER_MAX_BYTES = 1024;
+/** The modes a provenance blob may have to keep its checksums: a regular file, never a symlink. */
+const REGULAR_FILE_MODES = new Set(["100644", "100755"]);
+
+/**
+ * The largest provenance blob verify reads whole to place its old hashes: 16 MiB, about 100,000
+ * `files` entries (one is about 150 bytes), where a mirror of a few hundred recordings is tens of
+ * KiB. A bigger blob is not read, and its old hashes are `provenance-too-large`.
+ */
+export const PROVENANCE_MAX_BYTES = 16 * 1024 * 1024;
 
 /**
  * The key an annex pointer file (`/annex/objects/KEY`) or an annex symlink target
@@ -850,7 +987,15 @@ export function annexKeyOfBlob(content: Uint8Array): string | null {
  *
  * In both modes:
  * - no object reachable from any non-git-annex ref holds an old key's sha256 (every blob,
- *   plus commit and annotated-tag messages), not only the tips;
+ *   plus commit and annotated-tag messages), not only the tips; the one exception is the
+ *   upstream checksums of {@link PROVENANCE_PATH} (ADR 0085): a blob that is that file as a
+ *   regular file (`100644` or `100755`), and nothing else, in every commit of every ref and every
+ *   tree a ref names, where every old hash is a `sha256` of a `files` entry
+ *   ({@link provenanceHashUse}), is not a hit when it carries {@link PROVENANCE_NOTE_KEY}, and is
+ *   `provenance-unannotated` when it does not; one over {@link PROVENANCE_MAX_BYTES} is not read
+ *   and is `provenance-too-large`. The hashes kept are counted (`provenanceHashesKept`, distinct,
+ *   and `provenanceBlobsKept`). The exception is off while any ref names a blob, or anything but
+ *   a commit or a tree, because such a blob has no path to check;
  * - no dropped path in any commit's tree;
  * - every blanked key is empty in every commit that has the file, and every structural edit holds;
  * - the appended text is in every commit exactly once, at the end of the file;
@@ -918,21 +1063,77 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
     counts.refs = scanRefs.length;
   }
 
+  // Every entry of every commit of every ref, in one walk: the EDF/BDF check below reads it, and
+  // so does the provenance exception, which needs EVERY path a blob has in any commit; the one
+  // path `rev-list --objects` prints for a blob is only the first it met, and is one of these.
+  const rawEntries = parseRawLog(await git(repo, RAW_LOG_ARGS, `${scanRefs.join("\n")}\n`));
+  /** Every place a blob is, as `<mode> <path>`: in any commit, and in any tree a ref names. */
+  const blobPlaces = new Map<string, Set<string>>();
+  const place = (oid: string, mode: string, path: string): void => {
+    const places = blobPlaces.get(oid) ?? new Set<string>();
+    places.add(`${mode} ${path}`);
+    blobPlaces.set(oid, places);
+  };
+  for (const e of rawEntries) if (!isZeroSha(e.newSha)) place(e.newSha, e.newMode, e.path);
+  // A ref to a tree (git-annex's `refs/annex/last-index` is one) names its blobs under the
+  // tree's own paths, which the commit walk never sees, so they are listed too. A ref to a blob,
+  // or to anything but a commit or a tree, gives its blob no path at all: then nothing is exempt.
+  const peeled: { ref: string; type: string }[] = [];
+  await catBatch(
+    repo,
+    scanRefs.map((r) => `${r}^{}`),
+    "check",
+    {
+      header: (i, info) =>
+        peeled.push({ ref: scanRefs[i] as string, type: info?.type ?? "missing" }),
+    },
+  );
+  let exemptionOn = true;
+  for (const { ref, type } of peeled) {
+    if (type === "commit") continue;
+    if (type !== "tree") {
+      exemptionOn = false;
+      continue;
+    }
+    const listing = await gitRaw(repo, ["ls-tree", "-r", "-z", "--full-tree", `${ref}^{}`]);
+    if (listing.exitCode !== 0) {
+      throw new GitScrubError("git-command-failed", "git ls-tree", listing.stderr);
+    }
+    for (const entry of listing.stdout.toString("utf8").split("\0")) {
+      const tab = entry.indexOf("\t");
+      const [mode, kind, oid] = entry.slice(0, tab).split(" ");
+      if (tab > 0 && kind === "blob" && mode && oid) place(oid, mode, entry.slice(tab + 1));
+    }
+  }
+
   // Old keys in every object reachable from any non-annex ref.
   const oldHashes = new Set(Object.keys(keymap).map((k) => parseKey(k).sha256));
   const objects = (await git(repo, ["rev-list", "--objects", ...scanRefs]))
     .split("\n")
     .filter(Boolean)
     .map((line) => line.split(" ")[0] as string);
+  /** A blob that is the provenance file as a regular file, and nothing else, wherever it is. */
+  const onlyProvenance = (oid: string): boolean => {
+    const places = blobPlaces.get(oid);
+    if (!exemptionOn || places === undefined || places.size === 0) return false;
+    return [...places].every((p) => {
+      const space = p.indexOf(" ");
+      return REGULAR_FILE_MODES.has(p.slice(0, space)) && p.slice(space + 1) === PROVENANCE_PATH;
+    });
+  };
   let blobHits = 0;
   let messageHits = 0;
   let blobsScanned = 0;
+  const provenanceHits: string[] = [];
+  let provenanceTooLarge = 0;
   const scanners = new Map<number, HashScanner>();
   const kinds = new Map<number, string>();
+  const sizes = new Map<number, number>();
   await catBatch(repo, objects, "batch", {
     header: (i, info) => {
       if (info && (info.type === "blob" || info.type === "commit" || info.type === "tag")) {
         kinds.set(i, info.type);
+        sizes.set(i, info.size);
         scanners.set(i, new HashScanner(oldHashes));
         if (info.type === "blob") blobsScanned++;
       }
@@ -941,17 +1142,40 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
     end: (i) => {
       const scanner = scanners.get(i);
       const kind = kinds.get(i);
+      const size = sizes.get(i) ?? 0;
       scanners.delete(i);
       kinds.delete(i);
+      sizes.delete(i);
       if (!scanner?.found) return;
-      if (kind === "blob") blobHits++;
-      else messageHits++;
+      if (kind !== "blob") messageHits++;
+      else if (!onlyProvenance(objects[i] as string)) blobHits++;
+      else if (size > PROVENANCE_MAX_BYTES) provenanceTooLarge++;
+      else provenanceHits.push(objects[i] as string);
     },
   });
+  // The upstream checksums a provenance file keeps (ADR 0085): only where the rule allows them.
+  let unannotated = 0;
+  let provenanceBlobsKept = 0;
+  const provenanceHashesKept = new Set<string>();
+  for (const content of await readObjects(repo, provenanceHits)) {
+    const verdict: ProvenanceUse = content
+      ? provenanceHashUse(content, oldHashes)
+      : { use: "elsewhere" };
+    if (verdict.use === "elsewhere") blobHits++;
+    else if (verdict.use === "unannotated") unannotated++;
+    else {
+      provenanceBlobsKept++;
+      for (const hash of verdict.hashes) provenanceHashesKept.add(hash);
+    }
+  }
   fail("old-key-present", blobHits);
   fail("old-key-in-message", messageHits);
+  fail("provenance-unannotated", unannotated);
+  fail("provenance-too-large", provenanceTooLarge);
   counts.objectsScanned = objects.length;
   counts.blobsScanned = blobsScanned;
+  counts.provenanceHashesKept = provenanceHashesKept.size;
+  counts.provenanceBlobsKept = provenanceBlobsKept;
 
   // Per commit: dropped paths, blanked keys, appended text.
   const commits = (await git(repo, ["rev-list", ...scanRefs])).split("\n").filter(Boolean);
@@ -1040,8 +1264,7 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
     ...s3Plan.keys.filter((k) => !k.needsScrub && k.status === "read").map((k) => k.oldKey),
   ]);
   const edfBlobs = new Set<string>();
-  const log = await git(repo, RAW_LOG_ARGS, `${scanRefs.join("\n")}\n`);
-  for (const e of parseRawLog(log)) {
+  for (const e of rawEntries) {
     if (!EDF_PATH.test(e.path) || isZeroSha(e.newSha)) continue;
     if (e.status !== "D" && POINTER_MODES.has(e.newMode)) edfBlobs.add(e.newSha);
   }
