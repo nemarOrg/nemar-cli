@@ -29,6 +29,11 @@
  * Exit codes: 0 ok; 1 a stage failed; 2 usage; 3 refused (a precondition or proof is missing or
  * stale); 4 unreadable (the plan is incomplete); 5 versions or markers remain after a delete;
  * 129, 130, 143 ended by SIGHUP, SIGINT, SIGTERM (the `aws` children killed, temp files removed).
+ *
+ * `delete-old` evaluates every refusal before it stops: stdout has one
+ * `<stage>: refused <word>: <what triggered it>` line per refusal, and the stop line joins every
+ * word with `+` (`s3-scrub: archives-not-dropped+history-remains`), which with one refusal is the
+ * word alone.
  */
 
 import { parseArgs } from "node:util";
@@ -50,6 +55,7 @@ import {
 import {
   type CommonOptions,
   DEFAULT_PUBLIC_BASE,
+  type ProofFiles,
   assembleStage,
   canaryStage,
   checkPublicBase,
@@ -84,6 +90,8 @@ const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|zarr|drop-arc
              ID/zarr/ expect about one per store root the zarr step rewrote (zarr-plan.json counts
              them, and the dry run prints the exact number) plus any older versions a Zarr
              re-conversion left, so a large dataset needs a larger N than the default.
+             Every refusal is evaluated and listed, one line each, and the stop line joins the
+             words with +; the bucket is read once the working files agree.
   zarr       --dir DIR [--execute] [--concurrency 4] [--allow-member NAME]...
              [--max-zarr-json N]
              removes the subject and identifier members from every zarr.json under ID/zarr/
@@ -155,6 +163,15 @@ function intFlag(v: string | undefined, name: string, dflt: number, min = 0): nu
 function need(v: string | undefined, name: string): string {
   if (v === undefined || v === "") usage(`missing-${name}`);
   return v;
+}
+
+/** The proofs drop-archives and delete-old read, by default in the working directory. */
+function proofFiles(v: Values): ProofFiles {
+  return {
+    verifiedFile: v.verified ?? "verified.json",
+    hashVerifiedFile: v["hash-verified"] ?? "new-hash-verified.json",
+    gitVerifiedFile: v["git-verified"] ?? "git-verified.json",
+  };
 }
 
 function common(v: Values, log: (line: string) => void): CommonOptions {
@@ -242,9 +259,7 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
         confirmDataset: need(v["confirm-dataset"], "confirm-dataset"),
         publicBase,
         execute,
-        verifiedFile: v.verified ?? "verified.json",
-        hashVerifiedFile: v["hash-verified"] ?? "new-hash-verified.json",
-        gitVerifiedFile: v["git-verified"] ?? "git-verified.json",
+        ...proofFiles(v),
         maxDelete:
           v["max-delete"] === undefined ? undefined : intFlag(v["max-delete"], "max-delete", 0),
         maxPrune: intFlag(v["max-prune"], "max-prune", 1000),

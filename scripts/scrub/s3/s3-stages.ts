@@ -9,7 +9,8 @@
  * does so only behind the proofs of the earlier stages: two that name the exact bytes of
  * `assembled.json` they vouch for (`verified.json`, `new-hash-verified.json`), and the proof that a
  * fresh clone of the pushed repository verified (`git-verified.json`, which names the keymap and
- * the plan).
+ * the plan). It evaluates every refusal before it stops (`Refusals`), so one dry run lists them
+ * all.
  *
  * **Nothing printed or written here is a participant value.** Output is counts, annex keys, sizes,
  * version ids and fixed words. Header bytes are held in memory and compared, never logged.
@@ -41,6 +42,7 @@ import {
   type PlanFile,
   type PlanKey,
   type VerifiedFile,
+  type ZarrVerifiedFile,
   parseAssembled,
   parseGitVerified,
   parseHashes,
@@ -207,6 +209,62 @@ export function requireCompletePlan(plan: PlanFile): void {
   if (plan.partial) throw new StageError("plan-partial", EXIT.refused);
   if (plan.totals.unreadable > 0 || plan.keys.some((k) => k.status !== "read")) {
     throw new StageError("plan-has-unreadable", EXIT.refused);
+  }
+}
+
+/**
+ * The refusals of a stage that evaluates every precondition before it refuses, so that one dry
+ * run shows the whole list. A stage that stops at its first refusal hides the rest, and when the
+ * first one can only be cleared by an irreversible step, the rest show only after it: `delete-old`
+ * used to stop at `archives-not-dropped`, so whatever else was wrong appeared only after the
+ * archives, which hold the original recordings, were gone.
+ *
+ * Each refusal is a fixed word and what triggered it (a count, a file name, a tag), in the order
+ * the checks ran, which is fixed. A word that fires twice is one entry with both details. The stage
+ * then prints one line per word and stops with every word joined by `+` (exit 3), which with one
+ * refusal is the word alone, as before.
+ */
+export class Refusals {
+  private readonly found = new Map<string, string[]>();
+
+  add(word: string, detail?: string): void {
+    const details = this.found.get(word) ?? [];
+    if (detail !== undefined && !details.includes(detail)) details.push(detail);
+    this.found.set(word, details);
+  }
+
+  /**
+   * Run a check that refuses by throwing (exit 3), record its word, and go on. Anything else, a
+   * failure (a file that is there and cannot be read), a usage error or an `aws` error, is not a
+   * refusal and propagates.
+   */
+  async attempt<T>(check: () => T | Promise<T>, detail?: string): Promise<T | undefined> {
+    try {
+      return await check();
+    } catch (err) {
+      if (err instanceof StageError && err.exitCode === EXIT.refused) {
+        this.add(err.word, detail);
+        return undefined;
+      }
+      throw err;
+    }
+  }
+
+  get any(): boolean {
+    return this.found.size > 0;
+  }
+
+  /** One line per refusal, then stop with every word. Call it when `any` is true. */
+  stop(stage: string, log: (line: string) => void): never {
+    for (const [word, details] of this.found) {
+      log(`${stage}: refused ${word}${details.length > 0 ? `: ${details.join("; ")}` : ""}`);
+    }
+    throw new StageError([...this.found.keys()].join("+") || "refused", EXIT.refused);
+  }
+
+  /** Stop when any refusal fired; otherwise nothing. */
+  stopIfAny(stage: string, log: (line: string) => void): void {
+    if (this.any) this.stop(stage, log);
   }
 }
 
@@ -1042,10 +1100,146 @@ async function listOldKeys(
   return out as KeyVersions[];
 }
 
-/** A stage that reads manifests for a delete refuses where the plan stage would have stopped. */
-function asRefusal(err: unknown): never {
-  if (err instanceof StageError) throw new StageError(err.word, EXIT.refused);
-  throw err;
+/** Where the proofs of the earlier stages are: relative to the working directory unless absolute. */
+export interface ProofFiles {
+  /** `verified.json`, from the verify stage (runbook step 5). */
+  verifiedFile: string;
+  /** `new-hash-verified.json`, from the re-hash of the new objects on the hash host (step 5). */
+  hashVerifiedFile: string;
+  /** `git-verified.json` from `git-scrub verify --fresh-clone` (step 14). */
+  gitVerifiedFile: string;
+}
+
+/** The assembly the proofs vouch for, as `checkScrubProofs` read it. */
+export interface ProvenAssembly {
+  /** sha256 of the exact bytes of assembled.json. */
+  sha: string;
+  entries: Array<[string, AssembledFile["entries"][string]]>;
+  /** The old keys, sorted. */
+  oldKeys: string[];
+  newKeys: Set<string>;
+  /** The plan's keys by old key. */
+  planned: Map<string, PlanKey>;
+}
+
+/**
+ * Every proof in the working directory that the irreversible S3 steps stand on, each bound to this
+ * plan the way the stage that wrote it binds it:
+ *
+ * - `assembled.json` names the plan's dataset and bucket, maps every old key to a different new
+ *   key, and holds only keys the plan marked for a scrub;
+ * - `verified.json` and `new-hash-verified.json` name the exact bytes of `assembled.json`, this
+ *   dataset, and its number of entries;
+ * - `git-verified.json` is a verify of a FRESH clone of what was pushed, for this dataset, made
+ *   with this `keymap.json` and this `plan.json`, and that keymap is this assembly's, pair for pair.
+ *
+ * `delete-old` (runbook step 15b) asks this before it reads the bucket. Every check runs and records its refusal; a check whose file could not be read or parsed
+ * does not run, because that file's own refusal already stands. A file that is there and cannot be
+ * read is a failure (exit 1), not a refusal, and stops at once. Returns the assembly when
+ * `assembled.json` was read.
+ */
+export async function checkScrubProofs(
+  dir: string,
+  plan: PlanFile,
+  planBytes: Buffer,
+  files: ProofFiles,
+  refusals: Refusals,
+): Promise<ProvenAssembly | undefined> {
+  const dataset = plan.dataset;
+  const load = <T>(file: string, name: string, parse: (text: string) => T) =>
+    refusals.attempt(async () => {
+      const bytes = await readBytes(path.resolve(dir, file), name);
+      return { bytes, value: parseFile(name, parse, bytes.toString("utf8")) };
+    });
+
+  const assembled = await load("assembled.json", "assembled.json", parseAssembled);
+  if (assembled && assembled.value.dataset !== dataset) refusals.add("assembled-wrong-dataset");
+  if (assembled && assembled.value.bucket !== plan.bucket) refusals.add("assembled-wrong-bucket");
+  const sha = assembled ? sha256Hex(assembled.bytes) : undefined;
+  const entries = assembled ? Object.entries(assembled.value.entries) : undefined;
+
+  // Both S3 proofs must exist and vouch for these exact bytes.
+  const verified = await load(files.verifiedFile, "verified.json", parseVerified);
+  const hashVerified = await load(
+    files.hashVerifiedFile,
+    "new-hash-verified.json",
+    parseHashVerified,
+  );
+  if (verified && sha !== undefined && verified.value.assembledSha256 !== sha) {
+    refusals.add("verified-stale", "verified.json names other bytes than assembled.json");
+  }
+  if (hashVerified && sha !== undefined && hashVerified.value.assembledSha256 !== sha) {
+    refusals.add(
+      "new-hash-verified-stale",
+      "new-hash-verified.json names other bytes than assembled.json",
+    );
+  }
+  if (verified && verified.value.dataset !== dataset) {
+    refusals.add("proof-wrong-dataset", path.basename(files.verifiedFile));
+  }
+  if (hashVerified && hashVerified.value.dataset !== dataset) {
+    refusals.add("proof-wrong-dataset", path.basename(files.hashVerifiedFile));
+  }
+  if (
+    entries &&
+    ((verified && verified.value.counts.keys !== entries.length) ||
+      (hashVerified && hashVerified.value.count !== entries.length))
+  ) {
+    refusals.add(
+      "proof-count-mismatch",
+      `assembled.json has ${entries.length} entries, verified.json ${verified?.value.counts.keys ?? "-"}, new-hash-verified.json ${hashVerified?.value.count ?? "-"}`,
+    );
+  }
+
+  // The GitHub side: a verify of a FRESH clone of what was pushed, made with the keymap this
+  // assembly wrote and the plan this run reads.
+  const gitVerified = await load(files.gitVerifiedFile, "git-proof", parseGitVerified);
+  const keymap = await load("keymap.json", "keymap.json", parseKeymap);
+  if (gitVerified) {
+    const git = gitVerified.value;
+    if (git.dataset !== dataset) {
+      refusals.add("proof-wrong-dataset", path.basename(files.gitVerifiedFile));
+    }
+    const stale: string[] = [];
+    if (git.mode !== "fresh-clone") stale.push(`mode ${git.mode}, not fresh-clone`);
+    if (keymap && git.keymapSha256 !== sha256Hex(keymap.bytes)) {
+      stale.push("names another keymap.json");
+    }
+    if (git.s3PlanSha256 !== sha256Hex(planBytes)) stale.push("names another plan.json");
+    if (stale.length > 0) refusals.add("git-proof-stale", stale.join(", "));
+  }
+
+  if (sha === undefined || entries === undefined) return undefined;
+  // Every old key has a different new key, and no old key is any new key.
+  const oldKeys = entries.map(([k]) => k).sort();
+  const newKeys = new Set(entries.map(([, e]) => e.newKey));
+  if (newKeys.size !== entries.length) {
+    refusals.add("duplicate-new-key", `${entries.length - newKeys.size} new keys repeated`);
+  }
+  const selfMapped = entries.filter(([k, e]) => e.newKey === k).length;
+  if (selfMapped > 0) refusals.add("new-key-equals-old-key", `${selfMapped} entries`);
+  const chained = oldKeys.filter((k) => newKeys.has(k)).length;
+  if (chained > 0) refusals.add("old-key-is-a-new-key", `${chained} old keys`);
+  const planned = new Map(plan.keys.map((k) => [k.oldKey, k]));
+  const notPlanned = oldKeys.filter((k) => !planned.get(k)?.needsScrub).length;
+  if (notPlanned > 0) {
+    refusals.add(
+      "assembled-not-in-plan",
+      `${notPlanned} old keys the plan did not mark for a scrub`,
+    );
+  }
+  // The keymap the git proof names is this assembly's: old key to new key, pair for pair.
+  if (keymap) {
+    const pairs = keymap.value;
+    const differ = entries.filter(([k, e]) => pairs[k] !== e.newKey).length;
+    if (Object.keys(pairs).length !== entries.length || differ > 0) {
+      refusals.add(
+        "keymap-mismatch",
+        `keymap.json has ${Object.keys(pairs).length} pairs, assembled.json ${entries.length} entries, ${differ} differ`,
+      );
+    }
+  }
+  return { sha, entries, oldKeys, newKeys, planned };
 }
 
 /**
@@ -1057,39 +1251,50 @@ function asRefusal(err: unknown): never {
  * And every EDF or BDF a manifest names must be one this scrub accounted for (`known`: a key the
  * plan read, or a new key it assembled). A recording that appeared since the plan, a recording
  * kept inline in git, or a key that is not an annex key is one nobody checked.
+ *
+ * Every manifest is read, and each refusal names the tag that triggered it. A delete refuses
+ * where the plan stage would have stopped (an unknown file under `version/`, a malformed manifest).
  */
-async function refuseManifestNamingOldKey(
+async function checkManifests(
   ctx: S3Ctx,
   dataset: string,
   oldKeys: Set<string>,
   known: Set<string>,
+  refusals: Refusals,
 ): Promise<void> {
   let tags: string[];
   try {
     tags = await discoverTags(ctx, dataset);
   } catch (err) {
-    return asRefusal(err);
+    if (!(err instanceof StageError)) throw err;
+    refusals.add(err.word, "version/");
+    return;
   }
-  if (tags.length === 0) throw new StageError("no-manifests", EXIT.refused);
+  if (tags.length === 0) {
+    refusals.add("no-manifests", "no current manifest under version/");
+    return;
+  }
   for (const tag of tags) {
     let bytes: Uint8Array;
     try {
       bytes = await readWhole(ctx, `${dataset}/version/${tag}.json`);
     } catch {
-      throw new StageError("manifest-unreadable", EXIT.refused);
+      refusals.add("manifest-unreadable", tag);
+      continue;
     }
     let found: ManifestKeys;
     try {
       found = keysOfManifest(dataset, Buffer.from(bytes).toString("utf8"));
     } catch (err) {
-      return asRefusal(err);
+      if (!(err instanceof StageError)) throw err;
+      refusals.add(err.word, tag);
+      continue;
     }
-    for (const k of found.keys) {
-      if (oldKeys.has(k)) throw new StageError("manifest-names-old-key", EXIT.refused);
-    }
+    const old = [...found.keys].filter((k) => oldKeys.has(k)).length;
+    if (old > 0) refusals.add("manifest-names-old-key", `${tag} names ${old}`);
     const unplanned =
       found.badKeys + found.gitInline.size + [...found.keys].filter((k) => !known.has(k)).length;
-    if (unplanned > 0) throw new StageError("manifest-names-unplanned-key", EXIT.refused);
+    if (unplanned > 0) refusals.add("manifest-names-unplanned-key", `${tag} names ${unplanned}`);
   }
 }
 
@@ -1098,43 +1303,63 @@ async function refuseManifestNamingOldKey(
  * accounted for. One that appeared after the plan was never read, so its header was never
  * checked, and deleting the old keys around it would leave it as the dataset's only unchecked copy.
  */
-async function refuseUnplannedRecording(
+async function checkUnplannedRecordings(
   ctx: S3Ctx,
   dataset: string,
   known: Set<string>,
-  log: (line: string) => void,
+  refusals: Refusals,
 ): Promise<void> {
   const listed = await listObjectRecordings(ctx, dataset);
   const unplanned = listed.bad + [...listed.keys].filter((k) => !known.has(k)).length;
   if (unplanned > 0) {
-    log(`delete-old: ${unplanned} recordings under objects/ are not in the plan or the assembly`);
-    throw new StageError("unplanned-recording", EXIT.refused);
+    refusals.add(
+      "unplanned-recording",
+      `${unplanned} recordings under objects/ are not in the plan or the assembly`,
+    );
   }
 }
 
 /**
- * The dataset's Zarr serving copy repeats header fields in every store root, so while any Zarr
- * object is current the `zarr` stage must have run for THIS plan and left a proof behind, and a
- * proof that the prefix held nothing (`no-zarr`) is not a proof about objects that are there now.
+ * The dataset's Zarr serving copy repeats header fields in every store root, so the `zarr` stage
+ * must have run for THIS plan and left its proof (`zarr-verified.json`, which names the exact bytes
+ * of plan.json and of the zarr-plan.json its run wrote), and a proof that the prefix held nothing
+ * (`no-zarr`) is not a proof about Zarr objects that are current now (`zarrCurrent`). Refuses
+ * `zarr-not-scrubbed`, with every reason it does not hold. `delete-old` asks only while a Zarr
+ * object is current.
  */
-async function requireZarrVerified(dir: string, dataset: string, planBytes: Buffer): Promise<void> {
-  const refuse = () => new StageError("zarr-not-scrubbed", EXIT.refused);
-  let verified: ReturnType<typeof parseZarrVerified>;
-  let zarrPlanBytes: Buffer;
+export async function checkZarrProof(
+  dir: string,
+  dataset: string,
+  planBytes: Buffer,
+  zarrCurrent: boolean,
+  refusals: Refusals,
+): Promise<void> {
+  const problems: string[] = [];
+  let proof: ZarrVerifiedFile | undefined;
   try {
-    verified = parseZarrVerified((await readFile(path.join(dir, "zarr-verified.json"))).toString());
-    zarrPlanBytes = await readFile(path.join(dir, "zarr-plan.json"));
-  } catch {
-    throw refuse();
+    proof = parseZarrVerified((await readFile(path.join(dir, "zarr-verified.json"))).toString());
+  } catch (err) {
+    problems.push(
+      isNotFound(err) ? "zarr-verified.json missing" : "zarr-verified.json unreadable or invalid",
+    );
   }
-  if (
-    verified.dataset !== dataset ||
-    verified.found !== "stores" ||
-    verified.planSha256 !== sha256Hex(planBytes) ||
-    verified.zarrPlanSha256 !== sha256Hex(zarrPlanBytes)
-  ) {
-    throw refuse();
+  if (proof) {
+    if (proof.dataset !== dataset) problems.push("for another dataset");
+    if (zarrCurrent && proof.found !== "stores") {
+      problems.push("says no-zarr while Zarr objects are current");
+    }
+    if (proof.planSha256 !== sha256Hex(planBytes)) problems.push("for another plan.json");
+    let zarrPlanBytes: Buffer | undefined;
+    try {
+      zarrPlanBytes = await readFile(path.join(dir, "zarr-plan.json"));
+    } catch {
+      problems.push("zarr-plan.json missing or unreadable");
+    }
+    if (zarrPlanBytes && proof.zarrPlanSha256 !== sha256Hex(zarrPlanBytes)) {
+      problems.push("for another zarr-plan.json");
+    }
   }
+  if (problems.length > 0) refusals.add("zarr-not-scrubbed", problems.join(", "));
 }
 
 /** Where an anonymous reader reaches the production bucket. */
@@ -1209,31 +1434,37 @@ async function anonymousHeadStatus(url: string, timeoutMs: number): Promise<numb
  * The probe is one NEW object (current, as an anonymous reader would get it), and, while any
  * remains, one OLD object too. Probing the new keys is what lets a re-run finish after the old
  * keys are gone: a delete that stopped half way (a failed prune) would otherwise be stranded,
- * because there would be no old object left to ask about.
+ * because there would be no old object left to ask about. Both probes are made, and each answer
+ * other than 403 is a refusal: 200 is `dataset-is-public`, anything else (or no new object to ask
+ * about) is `privacy-unproven`.
  */
-async function requirePrivate(
+async function checkPrivate(
   ctx: S3Ctx,
   o: DeleteOptions,
   dataset: string,
   oldKeys: string[],
   newKeys: string[],
+  refusals: Refusals,
 ): Promise<void> {
   const firstPresent = async (keys: string[]): Promise<string | undefined> => {
     for (const k of keys) if (await headObject(ctx, objectKey(dataset, k))) return k;
     return undefined;
   };
-  const askAnonymously = async (key: string): Promise<void> => {
+  const askAnonymously = async (key: string, which: string): Promise<void> => {
     const url = `${o.publicBase.replace(/\/+$/, "")}/${objectKey(dataset, key)}`;
     const status = await anonymousHeadStatus(url, o.timeoutMs);
     if (status === 403) return;
-    if (status === 200) throw new StageError("dataset-is-public", EXIT.refused);
-    throw new StageError("privacy-unproven", EXIT.refused);
+    if (status === 200) refusals.add("dataset-is-public", `${which} answered 200`);
+    else refusals.add("privacy-unproven", `${which} answered ${status ?? "nothing"}`);
   };
   const newProbe = await firstPresent([...newKeys].sort());
-  if (newProbe === undefined) throw new StageError("privacy-unproven", EXIT.refused);
-  await askAnonymously(newProbe);
+  if (newProbe === undefined) {
+    refusals.add("privacy-unproven", "no new object is current to ask about");
+  } else {
+    await askAnonymously(newProbe, "a new object");
+  }
   const oldProbe = await firstPresent(oldKeys);
-  if (oldProbe !== undefined) await askAnonymously(oldProbe);
+  if (oldProbe !== undefined) await askAnonymously(oldProbe, "an old object");
 }
 
 /** Every version or marker under a prefix that is not a current version: its history. */
@@ -1275,106 +1506,64 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
   checkDataset(plan.dataset);
   requireCompletePlan(plan);
   checkPublicBase(o.publicBase, plan.bucket);
-  const assembledBytes = await readBytes(path.join(o.dir, "assembled.json"), "assembled.json");
-  const assembled = parseFile("assembled.json", parseAssembled, assembledBytes.toString("utf8"));
-  const sha = sha256Hex(assembledBytes);
-  const entries = Object.entries(assembled.entries);
   // The dataset and the bucket are the plan's, which the operator confirmed; every other file
   // must name the same ones, each compared on its own.
   const dataset = plan.dataset;
   const bucket = plan.bucket;
-  if (assembled.dataset !== dataset) throw new StageError("assembled-wrong-dataset", EXIT.refused);
-  if (assembled.bucket !== bucket) throw new StageError("assembled-wrong-bucket", EXIT.refused);
 
-  // Both proofs must exist and vouch for these exact bytes.
-  const verified = parseFile(
-    "verified.json",
-    parseVerified,
-    (await readBytes(path.resolve(o.dir, o.verifiedFile), "verified.json")).toString("utf8"),
-  );
-  const hashVerified = parseFile(
-    "new-hash-verified.json",
-    parseHashVerified,
-    (await readBytes(path.resolve(o.dir, o.hashVerifiedFile), "new-hash-verified.json")).toString(
-      "utf8",
-    ),
-  );
-  if (verified.assembledSha256 !== sha) throw new StageError("verified-stale", EXIT.refused);
-  if (hashVerified.assembledSha256 !== sha) {
-    throw new StageError("new-hash-verified-stale", EXIT.refused);
+  // Every refusal is evaluated and reported together (see `Refusals`). The working files come
+  // first: the proofs, the assembly and the flags.
+  const refusals: Refusals = new Refusals();
+  const proven = await checkScrubProofs(o.dir, plan, planBytes, o, refusals);
+  for (const p of o.prune) {
+    await refusals.attempt(
+      () => checkPrunePrefix(dataset, p),
+      "a --prune-noncurrent prefix is not <id>/version/, <id>/archives/ or <id>/zarr/",
+    );
   }
-  if (verified.dataset !== dataset) throw new StageError("proof-wrong-dataset", EXIT.refused);
-  if (hashVerified.dataset !== dataset) throw new StageError("proof-wrong-dataset", EXIT.refused);
-  if (verified.counts.keys !== entries.length || hashVerified.count !== entries.length) {
-    throw new StageError("proof-count-mismatch", EXIT.refused);
+  // Every check of the bucket below is about the keys these files name, so the bucket is read
+  // only once they agree. Nothing that clears a refusal here is irreversible.
+  if (refusals.any || proven === undefined) {
+    o.log("delete-old: the bucket was not read; its checks run once the working files agree");
+    refusals.stop("delete-old", o.log);
   }
-
-  // The GitHub side: a verify of a FRESH clone of what was pushed, made with the keymap this
-  // assembly wrote and the plan this run reads.
-  const gitVerified = parseFile(
-    "git-proof",
-    parseGitVerified,
-    (await readBytes(path.resolve(o.dir, o.gitVerifiedFile), "git-proof")).toString("utf8"),
-  );
-  const keymapBytes = await readBytes(path.join(o.dir, "keymap.json"), "keymap.json");
-  const keymap = parseFile("keymap.json", parseKeymap, keymapBytes.toString("utf8"));
-  if (gitVerified.dataset !== dataset) throw new StageError("proof-wrong-dataset", EXIT.refused);
-  if (
-    gitVerified.mode !== "fresh-clone" ||
-    gitVerified.keymapSha256 !== sha256Hex(keymapBytes) ||
-    gitVerified.s3PlanSha256 !== sha256Hex(planBytes)
-  ) {
-    throw new StageError("git-proof-stale", EXIT.refused);
-  }
-
-  // Every old key has a different new key, and no old key is any new key.
-  const oldKeys = entries.map(([k]) => k).sort();
-  const newKeys = new Set(entries.map(([, e]) => e.newKey));
-  if (newKeys.size !== entries.length) throw new StageError("duplicate-new-key", EXIT.refused);
-  for (const [k, e] of entries) {
-    if (e.newKey === k) throw new StageError("new-key-equals-old-key", EXIT.refused);
-  }
-  if (oldKeys.some((k) => newKeys.has(k)))
-    throw new StageError("old-key-is-a-new-key", EXIT.refused);
-  const planned = new Map(plan.keys.map((k) => [k.oldKey, k]));
-  if (oldKeys.some((k) => !planned.get(k)?.needsScrub)) {
-    throw new StageError("assembled-not-in-plan", EXIT.refused);
-  }
-  // The keymap the git proof names is this assembly's: old key to new key, pair for pair.
-  if (
-    Object.keys(keymap).length !== entries.length ||
-    entries.some(([k, e]) => keymap[k] !== e.newKey)
-  ) {
-    throw new StageError("keymap-mismatch", EXIT.refused);
-  }
-  for (const p of o.prune) checkPrunePrefix(dataset, p);
+  const { sha, entries, oldKeys, newKeys, planned } = proven;
   const prunePrefixes = [...new Set(o.prune)];
   /** Every recording key this scrub accounted for: what the plan read, and what it assembled. */
   const known = new Set([...planned.keys(), ...newKeys]);
 
   return withCtx(o, bucket, async (ctx) => {
+    // What must be true of the dataset before an old key may go. All of it is read only, all of it
+    // runs in the dry run, and every check runs whatever an earlier one found, so one dry run
+    // shows every refusal before --execute is typed, and before the archives are dropped.
+
     // The replacement must still be there before anything it replaces is touched.
-    const missing = await runPool(entries, o.concurrency, async ([k, e]) => {
+    const present = await runPool(entries, o.concurrency, async ([k, e]) => {
       const head = await headObject(ctx, objectKey(dataset, e.newKey), e.newVersionId);
       return head !== null && head.size === parseKey(k).size;
     });
-    if (missing.some((ok) => ok !== true)) throw new StageError("new-object-missing", EXIT.refused);
-
-    // What must be true of the rest of the dataset before an old key may go. All of it is read
-    // only, and all of it runs in the dry run, so a refusal is seen before --execute is typed.
-    await refuseManifestNamingOldKey(ctx, dataset, new Set(oldKeys), known);
-    await refuseUnplannedRecording(ctx, dataset, known, o.log);
+    const gone = present.filter((ok) => ok !== true).length;
+    if (gone > 0) {
+      refusals.add(
+        "new-object-missing",
+        `${gone} of ${entries.length} new objects are not at the version assembly recorded`,
+      );
+    }
+    await checkManifests(ctx, dataset, new Set(oldKeys), known, refusals);
+    await checkUnplannedRecordings(ctx, dataset, known, refusals);
     // An archive holds the original recordings, so ANY version or marker of one, current or not,
     // is a copy the delete would leave behind.
     const archives = await listPrefixVersions(ctx, `${dataset}/archives/`);
     if (archives.length > 0) {
-      o.log(`delete-old: archives versions and markers=${archives.length}`);
-      throw new StageError("archives-not-dropped", EXIT.refused);
+      refusals.add(
+        "archives-not-dropped",
+        `versions and markers=${archives.length} under archives/`,
+      );
     }
     if (await hasCurrentKey(ctx, `${dataset}/zarr/`)) {
-      await requireZarrVerified(o.dir, dataset, planBytes);
+      await checkZarrProof(o.dir, dataset, planBytes, true, refusals);
     }
-    await requirePrivate(ctx, o, dataset, oldKeys, [...newKeys]);
+    await checkPrivate(ctx, o, dataset, oldKeys, [...newKeys], refusals);
 
     const listed = await listOldKeys(ctx, dataset, oldKeys, o.concurrency);
     // Every version of an old key must be the size its key declares. One that is not holds bytes
@@ -1384,20 +1573,12 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
       (n, l) => n + l.sizes.filter((size) => size !== parseKey(l.oldKey).size).length,
       0,
     );
-    if (wrongSize > 0) {
-      o.log(`delete-old: ${wrongSize} versions of old keys are not the size their key declares`);
-      throw new StageError("version-size-differs", EXIT.refused);
-    }
     // Only what the plan recorded may be deleted: the plan read the header of each old key, and a
     // version written since is bytes nobody checked. No flag waives this.
     const unplanned = listed.reduce((n, l) => {
       const allowed = new Set((planned.get(l.oldKey) as PlanKey).versionIds);
       return n + [...l.versions, ...l.markers].filter((id) => !allowed.has(id)).length;
     }, 0);
-    if (unplanned > 0) {
-      o.log(`delete-old: ${unplanned} versions or markers of old keys are not in the plan`);
-      throw new StageError("version-not-in-plan", EXIT.refused);
-    }
     const totalVersions = listed.reduce((n, l) => n + l.versions.length, 0);
     const totalMarkers = listed.reduce((n, l) => n + l.markers.length, 0);
     const recorded = oldKeys.reduce((n, k) => n + (planned.get(k) as PlanKey).versionIds.length, 0);
@@ -1406,8 +1587,23 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
     o.log(
       `delete-old: keys=${oldKeys.length} versions=${totalVersions} markers=${totalMarkers} planRecorded=${recorded} limit=${limit}`,
     );
+    if (wrongSize > 0) {
+      refusals.add(
+        "version-size-differs",
+        `${wrongSize} versions of old keys are not the size their key declares`,
+      );
+    }
+    if (unplanned > 0) {
+      refusals.add(
+        "version-not-in-plan",
+        `${unplanned} versions or markers of old keys are not in the plan`,
+      );
+    }
     if (totalVersions + totalMarkers > limit) {
-      throw new StageError("over-max-delete", EXIT.refused);
+      refusals.add(
+        "over-max-delete",
+        `versions+markers=${totalVersions + totalMarkers} over limit=${limit}`,
+      );
     }
 
     // The history of the manifests and of the Zarr copy holds the old keys and the old metadata:
@@ -1420,18 +1616,24 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
       if (prunePrefixes.includes(prefix)) prunes.push(...history);
       else if (history.length > 0) unpruned[d] = history.length;
     }
-    if (Object.keys(unpruned).length > 0) {
-      o.log(
-        `delete-old: history-remains outside --prune-noncurrent: ${formatPrefixCounts(unpruned)}`,
-      );
-      throw new StageError("history-remains", EXIT.refused);
-    }
     const prunedVersions = prunes.filter((p) => p.kind === "version").length;
     const prunedMarkers = prunes.length - prunedVersions;
     if (prunePrefixes.length > 0) {
       o.log(`delete-old: prune noncurrent versions=${prunedVersions} markers=${prunedMarkers}`);
     }
-    if (prunes.length > o.maxPrune) throw new StageError("over-max-prune", EXIT.refused);
+    if (Object.keys(unpruned).length > 0) {
+      refusals.add(
+        "history-remains",
+        `${formatPrefixCounts(unpruned)} not named by --prune-noncurrent`,
+      );
+    }
+    if (prunes.length > o.maxPrune) {
+      refusals.add(
+        "over-max-prune",
+        `noncurrent versions and markers=${prunes.length} over --max-prune ${o.maxPrune}`,
+      );
+    }
+    refusals.stopIfAny("delete-old", o.log);
 
     if (!o.execute) {
       o.log(
