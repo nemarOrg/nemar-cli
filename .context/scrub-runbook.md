@@ -662,6 +662,7 @@ The dataset stays private until the old bytes are gone, so there is no window in
 >
 > **Preconditions you check by hand.**
 > - Step 14 passed, which is the proof that the scrub is good before the originals are lost: `jq -r .mode $W/git-verified.json` prints `fresh-clone`, and `$W/verified.json` and `$W/new-hash-verified.json` exist.
+> - The archive jobs that step 9's tag pushes dispatched have finished (`gh run list --repo nemarDatasets/.github --limit 30`), so none is built after the drop; a new archive built from the scrubbed tree is deleted here too, because the tool deletes every version.
 > - You have read step 11's counts and the dry run below again.
 > - The maintainer's go is recorded: `GO drop-archives <dataset> <plan-id>`.
 >
@@ -751,7 +752,10 @@ Anything else stops here, with the dataset still private.
 > **If anything below fails**, make it private again (`nemar admin repo private $D`) and stop: the new objects were verified twice, so the fault is in a manifest, a cache or a route, not in the bytes.
 
 Wait a few minutes, then confirm with C6's two commands (the dataset's object must now answer 200).
-Rebuild the archive from the scrubbed tree with the normal archive workflow (the version-DOI workflow dispatches it; if none is running, dispatch `generate-archive` for the dataset through the central workflow, as the administrators do for a missing archive), and confirm that the new zip hashes its own content.
+Then the archive, which step 15a deleted along with every older version.
+No command in this repository builds an archive for one dataset by hand: the Worker dispatches `generate-archive` after a version-DOI run (`triggerArchiveGeneration` in `backend/src/services/github/dispatch.ts`) and re-dispatches a failed one (`backend/src/services/archive-retry.ts`), and nothing re-dispatches a missing one.
+So ask the maintainer to have it built from the scrubbed tree, and when it exists confirm that its zip hashes its own content.
+This is not a privacy matter (the archive is built from the tree that is now clean), so it does not hold up the checks below.
 Then, from outside:
 
 ```bash
