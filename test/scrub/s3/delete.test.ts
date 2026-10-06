@@ -820,7 +820,7 @@ describe("delete-old: what must be true before an old key may go", () => {
     "refuses while a current manifest, of any tag, still names an old key",
     async () => {
       writeProofs();
-      // The manifest as it was before runbook step 9 regenerated it: it names the old keys.
+      // The manifest as it was before runbook step 12 regenerated it: it names the old keys.
       seedManifest(standin, "v1.0.0", [a, b, d]);
       await refused("manifest-names-old-key");
 

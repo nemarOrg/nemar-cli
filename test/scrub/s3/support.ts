@@ -283,7 +283,7 @@ export function seedManifest(
   fixtures: Fixture[],
   extra: Record<string, { key: string; size: number }> = {},
   dataset = DATASET,
-  /** Name each scrubbed file by its NEW key, as a regenerated manifest does (runbook step 9). */
+  /** Name each scrubbed file by its NEW key, as a regenerated manifest does (runbook step 12). */
   afterScrub = false,
 ): void {
   const files: Record<string, { key: string; size: number; checksum: string }> = {};

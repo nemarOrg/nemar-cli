@@ -5,7 +5,9 @@
  * recordings and all, so it is a second home for exactly the bytes the scrub replaces, and it is
  * not an object the scrub swaps for a new key: nothing can be patched inside a zip. The remedy is
  * to delete it, every VERSION and every delete marker, and let the normal workflow build a fresh
- * archive from the scrubbed tree afterwards (a runbook step, not this stage's).
+ * archive from the scrubbed tree afterwards (runbook step 16, not this stage's). The drop itself is
+ * runbook step 15a, after the pushed history has been verified from a fresh clone, because it
+ * cannot be undone.
  *
  * Deletes are by version id and never use the governance bypass. Archives carry no lock, so a
  * refusal means something is locked that should not be: it is reported and the stage fails, and

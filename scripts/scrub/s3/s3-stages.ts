@@ -1,10 +1,15 @@
 /**
- * The five S3 stages of an in-place scrub: plan, assemble, verify, delete-old and canary.
+ * Five S3 stages of an in-place scrub: plan, assemble, verify, delete-old and canary. The zarr,
+ * drop-archives and zarr-public stages live in `zarr-stage.ts`, `archives-stage.ts` and
+ * `zarr-public.ts`, and use the helpers exported here.
  *
  * Each stage reads the previous stage's JSON from a working directory (the contract in
  * `../contract.ts`) and refuses a file that does not match. Every stage is read-only unless it
- * is given `execute`. The only stage that deletes is {@link deleteOldStage}, and it does so only
- * behind two proofs that name the exact bytes of `assembled.json` they vouch for.
+ * is given `execute`. {@link deleteOldStage} is the only stage that deletes the old objects, and it
+ * does so only behind the proofs of the earlier stages: two that name the exact bytes of
+ * `assembled.json` they vouch for (`verified.json`, `new-hash-verified.json`), and the proof that a
+ * fresh clone of the pushed repository verified (`git-verified.json`, which names the keymap and
+ * the plan).
  *
  * **Nothing printed or written here is a participant value.** Output is counts, annex keys, sizes,
  * version ids and fixed words. Header bytes are held in memory and compared, never logged.

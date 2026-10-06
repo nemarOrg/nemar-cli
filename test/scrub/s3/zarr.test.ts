@@ -830,7 +830,8 @@ describe("zarr: what a store may keep (I10, T8)", () => {
   /**
    * nm000186's store roots, member for member (census of 2026-10-05, names only, all 88 stores):
    * the four subject and free-text fields, non-empty, beside the technical ones. The values are
-   * invented. The converter that wrote the real ones is biosigio 1.2.10
+   * invented, and `relabelled` below is biosigio's own (British) spelling of a member of its units
+   * report, kept as the converter writes it. The converter that wrote the real ones is biosigio 1.2.10
    * (scripts/zarr/requirements.txt); this store is built by hand because the converter cannot be
    * installed here without the network.
    */
