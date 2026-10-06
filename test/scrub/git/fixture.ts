@@ -600,3 +600,128 @@ export function buildSymlinkFixture(): SymlinkFixture {
     paths: { [keyX]: ["sub-01/eeg/a.edf", "sub-02/eeg/c.edf"], [keyZ]: ["top.bdf"] },
   };
 }
+
+// ---------------------------------------------------------------------------------------
+// A sourcedata mirror: the shape of nm000186
+// ---------------------------------------------------------------------------------------
+
+export const MIRROR_DATASET = "nm000997";
+export const MIRROR_TAGS = ["v1.0.0", "v1.1.0"];
+export const MIRROR_PROVENANCE = "sourcedata/sourcedata_provenance.json";
+export const MIRROR_README = "sourcedata/README_sourcedata_provenance.md";
+
+/** Subject n's BIDS recording, and the upstream original that `sourcedata/` mirrors for it. */
+export const mirrorRecording = (n: number): string => annexKey(`mirror-rec-${n}`, 2048 + n, ".edf");
+export const mirrorOriginal = (n: number): string => annexKey(`mirror-orig-${n}`, 1024 + n, ".edf");
+/** The checksum the provenance file lists for original n: the sha256 in that original's key. */
+export const mirrorChecksum = (n: number): string => sha(`mirror-orig-${n}`);
+
+/** The provenance file as an upstream mirror carries it: every original, with its sha256. */
+export function mirrorProvenance(ns: number[]): string {
+  const files = ns.map((n) => ({
+    file: `upstream/rec-${n}.edf`,
+    bytes: 1024 + n,
+    sha256: mirrorChecksum(n),
+  }));
+  const total = files.reduce((t, f) => t + f.bytes, 0);
+  return `${JSON.stringify({ source: "an upstream release", n_files: files.length, total_bytes: total, files }, null, 2)}\n`;
+}
+
+export interface MirrorFixture {
+  root: string;
+  src: string;
+  /** The stand-in for GitHub: a bare repository with a `nemar-s3` special remote recorded. */
+  bare: string;
+  /** The operator's clone of `bare`, with git-annex initialized; the plan is built from it. */
+  clone: string;
+  keymapPath: string;
+  /** Every old key needs a scrub: three recordings and the three originals they mirror. */
+  s3PlanPath: string;
+  /** Where the test writes the git plan the real builder made. */
+  planPath: string;
+  keymap: Record<string, string>;
+}
+
+/**
+ * Three subjects over three commits and two tags. Each has a BIDS recording and, under
+ * `sourcedata/upstream/`, the upstream original it was converted from, and the provenance file
+ * lists each original's sha256: two versions of it, one at `v1.0.0` (two originals) and one at
+ * `v1.1.0` and the tip (three), as nm000186 has two. No file under `sourcedata/` is an image or a
+ * document, so the scrub drops nothing: every key is scrubbed in place.
+ */
+export function buildMirrorFixture(): MirrorFixture {
+  const root = makeRoot();
+  const src = join(root, "src");
+  mkdirSync(src);
+  git(src, "init", "-q", "-b", "main");
+  const subject = (n: number): void => {
+    write(src, `sub-0${n}/eeg/sub-0${n}_eeg.edf`, pointer(mirrorRecording(n)));
+    write(src, `sourcedata/upstream/rec-${n}.edf`, pointer(mirrorOriginal(n)));
+  };
+  write(src, "dataset_description.json", '{\n  "Name": "Mirror dataset"\n}\n');
+  write(src, "README", "Mirror dataset\n");
+  write(src, "CHANGES", "1.0.0 initial release\n");
+  subject(1);
+  subject(2);
+  write(src, MIRROR_PROVENANCE, mirrorProvenance([1, 2]));
+  write(src, MIRROR_README, "The files under sourcedata/ are the upstream files, unmodified.\n");
+  commitAll(src, "c1");
+  git(src, "tag", "v1.0.0");
+  subject(3);
+  write(src, MIRROR_PROVENANCE, mirrorProvenance([1, 2, 3]));
+  commitAll(src, "c2");
+  git(src, "tag", "-a", "v1.1.0", "-m", "second release, annotated");
+  write(src, "README", "Mirror dataset, edited\n");
+  commitAll(src, "c3");
+
+  const oldKeys = [1, 2, 3].flatMap((n) => [mirrorRecording(n), mirrorOriginal(n)]);
+  sh(src, ["git", "annex", "init", "--quiet", "origin-copy"]);
+  const uuid = git(src, "config", "annex.uuid").trim();
+  sh(
+    src,
+    ["git", "annex", "setpresentkey", "--batch"],
+    `${oldKeys.map((k) => `${k} ${uuid} 1`).join("\n")}\n`,
+  );
+  // After the location logs, as in fresh-clone.test.ts: `initremote` commits the git-annex
+  // journal, so the bare clone below carries the logs `annex-registry` retracts.
+  const store = join(root, "store");
+  mkdirSync(store);
+  sh(src, [
+    "git",
+    "annex",
+    "initremote",
+    "nemar-s3",
+    "type=directory",
+    `directory=${store}`,
+    "encryption=none",
+  ]);
+  const bare = join(root, "github.git");
+  sh(root, ["git", "clone", "-q", "--bare", "--no-local", src, bare]);
+  const clone = join(root, "clone");
+  cloneOf(bare, clone, datasetUrl(MIRROR_DATASET));
+  sh(clone, ["git", "annex", "init", "--quiet", "operator"]);
+
+  const keymap = Object.fromEntries(
+    oldKeys.map((k) => {
+      const m = /^SHA256E-s(\d+)--[0-9a-f]{64}(\.edf)$/.exec(k) as RegExpExecArray;
+      return [k, `SHA256E-s${m[1]}--${sha(`new-${k}`)}${m[2]}`];
+    }),
+  );
+  const keymapPath = join(root, "keymap.json");
+  writeJson(keymapPath, keymap);
+  const s3PlanPath = join(root, "plan.json");
+  writeJson(s3PlanPath, {
+    ...(s3PlanFor(MIRROR_DATASET, { scrub: oldKeys, clean: [] }) as Record<string, unknown>),
+    tags: MIRROR_TAGS,
+  });
+  return {
+    root,
+    src,
+    bare,
+    clone,
+    keymapPath,
+    s3PlanPath,
+    planPath: join(root, "git-plan.json"),
+    keymap,
+  };
+}
