@@ -12913,30 +12913,58 @@ class TestSubjectInfoNeverReachesAStore(unittest.TestCase):
 # A stand-in biosigIO package, on disk and importable, that is only what the
 # subject-information check reads: a version, a distribution record, and the
 # three writers' signatures. It cannot convert, and is not meant to.
+# Placeholders are replaced with str.replace, not str.format, so the source can
+# hold braces.
 _STANDIN_INIT = '''\
-__version__ = {version!r}
+import json
+import os
+
+__version__ = __VERSION__
+# "read_nothing": every read raises. "unmarked": a recording reads, and its
+# writer names exclude_subject_info but ignores it, as a build whose version
+# outran its code would, so the root it writes carries no mark; a path
+# naming sub-02 still raises, for a run that mixes the two failures.
+_MODE = __MODE__
 
 
 class Recording:
+    def __init__(self):
+        self.channels = {"E1": {}}
+        self.metadata = {}
+
     @classmethod
     def from_file(cls, filepath, **kwargs):
+        if _MODE == "unmarked" and "sub-02" not in filepath:
+            return cls()
         raise RuntimeError("stand-in biosigIO reads nothing")
 
-    def to_zarr(self, filepath, {to_zarr}**kwargs):
-        raise RuntimeError("stand-in biosigIO writes nothing")
+    def to_zarr(self, filepath, __TO_ZARR__**kwargs):
+        os.makedirs(filepath, exist_ok=True)
+        with open(os.path.join(filepath, "zarr.json"), "w") as fh:
+            json.dump({"zarr_format": 3, "node_type": "group",
+                       "attributes": {"recording_metadata": {}}}, fh)
+        return filepath
 
 
-def stream_to_zarr(filepath, store_path, *, dtype="int16", {stream}**kwargs):
+def stream_to_zarr(filepath, store_path, *, dtype="int16", __STREAM__**kwargs):
     raise RuntimeError("stand-in biosigIO writes nothing")
 
 
 def strip_subject_info(metadata):
     return dict(metadata)
 '''
+_STANDIN_BIDS = '''\
+def apply_events_tsv(rec, path):
+    return rec
+
+
+def read_events_tsv(path):
+    return None
+'''
 _STANDIN_EXPORTER = '''\
 class ZarrExporter:
     @staticmethod
-    def export(rec, filepath, *, dtype="int16", {export}**kwargs):
+    def export(rec, filepath, *, dtype="int16", __EXPORT__**kwargs):
         raise RuntimeError("stand-in biosigIO writes nothing")
 '''
 # An install whose Zarr exporter cannot be imported (the [zarr] extra missing,
@@ -12970,6 +12998,7 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
     The `aws` stand-in is the real-file one, logging every call."""
 
     PRIMARY = "sub-01/eeg/sub-01_task-rest_eeg.edf"
+    SECOND = "sub-02/eeg/sub-02_task-rest_eeg.edf"
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -12993,7 +13022,7 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
             "ZARR_TEST_S3_LOG": self.aws_log,
         }
 
-    def commit(self, with_recording: bool) -> None:
+    def commit(self, with_recording: bool, second_recording: bool = False) -> None:
         def git(*args):
             subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True)
 
@@ -13008,11 +13037,16 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
             # stand-in fails the import before any reader runs.
             with open(os.path.join(self.repo, self.PRIMARY), "wb") as fh:
                 fh.write(b"0" * 256)
+        if second_recording:
+            os.makedirs(os.path.join(self.repo, "sub-02", "eeg"))
+            with open(os.path.join(self.repo, self.SECOND), "wb") as fh:
+                fh.write(b"0" * 256)
         git("add", "-A")
         git("commit", "-q", "-m", "init")
 
     def standin(self, version: str = "1.2.11", dist_version: str | None = None,
-                lacking: str | None = None, exporter_imports: bool = True) -> str:
+                lacking: str | None = None, exporter_imports: bool = True,
+                mode: str = "read_nothing") -> str:
         """Write the stand-in package; `lacking` names the one writer that does
         not take the option, as biosigIO's writers did before 1.2.11."""
         root = os.path.join(self.dir, "standin")
@@ -13024,15 +13058,19 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
             return "" if name == lacking else "exclude_subject_info=False, "
 
         with open(os.path.join(pkg, "__init__.py"), "w") as fh:
-            fh.write(_STANDIN_INIT.format(
-                version=version, to_zarr=option("Recording.to_zarr"),
-                stream=option("stream_to_zarr"),
-            ))
+            fh.write(
+                _STANDIN_INIT.replace("__VERSION__", repr(version))
+                .replace("__MODE__", repr(mode))
+                .replace("__TO_ZARR__", option("Recording.to_zarr"))
+                .replace("__STREAM__", option("stream_to_zarr"))
+            )
+        with open(os.path.join(pkg, "bids.py"), "w") as fh:
+            fh.write(_STANDIN_BIDS)
         with open(os.path.join(pkg, "exporters", "__init__.py"), "w") as fh:
             fh.write("")
         with open(os.path.join(pkg, "exporters", "zarr.py"), "w") as fh:
             fh.write(
-                _STANDIN_EXPORTER.format(export=option("ZarrExporter.export"))
+                _STANDIN_EXPORTER.replace("__EXPORT__", option("ZarrExporter.export"))
                 if exporter_imports else _STANDIN_BROKEN_EXPORTER
             )
         dist = os.path.join(root, f"biosigio-{dist_version or version}.dist-info")
@@ -13146,6 +13184,32 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
         self.assertFalse(body["deterministic"])
         self.assertIs(body["provenance_fetch_failed"], True)
 
+    def test_a_run_whose_workers_refuse_every_store_exits_78(self):
+        # Past the startup check: the writers name the option, but the store
+        # written comes back without the mark, so `write_store` refuses it in
+        # the converting process. Every failure is that refusal, which is the
+        # node's fault: exit 78 (the drain stops), not 1 (an attempt spent).
+        self.commit(with_recording=True)
+        rc, log = self.run_main(self.standin(mode="unmarked"))
+        self.assertEqual(rc, 78, log)
+        self.assertIn("::error::1 recording(s) refused at write or upload", log)
+        body = self.callback_body()
+        self.assertEqual(body["status"], "failed")
+        self.assertIn("refused at write or upload", body["error"])
+        self.assertEqual(body["pending_count"], 1)
+        self.assertEqual(mutating_aws_calls(self.aws_calls()), [], "nothing uploaded")
+
+    def test_a_run_that_also_fails_otherwise_takes_the_ordinary_exit(self):
+        # One recording refused, one failing for an ordinary reason: not the
+        # node alone, so the run is an ordinary total failure.
+        self.commit(with_recording=True, second_recording=True)
+        rc, log = self.run_main(self.standin(mode="unmarked"))
+        self.assertEqual(rc, 1, log)
+        self.assertNotIn("refused at write or upload", log)
+        body = self.callback_body()
+        self.assertNotIn("error", body)
+        self.assertEqual(body["pending_count"], 2)
+
     def test_a_run_with_nothing_to_convert_is_not_held_up(self):
         # Nothing is written, so a node's biosigIO is no reason to refuse.
         self.commit(with_recording=False)
@@ -13232,6 +13296,17 @@ class TestFailedCallbackBody(unittest.TestCase):
                     **{k: v for k, v in complete.items() if k != name}
                 )
 
+
+class TestSubjectInfoRefusedRun(unittest.TestCase):
+    """Which runs end with the node-level exit: every failure a refusal."""
+
+    def test_the_verdict(self):
+        verdict = generate_zarr.subject_info_refused_run
+        self.assertFalse(verdict([], []), "no failure at all")
+        self.assertTrue(verdict(["a"], ["a"]))
+        self.assertTrue(verdict(["a", "b"], ["b", "a"]))
+        self.assertFalse(verdict(["a", "b"], ["a"]), "one failure is something else")
+        self.assertFalse(verdict(["a"], []))
 
 if __name__ == "__main__":
     unittest.main()

@@ -6871,8 +6871,23 @@ class SubjectInfoExclusionUnavailable(RuntimeError):
 
     Deliberately uncoded (no `.code`): it is a property of the node, not of the
     recording, so `convert_one` lists the recording as pending and retries it,
-    and the store it refused is never uploaded.
+    and the store it refused is never uploaded. A run whose every failure is
+    one exits EXIT_SUBJECT_INFO_UNAVAILABLE (`subject_info_refused_run`).
     """
+
+
+def subject_info_refused_run(failures: list[str], refused: list[str]) -> bool:
+    """Whether a run failed ONLY because its conversion processes refused to
+    write or upload a store that may carry subject information.
+
+    That happens past `main`'s startup check: a pool worker that imports a
+    different biosigIO, or a later rewrite of a store root that loses the mark.
+    Like the startup refusal it is the node's fault, not the dataset's, so the
+    run exits EXIT_SUBJECT_INFO_UNAVAILABLE and hallu-zarr.sh stops the drain
+    rather than spend a retry attempt of every queued dataset. A run with any
+    other failure, or with none, takes the ordinary path.
+    """
+    return bool(failures) and set(failures) == set(refused)
 
 
 def final_release(version: object) -> tuple[int, ...] | None:
@@ -7688,6 +7703,11 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             # The object storage lacks, so the driver can name it (see
             # `annex_missing_summary`).
             "annex_key": exc.key if isinstance(exc, AnnexObjectMissing) else None,
+            # A refusal to write or upload a store that may carry subject
+            # information (#1626): a property of the process that converted, so
+            # `main` turns a run whose every failure is one into the node-level
+            # exit instead of a dataset failure (`subject_info_refused_run`).
+            "subject_info_refused": isinstance(exc, SubjectInfoExclusionUnavailable),
         }
     finally:
         # Parallel workers share the NVMe scratch; reclaim each recording's copy
@@ -8248,6 +8268,9 @@ def main() -> int:
     converted_entries: list[dict] = []
     manifest_entries: list[dict] = []
     failures: list[str] = []
+    # The subset of `failures` refused for subject information (#1626); see
+    # `subject_info_refused_run`.
+    subject_info_refused: list[str] = []
     failure_entries: list[FailureEntry] = []
     # NOT PendingEntry: these are the merge's INPUT, carrying only what this run
     # observed (path, reason, last_error, last_attempt_utc). `merge_index` is
@@ -8311,6 +8334,8 @@ def main() -> int:
             print(f"[zarr] [{i}/{n}] converted {r['primary']} -> {r['entry']['zarr']}", flush=True)
         else:
             failures.append(r["primary"])
+            if r.get("subject_info_refused"):
+                subject_info_refused.append(r["primary"])
             # Two destinations, and which one is the whole of #1197.
             #
             # A typed, non-retryable biosigIO/NEMAR failure is a property of the
@@ -8519,6 +8544,20 @@ def main() -> int:
     events_file: ManifestFileEntry | None = None
     events_upload_failed = False
 
+    # Every failure of this run a refusal to write or upload a store that may
+    # carry subject information (#1626): the node's fault, so the run ends with
+    # EXIT_SUBJECT_INFO_UNAVAILABLE, the exit hallu-zarr.sh stops its drain on,
+    # rather than 1 (a total failure the queue would spend an attempt on) or 0.
+    # Anything else that converted is still published as usual first.
+    node_refused = subject_info_refused_run(failures, subject_info_refused)
+    node_refusal_reason = (
+        f"{len(subject_info_refused)} recording(s) refused at write or upload because "
+        "this node's biosigIO cannot leave subject information out of a store; "
+        "fix the node, then rerun" if node_refused else None
+    )
+    if node_refusal_reason:
+        print(f"::error::{node_refusal_reason}", flush=True)
+
     def write_failed_callback(error: str | None = None) -> None:
         """Write the `status: "failed"` callback body for a run that publishes
         nothing.
@@ -8579,8 +8618,8 @@ def main() -> int:
                 "is retryable, not data_failed, in case an upload is still landing",
                 flush=True,
             )
-        write_failed_callback()
-        return 1
+        write_failed_callback(node_refusal_reason)
+        return EXIT_SUBJECT_INFO_UNAVAILABLE if node_refused else 1
 
     # Advance source_commit to HEAD unless there are INFRA failures to retry. A
     # typed data failure (a derivative, a corrupt file) is permanent -- retrying it
@@ -8897,7 +8936,9 @@ def main() -> int:
 
     if failures:
         print(f"::error::{len(failures)} recording(s) failed to convert: {failures}", flush=True)
-    return 0
+    # What converted is published above; the refusals are pending in the index.
+    # The exit still says the node is at fault, so the drain stops here.
+    return EXIT_SUBJECT_INFO_UNAVAILABLE if node_refused else 0
 
 
 if __name__ == "__main__":
