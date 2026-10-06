@@ -512,8 +512,10 @@ describe("delete-old: deleting", () => {
         expect(del.versionId, "version id").toBeTruthy();
         expect(del.bypass, "bypass header").toBe(true);
       }
-      // Counts only on the progress line: no key, no version id.
+      // Counts only on the progress line: no key, no version id anywhere in what it printed.
       expect(r.stdout).toContain("delete-old: deleted 6 of 6 in this group");
+      expect(r.stdout).not.toContain("SHA256E");
+      for (const del of deletes) expect(r.stdout).not.toContain(del.versionId as string);
       const deletedIds = deletes.map((x) => x.versionId).sort();
       expect(deletedIds).toEqual(
         [...(oldIds[a.oldKey] as string[]), ...(oldIds[b.oldKey] as string[])].sort(),

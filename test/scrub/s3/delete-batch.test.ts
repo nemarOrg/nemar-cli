@@ -10,19 +10,35 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { readdirSync } from "node:fs";
 import {
+  type AwsRunner,
   DELETE_BATCH_MAX,
+  type S3Ctx,
   StageError,
+  TempArea,
   type VersionRef,
+  createAwsRunner,
   deleteVersionBatch,
   deleteVersions,
 } from "../../../scripts/scrub/s3/s3-lib";
 import { type S3Standin, startS3Standin } from "../helpers/s3-standin";
-import { BUCKET, SLOW, centuryFromNow, withCtx } from "./support";
+import { BUCKET, SLOW, awsTestEnv, centuryFromNow, withCtx } from "./support";
 
 let standin: S3Standin;
 afterEach(() => standin?.stop());
 
 const P = "xx090411/zarr/";
+
+/** The real runner, with the delete-objects requests counted: what the library asked, not what S3 saw. */
+function counting(ctx: S3Ctx): { ctx: S3Ctx; requests: () => number } {
+  let n = 0;
+  const aws: AwsRunner = {
+    api(op, args, opts) {
+      if (op === "delete-objects") n += 1;
+      return ctx.aws.api(op, args, opts);
+    },
+  };
+  return { ctx: { ...ctx, aws }, requests: () => n };
+}
 const data = (v = 1) => new Uint8Array(8).fill(v);
 const left = (key: string) => standin.versions(BUCKET, key).map((v) => v.versionId);
 
@@ -233,17 +249,129 @@ describe("deleteVersionBatch", () => {
   );
 
   test(
-    "a request refused for malformed input is not retried and not read as success",
+    "an internal error of S3 for the whole request is every item's word and never read as success",
     async () => {
       standin = startS3Standin();
       const refs = oldVersions(2);
       standin.inject("DeleteObjects", { code: "InternalError", status: 500 });
       await withCtx(standin, async (ctx) => {
-        // The CLI retries a 500 itself; what matters is that the library never says "deleted".
+        // The CLI retries a 500 itself, and the library does not resend on it (S3 may have acted
+        // on part of it); what matters is that the library never says "deleted".
         const words = await deleteVersionBatch(ctx, refs, false, { backoffMs: 1 });
         expect(words).toEqual(Array(2).fill("DeleteObjects:failed"));
       });
       for (const r of refs) expect(left(r.key)).toContain(r.versionId);
+    },
+    SLOW,
+  );
+
+  test(
+    "a request that fails as a whole with throttling is sent again, whole, and then goes",
+    async () => {
+      standin = startS3Standin();
+      const refs = oldVersions(3);
+      // Three whole-request refusals in a row, then S3 recovers (the tests run the CLI with its
+      // own retries off, so each refusal reaches the library).
+      standin.inject("DeleteObjects", { code: "SlowDown", status: 503, times: 3 });
+      await withCtx(standin, async (ctx) => {
+        const counted = counting(ctx);
+        expect(await deleteVersionBatch(counted.ctx, refs, false, { backoffMs: 1 })).toEqual([]);
+        expect(counted.requests()).toBe(4);
+        expect(readdirSync(ctx.tmp.dir)).toEqual([]);
+      });
+      expect(standin.calls("DeleteObjects").map((c) => c.status)).toEqual([503, 503, 503, 200]);
+      // Each resend named the same whole batch.
+      expect(standin.calls("DeleteObjects").every((c) => c.items?.length === 3)).toBe(true);
+      for (const r of refs) expect(left(r.key)).not.toContain(r.versionId);
+    },
+    SLOW,
+  );
+
+  test(
+    "a request that stays throttled is given up after `attempts` requests, every item reported",
+    async () => {
+      standin = startS3Standin();
+      const refs = oldVersions(2);
+      standin.inject("DeleteObjects", { code: "SlowDown", status: 503 });
+      await withCtx(standin, async (ctx) => {
+        const counted = counting(ctx);
+        const words = await deleteVersionBatch(counted.ctx, refs, false, {
+          attempts: 2,
+          backoffMs: 1,
+        });
+        expect(words).toEqual(Array(2).fill("DeleteObjects:throttled"));
+        expect(counted.requests()).toBe(2);
+        expect(readdirSync(ctx.tmp.dir)).toEqual([]);
+      });
+      for (const r of refs) expect(left(r.key)).toContain(r.versionId);
+    },
+    SLOW,
+  );
+
+  test(
+    "a request that times out is sent again, and the body file is gone before the pause",
+    async () => {
+      standin = startS3Standin();
+      const refs = oldVersions(2);
+      // One hung answer: the first request outlives the 2 s the library allows (5 x 400 ms).
+      standin.stallNext("POST", 8_000, 1);
+      await withCtx(
+        standin,
+        async (ctx) => {
+          const counted = counting(ctx);
+          expect(await deleteVersionBatch(counted.ctx, refs, false, { backoffMs: 1 })).toEqual([]);
+          expect(counted.requests()).toBe(2);
+          expect(readdirSync(ctx.tmp.dir)).toEqual([]);
+        },
+        BUCKET,
+        400,
+      );
+      for (const r of refs) expect(left(r.key)).not.toContain(r.versionId);
+    },
+    SLOW,
+  );
+
+  test(
+    "an endpoint that cannot be reached is retried, then every item gets the unreachable word",
+    async () => {
+      // A port nothing listens on: start a stand-in, take its address, stop it.
+      const gone = startS3Standin();
+      const deadUrl = gone.url;
+      gone.stop();
+      standin = startS3Standin();
+      const refs = oldVersions(2);
+      const tmp = await TempArea.create();
+      try {
+        const aws = createAwsRunner({
+          region: "us-east-2",
+          endpointUrl: deadUrl,
+          timeoutMs: 60_000,
+          env: awsTestEnv(standin),
+        });
+        const counted = counting({ aws, bucket: BUCKET, tmp });
+        const words = await deleteVersionBatch(counted.ctx, refs, false, {
+          attempts: 2,
+          backoffMs: 1,
+        });
+        expect(words).toEqual(Array(2).fill("DeleteObjects:unreachable"));
+        expect(counted.requests()).toBe(2);
+        expect(readdirSync(tmp.dir)).toEqual([]);
+      } finally {
+        await tmp.dispose();
+      }
+    },
+    SLOW,
+  );
+
+  test(
+    "the request carries a checksum header, which S3 requires",
+    async () => {
+      standin = startS3Standin();
+      const refs = oldVersions(1);
+      await withCtx(standin, async (ctx) => {
+        expect(await deleteVersionBatch(ctx, refs, false)).toEqual([]);
+      });
+      expect(standin.calls("DeleteObjects").map((c) => c.checksum)).toEqual([true]);
     },
     SLOW,
   );
@@ -299,6 +427,34 @@ describe("deleteVersionBatch", () => {
 });
 
 describe("deleteVersions", () => {
+  test(
+    "one bad item anywhere refuses the whole call before the first request",
+    async () => {
+      standin = startS3Standin();
+      const refs = oldVersions(1500);
+      await withCtx(standin, async (ctx) => {
+        // The bad item is in the SECOND batch, one request at a time: without the upfront check the
+        // first batch would already be gone when the second is refused.
+        const noId = [...refs.slice(0, 1200), { key: `${P}k00000`, versionId: "" }];
+        await expect(deleteVersions(ctx, noId, false, 1)).rejects.toMatchObject({
+          word: "delete-without-version-id",
+        });
+        // An undefined id (a cast) would be dropped by JSON.stringify and add a marker.
+        const undef = [...refs.slice(0, 1200), { key: `${P}k00000` } as unknown as VersionRef];
+        await expect(deleteVersions(ctx, undef, false, 1)).rejects.toMatchObject({
+          word: "delete-without-version-id",
+        });
+        const noKey = [...refs.slice(0, 1200), { key: "", versionId: "v" }];
+        await expect(deleteVersions(ctx, noKey, false, 1)).rejects.toMatchObject({
+          word: "delete-without-key",
+        });
+      });
+      expect(standin.opCount("DeleteObjects")).toBe(0);
+      expect(standin.keys(BUCKET, P).every((k) => left(k).length === 2)).toBe(true);
+    },
+    SLOW,
+  );
+
   test(
     "splits at the S3 limit: 2,500 versions are three requests, all gone",
     async () => {

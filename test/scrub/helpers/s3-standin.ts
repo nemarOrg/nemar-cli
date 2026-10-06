@@ -18,8 +18,10 @@
  *    optional version id, with the same lock rules per item as DeleteObject. As on S3 the request
  *    answers 200 even when an item is refused: a locked item is an `<Error>` entry
  *    (`AccessDenied`) beside the `<Deleted>` ones; with `<Quiet>true</Quiet>` only the errors. A version id that does not exist is answered
- *    `<Deleted>` (ASSUMED from S3's documented idempotent delete; the canary's `--batch` step
- *    reads what the real bucket does). A fault on `DeleteObjects` fails the whole request; one on
+ *    `<Deleted>` (measured on the real bucket by the canary's `--batch` step, 2026-10-06, as
+ *    were the per-item refusal inside a 200, a delete marker named by id, and the bypass). A
+ *    request without `Content-MD5` or an `x-amz-checksum-*` header is refused (`InvalidRequest`),
+ *    as S3 does. A fault on `DeleteObjects` fails the whole request; one on
  *    `DeleteObjectsItem` (with a `key`) turns that one item into an `<Error>` entry.
  *  - ListObjectVersions: a PREFIX match across keys, Versions and DeleteMarkers, newest first
  *    within a key, exactly one IsLatest per key, key-marker / version-id-marker paging with a
@@ -344,6 +346,19 @@ export function startS3Standin(): S3Standin {
       if (req.method === "POST" && key === "" && q.has("delete")) {
         const bypass = req.headers.get("x-amz-bypass-governance-retention") === "true";
         const body = await req.text();
+        // S3 requires Content-MD5 or an x-amz-checksum-* header on a multi-object delete. The CLI
+        // sends one by default; a regression of the pinned checksum setting would show here.
+        const checksum =
+          [...req.headers.keys()].some((h) => h.startsWith("x-amz-checksum-")) ||
+          req.headers.has("content-md5");
+        if (!checksum) {
+          record({ op: "DeleteObjects", key: "", status: 400, bypass, checksum: false });
+          return s3Error(
+            "InvalidRequest",
+            400,
+            "Missing required header for this request: Content-MD5 OR x-amz-checksum-",
+          );
+        }
         // As on S3, Quiet mode answers only the failures: a caller that asks for it cannot tell
         // which items were deleted.
         const quiet = /<Quiet>\s*true\s*<\/Quiet>/i.test(body);
@@ -354,9 +369,9 @@ export function startS3Standin(): S3Standin {
           return { key: xmlUnescape(k), versionId: v === null ? null : xmlUnescape(v) };
         });
         const fault = enter("DeleteObjects", "");
-        if (fault) return fail("DeleteObjects", fault, { bypass, items });
+        if (fault) return fail("DeleteObjects", fault, { bypass, items, checksum });
         if (items.length === 0 || items.length > 1000) {
-          record({ op: "DeleteObjects", key: "", status: 400, bypass, items });
+          record({ op: "DeleteObjects", key: "", status: 400, bypass, items, checksum });
           return s3Error("MalformedXML", 400);
         }
         const deleted: string[] = [];
@@ -401,7 +416,7 @@ export function startS3Standin(): S3Standin {
             `<Deleted><Key>${xmlEscape(it.key)}</Key><VersionId>${xmlEscape(it.versionId)}</VersionId>${v?.deleteMarker ? `<DeleteMarker>true</DeleteMarker><DeleteMarkerVersionId>${xmlEscape(it.versionId)}</DeleteMarkerVersionId>` : ""}</Deleted>`,
           );
         }
-        record({ op: "DeleteObjects", key: "", status: 200, bypass, items });
+        record({ op: "DeleteObjects", key: "", status: 200, bypass, items, checksum });
         return xml(
           `<DeleteResult>${quiet ? "" : deleted.join("")}${errors.join("")}</DeleteResult>`,
         );

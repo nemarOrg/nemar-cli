@@ -1285,8 +1285,8 @@ export async function abortMultipart(ctx: S3Ctx, key: string, uploadId: string):
 
 /**
  * Delete ONE version (or delete marker) by id. `bypass` adds the governance bypass; without it
- * a locked version is refused, which is what the canary relies on and what prune relies on to
- * never touch a locked object.
+ * a locked version is refused. The canary proves the lock this way, one version at a time; the
+ * stages that delete many (`delete-old`, `drop-archives`) use {@link deleteVersions}.
  */
 export async function deleteVersion(
   ctx: S3Ctx,
@@ -1305,11 +1305,11 @@ export const DELETE_BATCH_MAX = 1000;
 /**
  * How many requests one batch gets in all (the first and the resends), and the pause before the
  * next, which grows with the attempt. A busy S3 answers a thousand-version request with `SlowDown`
- * on some of its items; the pauses add up to a few seconds, then the item is reported and a re-run
- * resumes.
+ * on some of its items; the pauses (jittered) add up to about ten seconds, then the item is reported
+ * and a re-run resumes.
  */
 export const DELETE_BATCH_ATTEMPTS = 5;
-export const DELETE_BATCH_BACKOFF_MS = 500;
+export const DELETE_BATCH_BACKOFF_MS = 1000;
 
 /** One version, or one delete marker, of one key. */
 export interface VersionRef {
@@ -1336,6 +1336,24 @@ const RETRYABLE_S3_CODES = new Set([
 const RETRYABLE_REQUEST_CODES = new Set<AwsErrorCode>(["throttled", "unreachable", "timeout"]);
 
 const versionRefId = (key: string, versionId: string) => `${key}\0${versionId}`;
+
+/**
+ * Refuse, before any request, an item that could do harm: no version id (the request would add a
+ * delete marker instead of removing a version; `JSON.stringify` drops an undefined one) or no
+ * key. The literal version id `"null"` is real (an object put before versioning) and passes.
+ */
+function checkVersionRefs(items: readonly VersionRef[]): void {
+  for (const it of items) {
+    if (typeof it.versionId !== "string" || it.versionId === "") {
+      throw new StageError("delete-without-version-id");
+    }
+    if (typeof it.key !== "string" || it.key === "") throw new StageError("delete-without-key");
+  }
+}
+
+/** The pause before a resend: grows with the attempt, and is jittered so workers do not move in step. */
+const pauseBeforeResend = (backoffMs: number, attempt: number) =>
+  new Promise((r) => setTimeout(r, backoffMs * attempt * (0.5 + Math.random())));
 
 /**
  * Delete up to {@link DELETE_BATCH_MAX} versions (or delete markers) in ONE `DeleteObjects`
@@ -1368,7 +1386,7 @@ export async function deleteVersionBatch(
 ): Promise<string[]> {
   if (items.length === 0) return [];
   if (items.length > DELETE_BATCH_MAX) throw new StageError("delete-batch-too-large");
-  if (items.some((it) => it.versionId === "")) throw new StageError("delete-without-version-id");
+  checkVersionRefs(items);
   const attempts = opts.attempts ?? DELETE_BATCH_ATTEMPTS;
   const backoffMs = opts.backoffMs ?? DELETE_BATCH_BACKOFF_MS;
   const failed: string[] = [];
@@ -1376,7 +1394,7 @@ export async function deleteVersionBatch(
   for (let attempt = 1; pending.length > 0; attempt++) {
     const last = attempt >= attempts;
     const file = ctx.tmp.file();
-    let answer: Record<string, unknown>;
+    let answer: Record<string, unknown> | undefined;
     try {
       await writeFile(
         file,
@@ -1390,15 +1408,19 @@ export async function deleteVersionBatch(
       if (bypass) args.push("--bypass-governance-retention");
       answer = await ctx.aws.api("delete-objects", args, { slow: true });
     } catch (err) {
-      if (!last && err instanceof AwsCliError && RETRYABLE_REQUEST_CODES.has(err.code)) {
-        await new Promise((r) => setTimeout(r, backoffMs * attempt));
-        continue;
+      // `answer` stays undefined: a request worth another try is resent below, after the body
+      // file is gone and the pause is over; any other failure is every item's word.
+      if (last || !(err instanceof AwsCliError) || !RETRYABLE_REQUEST_CODES.has(err.code)) {
+        const word = failureWord(err);
+        for (let i = 0; i < pending.length; i++) failed.push(word);
+        return failed;
       }
-      const word = failureWord(err);
-      for (let i = 0; i < pending.length; i++) failed.push(word);
-      return failed;
     } finally {
       await ctx.tmp.remove(file);
+    }
+    if (answer === undefined) {
+      await pauseBeforeResend(backoffMs, attempt);
+      continue;
     }
     const deleted = new Set<string>();
     for (const d of Array.isArray(answer.Deleted) ? answer.Deleted : []) {
@@ -1429,7 +1451,7 @@ export async function deleteVersionBatch(
       }
     }
     pending = again;
-    if (pending.length > 0) await new Promise((r) => setTimeout(r, backoffMs * attempt));
+    if (pending.length > 0) await pauseBeforeResend(backoffMs, attempt);
   }
   return failed;
 }
@@ -1446,6 +1468,9 @@ export async function deleteVersions(
   concurrency: number,
   onBatch?: (progress: { done: number; total: number; failed: number }) => void,
 ): Promise<string[]> {
+  // Every item is checked before the first request, so a bad one in the last batch cannot leave
+  // the earlier batches already sent.
+  checkVersionRefs(items);
   const seen = new Set<string>();
   const unique: VersionRef[] = [];
   for (const it of items) {

@@ -1925,8 +1925,8 @@ export async function canaryStage(o: CanaryOptions): Promise<number> {
   }
   if (o.batch) {
     steps.push(
-      `put two locked versions, an unlocked one under a key with XML characters, and a delete marker, under ${o.prefix}batch*`,
-      "delete all five in ONE DeleteObjects request WITHOUT the bypass (expect the 3 unlocked gone, the 2 locked refused per item)",
+      `put two locked versions, an unlocked one under a key with XML characters, and an unlocked one that a delete marker then covers, under ${o.prefix}batch*`,
+      "delete those four versions and the marker in ONE DeleteObjects request WITHOUT the bypass (expect the 3 unlocked gone, the 2 locked refused per item)",
       "delete the 2 locked in one DeleteObjects request WITH the bypass (expect success)",
       "name an already deleted version again (recorded, not judged)",
     );

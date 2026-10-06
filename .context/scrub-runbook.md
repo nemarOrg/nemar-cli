@@ -1049,8 +1049,9 @@ If the path differs, ask the maintainer to read the row.
 > - every prefix with history (`D/version/`, `D/zarr/`) is named with `--prune-noncurrent` (`history-remains`, with the count per prefix), and a prune prefix is exactly `D/version/`, `D/archives/` or `D/zarr/` (`bad-prune-prefix`).
 >
 > **Words.**
-> It deletes in batches, as step 15a does (up to 1,000 versions per `DeleteObjects` request, `--concurrency` requests at a time, default 8), with the governance bypass for the old recordings and without it for the pruned history, and prints a progress line `delete-old: deleted N of M in this group` after each request.
-> An item S3 asked to be retried (`SlowDown`, `InternalError` and the like) is sent again alone, up to five requests in all, with a pause that grows each time; a lock refusal (`AccessDenied`) is final for that item and stays on the final listing.
+> It deletes in batches, as step 15a does (up to 1,000 versions per `DeleteObjects` request, `--concurrency` requests at a time, default 4), with the governance bypass for the old recordings and without it for the pruned history, and prints a progress line `delete-old: deleted N of M in this group` after each request.
+> An item S3 asked to be retried (`SlowDown`, `InternalError` and the like, as an entry of the answer) is sent again alone, and a whole request that failed with throttling, an unreachable endpoint or a timeout is sent again whole, up to five requests in all, with a jittered pause that grows each time; a lock refusal (`AccessDenied`) is final for that item and stays on the final listing.
+> If a run ends with `DeleteObjects:throttled` in its `delete errors` line, S3 was busier than the pauses covered: run it again, which resumes, with a lower `--concurrency` (2).
 > One version at a time, nm000186's 82,195 history entries took hours (about 6 deletions a second, one `aws` process each); a batch of 1,000 is one request, so the same history is about 90 requests.
 > It ends with an authoritative `ListObjectVersions` showing zero versions and zero markers for every old key and no history under `D/archives/`, `D/version/` or `D/zarr/`; otherwise it exits 5 and writes no `deleted.json`.
 > A re-run is safe and resumes: once the old keys are gone the new keys prove privacy, so a run that stopped at exit 5 is finished by running it again.
