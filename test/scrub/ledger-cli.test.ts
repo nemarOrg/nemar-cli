@@ -424,6 +424,69 @@ describe("ledger-cli: what a line says is read from a proof, and the rules are v
     ]);
 
   test(
+    "an interrupted and resumed delete-old: the earlier run's counts are added to the proof's, and only those",
+    async () => {
+      const dir = work();
+      const file = join(dir, "ledger.jsonl");
+      const proofPath = join(dir, "deleted.json");
+      writeFileSync(proofPath, `${JSON.stringify(deleted())}\n`);
+      const ok = await deletion(file, [
+        "--proof",
+        proofPath,
+        "--earlier-run-counts",
+        "versions=170,markers=1,pruned_versions=40,pruned_markers=9",
+      ]);
+      expect(ok.exitCode, ok.all).toBe(0);
+      const line = JSON.parse(readFileSync(file, "utf8").trim());
+      // The proof said versions 5, markers 2, pruned 3 and 1; keys is the plan's and is not added.
+      expect(line.counts).toEqual({
+        keys: 2,
+        versions: 175,
+        markers: 3,
+        pruned_versions: 43,
+        pruned_markers: 10,
+      });
+      // A subset is fine, and the others stay as the proof says.
+      const partial = await deletion(file, [
+        "--proof",
+        proofPath,
+        "--earlier-run-counts",
+        "pruned_markers=5",
+      ]);
+      expect(partial.exitCode, partial.all).toBe(0);
+      const last = JSON.parse(readFileSync(file, "utf8").trim().split("\n").at(-1) as string);
+      expect(last.counts).toEqual({
+        keys: 2,
+        versions: 5,
+        markers: 2,
+        pruned_versions: 3,
+        pruned_markers: 6,
+      });
+
+      // Never `keys`, never an unknown or malformed name, never without a proof, never for
+      // another action; each is a usage error and leaves the file as it was.
+      const before = readFileSync(file, "utf8");
+      for (const bad of ["keys=1", "objects=1", "versions=-1", "versions", "versions=1,"]) {
+        const r = await deletion(file, ["--proof", proofPath, "--earlier-run-counts", bad]);
+        expect([r.exitCode, bad].join(" "), r.all).toBe(`2 ${bad}`);
+      }
+      const noProof = await deletion(file, ["--earlier-run-counts", "versions=1"]);
+      expect(noProof.exitCode).toBe(2);
+      const other = await append(file, "plan", [
+        "--counts",
+        "keys=1",
+        "--verification",
+        "plan-only",
+        "--earlier-run-counts",
+        "versions=1",
+      ]);
+      expect(other.exitCode, other.all).toBe(2);
+      expect(readFileSync(file, "utf8")).toBe(before);
+    },
+    SLOW,
+  );
+
+  test(
     "old-versions-deleted takes its counts and its verification from deleted.json, never from typing",
     async () => {
       const dir = work();

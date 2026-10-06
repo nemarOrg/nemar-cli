@@ -16,6 +16,11 @@
  * delete-old writes only after an authoritative listing showed nothing left), takes its counts from
  * it (`--counts` is refused beside it), checks it names this dataset, and records
  * `authoritative-listing-empty+proof-<first 16 hex of its sha256>` as the verification.
+ * A `delete-old` run that was interrupted and run again writes `deleted.json` with the counts of
+ * the LAST run only (what the first one removed is no longer there to count). The operator adds
+ * those, read from the earlier run's own `delete-old: ...` lines, with `--earlier-run-counts`
+ * (`versions`, `markers`, `pruned_versions`, `pruned_markers`; summed with the proof's, and only
+ * beside `--proof`), so the line says what was deleted in all rather than in the last run.
  * `publish` copies the file to `s3://nemar/<id>/corrections/ledger.jsonl`. It is a dry run unless
  * `--execute`, and it refuses unless the local file is a strict extension of the object already
  * there: the ledger is append-only, and an upload that would drop a line is refused.
@@ -83,6 +88,7 @@ const OPTIONS = {
   region: { type: "string" },
   "timeout-sec": { type: "string" },
   proof: { type: "string" },
+  "earlier-run-counts": { type: "string" },
   execute: { type: "boolean" },
 } as const;
 
@@ -158,6 +164,27 @@ function fromDeletionProof(
   };
 }
 
+/** The counts of a `delete-old` run that can have an earlier, interrupted run behind it. */
+const EARLIER_RUN_COUNT_NAMES = ["versions", "markers", "pruned_versions", "pruned_markers"];
+
+/**
+ * Add the counts of an earlier, interrupted run to the proof's. Only the four names a run removes
+ * (never `keys`, which is the plan's), each a number the operator read from that run's own lines.
+ */
+function addEarlierRun(
+  counts: Record<string, number>,
+  earlier: string | undefined,
+): Record<string, number> {
+  if (earlier === undefined) return counts;
+  const extra = parseCounts(earlier);
+  const out = { ...counts };
+  for (const [name, n] of Object.entries(extra)) {
+    if (!EARLIER_RUN_COUNT_NAMES.includes(name)) throw new Usage("bad --earlier-run-counts");
+    out[name] = (out[name] ?? 0) + n;
+  }
+  return out;
+}
+
 interface Remote {
   text: string;
   etag: string;
@@ -214,8 +241,12 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
         throw new Refused("verification-contradicts-proof");
       }
       ({ counts, verification } = fromDeletionProof(v.proof, dataset));
+      counts = addEarlierRun(counts, v["earlier-run-counts"]);
     } else {
       if (v.proof) throw new Usage("--proof is only for old-versions-deleted");
+      if (v["earlier-run-counts"] !== undefined) {
+        throw new Usage("--earlier-run-counts is only for old-versions-deleted");
+      }
       counts = parseCounts(v.counts);
       verification = need(v.verification, "verification");
     }
