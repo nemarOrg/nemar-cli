@@ -288,14 +288,11 @@ export function parseDeleted(text: string): DeletedFile {
     bad();
   }
   const c = x.counts as Record<string, unknown>;
-  // The raw counts come as a pair or not at all: a plan with raw copies deletes both kinds.
-  const raw = DELETED_RAW_COUNTS.filter((f) => f in c).length;
-  const expected = raw === 0 ? DELETED_COUNTS : [...DELETED_COUNTS, ...DELETED_RAW_COUNTS];
-  if (
-    (raw !== 0 && raw !== DELETED_RAW_COUNTS.length) ||
-    Object.keys(c).length !== expected.length ||
-    !expected.every((f) => isCount(c[f]))
-  ) {
+  // The raw counts come as a pair or not at all: a plan with raw copies deletes both kinds. With
+  // either one present both are expected, so half the pair fails the count check below.
+  const raw = DELETED_RAW_COUNTS.some((f) => f in c);
+  const expected = raw ? [...DELETED_COUNTS, ...DELETED_RAW_COUNTS] : DELETED_COUNTS;
+  if (Object.keys(c).length !== expected.length || !expected.every((f) => isCount(c[f]))) {
     bad();
   }
   return x as unknown as DeletedFile;
