@@ -197,6 +197,11 @@ SUITE("pointer-file dataset", () => {
     expect(rewriteOut.code).toBe(0);
     expect(verifyOut.out).toContain("verify: ok");
     expect(verifyOut.code).toBe(0);
+    // No `sourcedata/sourcedata_provenance.json` here: the provenance exception keeps nothing.
+    expect(counts(verifyOut.out, "verify: ok")).toMatchObject({
+      provenanceHashesKept: 0,
+      provenanceBlobsKept: 0,
+    });
   });
 
   test("the output is counts and fixed words only", () => {

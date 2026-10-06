@@ -7,6 +7,7 @@ import {
   buildKey,
   parseAssembled,
   parseGitPlan,
+  parseGitVerified,
   parseHashes,
   parseKey,
   parseKeymap,
@@ -383,5 +384,37 @@ describe("stage files", () => {
         ContractError,
       );
     }
+  });
+
+  test("git-verified.json: the provenance counts are counts, and a proof from before them still parses", () => {
+    const proof = {
+      version: 1,
+      dataset: "nm000186",
+      mode: "fresh-clone",
+      verifiedAt: "2026-10-06T00:00:00.000Z",
+      keymapSha256: H1,
+      gitPlanSha256: H2,
+      s3PlanSha256: BOUND,
+      counts: { refs: 5, commits: 9, provenanceHashesKept: 88, provenanceBlobsKept: 2 },
+    };
+    expect(parseGitVerified(JSON.stringify(proof)).counts.provenanceHashesKept).toBe(88);
+    // Written before the provenance exception: that verify kept no old hash at all, a stricter
+    // check, so its proof is still a proof.
+    const older = { ...proof, counts: { refs: 5, commits: 9 } };
+    expect(parseGitVerified(JSON.stringify(older)).counts.provenanceHashesKept).toBeUndefined();
+    for (const counts of [
+      { ...proof.counts, provenanceHashesKept: -1 },
+      { ...proof.counts, provenanceHashesKept: 1.5 },
+      { ...proof.counts, provenanceBlobsKept: "2" },
+    ]) {
+      expect(
+        () => parseGitVerified(JSON.stringify({ ...proof, counts })),
+        JSON.stringify(counts),
+      ).toThrow(ContractError);
+    }
+    // The kept count is a count, not a field of its own: one beside `counts` is still refused.
+    expect(() => parseGitVerified(JSON.stringify({ ...proof, provenanceHashesKept: 88 }))).toThrow(
+      ContractError,
+    );
   });
 });

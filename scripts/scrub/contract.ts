@@ -244,7 +244,13 @@ export interface GitVerifiedFile {
   keymapSha256: string;
   gitPlanSha256: string;
   s3PlanSha256: string;
-  /** The verify run's own counts (refs, commits, objects scanned, ...). */
+  /**
+   * The verify run's own counts (refs, commits, objects scanned, ...). Since the provenance
+   * exception (ADR 0085), a proof also counts the upstream checksums it let stand:
+   * `provenanceHashesKept` (distinct old hashes) and `provenanceBlobsKept`. A proof written before
+   * has neither and still parses: that verify allowed no old hash anywhere, a stricter check, so
+   * what it vouches for still holds.
+   */
   counts: Record<string, number>;
 }
 

@@ -619,6 +619,7 @@ export type VerifyReason =
   | "annex-branch-changed"
   | "edf-key-unaccounted"
   | "edf-path-not-a-pointer"
+  | "provenance-unannotated"
   // fresh-clone mode only:
   | "tag-names-not-plan"
   | "ledger-commit-not-alone"
@@ -630,6 +631,17 @@ export type VerifyReason =
 
 /** The one path a commit made after the rewrite may add, and the only one it may touch. */
 export const LEDGER_PATH = ".nemar/corrections.jsonl";
+
+/**
+ * The provenance file of a dataset that mirrors upstream recordings under `sourcedata/`: a JSON
+ * object whose top-level `files` array lists each mirrored file, with the `sha256` of the ORIGINAL
+ * upstream file. Those checksums are kept as provenance (ADR 0085), so they are the one place an
+ * old key's hash may remain, under the rule of {@link provenanceHashUse}.
+ */
+export const PROVENANCE_PATH = "sourcedata/sourcedata_provenance.json";
+
+/** The top-level key whose sentence says the checksums describe the files before the correction. */
+export const PROVENANCE_NOTE_KEY = "privacy_correction";
 
 /**
  * `local`: the clone the rewrite ran in, compared with the snapshot taken before it.
@@ -819,6 +831,116 @@ export class HashScanner {
   }
 }
 
+/** What an old key's hash is doing in a provenance blob; see {@link provenanceHashUse}. */
+export type ProvenanceUse =
+  /** Every old hash is the `sha256` of a `files` entry, and the file says the checksums are upstream's. */
+  | { use: "kept"; hashes: Set<string> }
+  /** Every old hash is the `sha256` of a `files` entry, but nothing says the copies now differ. */
+  | { use: "unannotated"; hashes: Set<string> }
+  /** An old hash somewhere else in the file, or the file is not a UTF-8 JSON object. */
+  | { use: "elsewhere" };
+
+const SHA256_VALUE = /^"([0-9a-fA-F]{64})"$/;
+
+/**
+ * Where the old hashes in one blob of {@link PROVENANCE_PATH} sit.
+ *
+ * An old hash may stay only as the whole string value of a `sha256` member of an object in the
+ * top-level `files` array, written without escapes. The blob is walked as text, so every
+ * occurrence is placed, a duplicated key included; the bytes of those values are masked, and the
+ * same scan `old-key-present` runs then reads the rest: a hash anywhere else (in another field, in
+ * the note, nested deeper, as a key) makes the blob `elsewhere`. When nothing else holds one, the
+ * blob is `kept` only if it carries a non-empty string {@link PROVENANCE_NOTE_KEY}, and
+ * `unannotated` otherwise.
+ */
+export function provenanceHashUse(raw: Uint8Array, oldHashes: ReadonlySet<string>): ProvenanceUse {
+  let text: string;
+  let doc: unknown;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(raw);
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    doc = JSON.parse(text);
+  } catch {
+    return { use: "elsewhere" };
+  }
+  if (typeof doc !== "object" || doc === null || Array.isArray(doc)) return { use: "elsewhere" };
+
+  // The text is valid JSON from here, so the walk needs no error handling.
+  const ws = (i: number): number => {
+    let j = i;
+    while (j < text.length && " \t\n\r".includes(text[j] as string)) j++;
+    return j;
+  };
+  const str = (i: number): number => {
+    let j = i + 1;
+    while (text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+    return j + 1;
+  };
+  const members = (i: number, on: (key: string, at: number) => number): number => {
+    let j = ws(i + 1);
+    if (text[j] === "}") return j + 1;
+    for (;;) {
+      const keyEnd = str(j);
+      const key = JSON.parse(text.slice(j, keyEnd)) as string;
+      j = ws(on(key, ws(ws(keyEnd) + 1)));
+      if (text[j] !== ",") return j + 1;
+      j = ws(j + 1);
+    }
+  };
+  const elements = (i: number, on: (at: number) => number): number => {
+    let j = ws(i + 1);
+    if (text[j] === "]") return j + 1;
+    for (;;) {
+      j = ws(on(j));
+      if (text[j] !== ",") return j + 1;
+      j = ws(j + 1);
+    }
+  };
+  const skip = (i: number): number => {
+    const c = text[i];
+    if (c === "{") return members(i, (_key, at) => skip(at));
+    if (c === "[") return elements(i, skip);
+    if (c === '"') return str(i);
+    let j = i;
+    while (j < text.length && !",]} \t\n\r".includes(text[j] as string)) j++;
+    return j;
+  };
+
+  const spans: [number, number][] = [];
+  const kept = new Set<string>();
+  members(ws(0), (key, at) => {
+    if (key !== "files" || text[at] !== "[") return skip(at);
+    return elements(at, (entry) => {
+      if (text[entry] !== "{") return skip(entry);
+      return members(entry, (field, value) => {
+        const end = skip(value);
+        if (field !== "sha256") return end;
+        const hash = SHA256_VALUE.exec(text.slice(value, end))?.[1]?.toLowerCase();
+        if (hash !== undefined && oldHashes.has(hash)) {
+          spans.push([value + 1, end - 1]);
+          kept.add(hash);
+        }
+        return end;
+      });
+    });
+  });
+
+  let rest = "";
+  let from = 0;
+  for (const [a, b] of spans) {
+    rest += `${text.slice(from, a)}${"-".repeat(b - a)}`;
+    from = b;
+  }
+  rest += text.slice(from);
+  const scanner = new HashScanner(oldHashes);
+  scanner.push(Buffer.from(rest, "utf8"));
+  if (scanner.found || kept.size === 0) return { use: "elsewhere" };
+  const note = (doc as Record<string, unknown>)[PROVENANCE_NOTE_KEY];
+  return typeof note === "string" && note.trim() !== ""
+    ? { use: "kept", hashes: kept }
+    : { use: "unannotated", hashes: kept };
+}
+
 function setDiffSize(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
   let n = 0;
   for (const x of a) if (!b.has(x)) n++;
@@ -850,7 +972,13 @@ export function annexKeyOfBlob(content: Uint8Array): string | null {
  *
  * In both modes:
  * - no object reachable from any non-git-annex ref holds an old key's sha256 (every blob,
- *   plus commit and annotated-tag messages), not only the tips;
+ *   plus commit and annotated-tag messages), not only the tips; the one exception is the
+ *   upstream checksums of {@link PROVENANCE_PATH} (ADR 0085): a blob whose only path, in every
+ *   commit of every ref, is that file, where every old hash is a `sha256` of a `files` entry
+ *   ({@link provenanceHashUse}), is not a hit when it carries {@link PROVENANCE_NOTE_KEY}, and is
+ *   `provenance-unannotated` when it does not; the hashes kept are counted
+ *   (`provenanceHashesKept`, distinct, and `provenanceBlobsKept`). The exception is off when any
+ *   ref names something other than a commit, whose blobs no commit's path accounts for;
  * - no dropped path in any commit's tree;
  * - every blanked key is empty in every commit that has the file, and every structural edit holds;
  * - the appended text is in every commit exactly once, at the end of the file;
@@ -918,15 +1046,43 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
     counts.refs = scanRefs.length;
   }
 
+  // Every entry of every commit of every ref, in one walk: the EDF/BDF check below reads it, and
+  // so does the provenance exception, which needs EVERY path a blob has in any commit; the one
+  // path `rev-list --objects` prints for a blob is only the first it met, and is one of these.
+  const rawEntries = parseRawLog(await git(repo, RAW_LOG_ARGS, `${scanRefs.join("\n")}\n`));
+  const blobPaths = new Map<string, Set<string>>();
+  for (const e of rawEntries) {
+    if (isZeroSha(e.newSha)) continue;
+    const paths = blobPaths.get(e.newSha) ?? new Set<string>();
+    paths.add(e.path);
+    blobPaths.set(e.newSha, paths);
+  }
+  // A ref to a tree or a blob reaches blobs, under other names, that no commit's entry names;
+  // with one, nothing is exempt.
+  const peeled: string[] = [];
+  await catBatch(
+    repo,
+    scanRefs.map((r) => `${r}^{}`),
+    "check",
+    { header: (_i, info) => peeled.push(info?.type ?? "missing") },
+  );
+  const commitsOnly = peeled.every((type) => type === "commit");
+
   // Old keys in every object reachable from any non-annex ref.
   const oldHashes = new Set(Object.keys(keymap).map((k) => parseKey(k).sha256));
   const objects = (await git(repo, ["rev-list", "--objects", ...scanRefs]))
     .split("\n")
     .filter(Boolean)
     .map((line) => line.split(" ")[0] as string);
+  /** A blob that is the provenance file, and nothing else, in every commit of every ref. */
+  const onlyProvenance = (oid: string): boolean => {
+    const paths = blobPaths.get(oid);
+    return commitsOnly && paths?.size === 1 && paths.has(PROVENANCE_PATH);
+  };
   let blobHits = 0;
   let messageHits = 0;
   let blobsScanned = 0;
+  const provenanceHits: string[] = [];
   const scanners = new Map<number, HashScanner>();
   const kinds = new Map<number, string>();
   await catBatch(repo, objects, "batch", {
@@ -944,14 +1100,33 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
       scanners.delete(i);
       kinds.delete(i);
       if (!scanner?.found) return;
-      if (kind === "blob") blobHits++;
-      else messageHits++;
+      if (kind !== "blob") messageHits++;
+      else if (onlyProvenance(objects[i] as string)) provenanceHits.push(objects[i] as string);
+      else blobHits++;
     },
   });
+  // The upstream checksums a provenance file keeps (ADR 0085): only where the rule allows them.
+  let unannotated = 0;
+  let provenanceBlobsKept = 0;
+  const provenanceHashesKept = new Set<string>();
+  for (const content of await readObjects(repo, provenanceHits)) {
+    const verdict: ProvenanceUse = content
+      ? provenanceHashUse(content, oldHashes)
+      : { use: "elsewhere" };
+    if (verdict.use === "elsewhere") blobHits++;
+    else if (verdict.use === "unannotated") unannotated++;
+    else {
+      provenanceBlobsKept++;
+      for (const hash of verdict.hashes) provenanceHashesKept.add(hash);
+    }
+  }
   fail("old-key-present", blobHits);
   fail("old-key-in-message", messageHits);
+  fail("provenance-unannotated", unannotated);
   counts.objectsScanned = objects.length;
   counts.blobsScanned = blobsScanned;
+  counts.provenanceHashesKept = provenanceHashesKept.size;
+  counts.provenanceBlobsKept = provenanceBlobsKept;
 
   // Per commit: dropped paths, blanked keys, appended text.
   const commits = (await git(repo, ["rev-list", ...scanRefs])).split("\n").filter(Boolean);
@@ -1040,8 +1215,7 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
     ...s3Plan.keys.filter((k) => !k.needsScrub && k.status === "read").map((k) => k.oldKey),
   ]);
   const edfBlobs = new Set<string>();
-  const log = await git(repo, RAW_LOG_ARGS, `${scanRefs.join("\n")}\n`);
-  for (const e of parseRawLog(log)) {
+  for (const e of rawEntries) {
     if (!EDF_PATH.test(e.path) || isZeroSha(e.newSha)) continue;
     if (e.status !== "D" && POINTER_MODES.has(e.newMode)) edfBlobs.add(e.newSha);
   }
