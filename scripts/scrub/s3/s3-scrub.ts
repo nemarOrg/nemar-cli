@@ -5,6 +5,7 @@
  *   plan       --dataset ID --out DIR [--tags v1,v2] [--bucket nemar]
  *   assemble   --dir DIR [--execute] [--concurrency 4]
  *   verify     --dir DIR [--samples 8]
+ *   raw-verify --dir DIR [--git-blobs git-blobs.txt]
  *   delete-old --dir DIR --confirm-dataset ID [--execute] [--verified verified.json]
  *              [--hash-verified new-hash-verified.json] [--git-verified git-verified.json]
  *              [--max-delete N]
@@ -19,8 +20,9 @@
  *   canary     --prefix <nm099999|xx09[0-8]NNN>/canary-<random>/ [--execute] [--multipart] [--batch]
  *              [--bucket nemar]
  *
- * Every subcommand is read-only unless it is given `--execute`; `plan`, `verify` and
- * `zarr-public` have no `--execute` because they never write to S3. Common flags: `--region` (default us-east-2),
+ * Every subcommand is read-only unless it is given `--execute`; `plan`, `verify`, `raw-verify` and
+ * `zarr-public` have no `--execute` because they never write to S3 (`raw-verify` reads no S3 object
+ * at all: it compares local files). Common flags: `--region` (default us-east-2),
  * `--timeout-sec` (per `aws` call, default 120; transfers get five times as long).
  *
  * Credentials are the ambient `aws` CLI session. A long-lived `AKIA` key in the environment is
@@ -41,6 +43,7 @@
 import { parseArgs } from "node:util";
 import { ContractError } from "../contract";
 import { dropArchivesStage } from "./archives-stage";
+import { rawVerifyStage } from "./raw-copies";
 import {
   AwsCliError,
   DEFAULT_SAMPLES,
@@ -68,10 +71,20 @@ import {
 import { zarrPublicStage } from "./zarr-public";
 import { DEFAULT_MAX_ZARR_JSON, zarrStage } from "./zarr-stage";
 
-const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|zarr|drop-archives|zarr-public|canary> [options]
+const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|raw-verify|delete-old|zarr|drop-archives|zarr-public|canary> [options]
   plan       --dataset ID --out DIR [--tags v1,v2] [--bucket nemar] [--concurrency 8]
+             also records every RAW copy under ID/objects/ (a name that is not an annex key and
+             not annex-uuid) with every version and delete marker; the line ends with
+             rawCopies=N versions=V markers=M.
   assemble   --dir DIR [--execute] [--concurrency 4] [--max-part-bytes N]
   verify     --dir DIR [--samples 8] [--concurrency 4]
+  raw-verify --dir DIR [--git-blobs F]
+             for a plan with raw copies: every raw version in raw-hashes.json (hash_stage.py
+             raw-hash, for this plan.json) must match, a raw recording an annex key of the plan
+             (sha256 and size) and any other raw file a blob in F (default git-blobs.txt in DIR,
+             one 40-hex blob id per line, taken from the clone BEFORE the rewrite). Writes
+             raw-verified.json only then; otherwise exit 1, counts by reason on the terminal and
+             the names in raw-unmatched.json. Reads no S3 object.
   delete-old --dir DIR --confirm-dataset ID [--execute] [--verified F] [--hash-verified F]
              [--git-verified F] [--max-delete N] [--prune-noncurrent PREFIX]... [--max-prune N]
              [--public-base URL]
@@ -88,7 +101,12 @@ const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|zarr|drop-arc
              and ID/zarr/ that has history (a noncurrent version or a delete marker) must be
              named, or the run refuses (history-remains); ID/archives/ must already be empty.
              --max-delete N only lowers the plan's own count; a version of an old key that the
-             plan did not record is refused whatever N is (version-not-in-plan).
+             plan did not record is refused whatever N is (version-not-in-plan). The count
+             covers the raw copies too: a plan with raw copies deletes every raw version (with
+             the bypass) and then every raw delete marker, only behind raw-verified.json for this
+             plan (raw-copies-unverified), only while every annex key a raw recording matched
+             and this run does not replace is current at its size (raw-duplicate-missing), and
+             refuses any raw version or marker it did not record (raw-copy-not-in-plan).
              --max-prune N (default 1000) refuses to prune more noncurrent versions than N. For
              ID/zarr/ expect about one per store root the zarr step rewrote (zarr-plan.json counts
              them, and the dry run prints the exact number) plus any older versions a Zarr
@@ -149,6 +167,7 @@ const OPTIONS = {
   "allow-member": { type: "string", multiple: true },
   "max-zarr-json": { type: "string" },
   "zarr-verified": { type: "string" },
+  "git-blobs": { type: "string" },
   concurrency: { type: "string" },
   samples: { type: "string" },
   "timeout-sec": { type: "string" },
@@ -222,9 +241,9 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
     throw new StageError("long-lived-key-in-environment", EXIT.refused);
   }
 
-  // Every command but zarr-public (anonymous fetches, no CLI) runs `aws`, and an old CLI ignores
-  // the checksum setting the locked writes need.
-  if (command !== "zarr-public") await requireAwsCliVersion();
+  // Every command but zarr-public (anonymous fetches, no CLI) and raw-verify (local files only)
+  // runs `aws`, and an old CLI ignores the checksum setting the locked writes need.
+  if (command !== "zarr-public" && command !== "raw-verify") await requireAwsCliVersion();
 
   const execute = v.execute === true;
   const opts = common(v, log);
@@ -259,6 +278,12 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
         dir: need(v.dir, "dir"),
         concurrency: concurrency(4),
         samples: intFlag(v.samples, "samples", DEFAULT_SAMPLES, 1),
+      });
+    case "raw-verify":
+      return rawVerifyStage({
+        dir: need(v.dir, "dir"),
+        gitBlobsFile: v["git-blobs"] ?? "git-blobs.txt",
+        log,
       });
     case "delete-old": {
       // Checked against the plan's bucket by the stage (`checkPublicBase`).

@@ -1,7 +1,13 @@
 /**
  * Five S3 stages of an in-place scrub: plan, assemble, verify, delete-old and canary. The zarr,
- * drop-archives and zarr-public stages live in `zarr-stage.ts`, `archives-stage.ts` and
- * `zarr-public.ts`, and use the helpers exported here.
+ * drop-archives, zarr-public and raw-verify stages live in `zarr-stage.ts`, `archives-stage.ts`,
+ * `zarr-public.ts` and `raw-copies.ts`, and use the helpers exported here.
+ *
+ * Raw copies (objects under `<id>/objects/` stored by their path, not by an annex key; ADR 0085,
+ * amendment of 2026-10-06) are recorded by the plan and deleted by delete-old, every version
+ * before every marker, only behind `raw-verified.json` for the plan (`checkRawCopiesProof`), only
+ * while every annex key a raw recording matched is still there (`raw-duplicate-missing`), and never
+ * one the plan did not record (`checkRawCopiesInBucket`).
  *
  * Each stage reads the previous stage's JSON from a working directory (the contract in
  * `../contract.ts`) and refuses a file that does not match. Every stage is read-only unless it
@@ -33,6 +39,8 @@ import {
   verifyScrub,
 } from "../../../shared/identifier-scrub";
 import {
+  ANNEX_KEY,
+  ANNEX_UUID_OBJECT,
   type AssembledFile,
   ContractError,
   type DeletedFile,
@@ -42,8 +50,12 @@ import {
   type PatchesFile,
   type PlanFile,
   type PlanKey,
+  type RawCopy,
+  type RawVerifiedFile,
   type VerifiedFile,
   type ZarrVerifiedFile,
+  isEdfOrBdf,
+  isRawCopyName,
   parseAssembled,
   parseGitVerified,
   parseHashes,
@@ -51,9 +63,11 @@ import {
   parseKeymap,
   parsePatches,
   parsePlan,
+  parseRawVerified,
   parseVerified,
   parseZarrVerified,
   patchDigest,
+  rawKindOf,
 } from "../contract";
 import {
   AwsCliError,
@@ -311,11 +325,7 @@ async function discoverTags(ctx: S3Ctx, dataset: string): Promise<string[]> {
   return tags.sort();
 }
 
-/** True for a path the scrub reads: an EDF or BDF file, in any letter case. */
-export function isEdfOrBdf(filePath: string): boolean {
-  const lower = filePath.toLowerCase();
-  return lower.endsWith(".edf") || lower.endsWith(".bdf");
-}
+export { isEdfOrBdf };
 
 interface ManifestKeys {
   keys: Set<string>;
@@ -361,32 +371,92 @@ export function keysOfManifest(dataset: string, text: string): ManifestKeys {
   return { keys, gitInline, badKeys };
 }
 
+/** What `<id>/objects/` holds, sorted into what the scrub does with each name. */
+export interface ObjectsListing {
+  /** The EDF and BDF annex keys, in any letter case. */
+  recordings: Set<string>;
+  /**
+   * Names in the annex key space (`SHA256E-`) that do not parse as an annex key, and names no
+   * call can carry (empty, a lone surrogate, or a control character, NUL and carriage return among
+   * them: `isRawCopyName`). The plan stops on any (`objects-bad-key`); counted, never printed.
+   */
+  badKeys: string[];
+  /** Every raw copy with every version and delete marker, sorted by name: the plan's `rawCopies`. */
+  raw: RawCopy[];
+}
+
 /**
- * Every EDF or BDF key under `<id>/objects/`, in any letter case, from a paginated listing of
- * every VERSION and DELETE MARKER there (`ListObjectVersions`), not only the current objects. A
- * manifest names the files a version has; the listing finds the ones a manifest does not name (a
+ * Sort one listing of every VERSION and DELETE MARKER under `<id>/objects/` (`ListObjectVersions`,
+ * not only the current objects) into the three things a name there can be:
+ *
+ * - an annex key (`SHA256E-s<size>--<sha256><ext>`): an EDF or BDF one is a recording the plan
+ *   reads, anything else is not the scrub's business;
+ * - exactly {@link ANNEX_UUID_OBJECT}, the special remote's marker: ignored, and never deleted;
+ * - any other name is a RAW copy (a file stored by its path, a zero-byte "folder" key ending in
+ *   `/` included), recorded with every version (id and size) and every delete marker, in the
+ *   listing's order, newest first. A name in the annex key space that does not parse is not one,
+ *   nor is a name no call can carry (`isRawCopyName`): each is a bad key.
+ *
+ * A manifest names the files a version has; the listing finds the ones a manifest does not name (a
  * file dropped from a later version, an older tag nobody listed), and a recording whose current
- * entry is a delete marker still holds its bytes in a noncurrent version, locked. `bad` counts
- * names that look like a recording and are not annex keys.
+ * entry is a delete marker still holds its bytes in a noncurrent version, locked.
  */
-async function listObjectRecordings(
-  ctx: S3Ctx,
-  dataset: string,
-): Promise<{ keys: Set<string>; bad: number }> {
+export function classifyObjects(dataset: string, entries: PrefixEntry[]): ObjectsListing {
   const prefix = `${dataset}/objects/`;
-  const keys = new Set<string>();
-  let bad = 0;
-  for (const full of new Set((await listPrefixVersions(ctx, prefix)).map((e) => e.key))) {
-    const name = full.slice(prefix.length);
-    if (!isEdfOrBdf(name)) continue;
-    try {
-      parseKey(name);
-      keys.add(name);
-    } catch {
-      bad += 1;
+  const recordings = new Set<string>();
+  const badKeys = new Set<string>();
+  const raw = new Map<string, RawCopy>();
+  for (const e of entries) {
+    // A listing is a prefix match and returns only keys under it; anything else is a bad answer.
+    if (!e.key.startsWith(prefix)) throw new AwsCliError("bad-output", "ListObjectVersions");
+    const name = e.key.slice(prefix.length);
+    if (name === ANNEX_UUID_OBJECT) continue;
+    if (name.startsWith("SHA256E-")) {
+      if (!ANNEX_KEY.test(name)) badKeys.add(name);
+      else if (isEdfOrBdf(name)) recordings.add(name);
+      continue;
+    }
+    if (!isRawCopyName(name)) {
+      badKeys.add(name);
+      continue;
+    }
+    let copy = raw.get(name);
+    if (!copy) {
+      copy = { name, kind: rawKindOf(name), versions: [], markers: [] };
+      raw.set(name, copy);
+    }
+    if (e.kind === "marker") {
+      copy.markers.push(e.versionId);
+    } else {
+      // A version the listing gives no size for cannot be checked against what raw-hash reads.
+      if (e.size === undefined) throw new AwsCliError("bad-output", "ListObjectVersions");
+      copy.versions.push({ id: e.versionId, size: e.size });
     }
   }
-  return { keys, bad };
+  const names = [...raw.keys()].sort();
+  return {
+    recordings,
+    badKeys: [...badKeys].sort(),
+    raw: names.map((n) => raw.get(n) as RawCopy),
+  };
+}
+
+/** One listing of `<id>/objects/`, classified. */
+async function listObjects(ctx: S3Ctx, dataset: string): Promise<ObjectsListing> {
+  return classifyObjects(dataset, await listPrefixVersions(ctx, `${dataset}/objects/`));
+}
+
+/** The raw counts a plan line and the totals carry. */
+export function rawCounts(raw: readonly RawCopy[]): {
+  names: number;
+  versions: number;
+  markers: number;
+} {
+  return {
+    names: raw.length,
+    versions: raw.reduce((n, r) => n + r.versions.length, 0),
+    markers: raw.reduce((n, r) => n + r.markers.length, 0),
+  };
 }
 
 interface PlannedKey {
@@ -497,13 +567,15 @@ export async function planStage(o: PlanOptions): Promise<number> {
       throw new StageError("manifest-bad-key", EXIT.unreadable);
     }
     // Then the objects themselves: whatever the manifests name, every recording that is in the
-    // bucket is planned too.
-    const listed = await listObjectRecordings(ctx, o.dataset);
-    if (listed.bad > 0) {
-      o.log(`plan: ${listed.bad} objects look like recordings but are not SHA256E annex keys`);
+    // bucket is planned too, and every raw copy is recorded with every version and marker.
+    const listed = await listObjects(ctx, o.dataset);
+    if (listed.badKeys.length > 0) {
+      o.log(
+        `plan: ${listed.badKeys.length} objects under objects/ have a bad key: in the annex key space (SHA256E-) but not a SHA256E annex key, or a name no S3 call can carry (a control character)`,
+      );
       throw new StageError("objects-bad-key", EXIT.unreadable);
     }
-    for (const k of listed.keys) keys.add(k);
+    for (const k of listed.recordings) keys.add(k);
 
     const sorted = [...keys].sort();
     const planned = await runPool(sorted, o.concurrency, (k) => planOneKey(ctx, o.dataset, k));
@@ -525,11 +597,16 @@ export async function planStage(o: PlanOptions): Promise<number> {
       const pk = p as PlannedKey;
       if (pk.patchHex) patches[pk.entry.oldKey] = pk.patchHex;
     }
-    const totals = {
+    const raw = rawCounts(listed.raw);
+    const totals: PlanFile["totals"] = {
       keys: entries.length,
       needScrub: entries.filter((e) => e.needsScrub).length,
       bytesToHash: entries.filter((e) => e.needsScrub).reduce((n, e) => n + e.size, 0),
       unreadable: entries.filter((e) => e.status === "unreadable").length,
+      // Only a plan that has raw copies carries their counts, so one without is the file it was.
+      ...(raw.names > 0
+        ? { rawCopyNames: raw.names, rawCopyVersions: raw.versions, rawCopyMarkers: raw.markers }
+        : {}),
     };
     const plan: PlanFile = {
       version: 1,
@@ -539,6 +616,7 @@ export async function planStage(o: PlanOptions): Promise<number> {
       ...(o.tags ? { partial: true } : {}),
       createdAt: new Date().toISOString(),
       keys: entries,
+      ...(raw.names > 0 ? { rawCopies: listed.raw } : {}),
       totals,
     };
     // patches.json first, so the plan can name its exact bytes.
@@ -547,9 +625,17 @@ export async function planStage(o: PlanOptions): Promise<number> {
     plan.patchesSha256 = sha256Hex(patchesBytes);
     await writeJson(o.out, "plan.json", plan);
 
+    // The raw counts are on the line whatever they are, so the screen from inside after the
+    // deletion (runbook step 16) reads `rawCopies=0 versions=0 markers=0` rather than nothing.
     o.log(
-      `plan: tags=${tags.length} keys=${totals.keys} needScrub=${totals.needScrub} bytesToHash=${totals.bytesToHash} unreadable=${totals.unreadable}`,
+      `plan: tags=${tags.length} keys=${totals.keys} needScrub=${totals.needScrub} bytesToHash=${totals.bytesToHash} unreadable=${totals.unreadable} rawCopies=${raw.names} versions=${raw.versions} markers=${raw.markers}`,
     );
+    if (raw.names > 0) {
+      const kinds = countWords(listed.raw.map((r) => r.kind));
+      o.log(
+        `plan: raw copies under objects/ by kind: recording=${kinds.recording ?? 0} other=${kinds.other ?? 0}; raw-hash and raw-verify must pass before delete-old (runbook step 5b)`,
+      );
+    }
     if (plan.partial) {
       o.log("plan: partial (--tags): assemble, verify and delete-old will refuse this plan");
     }
@@ -1317,23 +1403,155 @@ async function checkManifests(
 
 /**
  * Every EDF or BDF object under `<id>/objects/` (any letter case) must be one this scrub
- * accounted for. One that appeared after the plan was never read, so its header was never
- * checked, and deleting the old keys around it would leave it as the dataset's only unchecked copy.
+ * accounted for: an annex key the plan read or the assembly made, or a raw recording the plan
+ * recorded (whose versions {@link checkRawCopiesInBucket} checks). One that appeared after the
+ * plan was never read, so its header was never checked, and deleting the old keys around it would
+ * leave it as the dataset's only unchecked copy. A name in the annex key space that is no annex
+ * key is counted here when it ends like a recording, and is `objects-bad-key` otherwise, where the
+ * plan stage would have stopped.
  */
-async function checkUnplannedRecordings(
-  ctx: S3Ctx,
-  dataset: string,
+function checkUnplannedRecordings(
+  listed: ObjectsListing,
   known: Set<string>,
+  plannedRaw: ReadonlyMap<string, RawCopy>,
   refusals: Refusals,
-): Promise<void> {
-  const listed = await listObjectRecordings(ctx, dataset);
-  const unplanned = listed.bad + [...listed.keys].filter((k) => !known.has(k)).length;
+): void {
+  const badRecordings = listed.badKeys.filter(isEdfOrBdf).length;
+  const unplanned =
+    badRecordings +
+    listed.raw.filter((r) => r.kind === "recording" && !plannedRaw.has(r.name)).length +
+    [...listed.recordings].filter((k) => !known.has(k)).length;
   if (unplanned > 0) {
     refusals.add(
       "unplanned-recording",
       `${unplanned} recordings under objects/ are not in the plan or the assembly`,
     );
   }
+  const badOther = listed.badKeys.length - badRecordings;
+  if (badOther > 0) {
+    refusals.add(
+      "objects-bad-key",
+      `${badOther} objects under objects/ have a bad key (not an annex key in the annex key space, or a control character)`,
+    );
+  }
+}
+
+/** What delete-old removes of the raw copies: every version first, then every delete marker. */
+interface RawDeletion {
+  versions: VersionRef[];
+  markers: VersionRef[];
+  /** Raw names with anything to delete. */
+  names: number;
+}
+
+/**
+ * The raw copies under `<id>/objects/` as the bucket holds them now, against what the plan
+ * recorded. Only what the plan recorded may be deleted: the proof of `raw-verify` is about those
+ * versions, by id and size, and a version written since is bytes nobody compared. So
+ * `raw-copy-not-in-plan` counts every version or marker of a raw name the plan did not record (a
+ * version whose size is not the one recorded included) and every entry of a raw name the plan did
+ * not list at all, except a raw RECORDING the plan did not list, which is `unplanned-recording`
+ * ({@link checkUnplannedRecordings}), so one object is never two refusals. Returns what may go.
+ */
+function checkRawCopiesInBucket(
+  dataset: string,
+  listed: ObjectsListing,
+  plannedRaw: ReadonlyMap<string, RawCopy>,
+  refusals: Refusals,
+): RawDeletion {
+  let notInPlan = 0;
+  const out: RawDeletion = { versions: [], markers: [], names: 0 };
+  for (const r of listed.raw) {
+    const planned = plannedRaw.get(r.name);
+    if (!planned) {
+      if (r.kind !== "recording") notInPlan += r.versions.length + r.markers.length;
+      continue;
+    }
+    const sizes = new Map(planned.versions.map((v) => [v.id, v.size]));
+    const markers = new Set(planned.markers);
+    const key = objectKey(dataset, r.name);
+    let any = false;
+    for (const v of r.versions) {
+      if (sizes.get(v.id) !== v.size) {
+        notInPlan += 1;
+        continue;
+      }
+      out.versions.push({ key, versionId: v.id });
+      any = true;
+    }
+    for (const m of r.markers) {
+      if (!markers.has(m)) {
+        notInPlan += 1;
+        continue;
+      }
+      out.markers.push({ key, versionId: m });
+      any = true;
+    }
+    if (any) out.names += 1;
+  }
+  if (notInPlan > 0) {
+    refusals.add(
+      "raw-copy-not-in-plan",
+      `${notInPlan} versions or markers of raw copies under objects/ are not in the plan`,
+    );
+  }
+  return out;
+}
+
+/**
+ * A plan with raw copies deletes them only behind the proof of `raw-verify` for THIS plan
+ * (`raw-verified.json`, which names the exact bytes of plan.json), with the plan's own counts of
+ * raw names, versions and markers: every raw version was shown to duplicate an annex key of the plan
+ * or a blob of the repository's history. Refuses `raw-copies-unverified`, with every reason it does
+ * not hold. A proof that is there and cannot be read is a failure (exit 1), as for every file.
+ *
+ * It reads working files only, so it runs with the other proofs, before the bucket is read. It
+ * returns the annex keys the raw recordings matched when the proof holds (none otherwise), for the
+ * bucket check that each one survives (`raw-duplicate-missing`).
+ */
+export async function checkRawCopiesProof(
+  dir: string,
+  plan: PlanFile,
+  planBytes: Buffer,
+  refusals: Refusals,
+): Promise<string[]> {
+  const raw = plan.rawCopies ?? [];
+  if (raw.length === 0) return [];
+  const problems: string[] = [];
+  let bytes: Buffer | undefined;
+  try {
+    bytes = await readFile(path.join(dir, "raw-verified.json"));
+  } catch (err) {
+    if (!isNotFound(err)) throw new StageError("raw-verified.json-unreadable", EXIT.failed);
+    problems.push("raw-verified.json missing");
+  }
+  let proof: RawVerifiedFile | undefined;
+  if (bytes) {
+    try {
+      proof = parseRawVerified(bytes.toString("utf8"));
+    } catch {
+      problems.push("raw-verified.json invalid");
+    }
+  }
+  if (proof) {
+    if (proof.dataset !== plan.dataset) problems.push("for another dataset");
+    if (proof.planSha256 !== sha256Hex(planBytes)) problems.push("for another plan.json");
+    const want = rawCounts(raw);
+    const c = proof.counts;
+    if (c.names !== want.names || c.versions !== want.versions || c.markers !== want.markers) {
+      problems.push(
+        `counts names=${c.names} versions=${c.versions} markers=${c.markers}, the plan has names=${want.names} versions=${want.versions} markers=${want.markers}`,
+      );
+    }
+    const planKeys = new Set(plan.keys.map((k) => k.oldKey));
+    const foreign = proof.matchedKeys.filter((k) => !planKeys.has(k)).length;
+    if (foreign > 0) problems.push(`${foreign} matched keys are not keys of the plan`);
+  }
+  if (problems.length > 0) {
+    refusals.add("raw-copies-unverified", problems.join(", "));
+    return [];
+  }
+  return proof?.matchedKeys ?? [];
 }
 
 /**
@@ -1534,6 +1752,7 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
   // first: the proofs, the assembly and the flags.
   const refusals: Refusals = new Refusals();
   const proven = await checkScrubProofs(o.dir, plan, planBytes, o, refusals);
+  const rawMatchedKeys = await checkRawCopiesProof(o.dir, plan, planBytes, refusals);
   for (const p of o.prune) {
     await refusals.attempt(
       () => checkPrunePrefix(dataset, p),
@@ -1550,6 +1769,9 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
   const prunePrefixes = [...new Set(o.prune)];
   /** Every recording key this scrub accounted for: what the plan read, and what it assembled. */
   const known = new Set([...planned.keys(), ...newKeys]);
+  /** The raw copies the plan recorded, by name; none for a plan made without any. */
+  const plannedRaw = new Map((plan.rawCopies ?? []).map((r) => [r.name, r]));
+  const hasRaw = plannedRaw.size > 0;
 
   return withCtx(o, bucket, async (ctx) => {
     // What must be true of the dataset before an old key may go. All of it is read only, all of it
@@ -1569,7 +1791,9 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
       );
     }
     await checkManifests(ctx, dataset, new Set(oldKeys), known, refusals);
-    await checkUnplannedRecordings(ctx, dataset, known, refusals);
+    // One listing of objects/ (every version and marker) for the recordings and the raw copies.
+    const objects = await listObjects(ctx, dataset);
+    checkUnplannedRecordings(objects, known, plannedRaw, refusals);
     // An archive holds the original recordings, so ANY version or marker of one, current or not,
     // is a copy the delete would leave behind.
     const archives = await listPrefixVersions(ctx, `${dataset}/archives/`);
@@ -1581,6 +1805,21 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
     }
     if (await hasCurrentKey(ctx, `${dataset}/zarr/`)) {
       await checkZarrProof(o.dir, dataset, planBytes, true, refusals);
+    }
+    // A raw recording goes because an annex key holds its bytes: each key it matched that this run
+    // does not replace must still be current at its size (a replaced one is `new-object-missing`'s).
+    const replaced = new Set(oldKeys);
+    const kept = rawMatchedKeys.filter((k) => !replaced.has(k));
+    const keptPresent = await runPool(kept, o.concurrency, async (k) => {
+      const head = await headObject(ctx, objectKey(dataset, k));
+      return head !== null && head.size === parseKey(k).size;
+    });
+    const keptMissing = keptPresent.filter((ok) => ok !== true).length;
+    if (keptMissing > 0) {
+      refusals.add(
+        "raw-duplicate-missing",
+        `${keptMissing} of ${kept.length} annex keys the raw recordings duplicate are not current at their size`,
+      );
     }
     await checkPrivate(ctx, o, dataset, oldKeys, [...newKeys], refusals);
 
@@ -1600,12 +1839,6 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
     }, 0);
     const totalVersions = listed.reduce((n, l) => n + l.versions.length, 0);
     const totalMarkers = listed.reduce((n, l) => n + l.markers.length, 0);
-    const recorded = oldKeys.reduce((n, k) => n + (planned.get(k) as PlanKey).versionIds.length, 0);
-    // A sanity cap below the plan's own count, never a way past it.
-    const limit = Math.min(o.maxDelete ?? recorded, recorded);
-    o.log(
-      `delete-old: keys=${oldKeys.length} versions=${totalVersions} markers=${totalMarkers} planRecorded=${recorded} limit=${limit}`,
-    );
     if (wrongSize > 0) {
       refusals.add(
         "version-size-differs",
@@ -1618,11 +1851,26 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
         `${unplanned} versions or markers of old keys are not in the plan`,
       );
     }
-    if (totalVersions + totalMarkers > limit) {
-      refusals.add(
-        "over-max-delete",
-        `versions+markers=${totalVersions + totalMarkers} over limit=${limit}`,
+    // The raw copies go in the same run, so the plan's count and the cap cover them too.
+    const raw = checkRawCopiesInBucket(dataset, objects, plannedRaw, refusals);
+    const rawRecorded = rawCounts([...plannedRaw.values()]);
+    const recorded =
+      oldKeys.reduce((n, k) => n + (planned.get(k) as PlanKey).versionIds.length, 0) +
+      rawRecorded.versions +
+      rawRecorded.markers;
+    const deleting = totalVersions + totalMarkers + raw.versions.length + raw.markers.length;
+    // A sanity cap below the plan's own count, never a way past it.
+    const limit = Math.min(o.maxDelete ?? recorded, recorded);
+    o.log(
+      `delete-old: keys=${oldKeys.length} versions=${totalVersions} markers=${totalMarkers} planRecorded=${recorded} limit=${limit}`,
+    );
+    if (hasRaw) {
+      o.log(
+        `delete-old: raw copies names=${plannedRaw.size} versions=${raw.versions.length} markers=${raw.markers.length}`,
       );
+    }
+    if (deleting > limit) {
+      refusals.add("over-max-delete", `versions+markers=${deleting} over limit=${limit}`);
     }
 
     // The history of the manifests and of the Zarr copy holds the old keys and the old metadata:
@@ -1658,6 +1906,11 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
       o.log(
         `delete-old dry run: would delete versions=${totalVersions} markers=${totalMarkers} across ${oldKeys.length} keys`,
       );
+      if (hasRaw) {
+        o.log(
+          `delete-old dry run: would delete raw copies versions=${raw.versions.length} markers=${raw.markers.length} across ${raw.names} names`,
+        );
+      }
       return 0;
     }
 
@@ -1675,6 +1928,9 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
       ),
       true,
     );
+    // The raw copies' versions, with the bypass: the raw text is locked like the recordings. Their
+    // delete markers are NOT in these requests: they go last, below.
+    await removeAll(raw.versions, true);
     // Pruning never bypasses the lock: a locked object is refused, not forced. Noncurrent entries
     // first; a delete marker that is the CURRENT entry of a key goes only once the key has no
     // version left under it, because removing it earlier would make an old version current again.
@@ -1695,10 +1951,30 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
         false,
       );
     }
+    // Last, the raw copies' delete markers, in requests of their own after every raw version's,
+    // and only for a name with no version left: a raw recording is an ORIGINAL hidden by its
+    // marker, so removing the marker while a version stays would make the original current again.
+    // A marker is never locked, so no bypass is asked for.
+    if (raw.markers.length > 0) {
+      const stillVersioned = new Set(
+        (await listPrefixVersions(ctx, `${dataset}/objects/`))
+          .filter((e) => e.kind === "version")
+          .map((e) => e.key),
+      );
+      await removeAll(
+        raw.markers.filter((m) => !stillVersioned.has(m.key)),
+        false,
+      );
+    }
 
     // The listing is the authority, not the answers to the deletes.
     const after = await listOldKeys(ctx, dataset, oldKeys, o.concurrency);
     const remaining = after.reduce((n, l) => n + l.versions.length + l.markers.length, 0);
+    // Every raw name, planned or not: nothing under objects/ but annex keys and annex-uuid may be
+    // left, whether or not the plan had raw copies (one written during the run is found here).
+    const objectsAfter = await listObjects(ctx, dataset);
+    const rawLeft = rawCounts(objectsAfter.raw);
+    const rawRemaining = rawLeft.versions + rawLeft.markers + objectsAfter.badKeys.length;
     const history = await historyRemaining(ctx, dataset);
     const historyLeft = Object.values(history).reduce((n, c) => n + c, 0);
     if (errors.length > 0) {
@@ -1707,12 +1983,17 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
     if (remaining > 0) {
       o.log(`delete-old: FAILED, versions and markers remain: oldKeys=${remaining}`);
     }
+    if (rawRemaining > 0) {
+      o.log(
+        `delete-old: FAILED, versions and markers remain: rawCopies=${rawLeft.names} versions=${rawLeft.versions} markers=${rawLeft.markers} badKeys=${objectsAfter.badKeys.length}`,
+      );
+    }
     if (historyLeft > 0) {
       o.log(`delete-old: FAILED, history-remains ${formatPrefixCounts(history)}`);
     }
-    if (remaining > 0 || historyLeft > 0) {
+    if (remaining > 0 || rawRemaining > 0 || historyLeft > 0) {
       o.log("delete-old: deleted.json NOT written; a re-run resumes");
-      if (remaining > 0) return EXIT.remainder;
+      if (remaining > 0 || rawRemaining > 0) return EXIT.remainder;
       throw new StageError("history-remains", EXIT.remainder);
     }
     const done: DeletedFile = {
@@ -1726,12 +2007,18 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
         markers: totalMarkers,
         prunedVersions,
         prunedMarkers,
+        ...(hasRaw ? { rawVersions: raw.versions.length, rawMarkers: raw.markers.length } : {}),
       },
     };
     await writeJson(o.dir, "deleted.json", done);
     o.log(
       `delete-old: deleted versions=${totalVersions} markers=${totalMarkers}; zero versions and zero markers remain for ${oldKeys.length} keys, and no history under ${HISTORY_DIRS.join("/, ")}/`,
     );
+    if (hasRaw) {
+      o.log(
+        `delete-old: deleted raw copies versions=${raw.versions.length} markers=${raw.markers.length}; zero versions and zero markers remain under the ${plannedRaw.size} raw names, and no object under objects/ but annex keys and ${ANNEX_UUID_OBJECT}`,
+      );
+    }
     return 0;
   });
 }

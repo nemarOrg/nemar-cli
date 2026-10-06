@@ -8,16 +8,7 @@
  */
 
 import { createHash } from "node:crypto";
-import {
-  cpSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { spawn } from "bun";
 import {
@@ -32,6 +23,13 @@ import {
   parseHashVerified,
 } from "../../../scripts/scrub/s3/s3-stages";
 import type { S3Standin } from "../helpers/s3-standin";
+import { makeTempDir, removeTempDirs } from "../helpers/temp-dirs";
+
+/**
+ * Every directory this module makes is recorded in one registry; a test file that uses it calls
+ * `afterAll(removeTempDirs)` so its directories are removed when it ends (helpers/temp-dirs.ts).
+ */
+export { removeTempDirs };
 
 export const BUCKET = "nemar";
 export const DATASET = "xx090411";
@@ -303,14 +301,25 @@ export function seedManifest(
 // Running the real CLI.
 // ---------------------------------------------------------------------------
 
+// Shared by every file of the run (the module is evaluated once), and made again after a file's
+// `removeTempDirs` removed it.
 let isolatedHome: string | undefined;
 function home(): string {
-  if (!isolatedHome) {
-    isolatedHome = mkdtempSync(path.join(tmpdir(), "s3-scrub-test-home-"));
+  if (!isolatedHome || !existsSync(isolatedHome)) {
+    isolatedHome = makeTempDir("s3-scrub-test-home-");
     writeFileSync(path.join(isolatedHome, "config"), "");
     writeFileSync(path.join(isolatedHome, "credentials"), "");
   }
   return isolatedHome;
+}
+
+// The children's TMPDIR: a recorded directory under the run's own temp directory, so what a
+// child leaves there (a stage's temp area when a test kills it, Python's or the aws CLI's temp
+// files) follows a run pointed at another disk with TMPDIR, and is removed with the file's.
+let childTmp: string | undefined;
+function childTmpDir(): string {
+  if (!childTmp || !existsSync(childTmp)) childTmp = makeTempDir("s3-scrub-child-tmp-");
+  return childTmp;
 }
 
 export interface RunResult {
@@ -343,6 +352,7 @@ export function awsTestEnv(
     AWS_EC2_METADATA_DISABLED: "true",
     AWS_MAX_ATTEMPTS: "1",
     AWS_ENDPOINT_URL_S3: standin.url,
+    TMPDIR: childTmpDir(),
     // The anonymous requests of delete-old and zarr-public go to a loopback server in every test
     // (`startPublicEndpoint`); outside a test the stages accept only the bucket's S3 endpoint.
     [TEST_LOOPBACK_PUBLIC_BASE_ENV]: "1",
@@ -440,6 +450,35 @@ export async function runScrub(
   return { exitCode, stdout, stderr, all: `${stdout}\n${stderr}` };
 }
 
+export const HASH_STAGE = path.join(REPO_ROOT, "scripts", "scrub", "hash", "hash_stage.py");
+
+/**
+ * The REAL Python hash stage with its default source (the real `aws` CLI) pointed at the
+ * stand-in, with no retries, so a failing read fails at once.
+ */
+export async function runHashStage(
+  standin: S3Standin,
+  args: string[],
+  extraEnv: Record<string, string> = {},
+): Promise<RunResult> {
+  const proc = spawn({
+    cmd: ["python3", HASH_STAGE, ...args, "--retries", "0", "--retry-backoff", "0"],
+    env: awsTestEnv(standin, {
+      AWS_DEFAULT_REGION: "us-east-2",
+      PYTHONDONTWRITEBYTECODE: "1",
+      ...extraEnv,
+    }),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { exitCode, stdout, stderr, all: `${stdout}\n${stderr}` };
+}
+
 // ---------------------------------------------------------------------------
 // A stand-in for what an anonymous reader reaches.
 // ---------------------------------------------------------------------------
@@ -516,7 +555,7 @@ export function startPublicEndpoint(): PublicEndpoint {
 // ---------------------------------------------------------------------------
 
 export function tempDir(label: string): string {
-  return mkdtempSync(path.join(tmpdir(), `s3-scrub-${label}-`));
+  return makeTempDir(`s3-scrub-${label}-`);
 }
 
 export function readJson<T>(dir: string, name: string): T {

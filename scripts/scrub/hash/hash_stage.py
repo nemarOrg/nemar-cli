@@ -8,7 +8,7 @@ That pass is too slow from a laptop, so this program runs on a host with fast re
 read-only AWS credentials and Python 3.12. It uses the standard library and the ``aws`` CLI,
 nothing else. The file shapes are declared in ``scripts/scrub/contract.ts``.
 
-Two modes:
+Three modes:
 
 ``compute``
     For every plan key that needs a scrub and was read, stream ``<dataset>/objects/<oldKey>``
@@ -26,18 +26,29 @@ Two modes:
     names the exact bytes of ``assembled.json`` it vouches for. On any mismatch no such file exists
     afterwards: a proof left over from an earlier run is removed first.
 
+``raw-hash``
+    For every VERSION of every raw copy in the plan (``rawCopies``: an object under ``objects/``
+    stored by its path, not by an annex key) stream ``<dataset>/objects/<name>`` AT that version
+    id, and record in ``raw-hashes.json`` its SHA-256 and its git blob id: SHA-1 over
+    ``b"blob <size>\\0"`` and the bytes, with the plan's size, computed in the same pass. A byte
+    count other than the plan's size is recorded as ``size-differs`` and never with a digest. The
+    file names the sha256 of plan.json, is resumed like ``hashes.json``, and is compared by
+    ``s3-scrub raw-verify``. Raw names are file paths, so this mode prints counts and fixed words
+    only, never a name, and never a read failure's own text (it quotes the key).
+
 Privacy: no participant value is ever printed or written. Output holds annex keys, byte counts
 and fixed phrases. The one text that is not ours is the tail of the source command's own
-standard error when it fails (an ``aws`` error names a bucket and a key); the stream itself is
-only ever hashed, never decoded, logged or put in an exception message.
+standard error when ``compute`` or ``verify-new`` fails (an ``aws`` error names a bucket and a
+key); the stream itself is only ever hashed, never decoded, logged or put in an exception message.
 
 Every file it writes is owner-only (the process umask is 077), as the working directory is.
 
 Exit status: 0 everything done and verified; 1 an object failed (or an unexpected error);
 2 usage (an argument the parser refused); 3 refused (an input file does not match the contract,
-or patches.json is not the one written with plan.json); 4 ``--limit`` stopped the run with keys
-still to hash; 129, 130, 143 ended by SIGHUP, SIGINT, SIGTERM (every running source command, its
-``aws`` child included, is killed with its process group; finished keys are saved).
+patches.json is not the one written with plan.json, or an existing output file is another run's);
+4 ``--limit`` stopped the run with keys (raw versions) still to hash; 129, 130, 143 ended by
+SIGHUP, SIGINT, SIGTERM (every running source command, its ``aws`` child included, is killed with
+its process group; finished keys are saved).
 """
 
 from __future__ import annotations
@@ -101,7 +112,15 @@ class ReadFailed(Exception):
 
 
 class ObjectFailure(Exception):
-    """The object cannot be accepted. Not retried; the message is fixed words and counts."""
+    """The object cannot be accepted. Not retried; the message is fixed words and counts.
+
+    ``word`` is the fixed word ``raw-hash`` prints and records instead of the message, whose read
+    failures quote the source command's standard error (which names the key, a file path there).
+    """
+
+    def __init__(self, message: str, word: str = "failed") -> None:
+        super().__init__(message)
+        self.word = word
 
 
 class Overlong(Exception):
@@ -114,6 +133,9 @@ class Digests:
     original: str
     # None when no patch was asked for, or the stream ended before a whole header arrived.
     patched: str | None
+    # The git blob id (SHA-1 of b"blob <expected size>\0" and the bytes), when one was asked for.
+    # It names those bytes only when `total` is the expected size, which the caller checks.
+    git_blob_sha1: str | None = None
 
 
 @dataclass
@@ -141,15 +163,20 @@ def build_key(size: int, sha256: str, ext: str) -> str:
     return f"SHA256E-s{size}--{sha256}{ext}"
 
 
-def digest_stream(stream, expected_size: int, patch: bytes | None = None) -> Digests:
+def digest_stream(
+    stream, expected_size: int, patch: bytes | None = None, git_blob: bool = False
+) -> Digests:
     """Read ``stream`` to its end in CHUNK_SIZE pieces; hash it as stored and, given a patch, as
-    patched (the first HEADER_LEN bytes replaced by ``patch``) in the same pass.
+    patched (the first HEADER_LEN bytes replaced by ``patch``) in the same pass. With ``git_blob``
+    the same pass also computes the git blob id git gives those bytes, assuming ``expected_size``
+    of them: SHA-1 over ``b"blob <expected_size>\\0"`` and the bytes.
 
     ``stream.read(n)`` may return fewer than n bytes before the end, so the header is collected
     across reads. Raises Overlong as soon as more than ``expected_size`` bytes have arrived.
     """
     original = hashlib.sha256()
     patched = hashlib.sha256() if patch is not None else None
+    blob = hashlib.sha1(b"blob %d\0" % expected_size) if git_blob else None
     total = 0
     collecting: bytes | None = b"" if patch is not None else None
     while True:
@@ -160,6 +187,8 @@ def digest_stream(stream, expected_size: int, patch: bytes | None = None) -> Dig
         if total > expected_size:
             raise Overlong
         original.update(chunk)
+        if blob is not None:
+            blob.update(chunk)
         if patched is None:
             continue
         if collecting is None:
@@ -175,6 +204,7 @@ def digest_stream(stream, expected_size: int, patch: bytes | None = None) -> Dig
         total=total,
         original=original.hexdigest(),
         patched=patched.hexdigest() if whole_header and patched is not None else None,
+        git_blob_sha1=blob.hexdigest() if blob is not None else None,
     )
 
 
@@ -263,7 +293,11 @@ def _stderr_tail(handle) -> str:
 
 
 def fetch_digests(
-    command: str, timeout: float, expected_size: int, patch: bytes | None
+    command: str,
+    timeout: float,
+    expected_size: int,
+    patch: bytes | None,
+    git_blob: bool = False,
 ) -> Digests:
     """One attempt: run the source command and digest what it writes.
 
@@ -294,7 +328,7 @@ def fetch_digests(
         digests = None
         overlong = False
         try:
-            digests = digest_stream(proc.stdout, expected_size, patch)
+            digests = digest_stream(proc.stdout, expected_size, patch, git_blob)
         except Overlong:
             overlong = True
         finally:
@@ -308,7 +342,9 @@ def fetch_digests(
         if deadline.expired:
             raise ReadFailed(f"no complete read within {timeout:g} seconds")
         if overlong:
-            raise ObjectFailure("object is longer than its key says")
+            raise ObjectFailure(
+                "object is longer than its key says", word="size-differs"
+            )
         if status != 0:
             raise ReadFailed(f"source exited with status {status}: {_stderr_tail(err)}")
         return digests
@@ -321,15 +357,17 @@ def fetch_with_retry(
     backoff: float,
     expected_size: int,
     patch: bytes | None,
+    git_blob: bool = False,
 ) -> Digests:
     attempt = 0
     while True:
         try:
-            return fetch_digests(command, timeout, expected_size, patch)
+            return fetch_digests(command, timeout, expected_size, patch, git_blob)
         except ReadFailed as exc:
             if attempt >= retries or _ABORT.is_set():
                 raise ObjectFailure(
-                    f"read failed after {attempt + 1} attempts: {exc}"
+                    f"read failed after {attempt + 1} attempts: {exc}",
+                    word="read-failed",
                 ) from None
             attempt += 1
             _ABORT.wait(backoff * 2 ** (attempt - 1))
@@ -347,13 +385,24 @@ class Fetch:
     backoff: float
 
     def digests(
-        self, key: str, expected_size: int, patch: bytes | None, version: str = ""
+        self,
+        key: str,
+        expected_size: int,
+        patch: bytes | None,
+        version: str = "",
+        git_blob: bool = False,
     ) -> Digests:
         command = build_source_command(
             self.template, self.dataset, self.bucket, key, version
         )
         return fetch_with_retry(
-            command, self.timeout, self.retries, self.backoff, expected_size, patch
+            command,
+            self.timeout,
+            self.retries,
+            self.backoff,
+            expected_size,
+            patch,
+            git_blob,
         )
 
 
@@ -484,7 +533,102 @@ def parse_plan(raw: bytes) -> dict:
         or t["bytesToHash"] != bytes_to_hash
     ):
         raise bad
+    raw_totals = ("rawCopyNames", "rawCopyVersions", "rawCopyMarkers")
+    if "rawCopies" not in x:
+        # No raw copies, no raw counts: the plan is the file a plan without them always was.
+        if any(f in t for f in raw_totals):
+            raise bad
+    else:
+        counts = _check_raw_copies(x["rawCopies"])
+        if any(
+            not _is_count(t.get(f)) or t[f] != n for f, n in zip(raw_totals, counts)
+        ):
+            raise bad
     return x
+
+
+RAW_COPY_FIELDS = {"name", "kind", "versions", "markers"}
+#: The special remote's marker under objects/: never a raw copy (contract.ts ANNEX_UUID_OBJECT).
+ANNEX_UUID_OBJECT = "annex-uuid"
+
+
+def is_edf_or_bdf(name: str) -> bool:
+    return name.lower().endswith((".edf", ".bdf"))
+
+
+#: Control characters, and U+FFFE and U+FFFF: no DeleteObjects body can name a key holding one
+#: (contract.ts hasControlCharacter).
+CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f-\x9f\ufffe\uffff]")
+
+
+def has_control_character(name: str) -> bool:
+    """As ``hasControlCharacter`` in contract.ts."""
+    return CONTROL_CHARACTER.search(name) is not None
+
+
+def is_raw_copy_name(name) -> bool:
+    """As ``isRawCopyName`` in contract.ts: a name the plan stage lists as a raw copy, with no
+    control character (NUL among them). Also one UTF-8 can carry: a lone surrogate cannot reach a
+    shell or S3, so it is refused here."""
+    if (
+        not isinstance(name, str)
+        or name in ("", ANNEX_UUID_OBJECT)
+        or name.startswith("SHA256E-")
+        or has_control_character(name)
+    ):
+        return False
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _check_raw_copies(raw) -> tuple[int, int, int]:
+    """The ``rawCopies`` of a plan, checked as ``checkRawCopies`` in contract.ts checks them:
+    exactly the contract's members, a raw name, the kind its name gives, at least one version or
+    marker, ids that are names and never repeat within a name, sizes that are counts, and no name
+    twice. The order is the TypeScript reader's to check (Python and JavaScript order strings
+    differently outside the Basic Multilingual Plane). Returns (names, versions, markers)."""
+    bad = InputError("plan.json holds a raw copy that does not match the contract")
+    if not isinstance(raw, list):
+        raise bad
+    names: set[str] = set()
+    versions = markers = 0
+    for r in raw:
+        if not isinstance(r, dict) or set(r) != RAW_COPY_FIELDS:
+            raise bad
+        name = r["name"]
+        if not is_raw_copy_name(name) or name in names:
+            raise bad
+        names.add(name)
+        if r["kind"] != ("recording" if is_edf_or_bdf(name) else "other"):
+            raise bad
+        vs, ms = r["versions"], r["markers"]
+        if (
+            not isinstance(vs, list)
+            or not isinstance(ms, list)
+            or len(vs) + len(ms) == 0
+        ):
+            raise bad
+        ids: set[str] = set()
+        for v in vs:
+            if (
+                not isinstance(v, dict)
+                or set(v) != {"id", "size"}
+                or not _is_name(v["id"])
+                or not _is_count(v["size"])
+                or v["id"] in ids
+            ):
+                raise bad
+            ids.add(v["id"])
+        for m in ms:
+            if not _is_name(m) or m in ids:
+                raise bad
+            ids.add(m)
+        versions += len(vs)
+        markers += len(ms)
+    return len(raw), versions, markers
 
 
 def parse_patches(raw: bytes) -> dict:
@@ -836,6 +980,202 @@ def cmd_verify_new(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+# --- raw-hash -----------------------------------------------------------------------------------
+
+RAW_DIGEST_FIELDS = {"name", "versionId", "size", "sha256", "gitBlobSha1"}
+RAW_FAILURE_FIELDS = {"name", "versionId", "failure"}
+SHA1_HEX = re.compile(r"[0-9a-f]{40}")
+#: The one failure raw-hashes.json records: the bytes read were not the plan's size.
+SIZE_DIFFERS = "size-differs"
+
+
+def _utf16(text: str) -> bytes:
+    """A sort key that orders strings as JavaScript does (by UTF-16 code unit), so the file reads
+    in the order the TypeScript stages list names."""
+    return text.encode("utf-16-be", "surrogatepass")
+
+
+def _raw_jobs(plan: dict) -> list[tuple[str, str, int]]:
+    """(name, version id, plan size) of every raw VERSION of the plan; delete markers hold no
+    bytes, so none is read."""
+    return [
+        (r["name"], v["id"], v["size"])
+        for r in plan.get("rawCopies", [])
+        for v in r["versions"]
+    ]
+
+
+def load_existing_raw_hashes(
+    path: str, dataset: str, plan_sha: str, sizes: dict
+) -> dict:
+    """The digest entries of an earlier run's raw-hashes.json to keep, or {} when there is none.
+
+    A file that is not this run's (another dataset, another plan.json, a version this plan does
+    not record, a shape this program would not write) is refused: resuming from it would mix two
+    runs. A recorded ``size-differs`` is not kept: that version is read again.
+    """
+    if not os.path.exists(path):
+        return {}
+    what = "the existing raw-hashes file"
+    x = _load_json(_read_bytes(path, what), what)
+    if (
+        not isinstance(x, dict)
+        or set(x) != {"version", "dataset", "planSha256", "entries"}
+        or not _is_version_1(x["version"])
+        or x["dataset"] != dataset
+        or not isinstance(x["entries"], list)
+    ):
+        raise InputError(f"{what} is not this dataset's; move it aside to restart")
+    if x["planSha256"] != plan_sha:
+        raise InputError(
+            f"{what} was made for another plan.json; move it aside to restart"
+        )
+    kept: dict = {}
+    seen: set = set()
+    for e in x["entries"]:
+        if (
+            not isinstance(e, dict)
+            or not isinstance(e.get("name"), str)
+            or not isinstance(e.get("versionId"), str)
+        ):
+            raise InputError(f"{what} holds an entry this program would not write")
+        at = (e["name"], e["versionId"])
+        if at not in sizes:
+            raise InputError(f"{what} holds versions this plan does not record")
+        if at in seen:
+            raise InputError(f"{what} holds an entry this program would not write")
+        seen.add(at)
+        if set(e) == RAW_FAILURE_FIELDS and e["failure"] == SIZE_DIFFERS:
+            continue
+        if (
+            set(e) != RAW_DIGEST_FIELDS
+            or e["size"] != sizes[at]
+            or not isinstance(e["sha256"], str)
+            or not SHA256_HEX.fullmatch(e["sha256"])
+            or not isinstance(e["gitBlobSha1"], str)
+            or not SHA1_HEX.fullmatch(e["gitBlobSha1"])
+        ):
+            raise InputError(f"{what} holds an entry this program would not write")
+        kept[at] = e
+    return kept
+
+
+def _raw_hashes_text(dataset: str, plan_sha: str, entries: dict) -> str:
+    rows = [
+        entries[at]
+        for at in sorted(entries, key=lambda at: (_utf16(at[0]), _utf16(at[1])))
+    ]
+    body = {"version": 1, "dataset": dataset, "planSha256": plan_sha, "entries": rows}
+    return json.dumps(body, indent=2) + "\n"
+
+
+def _word_counts(words) -> str:
+    counts: dict[str, int] = {}
+    for w in words:
+        counts[w] = counts.get(w, 0) + 1
+    return ", ".join(f"{w}={n}" for w, n in sorted(counts.items()))
+
+
+def cmd_raw_hash(args: argparse.Namespace) -> int:
+    raw = _read_bytes(args.plan, "plan.json")
+    plan = parse_plan(raw)
+    _require_complete(plan)
+    plan_sha = hashlib.sha256(raw).hexdigest()
+    _check_out_dir(args.out)
+    dataset = _check_name(plan["dataset"], "the dataset name")
+    bucket = _check_name(args.dataset_bucket or plan["bucket"], "the bucket name")
+    template = args.source_cmd or DEFAULT_VERIFY_SOURCE_CMD
+    # A source that does not name the version would hash whatever is current, and the current
+    # entry of a raw recording is a delete marker.
+    if "{version}" not in template:
+        raise InputError("raw-hash needs a --source-cmd that names {version}")
+    fetch = Fetch(
+        template,
+        dataset,
+        bucket,
+        args.timeout,
+        args.retries,
+        args.retry_backoff,
+    )
+
+    jobs = _raw_jobs(plan)
+    sizes = {(name, vid): size for name, vid, size in jobs}
+    entries = load_existing_raw_hashes(args.out, dataset, plan_sha, sizes)
+    resumed = len(entries)
+    todo = [j for j in jobs if (j[0], j[1]) not in entries]
+    if args.limit is not None:
+        todo = todo[: args.limit]
+    # Counts only: a raw name is a file path, and a read failure's own text names it.
+    _say(
+        f"hash raw-hash {dataset} from bucket {bucket}: {len(jobs)} raw versions, "
+        f"{resumed} already done, {len(todo)} to read now"
+    )
+
+    failures: dict = {}
+    done = 0
+    unsaved = 0
+
+    def work(job: tuple[str, str, int]):
+        name, version, size = job
+        try:
+            d = fetch.digests(name, size, None, version, git_blob=True)
+        except ObjectFailure as exc:
+            return None, exc.word
+        if d.total != size:
+            return None, SIZE_DIFFERS
+        return d, None
+
+    def written() -> dict:
+        out = dict(entries)
+        for (name, version), word in failures.items():
+            if word == SIZE_DIFFERS:
+                out[(name, version)] = {
+                    "name": name,
+                    "versionId": version,
+                    "failure": word,
+                }
+        return out
+
+    def on_result(job: tuple[str, str, int], result) -> None:
+        nonlocal done, unsaved
+        name, version, size = job
+        d, word = result
+        done += 1
+        if d is None:
+            failures[(name, version)] = word
+            _say(f"[{done}/{len(todo)}] FAILED {word}")
+            return
+        entries[(name, version)] = {
+            "name": name,
+            "versionId": version,
+            "size": size,
+            "sha256": d.original,
+            "gitBlobSha1": d.git_blob_sha1,
+        }
+        unsaved += 1
+        _say(f"[{done}/{len(todo)}] hashed")
+        if unsaved >= args.checkpoint_every:
+            write_atomic(args.out, _raw_hashes_text(dataset, plan_sha, written()))
+            unsaved = 0
+
+    try:
+        run_jobs(todo, work, args.workers, on_result)
+    finally:
+        write_atomic(args.out, _raw_hashes_text(dataset, plan_sha, written()))
+
+    remaining = len(jobs) - len(entries) - len(failures)
+    _say(
+        f"hash raw-hash {dataset}: {len(entries)}/{len(jobs)} raw versions hashed, "
+        f"{len(failures)} failed, {remaining} not attempted"
+    )
+    if failures:
+        _say(
+            f"hash raw-hash {dataset}: failed by reason: {_word_counts(failures.values())}"
+        )
+        return EXIT_FAILED
+    return EXIT_INCOMPLETE if remaining else EXIT_OK
+
+
 # --- command line -------------------------------------------------------------------------------
 
 
@@ -887,10 +1227,12 @@ def _add_read_options(p: argparse.ArgumentParser) -> None:
         "--source-cmd",
         metavar="TEMPLATE",
         help="shell command that writes one object to standard output; {dataset}, {key}, "
-        "{bucket} and (verify-new, where it is required) {version} are filled in, "
-        "shell-quoted. Default: "
+        "{bucket} and (verify-new and raw-hash, where it is required) {version} are filled in, "
+        "shell-quoted for the shell that runs the template, once. A template that hands them "
+        "to another shell (ssh, sh -c) must quote them again for that one: a raw copy's {key} "
+        "is a file path and may hold a quote, a space, $ or a backtick. Default: "
         + DEFAULT_SOURCE_CMD
-        + "; for verify-new: "
+        + "; for verify-new and raw-hash: "
         + DEFAULT_VERIFY_SOURCE_CMD,
     )
     p.add_argument(
@@ -973,6 +1315,37 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--out", required=True, help="new-hash-verified.json")
     _add_read_options(verify)
     verify.set_defaults(func=cmd_verify_new)
+
+    raw_hash = modes.add_parser(
+        "raw-hash",
+        help="stream each raw version the plan records and write raw-hashes.json",
+        description="Stream every VERSION of every raw copy plan.json records (an object under "
+        "objects/ stored by its path, not by an annex key) at its version id, and record its "
+        "sha256 and its git blob id (SHA-1 of 'blob <size>\\0' and the bytes, with the plan's "
+        "size) in raw-hashes.json, which names the sha256 of plan.json. A version whose byte "
+        "count is not the plan's size is recorded as size-differs, never with a digest. Prints "
+        "counts and fixed words only, never a name. An existing raw-hashes.json for the same "
+        "plan.json is resumed. s3-scrub raw-verify then compares the digests.",
+        allow_abbrev=False,
+    )
+    raw_hash.add_argument("--plan", required=True, help="plan.json")
+    raw_hash.add_argument(
+        "--out", required=True, help="raw-hashes.json, rewritten atomically"
+    )
+    raw_hash.add_argument(
+        "--limit",
+        type=_positive_int,
+        help="read at most this many versions, then exit with status 4 if versions remain",
+    )
+    raw_hash.add_argument(
+        "--checkpoint-every",
+        type=_positive_int,
+        default=5,
+        metavar="N",
+        help="rewrite raw-hashes.json after every N newly hashed versions (5)",
+    )
+    _add_read_options(raw_hash)
+    raw_hash.set_defaults(func=cmd_raw_hash)
     return parser
 
 

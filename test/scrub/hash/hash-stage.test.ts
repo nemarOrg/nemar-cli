@@ -1622,6 +1622,8 @@ describe.skipIf(!awsInstalled)("default source: the real aws CLI, stand-in S3", 
       env: {
         PATH: process.env.PATH ?? "",
         HOME: home,
+        // The child's temp files land in this run's directory, which the file removes.
+        TMPDIR: home,
         PYTHONDONTWRITEBYTECODE: "1",
         AWS_ACCESS_KEY_ID: "ASIATESTDUMMY000001",
         AWS_SECRET_ACCESS_KEY: "dummySecretAccessKeyForHashStageTest",

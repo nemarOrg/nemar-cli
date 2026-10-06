@@ -12,9 +12,8 @@
  * own doing, not the test runner's.
  */
 
-import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { spawn } from "bun";
 import { type S3Standin, startS3Standin } from "../helpers/s3-standin";
@@ -29,12 +28,15 @@ import {
   fixtureC,
   has,
   planArgs,
+  removeTempDirs,
   runScrub,
   seedManifest,
   seedObject,
   tempDir,
   writeHashes,
 } from "./support";
+
+afterAll(removeTempDirs);
 
 let standin: S3Standin | undefined;
 afterEach(() => {
@@ -81,7 +83,7 @@ describe("a signal mid-stage", () => {
         writeHashes(out, [c]);
         // Assemble's read of C's first part: headers and 4 MiB, then nothing for a minute.
         standin.stallBodyNext({ keyPrefix: `${DATASET}/objects/`, bytes: 4 * MIB, ms: 60_000 });
-        const root = mkdtempSync(path.join(tmpdir(), "s3-scrub-signal-"));
+        const root = tempDir("signal");
         const cmd = ["bun", SCRIPT, ...assembleArgs(out)].map((a) => `'${a}'`).join(" ");
         const proc = spawn({
           cmd: ["sh", "-c", `umask 022; exec ${cmd}`],

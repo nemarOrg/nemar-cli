@@ -3,7 +3,7 @@
  * before anything real is touched. Run as the real CLI against the S3 stand-in.
  */
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -17,10 +17,13 @@ import {
   SLOW,
   awsTestEnv,
   diag,
+  removeTempDirs,
   runScrub,
   tempDir,
   withCtx,
 } from "./support";
+
+afterAll(removeTempDirs);
 
 let standin: S3Standin;
 afterEach(() => standin?.stop());

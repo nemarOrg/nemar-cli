@@ -7,7 +7,7 @@
  * 200, an item the answer never mentions, a request that failed as a whole.
  */
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { readdirSync } from "node:fs";
 import {
   type AwsRunner,
@@ -21,7 +21,9 @@ import {
   deleteVersions,
 } from "../../../scripts/scrub/s3/s3-lib";
 import { type S3Standin, startS3Standin } from "../helpers/s3-standin";
-import { BUCKET, SLOW, awsTestEnv, centuryFromNow, withCtx } from "./support";
+import { BUCKET, SLOW, awsTestEnv, centuryFromNow, removeTempDirs, withCtx } from "./support";
+
+afterAll(removeTempDirs);
 
 let standin: S3Standin;
 afterEach(() => standin?.stop());

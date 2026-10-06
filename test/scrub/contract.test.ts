@@ -6,6 +6,7 @@ import {
   ContractError,
   buildKey,
   parseAssembled,
+  parseDeleted,
   parseGitPlan,
   parseGitVerified,
   parseHashes,
@@ -13,6 +14,8 @@ import {
   parseKeymap,
   parsePatches,
   parsePlan,
+  parseRawHashes,
+  parseRawVerified,
   parseVerified,
   parseZarrVerified,
   patchDigest,
@@ -416,5 +419,197 @@ describe("stage files", () => {
     expect(() => parseGitVerified(JSON.stringify({ ...proof, provenanceHashesKept: 88 }))).toThrow(
       ContractError,
     );
+  });
+});
+
+describe("raw copies (ADR 0085, amendment of 2026-10-06)", () => {
+  const rec = {
+    name: "sub-01/eeg/sub-01_eeg.BDF",
+    kind: "recording",
+    versions: [{ id: "v1", size: 1000 }],
+    markers: ["m1"],
+  };
+  const tsv = {
+    name: "participants.tsv",
+    kind: "other",
+    versions: [{ id: "v2", size: 9 }],
+    markers: [],
+  };
+  const folder = { name: "code/", kind: "other", versions: [{ id: "v3", size: 0 }], markers: [] };
+  const onlyMarker = { name: "CHANGES", kind: "other", versions: [], markers: ["m2"] };
+  /** A plan with these raw copies and totals counted here, by hand. */
+  const rawPlan = (raw: KeyOver[], totals: KeyOver = {}) => {
+    const count = (f: (r: KeyOver) => unknown[] | undefined) =>
+      raw.reduce((n, r) => n + (Array.isArray(f(r)) ? (f(r) as unknown[]).length : 0), 0);
+    return planText(
+      [planKey()],
+      { rawCopies: raw },
+      {
+        rawCopyNames: raw.length,
+        rawCopyVersions: count((r) => r.versions as unknown[]),
+        rawCopyMarkers: count((r) => r.markers as unknown[]),
+        ...totals,
+      },
+    );
+  };
+  const sorted = [onlyMarker, folder, tsv, rec];
+
+  test("plan.json: raw copies are carried exactly, and a plan without them is unchanged", () => {
+    const plan = parsePlan(rawPlan(sorted));
+    expect(plan.rawCopies?.map((r) => r.name)).toEqual([
+      "CHANGES",
+      "code/",
+      "participants.tsv",
+      rec.name,
+    ]);
+    expect(plan.totals).toMatchObject({ rawCopyNames: 4, rawCopyVersions: 3, rawCopyMarkers: 2 });
+    // None at all: neither the list nor its counts.
+    expect(parsePlan(planText([planKey()])).rawCopies).toBeUndefined();
+    // An empty list with zero counts is a plan with none.
+    expect(parsePlan(rawPlan([])).rawCopies).toEqual([]);
+    const mutations: Array<[string, string]> = [
+      ["an unknown member", rawPlan([{ ...tsv, more: 1 }])],
+      ["a member missing", rawPlan([{ name: tsv.name, kind: "other", versions: tsv.versions }])],
+      ["a recording called other", rawPlan([{ ...rec, kind: "other" }])],
+      ["a text file called a recording", rawPlan([{ ...tsv, kind: "recording" }])],
+      ["annex-uuid", rawPlan([{ ...tsv, name: "annex-uuid" }])],
+      ["an annex key's name", rawPlan([{ ...rec, name: `SHA256E-s1000--${H1}.bdf` }])],
+      ["a bad annex key's name", rawPlan([{ ...tsv, name: "SHA256E-x" }])],
+      ["an empty name", rawPlan([{ ...tsv, name: "" }])],
+      ["a NUL", rawPlan([{ ...tsv, name: "a\u0000b" }])],
+      ["a lone surrogate", rawPlan([{ ...tsv, name: "a\ud800b" }])],
+      ["a carriage return", rawPlan([{ ...tsv, name: "a\rb.tsv" }])],
+      ["a tab", rawPlan([{ ...tsv, name: "a\tb.tsv" }])],
+      ["a line feed", rawPlan([{ ...tsv, name: "a\nb.tsv" }])],
+      ["U+001F", rawPlan([{ ...tsv, name: "a\u001fb.tsv" }])],
+      ["DEL", rawPlan([{ ...tsv, name: "a\u007fb.tsv" }])],
+      ["a C1 control", rawPlan([{ ...tsv, name: "a\u0085b.tsv" }])],
+      ["U+FFFE", rawPlan([{ ...tsv, name: "a\ufffeb.tsv" }])],
+      ["U+FFFF", rawPlan([{ ...tsv, name: "a\uffffb.tsv" }])],
+      ["out of order", rawPlan([tsv, folder])],
+      ["a name twice", rawPlan([tsv, tsv])],
+      ["nothing under the name", rawPlan([{ ...tsv, versions: [] }])],
+      ["an id twice", rawPlan([{ ...rec, markers: ["v1"] }])],
+      ["a version id empty", rawPlan([{ ...tsv, versions: [{ id: "", size: 9 }] }])],
+      ["a size negative", rawPlan([{ ...tsv, versions: [{ id: "v2", size: -1 }] }])],
+      ["a size a string", rawPlan([{ ...tsv, versions: [{ id: "v2", size: "9" }] }])],
+      ["a version with more", rawPlan([{ ...tsv, versions: [{ id: "v2", size: 9, x: 1 }] }])],
+      ["a marker a number", rawPlan([{ ...tsv, markers: [7] }])],
+      ["rawCopies an object", planText([planKey()], { rawCopies: {} })],
+      ["names counted wrong", rawPlan(sorted, { rawCopyNames: 3 })],
+      ["versions counted wrong", rawPlan(sorted, { rawCopyVersions: 4 })],
+      ["markers counted wrong", rawPlan(sorted, { rawCopyMarkers: 1 })],
+      ["a count absent", rawPlan(sorted, { rawCopyMarkers: undefined })],
+      ["raw counts without raw copies", planText([planKey()], {}, { rawCopyNames: 0 })],
+    ];
+    for (const [label, text] of mutations) {
+      expect(() => parsePlan(text), label).toThrow(ContractError);
+    }
+  });
+
+  test("raw-hashes.json: a digest or the one failure word per version, never twice", () => {
+    const digest = {
+      name: tsv.name,
+      versionId: "v2",
+      size: 9,
+      sha256: H1,
+      gitBlobSha1: "c".repeat(40),
+    };
+    const failure = { name: rec.name, versionId: "v1", failure: "size-differs" };
+    const doc = (entries: unknown[], over: KeyOver = {}) =>
+      JSON.stringify({ version: 1, dataset: "nm000112", planSha256: H2, entries, ...over });
+    expect(parseRawHashes(doc([failure, digest])).entries.length).toBe(2);
+    // The writer's order is not checked: Python and JavaScript sort strings differently.
+    expect(parseRawHashes(doc([digest, failure])).entries.length).toBe(2);
+    const mutations: Array<[string, string]> = [
+      ["an extra field", doc([digest], { more: 1 })],
+      ["planSha256 not a sha256", doc([digest], { planSha256: "x" })],
+      ["entries an object", doc([digest], { entries: {} })],
+      ["a digest with more", doc([{ ...digest, more: 1 }])],
+      ["a digest missing its blob id", doc([{ ...digest, gitBlobSha1: undefined }])],
+      ["a blob id of SHA-256 length", doc([{ ...digest, gitBlobSha1: H1 }])],
+      ["a sha256 in upper case", doc([{ ...digest, sha256: H1.toUpperCase() }])],
+      ["a size negative", doc([{ ...digest, size: -1 }])],
+      ["another failure word", doc([{ ...failure, failure: "read-failed" }])],
+      ["a failure with a digest", doc([{ ...failure, sha256: H1 }])],
+      ["a version twice", doc([digest, { ...digest }])],
+      ["annex-uuid", doc([{ ...digest, name: "annex-uuid" }])],
+      ["an empty version id", doc([{ ...digest, versionId: "" }])],
+    ];
+    for (const [label, text] of mutations) {
+      expect(() => parseRawHashes(text), label).toThrow(ContractError);
+    }
+  });
+
+  test("raw-verified.json: three bindings, counts that add up, and never vacuous", () => {
+    const ok = {
+      version: 1,
+      dataset: "nm000112",
+      verifiedAt: "2026-10-06T00:00:00.000Z",
+      planSha256: H1,
+      rawHashesSha256: H2,
+      gitBlobsSha256: BOUND,
+      matchedKeys: [`SHA256E-s1000--${H1}.bdf`, `SHA256E-s9--${H2}.edf`],
+      counts: { names: 3, versions: 4, markers: 2, matchedRecordings: 1, matchedOther: 3 },
+    };
+    expect(parseRawVerified(JSON.stringify(ok)).counts.matchedOther).toBe(3);
+    // Only markers left under the names: no version to match, still a proof about names.
+    const markersOnly = {
+      ...ok,
+      matchedKeys: [],
+      counts: { ...ok.counts, versions: 0, matchedRecordings: 0, matchedOther: 0 },
+    };
+    expect(parseRawVerified(JSON.stringify(markersOnly)).counts.versions).toBe(0);
+    for (const over of [
+      { more: 1 },
+      { planSha256: "x" },
+      { gitBlobsSha256: undefined },
+      { verifiedAt: "today" },
+      { counts: { ...ok.counts, matchedOther: 2 } },
+      { counts: { ...ok.counts, names: 0 } },
+      { counts: { ...ok.counts, extra: 1 } },
+      { counts: { ...ok.counts, markers: -1 } },
+      // The matched keys: annex keys, strictly sorted, there exactly when a recording matched.
+      { matchedKeys: undefined },
+      { matchedKeys: "SHA256E-s9" },
+      { matchedKeys: [...ok.matchedKeys].reverse() },
+      { matchedKeys: [ok.matchedKeys[0], ok.matchedKeys[0]] },
+      { matchedKeys: ["participants.tsv"] },
+      { matchedKeys: [`git:${"a".repeat(40)}`] },
+      { matchedKeys: [] },
+      { ...markersOnly, matchedKeys: [ok.matchedKeys[0]] },
+    ]) {
+      expect(
+        () => parseRawVerified(JSON.stringify({ ...ok, ...over })),
+        JSON.stringify(over),
+      ).toThrow(ContractError);
+    }
+  });
+
+  test("deleted.json: the raw counts come as a pair or not at all", () => {
+    const base = {
+      version: 1,
+      dataset: "nm000112",
+      deletedAt: "2026-10-06T00:00:00.000Z",
+      assembledSha256: H1,
+      counts: { keys: 2, versions: 2, markers: 0, prunedVersions: 0, prunedMarkers: 0 },
+    };
+    expect(parseDeleted(JSON.stringify(base)).counts.rawVersions).toBeUndefined();
+    const raw = { ...base, counts: { ...base.counts, rawVersions: 747, rawMarkers: 127 } };
+    expect(parseDeleted(JSON.stringify(raw)).counts).toMatchObject({
+      rawVersions: 747,
+      rawMarkers: 127,
+    });
+    for (const counts of [
+      { ...base.counts, rawVersions: 747 },
+      { ...base.counts, rawMarkers: 127 },
+      { ...base.counts, rawVersions: 1, rawMarkers: -1 },
+      { ...base.counts, rawVersions: 1, rawMarkers: 1, rawNames: 1 },
+    ]) {
+      expect(
+        () => parseDeleted(JSON.stringify({ ...base, counts })),
+        JSON.stringify(counts),
+      ).toThrow(ContractError);
+    }
   });
 });

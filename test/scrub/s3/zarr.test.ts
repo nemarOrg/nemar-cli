@@ -7,9 +7,8 @@
  * structure, from the same document.
  */
 
-import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
   type PlanFile,
@@ -35,6 +34,7 @@ import {
   leaksAName,
   planArgs,
   readJson,
+  removeTempDirs,
   runScrub,
   seedManifest,
   seedObject,
@@ -43,6 +43,8 @@ import {
   tempDir,
   writeJson,
 } from "./support";
+
+afterAll(removeTempDirs);
 
 let standin: S3Standin;
 let pub: PublicEndpoint | undefined;
@@ -765,7 +767,7 @@ describe("zarr: preconditions", () => {
     "needs a plan to name the dataset and the bucket",
     async () => {
       standin = startS3Standin();
-      const empty = mkdtempSync(path.join(tmpdir(), "s3-scrub-zarr-empty-"));
+      const empty = tempDir("zarr-empty");
       expectStopped(await runScrub(standin, zarrArgs(empty)), 3, "plan.json-missing");
 
       const bad = tempDir("zarr-badplan");

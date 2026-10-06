@@ -49,6 +49,7 @@ import {
   makeFixture,
   objectPath,
   readJson,
+  removeTempDirs,
   runScrub,
   seedManifest,
   sha256,
@@ -58,6 +59,8 @@ import {
   writeGitVerified,
   writeJson,
 } from "./support";
+
+afterAll(removeTempDirs);
 
 let standin: S3Standin;
 let pub: PublicEndpoint;
@@ -1104,6 +1107,45 @@ describe("delete-old: what must be true before an old key may go", () => {
       standin.putObject(BUCKET, `${DATASET}/objects/SHA256E-s1--${"9".repeat(64)}.json`, body("x"));
       const ok = await runScrub(standin, deleteArgs());
       expect(ok.exitCode, ok.all).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "a plan without raw copies ignores annex-uuid and refuses any raw object written since",
+    async () => {
+      writeProofs();
+      // The special remote's marker is in every dataset: never a raw copy, never deleted.
+      standin.putObject(
+        BUCKET,
+        objectPath("annex-uuid"),
+        body("6a1b7c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d"),
+      );
+      const ok = await runScrub(standin, deleteArgs());
+      expect(ok.exitCode, ok.all).toBe(0);
+      // No raw line for a plan that has none.
+      expect(ok.stdout).not.toContain("raw copies");
+      // A raw text object, and a zero-byte folder key, written after the plan.
+      for (const name of ["participants.tsv", "code/"]) {
+        standin.restore(snap);
+        standin.putObject(BUCKET, objectPath(name), body(name === "code/" ? "" : "x\n"));
+        await refused("raw-copy-not-in-plan", { execute: name === "code/" });
+      }
+      // One that appears while deleting is found by the final listing, and annex-uuid is kept.
+      standin.restore(snap);
+      standin.putObject(
+        BUCKET,
+        objectPath("annex-uuid"),
+        body("6a1b7c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d"),
+      );
+      standin.beforeOp("DeleteObjects", () => {
+        standin.putObject(BUCKET, objectPath("late.json"), body("{}"));
+      });
+      const r = await runScrub(standin, executeArgs());
+      expect(r.exitCode, r.all).toBe(5);
+      expect(r.stdout).toContain("versions and markers remain: rawCopies=1 versions=1 markers=0");
+      expect(has(dir, "deleted.json")).toBe(false);
+      expect(standin.versions(BUCKET, objectPath("annex-uuid")).length).toBe(1);
     },
     SLOW,
   );
