@@ -376,7 +376,10 @@ jobs:
   # skipped suite reports green.
   scrub-tools:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The suite takes 25 to 30 minutes on a runner (about 13 on a laptop): a 30 minute limit
+    # cancelled it on three runs that were otherwise passing, and a cancelled check reads as
+    # neither green nor red.
+    timeout-minutes: 60
     needs: changes
     if: needs.changes.outputs.scrub == 'true' || needs.changes.outputs.shared == 'true'
     steps:
