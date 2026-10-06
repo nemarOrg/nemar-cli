@@ -233,6 +233,7 @@ canary: a batch naming an already deleted version answered deleted
 ```
 
 The last line is a record, not a pass or fail: it says what a resend of an already deleted version answers (a retry after a lost answer sends such versions again).
+Measured against the real bucket on 2026-10-06 (aws-cli 2.x, `nm099999/canary-*-batch/`, every line above printed, the independent listing empty afterwards): a locked version is refused per item inside a 200 and stays, a delete marker and a key with `&`, a space and angle brackets are removed in the same request, the bypass removes the locked ones, and an already deleted version answers `deleted`.
 The two others are the proof: a locked version is refused per item inside a 200 and stays, and the bypass removes it.
 Any other word is a stop: `batch-lock-not-enforced`, `batch-bypass-denied`, `batch-unexpected:...`, `batch-result-wrong`, `batch-marker-missing`, `lock-not-enforced`, `bypass-denied`, `conditional-put-not-enforced`, `conditional-get-not-enforced`, `conditional-put-failed:...`, `unlocked-delete-refused:...`, `multipart-lock-missing`, or `canary-remainder` (exit 5).
 Then confirm independently that nothing is left; both listings must be empty:
