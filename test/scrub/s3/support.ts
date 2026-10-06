@@ -366,6 +366,24 @@ export function logTail(standin: S3Standin, n = 15): string {
 export const diag = (r: RunResult, standin: S3Standin): string =>
   `${r.all}\n--- stand-in log tail ---\n${logTail(standin)}`;
 
+/** Every delete request the stand-in has seen, single or batch: what a read-only stage must not send. */
+export function deleteRequests(standin: S3Standin): number {
+  return standin.calls("DeleteObject").length + standin.calls("DeleteObjects").length;
+}
+
+/**
+ * What the DeleteObjects requests named, in order, one row per version, with whether the request
+ * carried the governance bypass. The batch stages send these; `calls("DeleteObject")` is empty
+ * for them.
+ */
+export function batchDeleted(
+  standin: S3Standin,
+): Array<{ key: string; versionId: string | null; bypass: boolean }> {
+  return standin
+    .calls("DeleteObjects")
+    .flatMap((c) => (c.items ?? []).map((it) => ({ ...it, bypass: c.bypass === true })));
+}
+
 /** A library context (runner and temp area) wired to a stand-in, for tests of the operations. */
 export async function withCtx<T>(
   standin: S3Standin,

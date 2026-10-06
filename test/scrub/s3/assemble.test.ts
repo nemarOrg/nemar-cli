@@ -27,6 +27,7 @@ import {
   SLOW,
   assembleArgs,
   centuryFromNow,
+  deleteRequests,
   dirText,
   edfFile,
   edfHeader,
@@ -172,7 +173,7 @@ describe("assemble", () => {
       }
 
       // It never deleted anything, and the old objects are untouched.
-      expect(standin.calls("DeleteObject").length).toBe(0);
+      expect(deleteRequests(standin)).toBe(0);
       for (const f of [a, b, c, e]) {
         const vs = standin.versions(BUCKET, objectPath(f.oldKey));
         expect(vs.length, f.label).toBe(1);
@@ -247,6 +248,7 @@ describe("assemble", () => {
         "UploadPartCopy",
         "CompleteMultipartUpload",
         "DeleteObject",
+        "DeleteObjects",
       ] as const) {
         expect(standin.calls(op).length, op).toBe(0);
       }

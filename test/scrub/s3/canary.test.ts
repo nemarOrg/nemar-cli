@@ -361,6 +361,80 @@ describe("canary", () => {
   );
 
   test(
+    "--batch proves DeleteObjects: a locked version in a 200 is refused per item, a marker and an XML-character key go, the bypass removes the rest",
+    async () => {
+      standin = startS3Standin();
+      const r = await runScrub(standin, canary(["--execute", "--batch"]));
+      expect(r.exitCode, diag(r, standin)).toBe(0);
+      expect(r.stdout).toContain(
+        "a batch delete without the bypass removed 3 unlocked versions (one a delete marker, one with XML characters in its key) and refused the 2 locked ones",
+      );
+      expect(r.stdout).toContain("a batch delete with the bypass removed the 2 locked versions");
+      expect(r.stdout).toContain("a batch naming an already deleted version answered deleted");
+      expect(r.stdout).toContain("zero versions and zero delete markers remain");
+
+      const batches = standin.calls("DeleteObjects");
+      expect(batches.map((b) => [b.items?.length, b.bypass])).toEqual([
+        [5, false],
+        [2, true],
+        [1, false],
+      ]);
+      // The key with `&`, a space and angle brackets reached S3 as itself, through the real CLI.
+      expect(batches[0]?.items?.map((i) => i.key)).toContain(`${prefix}batch plain & <co>.txt`);
+      // Each version was named: nothing in a batch is a bare delete.
+      expect(batches.every((b) => b.items?.every((i) => typeof i.versionId === "string"))).toBe(
+        true,
+      );
+      expect(standin.keys(BUCKET, prefix).length).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
+    "--batch fails when a batch deletes a locked version without the bypass",
+    async () => {
+      standin = startS3Standin();
+      // A lock that is not honored in a batch: stripped just before the request is handled.
+      standin.beforeOp("DeleteObjects", () => {
+        for (const n of ["batch-locked-1.txt", "batch-locked-2.txt"]) {
+          for (const v of standin.versions(BUCKET, `${prefix}${n}`)) {
+            standin.clearLock(BUCKET, `${prefix}${n}`, v.versionId);
+          }
+        }
+      });
+      const r = await runScrub(standin, canary(["--execute", "--batch"]));
+      expectStopped(r, 1, "batch-lock-not-enforced");
+    },
+    SLOW,
+  );
+
+  test(
+    "--batch fails when the bypass is refused in a batch",
+    async () => {
+      standin = startS3Standin();
+      // The single deletes before it pass; the operator loses the bypass for the second batch.
+      standin.beforeOp("DeleteObjects", () => standin.setDenyBypass(true), 2);
+      const r = await runScrub(standin, canary(["--execute", "--batch"]));
+      expectStopped(r, 1, "batch-bypass-denied");
+      expect(standin.versions(BUCKET, `${prefix}batch-locked-1.txt`).length).toBe(1);
+    },
+    SLOW,
+  );
+
+  test(
+    "a dry run with --batch lists the batch steps and makes no S3 call",
+    async () => {
+      standin = startS3Standin();
+      const r = await runScrub(standin, canary(["--batch"]));
+      expect(r.exitCode, diag(r, standin)).toBe(0);
+      expect(r.stdout).toContain("ONE DeleteObjects request WITHOUT the bypass");
+      expect(r.stdout).toContain("DeleteObjects request WITH the bypass");
+      expect(standin.log.length).toBe(0);
+    },
+    SLOW,
+  );
+
+  test(
     "proves the conditional writes the zarr stage relies on: the right ETag passes, a stale one is refused",
     async () => {
       standin = startS3Standin();

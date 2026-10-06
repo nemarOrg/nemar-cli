@@ -311,6 +311,17 @@ The verify line and the proof's `counts` carry `provenanceHashesKept` (distinct 
 The proof's schema already takes any count, so a `git-verified.json` from before has neither and is still accepted: that verify allowed no old hash anywhere, which is stricter.
 A kept checksum is a digest of a file in the upstream release and carries none of its header text.
 
+## Amendment 2026-10-06 (#1610): old versions are deleted in batches, and the bypass is for the recordings only
+
+Step 7 above says the old object versions, "and the noncurrent manifest and archive versions", go "by VersionId with the governance bypass".
+Read that as two groups with two rules, which is what the tools do: the old recordings go with the bypass (the lock is the point), and the noncurrent manifest, Zarr and archive history goes **without** it, so a locked object there is refused and reported, never forced.
+The first real run, on nm000186, deleted one version per call, at about six a second, and an 82,195-entry Zarr history was hours of work.
+`delete-old` and `drop-archives` now send up to 1,000 versions in one `DeleteObjects` request, each named by key and version id, with the same bypass rule per request (a request never mixes the two groups).
+The answer to a batch is read item by item, because S3 answers 200 whatever happened to an item: a locked version without the bypass is an entry of `Errors`, not a failed request.
+An item in neither `Deleted` nor `Errors` counts as not deleted.
+Nothing about what is selected, what is refused, or the final authoritative `ListObjectVersions` changed, and that listing, not the answers, decides whether `deleted.json` is written.
+The canary's `--batch` step measured the behavior on the real bucket (2026-10-06) before it was relied on.
+
 ## Build status
 
 Built in Phase 2 (PR #1625, issue #1612): the S3 stages (`plan`, `assemble`, `verify`, `zarr`, `drop-archives`, `delete-old`, `zarr-public`, `canary`), the hash stage, the git stages (`snapshot`, `rewrite`, `verify`, `annex-registry`), the ruleset switch, the git plan, the ledger file and object, the shared header scrub, and the runbook.

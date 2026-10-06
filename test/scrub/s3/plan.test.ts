@@ -16,6 +16,7 @@ import {
   DATASET,
   SLOW,
   assembleArgs,
+  deleteRequests,
   dirText,
   edfFile,
   edfHeader,
@@ -194,7 +195,7 @@ describe("plan", () => {
       ]);
       expectStopped(del, 3, "plan-partial");
       expect(standin.calls("PutObject").length).toBe(0);
-      expect(standin.calls("DeleteObject").length).toBe(0);
+      expect(deleteRequests(standin)).toBe(0);
     },
     SLOW,
   );

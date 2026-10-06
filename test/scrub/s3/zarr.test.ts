@@ -27,6 +27,7 @@ import {
   type PublicEndpoint,
   SLOW,
   addUnreadableKey,
+  deleteRequests,
   dirText,
   fileSha256,
   fixtureD,
@@ -296,7 +297,7 @@ describe("zarr: --execute", () => {
         expect(versionsOf(k).length, k).toBe(1);
         expect(Buffer.compare(standin.current(BUCKET, k)?.data as Uint8Array, v), k).toBe(0);
       }
-      expect(standin.calls("DeleteObject").length).toBe(0);
+      expect(deleteRequests(standin)).toBe(0);
 
       // The record of the run, and the proof bound to it.
       const plan = readJson<ZarrPlanFile>(dir, "zarr-plan.json");

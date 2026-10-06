@@ -14,6 +14,15 @@
  *    even with it when the operator was configured without the bypass permission
  *    (`denyBypass`). Delete markers are never locked. A deletion without a version id is allowed
  *    on a locked key, as on S3, because it only adds a marker.
+ *  - DeleteObjects (`POST /<bucket>?delete`): up to 1000 `<Object>` entries, each by key and
+ *    optional version id, with the same lock rules per item as DeleteObject. As on S3 the request
+ *    answers 200 even when an item is refused: a locked item is an `<Error>` entry
+ *    (`AccessDenied`) beside the `<Deleted>` ones; with `<Quiet>true</Quiet>` only the errors. A version id that does not exist is answered
+ *    `<Deleted>` (measured on the real bucket by the canary's `--batch` step, 2026-10-06, as
+ *    were the per-item refusal inside a 200, a delete marker named by id, and the bypass). A
+ *    request without `Content-MD5` or an `x-amz-checksum-*` header is refused (`InvalidRequest`),
+ *    as S3 does. A fault on `DeleteObjects` fails the whole request; one on
+ *    `DeleteObjectsItem` (with a `key`) turns that one item into an `<Error>` entry.
  *  - ListObjectVersions: a PREFIX match across keys, Versions and DeleteMarkers, newest first
  *    within a key, exactly one IsLatest per key, key-marker / version-id-marker paging with a
  *    configurable page size, and `encoding-type=url` (the CLI sends it and decodes the keys).
@@ -62,7 +71,10 @@ export type StandinOp =
   | "CompleteMultipartUpload"
   | "AbortMultipartUpload"
   | "ListMultipartUploads"
-  | "DeleteObject";
+  | "DeleteObject"
+  | "DeleteObjects"
+  /** A per-item fault of a DeleteObjects request: the item is answered as an `<Error>` entry. */
+  | "DeleteObjectsItem";
 
 export interface StoredVersion {
   versionId: string;
@@ -94,6 +106,8 @@ export interface StandinLogEntry {
   checksum?: boolean;
   size?: number;
   method?: string;
+  /** A DeleteObjects request: what it named, in order, and whether it asked for the bypass. */
+  items?: Array<{ key: string; versionId: string | null }>;
 }
 
 export interface Fault {
@@ -110,6 +124,11 @@ export interface Fault {
    * CreateMultipartUpload honors it (the upload is created and left open).
    */
   applied?: boolean;
+  /**
+   * DeleteObjectsItem only: the item is neither deleted nor mentioned in the answer, which the
+   * caller must read as "not known to be gone".
+   */
+  omit?: boolean;
 }
 
 export interface PutOptions {
@@ -187,6 +206,14 @@ const md5hex = (data: Uint8Array) => md5(data).toString("hex");
 
 function xmlEscape(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function xmlUnescape(s: string): string {
+  return s
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, "&");
 }
 
 const XML_HEAD = '<?xml version="1.0" encoding="UTF-8"?>';
@@ -314,6 +341,86 @@ export function startS3Standin(): S3Standin {
         record({ op, key, status: f.status, ...extra });
         return s3Error(f.code, f.status, `induced ${f.code} (test)`);
       };
+
+      // ---- DeleteObjects ----
+      if (req.method === "POST" && key === "" && q.has("delete")) {
+        const bypass = req.headers.get("x-amz-bypass-governance-retention") === "true";
+        const body = await req.text();
+        // S3 requires Content-MD5 or an x-amz-checksum-* header on a multi-object delete. The CLI
+        // sends one by default; a regression of the pinned checksum setting would show here.
+        const checksum =
+          [...req.headers.keys()].some((h) => h.startsWith("x-amz-checksum-")) ||
+          req.headers.has("content-md5");
+        if (!checksum) {
+          record({ op: "DeleteObjects", key: "", status: 400, bypass, checksum: false });
+          return s3Error(
+            "InvalidRequest",
+            400,
+            "Missing required header for this request: Content-MD5 OR x-amz-checksum-",
+          );
+        }
+        // As on S3, Quiet mode answers only the failures: a caller that asks for it cannot tell
+        // which items were deleted.
+        const quiet = /<Quiet>\s*true\s*<\/Quiet>/i.test(body);
+        const items = [...body.matchAll(/<Object>([\s\S]*?)<\/Object>/g)].map((m) => {
+          const part = m[1] as string;
+          const k = /<Key>([\s\S]*?)<\/Key>/.exec(part)?.[1] ?? "";
+          const v = /<VersionId>([\s\S]*?)<\/VersionId>/.exec(part)?.[1] ?? null;
+          return { key: xmlUnescape(k), versionId: v === null ? null : xmlUnescape(v) };
+        });
+        const fault = enter("DeleteObjects", "");
+        if (fault) return fail("DeleteObjects", fault, { bypass, items, checksum });
+        if (items.length === 0 || items.length > 1000) {
+          record({ op: "DeleteObjects", key: "", status: 400, bypass, items, checksum });
+          return s3Error("MalformedXML", 400);
+        }
+        const deleted: string[] = [];
+        const errors: string[] = [];
+        const refuse = (k: string, v: string | null, code: string) =>
+          errors.push(
+            `<Error><Key>${xmlEscape(k)}</Key>${v === null ? "" : `<VersionId>${xmlEscape(v)}</VersionId>`}<Code>${code}</Code><Message>${code}</Message></Error>`,
+          );
+        for (const it of items) {
+          const itemFault = enter("DeleteObjectsItem", it.key);
+          if (itemFault) {
+            if (!itemFault.omit) refuse(it.key, it.versionId, itemFault.code);
+            continue;
+          }
+          const arr = versionsOf(bucket, it.key);
+          if (it.versionId === null) {
+            // No version id: a delete marker is added, as DeleteObject does.
+            const id = push(bucket, it.key, {
+              versionId: nextVersionId(),
+              deleteMarker: true,
+              data: new Uint8Array(0),
+              etag: "",
+              lastModified: new Date().toISOString(),
+              contentType: "",
+            });
+            deleted.push(
+              `<Deleted><Key>${xmlEscape(it.key)}</Key><DeleteMarker>true</DeleteMarker><DeleteMarkerVersionId>${id}</DeleteMarkerVersionId></Deleted>`,
+            );
+            continue;
+          }
+          const idx = arr.findIndex((v) => v.versionId === it.versionId);
+          const v = idx < 0 ? undefined : (arr[idx] as StoredVersion);
+          if (v && !v.deleteMarker && v.lock && v.lock.until.getTime() > Date.now()) {
+            const allowed = v.lock.mode === "GOVERNANCE" && bypass && !denyBypass;
+            if (!allowed) {
+              refuse(it.key, it.versionId, "AccessDenied");
+              continue;
+            }
+          }
+          if (idx >= 0) arr.splice(idx, 1);
+          deleted.push(
+            `<Deleted><Key>${xmlEscape(it.key)}</Key><VersionId>${xmlEscape(it.versionId)}</VersionId>${v?.deleteMarker ? `<DeleteMarker>true</DeleteMarker><DeleteMarkerVersionId>${xmlEscape(it.versionId)}</DeleteMarkerVersionId>` : ""}</Deleted>`,
+          );
+        }
+        record({ op: "DeleteObjects", key: "", status: 200, bypass, items, checksum });
+        return xml(
+          `<DeleteResult>${quiet ? "" : deleted.join("")}${errors.join("")}</DeleteResult>`,
+        );
+      }
 
       // ---- bucket-level: listings ----
       if (key === "") {

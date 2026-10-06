@@ -82,7 +82,12 @@ describe("verify", () => {
       expect(r.stdout).toContain("verify: ok keys=3 headersChecked=3");
 
       // Read-only, and it reached the final 64 KiB of the new 20 MiB object.
-      for (const op of ["PutObject", "CreateMultipartUpload", "DeleteObject"] as const) {
+      for (const op of [
+        "PutObject",
+        "CreateMultipartUpload",
+        "DeleteObject",
+        "DeleteObjects",
+      ] as const) {
         expect(standin.calls(op).length, op).toBe(0);
       }
       const last = `bytes=${c.bytes.length - 65536}-${c.bytes.length - 1}`;

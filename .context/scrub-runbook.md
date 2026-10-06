@@ -208,6 +208,7 @@ It proves: the lock holds without the bypass and gives way with it; an `If-Match
 ```bash
 bun run $T/s3/s3-scrub.ts canary --prefix $PC --execute
 bun run $T/s3/s3-scrub.ts canary --prefix $PC --execute --multipart
+bun run $T/s3/s3-scrub.ts canary --prefix $PC --execute --batch
 ```
 
 Expected, each run exit 0, with these lines in order:
@@ -223,7 +224,18 @@ canary: zero versions and zero delete markers remain under the prefix
 ```
 
 With `--multipart`, also `canary: multipart object built with the lock set at create`, and the without-bypass and with-bypass pair twice more.
-Any other word is a stop: `lock-not-enforced`, `bypass-denied`, `conditional-put-not-enforced`, `conditional-get-not-enforced`, `conditional-put-failed:...`, `unlocked-delete-refused:...`, `multipart-lock-missing`, or `canary-remainder` (exit 5).
+With `--batch`, also, after the lines above, the proof of `DeleteObjects` that steps 15a and 15b rely on (a batch answers 200 whatever happened to an item, so the stand-in's belief about it is checked here, on the real bucket):
+
+```
+canary: a batch delete without the bypass removed 3 unlocked versions (one a delete marker, one with XML characters in its key) and refused the 2 locked ones
+canary: a batch delete with the bypass removed the 2 locked versions
+canary: a batch naming an already deleted version answered deleted
+```
+
+The last line is a record, not a pass or fail: it says what a resend of an already deleted version answers (a retry after a lost answer sends such versions again).
+Measured against the real bucket on 2026-10-06 (aws-cli 2.x, `nm099999/canary-*-batch/`, every line above printed, the independent listing empty afterwards): a locked version is refused per item inside a 200 and stays, a delete marker and a key with `&`, a space and angle brackets are removed in the same request, the bypass removes the locked ones, and an already deleted version answers `deleted`.
+The two others are the proof: a locked version is refused per item inside a 200 and stays, and the bypass removes it.
+Any other word is a stop: `batch-lock-not-enforced`, `batch-bypass-denied`, `batch-unexpected:...`, `batch-result-wrong`, `batch-marker-missing`, `lock-not-enforced`, `bypass-denied`, `conditional-put-not-enforced`, `conditional-get-not-enforced`, `conditional-put-failed:...`, `unlocked-delete-refused:...`, `multipart-lock-missing`, or `canary-remainder` (exit 5).
 Then confirm independently that nothing is left; both listings must be empty:
 
 ```bash
@@ -990,6 +1002,8 @@ If the path differs, ask the maintainer to read the row.
 > The `zarr-public` check of step 16 runs after the dataset is public again and writes no proof, so it is not a precondition here.
 >
 > **Words.**
+> It deletes in batches: one `DeleteObjects` request takes up to 1,000 versions, each named by key and version id, and `--concurrency` (default 4) requests run at a time.
+> A batch answers 200 even when an item was refused, so the tool reads the answer item by item and counts each refusal as `DeleteObjects:<class>` (`delete errors=N (...)`); an item the answer never mentions counts as `DeleteObjects:bad-output`, never as deleted.
 > It ends with an authoritative `ListObjectVersions` that must show nothing; otherwise it prints `drop-archives: FAILED, versions and markers remain` and exits 5, with no `archives-dropped.json`.
 > A lock refusal is reported and fails the stage: archives carry no lock, so a refusal is news, and the lock is a person's to look at.
 > An archive job can still run after the drop: a version-DOI run outside the window, or a legacy per-repository `generate-archive.yml`, which writes the old key name `D/archives/v<X.Y.Z>.zip`.
@@ -1035,6 +1049,10 @@ If the path differs, ask the maintainer to read the row.
 > - every prefix with history (`D/version/`, `D/zarr/`) is named with `--prune-noncurrent` (`history-remains`, with the count per prefix), and a prune prefix is exactly `D/version/`, `D/archives/` or `D/zarr/` (`bad-prune-prefix`).
 >
 > **Words.**
+> It deletes in batches, as step 15a does (up to 1,000 versions per `DeleteObjects` request, `--concurrency` requests at a time, default 4), with the governance bypass for the old recordings and without it for the pruned history, and prints a progress line `delete-old: deleted N of M in this group` after each request.
+> An item S3 asked to be retried (`SlowDown`, `InternalError` and the like, as an entry of the answer) is sent again alone, and a whole request that failed with throttling, an unreachable endpoint or a timeout is sent again whole, up to five requests in all, with a jittered pause that grows each time; a lock refusal (`AccessDenied`) is final for that item and stays on the final listing.
+> If a run ends with `DeleteObjects:throttled` in its `delete errors` line, S3 was busier than the pauses covered: run it again, which resumes, with a lower `--concurrency` (2).
+> One version at a time, nm000186's 82,195 history entries took hours (about 6 deletions a second, one `aws` process each); a batch of 1,000 is one request, so the same history is about 90 requests.
 > It ends with an authoritative `ListObjectVersions` showing zero versions and zero markers for every old key and no history under `D/archives/`, `D/version/` or `D/zarr/`; otherwise it exits 5 and writes no `deleted.json`.
 > A re-run is safe and resumes: once the old keys are gone the new keys prove privacy, so a run that stopped at exit 5 is finished by running it again.
 > `deleted.json` is removed at the start of every run, so a refused or failed run leaves none.
@@ -1238,7 +1256,7 @@ What a signal cannot undo is in S3, and none of it shows in `list-object-version
 - **assemble**: an open multipart upload for each object in progress, created with the lock parameters and billed until aborted.
   The `assemble: open upload left by a failed create: key=... uploadId=...` lines name the ones a failed create left; find the rest with `aws s3api list-multipart-uploads --bucket nemar --prefix $D/objects/` and abort each with `aws s3api abort-multipart-upload --bucket nemar --key <Key> --upload-id <UploadId>`; confirm the listing is empty.
   A new object that was completed but never reached `assembled.json` is found and kept by a re-run, so run assemble again rather than deleting it.
-- **canary**: up to three locked objects under the canary prefix (`probe.txt`, `multipart-source.bin`, `multipart.bin`, GOVERNANCE for one day), an open multipart upload (a failed abort prints `canary: abort-failed key=... uploadId=...`), and up to two unlocked versions of `conditional.json`.
+- **canary**: up to five locked objects under the canary prefix (`probe.txt`, `multipart-source.bin`, `multipart.bin`, and with `--batch` `batch-locked-1.txt` and `batch-locked-2.txt`, GOVERNANCE for one day), an open multipart upload (a failed abort prints `canary: abort-failed key=... uploadId=...`), and up to two unlocked versions of `conditional.json`.
   List with `aws s3api list-object-versions --bucket nemar --prefix <prefix>` and `list-multipart-uploads --prefix <prefix>`; delete each version by id (`--bypass-governance-retention` for the locked ones), abort each upload, and confirm both listings are empty.
 - **zarr**, **drop-archives**, **delete-old**: some objects changed or deleted; each stage resumes on a re-run (delete-old proves privacy from the new keys once the old ones are gone).
 - **hash stage**: `hashes.json` holds every key finished before the signal, and a `hashes.json.tmp` (keys only) may remain; a re-run resumes.
