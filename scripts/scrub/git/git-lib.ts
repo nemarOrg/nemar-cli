@@ -620,6 +620,7 @@ export type VerifyReason =
   | "edf-key-unaccounted"
   | "edf-path-not-a-pointer"
   | "provenance-unannotated"
+  | "provenance-too-large"
   // fresh-clone mode only:
   | "tag-names-not-plan"
   | "ledger-commit-not-alone"
@@ -865,7 +866,8 @@ export function provenanceHashUse(raw: Uint8Array, oldHashes: ReadonlySet<string
   }
   if (typeof doc !== "object" || doc === null || Array.isArray(doc)) return { use: "elsewhere" };
 
-  // The text is valid JSON from here, so the walk needs no error handling.
+  // The text is valid JSON from here; the only way the walk can throw is nesting deeper than its
+  // stack, which JSON.parse accepts (measured: 50,000 levels), and then nothing is placed.
   const ws = (i: number): number => {
     let j = i;
     while (j < text.length && " \t\n\r".includes(text[j] as string)) j++;
@@ -908,22 +910,26 @@ export function provenanceHashUse(raw: Uint8Array, oldHashes: ReadonlySet<string
 
   const spans: [number, number][] = [];
   const kept = new Set<string>();
-  members(ws(0), (key, at) => {
-    if (key !== "files" || text[at] !== "[") return skip(at);
-    return elements(at, (entry) => {
-      if (text[entry] !== "{") return skip(entry);
-      return members(entry, (field, value) => {
-        const end = skip(value);
-        if (field !== "sha256") return end;
-        const hash = SHA256_VALUE.exec(text.slice(value, end))?.[1]?.toLowerCase();
-        if (hash !== undefined && oldHashes.has(hash)) {
-          spans.push([value + 1, end - 1]);
-          kept.add(hash);
-        }
-        return end;
+  try {
+    members(ws(0), (key, at) => {
+      if (key !== "files" || text[at] !== "[") return skip(at);
+      return elements(at, (entry) => {
+        if (text[entry] !== "{") return skip(entry);
+        return members(entry, (field, value) => {
+          const end = skip(value);
+          if (field !== "sha256") return end;
+          const hash = SHA256_VALUE.exec(text.slice(value, end))?.[1]?.toLowerCase();
+          if (hash !== undefined && oldHashes.has(hash)) {
+            spans.push([value + 1, end - 1]);
+            kept.add(hash);
+          }
+          return end;
+        });
       });
     });
-  });
+  } catch {
+    return { use: "elsewhere" };
+  }
 
   let rest = "";
   let from = 0;
@@ -957,6 +963,13 @@ const POINTER_MAX_BYTES = 1024;
 const REGULAR_FILE_MODES = new Set(["100644", "100755"]);
 
 /**
+ * The largest provenance blob verify reads whole to place its old hashes: 16 MiB, about 100,000
+ * `files` entries (one is about 150 bytes), where a mirror of a few hundred recordings is tens of
+ * KiB. A bigger blob is not read, and its old hashes are `provenance-too-large`.
+ */
+export const PROVENANCE_MAX_BYTES = 16 * 1024 * 1024;
+
+/**
  * The key an annex pointer file (`/annex/objects/KEY`) or an annex symlink target
  * (`.../annex/objects/xx/yy/KEY/KEY`) names, or null when the content is neither.
  */
@@ -979,8 +992,9 @@ export function annexKeyOfBlob(content: Uint8Array): string | null {
  *   regular file (`100644` or `100755`), and nothing else, in every commit of every ref and every
  *   tree a ref names, where every old hash is a `sha256` of a `files` entry
  *   ({@link provenanceHashUse}), is not a hit when it carries {@link PROVENANCE_NOTE_KEY}, and is
- *   `provenance-unannotated` when it does not. The hashes kept are counted (`provenanceHashesKept`,
- *   distinct, and `provenanceBlobsKept`). The exception is off while any ref names a blob, or anything but
+ *   `provenance-unannotated` when it does not; one over {@link PROVENANCE_MAX_BYTES} is not read
+ *   and is `provenance-too-large`. The hashes kept are counted (`provenanceHashesKept`, distinct,
+ *   and `provenanceBlobsKept`). The exception is off while any ref names a blob, or anything but
  *   a commit or a tree, because such a blob has no path to check;
  * - no dropped path in any commit's tree;
  * - every blanked key is empty in every commit that has the file, and every structural edit holds;
@@ -1111,12 +1125,15 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
   let messageHits = 0;
   let blobsScanned = 0;
   const provenanceHits: string[] = [];
+  let provenanceTooLarge = 0;
   const scanners = new Map<number, HashScanner>();
   const kinds = new Map<number, string>();
+  const sizes = new Map<number, number>();
   await catBatch(repo, objects, "batch", {
     header: (i, info) => {
       if (info && (info.type === "blob" || info.type === "commit" || info.type === "tag")) {
         kinds.set(i, info.type);
+        sizes.set(i, info.size);
         scanners.set(i, new HashScanner(oldHashes));
         if (info.type === "blob") blobsScanned++;
       }
@@ -1125,11 +1142,14 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
     end: (i) => {
       const scanner = scanners.get(i);
       const kind = kinds.get(i);
+      const size = sizes.get(i) ?? 0;
       scanners.delete(i);
       kinds.delete(i);
+      sizes.delete(i);
       if (!scanner?.found) return;
       if (kind !== "blob") messageHits++;
       else if (!onlyProvenance(objects[i] as string)) blobHits++;
+      else if (size > PROVENANCE_MAX_BYTES) provenanceTooLarge++;
       else provenanceHits.push(objects[i] as string);
     },
   });
@@ -1151,6 +1171,7 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
   fail("old-key-present", blobHits);
   fail("old-key-in-message", messageHits);
   fail("provenance-unannotated", unannotated);
+  fail("provenance-too-large", provenanceTooLarge);
   counts.objectsScanned = objects.length;
   counts.blobsScanned = blobsScanned;
   counts.provenanceHashesKept = provenanceHashesKept.size;

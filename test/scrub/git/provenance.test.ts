@@ -15,7 +15,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type GitPlanFile, parseGitVerified } from "../../../scripts/scrub/contract";
-import { provenanceHashUse } from "../../../scripts/scrub/git/git-lib";
+import { PROVENANCE_MAX_BYTES, provenanceHashUse } from "../../../scripts/scrub/git/git-lib";
 import {
   type PlanReport,
   buildGitPlan,
@@ -122,6 +122,14 @@ describe("provenanceHashUse places every old hash in a provenance blob", () => {
         name === "not UTF-8" ? Buffer.from(text, "latin1") : new TextEncoder().encode(text);
       expect(provenanceHashUse(bytes, OLD), name).toEqual({ use: "elsewhere" });
     }
+  });
+
+  test("elsewhere, not a crash: nesting JSON.parse accepts but the walk cannot follow", () => {
+    // Measured with Bun 1.4.2: JSON.parse reads 50,000 levels; the walk's stack does not.
+    const depth = 50_000;
+    const deep = doc({ deep: "@" }).replace('"@"', `${"[".repeat(depth)}${"]".repeat(depth)}`);
+    expect(() => JSON.parse(deep)).not.toThrow();
+    expect(use(deep)).toEqual({ use: "elsewhere" });
   });
 });
 
@@ -449,6 +457,18 @@ SUITE("a sourcedata mirror scrubbed in place keeps its upstream checksums (ADR 0
     expect(executable.out).not.toContain("reason=old-key-present");
     expect(counts(executable.out, "verify: failed")).toMatchObject({ provenanceBlobsKept: 2 });
   });
+
+  test(`a provenance blob over ${PROVENANCE_MAX_BYTES} bytes is not read: provenance-too-large`, async () => {
+    const r = await verifyDamaged("too-large", (repo) => {
+      const doc = { ...provenanceAt(repo, "main"), pad: "x".repeat(PROVENANCE_MAX_BYTES) };
+      write(repo, MIRROR_PROVENANCE, `${JSON.stringify(doc, null, 2)}\n`);
+      commitAll(repo, "a provenance file over the limit");
+    });
+    expect(r.code, r.out).toBe(4);
+    expect(r.out).toContain("reason=provenance-too-large count=1");
+    expect(r.out).not.toContain("reason=old-key-present");
+    expect(counts(r.out, "verify: failed")).toMatchObject({ provenanceBlobsKept: 2 });
+  }, 120_000);
 
   test("a provenance file whose sentence was removed fails provenance-unannotated", async () => {
     const r = await verifyDamaged("sentence-removed", (repo) => {
