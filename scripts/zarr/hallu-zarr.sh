@@ -803,6 +803,20 @@ DRIVER="$DRIVER_REPO/scripts/zarr/generate_zarr.py"
 QUEUE="$DRIVER_REPO/scripts/zarr/zarr_queue.py"
 qpy() { VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" "$QUEUE" --db "$QUEUE_DB" "$@"; }
 
+# The driver's exit when this node's biosigIO cannot leave subject information
+# out of a store (generate_zarr.py EXIT_SUBJECT_INFO_UNAVAILABLE, sysexits.h
+# EX_CONFIG; #1626; test_hallu_zarr_config.py holds the two together). It is a
+# property of the NODE, not of the dataset: every dataset would be refused the
+# same way, so the drain stops on it instead of spending a retry attempt of every
+# queued row in turn, which would turn the whole queue `failed` after a few
+# hourly ticks. setup()'s floor check normally stops such a node first.
+DRIVER_EXIT_SUBJECT_INFO_UNAVAILABLE=78
+report_subject_info_refusal() {
+  local id="$1"
+  err "FATAL: the driver refused to convert ${id}: this node's biosigIO cannot leave subject information out of a store (exit ${DRIVER_EXIT_SUBJECT_INFO_UNAVAILABLE}, #1626)."
+  err "No queued dataset was marked failed and no retry attempt was spent. Fix biosigIO in ${VENV_DIR} (the driver's ::error:: lines are in ${LOG_FILE}), then rerun."
+}
+
 # --- Per-dataset: download -> convert -> push -> CLEANUP -----------------------
 # Returns 0 on success. The store is on S3; the scratch copy is always deleted.
 convert_dataset() {
@@ -1140,8 +1154,12 @@ load_secrets
 if [[ -n "$ONLY_DATASET" ]]; then
   v="$(curl -sS --max-time 30 "${API_BASE}/datasets/${ONLY_DATASET}" 2>/dev/null \
         | jq -r '.dataset.latest_version // ""' 2>/dev/null)"
-  convert_dataset "$ONLY_DATASET" "$v"
-  exit $?
+  only_rc=0
+  convert_dataset "$ONLY_DATASET" "$v" || only_rc=$?
+  if [[ "$only_rc" -eq "$DRIVER_EXIT_SUBJECT_INFO_UNAVAILABLE" ]]; then
+    report_subject_info_refusal "$ONLY_DATASET"
+  fi
+  exit "$only_rc"
 fi
 
 # Reconcile (enqueue pending + recover stale inprogress), then drain the queue.
@@ -1209,11 +1227,20 @@ while :; do
   # stale-recovery sweep reclaims on its own -- it costs one re-conversion, it
   # does not lose data or stall the drain. Worth a loud line so the wasted work
   # is attributable, not worth abandoning a backfill mid-queue.
-  if convert_dataset "$id" "$version" retry-pending; then
+  driver_rc=0
+  convert_dataset "$id" "$version" retry-pending || driver_rc=$?
+  if [[ "$driver_rc" -eq 0 ]]; then
     # shellcheck disable=SC1010  # `done` is the queue subcommand, not the keyword
     qpy done "$id" "$version" --pending-count "${LAST_PENDING_COUNT:-0}" \
       --not-attempted-count "${LAST_NOT_ATTEMPTED:-0}" ||
       err "[$id] converted, but marking it done FAILED; the row stays inprogress until the stale sweep reclaims it (~6h) and it will be converted again"
+  elif [[ "$driver_rc" -eq "$DRIVER_EXIT_SUBJECT_INFO_UNAVAILABLE" ]]; then
+    # A node-level refusal: stop here, fail nothing. This row stays `inprogress`
+    # and reconcile's stale sweep returns it to `pending` without an attempt
+    # (~6h); the rows behind it are never claimed.
+    report_subject_info_refusal "$id"
+    err "Stopping the drain; ${n} dataset(s) processed before ${id}, which stays inprogress until reconcile's stale sweep returns it to pending."
+    exit "$DRIVER_EXIT_SUBJECT_INFO_UNAVAILABLE"
   else
     record_conversion_failure "$id"
   fi

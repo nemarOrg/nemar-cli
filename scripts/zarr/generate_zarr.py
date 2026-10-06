@@ -8132,9 +8132,12 @@ def main() -> int:
     # serving prefix: a biosigIO that cannot leave subject information out of a
     # store must not write one (#1626), and there is no fallback to writing it
     # in. A run with nothing to convert never writes a store, so it is not held
-    # up by this. The failed callback supersedes the `converting` signal, and its
-    # `error` names the node as the cause, not the dataset (see
-    # `write_failed_callback` for why a refusal writes one).
+    # up by this. The failed callback supersedes the `converting` signal (see
+    # `write_failed_callback` for why a refusal writes one). Its `error` names
+    # the node as the cause for whoever reads the callback file; the backend
+    # parses the body but does not store `error`, so the operator-facing signal
+    # is the `::error::` lines here and hallu-zarr.sh's FATAL on this exit code,
+    # which stops the drain rather than fail every queued dataset in turn.
     if convert:
         problems = biosigio_subject_info_problems()
         if problems:

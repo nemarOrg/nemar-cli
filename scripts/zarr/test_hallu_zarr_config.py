@@ -727,13 +727,38 @@ if argv[:1] == ["-c"]:
     real = os.environ["FAKE_REAL_PYTHON"]
     os.execv(real, [real, *argv])
 
+if argv[:1] and argv[0].endswith("generate_zarr.py"):
+    # The conversion driver. Its exit code is the one thing the drain loop
+    # reads from it when it writes no callback, and that loop is what is under
+    # test, so the code comes from the test (FAKE_DRIVER_RC, default 0).
+    with open(os.environ["QPY_LOG"], "a") as fh:
+        fh.write("DRIVER " + " ".join(argv[1:]) + chr(10))
+    sys.exit(int(os.environ.get("FAKE_DRIVER_RC", "0")))
+
 with open(os.environ["QPY_LOG"], "a") as fh:
     fh.write(" ".join(argv) + chr(10))
 
 if "reconcile" in argv:
     print(os.environ.get("QPY_RECONCILE_OUT", "queued=0 parked=0"))
-# `next` prints nothing: an empty line ends the drain immediately.
+if "next" in argv:
+    # QPY_NEXT is the queue, one `<id>TAB<version>` per `;`, handed out one per
+    # `next` call. Unset (the default) prints nothing: an empty line ends the
+    # drain immediately.
+    queue = [row for row in os.environ.get("QPY_NEXT", "").split(";") if row]
+    counter = os.environ["QPY_LOG"] + ".next"
+    taken = int(open(counter).read()) if os.path.exists(counter) else 0
+    if taken < len(queue):
+        print(queue[taken])
+    with open(counter, "w") as fh:
+        fh.write(str(taken + 1))
 sys.exit(0)
+"""
+
+FAKE_NEMAR = """#!/bin/sh
+# `nemar dataset download <id> --no-data -o <dir>`, the metadata clone each
+# queued dataset starts with. The drain loop's handling of the driver's exit is
+# what is under test, not the clone.
+exit 0
 """
 
 FAKE_UV = """#!/bin/sh
@@ -802,6 +827,7 @@ def ack_run(tmp_path: Path):
     fake_bin = tmp_path / "fakebin"
     fake_bin.mkdir()
     _write_exec(fake_bin / "uv", FAKE_UV)
+    _write_exec(fake_bin / "nemar", FAKE_NEMAR)
     if shutil.which("flock") is None:
         _write_exec(fake_bin / "flock", FAKE_FLOCK)
 
@@ -918,6 +944,71 @@ def test_the_env_var_form_arms_a_run_without_touching_the_file(ack_run) -> None:
     assert "ZARR_ENGINE_BUMP_ACK" in result.stdout + result.stderr
     # No file was created, and none was needed.
     assert not ack_file.exists()
+
+
+# -- the drain on the driver's subject-information refusal (#1626) --
+
+TWO_QUEUED = "nm000901\tv1.0.0;nm000902\tv1.0.0"
+
+
+def test_a_subject_info_refusal_stops_the_drain_and_fails_nothing(ack_run) -> None:
+    """generate_zarr.py exits 78 when this node's biosigIO cannot leave subject
+    information out of a store. That is the node, not the dataset: handled as
+    an ordinary failure it would spend a retry attempt of every queued row in
+    turn and leave the whole queue `failed` after a few ticks. The drain stops
+    on the first one, non-zero, and claims nothing behind it."""
+    run, qpy_calls, _ack_file, _log = ack_run
+
+    proc = run(extra_env={"QPY_NEXT": TWO_QUEUED, "FAKE_DRIVER_RC": "78"})
+
+    assert proc.returncode == 78, proc.stdout + proc.stderr
+    assert "FATAL" in proc.stderr
+    assert "cannot leave subject information out of a store" in proc.stderr
+    assert len(_calls_for(qpy_calls, "next")) == 1, qpy_calls()
+    assert [c for c in qpy_calls() if c.startswith("DRIVER ")] != []
+    assert _calls_for(qpy_calls, "fail") == [], "no retry attempt may be spent"
+    assert _calls_for(qpy_calls, "done") == []
+
+
+def test_an_ordinary_driver_failure_still_fails_the_row_and_drains_on(ack_run) -> None:
+    """The control: any other non-zero exit is the dataset's, takes the queue's
+    bounded backoff (`qpy fail`), and the drain moves on to the next row."""
+    run, qpy_calls, _ack_file, _log = ack_run
+
+    proc = run(extra_env={"QPY_NEXT": TWO_QUEUED, "FAKE_DRIVER_RC": "1"})
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "cannot leave subject information" not in proc.stderr
+    assert len(_calls_for(qpy_calls, "next")) == 3, qpy_calls()  # two rows, then empty
+    assert len(_calls_for(qpy_calls, "fail")) == 2, qpy_calls()
+
+
+def test_a_one_off_run_reports_the_refusal_and_keeps_its_exit(ack_run) -> None:
+    run, qpy_calls, _ack_file, _log = ack_run
+
+    proc = run(
+        args=["--dataset", "nm000901"],
+        # A closed port, so the version lookup fails fast instead of reaching
+        # the real API; the driver stand-in does not read it.
+        extra_env={"FAKE_DRIVER_RC": "78", "API_BASE": "http://127.0.0.1:9"},
+    )
+
+    assert proc.returncode == 78, proc.stdout + proc.stderr
+    assert "FATAL" in proc.stderr
+    assert "cannot leave subject information out of a store" in proc.stderr
+    assert _calls_for(qpy_calls, "fail") == []
+
+
+def test_the_refusal_exit_is_the_drivers() -> None:
+    """hallu-zarr.sh and generate_zarr.py spell the refusal's exit code twice;
+    a change to one alone would make the drain fail every queued row again."""
+    sys.path.insert(0, str(SCRIPT.parent))
+    try:
+        import generate_zarr  # type: ignore[import-not-found]
+    finally:
+        sys.path.pop(0)
+    shell = _script_assignment("DRIVER_EXIT_SUBJECT_INFO_UNAVAILABLE")
+    assert int(shell) == generate_zarr.EXIT_SUBJECT_INFO_UNAVAILABLE == 78
 
 
 # -- setup(): the installed biosigIO must be AT the floor, not merely importable --
@@ -1109,6 +1200,27 @@ def test_both_probe_paths_reach_the_same_verdict(
     assert _run_probe(tmp_path, version, packaging_importable) == PROBE_VERDICTS[version]
 
 
+@pytest.mark.parametrize("version", sorted(PROBE_VERDICTS))
+def test_the_driver_floor_agrees_with_the_setup_probe(version: str) -> None:
+    """setup()'s probe and generate_zarr.py's `final_release` read a version
+    twice, in two languages' worth of code. Wherever the probe lets a version
+    through the floor (in range, or above the cap), the driver must accept it
+    too, and wherever the probe refuses it as below the floor, unreadable or a
+    pre-release, the driver must refuse it as well."""
+    sys.path.insert(0, str(SCRIPT.parent))
+    try:
+        import generate_zarr  # type: ignore[import-not-found]
+    finally:
+        sys.path.pop(0)
+    release = generate_zarr.final_release(version)
+    floor = generate_zarr.final_release(generate_zarr.SUBJECT_INFO_FLOOR)
+    driver_accepts = release is not None and floor is not None and release >= floor
+    assert driver_accepts == (PROBE_VERDICTS[version] in (0, 4)), version
+    # And the node's floor never admits a biosigIO the driver then refuses.
+    node_floor = generate_zarr.final_release(_script_assignment("BIOSIGIO_FLOOR"))
+    assert node_floor is not None and floor is not None and node_floor >= floor
+
+
 def _calls_for(qpy_calls, subcommand: str) -> list[str]:
     # A recorded call is `<zarr_queue.py> --db <path> <subcommand> ...`.
     return [c for c in qpy_calls() if subcommand in c.split()]
@@ -1245,8 +1357,8 @@ def test_only_the_drain_loop_passes_the_retry_scope():
         for line in SCRIPT.read_text().splitlines()
         if "convert_dataset " in line and not line.lstrip().startswith("#")
     ]
-    assert 'if convert_dataset "$id" "$version" retry-pending; then' in calls
-    assert 'convert_dataset "$ONLY_DATASET" "$v"' in calls
+    assert 'convert_dataset "$id" "$version" retry-pending || driver_rc=$?' in calls
+    assert 'convert_dataset "$ONLY_DATASET" "$v" || only_rc=$?' in calls
     assert len(calls) == 2, calls
 
 
@@ -1363,7 +1475,7 @@ def test_a_run_without_a_callback_gets_the_generic_retryable_fail(tmp_path):
 
 def test_the_drain_loop_routes_every_failure_through_the_verdict():
     text = SCRIPT.read_text()
-    drain = text[text.index('if convert_dataset "$id" "$version" retry-pending; then') :]
+    drain = text[text.index('convert_dataset "$id" "$version" retry-pending || driver_rc=$?') :]
     drain = drain[: drain.index("\n  fi\n")]
     assert 'record_conversion_failure "$id"' in drain
     assert "qpy fail" not in drain
