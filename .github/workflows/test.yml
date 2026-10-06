@@ -50,6 +50,7 @@ jobs:
       decisions: ${{ steps.filter.outputs.decisions }}
       agentdocs: ${{ steps.filter.outputs.agentdocs }}
       neurobagel_deploy: ${{ steps.filter.outputs.neurobagel_deploy }}
+      scrub: ${{ steps.filter.outputs.scrub }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -83,6 +84,21 @@ jobs:
             # real quota.
             neurobagel_deploy:
               - 'deploy/neurobagel/**'
+            # The in-place privacy scrub toolchain (epic #1610, ADR 0085) and the
+            # identifier scanner it shares code with. These are irreversible tools
+            # (they delete locked objects and rewrite published history), so a change
+            # to any of them must run their suites, and nothing else here globs
+            # test/scrub/**: `unit-pure` lists test/*.test.ts only.
+            scrub:
+              - 'scripts/scrub/**'
+              - 'test/scrub/**'
+              - 'shared/identifier-*.ts'
+              - 'scripts/identifier-fleet-*.ts'
+              - 'test/identifier-*.test.ts'
+              # The Zarr converter writes the store members the zarr stage removes and the
+              # members it accepts (KNOWN_BENIGN in scripts/scrub/s3/zarr-json.ts): a change to
+              # what it writes must run the scrub suites.
+              - 'scripts/zarr/**'
             # shared/ is imported by BOTH src/ and backend/ but matched by
             # neither filter, so a PR touching only shared/** -- the wire
             # contract, the facet vocabulary, the two published Zarr JSON
@@ -357,6 +373,63 @@ jobs:
               )
               sys.exit(1)
           PY
+
+  # The scrub toolchain's suites, run against REAL git, git-annex, uv/python and the aws CLI
+  # with a local S3 stand-in (no mocks, .rules/testing.md). They are slow (minutes), so they
+  # run only when the toolchain or the scanner changes. NEMAR_REQUIRE_SCRUB_TOOLS makes a
+  # missing tool a failure: these suites used to skip silently without uv or git-annex, and a
+  # skipped suite reports green.
+  scrub-tools:
+    runs-on: ubuntu-latest
+    # The suite takes 25 to 30 minutes on a runner (about 13 on a laptop): a 30 minute limit
+    # cancelled it on three runs that were otherwise passing, and a cancelled check reads as
+    # neither green nor red.
+    timeout-minutes: 60
+    needs: changes
+    if: needs.changes.outputs.scrub == 'true' || needs.changes.outputs.shared == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install git-annex
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-annex
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Tool versions
+        run: |
+          git --version
+          git annex version | head -1
+          uv --version
+          aws --version
+
+      # The lint job's filters do not match a scrub-only change, and `bun run lint` covers
+      # src/ only, so the scrub tools are linted here.
+      - name: Lint the scrub toolchain
+        run: bun run lint:scrub
+
+      # `bun run test:scrub`, not a bare `bun test`: bunfig.toml keeps test/scrub out of a bare run,
+      # and the script's --path-ignore-patterns puts it back.
+      - name: Scrub toolchain and scanner suites
+        env:
+          NEMAR_REQUIRE_SCRUB_TOOLS: "1"
+        run: bun run test:scrub
 
   # Type check and lint - always runs on code changes
   lint:

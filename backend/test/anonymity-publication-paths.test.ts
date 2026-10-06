@@ -347,7 +347,13 @@ describe("anonymity is requested at publication, not refused there", () => {
     // request, on every surface, until the dataset is published.
     expect(PUBLICATION).toContain("anonymous: anonymousRequested,");
     expect(PUBLICATION).toContain("anonymous: request.anonymous === 1,");
-    expect(PUBLICATION).toContain("{ anonymous: anonymousRequested }");
+    // The admin mail carries it too. Since epic #1610 phase 4 the mail goes
+    // through `mailPublicationRequest`; when it waits for the identifier
+    // screen, the flag is read back off the request row instead, which
+    // identifier-screen-flow.test.ts asserts on the mail itself.
+    expect(PUBLICATION).toMatch(
+      /mailPublicationRequest\(c\.env, \{[^}]*anonymous: anonymousRequested,/,
+    );
   });
 
   test("the blind check cannot be skipped by a GitHub hiccup or an upstream review", () => {

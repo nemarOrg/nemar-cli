@@ -41,6 +41,7 @@ import {
   withRetry,
 } from "../scripts/identifier-fleet-lib";
 import { shapeOf } from "../shared/identifier-scan";
+import { toolOrFail } from "./scrub/helpers/require-tools";
 
 // ---------------------------------------------------------------------------------------
 // EDF headers
@@ -2241,8 +2242,9 @@ describe("a streak of failures stops the run", () => {
 // ---------------------------------------------------------------------------------------
 
 describe("the aws fallback runs the real aws CLI against an S3 stand-in", () => {
-  // `aws` is not installed everywhere; where it is missing these skip rather than pass.
-  const awsTest = Bun.which("aws") ? test : test.skip;
+  // `aws` is not installed everywhere; where it is missing these skip rather than pass, and
+  // under NEMAR_REQUIRE_SCRUB_TOOLS=1 (the scrub-tools CI job) a missing `aws` is a failure.
+  const awsTest = toolOrFail("aws", Bun.which("aws") !== null) ? test : test.skip;
   const doc = { files: { [EDF]: { key: "MD5E-s256--aa11.edf", size: 256 } } };
 
   /** Bun's spawn `env` REPLACES the environment: PATH and a private HOME are passed on purpose. */
@@ -2471,5 +2473,158 @@ describe("the summary and the pause, edge cases", () => {
       runFleet(w.ctx({ retryBaseMs: 0 }), { outDir: out, force: false, datasetConcurrency: 1 }),
     ).rejects.toThrow();
     expect(existsSync(join(out, "_summary.json"))).toBe(false);
+  });
+});
+
+/**
+ * The publication screen reads a metadata-only clone through `readEntryHead`: git blobs and
+ * presigned S3 objects, never a URL. The URLs below point at nothing, so a read that bypassed the
+ * hook would fail and the test would say so.
+ */
+describe("reading through a caller-supplied reader, and a clone source", () => {
+  const header = CLEAN;
+  const ctxWith = (read: NonNullable<FleetContext["readEntryHead"]>): FleetContext =>
+    createContext({ readEntryHead: read, retryBaseMs: 0, fileConcurrency: 4 });
+  // A URL nothing listens on: if the hook is bypassed, the read fails and the test says so.
+  const never = (path: string, extra: Record<string, unknown> = {}) => ({
+    path,
+    size: 300,
+    url: "http://127.0.0.1:9/never",
+    ...extra,
+  });
+
+  test("an entry is read through the hook, not through its URL", async () => {
+    const calls: string[] = [];
+    const ctx = ctxWith(async (entry) => {
+      calls.push(entry.path);
+      return header;
+    });
+    const record = await scanDatasetFromManifest(
+      ctx,
+      ID,
+      null,
+      [never("sub-01/eeg/sub-01_task-rest_eeg.edf")],
+      "clone",
+    );
+    expect(calls).toEqual(["sub-01/eeg/sub-01_task-rest_eeg.edf"]);
+    expect(record.files?.header_read).toBe(1);
+    expect(record.status).toBe("clean");
+  });
+
+  test("a hook failure is a counted, unread file and never a clean one", async () => {
+    const ctx = ctxWith(async () => {
+      throw new ReadFailure("blob-missing");
+    });
+    const record = await scanDatasetFromManifest(
+      ctx,
+      ID,
+      null,
+      [never("a.edf"), never("b.edf")],
+      "clone",
+    );
+    expect(record.status).toBe("unchecked");
+    expect(record.read_failures).toEqual({ "edf/blob-missing": 2 });
+    expect(record.incomplete_reasons).toContain("edf-headers-unread");
+  });
+
+  test("a clone reads every candidate; a manifest source samples the same list", async () => {
+    const entries = Array.from({ length: 350 }, (_, i) =>
+      never(`sourcedata/s${String(i).padStart(3, "0")}.json`, { size: 2 }),
+    );
+    const ctx = ctxWith(async () => new TextEncoder().encode("{}"));
+    const cloned = await scanDatasetFromManifest(ctx, ID, null, entries, "clone");
+    expect(cloned.sampling?.json_files).toEqual({
+      candidates: 350,
+      oversize: 0,
+      selected: 350,
+      scanned: 350,
+    });
+    expect(cloned.incomplete_reasons).not.toContain("json-sampled");
+    const sampled = await scanDatasetFromManifest(ctx, ID, null, entries, "manifest.json");
+    expect(sampled.sampling?.json_files.scanned).toBe(300);
+    expect(sampled.incomplete_reasons).toContain("json-sampled");
+  });
+
+  test("scans tables are all read in a clone, one in a manifest source", async () => {
+    const entries = Array.from({ length: 5 }, (_, i) =>
+      never(`sub-0${i}/sub-0${i}_scans.tsv`, { size: 20 }),
+    );
+    const ctx = ctxWith(async () => new TextEncoder().encode("filename\tacq_time\n"));
+    expect(
+      (await scanDatasetFromManifest(ctx, ID, null, entries, "clone")).sampling?.scans_tables
+        .scanned,
+    ).toBe(5);
+    expect(
+      (await scanDatasetFromManifest(ctx, ID, null, entries, "manifest.json")).sampling
+        ?.scans_tables.scanned,
+    ).toBe(1);
+  });
+
+  test("an entry flagged edf is an EDF whatever its path", async () => {
+    const ctx = ctxWith(async () => NAMED);
+    const record = await scanDatasetFromManifest(
+      ctx,
+      ID,
+      null,
+      [never("data/recording.dat", { edf: true }), never("data/other.dat")],
+      "clone",
+    );
+    expect(record.files?.edf_bdf).toBe(1);
+    expect(record.edf_bdf_files_flagged).toBe(1);
+  });
+
+  test("a superseded recording that is gone (404) is counted apart; any other failure is unread", async () => {
+    const ctx = ctxWith(async (entry) => {
+      if (entry.path.startsWith("gone")) throw new ReadFailure("http-404", { status: 404 });
+      if (entry.path.startsWith("denied")) throw new ReadFailure("http-403", { status: 403 });
+      return header;
+    });
+    const current = [never("sub-01/eeg/sub-01_task-rest_eeg.edf")];
+    const gone = { ...never("gone/old.edf"), edf: true };
+    const denied = { ...never("denied/old.edf"), edf: true };
+
+    const absent = await scanDatasetFromManifest(ctx, ID, null, current, "clone", {
+      supersededEdf: [gone],
+    });
+    expect(absent.status).toBe("clean");
+    expect(absent.incomplete).toBe(false);
+    expect(absent.files).toMatchObject({ edf_bdf: 1, header_read: 1, header_read_failed: 0 });
+    expect(absent.read_failures).toEqual({ "edf/superseded-absent": 1 });
+
+    const refused = await scanDatasetFromManifest(ctx, ID, null, current, "clone", {
+      supersededEdf: [denied],
+    });
+    expect(refused.status).toBe("unchecked");
+    expect(refused.files).toMatchObject({ edf_bdf: 2, header_read: 1, header_read_failed: 1 });
+    expect(refused.read_failures).toEqual({ "edf/http-403": 1 });
+
+    // The same 404 on a CURRENT recording is data that should be there and is not.
+    const missing = await scanDatasetFromManifest(
+      ctx,
+      ID,
+      null,
+      [never("gone/current.edf")],
+      "clone",
+      {},
+    );
+    expect(missing.status).toBe("unchecked");
+    expect(missing.read_failures).toEqual({ "edf/http-404": 1 });
+  });
+
+  test("extra paths get the path rules only; extra reasons make the scan incomplete", async () => {
+    const ctx = ctxWith(async () => header);
+    const entries = [never("sub-01/eeg/sub-01_task-rest_eeg.edf")];
+    const plain = await scanDatasetFromManifest(ctx, ID, null, entries, "clone");
+    expect(plain.status).toBe("clean");
+    const withHistory = await scanDatasetFromManifest(ctx, ID, null, entries, "clone", {
+      extraPaths: ["old/photo.jpg"],
+    });
+    expect(withHistory.findings_by_kind?.["image-or-document-file"]).toBe(1);
+    expect(withHistory.files?.total).toBe(1);
+    const unread = await scanDatasetFromManifest(ctx, ID, null, entries, "clone", {
+      extraIncompleteReasons: ["history-unread"],
+    });
+    expect(unread.status).toBe("unchecked");
+    expect(unread.incomplete_reasons).toEqual(["history-unread"]);
   });
 });

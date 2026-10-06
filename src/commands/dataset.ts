@@ -162,6 +162,7 @@ import {
   writeFailureList,
   writeSnapshotStamp,
 } from "../lib/http-download.js";
+import { identifierScreenLines } from "../lib/identifier-screen-display.js";
 import {
   detectLicense,
   ensureLicenseFile,
@@ -4030,9 +4031,18 @@ Examples:
           ),
         );
       }
+      // Epic #1610 phase 4: the admins are mailed when the identifier screen
+      // finishes, not now, so say which of the two happened.
+      const screen = result.identifier_screen;
+      if (screen) {
+        console.log();
+        for (const line of identifierScreenLines(screen)) console.log(line);
+      }
       console.log(
         chalk.dim(
-          "\n  Admins have been notified. Use 'nemar dataset publish status' to check progress.",
+          screen?.state === "pending"
+            ? "\n  Admins will be notified when the identifier screen finishes. Use 'nemar dataset publish status' to check progress."
+            : "\n  Admins have been notified. Use 'nemar dataset publish status' to check progress.",
         ),
       );
     } catch (error) {
@@ -4148,6 +4158,13 @@ Examples:
 
       if (result.status === "denied" && result.denied_reason) {
         console.log(`\n  ${chalk.red("Reason:")} ${result.denied_reason}`);
+      }
+
+      // Epic #1610 phase 4: the identifier screen, in the backend's words.
+      const screenLines = identifierScreenLines(result.identifier_screen);
+      if (screenLines.length > 0) {
+        console.log();
+        for (const line of screenLines) console.log(line);
       }
 
       // Blocked requests: surface WHY (e.g. BIDS validation pending/failed) plus

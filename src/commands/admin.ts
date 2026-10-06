@@ -173,6 +173,7 @@ import {
   denyPublication,
   getPublishStatus,
   listPublishRequests,
+  rerunIdentifierScreen,
 } from "../lib/api/publish.js";
 import { getConfig, isAuthenticated } from "../lib/config.js";
 import {
@@ -195,6 +196,7 @@ import {
 } from "../lib/git-annex/clone-push.js";
 import { checkDownloadPrerequisites } from "../lib/git-annex/prereq.js";
 import { getVersionCommit, listDatasetVersions } from "../lib/git-annex/repo-state.js";
+import { identifierScreenLines } from "../lib/identifier-screen-display.js";
 import {
   type RecoverDatasetEntry,
   loadRecoverDatasets,
@@ -2606,6 +2608,8 @@ Examples:
             )}`,
           );
         }
+        // Epic #1610 phase 4: the identifier screen, in the backend's words.
+        for (const line of identifierScreenLines(req.identifier_screen, 4)) console.log(line);
         if (req.current_step && req.status === "approving") {
           console.log(
             `    ${chalk.yellow(">")} ${req.current_step.replace(/_/g, " ")}${req.last_error ? chalk.red(` (${req.last_error})`) : ""}`,
@@ -2692,12 +2696,54 @@ Examples:
   });
 
 publishCommand
+  .command("screen")
+  .description("Re-run the identifier screen of a publication request")
+  .argument("<dataset-id>", "Dataset ID")
+  .addHelpText(
+    "after",
+    `
+Description:
+  Dispatch the identifier screen again for the dataset's active publication
+  request (requested or blocked). Use it when the screen did not run, did not
+  report, or read a commit that is no longer the repository's main. The admins
+  are mailed when it reports, as for a new request.
+
+  Refused while a screen is already running and recent, and for sandbox (xx)
+  datasets, which are not screened.
+
+Examples:
+  $ nemar admin publish screen nm000104`,
+  )
+  .action(async (datasetId: string) => {
+    if (!requireAuth()) return;
+    const spinner = ora(`Re-running the identifier screen for ${datasetId}...`).start();
+    try {
+      const result = await rerunIdentifierScreen(datasetId);
+      if (result.status === "pending") {
+        spinner.succeed(`Identifier screen dispatched for ${datasetId}`);
+        console.log(chalk.dim("  The admins are mailed when it reports."));
+      } else {
+        spinner.warn(`The identifier screen for ${datasetId} could not be started`);
+        for (const line of identifierScreenLines(result.identifier_screen)) console.log(line);
+        console.log(chalk.dim("  The admins have been mailed this result."));
+      }
+    } catch (error) {
+      handleCommandError(error, spinner, "Failed to re-run the identifier screen");
+      process.exitCode = 1;
+    }
+  });
+
+publishCommand
   .command("approve")
   .description("Approve and publish a dataset (runs orchestrator)")
   .argument("<dataset-id>", "Dataset ID")
   .option("--resume", "Resume from last failed step")
   .option("--sandbox", "Use Zenodo sandbox for testing")
   .option("--skip-ci-check", "Skip BIDS validation CI check (admin override)")
+  .option(
+    "--acknowledge-identifier-screen <reason>",
+    "Approve over an identifier screen that needs review, recording why (10 to 500 characters)",
+  )
   .option(YES_OPTION, YES_DESCRIPTION)
   .option(NO_OPTION, NO_DESCRIPTION)
   .addHelpText(
@@ -2706,6 +2752,14 @@ publishCommand
 Description:
   Approve a publication request and run the automated orchestrator
   to make the dataset publicly accessible with a permanent DOI.
+
+  The request's IDENTIFIER SCREEN must allow it first. A clean screen passes.
+  A screen that needs review, or could not look at everything, passes only with
+  --acknowledge-identifier-screen "<reason>", which is recorded with your name.
+  Direct identifiers cannot be acknowledged: the depositor fixes the data and
+  requests again. A screen that did not run or did not report must be re-run
+  with 'nemar admin publish screen <dataset-id>', and so must one whose commit
+  is no longer the repository's main. 'nemar admin publish list' shows it.
 
   An ANONYMOUS RELEASE runs a smaller step set: the GitHub repository stays
   private, no identifier is published, and the depositor is not named. The
@@ -2767,9 +2821,23 @@ After Approval:
   .action(
     async (
       datasetId,
-      options: ConfirmOptions & { resume?: boolean; sandbox?: boolean; skipCiCheck?: boolean },
+      options: ConfirmOptions & {
+        resume?: boolean;
+        sandbox?: boolean;
+        skipCiCheck?: boolean;
+        acknowledgeIdentifierScreen?: string;
+      },
     ) => {
       if (!requireAuth()) return;
+
+      const ack = options.acknowledgeIdentifierScreen?.trim();
+      if (ack !== undefined && (ack.length < 10 || ack.length > 500)) {
+        console.log(
+          chalk.red("--acknowledge-identifier-screen needs a reason of 10 to 500 characters."),
+        );
+        process.exitCode = 1;
+        return;
+      }
 
       const action = options.resume
         ? `Resume publication of ${datasetId}`
@@ -2918,6 +2986,7 @@ After Approval:
             currentSpinnerText = renderProgress(info);
             spinner.text = currentSpinnerText;
           },
+          ack,
         );
         spinner.succeed(result.message);
 

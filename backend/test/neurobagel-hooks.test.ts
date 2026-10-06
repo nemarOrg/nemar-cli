@@ -31,6 +31,7 @@ import { runNeurobagelWriter } from "../src/services/neurobagel-writer";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings } from "../src/types/bindings";
 import { wrapD1 } from "./helpers/d1";
+import { SCREENED_HEAD, markDatasetScreensClean } from "./helpers/identifier-screen";
 import {
   type Harness,
   recordWrites,
@@ -589,6 +590,9 @@ describe("the publication approval (a publication)", () => {
  * step but the two logged no-ops (`upload_to_zenodo`, `sync_nemar`): the golden resume path
  * of publication-approve-golden.test.ts, which touches no external service, so the whole
  * approval, its finalize block and the hook after it run for real.
+ *
+ * The request carries a clean identifier screen (epic #1610 phase 4) of the commit the
+ * stand-in serves as the repository's `main`, the one GitHub read the approval gate makes.
  */
 async function seedApprovalWithTwoStepsLeft(datasetId: string): Promise<void> {
   seedSynthetic(h, datasetId);
@@ -620,6 +624,11 @@ async function seedApprovalWithTwoStepsLeft(datasetId: string): Promise<void> {
         PUBLICATION_STEPS.filter((x) => x !== "upload_to_zenodo" && x !== "sync_nemar"),
       ),
     );
+  markDatasetScreensClean(h.db, datasetId);
+  h.standin.put(
+    `/repos/nemarDatasets/${datasetId}/git/ref/heads/main`,
+    JSON.stringify({ object: { sha: SCREENED_HEAD } }),
+  );
 }
 
 function approveResume(datasetId: string, c: ReturnType<typeof collector>, env: Bindings) {

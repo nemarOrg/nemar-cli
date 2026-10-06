@@ -322,8 +322,16 @@ nemar dataset publish resend <dataset-id>  # Resend admin notification
 nemar admin publish list                   # List all publication requests
 nemar admin publish list --pending         # List pending requests only
 nemar admin publish approve <dataset-id>   # Approve and publish dataset
+nemar admin publish approve <dataset-id> --acknowledge-identifier-screen "<reason>"
+                                           # Approve over a screen that needs review
+nemar admin publish screen <dataset-id>    # Re-run the identifier screen
 nemar admin publish deny <dataset-id>      # Deny publication request
 ```
+
+A publication request is screened for identifying information before the
+admins are mailed; the mail, `publish status` and `admin publish list` state
+the result, and approval waits for a screen that is clear for the current
+`main`.
 
 ### Admin Commands
 

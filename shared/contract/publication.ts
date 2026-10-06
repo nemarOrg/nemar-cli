@@ -56,8 +56,24 @@ export const publicationBlockReasonSchema = z.enum([
   "min_requirements_failed",
   /** #1255: the owner has no researcher name, so a DOI cannot cite them. */
   "owner_name_missing",
+  /** Epic #1610 phase 4: the identifier screen found a direct identifier. */
+  "identifier_screen_findings",
 ]);
 export type PublicationBlockReason = z.infer<typeof publicationBlockReasonSchema>;
+
+/**
+ * The codes the identifier screen's refusals carry in `error` (epic #1610,
+ * phase 4), with the human sentence in `message`. Declared here so the CLI's
+ * client knows to lead with the sentence rather than print a bare token.
+ */
+export const IDENTIFIER_SCREEN_ERROR_CODES: readonly string[] = [
+  /** Resend while the screen still runs: the admins are mailed when it finishes. */
+  "identifier_screen_pending",
+  /** An approval the screen does not allow (stale, unverifiable, not run, findings). */
+  "identifier_screen_not_clear",
+  /** A sandbox (xx) dataset, which is not screened. */
+  "identifier_screen_not_applicable",
+];
 
 /**
  * Per-user outcome of `POST /admin/users/backfill-names` (#1255).

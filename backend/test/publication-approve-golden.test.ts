@@ -14,16 +14,23 @@
  * `upload_to_zenodo` + `sync_nemar` remaining — both logged no-ops — so no
  * external service is touched (getDatasetsToken resolves from
  * GITHUB_ADMIN_PAT without network).
+ *
+ * The identifier screen gate (epic #1610 phase 4) runs before any of this, so
+ * each seeded request carries a clean screen of the commit a `Bun.serve()`
+ * stand-in reports as `main`: the one GitHub read the gate makes. The gate
+ * itself is pinned in identifier-screen-gate.test.ts.
  */
 
 import type { Database } from "bun:sqlite";
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import type { Server } from "bun";
 import { Hono } from "hono";
 import { PUBLICATION_STEPS } from "../../shared/publication-steps.js";
 import { adminRoutes } from "../src/routes/admin";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
+import { mainRefAnswer, markDatasetScreensClean } from "./helpers/identifier-screen";
 
 const ADMIN_KEY = "golden-admin-key-0123456789abcdef0123456789abcdef";
 const DATASET = "nm098765";
@@ -34,6 +41,21 @@ const ALL_STEPS = PUBLICATION_STEPS;
 let db: Database;
 let app: Hono<{ Bindings: Bindings; Variables: Variables }>;
 let env: Bindings;
+let github: Server;
+
+beforeAll(() => {
+  github = Bun.serve({
+    port: 0,
+    fetch: (req) => mainRefAnswer(req) ?? new Response("not found", { status: 404 }),
+  });
+  (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL =
+    `http://127.0.0.1:${github.port}`;
+});
+
+afterAll(() => {
+  (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = undefined;
+  github.stop(true);
+});
 
 async function seed(
   stepsCompleted: readonly string[],
@@ -69,6 +91,7 @@ async function seed(
     `INSERT INTO publication_requests (dataset_id, status, requested_by, requested_at, steps_completed)
      VALUES (?, 'requested', ?, datetime('now'), ?)`,
   ).run(datasetId, userId.id, JSON.stringify(stepsCompleted));
+  markDatasetScreensClean(db, datasetId);
 }
 
 function approve(body: Record<string, unknown>, id = DATASET): Promise<Response> {

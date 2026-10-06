@@ -8,6 +8,7 @@
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 
+import { screenGate } from "../../../../shared/identifier-screen-report.js";
 import { auditLogStatement } from "../../db/audit-log";
 import { ACTIVE_REQUEST_TAIL_SQL, approvalInFlightSql } from "../../services/approval-dispatch";
 import { resolveEmailConfig, sendPublicationDeniedEmail } from "../../services/email";
@@ -17,12 +18,41 @@ import {
   approvalDispatchEnvironment,
   triggerApprovePublication,
 } from "../../services/github/dispatch";
-import { approveSchema, runPublicationApproval } from "../../services/publication-orchestrator";
+import {
+  RERUN_GUARD_SQL,
+  SCREEN_REPORT_DEADLINE_MINUTES,
+  hasStartedPublishing,
+  isScreenExempt,
+  notifyAdminsOfScreen,
+  readStoredState,
+  recordScreenAcknowledgment,
+  screenStateGate,
+  screenView,
+  startIdentifierScreen,
+  verifyScreenHead,
+} from "../../services/identifier-screen";
+import {
+  acknowledgeIdentifierScreenSchema,
+  approveSchema,
+  runPublicationApproval,
+} from "../../services/publication-orchestrator";
 import { errorMessage } from "../../services/repo-metadata";
 import { applyObjectLockBatch } from "../../services/s3";
 import { isAllowedOrigin } from "../../services/web-session";
 import { getS3Config } from "./shared";
 import type { AdminRouter } from "./shared";
+
+/** The re-run route's answer for a request whose approval has started publishing. */
+const APPROVAL_IN_PROGRESS = {
+  error: "approval_in_progress",
+  message:
+    "An approval of this request has already started publishing, and it passed the identifier screen when it started. Resume it rather than screening again.",
+};
+
+/** The optional body of the approve-dispatch route. */
+const dispatchBodySchema = z
+  .object({ acknowledge_identifier_screen: acknowledgeIdentifierScreenSchema.optional() })
+  .strict();
 
 export function registerPublishRoutes(admin: AdminRouter): void {
   // ============================================================================
@@ -76,14 +106,32 @@ export function registerPublishRoutes(admin: AdminRouter): void {
         approval_requested_by: number | null;
         approval_dispatched_at: string | null;
         approval_in_flight: number;
+        prescreen_nonce?: string | null;
+        identifier_screen_status: string | null;
+        identifier_screen_nonce?: string | null;
+        identifier_screen_report?: string | null;
       }>();
 
     return c.json({
-      requests: requests.results.map((r) => ({
-        ...r,
-        steps_completed: JSON.parse(r.steps_completed || "[]"),
-        approval_in_flight: r.approval_in_flight === 1,
-      })),
+      requests: requests.results.map((r) => {
+        // `pr.*` puts every column on the wire without naming it. The two
+        // callback nonces are credentials (each one verifies a workflow's
+        // callback), and the stored screen report is shown ONLY through
+        // describeScreen's words below, so all three are withheld here, from
+        // everyone (epic #1610 phase 4).
+        const {
+          prescreen_nonce: _prescreenNonce,
+          identifier_screen_nonce: _screenNonce,
+          identifier_screen_report: screenReport,
+          ...rest
+        } = r;
+        return {
+          ...rest,
+          steps_completed: JSON.parse(r.steps_completed || "[]"),
+          approval_in_flight: r.approval_in_flight === 1,
+          identifier_screen: screenView(r.dataset_id, r.identifier_screen_status, screenReport),
+        };
+      }),
       count: requests.results.length,
     });
   });
@@ -199,6 +247,11 @@ export function registerPublishRoutes(admin: AdminRouter): void {
    *   409 not_dispatchable  the newest active request is `blocked`
    *   409 already_in_flight a run is live (services/approval-dispatch.ts), a
    *                         failed run inside its short grace window included
+   *   409 identifier_screen_not_clear  the request's identifier screen does not
+   *                         allow approval (epic #1610 phase 4): not run, not
+   *                         reported, findings, a review with no reason, or a
+   *                         verdict about a commit `main` has moved past
+   *   400 invalid_body      the optional body is not `{ acknowledge_identifier_screen }`
    *   502 dispatch_failed   GitHub answered 4xx, or a token could not be
    *                         minted: nothing was sent, the claim is released
    *   502 dispatch_unconfigured  the Worker has no GitHub credential; retrying
@@ -232,10 +285,44 @@ export function registerPublishRoutes(admin: AdminRouter): void {
     const adminUser = c.get("user");
     const db = c.env.DB;
 
+    // The body is optional; it carries only an acknowledgment of the
+    // identifier screen (epic #1610 phase 4). No body, or none that parses as
+    // JSON, is the bodyless click every existing caller sends.
+    let acknowledgment: string | undefined;
+    const rawBody: unknown = await c.req.json().catch(() => undefined);
+    if (rawBody !== undefined) {
+      const parsed = dispatchBodySchema.safeParse(rawBody);
+      if (!parsed.success) {
+        return c.json(
+          {
+            error: "invalid_body",
+            message:
+              "The only field this accepts is acknowledge_identifier_screen, a reason of 10 to 500 characters.",
+          },
+          400,
+        );
+      }
+      acknowledgment = parsed.data.acknowledge_identifier_screen;
+    }
+
     const request = await db
-      .prepare(`SELECT id, status, last_error, updated_at ${ACTIVE_REQUEST_TAIL_SQL}`)
+      .prepare(
+        `SELECT id, status, last_error, updated_at, identifier_screen_status,
+                identifier_screen_report, identifier_screen_ack_at, identifier_screen_ack_by,
+                steps_completed ${ACTIVE_REQUEST_TAIL_SQL}`,
+      )
       .bind(datasetId)
-      .first<{ id: number; status: string; last_error: string | null; updated_at: string }>();
+      .first<{
+        id: number;
+        status: string;
+        last_error: string | null;
+        updated_at: string;
+        identifier_screen_status: string | null;
+        identifier_screen_report: string | null;
+        identifier_screen_ack_at: string | null;
+        identifier_screen_ack_by: number | null;
+        steps_completed: string | null;
+      }>();
 
     if (!request) {
       return c.json({ error: "not_found", message: "No active publication request found" }, 404);
@@ -249,6 +336,29 @@ export function registerPublishRoutes(admin: AdminRouter): void {
         },
         409,
       );
+    }
+
+    // A request already `approving` has done part of the work, and some of it
+    // cannot be undone: it resumes, it does not start over.
+    const resume = request.status === "approving";
+
+    // The identifier screen gate (ADR 0086), by the orchestrator's own rule: it
+    // is skipped only for a run that has already started publishing. A run that
+    // stopped before that (a failed ci_check leaves the row `approving`) is
+    // gated like a fresh one, because the depositor may have pushed since.
+    const gated = !(resume && hasStartedPublishing(request.steps_completed));
+
+    // The state half: no network and no claim, so a refused click changes
+    // nothing. The head half needs a GitHub token and runs once one is in hand,
+    // below. A reason recorded earlier counts only for the admin who gave it.
+    if (gated) {
+      const stateGate = screenStateGate(
+        datasetId,
+        request,
+        acknowledgment !== undefined,
+        adminUser.id,
+      );
+      if (!stateGate.ok) return c.json(stateGate.refusal, 409);
     }
 
     // One conditional UPDATE is the claim: D1 runs it atomically, so two
@@ -306,9 +416,6 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       );
     }
 
-    // A request already `approving` has done part of the work, and some of it
-    // cannot be undone: it resumes, it does not start over.
-    const resume = request.status === "approving";
     const environment = approvalDispatchEnvironment(c.env);
 
     // Release the claim so the admin can try again at once rather than wait out
@@ -378,6 +485,44 @@ export function registerPublishRoutes(admin: AdminRouter): void {
       );
     }
 
+    // The identifier screen, content half (epic #1610 phase 4): the screened
+    // commit must still be `main`, and a lookup that fails refuses (fail
+    // closed). Nothing has been sent, so a refusal releases the claim. A
+    // reason given for a screen that needs one is recorded only once this has
+    // passed, so it attaches to the verdict the admin was shown.
+    if (gated) {
+      const headGate = await verifyScreenHead(c.env, datasetId, request, pat);
+      if (!headGate.ok) {
+        await releaseClaim();
+        return c.json(headGate.refusal, 409);
+      }
+      if (
+        acknowledgment !== undefined &&
+        screenGate(readStoredState(request.identifier_screen_status)) === "acknowledge"
+      ) {
+        const recorded = await recordScreenAcknowledgment(db, {
+          requestId: request.id,
+          datasetId,
+          adminUserId: adminUser.id,
+          reason: acknowledgment,
+          state: request.identifier_screen_status as string,
+        });
+        if (!recorded) {
+          await releaseClaim();
+          return c.json(
+            {
+              error: "identifier_screen_not_clear",
+              gate: "wait",
+              headline: "Identifier screen: changed",
+              message:
+                "The identifier screen's result changed while this approval was being checked. Read it again before approving.",
+            },
+            409,
+          );
+        }
+      }
+    }
+
     // The audit row for this click's dispatch. A missing row must never change
     // what the admin is told about a run, so a failed write is only logged.
     const audit = async (action: string, extra: Record<string, unknown> = {}): Promise<void> => {
@@ -438,6 +583,147 @@ export function registerPublishRoutes(admin: AdminRouter): void {
 
     return c.json(
       { status: "dispatched", dataset_id: datasetId, request_id: request.id, resume },
+      202,
+    );
+  });
+
+  /**
+   * POST /admin/publish/:id/identifier-screen - Re-run the identifier screen
+   * of the dataset's active request (epic #1610, phase 4).
+   *
+   * For a screen that did not run, did not report, or read a commit `main`
+   * has since moved past: the approval gate refuses all three and names this
+   * route. Same dispatch and failure handling as a new request, so the admins
+   * are mailed when it reports, or at once when it cannot start. Every screen
+   * column is reset in the claim, an earlier acknowledgment included.
+   *
+   *   202 { status: "pending" | "error", identifier_screen }
+   *   400 identifier_screen_not_applicable  a sandbox (xx) dataset
+   *   404 not_found             no active request
+   *   403 origin_not_allowed    a cookie request from a non-NEMAR origin
+   *   409 approval_in_progress  the request's approval has started publishing;
+   *                             it passed the screen when it started
+   *   409 identifier_screen_pending  a screen dispatched under
+   *                             SCREEN_REPORT_DEADLINE_MINUTES ago has not reported
+   */
+  admin.post("/publish/:id/identifier-screen", async (c) => {
+    // The same origin rule approve-dispatch applies: a session cookie rides
+    // along with a cross-site request, so anything but a bearer key must come
+    // from a NEMAR page.
+    if (c.get("authMethod") !== "token" && !isAllowedOrigin(c.req.header("Origin"))) {
+      return c.json(
+        {
+          error: "origin_not_allowed",
+          message: "This request did not come from a NEMAR page, so it was not accepted.",
+        },
+        403,
+      );
+    }
+    const datasetId = c.req.param("id");
+    const adminUser = c.get("user");
+    const db = c.env.DB;
+
+    if (isScreenExempt(datasetId)) {
+      return c.json(
+        {
+          error: "identifier_screen_not_applicable",
+          message: "Sandbox (xx) datasets never publish real data and are not screened.",
+        },
+        400,
+      );
+    }
+    const request = await db
+      .prepare(`SELECT id, status, steps_completed ${ACTIVE_REQUEST_TAIL_SQL}`)
+      .bind(datasetId)
+      .first<{ id: number; status: string; steps_completed: string | null }>();
+    if (!request) {
+      return c.json({ error: "not_found", message: "No active publication request found" }, 404);
+    }
+    if (request.status === "approving" && hasStartedPublishing(request.steps_completed)) {
+      return c.json(APPROVAL_IN_PROGRESS, 409);
+    }
+    const dataset = await db
+      .prepare("SELECT github_repo FROM datasets WHERE dataset_id = ?")
+      .bind(datasetId)
+      .first<{ github_repo: string | null }>();
+
+    let started: Awaited<ReturnType<typeof startIdentifierScreen>>;
+    try {
+      started = await startIdentifierScreen(
+        c.env,
+        { requestId: request.id, datasetId, githubRepo: dataset?.github_repo ?? null },
+        RERUN_GUARD_SQL,
+      );
+    } catch (err) {
+      console.error(`[identifier-screen] re-run for ${datasetId} failed:`, errorMessage(err));
+      return c.json(
+        {
+          error: "identifier_screen_rerun_failed",
+          message: "The screen could not be started: the database refused the write. Try again.",
+        },
+        500,
+      );
+    }
+    if (started === null) {
+      // The claim's guard refused. It has two halves, and the admin must be told
+      // the true one: the request may have stopped being active (or started
+      // publishing) since it was read, or a recent screen is still running.
+      const now = await db
+        .prepare("SELECT status, steps_completed FROM publication_requests WHERE id = ?")
+        .bind(request.id)
+        .first<{ status: string; steps_completed: string | null }>();
+      if (!now || !["requested", "blocked", "approving"].includes(now.status)) {
+        return c.json({ error: "not_found", message: "No active publication request found" }, 404);
+      }
+      if (now.status === "approving" && hasStartedPublishing(now.steps_completed)) {
+        return c.json(APPROVAL_IN_PROGRESS, 409);
+      }
+      return c.json(
+        {
+          error: "identifier_screen_pending",
+          message: `A screen of this request was dispatched less than ${SCREEN_REPORT_DEADLINE_MINUTES} minutes ago and has not reported yet. The admins are mailed when it does; if it never does, it is marked unreported and can be re-run then.`,
+        },
+        409,
+      );
+    }
+    if (started.kind === "failed") {
+      await notifyAdminsOfScreen(c.env, request.id);
+    }
+    try {
+      await auditLogStatement(db, {
+        userId: adminUser.id,
+        action: "identifier_screen_rerun",
+        resourceType: "dataset",
+        resourceId: datasetId,
+        details: JSON.stringify({ request_id: request.id, outcome: started.kind }),
+      }).run();
+    } catch (auditErr) {
+      console.error(
+        `[identifier-screen] audit write for the re-run of ${datasetId} failed:`,
+        errorMessage(auditErr),
+      );
+    }
+
+    const row = await db
+      .prepare(
+        "SELECT identifier_screen_status, identifier_screen_report FROM publication_requests WHERE id = ?",
+      )
+      .bind(request.id)
+      .first<{
+        identifier_screen_status: string | null;
+        identifier_screen_report: string | null;
+      }>();
+    return c.json(
+      {
+        dataset_id: datasetId,
+        request_id: request.id,
+        status: started.kind === "dispatched" ? "pending" : "error",
+        identifier_screen: screenView(
+          datasetId,
+          row?.identifier_screen_status,
+          row?.identifier_screen_report,
+        ),
+      },
       202,
     );
   });
