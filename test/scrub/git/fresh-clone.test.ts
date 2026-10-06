@@ -149,6 +149,12 @@ SUITE("verify --fresh-clone: the pushed repository (I1, I11)", () => {
     git(work, "push", "-q", "--force", "origin", "refs/heads/main:refs/heads/main");
     git(work, "push", "-q", "--force", "origin", "refs/remotes/origin/side:refs/heads/side");
     git(work, "push", "-q", "--force", "origin", "--tags");
+    // Fetch and merge first: the "GitHub" here is a local path, and git-annex 10.20240129
+    // (Ubuntu 24.04) writes to the git-annex branch of a local-path remote it works with, so the
+    // remote's branch has moved and a plain push is rejected (fetch first). A real GitHub remote
+    // is not written to that way; the fetch and merge are harmless there and on 10.20260901.
+    git(work, "fetch", "-q", "origin", "git-annex");
+    sh(work, ["git", "annex", "merge", "--quiet"]);
     git(work, "push", "-q", "origin", "refs/heads/git-annex:refs/heads/git-annex");
   }, 240_000);
 
