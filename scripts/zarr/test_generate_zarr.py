@@ -12454,7 +12454,8 @@ class TestReadBackWhenStripUnavailable(unittest.TestCase):
 
 class TestSyncStore(unittest.TestCase):
     """`sync_store`, the one upload, re-checks the bytes it uploads. A logging
-    `aws` stand-in shows whether a sync was attempted."""
+    `aws` stand-in records each call's arguments, one tab-separated line per
+    call, so an argument holding a space stays one argument."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -12464,17 +12465,21 @@ class TestSyncStore(unittest.TestCase):
         bindir = os.path.join(self._tmp.name, "bin")
         os.makedirs(bindir)
         with open(os.path.join(bindir, "aws"), "w") as fh:
-            fh.write(f'#!/bin/sh\necho "$@" >> "{self.log}"\nexit 0\n')
+            fh.write(
+                "#!/bin/sh\n"
+                f'{{ for a in "$@"; do printf \'%s\\t\' "$a"; done; printf \'\\n\'; }} >> "{self.log}"\n'
+                "exit 0\n"
+            )
         os.chmod(os.path.join(bindir, "aws"), 0o755)
         path = os.environ["PATH"]
         os.environ["PATH"] = bindir + os.pathsep + path
         self.addCleanup(os.environ.__setitem__, "PATH", path)
 
-    def calls(self) -> list[str]:
+    def calls(self) -> list[list[str]]:
         if not os.path.exists(self.log):
             return []
         with open(self.log) as fh:
-            return fh.read().splitlines()
+            return [line.rstrip("\t").split("\t") for line in fh.read().splitlines()]
 
     def test_a_store_that_lost_its_mark_is_not_uploaded(self):
         # As a later rewrite of the root would leave it.
@@ -12492,11 +12497,92 @@ class TestSyncStore(unittest.TestCase):
         self.assertEqual(self.calls(), [])
 
     @unittest.skipUnless(_have_biosigio_strip(), "conversion deps unavailable: biosigio")
-    def test_a_clean_store_is_uploaded(self):
+    def test_a_clean_store_is_uploaded_with_the_full_sync_vector(self):
+        # Every flag pinned: `--delete` is what makes the bucket copy exactly the
+        # converted store (ADR 0023 relies on it), and the cache lifetime is what
+        # the CDN purge in the callback is sized against.
         write_root(self.store, EXCLUDED_ROOT)
-        generate_zarr.sync_store(self.store, "s3://nemar-test/nm000186/zarr/rec.zarr")
-        (call,) = self.calls()
-        self.assertTrue(call.startswith(f"s3 sync {self.store} s3://nemar-test/"), call)
+        prefix = "s3://nemar-test/nm000186/zarr/rec.zarr"
+        generate_zarr.sync_store(self.store, prefix)
+        self.assertEqual(self.calls(), [[
+            "s3", "sync", self.store, prefix,
+            "--delete", "--only-show-errors",
+            "--cache-control", "public, max-age=86400",
+            *_AWS_TIMEOUTS,
+        ]])
+
+
+def aws_sync_builders(source: str) -> list[tuple[int, str]]:
+    """Every place Python source builds an `aws s3 sync` command, as
+    `(line, enclosing function)`: a list or tuple literal holding the elements
+    "s3" and "sync", or a string that starts with "aws s3 sync" (a shell
+    command). Prose that merely mentions the command is not matched."""
+    import ast
+
+    found: list[tuple[int, str]] = []
+
+    def visit(node: ast.AST, function: str) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            function = node.name
+        if isinstance(node, (ast.List, ast.Tuple)):
+            words = {e.value for e in node.elts if isinstance(e, ast.Constant)}
+            if {"s3", "sync"} <= words:
+                found.append((node.lineno, function))
+        elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
+              and node.value.lstrip().startswith("aws s3 sync")):
+            found.append((node.lineno, function))
+        for child in ast.iter_child_nodes(node):
+            visit(child, function)
+
+    visit(ast.parse(source), "<module>")
+    return found
+
+
+class TestOnlySyncStoreUploadsAStore(unittest.TestCase):
+    """`sync_store` re-checks a store for subject information on the bytes it
+    uploads, which only protects anything if it is the ONLY way a store is
+    uploaded. These scan the scripts for an `aws s3 sync` built anywhere else,
+    and check that `convert_one` uploads through it. No code is run."""
+
+    SCRIPTS = Path(__file__).resolve().parent.parent
+
+    def test_no_script_builds_a_sync_outside_sync_store(self):
+        builders = {}
+        for path in sorted(self.SCRIPTS.rglob("*.py")):
+            if path.name.startswith("test_"):
+                continue
+            found = aws_sync_builders(path.read_text(encoding="utf-8"))
+            if found:
+                builders[str(path.relative_to(self.SCRIPTS))] = sorted(f for _, f in found)
+        self.assertEqual(builders, {"zarr/generate_zarr.py": ["sync_store"]})
+
+    def test_convert_one_uploads_through_sync_store(self):
+        import ast
+
+        tree = ast.parse(Path(generate_zarr.__file__).read_text(encoding="utf-8"))
+        (convert_one_def,) = [
+            n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "convert_one"
+        ]
+        calls = [
+            n for n in ast.walk(convert_one_def)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "sync_store"
+        ]
+        self.assertEqual(len(calls), 1)
+
+    def test_the_scan_sees_every_shape(self):
+        found = aws_sync_builders(
+            "def a():\n"
+            "    _aws(['aws', 's3', 'sync', src, dst])\n"
+            "def b():\n"
+            "    subprocess.run(('aws', 's3', 'sync', src, dst))\n"
+            "def c():\n"
+            "    subprocess.run('aws s3 sync ' + src + ' ' + dst, shell=True)\n"
+            "CMD = ['s3', 'sync']\n"
+            "def d():\n"
+            "    '''Uploads with `aws s3 sync --delete`.'''\n"
+            "    _aws(['aws', 's3', 'cp', src, dst])\n"
+        )
+        self.assertEqual(found, [(2, "a"), (4, "b"), (6, "c"), (7, "<module>")])
 
 
 # The biosigIO store writers, by how a reference reaches them: an attribute
