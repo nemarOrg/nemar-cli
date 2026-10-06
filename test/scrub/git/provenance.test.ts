@@ -42,6 +42,7 @@ import {
   fileAt,
   git,
   mirrorChecksum,
+  mirrorEventsChecksum,
   mirrorOriginal,
   mirrorRecording,
   sh,
@@ -81,6 +82,12 @@ describe("provenanceHashUse places every old hash in a provenance blob", () => {
 
   test("kept: every old hash is a files[].sha256 value and the file carries the sentence", () => {
     expect(use(doc())).toEqual({ use: "kept", hashes: new Set([A, B]) });
+    // A checksum that is no old key's is neither a hit nor counted as kept.
+    const notOld = sha("prov-not-old");
+    expect(use(doc({}, [{ sha256: A }, { sha256: notOld }, { sha256: B }]))).toEqual({
+      use: "kept",
+      hashes: new Set([A, B]),
+    });
     // A byte-order mark, capitals and a second `files` key are still the same values.
     expect(use(`\uFEFF${doc()}`).use).toBe("kept");
     expect(use(doc({}, [{ sha256: A.toUpperCase() }])).use).toBe("kept");
@@ -242,7 +249,8 @@ SUITE("a sourcedata mirror scrubbed in place keeps its upstream checksums (ADR 0
   test("rewrite and verify pass, and verify counts the upstream checksums it kept", () => {
     expect(rewriteOut.code, rewriteOut.out).toBe(0);
     expect(verifyOut.code, verifyOut.out).toBe(0);
-    // Three distinct checksums, in the two versions of the file (v1.0.0's two, and three later).
+    // Three distinct checksums, in the two versions of the file (v1.0.0's two, and three later);
+    // the events file's checksum, in both, is no old key's and is not counted.
     expect(counts(verifyOut.out, "verify: ok")).toMatchObject({
       provenanceHashesKept: 3,
       provenanceBlobsKept: 2,
@@ -262,7 +270,7 @@ SUITE("a sourcedata mirror scrubbed in place keeps its upstream checksums (ADR 0
       expect(
         doc.files.map((f) => f.sha256),
         ref,
-      ).toEqual(ns.map(mirrorChecksum));
+      ).toEqual([...ns.map(mirrorChecksum), mirrorEventsChecksum()]);
       expect(doc.privacy_correction, ref).toBe(provenanceNote(DATE, "scrubbed-in-place"));
       expect(
         fileAt(fx.clone, ref, MIRROR_README)?.endsWith(
@@ -437,6 +445,24 @@ SUITE("a sourcedata mirror scrubbed in place keeps its upstream checksums (ADR 0
       provenanceBlobsKept: 0,
     });
   });
+
+  test("a path that only resembles the provenance path fails: under a subdirectory, with a suffix, or another file in sourcedata", async () => {
+    for (const path of [
+      `x/${MIRROR_PROVENANCE}`,
+      `${MIRROR_PROVENANCE}.bak`,
+      "sourcedata/other.json",
+    ]) {
+      const r = await verifyDamaged(`look-alike-${path.replace(/[/.]/g, "-")}`, (repo) => {
+        // Annotated, checksums only in files[].sha256, and new bytes, so a blob of its own.
+        const doc = { ...provenanceAt(repo, "main"), copy: path };
+        write(repo, path, `${JSON.stringify(doc, null, 2)}\n`);
+        commitAll(repo, `a look-alike at ${path}`);
+      });
+      expect(r.code, `${path}: ${r.out}`).toBe(4);
+      expect(r.out, path).toContain("reason=old-key-present count=1");
+      expect(counts(r.out, "verify: failed"), path).toMatchObject({ provenanceBlobsKept: 2 });
+    }
+  }, 120_000);
 
   test("only a regular file keeps the checksums: a symlink at the path fails, an executable file does not", async () => {
     const link = await verifyDamaged("symlink-mode", (repo) => {

@@ -616,13 +616,28 @@ export const mirrorOriginal = (n: number): string => annexKey(`mirror-orig-${n}`
 /** The checksum the provenance file lists for original n: the sha256 in that original's key. */
 export const mirrorChecksum = (n: number): string => sha(`mirror-orig-${n}`);
 
+/**
+ * A mirrored upstream file the scrub leaves alone (its content identifies nobody), so its checksum
+ * in the provenance file is not an old key's: nm000186's file lists such entries too.
+ */
+export const MIRROR_EVENTS = "onset\tduration\ttrial_type\n0.5\t1.0\tstimulus\n";
+export const mirrorEventsChecksum = (): string =>
+  createHash("sha256").update(MIRROR_EVENTS).digest("hex");
+
 /** The provenance file as an upstream mirror carries it: every original, with its sha256. */
 export function mirrorProvenance(ns: number[]): string {
-  const files = ns.map((n) => ({
-    file: `upstream/rec-${n}.edf`,
-    bytes: 1024 + n,
-    sha256: mirrorChecksum(n),
-  }));
+  const files = [
+    ...ns.map((n) => ({
+      file: `upstream/rec-${n}.edf`,
+      bytes: 1024 + n,
+      sha256: mirrorChecksum(n),
+    })),
+    {
+      file: "upstream/events.tsv",
+      bytes: Buffer.byteLength(MIRROR_EVENTS),
+      sha256: mirrorEventsChecksum(),
+    },
+  ];
   const total = files.reduce((t, f) => t + f.bytes, 0);
   return `${JSON.stringify({ source: "an upstream release", n_files: files.length, total_bytes: total, files }, null, 2)}\n`;
 }
@@ -646,8 +661,9 @@ export interface MirrorFixture {
  * Three subjects over three commits and two tags. Each has a BIDS recording and, under
  * `sourcedata/upstream/`, the upstream original it was converted from, and the provenance file
  * lists each original's sha256: two versions of it, one at `v1.0.0` (two originals) and one at
- * `v1.1.0` and the tip (three), as nm000186 has two. No file under `sourcedata/` is an image or a
- * document, so the scrub drops nothing: every key is scrubbed in place.
+ * `v1.1.0` and the tip (three), as nm000186 has two. Each version also lists an upstream events
+ * file the scrub leaves alone, whose checksum is no old key's. No file under `sourcedata/` is an
+ * image or a document, so the scrub drops nothing: every key is scrubbed in place.
  */
 export function buildMirrorFixture(): MirrorFixture {
   const root = makeRoot();
@@ -663,6 +679,7 @@ export function buildMirrorFixture(): MirrorFixture {
   write(src, "CHANGES", "1.0.0 initial release\n");
   subject(1);
   subject(2);
+  write(src, "sourcedata/upstream/events.tsv", MIRROR_EVENTS);
   write(src, MIRROR_PROVENANCE, mirrorProvenance([1, 2]));
   write(src, MIRROR_README, "The files under sourcedata/ are the upstream files, unmodified.\n");
   commitAll(src, "c1");
