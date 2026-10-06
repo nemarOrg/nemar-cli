@@ -617,7 +617,12 @@ describe("the UTC boundary holds regardless of the host timezone", () => {
         expect(shouldRunWeeklySummary(new Date("2026-09-06T23:59:59Z"))).toBe(false);
         expect(shouldRunWeeklySummary(new Date("2026-09-07T00:00:00Z"))).toBe(true);
       } finally {
-        process.env.TZ = original;
+        // Assigning `undefined` to a process.env key stores the string "undefined" and Bun
+        // keeps the zone it was last given, so every later file in this process would parse
+        // a SQLite UTC timestamp as Los Angeles time. Delete the key when it was unset
+        // (Reflect, because the lint rule against `delete` would suggest the broken form).
+        if (original === undefined) Reflect.deleteProperty(process.env, "TZ");
+        else process.env.TZ = original;
       }
     });
   }
