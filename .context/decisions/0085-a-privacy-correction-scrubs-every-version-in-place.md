@@ -119,6 +119,8 @@ Phase 2 builds the tools an administrator runs by hand, and the shared header sc
   bytes are identical.
 - A mirror diverges from upstream. The provenance text that said sourcedata is byte-for-byte
   unmodified is corrected for any dataset scrubbed, and upstream archives are told.
+  The provenance file keeps the `sha256` of each original upstream file, which is also the hash of an old key the scrub replaced; it says, in `privacy_correction`, that those checksums describe the original upstream files and not the scrubbed copies, whenever any key is scrubbed or any file is removed, and names removed files only when some were.
+  `git-scrub verify` lets an old hash stand there and nowhere else (amendment of 2026-10-06, "A mirror's provenance file keeps the upstream checksums").
 - Scrubbing re-reads every affected file once (about 345 GB across the first 16 datasets), which is
   why hashing runs on a host with fast S3 reads and assembly never moves the payload.
 - **NOT BUILT in Phase 2:** the purge list does not exist, so nothing yet refuses a purged key.
@@ -275,6 +277,36 @@ A scrub keeps the version numbers, so the sync keeps the pre-scrub copy without 
   The rest of that sentence holds: nothing re-dispatches a missing archive, because the archive retry looks only at a `failed` status.
 - `datasets.latest_version_doi` is written unconditionally by every successful version-DOI publish, and the runs of several tags race with no concurrency group; the runbook compares it with its value from before the window (step 15c).
 - The archive is no longer rebuilt after the flip at the maintainer's request: the runbook rebuilds it in step 15c, while the dataset is still private, and step 16 checks the new key anonymously after the flip.
+
+## Amendment 2026-10-06 (#1610): a mirror's provenance file keeps the upstream checksums
+
+The first real run, on nm000186, stopped at the local verify of the rewritten clone (runbook step 7) with `old-key-present count=2`, before anything was pushed.
+Both hits were versions of `sourcedata/sourcedata_provenance.json`, whose `files` entries carry the `sha256` of each original upstream recording that `sourcedata/` mirrors.
+The mirrored copies were the upstream bytes, so each of those checksums is also the hash of an old key the scrub replaced: on nm000186, 88 of its 176.
+This ADR keeps those checksums as upstream provenance, so the check was right to stop and two things were wrong.
+Verify treated a kept checksum as a dangling reference.
+The git plan said, in the file and in its README, that the checksums describe the upstream files only when it dropped a file, so a dataset scrubbed purely in place, as nm000186 is, would have kept upstream checksums with no word that its copies differ.
+Ten of the sixteen datasets carry the same mirror and the same file.
+
+**The plan.**
+Whenever the provenance file is in any commit and the S3 plan scrubs any key, or any file is dropped, the plan sets `privacy_correction` in that file to a sentence saying what changed and that its checksums describe the original upstream files, not the scrubbed copies.
+When `sourcedata/README_sourcedata_provenance.md` exists, it appends a note on the same terms.
+Both say files were removed only when some were, and only then are entries dropped from `files` and the counts recomputed.
+The report counts what it did (`provenanceAnnotated`, `provenanceReadmeAnnotated`, and `s3KeysScrubbed`, the keys the S3 plan scrubs).
+Without `--s3-plan` the plan cannot know that a key is scrubbed and annotates only for dropped files; the runbook always passes it, and verify refuses what that would leave.
+
+**The verify rule.**
+In both modes, `--before` and `--fresh-clone`, which share one code path, an old hash found in a blob is not `old-key-present` only if all of these hold:
+
+- the blob is `sourcedata/sourcedata_provenance.json`, and no other path, in every commit of every ref, and every ref names a commit (a ref to a tree or a blob turns the exception off, because a tree names its blobs under paths no commit shows);
+- the blob is a UTF-8 JSON object, and every old hash in it is the whole string value of a `sha256` member of an object in the top-level `files` array; one anywhere else in the file (in the sentence, in another field, nested deeper, in another array, as a key) is a hit, found by the same scan as before with only those values masked;
+- the blob carries `privacy_correction` as a non-empty string.
+
+A blob that meets the first two and not the third fails with a reason of its own, `provenance-unannotated`, with a count.
+A hash in any other file, a copy of the provenance file at another path included, is `old-key-present` as before.
+The verify line and the proof's `counts` carry `provenanceHashesKept` (distinct hashes) and `provenanceBlobsKept`, both 0 for a dataset without the file.
+The proof's schema already takes any count, so a `git-verified.json` from before has neither and is still accepted: that verify allowed no old hash anywhere, which is stricter.
+A kept checksum is a digest of a file in the upstream release and carries none of its header text.
 
 ## Build status
 
