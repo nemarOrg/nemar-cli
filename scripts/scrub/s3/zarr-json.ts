@@ -23,22 +23,23 @@
 import { canonical, hasContent, scanJsonKeys } from "../../../shared/identifier-scan";
 
 /**
- * What a Zarr store may say, and why the two lists below are what they are (Yahya, 2026-10-05):
+ * THE PRINCIPLE behind this list and {@link KNOWN_BENIGN} (maintainer decision, 2026-10-05):
  *
- * **A store holds the DATA and EVENTS plus channel names, types and units and technical
- * recording metadata; it says nothing about the SUBJECT. Subject and phenotype information (age,
- * sex/gender, patient code, birth date, name, additional patient text) lives at DATASET scope,
- * participants.tsv is the one canonical place, and agents and people go there.**
+ * **A Zarr store holds the DATA and the EVENTS, plus channel names, types and units and
+ * technical recording metadata. It says nothing about the SUBJECT. Subject and phenotype
+ * information (age, sex or gender, patient code, birth date, name, additional patient text)
+ * lives at DATASET scope; `participants.tsv` is the one canonical place for it, and agents and
+ * people go there.** Operator and administrative free text copied from a recording header
+ * (technician, administrative code, equipment, additional recording text) is not data, events or
+ * channels either.
  *
  * So the members removed from a store are every subject field the converter mirrors from the
  * EDF/BDF patient identification, plus the operator and administrative free text from the
- * recording identification ({@link EDF_MIRROR_MEMBERS}), plus anything the scanner calls an
- * identifier. And the members a store's recording metadata may keep are exactly the technical
- * ones ({@link KNOWN_BENIGN}); any other name is refused until a person has looked at it and named
- * it with `--allow-member`, because a name nobody listed may hold header text.
- */
-
-/**
+ * recording identification (this set), plus anything the scanner calls an identifier. And the
+ * members a store's recording metadata may keep are exactly the technical ones
+ * ({@link KNOWN_BENIGN}); any other name is refused until a person has looked at it and named it
+ * with `--allow-member`, because a name nobody listed may hold header text.
+ *
  * The EDF identification fields the converter copies into a store's root attributes, in the
  * scanner's canonical spelling (lowercase, no spaces, underscores or hyphens), so `patient_name`,
  * `PatientName` and `patient-name` are one name.
