@@ -92,6 +92,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "isRetryablePublishError",
     "listPublishRequests",
     "requestPublication",
+    "rerunIdentifierScreen",
     "resendPublishNotification",
     "stepIndexFor",
   ],
@@ -325,6 +326,7 @@ const MONOLITH_EXPORTS = [
   "requestPublication",
   "requestUploadCredentials",
   "requestUploadUrls",
+  "rerunIdentifierScreen", // epic #1610 phase 4: POST /admin/publish/:id/identifier-screen
   "resendPublishNotification",
   "resendVerification",
   "resetSandbox",

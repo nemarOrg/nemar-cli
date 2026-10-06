@@ -28,9 +28,12 @@
     "scripts/neurobagel/**/*.ts",
     "scripts/identifier-fleet-lib.ts",
     "scripts/identifier-fleet-scan.ts",
+    "scripts/identifier-screen-ci-lib.ts",
+    "scripts/identifier-screen-ci.ts",
     "test/neurobagel-*.ts",
     "test/identifier-fleet.test.ts",
     "test/identifier-scan.test.ts",
+    "test/identifier-screen-ci.test.ts",
     "test/identifier-scrub.test.ts",
     "scripts/scrub/**/*.ts",
     "test/scrub/**/*.ts"
