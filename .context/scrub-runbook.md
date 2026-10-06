@@ -17,6 +17,7 @@ Step numbers 0 to 17 are fixed, because code comments cite them; a step added la
 
 - Setup; Boxes and the go; Exit codes; Files in the working directory; What a copy of a recording can be; What a push sets off; Real-bucket checklist; Before each dataset (item 7: delete the merged branches before the clone).
 - Steps 0 to 8, one dataset at a time: clone, plan, git plan, hash, assemble, verify, sanity, rewrite, register keys.
+- Step 5b: hash and verify the raw copies (only for a dataset whose plan has any: nm000112 and nm000114).
 - Step 8b: open the dispatch window, once per batch.
 - Step 8c: a mirror's import is quiet (`on` datasets only).
 - Step 9: switch the repository (box), for every dataset of the batch inside the window.
@@ -54,6 +55,7 @@ mkdir -p -m 700 "$W"
 
 Every tool prints counts and fixed words only.
 `s3-scrub.ts`, `git-scrub.ts` and `hash_stage.py` print their usage with `--help`; the others print theirs on a usage error.
+A dataset with raw copies (step 1) puts their names, which are file paths, in `plan.json`, `raw-hashes.json` and `raw-unmatched.json`; those stay in `$W` and on the hash host, and are never printed.
 A bad flag is exit 2 everywhere.
 
 ## Boxes and the go
@@ -92,6 +94,8 @@ The tools add their own words: `--confirm-dataset $D` on `drop-archives` and `de
 | `identifier-fleet-scan.ts` | done | | usage | the run was stopped (a server was struggling) | | | |
 
 Each step below says which exit continues; a nonzero exit is never "close enough".
+`s3-scrub.ts raw-verify` exits 1 when a raw version did not match (`raw-verify: FAILED ...`) and 3 when an input is missing or stale; `hash_stage.py raw-hash` exits as `compute` does, 4 meaning `--limit` left raw versions to hash (step 5b).
+`raw-verify` reads no S3 object, so it skips the `aws` version check.
 
 `drop-archives` and `delete-old` evaluate every refusal before they stop, so one dry run lists them all.
 On stdout there is one line per refusal, `<stage>: refused <word>: <what triggered it>` (a count, a file name or a tag, never a value), in a fixed order.
@@ -101,8 +105,11 @@ The stop line on stderr joins the words with `+`, for example `s3-scrub: archive
 
 | File | Written by | Needed by |
 |---|---|---|
-| `plan.json`, `patches.json` | step 1 (`patches.json` first; `plan.json` names its sha256 as `patchesSha256`) | every later stage |
+| `plan.json`, `patches.json` | step 1 (`patches.json` first; `plan.json` names its sha256 as `patchesSha256`); for a dataset with raw copies `plan.json` also holds their names, which are file paths | every later stage |
 | `hashes.json` | step 3, on the hash host | step 4 |
+| `git-blobs.txt` | step 0, from the clone BEFORE the rewrite (only for a dataset with raw copies) | step 5b (`raw-verify`) |
+| `raw-hashes.json` | step 5b, on the hash host (`raw-hash`); it names the sha256 of `plan.json` and holds raw names | step 5b (`raw-verify`) |
+| `raw-verified.json`, `raw-unmatched.json` | step 5b (`raw-verify`; the second only when a raw version did not match, with the names) | step 15b (the first); a person (the second) |
 | `assembled.json`, `keymap.json` | step 4 | steps 5, 7, 8, 14, 15a, 15b |
 | `verified.json` | step 5 | steps 15a and 15b |
 | `new-hash-verified.json` | step 5, on the hash host | steps 15a and 15b |
@@ -141,6 +148,7 @@ Measured in the real bucket on 2026-10-04 and 2026-10-05, a dataset has these:
 | Where | What it holds | Handled by |
 |---|---|---|
 | `D/objects/` | the recordings, locked 100 years | steps 1 to 6, 15b |
+| `D/objects/<path>` (raw copies, nm000112 and nm000114, read on 2026-10-06) | a legacy import uploaded the whole BIDS tree by PATH, from a Mac, next to the annex keys: the original recordings (`.bdf` on nm000112, 123 names; `.edf` on nm000114, 181 names with 328 versions), every one behind a current delete marker and unlocked, and the text files as they were before the rewrite blanks them (TSV, JSON, `README.md`, `.gitignore`, `code/`, AppleDouble `._*` files; 624 names on nm000112, 435 on nm000114, one version each), current and locked GOVERNANCE 100 years (four TSV names of nm000112 are behind a delete marker too). Every raw recording version has the size of an annex key of its dataset. `annex-uuid` (36 bytes, the special remote's marker) is the one non-annex name every dataset has: it is not a raw copy and stays | steps 0 (blob list), 1, 5b, 15b, 16 |
 | GitHub history | annex pointers, inline JSON, file names; in a `sourcedata/` mirror, `sourcedata/sourcedata_provenance.json` lists the sha256 of each upstream original, which stays as provenance with a `privacy_correction` sentence (ADR 0085) | steps 2 and 7 to 9 |
 | `D/zarr/**/<store>.zarr/zarr.json` | the subject and operator members the converter mirrors from the EDF or BDF header into `attributes.recording_metadata`: `patientcode`, `birthdate`, `gender`, `patient_name`, `patient_additional`, `admincode`, `technician`, `equipment`, `recording_additional` (the removal set, `EDF_MIRROR_MEMBERS`), plus every key the scanner calls an identifier. Only the technical members stay (`startdate`, `filetype`, `number_of_signals`, `file_duration`, `datarecord_duration`, `source_file`, `source_format`, `streamed`, `channels_tsv_units`). Not locked | steps 10 and 15b |
 | `D/archives/*.zip` | the original recordings, zipped | steps 11, 15a and 16 |
@@ -152,6 +160,11 @@ Measured in the real bucket on 2026-10-04 and 2026-10-05, a dataset has these:
 | Zenodo backup deposits | a draft holding GitHub's zip of the tag's git tree (pointer files, inline JSON, file names; never a recording), made by a version-DOI run when a Zenodo key is configured, never for an `on` dataset | not changed by this procedure: Residuals |
 | GitHub pull-request refs and cached views | the pre-scrub commits | not removed: Residuals (decision of 2026-10-06) |
 | Hallu (the SCCN host) | a clone with annexed content and the archive zip of every public `nm` dataset | not removed: Residuals (decision of 2026-10-06) |
+
+**Decision of 2026-10-06 (the maintainer) on the raw copies: "Delete the raw copies after verifying they match."**
+A raw recording is an original, header and all, and a raw text file holds the values the rewrite blanks, so both go at step 15b, like the old annex keys.
+They go only once each raw VERSION is shown to duplicate content NEMAR keeps elsewhere (step 5b): a raw recording must be byte for byte an annex key of the plan (its sha256 and size), and any other raw file must be a blob of the repository's history from before the rewrite.
+Anything that is not shown to match stops `delete-old` (ADR 0085, amendment of 2026-10-06 on raw copies).
 
 The principle behind the Zarr row, from the maintainer (2026-10-05): a store holds the data and the events plus channel names, types and units and technical recording metadata, and says nothing about the subject.
 Subject and phenotype information (age, sex, patient code, birth date, name, additional patient text) lives at dataset scope, and `participants.tsv` is the one canonical place for it.
@@ -362,7 +375,7 @@ rm -rf $W/check
 2. The real-bucket checklist has been run with the current checkout, after the last change to an S3 call.
 3. The dataset is private with the bucket-policy exclusion (`nemar admin repo private $D` is the supported transition: the GitHub repository, the bucket policy and the catalog row), verified by C6: an anonymous `HEAD` of one of its objects answers 403, and a public control answers 200.
 4. The uploader, and for a mirror the source archive, have been told and asked not to upload over it.
-   Nothing here stops an upload: a push the uploader makes during the run is caught by the leases of step 9 (`remote-moved-since-clone`), and a recording written to S3 after the plan is caught by `delete-old` (`unplanned-recording`).
+   Nothing here stops an upload: a push the uploader makes during the run is caught by the leases of step 9 (`remote-moved-since-clone`), and a recording written to S3 after the plan is caught by `delete-old` (`unplanned-recording`), as is any raw object (`raw-copy-not-in-plan`).
 5. **Read the member names, not the values, of the real Zarr stores**, so the lists in `scripts/scrub/s3/zarr-json.ts` are known to cover what the converter wrote.
    One store:
 
@@ -424,6 +437,19 @@ git -C $W/clone bundle create $W/original.bundle --all
 The bundle holds the original inline content and every ref, so it is private and is deleted with `W`.
 It is the way back until step 15b.
 
+**A dataset with raw copies (step 1 says `rawCopies=` more than 0; nm000112 and nm000114) also needs the blob list of the history, now.**
+Step 5b proves each raw text file against it, and step 7 rewrites this clone in place, after which the history no longer holds the original text, so the list must come from the clone BEFORE the rewrite (taking it from `original.bundle` cloned again is the same thing):
+
+```bash
+git -C $W/clone rev-list --objects --all | awk '{print $1}' \
+  | git -C $W/clone cat-file --batch-check='%(objecttype) %(objectname)' \
+  | awk '$1=="blob"{print $2}' | sort -u > $W/git-blobs.txt
+wc -l < $W/git-blobs.txt          # a count, never zero
+```
+
+It holds 40-hex blob ids and nothing else, one per line.
+Taking it for a dataset without raw copies does no harm; step 5b does not run for one.
+
 ### Step 1: Plan (read-only)
 
 ```bash
@@ -431,7 +457,11 @@ bun run $T/s3/s3-scrub.ts plan --dataset $D --out $W
 ```
 
 Continue only on exit 0.
-Exit 4 means the plan is incomplete, and no later stage runs on it: a key was unreadable, a manifest named an EDF or BDF held inline in git (`git-inline-recording`), `version/` held a file that is neither a manifest nor a known sibling (`version-dir-unknown-file`), or a recording hidden by a delete marker needs a scrub (`masked-needs-scrub`; a recording with markers and no version at all is `markers-only`).
+The line reads `plan: tags=T keys=K needScrub=N bytesToHash=B unreadable=U rawCopies=R versions=V markers=M`, the raw counts there even when they are 0.
+A raw copy is an object under `D/objects/` stored by its path instead of an annex key ("What a copy of a recording can be"); `annex-uuid` is not one and is never counted.
+The plan records every raw name with every version (id and size) and every delete marker in `plan.json` (`rawCopies`), and prints counts only, never a name, and with any it adds `plan: raw copies under objects/ by kind: recording=N other=M; ...`.
+Raw copies never make the plan incomplete and change nothing about the keys; a plan with any needs step 5b, and the blob list of step 0.
+Exit 4 means the plan is incomplete, and no later stage runs on it: a key was unreadable, a manifest named an EDF or BDF held inline in git (`git-inline-recording`), `version/` held a file that is neither a manifest nor a known sibling (`version-dir-unknown-file`), an object under `objects/` is named in the annex key space (`SHA256E-`) but is not an annex key (`objects-bad-key`, whatever its extension), or a recording hidden by a delete marker needs a scrub (`masked-needs-scrub`; a recording with markers and no version at all is `markers-only`).
 A masked recording (`masked-needs-scrub`, `markers-only`) is a person's decision: the tools never remove a delete marker, so remove it and plan again, or deal with its versions.
 The line `plan: unreadable by reason: ...` names each reason with its count.
 The keys are the union of every manifest and of a listing of every version and delete marker under `D/objects/`, so a recording that no manifest names, or whose current entry is a delete marker, is still found.
@@ -475,7 +505,7 @@ For a dataset with the provenance file and a nonzero `s3KeysScrubbed`, `provenan
 This reads every object once; the original is verified against its own key in the same pass.
 `hash_stage.py` runs where the data is read quickly, so it runs on the hash host, which needs only `hash_stage.py` (standard library plus the `aws` CLI), `plan.json` and `patches.json`.
 For a small dataset the host can be this machine, with the credentials frozen for the short run: `eval "$(aws configure export-credentials --format env)"`, in a shell that runs nothing else.
-For a large one, copy the inputs, run there, and carry `hashes.json` back (the files hold annex keys, sizes, version ids and patched headers, no value; they are 0600):
+For a large one, copy the inputs, run there, and carry `hashes.json` back (the files hold annex keys, sizes, version ids and patched headers, no value, and for a dataset with raw copies `plan.json` also holds their names, which are file paths; they are 0600):
 
 ```bash
 H=hallu                                       # an ssh alias for the hash host
@@ -521,11 +551,40 @@ ssh $H "cd scrub-work/$D && python3 hash_stage.py verify-new --assembled assembl
 scp $H:scrub-work/$D/new-hash-verified.json $W/new-hash-verified.json
 ```
 
-When both have passed, remove the host's copy: `ssh $H "rm -rf scrub-work/$D"`.
+When both have passed, remove the host's copy: `ssh $H "rm -rf scrub-work/$D"` (for a dataset with raw copies, after step 5b).
 That default source is new: run it once on a small dataset on the host it will run on before trusting it on a large one, since a Linux `/dev/fd` behaves differently from macOS in edge cases.
 Both must pass.
 `verify` prints `verify: ok ...`, and a failure prints `verify: FAILED ...` with words such as `new-not-current` (someone wrote the new key after assembly), `old-unreadable:<Op>:<class>`, `header-not-patch`, `range-mismatch`, `lock-missing`, `retention-short`.
 `verify-new` writes `new-hash-verified.json` only if every object matches, and removes one left by an earlier run.
+
+### Step 5b: Hash and verify the raw copies (only when step 1 counted any)
+
+Skip this step when step 1 printed `rawCopies=0`.
+Decided by the maintainer on 2026-10-06: "Delete the raw copies after verifying they match."
+Step 15b deletes every raw copy, every version and every delete marker of every name under `D/objects/` that is not an annex key and not `annex-uuid`, and it refuses to unless this step proved, for this `plan.json`, that every raw VERSION duplicates content NEMAR keeps: a raw recording (`.edf`, `.bdf`) must be byte for byte an annex key of the plan, scrubbed or clean (its sha256 is the one the key names, and its size the key's), and any other raw file must be a blob of the repository's history from before the rewrite (its git blob id is in `$W/git-blobs.txt`, step 0).
+A recording is compared with the annex keys and never with the blobs, and a text file with the blobs and never with the keys.
+The raw recordings of nm000112 hold 33.7 GB, so the hashing runs on the hash host, as step 3 does; `plan.json` there holds the raw names, which are file paths, and the host's copy is removed after.
+
+```bash
+scp -p $T/hash/hash_stage.py $W/plan.json $H:scrub-work/$D/        # this plan.json, if step 3 copied an older one
+ssh $H "cd scrub-work/$D && python3 hash_stage.py raw-hash --plan plan.json --out raw-hashes.json --workers 16"
+scp $H:scrub-work/$D/raw-hashes.json $W/raw-hashes.json
+bun run $T/s3/s3-scrub.ts raw-verify --dir $W                      # reads $W/git-blobs.txt; --git-blobs F names another file
+```
+
+`raw-hash` streams every raw version at its version id (`aws s3api get-object --version-id`, the body on `/dev/fd/3`, as `verify-new` reads; a delete marker holds no bytes and is never read) and records its sha256 and its git blob id, the SHA-1 of `blob <size>\0` and the bytes with the plan's size, computed in the same pass.
+A byte count that is not the plan's size is recorded as `size-differs`, never with a digest.
+It prints counts and fixed words only (`[i/N] hashed`, `[i/N] FAILED read-failed` or `size-differs`, and `failed by reason: ...`), never a name, and never a read failure's own text, because an `aws` error quotes the key.
+`raw-hashes.json` names the sha256 of `plan.json`: a run resumes from one for the same plan (a `size-differs` entry is read again) and refuses one for another plan, another dataset, or with a version the plan does not record (exit 3: move it aside).
+Its exits are `compute`'s: 0 every version hashed, 1 a version failed, 3 refused (a plan that is partial or has an unreadable key, raw copies off the contract, a `--source-cmd` that does not name `{version}`), 4 `--limit` stopped with versions left; 129, 130, 143 on a signal, with the finished versions saved.
+
+`raw-verify` reads no S3 object and calls no `aws`.
+It prints `raw-verify: ok names=N versions=V markers=M matchedRecordings=R matchedOther=O` and writes `raw-verified.json` (names, versions and markers equal to step 1's; it names the sha256 of `plan.json`, `raw-hashes.json` and `git-blobs.txt`) only when every raw version matched, and removes an earlier proof first.
+Otherwise it exits 1 with `raw-verify: FAILED ... (<reason>=<count>, ...)`, and the names and version ids that did not match go to `$W/raw-unmatched.json` (0600), never to the terminal.
+The reasons: `raw-recording-unmatched` (no annex key of the plan has those bytes), `raw-other-unmatched` (the blob is not in the history's list), `raw-hash-missing` (no digest for a version the plan records: run `raw-hash` again), `raw-size-differs` (the bytes read were not the plan's size), `raw-hash-not-in-plan` (a digest of a version the plan does not record).
+It refuses (exit 3) `raw-hashes-stale` (made for another `plan.json`: run `raw-hash` again), `raw-hashes-wrong-dataset`, `raw-hashes.json-missing`, `raw-hashes.json-invalid`, `git-blobs-missing` and `git-blobs-invalid` (a line that is not 40 lowercase hex, a blank line, or no blob at all); `git-blobs-unreadable` is a failure (exit 1).
+**Any unmatched version is a stop for a person, with the maintainer**: the decision deletes copies that match, and nothing here deletes one that does not.
+On nm000112 every raw text version was measured, read only, to hash to a blob of the history (624 of 624), and every raw recording version has the size of an annex key; nm000114's text has not been measured.
 
 ### Step 6: Sanity (still read-only)
 
@@ -1013,6 +1072,8 @@ If the path differs, ask the maintainer to read the row.
 >
 > **What it destroys.**
 > Every version and delete marker of every old key under `D/objects/`, by version id with the governance bypass (a locked object is the point), and the noncurrent versions under `D/version/` and `D/zarr/` that `--prune-noncurrent` names (no bypass).
+> For a plan with raw copies (step 1), also every raw version the plan recorded, with the bypass (the raw text is locked), and then every raw delete marker it recorded, in requests of their own after every raw version's; a marker goes only once no version is left under its name, because a raw recording is an original hidden by its marker and removing the marker first would make the original current again.
+> `annex-uuid` is never touched.
 > After it nothing NEMAR controls holds the original bytes, and `$W/original.bundle` can no longer restore a usable dataset.
 >
 > **Preconditions you check by hand.**
@@ -1021,8 +1082,10 @@ If the path differs, ask the maintainer to read the row.
 > - Nothing wrote to the dataset since the plan; the tool refuses anything it did not plan, but read the dry run.
 > - Step 12's manifests and records exist for every tag, so the prune of `D/version/` removes the versions they replaced; a file regenerated for the first time after this step would leave its pre-scrub version behind.
 > - Step 14b passed, and for an `on` mirror step 8c's read, taken again now, still says `complete` with `integrity_checked_at` set.
-> - The dry run's lines: `delete-old: keys=K versions=V markers=M planRecorded=R limit=L` and `delete-old: prune noncurrent versions=N markers=P`.
-> - `--max-delete` is set to V+M (it can only lower the plan's own count, never raise it) and `--max-prune` to at least N+P (default 1000).
+> - The dry run's lines: `delete-old: keys=K versions=V markers=M planRecorded=R limit=L` and `delete-old: prune noncurrent versions=N markers=P`, and for a plan with raw copies `delete-old: raw copies names=RN versions=RV markers=RM` and `delete-old dry run: would delete raw copies versions=RV markers=RM across X names`.
+>   `planRecorded` counts the old keys' versions and markers and, for such a plan, the raw versions and markers it recorded.
+> - `--max-delete` is set to V+M, plus RV+RM for a plan with raw copies (it can only lower the plan's own count, never raise it), and `--max-prune` to at least N+P (default 1000).
+> - For a plan with raw copies, step 5b passed (`$W/raw-verified.json` is there), and `$W/raw-unmatched.json` is not.
 > - The maintainer's go is recorded: `GO delete-old <dataset> <plan-id>`.
 >
 > **Commands.** The dry run first, with every refusal evaluated:
@@ -1040,12 +1103,14 @@ If the path differs, ask the maintainer to read the row.
 > - both S3 proofs exist, parse, and name the exact bytes of `assembled.json` (`verified.json-missing`, `new-hash-verified.json-missing`, `verified-stale`, `new-hash-verified-stale`, `proof-wrong-dataset`, `proof-count-mismatch`), and `assembled.json` names this dataset and bucket (`assembled-wrong-dataset`, `assembled-wrong-bucket`);
 > - the git proof exists, parses, is mode `fresh-clone`, and names this `keymap.json` and `plan.json`, and, when `git-plan.json` is in `$W`, that git plan (`git-proof-missing`, `git-proof-invalid`, `git-proof-stale`), and the keymap is this assembly's (`keymap-mismatch`);
 > - every current manifest names no old key and no recording the scrub did not account for (`manifest-names-old-key`, `manifest-names-unplanned-key`, `manifest-unreadable`, `no-manifests`);
-> - every EDF and BDF under `D/objects/`, a version or a marker included, is a planned or an assembled key (`unplanned-recording`);
+> - every EDF and BDF under `D/objects/`, a version or a marker included, is a planned or an assembled key, or a raw recording the plan recorded (`unplanned-recording`, which also counts a raw recording the plan never listed), and no name in the annex key space is a bad key (`objects-bad-key`);
 > - `D/archives/` holds no version or marker at all (`archives-not-dropped`);
 > - while Zarr objects are current, `zarr-verified.json` exists, names stores, and belongs to this plan (`zarr-not-scrubbed`);
+> - for a plan with raw copies, `raw-verified.json` (step 5b) exists, parses, names this `plan.json` and this dataset, and counts the plan's raw names, versions and markers (`raw-copies-unverified`, with the reason; a proof that is there and cannot be read is `raw-verified.json-unreadable`, exit 1);
 > - an anonymous `HEAD` of a new object, and of an old one while any remains, answers 403 (`dataset-is-public` on 200, `privacy-unproven` otherwise), and `--public-base` is the plan's bucket's own S3 endpoint over https (`bad-public-base`, exit 2);
 > - every version of an old key is the size its key declares (`version-size-differs`) and one the plan recorded (`version-not-in-plan`: someone wrote to an old key after the plan, so stop and find out why);
-> - the count is within `--max-delete` (`over-max-delete`) and the prune within `--max-prune` (`over-max-prune`);
+> - every version and marker under a raw name is one the plan recorded, at the size recorded, and every non-annex name under `D/objects/` but `annex-uuid` is one the plan listed (`raw-copy-not-in-plan`: a raw object written after the plan, whose bytes step 5b never compared; a plan made without raw copies refuses any raw object the same way);
+> - the count is within `--max-delete` (`over-max-delete`, old keys and raw copies together) and the prune within `--max-prune` (`over-max-prune`);
 > - every prefix with history (`D/version/`, `D/zarr/`) is named with `--prune-noncurrent` (`history-remains`, with the count per prefix), and a prune prefix is exactly `D/version/`, `D/archives/` or `D/zarr/` (`bad-prune-prefix`).
 >
 > **Words.**
@@ -1053,7 +1118,10 @@ If the path differs, ask the maintainer to read the row.
 > An item S3 asked to be retried (`SlowDown`, `InternalError` and the like, as an entry of the answer) is sent again alone, and a whole request that failed with throttling, an unreachable endpoint or a timeout is sent again whole, up to five requests in all, with a jittered pause that grows each time; a lock refusal (`AccessDenied`) is final for that item and stays on the final listing.
 > If a run ends with `DeleteObjects:throttled` in its `delete errors` line, S3 was busier than the pauses covered: run it again, which resumes, with a lower `--concurrency` (2).
 > One version at a time, nm000186's 82,195 history entries took hours (about 6 deletions a second, one `aws` process each); a batch of 1,000 is one request, so the same history is about 90 requests.
-> It ends with an authoritative `ListObjectVersions` showing zero versions and zero markers for every old key and no history under `D/archives/`, `D/version/` or `D/zarr/`; otherwise it exits 5 and writes no `deleted.json`.
+> For a plan with raw copies the order is: the old keys (bypass), the raw versions (bypass), the pruned history (no bypass), then the raw markers (no bypass, never locked), each group in requests of its own, with the same progress line.
+> It ends with an authoritative `ListObjectVersions` showing zero versions and zero markers for every old key, no history under `D/archives/`, `D/version/` or `D/zarr/`, and nothing under `D/objects/` but annex keys and `annex-uuid`, for a plan with raw copies or without; otherwise it exits 5 and writes no `deleted.json`, and a raw object left is the line `delete-old: FAILED, versions and markers remain: rawCopies=N versions=V markers=M badKeys=B`.
+> A raw version the bypass could not remove (a lock without the permission) stays, and so does the marker over it, so no original becomes current; it is in the exit-5 line.
+> `deleted.json` then carries `rawVersions` and `rawMarkers` beside the other counts, for a plan with raw copies only, and the run ends with `delete-old: deleted raw copies versions=RV markers=RM; zero versions and zero markers remain under the RN raw names, and no object under objects/ but annex keys and annex-uuid`.
 > A re-run is safe and resumes: once the old keys are gone the new keys prove privacy, so a run that stopped at exit 5 is finished by running it again.
 > `deleted.json` is removed at the start of every run, so a refused or failed run leaves none.
 > An archive object that appears during the run is found by the final listing (exit 5, `history-remains`).
@@ -1112,7 +1180,7 @@ The old keys are gone, so a new read-only plan, into a fresh directory, reads th
 bun run $T/s3/s3-scrub.ts plan --dataset $D --out $W/post
 ```
 
-Expect exit 0 with `needScrub=0 unreadable=0`: no recording header has anything left for the rule to change, and its key count equals step 1's (each scrubbed key was replaced by one new key, and each clean key stayed).
+Expect exit 0 with `needScrub=0 unreadable=0 rawCopies=0 versions=0 markers=0`: no recording header has anything left for the rule to change, no raw copy is left under `D/objects/` (for nm000112 and nm000114 this is the screen of what step 15b deleted there; `annex-uuid` is never counted), and its key count equals step 1's (each scrubbed key was replaced by one new key, and each clean key stayed).
 Anything else stops here, with the dataset still private.
 
 Then the surfaces nothing else lists, as names of prefixes and counts only.
@@ -1166,7 +1234,7 @@ Last, step 14b again.
 > **Preconditions you check by hand.**
 > - Step 15b finished: `$W/deleted.json` exists and the run ended `zero versions and zero markers remain`.
 > - `$W/zarr-verified.json` exists for this plan (a `found: no-zarr` proof is fine when there is no Zarr copy).
-> - Every earlier box has its go and its record, and the plan above said `needScrub=0 unreadable=0`.
+> - Every earlier box has its go and its record, and the plan above said `needScrub=0 unreadable=0 rawCopies=0 versions=0 markers=0`.
 > - The prefix listing, the census and the Zarr index counts above are as expected, and step 14b passed again.
 > - Step 15c confirmed the archive (or its skip, for a dataset over the archive policy) and the version DOI pointer.
 > - The maintainer's go is recorded: `GO public <dataset> <plan-id>`.
@@ -1239,11 +1307,12 @@ Do step 17 only after all of this passes.
   ```
 
   (`A` is step 13's shell function; in a new shell, set `ACTOR` and `VERSIONS` and define `A` again.)
-  `old-versions-deleted` is read, not typed: `--proof` must be `deleted.json` (parsed strictly), its counts (`keys`, `versions`, `markers`, `pruned_versions`, `pruned_markers`) are taken from it, `--counts` beside it is a usage error, and the verification is set to `authoritative-listing-empty+proof-<first 16 hex of the sha256 of deleted.json>` (`--verification` may be omitted or say `authoritative-listing-empty`; anything else is `verification-contradicts-proof`).
+  `old-versions-deleted` is read, not typed: `--proof` must be `deleted.json` (parsed strictly), its counts (`keys`, `versions`, `markers`, `pruned_versions`, `pruned_markers`, and `raw_versions` and `raw_markers` when the plan had raw copies) are taken from it, `--counts` beside it is a usage error, and the verification is set to `authoritative-listing-empty+proof-<first 16 hex of the sha256 of deleted.json>` (`--verification` may be omitted or say `authoritative-listing-empty`; anything else is `verification-contradicts-proof`).
   Refusals: `proof-missing`, `proof-invalid`, `proof-wrong-dataset`, and `verification-needs-deletion` when `authoritative-listing-empty` is used with another action.
   **If `delete-old` was interrupted and run again**, `deleted.json` counts only the last run (the first run's deletions are gone, so the last run's listing never saw them), and the line would undercount.
   Add what the first run removed with `--earlier-run-counts`, read from that run's own lines (its dry run's `delete-old: keys=K versions=V markers=M` and `prune noncurrent versions=N markers=P`, less what the last run removed, which is in `deleted.json`): `A --action old-versions-deleted --proof $W/deleted.json --earlier-run-counts versions=V,markers=M,pruned_versions=N,pruned_markers=P-<last run's pruned_markers>`.
-  It takes only those four names, adds them to the proof's, and is refused for any other action or without `--proof` (usage error).
+  For a plan with raw copies add the raw counts the same way, from that run's `delete-old: raw copies ... versions=RV markers=RM` line less what `deleted.json` says: `raw_versions=...,raw_markers=...`.
+  It takes only those six names (the two raw ones only beside a proof that has raw counts), adds them to the proof's, and is refused for any other action or without `--proof` (usage error).
   nm000186 (2026-10-06) was the case: the first run, one version at a time, was stopped after removing all 176 old versions and part of the history, the rest was finished by the batch tool.
 - Comment on the dataset issue in plain words and close it; tell the uploader and the authors, and the source archive for a mirror.
 - Do not ask GitHub Support to clear cached views or pull-request refs: they are an accepted residual (decision of 2026-10-06).
