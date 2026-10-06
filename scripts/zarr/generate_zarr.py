@@ -1057,28 +1057,25 @@ def failed_callback_body(
     head: str,
     prior: dict | None,
     discovered: list[str],
-    failures: list[str] | None = None,
-    failure_entries: list | None = None,
-    annex_missing: list[tuple[str, str | None]] | None = None,
-    pool_breaks: int = 0,
-    pending_entries: list[dict] | None = None,
-    provenance_fetch_failed: bool = False,
-    events_row_count: int | None = None,
-    events_upload_failed: bool = False,
-    events_stores_without_rows: int = 0,
-    error: str | None = None,
+    failures: list[str],
+    failure_entries: list,
+    annex_missing: list[tuple[str, str | None]],
+    pool_breaks: int,
+    pending_entries: list[dict],
+    provenance_fetch_failed: bool,
+    events_row_count: int | None,
+    events_upload_failed: bool,
+    events_stores_without_rows: int,
+    error: str | None,
 ) -> dict:
     """The `status: "failed"` callback body for a run that publishes nothing.
 
     One builder for every such exit, so they cannot drift apart: `main`'s
     `write_failed_callback`, and the refusal to convert on a biosigIO that
     cannot leave subject information out, which happens before any recording
-    is attempted and so passes only what it knows. The defaults are the values
-    a run that attempted nothing has.
+    is attempted. Every field is required and has no default, so a caller that
+    leaves one out fails loudly instead of reporting a zero it never measured.
     """
-    failures = failures or []
-    failure_entries = failure_entries or []
-    pending_entries = pending_entries or []
     return {
         "dataset_id": dataset_id,
         "status": "failed",
@@ -1091,7 +1088,7 @@ def failed_callback_body(
         "failure_count": len(failure_entries),
         "data_failures": failure_entries,
         "deterministic": dataset_failure_is_deterministic(failures, failure_entries),
-        **annex_missing_summary(annex_missing or []),
+        **annex_missing_summary(annex_missing),
         "pool_breaks": pool_breaks,
         # Coverage (#1197). Reported even here, where the index was NOT
         # rewritten: the queue's pending-driven requeue needs to know a total
@@ -8152,12 +8149,21 @@ def main() -> int:
             print(f"::error::{reason}", flush=True)
             with open(args.callback_out, "w") as fh:
                 json.dump(
+                    # Nothing was attempted: no failures, no pool, no events.
                     failed_callback_body(
                         dataset_id=dataset_id,
                         head=head,
                         prior=prior,
                         discovered=discovered,
+                        failures=[],
+                        failure_entries=[],
+                        annex_missing=[],
+                        pool_breaks=0,
+                        pending_entries=[],
                         provenance_fetch_failed=bool(early_row and early_row[1]),
+                        events_row_count=None,
+                        events_upload_failed=False,
+                        events_stores_without_rows=0,
                         error=reason,
                     ),
                     fh,

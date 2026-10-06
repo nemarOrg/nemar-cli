@@ -29,7 +29,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import ClassVar, cast
+from typing import Any, ClassVar, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -12777,7 +12777,15 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
         self.assertEqual(rc, 1, log)
         self.assertNotIn("cannot leave subject information out", log)
         self.assertIn(f"conversion failed for {self.PRIMARY}", log)
-        self.assertNotIn("error", self.callback_body())
+        body = self.callback_body()
+        self.assertNotIn("error", body)
+        # The total failure's callback carries what the run measured: one
+        # uncoded failure, pending and retryable, and the catalog read failed
+        # (the closed port above).
+        self.assertEqual((body["errors"], body["failed"]), (1, [self.PRIMARY]))
+        self.assertEqual(body["pending_count"], 1)
+        self.assertFalse(body["deterministic"])
+        self.assertIs(body["provenance_fetch_failed"], True)
 
     def test_a_run_with_nothing_to_convert_is_not_held_up(self):
         # Nothing is written, so a node's biosigIO is no reason to refuse.
@@ -12785,6 +12793,86 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
         rc, log = self.run_main(self.standin(lacking="stream_to_zarr"))
         self.assertEqual(rc, 0, log)
         self.assertNotIn("cannot leave subject information out", log)
+
+
+class TestFailedCallbackBody(unittest.TestCase):
+    """`failed_callback_body`, every key, from a distinct non-default value
+    for every field, so a field dropped or crossed with another shows."""
+
+    FAILURES: ClassVar[list[dict[str, str]]] = [
+        {"path": "sub-01/eeg/a_eeg.edf", "code": "corrupt_or_truncated"},
+        {"path": "sub-01/eeg/b_eeg.edf", "code": "annex_object_missing"},
+    ]
+
+    def body(self, **overrides):
+        fields: dict[str, Any] = {
+            "dataset_id": "nm000186", "head": "e" * 40, "prior": {"store_count": 7},
+            "discovered": ["a", "b", "c", "d"],
+            "failures": ["sub-01/eeg/a_eeg.edf", "sub-01/eeg/b_eeg.edf"],
+            "failure_entries": self.FAILURES,
+            "annex_missing": [("sub-01/eeg/b_eeg.edf", "SHA256E-s1--b")],
+            "pool_breaks": 3,
+            "pending_entries": [{"path": "c", "reason": "infra_failure"},
+                                {"path": "d", "reason": "not_attempted"},
+                                {"path": "e", "reason": "not_attempted"}],
+            "provenance_fetch_failed": True, "events_row_count": 11,
+            "events_upload_failed": True, "events_stores_without_rows": 2,
+            "error": "index refused: test",
+        }
+        fields.update(overrides)
+        return generate_zarr.failed_callback_body(**fields)
+
+    def test_every_key(self):
+        self.assertEqual(self.body(), {
+            "dataset_id": "nm000186",
+            "status": "failed",
+            "store_count": 7,
+            "commit": "e" * 40,
+            "converted": [],
+            "removed": [],
+            "errors": 2,
+            "failed": ["sub-01/eeg/a_eeg.edf", "sub-01/eeg/b_eeg.edf"],
+            "failure_count": 2,
+            "data_failures": self.FAILURES,
+            "deterministic": True,
+            "annex_missing_count": 1,
+            "annex_missing_first_path": "sub-01/eeg/b_eeg.edf",
+            "annex_missing_first_key": "SHA256E-s1--b",
+            "pool_breaks": 3,
+            "pending_count": 3,
+            "discovered_count": 4,
+            "not_attempted_count": 2,
+            "provenance_fetch_failed": True,
+            "events_row_count": 11,
+            "events_upload_failed": True,
+            "events_stores_without_rows": 2,
+            "error": "index refused: test",
+        })
+
+    def test_no_error_means_no_error_key(self):
+        self.assertNotIn("error", self.body(error=None))
+
+    def test_a_clean_run_has_no_prior_store_count(self):
+        self.assertEqual(self.body(prior=None)["store_count"], 0)
+
+    def test_every_field_is_required(self):
+        # A caller that leaves one out fails, rather than reporting a zero it
+        # never measured (the refactor once had defaults, and five dropped
+        # fields went unnoticed by the whole suite).
+        complete: dict[str, Any] = {
+            "dataset_id": "x", "head": "h", "prior": None, "discovered": [], "failures": [],
+            "failure_entries": [], "annex_missing": [], "pool_breaks": 0,
+            "pending_entries": [], "provenance_fetch_failed": False,
+            "events_row_count": None, "events_upload_failed": False,
+            "events_stores_without_rows": 0, "error": None,
+        }
+        generate_zarr.failed_callback_body(**complete)
+        for name in complete:
+            with self.subTest(name), self.assertRaises(TypeError):
+                generate_zarr.failed_callback_body(
+                    **{k: v for k, v in complete.items() if k != name}
+                )
+
 
 
 if __name__ == "__main__":
