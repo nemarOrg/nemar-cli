@@ -73,8 +73,117 @@ export interface PlanFile {
    */
   patchesSha256?: string;
   keys: PlanKey[];
-  /** Counts only, for the report. */
-  totals: { keys: number; needScrub: number; bytesToHash: number; unreadable: number };
+  /**
+   * Every RAW copy under `<dataset>/objects/`: an object whose name is not an annex key and not
+   * {@link ANNEX_UUID_OBJECT}, with every version and every delete marker it had when the plan was
+   * made, sorted by name (see {@link RawCopy}). Absent when there is none, so a plan of a dataset
+   * without raw copies is the file it always was. Names are file paths, so a plan that has them is
+   * private like `git-plan.json`.
+   */
+  rawCopies?: RawCopy[];
+  /** Counts only, for the report. The three `rawCopy*` counts are there exactly when `rawCopies` is. */
+  totals: {
+    keys: number;
+    needScrub: number;
+    bytesToHash: number;
+    unreadable: number;
+    rawCopyNames?: number;
+    rawCopyVersions?: number;
+    rawCopyMarkers?: number;
+  };
+}
+
+/**
+ * The one standard object under `<dataset>/objects/` that is not an annex key: the S3 special
+ * remote's marker (36 bytes, the remote's uuid). It is neither a raw copy nor a recording, it stays,
+ * and every stage ignores it by this exact name.
+ */
+export const ANNEX_UUID_OBJECT = "annex-uuid";
+
+/** True for a path the scrub reads: an EDF or BDF file, in any letter case. */
+export function isEdfOrBdf(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  return lower.endsWith(".edf") || lower.endsWith(".bdf");
+}
+
+/**
+ * A raw copy: an object under `<dataset>/objects/` stored by its PATH, not by an annex key (a
+ * legacy import uploaded a whole BIDS tree that way into nm000112 and nm000114, AppleDouble `._*`
+ * files included). A raw recording is an original, header and all; a raw text file holds the
+ * values the git rewrite blanks. Every raw copy is deleted at step 15b, but only once each of its
+ * versions is proven to duplicate content NEMAR keeps elsewhere (`raw-verify`, ADR 0085).
+ *
+ * `kind` is "recording" exactly when the name ends `.edf` or `.bdf` in any letter case
+ * ({@link isEdfOrBdf}). `versions` are every version with its size and `markers` every delete
+ * marker, as the plan's listing found them.
+ */
+export interface RawCopy {
+  name: string;
+  kind: "recording" | "other";
+  versions: Array<{ id: string; size: number }>;
+  markers: string[];
+}
+
+/** The kind a raw name has; the plan writes it and every reader checks it. */
+export function rawKindOf(name: string): RawCopy["kind"] {
+  return isEdfOrBdf(name) ? "recording" : "other";
+}
+
+/**
+ * True for a name under `<dataset>/objects/` that is a raw copy: not the special remote's marker,
+ * not in the annex key space (`SHA256E-`; one there that does not parse is refused, not a raw
+ * copy), not empty, and with no NUL and no lone surrogate (no shell or S3 call can carry either;
+ * an S3 key is UTF-8).
+ */
+export function isRawCopyName(name: string): boolean {
+  return (
+    name !== "" &&
+    name !== ANNEX_UUID_OBJECT &&
+    !name.startsWith("SHA256E-") &&
+    !name.includes("\u0000") &&
+    !/\p{Cs}/u.test(name)
+  );
+}
+
+/**
+ * `raw-hashes.json`: written on the hash host by `hash_stage.py raw-hash`, one entry per raw
+ * VERSION of the plan it names (`planSha256`, the sha256 of plan.json's exact bytes), sorted by
+ * name and then version id. A hashed entry carries the sha256 of the version's bytes and its git
+ * blob id (the SHA-1 of `blob <size>\0` and the bytes, with the plan's size); a version whose byte
+ * count was not the plan's size carries the fixed word `size-differs` and no digest.
+ */
+export interface RawHashesFile {
+  version: 1;
+  dataset: string;
+  planSha256: string;
+  entries: RawHashEntry[];
+}
+
+export type RawHashEntry =
+  | { name: string; versionId: string; size: number; sha256: string; gitBlobSha1: string }
+  | { name: string; versionId: string; failure: "size-differs" };
+
+/**
+ * `raw-verified.json`: written by `s3-scrub raw-verify` ONLY when every raw version of the plan it
+ * names is proven to duplicate content NEMAR keeps: a raw recording is byte for byte an annex key
+ * of the plan (its sha256 and size), and any other raw file is a blob of the repository's history
+ * from before the rewrite. It names the exact bytes it was made from: plan.json, raw-hashes.json and
+ * the git blob list. Counts only. `delete-old` refuses a plan with raw copies without it.
+ */
+export interface RawVerifiedFile {
+  version: 1;
+  dataset: string;
+  verifiedAt: string;
+  planSha256: string;
+  rawHashesSha256: string;
+  gitBlobsSha256: string;
+  counts: {
+    names: number;
+    versions: number;
+    markers: number;
+    matchedRecordings: number;
+    matchedOther: number;
+  };
 }
 
 export interface PlanKey {
@@ -150,10 +259,14 @@ export interface DeletedFile {
     markers: number;
     prunedVersions: number;
     prunedMarkers: number;
+    /** The raw copies' versions and markers deleted, both there exactly when the plan had raw copies. */
+    rawVersions?: number;
+    rawMarkers?: number;
   };
 }
 
 const DELETED_COUNTS = ["keys", "versions", "markers", "prunedVersions", "prunedMarkers"];
+const DELETED_RAW_COUNTS = ["rawVersions", "rawMarkers"];
 
 /** Read deleted.json, or refuse: exactly the contract's fields, counts that are counts. */
 export function parseDeleted(text: string): DeletedFile {
@@ -175,9 +288,13 @@ export function parseDeleted(text: string): DeletedFile {
     bad();
   }
   const c = x.counts as Record<string, unknown>;
+  // The raw counts come as a pair or not at all: a plan with raw copies deletes both kinds.
+  const raw = DELETED_RAW_COUNTS.filter((f) => f in c).length;
+  const expected = raw === 0 ? DELETED_COUNTS : [...DELETED_COUNTS, ...DELETED_RAW_COUNTS];
   if (
-    Object.keys(c).length !== DELETED_COUNTS.length ||
-    !DELETED_COUNTS.every((f) => isCount(c[f]))
+    (raw !== 0 && raw !== DELETED_RAW_COUNTS.length) ||
+    Object.keys(c).length !== expected.length ||
+    !expected.every((f) => isCount(c[f]))
   ) {
     bad();
   }
@@ -435,7 +552,169 @@ export function parsePlan(text: string): PlanFile {
   ) {
     bad();
   }
+  const rawTotals = ["rawCopyNames", "rawCopyVersions", "rawCopyMarkers"] as const;
+  const tt = t as Record<string, unknown>;
+  if (plan.rawCopies === undefined) {
+    // No raw copies, no raw counts: the plan is the file a plan without them always was.
+    if (rawTotals.some((f) => f in tt)) bad();
+  } else {
+    const raw = checkRawCopies(plan.rawCopies);
+    if (
+      tt.rawCopyNames !== raw.names ||
+      tt.rawCopyVersions !== raw.versions ||
+      tt.rawCopyMarkers !== raw.markers
+    ) {
+      bad();
+    }
+  }
   return x as unknown as PlanFile;
+}
+
+const RAW_COPY_FIELDS = ["name", "kind", "versions", "markers"];
+
+/**
+ * The `rawCopies` of a plan, or refuse: exactly the contract's members in each entry (anything
+ * else is not what the plan stage writes), a raw name the plan stage would list (never
+ * `annex-uuid`, never in the annex key space), the kind its name gives, at least one version or
+ * marker, version ids and marker ids that are names and never repeat within a name, sizes that are
+ * counts, and entries strictly sorted by name, so no name appears twice. Returns the counts the
+ * totals must carry.
+ */
+function checkRawCopies(raw: unknown): { names: number; versions: number; markers: number } {
+  const bad = (): never => {
+    throw new ContractError("plan.json holds a raw copy that does not match the contract");
+  };
+  if (!Array.isArray(raw)) return bad();
+  let versions = 0;
+  let markers = 0;
+  let previous: string | undefined;
+  for (const r of raw as unknown[]) {
+    if (!isObject(r)) return bad();
+    if (Object.keys(r).length !== RAW_COPY_FIELDS.length || !RAW_COPY_FIELDS.every((f) => f in r)) {
+      bad();
+    }
+    if (!isString(r.name) || !isRawCopyName(r.name)) return bad();
+    if (r.kind !== rawKindOf(r.name)) bad();
+    if (previous !== undefined && !(previous < r.name)) bad();
+    previous = r.name;
+    if (!Array.isArray(r.versions) || !Array.isArray(r.markers)) return bad();
+    if (r.versions.length + r.markers.length === 0) bad();
+    const ids = new Set<string>();
+    for (const v of r.versions as unknown[]) {
+      if (!isObject(v) || Object.keys(v).length !== 2 || !isName(v.id) || !isCount(v.size)) {
+        return bad();
+      }
+      if (ids.has(v.id)) bad();
+      ids.add(v.id);
+    }
+    for (const m of r.markers as unknown[]) {
+      if (!isName(m) || ids.has(m)) return bad();
+      ids.add(m);
+    }
+    versions += r.versions.length;
+    markers += r.markers.length;
+  }
+  return { names: raw.length, versions, markers };
+}
+
+const RAW_HASHES_FIELDS = ["version", "dataset", "planSha256", "entries"];
+const RAW_HASH_DIGEST_FIELDS = ["name", "versionId", "size", "sha256", "gitBlobSha1"];
+const RAW_HASH_FAILURE_FIELDS = ["name", "versionId", "failure"];
+const SHA1_HEX = /^[0-9a-f]{40}$/;
+
+/**
+ * Read raw-hashes.json, or refuse: exactly the contract's fields, each entry either a digest (a
+ * size that is a count, a sha256, a git blob id) or the one failure word, and no name and version
+ * id twice. The writer sorts the entries; the order is not checked here, because Python and
+ * JavaScript order strings differently outside the Basic Multilingual Plane.
+ */
+export function parseRawHashes(text: string): RawHashesFile {
+  const x = JSON.parse(text) as unknown;
+  const bad = (): never => {
+    throw new ContractError("raw-hashes.json does not match the contract");
+  };
+  if (!isObject(x)) return bad();
+  if (
+    Object.keys(x).length !== RAW_HASHES_FIELDS.length ||
+    !RAW_HASHES_FIELDS.every((f) => f in x) ||
+    x.version !== 1 ||
+    !isName(x.dataset) ||
+    !isString(x.planSha256) ||
+    !SHA256_HEX.test(x.planSha256) ||
+    !Array.isArray(x.entries)
+  ) {
+    return bad();
+  }
+  const seen = new Set<string>();
+  for (const e of x.entries as unknown[]) {
+    if (!isObject(e) || !isString(e.name) || !isRawCopyName(e.name) || !isName(e.versionId)) {
+      return bad();
+    }
+    const fields = "failure" in e ? RAW_HASH_FAILURE_FIELDS : RAW_HASH_DIGEST_FIELDS;
+    if (Object.keys(e).length !== fields.length || !fields.every((f) => f in e)) bad();
+    if ("failure" in e) {
+      if (e.failure !== "size-differs") bad();
+    } else if (
+      !isCount(e.size) ||
+      !isString(e.sha256) ||
+      !SHA256_HEX.test(e.sha256) ||
+      !isString(e.gitBlobSha1) ||
+      !SHA1_HEX.test(e.gitBlobSha1)
+    ) {
+      bad();
+    }
+    const at = JSON.stringify([e.name, e.versionId]);
+    if (seen.has(at)) bad();
+    seen.add(at);
+  }
+  return x as unknown as RawHashesFile;
+}
+
+const RAW_VERIFIED_FIELDS = [
+  "version",
+  "dataset",
+  "verifiedAt",
+  "planSha256",
+  "rawHashesSha256",
+  "gitBlobsSha256",
+  "counts",
+];
+const RAW_VERIFIED_COUNTS = ["names", "versions", "markers", "matchedRecordings", "matchedOther"];
+
+/**
+ * Read raw-verified.json, or refuse: exactly the contract's fields, three sha256 bindings, counts
+ * that are counts, every version matched one way or the other, and never vacuous (it vouches for
+ * at least one raw name).
+ */
+export function parseRawVerified(text: string): RawVerifiedFile {
+  const x = JSON.parse(text) as unknown;
+  const bad = (): never => {
+    throw new ContractError("raw-verified.json does not match the contract");
+  };
+  if (!isObject(x)) return bad();
+  if (
+    Object.keys(x).length !== RAW_VERIFIED_FIELDS.length ||
+    !RAW_VERIFIED_FIELDS.every((f) => f in x) ||
+    x.version !== 1 ||
+    !isName(x.dataset) ||
+    !isIsoDate(x.verifiedAt) ||
+    ![x.planSha256, x.rawHashesSha256, x.gitBlobsSha256].every(
+      (s) => isString(s) && SHA256_HEX.test(s),
+    ) ||
+    !isObject(x.counts)
+  ) {
+    return bad();
+  }
+  const c = x.counts as Record<string, unknown>;
+  if (
+    Object.keys(c).length !== RAW_VERIFIED_COUNTS.length ||
+    !RAW_VERIFIED_COUNTS.every((f) => isCount(c[f]))
+  ) {
+    return bad();
+  }
+  const n = c as RawVerifiedFile["counts"];
+  if (n.matchedRecordings + n.matchedOther !== n.versions || n.names === 0) bad();
+  return x as unknown as RawVerifiedFile;
 }
 
 export function parsePatches(text: string): PatchesFile {
