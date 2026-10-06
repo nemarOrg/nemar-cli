@@ -539,6 +539,66 @@ describe("ledger-cli: what a line says is read from a proof, and the rules are v
     SLOW,
   );
 
+  test(
+    "a deletion whose plan had raw copies records them, and an earlier run's raw counts are added",
+    async () => {
+      const dir = work();
+      const file = join(dir, "ledger.jsonl");
+      const proofPath = join(dir, "deleted.json");
+      const withRaw = {
+        ...deleted(),
+        counts: { ...deleted().counts, rawVersions: 747, rawMarkers: 127 },
+      };
+      writeFileSync(proofPath, `${JSON.stringify(withRaw)}\n`);
+      const ok = await deletion(file, ["--proof", proofPath]);
+      expect(ok.exitCode, ok.all).toBe(0);
+      expect(JSON.parse(readFileSync(file, "utf8").trim()).counts).toEqual({
+        keys: 2,
+        versions: 5,
+        markers: 2,
+        pruned_versions: 3,
+        pruned_markers: 1,
+        raw_versions: 747,
+        raw_markers: 127,
+      });
+      // An interrupted run removed some raw copies before the last one: those are added too.
+      const resumed = await deletion(file, [
+        "--proof",
+        proofPath,
+        "--earlier-run-counts",
+        "raw_versions=3,raw_markers=1,versions=1",
+      ]);
+      expect(resumed.exitCode, resumed.all).toBe(0);
+      const last = JSON.parse(readFileSync(file, "utf8").trim().split("\n").at(-1) as string);
+      expect(last.counts).toMatchObject({ versions: 6, raw_versions: 750, raw_markers: 128 });
+
+      // A proof without raw copies records none, and takes no raw count from an earlier run: no
+      // run of that plan deleted one.
+      writeFileSync(proofPath, `${JSON.stringify(deleted())}\n`);
+      const before = readFileSync(file, "utf8");
+      const plain = await deletion(file, ["--proof", proofPath]);
+      expect(plain.exitCode, plain.all).toBe(0);
+      const plainLine = JSON.parse(readFileSync(file, "utf8").trim().split("\n").at(-1) as string);
+      expect(Object.keys(plainLine.counts)).not.toContain("raw_versions");
+      expect(Object.keys(plainLine.counts)).not.toContain("raw_markers");
+      const afterPlain = readFileSync(file, "utf8");
+      for (const extra of ["raw_versions=1", "raw_markers=1", "raw_names=1"]) {
+        const r = await deletion(file, ["--proof", proofPath, "--earlier-run-counts", extra]);
+        expect([r.exitCode, extra].join(" "), r.all).toBe(`2 ${extra}`);
+      }
+      expect(readFileSync(file, "utf8")).toBe(afterPlain);
+      expect(afterPlain.startsWith(before)).toBe(true);
+      // Half the pair is not a proof delete-old writes.
+      writeFileSync(
+        proofPath,
+        JSON.stringify({ ...deleted(), counts: { ...deleted().counts, rawVersions: 1 } }),
+      );
+      const half = await deletion(file, ["--proof", proofPath]);
+      expect([half.exitCode, half.stderr.trim()]).toEqual([3, "proof-invalid"]);
+    },
+    SLOW,
+  );
+
   test("the scanner revision is the last commit that touched ANY rule file", () => {
     const repo = work();
     const env = {

@@ -19,8 +19,10 @@
  * A `delete-old` run that was interrupted and run again writes `deleted.json` with the counts of
  * the LAST run only (what the first one removed is no longer there to count). The operator adds
  * those, read from the earlier run's own `delete-old: ...` lines, with `--earlier-run-counts`
- * (`versions`, `markers`, `pruned_versions`, `pruned_markers`; summed with the proof's, and only
- * beside `--proof`), so the line says what was deleted in all rather than in the last run.
+ * (`versions`, `markers`, `pruned_versions`, `pruned_markers`, and `raw_versions`, `raw_markers`
+ * when the proof has raw counts; summed with the proof's, and only beside `--proof`), so the line
+ * says what was deleted in all rather than in the last run. A proof whose plan had raw copies
+ * carries `rawVersions` and `rawMarkers`, and the line then has `raw_versions` and `raw_markers`.
  * `publish` copies the file to `s3://nemar/<id>/corrections/ledger.jsonl`. It is a dry run unless
  * `--execute`, and it refuses unless the local file is a strict extension of the object already
  * there: the ledger is append-only, and an upload that would drop a line is refused.
@@ -159,17 +161,32 @@ function fromDeletionProof(
       markers: c.markers,
       pruned_versions: c.prunedVersions,
       pruned_markers: c.prunedMarkers,
+      // Only a deletion whose plan had raw copies says how many of them went (the pair, or neither).
+      ...(c.rawVersions !== undefined && c.rawMarkers !== undefined
+        ? { raw_versions: c.rawVersions, raw_markers: c.rawMarkers }
+        : {}),
     },
     verification: `${DELETION_VERIFICATION}+proof-${createHash("sha256").update(bytes).digest("hex").slice(0, 16)}`,
   };
 }
 
 /** The counts of a `delete-old` run that can have an earlier, interrupted run behind it. */
-const EARLIER_RUN_COUNT_NAMES = ["versions", "markers", "pruned_versions", "pruned_markers"];
+const EARLIER_RUN_COUNT_NAMES = [
+  "versions",
+  "markers",
+  "pruned_versions",
+  "pruned_markers",
+  "raw_versions",
+  "raw_markers",
+];
+/** The two a proof carries only when its plan had raw copies. */
+const RAW_COUNT_NAMES = ["raw_versions", "raw_markers"];
 
 /**
- * Add the counts of an earlier, interrupted run to the proof's. Only the four names a run removes
+ * Add the counts of an earlier, interrupted run to the proof's. Only the names a run removes
  * (never `keys`, which is the plan's), each a number the operator read from that run's own lines.
+ * `raw_versions` and `raw_markers` only when the proof has them: a plan without raw copies deleted
+ * none in any run, so a raw count beside such a proof is a mistake, not a sum.
  */
 function addEarlierRun(
   counts: Record<string, number>,
@@ -180,6 +197,9 @@ function addEarlierRun(
   const out = { ...counts };
   for (const [name, n] of Object.entries(extra)) {
     if (!EARLIER_RUN_COUNT_NAMES.includes(name)) throw new Usage("bad --earlier-run-counts");
+    if (RAW_COUNT_NAMES.includes(name) && !(name in counts)) {
+      throw new Usage("bad --earlier-run-counts: the proof has no raw copies");
+    }
     out[name] = (out[name] ?? 0) + n;
   }
   return out;
