@@ -43,4 +43,6 @@ Two facts about this failure shaped what follows. First, it was invisible from o
 
 ## Amendment 2026-10-04 (#1610): privacy corrections
 
-Registration reads the purge list and refuses a purged key. A privacy correction registers its new keys with `setpresentkey` and reads the log back, and marks the old keys dead ([ADR 0085](0085-a-privacy-correction-scrubs-every-version-in-place.md)).
+Registration reads the purge list and refuses a purged key.
+**Not built in Phase 2 of #1610:** there is no purge list yet, and registration does not read one ([ADR 0085](0085-a-privacy-correction-scrubs-every-version-in-place.md), "Build status").
+A privacy correction registers its new keys with `setpresentkey` and reads the log back, and marks the old keys dead ([ADR 0085](0085-a-privacy-correction-scrubs-every-version-in-place.md)).
