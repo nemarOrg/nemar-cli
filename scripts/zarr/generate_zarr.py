@@ -1042,6 +1042,72 @@ def annex_missing_summary(missing: list[tuple[str, str | None]]) -> dict:
     }
 
 
+def failed_callback_body(
+    *,
+    dataset_id: str,
+    head: str,
+    prior: dict | None,
+    discovered: list[str],
+    failures: list[str] | None = None,
+    failure_entries: list | None = None,
+    annex_missing: list[tuple[str, str | None]] | None = None,
+    pool_breaks: int = 0,
+    pending_entries: list[dict] | None = None,
+    provenance_fetch_failed: bool = False,
+    events_row_count: int | None = None,
+    events_upload_failed: bool = False,
+    events_stores_without_rows: int = 0,
+    error: str | None = None,
+) -> dict:
+    """The `status: "failed"` callback body for a run that publishes nothing.
+
+    One builder for every such exit, so they cannot drift apart. `main`'s
+    `write_failed_callback` passes everything the run gathered; an exit taken
+    before any recording is attempted passes only what it knows, and the
+    defaults are the values a run that attempted nothing has.
+    """
+    failures = failures or []
+    failure_entries = failure_entries or []
+    pending_entries = pending_entries or []
+    return {
+        "dataset_id": dataset_id,
+        "status": "failed",
+        "store_count": int((prior or {}).get("store_count", 0) or 0),
+        "commit": head,
+        "converted": [],
+        "removed": [],
+        "errors": len(failures),
+        "failed": failures,
+        "failure_count": len(failure_entries),
+        "data_failures": failure_entries,
+        "deterministic": dataset_failure_is_deterministic(failures, failure_entries),
+        **annex_missing_summary(annex_missing or []),
+        "pool_breaks": pool_breaks,
+        # Coverage (#1197). Reported even here, where the index was NOT
+        # rewritten: the queue's pending-driven requeue needs to know a total
+        # failure left recordings outstanding, and `discovered_count` is what
+        # makes "2 of 43" sayable at all.
+        "pending_count": len(pending_entries),
+        "discovered_count": len(discovered),
+        "not_attempted_count": sum(
+            1 for e in pending_entries if e.get("reason") == "not_attempted"
+        ),
+        "provenance_fetch_failed": provenance_fetch_failed,
+        # The events file, on the failure path too (#1060). A refused index can
+        # still have been preceded by a successful events.parquet upload, and an
+        # operator reading only the callback would otherwise have no idea an
+        # object on S3 was replaced by a run that then published nothing.
+        "events_row_count": events_row_count,
+        "events_upload_failed": events_upload_failed,
+        "events_stores_without_rows": events_stores_without_rows,
+        # What went wrong, when it was the PRODUCER rather than the recordings:
+        # a schema violation or an unbalanced index has no per-recording
+        # failure to point at, so without this the callback would say "failed"
+        # and name no cause.
+        **({"error": error} if error else {}),
+    }
+
+
 class ChannelCountMismatch(Exception):
     """The converted store carries fewer channels than the recording file's own
     header declares, with or without a channels.tsv; or fewer than its BIDS
@@ -8125,48 +8191,27 @@ def main() -> int:
         nothing running. That is exactly the invisible-failure shape #774 fixed
         for the total-failure branch, and the two refuse-to-publish guards below
         (a bad index, a bad manifest) reintroduced it: they were added later and
-        returned 1 directly.
+        returned 1 directly. The body itself is `failed_callback_body`, so every
+        such exit writes the same shape.
         """
         with open(args.callback_out, "w") as fh:
             json.dump(
-                {
-                    "dataset_id": dataset_id,
-                    "status": "failed",
-                    "store_count": int((prior or {}).get("store_count", 0) or 0),
-                    "commit": head,
-                    "converted": [],
-                    "removed": [],
-                    "errors": len(failures),
-                    "failed": failures,
-                    "failure_count": len(failure_entries),
-                    "data_failures": failure_entries,
-                    "deterministic": deterministic,
-                    **annex_missing_fields,
-                    "pool_breaks": pool_breaks,
-                    # Coverage (#1197). Reported even here, where the index was
-                    # NOT rewritten: the queue's pending-driven requeue needs to
-                    # know a total failure left recordings outstanding, and
-                    # `discovered_count` is what makes "2 of 43" sayable at all.
-                    "pending_count": len(pending_entries),
-                    "discovered_count": len(discovered),
-                    "not_attempted_count": sum(
-                        1 for e in pending_entries if e.get("reason") == "not_attempted"
-                    ),
-                    "provenance_fetch_failed": provenance_fetch_failed,
-                    # The events file, on the failure path too (#1060). A refused
-                    # index can still have been preceded by a successful
-                    # events.parquet upload, and an operator reading only the
-                    # callback would otherwise have no idea an object on S3 was
-                    # replaced by a run that then published nothing.
-                    "events_row_count": events_file["row_count"] if events_file else None,
-                    "events_upload_failed": events_upload_failed,
-                    "events_stores_without_rows": events_stores_without_rows,
-                    # What went wrong, when it was the PRODUCER rather than the
-                    # recordings: a schema violation or an unbalanced index has no
-                    # per-recording failure to point at, so without this the
-                    # callback would say "failed" and name no cause.
-                    **({"error": error} if error else {}),
-                },
+                failed_callback_body(
+                    dataset_id=dataset_id,
+                    head=head,
+                    prior=prior,
+                    discovered=discovered,
+                    failures=failures,
+                    failure_entries=failure_entries,
+                    annex_missing=annex_missing,
+                    pool_breaks=pool_breaks,
+                    pending_entries=pending_entries,
+                    provenance_fetch_failed=provenance_fetch_failed,
+                    events_row_count=events_file["row_count"] if events_file else None,
+                    events_upload_failed=events_upload_failed,
+                    events_stores_without_rows=events_stores_without_rows,
+                    error=error,
+                ),
                 fh,
             )
 
