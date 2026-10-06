@@ -196,9 +196,10 @@ def test_test_mode_print_config_defaults(dirs: tuple[Path, Path]) -> None:
     # below 1.2.9 real EEGLAB v7.3 and BrainVision files fail to convert and
     # EDF files that repeat a channel label lose channels, and below 1.2.10 a
     # channels.tsv row that differs from its channel only in case is not
-    # applied. The upper bound is a cap, not a floor, raised deliberately per
-    # biosigIO release (requirements.txt).
-    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.10,<1.2.11"
+    # applied, and below 1.2.11 no writer can leave subject information out of
+    # a store (#1626). The upper bound is a cap, not a floor, raised
+    # deliberately per biosigIO release (requirements.txt).
+    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.11,<1.2.12"
     assert cfg["S3_BUCKET"] == "nemar-dev"
     assert cfg["AWS_PROFILE"] == "nemar-zarr-dev"
     assert cfg["STATE_DIR"] == state_dir
@@ -265,7 +266,7 @@ def test_print_config_without_test_uses_prod_defaults(dirs: tuple[Path, Path]) -
     assert cfg["TEST_API_URL"] == ""
     assert cfg["CALLBACK_URL"] == "https://api.nemar.org/webhooks/zarr-ready"
     assert cfg["CONTRACT_BASE"] == "https://zarr.nemar.org"
-    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.10,<1.2.11"
+    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.11,<1.2.12"
     assert cfg["S3_BUCKET"] == "nemar"
     assert cfg["AWS_PROFILE"] == "nemar-zarr"
     assert cfg["STATE_DIR"] == f"{zarr_base}/zarr-state"
@@ -813,7 +814,7 @@ def ack_run(tmp_path: Path):
         extra_env: dict[str, str] | None = None,
         args: list[str] | None = None,
         # In range for the two-sided check in setup(): [BIOSIGIO_FLOOR, BIOSIGIO_CAP).
-        biosigio_version: str = "1.2.10",
+        biosigio_version: str = "1.2.11",
         packaging_importable: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         # The venv's `biosigio`: a package that is only a version, which is all
@@ -923,7 +924,7 @@ def test_the_env_var_form_arms_a_run_without_touching_the_file(ack_run) -> None:
 
 
 @pytest.mark.parametrize("packaging_importable", [True, False], ids=["packaging", "tuple"])
-@pytest.mark.parametrize("stale", ["1.2.9", "1.2.8", "1.2.0", "0.9.9"])
+@pytest.mark.parametrize("stale", ["1.2.10", "1.2.9", "1.2.8", "1.2.0", "0.9.9"])
 def test_setup_refuses_a_biosigio_below_the_floor(
     ack_run, stale: str, packaging_importable: bool
 ) -> None:
@@ -932,9 +933,11 @@ def test_setup_refuses_a_biosigio_below_the_floor(
     imports. On 1.2.8 a streaming EDF with repeated labels publishes, and the
     converter's header gate cannot catch it (every channel is present, only the
     names collapse), so setup has to stop the run before it converts anything.
-    Both comparison paths are driven: `packaging` when the venv has it, the
-    numeric-tuple fallback when it does not. "1.2.9" is the case a string
-    comparison gets wrong against the 1.2.10 floor: as strings it sorts above."""
+    On 1.2.10 no writer can leave subject information out of a store, and the
+    converter refuses every dataset (#1626). Both comparison paths are driven:
+    `packaging` when the venv has it, the numeric-tuple fallback when it does
+    not. "1.2.9" is the case a string comparison gets wrong against the 1.2.11
+    floor: as strings it sorts above."""
     run, qpy_calls, _ack_file, _log = ack_run
 
     proc = run(biosigio_version=stale, packaging_importable=packaging_importable)
@@ -942,18 +945,18 @@ def test_setup_refuses_a_biosigio_below_the_floor(
     assert proc.returncode != 0, proc.stdout
     assert "FATAL" in proc.stderr
     assert stale in proc.stderr
-    assert "1.2.10" in proc.stderr
+    assert "1.2.11 floor" in proc.stderr
     assert qpy_calls() == [], "setup must stop before the queue is touched"
 
 
 @pytest.mark.parametrize("packaging_importable", [True, False], ids=["packaging", "tuple"])
-@pytest.mark.parametrize("version", ["1.2.10", "1.2.10.post1", "1.2.10+local.1"])
+@pytest.mark.parametrize("version", ["1.2.11", "1.2.11.post1", "1.2.11+local.1"])
 def test_setup_accepts_a_final_biosigio_between_the_floor_and_the_cap(
     ack_run, version: str, packaging_importable: bool
 ) -> None:
-    """Compared AS versions: as strings "1.2.10" sorts below "1.2.9", which
+    """Compared AS versions: as strings "1.2.11" sorts below "1.2.9", which
     would refuse a node that is at the floor. A post release and a local label
-    satisfy `>=1.2.10,<1.2.11` for the resolver, so they satisfy the check."""
+    satisfy `>=1.2.11,<1.2.12` for the resolver, so they satisfy the check."""
     run, qpy_calls, _ack_file, _log = ack_run
 
     proc = run(biosigio_version=version, packaging_importable=packaging_importable)
@@ -964,11 +967,11 @@ def test_setup_accepts_a_final_biosigio_between_the_floor_and_the_cap(
 
 
 @pytest.mark.parametrize("packaging_importable", [True, False], ids=["packaging", "tuple"])
-@pytest.mark.parametrize("version", ["1.2.11", "1.2.11.post1", "1.10.0", "2.0.0"])
+@pytest.mark.parametrize("version", ["1.2.12", "1.2.12.post1", "1.10.0", "2.0.0"])
 def test_setup_refuses_a_biosigio_at_or_above_the_cap(
     ack_run, version: str, packaging_importable: bool
 ) -> None:
-    """The pin is `<1.2.11` because a biosigIO release is read before the
+    """The pin is `<1.2.12` because a biosigIO release is read before the
     converter takes it. An install that went wrong (a resolver conflict, a
     venv someone upgraded by hand) can leave a newer one behind, and the
     install line hides it (`| tail -2 || true`), so setup refuses it. "1.10.0"
@@ -980,19 +983,19 @@ def test_setup_refuses_a_biosigio_at_or_above_the_cap(
     assert proc.returncode != 0, proc.stdout
     assert "FATAL" in proc.stderr
     assert version in proc.stderr
-    assert "1.2.11 cap" in proc.stderr
+    assert "1.2.12 cap" in proc.stderr
     assert qpy_calls() == [], "setup must stop before the queue is touched"
 
 
 @pytest.mark.parametrize("packaging_importable", [True, False], ids=["packaging", "tuple"])
 @pytest.mark.parametrize(
-    "version", ["1.2.10rc1", "1.2.10.dev0", "1.2.10a1", "1.2.11.dev0", "1.2.10.post1.dev0"]
+    "version", ["1.2.11rc1", "1.2.11.dev0", "1.2.11a1", "1.2.12.dev0", "1.2.11.post1.dev0"]
 )
 def test_setup_refuses_a_pre_release_on_both_paths(
     ack_run, version: str, packaging_importable: bool
 ) -> None:
-    """`1.2.10rc1` and `1.2.10.dev0` sort BELOW 1.2.10, and a tuple of leading
-    digits reads both as (1, 2, 10) and would accept them: the two paths used to
+    """`1.2.11rc1` and `1.2.11.dev0` sort BELOW 1.2.11, and a tuple of leading
+    digits reads both as (1, 2, 11) and would accept them: the two paths used to
     disagree. Both now refuse every pre-release and dev build."""
     run, qpy_calls, _ack_file, _log = ack_run
 
@@ -1088,11 +1091,11 @@ def _run_probe(tmp_path: Path, version: str, packaging_importable: bool) -> int:
 # 0 in range, 3 below the floor or unreadable, 4 at or above the cap, 5 a
 # pre-release or dev build.
 PROBE_VERDICTS = {
-    "1.2.10": 0, "1.2.10.0": 0, "1.2.10.post1": 0, "1.2.10+local.1": 0,
-    "1.2.9": 3, "1.2.8": 3, "0.9.9": 3, "not-a-version": 3,
-    "1.2.11": 4, "1.2.11.0": 4, "1.2.11.post1": 4, "1.10.0": 4, "2.0.0": 4,
-    "1.2.10rc1": 5, "1.2.10.dev0": 5, "1.2.10a1": 5, "1.2.10b2": 5,
-    "1.2.11.dev0": 5, "1.2.11rc1": 5, "1.2.10.post1.dev0": 5, "1.2.9rc1": 5,
+    "1.2.11": 0, "1.2.11.0": 0, "1.2.11.post1": 0, "1.2.11+local.1": 0,
+    "1.2.10": 3, "1.2.10.post1": 3, "1.2.9": 3, "1.2.8": 3, "0.9.9": 3, "not-a-version": 3,
+    "1.2.12": 4, "1.2.12.0": 4, "1.2.12.post1": 4, "1.10.0": 4, "2.0.0": 4,
+    "1.2.11rc1": 5, "1.2.11.dev0": 5, "1.2.11a1": 5, "1.2.11b2": 5,
+    "1.2.12.dev0": 5, "1.2.12rc1": 5, "1.2.11.post1.dev0": 5, "1.2.10rc1": 5,
 }
 
 

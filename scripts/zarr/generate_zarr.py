@@ -14,6 +14,13 @@ The conversion itself is biosigIO (``Recording.from_file -> bids.apply_events_ts
 -> rec.to_zarr``); this driver owns the BIDS-tree orchestration: change
 detection, annex-content materialization, S3 sync, and the index.
 
+A store holds the data, the events, channel names, types and units, and
+technical recording metadata, and never the subject (#1626). Every store is
+written through ``write_store``, which has biosigIO leave subject and operator
+information out (``exclude_subject_info``, biosigio>=1.2.11), and ``main``
+refuses to convert on a biosigIO that cannot. Subject information stays at
+dataset scope, in ``participants.tsv``.
+
 Design notes
 ------------
 * The dataset repo is cloned by the workflow (full history, ``--no-checkout``);
@@ -56,6 +63,8 @@ import argparse
 import contextlib
 import csv
 import errno
+import importlib
+import inspect
 import io
 import json
 import math
@@ -69,7 +78,7 @@ import sys
 import tempfile
 import time
 import urllib.request
-from collections.abc import MutableMapping
+from collections.abc import Callable, Mapping, MutableMapping
 from concurrent.futures import (
     FIRST_COMPLETED,
     ProcessPoolExecutor,
@@ -1061,10 +1070,11 @@ def failed_callback_body(
 ) -> dict:
     """The `status: "failed"` callback body for a run that publishes nothing.
 
-    One builder for every such exit, so they cannot drift apart. `main`'s
-    `write_failed_callback` passes everything the run gathered; an exit taken
-    before any recording is attempted passes only what it knows, and the
-    defaults are the values a run that attempted nothing has.
+    One builder for every such exit, so they cannot drift apart: `main`'s
+    `write_failed_callback`, and the refusal to convert on a biosigIO that
+    cannot leave subject information out, which happens before any recording
+    is attempted and so passes only what it knows. The defaults are the values
+    a run that attempted nothing has.
     """
     failures = failures or []
     failure_entries = failure_entries or []
@@ -1100,10 +1110,11 @@ def failed_callback_body(
         "events_row_count": events_row_count,
         "events_upload_failed": events_upload_failed,
         "events_stores_without_rows": events_stores_without_rows,
-        # What went wrong, when it was the PRODUCER rather than the recordings:
-        # a schema violation or an unbalanced index has no per-recording
-        # failure to point at, so without this the callback would say "failed"
-        # and name no cause.
+        # What went wrong, when it was the PRODUCER or the node rather than the
+        # recordings: a schema violation, an unbalanced index or a biosigIO that
+        # cannot exclude subject information has no per-recording failure to
+        # point at, so without this the callback would say "failed" and name no
+        # cause.
         **({"error": error} if error else {}),
     }
 
@@ -6372,6 +6383,13 @@ def fix_source_file_attr(store_path: str, bids_relpath: str) -> None:
     extra lookup. biosigIO itself is untouched; this only corrects what NEMAR
     publishes downstream, after biosigIO has written the store and before it
     is validated/uploaded. nemarOrg/nemar-cli#1102.
+
+    Since #1626 every store is written with ``exclude_subject_info``, which has
+    biosigIO keep only the final component of the path (the scratch file's
+    name, ``sss_<name>`` on the MaxShield path). The overwrite is unconditional,
+    so the result is the BIDS path either way, and the rest of the root
+    attributes, the ``subject_info_excluded`` mark included, are rewritten as
+    read.
     """
     meta_path = os.path.join(store_path, "zarr.json")
     with open(meta_path, encoding="utf-8") as fh:
@@ -6796,6 +6814,219 @@ def _recording_size_bytes(primary_local: str) -> int:
     return total
 
 
+# --- Subject information never reaches a store (#1626) -------------------------
+# A Zarr store holds the data, the events, channel names, types and units, and
+# technical recording metadata. It never holds the subject. Age, sex, a patient
+# code or name, a birth date and other phenotype stay at dataset scope, in
+# participants.tsv, and the operator and administrative free text a recording
+# header carries (technician, equipment, admin code, additional recording text) is
+# not data, events or channels either. The 2026-10-05 census found patientcode,
+# birthdate, gender and equipment non-empty in every store root of nm000186.
+#
+# biosigIO 1.2.11 added `exclude_subject_info` to its three store writers: it
+# removes the members `biosigio.SUBJECT_INFO_KEYS` names from `recording_metadata`
+# at any depth, reduces `source_file` and `bti_pdf_file` to their final path
+# component, and marks the store root `subject_info_excluded: true`. The list of
+# members is biosigIO's and lives there only; this module keeps no copy of it.
+#
+# Three layers, so no path writes a store with those members in it:
+#   * `main` refuses to convert anything on a biosigIO that cannot leave them out
+#     (`biosigio_subject_info_problems`), and exits EXIT_SUBJECT_INFO_UNAVAILABLE
+#     rather than fall back to a store that carries them.
+#   * Every store is written through `write_store`, which passes the option
+#     itself, refuses a writer whose signature does not NAME it, and reads the
+#     written root back for the mark. That check runs in the process that
+#     writes, so a pool worker that imports a different biosigIO from the one
+#     `main` checked still refuses. A test fails if a biosigIO writer is called
+#     anywhere else.
+#   * hallu-zarr.sh's setup() refuses an installed biosigIO below 1.2.11.
+#
+# `fix_source_file_attr` still rewrites `source_file` afterwards: biosigIO now
+# leaves the scratch file's name there instead of its whole path, and the
+# converter replaces it with the BIDS path the index keys the store by.
+SUBJECT_INFO_FLOOR = "1.2.11"
+SUBJECT_INFO_OPTION = "exclude_subject_info"
+SUBJECT_INFO_EXCLUDED_ATTR = "subject_info_excluded"
+# The writers that put a store on disk, by the names `biosigio_subject_info_problems`
+# reports them under. `Recording.to_zarr` forwards to `ZarrExporter.export`, so
+# both have to take the option for the in-memory path to honor it.
+BIOSIGIO_STORE_WRITERS = ("Recording.to_zarr", "ZarrExporter.export", "stream_to_zarr")
+# sysexits.h EX_CONFIG: what is wrong is the node's biosigIO, not the dataset.
+EXIT_SUBJECT_INFO_UNAVAILABLE = 78
+
+# A final release: `1.2.11`, `1.2.11.post1`, `1.2.11+local.1`. A pre-release or a
+# dev build does not match and is refused, the same rule hallu-zarr.sh's
+# BIOSIGIO_FLOOR_PROBE applies: `1.2.11rc1` sorts BELOW 1.2.11, and a parser that
+# kept only its leading digits would read it as 1.2.11 and accept it.
+_FINAL_RELEASE_RE = re.compile(
+    r"(\d+(?:\.\d+)*)(?:\.post\d+)?(?:\+[a-z0-9]+(?:\.[a-z0-9]+)*)?", re.IGNORECASE
+)
+
+
+class SubjectInfoExclusionUnavailable(RuntimeError):
+    """The biosigIO this process writes with cannot leave subject information out
+    of a store, or a store came back without the mark that says it did.
+
+    Deliberately uncoded (no `.code`): it is a property of the node, not of the
+    recording, so `convert_one` lists the recording as pending and retries it,
+    and the store it refused is never uploaded.
+    """
+
+
+def final_release(version: object) -> tuple[int, ...] | None:
+    """The numeric release fields of a final release version, trailing zeros
+    dropped so `1.2.11.0` compares equal to `1.2.11`; None for anything else
+    (a pre-release, a dev build, None, or text that is not a version). Compared
+    as a tuple, because as strings "1.10.0" sorts below "1.2.11"."""
+    if not isinstance(version, str):
+        return None
+    match = _FINAL_RELEASE_RE.fullmatch(version.strip())
+    if match is None:
+        return None
+    fields = [int(part) for part in match.group(1).split(".")]
+    while len(fields) > 1 and fields[-1] == 0:
+        fields.pop()
+    return tuple(fields)
+
+
+def names_keyword(fn: object, name: str) -> bool:
+    """Whether `fn`'s signature NAMES `name` as a parameter a caller can pass by
+    keyword. A bare `**kwargs` does not count: a writer that only collects
+    unknown keywords can drop this one and write the store without it."""
+    if not callable(fn):
+        return False
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    param = params.get(name)
+    return param is not None and param.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    )
+
+
+def subject_info_problems(
+    *,
+    installed_version: str | None,
+    imported_version: object,
+    writers: Mapping[str, object],
+) -> list[str]:
+    """Why a biosigIO cannot be trusted to leave subject information out of a
+    store; empty when it can.
+
+    Both versions have to be a final release at or above SUBJECT_INFO_FLOOR: the
+    distribution the environment says is installed, and the `__version__` of
+    the module actually imported, which differ when an older copy shadows the
+    installed one or was imported before an upgrade. Each writer in
+    BIOSIGIO_STORE_WRITERS has to name `exclude_subject_info` in its signature;
+    a version alone is not proof, because a build can carry a version it does
+    not have the code for.
+    """
+    problems: list[str] = []
+    floor = final_release(SUBJECT_INFO_FLOOR)
+    assert floor is not None
+    for label, version in (("installed", installed_version), ("imported", imported_version)):
+        release = final_release(version)
+        if version is None:
+            problems.append(f"no {label} biosigIO version could be read")
+        elif release is None:
+            problems.append(
+                f"the {label} biosigIO version {version!r} is not a final release"
+            )
+        elif release < floor:
+            problems.append(
+                f"the {label} biosigIO is {version}, below {SUBJECT_INFO_FLOOR}"
+            )
+    for name in BIOSIGIO_STORE_WRITERS:
+        fn = writers.get(name)
+        if fn is None:
+            problems.append(f"biosigIO has no {name}")
+        elif not names_keyword(fn, SUBJECT_INFO_OPTION):
+            problems.append(f"biosigIO's {name} does not take {SUBJECT_INFO_OPTION}")
+    return problems
+
+
+def biosigio_subject_info_problems() -> list[str]:
+    """`subject_info_problems` for the biosigIO this process imports, resolved
+    the way the conversion resolves it: `import biosigio`, its `Recording` and
+    `stream_to_zarr`, and `biosigio.exporters.zarr.ZarrExporter`."""
+    try:
+        from importlib.metadata import version
+
+        installed: str | None = version("biosigio")
+    except Exception:  # noqa: BLE001 - absent metadata is reported, not raised
+        installed = None
+    try:
+        # By name rather than an import statement: biosigIO is a runtime-only
+        # dependency of this module, absent from the fast test tier.
+        biosigio = importlib.import_module("biosigio")
+        zarr_module = importlib.import_module("biosigio.exporters.zarr")
+        exporter = getattr(zarr_module, "ZarrExporter", None)
+    except Exception as exc:  # noqa: BLE001 - any import failure means "cannot"
+        return [f"biosigIO cannot be imported ({type(exc).__name__}: {exc})"]
+    recording = getattr(biosigio, "Recording", None)
+    return subject_info_problems(
+        installed_version=installed,
+        imported_version=getattr(biosigio, "__version__", None),
+        writers={
+            "Recording.to_zarr": getattr(recording, "to_zarr", None),
+            "ZarrExporter.export": getattr(exporter, "export", None),
+            "stream_to_zarr": getattr(biosigio, "stream_to_zarr", None),
+        },
+    )
+
+
+def require_subject_info_excluded(store_path: str) -> None:
+    """Refuse a written store whose root does not carry
+    `subject_info_excluded: true`, the mark biosigIO sets when it left subject
+    information out. Read from the root `zarr.json` on disk, which is what gets
+    uploaded."""
+    meta_path = os.path.join(store_path, "zarr.json")
+    try:
+        with open(meta_path, encoding="utf-8") as fh:
+            attrs = json.load(fh).get("attributes")
+    except (OSError, ValueError, AttributeError) as exc:
+        raise SubjectInfoExclusionUnavailable(
+            f"cannot read {meta_path} to confirm subject information was left out ({exc})"
+        ) from exc
+    if not isinstance(attrs, dict) or attrs.get(SUBJECT_INFO_EXCLUDED_ATTR) is not True:
+        raise SubjectInfoExclusionUnavailable(
+            f"{store_path} was written without `{SUBJECT_INFO_EXCLUDED_ATTR}: true`; "
+            "refusing to publish a store that may carry subject information"
+        )
+
+
+def write_store(writer: Callable[..., object], *args: object, **kwargs: object) -> str:
+    """Write a store with a biosigIO writer, leaving subject information out.
+
+    The ONLY way this module writes a store: a test scans the scripts for a
+    biosigIO writer referenced anywhere but as this function's first argument.
+    `writer` is `Recording.to_zarr`, `ZarrExporter.export` or `stream_to_zarr`,
+    called with `args` and `kwargs` plus `exclude_subject_info=True`. Refused
+    BEFORE the call when the writer does not name the option, so a worker
+    holding an older biosigIO writes nothing; and refused AFTER it when the
+    written root lacks the mark. Returns the store path the writer reports.
+    """
+    name = getattr(writer, "__qualname__", None) or repr(writer)
+    if SUBJECT_INFO_OPTION in kwargs:
+        raise TypeError(f"write_store sets {SUBJECT_INFO_OPTION} itself; do not pass it")
+    if not names_keyword(writer, SUBJECT_INFO_OPTION):
+        raise SubjectInfoExclusionUnavailable(
+            f"{name} does not take {SUBJECT_INFO_OPTION}: this process has a biosigIO "
+            f"older than {SUBJECT_INFO_FLOOR}, so no store was written"
+        )
+    written = writer(*args, **kwargs, **{SUBJECT_INFO_OPTION: True})
+    if isinstance(written, os.PathLike):
+        written = os.fspath(written)
+    if not isinstance(written, str):
+        raise SubjectInfoExclusionUnavailable(
+            f"{name} returned {type(written).__name__}, not the store path it wrote"
+        )
+    require_subject_info_excluded(written)
+    return written
+
+
 def bids_channels_arg(channels_local: str | None) -> str:
     """The `bids_channels` value for both biosigIO exporters: the resolved sidecar
     path, or "off".
@@ -6922,7 +7153,9 @@ def convert_recording(
         if modality:
             for label in rec.channels:
                 rec.channels[label]["modality"] = modality
-        rec.to_zarr(store_path, dtype="int16", modality_rates=MODALITY_RATES)
+        # Through `write_store`, never `rec.to_zarr(...)` directly: it is what
+        # leaves subject information out of the store (#1626).
+        write_store(rec.to_zarr, store_path, dtype="int16", modality_rates=MODALITY_RATES)
 
     # Large recordings use the streaming converter so peak RAM stays bounded; the
     # in-memory path would load them at float64 2-3x and OOM. (multi-GB BrainVision/
@@ -6939,7 +7172,10 @@ def convert_recording(
             else None
         )
         try:
-            stream_to_zarr(
+            # Through `write_store` like the in-memory path, so neither exporter
+            # can write a store that carries subject information (#1626).
+            write_store(
+                stream_to_zarr,
                 primary_local,
                 store_path,
                 force_modality=modality,
@@ -7158,10 +7394,11 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             projected_peak=(c.get("projections") or {}).get(primary),
             channels_local=channels_local,
         )
-        # biosigIO stamped recording_metadata.source_file with the scratch path
-        # it was handed (this run's tmpdir); overwrite it with the stable,
-        # reproducible BIDS-repo-relative path before validating/uploading.
-        # nemarOrg/nemar-cli#1102.
+        # biosigIO stamped recording_metadata.source_file with the name of the
+        # scratch file it was handed (only the final component under
+        # exclude_subject_info, #1626; `sss_<name>` on the MaxShield path);
+        # overwrite it with the stable, reproducible BIDS-repo-relative path
+        # before validating/uploading. nemarOrg/nemar-cli#1102.
         fix_source_file_attr(store_local, primary)
         if sss_meta:
             # In the store as well as the index: a consumer reading the store
@@ -7891,6 +8128,38 @@ def main() -> int:
         # Stays a sorted LIST: `remove` is JSON-serialized into the callback and
         # the index, and a set would blow up json.dump.
         remove = sorted(set(remove) | orphans)
+    # Fail closed before anything is converted, and before `--wipe` erases the
+    # serving prefix: a biosigIO that cannot leave subject information out of a
+    # store must not write one (#1626), and there is no fallback to writing it
+    # in. A run with nothing to convert never writes a store, so it is not held
+    # up by this. The failed callback supersedes the `converting` signal, and its
+    # `error` names the node as the cause, not the dataset (see
+    # `write_failed_callback` for why a refusal writes one).
+    if convert:
+        problems = biosigio_subject_info_problems()
+        if problems:
+            for problem in problems:
+                print(f"::error::{problem}", flush=True)
+            reason = (
+                f"refusing to convert: this biosigIO cannot leave subject information "
+                f"out of a store (needs a final release >= {SUBJECT_INFO_FLOOR} whose "
+                f"{', '.join(BIOSIGIO_STORE_WRITERS)} take {SUBJECT_INFO_OPTION}): "
+                + "; ".join(problems)
+            )
+            print(f"::error::{reason}", flush=True)
+            with open(args.callback_out, "w") as fh:
+                json.dump(
+                    failed_callback_body(
+                        dataset_id=dataset_id,
+                        head=head,
+                        prior=prior,
+                        discovered=discovered,
+                        provenance_fetch_failed=bool(early_row and early_row[1]),
+                        error=reason,
+                    ),
+                    fh,
+                )
+            return EXIT_SUBJECT_INFO_UNAVAILABLE
     if args.wipe and convert:
         prefix = f"{dataset_id}/zarr/"
         if _s3_prefix_empty(bucket, prefix):
@@ -8191,8 +8460,9 @@ def main() -> int:
         nothing running. That is exactly the invisible-failure shape #774 fixed
         for the total-failure branch, and the two refuse-to-publish guards below
         (a bad index, a bad manifest) reintroduced it: they were added later and
-        returned 1 directly. The body itself is `failed_callback_body`, so every
-        such exit writes the same shape.
+        returned 1 directly. The body itself is `failed_callback_body`, shared
+        with the refusal to convert on a biosigIO that cannot exclude subject
+        information.
         """
         with open(args.callback_out, "w") as fh:
             json.dump(

@@ -236,7 +236,7 @@ VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
 # check is TWO-SIDED: the installed biosigIO must be a final release in
 # [BIOSIGIO_FLOOR, BIOSIGIO_CAP). Below the floor is a failed upgrade; at or above
 # the cap is a release nobody has read yet (the cap exists because a biosigIO
-# patch release changed what a store contains twice in a row), which an install
+# patch release changed what a store contains three times in a row), which an install
 # that went wrong can also leave behind; a pre-release or dev build satisfies
 # neither pin. None of them may convert.
 #
@@ -250,8 +250,8 @@ VENV_DIR="${ZARR_VENV_DIR:-${STATE_DIR}/.zarr-venv}"
 # `1.2.10rc1` and `1.2.10.dev0` as pre-releases, which a bare tuple of leading
 # digits would read as 1.2.10 and accept. Anything the fallback cannot parse fails
 # closed.
-BIOSIGIO_FLOOR="1.2.10"
-BIOSIGIO_CAP="1.2.11"
+BIOSIGIO_FLOOR="1.2.11"
+BIOSIGIO_CAP="1.2.12"
 BIOSIGIO_FLOOR_PROBE='
 import re
 import sys
@@ -327,15 +327,17 @@ sys.exit(code)
 # one channel whose label differs from it only in case (biosigio#140), which can
 # convert that channel's unit; the converter publishes those matches bounded
 # (`units_report.matched_case_only`), and the join texts in the schema, zod and
-# MCP mirrors were reworded with this bump. The engine stamp did not move for
-# either (see requirements.txt).
-# The `<1.2.11` half is a CAP, not a floor, raised deliberately per release; raise
+# MCP mirrors were reworded with this bump, and 1.2.11 lets a store be written
+# without subject information (`exclude_subject_info`, #1626), which the
+# converter passes on every write and refuses to convert without. The engine
+# stamp did not move for any of them (see requirements.txt).
+# The `<1.2.12` half is a CAP, not a floor, raised deliberately per release; raise
 # it in all three places at once (requirements.txt, this default and
 # BIOSIGIO_FLOOR/BIOSIGIO_CAP, test_hallu_zarr_config.py).
 # Extras are not optional here: [mef3] carries pymef and [hdf5] carries h5py, and
 # without either the matching recordings raise ImportError at convert time even
 # though discovery finds them.
-BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.10,<1.2.11}"
+BIOSIGIO_SPEC="${BIOSIGIO_SPEC:-biosigio[zarr,meg,mef3,hdf5]>=1.2.11,<1.2.12}"
 API_BASE="${API_BASE:-https://api.nemar.org}"
 # The STABLE base published in each index as `contract_base` and in each store's
 # `nemar.contract_url` (#1059/#1064). Distinct from S3_BUCKET/AWS_REGION, which
@@ -770,7 +772,9 @@ setup() {
   # gate in generate_zarr.py cannot catch it: every channel is there, only the
   # names collapse for a consumer that keys by label. On 1.2.9 a channels.tsv row
   # that differs from its channel only in case is silently not applied, so the
-  # store serves the importer's unit where the sidecar declares another.
+  # store serves the importer's unit where the sidecar declares another. On 1.2.10
+  # no writer can leave subject information out of a store; generate_zarr.py
+  # would refuse every dataset with exit 78, so stop here once instead (#1626).
   # And it must be BELOW the cap, and a final release: see BIOSIGIO_FLOOR_PROBE.
   local installed probe_rc=0
   installed="$(VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" -c "$BIOSIGIO_FLOOR_PROBE" "$BIOSIGIO_FLOOR" "$BIOSIGIO_CAP" 2>&1)" || probe_rc=$?
