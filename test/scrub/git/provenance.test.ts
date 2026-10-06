@@ -374,14 +374,80 @@ SUITE("a sourcedata mirror scrubbed in place keeps its upstream checksums (ADR 0
     expect(counts(r.out, "verify: failed")).toMatchObject({ provenanceBlobsKept: 1 });
   });
 
-  test("a ref to a tree, which names the file another way, turns the exception off", async () => {
-    const r = await verifyDamaged("tree-ref", (repo) => {
-      // The `sourcedata` tree, where the provenance blob is `sourcedata_provenance.json`.
+  test("a root-tree ref, as git-annex writes refs/annex/last-index, keeps the exception", async () => {
+    let kind = "";
+    const r = await verifyDamaged("root-tree-ref", (repo) => {
+      // git-annex 10.20260901 writes `refs/annex/last-index` on this checkout (10.20240129 does
+      // on `git status`): a ref to the root tree of the index. Made by hand where it does not.
+      git(repo, "checkout", "-q", "main");
+      const has = git(repo, "for-each-ref", "--format=%(refname)", "refs/annex/last-index").trim();
+      if (has === "")
+        git(repo, "update-ref", "refs/annex/last-index", git(repo, "write-tree").trim());
+      kind = git(repo, "cat-file", "-t", "refs/annex/last-index").trim();
+    });
+    expect(kind).toBe("tree");
+    expect(r.code, r.out).toBe(0);
+    expect(counts(r.out, "verify: ok")).toMatchObject({
+      provenanceHashesKept: 3,
+      provenanceBlobsKept: 2,
+    });
+  });
+
+  test("a ref to a subtree, where the provenance blob has another path, fails", async () => {
+    const r = await verifyDamaged("subtree-ref", (repo) => {
+      // The `sourcedata` tree, where the tip's provenance blob is `sourcedata_provenance.json`.
       git(repo, "tag", "tree-of-sourcedata", "main:sourcedata");
     });
     expect(r.code, r.out).toBe(4);
+    expect(r.out).toContain("reason=old-key-present count=1");
+    expect(counts(r.out, "verify: failed")).toMatchObject({ provenanceBlobsKept: 1 });
+  });
+
+  test("a ref to a tree that also holds the provenance blob at zz/copy.json fails", async () => {
+    const r = await verifyDamaged("tree-second-path", (repo) => {
+      const index = join(repo, "..", "tree-second-path.index");
+      const withIndex = (...args: string[]) =>
+        sh(repo, ["env", `GIT_INDEX_FILE=${index}`, "git", ...args]);
+      const blob = git(repo, "rev-parse", `main:${MIRROR_PROVENANCE}`).trim();
+      withIndex("read-tree", "main");
+      withIndex("update-index", "--add", "--cacheinfo", `100644,${blob},zz/copy.json`);
+      git(repo, "update-ref", "refs/annex/last-index", withIndex("write-tree").trim());
+    });
+    expect(r.code, r.out).toBe(4);
+    expect(r.out).toContain("reason=old-key-present count=1");
+    expect(counts(r.out, "verify: failed")).toMatchObject({ provenanceBlobsKept: 1 });
+  });
+
+  test("a ref to a blob gives that blob no path, and turns the exception off", async () => {
+    const r = await verifyDamaged("blob-ref", (repo) => {
+      git(repo, "tag", "provenance-blob", `main:${MIRROR_PROVENANCE}`);
+    });
+    expect(r.code, r.out).toBe(4);
     expect(r.out).toContain("reason=old-key-present count=2");
-    expect(counts(r.out, "verify: failed")).toMatchObject({ provenanceHashesKept: 0 });
+    expect(counts(r.out, "verify: failed")).toMatchObject({
+      provenanceHashesKept: 0,
+      provenanceBlobsKept: 0,
+    });
+  });
+
+  test("only a regular file keeps the checksums: a symlink at the path fails, an executable file does not", async () => {
+    const link = await verifyDamaged("symlink-mode", (repo) => {
+      // A symlink whose target text is the annotated provenance JSON, at the provenance path.
+      const doc = { ...provenanceAt(repo, "main"), link: true };
+      const blob = sh(repo, ["git", "hash-object", "-w", "--stdin"], JSON.stringify(doc)).trim();
+      git(repo, "update-index", "--cacheinfo", `120000,${blob},${MIRROR_PROVENANCE}`);
+      git(repo, "commit", "-q", "-m", "provenance as a symlink");
+      expect(git(repo, "ls-tree", "main", MIRROR_PROVENANCE)).toStartWith("120000 blob");
+    });
+    expect(link.code, link.out).toBe(4);
+    expect(link.out).toContain("reason=old-key-present count=1");
+    const executable = await verifyDamaged("executable-mode", (repo) => {
+      git(repo, "update-index", "--chmod=+x", MIRROR_PROVENANCE);
+      git(repo, "commit", "-q", "-m", "provenance made executable");
+      expect(git(repo, "ls-tree", "main", MIRROR_PROVENANCE)).toStartWith("100755 blob");
+    });
+    expect(executable.out).not.toContain("reason=old-key-present");
+    expect(counts(executable.out, "verify: failed")).toMatchObject({ provenanceBlobsKept: 2 });
   });
 
   test("a provenance file whose sentence was removed fails provenance-unannotated", async () => {

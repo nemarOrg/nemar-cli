@@ -953,6 +953,8 @@ const EDF_PATH = /\.(edf|bdf)$/i;
 const POINTER_MODES = new Set(["100644", "100755", "120000"]);
 /** A pointer file or a symlink target is a line long; a bigger blob at an EDF path is content. */
 const POINTER_MAX_BYTES = 1024;
+/** The modes a provenance blob may have to keep its checksums: a regular file, never a symlink. */
+const REGULAR_FILE_MODES = new Set(["100644", "100755"]);
 
 /**
  * The key an annex pointer file (`/annex/objects/KEY`) or an annex symlink target
@@ -973,12 +975,13 @@ export function annexKeyOfBlob(content: Uint8Array): string | null {
  * In both modes:
  * - no object reachable from any non-git-annex ref holds an old key's sha256 (every blob,
  *   plus commit and annotated-tag messages), not only the tips; the one exception is the
- *   upstream checksums of {@link PROVENANCE_PATH} (ADR 0085): a blob whose only path, in every
- *   commit of every ref, is that file, where every old hash is a `sha256` of a `files` entry
+ *   upstream checksums of {@link PROVENANCE_PATH} (ADR 0085): a blob that is that file as a
+ *   regular file (`100644` or `100755`), and nothing else, in every commit of every ref and every
+ *   tree a ref names, where every old hash is a `sha256` of a `files` entry
  *   ({@link provenanceHashUse}), is not a hit when it carries {@link PROVENANCE_NOTE_KEY}, and is
- *   `provenance-unannotated` when it does not; the hashes kept are counted
- *   (`provenanceHashesKept`, distinct, and `provenanceBlobsKept`). The exception is off when any
- *   ref names something other than a commit, whose blobs no commit's path accounts for;
+ *   `provenance-unannotated` when it does not. The hashes kept are counted (`provenanceHashesKept`,
+ *   distinct, and `provenanceBlobsKept`). The exception is off while any ref names a blob, or anything but
+ *   a commit or a tree, because such a blob has no path to check;
  * - no dropped path in any commit's tree;
  * - every blanked key is empty in every commit that has the file, and every structural edit holds;
  * - the appended text is in every commit exactly once, at the end of the file;
@@ -1050,23 +1053,44 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
   // so does the provenance exception, which needs EVERY path a blob has in any commit; the one
   // path `rev-list --objects` prints for a blob is only the first it met, and is one of these.
   const rawEntries = parseRawLog(await git(repo, RAW_LOG_ARGS, `${scanRefs.join("\n")}\n`));
-  const blobPaths = new Map<string, Set<string>>();
-  for (const e of rawEntries) {
-    if (isZeroSha(e.newSha)) continue;
-    const paths = blobPaths.get(e.newSha) ?? new Set<string>();
-    paths.add(e.path);
-    blobPaths.set(e.newSha, paths);
-  }
-  // A ref to a tree or a blob reaches blobs, under other names, that no commit's entry names;
-  // with one, nothing is exempt.
-  const peeled: string[] = [];
+  /** Every place a blob is, as `<mode> <path>`: in any commit, and in any tree a ref names. */
+  const blobPlaces = new Map<string, Set<string>>();
+  const place = (oid: string, mode: string, path: string): void => {
+    const places = blobPlaces.get(oid) ?? new Set<string>();
+    places.add(`${mode} ${path}`);
+    blobPlaces.set(oid, places);
+  };
+  for (const e of rawEntries) if (!isZeroSha(e.newSha)) place(e.newSha, e.newMode, e.path);
+  // A ref to a tree (git-annex's `refs/annex/last-index` is one) names its blobs under the
+  // tree's own paths, which the commit walk never sees, so they are listed too. A ref to a blob,
+  // or to anything but a commit or a tree, gives its blob no path at all: then nothing is exempt.
+  const peeled: { ref: string; type: string }[] = [];
   await catBatch(
     repo,
     scanRefs.map((r) => `${r}^{}`),
     "check",
-    { header: (_i, info) => peeled.push(info?.type ?? "missing") },
+    {
+      header: (i, info) =>
+        peeled.push({ ref: scanRefs[i] as string, type: info?.type ?? "missing" }),
+    },
   );
-  const commitsOnly = peeled.every((type) => type === "commit");
+  let exemptionOn = true;
+  for (const { ref, type } of peeled) {
+    if (type === "commit") continue;
+    if (type !== "tree") {
+      exemptionOn = false;
+      continue;
+    }
+    const listing = await gitRaw(repo, ["ls-tree", "-r", "-z", "--full-tree", `${ref}^{}`]);
+    if (listing.exitCode !== 0) {
+      throw new GitScrubError("git-command-failed", "git ls-tree", listing.stderr);
+    }
+    for (const entry of listing.stdout.toString("utf8").split("\0")) {
+      const tab = entry.indexOf("\t");
+      const [mode, kind, oid] = entry.slice(0, tab).split(" ");
+      if (tab > 0 && kind === "blob" && mode && oid) place(oid, mode, entry.slice(tab + 1));
+    }
+  }
 
   // Old keys in every object reachable from any non-annex ref.
   const oldHashes = new Set(Object.keys(keymap).map((k) => parseKey(k).sha256));
@@ -1074,10 +1098,14 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
     .split("\n")
     .filter(Boolean)
     .map((line) => line.split(" ")[0] as string);
-  /** A blob that is the provenance file, and nothing else, in every commit of every ref. */
+  /** A blob that is the provenance file as a regular file, and nothing else, wherever it is. */
   const onlyProvenance = (oid: string): boolean => {
-    const paths = blobPaths.get(oid);
-    return commitsOnly && paths?.size === 1 && paths.has(PROVENANCE_PATH);
+    const places = blobPlaces.get(oid);
+    if (!exemptionOn || places === undefined || places.size === 0) return false;
+    return [...places].every((p) => {
+      const space = p.indexOf(" ");
+      return REGULAR_FILE_MODES.has(p.slice(0, space)) && p.slice(space + 1) === PROVENANCE_PATH;
+    });
   };
   let blobHits = 0;
   let messageHits = 0;
@@ -1101,8 +1129,8 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
       kinds.delete(i);
       if (!scanner?.found) return;
       if (kind !== "blob") messageHits++;
-      else if (onlyProvenance(objects[i] as string)) provenanceHits.push(objects[i] as string);
-      else blobHits++;
+      else if (!onlyProvenance(objects[i] as string)) blobHits++;
+      else provenanceHits.push(objects[i] as string);
     },
   });
   // The upstream checksums a provenance file keeps (ADR 0085): only where the rule allows them.
