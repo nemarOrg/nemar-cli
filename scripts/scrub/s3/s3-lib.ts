@@ -128,6 +128,11 @@ const CODE_BY_S3: Record<string, AwsErrorCode> = {
   "401": "credentials",
 };
 
+/** An S3 error code (the CLI's, or one entry of a DeleteObjects `Errors` list) as a fixed class. */
+export function classifyS3Code(code: string, op: string): AwsCliError {
+  return new AwsCliError(CODE_BY_S3[code] ?? "failed", op);
+}
+
 /**
  * Classify a FAILED `aws` invocation from its stderr into a fixed class.
  *
@@ -138,10 +143,7 @@ const CODE_BY_S3: Record<string, AwsErrorCode> = {
  */
 export function classifyAwsError(stderr: string, fallbackOp: string): AwsCliError {
   const m = /An error occurred \(([A-Za-z0-9]+)\) when calling the (\w+) operation/.exec(stderr);
-  if (m) {
-    const op = m[2] as string;
-    return new AwsCliError(CODE_BY_S3[m[1] as string] ?? "failed", op);
-  }
+  if (m) return classifyS3Code(m[1] as string, m[2] as string);
   if (/Could not connect to the endpoint URL|Connection was closed|Read timeout/.test(stderr)) {
     return new AwsCliError("unreachable", fallbackOp);
   }
@@ -1295,4 +1297,173 @@ export async function deleteVersion(
   const args = ["--bucket", ctx.bucket, "--key", key, "--version-id", versionId];
   if (bypass) args.push("--bypass-governance-retention");
   await ctx.aws.api("delete-object", args);
+}
+
+/** The most versions one DeleteObjects request may name (S3's own limit). */
+export const DELETE_BATCH_MAX = 1000;
+
+/**
+ * How many requests one batch gets in all (the first and the resends), and the pause before the
+ * next, which grows with the attempt. A busy S3 answers a thousand-version request with `SlowDown`
+ * on some of its items; the pauses add up to a few seconds, then the item is reported and a re-run
+ * resumes.
+ */
+export const DELETE_BATCH_ATTEMPTS = 5;
+export const DELETE_BATCH_BACKOFF_MS = 500;
+
+/** One version, or one delete marker, of one key. */
+export interface VersionRef {
+  key: string;
+  versionId: string;
+}
+
+/**
+ * Per-item codes of a DeleteObjects `Errors` list that mean "ask again", not "refused": the
+ * request was throttled or S3 failed on its side. Anything else (AccessDenied above all, which is
+ * a lock) is final for that item.
+ */
+const RETRYABLE_S3_CODES = new Set([
+  "SlowDown",
+  "InternalError",
+  "ServiceUnavailable",
+  "RequestTimeout",
+  "Throttling",
+  "ThrottlingException",
+  "RequestLimitExceeded",
+]);
+
+/** Whole-request failures worth another try: the request may not have reached S3, or S3 was busy. */
+const RETRYABLE_REQUEST_CODES = new Set<AwsErrorCode>(["throttled", "unreachable", "timeout"]);
+
+const versionRefId = (key: string, versionId: string) => `${key}\0${versionId}`;
+
+/**
+ * Delete up to {@link DELETE_BATCH_MAX} versions (or delete markers) in ONE `DeleteObjects`
+ * request, each by its version id, and say which were not deleted.
+ *
+ * Returns one fixed word (`DeleteObjects:access-denied`, ...) for every item that is NOT known to
+ * be gone, and `[]` when all are (or none were given). It throws only for input that could do
+ * harm, before any request: an item with no version id (the request would then add a delete
+ * marker instead of removing a version) and more items than S3 takes.
+ *
+ * Why the answer is read item by item: `DeleteObjects` answers 200 even when an item was
+ * refused (a locked object without the bypass is a per-item `AccessDenied` in `Errors`), so a
+ * 200 proves nothing about any one version. Every requested item must appear in `Deleted`, or
+ * its refusal in `Errors`; one that appears in neither is reported as `bad-output`, never
+ * assumed deleted. The caller's own listing afterwards stays the authority.
+ *
+ * `bypass` sends the governance bypass for the whole request, as the single-delete does. Items
+ * that were throttled or failed on S3's side are sent again, only those, up to `attempts`
+ * requests in all. Deleting a version that is already gone is not an error on S3, so a resend is
+ * safe.
+ *
+ * The request body goes in a private temp file (`--delete file://...`), not on the command line:
+ * a thousand versions would pass the per-argument limit of some systems and sit in `ps`.
+ */
+export async function deleteVersionBatch(
+  ctx: S3Ctx,
+  items: readonly VersionRef[],
+  bypass: boolean,
+  opts: { attempts?: number; backoffMs?: number } = {},
+): Promise<string[]> {
+  if (items.length === 0) return [];
+  if (items.length > DELETE_BATCH_MAX) throw new StageError("delete-batch-too-large");
+  if (items.some((it) => it.versionId === "")) throw new StageError("delete-without-version-id");
+  const attempts = opts.attempts ?? DELETE_BATCH_ATTEMPTS;
+  const backoffMs = opts.backoffMs ?? DELETE_BATCH_BACKOFF_MS;
+  const failed: string[] = [];
+  let pending = [...items];
+  for (let attempt = 1; pending.length > 0; attempt++) {
+    const last = attempt >= attempts;
+    const file = ctx.tmp.file();
+    let answer: Record<string, unknown>;
+    try {
+      await writeFile(
+        file,
+        JSON.stringify({
+          Objects: pending.map((it) => ({ Key: it.key, VersionId: it.versionId })),
+          Quiet: false,
+        }),
+        { mode: 0o600 },
+      );
+      const args = ["--bucket", ctx.bucket, "--delete", `file://${file}`];
+      if (bypass) args.push("--bypass-governance-retention");
+      answer = await ctx.aws.api("delete-objects", args, { slow: true });
+    } catch (err) {
+      if (!last && err instanceof AwsCliError && RETRYABLE_REQUEST_CODES.has(err.code)) {
+        await new Promise((r) => setTimeout(r, backoffMs * attempt));
+        continue;
+      }
+      const word = failureWord(err);
+      for (let i = 0; i < pending.length; i++) failed.push(word);
+      return failed;
+    } finally {
+      await ctx.tmp.remove(file);
+    }
+    const deleted = new Set<string>();
+    for (const d of Array.isArray(answer.Deleted) ? answer.Deleted : []) {
+      const e = d as Record<string, unknown>;
+      const id = e.VersionId ?? e.DeleteMarkerVersionId;
+      if (typeof e.Key === "string" && typeof id === "string") {
+        deleted.add(versionRefId(e.Key, id));
+      }
+    }
+    const refused = new Map<string, string>();
+    for (const r of Array.isArray(answer.Errors) ? answer.Errors : []) {
+      const e = r as Record<string, unknown>;
+      if (typeof e.Key === "string" && typeof e.VersionId === "string") {
+        refused.set(versionRefId(e.Key, e.VersionId), typeof e.Code === "string" ? e.Code : "");
+      }
+    }
+    const again: VersionRef[] = [];
+    for (const it of pending) {
+      const id = versionRefId(it.key, it.versionId);
+      if (deleted.has(id)) continue;
+      const code = refused.get(id);
+      if (code === undefined) {
+        failed.push(failureWord(new AwsCliError("bad-output", "DeleteObjects")));
+      } else if (!last && RETRYABLE_S3_CODES.has(code)) {
+        again.push(it);
+      } else {
+        failed.push(failureWord(classifyS3Code(code, "DeleteObjects")));
+      }
+    }
+    pending = again;
+    if (pending.length > 0) await new Promise((r) => setTimeout(r, backoffMs * attempt));
+  }
+  return failed;
+}
+
+/**
+ * Delete every version in `items` (duplicates sent once), {@link DELETE_BATCH_MAX} per request,
+ * with at most `concurrency` requests in flight. Returns the fixed word of every item that was
+ * not deleted. `onBatch` hears the running totals after each request, for a progress line.
+ */
+export async function deleteVersions(
+  ctx: S3Ctx,
+  items: readonly VersionRef[],
+  bypass: boolean,
+  concurrency: number,
+  onBatch?: (progress: { done: number; total: number; failed: number }) => void,
+): Promise<string[]> {
+  const seen = new Set<string>();
+  const unique: VersionRef[] = [];
+  for (const it of items) {
+    const id = versionRefId(it.key, it.versionId);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    unique.push(it);
+  }
+  const batches: VersionRef[][] = [];
+  for (let i = 0; i < unique.length; i += DELETE_BATCH_MAX) {
+    batches.push(unique.slice(i, i + DELETE_BATCH_MAX));
+  }
+  const failed: string[] = [];
+  let done = 0;
+  await runPool(batches, concurrency, async (batch) => {
+    failed.push(...(await deleteVersionBatch(ctx, batch, bypass)));
+    done += batch.length;
+    onBatch?.({ done, total: unique.length, failed: failed.length });
+  });
+  return failed;
 }

@@ -16,7 +16,7 @@
  *              [--git-verified git-verified.json]
  *   zarr-public --dataset ID --zarr-verified F [--public-base URL] [--bucket nemar]
  *              [--concurrency 8]
- *   canary     --prefix <nm099999|xx09[0-8]NNN>/canary-<random>/ [--execute] [--multipart]
+ *   canary     --prefix <nm099999|xx09[0-8]NNN>/canary-<random>/ [--execute] [--multipart] [--batch]
  *              [--bucket nemar]
  *
  * Every subcommand is read-only unless it is given `--execute`; `plan`, `verify` and
@@ -124,7 +124,7 @@ const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|zarr|drop-arc
              or when there is no store at all and the proof does not say no-zarr. Exit 0 only when
              at least one store was read and every one is clean, or the proof says no-zarr and
              there is none.
-  canary     --prefix ID/canary-RANDOM/ [--execute] [--multipart] [--bucket nemar]
+  canary     --prefix ID/canary-RANDOM/ [--execute] [--multipart] [--batch] [--bucket nemar]
              ID is nm099999 or a dev ephemeral sandbox id, xx090000 to xx098999; never a live
              dataset, a production sandbox or the exemplar fleet.
 common: --region us-east-2  --timeout-sec 120`;
@@ -154,6 +154,7 @@ const OPTIONS = {
   "timeout-sec": { type: "string" },
   execute: { type: "boolean" },
   multipart: { type: "boolean" },
+  batch: { type: "boolean" },
   help: { type: "boolean", short: "h" },
 } as const;
 
@@ -313,6 +314,7 @@ export async function run(argv: string[], log: (line: string) => void): Promise<
         prefix: need(v.prefix, "prefix"),
         execute,
         multipart: v.multipart === true,
+        batch: v.batch === true,
       });
     default:
       return usage("unknown-command");

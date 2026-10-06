@@ -34,9 +34,11 @@ import {
   type PublicEndpoint,
   SLOW,
   addUnreadableKey,
+  batchDeleted,
   buildAssembled,
   centuryFromNow,
   copyDir,
+  deleteRequests,
   edfFile,
   edfHeader,
   fileSha256,
@@ -137,7 +139,7 @@ const firstNewKey = () => [a.newKey as string, b.newKey as string].sort()[0] as 
 
 /** Nothing was deleted: every old version and marker is still there. */
 function expectOldIntact() {
-  expect(standin.calls("DeleteObject").length).toBe(0);
+  expect(deleteRequests(standin)).toBe(0);
   for (const f of [a, b]) {
     expect(versionIdsOf(f.oldKey).sort()).toEqual([...(oldIds[f.oldKey] as string[])].sort());
   }
@@ -303,7 +305,7 @@ describe("delete-old: refusals", () => {
         expect(raised.stdout).toContain("1 versions or markers of old keys are not in the plan");
         expect(raised.stdout).toContain("refused over-max-delete: versions+markers=7 over limit=6");
       }
-      expect(standin.calls("DeleteObject").length).toBe(0);
+      expect(deleteRequests(standin)).toBe(0);
       expect(versionIdsOf(a.oldKey)).toContain(extra);
 
       // Swapping a recorded id for an unrecorded one keeps the count and is refused all the same.
@@ -500,14 +502,18 @@ describe("delete-old: deleting", () => {
       for (const f of [a, b]) {
         expect(standin.versions(BUCKET, objectPath(f.oldKey)).length, f.label).toBe(0);
       }
-      // Each delete named a version id and carried the bypass; none was a bare delete.
-      const deletes = standin.calls("DeleteObject");
+      // Each version was named by id in a batch that carried the bypass; none was a bare delete,
+      // and the six went in ONE request (no single-object delete at all).
+      const deletes = batchDeleted(standin);
       expect(deletes.length).toBe(6);
+      expect(standin.calls("DeleteObjects").length).toBe(1);
+      expect(standin.calls("DeleteObject").length).toBe(0);
       for (const del of deletes) {
         expect(del.versionId, "version id").toBeTruthy();
         expect(del.bypass, "bypass header").toBe(true);
-        expect(del.status).toBe(204);
       }
+      // Counts only on the progress line: no key, no version id.
+      expect(r.stdout).toContain("delete-old: deleted 6 of 6 in this group");
       const deletedIds = deletes.map((x) => x.versionId).sort();
       expect(deletedIds).toEqual(
         [...(oldIds[a.oldKey] as string[]), ...(oldIds[b.oldKey] as string[])].sort(),
@@ -542,7 +548,7 @@ describe("delete-old: deleting", () => {
     async () => {
       writeProofs();
       let newcomer = "";
-      standin.beforeOp("DeleteObject", () => {
+      standin.beforeOp("DeleteObjects", () => {
         // A writer re-adds the original to B just as the deletes begin.
         newcomer = standin.putObject(BUCKET, objectPath(b.oldKey), b.bytes, {
           lockUntil: centuryFromNow(),
@@ -566,7 +572,7 @@ describe("delete-old: deleting", () => {
       standin.setDenyBypass(true);
       const r = await runScrub(standin, executeArgs());
       expect(r.exitCode, r.all).toBe(5);
-      expect(r.stdout).toContain("DeleteObject:access-denied");
+      expect(r.stdout).toContain("DeleteObjects:access-denied");
       expect(has(dir, "deleted.json")).toBe(false);
       // Delete markers are not locked, so those went; the locked versions stayed.
       for (const f of [a, b]) {
@@ -621,9 +627,7 @@ describe("delete-old: pruning noncurrent versions", () => {
       expect(standin.current(BUCKET, manifest)?.deleteMarker).toBe(false);
 
       // The pruning deletes are by id and never carry the bypass.
-      const prunes = standin
-        .calls("DeleteObject")
-        .filter((x) => !x.key.startsWith(`${DATASET}/objects/`));
+      const prunes = batchDeleted(standin).filter((x) => !x.key.startsWith(`${DATASET}/objects/`));
       expect(prunes.length).toBe(4);
       for (const p of prunes) {
         expect(p.versionId).toBeTruthy();
@@ -646,7 +650,7 @@ describe("delete-old: pruning noncurrent versions", () => {
       await proveZarr();
       const r = await runScrub(standin, executeArgs(["--prune-noncurrent", `${DATASET}/zarr/`]));
       expect(r.exitCode, r.all).toBe(5);
-      expect(r.stdout).toContain("DeleteObject:access-denied");
+      expect(r.stdout).toContain("DeleteObjects:access-denied");
       expect(standin.versions(BUCKET, zarrJson).length).toBe(2);
       expect(has(dir, "deleted.json")).toBe(false);
     },
@@ -690,7 +694,7 @@ describe("delete-old: pruning noncurrent versions", () => {
       writeProofs();
       // The first delete is when a writer regenerates the manifest once more: the version that
       // was current becomes history after the preflight has looked.
-      standin.beforeOp("DeleteObject", () => {
+      standin.beforeOp("DeleteObjects", () => {
         standin.putObject(BUCKET, manifest, manifestBody());
       });
       const pruneVersion = ["--prune-noncurrent", `${DATASET}/version/`];
@@ -723,18 +727,19 @@ describe("delete-old: pruning noncurrent versions", () => {
     "a key that is only history, a version under a delete marker, is pruned whole",
     async () => {
       writeProofs();
-      standin.putObject(BUCKET, zarrJson, body(dirtyStore));
-      standin.putDeleteMarker(BUCKET, zarrJson);
+      const oldVersion = standin.putObject(BUCKET, zarrJson, body(dirtyStore));
+      const oldMarker = standin.putDeleteMarker(BUCKET, zarrJson);
       const r = await runScrub(standin, executeArgs(["--prune-noncurrent", `${DATASET}/zarr/`]));
       expect(r.exitCode, r.all).toBe(0);
       expect(r.stdout).toContain("prune noncurrent versions=1 markers=1");
       expect(standin.versions(BUCKET, zarrJson)).toEqual([]);
-      // The version went first; the marker only once nothing was left under it.
-      const order = standin
-        .calls("DeleteObject")
-        .filter((c) => c.key === zarrJson)
-        .map((c) => c.status);
-      expect(order).toEqual([204, 204]);
+      // The version went first; the marker only once nothing was left under it: the marker is in
+      // a LATER request than the version, never beside it.
+      const requestOf = (id: string) =>
+        standin.calls("DeleteObjects").findIndex((c) => c.items?.some((i) => i.versionId === id));
+      const [version, marker] = [oldVersion, oldMarker].map(requestOf) as [number, number];
+      expect(version).toBeGreaterThanOrEqual(0);
+      expect(marker).toBeGreaterThan(version);
     },
     SLOW,
   );
@@ -747,7 +752,7 @@ describe("delete-old: pruning noncurrent versions", () => {
       standin.putDeleteMarker(BUCKET, zarrJson);
       const r = await runScrub(standin, executeArgs(["--prune-noncurrent", `${DATASET}/zarr/`]));
       expectStopped(r, 5, "history-remains");
-      expect(r.stdout).toContain("DeleteObject:access-denied");
+      expect(r.stdout).toContain("DeleteObjects:access-denied");
       expect(standin.current(BUCKET, zarrJson)).toBeUndefined();
       expect(standin.versions(BUCKET, zarrJson).map((v) => v.deleteMarker)).toEqual([false, true]);
       expect(has(dir, "deleted.json")).toBe(false);
@@ -790,7 +795,7 @@ describe("delete-old: what must be true before an old key may go", () => {
     for (const flag of modes) {
       const r = await runScrub(standin, deleteArgs([...flag, ...(opts.extra ?? [])], opts.base));
       expectStopped(r, 3, word, `${flag.length ? "execute" : "dry run"}: ${word}`);
-      expect(standin.calls("DeleteObject").length, word).toBe(0);
+      expect(deleteRequests(standin), word).toBe(0);
       expect(has(dir, "deleted.json"), word).toBe(false);
     }
     if (opts.intact !== false) expectOldIntact();
@@ -1332,7 +1337,7 @@ describe("delete-old: every file names the same dataset, bucket and bytes (I11, 
       const r = await runScrub(standin, executeArgs());
       expectStopped(r, 3, "version-size-differs");
       expect(r.stdout).toContain("1 versions of old keys are not the size their key declares");
-      expect(standin.calls("DeleteObject").length).toBe(0);
+      expect(deleteRequests(standin)).toBe(0);
     },
     SLOW,
   );
@@ -1342,7 +1347,7 @@ describe("delete-old: every file names the same dataset, bucket and bytes (I11, 
     async () => {
       writeProofs();
       // Between the last precondition and the final listing: while the deletes run.
-      standin.beforeOp("DeleteObject", () => {
+      standin.beforeOp("DeleteObjects", () => {
         standin.putObject(BUCKET, `${DATASET}/archives/${DATASET}.zip`, body("zip"));
       });
       const r = await runScrub(standin, executeArgs());
@@ -1481,7 +1486,7 @@ describe("delete-old: every refusal is evaluated, and all are reported together"
           "delete-old: keys=2 versions=5 markers=2 planRecorded=6 limit=6",
         );
         expect(r.stdout).toContain("delete-old: prune noncurrent versions=2 markers=0");
-        expect(standin.calls("DeleteObject").length).toBe(0);
+        expect(deleteRequests(standin)).toBe(0);
         expect(has(dir, "deleted.json")).toBe(false);
       }
     },

@@ -23,9 +23,11 @@ import {
   DATASET,
   SLOW,
   addUnreadableKey,
+  batchDeleted,
   buildAssembled,
   centuryFromNow,
   copyDir,
+  deleteRequests,
   fixtureA,
   fixtureD,
   has,
@@ -134,7 +136,7 @@ const bystanderIds = (key: string) => standin.versions(BUCKET, key).map((v) => v
 
 /** Every archive version and marker is still there, and nothing was deleted. */
 function expectArchivesIntact(ids: string[]) {
-  expect(standin.calls("DeleteObject").length).toBe(0);
+  expect(deleteRequests(standin)).toBe(0);
   expect(
     [A, B, C].flatMap((k) => standin.versions(BUCKET, k).map((v) => v.versionId)).sort(),
   ).toEqual([...ids].sort());
@@ -202,13 +204,15 @@ describe("drop-archives", () => {
       expect(r.exitCode, r.all).toBe(0);
       expect(r.stdout).toContain("zero versions and zero markers remain");
 
-      // Seven deletes: five versions and two markers, each by its own id, none with the bypass.
-      const deletes = standin.calls("DeleteObject");
+      // Seven versions: five versions and two markers, each by its own id, none with the
+      // bypass, all in ONE request, and no single-object delete.
+      const deletes = batchDeleted(standin);
       expect(deletes.length).toBe(7);
+      expect(standin.calls("DeleteObjects").length).toBe(1);
+      expect(standin.calls("DeleteObject").length).toBe(0);
       for (const d of deletes) {
         expect(d.versionId, "version id").toBeTruthy();
         expect(d.bypass, "bypass header").toBe(false);
-        expect(d.status).toBe(204);
       }
       expect(deletes.map((d) => d.versionId).sort()).toEqual([...ids].sort());
       // Gone from the stand-in, key by key, and the final listing was a fresh one.
@@ -246,13 +250,14 @@ describe("drop-archives", () => {
       standin.log.length = 0;
       const r = await runScrub(standin, dropArgs(dir, ["--execute"]));
       expect(r.exitCode, r.all).toBe(5);
-      expect(r.stdout).toContain("DeleteObject:access-denied=1");
+      expect(r.stdout).toContain("DeleteObjects:access-denied=1");
       expect(r.stdout).toContain("versions and markers remain: 1");
       expect(has(dir, "archives-dropped.json")).toBe(false);
       // Only the locked version stands, and every attempt, including that one, was without bypass.
       expect(standin.keys(BUCKET, `${DATASET}/archives/`)).toEqual([arch("locked.zip")]);
       expect(bystanderIds(arch("locked.zip"))).toEqual([locked]);
-      expect(standin.calls("DeleteObject").every((d) => d.bypass === false)).toBe(true);
+      expect(batchDeleted(standin).length).toBeGreaterThan(0);
+      expect(batchDeleted(standin).every((d) => d.bypass === false)).toBe(true);
     },
     SLOW,
   );
@@ -262,7 +267,7 @@ describe("drop-archives", () => {
     async () => {
       const { dir } = await seeded();
       let newcomer = "";
-      standin.beforeOp("DeleteObject", () => {
+      standin.beforeOp("DeleteObjects", () => {
         newcomer = standin.putObject(BUCKET, arch("late.zip"), body("a workflow rebuilt it"));
       });
       const r = await runScrub(standin, dropArgs(dir, ["--execute"]));
@@ -286,7 +291,7 @@ describe("drop-archives", () => {
         versions: 0,
         markers: 0,
       });
-      expect(standin.calls("DeleteObject").length).toBe(0);
+      expect(deleteRequests(standin)).toBe(0);
     },
     SLOW,
   );
@@ -495,7 +500,7 @@ describe("drop-archives: every proof of the scrub must be there first (runbook s
       standin.log.length = 0;
       const r = await runScrub(standin, dropArgs(dir, ["--execute"]));
       expect(r.exitCode, r.all).toBe(0);
-      expect(standin.calls("DeleteObject").length).toBe(7);
+      expect(batchDeleted(standin).length).toBe(7);
     },
     SLOW,
   );
@@ -543,7 +548,7 @@ describe("drop-archives: proofs and stage files (S2, S1)", () => {
       rmSync(proof);
       mkdirSync(proof);
       expectStopped(await runScrub(standin, dropArgs(dir)), 1, "git-proof-unreadable");
-      expect(standin.calls("DeleteObject").length).toBe(0);
+      expect(deleteRequests(standin)).toBe(0);
     },
     SLOW,
   );

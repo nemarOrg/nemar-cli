@@ -25,12 +25,10 @@ import { parsePlan } from "../contract";
 import {
   EXIT,
   countWords,
-  deleteVersion,
-  failureWord,
+  deleteVersions,
   formatWordCounts,
   hasCurrentKey,
   listPrefixVersions,
-  runPool,
 } from "./s3-lib";
 import { StageError } from "./s3-lib";
 import {
@@ -103,15 +101,8 @@ export async function dropArchivesStage(o: DropArchivesOptions): Promise<number>
     refusals.stopIfAny("drop-archives", o.log);
     if (!o.execute) return 0;
 
-    const errors: string[] = [];
-    await runPool(found, o.concurrency, async (e) => {
-      try {
-        // By id, and never with the bypass: nothing here is locked, so a refusal is news.
-        await deleteVersion(ctx, e.key, e.versionId, false);
-      } catch (err) {
-        errors.push(failureWord(err));
-      }
-    });
+    // By id, and never with the bypass: nothing here is locked, so a refusal is news.
+    const errors = await deleteVersions(ctx, found, false, o.concurrency);
 
     // The listing is the authority, not the answers to the deletes.
     const left = await listPrefixVersions(ctx, prefix);

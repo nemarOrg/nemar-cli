@@ -247,6 +247,7 @@ describe("assemble", () => {
         "UploadPartCopy",
         "CompleteMultipartUpload",
         "DeleteObject",
+        "DeleteObjects",
       ] as const) {
         expect(standin.calls(op).length, op).toBe(0);
       }

@@ -68,6 +68,7 @@ import {
   type S3Ctx,
   StageError,
   TempArea,
+  type VersionRef,
   abortMultipart,
   bytesEqual,
   callsFor,
@@ -76,6 +77,8 @@ import {
   createAwsRunner,
   createMultipart,
   deleteVersion,
+  deleteVersionBatch,
+  deleteVersions,
   failureWord,
   formatWordCounts,
   fromHex,
@@ -1659,17 +1662,12 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
     }
 
     const errors: string[] = [];
-    const removeAll = async (
-      items: Array<{ key: string; versionId: string }>,
-      bypass: boolean,
-    ): Promise<void> => {
-      await runPool(items, o.concurrency, async (it) => {
-        try {
-          await deleteVersion(ctx, it.key, it.versionId, bypass);
-        } catch (err) {
-          errors.push(failureWord(err));
-        }
-      });
+    const removeAll = async (items: VersionRef[], bypass: boolean): Promise<void> => {
+      errors.push(
+        ...(await deleteVersions(ctx, items, bypass, o.concurrency, (p) =>
+          o.log(`delete-old: deleted ${p.done - p.failed} of ${p.total} in this group`),
+        )),
+      );
     };
     await removeAll(
       listed.flatMap((l) =>
@@ -1748,6 +1746,8 @@ export interface CanaryOptions extends CommonOptions {
   execute: boolean;
   /** Also prove the multipart path (a lock at create, an upload part and a server-side copy). */
   multipart: boolean;
+  /** Also prove the batch delete (`DeleteObjects`): a lock in a 200, and the bypass. */
+  batch: boolean;
 }
 
 /**
@@ -1839,6 +1839,73 @@ async function proveConditionalWrites(ctx: S3Ctx, key: string, body: string, o: 
   o.log("canary: the unlocked versions were deleted by id without the bypass");
 }
 
+/**
+ * Prove what `DeleteObjects` does on the real bucket, which the stand-in only believes: it
+ * answers 200 with the refused versions listed per item (a locked one without the bypass), it
+ * removes the unlocked ones and a delete marker named by id in the same request, a key with
+ * characters XML escapes survives the round trip, and the bypass removes the locked ones.
+ */
+async function proveBatchDelete(
+  ctx: S3Ctx,
+  prefix: string,
+  body: string,
+  retainUntil: string,
+  o: CommonOptions,
+) {
+  await writeFile(body, "canary\n", { mode: 0o600 });
+  const locked: VersionRef[] = [];
+  for (const name of ["batch-locked-1.txt", "batch-locked-2.txt"]) {
+    const key = `${prefix}${name}`;
+    locked.push({ key, versionId: await putObjectLocked(ctx, key, body, {}, retainUntil) });
+  }
+  const specialKey = `${prefix}batch plain & <co>.txt`;
+  const special = { key: specialKey, versionId: await putObjectPlain(ctx, specialKey, body, {}) };
+  const markedKey = `${prefix}batch-marked.txt`;
+  const marked = { key: markedKey, versionId: await putObjectPlain(ctx, markedKey, body, {}) };
+  // A bare delete adds a delete marker, whose own version id the batch then names.
+  await ctx.aws.api("delete-object", ["--bucket", ctx.bucket, "--key", markedKey]);
+  const markerId = (await listKeyVersions(ctx, markedKey)).markers[0]?.versionId;
+  if (!markerId) throw new StageError("batch-marker-missing");
+
+  const refused = await deleteVersionBatch(
+    ctx,
+    [...locked, special, marked, { key: markedKey, versionId: markerId }],
+    false,
+  );
+  if (refused.length === 0) throw new StageError("batch-lock-not-enforced");
+  if (refused.length !== 2 || refused.some((w) => w !== "DeleteObjects:access-denied")) {
+    throw new StageError(`batch-unexpected:${formatWordCounts(countWords(refused))}`);
+  }
+  const lockedIds = new Set(locked.map((l) => l.versionId));
+  const stayed = await listPrefixVersions(ctx, `${prefix}batch`);
+  if (stayed.length !== 2 || stayed.some((e) => !lockedIds.has(e.versionId))) {
+    throw new StageError("batch-result-wrong");
+  }
+  o.log(
+    "canary: a batch delete without the bypass removed 3 unlocked versions (one a delete marker, one with XML characters in its key) and refused the 2 locked ones",
+  );
+
+  const bypassed = await deleteVersionBatch(ctx, locked, true);
+  if (bypassed.length > 0) {
+    throw new StageError(
+      bypassed.every((w) => w === "DeleteObjects:access-denied")
+        ? "batch-bypass-denied"
+        : `batch-unexpected:${formatWordCounts(countWords(bypassed))}`,
+    );
+  }
+  if ((await listPrefixVersions(ctx, `${prefix}batch`)).length > 0) {
+    throw new StageError("batch-result-wrong");
+  }
+  o.log("canary: a batch delete with the bypass removed the 2 locked versions");
+
+  // Not a pass or fail: what a resend of an already deleted version answers, for the record. A
+  // retry after a lost answer sends such versions again.
+  const again = await deleteVersionBatch(ctx, [special], false);
+  o.log(
+    `canary: a batch naming an already deleted version answered ${again.length === 0 ? "deleted" : (again[0] as string)}`,
+  );
+}
+
 export async function canaryStage(o: CanaryOptions): Promise<number> {
   checkCanaryPrefix(o.prefix);
   const steps = [
@@ -1854,6 +1921,14 @@ export async function canaryStage(o: CanaryOptions): Promise<number> {
     steps.push(
       `build ${o.prefix}multipart.bin from an upload part and a server-side copy, with the lock set at create`,
       "repeat the delete without and with the bypass on it and on its source",
+    );
+  }
+  if (o.batch) {
+    steps.push(
+      `put two locked versions, an unlocked one under a key with XML characters, and a delete marker, under ${o.prefix}batch*`,
+      "delete all five in ONE DeleteObjects request WITHOUT the bypass (expect the 3 unlocked gone, the 2 locked refused per item)",
+      "delete the 2 locked in one DeleteObjects request WITH the bypass (expect success)",
+      "name an already deleted version again (recorded, not judged)",
     );
   }
   if (!o.execute) {
@@ -1914,6 +1989,7 @@ export async function canaryStage(o: CanaryOptions): Promise<number> {
         await proveAndDelete(ctx, mpKey, mpVersion, o);
         await proveAndDelete(ctx, sourceKey, sourceVersion, o);
       }
+      if (o.batch) await proveBatchDelete(ctx, o.prefix, body, retainUntil, o);
     } finally {
       await ctx.tmp.remove(body);
     }
