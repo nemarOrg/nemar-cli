@@ -440,6 +440,35 @@ export async function runScrub(
   return { exitCode, stdout, stderr, all: `${stdout}\n${stderr}` };
 }
 
+export const HASH_STAGE = path.join(REPO_ROOT, "scripts", "scrub", "hash", "hash_stage.py");
+
+/**
+ * The REAL Python hash stage with its default source (the real `aws` CLI) pointed at the
+ * stand-in, with no retries, so a failing read fails at once.
+ */
+export async function runHashStage(
+  standin: S3Standin,
+  args: string[],
+  extraEnv: Record<string, string> = {},
+): Promise<RunResult> {
+  const proc = spawn({
+    cmd: ["python3", HASH_STAGE, ...args, "--retries", "0", "--retry-backoff", "0"],
+    env: awsTestEnv(standin, {
+      AWS_DEFAULT_REGION: "us-east-2",
+      PYTHONDONTWRITEBYTECODE: "1",
+      ...extraEnv,
+    }),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { exitCode, stdout, stderr, all: `${stdout}\n${stderr}` };
+}
+
 // ---------------------------------------------------------------------------
 // A stand-in for what an anonymous reader reaches.
 // ---------------------------------------------------------------------------

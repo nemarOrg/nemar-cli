@@ -112,8 +112,13 @@ describe("plan", () => {
         bytesToHash: a.bytes.length + b.bytes.length,
         unreadable: 0,
       });
+      // The raw counts are on the line when there is none, so a plan says "none" rather than nothing.
       expect(r.stdout.trim()).toBe(
-        `plan: tags=2 keys=3 needScrub=2 bytesToHash=${a.bytes.length + b.bytes.length} unreadable=0`,
+        `plan: tags=2 keys=3 needScrub=2 bytesToHash=${a.bytes.length + b.bytes.length} unreadable=0 rawCopies=0 versions=0 markers=0`,
+      );
+      // And a plan without raw copies is the file it was: no rawCopies, no raw totals.
+      expect(Object.keys(readJson<Record<string, unknown>>(dir, "plan.json"))).not.toContain(
+        "rawCopies",
       );
 
       // Patches: the scrubbed header as hex, only for the keys that need one.
@@ -267,17 +272,28 @@ describe("plan", () => {
   );
 
   test(
-    "an object that looks like a recording but is not an annex key stops the plan",
+    "an object named in the annex key space that is not an annex key stops the plan, any extension",
     async () => {
-      standin = startS3Standin();
-      const a = fixtureA();
-      seedObject(standin, a);
-      seedManifest(standin, "v1.0.0", [a]);
-      standin.putObject(BUCKET, objectPath("notes.EDF"), new Uint8Array(5));
-      const dir = tempDir("plan-objects-bad");
-      const r = await runScrub(standin, planArgs(dir));
-      expectStopped(r, 4, "objects-bad-key");
-      expect(has(dir, "plan.json")).toBe(false);
+      // A raw recording stored by its path (`notes.EDF`) is a raw copy now, planned and recorded
+      // (raw-copies.test.ts); a name that claims to be an annex key and is not one is still
+      // a stop, because nothing can say what it holds.
+      for (const name of [
+        `SHA256E-s5--${"a".repeat(63)}.edf`,
+        `SHA256E-s5--${"A".repeat(64)}.bdf`,
+        `SHA256E-sx--${"a".repeat(64)}.json`,
+        "SHA256E-",
+      ]) {
+        standin = startS3Standin();
+        const a = fixtureA();
+        seedObject(standin, a);
+        seedManifest(standin, "v1.0.0", [a]);
+        standin.putObject(BUCKET, objectPath(name), new Uint8Array(5));
+        const dir = tempDir("plan-objects-bad");
+        const r = await runScrub(standin, planArgs(dir));
+        expectStopped(r, 4, "objects-bad-key", name);
+        expect(has(dir, "plan.json"), name).toBe(false);
+        standin.stop();
+      }
     },
     SLOW,
   );
