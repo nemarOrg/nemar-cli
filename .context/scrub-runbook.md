@@ -30,7 +30,7 @@ mkdir -p -m 700 "$W"
   The S3 tools resolve the session once and share it across every `aws` call (`cliCredentialSource`), because parallel `aws` processes race on the login session's single-use refresh token.
   So do not `export` credentials in the shell that runs the TypeScript tools: a key already in the environment is used as it is, and it expires.
 - The hash host (a host with fast reads from S3; Hallu in the maintainers' setup) needs `python3` 3.12, the `aws` CLI, and the host's own read-only AWS credentials.
-- The suites pass on the checkout: `NEMAR_REQUIRE_SCRUB_TOOLS=1 bun run test:scrub` (661 tests when this runbook was written; the variable makes a missing tool a failure, not a skip).
+- The suites pass on the checkout: `NEMAR_REQUIRE_SCRUB_TOOLS=1 bun run test:scrub` (669 tests when this runbook was written; the variable makes a missing tool a failure, not a skip).
   One file: `bun test --path-ignore-patterns=x test/scrub/<file>.test.ts`, because `bunfig.toml` keeps `test/scrub` out of a bare `bun test` and hides even an explicit path.
 
 Every tool prints counts and fixed words only.
@@ -40,7 +40,7 @@ A bad flag is exit 2 everywhere.
 ## Boxes and the go
 
 An **irreversible** step is one whose result cannot be undone from what the tools keep.
-Each box below lists what it destroys, the checks to make by hand (the tool checks the rest, and a dry run shows its refusals before `--execute` is typed), and the words.
+Each box below lists what it destroys, the checks to make by hand (the tool checks the rest, and a dry run shows all of its refusals at once before `--execute` is typed), and the words.
 
 The go is a sentence the maintainer says for this dataset and this step:
 
@@ -73,20 +73,24 @@ The tools add their own words: `--confirm-dataset $D` on `drop-archives` and `de
 
 Each step below says which exit continues; a nonzero exit is never "close enough".
 
+`drop-archives` and `delete-old` evaluate every refusal before they stop, so one dry run lists them all.
+On stdout there is one line per refusal, `<stage>: refused <word>: <what triggered it>` (a count, a file name or a tag, never a value), in a fixed order.
+The stop line on stderr joins the words with `+`, for example `s3-scrub: archives-not-dropped+history-remains`; with one refusal it is the word alone, and the exit is 3 either way.
+
 ## Files in the working directory
 
 | File | Written by | Needed by |
 |---|---|---|
 | `plan.json`, `patches.json` | step 1 (`patches.json` first; `plan.json` names its sha256 as `patchesSha256`) | every later stage |
 | `hashes.json` | step 3, on the hash host | step 4 |
-| `assembled.json`, `keymap.json` | step 4 | steps 5, 7, 8, 14, 15b |
-| `verified.json` | step 5 | step 15b |
-| `new-hash-verified.json` | step 5, on the hash host | step 15b |
+| `assembled.json`, `keymap.json` | step 4 | steps 5, 7, 8, 14, 15a, 15b |
+| `verified.json` | step 5 | steps 15a and 15b |
+| `new-hash-verified.json` | step 5, on the hash host | steps 15a and 15b |
 | `git-plan.json`, `git-plan.json.skipped.json`, `git-plan.report.json` | step 2 | steps 7, 13, 14 |
 | `before.json` | step 7 | steps 7 (local verify) and 9 (snapshot) |
-| `git-verified.json` | step 7 (mode `local`), then step 14 (mode `fresh-clone`, which overwrites it) | step 15b needs the `fresh-clone` one |
+| `git-verified.json` | step 7 (mode `local`), then step 14 (mode `fresh-clone`, which overwrites it) | steps 15a and 15b need the `fresh-clone` one |
 | `ruleset.json` | step 9 | step 9 (switch, check, restore) |
-| `zarr-plan.json`, `zarr-verified.json`, `zarr-unknown-members.json` | step 10 | steps 15b (the first two) and 16 (`zarr-public`) |
+| `zarr-plan.json`, `zarr-verified.json`, `zarr-unknown-members.json` | step 10 | steps 15a and 15b (the first two) and 16 (`zarr-public`) |
 | `archives-dropped.json` | step 15a | the record only |
 | `deleted.json` | step 15b | step 17 (the ledger) |
 | `ledger.jsonl` | step 13 | steps 13 and 17 |
@@ -99,7 +103,7 @@ A file that exists and cannot be read is `<name>-unreadable` (exit 1); `<name>-m
 **Files from an older version of the tools are refused.**
 A `plan.json` made before `patchesSha256` existed (the read-only plans of 2026-10-04 are such files) is refused by `assemble`, `verify` and the hash stage as `patches-stale` (exit 3): plan again, which is read-only.
 A re-plan is refused over an existing `assembled.json` (`assembled-exists`), because it would orphan an assembly; abandon the assembly first (see "Abort points and rollback").
-A `zarr-verified.json` from the older Zarr stage has no `stores` or `allowedMembers` and does not parse: `delete-old` refuses it (`zarr-not-scrubbed`) and `zarr-public` refuses it (`zarr-verified.json-invalid`); run the zarr stage again.
+A `zarr-verified.json` from the older Zarr stage has no `stores` or `allowedMembers` and does not parse: `drop-archives` and `delete-old` refuse it (`zarr-not-scrubbed`) and `zarr-public` refuses it (`zarr-verified.json-invalid`); run the zarr stage again.
 A `before.json` or a switch snapshot without `originTips` is refused (`before-invalid` by `switch.ts snapshot`, `snapshot-invalid` by `switch.ts switch`, `refused: contract` by `git-scrub verify`), and a before file cannot be taken after the rewrite (`snapshot-after-rewrite`), so a clone the older tool rewrote is cloned again and rewritten again, with `original.bundle` as the way back.
 A `ledger.jsonl` line written by the older tool with `old-versions-deleted` and a bare verification no longer validates; the line is appended again from `deleted.json` (step 17).
 
@@ -466,7 +470,7 @@ The rewrite deletes `refs/annex/last-index`, a cache that git-annex 10.20240129 
 Verify must exit 0: no old key in any blob, commit message or annotated-tag message of any ref, every EDF and BDF key in any commit is a new key or one the plan found clean, no dropped path, JSON blanked and structural edits applied, commit counts and tag names unchanged.
 Exit 4 prints `verify: FAIL reason=... count=...` for each reason.
 `--allow-unparseable-json` accepts a plan path whose content is not JSON in some commit; it is about plan paths and is unrelated to step 2's `--allow-skipped-json`.
-A passing verify writes `$W/git-verified.json` in mode `local`; step 15b needs the one that step 14 writes.
+A passing verify writes `$W/git-verified.json` in mode `local`; steps 15a and 15b need the one that step 14 writes.
 
 ### Step 8: Register keys in the clone
 
@@ -540,7 +544,8 @@ A store that vanishes between the listing and its read is `HeadObject:not-found`
 The output is `zarr: stores=S docs=D clean=.. scrubbed=.. unreadable=.. unknownMembers=.. failed=..` (`needScrub=` in the dry run) and, on success, `zarr: ok; every one of S store roots and D zarr.json documents is clean`.
 From the census, nm000186's roots are expected to need a scrub (88) and the real run to remove 352 members; nested documents were not part of the census.
 It writes `zarr-plan.json` (counts and a digest of the keys it read, no key) and `zarr-verified.json` (`stores`, `allowedMembers`, `counts`).
-A dataset with nothing under `D/zarr/` is `found: no-zarr`, which `delete-old` does not accept once Zarr objects exist.
+A dataset with nothing under `D/zarr/` is `found: no-zarr`, which `drop-archives` and `delete-old` do not accept once Zarr objects exist.
+Run this step with `--execute` for every dataset, one without a Zarr copy too: `drop-archives` refuses without a `zarr-verified.json` for this plan, and for such a dataset the proof is the `no-zarr` one.
 
 The noncurrent versions of every zarr object still hold the old metadata, and step 15b prunes them with `--prune-noncurrent $D/zarr/`.
 Expect about one noncurrent version per document rewritten, so `delete-old --max-prune` must cover the store roots plus the nested documents rewritten (its dry run prints the exact number).
@@ -558,9 +563,11 @@ If the privacy flip was less than two days ago, check a store root through `http
 bun run $T/s3/s3-scrub.ts drop-archives --dir $W --confirm-dataset $D
 ```
 
-This is the dry run: it prints `drop-archives: keys=.. versions=.. markers=..` and deletes nothing.
+This is the dry run: it prints `drop-archives: keys=.. versions=.. markers=..` and the `would delete` line, and deletes nothing.
 Note the counts.
 The archive holds the original recordings, so it must go, but not yet: step 15a does it, after the rewrite has been verified from outside the clone, because it cannot be undone.
+The tool enforces that: it refuses until every proof of step 15a is in `$W` and names this plan, so here it is expected to exit 3 with `drop-archives: refused git-proof-stale: mode local, not fresh-clone` (step 14 has not run yet).
+Any other refusal line names a proof to fix before step 15a: a missing `verified.json`, `new-hash-verified.json` or `zarr-verified.json`, or one made for another plan.
 
 ### Step 12: Regenerate every tag's manifest after the tags moved
 
@@ -644,7 +651,7 @@ rm -rf $W/fresh
 A fresh clone needs no `git annex init`: the pushed `git-annex` branch is read from `refs/remotes/origin/git-annex`.
 It checks, over every ref: no old key anywhere; every EDF and BDF key is new or planned clean; no dropped path; JSON blanked and structural edits applied; appended text once at the end; the tag names equal the plan's `tags` (`tag-names-not-plan`); every commit that touches `.nemar/corrections.jsonl` touches nothing else (`ledger-commit-not-alone`), and the ledger at every head tip is valid for this dataset (`ledger-invalid`); and in the pushed `git-annex` branch, no old key is held anywhere (`annex-old-key-held`), every old key is dead (`annex-old-key-not-dead`) and every new key is recorded present (`annex-new-key-unregistered`; `annex-branch-missing` if the branch was not pushed).
 It does not compare commit counts, tip paths or annex refs, so the ledger commit of step 13 is tolerated.
-Exit 0 writes `$W/git-verified.json` in mode `fresh-clone` (overwriting step 7's), which step 15b requires, with this same `keymap.json` and `plan.json`.
+Exit 0 writes `$W/git-verified.json` in mode `fresh-clone` (overwriting step 7's), which steps 15a and 15b require, with this same `keymap.json` and `plan.json`.
 Exit 4 prints `verify: FAIL reason=...` and removes any earlier proof.
 
 Then read every regenerated manifest again (step 12's check).
@@ -658,12 +665,13 @@ The dataset stays private until the old bytes are gone, so there is no window in
 > **What it destroys.**
 > Every version and every delete marker of every key under `s3://nemar/$D/archives/`, by version id, with no bypass.
 > The archive is a zip of the dataset's files as they were, original recordings included, and nothing can be patched inside a zip, so it is deleted and rebuilt from the scrubbed tree (step 16).
-> The tool itself checks only that the plan is complete and that `--confirm-dataset` matches, so everything else is yours.
+> The tool checks for itself that the scrub has been verified everywhere before the originals are lost (the list is under "It refuses unless"); the checks below are the ones it cannot make.
 >
 > **Preconditions you check by hand.**
-> - Step 14 passed, which is the proof that the scrub is good before the originals are lost: `jq -r .mode $W/git-verified.json` prints `fresh-clone`, and `$W/verified.json` and `$W/new-hash-verified.json` exist.
 > - The archive jobs that step 9's tag pushes dispatched have finished (`gh run list --repo nemarDatasets/.github --limit 30`), so none is built after the drop; a new archive built from the scrubbed tree is deleted here too, because the tool deletes every version.
-> - You have read step 11's counts and the dry run below again.
+> - The dry run of step 15b, run now with the flags it will run with (`--prune-noncurrent`, `--max-delete`, `--max-prune`), lists `archives-not-dropped` and no other refusal.
+>   It evaluates every refusal, so anything else it names is something to fix while the originals still exist.
+> - You have read step 11's counts, and the dry run below exits 0 with the same counts or ones you can explain (an archive job that ran since).
 > - The maintainer's go is recorded: `GO drop-archives <dataset> <plan-id>`.
 >
 > **Commands.**
@@ -671,6 +679,18 @@ The dataset stays private until the old bytes are gone, so there is no window in
 > bun run $T/s3/s3-scrub.ts drop-archives --dir $W --confirm-dataset $D                  # dry run
 > bun run $T/s3/s3-scrub.ts drop-archives --dir $W --confirm-dataset $D --execute
 > ```
+> `--verified`, `--hash-verified` and `--git-verified` default to `verified.json`, `new-hash-verified.json` and `git-verified.json` in `$W`, as for step 15b.
+>
+> **It refuses unless** (all exit 3, all in the dry run, and every one that applies is listed, while the dry run still prints what it would delete):
+> - the plan is complete and not partial, and `--confirm-dataset` matches (`plan-partial`, `plan-has-unreadable`, `confirm-dataset-mismatch`); these stop before anything else is read;
+> - `assembled.json` exists, names this dataset and bucket, and holds only keys the plan marked for a scrub, each with a new key of its own (`assembled.json-missing`, `assembled-wrong-dataset`, `assembled-wrong-bucket`, `assembled-not-in-plan`, `duplicate-new-key`, `old-key-is-a-new-key`);
+> - `verified.json` and `new-hash-verified.json` (step 5) exist, parse, and name the exact bytes of `assembled.json`, this dataset and its number of entries (`verified.json-missing`, `new-hash-verified.json-missing`, `verified.json-invalid`, `new-hash-verified.json-invalid`, `verified-stale`, `new-hash-verified-stale`, `proof-wrong-dataset`, `proof-count-mismatch`);
+> - `git-verified.json` (step 14) exists, parses, is mode `fresh-clone`, and names this `keymap.json` and `plan.json`, and the keymap is this assembly's (`git-proof-missing`, `git-proof-invalid`, `git-proof-stale`, `keymap.json-missing`, `keymap-mismatch`);
+> - `zarr-verified.json` (step 10) exists, parses, and names this `plan.json` and the `zarr-plan.json` beside it, and while Zarr objects are current it proves stores, not `no-zarr` (`zarr-not-scrubbed`, with the reason).
+>
+> These are step 15b's checks of the same files, with the same words, except that step 15b asks for the Zarr proof only while Zarr objects are current.
+> A proof file that is there and cannot be read is `<name>-unreadable` (exit 1, a failure).
+> The `zarr-public` check of step 16 runs after the dataset is public again and writes no proof, so it is not a precondition here.
 >
 > **Words.**
 > It ends with an authoritative `ListObjectVersions` that must show nothing; otherwise it prints `drop-archives: FAILED, versions and markers remain` and exits 5, with no `archives-dropped.json`.
@@ -684,8 +704,8 @@ The dataset stays private until the old bytes are gone, so there is no window in
 > After it nothing NEMAR controls holds the original bytes, and `$W/original.bundle` can no longer restore a usable dataset.
 >
 > **Preconditions you check by hand.**
-> - Step 14 passed, and step 15a is done.
-> - `$W/git-verified.json` is the `fresh-clone` one, made with this `keymap.json` and `plan.json`, and `$W/deleted.json` does not exist yet.
+> The tool checks the proofs of steps 5, 10 and 14 and that step 15a is done (the list is under "It refuses unless"); these are left to you:
+> - `$W/deleted.json` does not exist yet.
 > - Nothing wrote to the dataset since the plan; the tool refuses anything it did not plan, but read the dry run.
 > - The dry run's lines: `delete-old: keys=K versions=V markers=M planRecorded=R limit=L` and `delete-old: prune noncurrent versions=N markers=P`.
 > - `--max-delete` is set to V+M (it can only lower the plan's own count, never raise it) and `--max-prune` to at least N+P (default 1000).
@@ -697,11 +717,13 @@ The dataset stays private until the old bytes are gone, so there is no window in
 > bun run $T/s3/s3-scrub.ts delete-old --dir $W --confirm-dataset $D --prune-noncurrent $D/version/ --prune-noncurrent $D/zarr/ --max-delete <V+M> --max-prune <N+P> --execute
 > ```
 > `--verified`, `--hash-verified` and `--git-verified` default to `verified.json`, `new-hash-verified.json` and `git-verified.json` in `$W`.
-> A dry run before step 15a evaluates the proofs, the manifests and the unplanned recordings, then stops at `archives-not-dropped`, which is the expected answer then; everything after that point is evaluated only once the archives are gone.
+> A dry run evaluates every refusal and lists them all, so the dry run before step 15a shows everything that would stop this step: `archives-not-dropped` is the expected line then, and any other line is something to fix before the archives go.
+> The working files are checked first, all of them (the proofs, `assembled.json`, `keymap.json` and the prune prefixes); if any of them refuses, the bucket is not read (`delete-old: the bucket was not read; its checks run once the working files agree`), and the bucket's checks are listed once the files agree.
+> Nothing that clears a refusal of the working files is irreversible.
 >
-> **It refuses unless** (all exit 3, and all in the dry run):
-> - the plan is complete and not partial, and `--confirm-dataset` matches (`confirm-dataset-mismatch`);
-> - both S3 proofs name the exact bytes of `assembled.json` (`verified-stale`, `new-hash-verified-stale`, `proof-wrong-dataset`, `proof-count-mismatch`), and `assembled.json` names this dataset and bucket (`assembled-wrong-dataset`, `assembled-wrong-bucket`);
+> **It refuses unless** (all exit 3, all in the dry run, and every one that applies is listed):
+> - the plan is complete and not partial, and `--confirm-dataset` matches (`plan-partial`, `plan-has-unreadable`, `confirm-dataset-mismatch`); these stop before anything else is read;
+> - both S3 proofs exist, parse, and name the exact bytes of `assembled.json` (`verified.json-missing`, `new-hash-verified.json-missing`, `verified-stale`, `new-hash-verified-stale`, `proof-wrong-dataset`, `proof-count-mismatch`), and `assembled.json` names this dataset and bucket (`assembled-wrong-dataset`, `assembled-wrong-bucket`);
 > - the git proof exists, parses, is mode `fresh-clone`, and names this `keymap.json` and `plan.json` (`git-proof-missing`, `git-proof-invalid`, `git-proof-stale`), and the keymap is this assembly's (`keymap-mismatch`);
 > - every current manifest names no old key and no recording the scrub did not account for (`manifest-names-old-key`, `manifest-names-unplanned-key`, `manifest-unreadable`, `no-manifests`);
 > - every EDF and BDF under `D/objects/`, a version or a marker included, is a planned or an assembled key (`unplanned-recording`);
