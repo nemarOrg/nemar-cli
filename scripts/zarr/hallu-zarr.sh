@@ -809,12 +809,23 @@ qpy() { VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" "$QUEUE" --db "$QUEUE_DB"
 # property of the NODE, not of the dataset: every dataset would be refused the
 # same way, so the drain stops on it instead of spending a retry attempt of every
 # queued row in turn, which would turn the whole queue `failed` after a few
-# hourly ticks. setup()'s floor check normally stops such a node first.
+# hourly ticks. setup()'s floor check normally stops such a node first; the
+# driver also exits 78 when its conversion workers refused every store they
+# failed on (a worker with a different biosigIO than the one it checked).
+#
+# The driver's callback is still POSTed, as on every outcome (convert_dataset).
+# Skipping it would keep nothing: the `converting` POST at the start of the
+# attempt already set zarr_status='pending' and cleared the dataset's recorded
+# failure detail (routes/callbacks/zarr-ready.ts), so without a terminal
+# callback the dashboard would show the dataset as processing with nothing
+# running, the #774 shape. With it, D1 reads `failed` (or `ready`, for a run
+# that published what did convert) until the dataset's next conversion.
 DRIVER_EXIT_SUBJECT_INFO_UNAVAILABLE=78
 report_subject_info_refusal() {
   local id="$1"
-  err "FATAL: the driver refused to convert ${id}: this node's biosigIO cannot leave subject information out of a store (exit ${DRIVER_EXIT_SUBJECT_INFO_UNAVAILABLE}, #1626)."
-  err "No queued dataset was marked failed and no retry attempt was spent. Fix biosigIO in ${VENV_DIR} (the driver's ::error:: lines are in ${LOG_FILE}), then rerun."
+  err "FATAL: the driver stopped on ${id}: this node's biosigIO cannot leave subject information out of a store (exit ${DRIVER_EXIT_SUBJECT_INFO_UNAVAILABLE}, #1626). No store it refused was uploaded."
+  err "No queue row was marked failed and no retry attempt was spent. The driver's callback for ${id} was posted as on any outcome, so its zarr_status in D1 reads failed (ready if part of it converted) until its next conversion; the failure detail of its previous conversion was already cleared when this attempt started."
+  err "Fix biosigIO in ${VENV_DIR} (the driver's ::error:: lines are in ${LOG_FILE}), then rerun."
 }
 
 # --- Per-dataset: download -> convert -> push -> CLEANUP -----------------------
@@ -1239,7 +1250,7 @@ while :; do
     # and reconcile's stale sweep returns it to `pending` without an attempt
     # (~6h); the rows behind it are never claimed.
     report_subject_info_refusal "$id"
-    err "Stopping the drain; ${n} dataset(s) processed before ${id}, which stays inprogress until reconcile's stale sweep returns it to pending."
+    err "Stopping the drain; ${n} dataset(s) processed before ${id}. Its queue row stays inprogress until reconcile's stale sweep (~6h) returns it to pending, without an attempt."
     exit "$DRIVER_EXIT_SUBJECT_INFO_UNAVAILABLE"
   else
     record_conversion_failure "$id"

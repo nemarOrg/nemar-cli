@@ -733,6 +733,11 @@ if argv[:1] and argv[0].endswith("generate_zarr.py"):
     # test, so the code comes from the test (FAKE_DRIVER_RC, default 0).
     with open(os.environ["QPY_LOG"], "a") as fh:
         fh.write("DRIVER " + " ".join(argv[1:]) + chr(10))
+    if os.environ.get("FAKE_DRIVER_CALLBACK") and "--callback-out" in argv:
+        # The callback body the driver writes on every outcome, when a test
+        # wants to see what the script does with it.
+        with open(argv[argv.index("--callback-out") + 1], "w") as fh:
+            fh.write(os.environ["FAKE_DRIVER_CALLBACK"])
     sys.exit(int(os.environ.get("FAKE_DRIVER_RC", "0")))
 
 with open(os.environ["QPY_LOG"], "a") as fh:
@@ -968,6 +973,30 @@ def test_a_subject_info_refusal_stops_the_drain_and_fails_nothing(ack_run) -> No
     assert [c for c in qpy_calls() if c.startswith("DRIVER ")] != []
     assert _calls_for(qpy_calls, "fail") == [], "no retry attempt may be spent"
     assert _calls_for(qpy_calls, "done") == []
+
+
+def test_a_refusal_still_posts_the_drivers_callback(ack_run, tmp_path: Path) -> None:
+    """Deliberate: the `converting` POST at the start of the attempt already set
+    the dataset's zarr_status to pending and cleared its failure detail, so
+    skipping the refusal's callback would keep nothing and leave the dashboard
+    showing a conversion in progress with nothing running (#774). The callback
+    goes out on exit 78 as on any other outcome."""
+    run, _qpy_calls, _ack_file, _log = ack_run
+    curl_log = tmp_path / "curl.log"
+    _write_exec(tmp_path / "fakebin" / "curl",
+                '#!/bin/sh\necho "$@" >> "$CURL_LOG"\nexit 0\n')
+
+    proc = run(extra_env={
+        "QPY_NEXT": "nm000901\tv1.0.0", "FAKE_DRIVER_RC": "78",
+        "FAKE_DRIVER_CALLBACK": '{"dataset_id": "nm000901", "status": "failed"}',
+        "NEMAR_WEBHOOK_TOKEN": "test-token", "CURL_LOG": str(curl_log),
+    })
+
+    assert proc.returncode == 78, proc.stdout + proc.stderr
+    calls = curl_log.read_text().splitlines()
+    assert any('"status":"converting"' in c for c in calls), calls
+    assert any("--data @" in c and c.rstrip().endswith(".callback.json") for c in calls), calls
+    assert "zarr_status in D1 reads failed" in proc.stderr
 
 
 def test_an_ordinary_driver_failure_still_fails_the_row_and_drains_on(ack_run) -> None:
