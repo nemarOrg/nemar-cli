@@ -20,6 +20,7 @@ import io
 import itertools
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -12178,15 +12179,28 @@ CAPABLE_WRITERS = {
 }
 
 
+def _strip_nothing(metadata):
+    """A stand-in `strip_subject_info` that the check only needs to be callable."""
+    return dict(metadata)
+
+
+def _have_biosigio_strip() -> bool:
+    try:
+        from biosigio import strip_subject_info  # noqa: F401
+    except Exception:  # noqa: BLE001 - absent or too old: the read-back cannot run
+        return False
+    return True
+
+
 class TestSubjectInfoProblems(unittest.TestCase):
     """The check `main` runs before converting anything, against stand-in
     writers that do or do not name the option. This tests the check itself:
     no conversion logic is replaced."""
 
-    def problems(self, installed="1.2.11", imported="1.2.11", **writers):
+    def problems(self, installed="1.2.11", imported="1.2.11", strip=_strip_nothing, **writers):
         return generate_zarr.subject_info_problems(
             installed_version=installed, imported_version=imported,
-            writers={**CAPABLE_WRITERS, **writers},
+            writers={**CAPABLE_WRITERS, **writers}, strip=strip,
         )
 
     def test_a_capable_biosigio_passes(self):
@@ -12201,8 +12215,10 @@ class TestSubjectInfoProblems(unittest.TestCase):
         for version in ("1.2.10", "1.2.10.post1", "1.2.9", "1.1.99", "0.9.9"):
             with self.subTest(version):
                 problems = self.problems(version, version)
-                self.assertEqual(len(problems), 2, problems)  # installed and imported
-                self.assertTrue(all("below 1.2.11" in p for p in problems), problems)
+                self.assertEqual(problems, [
+                    f"the installed biosigIO is {version}, below 1.2.11",
+                    f"the imported biosigIO is {version}, below 1.2.11",
+                ])
 
     def test_a_pre_release_or_unreadable_version_is_refused(self):
         # `1.2.11rc1` sorts BELOW 1.2.11; read by its leading digits it would pass.
@@ -12214,9 +12230,12 @@ class TestSubjectInfoProblems(unittest.TestCase):
     def test_an_import_older_than_the_installed_release_is_refused(self):
         # An older copy shadowing the installed one, or imported before an
         # upgrade: the distribution says 1.2.11, the code that runs is 1.2.10.
-        problems = self.problems("1.2.11", "1.2.10")
-        self.assertEqual(len(problems), 1, problems)
-        self.assertIn("imported", problems[0])
+        self.assertEqual(self.problems("1.2.11", "1.2.10"),
+                         ["the imported biosigIO is 1.2.10, below 1.2.11"])
+
+    def test_an_installed_release_older_than_the_import_is_refused(self):
+        self.assertEqual(self.problems("1.2.10", "1.2.11"),
+                         ["the installed biosigIO is 1.2.10, below 1.2.11"])
 
     def test_every_writer_must_name_the_option(self):
         for name in generate_zarr.BIOSIGIO_STORE_WRITERS:
@@ -12230,6 +12249,13 @@ class TestSubjectInfoProblems(unittest.TestCase):
         problems = self.problems(stream_to_zarr=None)
         self.assertEqual(problems, ["biosigIO has no stream_to_zarr"])
 
+    def test_a_biosigio_without_strip_subject_info_is_refused(self):
+        # The read-back of every written store needs it; without it every
+        # recording would be refused one by one instead of the run up front.
+        self.assertEqual(self.problems(strip=None), [
+            "biosigIO has no strip_subject_info to check a written store with"
+        ])
+
     def test_names_keyword_does_not_count_a_catch_all(self):
         self.assertTrue(generate_zarr.names_keyword(_writer_with_option, "exclude_subject_info"))
         self.assertFalse(generate_zarr.names_keyword(_writer_without_option, "exclude_subject_info"))
@@ -12238,23 +12264,43 @@ class TestSubjectInfoProblems(unittest.TestCase):
     def test_the_floor_is_the_release_that_added_the_option(self):
         self.assertEqual(generate_zarr.final_release(generate_zarr.SUBJECT_INFO_FLOOR), (1, 2, 11))
 
+    def test_the_refusal_exit_is_ex_config(self):
+        self.assertEqual(generate_zarr.EXIT_SUBJECT_INFO_UNAVAILABLE, 78)
+
     def test_the_pin_installs_nothing_the_check_refuses(self):
         # requirements.txt is what the node installs; a floor below the check's
         # would install a biosigIO the converter then refuses on every run.
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                "requirements.txt")) as fh:
-            (pin,) = [ln.strip() for ln in fh if ln.strip().startswith("biosigio[")]
-        pinned = generate_zarr.final_release(pin.split(">=", 1)[1].split(",", 1)[0])
+            pins = [ln.strip() for ln in fh if ln.strip().startswith("biosigio[")]
+        self.assertEqual(len(pins), 1, pins)
+        match = re.search(r">=\s*([^,\s]+)", pins[0])
+        if match is None:
+            self.fail(f"no >= floor in {pins[0]!r}")
+        pinned = generate_zarr.final_release(match.group(1))
         required = generate_zarr.final_release(generate_zarr.SUBJECT_INFO_FLOOR)
         if pinned is None or required is None:
-            self.fail(f"cannot read the floor of {pin!r}")
-        self.assertGreaterEqual(pinned, required, pin)
+            self.fail(f"cannot read the floor of {pins[0]!r}")
+        self.assertGreaterEqual(pinned, required, pins[0])
+
+
+def write_root(store: str, attrs: dict) -> None:
+    """A real Zarr v3 root group document holding `attrs`."""
+    os.makedirs(store, exist_ok=True)
+    with open(os.path.join(store, "zarr.json"), "w") as fh:
+        json.dump({"zarr_format": 3, "node_type": "group", "attributes": attrs}, fh)
+
+
+EXCLUDED_ROOT = {"subject_info_excluded": True,
+                 "recording_metadata": {"number_of_signals": 4, "startdate": "2020-01-02"}}
 
 
 class TestWriteStore(unittest.TestCase):
     """`write_store`, the one way the converter writes a store, against
     stand-in writers that write a real root `zarr.json`. What is under test is
-    the guard, so the writers are the smallest that can satisfy or break it."""
+    the guard, so the writers are the smallest that can satisfy or break it.
+    The cases a store passes need biosigIO's `strip_subject_info` for the
+    content check, so they run in the job with the real stack."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -12262,42 +12308,63 @@ class TestWriteStore(unittest.TestCase):
         self.store = os.path.join(self._tmp.name, "rec.zarr")
         self.calls: list[dict] = []
 
-    def write_root(self, attrs: dict) -> None:
-        os.makedirs(self.store)
-        with open(os.path.join(self.store, "zarr.json"), "w") as fh:
-            json.dump({"zarr_format": 3, "node_type": "group", "attributes": attrs}, fh)
-
     def honoring_writer(self, filepath, *, dtype="int16", exclude_subject_info=False):
         self.calls.append({"dtype": dtype, "exclude_subject_info": exclude_subject_info})
-        self.write_root({"subject_info_excluded": True} if exclude_subject_info else {})
+        write_root(self.store, EXCLUDED_ROOT if exclude_subject_info else {})
         return filepath
 
+    def write(self, writer, **kwargs):
+        return generate_zarr.write_store(writer, self.store, expected_path=self.store, **kwargs)
+
+    @unittest.skipUnless(_have_biosigio_strip(), "conversion deps unavailable: biosigio")
     def test_the_option_is_passed_and_the_mark_read_back(self):
-        written = generate_zarr.write_store(self.honoring_writer, self.store, dtype="float32")
-        self.assertEqual(written, self.store)
+        self.assertEqual(self.write(self.honoring_writer, dtype="float32"), self.store)
         self.assertEqual(self.calls, [{"dtype": "float32", "exclude_subject_info": True}])
+
+    @unittest.skipUnless(_have_biosigio_strip(), "conversion deps unavailable: biosigio")
+    def test_a_path_like_return_is_accepted(self):
+        def writer(filepath, *, exclude_subject_info=False):
+            write_root(filepath, EXCLUDED_ROOT)
+            return Path(filepath)
+
+        written = self.write(writer)
+        self.assertEqual(written, self.store)
+        self.assertIsInstance(written, str)
 
     def test_a_writer_without_the_option_writes_nothing(self):
         # What a pool worker holding a pre-1.2.11 biosigIO would call.
         def old_writer(filepath, **kwargs):
-            self.write_root({})
+            write_root(filepath, {})
             return filepath
 
         with self.assertRaises(generate_zarr.SubjectInfoExclusionUnavailable) as caught:
-            generate_zarr.write_store(old_writer, self.store)
+            self.write(old_writer)
         self.assertFalse(os.path.exists(self.store), "refused BEFORE the write")
         self.assertIn("exclude_subject_info", str(caught.exception))
         # Uncoded on purpose: a property of the node, so the recording is
         # retried as pending rather than failed as data.
         self.assertIsNone(getattr(caught.exception, "code", None))
 
+    def test_a_writer_that_reports_another_path_is_refused(self):
+        # The store the writer vouches for is not the one that would be
+        # uploaded, so its mark proves nothing about what is published.
+        elsewhere = os.path.join(self._tmp.name, "elsewhere.zarr")
+
+        def writer(filepath, *, exclude_subject_info=False):
+            write_root(elsewhere, EXCLUDED_ROOT)
+            return elsewhere
+
+        with self.assertRaises(generate_zarr.SubjectInfoExclusionUnavailable) as caught:
+            self.write(writer)
+        self.assertIn("not " + self.store, str(caught.exception))
+
     def test_a_store_without_the_mark_is_refused(self):
         def ignoring_writer(filepath, *, exclude_subject_info=False):
-            self.write_root({"recording_metadata": {}})
+            write_root(filepath, {"recording_metadata": {}})
             return filepath
 
         with self.assertRaises(generate_zarr.SubjectInfoExclusionUnavailable):
-            generate_zarr.write_store(ignoring_writer, self.store)
+            self.write(ignoring_writer)
 
     def test_only_a_true_mark_counts(self):
         for mark in (False, "true", 1, None):
@@ -12305,29 +12372,131 @@ class TestWriteStore(unittest.TestCase):
                 shutil.rmtree(self.store, ignore_errors=True)
 
                 def writer(filepath, *, exclude_subject_info=False, mark=mark):
-                    self.write_root({"subject_info_excluded": mark})
+                    write_root(filepath, {**EXCLUDED_ROOT, "subject_info_excluded": mark})
                     return filepath
 
                 with self.assertRaises(generate_zarr.SubjectInfoExclusionUnavailable):
-                    generate_zarr.write_store(writer, self.store)
+                    self.write(writer)
+
+    @unittest.skipUnless(_have_biosigio_strip(), "conversion deps unavailable: biosigio")
+    def test_a_marked_store_that_still_carries_a_member_is_refused(self):
+        # The mark is biosigIO's claim; the content check is biosigIO's own list
+        # applied to what is actually there, at any depth.
+        for rec_meta in ({"patientcode": "x", "number_of_signals": 4},
+                         {"recording_info": {"Sex": "x"}, "number_of_signals": 4}):
+            with self.subTest(sorted(member_names(rec_meta))):
+                shutil.rmtree(self.store, ignore_errors=True)
+
+                def writer(filepath, *, exclude_subject_info=False, rec_meta=rec_meta):
+                    write_root(filepath, {"subject_info_excluded": True,
+                                          "recording_metadata": rec_meta})
+                    return filepath
+
+                with self.assertRaises(generate_zarr.SubjectInfoExclusionUnavailable):
+                    self.write(writer)
+
+    def test_a_root_without_recording_metadata_is_refused(self):
+        def writer(filepath, *, exclude_subject_info=False):
+            write_root(filepath, {"subject_info_excluded": True})
+            return filepath
+
+        with self.assertRaises(generate_zarr.SubjectInfoExclusionUnavailable):
+            self.write(writer)
 
     def test_a_missing_root_is_refused(self):
         with self.assertRaises(generate_zarr.SubjectInfoExclusionUnavailable):
-            generate_zarr.write_store(_writer_with_option, self.store)
+            self.write(_writer_with_option)
 
     def test_a_writer_that_returns_no_path_is_refused(self):
         def writer(filepath, *, exclude_subject_info=False):
-            self.write_root({"subject_info_excluded": True})
+            write_root(filepath, EXCLUDED_ROOT)
 
         with self.assertRaises(generate_zarr.SubjectInfoExclusionUnavailable):
-            generate_zarr.write_store(writer, self.store)
+            self.write(writer)
 
     def test_the_caller_cannot_turn_it_off(self):
-        with self.assertRaises(TypeError):
-            generate_zarr.write_store(
-                self.honoring_writer, self.store, exclude_subject_info=False
-            )
+        with self.assertRaises(TypeError) as caught:
+            self.write(self.honoring_writer, exclude_subject_info=False)
+        self.assertEqual(
+            str(caught.exception),
+            "write_store sets exclude_subject_info itself; do not pass it",
+        )
         self.assertEqual(self.calls, [])
+
+
+class TestReadBackWhenStripUnavailable(unittest.TestCase):
+    """The read-back cannot check content without biosigIO's
+    `strip_subject_info`, and must then refuse a store that otherwise passes.
+    Run in a separate process against a stand-in `biosigio` that has none, so
+    the result does not depend on what this interpreter has installed."""
+
+    def test_a_marked_store_is_refused_when_its_content_cannot_be_checked(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = os.path.join(d, "rec.zarr")
+            write_root(store, EXCLUDED_ROOT)
+            os.makedirs(os.path.join(d, "standin", "biosigio"))
+            with open(os.path.join(d, "standin", "biosigio", "__init__.py"), "w") as fh:
+                fh.write('__version__ = "1.2.11"\n')
+            proc = subprocess.run(
+                [sys.executable, "-c",
+                 "import sys; sys.path.insert(0, sys.argv[1]); import generate_zarr as g\n"
+                 "try:\n    g.require_subject_info_excluded(sys.argv[2])\n"
+                 "except g.SubjectInfoExclusionUnavailable as exc:\n"
+                 "    print('REFUSED', exc); sys.exit(0)\n"
+                 "print('ACCEPTED'); sys.exit(1)\n",
+                 os.path.dirname(os.path.abspath(generate_zarr.__file__)), store],
+                env={**os.environ, "PYTHONPATH": os.path.join(d, "standin")},
+                capture_output=True, text=True, timeout=60, check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("strip_subject_info is unavailable", proc.stdout)
+
+
+class TestSyncStore(unittest.TestCase):
+    """`sync_store`, the one upload, re-checks the bytes it uploads. A logging
+    `aws` stand-in shows whether a sync was attempted."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = os.path.join(self._tmp.name, "rec.zarr")
+        self.log = os.path.join(self._tmp.name, "aws.log")
+        bindir = os.path.join(self._tmp.name, "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "aws"), "w") as fh:
+            fh.write(f'#!/bin/sh\necho "$@" >> "{self.log}"\nexit 0\n')
+        os.chmod(os.path.join(bindir, "aws"), 0o755)
+        path = os.environ["PATH"]
+        os.environ["PATH"] = bindir + os.pathsep + path
+        self.addCleanup(os.environ.__setitem__, "PATH", path)
+
+    def calls(self) -> list[str]:
+        if not os.path.exists(self.log):
+            return []
+        with open(self.log) as fh:
+            return fh.read().splitlines()
+
+    def test_a_store_that_lost_its_mark_is_not_uploaded(self):
+        # As a later rewrite of the root would leave it.
+        write_root(self.store, {"recording_metadata": {"number_of_signals": 4}})
+        with self.assertRaises(generate_zarr.SubjectInfoExclusionUnavailable):
+            generate_zarr.sync_store(self.store, "s3://nemar-test/nm000186/zarr/rec.zarr")
+        self.assertEqual(self.calls(), [])
+
+    @unittest.skipUnless(_have_biosigio_strip(), "conversion deps unavailable: biosigio")
+    def test_a_store_that_gained_a_member_is_not_uploaded(self):
+        write_root(self.store, {"subject_info_excluded": True,
+                                "recording_metadata": {"gender": "x"}})
+        with self.assertRaises(generate_zarr.SubjectInfoExclusionUnavailable):
+            generate_zarr.sync_store(self.store, "s3://nemar-test/nm000186/zarr/rec.zarr")
+        self.assertEqual(self.calls(), [])
+
+    @unittest.skipUnless(_have_biosigio_strip(), "conversion deps unavailable: biosigio")
+    def test_a_clean_store_is_uploaded(self):
+        write_root(self.store, EXCLUDED_ROOT)
+        generate_zarr.sync_store(self.store, "s3://nemar-test/nm000186/zarr/rec.zarr")
+        (call,) = self.calls()
+        self.assertTrue(call.startswith(f"s3 sync {self.store} s3://nemar-test/"), call)
 
 
 # The biosigIO store writers, by how a reference reaches them: an attribute
@@ -12489,18 +12658,31 @@ class TestTheInstalledBiosigioExcludesSubjectInfo(unittest.TestCase):
 
 class TestSubjectInfoNeverReachesAStore(unittest.TestCase):
     """A REAL EDF+ whose header carries every patient and recording field,
-    through `convert_one`, on both exporters. `aws` is a stand-in that copies a
-    synced store aside so the test can open what would have been uploaded;
-    nothing else is substituted.
+    through `convert_one`, on both exporters. `aws` is a stand-in that logs
+    every call and copies a synced store aside so the test can open what would
+    have been uploaded; nothing else is substituted.
 
     The file repeats a label and has a channels.tsv, so the two members the
     converter reads back from `recording_metadata` (`channels_tsv_units` and
-    `channel_labels_deduplicated`) are present to be checked."""
+    `channel_labels_deduplicated`) are present to be checked; and it has a
+    PowerLineFrequency sidecar and electrodes, so the converter rewrites the
+    root (`embed_root_attr`) after biosigIO wrote it, before the upload."""
 
     PRIMARY = "sub-01/eeg/sub-01_task-rest_eeg.edf"
     TSV = "sub-01/eeg/sub-01_task-rest_channels.tsv"
+    SIDECAR = "sub-01/eeg/sub-01_task-rest_eeg.json"
+    ELECTRODES = "sub-01/eeg/sub-01_electrodes.tsv"
+    COORDSYSTEM = "sub-01/eeg/sub-01_coordsystem.json"
     LABELS = ("E1", "E2", "E2", "E3")
     SUFFIXED = ("E1", "E2-0", "E2-1", "E3")
+    # The synthetic header values `build_edf_with_subject_header` writes, by the
+    # field that carries each. Only ever searched for, never printed.
+    HEADER_VALUES: ClassVar[dict[str, str]] = {
+        "patientcode": "SUBJ-0042", "patientname": "Test_Person",
+        "patient_additional": "left_handed", "admincode": "ADM-7",
+        "technician": "Operator_A", "equipment": "Amplifier_1000",
+        "recording_additional": "pilot_session", "birthdate": "1970",
+    }
 
     @classmethod
     def setUpClass(cls):
@@ -12523,14 +12705,25 @@ class TestSubjectInfoNeverReachesAStore(unittest.TestCase):
         self.edf = build_edf_with_subject_header(
             os.path.join(self.repo, self.PRIMARY), list(self.LABELS)
         )
-        with open(os.path.join(self.repo, self.TSV), "w") as fh:
-            fh.writelines(["name\ttype\tunits\n"] + [f"{n}\tEEG\tuV\n" for n in self.SUFFIXED])
+        self.write(self.TSV, "name\ttype\tunits\n"
+                   + "".join(f"{n}\tEEG\tuV\n" for n in self.SUFFIXED))
+        self.write(self.SIDECAR, json.dumps({"PowerLineFrequency": 60}))
+        # Named by the file's own labels, so the converter has to carry E2's
+        # position to both de-duplicated channels (`label_renames`).
+        self.write(self.ELECTRODES, "name\tx\ty\tz\n"
+                   + "".join(f"{n}\t{i}.0\t0.0\t0.0\n"
+                             for i, n in enumerate(("E1", "E2", "E3"))))
+        self.write(self.COORDSYSTEM, json.dumps(
+            {"EEGCoordinateSystem": "CapTrak", "EEGCoordinateUnits": "mm"}
+        ))
         self.synced_dir = os.path.join(self._tmp.name, "synced")
+        self.aws_log = os.path.join(self._tmp.name, "aws.log")
         bindir = os.path.join(self._tmp.name, "bin")
         os.makedirs(bindir)
         with open(os.path.join(bindir, "aws"), "w") as fh:
             fh.write(
                 "#!/bin/sh\n"
+                f'echo "$@" >> "{self.aws_log}"\n'
                 'if [ "$1" = s3 ] && [ "$2" = sync ]; then\n'
                 f'  mkdir -p "{self.synced_dir}" && cp -R "$3" "{self.synced_dir}/"\n'
                 "fi\nexit 0\n"
@@ -12544,14 +12737,22 @@ class TestSubjectInfoNeverReachesAStore(unittest.TestCase):
         saved_min = generate_zarr.STREAM_EDF_MIN_BYTES
         self.addCleanup(setattr, generate_zarr, "STREAM_EDF_MIN_BYTES", saved_min)
 
+    def write(self, rel: str, text: str) -> None:
+        with open(os.path.join(self.repo, rel), "w") as fh:
+            fh.write(text)
+
     def convert(self) -> dict:
         work = os.path.join(self._tmp.name, "work")
         os.makedirs(work, exist_ok=True)
         shutil.rmtree(self.synced_dir, ignore_errors=True)
+        if os.path.exists(self.aws_log):
+            os.unlink(self.aws_log)
         generate_zarr._init_worker({
             "repo": self.repo, "bucket": "nemar-test", "dataset_id": "nm000186",
-            "head": "d" * 40, "head_files": {self.PRIMARY, self.TSV}, "local": True,
-            "tmp": work, "updated": "2026-10-05T00:00:00Z",
+            "head": "d" * 40,
+            "head_files": {self.PRIMARY, self.TSV, self.SIDECAR, self.ELECTRODES,
+                           self.COORDSYSTEM},
+            "local": True, "tmp": work, "updated": "2026-10-05T00:00:00Z",
             "contract_base": "https://zarr.nemar.org", "engine_version": ZARR_ENGINE_VERSION,
             "dataset_row": None, "provenance_fetch_failed": False,
             "mem_budget": None, "hard_ceiling": None, "projections": {},
@@ -12559,15 +12760,25 @@ class TestSubjectInfoNeverReachesAStore(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             return convert_one(self.PRIMARY)
 
+    def aws_calls(self) -> list[str]:
+        if not os.path.exists(self.aws_log):
+            return []
+        with open(self.aws_log) as fh:
+            return fh.read().splitlines()
+
+    def synced_store(self, entry: dict) -> str:
+        return os.path.join(self.synced_dir, os.path.basename(entry["zarr"]))
+
     def synced_nodes(self, entry: dict) -> dict[str, dict]:
         """Every node's attributes in the store that would have been uploaded,
         keyed by its path inside the store."""
-        store = os.path.join(self.synced_dir, os.path.basename(entry["zarr"]))
         nodes = {}
-        for dirpath, _dirs, files in os.walk(store):
+        for dirpath, _dirs, files in os.walk(self.synced_store(entry)):
             if "zarr.json" in files:
                 with open(os.path.join(dirpath, "zarr.json")) as fh:
-                    nodes[os.path.relpath(dirpath, store)] = json.load(fh).get("attributes") or {}
+                    nodes[os.path.relpath(dirpath, self.synced_store(entry))] = (
+                        json.load(fh).get("attributes") or {}
+                    )
         return nodes
 
     def test_the_fixture_carries_subject_members_and_biosigios_default_keeps_them(self):
@@ -12581,12 +12792,14 @@ class TestSubjectInfoNeverReachesAStore(unittest.TestCase):
             EDF_HEADER_SUBJECT_MEMBERS,
         )
         # And a store written WITHOUT the option still carries every one, which
-        # is what `write_store` exists to prevent.
+        # is what `write_store` exists to prevent; the value scan below finds them.
         store = rec.to_zarr(os.path.join(self._tmp.name, "default.zarr"), dtype="int16")
         with open(os.path.join(store, "zarr.json")) as fh:
-            attrs = json.load(fh)["attributes"]
+            text = fh.read()
+        attrs = json.loads(text)["attributes"]
         self.assertNotIn("subject_info_excluded", attrs)
         self.assertLessEqual(EDF_HEADER_SUBJECT_MEMBERS, member_names(attrs["recording_metadata"]))
+        self.assertTrue(any(value in text for value in self.HEADER_VALUES.values()))
 
     def test_no_store_carries_a_subject_member_on_either_exporter(self):
         from biosigio import SUBJECT_INFO_KEYS, is_subject_info_key
@@ -12610,6 +12823,15 @@ class TestSubjectInfoNeverReachesAStore(unittest.TestCase):
                 for node, attrs in nodes.items():
                     found = sorted(n for n in member_names(attrs) if is_subject_info_key(n))
                     self.assertEqual(found, [], node)
+                # And no header VALUE survives under some other name: a boolean
+                # per field, so a failure names the field and never the value.
+                texts = []
+                for dirpath, _dirs, files in os.walk(self.synced_store(entry)):
+                    if "zarr.json" in files:
+                        with open(os.path.join(dirpath, "zarr.json")) as fh:
+                            texts.append(fh.read())
+                for field, value in self.HEADER_VALUES.items():
+                    self.assertFalse(any(value in t for t in texts), f"{field} value present")
 
                 # The technical members stay, including the two the converter
                 # reads back: `channel_labels_deduplicated` (label_renames) and
@@ -12632,6 +12854,16 @@ class TestSubjectInfoNeverReachesAStore(unittest.TestCase):
                 self.assertEqual(entry["units_report"]["unmatched_channels"], 0)
                 self.assertEqual(store_total_channels(entry), len(self.LABELS))
 
+                # The converter's own rewrites of the root ran after biosigIO
+                # wrote it, and the mark (checked above, on the uploaded copy)
+                # survived them: the sidecar's frequency, and electrode
+                # positions carried to the de-duplicated labels.
+                self.assertEqual(root["power_line_frequency"], 60)
+                self.assertEqual(
+                    set(root["electrode_positions"]), {"E1", "E2", "E2-0", "E2-1", "E3"}
+                )
+                self.assertIn("nemar", root)
+
                 # biosigIO left the scratch file's name; the converter's rewrite
                 # puts back the BIDS path the index keys this store by.
                 self.assertEqual(rec_meta["source_file"], self.PRIMARY)
@@ -12642,6 +12874,40 @@ class TestSubjectInfoNeverReachesAStore(unittest.TestCase):
                 )
                 check_index_invariant(index)
                 validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_a_worker_with_a_pre_option_writer_writes_and_uploads_nothing(self):
+        """A pool worker that holds biosigIO 1.2.10's writers: the real ones,
+        wrapped in the signature 1.2.10 had, which collects unknown keywords and
+        so would drop the option. The recording is refused, uncoded (pending,
+        retried), and nothing is synced."""
+        import biosigio
+
+        real_to_zarr = biosigio.Recording.to_zarr
+        real_stream = biosigio.stream_to_zarr
+
+        def to_zarr_1_2_10(rec, filepath, **kwargs):
+            kwargs.pop("exclude_subject_info", None)
+            return real_to_zarr(rec, filepath, **kwargs)
+
+        def stream_to_zarr_1_2_10(filepath, store_path, **kwargs):
+            kwargs.pop("exclude_subject_info", None)
+            return real_stream(filepath, store_path, **kwargs)
+
+        self.addCleanup(setattr, biosigio.Recording, "to_zarr", real_to_zarr)
+        self.addCleanup(setattr, biosigio, "stream_to_zarr", real_stream)
+        biosigio.Recording.to_zarr = to_zarr_1_2_10
+        biosigio.stream_to_zarr = stream_to_zarr_1_2_10
+
+        for path_name, threshold in (("in-memory", generate_zarr.STREAM_EDF_MIN_BYTES),
+                                     ("streaming", 1)):
+            with self.subTest(path_name):
+                generate_zarr.STREAM_EDF_MIN_BYTES = threshold
+                result = self.convert()
+                self.assertIs(result["ok"], False)
+                self.assertIsNone(result["code"])
+                self.assertIn("exclude_subject_info", result["error"])
+                self.assertEqual([c for c in self.aws_calls() if c.startswith("s3 sync")], [])
+                self.assertFalse(os.path.exists(self.synced_dir))
 
 
 # A stand-in biosigIO package, on disk and importable, that is only what the
@@ -12662,6 +12928,10 @@ class Recording:
 
 def stream_to_zarr(filepath, store_path, *, dtype="int16", {stream}**kwargs):
     raise RuntimeError("stand-in biosigIO writes nothing")
+
+
+def strip_subject_info(metadata):
+    return dict(metadata)
 '''
 _STANDIN_EXPORTER = '''\
 class ZarrExporter:
@@ -12669,6 +12939,27 @@ class ZarrExporter:
     def export(rec, filepath, *, dtype="int16", {export}**kwargs):
         raise RuntimeError("stand-in biosigIO writes nothing")
 '''
+# An install whose Zarr exporter cannot be imported (the [zarr] extra missing,
+# say): the package imports, the writer module does not.
+_STANDIN_BROKEN_EXPORTER = 'raise ImportError("stand-in: no module named zarr")\n'
+
+# aws calls that write, delete or list (the `--wipe` probe) in the serving
+# bucket. A refused run makes none of them.
+_MUTATING_AWS = {("s3", "sync"), ("s3", "rm"), ("s3", "mv"), ("s3", "ls"),
+                 ("s3api", "put-object"), ("s3api", "delete-object"),
+                 ("s3api", "delete-objects"), ("s3api", "list-objects"),
+                 ("s3api", "list-objects-v2")}
+
+
+def mutating_aws_calls(calls: list[str]) -> list[str]:
+    out = []
+    for call in calls:
+        words = call.split()
+        if tuple(words[:2]) in _MUTATING_AWS:
+            out.append(call)
+        elif words[:2] == ["s3", "cp"] and words[-1].startswith("s3://"):
+            out.append(call)  # an upload
+    return out
 
 
 class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
@@ -12721,7 +13012,7 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
         git("commit", "-q", "-m", "init")
 
     def standin(self, version: str = "1.2.11", dist_version: str | None = None,
-                lacking: str | None = None) -> str:
+                lacking: str | None = None, exporter_imports: bool = True) -> str:
         """Write the stand-in package; `lacking` names the one writer that does
         not take the option, as biosigIO's writers did before 1.2.11."""
         root = os.path.join(self.dir, "standin")
@@ -12740,7 +13031,10 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
         with open(os.path.join(pkg, "exporters", "__init__.py"), "w") as fh:
             fh.write("")
         with open(os.path.join(pkg, "exporters", "zarr.py"), "w") as fh:
-            fh.write(_STANDIN_EXPORTER.format(export=option("ZarrExporter.export")))
+            fh.write(
+                _STANDIN_EXPORTER.format(export=option("ZarrExporter.export"))
+                if exporter_imports else _STANDIN_BROKEN_EXPORTER
+            )
         dist = os.path.join(root, f"biosigio-{dist_version or version}.dist-info")
         os.makedirs(dist)
         with open(os.path.join(dist, "METADATA"), "w") as fh:
@@ -12748,6 +13042,8 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
         return root
 
     def run_main(self, standin: str, *extra: str) -> tuple[int, str]:
+        if os.path.exists(self.aws_log):
+            os.unlink(self.aws_log)
         proc = subprocess.run(
             [sys.executable, generate_zarr.__file__,
              "--dataset-id", "on008083", "--repo-dir", self.repo,
@@ -12769,7 +13065,7 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
             return fh.read().splitlines()
 
     def assert_refused(self, rc: int, log: str, why: str) -> None:
-        self.assertEqual(rc, generate_zarr.EXIT_SUBJECT_INFO_UNAVAILABLE, log)
+        self.assertEqual(rc, 78, log)  # sysexits.h EX_CONFIG, which hallu-zarr.sh stops on
         self.assertIn(f"::error::{why}", log)
         body = self.callback_body()
         self.assertEqual(body["status"], "failed")
@@ -12777,18 +13073,34 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
         self.assertFalse(body["deterministic"], "the node, not the dataset, is at fault")
         self.assertIn("cannot leave subject information out", body["error"])
         self.assertEqual(body["discovered_count"], 1)
-        # Only the prior index was READ. No store sync, no listing for the wipe,
-        # no removal, no write of any kind.
+        self.assertEqual(body["pending_count"], 0, "nothing was attempted")
+        # The prior index was read first, and nothing in the bucket was synced,
+        # listed for the wipe, removed or written.
         calls = self.aws_calls()
         self.assertTrue(calls, "the run should have read the prior index first")
-        self.assertTrue(all(c.startswith("s3api get-object") for c in calls), calls)
+        self.assertEqual(mutating_aws_calls(calls), [])
+
+    def test_the_mutating_call_filter_sees_what_it_must(self):
+        self.assertEqual(mutating_aws_calls([
+            "s3api get-object --bucket b --key k /tmp/x",
+            "s3 cp s3://b/k -",
+            "s3 sync /tmp/s s3://b/p --delete",
+            "s3api list-objects-v2 --bucket b --prefix p",
+            "s3 rm s3://b/p --recursive",
+            "s3 cp /tmp/x s3://b/k",
+            "s3api put-object --bucket b --key k --body /tmp/x",
+        ]), [
+            "s3 sync /tmp/s s3://b/p --delete",
+            "s3api list-objects-v2 --bucket b --prefix p",
+            "s3 rm s3://b/p --recursive",
+            "s3 cp /tmp/x s3://b/k",
+            "s3api put-object --bucket b --key k --body /tmp/x",
+        ])
 
     def test_each_writer_without_the_option_is_refused(self):
         self.commit(with_recording=True)
         for name in generate_zarr.BIOSIGIO_STORE_WRITERS:
             with self.subTest(name):
-                if os.path.exists(self.aws_log):
-                    os.unlink(self.aws_log)
                 rc, log = self.run_main(self.standin(lacking=name), "--wipe")
                 self.assert_refused(rc, log, f"biosigIO's {name} does not take exclude_subject_info")
 
@@ -12802,6 +13114,19 @@ class TestMainRefusesWithoutSubjectInfoExclusion(unittest.TestCase):
         self.commit(with_recording=True)
         rc, log = self.run_main(self.standin(version="1.2.10", dist_version="1.2.11"), "--wipe")
         self.assert_refused(rc, log, "the imported biosigIO is 1.2.10, below 1.2.11")
+
+    def test_an_installed_release_older_than_the_import_is_refused(self):
+        # The other way round: the module says 1.2.11, but what the environment
+        # records as installed is 1.2.10.
+        self.commit(with_recording=True)
+        rc, log = self.run_main(self.standin(version="1.2.11", dist_version="1.2.10"), "--wipe")
+        self.assert_refused(rc, log, "the installed biosigIO is 1.2.10, below 1.2.11")
+
+    def test_a_biosigio_whose_exporter_cannot_be_imported_is_refused(self):
+        # Fail closed: a check that cannot look must refuse, not wave through.
+        self.commit(with_recording=True)
+        rc, log = self.run_main(self.standin(exporter_imports=False), "--wipe")
+        self.assert_refused(rc, log, "biosigIO cannot be imported (ImportError")
 
     def test_a_capable_biosigio_gets_past_the_check(self):
         # The control. The stand-in cannot convert, so the run still fails, but
@@ -12906,7 +13231,6 @@ class TestFailedCallbackBody(unittest.TestCase):
                 generate_zarr.failed_callback_body(
                     **{k: v for k, v in complete.items() if k != name}
                 )
-
 
 
 if __name__ == "__main__":

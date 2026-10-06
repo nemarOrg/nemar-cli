@@ -6826,16 +6826,21 @@ def _recording_size_bytes(primary_local: str) -> int:
 # component, and marks the store root `subject_info_excluded: true`. The list of
 # members is biosigIO's and lives there only; this module keeps no copy of it.
 #
-# Three layers, so no path writes a store with those members in it:
+# Four layers, so no path uploads a store with those members in it:
 #   * `main` refuses to convert anything on a biosigIO that cannot leave them out
 #     (`biosigio_subject_info_problems`), and exits EXIT_SUBJECT_INFO_UNAVAILABLE
-#     rather than fall back to a store that carries them.
+#     rather than fall back to a store that carries them. hallu-zarr.sh stops its
+#     drain on that exit instead of failing every queued dataset in turn.
 #   * Every store is written through `write_store`, which passes the option
-#     itself, refuses a writer whose signature does not NAME it, and reads the
-#     written root back for the mark. That check runs in the process that
-#     writes, so a pool worker that imports a different biosigIO from the one
-#     `main` checked still refuses. A test fails if a biosigIO writer is called
-#     anywhere else.
+#     itself, refuses a writer whose signature does not NAME it, refuses a
+#     writer that reports a path other than the store to be uploaded, and reads
+#     that root back (`require_subject_info_excluded`: the mark, and the
+#     metadata unchanged by biosigIO's own `strip_subject_info`). It runs in the
+#     process that writes, so a pool worker that imports a different biosigIO
+#     from the one `main` checked still refuses. A test fails if a biosigIO
+#     writer is referenced anywhere else.
+#   * `sync_store`, the one upload, runs the same read-back on the bytes it is
+#     about to upload, after every later rewrite of the root.
 #   * hallu-zarr.sh's setup() refuses an installed biosigIO below 1.2.11.
 #
 # `fix_source_file_attr` still rewrites `source_file` afterwards: biosigIO now
@@ -6908,6 +6913,7 @@ def subject_info_problems(
     installed_version: str | None,
     imported_version: object,
     writers: Mapping[str, object],
+    strip: object,
 ) -> list[str]:
     """Why a biosigIO cannot be trusted to leave subject information out of a
     store; empty when it can.
@@ -6918,7 +6924,8 @@ def subject_info_problems(
     installed one or was imported before an upgrade. Each writer in
     BIOSIGIO_STORE_WRITERS has to name `exclude_subject_info` in its signature;
     a version alone is not proof, because a build can carry a version it does
-    not have the code for.
+    not have the code for. `strip` is biosigIO's `strip_subject_info`, which
+    `require_subject_info_excluded` checks every written store with.
     """
     problems: list[str] = []
     floor = final_release(SUBJECT_INFO_FLOOR)
@@ -6941,6 +6948,8 @@ def subject_info_problems(
             problems.append(f"biosigIO has no {name}")
         elif not names_keyword(fn, SUBJECT_INFO_OPTION):
             problems.append(f"biosigIO's {name} does not take {SUBJECT_INFO_OPTION}")
+    if not callable(strip):
+        problems.append("biosigIO has no strip_subject_info to check a written store with")
     return problems
 
 
@@ -6971,14 +6980,22 @@ def biosigio_subject_info_problems() -> list[str]:
             "ZarrExporter.export": getattr(exporter, "export", None),
             "stream_to_zarr": getattr(biosigio, "stream_to_zarr", None),
         },
+        strip=getattr(biosigio, "strip_subject_info", None),
     )
 
 
 def require_subject_info_excluded(store_path: str) -> None:
-    """Refuse a written store whose root does not carry
-    `subject_info_excluded: true`, the mark biosigIO sets when it left subject
-    information out. Read from the root `zarr.json` on disk, which is what gets
-    uploaded."""
+    """Refuse a store whose root does not show subject information left out.
+
+    Two checks on the root `zarr.json` on disk, which is what gets uploaded: it
+    carries `subject_info_excluded: true`, the mark biosigIO sets when it left
+    the members out, and its `recording_metadata` is unchanged by biosigIO's own
+    `strip_subject_info`, so no member biosigIO lists is there at any depth
+    whatever the mark says. The second check uses biosigIO's list, never a copy,
+    and fails closed when that function cannot be imported. A root with no
+    `recording_metadata` is refused too: biosigIO always writes one, so its
+    absence means something else wrote the root.
+    """
     meta_path = os.path.join(store_path, "zarr.json")
     try:
         with open(meta_path, encoding="utf-8") as fh:
@@ -6992,9 +7009,28 @@ def require_subject_info_excluded(store_path: str) -> None:
             f"{store_path} was written without `{SUBJECT_INFO_EXCLUDED_ATTR}: true`; "
             "refusing to publish a store that may carry subject information"
         )
+    rec_meta = attrs.get("recording_metadata")
+    if not isinstance(rec_meta, dict):
+        raise SubjectInfoExclusionUnavailable(
+            f"{store_path} has no recording_metadata object to check for subject information"
+        )
+    try:
+        strip = importlib.import_module("biosigio").strip_subject_info
+    except Exception as exc:  # cannot verify means refuse
+        raise SubjectInfoExclusionUnavailable(
+            f"cannot check {store_path} for subject information: biosigIO's "
+            f"strip_subject_info is unavailable ({type(exc).__name__}: {exc})"
+        ) from exc
+    if strip(rec_meta) != rec_meta:
+        raise SubjectInfoExclusionUnavailable(
+            f"{store_path} carries a recording_metadata member biosigIO lists as "
+            "subject information; refusing to publish it"
+        )
 
 
-def write_store(writer: Callable[..., object], *args: object, **kwargs: object) -> str:
+def write_store(
+    writer: Callable[..., object], *args: object, expected_path: str, **kwargs: object
+) -> str:
     """Write a store with a biosigIO writer, leaving subject information out.
 
     The ONLY way this module writes a store: a test scans the scripts for a
@@ -7003,7 +7039,10 @@ def write_store(writer: Callable[..., object], *args: object, **kwargs: object) 
     called with `args` and `kwargs` plus `exclude_subject_info=True`. Refused
     BEFORE the call when the writer does not name the option, so a worker
     holding an older biosigIO writes nothing; and refused AFTER it when the
-    written root lacks the mark. Returns the store path the writer reports.
+    path the writer reports is not `expected_path` (the store the caller will
+    upload) or that store's root does not show subject information left out.
+    `sync_store` checks the same store again right before the upload, after
+    every later rewrite of its root. Returns `expected_path`.
     """
     name = getattr(writer, "__qualname__", None) or repr(writer)
     if SUBJECT_INFO_OPTION in kwargs:
@@ -7020,8 +7059,36 @@ def write_store(writer: Callable[..., object], *args: object, **kwargs: object) 
         raise SubjectInfoExclusionUnavailable(
             f"{name} returned {type(written).__name__}, not the store path it wrote"
         )
-    require_subject_info_excluded(written)
-    return written
+    if os.path.realpath(written) != os.path.realpath(expected_path):
+        raise SubjectInfoExclusionUnavailable(
+            f"{name} reports writing {written}, not {expected_path}, the store that "
+            "would be uploaded"
+        )
+    require_subject_info_excluded(expected_path)
+    return expected_path
+
+
+def sync_store(store_local: str, prefix: str) -> None:
+    """Upload one converted store to `prefix` with `aws s3 sync --delete`.
+
+    The last step between a store and the public bucket, and the one place a
+    store is uploaded, so it checks the bytes being uploaded once more
+    (`require_subject_info_excluded`), after every rewrite of the root that
+    followed the write (`fix_source_file_attr`, `embed_root_attr`).
+
+    Latest-only: --delete drops stale chunk objects a smaller new store no
+    longer needs. Long origin TTL; the callback purges zarr.json/index.json.
+    Through `_aws` for the wall-clock timeout + retry: a store is thousands of
+    tiny chunk PUTs, which under contention intermittently fail ("Need to
+    rewind the stream") or wedge; sync is idempotent so a retry just re-PUTs
+    whatever is missing.
+    """
+    require_subject_info_excluded(store_local)
+    _aws([
+        "aws", "s3", "sync", store_local, prefix,
+        "--delete", "--only-show-errors",
+        "--cache-control", "public, max-age=86400",
+    ])
 
 
 def bids_channels_arg(channels_local: str | None) -> str:
@@ -7152,7 +7219,10 @@ def convert_recording(
                 rec.channels[label]["modality"] = modality
         # Through `write_store`, never `rec.to_zarr(...)` directly: it is what
         # leaves subject information out of the store (#1626).
-        write_store(rec.to_zarr, store_path, dtype="int16", modality_rates=MODALITY_RATES)
+        write_store(
+            rec.to_zarr, store_path, expected_path=store_path,
+            dtype="int16", modality_rates=MODALITY_RATES,
+        )
 
     # Large recordings use the streaming converter so peak RAM stays bounded; the
     # in-memory path would load them at float64 2-3x and OOM. (multi-GB BrainVision/
@@ -7175,6 +7245,7 @@ def convert_recording(
                 stream_to_zarr,
                 primary_local,
                 store_path,
+                expected_path=store_path,
                 force_modality=modality,
                 modality_rates=MODALITY_RATES,
                 dtype="int16",
@@ -7457,18 +7528,9 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
             primary, store_total_channels(meta), expected,
             file_declared_channel_count(primary_local),
         )
-        # Latest-only: --delete drops stale chunk objects a smaller new store no
-        # longer needs. Long origin TTL; the callback purges zarr.json/index.json.
-        # Through `_aws` for the wall-clock timeout + retry: a store is thousands of
-        # tiny chunk PUTs, which under contention intermittently fail ("Need to
-        # rewind the stream") or wedge; sync is idempotent so a retry just re-PUTs
-        # whatever is missing.
-        _aws([
-            "aws", "s3", "sync", store_local,
-            safe_store_prefix(c["bucket"], c["dataset_id"], rel_store),
-            "--delete", "--only-show-errors",
-            "--cache-control", "public, max-age=86400",
-        ])
+        # The upload, which re-checks this store for subject information on the
+        # bytes it uploads (#1626); see `sync_store`.
+        sync_store(store_local, safe_store_prefix(c["bucket"], c["dataset_id"], rel_store))
         # `source_key` is deliberately NOT here any more: it moved to the sibling
         # producer manifest in v3 (#1178 item 5). It was ~90 bytes per store that
         # no consumer read -- 2.3 MB of nm000281's 12.8 MB index, fetched on every
