@@ -765,7 +765,10 @@ A dataset with nothing under `D/zarr/` is `found: no-zarr`, which `drop-archives
 Run this step with `--execute` for every dataset, one without a Zarr copy too: `drop-archives` refuses without a `zarr-verified.json` for this plan, and for such a dataset the proof is the `no-zarr` one.
 
 The noncurrent versions of every zarr object still hold the old metadata, and step 15b prunes them with `--prune-noncurrent $D/zarr/`.
-Expect about one noncurrent version per document rewritten, so `delete-old --max-prune` must cover the store roots plus the nested documents rewritten (its dry run prints the exact number).
+The count is not one per document rewritten: it is the whole history of the prefix.
+nm000186 (88 stores, 968 documents rewritten) measured 46,127 noncurrent versions and 36,068 markers, 82,195 in all: 40,654 data chunks, 5,456 `zarr.json` and 5 `index.json` from every earlier conversion, 15,622 noncurrent delete markers, and 20,446 delete markers that are current (keys deleted long ago, whose old versions are still there).
+The old `zarr.json` versions are the ones that carry the subject, and the rest is history of a derived copy, regenerable from the dataset.
+Read the dry run's `prune noncurrent versions=N markers=P` line and set `delete-old --max-prune` to at least N+P (its default is 1,000, which a dataset converted more than once always exceeds).
 
 **Waiting for the edge.**
 The stage writes to S3, not through `zarr.nemar.org`.
@@ -847,18 +850,19 @@ done
 
 ### Step 13: Ledger
 
-One line per action, appended to `$W/ledger.jsonl`, with the numbers read from the stages' own files:
+One line per action, appended to `$W/ledger.jsonl`, with the numbers read from the stages' own files.
+`A` is a shell function, not a variable, because zsh (the maintainers' shell) does not split an unquoted `$A` into words and would try to run the whole string as one command name:
 
 ```bash
 ACTOR=$(gh api user --jq .login)
 VERSIONS=$(jq -r '.tags | join(",")' $W/plan.json)
-A="bun run $T/ledger-cli.ts append --file $W/ledger.jsonl --dataset $D --actor $ACTOR --versions $VERSIONS"
-$A --action plan --counts keys=$(jq .totals.keys $W/plan.json),need_scrub=$(jq .totals.needScrub $W/plan.json) --verification plan-only
-$A --action headers-scrubbed --counts objects=$(jq '.entries | length' $W/assembled.json),headers=$(jq .counts.headersChecked $W/verified.json) --verification scanner-clean+payload-identical+rehash-ok
-$A --action files-removed --counts drop_paths=$(jq '.dropPaths | length' $W/git-plan.json),json_files_blanked=$(jq '.blankJsonKeys | length' $W/git-plan.json),provenance_entries_dropped=$(jq .provenanceEntriesDropped $W/git-plan.report.json) --verification scanner-clean
-$A --action history-rewritten --counts refs=$(jq .counts.refs $W/git-verified.json),commits=$(jq .counts.commits $W/git-verified.json) --verification scanner-clean
-$A --action locks-applied --counts objects=$(jq '.entries | length' $W/assembled.json) --verification none
-$A --action manifests-regenerated --counts manifests=$(jq '.tags | length' $W/plan.json) --verification none
+A() { bun run $T/ledger-cli.ts append --file $W/ledger.jsonl --dataset $D --actor $ACTOR --versions $VERSIONS "$@"; }
+A --action plan --counts keys=$(jq .totals.keys $W/plan.json),need_scrub=$(jq .totals.needScrub $W/plan.json) --verification plan-only
+A --action headers-scrubbed --counts objects=$(jq '.entries | length' $W/assembled.json),headers=$(jq .counts.headersChecked $W/verified.json) --verification scanner-clean+payload-identical+rehash-ok
+A --action files-removed --counts drop_paths=$(jq '.dropPaths | length' $W/git-plan.json),json_files_blanked=$(jq '.blankJsonKeys | length' $W/git-plan.json),provenance_entries_dropped=$(jq .provenanceEntriesDropped $W/git-plan.report.json) --verification scanner-clean
+A --action history-rewritten --counts refs=$(jq .counts.refs $W/git-verified.json),commits=$(jq .counts.commits $W/git-verified.json) --verification scanner-clean
+A --action locks-applied --counts objects=$(jq '.entries | length' $W/assembled.json) --verification none
+A --action manifests-regenerated --counts manifests=$(jq '.tags | length' $W/plan.json) --verification none
 ```
 
 A ledger line holds counts and a closed vocabulary only: an action (`plan`, `headers-scrubbed`, `files-removed`, `history-rewritten`, `locks-applied`, `manifests-regenerated`, `old-versions-deleted`, `published-again`), versions as tags, counts as `name=number` with lowercase names, a verification from the closed list (`none`, `plan-only`, `scanner-clean`, `scanner-clean+payload-identical`, `scanner-clean+payload-identical+rehash-ok`, `public-surface-clean`, `authoritative-listing-empty`), a scanner revision and an actor handle.
@@ -867,11 +871,14 @@ The words chosen above are this runbook's convention: the closed list has no wor
 The scanner revision is the last commit that touched `shared/identifier-scan.ts`, `shared/identifier-scrub.ts` or `scripts/scrub/s3/zarr-json.ts`, unless `--scanner` is given.
 `ledger-cli.ts show --file $W/ledger.jsonl` prints the file back, validating every line.
 
-Commit the file as `.nemar/corrections.jsonl` on `main` (a normal push, not a force; if GitHub declines it, stop and ask, and never lift a ruleset by hand), and publish it:
+Commit the file as `.nemar/corrections.jsonl` on `main` (a normal push, not a force; if GitHub declines it, stop and ask, and never lift a ruleset by hand), and publish it.
+The dataset's own `.gitignore` has listed `.nemar/` since its first upload (the bot's `metadata.json` and `availability-report.json` are tracked only because they were force-added), so `git add` without `-f` refuses and the push says `Everything up-to-date`; `-f` on this one file is the fix, and no ruleset is involved.
+A push by an admin shows `remote: - 2 of 2 required status checks are expected.` and succeeds; that is the rule being bypassed by the pusher, as for every push of the pipeline's own bot, not a refusal.
+The push sets off the BIDS validation (two runs were seen for the one push on 2026-10-06, both for this dataset and both `success`) and nothing else:
 
 ```bash
 mkdir -p $W/clone/.nemar && cp $W/ledger.jsonl $W/clone/.nemar/corrections.jsonl
-git -C $W/clone add .nemar/corrections.jsonl && git -C $W/clone commit -m "Record the privacy correction" && git -C $W/clone push origin main
+git -C $W/clone add -f .nemar/corrections.jsonl && git -C $W/clone commit -m "Record the privacy correction" && git -C $W/clone push origin main
 bun run $T/ledger-cli.ts publish --file $W/ledger.jsonl --dataset $D                 # dry run
 bun run $T/ledger-cli.ts publish --file $W/ledger.jsonl --dataset $D --execute
 ```
@@ -934,11 +941,18 @@ While the dataset is private the queue's `reconcile` parks it as `unlisted`, and
 Read the dataset's row on the conversion host, read-only; the queue is a SQLite file, `${ZARR_BASE:-/mnt/local}/zarr-state/zarr-queue.db` by default in `scripts/zarr/hallu-zarr.sh`, and `zarr_queue.py` itself is not read-only, because its `connect` migrates the schema:
 
 ```bash
-ssh hallu "sqlite3 -readonly /mnt/local/zarr-state/zarr-queue.db \"SELECT status, converted_version, updated_at FROM jobs WHERE dataset_id = '$D'\""
+ssh hallu "python3 - <<'EOF'
+import sqlite3
+c = sqlite3.connect('file:/mnt/local/zarr-state/zarr-queue.db?mode=ro', uri=True)
+print(c.execute(\"SELECT status, converted_version, updated_at FROM jobs WHERE dataset_id = ?\", ('$D',)).fetchall())
+print(c.execute(\"SELECT COUNT(*) FROM jobs WHERE status = 'inprogress'\").fetchone())
+EOF"
 ```
 
 Expect `unlisted`, or no row, and never `inprogress`.
-The live host's path and its `sqlite3` binary are UNVERIFIED; if either differs, ask the maintainer to read the row.
+The host has no `sqlite3` binary (measured 2026-10-06: `sqlite3: command not found`), so the read uses Python's `sqlite3` module in read-only mode (`mode=ro`, which does not migrate the schema); the path was right.
+The second line counts rows `inprogress` for any dataset, which is not this dataset's concern unless the first line says `inprogress` too.
+If the path differs, ask the maintainer to read the row.
 
 ### Step 15: Drop the archives, then delete the old bytes
 
@@ -1199,14 +1213,14 @@ Do step 17 only after all of this passes.
 - Record the deletion and the republication in the ledger, then commit and publish it again as in step 13 (it is a strict extension):
 
   ```bash
-  $A --action old-versions-deleted --proof $W/deleted.json
-  $A --action published-again --counts manifests=$(jq '.tags | length' $W/plan.json) --verification public-surface-clean
+  A --action old-versions-deleted --proof $W/deleted.json
+  A --action published-again --counts manifests=$(jq '.tags | length' $W/plan.json) --verification public-surface-clean
   cp $W/ledger.jsonl $W/clone/.nemar/corrections.jsonl
-  git -C $W/clone add .nemar/corrections.jsonl && git -C $W/clone commit -m "Record the deletion and republication" && git -C $W/clone push origin main
+  git -C $W/clone add -f .nemar/corrections.jsonl && git -C $W/clone commit -m "Record the deletion and republication" && git -C $W/clone push origin main
   bun run $T/ledger-cli.ts publish --file $W/ledger.jsonl --dataset $D --execute
   ```
 
-  (`$A` is step 13's variable; in a new shell, set `ACTOR`, `VERSIONS` and `A` again.)
+  (`A` is step 13's shell function; in a new shell, set `ACTOR` and `VERSIONS` and define `A` again.)
   `old-versions-deleted` is read, not typed: `--proof` must be `deleted.json` (parsed strictly), its counts (`keys`, `versions`, `markers`, `pruned_versions`, `pruned_markers`) are taken from it, `--counts` beside it is a usage error, and the verification is set to `authoritative-listing-empty+proof-<first 16 hex of the sha256 of deleted.json>` (`--verification` may be omitted or say `authoritative-listing-empty`; anything else is `verification-contradicts-proof`).
   Refusals: `proof-missing`, `proof-invalid`, `proof-wrong-dataset`, and `verification-needs-deletion` when `authoritative-listing-empty` is used with another action.
 - Comment on the dataset issue in plain words and close it; tell the uploader and the authors, and the source archive for a mirror.
