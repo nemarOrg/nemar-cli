@@ -49,6 +49,7 @@ import {
   makeFixture,
   objectPath,
   readJson,
+  removeTempDirs,
   runScrub,
   seedManifest,
   sha256,
@@ -58,6 +59,8 @@ import {
   writeGitVerified,
   writeJson,
 } from "./support";
+
+afterAll(removeTempDirs);
 
 let standin: S3Standin;
 let pub: PublicEndpoint;

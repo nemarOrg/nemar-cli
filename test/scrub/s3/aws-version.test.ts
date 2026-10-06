@@ -12,7 +12,9 @@ import path from "node:path";
 import { spawn } from "bun";
 import { awsCliVersionOk, parseAwsCliVersion } from "../../../scripts/scrub/s3/s3-lib";
 import { startS3Standin } from "../helpers/s3-standin";
-import { DATASET, SLOW, runScrub, tempDir } from "./support";
+import { DATASET, SLOW, removeTempDirs, runScrub, tempDir } from "./support";
+
+afterAll(removeTempDirs);
 
 const LEDGER = path.join(import.meta.dir, "..", "..", "..", "scripts", "scrub", "ledger-cli.ts");
 

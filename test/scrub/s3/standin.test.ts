@@ -4,7 +4,7 @@
  * Each case is a behavior the scrub stages rely on and that S3 has.
  */
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { writeFile } from "node:fs/promises";
 import {
   AwsCliError,
@@ -22,7 +22,9 @@ import {
   uploadPartCopy,
 } from "../../../scripts/scrub/s3/s3-lib";
 import { type S3Standin, startS3Standin } from "../helpers/s3-standin";
-import { BUCKET, MIB, SLOW, centuryFromNow, withCtx } from "./support";
+import { BUCKET, MIB, SLOW, centuryFromNow, removeTempDirs, withCtx } from "./support";
+
+afterAll(removeTempDirs);
 
 let standin: S3Standin;
 afterEach(() => standin?.stop());

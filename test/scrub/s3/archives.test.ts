@@ -33,6 +33,7 @@ import {
   has,
   planArgs,
   readJson,
+  removeTempDirs,
   runScrub,
   sha256,
   tempDir,
@@ -41,6 +42,8 @@ import {
   writeHashVerified,
   writeJson,
 } from "./support";
+
+afterAll(removeTempDirs);
 
 let standin: S3Standin;
 let snap: Snapshot;

@@ -642,6 +642,8 @@ describe.skipIf(!awsInstalled)("raw-hash: the default source, the real aws CLI",
           ["raw-hash", "--plan", ws.plan, "--out", ws.out, "--retries", "0", "--workers", "2"],
           {
             HOME: home,
+            // The child's temp files land in this run's directory, which the file removes.
+            TMPDIR: home,
             AWS_ACCESS_KEY_ID: "ASIATESTDUMMY000001",
             AWS_SECRET_ACCESS_KEY: "dummySecretAccessKeyForRawHashTest",
             AWS_SESSION_TOKEN: "dummySessionTokenForRawHashTest",

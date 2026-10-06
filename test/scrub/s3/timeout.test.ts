@@ -4,7 +4,7 @@
  * limit, and the real CLI is killed and reported as a timeout.
  */
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import type { PlanFile } from "../../../scripts/scrub/contract";
 import { AwsCliError, headObject } from "../../../scripts/scrub/s3/s3-lib";
 import { type S3Standin, startS3Standin } from "../helpers/s3-standin";
@@ -15,12 +15,15 @@ import {
   objectPath,
   planArgs,
   readJson,
+  removeTempDirs,
   runScrub,
   seedManifest,
   seedObject,
   tempDir,
   withCtx,
 } from "./support";
+
+afterAll(removeTempDirs);
 
 let standin: S3Standin;
 afterEach(() => standin?.stop());

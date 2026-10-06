@@ -4,7 +4,7 @@
  * small as the test asks.
  */
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import {
   type AwsRunner,
   listCurrentKeys,
@@ -12,7 +12,9 @@ import {
   listPrefixVersions,
 } from "../../../scripts/scrub/s3/s3-lib";
 import { type S3Standin, startS3Standin } from "../helpers/s3-standin";
-import { BUCKET, SLOW, withCtx } from "./support";
+import { BUCKET, SLOW, removeTempDirs, withCtx } from "./support";
+
+afterAll(removeTempDirs);
 
 let standin: S3Standin;
 afterEach(() => standin?.stop());

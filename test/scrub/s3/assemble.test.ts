@@ -6,7 +6,7 @@
  * hash the hashing stage promised in the key, and with the bytes the stand-in actually stored.
  */
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import path from "node:path";
 import {
@@ -44,6 +44,7 @@ import {
   planArgs,
   readJson,
   rebindPatches,
+  removeTempDirs,
   runScrub,
   seedManifest,
   seedObject,
@@ -53,6 +54,8 @@ import {
   writeHashes,
   writeJson,
 } from "./support";
+
+afterAll(removeTempDirs);
 
 let standin: S3Standin;
 afterEach(() => standin?.stop());

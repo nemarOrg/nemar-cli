@@ -3,7 +3,7 @@
  * reads, what it writes, and that it stops (exit 4) rather than plan over data it could not read.
  */
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { parsePatches, parsePlan } from "../../../scripts/scrub/contract";
@@ -31,6 +31,7 @@ import {
   objectPath,
   planArgs,
   readJson,
+  removeTempDirs,
   runScrub,
   seedManifest,
   seedObject,
@@ -40,6 +41,8 @@ import {
   writeHashes,
   writeJson,
 } from "./support";
+
+afterAll(removeTempDirs);
 
 let standin: S3Standin;
 afterEach(() => standin?.stop());

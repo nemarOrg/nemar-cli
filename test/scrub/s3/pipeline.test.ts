@@ -7,7 +7,7 @@
  * value means; this one can.
  */
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import path from "node:path";
 import { spawn } from "bun";
 import { type HashesFile, parseHashes, patchDigest } from "../../../scripts/scrub/contract";
@@ -26,6 +26,7 @@ import {
   planArgs,
   readJson,
   rebindPatches,
+  removeTempDirs,
   runScrub,
   seedManifest,
   seedObject,
@@ -35,6 +36,8 @@ import {
   withFields,
   writeJson,
 } from "./support";
+
+afterAll(removeTempDirs);
 
 const HASH_STAGE = path.join(REPO_ROOT, "scripts", "scrub", "hash", "hash_stage.py");
 

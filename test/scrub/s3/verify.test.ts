@@ -33,11 +33,14 @@ import {
   objectPath,
   readJson,
   rebindPatches,
+  removeTempDirs,
   runScrub,
   sha256,
   verifyArgs,
   writeJson,
 } from "./support";
+
+afterAll(removeTempDirs);
 
 let standin: S3Standin;
 let snap: Snapshot;
