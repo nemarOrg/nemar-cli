@@ -1132,7 +1132,8 @@ export interface ProvenAssembly {
  * - `verified.json` and `new-hash-verified.json` name the exact bytes of `assembled.json`, this
  *   dataset, and its number of entries;
  * - `git-verified.json` is a verify of a FRESH clone of what was pushed, for this dataset, made
- *   with this `keymap.json` and this `plan.json`, and that keymap is this assembly's, pair for pair.
+ *   with this `keymap.json` and this `plan.json` (and with the `git-plan.json` in the working
+ *   directory, when there is one), and that keymap is this assembly's, pair for pair.
  *
  * `drop-archives` (runbook step 15a) and `delete-old` (step 15b) both ask this, so the rule is one
  * rule. Every check runs and records its refusal; a check whose file could not be read or parsed
@@ -1208,6 +1209,17 @@ export async function checkScrubProofs(
       stale.push("names another keymap.json");
     }
     if (git.s3PlanSha256 !== sha256Hex(planBytes)) stale.push("names another plan.json");
+    // The git plan is not a file these stages need, so only one in the working directory (runbook
+    // step 2 writes it there) is compared: a proof made with another git plan proved other edits.
+    const gitPlanBytes = await readBytes(path.resolve(dir, "git-plan.json"), "git-plan.json").catch(
+      (err: unknown) => {
+        if (err instanceof StageError && err.word === "git-plan.json-missing") return undefined;
+        throw err;
+      },
+    );
+    if (gitPlanBytes && git.gitPlanSha256 !== sha256Hex(gitPlanBytes)) {
+      stale.push("names another git-plan.json");
+    }
     if (stale.length > 0) refusals.add("git-proof-stale", stale.join(", "));
   }
 

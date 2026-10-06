@@ -395,6 +395,16 @@ describe("drop-archives: every proof of the scrub must be there first (runbook s
       ({ dir, ids } = await seeded());
       writeGitVerified(dir, { keymapSha256: "b".repeat(64) });
       await refusedBoth(dir, ids, "git-proof-stale", "git proof of another keymap");
+      // Another git plan, when a git-plan.json is in the working directory.
+      ({ dir, ids } = await seeded());
+      writeFileSync(path.join(dir, "git-plan.json"), '{"version":1}\n');
+      const gitPlanDry = await refusedBoth(
+        dir,
+        ids,
+        "git-proof-stale",
+        "git proof of another git plan",
+      );
+      expect(gitPlanDry.stdout).toContain("git-proof-stale: names another git-plan.json");
 
       // The S3 proofs name the bytes of another assembly.
       ({ dir, ids } = await seeded());

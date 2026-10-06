@@ -78,8 +78,9 @@ const USAGE = `usage: s3-scrub.ts <plan|assemble|verify|delete-old|zarr|drop-arc
              --confirm-dataset: the dataset id again, required even for the dry run.
              --git-verified (default git-verified.json in DIR): written by
              \`git-scrub verify --fresh-clone\` over a fresh clone of what was pushed; refused
-             unless its mode is fresh-clone, it names this keymap.json and plan.json, and the
-             keymap is this assembly's (git-proof-missing, git-proof-stale, keymap-mismatch).
+             unless its mode is fresh-clone, it names this keymap.json and plan.json (and the
+             git-plan.json in DIR, when there is one), and the keymap is this assembly's
+             (git-proof-missing, git-proof-stale, keymap-mismatch).
              --public-base: where an anonymous HEAD proves the dataset is private
              (default ${DEFAULT_PUBLIC_BASE}); it must answer 403. It must be https and the
              plan's bucket's own S3 endpoint (virtual-hosted or path-style).

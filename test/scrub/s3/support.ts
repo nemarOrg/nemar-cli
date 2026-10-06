@@ -549,7 +549,13 @@ export function rebindPatches(dir: string): void {
  */
 export function writeGitVerified(
   dir: string,
-  over: Partial<{ mode: string; keymapSha256: string; s3PlanSha256: string; dataset: string }> = {},
+  over: Partial<{
+    mode: string;
+    keymapSha256: string;
+    gitPlanSha256: string;
+    s3PlanSha256: string;
+    dataset: string;
+  }> = {},
 ): void {
   const proof = {
     version: 1,
