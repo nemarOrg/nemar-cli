@@ -271,7 +271,7 @@ describe("ledger-cli publish: only a genuine not-found is absence (C1)", () => {
   test(
     "an unreachable endpoint refuses, in the dry run and with --execute, and never says (new)",
     async () => {
-      const closed = Bun.serve({ port: 0, fetch: () => new Response(null) });
+      const closed = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response(null) });
       const url = `http://127.0.0.1:${closed.port}`;
       closed.stop(true);
       const file = join(work(), "ledger.jsonl");

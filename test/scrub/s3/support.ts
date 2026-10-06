@@ -467,6 +467,11 @@ export function startPublicEndpoint(): PublicEndpoint {
   };
   const server = Bun.serve({
     port: 0,
+    // 127.0.0.1, not the default: a wildcard bind (`*:port`, IPv6 dual-stack) lets another
+    // process on the machine bind 127.0.0.1:<same port> and take every connection the test makes
+    // to 127.0.0.1 (measured on macOS: the "404 in 2 ms" and "401" flakes were other local
+    // servers answering). A specific bind refuses that second bind (EADDRINUSE).
+    hostname: "127.0.0.1",
     fetch(req) {
       const headers: Record<string, string> = {};
       req.headers.forEach((v, k) => {
