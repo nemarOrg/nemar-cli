@@ -17,7 +17,7 @@
  *  - DeleteObjects (`POST /<bucket>?delete`): up to 1000 `<Object>` entries, each by key and
  *    optional version id, with the same lock rules per item as DeleteObject. As on S3 the request
  *    answers 200 even when an item is refused: a locked item is an `<Error>` entry
- *    (`AccessDenied`) beside the `<Deleted>` ones. A version id that does not exist is answered
+ *    (`AccessDenied`) beside the `<Deleted>` ones; with `<Quiet>true</Quiet>` only the errors. A version id that does not exist is answered
  *    `<Deleted>` (ASSUMED from S3's documented idempotent delete; the canary's `--batch` step
  *    reads what the real bucket does). A fault on `DeleteObjects` fails the whole request; one on
  *    `DeleteObjectsItem` (with a `key`) turns that one item into an `<Error>` entry.
@@ -344,6 +344,9 @@ export function startS3Standin(): S3Standin {
       if (req.method === "POST" && key === "" && q.has("delete")) {
         const bypass = req.headers.get("x-amz-bypass-governance-retention") === "true";
         const body = await req.text();
+        // As on S3, Quiet mode answers only the failures: a caller that asks for it cannot tell
+        // which items were deleted.
+        const quiet = /<Quiet>\s*true\s*<\/Quiet>/i.test(body);
         const items = [...body.matchAll(/<Object>([\s\S]*?)<\/Object>/g)].map((m) => {
           const part = m[1] as string;
           const k = /<Key>([\s\S]*?)<\/Key>/.exec(part)?.[1] ?? "";
@@ -399,7 +402,9 @@ export function startS3Standin(): S3Standin {
           );
         }
         record({ op: "DeleteObjects", key: "", status: 200, bypass, items });
-        return xml(`<DeleteResult>${deleted.join("")}${errors.join("")}</DeleteResult>`);
+        return xml(
+          `<DeleteResult>${quiet ? "" : deleted.join("")}${errors.join("")}</DeleteResult>`,
+        );
       }
 
       // ---- bucket-level: listings ----

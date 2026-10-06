@@ -94,6 +94,29 @@ describe("deleteVersionBatch", () => {
   );
 
   test(
+    "two versions of one key, one locked: the deleted one never vouches for the refused one",
+    async () => {
+      standin = startS3Standin();
+      const key = `${P}shared`;
+      const locked = standin.putObject(BUCKET, key, data(1), { lockUntil: centuryFromNow() });
+      const free = standin.putObject(BUCKET, key, data(2));
+      standin.putObject(BUCKET, key, data(3));
+      await withCtx(standin, async (ctx) => {
+        const items = [
+          { key, versionId: locked },
+          { key, versionId: free },
+        ];
+        expect(await deleteVersionBatch(ctx, items, false)).toEqual([
+          "DeleteObjects:access-denied",
+        ]);
+      });
+      expect(left(key)).toContain(locked);
+      expect(left(key)).not.toContain(free);
+    },
+    SLOW,
+  );
+
+  test(
     "an operator without the bypass permission gets a word per locked item, and nothing is deleted",
     async () => {
       standin = startS3Standin();
