@@ -13,6 +13,165 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## 0.10.14 - 2026-10-07
+
+### Fixed
+
+- **Zarr conversion admits recordings against free scratch disk and reclaims what a killed
+  worker leaves behind (#1638).** A very large recording could never finish: the conversion
+  node's scratch volume filled, workers died with `No space left on device`, and the dead
+  workers' scratch stayed on disk, so every recording queued behind them failed the same way.
+  nm000276 (40 recordings, 3,031 GiB) stalled at 12 converted for that reason. Memory was not
+  the cause. A recording is now charged 3 times its bytes when streamed (2 times otherwise)
+  against free space plus what its in-flight recordings hold, minus 10 GiB, re-read every
+  round, and one that does not fit yet is deferred rather than attempted. A deferral is neither
+  an attempt nor a conversion: it keeps a published store whose index is current, counts as
+  not attempted so the queue advances no retry round, and a run that defers everything and
+  finds the index unchanged writes nothing to S3. Each recording gets its own memmap
+  directory; after a broken worker pool its scratch is deleted, its orphaned `aws s3 cp`
+  children are killed, and the free space before and after is logged. A killed worker's
+  verdict now lists a full scratch disk among its possible causes, and a pool break warns
+  about it, so a full volume is no longer read only as out of memory.
+- **`generate_zarr.py --check-env` and a single settings check per run (#1638).**
+  `hallu-zarr.sh` validates the `ZARR_SCRATCH_*` settings once before it dispatches anything,
+  so a typo stops the run with the queue and D1 untouched instead of posting `failed` and
+  burning an attempt for every dataset the drain visits.
+
+### Known limitations
+
+- The 3x factor is the measured float32 peak plus margin, so an int16 source can still hit
+  `No space left on device`; this narrows the risk, it does not remove it.
+- A recording that can never fit is still re-queued hourly (a metadata clone and the
+  start-of-run signal, no publish), and its `ready` callback restamps `zarr_converted_at`.
+  The start-of-run signal sets the dataset pending again each hour, and each `ready` callback
+  clears its recording-stats stamp so that sweep picks it up again. An `unchanged` webhook
+  status and a `scratch_deferred` field are the follow-up.
+- nm000276's largest recording is charged about 532 GiB, and admission also keeps 10 GiB of
+  headroom, so it needs about 542 GiB free with nothing else running and stays deferred until
+  then. With `ZARR_SCRATCH_STREAM_FACTOR=2.9` it is charged about 514 GiB and needs about
+  524 GiB free.
+
+### Migrations
+
+None.
+
+### Deploy coupling
+
+Merging to `main` makes the Hallu converter (the Zarr conversion host, cron `ZARR_DRIVER_REF=main`)
+run this code on its next tick. The only other deploy-relevant changes are the versions:
+`backend/package.json` moves, so the backend redeploys unchanged, and the root `package.json`
+moves from 0.10.13 to a `0.10.14-devN` pre-release, so the merge also triggers `auto-tag.yml`,
+which strips `-dev`, tags `v0.10.14` and publishes the identical CLI to npm as a new version.
+A dataset already stuck on scratch space converts again only when it is queued:
+`hallu-zarr.sh --dataset <id> --requeue done --execute`.
+
+## 0.10.13 - 2026-10-05
+
+### Added
+
+- **NEMAR records for Neurobagel's federated search (epic #1586, ADR 0081 to ADR 0084).**
+  [Neurobagel](https://neurobagel.org/) searches participant-level information across
+  archives that each run a node. NEMAR now converts what its data plane already serves into
+  Neurobagel records and serves them to a stock Neurobagel node, which pulls them. The
+  parts, in the order data flows through them:
+  - **One pure transform (`shared/neurobagel/`, ADR 0081).** It turns `metadata.json`,
+    `participants.tsv` and `participants.json` into graph-mode JSON-LD, a Neurobagel data
+    dictionary, a dataset description and a counts-only report. Identity comes only from
+    `metadata.json`, and the transform refuses any input whose `anonymous` is not exactly
+    `false`. Identifiers are version 5 UUIDs under one committed namespace, so they never
+    churn between runs; the vocabulary is a pinned snapshot; output is byte-stable and
+    validated before it is returned. A fact the rules cannot establish is left out and
+    counted, never guessed. Only `eeg` and `meg` map to an imaging modality, because
+    Neurobagel's vocabulary has no other. A column named `sex` is read as sex; a column
+    with any other name is read as sex only when the dataset's own `participants.json`
+    description says sex and does not mention gender (#1609), and numeric codes are never
+    read without a reviewed annotation.
+  - **Reviewed annotations (`shared/neurobagel/curation.json`, ADR 0083).** A strict,
+    content-pinned file keyed by dataset id for what the automatic rules cannot read
+    (assessment columns, group labels, a few sex and age columns). Terms come only from the
+    pinned vocabulary, an entry applies only to the exact table it was reviewed against,
+    one that no longer applies is skipped whole and the variables it names are withheld
+    with a flag, and a dataset with an entry is never converted without it. Every entry
+    records its source and reviewer. Twelve ship: six written and reviewed by the author,
+    and six reused from annotations the Neurobagel community published for OpenNeuro
+    datasets (MIT license), which are marked as not reviewed by NEMAR beyond the loader and
+    binder checks.
+  - **One eligibility predicate (ADR 0084).** A dataset is federated only when it is
+    public, published and not anonymous, and is not withdrawn, deleted, tombstoned, a
+    sandbox, a fixture or an exemplar. OpenNeuro mirrors (`on` ids) are included on
+    purpose. The predicate is one list of named terms compiled to SQL and TypeScript from
+    the same source, decided from the D1 row, and re-checked at every read.
+    `anonymous: false` in the gathered metadata is a second, independent guard; its
+    disagreement is an audit-log finding and writes nothing.
+  - **A writer that never blocks a flow (ADR 0084).** A hook on publication and import
+    callbacks (fire-and-forget through `waitUntil`) and a production-only daily reconcile
+    on the existing 03:00 tick write each dataset's artifacts, then that dataset's entry
+    in `index.json`, to a new private R2 bucket (binding `NEUROBAGEL`). A dataset is
+    skipped when its fingerprint matches (row fields, latest version, manifest ETag,
+    curation entry, transform version, vocabulary pin). The writer is **off unless
+    `NEUROBAGEL_WRITER_ENABLED` is `1`**, counts its D1, R2 and HTTP operations at the
+    bindings, stops with headroom, and defaults to 10 datasets a tick
+    (`NEUROBAGEL_RECONCILE_MAX`, at most 50; a call is capped at 50). Measured: about 22
+    operations for a rewritten dataset, 3 for an unchanged one. A dataset that stops being
+    eligible leaves the index before its artifacts are deleted.
+  - **A read route for the node.** `GET /neurobagel/index.json` and
+    `GET /neurobagel/<name>`, behind the `NEUROBAGEL_READ_TOKEN` secret (a deployment
+    secret, not an account credential). It answers 401 without the token, 404 for any
+    name that is not an artifact of an eligible dataset, re-checks eligibility on every
+    request and serves the index without a dataset that is no longer eligible. Every
+    answer is `no-store` and served directly, never as a redirect.
+  - **Admin surface.** `GET /admin/neurobagel/status`, `POST /admin/neurobagel/regenerate`
+    (dry run by default) and `POST /admin/neurobagel/verify`, and the matching
+    `nemar admin neurobagel status|regenerate|verify` commands. `status` and `verify` exit
+    0 when healthy, 1 on an alarm and 2 when the answer could not be determined.
+  - **A daily verification sweep (production only, reports and never repairs).** It checks
+    the store against the predicate (residue, and datasets eligible but missing for 48
+    hours), probes the node (`NEUROBAGEL_NODE_URL`), reads the registration state
+    (`NEUROBAGEL_FEDERATION_URL`) and compares Neurobagel's release tags and vocabulary
+    against the pins. Verdicts are `healthy`, `alarm`, `unknown` and `unchecked`, following
+    ADR 0053 and ADR 0054: a check that could not run is never healthy, and a heartbeat is
+    written even when the sweep throws. A new section of the weekly import report carries
+    counts only. The anonymity sweep (ADR 0067, amended) gains the invariant
+    `neurobagel_store_holds_deposit`: an object for an anonymous deposit in the store is
+    an audit-log finding and a `dataset_anonymity` mail, never a GitHub issue.
+  - **`session_modalities` in `bids_index` (ADR 0081, rule 6).** The `bids_index` block of
+    `metadata.json` gains an optional `session_modalities`, which records which datatypes
+    belong to which session (`no-session` for subjects with none). It is additive:
+    readers that ignore unknown keys are unaffected, and an existing dataset gains it the
+    next time its index is built.
+  - **The node's deployment definition (`deploy/neurobagel/`, ADR 0082)** and the tools
+    around the transform (`scripts/neurobagel/`: the gatherer, the vocabulary generator,
+    the oracle that checks every golden against Neurobagel's own `bagel`, and the
+    annotation reuse tool). Nothing in the API depends on the node.
+
+### Deploy coupling
+
+- The release carries a new R2 binding, `NEUROBAGEL`, in `backend/wrangler-sccn.toml`
+  (bucket `nemar-neurobagel`; the dev environment has its own, `nemar-neurobagel-dev`).
+  A deploy whose binding names a bucket that does not exist fails, so both buckets must
+  exist first.
+- Nothing federates until the owner opts in. With `NEUROBAGEL_WRITER_ENABLED` absent the
+  writer, its hooks and the reconcile do nothing at all; the read route needs
+  `NEUROBAGEL_READ_TOKEN` and answers 401 without it; the sweep's node and registration
+  checks report `unchecked` until `NEUROBAGEL_NODE_URL` and `NEUROBAGEL_FEDERATION_URL`
+  are set. The sweep itself needs no switch and writes only its heartbeat.
+- After the writer is enabled, run `nemar admin neurobagel regenerate` once to backfill
+  (it is a dry run until told to execute); the reconcile alone takes about 78 days to cover
+  every dataset at 10 a tick.
+- No D1 migration. Rolling the Worker back is safe: the store is a separate bucket, and
+  the 0.10.12 Worker neither reads nor writes it.
+
+### Known limitations
+
+- Neurobagel's imaging-modality vocabulary has only EEG and MEG, so datasets of other
+  kinds (intracranial EEG, EMG, NIRS, motion) are federated without a modality: 106 of 776
+  datasets at the time of writing.
+- Conditional writes and list paging are proven against the R2 simulator, not against
+  real R2; the production Worker's timing and subrequest use on the 03:00 tick are
+  unmeasured. The soak that follows the release records both.
+- NEMAR is not registered with the public federation, and registration is a separate step
+  gated on a soak and on Neurobagel's agreement.
+
 ## 0.10.12 - 2026-10-02
 
 ### Added

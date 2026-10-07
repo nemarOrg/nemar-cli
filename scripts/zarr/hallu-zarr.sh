@@ -1160,6 +1160,18 @@ fi
 # Past every early exit; from here on convert_dataset() may run and needs the token.
 load_secrets
 
+# The scratch settings (ZARR_SCRATCH_*) are checked ONCE, before anything is
+# dispatched. generate_zarr.py refuses a bad value per dataset, after the clone and
+# with a failed callback, so left to that every dataset the drain visited would post
+# `failed` and burn a queue attempt on a typo that has nothing to do with it. Here a
+# bad value stops the whole run with the clear message and leaves the queue and D1
+# untouched, and the next tick tries again once the crontab is fixed.
+if ! check_env_out="$(VIRTUAL_ENV="$VENV_DIR" "$VENV_DIR/bin/python" "$DRIVER" --check-env 2>&1)"; then
+  err "$check_env_out"
+  err "refusing to dispatch any dataset until the setting above is fixed (queue and D1 untouched)"
+  exit 1
+fi
+
 
 # Targeted single-dataset run bypasses the queue (manual rebuild / test).
 if [[ -n "$ONLY_DATASET" ]]; then
