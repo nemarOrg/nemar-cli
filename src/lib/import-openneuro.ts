@@ -25,6 +25,7 @@ import chalk from "chalk";
 import ora from "ora";
 import { addCi, importDataset, reindexDataset } from "./api/admin.js";
 import { getDataset, getUserCiStatus } from "./api/datasets.js";
+import { ApiError } from "./api/errors.js";
 import { requestPublication } from "./api/publish.js";
 
 import { cloneDataset, pushToGitHub } from "./git-annex/clone-push.js";
@@ -1145,6 +1146,15 @@ export async function prepareImport(
     }
   }
   // else: origin has no `main` ref yet -- the normal first-import path, no-op.
+  if (didResetMain && annexFetchResult.exitCode !== 0) {
+    // The dead marks a correction left (ADR 0085, ADR 0087) live in that branch; without them only
+    // the cut to the tree keeps a replaced key out of the copy. Said, not refused: the cut holds.
+    console.log(
+      chalk.yellow(
+        "  Warning: re-import, but the dataset's git-annex branch could not be fetched; keys a correction marked dead are unknown to this run",
+      ),
+    );
+  }
 
   // The authoritative scan for data upstream left in git, distinct from step 1b's
   // diagnostic in two ways that matter: it runs AFTER 4c's possible
@@ -1304,6 +1314,13 @@ export async function prepareImport(
     );
     if (scrub.committed) {
       console.log(chalk.dim("  Committed the privacy correction and its ledger line"));
+    }
+    if (c.provenance_not_annotated > 0) {
+      console.log(
+        chalk.yellow(
+          `  Warning: ${c.provenance_not_annotated} provenance file(s) could not be annotated; their checksums still describe the upstream files without saying so`,
+        ),
+      );
     }
 
     if (normalized.notes.length === 0) {
@@ -1818,6 +1835,8 @@ export async function finalizeImport(
   const PUBLICATION_REQUEST_WAIT_MS = 5 * 60_000;
   const pubSpinner = ora("Requesting publication...").start();
   let publicationRequested = false;
+  // Set when the dataset already has an open request: an earlier run left it for an admin.
+  let requestInPlace: "requested" | "approving" | null = null;
   if (alreadyPublished) {
     publicationRequested = true;
     pubSpinner.succeed(
@@ -1847,6 +1866,20 @@ export async function finalizeImport(
         );
         break;
       }
+      // An open request is the normal end state of an import an earlier run left for an admin
+      // (ADR 0087), so a re-run of finalize meets it. Its screen is waited on like a fresh one's;
+      // an approval already in progress is not started a second time.
+      if (
+        err instanceof ApiError &&
+        err.statusCode === 409 &&
+        msg === "A publication request already exists"
+      ) {
+        const status = (err.rawBody as { status?: unknown } | undefined)?.status;
+        requestInPlace = status === "approving" ? "approving" : "requested";
+        publicationRequested = true;
+        pubSpinner.succeed(`${nemarId} already has an open publication request; using it`);
+        break;
+      }
       const isValidationInProgress = msg.includes("BIDS validation is currently running");
       if (!isValidationInProgress) {
         pubSpinner.fail(`Failed to request publication: ${msg}`);
@@ -1862,7 +1895,7 @@ export async function finalizeImport(
       await new Promise((r) => setTimeout(r, PUBLICATION_REQUEST_WAIT_MS));
     }
   }
-  if (publicationRequested && !alreadyPublished) {
+  if (publicationRequested && !alreadyPublished && requestInPlace === null) {
     pubSpinner.succeed("Publication requested");
   }
 
@@ -1875,6 +1908,8 @@ export async function finalizeImport(
   let publication: PublicationDecision;
   if (alreadyPublished) {
     publication = { outcome: "already-published" };
+  } else if (requestInPlace === "approving") {
+    publication = { outcome: "unchecked", reason: "approval-in-progress" };
   } else {
     try {
       publication = await awaitScreenAndApprove({

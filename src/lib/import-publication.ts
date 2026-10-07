@@ -8,10 +8,17 @@
  * re-runs a screen the gate calls `stale` at most once (an automated commit to `main`, such as
  * enrichment's, can land after the screen read the head), and otherwise approves nothing.
  *
- * **A held publication is not a failed import.** Every outcome but an approval error returns: the
- * data is copied and registered, the request stays open, and Phase 4 mails the admins whatever the
- * screen says, including when it never reports. Exiting non-zero here would quarantine or roll back
- * the import and open a public failure issue for a dataset that needs a person, not a fix (ADR 0053).
+ * **A held publication is not a failed import.** Every outcome returns, except an approval of a
+ * clear screen that fails for a reason that is not the screen's and a hold that cannot be recorded:
+ * the data is copied and registered, the request stays open, and Phase 4 mails the admins whatever
+ * the screen says, including when it never reports. Exiting non-zero here would quarantine or roll
+ * back the import and open a public failure issue for a dataset that needs a person, not a fix
+ * (ADR 0053).
+ *
+ * **The importer's own holds are written on the request.** The screen cannot see that a forward fix
+ * left originals in the pushed history, or that the staging manifest has no scrub record, so for
+ * those the request is denied with a fixed reason (`IMPORTER_HOLD_REASONS`) before anyone is asked
+ * to approve it; publishing then takes a person's new request, which re-runs the screen.
  *
  * **Unknown is never clear.** A status that cannot be read, a screen view an older backend does
  * not send, a state that is not a state, and a wait that runs out are each `unchecked`, never an
@@ -24,7 +31,12 @@ import {
   screenGate,
 } from "../../shared/identifier-screen-report.js";
 import { ApiError } from "./api/errors.js";
-import { approvePublication, getPublishStatus, rerunIdentifierScreen } from "./api/publish.js";
+import {
+  approvePublication,
+  denyPublication,
+  getPublishStatus,
+  rerunIdentifierScreen,
+} from "./api/publish.js";
 import type { ImportPrivacyRecord } from "./s3-server-copy.js";
 
 /** The outcome of finalize's publication step, as one fixed word. */
@@ -56,6 +68,12 @@ export type ImportPublicationReason =
   | "status-unreadable"
   /** The backend sent no screen view, or a state that is not one. */
   | "no-screen-view"
+  /** The request's status was refused (401, 403 or 404): waiting would not change it. */
+  | "status-refused"
+  /** `main` moved after the screen read it, and the re-run could not be started. */
+  | "rerun-failed"
+  /** The dataset's open request is already being approved; finalize does not start a second run. */
+  | "approval-in-progress"
   /** `main` moved after the screen read it, and the one re-run allowed did not settle it. */
   | "stale"
   /** The approval could not verify which commit the screen read. */
@@ -65,6 +83,22 @@ export interface PublicationDecision {
   outcome: ImportPublicationOutcome;
   reason?: ImportPublicationReason;
 }
+
+/**
+ * What the importer writes on a request it holds itself (ADR 0087), through the deny route: fixed
+ * words a person reads in the denial mail and the request's record. The screen cannot see these
+ * holds, so a request left open would show only its verdict, and a clean verdict would be approved.
+ */
+export const IMPORTER_HOLD_REASONS: Record<"history-holds-originals" | "no-scrub-record", string> =
+  {
+    "history-holds-originals":
+      "Held by the importer (ADR 0087): its identifier scrub changed files git tracks, and the pushed history still holds their original content. Rewrite the history with ADR 0085's tools, or request publication again to publish the history as it is.",
+    "no-scrub-record":
+      "Held by the importer (ADR 0087): the import's staging manifest has no valid record of the identifier scrub, so whether it ran is unknown. Re-run the import's prepare phase, or check the dataset and request publication again.",
+  };
+
+/** Attempts at recording a hold before finalize gives up and fails loudly. */
+const HOLD_ATTEMPTS = 3;
 
 /** The longest finalize waits for a verdict: past the screen's own 35-minute deadline, under the 50-minute watchdog. */
 export const SCREEN_WAIT_MS = 45 * 60_000;
@@ -108,17 +142,36 @@ export interface AwaitScreenOptions {
   onProgress?: (text: string) => void;
 }
 
-/** The gate a status view's state puts the request behind; anything unrecognized is `rerun`. */
-function gateOfState(state: unknown): ScreenGate | "exempt" {
-  if (state === "exempt") return "exempt";
+/**
+ * The gate a status view's state puts the request behind; anything that is not a screen state is
+ * `rerun`. That includes `exempt`, which the backend reports only for sandbox (`xx`) ids: the
+ * importer imports `on` ids, so an exemption here is a fault, not a reason to approve.
+ */
+function gateOfState(state: unknown): ScreenGate {
   return screenGate(isScreenState(state) ? state : null);
 }
 
 type Verdict =
-  | { kind: "verdict"; gate: ScreenGate | "exempt" }
+  | { kind: "verdict"; gate: ScreenGate }
   | { kind: "no-view" }
   | { kind: "timeout" }
-  | { kind: "unreadable" };
+  | { kind: "unreadable" }
+  | { kind: "refused" };
+
+/** A status read the backend will refuse again however long the wait. */
+function isRefusedRead(err: unknown): boolean {
+  return (
+    err instanceof ApiError &&
+    (err.statusCode === 401 || err.statusCode === 403 || err.statusCode === 404)
+  );
+}
+
+/** The privacy record is one this finalize understands, and says exactly whether history holds. */
+function isPrivacyRecord(x: unknown): x is ImportPrivacyRecord {
+  if (typeof x !== "object" || x === null) return false;
+  const r = x as Record<string, unknown>;
+  return r.version === 1 && typeof r.historyHoldsOriginals === "boolean";
+}
 
 /** The screen's refusal of an approval, when the error is one; null for any other error. */
 function screenRefusal(err: unknown): string | null {
@@ -143,6 +196,31 @@ export async function awaitScreenAndApprove(
   const progress = opts.onProgress ?? (() => undefined);
   let rescreens = 0;
 
+  // The holds only the importer knows about come first: the screen cannot see them, so they are
+  // recorded on the request before anyone is asked to approve it.
+  const hold = !isPrivacyRecord(opts.privacy)
+    ? "no-scrub-record"
+    : opts.privacy.historyHoldsOriginals
+      ? "history-holds-originals"
+      : null;
+  if (hold) {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        progress("Recording the importer's hold on the publication request");
+        await denyPublication(opts.nemarId, IMPORTER_HOLD_REASONS[hold]);
+        return { outcome: "review", reason: hold };
+      } catch {
+        // Fail loudly rather than leave an open request that a clean verdict would get approved.
+        if (attempt >= HOLD_ATTEMPTS) {
+          throw new Error(
+            `could not record the importer's hold (${hold}) on the publication request after ${HOLD_ATTEMPTS} attempts; deny it by hand before anyone approves it`,
+          );
+        }
+        await sleep(opts.approveRetryMs ?? APPROVE_RETRY_MS);
+      }
+    }
+  }
+
   const pollForVerdict = async (): Promise<Verdict> => {
     let sawStatus = false;
     for (;;) {
@@ -153,8 +231,10 @@ export async function awaitScreenAndApprove(
         sawStatus = true;
         const gate = gateOfState(view.state);
         if (gate !== "wait") return { kind: "verdict", gate };
-      } catch {
-        // A failed read is retried until the deadline; it is never read as a verdict.
+      } catch (err) {
+        // A failed read is retried until the deadline and never read as a verdict; one the backend
+        // will refuse again (a revoked key, a missing dataset) ends the wait now.
+        if (isRefusedRead(err)) return { kind: "refused" };
       }
       const left = deadline - now();
       if (left <= 0) return { kind: sawStatus ? "timeout" : "unreadable" };
@@ -168,19 +248,14 @@ export async function awaitScreenAndApprove(
     if (verdict.kind === "timeout") return { outcome: "unchecked", reason: "timeout" };
     if (verdict.kind === "unreadable") return { outcome: "unchecked", reason: "status-unreadable" };
     if (verdict.kind === "no-view") return { outcome: "unchecked", reason: "no-screen-view" };
+    if (verdict.kind === "refused") return { outcome: "unchecked", reason: "status-refused" };
     const gate = verdict.gate;
     if (gate === "blocks") return { outcome: "blocked" };
     if (gate === "acknowledge") return { outcome: "review", reason: "acknowledgment-needed" };
     if (gate === "rerun") return { outcome: "unchecked", reason: "no-verdict" };
     if (gate === "wait") return { outcome: "unchecked", reason: "timeout" };
 
-    // Clear. What the screen cannot see is the history: a value the scrub blanked, or a recording
-    // it rewrote while git held it, is still in the commits the push carried.
-    if (!opts.privacy) return { outcome: "review", reason: "no-scrub-record" };
-    if (opts.privacy.historyHoldsOriginals) {
-      return { outcome: "review", reason: "history-holds-originals" };
-    }
-
+    // Clear, and no hold of the importer's own (they returned above).
     let refusal: string | null = null;
     for (let attempt = 1; attempt <= APPROVE_ATTEMPTS; attempt++) {
       try {
@@ -205,7 +280,8 @@ export async function awaitScreenAndApprove(
       try {
         await rerunIdentifierScreen(opts.nemarId);
       } catch {
-        // A re-run that could not start leaves the old state, which the next read reports.
+        // No new screen means no new verdict and no new mail: say so rather than wait on the old one.
+        return { outcome: "unchecked", reason: "rerun-failed" };
       }
       continue;
     }
@@ -231,7 +307,9 @@ export function describePublicationDecision(id: string, d: PublicationDecision):
     case "blocked":
       return "Identifier screen: blocked; publication not approved. The data must be corrected and publication requested again.";
     case "review":
-      return `Identifier screen: review (${d.reason}); publication not approved. An admin decides: nemar admin publish list`;
+      return d.reason === "history-holds-originals" || d.reason === "no-scrub-record"
+        ? `Import held (${d.reason}); the publication request was denied with that reason. An admin decides: nemar admin publish list`
+        : `Identifier screen: review (${d.reason}); publication not approved. An admin decides: nemar admin publish list`;
     case "unchecked":
       return `Identifier screen: unchecked (${d.reason}); publication not approved. An admin decides: nemar admin publish screen ${id}`;
   }

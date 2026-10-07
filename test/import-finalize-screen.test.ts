@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getApiUrl } from "../src/lib/api/client";
 import { finalizeImport } from "../src/lib/import-openneuro";
+import { IMPORTER_HOLD_REASONS, awaitScreenAndApprove } from "../src/lib/import-publication";
 import type { ImportManifest } from "../src/lib/s3-server-copy";
 
 const NEMAR_ID = "on999999";
@@ -30,10 +31,19 @@ interface Script {
   approve: Array<{ status: number; body: unknown }>;
   visibility?: "public" | "private";
   statusFails?: boolean;
+  /** The status route's HTTP status when it refuses (404, 401, ...). */
+  statusRefuses?: number;
+  /** The request route answers 409: an open request in this state already exists. */
+  existingRequest?: "requested" | "approving";
+  /** The deny route answers with this status. */
+  denyStatus?: number;
+  /** The re-run route answers with this status. */
+  rerunStatus?: number;
 }
 
 let script: Script;
 const calls: string[] = [];
+const denyBodies: string[] = [];
 let statusReads = 0;
 let approveCalls = 0;
 
@@ -66,6 +76,12 @@ beforeAll(() => {
       const url = new URL(req.url);
       const route = `${req.method} ${url.pathname}`;
       calls.push(route);
+      if (route === `POST /admin/publish/${NEMAR_ID}/deny`) {
+        denyBodies.push(await req.text());
+        return script.denyStatus
+          ? Response.json({ error: "boom" }, { status: script.denyStatus })
+          : Response.json({ message: "Publication request denied", dataset_id: NEMAR_ID });
+      }
       switch (route) {
         case `POST /admin/datasets/${NEMAR_ID}/ci`:
           return Response.json({ message: "deployed", dataset_id: NEMAR_ID });
@@ -80,6 +96,20 @@ beforeAll(() => {
             },
           });
         case `POST /datasets/${NEMAR_ID}/publish/request`:
+          if (script.existingRequest) {
+            // The backend's own 409 for an open request (routes/datasets/publication.ts).
+            return Response.json(
+              {
+                error: "A publication request already exists",
+                status: script.existingRequest,
+                message:
+                  script.existingRequest === "approving"
+                    ? "Publication is in progress"
+                    : "Use 'resend' to remind admins",
+              },
+              { status: 409 },
+            );
+          }
           return Response.json({
             message: "Publication request submitted",
             dataset_id: NEMAR_ID,
@@ -88,6 +118,9 @@ beforeAll(() => {
           });
         case `GET /datasets/${NEMAR_ID}/publish/status`: {
           if (script.statusFails) return Response.json({ error: "boom" }, { status: 500 });
+          if (script.statusRefuses) {
+            return Response.json({ error: "Dataset not found" }, { status: script.statusRefuses });
+          }
           const state = script.states[Math.min(statusReads, script.states.length - 1)];
           statusReads++;
           return Response.json({
@@ -102,6 +135,12 @@ beforeAll(() => {
           return Response.json(answer?.body, { status: answer?.status ?? 500 });
         }
         case `POST /admin/publish/${NEMAR_ID}/identifier-screen`:
+          if (script.rerunStatus) {
+            return Response.json(
+              { error: "identifier_screen_rerun_failed" },
+              { status: script.rerunStatus },
+            );
+          }
           // A re-run starts a fresh screen: the next reads see it running, then its verdict.
           script.states = ["pending", script.states[script.states.length - 1] ?? null];
           statusReads = 0;
@@ -149,6 +188,7 @@ afterAll(() => {
 
 beforeEach(() => {
   calls.length = 0;
+  denyBodies.length = 0;
   statusReads = 0;
   approveCalls = 0;
   // Refuse to run against anything but this file's server.
@@ -277,18 +317,98 @@ describe("finalize approves only a clear screen", () => {
 });
 
 describe("what a clear screen cannot see", () => {
-  test("a scrub that left originals in the pushed history is held for a person", async () => {
+  test("a scrub that left originals in the pushed history is held, and the hold is written on the request", async () => {
     script = { states: ["clean"], approve: [CLEAN_APPROVAL] };
     expect(await finalize({ version: 1, historyHoldsOriginals: true })).toEqual({
       outcome: "review",
       reason: "history-holds-originals",
     });
     expect(count(approveRoute)).toBe(0);
+    // A clean verdict would otherwise be approved by the next admin who reads the mail: the
+    // request is denied with the importer's fixed reason, before any approval is asked for.
+    expect(denyBodies.map((b) => JSON.parse(b).reason)).toEqual([
+      IMPORTER_HOLD_REASONS["history-holds-originals"],
+    ]);
   }, 30_000);
 
-  test("a manifest with no scrub record (an older prepare) is held for a person", async () => {
+  test("a manifest with no scrub record (an older prepare) is held, and the hold written", async () => {
     script = { states: ["clean"], approve: [CLEAN_APPROVAL] };
     expect(await finalize("no-record")).toEqual({ outcome: "review", reason: "no-scrub-record" });
+    expect(count(approveRoute)).toBe(0);
+    expect(denyBodies.map((b) => JSON.parse(b).reason)).toEqual([
+      IMPORTER_HOLD_REASONS["no-scrub-record"],
+    ]);
+  }, 30_000);
+
+  test("a record that is not exactly version 1 with a boolean is no record at all", async () => {
+    // Inert values: a cast from S3 JSON, so `{}` or a missing field would otherwise read as false.
+    for (const bad of [{}, { version: 1 }, { version: 2, historyHoldsOriginals: false }]) {
+      calls.length = 0;
+      denyBodies.length = 0;
+      script = { states: ["clean"], approve: [CLEAN_APPROVAL] };
+      expect(await finalize(bad as ImportManifest["privacy"])).toEqual({
+        outcome: "review",
+        reason: "no-scrub-record",
+      });
+      expect(count(approveRoute)).toBe(0);
+      expect(denyBodies).toHaveLength(1);
+    }
+  }, 30_000);
+
+  test("no clean screen is approved on a dataset whose hold cannot be written", async () => {
+    // Driven below finalize, because finalize exits the process on this failure by design: an open
+    // request that a clean verdict would get approved is worse than a loud failed import.
+    script = { states: ["clean"], approve: [CLEAN_APPROVAL], denyStatus: 500 };
+    await expect(
+      awaitScreenAndApprove({
+        nemarId: NEMAR_ID,
+        skipCiCheck: false,
+        privacy: { version: 1, historyHoldsOriginals: true },
+        waitMs: 1_000,
+        pollMs: 10,
+        approveRetryMs: 1,
+      }),
+    ).rejects.toThrow("could not record the importer's hold");
+    expect(denyBodies).toHaveLength(3);
+    expect(count(approveRoute)).toBe(0);
+  }, 30_000);
+});
+
+describe("waits that cannot end in a verdict", () => {
+  test("a status the backend refuses ends the wait at once", async () => {
+    script = { states: ["clean"], approve: [CLEAN_APPROVAL], statusRefuses: 404 };
+    const started = Date.now();
+    expect(await finalize(SCRUBBED, 5_000)).toEqual({
+      outcome: "unchecked",
+      reason: "status-refused",
+    });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(count(approveRoute)).toBe(0);
+  }, 30_000);
+
+  test("a re-run that cannot start is said, not waited on", async () => {
+    script = { states: ["clean"], approve: [STALE], rerunStatus: 500 };
+    expect(await finalize()).toEqual({ outcome: "unchecked", reason: "rerun-failed" });
+    expect(count(approveRoute)).toBe(1);
+  }, 30_000);
+
+  test("a sandbox exemption is never the importer's reason to approve", async () => {
+    script = { states: ["exempt"], approve: [CLEAN_APPROVAL] };
+    expect(await finalize()).toEqual({ outcome: "unchecked", reason: "no-verdict" });
+    expect(count(approveRoute)).toBe(0);
+  }, 30_000);
+});
+
+describe("a dataset that already has an open request", () => {
+  test("is waited on and approved like a fresh one when its screen is clean", async () => {
+    script = { states: ["clean"], approve: [CLEAN_APPROVAL], existingRequest: "requested" };
+    expect(await finalize()).toEqual({ outcome: "published" });
+    expect(count(approveRoute)).toBe(1);
+  }, 30_000);
+
+  test("is not approved a second time while an approval runs", async () => {
+    script = { states: ["clean"], approve: [CLEAN_APPROVAL], existingRequest: "approving" };
+    expect(await finalize()).toEqual({ outcome: "unchecked", reason: "approval-in-progress" });
     expect(count(approveRoute)).toBe(0);
   }, 30_000);
 });
