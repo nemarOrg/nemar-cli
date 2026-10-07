@@ -48,6 +48,7 @@ import {
   ImportScrubRefused,
   httpUpstreamReader,
   prepareImportedTreeForCopy,
+  restrictManifestToTree,
   setTopLevelString,
 } from "../src/lib/import-scrub";
 import type { ImportManifestItem } from "../src/lib/s3-server-copy";
@@ -480,6 +481,21 @@ describe("a first import of a tree with identifiers", () => {
     );
   }, 120_000);
 
+  test("the new key is SHA256E even when the tree's attributes now name another backend", async () => {
+    // A dataset whose attributes changed after its recordings were annexed: the old keys are
+    // SHA256E, and a plain re-add would follow the newer attribute. ADR 0085's tools follow only
+    // SHA256E keys, so the scrub names its backend rather than inheriting one.
+    const upstream = await buildUpstream(baseFixtures());
+    const { clone } = await cloneForImport(upstream);
+    writeFileSync(
+      join(clone, ".gitattributes"),
+      UPSTREAM_GITATTRIBUTES.replace("* annex.backend=SHA256E", "* annex.backend=MD5E"),
+    );
+    await run(["git", "commit", "-qam", "backend changed"], clone);
+    await prepare(clone, await upstreamView(clone));
+    expect(await keyAt(clone, FLAGGED_ANNEXED)).toMatch(/^SHA256E-/);
+  }, 120_000);
+
   test("a clean tree is left alone: no commit, no ledger, the manifest is upstream's", async () => {
     const files = baseFixtures().filter((f) => f.path !== FLAGGED_ANNEXED && f.path !== SIDECAR);
     const upstream = await buildUpstream(files);
@@ -835,6 +851,20 @@ describe("a re-import never copies back what a correction replaced", () => {
 // ---------------------------------------------------------------------------------------
 // Small pieces with their own rules
 // ---------------------------------------------------------------------------------------
+
+describe("restrictManifestToTree", () => {
+  test("refuses when the tree still names a key the scrub replaced", async () => {
+    // Defensive: the scrub replaces every path that names a flagged key, so no fixture reaches
+    // this through prepare. Driven directly, because the refusal is what keeps a replaced key out
+    // of the copy if that ever stops being true.
+    const upstream = await buildUpstream(baseFixtures());
+    const { clone } = await cloneForImport(upstream);
+    const { upstreamItems } = await upstreamView(clone);
+    const named = await keyAt(clone, CLEAN_ANNEXED);
+    const err = await refusal(restrictManifestToTree(clone, upstreamItems, new Set([named])));
+    expect(err.code).toBe("old-key-still-named");
+  }, 120_000);
+});
 
 describe("setTopLevelString", () => {
   test("appends a member in the file's own indentation and keeps every other byte", () => {
