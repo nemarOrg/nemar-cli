@@ -940,7 +940,7 @@ export interface AcqTimeCell {
  */
 export function acqTimeCells(tsvText: string): AcqTimeCell[] {
   const out: AcqTimeCell[] = [];
-  let rowStart = tsvText.startsWith("﻿") ? 1 : 0;
+  let rowStart = tsvText.startsWith("\uFEFF") ? 1 : 0;
   let col = -1;
   for (let row = 0; ; row++) {
     const newline = tsvText.indexOf("\n", rowStart);
