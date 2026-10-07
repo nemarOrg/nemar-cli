@@ -5546,13 +5546,14 @@ class TestDrainAdmitsAgainstScratch(unittest.TestCase):
         )
         generate_zarr.ADMISSION_RECHECK_SECONDS = 0.05
 
-    def _drain(self, scratch_peaks, budget, cpu_cap=3, deferred=None):
+    def _drain(self, scratch_peaks, budget, cpu_cap=3, deferred=None, volume=None):
         results = []
         _drain_with_admission(
             list(scratch_peaks), {p: 1024 for p in scratch_peaks}, cpu_cap, 10**12, {},
             lambda r, i: results.append(r), worker=_timed_worker,
-            scratch_peaks=scratch_peaks, scratch_budget=lambda _in_flight: budget,
-            deferred=deferred,
+            scratch_peaks=scratch_peaks,
+            scratch_budget=budget if callable(budget) else (lambda _in_flight: budget),
+            deferred=deferred, scratch_volume=volume,
         )
         return results
 
@@ -5570,20 +5571,116 @@ class TestDrainAdmitsAgainstScratch(unittest.TestCase):
 
     def test_a_recording_that_can_never_fit_is_deferred_not_reported(self):
         a, b, c = self.PRIMARIES
-        deferred: list[str] = []
+        deferred: dict[str, str] = {}
         with contextlib.redirect_stdout(io.StringIO()) as out:
             results = self._drain({b: 500, a: 50, c: 50}, budget=150, cpu_cap=2, deferred=deferred)
         self.assertEqual(sorted(r["primary"] for r in results), [a, c])
         self.assertTrue(all(r["ok"] for r in results))
-        self.assertEqual(deferred, [b])
-        self.assertIn("deferring 1 recording(s)", out.getvalue())
+        self.assertEqual(list(deferred), [b])
+        self.assertIn("deferred 1 recording(s)", out.getvalue())
+
+    def test_the_first_fitting_and_the_second_not_converts_one_and_defers_one(self):
+        a, b, _ = self.PRIMARIES
+        deferred: dict[str, str] = {}
+        with contextlib.redirect_stdout(io.StringIO()):
+            results = self._drain({a: 50, b: 500}, budget=150, cpu_cap=2, deferred=deferred)
+        self.assertEqual([r["primary"] for r in results], [a])
+        self.assertEqual(list(deferred), [b])
 
     def test_it_terminates_when_every_recording_is_too_large(self):
-        deferred: list[str] = []
+        deferred: dict[str, str] = {}
         with contextlib.redirect_stdout(io.StringIO()):
             results = self._drain({p: 500 for p in self.PRIMARIES}, budget=150, deferred=deferred)
         self.assertEqual(results, [])
         self.assertEqual(sorted(deferred), sorted(self.PRIMARIES))
+
+    def test_each_deferred_recording_is_named_with_its_charge_and_the_volume(self):
+        a, b, _ = self.PRIMARIES
+        gib = 1024**3
+        deferred: dict[str, str] = {}
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self._drain(
+                {a: 80 * gib, b: 60 * gib}, budget=50 * gib, deferred=deferred,
+                volume=lambda: (40 * gib, 500 * gib),
+            )
+        log = out.getvalue()
+        for primary, charge in ((a, 80), (b, 60)):
+            line = next(ln for ln in log.splitlines() if primary in ln)
+            self.assertIn(f"charged {charge} GiB", line)
+            self.assertIn("budget 50 GiB", line)
+            self.assertIn("free 40 of 500 GiB", line)
+        self.assertEqual(deferred[a], "deferred: needs 80 GiB of scratch, 50 GiB available")
+        self.assertNotIn("::error::", log, "both could fit an empty volume, so neither is final")
+
+    def test_a_recording_larger_than_the_volume_is_an_error_naming_it(self):
+        a, b, _ = self.PRIMARIES
+        gib = 1024**3
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self._drain(
+                {a: 900 * gib, b: 60 * gib}, budget=50 * gib,
+                volume=lambda: (40 * gib, 500 * gib),
+            )
+        errors = [ln for ln in out.getvalue().splitlines() if ln.startswith("::error::")]
+        self.assertEqual(len(errors), 1)
+        self.assertIn(a, errors[0])
+        self.assertIn("can never fit this volume", errors[0])
+        self.assertIn("1 can never fit", out.getvalue())
+
+    def test_the_per_recording_lines_are_capped_but_every_recording_is_deferred(self):
+        self.addCleanup(
+            setattr, generate_zarr, "SCRATCH_DEFER_LOG_LINES", generate_zarr.SCRATCH_DEFER_LOG_LINES
+        )
+        generate_zarr.SCRATCH_DEFER_LOG_LINES = 2
+        peaks = {f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest_eeg.set": 500 for i in range(1, 6)}
+        deferred: dict[str, str] = {}
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self._drain(peaks, budget=150, deferred=deferred)
+        self.assertEqual(len(deferred), 5)
+        self.assertEqual(out.getvalue().count("::warning::deferring "), 2)
+        self.assertIn("3 more deferred recording(s) not listed", out.getvalue())
+
+    def test_a_transient_spike_does_not_defer_the_queue(self):
+        # With nothing in flight one bad sample used to defer everything left. The
+        # volume reads as full twice, then as it really is.
+        reads = {"n": 0}
+
+        def spiky(_in_flight):
+            reads["n"] += 1
+            return 0 if reads["n"] <= 2 else 10**6
+
+        deferred: dict[str, str] = {}
+        results = self._drain({p: 100 for p in self.PRIMARIES}, budget=spiky, deferred=deferred)
+        self.assertEqual(len(results), 3)
+        self.assertEqual(deferred, {})
+
+    def test_a_sustained_shortage_defers_after_the_resamples(self):
+        reads = {"n": 0}
+
+        def full(_in_flight):
+            reads["n"] += 1
+            return 0
+
+        deferred: dict[str, str] = {}
+        with contextlib.redirect_stdout(io.StringIO()):
+            self._drain({p: 100 for p in self.PRIMARIES}, budget=full, deferred=deferred)
+        self.assertEqual(len(deferred), 3)
+        self.assertEqual(reads["n"], 1 + generate_zarr.SCRATCH_DEFER_RESAMPLES)
+
+    def test_without_resamples_the_first_sample_decides(self):
+        self.addCleanup(
+            setattr, generate_zarr, "SCRATCH_DEFER_RESAMPLES", generate_zarr.SCRATCH_DEFER_RESAMPLES
+        )
+        generate_zarr.SCRATCH_DEFER_RESAMPLES = 0
+        reads = {"n": 0}
+
+        def spiky(_in_flight):
+            reads["n"] += 1
+            return 0 if reads["n"] == 1 else 10**6
+
+        deferred: dict[str, str] = {}
+        with contextlib.redirect_stdout(io.StringIO()):
+            self._drain({p: 100 for p in self.PRIMARIES}, budget=spiky, deferred=deferred)
+        self.assertEqual(len(deferred), 3)
 
     def test_a_budget_that_changes_between_rounds_is_followed(self):
         # Every other test here hands the drain a constant. This one rewrites the
@@ -5622,7 +5719,7 @@ class TestDrainAdmitsAgainstScratch(unittest.TestCase):
     def test_an_unreadable_volume_admits_nothing_instead_of_everything(self):
         # The default gate fails closed: with no good read there is no budget, so
         # the whole queue is deferred rather than admitted blind.
-        deferred: list[str] = []
+        deferred: dict[str, str] = {}
         results = []
         with contextlib.redirect_stdout(io.StringIO()) as out:
             _drain_with_admission(
@@ -5640,6 +5737,125 @@ class TestDrainAdmitsAgainstScratch(unittest.TestCase):
             results = self._drain({p: 500 for p in self.PRIMARIES}, budget=150)
         self.assertEqual(results, [])
 
+
+
+class TestSerialDrainAdmitsAgainstScratch(unittest.TestCase):
+    """The ``--jobs 1`` drain: same rule, in this process."""
+
+    A, B, C = tuple(f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest_eeg.set" for i in range(1, 4))
+
+    def setUp(self):
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.01
+
+    def _run(self, peaks, budget, order=None):
+        ran, results, deferred = [], [], {}
+
+        def run_one(p):
+            ran.append(p)
+            return {"ok": True, "primary": p}
+
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            generate_zarr.drain_serially(
+                list(order or peaks), peaks,
+                budget if callable(budget) else (lambda _in_flight: budget),
+                None, deferred, run_one, lambda r, i: results.append((i, r["primary"])),
+            )
+        return ran, results, deferred, out.getvalue()
+
+    def test_the_first_fitting_and_the_second_not_converts_one_and_defers_one(self):
+        ran, results, deferred, _ = self._run({self.A: 50, self.B: 500}, 150)
+        self.assertEqual(ran, [self.A])
+        self.assertEqual(results, [(1, self.A)])
+        self.assertEqual(list(deferred), [self.B])
+        self.assertTrue(deferred[self.B].startswith("deferred: needs"))
+
+    def test_a_giant_at_the_head_does_not_hold_a_smaller_recording_behind_it(self):
+        ran, _, deferred, _ = self._run({self.B: 500, self.A: 50}, 150)
+        self.assertEqual(ran, [self.A])
+        self.assertEqual(list(deferred), [self.B])
+
+    def test_everything_that_fits_runs_in_order(self):
+        ran, results, deferred, _ = self._run({self.A: 10, self.B: 20, self.C: 30}, 150)
+        self.assertEqual(ran, [self.A, self.B, self.C])
+        self.assertEqual([i for i, _ in results], [1, 2, 3])
+        self.assertEqual(deferred, {})
+
+    def test_a_transient_spike_does_not_defer(self):
+        reads = {"n": 0}
+
+        def spiky(_in_flight):
+            reads["n"] += 1
+            return 0 if reads["n"] <= 2 else 10**6
+
+        ran, _, deferred, _ = self._run({self.A: 10, self.B: 20}, spiky)
+        self.assertEqual(ran, [self.A, self.B])
+        self.assertEqual(deferred, {})
+
+    def test_a_sustained_shortage_defers_all_after_the_resamples(self):
+        reads = {"n": 0}
+
+        def full(_in_flight):
+            reads["n"] += 1
+            return 0
+
+        ran, _, deferred, log = self._run({self.A: 10, self.B: 20}, full)
+        self.assertEqual(ran, [])
+        self.assertEqual(len(deferred), 2)
+        self.assertEqual(reads["n"], 1 + generate_zarr.SCRATCH_DEFER_RESAMPLES)
+        self.assertIn(self.A, log)
+        self.assertIn(self.B, log)
+
+
+class TestHeldMemoryFailureIsReportedWhenTheRetryCannotFit(unittest.TestCase):
+    """A recording that failed its memory budget WAS attempted. If the serial retry
+    then cannot get scratch for it, the failure it already had is reported, not
+    replaced by "not attempted" at the index's coverage balance."""
+
+    MIB = 1024**2
+
+    def setUp(self):
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.01
+
+    def _run(self, retry_budget):
+        small = "sub-01/eeg/sub-01_task-rest_eeg.set"
+        big = "sub-02/eeg/sub-02_task-rest_need-300_eeg.set"
+        peaks = {small: 100 * self.MIB, big: 100 * self.MIB}
+        phase = {"retry": False}
+        results, deferred = [], {}
+
+        def memory_retry():
+            phase["retry"] = True
+            return {"mem_budget": 512 * self.MIB}, 512 * self.MIB
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            _drain_with_admission(
+                [small, big], peaks, 2, 10**12, {"mem_budget": 100 * self.MIB},
+                lambda r, i: results.append(r), worker=_budget_worker,
+                memory_retry=memory_retry, scratch_peaks={small: 1, big: 1},
+                scratch_budget=lambda _in_flight: retry_budget if phase["retry"] else 10**9,
+                deferred=deferred,
+            )
+        return small, big, {r["primary"]: r for r in results}, deferred
+
+    def test_a_retry_with_room_converts_it(self):
+        small, big, results, deferred = self._run(retry_budget=10**9)
+        self.assertTrue(results[big]["ok"])
+        self.assertEqual(deferred, {})
+
+    def test_a_retry_without_room_reports_the_memory_failure_it_already_had(self):
+        small, big, results, deferred = self._run(retry_budget=0)
+        self.assertTrue(results[small]["ok"])
+        self.assertFalse(results[big]["ok"])
+        self.assertEqual(results[big]["code"], "recording_memory_exceeded")
+        self.assertNotIn(big, deferred, "it was attempted, so it is not a deferral")
 
 class TestSerialMemoryRetry(unittest.TestCase):
     """#1483: a recording that exceeds its memory reserve is retried ONCE, alone,

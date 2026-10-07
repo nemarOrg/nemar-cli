@@ -1380,6 +1380,14 @@ SCRATCH_HEADROOM_BYTES = int(
 SCRATCH_UNKNOWN_SIZE_BYTES = int(
     _scratch_setting("ZARR_SCRATCH_UNKNOWN_SIZE_BYTES", 16 * 1024**3, minimum=1)
 )
+# How many times admission looks at the volume again, `ADMISSION_RECHECK_SECONDS`
+# apart, before it concludes that nothing left can fit and defers the rest of the
+# queue. One statvfs sample can land in another tenant's transient spike, and with
+# nothing in flight the whole remaining queue would be deferred on it.
+SCRATCH_DEFER_RESAMPLES = int(_scratch_setting("ZARR_SCRATCH_DEFER_RESAMPLES", 3, minimum=0))
+# One line per deferred recording is the point, but a dataset of 25k recordings on a
+# node with no room would write 25k of them every tick; the index names them all.
+SCRATCH_DEFER_LOG_LINES = 200
 
 
 def scratch_peak_bytes(primary: str, size_bytes: int, size_known: bool = True) -> int:
@@ -7735,6 +7743,103 @@ ADMISSION_RECHECK_SECONDS = float(os.environ.get("ZARR_ADMISSION_RECHECK_SECONDS
 MEMORY_RETRY_MAX = int(os.environ.get("ZARR_MEMORY_RETRY_MAX", "64"))
 
 
+def _gib(n: float) -> str:
+    return f"{n / 1024**3:.1f}" if n < 10 * 1024**3 else f"{n / 1024**3:.0f}"
+
+
+def deferral_message(charge: int, budget: int) -> str:
+    """What the index's ``last_error`` says about a deferred recording."""
+    return f"deferred: needs {_gib(charge)} GiB of scratch, {_gib(budget)} GiB available"
+
+
+def defer_unfit(queue, scratch_peaks, budget, volume, sink) -> None:
+    """Hand ``queue`` back unreported: nothing is running, and none of it fits.
+
+    One line per recording names it, its charge, the budget, and the volume's free
+    and total space. A recording whose charge exceeds the whole volume minus
+    headroom can NEVER fit however long it waits: that is an ``::error::`` telling
+    the operator the node needs more scratch, not a note that a tick was busy.
+    ``sink`` (a dict, or None) receives ``{recording: last_error message}``."""
+    free_total = volume() if volume else None
+    ceiling = None if free_total is None else max(0, free_total[1] - SCRATCH_HEADROOM_BYTES)
+    shown = 0
+    never = 0
+    for primary in queue:
+        charge = scratch_peaks.get(primary, SCRATCH_UNKNOWN_SIZE_BYTES)
+        message = deferral_message(charge, budget)
+        if sink is not None:
+            sink[primary] = message
+        impossible = ceiling is not None and charge > ceiling
+        never += impossible
+        if shown >= SCRATCH_DEFER_LOG_LINES:
+            continue
+        shown += 1
+        where = (
+            f", free {_gib(free_total[0])} of {_gib(free_total[1])} GiB"
+            if free_total else ""
+        )
+        if impossible:
+            print(
+                f"::error::{primary} can never fit this volume: charged {_gib(charge)} GiB, "
+                f"the volume holds {_gib(free_total[1])} GiB with "  # type: ignore[index]
+                f"{_gib(SCRATCH_HEADROOM_BYTES)} GiB of headroom; it needs more scratch, "
+                "or a lower ZARR_SCRATCH_STREAM_FACTOR if the charge is too high",
+                flush=True,
+            )
+        else:
+            print(
+                f"::warning::deferring {primary}: charged {_gib(charge)} GiB, "
+                f"budget {_gib(budget)} GiB{where}",
+                flush=True,
+            )
+    if len(queue) > shown:
+        print(
+            f"::warning::{len(queue) - shown} more deferred recording(s) not listed here; "
+            "the index names them all",
+            flush=True,
+        )
+    print(
+        f"::warning::deferred {len(queue)} recording(s) that do not fit the scratch disk"
+        + (f" ({never} can never fit this volume)" if never else "")
+        + "; they stay pending without spending an attempt",
+        flush=True,
+    )
+
+
+def drain_serially(
+    convert, scratch_peaks, scratch_budget, scratch_volume, deferred, run_one, record
+) -> None:
+    """The ``--jobs 1`` drain: one recording at a time, in this process, each only if
+    it fits. First fit, like the pool's admission, so a giant at the head does not
+    hold smaller recordings behind it; a recording that fits nothing after the
+    re-samples (see ``SCRATCH_DEFER_RESAMPLES``) is deferred with the rest."""
+    queue = list(convert)
+    done = 0
+
+    def pick(budget: int) -> int | None:
+        return next(
+            (j for j, p in enumerate(queue)
+             if scratch_peaks.get(p, SCRATCH_UNKNOWN_SIZE_BYTES) <= budget),
+            None,
+        )
+
+    while queue:
+        budget = scratch_budget(())
+        idx = pick(budget)
+        for _ in range(SCRATCH_DEFER_RESAMPLES if idx is None else 0):
+            time.sleep(ADMISSION_RECHECK_SECONDS)
+            budget = scratch_budget(())
+            idx = pick(budget)
+            if idx is not None:
+                break
+        if idx is None:
+            defer_unfit(queue, scratch_peaks, budget, scratch_volume, deferred)
+            return
+        p = queue.pop(idx)
+        done += 1
+        record(run_one(p), done)
+
+
 def _next_admission(
     pending_peaks: list[int], in_flight_count: int, running_peak: int,
     cpu_cap: int, ram_ceiling: int,
@@ -7821,9 +7926,12 @@ def _drain_with_admission(
     (default: a `ScratchGate` over ``ctx["tmp"]``, which is handed the in-flight
     primaries so it can count what they hold). Unlike RAM there is no run-alone
     exception: a recording that does not fit while nothing is in flight can never
-    be admitted this run, so it is handed back in ``deferred`` UNREPORTED, which
-    the index records as ``not_attempted`` (no attempt spent, no round advanced)
-    for a later run to take when scratch allows.
+    be admitted this run, so it is handed back in ``deferred`` (a dict of
+    recording -> the `last_error` text the index will carry) UNREPORTED. Before
+    that, admission looks at the volume again ``SCRATCH_DEFER_RESAMPLES`` times,
+    since one sample can land in someone else's spike. A memory-failed recording
+    held for the serial retry that cannot fit there is reported as the memory
+    failure it was, not deferred.
     """
     worker = worker or convert_one
     if ceiling is None:
@@ -7858,7 +7966,9 @@ def _drain_with_admission(
         done += 1
         record(r, done)
 
-    def drain_once(queue: list, cap: int, run_ctx=None, run_peaks=None) -> list:
+    def drain_once(
+        queue: list, cap: int, run_ctx=None, run_peaks=None, defer_to=None
+    ) -> list:
         """Drain ``queue`` (mutated in place) with up to ``cap`` workers until it
         is empty or the pool breaks. Returns the recordings that were in flight
         at the moment of the break -- empty when the pass completed cleanly."""
@@ -7885,38 +7995,54 @@ def _drain_with_admission(
             # cannot move because of it. No slot, no read.
             limit: int | None = None
             budget: int | None = None
-            while queue and len(in_flight) < cap:
-                if limit is None:
-                    limit = ceiling(running_peak, track_dir)
-                    budget = (
-                        scratch_budget([p for p, _ in in_flight.values()])
-                        if scratch_peaks is not None and scratch_budget else None
-                    )
+            gated = scratch_peaks is not None and scratch_budget is not None
+
+            def read_scratch() -> int | None:
+                return scratch_budget([p for p, _ in in_flight.values()]) if gated else None
+
+            def pick() -> int | None:
                 running_scratch = (
-                    sum(scratch_peaks.get(q, SCRATCH_UNKNOWN_SIZE_BYTES) for q, _ in in_flight.values())
+                    sum(
+                        scratch_peaks.get(q, SCRATCH_UNKNOWN_SIZE_BYTES)
+                        for q, _ in in_flight.values()
+                    )
                     if budget is not None else 0
                 )
-                idx = _next_admission(
+                return _next_admission(
                     [run_peaks[p] for p in queue], len(in_flight), running_peak,
-                    cap, limit,
+                    cap, limit,  # type: ignore[arg-type]
                     pending_scratch=(
-                        [scratch_peaks.get(p, SCRATCH_UNKNOWN_SIZE_BYTES) for p in queue] if budget is not None else None
+                        [scratch_peaks.get(p, SCRATCH_UNKNOWN_SIZE_BYTES) for p in queue]
+                        if budget is not None else None
                     ),
                     running_scratch=running_scratch, scratch_budget=budget,
                 )
+
+            while queue and len(in_flight) < cap:
+                if limit is None:
+                    limit = ceiling(running_peak, track_dir)
+                    budget = read_scratch()
+                idx = pick()
+                if idx is None and not in_flight and budget is not None:
+                    # Nothing running will give scratch back, so one more sample is
+                    # the only thing that can change the answer. A single statvfs
+                    # can land in another tenant's transient spike; look again a
+                    # few times, `ADMISSION_RECHECK_SECONDS` apart, before
+                    # deferring everything that is left.
+                    for _ in range(SCRATCH_DEFER_RESAMPLES):
+                        time.sleep(ADMISSION_RECHECK_SECONDS)
+                        limit = ceiling(running_peak, track_dir)
+                        budget = read_scratch()
+                        idx = pick()
+                        if idx is not None:
+                            break
                 if idx is None:
                     if not in_flight and queue and budget is not None:
-                        # Nothing running will ever give scratch back, so what is
-                        # left cannot be admitted this run. Handed back, not
-                        # reported: see the docstring.
-                        print(
-                            f"::warning::deferring {len(queue)} recording(s) that do not "
-                            f"fit the scratch disk (~{budget / 1024**3:.0f} GiB usable "
-                            "for this run); they stay pending without spending an attempt",
-                            flush=True,
+                        # Handed back, not reported: see the docstring.
+                        defer_unfit(
+                            queue, scratch_peaks, budget, volume,
+                            deferred if defer_to is None else defer_to,
                         )
-                        if deferred is not None:
-                            deferred.extend(queue)
                         queue.clear()
                     break
                 # Submit BEFORE popping. `ex.submit` is exactly where a broken
@@ -8026,14 +8152,23 @@ def _drain_with_admission(
             queue = [r["primary"] for r in to_retry]
             retried.update(queue)
             retry_peaks = {p: retry_peak for p in queue}
+            held_result = {r["primary"]: r for r in to_retry}
+            # A recording the retry cannot fit on scratch is not "not attempted": it
+            # WAS attempted and failed its memory budget. Reported as that failure,
+            # not left to be filed as untouched by the index's coverage balance.
+            retry_deferred: dict[str, str] = {}
             while queue:
-                for p in drain_once(queue, 1, run_ctx=retry_ctx, run_peaks=retry_peaks):
+                for p in drain_once(
+                    queue, 1, run_ctx=retry_ctx, run_peaks=retry_peaks, defer_to=retry_deferred
+                ):
                     report({
                         "ok": False,
                         "primary": p,
                         "error": killed,
                         "detail": failure_detail(killed),
                     })
+            for p in retry_deferred:
+                report(held_result[p])
             print(
                 f"[zarr] memory retry: {recovered} of {len(to_retry)} converted when "
                 "given the node alone",
@@ -8472,7 +8607,7 @@ def main() -> int:
             f"GiB of scratch at least (first: {', '.join(unreadable[:3])})",
             flush=True,
         )
-    deferred: list[str] = []
+    deferred: dict[str, str] = {}  # recording -> the last_error the index will carry
     # Measured peak RSS per recording, so the factors above stop being guesses.
     measured: dict[str, int] = {}
     # Every tunable here is env-overridable, and ADR 0030 expects one such
@@ -8544,21 +8679,12 @@ def main() -> int:
         if cpu_cap == 1 or not convert:
             _init_worker(ctx)
             scratch_gate = ScratchGate(tmp)
-            done_n = 0
-            for p in convert:
-                # One at a time still has to fit: a recording that cannot is
-                # deferred rather than downloaded for hours and failed at ENOSPC.
-                budget = scratch_gate(())
-                if scratch_peaks[p] > budget:
-                    deferred.append(p)
-                    print(
-                        f"::warning::deferring {p}: needs ~{scratch_peaks[p] / 1024**3:.0f} "
-                        f"GiB of scratch, ~{budget / 1024**3:.0f} GiB usable for this run",
-                        flush=True,
-                    )
-                    continue
-                done_n += 1
-                record(convert_one(p, peaks[p]), done_n)
+            # One at a time still has to fit: a recording that cannot is deferred
+            # rather than downloaded for hours and failed at ENOSPC.
+            drain_serially(
+                convert, scratch_peaks, scratch_gate, scratch_gate.volume, deferred,
+                lambda p: convert_one(p, peaks[p]), record,
+            )
         else:
             def memory_retry() -> tuple[dict, int]:
                 return memory_retry_context(ctx)
@@ -8683,7 +8809,8 @@ def main() -> int:
     # it has to be rewritten so the pending attempt counts advance, or those
     # recordings could never reach `retry_exhausted` and the queue row would go
     # `failed` instead of backing off.
-    attempted = [p for p in convert if p not in set(deferred)]
+    deferred_set = set(deferred)
+    attempted = [p for p in convert if p not in deferred_set]
     if attempted and not converted_entries and not remove and retry_paths is None:
         print(f"::error::all {len(attempted)} conversion(s) failed; index left untouched", flush=True)
         if annex_missing and not deterministic:
