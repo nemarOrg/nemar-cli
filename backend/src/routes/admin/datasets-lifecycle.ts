@@ -1063,8 +1063,8 @@ export function registerDatasetLifecycleRoutes(admin: AdminRouter): void {
    * has no 403 backoff (its retry loop only covers a stale-SHA conflict), so a
    * rate-limited candidate just throws, lands in `errors`, and stays
    * unstamped. A candidate the write REFUSES (the repository has no `main`, or
-   * is not visible to NEMAR) also lands in `errors` with its `status`, stays
-   * unstamped, and keeps holding a LIMIT slot on every pass. The pacing
+   * is not visible to NEMAR) also lands in `errors`, with its `status`; see
+   * AVAILABILITY_REPORT_SWEEP_BASE_WHERE for what that costs. The pacing
    * strategy is entirely external to this handler: the
    * small per-batch cap plus the CLI's inter-batch sleep between calls, and
    * an unstamped candidate is simply retried on the next sweep invocation

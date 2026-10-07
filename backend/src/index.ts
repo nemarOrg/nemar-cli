@@ -1179,10 +1179,9 @@ export default {
       // AVAILABILITY_REPORT_SWEEP_MAX (30) GitHub commits per run because a
       // burst of writes trips GitHub's secondary rate limit on the shared PAT.
       // It drains up to 30/day and stamps only on success, so failures are
-      // retried on the next pass; a row the write refuses (the repository has
-      // no `main`) is retried every day and holds one of the 30 slots until
-      // main exists. A large backlog is meant to be cleared with `nemar admin
-      // availability-report --all`, not by waiting on this.
+      // retried on the next pass (see AVAILABILITY_REPORT_SWEEP_BASE_WHERE for
+      // rows the write refuses). A large backlog is meant to be cleared with
+      // `nemar admin availability-report --all`, not by waiting on this.
       ctx.waitUntil(
         runAvailabilityReportSweepCron(env)
           .then((r) => {
