@@ -32,6 +32,7 @@ import { resolveEmailConfig, sendOpenNeuroMaintainerReport } from "./email.js";
 import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { triggerOpenNeuroOnboard } from "./github.js";
+import { isDeterministicScrubRefusal } from "./import-failure-cause.js";
 import type { DatasetVersionIntegrityResult } from "./import-integrity.js";
 import { integrityAuditSummary, verifyDatasetVersionS3 } from "./import-integrity.js";
 import { OPENNEURO_UPSTREAM_MARKER } from "./import-recovery.js";
@@ -67,7 +68,10 @@ export function retryBackoffMs(attempt: number): number {
 
 export type RetryDecision =
   | { action: "recover" }
-  | { action: "blocklist"; reason: "upstream_403_after_window" | "no_source" }
+  | {
+      action: "blocklist";
+      reason: "upstream_403_after_window" | "no_source" | "identifier_scrub_refused";
+    }
   | { action: "dispatch"; nextRecoveryAttempt: number; nextRetryAt: number };
 
 /**
@@ -100,6 +104,12 @@ export function decideRetryAction(args: {
 }): RetryDecision {
   if (args.verified.complete) return { action: "recover" };
   if (!args.hasSourceId) return { action: "blocklist", reason: "no_source" };
+  // A refusal of the import's identifier scrub that a retry cannot clear (ADR 0089): parked for a
+  // person instead of re-dispatched to refuse again. The blocklist's slow re-check still recovers
+  // the row if the import is completed another way (a host with a larger bound, say).
+  if (isDeterministicScrubRefusal(args.lastError)) {
+    return { action: "blocklist", reason: "identifier_scrub_refused" };
+  }
 
   const upstreamInaccessible = (args.lastError ?? "").includes(OPENNEURO_UPSTREAM_MARKER);
   const pastWindow = args.now - args.firstIncompleteAtMs >= RETRY_WINDOW_MS;

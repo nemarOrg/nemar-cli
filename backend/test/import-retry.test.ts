@@ -105,6 +105,33 @@ describe("decideRetryAction", () => {
     expect(atBoundary).toEqual({ action: "blocklist", reason: "upstream_403_after_window" });
   });
 
+  test("a scrub refusal a retry cannot clear is parked for a person, not re-dispatched (ADR 0089)", () => {
+    // The CLI's own refusal line, as the prepare reporter posts it. The words are pinned to the
+    // CLI's list in test/import-scrub.test.ts.
+    for (const word of [
+      "bound-exceeded",
+      "already-imported-unscrubbed",
+      "unsupported-key-backend",
+    ]) {
+      expect(
+        decideRetryAction({
+          ...base,
+          lastError: `[nemar-identifier-scrub] refused: ${word} (2 recording(s) to scrub). Nothing was pushed, and the copy phase did not run.`,
+        }),
+      ).toEqual({ action: "blocklist", reason: "identifier_scrub_refused" });
+    }
+  });
+
+  test("a scrub refusal that can clear on its own is retried", () => {
+    for (const word of ["header-unreadable", "upload-failed", "content-mismatch", "scrub-failed"]) {
+      const decision = decideRetryAction({
+        ...base,
+        lastError: `[nemar-identifier-scrub] refused: ${word} (1 of 4 recording header(s) could not be read: network x1). Nothing was pushed, and the copy phase did not run.`,
+      });
+      expect(decision.action).toBe("dispatch");
+    }
+  });
+
   test("dispatch bumps recoveryAttempts and computes next_retry_at via retryBackoffMs", () => {
     const decision = decideRetryAction({ ...base, recoveryAttempts: 2 });
     expect(decision).toEqual({

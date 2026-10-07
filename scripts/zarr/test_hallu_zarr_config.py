@@ -196,9 +196,10 @@ def test_test_mode_print_config_defaults(dirs: tuple[Path, Path]) -> None:
     # below 1.2.9 real EEGLAB v7.3 and BrainVision files fail to convert and
     # EDF files that repeat a channel label lose channels, and below 1.2.10 a
     # channels.tsv row that differs from its channel only in case is not
-    # applied. The upper bound is a cap, not a floor, raised deliberately per
-    # biosigIO release (requirements.txt).
-    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.10,<1.2.11"
+    # applied, and below 1.2.11 no writer can leave subject information out of
+    # a store (#1626). The upper bound is a cap, not a floor, raised
+    # deliberately per biosigIO release (requirements.txt).
+    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.11,<1.2.12"
     assert cfg["S3_BUCKET"] == "nemar-dev"
     assert cfg["AWS_PROFILE"] == "nemar-zarr-dev"
     assert cfg["STATE_DIR"] == state_dir
@@ -265,7 +266,7 @@ def test_print_config_without_test_uses_prod_defaults(dirs: tuple[Path, Path]) -
     assert cfg["TEST_API_URL"] == ""
     assert cfg["CALLBACK_URL"] == "https://api.nemar.org/webhooks/zarr-ready"
     assert cfg["CONTRACT_BASE"] == "https://zarr.nemar.org"
-    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.10,<1.2.11"
+    assert cfg["BIOSIGIO_SPEC"] == "biosigio[zarr,meg,mef3,hdf5]>=1.2.11,<1.2.12"
     assert cfg["S3_BUCKET"] == "nemar"
     assert cfg["AWS_PROFILE"] == "nemar-zarr"
     assert cfg["STATE_DIR"] == f"{zarr_base}/zarr-state"
@@ -726,14 +727,17 @@ if argv[:1] == ["-c"]:
     real = os.environ["FAKE_REAL_PYTHON"]
     os.execv(real, [real, *argv])
 
-with open(os.environ["QPY_LOG"], "a") as fh:
-    fh.write(" ".join(argv) + chr(10))
-
 if "--check-env" in argv:
-    # generate_zarr.py --check-env: the scratch-settings preflight. A test makes it
-    # fail by setting CHECK_ENV_RC (and CHECK_ENV_MSG, printed as the driver does, on
-    # stderr when CHECK_ENV_STREAM is "stderr", the way a traceback arrives), or runs
-    # the REAL driver's check by pointing CHECK_ENV_REAL_DRIVER at it.
+    # generate_zarr.py --check-env: the scratch-settings preflight, run once
+    # before any dataset is dispatched. Ahead of the conversion branch below
+    # because it is the same script, and recorded as its full argv rather than
+    # as a DRIVER line, so a test asking whether a conversion ran is not
+    # answered by the preflight. A test makes it fail by setting CHECK_ENV_RC
+    # (and CHECK_ENV_MSG, printed as the driver does, on stderr when
+    # CHECK_ENV_STREAM is "stderr", the way a traceback arrives), or runs the
+    # REAL driver's check by pointing CHECK_ENV_REAL_DRIVER at it.
+    with open(os.environ["QPY_LOG"], "a") as fh:
+        fh.write(" ".join(argv) + chr(10))
     real_driver = os.environ.get("CHECK_ENV_REAL_DRIVER")
     if real_driver:
         real = os.environ["FAKE_REAL_PYTHON"]
@@ -744,24 +748,48 @@ if "--check-env" in argv:
         print(os.environ.get("CHECK_ENV_MSG", "::error::invalid scratch setting"), file=stream)
     sys.exit(rc)
 
-if "--callback-out" in argv and os.environ.get("DRIVER_CALLBACK_JSON"):
-    # The conversion driver, as far as hallu-zarr.sh can tell: it writes the body it
-    # was told to and exits with DRIVER_RC. What the script does with that body is
-    # the script's own logic.
-    with open(argv[argv.index("--callback-out") + 1], "w") as fh:
-        fh.write(os.environ["DRIVER_CALLBACK_JSON"])
-    sys.exit(int(os.environ.get("DRIVER_RC", "0")))
+if argv[:1] and argv[0].endswith("generate_zarr.py"):
+    # The conversion driver. Its exit code is the one thing the drain loop
+    # reads from it when it writes no callback, and that loop is what is under
+    # test, so the code comes from the test (FAKE_DRIVER_RC, default 0).
+    with open(os.environ["QPY_LOG"], "a") as fh:
+        fh.write("DRIVER " + " ".join(argv[1:]) + chr(10))
+    if os.environ.get("FAKE_DRIVER_CALLBACK") and "--callback-out" in argv:
+        # The callback body the driver writes on every outcome, when a test
+        # wants to see what the script does with it.
+        with open(argv[argv.index("--callback-out") + 1], "w") as fh:
+            fh.write(os.environ["FAKE_DRIVER_CALLBACK"])
+    sys.exit(int(os.environ.get("FAKE_DRIVER_RC", "0")))
+
+with open(os.environ["QPY_LOG"], "a") as fh:
+    fh.write(" ".join(argv) + chr(10))
 
 if "reconcile" in argv:
     print(os.environ.get("QPY_RECONCILE_OUT", "queued=0 parked=0"))
-if "next" in argv and os.environ.get("QPY_NEXT_OUT"):
-    # One queue entry, then an empty queue.
-    marker = os.environ["QPY_LOG"] + ".next-served"
-    if not os.path.exists(marker):
-        open(marker, "w").close()
-        print(os.environ["QPY_NEXT_OUT"])
-# Otherwise `next` prints nothing: an empty line ends the drain immediately.
+if "next" in argv:
+    # QPY_NEXT is the queue, one `<id>TAB<version>` per `;`, handed out one per
+    # `next` call. Unset (the default) prints nothing: an empty line ends the
+    # drain immediately.
+    queue = [row for row in os.environ.get("QPY_NEXT", "").split(";") if row]
+    counter = os.environ["QPY_LOG"] + ".next"
+    taken = int(open(counter).read()) if os.path.exists(counter) else 0
+    if taken < len(queue):
+        print(queue[taken])
+    with open(counter, "w") as fh:
+        fh.write(str(taken + 1))
 sys.exit(0)
+"""
+
+FAKE_NEMAR = """#!/bin/sh
+# `nemar dataset download <id> --no-data -o <dir>`, the metadata clone each
+# queued dataset starts with. The drain loop's handling of the driver's exit is
+# what is under test, not the clone, and the driver stand-in never reads the
+# clone, so an empty directory is the whole job.
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-o" ]; then mkdir -p "$2"; fi
+  shift
+done
+exit 0
 """
 
 FAKE_UV = """#!/bin/sh
@@ -830,6 +858,7 @@ def ack_run(tmp_path: Path):
     fake_bin = tmp_path / "fakebin"
     fake_bin.mkdir()
     _write_exec(fake_bin / "uv", FAKE_UV)
+    _write_exec(fake_bin / "nemar", FAKE_NEMAR)
     if shutil.which("flock") is None:
         _write_exec(fake_bin / "flock", FAKE_FLOCK)
 
@@ -842,7 +871,7 @@ def ack_run(tmp_path: Path):
         extra_env: dict[str, str] | None = None,
         args: list[str] | None = None,
         # In range for the two-sided check in setup(): [BIOSIGIO_FLOOR, BIOSIGIO_CAP).
-        biosigio_version: str = "1.2.10",
+        biosigio_version: str = "1.2.11",
         packaging_importable: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         # The venv's `biosigio`: a package that is only a version, which is all
@@ -1018,16 +1047,6 @@ def test_the_real_driver_accepts_the_default_settings_through_the_real_wiring(ac
 # The run's ready body is posted as it is, and its counts reach the queue
 # ---------------------------------------------------------------------------
 
-STAND_IN_NEMAR = """#!/bin/sh
-# `nemar dataset download <id> --no-data -o <dir>`: the metadata clone. The driver
-# stand-in never reads it, so an empty directory is the whole job.
-while [ $# -gt 0 ]; do
-  if [ "$1" = "-o" ]; then mkdir -p "$2"; fi
-  shift
-done
-exit 0
-"""
-
 STAND_IN_CURL = """#!/bin/sh
 # Records each call as one compact JSON line: the full argv and the JSON body the
 # call carries. `--data @file` is read, as curl does.
@@ -1048,13 +1067,12 @@ WEBHOOK_URL = "https://hooks.example.test/webhooks/zarr-ready"
 @pytest.fixture
 def drain_one(ack_run, tmp_path: Path):
     """The queue drain handling one dataset: `next` serves it once, the conversion
-    driver writes the body a test chooses, and `curl` records every POST. The
-    script's own handling of that body (what it posts, what it hands `qpy done`) is
-    the real code."""
+    driver writes the body a test chooses, `curl` records every POST, and the
+    metadata clone is `ack_run`'s `FAKE_NEMAR`. The script's own handling of that
+    body (what it posts, what it hands `qpy done`) is the real code."""
     run, qpy_calls, _, _ = ack_run
     stubs = tmp_path / "stubbin"
     stubs.mkdir()
-    _write_exec(stubs / "nemar", STAND_IN_NEMAR)
     _write_exec(stubs / "curl", STAND_IN_CURL)
     curl_log = tmp_path / "curl.log"
 
@@ -1068,9 +1086,9 @@ def drain_one(ack_run, tmp_path: Path):
                 "NEMAR_WEBHOOK_TOKEN": "test-token",
                 "ZARR_CALLBACK_URL": WEBHOOK_URL,
                 "CURL_LOG": str(curl_log),
-                "QPY_NEXT_OUT": "nm000276\tv1",
-                "DRIVER_CALLBACK_JSON": json.dumps(body),
-                "DRIVER_RC": str(rc),
+                "QPY_NEXT": "nm000276\tv1",
+                "FAKE_DRIVER_CALLBACK": json.dumps(body),
+                "FAKE_DRIVER_RC": str(rc),
             }
         )
 
@@ -1172,11 +1190,100 @@ def test_the_env_var_form_arms_a_run_without_touching_the_file(ack_run) -> None:
     assert not ack_file.exists()
 
 
+# -- the drain on the driver's subject-information refusal (#1626) --
+
+TWO_QUEUED = "nm000901\tv1.0.0;nm000902\tv1.0.0"
+
+
+def test_a_subject_info_refusal_stops_the_drain_and_fails_nothing(ack_run) -> None:
+    """generate_zarr.py exits 78 when this node's biosigIO cannot leave subject
+    information out of a store. That is the node, not the dataset: handled as
+    an ordinary failure it would spend a retry attempt of every queued row in
+    turn and leave the whole queue `failed` after a few ticks. The drain stops
+    on the first one, non-zero, and claims nothing behind it."""
+    run, qpy_calls, _ack_file, _log = ack_run
+
+    proc = run(extra_env={"QPY_NEXT": TWO_QUEUED, "FAKE_DRIVER_RC": "78"})
+
+    assert proc.returncode == 78, proc.stdout + proc.stderr
+    assert "FATAL" in proc.stderr
+    assert "cannot leave subject information out of a store" in proc.stderr
+    assert len(_calls_for(qpy_calls, "next")) == 1, qpy_calls()
+    assert [c for c in qpy_calls() if c.startswith("DRIVER ")] != []
+    assert _calls_for(qpy_calls, "fail") == [], "no retry attempt may be spent"
+    assert _calls_for(qpy_calls, "done") == []
+
+
+def test_a_refusal_still_posts_the_drivers_callback(ack_run, tmp_path: Path) -> None:
+    """Deliberate: the `converting` POST at the start of the attempt already set
+    the dataset's zarr_status to pending and cleared its failure detail, so
+    skipping the refusal's callback would keep nothing and leave the dashboard
+    showing a conversion in progress with nothing running (#774). The callback
+    goes out on exit 78 as on any other outcome."""
+    run, _qpy_calls, _ack_file, _log = ack_run
+    curl_log = tmp_path / "curl.log"
+    _write_exec(tmp_path / "fakebin" / "curl",
+                '#!/bin/sh\necho "$@" >> "$CURL_LOG"\nexit 0\n')
+
+    proc = run(extra_env={
+        "QPY_NEXT": "nm000901\tv1.0.0", "FAKE_DRIVER_RC": "78",
+        "FAKE_DRIVER_CALLBACK": '{"dataset_id": "nm000901", "status": "failed"}',
+        "NEMAR_WEBHOOK_TOKEN": "test-token", "CURL_LOG": str(curl_log),
+    })
+
+    assert proc.returncode == 78, proc.stdout + proc.stderr
+    calls = curl_log.read_text().splitlines()
+    assert any('"status":"converting"' in c for c in calls), calls
+    assert any("--data @" in c and c.rstrip().endswith(".callback.json") for c in calls), calls
+    assert "zarr_status in D1 reads failed" in proc.stderr
+
+
+def test_an_ordinary_driver_failure_still_fails_the_row_and_drains_on(ack_run) -> None:
+    """The control: any other non-zero exit is the dataset's, takes the queue's
+    bounded backoff (`qpy fail`), and the drain moves on to the next row."""
+    run, qpy_calls, _ack_file, _log = ack_run
+
+    proc = run(extra_env={"QPY_NEXT": TWO_QUEUED, "FAKE_DRIVER_RC": "1"})
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "cannot leave subject information" not in proc.stderr
+    assert len(_calls_for(qpy_calls, "next")) == 3, qpy_calls()  # two rows, then empty
+    assert len(_calls_for(qpy_calls, "fail")) == 2, qpy_calls()
+
+
+def test_a_one_off_run_reports_the_refusal_and_keeps_its_exit(ack_run) -> None:
+    run, qpy_calls, _ack_file, _log = ack_run
+
+    proc = run(
+        args=["--dataset", "nm000901"],
+        # A closed port, so the version lookup fails fast instead of reaching
+        # the real API; the driver stand-in does not read it.
+        extra_env={"FAKE_DRIVER_RC": "78", "API_BASE": "http://127.0.0.1:9"},
+    )
+
+    assert proc.returncode == 78, proc.stdout + proc.stderr
+    assert "FATAL" in proc.stderr
+    assert "cannot leave subject information out of a store" in proc.stderr
+    assert _calls_for(qpy_calls, "fail") == []
+
+
+def test_the_refusal_exit_is_the_drivers() -> None:
+    """hallu-zarr.sh and generate_zarr.py spell the refusal's exit code twice;
+    a change to one alone would make the drain fail every queued row again."""
+    sys.path.insert(0, str(SCRIPT.parent))
+    try:
+        import generate_zarr  # type: ignore[import-not-found]
+    finally:
+        sys.path.pop(0)
+    shell = _script_assignment("DRIVER_EXIT_SUBJECT_INFO_UNAVAILABLE")
+    assert int(shell) == generate_zarr.EXIT_SUBJECT_INFO_UNAVAILABLE == 78
+
+
 # -- setup(): the installed biosigIO must be AT the floor, not merely importable --
 
 
 @pytest.mark.parametrize("packaging_importable", [True, False], ids=["packaging", "tuple"])
-@pytest.mark.parametrize("stale", ["1.2.9", "1.2.8", "1.2.0", "0.9.9"])
+@pytest.mark.parametrize("stale", ["1.2.10", "1.2.9", "1.2.8", "1.2.0", "0.9.9"])
 def test_setup_refuses_a_biosigio_below_the_floor(
     ack_run, stale: str, packaging_importable: bool
 ) -> None:
@@ -1185,9 +1292,11 @@ def test_setup_refuses_a_biosigio_below_the_floor(
     imports. On 1.2.8 a streaming EDF with repeated labels publishes, and the
     converter's header gate cannot catch it (every channel is present, only the
     names collapse), so setup has to stop the run before it converts anything.
-    Both comparison paths are driven: `packaging` when the venv has it, the
-    numeric-tuple fallback when it does not. "1.2.9" is the case a string
-    comparison gets wrong against the 1.2.10 floor: as strings it sorts above."""
+    On 1.2.10 no writer can leave subject information out of a store, and the
+    converter refuses every dataset (#1626). Both comparison paths are driven:
+    `packaging` when the venv has it, the numeric-tuple fallback when it does
+    not. "1.2.9" is the case a string comparison gets wrong against the 1.2.11
+    floor: as strings it sorts above."""
     run, qpy_calls, _ack_file, _log = ack_run
 
     proc = run(biosigio_version=stale, packaging_importable=packaging_importable)
@@ -1195,18 +1304,18 @@ def test_setup_refuses_a_biosigio_below_the_floor(
     assert proc.returncode != 0, proc.stdout
     assert "FATAL" in proc.stderr
     assert stale in proc.stderr
-    assert "1.2.10" in proc.stderr
+    assert "1.2.11 floor" in proc.stderr
     assert qpy_calls() == [], "setup must stop before the queue is touched"
 
 
 @pytest.mark.parametrize("packaging_importable", [True, False], ids=["packaging", "tuple"])
-@pytest.mark.parametrize("version", ["1.2.10", "1.2.10.post1", "1.2.10+local.1"])
+@pytest.mark.parametrize("version", ["1.2.11", "1.2.11.post1", "1.2.11+local.1"])
 def test_setup_accepts_a_final_biosigio_between_the_floor_and_the_cap(
     ack_run, version: str, packaging_importable: bool
 ) -> None:
-    """Compared AS versions: as strings "1.2.10" sorts below "1.2.9", which
+    """Compared AS versions: as strings "1.2.11" sorts below "1.2.9", which
     would refuse a node that is at the floor. A post release and a local label
-    satisfy `>=1.2.10,<1.2.11` for the resolver, so they satisfy the check."""
+    satisfy `>=1.2.11,<1.2.12` for the resolver, so they satisfy the check."""
     run, qpy_calls, _ack_file, _log = ack_run
 
     proc = run(biosigio_version=version, packaging_importable=packaging_importable)
@@ -1217,11 +1326,11 @@ def test_setup_accepts_a_final_biosigio_between_the_floor_and_the_cap(
 
 
 @pytest.mark.parametrize("packaging_importable", [True, False], ids=["packaging", "tuple"])
-@pytest.mark.parametrize("version", ["1.2.11", "1.2.11.post1", "1.10.0", "2.0.0"])
+@pytest.mark.parametrize("version", ["1.2.12", "1.2.12.post1", "1.10.0", "2.0.0"])
 def test_setup_refuses_a_biosigio_at_or_above_the_cap(
     ack_run, version: str, packaging_importable: bool
 ) -> None:
-    """The pin is `<1.2.11` because a biosigIO release is read before the
+    """The pin is `<1.2.12` because a biosigIO release is read before the
     converter takes it. An install that went wrong (a resolver conflict, a
     venv someone upgraded by hand) can leave a newer one behind, and the
     install line hides it (`| tail -2 || true`), so setup refuses it. "1.10.0"
@@ -1233,19 +1342,19 @@ def test_setup_refuses_a_biosigio_at_or_above_the_cap(
     assert proc.returncode != 0, proc.stdout
     assert "FATAL" in proc.stderr
     assert version in proc.stderr
-    assert "1.2.11 cap" in proc.stderr
+    assert "1.2.12 cap" in proc.stderr
     assert qpy_calls() == [], "setup must stop before the queue is touched"
 
 
 @pytest.mark.parametrize("packaging_importable", [True, False], ids=["packaging", "tuple"])
 @pytest.mark.parametrize(
-    "version", ["1.2.10rc1", "1.2.10.dev0", "1.2.10a1", "1.2.11.dev0", "1.2.10.post1.dev0"]
+    "version", ["1.2.11rc1", "1.2.11.dev0", "1.2.11a1", "1.2.12.dev0", "1.2.11.post1.dev0"]
 )
 def test_setup_refuses_a_pre_release_on_both_paths(
     ack_run, version: str, packaging_importable: bool
 ) -> None:
-    """`1.2.10rc1` and `1.2.10.dev0` sort BELOW 1.2.10, and a tuple of leading
-    digits reads both as (1, 2, 10) and would accept them: the two paths used to
+    """`1.2.11rc1` and `1.2.11.dev0` sort BELOW 1.2.11, and a tuple of leading
+    digits reads both as (1, 2, 11) and would accept them: the two paths used to
     disagree. Both now refuse every pre-release and dev build."""
     run, qpy_calls, _ack_file, _log = ack_run
 
@@ -1341,11 +1450,11 @@ def _run_probe(tmp_path: Path, version: str, packaging_importable: bool) -> int:
 # 0 in range, 3 below the floor or unreadable, 4 at or above the cap, 5 a
 # pre-release or dev build.
 PROBE_VERDICTS = {
-    "1.2.10": 0, "1.2.10.0": 0, "1.2.10.post1": 0, "1.2.10+local.1": 0,
-    "1.2.9": 3, "1.2.8": 3, "0.9.9": 3, "not-a-version": 3,
-    "1.2.11": 4, "1.2.11.0": 4, "1.2.11.post1": 4, "1.10.0": 4, "2.0.0": 4,
-    "1.2.10rc1": 5, "1.2.10.dev0": 5, "1.2.10a1": 5, "1.2.10b2": 5,
-    "1.2.11.dev0": 5, "1.2.11rc1": 5, "1.2.10.post1.dev0": 5, "1.2.9rc1": 5,
+    "1.2.11": 0, "1.2.11.0": 0, "1.2.11.post1": 0, "1.2.11+local.1": 0,
+    "1.2.10": 3, "1.2.10.post1": 3, "1.2.9": 3, "1.2.8": 3, "0.9.9": 3, "not-a-version": 3,
+    "1.2.12": 4, "1.2.12.0": 4, "1.2.12.post1": 4, "1.10.0": 4, "2.0.0": 4,
+    "1.2.11rc1": 5, "1.2.11.dev0": 5, "1.2.11a1": 5, "1.2.11b2": 5,
+    "1.2.12.dev0": 5, "1.2.12rc1": 5, "1.2.11.post1.dev0": 5, "1.2.10rc1": 5,
 }
 
 
@@ -1357,6 +1466,27 @@ def test_both_probe_paths_reach_the_same_verdict(
     if packaging_importable:
         pytest.importorskip("packaging")
     assert _run_probe(tmp_path, version, packaging_importable) == PROBE_VERDICTS[version]
+
+
+@pytest.mark.parametrize("version", sorted(PROBE_VERDICTS))
+def test_the_driver_floor_agrees_with_the_setup_probe(version: str) -> None:
+    """setup()'s probe and generate_zarr.py's `final_release` read a version
+    twice, in two languages' worth of code. Wherever the probe lets a version
+    through the floor (in range, or above the cap), the driver must accept it
+    too, and wherever the probe refuses it as below the floor, unreadable or a
+    pre-release, the driver must refuse it as well."""
+    sys.path.insert(0, str(SCRIPT.parent))
+    try:
+        import generate_zarr  # type: ignore[import-not-found]
+    finally:
+        sys.path.pop(0)
+    release = generate_zarr.final_release(version)
+    floor = generate_zarr.final_release(generate_zarr.SUBJECT_INFO_FLOOR)
+    driver_accepts = release is not None and floor is not None and release >= floor
+    assert driver_accepts == (PROBE_VERDICTS[version] in (0, 4)), version
+    # And the node's floor never admits a biosigIO the driver then refuses.
+    node_floor = generate_zarr.final_release(_script_assignment("BIOSIGIO_FLOOR"))
+    assert node_floor is not None and floor is not None and node_floor >= floor
 
 
 def _calls_for(qpy_calls, subcommand: str) -> list[str]:
@@ -1495,8 +1625,8 @@ def test_only_the_drain_loop_passes_the_retry_scope():
         for line in SCRIPT.read_text().splitlines()
         if "convert_dataset " in line and not line.lstrip().startswith("#")
     ]
-    assert 'if convert_dataset "$id" "$version" retry-pending; then' in calls
-    assert 'convert_dataset "$ONLY_DATASET" "$v"' in calls
+    assert 'convert_dataset "$id" "$version" retry-pending || driver_rc=$?' in calls
+    assert 'convert_dataset "$ONLY_DATASET" "$v" || only_rc=$?' in calls
     assert len(calls) == 2, calls
 
 
@@ -1613,7 +1743,7 @@ def test_a_run_without_a_callback_gets_the_generic_retryable_fail(tmp_path):
 
 def test_the_drain_loop_routes_every_failure_through_the_verdict():
     text = SCRIPT.read_text()
-    drain = text[text.index('if convert_dataset "$id" "$version" retry-pending; then') :]
+    drain = text[text.index('convert_dataset "$id" "$version" retry-pending || driver_rc=$?') :]
     drain = drain[: drain.index("\n  fi\n")]
     assert 'record_conversion_failure "$id"' in drain
     assert "qpy fail" not in drain

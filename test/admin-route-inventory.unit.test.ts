@@ -87,6 +87,8 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /publish/:id/approve": 2,
   // ADR 0080: launch an approval from the web by dispatching it to an executor.
   "POST /publish/:id/approve-dispatch": 1,
+  // Epic #1610 phase 4: re-run the identifier screen of an active request.
+  "POST /publish/:id/identifier-screen": 1,
   "POST /datasets/:id/s3-lock": 1,
 
   // Dataset lifecycle (sweeps, doctor, deletion, reindex, manifests)
@@ -161,6 +163,10 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /neurobagel/regenerate": 2,
   // Epic #1586 phase 6: the verification sweep on demand. No body, so no validator.
   "POST /neurobagel/verify": 1,
+  // Scheduled identifier sweep (epic #1610 phase 5, ADR 0088): the weekly report on
+  // demand (read-only) and a rescreen request (a D1 write the production tick answers).
+  "GET /identifier-sweep": 1,
+  "POST /identifier-sweep/:id/rescreen": 1,
 };
 
 describe("admin route inventory", () => {
@@ -193,7 +199,7 @@ describe("admin route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(adminRoutes.routes.length).toBe(130);
+    expect(adminRoutes.routes.length).toBe(133);
   });
 
   // The count pin above can't see a SWAP of the two router-level middleware

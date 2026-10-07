@@ -45,6 +45,11 @@ export function registerFleetRoutes(admin: AdminRouter): void {
 
   /**
    * PATCH /admin/datasets/:id/visibility - Change repository visibility
+   *
+   * A break-glass admin tool: making a dataset public here does NOT pass the
+   * identifier screen gate that a publication approval does (ADR 0086 states
+   * the exception). It writes an audit row; use the publication flow for a
+   * dataset that has not been screened.
    */
   admin.patch("/datasets/:id/visibility", zValidator("json", visibilitySchema), async (c) => {
     const datasetId = c.req.param("id");

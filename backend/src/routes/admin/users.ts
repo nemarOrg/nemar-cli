@@ -1636,6 +1636,8 @@ export function registerUsersRoutes(admin: AdminRouter): void {
     announcements: z.boolean().optional(),
     /** #1409: findings from the anonymity sweep on an anonymous deposit. */
     dataset_anonymity: z.boolean().optional(),
+    /** Epic #1610 phase 5 (ADR 0088): the identifier sweep's weekly report. */
+    identifier_sweep: z.boolean().optional(),
   });
 
   /**
@@ -1685,6 +1687,7 @@ export function registerUsersRoutes(admin: AdminRouter): void {
       publication_request: body.publication_request ?? current.publication_request,
       announcements: body.announcements ?? current.announcements,
       dataset_anonymity: body.dataset_anonymity ?? current.dataset_anonymity,
+      identifier_sweep: body.identifier_sweep ?? current.identifier_sweep,
     };
 
     await db

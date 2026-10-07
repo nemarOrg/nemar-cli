@@ -15,6 +15,11 @@
  * case chains the real dispatch route into it. Real engine only: bun:sqlite
  * behind realD1 with every migration applied, the real auth middleware, and a
  * `Bun.serve()` stand-in for api.github.com for the one dispatch.
+ *
+ * Each request carries a clean identifier screen of the commit the stand-in
+ * reports as `main` (epic #1610 phase 4), because the gate runs before the
+ * approver is recorded; the gate itself is pinned in
+ * identifier-screen-gate.test.ts.
  */
 
 import type { Database } from "bun:sqlite";
@@ -26,6 +31,7 @@ import { adminRoutes } from "../src/routes/admin";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
+import { mainRefAnswer, markDatasetScreensClean } from "./helpers/identifier-screen";
 
 const EXECUTOR_KEY = "attrib-executor-key-0123456789abcdef0123456789abcdef";
 const CLICKER_KEY = "attrib-clicker-key-0123456789abcdef0123456789abcdef";
@@ -47,7 +53,10 @@ let clickerId: number;
 beforeAll(() => {
   server = Bun.serve({
     port: 0,
-    fetch() {
+    fetch(req) {
+      // The identifier screen gate's read of `main` is not a dispatch.
+      const ref = mainRefAnswer(req);
+      if (ref) return ref;
       dispatched += 1;
       return new Response(null, { status: 204 });
     },
@@ -120,6 +129,7 @@ function seedRequest(seed: RequestSeed = {}): void {
       seed.lastError ?? null,
     ],
   );
+  markDatasetScreensClean(db, DATASET);
 }
 
 /** A web approval that was dispatched a minute ago: the clicker's lease is live. */
@@ -432,6 +442,7 @@ describe("the request the run reads", () => {
        VALUES (?, 'requested', ?, datetime('now'), ?)`,
       [DATASET, ownerId, JSON.stringify(DONE)],
     );
+    markDatasetScreensClean(db, DATASET);
 
     const res = await approveAs(EXECUTOR_KEY);
     expect(res.status).toBe(200);

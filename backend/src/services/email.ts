@@ -175,6 +175,15 @@ export interface EmailPreferences {
    * by accident, and the finding is time-sensitive in a way a request is not.
    */
   dataset_anonymity: boolean;
+  /**
+   * The scheduled identifier sweep's weekly report (epic #1610 phase 5, ADR 0088).
+   *
+   * Its own category for the reason `dataset_anonymity` has one: an admin who
+   * stops watching publication requests has said nothing about wanting to stop
+   * hearing which published datasets carry identifiers. Opted in by default,
+   * like every category here, so a stored row from before it existed receives it.
+   */
+  identifier_sweep: boolean;
 }
 
 export type EmailCategory = keyof EmailPreferences;
@@ -184,6 +193,7 @@ export const DEFAULT_EMAIL_PREFERENCES: EmailPreferences = {
   publication_request: true,
   announcements: true,
   dataset_anonymity: true,
+  identifier_sweep: true,
 };
 
 interface ResendResponse {
@@ -212,6 +222,7 @@ export function parseEmailPreferences(raw: string | null): EmailPreferences {
       // IN rather than out. Defaulting a new alert to off would silently give
       // every current admin no anonymity mail at all.
       dataset_anonymity: parsed.dataset_anonymity !== false,
+      identifier_sweep: parsed.identifier_sweep !== false,
     };
   } catch (err) {
     console.error("Corrupt email_preferences JSON, defaulting to all enabled:", raw, err);
@@ -320,6 +331,22 @@ export async function getAdminEmailsForCategory(
  * still fails closed (isEmailDeliveryAllowed treats undefined ENVIRONMENT
  * as non-production with an empty allow-list, i.e. refuses).
  */
+/**
+ * Resend ANSWERED a send with a 4xx: it refused the message itself (a bad key,
+ * a bad address, a malformed body) and delivered nothing. The message keeps the
+ * plain error's words. A thrown fetch, a timeout or a 5xx is not this class:
+ * the mail may have been accepted and only the answer lost.
+ */
+export class EmailRejectedError extends Error {
+  constructor(
+    readonly httpStatus: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "EmailRejectedError";
+  }
+}
+
 async function sendEmail(
   to: string,
   subject: string,
@@ -329,6 +356,7 @@ async function sendEmail(
   replyTo?: string,
   isDev?: boolean,
   deliveryEnv?: EmailDeliveryEnv,
+  timeoutMs?: number,
 ): Promise<void> {
   if (!isEmailDeliveryAllowed(to, deliveryEnv)) {
     console.warn(
@@ -354,13 +382,16 @@ async function sendEmail(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
+    ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
   });
 
   if (!response.ok) {
-    const error: ResendResponse = await response.json();
-    throw new Error(
-      `Failed to send email from ${fromEmail} to ${to}: ${error.message || response.statusText}`,
-    );
+    const error = (await response.json().catch(() => ({}))) as ResendResponse;
+    const message = `Failed to send email from ${fromEmail} to ${to}: ${error.message || response.statusText}`;
+    if (response.status >= 400 && response.status < 500) {
+      throw new EmailRejectedError(response.status, message);
+    }
+    throw new Error(message);
   }
 }
 
@@ -1152,7 +1183,46 @@ export async function sendRevocationEmail(
 }
 
 /**
- * Notify admins that a user has requested publication of a dataset
+ * The identifier screen's part of the publication-request email (epic #1610,
+ * phase 4). Built ONLY from `describeScreen` (shared/identifier-screen-report.ts)
+ * plus Worker-fixed sentences, so nothing a workflow wrote reaches the mail
+ * except the counts and fixed words that module emits.
+ */
+export interface PublicationScreenSection {
+  /** `describeScreen`'s headline, e.g. "Identifier screen: FOUND IDENTIFIERS". */
+  headline: string;
+  tone: "ok" | "note" | "warn" | "stop";
+  /** `describeScreen`'s lines: counts and fixed words, never a value. */
+  lines: string[];
+  /** What approval may do next, in a Worker-fixed sentence. */
+  next?: string;
+}
+
+const SCREEN_TONE_COLOR: Record<PublicationScreenSection["tone"], string> = {
+  ok: "#16a34a",
+  note: "#2563eb",
+  warn: "#d97706",
+  stop: "#dc2626",
+};
+
+/**
+ * The verdict as it appears at the end of the subject line:
+ * "IDENTIFIER SCREEN: FOUND IDENTIFIERS", "IDENTIFIER SCREEN: clean". The
+ * prefix is shouted so the verdict survives an inbox that truncates subjects.
+ */
+export function screenSubjectSuffix(headline: string): string {
+  return headline.replace(/^Identifier screen:/, "IDENTIFIER SCREEN:");
+}
+
+/**
+ * Notify admins that a user has requested publication of a dataset.
+ *
+ * Returns per-recipient results (#1610 phase 4), the same shape
+ * `sendUploadAccessRequestEmail` returns, for the same reason: the identifier
+ * screen's email is claimed before it is sent and must be released when nobody
+ * received it, so the caller has to know whether anybody did. Recipients are
+ * still tried independently, so one bad address does not cost the others their
+ * copy. Callers that do not need the outcome may ignore it.
  */
 export async function sendPublicationRequestEmail(
   adminEmails: string[],
@@ -1163,8 +1233,8 @@ export async function sendPublicationRequestEmail(
   replyTo?: string,
   isDev?: boolean,
   deliveryEnv?: EmailDeliveryEnv,
-  opts?: { anonymous?: boolean },
-): Promise<void> {
+  opts?: { anonymous?: boolean; screen?: PublicationScreenSection },
+): Promise<AdminNotificationOutcome> {
   // #1408: an anonymous release and a publication are different runs with
   // different outcomes -- one keeps the repository private and the DOI
   // reserved, the other makes both public and permanent. The admin approving
@@ -1180,6 +1250,21 @@ export async function sendPublicationRequestEmail(
     <code>--anonymous</code>.
   </div>`
     : "";
+  const screen = opts?.screen;
+  const screenSection = screen
+    ? `
+  <div style="border-left: 4px solid ${SCREEN_TONE_COLOR[screen.tone]}; background: #f9fafb; padding: 12px 16px; border-radius: 4px; margin: 16px 0;">
+    <strong style="color: ${SCREEN_TONE_COLOR[screen.tone]};">${escapeHtml(screen.headline)}</strong>
+    ${
+      screen.lines.length > 0
+        ? `<ul style="margin: 8px 0 0 0; padding-left: 20px;">${screen.lines
+            .map((line) => `<li>${escapeHtml(line)}</li>`)
+            .join("")}</ul>`
+        : ""
+    }
+    ${screen.next ? `<p style="margin: 8px 0 0 0;"><strong>${escapeHtml(screen.next)}</strong></p>` : ""}
+  </div>`
+    : "";
   const html = `
 <!DOCTYPE html>
 <html>
@@ -1192,6 +1277,7 @@ export async function sendPublicationRequestEmail(
 
   <p>User <strong>${escapeHtml(username)}</strong> has requested ${anonymous ? "an anonymous release" : "publication"} of dataset <strong>${escapeHtml(datasetId)}</strong>.</p>
 ${anonymousNotice}
+${screenSection}
 
   <h2 style="color: #333; font-size: 18px; margin-top: 30px;">Action Required</h2>
   <p>Review the dataset and approve or deny the request:</p>
@@ -1214,11 +1300,19 @@ ${anonymousNotice}
 </html>
   `;
 
+  const subject = `[NEMAR] ${anonymous ? "Anonymous release" : "Publication"} request: ${datasetId} by ${username}${
+    screen ? ` - ${screenSubjectSuffix(screen.headline)}` : ""
+  }`;
+  const outcome: AdminNotificationOutcome = {
+    attempted: adminEmails.length,
+    delivered: 0,
+    failures: [],
+  };
   for (const adminEmail of adminEmails) {
     try {
       await sendEmail(
         adminEmail,
-        `[NEMAR] ${anonymous ? "Anonymous release" : "Publication"} request: ${datasetId} by ${username}`,
+        subject,
         html,
         resendApiKey,
         fromEmail,
@@ -1226,10 +1320,93 @@ ${anonymousNotice}
         isDev,
         deliveryEnv,
       );
+      outcome.delivered++;
     } catch (error) {
-      console.error(`Failed to send publication request email to ${adminEmail}:`, error);
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error(
+        `Failed to send publication request email to ${redactRecipient(adminEmail)}: ${detail}`,
+      );
+      outcome.failures.push({ recipient: redactRecipient(adminEmail), error: detail });
     }
   }
+  return outcome;
+}
+
+/**
+ * Tell a depositor that the identifier screen blocked their publication request
+ * (epic #1610, phase 4).
+ *
+ * Built from `describeScreen`'s lines only: finding KINDS and COUNTS, never a
+ * value. The depositor knows their own data; what they need from this mail is
+ * where to look and what clears the block, and a mail that quoted the header
+ * text it found would itself be a copy of the identifier in an inbox.
+ */
+export async function sendIdentifierScreenBlockedEmail(
+  to: string,
+  username: string,
+  datasetId: string,
+  screen: PublicationScreenSection,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<void> {
+  const lines =
+    screen.lines.length > 0
+      ? screen.lines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")
+      : "<li>The screen found a direct identifier.</li>";
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #dc2626;">Publication on hold: ${escapeHtml(datasetId)}</h1>
+
+  <p>Hello ${escapeHtml(username)},</p>
+
+  <p>Before a dataset is published, NEMAR screens it for information that identifies a
+  participant: names, birth dates and record numbers in EDF/BDF headers, identifying
+  columns and keys in sidecar files, and identifying file names. The screen of
+  <strong>${escapeHtml(datasetId)}</strong> found some, so the request is on hold and has not
+  been sent for approval. What it found, by kind and count:</p>
+
+  <ul style="background-color: #fef2f2; padding: 16px 16px 16px 36px; border-radius: 8px; margin: 16px 0; border-left: 4px solid #dc2626;">
+    ${lines}
+  </ul>
+
+  <p>Remove or replace the identifying information in your dataset (for EDF/BDF files, the
+  patient and recording fields of the header), push the change, then request publication
+  again. Requesting again re-runs the screen:</p>
+  <div style="background: #f4f4f5; padding: 16px; border-radius: 8px; font-family: monospace; font-size: 14px; margin: 16px 0;">
+    nemar dataset publish request ${escapeHtml(datasetId)}
+  </div>
+
+  <p style="font-size: 13px; color: #666;">The same summary is shown by
+  <code>nemar dataset publish status ${escapeHtml(datasetId)}</code>. If you believe this was
+  flagged in error, reply to this email.</p>
+
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+  <p style="color: #999; font-size: 12px;">
+    <a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource
+  </p>
+</body>
+</html>
+  `;
+
+  await sendEmail(
+    to,
+    `Publication on hold: ${datasetId} - identifying information found`,
+    html,
+    resendApiKey,
+    fromEmail,
+    replyTo,
+    isDev,
+    deliveryEnv,
+  );
 }
 
 /**
@@ -2123,4 +2300,88 @@ export async function sendAnonymityFindingsEmail(
     }
   }
   return { delivered, failed };
+}
+
+/** How long one send of the identifier sweep's weekly report waits for Resend. */
+export const IDENTIFIER_SWEEP_EMAIL_TIMEOUT_MS = 15_000;
+
+/**
+ * What the identifier sweep's weekly report says (ADR 0088). Structurally the
+ * report `identifier-sweep-report.ts` renders, re-declared here so `email.ts`
+ * does not import a sweep; the dependency runs the other way.
+ */
+export interface IdentifierSweepReportForEmail {
+  subject: string;
+  headline: string;
+  attention: boolean;
+  lines: readonly string[];
+}
+
+/**
+ * Send the identifier sweep's weekly report to each admin, one message each.
+ *
+ * Every line is escaped: a line carries dataset ids, finding kinds, counts and
+ * fixed words, never a value, and escaping is what keeps it that way if a line
+ * ever carried anything else. Returns how many admins it reached, so the caller
+ * records the week as sent only when someone received it, and how many sends
+ * ended without a definite answer (a timeout, a dropped connection, a 5xx), so
+ * the caller never treats a send that may have landed as one that reached nobody.
+ */
+export async function sendIdentifierSweepReportEmail(
+  adminEmails: readonly string[],
+  report: IdentifierSweepReportForEmail,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<{ delivered: number; ambiguous: number }> {
+  const color = report.attention ? "#d97706" : "#16a34a";
+  const body = report.lines.map((line) => escapeHtml(line)).join("\n");
+  const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 720px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #333; font-size: 20px;">Identifier sweep: weekly report</h1>
+  <p style="color: ${color}; font-weight: bold;">${escapeHtml(report.headline)}</p>
+  <pre style="white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; background: #f4f4f5; padding: 16px; border-radius: 8px;">${body}</pre>
+  <p style="color: #666; font-size: 14px;">This report arrives every week whether or not anything is wrong; a week without it means the reporter is not running. The sweep reports and never repairs. Read it on demand: <code>GET /admin/identifier-sweep</code>.</p>
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+  <p style="color: #999; font-size: 12px;"><a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource</p>
+</body>
+</html>
+  `;
+  let delivered = 0;
+  let ambiguous = 0;
+  for (const adminEmail of adminEmails) {
+    try {
+      await sendEmail(
+        adminEmail,
+        report.subject,
+        html,
+        resendApiKey,
+        fromEmail,
+        replyTo,
+        isDev,
+        deliveryEnv,
+        IDENTIFIER_SWEEP_EMAIL_TIMEOUT_MS,
+      );
+      delivered++;
+    } catch (error) {
+      // Refused for certain: a 4xx from Resend, or the dev fence before any
+      // request. Anything else (a timeout, a dropped connection, a 5xx) may have
+      // been accepted, and the caller must not treat it as "reached nobody".
+      if (!(error instanceof EmailRejectedError || error instanceof DevEmailFenceError)) {
+        ambiguous++;
+      }
+      // `sendEmail`'s message names the recipient; redact it in the message too.
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(
+        `Failed to send the identifier sweep report to ${redactRecipient(adminEmail)}:`,
+        message.split(adminEmail).join(redactRecipient(adminEmail)),
+      );
+    }
+  }
+  return { delivered, ambiguous };
 }

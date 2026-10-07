@@ -107,3 +107,89 @@ export const ANONYMITY_ATTEMPTED_AT_PATH = "$.anonymity_attempted_at";
  * another host.
  */
 export const ZARR_REQUEUE_AT_PATH = "$.zarr_requeue_at";
+
+// ============================================================================
+// The scheduled identifier sweep (epic #1610 phase 5, ADR 0088)
+// ============================================================================
+//
+// Two groups, kept apart on purpose. The VERDICT (status, report, when, which
+// version) is written only from a scan the workflow reported and the Worker
+// parsed. The ATTEMPT (state, error word, when, which version, nonce) is
+// written on every dispatch and every outcome. An infrastructure failure moves
+// the attempt and never the verdict, so a screen that could not run can never
+// refresh, replace or stand in for one that did (ADR 0053, ADR 0067).
+
+/**
+ * The last verdict: a `DatasetStatus` from `shared/identifier-screen-report.ts`
+ * (`clean`, `direct-identifiers`, `unchecked`, ...). Absent until a scan has
+ * been stored. A reader must not trust it: anything that is not a status is
+ * read as no verdict.
+ */
+export const IDENTIFIER_SWEEP_STATUS_PATH = "$.identifier_sweep_status";
+
+/** When that verdict was stored (`datetime('now')` shape). */
+export const IDENTIFIER_SWEEP_CHECKED_AT_PATH = "$.identifier_sweep_checked_at";
+
+/**
+ * The parsed report of that verdict, as a JSON object: kinds, counts, the
+ * commit it screened and the scanner revision, never a value. Only what
+ * `parseScreenReport` accepted is written, and every reader parses it again.
+ */
+export const IDENTIFIER_SWEEP_REPORT_PATH = "$.identifier_sweep_report";
+
+/**
+ * The dataset's latest version when the verdict's screen was DISPATCHED.
+ * Copied from the attempt when the result lands, never read at that moment,
+ * so a version published while the screen ran is not credited to it.
+ */
+export const IDENTIFIER_SWEEP_VERSION_PATH = "$.identifier_sweep_version";
+
+/** The last attempt: `pending` | `reported` | `error` | `unreported`. */
+export const IDENTIFIER_SWEEP_ATTEMPT_PATH = "$.identifier_sweep_attempt";
+
+/** For an `error` or `unreported` attempt, the `ScreenError` word that says why. */
+export const IDENTIFIER_SWEEP_ATTEMPT_ERROR_PATH = "$.identifier_sweep_attempt_error";
+
+/**
+ * When the last attempt was dispatched, whatever came of it. The queue orders
+ * on this and the retry backoff reads it, the role `ZARR_VERIFY_ATTEMPTED_AT_PATH`
+ * has for the fidelity sweep: a dataset that fails every time costs one slot
+ * per backoff window and never holds the front of the queue.
+ */
+export const IDENTIFIER_SWEEP_ATTEMPTED_AT_PATH = "$.identifier_sweep_attempted_at";
+
+/** The dataset's latest version at that dispatch (see `IDENTIFIER_SWEEP_VERSION_PATH`). */
+export const IDENTIFIER_SWEEP_ATTEMPT_VERSION_PATH = "$.identifier_sweep_attempt_version";
+
+/**
+ * The one-shot nonce signed into the attempt's callback token. Cleared when a
+ * result is stored; KEPT when the tick marks the attempt `unreported`, so a late
+ * but valid report still lands; replaced by the next dispatch, so an older run
+ * cannot answer for a newer one.
+ */
+export const IDENTIFIER_SWEEP_NONCE_PATH = "$.identifier_sweep_nonce";
+
+/**
+ * An administrator asked for this dataset to be screened again (after a scrub,
+ * say). Makes the dataset a candidate and puts it at the front of the queue;
+ * cleared by the dispatch that answers it.
+ */
+export const IDENTIFIER_SWEEP_REQUESTED_AT_PATH = "$.identifier_sweep_requested_at";
+
+/**
+ * Consecutive attempts that produced no verdict (`error` or `unreported`),
+ * counted once per attempt and removed when a verdict lands. It lengthens the
+ * retry backoff, so a dataset whose screen always fails is tried less and less
+ * often instead of four times a day forever. A count of failed runs, which the
+ * public run list shows anyway, never a property of the verdict.
+ */
+export const IDENTIFIER_SWEEP_FAILURES_PATH = "$.identifier_sweep_failures";
+
+/**
+ * The last verdict that found something (`direct-identifiers` or `review`), as
+ * `{ status, checked_at, report }`, kept while every later screen was
+ * incomplete. An incomplete screen read less; it is not evidence that the
+ * finding is gone, so the finding stays listed until a complete screen, or a
+ * newer finding, replaces it.
+ */
+export const IDENTIFIER_SWEEP_FINDING_PATH = "$.identifier_sweep_finding";

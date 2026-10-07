@@ -20,6 +20,16 @@ import { DEV_OWNED_FIXTURE_IDS } from "./datasetId.js";
 import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsToken } from "./github-auth.js";
 import { getWorkflowRuns } from "./github.js";
+import { RESET_SCREEN_COLUMNS_SQL, startScreenAndNotify } from "./identifier-screen.js";
+
+/**
+ * Requests one sweep may unblock, and therefore screen (epic #1610 phase 4).
+ * Each unblock dispatches an identifier screen and, when it reports, mails the
+ * admins once; the cap keeps a backlog from becoming a burst of dispatches and
+ * mail in one tick. A request over the cap stays blocked and is unblocked by a
+ * later sweep, so it is never left `requested` with no screen.
+ */
+export const MAX_SCREENED_UNBLOCKS_PER_SWEEP = 10;
 
 /** The block_reason values produced by the BIDS-validation readiness check. */
 export const BIDS_VALIDATION_BLOCK_REASONS = [
@@ -59,6 +69,8 @@ export interface BlockedSweepResult {
   unblocked: number;
   reblocked: number;
   errors: number;
+  /** Unblocked requests whose identifier screen was dispatched. */
+  screened?: number;
 }
 
 function errMsg(err: unknown): string {
@@ -117,9 +129,13 @@ export function blockedCandidateQuery(
  * can't abort the sweep.
  *
  * Unblocked requests move to 'requested' (they re-enter the admin publish
- * queue, visible via `nemar admin publish list`). No email is sent from the
- * sweep on purpose: a daily batch could otherwise fire a burst of notifications
- * for a backlog of stuck requests.
+ * queue, visible via `nemar admin publish list`) and their identifier screen is
+ * started (epic #1610 phase 4, ADR 0086), exactly as a re-request would: the
+ * admins are mailed once, when the screen reports, or at once if it cannot
+ * start. Without it an unblocked request would sit `requested` with no screen,
+ * which the approval gate refuses and nobody is told about. The burst the old
+ * no-mail rule guarded against is bounded by MAX_SCREENED_UNBLOCKS_PER_SWEEP
+ * instead: a request over the cap stays blocked until a later sweep.
  */
 export async function sweepBlockedBidsValidationRequests(
   env: Bindings,
@@ -188,6 +204,8 @@ export async function sweepBlockedBidsValidationRequests(
     return result;
   }
 
+  result.screened = 0;
+  let unblocks = 0;
   for (const row of rows.results) {
     result.scanned++;
     const repoName = row.github_repo?.split("/")[1];
@@ -211,27 +229,43 @@ export async function sweepBlockedBidsValidationRequests(
 
     try {
       if (action.kind === "unblock") {
+        if (unblocks >= MAX_SCREENED_UNBLOCKS_PER_SWEEP) {
+          // Over the cap: left blocked for a later sweep, never unblocked
+          // without a screen.
+          continue;
+        }
         // Mirror the interactive re-request unblock (routes/datasets/publication.ts): also
-        // clear stale prescreen state so a previously-screened request doesn't
-        // surface a phantom advisory after the sweep moves it back to
-        // 'requested'. Guard on status='blocked' so a concurrent re-request
-        // can't be clobbered.
+        // clear stale prescreen and identifier-screen state, so a previously
+        // screened request doesn't carry an old verdict back to 'requested'.
+        // Guard on status='blocked' so a concurrent re-request can't be
+        // clobbered.
         const upd = await db
           .prepare(
             `UPDATE publication_requests
                 SET status = 'requested', block_reason = NULL,
                     prescreen_status = NULL, prescreen_nonce = NULL,
                     prescreen_issue_url = NULL, prescreen_reasons = NULL,
+                    ${RESET_SCREEN_COLUMNS_SQL},
                     updated_at = datetime('now')
               WHERE id = ? AND status = 'blocked'`,
           )
           .bind(row.id)
           .run();
         if ((upd.meta.changes ?? 0) > 0) {
+          unblocks++;
           result.unblocked++;
           console.log(
             `[publish-sweep] ${row.dataset_id}: BIDS validation now green; request ${row.id} unblocked -> requested`,
           );
+          // Its own failure is its own: startScreenAndNotify never throws, and
+          // mails the admins itself when the screen cannot start.
+          const started = await startScreenAndNotify(env, {
+            requestId: row.id,
+            datasetId: row.dataset_id,
+            githubRepo: row.github_repo,
+          });
+          if (started.kind === "dispatched") result.screened++;
+          else if (started.kind !== "exempt") result.errors++;
         }
       } else if (action.kind === "reblock" && row.block_reason !== action.blockReason) {
         const upd = await db

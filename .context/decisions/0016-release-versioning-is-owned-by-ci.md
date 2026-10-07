@@ -31,3 +31,7 @@ Three things must agree at release time: `package.json`, the git tag, and the np
 
 - AGENTS.md "Version Bumping and Release"
 - `.github/workflows/auto-tag.yml`, `npm-publish.yml`, `sync-dev.yml`; `scripts/bump-version.sh`
+
+## Amendment 2026-10-04 (#1610): privacy corrections
+
+Version tags are moved only by CI, with one exception: during a privacy correction ([ADR 0085](0085-a-privacy-correction-scrubs-every-version-in-place.md)) an administrator briefly lifts the per-repository tag ruleset, force-pushes the rewritten tags, and restores the ruleset.

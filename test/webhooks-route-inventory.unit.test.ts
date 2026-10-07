@@ -32,6 +32,11 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   // Publication prescreen callback (PRESCREEN_CALLBACK_SECRET token)
   "POST /prescreen-result": 1,
 
+  // Publication identifier-screen callback (domain-tagged token, same secret)
+  "POST /identifier-screen-result": 1,
+  // Scheduled identifier sweep callback (epic #1610 phase 5, ADR 0088)
+  "POST /identifier-sweep-result": 1,
+
   // OpenNeuro import state callback (bearer token)
   "POST /import-state": 1,
 
@@ -58,7 +63,7 @@ describe("webhooks route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(webhooks.routes.length).toBe(11);
+    expect(webhooks.routes.length).toBe(13);
   });
 
   // The webhooks router has NO router-level middleware: every route does its

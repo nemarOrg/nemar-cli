@@ -42,9 +42,14 @@ const UPSTREAM_MARKER = "[openneuro-upstream-inaccessible]";
  *  UPSTREAM_MARKER above: this module stays pure. */
 const DATA_UNAVAILABLE_MARKER = "[nemar-data-unavailable]";
 
+/** Marker the import's identifier scrub puts in front of a refusal (ADR 0089). Duplicated from
+ *  `src/lib/import-markers.ts` for the same reason, and pinned to it by a test. */
+const IDENTIFIER_SCRUB_MARKER = "[nemar-identifier-scrub]";
+
 export type ImportFailureCause =
   | "upstream_inaccessible"
   | "data_unavailable"
+  | "identifier_scrub"
   | "auth_invalid"
   | "annex_uuid_conflict"
   | "branch_protection"
@@ -92,6 +97,16 @@ const RULES: {
     summary:
       "NEMAR's bucket has no object for some of the keys this dataset's tree names, so it was not published (ADR 0064 withdraws a dataset below 90% of its data keys). This does NOT yet say the content is gone upstream: run `nemar admin fleet content-recovery <id>` to find out, per key, whether any recorded source is still readable.",
     match: /\[nemar-data-unavailable\]/,
+  },
+  {
+    // After upstream_inaccessible: a header read that OpenNeuro refused carries both markers, and
+    // the upstream one is the more useful claim there. A refusal of the scrub is deterministic
+    // for the same upstream content, so a retry alone does not clear it.
+    cause: "identifier_scrub",
+    label: "identifier-scrub",
+    summary:
+      "The import's identifier scrub refused before anything was copied or pushed (ADR 0089). The word after `refused:` says why: a recording header it could not read, an upstream object that is not the content its key names, recordings to scrub over the bound (re-run on a host that can move them, with --normalize-max-gb), or a dataset NEMAR already holds unscrubbed, which ADR 0085's procedure corrects rather than a re-import.",
+    match: /\[nemar-identifier-scrub\]/,
   },
   {
     cause: "auth_invalid",
@@ -197,3 +212,28 @@ export const IMPORT_UPSTREAM_MARKER_FOR_CLASSIFY = UPSTREAM_MARKER;
  * classifying as `unknown` with no label, which is the gap this closed.
  */
 export const IMPORT_DATA_UNAVAILABLE_MARKER_FOR_CLASSIFY = DATA_UNAVAILABLE_MARKER;
+
+/** The scrub's marker, exposed for the same pin (ADR 0089). */
+export const IMPORT_IDENTIFIER_SCRUB_MARKER_FOR_CLASSIFY = IDENTIFIER_SCRUB_MARKER;
+
+/**
+ * The scrub's refusal words a retry cannot clear (ADR 0089): the bytes to move are over the bound,
+ * the dataset already holds an unscrubbed original, a key the tools cannot follow, or a scrub that
+ * could not be proven. A person acts on each; re-dispatching the import only repeats the refusal.
+ * The other words (a header that could not be read, an upload that failed, an upstream object that
+ * is not its key) can clear on their own. Pinned to the CLI's word list by a test.
+ */
+export const DETERMINISTIC_SCRUB_REFUSALS: readonly string[] = [
+  "bound-exceeded",
+  "already-imported-unscrubbed",
+  "unsupported-key-backend",
+  "old-key-still-named",
+  "scrub-unverified",
+  "retire-failed",
+];
+
+/** True when `last_error` is a scrub refusal whose word is one a retry cannot clear. */
+export function isDeterministicScrubRefusal(lastError: string | null | undefined): boolean {
+  const m = /\[nemar-identifier-scrub\] refused: ([a-z-]+)/.exec(lastError ?? "");
+  return m !== null && DETERMINISTIC_SCRUB_REFUSALS.includes(m[1] as string);
+}

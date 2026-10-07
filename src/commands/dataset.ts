@@ -31,6 +31,10 @@ import {
   describeUncheckedSandboxGap,
 } from "../../shared/contract/profile-gaps.js";
 import { datasetLandingUrl } from "../../shared/datacite-constants.js";
+import {
+  PREFLIGHT_ACKNOWLEDGEABLE,
+  publicationRequestNotice,
+} from "../../shared/identifier-screen-report.js";
 import { LICENSE_TIERS } from "../../shared/license-tiers.js";
 import { stepsForRelease } from "../../shared/publication-steps.js";
 import { RangeParseError } from "../../shared/range.js";
@@ -162,6 +166,7 @@ import {
   writeFailureList,
   writeSnapshotStamp,
 } from "../lib/http-download.js";
+import { identifierScreenLines } from "../lib/identifier-screen-display.js";
 import {
   detectLicense,
   ensureLicenseFile,
@@ -196,6 +201,7 @@ import {
   readUploadProgress,
   writeUploadProgress,
 } from "../lib/upload-progress.js";
+import { applyUploadDates, planUploadDates } from "../lib/upload/date-normalization.js";
 import {
   analyzeDataset,
   collectAuthorOrcids,
@@ -209,6 +215,12 @@ import {
   saveDatasetStep,
   writeNemarMetadata,
 } from "../lib/upload/finalize.js";
+import {
+  ACKNOWLEDGE_FLAG,
+  collectAcknowledgment,
+  identifierPreflightStep,
+  recheckIdentifierPreflight,
+} from "../lib/upload/identifier-preflight.js";
 import {
   computeFilesToUpload,
   prepareUploadProgress,
@@ -560,6 +572,12 @@ export function createUploadCommand(): Command {
       "--dataset-id <id>",
       "Name the dataset id instead of being allocated one (admin, non-production, reserved fixture band only)",
     )
+    .addOption(
+      new Option(
+        `${ACKNOWLEDGE_FLAG} <verdicts>`,
+        `Upload despite what the identifier preflight found, naming every condition it reports (non-interactive; recorded; repeatable or comma-separated: ${PREFLIGHT_ACKNOWLEDGEABLE.join(", ")}). Direct identifiers cannot be acknowledged`,
+      ).argParser(collectAcknowledgment),
+    )
     .addHelpText(
       "after",
       ({ command }) => `
@@ -573,10 +591,25 @@ Requirements:
   - GitHub CLI authenticated (gh auth login)
 
 Process:
-  1. Validates BIDS format (unless --skip-validation)
-  2. Creates GitHub repository for metadata
-  3. Uploads large files to S3 in parallel
-  4. Enables PR-based versioning workflow
+  1. Screens the files for identifiers on this machine, before anything is sent
+  2. Validates BIDS format (unless --skip-validation)
+  3. Creates GitHub repository for metadata
+  4. Uploads large files to S3 in parallel
+  5. Enables PR-based versioning workflow
+
+Identifier preflight:
+  Every EDF/BDF header (256 bytes each), the participants and scans tables,
+  and non-BIDS JSON and small text files are read locally and checked by the
+  scanner NEMAR's publication screen uses. Only kinds and counts are printed.
+  - Direct identifiers (names, birth dates, record numbers): the upload is
+    refused. There is no override.
+  - A lesser finding, an incomplete read, or recordings in a format the
+    scanner cannot read: the upload needs your acknowledgment, at the prompt
+    or with ${ACKNOWLEDGE_FLAG} naming every condition the
+    preflight reports (for example review,unchecked). --yes does not count.
+  The dataset is screened again right before anything is sent, and the
+  verdict is recorded with your deposit attestation. NEMAR screens the
+  dataset again when you request publication.
 
 Note:
   This command is for initial dataset creation only. To update an
@@ -638,6 +671,19 @@ Examples:
         process.exit(1);
       }
 
+      // Identifier preflight, between steps 1c and 1d (epic #1610 phase 3, ADR 0087). Local,
+      // and BEFORE every step that sends dataset content: the co-author ORCID step (4b) reads
+      // names out of dataset_description.json, and the create call (6) carries every data
+      // file's path. A refusal, or a verdict nobody acknowledged, stops here with nothing sent.
+      //
+      // The acquisition dates the upload will set to 1 January (ADR 0091) are planned first and
+      // only read, so the preflight screens the files as they will be sent; nothing changes until
+      // the final confirmation below.
+      const datePlan = await planUploadDates(absolutePath);
+      const preflight = await identifierPreflightStep(absolutePath, options, undefined, datePlan);
+      if (preflight.status === "fail") process.exit(1);
+      const identifierPreflight = preflight.value;
+
       // Step 1d: Check required tools
       await checkPrerequisitesForCommand("upload");
 
@@ -694,6 +740,24 @@ Examples:
 
       console.log();
 
+      // Identifier preflight, again, right before the first byte goes: the steps since the first
+      // screen take as long as a person likes and some write into the tree, so what is recorded
+      // and sent is the tree as it is now. Only a dry run gets no record, and it returned at the
+      // plan; a null here is a bug, and it stops the upload rather than sending unscreened files.
+      if (identifierPreflight === null) {
+        console.log(chalk.red("Identifier preflight: no record to send. Nothing was sent."));
+        process.exit(1);
+      }
+      // The planned dates are set now, after the confirmation and before the second screen, which
+      // reads the files as they are: a file left as it was keeps its date, and that screen warns.
+      const dates = applyUploadDates(absolutePath, datePlan);
+      for (const file of manifest.files) {
+        const mtimeMs = dates.mtimes.get(file.path);
+        if (mtimeMs !== undefined) file.mtimeMs = mtimeMs;
+      }
+      const rechecked = await recheckIdentifierPreflight(absolutePath, identifierPreflight);
+      if (rechecked.status === "fail") process.exit(1);
+
       const { dataFiles, uploadProgress: loadedProgress } = prepareUploadProgress(
         absolutePath,
         manifest,
@@ -708,6 +772,7 @@ Examples:
         dataFiles,
         existingConfig,
         attestation,
+        rechecked.value,
       );
       if (created.status === "fail") process.exit(1);
       const datasetInfo = created.value;
@@ -4030,11 +4095,21 @@ Examples:
           ),
         );
       }
-      console.log(
-        chalk.dim(
-          "\n  Admins have been notified. Use 'nemar dataset publish status' to check progress.",
-        ),
-      );
+      // Epic #1610 phase 4: the screen's state as the backend worded it.
+      const screen = result.identifier_screen;
+      if (screen) {
+        console.log();
+        for (const line of identifierScreenLines(screen)) console.log(line);
+      }
+      // What happens next, in neutral words that name no finding, verdict or
+      // date warning (ADR 0090, amendment 2026-10-07): the screen runs after
+      // this request and its verdict is bound to a commit, so the outcome is
+      // read from `publish status` or the mail, never guessed at here. Made
+      // from the shared definition rather than read off the response, so every
+      // accepted request prints it whatever the Worker's version; a refused
+      // one threw above and prints its own text.
+      console.log();
+      for (const line of publicationRequestNotice(datasetId)) console.log(`  ${line}`);
     } catch (error) {
       if (error instanceof ApiError) {
         spinner.fail(error.message);
@@ -4148,6 +4223,13 @@ Examples:
 
       if (result.status === "denied" && result.denied_reason) {
         console.log(`\n  ${chalk.red("Reason:")} ${result.denied_reason}`);
+      }
+
+      // Epic #1610 phase 4: the identifier screen, in the backend's words.
+      const screenLines = identifierScreenLines(result.identifier_screen);
+      if (screenLines.length > 0) {
+        console.log();
+        for (const line of screenLines) console.log(line);
       }
 
       // Blocked requests: surface WHY (e.g. BIDS validation pending/failed) plus

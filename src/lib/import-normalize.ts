@@ -370,6 +370,12 @@ export async function normalizeUnannexedData(args: {
   maxBytes?: number;
   /** How the bytes move, and with which credentials; see {@link UploadStrategy}. */
   upload: UploadStrategy;
+  /**
+   * The key backend, when it must not be the one the tree's attributes name. The
+   * identifier scrub passes `SHA256E` (ADR 0089); the annex-policy leg leaves it
+   * unset and keeps upstream's.
+   */
+  backend?: "SHA256E";
 }): Promise<NormalizeDataResult> {
   const { datasetPath, files, remoteName, bucket, nemarId } = args;
   if (files.length === 0) return { items: [], files: [], copied: 0, bytes: 0 };
@@ -393,7 +399,7 @@ export async function normalizeUnannexedData(args: {
     datasetPath,
     paths,
     {},
-    { forceLarge: true, checkGitignore: false },
+    { forceLarge: true, checkGitignore: false, ...(args.backend ? { backend: args.backend } : {}) },
   );
   if (!added.success) {
     throw new Error(`Failed to annex ${paths.length} data file(s): ${added.error}`);

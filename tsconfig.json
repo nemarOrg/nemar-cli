@@ -22,6 +22,25 @@
       "@/*": ["src/*"]
     }
   },
-  "include": ["src/**/*", "shared/**/*", "scripts/neurobagel/**/*.ts", "test/neurobagel-*.ts"],
+  "include": [
+    "src/**/*",
+    "shared/**/*",
+    "scripts/neurobagel/**/*.ts",
+    "scripts/identifier-fleet-lib.ts",
+    "scripts/identifier-fleet-scan.ts",
+    "scripts/identifier-screen-ci-lib.ts",
+    "scripts/identifier-screen-ci.ts",
+    "test/neurobagel-*.ts",
+    "test/identifier-fleet.test.ts",
+    "test/identifier-scan.test.ts",
+    "test/identifier-preflight-contract.test.ts",
+    "test/upload-identifier-preflight.test.ts",
+    "test/upload-identifier-preflight-cli.test.ts",
+    "test/upload-preflight-recording.test.ts",
+    "test/identifier-screen-ci.test.ts",
+    "test/identifier-scrub.test.ts",
+    "scripts/scrub/**/*.ts",
+    "test/scrub/**/*.ts"
+  ],
   "exclude": ["node_modules", "dist"]
 }
