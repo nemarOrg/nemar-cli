@@ -570,8 +570,25 @@ describe("the walk, the reader and the limits, at their edges", () => {
 
   test("a dataset path that is not a directory is refused before anything else", async () => {
     write("not-a-dataset.edf", recording(CLEAN_PATIENT));
-    const step = await identifierPreflightStep(join(root, "not-a-dataset.edf"), {}, false);
+    // Even with the acknowledgment an unlistable tree would need: it is not a dataset at all.
+    const step = await identifierPreflightStep(
+      join(root, "not-a-dataset.edf"),
+      { acknowledgeIdentifierPreflight: ["unchecked"] },
+      false,
+    );
     expect(step.status).toBe("fail");
+  });
+
+  test("a link to a directory is listed, not walked: git stores the link, not what it names", async () => {
+    const elsewhere = mkdtempSync(join(tmpdir(), "nemar-preflight-outside-"));
+    outside.push(elsewhere);
+    writeFileSync(join(elsewhere, "sub-09_task-rest_eeg.edf"), recording(NAMED_PATIENT));
+    bidsWith(recording(CLEAN_PATIENT));
+    symlinkSync(elsewhere, join(root, "sub-01/eeg/linked"));
+    const scan = await scanLocalDataset(root);
+    expect(scan.status).toBe("clean");
+    expect(scan.files.total).toBe(4);
+    expect(scan.files.edf_bdf).toBe(1);
   });
 });
 
