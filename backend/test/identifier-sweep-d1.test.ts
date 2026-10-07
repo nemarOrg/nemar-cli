@@ -1,6 +1,6 @@
 /**
  * The identifier sweep's SQL on Miniflare D1, the implementation `wrangler
- * --local` runs (epic #1610, phase 5, ADR 0087).
+ * --local` runs (epic #1610, phase 5, ADR 0088).
  *
  * Every other sweep test runs on bun:sqlite, which is more lenient than D1
  * (a GLOB pattern-length limit, for one, has bitten this repo before). The

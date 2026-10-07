@@ -31,7 +31,7 @@ import {
   parsePlan,
 } from "../contract";
 import { githubRepoOf } from "../github/repo-url";
-import { validateLedgerEntry } from "../ledger";
+import { VERSION_TAG, validateLedgerEntry } from "../ledger";
 
 /** Pinned: the rewrite script is written against this release's Python API. */
 export const FILTER_REPO_REQUIREMENT = "git-filter-repo==2.47.0";
@@ -623,6 +623,7 @@ export type VerifyReason =
   | "provenance-too-large"
   // fresh-clone mode only:
   | "tag-names-not-plan"
+  | "allowed-tag-missing"
   | "ledger-commit-not-alone"
   | "ledger-invalid"
   | "annex-branch-missing"
@@ -677,6 +678,13 @@ export interface VerifyOptions {
    * file the rewrite could not parse is a file whose named keys may still hold a value.
    */
   allowUnparseableJson?: boolean;
+  /**
+   * `fresh-clone` only: version tags (`vX.Y.Z[-pre]`) the repository may have although the S3
+   * plan does not list them, because they were never a published version (no manifest in S3). The
+   * allowance is for the tag NAME check alone: the tag's tree is scanned like every other ref's.
+   * One the repository does not have is `allowed-tag-missing`.
+   */
+  allowTags?: readonly string[];
 }
 
 /**
@@ -1008,7 +1016,8 @@ export function annexKeyOfBlob(content: Uint8Array): string | null {
  * - the git-annex branch is where it was.
  *
  * `fresh-clone` mode, against the plans and the pushed git-annex branch instead:
- * - the tag names are the S3 plan's tags;
+ * - the tag names are the S3 plan's tags, plus the names `allowTags` accepts (by name, for the
+ *   name check only; an accepted name the repository lacks is `allowed-tag-missing`);
  * - a commit that touches {@link LEDGER_PATH} touches nothing else, and the ledger at every head
  *   tip is a valid ledger of this dataset (the ledger commit on top of the rewrite is the one
  *   extra path and the only extra commits it tolerates; nothing else is compared with a before);
@@ -1023,6 +1032,15 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
   if (mode === "local" && !opts.before) throw new GitScrubError("refused: before-required");
   if (mode === "fresh-clone" && opts.before) {
     throw new GitScrubError("refused: before-not-for-fresh-clone");
+  }
+  // A name the git plan would not accept is no tag of this scrub, and the local comparison is
+  // against the snapshot, where an allowance would mean nothing: refuse both, never ignore them.
+  const allowTags = new Set(opts.allowTags ?? []);
+  if (allowTags.size > 0 && mode !== "fresh-clone") {
+    throw new GitScrubError("refused: allow-tag-not-for-local");
+  }
+  if ([...allowTags].some((t) => !VERSION_TAG.test(t))) {
+    throw new GitScrubError("bad-input: allow-tag-not-semver");
   }
   const failures: VerifyFailure[] = [];
   const counts: Record<string, number> = {};
@@ -1059,7 +1077,12 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
     fail("commit-count-changed", countChanges);
     counts.refs = beforeRefs.length;
   } else {
-    fail("tag-names-not-plan", setDiffSize(nowTags, new Set(s3Plan.tags)));
+    // An allowed name the repository has is expected; one it lacks is its own failure, so the
+    // name check is not also charged for it.
+    const expected = new Set(s3Plan.tags);
+    for (const t of allowTags) if (nowTags.has(t)) expected.add(t);
+    fail("tag-names-not-plan", setDiffSize(nowTags, expected));
+    fail("allowed-tag-missing", [...allowTags].filter((t) => !nowTags.has(t)).length);
     counts.refs = scanRefs.length;
   }
 

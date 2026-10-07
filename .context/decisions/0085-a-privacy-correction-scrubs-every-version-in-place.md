@@ -359,6 +359,11 @@ It deletes every raw version first, with the governance bypass (the raw text is 
 `--max-delete` and the plan's own count cover the raw versions and markers with the old keys'.
 The final authoritative listing must show zero versions and zero markers under every raw name and no non-annex name under `objects/` but `annex-uuid`; otherwise exit 5 and no `deleted.json`, which records `rawVersions` and `rawMarkers` when the plan had raw copies, and the ledger line carries them as `raw_versions` and `raw_markers`.
 
+## Amendment 2026-10-07 (#1610): a git tag that was never a published version
+
+The fresh-clone verify required the repository's tag names to equal the S3 plan's tags (the versions that have a manifest), and nm000112 has a git tag and a GitHub release, `v1.1.1`, that never had one, so runbook step 14 stopped with `tag-names-not-plan` and blocked steps 15a and 15b although every key of that tag's tree was in the plan.
+The rule is that `git-scrub verify --fresh-clone --allow-tag NAME` accepts a version tag by name, for that run only, recorded in the proof as `allowedTags`, and covers the name check only: the tag's tree is scanned like every other ref's, a name the repository lacks is `allowed-tag-missing`, and the flag is refused with `--before`.
+
 ## Build status
 
 Built in Phase 2 (PR #1625, issue #1612): the S3 stages (`plan`, `assemble`, `verify`, `zarr`, `drop-archives`, `delete-old`, `zarr-public`, `canary`), the hash stage, the git stages (`snapshot`, `rewrite`, `verify`, `annex-registry`), the ruleset switch, the git plan, the ledger file and object, the shared header scrub, and the runbook.
@@ -379,7 +384,7 @@ The maintainer's go is the one precondition of an irreversible step that no tool
 | `identifier_screen`, the publication gate | not built | Phase 4 (#1614) |
 | The converter never writes subject members, and a fleet-wide strip of existing stores | not built | Phase 8 (#1626) |
 | The uploader's preflight, admin triage | not built | Phases 3 (#1613) and 6 (#1616) |
-| The scheduled sweep | built in Phase 5 (#1615, ADR 0087): it reports and never repairs | Phase 5 (#1615) |
+| The scheduled sweep | built in Phase 5 (#1615, ADR 0088): it reports and never repairs | Phase 5 (#1615) |
 
 **Deferred inside Phase 2, none a blocker for the first real run on nm000186:**
 

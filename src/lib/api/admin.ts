@@ -1296,7 +1296,7 @@ export interface EmailPreferences {
   announcements: boolean;
   /** #1409: findings from the anonymity sweep on an anonymous deposit. */
   dataset_anonymity: boolean;
-  /** Epic #1610 phase 5 (ADR 0087): the identifier sweep's weekly report. */
+  /** Epic #1610 phase 5 (ADR 0088): the identifier sweep's weekly report. */
   identifier_sweep: boolean;
 }
 

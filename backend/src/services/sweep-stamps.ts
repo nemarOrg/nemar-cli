@@ -109,7 +109,7 @@ export const ANONYMITY_ATTEMPTED_AT_PATH = "$.anonymity_attempted_at";
 export const ZARR_REQUEUE_AT_PATH = "$.zarr_requeue_at";
 
 // ============================================================================
-// The scheduled identifier sweep (epic #1610 phase 5, ADR 0087)
+// The scheduled identifier sweep (epic #1610 phase 5, ADR 0088)
 // ============================================================================
 //
 // Two groups, kept apart on purpose. The VERDICT (status, report, when, which

@@ -1,6 +1,6 @@
 /**
  * The scheduled identifier sweep, through its real entry points (epic #1610,
- * phase 5, ADR 0087).
+ * phase 5, ADR 0088).
  *
  * The tick (`runIdentifierSweepTick`) selects, claims and dispatches; the
  * callback (`POST /webhooks/identifier-sweep-result`) stores; the admin route
@@ -915,7 +915,7 @@ describe("when a screened dataset is due again", () => {
   test("a fresh verdict of the current version is not due, whatever it found", async () => {
     // The cadence must not depend on the verdict: the public run list names the
     // dataset each screen reads, so a flagged dataset screened more often would be
-    // pointed out to anyone reading it (ADR 0087).
+    // pointed out to anyone reading it (ADR 0088).
     for (const [id, status] of [
       ["nm000630", "clean"],
       ["nm000631", "direct-identifiers"],

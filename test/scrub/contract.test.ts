@@ -420,6 +420,61 @@ describe("stage files", () => {
       ContractError,
     );
   });
+
+  test("git-verified.json: allowedTags is optional, and when there it is a sorted list of version tags", () => {
+    const proof = {
+      version: 1,
+      dataset: "nm000112",
+      mode: "fresh-clone",
+      verifiedAt: "2026-10-07T00:00:00.000Z",
+      keymapSha256: H1,
+      gitPlanSha256: H2,
+      s3PlanSha256: BOUND,
+      counts: { refs: 6, commits: 9 },
+    };
+    // Without the field, or with the tags the operator named, it is a proof.
+    expect(parseGitVerified(JSON.stringify(proof)).allowedTags).toBeUndefined();
+    expect(
+      parseGitVerified(JSON.stringify({ ...proof, allowedTags: ["v1.1.1"] })).allowedTags,
+    ).toEqual(["v1.1.1"]);
+    expect(
+      parseGitVerified(JSON.stringify({ ...proof, allowedTags: ["v1.1.1", "v2.0.0-rc1"] }))
+        .allowedTags,
+    ).toEqual(["v1.1.1", "v2.0.0-rc1"]);
+    // Present only when there is a tag, and a tag the git plan would refuse is no tag here.
+    for (const allowedTags of [
+      [],
+      null,
+      "v1.1.1",
+      { 0: "v1.1.1" },
+      [1],
+      [null],
+      [""],
+      ["1.1.1"],
+      ["v1.1"],
+      ["v1.1.1 "],
+      ["v1.1.1-"],
+      ["v1.1.1/../x"],
+      ["main"],
+      ["v1.1.1", "v1.1.1"],
+      ["v2.0.0", "v1.1.1"],
+    ]) {
+      expect(
+        () => parseGitVerified(JSON.stringify({ ...proof, allowedTags })),
+        JSON.stringify(allowedTags),
+      ).toThrow(ContractError);
+    }
+    // The flag exists in a fresh-clone verify only, so no other proof carries a list.
+    expect(() =>
+      parseGitVerified(JSON.stringify({ ...proof, mode: "local", allowedTags: ["v1.1.1"] })),
+    ).toThrow(ContractError);
+    expect(parseGitVerified(JSON.stringify({ ...proof, mode: "local" })).mode).toBe("local");
+    // Still no field the contract does not name.
+    expect(() =>
+      parseGitVerified(JSON.stringify({ ...proof, allowedTags: ["v1.1.1"], extra: 1 })),
+    ).toThrow(ContractError);
+    expect(() => parseGitVerified(JSON.stringify({ ...proof, extra: 1 }))).toThrow(ContractError);
+  });
 });
 
 describe("raw copies (ADR 0085, amendment of 2026-10-06)", () => {

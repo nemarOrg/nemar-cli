@@ -1,5 +1,5 @@
 /**
- * The identifier sweep's weekly report (epic #1610, phase 5, ADR 0087).
+ * The identifier sweep's weekly report (epic #1610, phase 5, ADR 0088).
  *
  * Two halves. The pure half (`identifier-sweep-report.ts`) decides what each
  * dataset's standing is and what the week says, from stored rows and a clock;

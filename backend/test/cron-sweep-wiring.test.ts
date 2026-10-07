@@ -117,7 +117,7 @@ const SWEEP_WIRING: Record<
   // minutes, so it rides the 30-minute tick; it mails admins, so it is
   // production-only there and absent from DEV_CRON_ALLOWLIST.
   sweepIdentifierScreens: "tick-prod-only",
-  // Epic #1610 phase 5 (ADR 0087): the scheduled identifier sweep and its weekly
+  // Epic #1610 phase 5 (ADR 0088): the scheduled identifier sweep and its weekly
   // report. Both ride the 30-minute tick: the sweep's deadline is the screen's 50
   // minutes, and the report retries on a later tick when a send reached nobody. The
   // sweep dispatches against the shared nemarDatasets org and the report mails

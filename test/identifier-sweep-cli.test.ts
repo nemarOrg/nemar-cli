@@ -1,6 +1,6 @@
 /**
  * The identifier sweep's mail category in the terminal (epic #1610, phase 5,
- * ADR 0087), driven through the real CLI entry point.
+ * ADR 0088), driven through the real CLI entry point.
  *
  * Same harness as test/identifier-screen-cli.test.ts: a real subprocess
  * (`bun run src/index.ts ...`) pointed at a local HTTP server that answers with

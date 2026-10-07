@@ -1,5 +1,5 @@
 /**
- * Admin routes for the scheduled identifier sweep (epic #1610, phase 5, ADR 0087).
+ * Admin routes for the scheduled identifier sweep (epic #1610, phase 5, ADR 0088).
  *
  * GET  /admin/identifier-sweep              the weekly report, now, on demand
  * POST /admin/identifier-sweep/:id/rescreen screen one dataset again, next tick

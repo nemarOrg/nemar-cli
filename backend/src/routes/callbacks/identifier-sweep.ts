@@ -1,7 +1,7 @@
 /**
  * Identifier-sweep callback: POST /identifier-sweep-result, called by the
  * `run-identifier-screen` workflow when the scheduled sweep dispatched it
- * (epic #1610, phase 5, ADR 0087).
+ * (epic #1610, phase 5, ADR 0088).
  *
  * The same workflow and report as the publication screen
  * (`identifier-screen.ts` beside this file), a different door: a sweep screen

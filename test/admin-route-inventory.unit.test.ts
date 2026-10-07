@@ -163,7 +163,7 @@ const EXPECTED_ENTRIES: Record<string, number> = {
   "POST /neurobagel/regenerate": 2,
   // Epic #1586 phase 6: the verification sweep on demand. No body, so no validator.
   "POST /neurobagel/verify": 1,
-  // Scheduled identifier sweep (epic #1610 phase 5, ADR 0087): the weekly report on
+  // Scheduled identifier sweep (epic #1610 phase 5, ADR 0088): the weekly report on
   // demand (read-only) and a rescreen request (a D1 write the production tick answers).
   "GET /identifier-sweep": 1,
   "POST /identifier-sweep/:id/rescreen": 1,

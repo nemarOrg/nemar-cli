@@ -69,7 +69,7 @@ describe("parseEmailPreferences", () => {
   });
 
   test("an explicit identifier_sweep: false is honored, and a row that predates it opts in", () => {
-    // Epic #1610 phase 5 (ADR 0087): the identifier sweep's weekly report. Same
+    // Epic #1610 phase 5 (ADR 0088): the identifier sweep's weekly report. Same
     // default as dataset_anonymity above, and the same control in both directions.
     expect(
       parseEmailPreferences(JSON.stringify({ identifier_sweep: false })).identifier_sweep,

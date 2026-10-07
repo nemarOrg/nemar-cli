@@ -217,7 +217,7 @@ export async function verifyIdentifierScreenCallbackToken(
 }
 
 // ============================================================================
-// Identifier-sweep callback HMAC tokens (epic #1610, phase 5, ADR 0087)
+// Identifier-sweep callback HMAC tokens (epic #1610, phase 5, ADR 0088)
 // ============================================================================
 //
 // The scheduled sweep dispatches the same screen workflow as a publication

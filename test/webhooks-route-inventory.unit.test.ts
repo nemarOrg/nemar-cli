@@ -34,7 +34,7 @@ const EXPECTED_ENTRIES: Record<string, number> = {
 
   // Publication identifier-screen callback (domain-tagged token, same secret)
   "POST /identifier-screen-result": 1,
-  // Scheduled identifier sweep callback (epic #1610 phase 5, ADR 0087)
+  // Scheduled identifier sweep callback (epic #1610 phase 5, ADR 0088)
   "POST /identifier-sweep-result": 1,
 
   // OpenNeuro import state callback (bearer token)

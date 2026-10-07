@@ -900,7 +900,7 @@ export default {
               ),
             ),
         );
-        // Epic #1610 phase 5 (ADR 0087): the scheduled identifier sweep. Each tick
+        // Epic #1610 phase 5 (ADR 0088): the scheduled identifier sweep. Each tick
         // marks an overdue screen unreported and dispatches at most three published
         // datasets to the same screen workflow, so the fleet is covered over its
         // 28-day cycle a few datasets at a time. PRODUCTION-ONLY and absent from
@@ -934,7 +934,7 @@ export default {
               ),
             ),
         );
-        // ADR 0087: the sweep's weekly admin report, for the ISO week before this one.
+        // ADR 0088: the sweep's weekly admin report, for the ISO week before this one.
         // It arrives whether or not anything is wrong (ADR 0054). Evaluated on every
         // tick and sent once, by an atomic claim in audit_log that fails closed; a
         // send that reached nobody is retried on a later tick, up to a cap. Mail

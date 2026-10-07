@@ -1,5 +1,5 @@
 /**
- * The scheduled identifier sweep (epic #1610, phase 5, ADR 0087).
+ * The scheduled identifier sweep (epic #1610, phase 5, ADR 0088).
  *
  * Published datasets are screened again on a cycle, with the same workflow and
  * the same report contract as a publication request (ADR 0086): the tick
@@ -84,7 +84,7 @@ import {
 } from "./sweep-stamps.js";
 
 // ============================================================================
-// The numbers (ADR 0087)
+// The numbers (ADR 0088)
 // ============================================================================
 
 /** Where the workflow posts a sweep screen's report, under API_BASE_URL. */

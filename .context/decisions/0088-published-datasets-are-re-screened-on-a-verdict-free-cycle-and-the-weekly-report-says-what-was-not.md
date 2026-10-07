@@ -1,4 +1,4 @@
-# ADR 0087: Published datasets are re-screened on a cycle that does not depend on the verdict, and a weekly admin report says what was not screened
+# ADR 0088: Published datasets are re-screened on a cycle that does not depend on the verdict, and a weekly admin report says what was not screened
 
 **Status:** accepted
 **Date:** 2026-10-06

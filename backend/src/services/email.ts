@@ -176,7 +176,7 @@ export interface EmailPreferences {
    */
   dataset_anonymity: boolean;
   /**
-   * The scheduled identifier sweep's weekly report (epic #1610 phase 5, ADR 0087).
+   * The scheduled identifier sweep's weekly report (epic #1610 phase 5, ADR 0088).
    *
    * Its own category for the reason `dataset_anonymity` has one: an admin who
    * stops watching publication requests has said nothing about wanting to stop
@@ -2306,7 +2306,7 @@ export async function sendAnonymityFindingsEmail(
 export const IDENTIFIER_SWEEP_EMAIL_TIMEOUT_MS = 15_000;
 
 /**
- * What the identifier sweep's weekly report says (ADR 0087). Structurally the
+ * What the identifier sweep's weekly report says (ADR 0088). Structurally the
  * report `identifier-sweep-report.ts` renders, re-declared here so `email.ts`
  * does not import a sweep; the dependency runs the other way.
  */
