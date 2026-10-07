@@ -20,6 +20,7 @@ import io
 import itertools
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -5377,13 +5378,28 @@ class TestReclaimReportsWhatItCouldNotRemove(unittest.TestCase):
         self.assertIn("is still on disk", out.getvalue())
 
     def test_convert_one_reports_a_scratch_directory_it_could_not_remove(self):
+        # Through the real `convert_one`: the recording fails before any conversion
+        # (its file is not in the repo), and the `finally` that follows has to say it
+        # could not delete the directory a killed attempt left locked.
         with tempfile.TemporaryDirectory() as root:
-            work = self._undeletable(root)
+            repo = os.path.join(root, "repo")
+            os.makedirs(repo)
+            run = os.path.join(root, "run")
+            os.makedirs(run)
+            work = self._undeletable(run)
+            generate_zarr._init_worker({
+                "repo": repo, "bucket": "nemar-test", "dataset_id": "on000117",
+                "head": "b" * 40, "head_files": {self.PRIMARY}, "local": True,
+                "tmp": run, "updated": "2026-10-07T00:00:00Z",
+                "contract_base": "https://zarr.nemar.org", "engine_version": "3",
+                "dataset_row": None, "provenance_fetch_failed": False,
+                "mem_budget": None, "hard_ceiling": None, "projections": {},
+            })
             with contextlib.redirect_stdout(io.StringIO()) as out:
-                for failure in generate_zarr.remove_scratch_tree(work):
-                    print(f"::error::could not remove scratch {failure}", flush=True)
+                result = convert_one(self.PRIMARY)
             os.chmod(work, 0o700)
-        self.assertIn("::error::could not remove scratch", out.getvalue())
+        self.assertFalse(result["ok"], "the recording has no file, so it cannot convert")
+        self.assertRegex(out.getvalue(), r"::error::could not remove scratch .*" + re.escape(work))
 
 
 class TestKillOrphansUnder(unittest.TestCase):
@@ -10855,6 +10871,50 @@ class TestConvertOneStreamsIntoItsOwnScratch(unittest.TestCase):
         self.assertEqual(leftovers, [], "nothing may remain beside the store")
 
 
+    def test_a_volume_that_fills_under_the_exporter_is_an_uncoded_failure_and_leaves_nothing(self):
+        # The case the admission gate exists to avoid, and what happens when it
+        # misses: the exporter has made its memmap and half a store when the volume
+        # fills. Today that is an uncoded infrastructure failure, which spends one of
+        # a recording's five attempts (whether it should defer instead is a design
+        # question, not decided here). Whatever the classification, nothing may stay
+        # on the disk that just filled.
+        import biosigio
+
+        work_root = os.path.join(self._tmp.name, "work")
+        os.makedirs(work_root)
+        work, store_local, scratch = generate_zarr.recording_scratch_paths(
+            work_root, self.PRIMARY
+        )
+        real = biosigio.stream_to_zarr
+
+        def full_volume(*args, **kwargs):
+            with open(os.path.join(kwargs["scratch_dir"], "memmap.dat"), "wb") as fh:
+                fh.write(b"x" * 4096)
+            os.makedirs(args[1], exist_ok=True)
+            with open(os.path.join(args[1], "zarr.json"), "wb") as fh:
+                fh.write(b"{}")
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+        biosigio.stream_to_zarr = full_volume
+        self.addCleanup(setattr, biosigio, "stream_to_zarr", real)
+        generate_zarr._init_worker({
+            "repo": self.repo, "bucket": "nemar-test", "dataset_id": "on000117",
+            "head": "b" * 40, "head_files": {self.PRIMARY}, "local": True,
+            "tmp": work_root, "updated": "2026-10-07T00:00:00Z",
+            "contract_base": "https://zarr.nemar.org", "engine_version": "3",
+            "dataset_row": None, "provenance_fetch_failed": False,
+            "mem_budget": None, "hard_ceiling": None, "projections": {},
+        })
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = convert_one(self.PRIMARY)
+        self.assertFalse(result["ok"])
+        self.assertIsNone(result["code"], "uncoded, so it is an infrastructure failure")
+        self.assertIn("No space left on device", result["error"])
+        self.assertNotEqual(result["code"], "recording_memory_exceeded")
+        for path in (work, store_local, scratch):
+            self.assertFalse(os.path.exists(path), f"{path} outlived the failed conversion")
+
+
 class TestConvertOneFifSidecarOvercount(unittest.TestCase):
     """on000117 through `convert_one`: an MEG channels.tsv listing channels its
     FIF never had (CHPI coils, EEG inherited from another run) was refused as
@@ -12719,6 +12779,133 @@ class TestMainRetryPendingRound(unittest.TestCase):
         self._no_scratch()
         self._assert_deferred_without_spending_attempts(
             *self.run_main("--retry-pending", "--jobs", "1")
+        )
+
+
+class TestSerialAdmissionBoundary(unittest.TestCase):
+    """`--jobs 1` admits a recording whose charge EQUALS the budget, like the pool."""
+
+    def _drain(self, peak, budget):
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.0
+        ran: list[str] = []
+        deferred: dict[str, str] = {}
+        with contextlib.redirect_stdout(io.StringIO()):
+            generate_zarr.drain_serially(
+                ["a"], {"a": peak}, lambda _in_flight: budget, None, deferred,
+                lambda p: {"ok": True, "primary": p}, lambda r, _i: ran.append(r["primary"]),
+            )
+        return ran, deferred
+
+    def test_a_charge_equal_to_the_budget_runs(self):
+        self.assertEqual(self._drain(100, 100), (["a"], {}))
+
+    def test_a_charge_one_byte_over_the_budget_is_deferred(self):
+        ran, deferred = self._drain(101, 100)
+        self.assertEqual(ran, [])
+        self.assertEqual(list(deferred), ["a"])
+
+
+class TestNeverFitThreshold(unittest.TestCase):
+    """A recording can never fit when its charge exceeds the volume's TOTAL minus the
+    headroom; one that merely does not fit now is a note, not an operator error."""
+
+    GIB = 1024**3
+
+    def _defer(self, charge):
+        self.addCleanup(
+            setattr, generate_zarr, "SCRATCH_HEADROOM_BYTES", generate_zarr.SCRATCH_HEADROOM_BYTES
+        )
+        generate_zarr.SCRATCH_HEADROOM_BYTES = 10 * self.GIB
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            generate_zarr.defer_unfit(
+                ["a"], {"a": charge}, 5 * self.GIB, lambda: (50 * self.GIB, 100 * self.GIB), {}
+            )
+        return out.getvalue()
+
+    def test_a_charge_that_fits_the_volume_minus_headroom_exactly_is_only_deferred(self):
+        log = self._defer(90 * self.GIB)  # the 100 GiB volume less the 10 GiB headroom
+        self.assertNotIn("can never fit", log)
+        self.assertIn("::warning::deferring a: charged 90 GiB", log)
+
+    def test_one_byte_more_can_never_fit_and_is_an_error(self):
+        log = self._defer(90 * self.GIB + 1)
+        self.assertIn("::error::a can never fit this volume", log)
+        self.assertIn("(1 can never fit this volume)", log)
+
+
+class TestOrphanKillNeverTouchesThisProcess(unittest.TestCase):
+    def test_this_process_is_not_signalled_even_when_its_command_line_matches(self):
+        # A fixture in /proc's layout names THIS pid with an argument under the run
+        # root, as an unlucky command line would. The recording `send_signal` shows
+        # who would have been killed; it must be nobody here.
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as proc:
+            os.makedirs(os.path.join(proc, str(os.getpid())))
+            with open(os.path.join(proc, str(os.getpid()), "cmdline"), "wb") as fh:
+                fh.write(b"aws\0s3\0cp\0" + os.path.join(root, "work", "x").encode() + b"\0")
+            signalled: list[int] = []
+            report = generate_zarr.kill_orphans_under(
+                root, proc_root=proc, wait_seconds=0.1,
+                send_signal=lambda pid, _sig: signalled.append(pid),
+            )
+        self.assertEqual(signalled, [])
+        self.assertEqual(report.killed, [])
+        self.assertEqual(report.scanned, 1)
+
+
+class TestPoolBreakWarningContract(unittest.TestCase):
+    """The one line a pool break prints, as an operator reads it."""
+
+    GIB = 1024**3
+    PRIMARY = "sub-01/eeg/sub-01_task-a_eeg.vhdr"
+
+    def test_the_warning_gives_the_volume_before_and_after_the_reclaim(self):
+        reads = iter([(200 * self.GIB, 500 * self.GIB), (260 * self.GIB, 500 * self.GIB)])
+        with (
+            tempfile.TemporaryDirectory() as root,
+            tempfile.TemporaryDirectory() as empty_proc,
+            contextlib.redirect_stdout(io.StringIO()) as out,
+        ):
+            generate_zarr.reclaim_after_pool_break(
+                root, [self.PRIMARY], lambda: next(reads), proc_root=empty_proc
+            )
+        self.assertRegex(
+            out.getvalue(),
+            r"(?m)^::warning::worker pool broke with 1 recording\(s\) in flight; "
+            r"scratch free 200 GiB before the reclaim and 260 GiB after, of 500 GiB; ",
+        )
+
+    def test_without_a_volume_the_warning_says_the_free_space_is_unreadable(self):
+        with (
+            tempfile.TemporaryDirectory() as root,
+            tempfile.TemporaryDirectory() as empty_proc,
+            contextlib.redirect_stdout(io.StringIO()) as out,
+        ):
+            generate_zarr.reclaim_after_pool_break(
+                root, [self.PRIMARY], None, proc_root=empty_proc
+            )
+        self.assertRegex(
+            out.getvalue(),
+            r"(?m)^::warning::worker pool broke with 1 recording\(s\) in flight; "
+            r"scratch free space unreadable; ",
+        )
+
+    def test_a_break_inside_a_drain_reads_the_drains_own_volume(self):
+        # The drain hands its volume probe to the reclaim: a run whose probe works
+        # must not report the free space as unreadable.
+        boom = "sub-boom/eeg/sub-boom_task-rest_eeg.vhdr"
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as out:
+            _drain_with_admission(
+                [boom], {boom: 1024}, 1, 10**9, {"tmp": tmp},
+                lambda r, i: None, worker=_scratch_worker,
+                scratch_volume=lambda: (200 * self.GIB, 500 * self.GIB),
+            )
+        self.assertRegex(
+            out.getvalue(),
+            r"scratch free 200 GiB before the reclaim and 200 GiB after, of 500 GiB",
         )
 
 
