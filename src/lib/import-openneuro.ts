@@ -43,10 +43,13 @@ import {
   getRemoteUuid,
   listAnnexedKeys,
 } from "./git-annex/transfer.js";
-import { annexCopyUpload, normalizeImportedTree } from "./import-normalize.js";
+import { OPENNEURO_UPSTREAM_MARKER } from "./import-markers.js";
+import { annexCopyUpload } from "./import-normalize.js";
+import { httpUpstreamReader, prepareImportedTreeForCopy } from "./import-scrub.js";
 import {
   type ImportManifest,
   type ImportManifestItem,
+  type ImportPrivacyRecord,
   MIN_DATA_AVAILABILITY,
   annexKeyDeclaredSize,
   batchServerSideCopy,
@@ -386,13 +389,8 @@ export function findAnnexedRootMetadata(datasetPath: string): string[] {
   return found.sort();
 }
 
-/**
- * Distinct, greppable marker for "this import failed because OpenNeuro's own data
- * is unreachable" (objects not anonymously public + no signed login) vs a NEMAR
- * bug. Surfaces in the prepare error + workflow log so these datasets are
- * understood and can be collected into a tracking list. (#808)
- */
-export const OPENNEURO_UPSTREAM_MARKER = "[openneuro-upstream-inaccessible]";
+/** Defined beside the scrub's marker (`import-markers.ts`); re-exported for existing callers. */
+export { OPENNEURO_UPSTREAM_MARKER };
 
 /**
  * Marker for "NEMAR's bucket cannot back this dataset's data keys" (#1396).
@@ -811,7 +809,7 @@ export function ensureReadmeMd(
  * URL (kept for the curl fallback) and the flat NEMAR destination URI. Keys
  * with no usable source at all are skipped (returned count).
  */
-function buildManifestItems(
+export function buildManifestItems(
   keyUrlMap: Map<string, string>,
   nemarId: string,
 ): { items: ImportManifestItem[]; skipped: number } {
@@ -1206,9 +1204,17 @@ export async function prepareImport(
     }
   }
 
-  // Step 5b: bring the tree onto NEMAR's annex policy, in the one phase that can.
+  // Step 5b: the identifier scrub, then NEMAR's annex policy, then the copy manifest
+  // cut to the tree that will be pushed (ADR 0087, then #1159 / ADR 0060).
   //
-  // Two halves, one commit (#1159, ADR 0060):
+  // The scrub comes first because it is the last moment anything can be changed
+  // before bytes reach the bucket: the copy phase copies upstream's bytes by key, and
+  // a recording it writes is readable by key at once. A header that needs a scrub is
+  // downloaded, patched, annexed under a new key and uploaded from THIS clone, its
+  // old key retired; identifier-keyed JSON values are blanked. It refuses, before the
+  // push, anything it cannot read, verify or move.
+  //
+  // The annex-policy half (ADR 0060), in its own commit:
   //   - files upstream left as git blobs are annexed and their content uploaded
   //     from THIS clone, which is why this cannot move to the copy phase: that
   //     phase is pure S3 and has no clone, and no upstream KEY exists for these
@@ -1223,10 +1229,16 @@ export async function prepareImport(
   // On a re-import it also carries keys this tree already holds into the manifest,
   // so finalize verifies and registers the ones a previous prepare uploaded.
   //
+  // The manifest is then cut to the keys the committed tree names, minus any the
+  // git-annex branch records as dead. Built from upstream's whereis, it describes
+  // upstream's tree: without the cut, a re-import (reset onto origin/main, which a
+  // correction rewrote) would copy back every key the correction replaced.
+  //
   // After step 4c: a re-import's `reset --hard origin/main` would otherwise throw
   // the rewrite away. Before step 6: its pathspec-less commit would otherwise
   // absorb these changes into the metadata commit.
-  const policySpinner = ora("Applying NEMAR annex policy to the tree...").start();
+  let privacy: ImportPrivacyRecord | undefined;
+  const policySpinner = ora("Applying the identifier scrub and NEMAR annex policy...").start();
   try {
     // The step 5 gate fires on exactly this condition and exits if the remote
     // cannot be configured, so s3Creds is set here by construction whenever there
@@ -1238,23 +1250,47 @@ export async function prepareImport(
         `${unannexedData.length} file(s) need moving into the annex but no S3 credentials were resolved for ${nemarId}. Refusing to continue: the upload would be attempted with whatever credentials git-annex had cached.`,
       );
     }
-    const normalized = await normalizeImportedTree({
+    const prepared = await prepareImportedTreeForCopy({
       datasetPath,
       nemarId,
       bucket: S3_BUCKET,
       remoteName: "nemar-s3",
+      keyUrlMap,
+      upstreamItems: items,
       unannexedData,
-      upstreamKeys: new Set(keyUrlMap.keys()),
-      // Gated on the data step having actually run. With --skip-data there is no
-      // `keyUrlMap`, so "unaccounted" would mean EVERY annexed key in the dataset,
-      // and the staging manifest would assert that prepare uploaded content it
-      // never touched -- sending finalize's remedy to re-run a phase that saw none
-      // of it.
-      carryOverUnaccountedKeys: isReimportOntoExistingMain && !options.skipData,
-      upload: annexCopyUpload({ credentials: s3Creds ?? "inherit" }),
+      // Set by step 4c only when it really reset onto origin/main.
+      reimport: isReimportOntoExistingMain,
+      skipData: options.skipData ?? false,
       maxBytes: options.normalizeMaxBytes,
+      reader: httpUpstreamReader(),
+      upload: annexCopyUpload({ credentials: s3Creds ?? "inherit" }),
     });
-    items.push(...normalized.items);
+    const { scrub, normalized, manifest: cut } = prepared;
+    items = cut.items;
+    privacy = prepared.privacy;
+
+    // Counts and fixed words only: this log is public, and a path can be the identifier.
+    const c = scrub.counts;
+    const notRead = [
+      c.headers_not_read_skip_data > 0
+        ? `${c.headers_not_read_skip_data} not read (--skip-data)`
+        : null,
+      c.headers_not_read_no_source > 0
+        ? `${c.headers_not_read_no_source} with no upstream source`
+        : null,
+      c.headers_not_read_nemar_held > 0
+        ? `${c.headers_not_read_nemar_held} already NEMAR's (the screen reads them)`
+        : null,
+      c.headers_not_edf > 0 ? `${c.headers_not_edf} not an EDF/BDF header` : null,
+    ].filter(Boolean);
+    console.log(
+      chalk.dim(
+        `  Identifier scrub: ${c.recordings} EDF/BDF recording(s), ${c.headers_read} header(s) read, ${c.headers_scrubbed} scrubbed${notRead.length > 0 ? ` (${notRead.join(", ")})` : ""}; ${c.json_values_blanked} JSON value(s) blanked in ${c.json_files_blanked} file(s), ${c.json_files_unread + c.json_files_annexed} JSON file(s) not read; ${c.images_or_documents_held} image or document path(s) left for review`,
+      ),
+    );
+    if (scrub.committed) {
+      console.log(chalk.dim("  Committed the privacy correction and its ledger line"));
+    }
 
     if (normalized.notes.length === 0) {
       policySpinner.stop();
@@ -1278,6 +1314,13 @@ export async function prepareImport(
         ),
       );
     }
+    if (cut.droppedNotInTree > 0 || cut.droppedDead > 0) {
+      console.log(
+        chalk.dim(
+          `  Copy manifest: ${cut.items.length} key(s); dropped ${cut.droppedNotInTree} the pushed tree does not name and ${cut.droppedDead} the git-annex branch records as dead`,
+        ),
+      );
+    }
     for (const line of normalized.policy.skipped) {
       console.log(
         chalk.yellow(
@@ -1287,7 +1330,7 @@ export async function prepareImport(
     }
   } catch (err) {
     policySpinner.fail(
-      `Failed to apply NEMAR annex policy: ${err instanceof Error ? err.message : String(err)}`,
+      `Failed to apply the identifier scrub or NEMAR annex policy: ${err instanceof Error ? err.message : String(err)}`,
     );
     process.exit(1);
   }
@@ -1356,7 +1399,7 @@ export async function prepareImport(
   }
   pushSpinner.succeed("Pushed to nemarDatasets");
 
-  const manifest: ImportManifest = { openneuroId, nemarId, nemarUuid, items };
+  const manifest: ImportManifest = { openneuroId, nemarId, nemarUuid, items, privacy };
   if (options.persistStaging) {
     await writeManifestToS3(manifest, S3_BUCKET, S3_REGION);
     console.log(chalk.dim(`  Wrote import manifest to s3://${S3_BUCKET}/${nemarId}/staging/`));

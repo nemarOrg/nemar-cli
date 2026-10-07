@@ -1508,8 +1508,11 @@ function newestStatuses(log: string): Map<string, string> {
   return new Map([...newest].map(([uuid, v]) => [uuid, v.status]));
 }
 
-/** Location-log text for each key, read from the git-annex branch; "" when there is none. */
-async function locationLogs(repo: string, keys: string[]): Promise<string[]> {
+/**
+ * Location-log text for each key, read from the git-annex branch; "" when there is none.
+ * Exported for the importer's purge-list read (ADR 0087): a key dead here is never copied.
+ */
+export async function locationLogs(repo: string, keys: string[]): Promise<string[]> {
   if (keys.length === 0) return [];
   const paths = await annex(
     repo,
@@ -1559,7 +1562,7 @@ function presentIn(log: string): Set<string> {
 }
 
 /** Dead: some repository's newest line is `X` and none is present. */
-function isDead(log: string): boolean {
+export function isDead(log: string): boolean {
   const statuses = [...newestStatuses(log).values()];
   return statuses.includes("X") && !statuses.includes("1");
 }
