@@ -3,67 +3,164 @@
  * root `-v, --version`: the CLI printed its own version and exited 0, so a
  * scripted release (`-y`) silently did nothing.
  *
- * Unit tests pin bindShadowedOptionValues on a small program with the same
- * shape; the entry-point tests drive the real CLI (`bun run src/index.ts`)
- * with no account configured, so reaching the release handler shows up as its
- * "Not authenticated" refusal, while a swallowed flag prints the version.
+ * The unit tests run bindShadowedOptionValues over the REAL command tree: the
+ * command groups src/index.ts registers, under a root declared the way
+ * src/index.ts declares it. A hand-kept copy of the tree would keep passing
+ * after a flag was added or renamed in src/commands, which is exactly the
+ * drift this guard exists to catch. The entry-point tests drive the real CLI
+ * (`bun run src/index.ts`) with no account key configured, so reaching the
+ * release handler shows up as its "Not authenticated" refusal, while a
+ * swallowed flag prints the version.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
-import { Command } from "commander";
+import { Command, type Option } from "commander";
+import { adminCommand } from "../src/commands/admin";
+import { authCommand } from "../src/commands/auth";
+import { completionCommand } from "../src/commands/completion";
+import {
+  createDownloadCommand,
+  createUploadCommand,
+  datasetCommand,
+} from "../src/commands/dataset";
+import { doctorCommand } from "../src/commands/doctor";
+import { sandboxCommand } from "../src/commands/sandbox";
 import { MissingShadowedValueError, bindShadowedOptionValues } from "../src/lib/argv-shadowing";
 import { version } from "../src/lib/version";
 
-function miniProgram(): Command {
-  const program = new Command("nemar")
-    .version("9.9.9", "-v, --version")
-    .option("--verbose")
-    .option("--debug");
-  const dataset = new Command("dataset");
-  dataset
-    .command("release")
-    .argument("<id>")
-    .option("--type <type>")
-    .option("--version <version>")
-    .option("-y, --yes");
-  dataset.command("validate").argument("<path>").option("-v, --verbose");
-  dataset.command("upload").argument("<path>").option("-j, --jobs <n>");
-  program.addCommand(dataset);
-  return program;
+// ---------------------------------------------------------------------------
+// The real command tree
+// ---------------------------------------------------------------------------
+
+// The module-level command groups src/index.ts passes to addCommand().
+// addCommand() sets the child's `.parent`, and these objects are shared with
+// every other test file in the same `bun test` process, so each one's parent
+// is put back in afterAll.
+const SHARED_GROUPS = [
+  adminCommand,
+  authCommand,
+  completionCommand,
+  datasetCommand,
+  doctorCommand,
+  sandboxCommand,
+];
+
+// Declared in src/index.ts itself rather than imported, so the tree below
+// cannot see them. None takes a flag an ancestor also declares. The drift test
+// at the bottom of the unit tests fails when src/index.ts gains or loses a
+// top-level command, so this list cannot go stale unnoticed.
+const INLINE_ROOT_COMMANDS = ["login", "logout", "register", "signup", "switch", "whoami"];
+
+/** The root exactly as src/index.ts declares it: `-v, --version` plus four booleans. */
+function declareRoot(): Command {
+  return new Command("nemar")
+    .version(version, "-v, --version", "Output the current version")
+    .option("--no-color", "Disable colored output")
+    .option("--verbose", "Enable verbose output")
+    .option("--help-all", "Show detailed help with examples and descriptions")
+    .option("--debug", "Write a diagnostic log for this run");
 }
 
-describe("bindShadowedOptionValues", () => {
-  const p = miniProgram();
+class StoppedBeforeAction extends Error {}
 
+let program: Command;
+const reached: Command[] = [];
+const originalParents = SHARED_GROUPS.map((c) => c.parent);
+
+beforeAll(() => {
+  program = declareRoot();
+  // The root's own --version handler would otherwise process.exit(0) the test
+  // runner if the pre-pass ever failed to protect a subcommand's flag.
+  program.exitOverride();
+  for (const group of SHARED_GROUPS) program.addCommand(group);
+  // Fresh instances, as in src/index.ts: Commander gives a Command one parent.
+  program.addCommand(createDownloadCommand());
+  program.addCommand(createUploadCommand());
+  // Stop at the command that would run, before its action touches the network
+  // or the account. What Commander parsed for that command is the evidence.
+  program.hook("preAction", (_root, actionCommand) => {
+    reached.push(actionCommand);
+    throw new StoppedBeforeAction();
+  });
+});
+
+afterAll(() => {
+  SHARED_GROUPS.forEach((group, i) => {
+    group.parent = originalParents[i];
+  });
+});
+
+/** Parse `argv` the way src/index.ts does and return the command Commander reached. */
+async function reach(argv: string[]): Promise<Command> {
+  reached.length = 0;
+  await expect(
+    program.parseAsync(bindShadowedOptionValues(program, argv), { from: "user" }),
+  ).rejects.toBeInstanceOf(StoppedBeforeAction);
+  expect(reached).toHaveLength(1);
+  return reached[0];
+}
+
+describe("bindShadowedOptionValues on the real command tree", () => {
   test("joins a shadowed value option of the addressed subcommand", () => {
     expect(
-      bindShadowedOptionValues(p, ["dataset", "release", "nm000104", "--version", "2.0.0", "-y"]),
+      bindShadowedOptionValues(program, [
+        "dataset",
+        "release",
+        "nm000104",
+        "--version",
+        "2.0.0",
+        "-y",
+      ]),
     ).toEqual(["dataset", "release", "nm000104", "--version=2.0.0", "-y"]);
   });
 
   test("works with global flags before and after the subcommand", () => {
     expect(
-      bindShadowedOptionValues(p, ["--debug", "dataset", "release", "--version", "1.2.3", "nm1"]),
+      bindShadowedOptionValues(program, [
+        "--debug",
+        "dataset",
+        "release",
+        "--version",
+        "1.2.3",
+        "nm1",
+      ]),
     ).toEqual(["--debug", "dataset", "release", "--version=1.2.3", "nm1"]);
+    expect(
+      bindShadowedOptionValues(program, [
+        "dataset",
+        "release",
+        "nm1",
+        "--version",
+        "1.2.3",
+        "--verbose",
+      ]),
+    ).toEqual(["dataset", "release", "nm1", "--version=1.2.3", "--verbose"]);
   });
 
   test("leaves everything else alone", () => {
     const cases = [
+      // The root's own flag, with no subcommand to hand it to.
       ["--version"],
       ["-v"],
       ["dataset", "--version"],
+      // Already the equals form.
       ["dataset", "release", "nm1", "--version=2.0.0"],
+      // After `--` nothing is an option, valueless or not.
       ["dataset", "release", "nm1", "--", "--version", "2.0.0"],
+      ["dataset", "release", "nm1", "--", "--version"],
+      // Options of the leaf that no ancestor declares.
       ["dataset", "upload", "./x", "--jobs", "4", "--verbose"],
       ["dataset", "validate", "./x", "-v"],
+      ["dataset", "validate", "./x", "--version-info"],
+      // Not a command of this program.
       ["unknown", "--version", "1"],
     ];
     for (const argv of cases) {
-      expect(bindShadowedOptionValues(p, argv)).toEqual(argv);
+      expect(bindShadowedOptionValues(program, argv)).toEqual(argv);
     }
   });
 
@@ -82,7 +179,7 @@ describe("bindShadowedOptionValues", () => {
     for (const argv of cases) {
       let caught: unknown;
       try {
-        bindShadowedOptionValues(p, argv);
+        bindShadowedOptionValues(program, argv);
       } catch (err) {
         caught = err;
       }
@@ -95,50 +192,98 @@ describe("bindShadowedOptionValues", () => {
   });
 
   test("Commander then hands the value to the subcommand", async () => {
-    let seen: string | undefined;
-    const prog = miniProgram().exitOverride();
-    const release = prog.commands[0].commands.find((c) => c.name() === "release");
-    release?.action((_id: string, opts: { version?: string }) => {
-      seen = opts.version;
-    });
-    await prog.parseAsync(
-      bindShadowedOptionValues(prog, ["dataset", "release", "nm1", "--version", "2.0.0"]),
-      { from: "user" },
-    );
-    expect(seen).toBe("2.0.0");
+    const release = await reach(["dataset", "release", "nm1", "--version", "2.0.0", "-y"]);
+    expect(release.name()).toBe("release");
+    expect(release.opts().version).toBe("2.0.0");
+    expect(release.processedArgs).toEqual(["nm1"]);
+  });
+
+  // `admin recover status` redeclares --recover-file from its parent group
+  // `admin recover`, which is also value-taking. The parent's parseOptions
+  // consumes the flag AND its value either way and `status` reads it back
+  // through optsWithGlobals() (src/commands/admin.ts), so the join must leave
+  // that design working.
+  test("a value option shared with a value-taking group still resolves", async () => {
+    const status = await reach(["admin", "recover", "status", "--recover-file", "list.json"]);
+    expect(status.name()).toBe("status");
+    expect(status.optsWithGlobals().recoverFile).toBe("list.json");
   });
 });
 
 // ---------------------------------------------------------------------------
-// Real entry point
+// Invariant over the whole tree
 // ---------------------------------------------------------------------------
 
-const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
-const REPO_ROOT = join(import.meta.dir, "..");
+interface ShadowedPair {
+  path: string[];
+  option: Option;
+}
+
+function flagsOf(option: Option): string[] {
+  return [option.long, option.short].filter((f): f is string => typeof f === "string");
+}
+
+/**
+ * Every command below the root with a value-taking option whose long flag an
+ * ancestor also declares. Every command, not only tree leaves: the pre-pass
+ * addresses the deepest command NAMED on the line, and `admin recover` is both
+ * a group and a command with its own options.
+ */
+function shadowedValueOptions(root: Command): ShadowedPair[] {
+  const found: ShadowedPair[] = [];
+  const visit = (cmd: Command, path: string[], ancestors: Command[]) => {
+    const ancestorFlags = new Set(ancestors.flatMap((a) => a.options.flatMap(flagsOf)));
+    for (const option of cmd.options) {
+      if (!(option.required || option.optional)) continue;
+      if (option.long && ancestorFlags.has(option.long)) found.push({ path, option });
+    }
+    for (const sub of cmd.commands) visit(sub, [...path, sub.name()], [...ancestors, cmd]);
+  };
+  for (const sub of root.commands) visit(sub, [sub.name()], [root]);
+  return found;
+}
+
+describe("every shadowed value option in the real tree is bound", () => {
+  test("the walk finds the known collision, so it cannot pass vacuously", () => {
+    const names = shadowedValueOptions(program).map((p) => `${p.path.join(" ")} ${p.option.long}`);
+    expect(names).toContain("dataset release --version");
+  });
+
+  test("--flag value is joined to --flag=value for each of them", () => {
+    for (const { path, option } of shadowedValueOptions(program)) {
+      const flag = option.long as string;
+      expect(bindShadowedOptionValues(program, [...path, flag, "some-value"])).toEqual([
+        ...path,
+        `${flag}=some-value`,
+      ]);
+    }
+  });
+
+  test("none takes an OPTIONAL value, which the pre-pass cannot deliver bare", () => {
+    // `--flag [value]` with no value has no spelling the shadowing ancestor
+    // does not claim, so it would still be swallowed. If this fails, decide
+    // how that flag is meant to work before adding it: the pre-pass can only
+    // join a value, or fail a required one that is missing.
+    const optional = shadowedValueOptions(program)
+      .filter((p) => !p.option.required)
+      .map((p) => `${p.path.join(" ")} ${p.option.flags}`);
+    expect(optional).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The real tree above must be the real program
+// ---------------------------------------------------------------------------
+
 // Nothing here may depend on the network. The CLI is pointed at a closed port
 // through config.json (the account's apiUrl) rather than an environment
 // variable: this file has to stay in the offline `unit-pure` CI tier, and a
 // test that names the live-backend variable or helper is routed to the soft
 // `integration-dev` tier instead (see the file-sorting grep in test.yml).
+const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
+const REPO_ROOT = join(import.meta.dir, "..");
 const UNREACHABLE_API = "http://127.0.0.1:9";
 let configDir: string;
-
-beforeEach(() => {
-  configDir = mkdtempSync(join(tmpdir(), "nemar-release-version-"));
-  // An account with an apiUrl and no key: the notices call fails fast against
-  // the closed port, and the release handler refuses with "Not authenticated".
-  writeFileSync(
-    join(configDir, "config.json"),
-    JSON.stringify({
-      activeAccount: "argv-shadow",
-      accounts: { "argv-shadow": { apiUrl: UNREACHABLE_API } },
-    }),
-  );
-});
-
-afterEach(() => {
-  rmSync(configDir, { recursive: true, force: true });
-});
 
 async function spawnCli(args: string[]) {
   // Drop every TEST_* variable so an ambient live-backend setting cannot
@@ -164,29 +309,72 @@ async function spawnCli(args: string[]) {
   return { stdout, stderr, exitCode: await proc.exited };
 }
 
-describe("nemar entry point", () => {
-  test("dataset release --version X.Y.Z reaches the release handler", async () => {
-    const r = await spawnCli(["dataset", "release", "nm000104", "--version", "2.0.0", "-y"]);
-    expect(r.stdout.trim()).not.toBe(version);
-    expect(r.stdout).toContain("Not authenticated");
-    expect(r.exitCode).toBe(1);
+describe("spawned CLI", () => {
+  beforeEach(() => {
+    configDir = mkdtempSync(join(tmpdir(), "nemar-release-version-"));
+    // An account with an apiUrl and no key: the notices call fails fast
+    // against the closed port, and the release handler refuses with "Not
+    // authenticated".
+    writeFileSync(
+      join(configDir, "config.json"),
+      JSON.stringify({
+        activeAccount: "argv-shadow",
+        accounts: { "argv-shadow": { apiUrl: UNREACHABLE_API } },
+      }),
+    );
   });
 
-  test("dataset release --version with no value fails like Commander", async () => {
-    for (const args of [
-      ["dataset", "release", "nm000104", "--version"],
-      ["dataset", "release", "nm000104", "--version", "-y"],
-    ]) {
-      const r = await spawnCli(args);
+  afterEach(() => {
+    rmSync(configDir, { recursive: true, force: true });
+  });
+
+  describe("the tree under test matches src/index.ts", () => {
+    test("same global options and same top-level commands as `nemar --help`", async () => {
+      const help = (await spawnCli(["--help"])).stdout.split("\n");
+      const section = (title: string) =>
+        help
+          .slice(help.indexOf(`${title}:`) + 1)
+          .join("\n")
+          .split("\n\n")[0]
+          .split("\n")
+          // Wrapped descriptions are indented further than the entries.
+          .filter((line) => /^ {2}\S/.test(line));
+
+      // `-h, --help` is Commander's own and not part of options[].
+      const optionFlags = section("Options").map((line) => line.trim().split(/ {2,}/)[0]);
+      expect(optionFlags).toEqual([...program.options.map((o) => o.flags), "-h, --help"]);
+
+      const commandNames = section("Commands").map((line) => line.trim().split(/\s/)[0]);
+      expect([...commandNames].sort()).toEqual(
+        [...program.commands.map((c) => c.name()), ...INLINE_ROOT_COMMANDS, "help"].sort(),
+      );
+    });
+  });
+
+  describe("nemar entry point", () => {
+    test("dataset release --version X.Y.Z reaches the release handler", async () => {
+      const r = await spawnCli(["dataset", "release", "nm000104", "--version", "2.0.0", "-y"]);
       expect(r.stdout.trim()).not.toBe(version);
-      expect(r.stderr).toContain("error: option '--version <version>' argument missing");
+      expect(r.stdout).toContain("Not authenticated");
       expect(r.exitCode).toBe(1);
-    }
-  });
+    });
 
-  test("the root --version still prints the CLI version", async () => {
-    const r = await spawnCli(["--version"]);
-    expect(r.exitCode).toBe(0);
-    expect(r.stdout.trim()).toBe(version);
+    test("dataset release --version with no value fails like Commander", async () => {
+      for (const args of [
+        ["dataset", "release", "nm000104", "--version"],
+        ["dataset", "release", "nm000104", "--version", "-y"],
+      ]) {
+        const r = await spawnCli(args);
+        expect(r.stdout.trim()).not.toBe(version);
+        expect(r.stderr).toContain("error: option '--version <version>' argument missing");
+        expect(r.exitCode).toBe(1);
+      }
+    });
+
+    test("the root --version still prints the CLI version", async () => {
+      const r = await spawnCli(["--version"]);
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout.trim()).toBe(version);
+    });
   });
 });
