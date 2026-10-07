@@ -73,9 +73,12 @@ import pickle
 import posixpath
 import re
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 from collections.abc import Callable, Mapping, MutableMapping
@@ -87,7 +90,7 @@ from concurrent.futures import (
 )
 from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timezone
-from typing import Any, Literal, Protocol, TypedDict
+from typing import Any, Literal, NamedTuple, Protocol, TypedDict
 
 # The engine stamp lives in `zarr_queue`, whose column decides which already-done
 # datasets re-convert (ADR 0033). The index republishes it so a consumer can tell
@@ -1006,7 +1009,8 @@ def count_infra_failures(failures: list, failure_entries: list) -> int:
     ``retryable_coded`` term is normally zero. It stays because the term is what
     makes the rule TRUE rather than incidentally right: if a retryable code is
     ever surfaced as a typed failure again, the verdict must not silently flip to
-    terminal. This number equals ``len(pending)`` for a run, by construction.
+    terminal. This number is the infra failures of this run itself; recordings
+    deferred for scratch space are pending but are not counted.
     """
     retryable_coded = sum(1 for e in failure_entries if e.get("code") in RETRYABLE_CODES)
     return len(failures) - len(failure_entries) + retryable_coded
@@ -1062,6 +1066,7 @@ def failed_callback_body(
     annex_missing: list[tuple[str, str | None]],
     pool_breaks: int,
     pending_entries: list[dict],
+    deferred: dict[str, str],
     provenance_fetch_failed: bool,
     events_row_count: int | None,
     events_upload_failed: bool,
@@ -1070,11 +1075,20 @@ def failed_callback_body(
 ) -> dict:
     """The `status: "failed"` callback body for a run that publishes nothing.
 
-    One builder for every such exit, so they cannot drift apart: `main`'s
-    `write_failed_callback`, and the refusal to convert on a biosigIO that
-    cannot leave subject information out, which happens before any recording
-    is attempted. Every field is required and has no default, so a caller that
-    leaves one out fails loudly instead of reporting a zero it never measured.
+    One builder for every such exit once the dataset has been measured, so they
+    cannot drift apart: `main`'s `write_failed_callback`, and the refusal to
+    convert on a biosigIO that cannot leave subject information out, which
+    happens before any recording is attempted (or deferred). Every field is
+    required and has no default, so a caller that leaves one out fails loudly
+    instead of reporting a zero it never measured. The one failed body that
+    does not come from here is the refusal of an invalid scratch setting at the
+    top of `main`: it runs before the dataset is cloned, so it has none of these
+    numbers to report and reports none.
+
+    `deferred` maps each recording the scratch gate would not admit to the
+    `last_error` the index carries for it. Those recordings are pending and
+    were never attempted, and they are not in `pending_entries` (the merge
+    derives their entries from `deferred`), so both counts add them.
     """
     return {
         "dataset_id": dataset_id,
@@ -1094,9 +1108,9 @@ def failed_callback_body(
         # rewritten: the queue's pending-driven requeue needs to know a total
         # failure left recordings outstanding, and `discovered_count` is what
         # makes "2 of 43" sayable at all.
-        "pending_count": len(pending_entries),
+        "pending_count": len(pending_entries) + len(deferred),
         "discovered_count": len(discovered),
-        "not_attempted_count": sum(
+        "not_attempted_count": len(deferred) + sum(
             1 for e in pending_entries if e.get("reason") == "not_attempted"
         ),
         "provenance_fetch_failed": provenance_fetch_failed,
@@ -1399,6 +1413,188 @@ def per_recording_ceiling_bytes() -> int:
     if override:
         return int(override)
     return usable_ram_bytes()
+
+
+# --- Scratch-disk admission -----------------------------------------------------
+# RAM was the only resource admission charged, and the streaming path's scratch is
+# the one that ran out. A streaming recording first lands whole on scratch (the raw
+# blob), then becomes a channel-major float32 memmap, then an int16 memmap plus the
+# view pyramid; the memmap and the outputs coexist with the raw copy at the end of
+# pass 2, which is the recording's peak. Measured on nm000276 sub-03 (a float32
+# BrainVision recording of 114,458,234,880 bytes) just before the node filled up:
+#
+#     raw 1.00x + float32 memmap 1.00x + int16 memmap 0.50x + views 0.33x = 2.83x
+#
+# so a 177 GiB recording needs ~500 GiB at once against ~535 GiB of free scratch, and
+# 24 workers admitted by RAM alone (~4.7 GiB each) had no chance. A recording stored
+# in fewer bytes per sample (int16 BrainVision, EDF) expands more, so this factor is
+# the float32 figure plus margin, not a bound; a miss costs one retryable ENOSPC,
+# which `reclaim_recording_scratch` now keeps from cascading.
+def _scratch_setting(name: str, default: float, *, minimum: float) -> float:
+    """One scratch tunable from the environment, refused loudly when it cannot mean
+    what an operator intended. A factor of 0 or below would charge every recording
+    nothing and quietly switch the gate off, ``nan`` raised ValueError deep inside
+    ``main``, ``inf`` overflowed ``int()``, and a negative headroom inflated the
+    budget; each is a crontab typo that should stop the run, naming the
+    variable, not surface hours later as a full disk. The import records the message and
+    keeps the default; `main` is what refuses to run (see SCRATCH_SETTING_ERRORS)."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{name}={raw!r} is not a number") from None
+    if not math.isfinite(value) or value < minimum:
+        raise ValueError(f"{name}={raw!r} must be a finite number of at least {minimum:g}")
+    return value
+
+
+# A bad value must not take down the import: every dataset run (and `patch_duration`)
+# loads this module, and an exception here would kill each before it could write a
+# callback, so nothing would say why. The defaults stand and the messages wait here
+# for `main()`, which refuses to run and reports them through the callback.
+SCRATCH_SETTING_ERRORS: list[str] = []
+
+
+def _scratch_setting_or_default(name: str, default: float, *, minimum: float) -> float:
+    try:
+        return _scratch_setting(name, default, minimum=minimum)
+    except ValueError as exc:
+        SCRATCH_SETTING_ERRORS.append(str(exc))
+        return default
+
+
+SCRATCH_STREAM_FACTOR = _scratch_setting_or_default(
+    "ZARR_SCRATCH_STREAM_FACTOR", 3.0, minimum=1.0
+)
+# In-memory path: the raw copy plus the store it writes. Those recordings are small
+# by construction (the streaming threshold is 256 MiB) or have no streaming reader.
+SCRATCH_INMEM_FACTOR = _scratch_setting_or_default(
+    "ZARR_SCRATCH_INMEM_FACTOR", 2.0, minimum=1.0
+)
+# Left unspoken for: other tenants share the volume and grow while a run lasts hours,
+# and `aws s3 cp` keeps partial files beside the chunks it is assembling.
+SCRATCH_HEADROOM_BYTES = int(
+    _scratch_setting_or_default("ZARR_SCRATCH_HEADROOM_BYTES", 10 * 1024**3, minimum=0)
+)
+# What a recording whose size cannot be read is charged. Its pointer carries no
+# `-s` field (or there is no pointer), so the factor would multiply nothing and the
+# recording would be admitted for free, even at a budget of zero. A floor rather
+# than a refusal: most such recordings are small, and one that is not fails with a
+# retryable ENOSPC like any other miss.
+SCRATCH_UNKNOWN_SIZE_BYTES = int(
+    _scratch_setting_or_default("ZARR_SCRATCH_UNKNOWN_SIZE_BYTES", 16 * 1024**3, minimum=1)
+)
+# How many times admission looks at the volume again, `ADMISSION_RECHECK_SECONDS`
+# apart, before it concludes that nothing left can fit and defers the rest of the
+# queue. One statvfs sample can land in another tenant's transient spike, and with
+# nothing in flight the whole remaining queue would be deferred on it.
+SCRATCH_DEFER_RESAMPLES = int(
+    _scratch_setting_or_default("ZARR_SCRATCH_DEFER_RESAMPLES", 3, minimum=0)
+)
+# One line per deferred recording is the point, but a dataset of 25k recordings on a
+# node with no room would write 25k of them every tick; the index names them all.
+SCRATCH_DEFER_LOG_LINES = 200
+
+
+def scratch_peak_bytes(primary: str, size_bytes: int, size_known: bool = True) -> int:
+    """Projected peak scratch for one recording: its on-disk bytes times the
+    factor for the path it will take. Projected from git-annex pointers like the
+    RAM peak, so it costs no download.
+
+    A size that could not be read (``size_known`` false, or not positive) is
+    charged at least ``SCRATCH_UNKNOWN_SIZE_BYTES``: a charge of zero is admitted
+    unconditionally, which is the one input that defeats the gate."""
+    factor = SCRATCH_STREAM_FACTOR if should_stream(primary, size_bytes) else SCRATCH_INMEM_FACTOR
+    charge = int(max(0, size_bytes) * factor)
+    if not size_known or size_bytes <= 0:
+        return max(charge, SCRATCH_UNKNOWN_SIZE_BYTES)
+    return charge
+
+
+def scratch_budget_bytes(free: int, held: int, headroom: int) -> int:
+    """Bytes this run may hold on scratch in total: what is free, plus what the run's
+    in-flight recordings already hold, minus headroom, never below zero.
+
+    What is free already excludes what those recordings have written, so charging
+    their whole projected peaks against it would count them twice. Adding ``held``
+    back gives the total the run could occupy if none of its own were on disk,
+    which is what the SUM of in-flight projected peaks plus the candidate's is
+    compared with."""
+    return max(0, free + held - headroom)
+
+
+def held_scratch_bytes(run_root: str, primaries) -> int:
+    """Disk blocks the given in-flight recordings hold under ``run_root``.
+
+    Their own `work/`, store and memmap directories only, never the whole run tree:
+    debris a killed worker left (or a failed delete left behind) is not memory the
+    run can hand back, and counting it as held would add it to the budget as if it
+    were about to be freed."""
+    total = 0
+    for primary in primaries:
+        try:
+            paths = recording_scratch_paths(run_root, primary)
+        except ValueError:
+            continue  # a path that cannot be ours holds nothing of ours
+        total += sum(allocated_bytes(path) for path in paths)
+    return total
+
+
+class ScratchGate:
+    """What admission asks the scratch volume, and what it does when the volume
+    cannot answer.
+
+    ``gate(in_flight)`` is the budget right now (`scratch_budget_bytes`). A read
+    that fails (EIO, ESTALE or ENOENT on a volume under load) used to turn the gate
+    OFF and let a whole wave in, on the one occasion nothing was known about the
+    disk. It now fails closed: the last good budget stands, and with no good read
+    yet the budget is zero so nothing is admitted. Warned once, not every round."""
+
+    def __init__(
+        self, run_root: str, headroom: int | None = None, usage=shutil.disk_usage
+    ) -> None:
+        self.run_root = run_root
+        self.headroom = SCRATCH_HEADROOM_BYTES if headroom is None else headroom
+        # The probe of the volume, injectable the way `live_admission_ceiling` takes
+        # its /proc paths: a test can state the free space and make the read fail
+        # without waiting for a real disk to do either.
+        self._usage = usage
+        self._last_good: int | None = None
+        self._warned = False
+
+    def volume(self) -> tuple[int, int] | None:
+        """``(free, total)`` bytes of the volume right now, or None if unreadable."""
+        try:
+            usage = self._usage(self.run_root)
+        except OSError:
+            return None
+        return usage.free, usage.total
+
+    def __call__(self, in_flight=()) -> int:
+        try:
+            free = self._usage(self.run_root).free
+        except OSError as exc:
+            if not self._warned:
+                self._warned = True
+                kept = (
+                    f"holding the last good budget of {self._last_good / 1024**3:.0f} GiB"
+                    if self._last_good is not None
+                    else "admitting nothing until it can be read"
+                )
+                print(
+                    f"::warning::cannot read the scratch volume at {self.run_root} ({exc}); "
+                    f"{kept}",
+                    flush=True,
+                )
+            return self._last_good if self._last_good is not None else 0
+        budget = scratch_budget_bytes(
+            free, held_scratch_bytes(self.run_root, in_flight), self.headroom
+        )
+        self._last_good = budget
+        self._warned = False
+        return budget
 
 
 # Fallback user-facing reasons, keyed by biosigIO error code. The authoritative
@@ -1987,6 +2183,414 @@ def store_rel_for(primary_path: str) -> str:
     """
     root, _ = os.path.splitext(primary_path)
     return root + ".zarr"
+
+
+# Sibling of a store's local directory that holds the streaming exporter's memmaps.
+# It sits NEXT to the store (same volume, never uploaded) but is unique to one
+# recording: the exporter's `TemporaryDirectory` used to land in the store's PARENT
+# directory, which sibling recordings of the same session share, so nothing could
+# reclaim one recording's memmaps without risking another's.
+SCRATCH_DIR_SUFFIX = ".scratch"
+
+
+def recording_scratch_paths(tmp: str, primary: str) -> tuple[str, str, str]:
+    """Where one recording keeps its local bytes under the run's temp root:
+    ``(work, store_local, memmap_scratch)``. One definition, shared by the worker
+    that creates them and by the drain that reclaims them after a pool break, so
+    the two cannot disagree about what a dead worker left behind.
+
+    Every path must sit inside ``tmp``: a git primary is relative today, but this is
+    also what a reclaim deletes, so an absolute or ``..``-climbing ``primary`` (it
+    would make `os.path.join` discard ``tmp``) raises ValueError instead of naming
+    a directory outside the run."""
+    work = os.path.join(tmp, "work", primary.replace("/", "_"))
+    store_local = os.path.join(tmp, "stores", store_rel_for(primary))
+    paths = (work, store_local, store_local + SCRATCH_DIR_SUFFIX)
+    # realpath, not abspath: a symlink inside the run's directory that points
+    # outside it would pass a lexical check and have a reclaim delete through it.
+    root = os.path.realpath(tmp)
+    for path in paths:
+        resolved = os.path.realpath(path)
+        if resolved == root or os.path.commonpath([root, resolved]) != root:
+            raise ValueError(f"scratch path {path!r} for {primary!r} is outside {tmp!r}")
+    return paths
+
+
+def remove_scratch_tree(path: str) -> list[str]:
+    """Delete ``path`` and return what could not be removed, as ``"<path>: <error>"``.
+
+    Every scratch delete used to be ``ignore_errors=True``: a failed one (a read-only
+    directory, a busy mount) reported the bytes as freed, left them on disk, and
+    added them to the next budget. Nothing here is silent now."""
+    failures: list[str] = []
+    if not os.path.lexists(path):
+        return failures
+
+    def record(_func, failed_path, exc) -> None:
+        failures.append(f"{failed_path}: {exc}")
+
+    try:
+        try:
+            shutil.rmtree(path, onexc=record)
+        except TypeError:  # Python < 3.12 has onerror, not onexc
+            shutil.rmtree(path, onerror=lambda f, p, info: record(f, p, info[1]))
+    except OSError as exc:  # the top-level path itself (not a directory, vanished)
+        failures.append(f"{path}: {exc}")
+    return failures
+
+
+class ReclaimResult(NamedTuple):
+    freed: int  # bytes that are gone from disk, measured after the delete
+    leaked: int  # bytes still on disk under the recording's paths
+    errors: list[str]
+
+
+def reclaim_recording_scratch(tmp: str, primary: str) -> ReclaimResult:
+    """Delete everything a recording left on scratch and say what that bought.
+
+    `convert_one`'s ``finally`` does this on every exit it gets to run. A worker
+    killed outright (SIGKILL, or SIGBUS from a memmap write to a full volume) never
+    reaches it, so its raw download and its multi-hundred-GiB memmaps stayed on
+    disk until the whole dataset run ended: on nm000276 two killed workers held 535
+    GiB and every recording behind them in the queue failed with ENOSPC. Called
+    only once the pool's workers are gone, when nothing can still be writing.
+
+    ``freed`` is measured AFTER the delete (before minus after), so a delete that
+    failed reports what it did not free: it used to claim the bytes it had only
+    tried to remove. Each failure is an ``::error::`` naming the path and what is
+    still on disk.
+    """
+    try:
+        paths = recording_scratch_paths(tmp, primary)
+    except ValueError as exc:
+        print(f"::error::not reclaiming scratch for {primary!r}: {exc}", flush=True)
+        return ReclaimResult(0, 0, [str(exc)])
+    freed = leaked = 0
+    errors: list[str] = []
+    for path in paths:
+        before = allocated_bytes(path)
+        failures = remove_scratch_tree(path)
+        after = allocated_bytes(path)
+        freed += max(0, before - after)
+        leaked += after
+        for failure in failures:
+            print(
+                f"::error::could not remove scratch {failure}; "
+                f"{after / 1024**3:.2f} GiB under {path} is still on disk",
+                flush=True,
+            )
+        errors.extend(failures)
+    return ReclaimResult(freed, leaked, errors)
+
+
+class OrphanReport(NamedTuple):
+    killed: list[int]  # pids sent SIGKILL
+    survivors: list[int]  # killed pids still present after the wait
+    scanned: int  # processes whose command line could be read
+    error: str | None  # why the scan could not run at all, or None
+
+
+def _ps_process_table() -> tuple[list[tuple[int, list[str]]], str | None]:
+    """``(pid, argv)`` from `ps`, for a system without /proc. ``-ww`` and a huge
+    COLUMNS keep procps and BSD ps from truncating `args` to a terminal width,
+    which hid a live process from the first version of this scan on Ubuntu. argv
+    is the whitespace split of the command line, so it is only as exact as that."""
+    try:
+        done = subprocess.run(
+            ["ps", "-ww", "-Ao", "pid=,args="], capture_output=True, text=True, timeout=30,
+            env={**os.environ, "COLUMNS": "100000"},
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return [], f"ps could not run: {exc}"
+    if done.returncode != 0:
+        return [], f"ps exited {done.returncode}: {done.stderr.strip()[:200]}"
+    table: list[tuple[int, list[str]]] = []
+    for line in done.stdout.splitlines():
+        pid_text, _, args = line.strip().partition(" ")
+        if pid_text.isdigit():
+            table.append((int(pid_text), args.split()))
+    return table, None
+
+
+def process_table(proc_root: str | None = None) -> tuple[list[tuple[int, list[str]]], str | None]:
+    """``(pid, argv)`` for every process whose command line can be read, and the
+    reason when the table could not be built at all.
+
+    On Linux this reads ``/proc/<pid>/cmdline``: the kernel's own NUL-separated argv,
+    exact and never truncated, with no dependency on a `ps` binary being installed.
+    Without /proc it falls back to `ps`. ``proc_root`` points the /proc reader at a
+    fixture directory in the kernel's layout."""
+    if proc_root is None and not os.path.isdir("/proc/self"):
+        return _ps_process_table()
+    root = proc_root or "/proc"
+    try:
+        names = os.listdir(root)
+    except OSError as exc:
+        return [], f"cannot list {root}: {exc}"
+    table: list[tuple[int, list[str]]] = []
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(os.path.join(root, name, "cmdline"), "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            continue  # exited since the listing, or not readable
+        table.append((int(name), [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]))
+    return table, None
+
+
+def _with_deadline(fn, seconds: float):
+    """``(value, timed_out)``: run ``fn`` in a daemon thread and give up after
+    ``seconds``. A /proc read of a live process normally returns at once, but it
+    reaches into the target's memory and can wait on it; a scan run while a pool is
+    being cleaned up must not hang the run on one such read. The abandoned thread is
+    left behind (daemon), which is the price of not being able to cancel a read."""
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the caller's thread
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        return None, True
+    if "error" in box:
+        raise box["error"]
+    return box["value"], False
+
+
+def _cmdline_argv(pid: int, proc_root: str | None) -> list[str] | None:
+    """The argv of ``pid`` right now, or None if it cannot be read (it has exited)."""
+    if proc_root is not None or os.path.isdir("/proc/self"):
+        try:
+            with open(os.path.join(proc_root or "/proc", str(pid), "cmdline"), "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            return None
+        return [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
+    try:
+        done = subprocess.run(
+            ["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True,
+            timeout=10, env={**os.environ, "COLUMNS": "100000"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout.split() if done.returncode == 0 and done.stdout.strip() else None
+
+
+def _pid_is_gone(pid: int) -> bool:
+    """Whether ``pid`` has exited. A process killed but not yet reaped is a zombie:
+    it has released its files and its blocks, so it counts as gone."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    if os.path.isdir("/proc/self"):
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as fh:
+                state = fh.read().rpartition(b")")[2].split()[0]
+            return state in (b"Z", b"X")
+        except FileNotFoundError:
+            return True  # /proc exists and has no such process
+        except (OSError, IndexError):
+            pass
+    try:
+        listing = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return listing.stdout.strip().startswith("Z")
+
+
+def _wait_until_gone(pids: list[int], seconds: float) -> list[int]:
+    """The pids among ``pids`` still present after up to ``seconds``."""
+    deadline = time.monotonic() + seconds
+    alive = list(pids)
+    while alive:
+        alive = [pid for pid in alive if not _pid_is_gone(pid)]
+        if not alive or time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    return alive
+
+
+def kill_orphans_under(
+    root: str,
+    proc_root: str | None = None,
+    wait_seconds: float = 5.0,
+    *,
+    scan_seconds: float = 30.0,
+    send_signal=os.kill,
+    _after_scan=None,
+) -> OrphanReport:
+    """SIGKILL every process whose command line names a path under ``root``, wait
+    for each to exit, and say what could not be established.
+
+    `aws s3 cp` children are started without a process group or a parent-death
+    signal, so one can outlive the worker that started it and keep writing into
+    files `reclaim_recording_scratch` is about to unlink (the blocks stay allocated
+    until it exits). ``root`` is this run's own unique temp directory, so a process
+    that names a path under it belongs to this run, and the caller only asks once
+    the pool's workers are gone: what is left is an orphan. An argument matches only
+    if it starts with ``root`` plus a separator, so a sibling directory sharing a
+    prefix survives, and this process is never touched.
+
+    The result is explicit about the two ways this can quietly do nothing: the scan
+    could not run (``error``), or it read no process at all (``scanned`` is 0). A
+    killed process that is still present after the wait is in ``survivors``.
+
+    The scan has a deadline (``scan_seconds``), and each candidate's command line is
+    read AGAIN immediately before the signal and must still match: between the scan
+    and the kill a pid can be freed and reused by an unrelated process, and the second
+    read is what stops that process being killed. ``send_signal`` is ``os.kill``; a
+    test passes another to produce a process that outlives the signal.
+    """
+    scanned, timed_out = _with_deadline(lambda: process_table(proc_root), scan_seconds)
+    if timed_out:
+        return OrphanReport([], [], 0, f"the process scan did not finish in {scan_seconds:g}s")
+    table, error = scanned
+    prefix = os.path.join(root, "")
+    me = os.getpid()
+    candidates = [
+        pid for pid, argv in table
+        if pid != me and any(arg.startswith(prefix) for arg in argv)
+    ]
+    if _after_scan is not None:
+        _after_scan()
+    killed: list[int] = []
+    for pid in candidates:
+        again, _ = _with_deadline(lambda pid=pid: _cmdline_argv(pid, proc_root), 5.0)
+        if not again or not any(arg.startswith(prefix) for arg in again):
+            continue  # exited, or the pid now belongs to something else
+        try:
+            send_signal(pid, signal.SIGKILL)
+            killed.append(pid)
+        except OSError:
+            continue  # already gone, or not ours to signal
+    return OrphanReport(killed, _wait_until_gone(killed, wait_seconds), len(table), error)
+
+
+def reclaim_after_pool_break(
+    tmp_root: str,
+    primaries: list[str],
+    volume=None,
+    *,
+    proc_root: str | None = None,
+    suspect_after: int = 1024**3,
+    send_signal=os.kill,
+    wait_seconds: float = 5.0,
+) -> ReclaimResult:
+    """What a pool break owes the disk, in one warning.
+
+    Kills the orphaned children of the dead workers first (they would keep writing
+    into what is about to be unlinked), reclaims each in-flight recording's scratch,
+    and reports the volume before and after. The warning names the cause the
+    "killed its worker process" verdict cannot: a full volume kills workers with
+    SIGBUS, which looks exactly like an out-of-memory kill.
+
+    The bytes it says were reclaimed are the ones removed from the recordings'
+    paths. They are only freed on the volume once nothing holds the deleted files
+    open, so the volume's own free space is compared with them: a gain under half of
+    what was removed (once it exceeds ``suspect_after``) says a process may still
+    hold the blocks. When the disk is still short after the reclaim, or the orphan
+    scan could not run, or a killed process survived, that is an ``::error::`` or a
+    ``::warning::`` with the numbers, since the rebuilt pool is about to inherit it.
+    ``volume`` is a callable returning ``(free, total)`` or None."""
+    before = volume() if volume else None
+    orphans = kill_orphans_under(
+        tmp_root, proc_root, wait_seconds, send_signal=send_signal
+    )
+    freed = leaked = 0
+    errors: list[str] = []
+    for primary in primaries:
+        result = reclaim_recording_scratch(tmp_root, primary)
+        freed += result.freed
+        leaked += result.leaked
+        errors.extend(result.errors)
+    after = volume() if volume else None
+    gib = 1024**3
+    if before and after:
+        disk = (
+            f"scratch free {before[0] / gib:.0f} GiB before the reclaim and "
+            f"{after[0] / gib:.0f} GiB after, of {after[1] / gib:.0f} GiB"
+        )
+    else:
+        disk = "scratch free space unreadable"
+    print(
+        f"::warning::worker pool broke with {len(primaries)} recording(s) in flight; "
+        f"{disk}; removed {freed / gib:.1f} GiB of files, {leaked / gib:.1f} GiB still on "
+        f"disk, {len(orphans.killed)} orphaned child process(es) killed. A full scratch "
+        "volume kills workers with SIGBUS, which the 'killed its worker process' "
+        "verdict below reports as out of memory",
+        flush=True,
+    )
+    if orphans.error or not orphans.scanned:
+        why = orphans.error or "no process command line was readable"
+        print(
+            f"::warning::could not look for orphaned child processes ({why}); one may "
+            "still be writing into files that were just deleted",
+            flush=True,
+        )
+    if orphans.survivors:
+        print(
+            f"::error::{len(orphans.survivors)} orphaned process(es) survived SIGKILL "
+            f"{orphans.survivors[:5]}; the blocks of the files they hold stay allocated",
+            flush=True,
+        )
+    if before and after and freed >= suspect_after and after[0] - before[0] < freed / 2:
+        print(
+            f"::warning::scratch free rose by {max(0, after[0] - before[0]) / gib:.1f} GiB "
+            f"although {freed / gib:.1f} GiB of files were removed: a process may still "
+            "hold deleted files open, or something else is writing to the volume",
+            flush=True,
+        )
+    if leaked or (after and after[0] < SCRATCH_HEADROOM_BYTES):
+        free_text = f"{after[0] / gib:.1f} GiB" if after else "unknown"
+        print(
+            f"::error::scratch is still short after reclaiming: {free_text} free, "
+            f"{leaked / gib:.1f} GiB left under the dead workers' recordings "
+            f"({len(errors)} delete(s) failed); the rest of the queue starts from this",
+            flush=True,
+        )
+    return ReclaimResult(freed, leaked, errors)
+
+
+def allocated_bytes(root: str) -> int:
+    """Disk blocks actually allocated under ``root``, in bytes. Not the apparent
+    size: a streaming memmap is a sparse file created at its full length, so
+    `st_size` would charge hundreds of GiB that were never written. Unreadable or
+    vanishing entries count as zero; a live scratch tree changes under the walk."""
+    try:
+        top = os.lstat(root)
+    except OSError:
+        return 0
+    if not stat.S_ISDIR(top.st_mode):
+        return top.st_blocks * 512
+    total = 0
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        else:
+                            total += entry.stat(follow_symlinks=False).st_blocks * 512
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return total
 
 
 # --- Extension-keyed directory recordings (CTF `.ds`, MEF3 `.mefd`) -----------
@@ -3880,6 +4484,51 @@ def index_provenance(dataset_row: dict | None) -> dict:
     }
 
 
+def index_currency_problem(
+    index: dict | None,
+    head: str,
+    dataset_row: dict | None,
+    row_fetch_failed: bool,
+    biosigio_version: str | None,
+    engine_version: str = ZARR_ENGINE_VERSION,
+    *,
+    provenance_unknown_ok: bool = False,
+) -> str | None:
+    """Why a published index is NOT exactly what a full rebuild at ``head`` would
+    produce for the stores it already serves, or None when it is: same commit, same
+    engine, same biosigIO, same dataset provenance (which every store embeds).
+
+    One predicate for two decisions. A retry round may convert only the pending
+    recordings when this is None (`pending_retry_worklist`), and a recording the
+    scratch gate defers may keep serving its published store when this is None
+    (`merge_index`): in both cases the store on S3 is what this run would have
+    written. When it is not None that store is stale, so a deferred recording's
+    entry leaves the index and the recording is listed pending to be rebuilt.
+
+    An unreadable catalog means provenance cannot be compared. A retry round must
+    treat that as "not current" (converting only the pending recordings would leave
+    every other store with provenance nobody checked). A store that is merely being
+    KEPT must not: dropping a served store because the catalog was down for a minute
+    is the one outcome worse than serving it. ``provenance_unknown_ok`` selects the
+    second reading; commit, engine and biosigIO are still compared."""
+    if not isinstance(index, dict):
+        return "no published index"
+    if index.get("source_commit") != head:
+        return "the index was built from a different commit"
+    if index.get("engine_version") != engine_version:
+        return "the index was built by a different engine"
+    if index.get("biosigio_version") != biosigio_version:
+        return "the index was built with a different biosigIO"
+    if row_fetch_failed:
+        return None if provenance_unknown_ok else (
+            "the catalog could not be read to compare provenance"
+        )
+    current = index_provenance(dataset_row)
+    if any(index.get(k) != v for k, v in current.items()):
+        return "the dataset's provenance changed since the index was built"
+    return None
+
+
 def pending_retry_worklist(
     index: dict | None,
     head: str,
@@ -3903,19 +4552,12 @@ def pending_retry_worklist(
     reconverting stores that were already published at this commit, and could
     fail new recordings for memory while doing it.
     """
-    if not isinstance(index, dict):
-        return None, "no published index"
-    if index.get("source_commit") != head:
-        return None, "the index was built from a different commit"
-    if index.get("engine_version") != engine_version:
-        return None, "the index was built by a different engine"
-    if index.get("biosigio_version") != biosigio_version:
-        return None, "the index was built with a different biosigIO"
-    if row_fetch_failed:
-        return None, "the catalog could not be read to compare provenance"
-    current = index_provenance(dataset_row)
-    if any(index.get(k) != v for k, v in current.items()):
-        return None, "the dataset's provenance changed since the index was built"
+    problem = index_currency_problem(
+        index, head, dataset_row, row_fetch_failed, biosigio_version, engine_version
+    )
+    if problem:
+        return None, problem
+    assert isinstance(index, dict)  # narrowed by the check above
     at_head = set(discovered)
     pending = index.get("pending")
     paths = sorted(
@@ -3951,6 +4593,33 @@ def _heal_carried_units_report(entry: dict) -> dict:
     return {**entry, "units_report": bounded}
 
 
+def _entry_for_path(doc: dict | None, section: str, path: str) -> dict | None:
+    """The entry of ``doc[section]`` ("stores" or "failures") for a recording, or
+    None. Read off a PUBLISHED document, so nothing about its shape is assumed."""
+    entries = (doc or {}).get(section)
+    if not isinstance(entries, list):
+        return None
+    return next(
+        (e for e in entries if isinstance(e, dict) and e.get("path") == path), None
+    )
+
+
+_DEFERRED_PREFIX = "deferred:"
+_DEFERRED_JOIN = "; last error: "
+
+
+def _without_deferral(last_error: str | None) -> str | None:
+    """A pending entry's ``last_error`` with a deferral note stripped, so a recording
+    deferred tick after tick keeps the error it last FAILED with instead of a chain
+    of deferral notes. A note with nothing behind it leaves None."""
+    if not last_error:
+        return None
+    if not last_error.startswith(_DEFERRED_PREFIX):
+        return last_error
+    _, sep, tail = last_error.partition(_DEFERRED_JOIN)
+    return tail or None if sep else None
+
+
 def merge_index(
     prior: dict | None,
     dataset_id: str,
@@ -3977,6 +4646,9 @@ def merge_index(
     biosigio_version: str | None = None,
     prior_pending: list[dict] | None = None,
     dataset_row: dict | None = None,
+    deferred: dict[str, str] | None = None,
+    seed: dict | None = None,
+    seed_current: bool = False,
 ) -> dict:
     """Fold this run's results into the prior index and return the v3 document. Pure.
 
@@ -4004,6 +4676,26 @@ def merge_index(
     BY CONSTRUCTION rather than by hope: entries for paths that are not discovered
     are dropped, and discovered paths in none of the three lists become
     `not_attempted` pending entries. A partial run therefore still balances.
+
+    `deferred` maps recordings the scratch gate would not admit to the text that
+    explains it. A deferral is not an attempt and not a conversion, so it must
+    neither spend an attempt nor make the index serve less than it did (a served
+    store is not dropped by a rebuild that could not run).
+    `seed` is the index as published (under ``--clean`` the merge is handed no
+    `prior`, so this is the only place the deferred recordings' old entries live),
+    and `seed_current` says whether the stores it serves are what this run would
+    have written (`index_currency_problem` is None). For each deferred path:
+
+    - a store in `seed` and `seed_current`: the store stays in the index, served
+      exactly as before; nothing is owed;
+    - a store that is stale (or any store carried by an incremental merge): the
+      entry leaves the index, as a failure's does, and the recording is listed
+      pending as `not_attempted` so the queue rebuilds it; its objects stay on S3;
+    - a typed failure already on record stays a failure when the index is current,
+      and is dropped for pending when it is stale (the verdict may no longer hold);
+    - otherwise it is pending as `not_attempted`, `attempts` and `last_attempt_utc`
+      carried from its history (so an attempt-3 recording is still attempt 3), and
+      `last_error` says why it was deferred ahead of whatever it last failed with.
 
     A path is never in more than one of `stores`, `failures`, `pending`.
 
@@ -4109,6 +4801,40 @@ def merge_index(
             e.get("last_attempt_utc") or updated_utc,
         )
 
+    for path, message in (deferred or {}).items():
+        rel = store_rel_for(path)
+        seeded_store = _entry_for_path(seed, "stores", path)
+        if seed_current and seeded_store is not None and path not in converted_paths:
+            stores[rel] = _heal_carried_units_report(seeded_store)
+            pends.pop(path, None)
+            fails.pop(path, None)
+            continue
+        stores.pop(rel, None)
+        # A typed failure is a verdict on the recording AS IT WAS read, by the engine
+        # that read it. Under a stale index (the data changed, or a newer engine may
+        # read it) it may no longer be true, and a failure is never retried, so
+        # keeping it would publish an obsolete verdict as final: the recording goes
+        # back to pending instead. Under a current index it is still the verdict.
+        if seed_current:
+            seeded_failure = fails.get(path) or _entry_for_path(seed, "failures", path)
+        else:
+            fails.pop(path, None)
+            seeded_failure = None
+        if seeded_failure is not None:
+            fails[path] = seeded_failure
+            pends.pop(path, None)
+            continue
+        history = pends.get(path)
+        earlier = _without_deferral(history["last_error"] if history else None)
+        text = message if not earlier else f"{message}; last error: {earlier}"
+        pends[path] = _pending_entry(
+            path,
+            "not_attempted",
+            prior_attempts.get(path, 0),
+            text[:_DETAIL_MAX_CHARS],
+            history["last_attempt_utc"] if history else None,
+        )
+
     if discovered is not None:
         wanted = set(discovered)
         # A carried-over store whose path is EXCLUDED from discovery goes, and
@@ -4205,6 +4931,131 @@ def merge_index(
     }
 
 
+def deferral_leaves_index_as_is(
+    live_index: dict | None,
+    seed_current: bool,
+    convert: list[str],
+    deferred,
+    remove: list[str],
+    failed: list[str],
+    wipe: bool,
+) -> bool:
+    """Whether a run in which the scratch gate deferred EVERYTHING it was asked to
+    convert has nothing to say that the published index does not already say.
+
+    Rewriting it anyway is not free: a metadata clone, a manifest and index PUT, and
+    (when stores are carried) an `events.parquet` download and upload, every
+    `PENDING_BACKOFF_SECONDS[0]` for a recording that can never fit. And for a
+    ``--clean`` run it is not harmless either, since the merge is handed no prior and
+    would republish the dataset with only what this run converted.
+
+    True when every deferred path is already accounted for as the run would leave
+    it: pending with the `not_attempted` reason and a deferral note (written by the
+    first run that deferred it), a typed failure, or a store the index may keep
+    (``seed_current``). Anything else (a stale store to turn into a pending entry,
+    an older ``infra_failure`` reason to correct) is a real change and publishes."""
+    if not isinstance(live_index, dict) or wipe or remove or failed or not deferred:
+        return False
+    if set(deferred) != set(convert):
+        return False
+    pending = {
+        e["path"]: e
+        for e in live_index.get("pending") or []
+        if isinstance(e, dict) and isinstance(e.get("path"), str)
+    }
+    stores = {
+        e.get("path") for e in live_index.get("stores") or [] if isinstance(e, dict)
+    }
+    failures = {
+        e.get("path") for e in live_index.get("failures") or [] if isinstance(e, dict)
+    }
+    for path in deferred:
+        entry = pending.get(path)
+        if entry is not None:
+            note = str(entry.get("last_error") or "")
+            if entry.get("reason") != "not_attempted" or not note.startswith(_DEFERRED_PREFIX):
+                return False
+        elif not seed_current:
+            return False  # a stale store or verdict is a real change
+        elif path in failures or path in stores:
+            continue
+        else:
+            return False
+    return True
+
+
+def deferred_unchanged_callback(
+    dataset_id: str,
+    head: str,
+    live_index: dict,
+    live_etag: str | None,
+    deferred,
+    discovered_count: int,
+    non_raw_dropped: int,
+    provenance_fetch_failed: bool,
+) -> dict:
+    """The zarr-ready body for a run that deferred everything and published nothing.
+
+    It restates the published index's own numbers, because the backend overwrites
+    its row from this body: an empty ``data_failures`` would clear the failure
+    summary, and a ``pending_count`` of zero would stop the queue re-queueing
+    recordings that are still owed. ``not_attempted_count`` counts the deferred
+    recordings among the pending ones, so ``zarr_queue.mark_done`` neither advances
+    a retry round nor schedules a longer backoff for them.
+
+    The body is POSTed like any other, and it has to be: the run began with a
+    `converting` signal that sets ``zarr_status`` to `pending`, and without a
+    terminal `ready` a dataset that serves stores would stay `pending`, lose its
+    ``zarr_index_url`` and drop out of every "has a Zarr copy" filter. The known
+    cost is that a `ready` body restamps ``zarr_converted_at`` and re-queues the
+    recording-stats sweep; the webhook has no status that says "nothing changed",
+    and adding one is a backend change that does not belong in this converter."""
+    pending = [
+        e for e in live_index.get("pending") or []
+        if isinstance(e, dict) and isinstance(e.get("path"), str)
+    ]
+    failures = [
+        e for e in live_index.get("failures") or [] if isinstance(e, dict)
+    ]
+    deferred_paths = set(deferred)
+    deferred_pending = sum(1 for e in pending if e["path"] in deferred_paths)
+    errors = live_index.get("errors")
+    return {
+        "dataset_id": dataset_id,
+        "status": "ready",
+        "store_count": int(live_index.get("store_count") or 0),
+        "index_etag": (live_etag or "").strip().strip('"') or None,
+        # The commit the PUBLISHED index names, not this run's HEAD: nothing was
+        # rebuilt, so the row must keep agreeing with the document it describes.
+        "commit": live_index.get("source_commit") or head,
+        "converted": [],
+        "removed": [],
+        "errors": errors if isinstance(errors, int) else len(failures) + len(pending),
+        "failed": [],
+        "failure_count": int(live_index.get("failure_count") or len(failures)),
+        "data_failures": [{"path": f.get("path"), "code": f.get("code")} for f in failures],
+        "deterministic": False,
+        **annex_missing_summary([]),
+        "pool_breaks": 0,
+        "calibration": [],
+        "measured_count": 0,
+        # This run attempted nothing, so nothing in it failed for a retryable
+        # reason; the pending recordings are counted below. `hallu-zarr.sh` logs
+        # "N recording(s) failed for a RETRYABLE reason" from this field, which
+        # would otherwise repeat every hour for a recording that only waits for room.
+        "retryable_failures": 0,
+        "pending_count": len(pending),
+        "discovered_count": discovered_count,
+        "not_attempted_count": deferred_pending,
+        "non_raw_dropped": non_raw_dropped,
+        "provenance_fetch_failed": provenance_fetch_failed,
+        "manifest_upload_failed": False,
+        "events_row_count": live_index.get("events_row_count"),
+        "events_upload_failed": False,
+        "events_stores_without_rows": 0,
+    }
+
+
 def check_index_invariant(index: dict) -> None:
     """Raise unless every discovered recording is accounted for exactly once.
 
@@ -4238,6 +5089,37 @@ def check_index_invariant(index: dict) -> None:
             f"pending_count={sum(parts)} "  # type: ignore[arg-type]
             f"({parts[0]}+{parts[1]}+{parts[2]})"
         )
+
+
+def kept_manifest_seed(bucket: str, dataset_id: str, kept: set[str], read=None) -> dict:
+    """The published manifest's entries for the stores an index kept, as a prior for
+    `merge_manifest`. The manifest is producer bookkeeping, so a read that fails or
+    finds nothing does not fail the run, but it is never silent:
+    the kept stores then have no ``source_key`` in the manifest until a run rebuilds
+    them, and the warning says which read failed and how many are affected."""
+    reader = read or s3_read_json
+    try:
+        live = reader(bucket, f"{dataset_id}/zarr/manifest.json")
+    except Exception as exc:  # noqa: BLE001 - bookkeeping; reported, not fatal
+        print(
+            f"::warning::could not read the published manifest ({exc}); {len(kept)} kept "
+            "store(s) will have no source_key or size in the new manifest",
+            flush=True,
+        )
+        return {"stores": []}
+    if live is None:
+        print(
+            f"::warning::no published manifest to carry {len(kept)} kept store(s) from; "
+            "they will have no source_key or size in the new manifest",
+            flush=True,
+        )
+        return {"stores": []}
+    return {
+        "stores": [
+            e for e in live.get("stores") or []
+            if isinstance(e, dict) and e.get("zarr") in kept
+        ]
+    }
 
 
 def merge_manifest(
@@ -4920,15 +5802,19 @@ def _blob_key_and_size(repo_dir: str, path: str, head: str) -> tuple[str | None,
     return None, len(blob)
 
 
-def recording_size_from_pointers(
+def recording_size_info(
     repo_dir: str, primary_path: str, head_files: set[str], head: str
-) -> int:
-    """On-disk bytes of a recording's whole file set, read from git-annex pointers
-    at ``head`` WITHOUT downloading: primary + same-stem companions + FIF split
-    members, or every file under a directory recording (CTF ``.ds``/MEF3
-    ``.mefd``/4D-BTi). Mirrors ``materialize_recording``'s wanted set and
-    ``_recording_size_bytes`` so the parent's admission estimate (main) lines up
-    with the worker's #909 preflight."""
+) -> tuple[int, bool]:
+    """``(bytes, readable)``: on-disk bytes of a recording's whole file set, read
+    from git-annex pointers at ``head`` WITHOUT downloading: primary + same-stem
+    companions + FIF split members, or every file under a directory recording (CTF
+    ``.ds``/MEF3 ``.mefd``/4D-BTi). Mirrors ``materialize_recording``'s wanted set
+    and ``_recording_size_bytes`` so the parent's admission estimate (main) lines up
+    with the worker's #909 preflight.
+
+    ``readable`` is false when the number cannot be trusted as a size: a member's
+    annex key carries no ``-s`` field, or the total is zero (no pointer at HEAD).
+    An unreadable size used to read as 0 and so as free."""
     if is_dir_recording(primary_path):
         members: list[str] = [p for p in head_files if dir_recording_of(p) == primary_path]
     elif is_bti_dir(primary_path):
@@ -4946,10 +5832,20 @@ def recording_size_from_pointers(
             dict.fromkeys([primary_path, *siblings, *split_members_for(primary_path, head_files)])
         )
     total = 0
+    readable = True
     for path in members:
         key, blob_size = _blob_key_and_size(repo_dir, path, head)
+        if key and annex_key_size(key) is None:
+            readable = False
         total += (annex_key_size(key) or 0) if key else blob_size
-    return total
+    return total, readable and total > 0
+
+
+def recording_size_from_pointers(
+    repo_dir: str, primary_path: str, head_files: set[str], head: str
+) -> int:
+    """On-disk bytes of a recording's whole file set; see ``recording_size_info``."""
+    return recording_size_info(repo_dir, primary_path, head_files, head)[0]
 
 
 def download_blob(src: str, dst: str, expected_size: int | None) -> None:
@@ -5553,8 +6449,10 @@ def publish_events_parquet(
     local: str | None = None
     try:
         if carried:
-            # Only an INCREMENTAL run reaches this: `--clean` (the Hallu path)
-            # rebuilds every store, so nothing is carried and nothing is fetched.
+            # An INCREMENTAL run carries the rows of every untouched store. A
+            # `--clean` run (the Hallu path) rebuilds every store, so it reaches
+            # this only when a deferred store was kept, and then carries just
+            # that store's rows.
             with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as fh:
                 prior_local = fh.name
             if s3_download_file(bucket, f"{dataset_id}/zarr/{EVENTS_PARQUET_NAME}", prior_local):
@@ -7136,6 +8034,14 @@ def bids_channels_arg(channels_local: str | None) -> str:
     return channels_local if channels_local and os.path.exists(channels_local) else "off"
 
 
+def _memmap_scratch_dir(store_path: str) -> str:
+    """The recording's own memmap directory, created. `tempfile` needs the parent to
+    exist before it will make a `TemporaryDirectory` inside it."""
+    path = store_path + SCRATCH_DIR_SUFFIX
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 def convert_recording(
     primary_local: str,
     events_local: str | None,
@@ -7266,8 +8172,10 @@ def convert_recording(
                 dtype="int16",
                 events_df=events_df,
                 # Keep the temp channel-major memmap on the same (fast) scratch volume as
-                # the store; it is a sibling temp dir, not synced to S3.
-                scratch_dir=os.path.dirname(store_path) or None,
+                # the store; it is a sibling directory, not synced to S3, and unique to
+                # this recording so a pool break can reclaim it (see
+                # `reclaim_recording_scratch`).
+                scratch_dir=_memmap_scratch_dir(store_path),
                 # The same explicit sidecar the in-memory path uses, so the two
                 # exporters cannot disagree about a recording's units -- the
                 # disagreement that held the engine bump back until biosigio#128
@@ -7347,7 +8255,7 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
     # escaped convert_one uncoded, retrying forever: exactly the failure the
     # limit call sits inside the try to prevent (#1110). Default to untrusted,
     # which is correct anyway when the reset never ran.
-    work = store_local = None
+    work = store_local = memmap_scratch = None
     rss_trusted = False
     try:
         # Backstop this recording before any allocation: exceeding the reservation
@@ -7372,8 +8280,7 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
                 flush=True,
             )
         rel_store = store_rel_for(primary)
-        work = os.path.join(c["tmp"], "work", primary.replace("/", "_"))
-        store_local = os.path.join(c["tmp"], "stores", rel_store)
+        work, store_local, memmap_scratch = recording_scratch_paths(c["tmp"], primary)
         os.makedirs(work, exist_ok=True)
         os.makedirs(os.path.dirname(store_local), exist_ok=True)
         if c["local"]:
@@ -7712,9 +8619,10 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
     finally:
         # Parallel workers share the NVMe scratch; reclaim each recording's copy
         # right after upload so N concurrent stores don't accumulate on disk.
-        for d in (store_local, work):
+        for d in (store_local, memmap_scratch, work):
             if d:
-                shutil.rmtree(d, ignore_errors=True)
+                for failure in remove_scratch_tree(d):
+                    print(f"::error::could not remove scratch {failure}", flush=True)
 
 
 # How often a drain re-evaluates admission while nothing finishes (#1483). A
@@ -7731,28 +8639,143 @@ ADMISSION_RECHECK_SECONDS = float(os.environ.get("ZARR_ADMISSION_RECHECK_SECONDS
 MEMORY_RETRY_MAX = int(os.environ.get("ZARR_MEMORY_RETRY_MAX", "64"))
 
 
+def _gib(n: float) -> str:
+    return f"{n / 1024**3:.1f}" if n < 10 * 1024**3 else f"{n / 1024**3:.0f}"
+
+
+def deferral_message(charge: int, budget: int) -> str:
+    """What the index's ``last_error`` says about a deferred recording."""
+    return f"deferred: needs {_gib(charge)} GiB of scratch, {_gib(budget)} GiB available"
+
+
+def defer_unfit(queue, scratch_peaks, budget, volume, sink) -> None:
+    """Hand ``queue`` back unreported: nothing is running, and none of it fits.
+
+    One line per recording names it, its charge, the budget, and the volume's free
+    and total space. A recording whose charge exceeds the whole volume minus
+    headroom can NEVER fit however long it waits: that is an ``::error::`` telling
+    the operator the node needs more scratch, not a note that a tick was busy.
+    ``sink`` (a dict, or None) receives ``{recording: last_error message}``."""
+    free_total = volume() if volume else None
+    ceiling = None if free_total is None else max(0, free_total[1] - SCRATCH_HEADROOM_BYTES)
+    shown = 0
+    never = 0
+    for primary in queue:
+        charge = scratch_peaks.get(primary, SCRATCH_UNKNOWN_SIZE_BYTES)
+        message = deferral_message(charge, budget)
+        if sink is not None:
+            sink[primary] = message
+        impossible = ceiling is not None and charge > ceiling
+        never += impossible
+        if shown >= SCRATCH_DEFER_LOG_LINES:
+            continue
+        shown += 1
+        where = (
+            f", free {_gib(free_total[0])} of {_gib(free_total[1])} GiB"
+            if free_total else ""
+        )
+        if impossible:
+            print(
+                f"::error::{primary} can never fit this volume: charged {_gib(charge)} GiB, "
+                f"the volume holds {_gib(free_total[1])} GiB with "  # type: ignore[index]
+                f"{_gib(SCRATCH_HEADROOM_BYTES)} GiB of headroom; it needs more scratch, "
+                "or a lower ZARR_SCRATCH_STREAM_FACTOR if the charge is too high",
+                flush=True,
+            )
+        else:
+            print(
+                f"::warning::deferring {primary}: charged {_gib(charge)} GiB, "
+                f"budget {_gib(budget)} GiB{where}",
+                flush=True,
+            )
+    if len(queue) > shown:
+        print(
+            f"::warning::{len(queue) - shown} more deferred recording(s) not listed here; "
+            "the index names them all",
+            flush=True,
+        )
+    print(
+        f"::warning::deferred {len(queue)} recording(s) that do not fit the scratch disk"
+        + (f" ({never} can never fit this volume)" if never else "")
+        + "; they stay pending without spending an attempt",
+        flush=True,
+    )
+
+
+def drain_serially(
+    convert, scratch_peaks, scratch_budget, scratch_volume, deferred, run_one, record
+) -> None:
+    """The ``--jobs 1`` drain: one recording at a time, in this process, each only if
+    it fits. First fit, like the pool's admission, so a giant at the head does not
+    hold smaller recordings behind it; a recording that fits nothing after the
+    re-samples (see ``SCRATCH_DEFER_RESAMPLES``) is deferred with the rest."""
+    queue = list(convert)
+    done = 0
+
+    def pick(budget: int) -> int | None:
+        return next(
+            (j for j, p in enumerate(queue)
+             if scratch_peaks.get(p, SCRATCH_UNKNOWN_SIZE_BYTES) <= budget),
+            None,
+        )
+
+    while queue:
+        budget = scratch_budget(())
+        idx = pick(budget)
+        for _ in range(SCRATCH_DEFER_RESAMPLES if idx is None else 0):
+            time.sleep(ADMISSION_RECHECK_SECONDS)
+            budget = scratch_budget(())
+            idx = pick(budget)
+            if idx is not None:
+                break
+        if idx is None:
+            defer_unfit(queue, scratch_peaks, budget, scratch_volume, deferred)
+            return
+        p = queue.pop(idx)
+        done += 1
+        record(run_one(p), done)
+
+
 def _next_admission(
     pending_peaks: list[int], in_flight_count: int, running_peak: int,
     cpu_cap: int, ram_ceiling: int,
+    *, pending_scratch: list[int] | None = None, running_scratch: int = 0,
+    scratch_budget: int | None = None,
 ) -> int | None:
     """Index into ``pending_peaks`` of the next recording to dispatch, or ``None``
     to wait for a running one to finish. Admittable when a worker slot is free AND
     either nothing is in flight (it runs alone, guaranteeing progress) or it fits
-    the remaining RAM ceiling. Picks the first pending recording that fits, so a
-    head-of-line giant doesn't starve smaller ones behind it."""
+    the remaining RAM ceiling, AND (when scratch is gated) it fits the scratch
+    budget. Picks the first pending recording that fits, so a head-of-line giant
+    doesn't starve smaller ones behind it.
+
+    The run-alone exception is RAM's only. Memory a recording cannot fit is
+    reported by the worker's own preflight, but a recording that does not fit the
+    disk would spend hours downloading before it hit ENOSPC, so scratch is checked
+    even when nothing is in flight: a ``None`` with nothing running means what is
+    left cannot be admitted at all (see ``_drain_with_admission``)."""
     if in_flight_count >= cpu_cap:
         return None
     idle = in_flight_count == 0
+    gated = pending_scratch is not None and scratch_budget is not None
+
+    def fits_scratch(j: int) -> bool:
+        if not gated:
+            return True
+        needed = running_scratch + pending_scratch[j]  # type: ignore[index]
+        return needed <= scratch_budget  # type: ignore[operator]
+
     return next(
         (j for j, pk in enumerate(pending_peaks)
-         if idle or running_peak + pk <= ram_ceiling),
+         if (idle or running_peak + pk <= ram_ceiling) and fits_scratch(j)),
         None,
     )
 
 
 def _drain_with_admission(
     convert, peaks, cpu_cap, ram_ceiling, ctx, record, worker=None, memory_retry=None,
-    ceiling=None,
+    ceiling=None, scratch_peaks=None, scratch_budget=None, deferred=None,
+    scratch_volume=None,
 ) -> tuple[int, int]:
     """Run ``convert_one`` over ``convert`` in a pool of up to ``cpu_cap`` workers,
     dispatching a recording only while the SUM of in-flight projected peaks stays
@@ -7795,6 +8818,19 @@ def _drain_with_admission(
     default `live_admission_ceiling` over this node's /proc with ``ram_ceiling``
     as its off-Linux fallback, whenever a recording finishes and at least every
     ``ADMISSION_RECHECK_SECONDS`` otherwise (#1483).
+
+    Scratch disk is admitted the same way when ``scratch_peaks`` (primary ->
+    projected peak bytes) is given: a recording is dispatched only while the sum
+    of in-flight scratch peaks plus its own fits ``scratch_budget(in_flight)``
+    (default: a `ScratchGate` over ``ctx["tmp"]``, which is handed the in-flight
+    primaries so it can count what they hold). Unlike RAM there is no run-alone
+    exception: a recording that does not fit while nothing is in flight can never
+    be admitted this run, so it is handed back in ``deferred`` (a dict of
+    recording -> the `last_error` text the index will carry) UNREPORTED. Before
+    that, admission looks at the volume again ``SCRATCH_DEFER_RESAMPLES`` times,
+    since one sample can land in someone else's spike. A memory-failed recording
+    held for the serial retry that cannot fit there is reported as the memory
+    failure it was, not deferred.
     """
     worker = worker or convert_one
     if ceiling is None:
@@ -7802,6 +8838,11 @@ def _drain_with_admission(
 
         def ceiling(running_peak: int, track_dir: str | None) -> int:
             return live_admission_ceiling(ram_ceiling, hard, running_peak, track_dir)
+    if scratch_peaks is not None and scratch_budget is None and ctx.get("tmp"):
+        scratch_budget = ScratchGate(ctx["tmp"])
+    volume = scratch_volume or (
+        ScratchGate(ctx["tmp"]).volume if ctx.get("tmp") else None
+    )
     done = 0
     pool_breaks = 0
     held: list[dict] = []  # memory failures awaiting the serial retry
@@ -7824,7 +8865,9 @@ def _drain_with_admission(
         done += 1
         record(r, done)
 
-    def drain_once(queue: list, cap: int, run_ctx=None, run_peaks=None) -> list:
+    def drain_once(
+        queue: list, cap: int, run_ctx=None, run_peaks=None, defer_to=None
+    ) -> list:
         """Drain ``queue`` (mutated in place) with up to ``cap`` workers until it
         is empty or the pool breaks. Returns the recordings that were in flight
         at the moment of the break -- empty when the pass completed cleanly."""
@@ -7850,14 +8893,56 @@ def _drain_with_admission(
             # submits has not started, so it earns no credit and the ceiling
             # cannot move because of it. No slot, no read.
             limit: int | None = None
+            budget: int | None = None
+            gated = scratch_peaks is not None and scratch_budget is not None
+
+            def read_scratch() -> int | None:
+                return scratch_budget([p for p, _ in in_flight.values()]) if gated else None
+
+            def pick() -> int | None:
+                running_scratch = (
+                    sum(
+                        scratch_peaks.get(q, SCRATCH_UNKNOWN_SIZE_BYTES)
+                        for q, _ in in_flight.values()
+                    )
+                    if budget is not None else 0
+                )
+                return _next_admission(
+                    [run_peaks[p] for p in queue], len(in_flight), running_peak,
+                    cap, limit,  # type: ignore[arg-type]
+                    pending_scratch=(
+                        [scratch_peaks.get(p, SCRATCH_UNKNOWN_SIZE_BYTES) for p in queue]
+                        if budget is not None else None
+                    ),
+                    running_scratch=running_scratch, scratch_budget=budget,
+                )
+
             while queue and len(in_flight) < cap:
                 if limit is None:
                     limit = ceiling(running_peak, track_dir)
-                idx = _next_admission(
-                    [run_peaks[p] for p in queue], len(in_flight), running_peak,
-                    cap, limit,
-                )
+                    budget = read_scratch()
+                idx = pick()
+                if idx is None and not in_flight and budget is not None:
+                    # Nothing running will give scratch back, so one more sample is
+                    # the only thing that can change the answer. A single statvfs
+                    # can land in another tenant's transient spike; look again a
+                    # few times, `ADMISSION_RECHECK_SECONDS` apart, before
+                    # deferring everything that is left.
+                    for _ in range(SCRATCH_DEFER_RESAMPLES):
+                        time.sleep(ADMISSION_RECHECK_SECONDS)
+                        limit = ceiling(running_peak, track_dir)
+                        budget = read_scratch()
+                        idx = pick()
+                        if idx is not None:
+                            break
                 if idx is None:
+                    if not in_flight and queue and budget is not None:
+                        # Handed back, not reported: see the docstring.
+                        defer_unfit(
+                            queue, scratch_peaks, budget, volume,
+                            deferred if defer_to is None else defer_to,
+                        )
+                        queue.clear()
                     break
                 # Submit BEFORE popping. `ex.submit` is exactly where a broken
                 # pool surfaces, and popping first would leave the recording in
@@ -7902,9 +8987,18 @@ def _drain_with_admission(
             broke = True
         finally:
             shutil.rmtree(track_dir, ignore_errors=True)
+        suspects_now = broken + [p for p, _peak in in_flight.values()]
         if broke or broken:
             pool_breaks += 1
-        return broken + [p for p, _peak in in_flight.values()]
+            # The executor was shut down above, so every worker is gone and nothing
+            # can still be writing. A killed worker never ran `convert_one`'s
+            # `finally`, so its raw download and memmaps are still on scratch, and
+            # the rebuilt pool would inherit that disk. Reclaim them BEFORE the
+            # suspects re-run and the rest of the queue drains.
+            tmp_root = run_ctx.get("tmp")
+            if tmp_root and suspects_now:
+                reclaim_after_pool_break(tmp_root, suspects_now, volume)
+        return suspects_now
 
     pending = list(convert)
     suspects: list = []
@@ -7925,7 +9019,7 @@ def _drain_with_admission(
             flush=True,
         )
     killed = ("killed its worker process while running alone "
-              "(out of memory, or a native crash in the reader)")
+              "(out of memory, a full scratch disk, or a native crash in the reader)")
     while suspects:
         culprits = drain_once(suspects, 1)
         # cap=1, so at most one recording was in flight: it died running alone.
@@ -7957,14 +9051,23 @@ def _drain_with_admission(
             queue = [r["primary"] for r in to_retry]
             retried.update(queue)
             retry_peaks = {p: retry_peak for p in queue}
+            held_result = {r["primary"]: r for r in to_retry}
+            # A recording the retry cannot fit on scratch is not "not attempted": it
+            # WAS attempted and failed its memory budget. Reported as that failure,
+            # not left to be filed as untouched by the index's coverage balance.
+            retry_deferred: dict[str, str] = {}
             while queue:
-                for p in drain_once(queue, 1, run_ctx=retry_ctx, run_peaks=retry_peaks):
+                for p in drain_once(
+                    queue, 1, run_ctx=retry_ctx, run_peaks=retry_peaks, defer_to=retry_deferred
+                ):
                     report({
                         "ok": False,
                         "primary": p,
                         "error": killed,
                         "detail": failure_detail(killed),
                     })
+            for p in retry_deferred:
+                report(held_result[p])
             print(
                 f"[zarr] memory retry: {recovered} of {len(to_retry)} converted when "
                 "given the node alone",
@@ -7984,6 +9087,27 @@ def _drain_with_admission(
     return pool_breaks, max_suspects_at_once
 
 
+def admission_size_info(
+    repo: str,
+    convert: list[str],
+    head_set: set[str],
+    head: str,
+    fdt_declarations: dict[str, FdtDeclaration],
+) -> dict[str, tuple[int, bool]]:
+    """``{recording: (bytes, readable)}`` admission projects from: its
+    pointer-walked file set, plus a declared `.fdt`'s size. The declared `.fdt`
+    lives outside the recording's directory, so the pointer walk cannot see it,
+    and without the addition a multi-GB in-memory `.set` read is projected as a few
+    tens of MB. One walk serves both the size and whether it can be trusted."""
+    info: dict[str, tuple[int, bool]] = {}
+    for p in convert:
+        size, readable = recording_size_info(repo, p, head_set, head)
+        if p in fdt_declarations:
+            size += fdt_declarations[p]["fdt_bytes"]
+        info[p] = (size, readable)
+    return info
+
+
 def admission_sizes(
     repo: str,
     convert: list[str],
@@ -7991,15 +9115,13 @@ def admission_sizes(
     head: str,
     fdt_declarations: dict[str, FdtDeclaration],
 ) -> dict[str, int]:
-    """On-disk bytes admission projects each recording from: its pointer-walked
-    file set, plus a declared `.fdt`'s size. The declared `.fdt` lives outside
-    the recording's directory, so the pointer walk cannot see it, and without
-    the addition a multi-GB in-memory `.set` read is projected as a few tens of
-    MB."""
+    """On-disk bytes admission projects each recording from; see
+    ``admission_size_info``."""
     return {
-        p: recording_size_from_pointers(repo, p, head_set, head)
-        + (fdt_declarations[p]["fdt_bytes"] if p in fdt_declarations else 0)
-        for p in convert
+        p: size
+        for p, (size, _readable) in admission_size_info(
+            repo, convert, head_set, head, fdt_declarations
+        ).items()
     }
 
 
@@ -8012,6 +9134,21 @@ def memory_retry_context(ctx: dict) -> tuple[dict, int]:
     if ctx["hard_ceiling"]:
         budget = min(budget, ctx["hard_ceiling"])
     return {**ctx, "mem_budget": budget}, budget
+
+
+def scratch_settings_message() -> str:
+    """The one line that names every invalid ``ZARR_SCRATCH_*`` setting."""
+    return "invalid scratch setting: " + "; ".join(SCRATCH_SETTING_ERRORS)
+
+
+def check_env() -> int:
+    """``--check-env``: 0 when the scratch settings are valid, else 1 with the message
+    printed. Takes no dataset, repository or callback, so it can run once ahead of the
+    whole drain."""
+    if SCRATCH_SETTING_ERRORS:
+        print(f"::error::{scratch_settings_message()}", flush=True)
+        return 1
+    return 0
 
 
 def main() -> int:
@@ -8078,7 +9215,37 @@ def main() -> int:
         "Default 1 (serial). The Hallu cron raises it; cap to keep N concurrent "
         "multi-GB recordings within local scratch + RAM.",
     )
+    ap.add_argument(
+        "--check-env",
+        action="store_true",
+        help="validate the ZARR_SCRATCH_* settings and exit (0 valid, 1 invalid, with "
+        "the message). Needs no other argument; hallu-zarr.sh runs it once before "
+        "dispatching any dataset.",
+    )
+    if "--check-env" in sys.argv[1:]:
+        return check_env()
     args = ap.parse_args()
+
+    if SCRATCH_SETTING_ERRORS:
+        # Refused here, not at import, so the failure is REPORTED: the callback is
+        # how an operator learns why every dataset stopped converting. (The Hallu
+        # driver script checks once up front with --check-env, so in production this
+        # only fires for a run started by hand.)
+        message = scratch_settings_message()
+        print(f"::error::{message}", flush=True)
+        with open(args.callback_out, "w") as fh:
+            json.dump(
+                {
+                    "dataset_id": args.dataset_id,
+                    "status": "failed",
+                    "errors": 1,
+                    "failed": [],
+                    "deterministic": False,
+                    "error": message,
+                },
+                fh,
+            )
+        return 1
 
     dataset_id = args.dataset_id
     bucket = args.bucket
@@ -8231,7 +9398,8 @@ def main() -> int:
             print(f"::error::{reason}", flush=True)
             with open(args.callback_out, "w") as fh:
                 json.dump(
-                    # Nothing was attempted: no failures, no pool, no events.
+                    # Nothing was attempted: no failures, no pool, no events,
+                    # and nothing deferred (scratch admission has not run yet).
                     failed_callback_body(
                         dataset_id=dataset_id,
                         head=head,
@@ -8242,6 +9410,7 @@ def main() -> int:
                         annex_missing=[],
                         pool_breaks=0,
                         pending_entries=[],
+                        deferred={},
                         provenance_fetch_failed=bool(early_row and early_row[1]),
                         events_row_count=None,
                         events_upload_failed=False,
@@ -8382,7 +9551,8 @@ def main() -> int:
     # malformed one fails every run, which is why the committed file is loaded
     # by a test in CI.
     fdt_declarations = load_fdt_declarations().get(dataset_id, {})
-    sizes = admission_sizes(repo, convert, head_set, head, fdt_declarations)
+    size_info = admission_size_info(repo, convert, head_set, head, fdt_declarations)
+    sizes = {p: size for p, (size, _readable) in size_info.items()}
     # channels.tsv is already the fidelity gate's ground truth; reuse it so the
     # streaming projection can account for its per-channel term (see
     # `streaming_peak_bytes`). Best-effort: an unreadable sidecar falls back to
@@ -8419,6 +9589,20 @@ def main() -> int:
         p: admission_reserve_bytes(proj, ram_ceiling, streamed=p in streamed_paths)
         for p, proj in projections.items()
     }
+    # Projected scratch per recording, charged by admission like RAM (see
+    # `scratch_peak_bytes`). Recordings admission cannot fit land in `deferred`.
+    scratch_peaks = {
+        p: scratch_peak_bytes(p, sizes[p], size_info[p][1]) for p in convert
+    }
+    unreadable = [p for p in convert if not size_info[p][1]]
+    if unreadable:
+        print(
+            f"::warning::the size of {len(unreadable)} recording(s) could not be read "
+            f"from their pointers; each is charged {SCRATCH_UNKNOWN_SIZE_BYTES / 1024**3:.0f} "
+            f"GiB of scratch at least (first: {', '.join(unreadable[:3])})",
+            flush=True,
+        )
+    deferred: dict[str, str] = {}  # recording -> the last_error the index will carry
     # Measured peak RSS per recording, so the factors above stop being guesses.
     measured: dict[str, int] = {}
     # Every tunable here is env-overridable, and ADR 0030 expects one such
@@ -8435,18 +9619,18 @@ def main() -> int:
             flush=True,
         )
 
-    # Admission is RAM-only. Each streaming recording also writes a scratch memmap
-    # of `n_channels * n_samples * 4` bytes, and raising concurrency raises the
-    # CONCURRENT scratch peak proportionally -- the per-recording cleanup in
-    # convert_one's `finally` bounds accumulation over a run, not the peak at one
-    # instant. There is no disk admission control; report the headroom so a
-    # shortage is visible before it becomes a mid-run write failure. #1112
+    # Scratch is admitted like RAM: each streaming recording holds its raw blob plus
+    # a memmap of `n_channels * n_samples * 4` bytes plus the outputs, and nothing
+    # used to stop 24 of them being admitted into a few hundred GiB. #1112 recorded
+    # that as an open risk; nm000276 is what it cost.
     try:
         scratch_root = tempfile.gettempdir()
         scratch_free = shutil.disk_usage(scratch_root).free
         print(
             f"[zarr] scratch free: {scratch_free / 1024**3:.0f} GiB at {scratch_root} "
-            "(not admission-controlled; streaming writes a per-recording memmap)",
+            f"(admission charges each recording ~{SCRATCH_STREAM_FACTOR:g}x its bytes "
+            f"when streamed, {SCRATCH_INMEM_FACTOR:g}x otherwise, and keeps "
+            f"{SCRATCH_HEADROOM_BYTES / 1024**3:.0f} GiB free)",
             flush=True,
         )
     except OSError as exc:  # visibility only; never fail a run over a stat
@@ -8489,8 +9673,13 @@ def main() -> int:
         # where a large recording most often trips its reserve (#1483).
         if cpu_cap == 1 or not convert:
             _init_worker(ctx)
-            for i, p in enumerate(convert, 1):
-                record(convert_one(p, peaks[p]), i)
+            scratch_gate = ScratchGate(tmp)
+            # One at a time still has to fit: a recording that cannot is deferred
+            # rather than downloaded for hours and failed at ENOSPC.
+            drain_serially(
+                convert, scratch_peaks, scratch_gate, scratch_gate.volume, deferred,
+                lambda p: convert_one(p, peaks[p]), record,
+            )
         else:
             def memory_retry() -> tuple[dict, int]:
                 return memory_retry_context(ctx)
@@ -8498,6 +9687,7 @@ def main() -> int:
             pool_breaks, _max_suspects = _drain_with_admission(
                 convert, peaks, cpu_cap, ram_ceiling, ctx, record,
                 memory_retry=memory_retry,
+                scratch_peaks=scratch_peaks, deferred=deferred,
             )
 
     calibration = calibration_summary(measured, projections, streamed_paths)
@@ -8562,7 +9752,9 @@ def main() -> int:
         """Write the `status: "failed"` callback body for a run that publishes
         nothing.
 
-        Every exit that returns 1 goes through here, and that is the point. The
+        Every exit that returns 1 goes through here, and that is the point (the
+        one exception, an invalid scratch setting, is refused before the
+        dataset is cloned and writes its own minimal body). The
         driver POSTs whatever this file contains; if a failure path writes NO
         file, `hallu-zarr.sh` posts nothing, the `converting` signal it sent at
         the start is never superseded, and D1 sits at `zarr_status='pending'`
@@ -8586,6 +9778,7 @@ def main() -> int:
                     annex_missing=annex_missing,
                     pool_breaks=pool_breaks,
                     pending_entries=pending_entries,
+                    deferred=deferred,
                     provenance_fetch_failed=provenance_fetch_failed,
                     events_row_count=events_file["row_count"] if events_file else None,
                     events_upload_failed=events_upload_failed,
@@ -8608,8 +9801,47 @@ def main() -> int:
     # it has to be rewritten so the pending attempt counts advance, or those
     # recordings could never reach `retry_exhausted` and the queue row would go
     # `failed` instead of backing off.
-    if convert and not converted_entries and not remove and retry_paths is None:
-        print(f"::error::all {len(convert)} conversion(s) failed; index left untouched", flush=True)
+    deferred_set = set(deferred)
+    attempted = [p for p in convert if p not in deferred_set]
+
+    def store_is_keepable(doc: dict | None) -> bool:
+        """Whether a store ``doc`` serves may stay in the index although this run
+        deferred its recording: same commit, engine and biosigIO, and provenance
+        that matches or cannot be checked because the catalog was unreadable."""
+        return doc is not None and index_currency_problem(
+            doc, head, dataset_row, provenance_fetch_failed, biosigio_version,
+            provenance_unknown_ok=True,
+        ) is None
+
+    # Every recording was deferred and the published index already says so: there is
+    # nothing to publish, and republishing is the one way a --clean run could drop
+    # stores it merely failed to rebuild. Report and stop (see
+    # `deferral_leaves_index_as_is`).
+    if deferral_leaves_index_as_is(
+        live_index, store_is_keepable(live_index),
+        convert, deferred, remove, failures, args.wipe,
+    ):
+        assert live_index is not None
+        print(
+            f"[zarr] all {len(deferred)} recording(s) were deferred for scratch and the "
+            "published index already says so; index, manifest and events.parquet left "
+            "untouched",
+            flush=True,
+        )
+        with open(args.callback_out, "w") as fh:
+            json.dump(
+                deferred_unchanged_callback(
+                    dataset_id, head, live_index, live_index_etag, deferred,
+                    len(discovered), non_raw_dropped, provenance_fetch_failed,
+                ),
+                fh,
+            )
+        return 0
+    if attempted and not converted_entries and not remove and retry_paths is None:
+        print(
+            f"::error::all {len(attempted)} conversion(s) failed; index left untouched",
+            flush=True,
+        )
         if annex_missing and not deterministic:
             print(
                 f"::error::storage lacks the annex object(s) of {len(annex_missing)} "
@@ -8643,11 +9875,19 @@ def main() -> int:
     # published as the index's `source_commit`, where None would serialize as
     # JSON null -- the on008083 shape (#1197) that took an empty commit all the
     # way into a published document.
+    #
+    # A deferral holds the commit back for the same reason an infra failure does: on
+    # the incremental path a recording the gate would not admit is still owed, and
+    # the next run diffs from the commit the stores were really built from.
     index_commit = (
-        prior_commit if (infra_failures and is_commit_sha(prior_commit) and prior_commit) else head
+        prior_commit
+        if ((infra_failures or deferred) and is_commit_sha(prior_commit) and prior_commit)
+        else head
     )
 
-    def build_index(merge_prior: dict | None, merge_pending: list | None) -> dict:
+    def build_index(
+        merge_prior: dict | None, merge_pending: list | None, seed_doc: dict | None = None
+    ) -> dict:
         """Merge this run's results onto a prior document and check the coverage
         invariant. A function rather than a straight line because the publish
         below re-runs it against a NEWER live document when the conditional write
@@ -8670,12 +9910,15 @@ def main() -> int:
             biosigio_version=biosigio_version,
             prior_pending=merge_pending,
             dataset_row=dataset_row,
+            deferred=deferred,
+            seed=seed_doc,
+            seed_current=store_is_keepable(seed_doc),
         )
         check_index_invariant(merged)
         return merged
 
     try:
-        index = build_index(prior, prior_pending)
+        index = build_index(prior, prior_pending, None if args.wipe else prior_index_doc)
         # SCHEMA FIRST, UPLOADS SECOND. A refused index means this run publishes
         # nothing -- and "nothing" has to include events.parquet, which is a
         # destructive overwrite of a file the LIVE index still describes. So the
@@ -8720,6 +9963,19 @@ def main() -> int:
         write_failed_callback(f"index refused: {exc}")
         return 1
 
+    def manifest_prior_for(index_doc: dict) -> dict | None:
+        """The manifest to carry entries from. ``--clean`` hands the merge no prior
+        (this run rebuilds everything), but a store the index KEPT because its
+        recording was deferred was not rebuilt, so its ``source_key`` and size exist
+        only in the published manifest. Seed exactly those entries; without them
+        the manifest would list fewer stores than the index serves."""
+        if not (clean and deferred and not args.wipe):
+            return prior_manifest
+        kept = {store_rel_for(p) for p in deferred} & {e["zarr"] for e in index_doc["stores"]}
+        if not kept:
+            return prior_manifest
+        return kept_manifest_seed(bucket, dataset_id, kept)
+
     def build_manifest(index_doc: dict) -> dict:
         """The producer manifest tracks EXACTLY the index's store set, so it is
         derived from the document that is actually published -- including the
@@ -8728,7 +9984,7 @@ def main() -> int:
         refuses the publish rather than being uploaded.
         """
         doc = merge_manifest(
-            prior_manifest,
+            manifest_prior_for(index_doc),
             dataset_id,
             manifest_entries,
             [e["zarr"] for e in index_doc["stores"]],
@@ -8784,7 +10040,10 @@ def main() -> int:
         # `--clean` hands the merge no prior (the document is rebuilt from this
         # run), exactly as the first attempt did; the pending attempt history
         # still comes from the published document, newer one included.
-        remerged = build_index(None if clean else newer, (newer or {}).get("pending"))
+        remerged = build_index(
+            None if clean else newer, (newer or {}).get("pending"),
+            None if args.wipe else newer,
+        )
         if events_file:
             remerged["events_parquet"] = f"{remerged['data_base']}{EVENTS_PARQUET_NAME}"
             remerged["events_row_count"] = events_file["row_count"]
