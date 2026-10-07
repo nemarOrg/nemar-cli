@@ -4360,7 +4360,8 @@ def merge_index(
 
     `deferred` maps recordings the scratch gate would not admit to the text that
     explains it. A deferral is not an attempt and not a conversion, so it must
-    neither spend an attempt nor make the index serve less than it did (ADR 0005).
+    neither spend an attempt nor make the index serve less than it did (a served
+    store is not dropped by a rebuild that could not run).
     `seed` is the index as published (under ``--clean`` the merge is handed no
     `prior`, so this is the only place the deferred recordings' old entries live),
     and `seed_current` says whether the stores it serves are what this run would

@@ -1,10 +1,6 @@
 # ADR 0030: Bounded streaming is the default conversion path; in-memory is the exception
 
 **Status:** accepted
-**Amendment 2026-10-06:** The last consequence below records scratch disk as an open risk with
-nothing gating admission on it. ADR 0088 narrows it: scratch is admitted like RAM, and a
-recording that cannot fit is deferred rather than attempted. The charge is an estimate, so the
-risk is smaller, not gone. The text below is left as written.
 **Date:** 2026-08-22
 **Owner:** Seyed Yahya Shirazi
 

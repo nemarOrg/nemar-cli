@@ -5584,7 +5584,7 @@ class TestScratchAdmissionDecision(unittest.TestCase):
             generate_zarr.scratch_peak_bytes("sub-01/ieeg/sub-01_task-x_ieeg.vhdr", small),
             int(small * generate_zarr.SCRATCH_INMEM_FACTOR),
         )
-        # EEGLAB .set never streams (ADR 0030), whatever its size.
+        # EEGLAB .set never streams, whatever its size.
         big = 5 * self.GIB
         self.assertEqual(
             generate_zarr.scratch_peak_bytes("sub-01/eeg/sub-01_task-x_eeg.set", big),
@@ -11864,7 +11864,7 @@ class TestMainRetryPendingRound(unittest.TestCase):
     def test_an_all_deferred_clean_run_keeps_the_served_store(self):
         # The run hallu always makes: --clean, so the merge is handed no prior. A
         # previously served store must not drop out of the index because this run
-        # could not rebuild it (ADR 0005), and a run with nothing to say must not
+        # could not rebuild it, and a run with nothing to say must not
         # rewrite the index at all.
         self.first_round()
         self._no_scratch()
