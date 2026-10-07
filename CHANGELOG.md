@@ -58,9 +58,11 @@ None.
 ### Deploy coupling
 
 Merging to `main` makes the Hallu converter (the Zarr conversion host, cron `ZARR_DRIVER_REF=main`)
-run this code on its next tick. The only other change is the version in `backend/package.json`,
-so the backend redeploys unchanged. A dataset already stuck on scratch space converts again only
-when it is queued: `hallu-zarr.sh --dataset <id> --requeue done --execute`.
+run this code on its next tick. The only other changes are the versions: `backend/package.json`
+moves, so the backend redeploys unchanged, and the root `package.json` moves from 0.10.13 to a
+`0.10.14-devN` pre-release, so the merge also triggers `auto-tag.yml`, which strips `-dev`, tags
+`v0.10.14` and publishes the identical CLI to npm as a new version. A dataset already stuck on scratch space
+converts again only when it is queued: `hallu-zarr.sh --dataset <id> --requeue done --execute`.
 
 ## 0.10.13 - 2026-10-05
 
@@ -91,7 +93,7 @@ when it is queued: `hallu-zarr.sh --dataset <id> --requeue done --execute`.
     with a flag, and a dataset with an entry is never converted without it. Every entry
     records its source and reviewer. Twelve ship: six written and reviewed by the author,
     and six reused from annotations the Neurobagel community published for OpenNeuro
-    datasets (MIT licence), which are marked as not reviewed by NEMAR beyond the loader and
+    datasets (MIT license), which are marked as not reviewed by NEMAR beyond the loader and
     binder checks.
   - **One eligibility predicate (ADR 0084).** A dataset is federated only when it is
     public, published and not anonymous, and is not withdrawn, deleted, tombstoned, a
