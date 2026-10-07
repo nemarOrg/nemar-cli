@@ -31,6 +31,7 @@ import {
   describeUncheckedSandboxGap,
 } from "../../shared/contract/profile-gaps.js";
 import { datasetLandingUrl } from "../../shared/datacite-constants.js";
+import { PREFLIGHT_ACKNOWLEDGEABLE } from "../../shared/identifier-screen-report.js";
 import { LICENSE_TIERS } from "../../shared/license-tiers.js";
 import { stepsForRelease } from "../../shared/publication-steps.js";
 import { RangeParseError } from "../../shared/range.js";
@@ -210,6 +211,12 @@ import {
   saveDatasetStep,
   writeNemarMetadata,
 } from "../lib/upload/finalize.js";
+import {
+  ACKNOWLEDGE_FLAG,
+  collectAcknowledgment,
+  identifierPreflightStep,
+  recheckIdentifierPreflight,
+} from "../lib/upload/identifier-preflight.js";
 import {
   computeFilesToUpload,
   prepareUploadProgress,
@@ -561,6 +568,12 @@ export function createUploadCommand(): Command {
       "--dataset-id <id>",
       "Name the dataset id instead of being allocated one (admin, non-production, reserved fixture band only)",
     )
+    .addOption(
+      new Option(
+        `${ACKNOWLEDGE_FLAG} <verdicts>`,
+        `Upload despite what the identifier preflight found, naming every condition it reports (non-interactive; recorded; repeatable or comma-separated: ${PREFLIGHT_ACKNOWLEDGEABLE.join(", ")}). Direct identifiers cannot be acknowledged`,
+      ).argParser(collectAcknowledgment),
+    )
     .addHelpText(
       "after",
       ({ command }) => `
@@ -574,10 +587,25 @@ Requirements:
   - GitHub CLI authenticated (gh auth login)
 
 Process:
-  1. Validates BIDS format (unless --skip-validation)
-  2. Creates GitHub repository for metadata
-  3. Uploads large files to S3 in parallel
-  4. Enables PR-based versioning workflow
+  1. Screens the files for identifiers on this machine, before anything is sent
+  2. Validates BIDS format (unless --skip-validation)
+  3. Creates GitHub repository for metadata
+  4. Uploads large files to S3 in parallel
+  5. Enables PR-based versioning workflow
+
+Identifier preflight:
+  Every EDF/BDF header (256 bytes each), the participants and scans tables,
+  and non-BIDS JSON and small text files are read locally and checked by the
+  scanner NEMAR's publication screen uses. Only kinds and counts are printed.
+  - Direct identifiers (names, birth dates, record numbers): the upload is
+    refused. There is no override.
+  - A lesser finding, an incomplete read, or recordings in a format the
+    scanner cannot read: the upload needs your acknowledgment, at the prompt
+    or with ${ACKNOWLEDGE_FLAG} naming every condition the
+    preflight reports (for example review,unchecked). --yes does not count.
+  The dataset is screened again right before anything is sent, and the
+  verdict is recorded with your deposit attestation. NEMAR screens the
+  dataset again when you request publication.
 
 Note:
   This command is for initial dataset creation only. To update an
@@ -639,6 +667,14 @@ Examples:
         process.exit(1);
       }
 
+      // Identifier preflight, between steps 1c and 1d (epic #1610 phase 3, ADR 0087). Local,
+      // and BEFORE every step that sends dataset content: the co-author ORCID step (4b) reads
+      // names out of dataset_description.json, and the create call (6) carries every data
+      // file's path. A refusal, or a verdict nobody acknowledged, stops here with nothing sent.
+      const preflight = await identifierPreflightStep(absolutePath, options);
+      if (preflight.status === "fail") process.exit(1);
+      const identifierPreflight = preflight.value;
+
       // Step 1d: Check required tools
       await checkPrerequisitesForCommand("upload");
 
@@ -695,6 +731,17 @@ Examples:
 
       console.log();
 
+      // Identifier preflight, again, right before the first byte goes: the steps since the first
+      // screen take as long as a person likes and some write into the tree, so what is recorded
+      // and sent is the tree as it is now. Only a dry run gets no record, and it returned at the
+      // plan; a null here is a bug, and it stops the upload rather than sending unscreened files.
+      if (identifierPreflight === null) {
+        console.log(chalk.red("Identifier preflight: no record to send. Nothing was sent."));
+        process.exit(1);
+      }
+      const rechecked = await recheckIdentifierPreflight(absolutePath, identifierPreflight);
+      if (rechecked.status === "fail") process.exit(1);
+
       const { dataFiles, uploadProgress: loadedProgress } = prepareUploadProgress(
         absolutePath,
         manifest,
@@ -709,6 +756,7 @@ Examples:
         dataFiles,
         existingConfig,
         attestation,
+        rechecked.value,
       );
       if (created.status === "fail") process.exit(1);
       const datasetInfo = created.value;
