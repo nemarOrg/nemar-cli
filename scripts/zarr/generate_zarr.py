@@ -4336,6 +4336,8 @@ def index_currency_problem(
     row_fetch_failed: bool,
     biosigio_version: str | None,
     engine_version: str = ZARR_ENGINE_VERSION,
+    *,
+    provenance_unknown_ok: bool = False,
 ) -> str | None:
     """Why a published index is NOT exactly what a full rebuild at ``head`` would
     produce for the stores it already serves, or None when it is: same commit, same
@@ -4346,7 +4348,14 @@ def index_currency_problem(
     scratch gate defers may keep serving its published store when this is None
     (`merge_index`): in both cases the store on S3 is what this run would have
     written. When it is not None that store is stale, so a deferred recording's
-    entry leaves the index and the recording is listed pending to be rebuilt."""
+    entry leaves the index and the recording is listed pending to be rebuilt.
+
+    An unreadable catalog means provenance cannot be compared. A retry round must
+    treat that as "not current" (converting only the pending recordings would leave
+    every other store with provenance nobody checked). A store that is merely being
+    KEPT must not: dropping a served store because the catalog was down for a minute
+    is the one outcome worse than serving it. ``provenance_unknown_ok`` selects the
+    second reading; commit, engine and biosigIO are still compared."""
     if not isinstance(index, dict):
         return "no published index"
     if index.get("source_commit") != head:
@@ -4356,7 +4365,9 @@ def index_currency_problem(
     if index.get("biosigio_version") != biosigio_version:
         return "the index was built with a different biosigIO"
     if row_fetch_failed:
-        return "the catalog could not be read to compare provenance"
+        return None if provenance_unknown_ok else (
+            "the catalog could not be read to compare provenance"
+        )
     current = index_provenance(dataset_row)
     if any(index.get(k) != v for k, v in current.items()):
         return "the dataset's provenance changed since the index was built"
@@ -9207,16 +9218,22 @@ def main() -> int:
     # `failed` instead of backing off.
     deferred_set = set(deferred)
     attempted = [p for p in convert if p not in deferred_set]
+
+    def store_is_keepable(doc: dict | None) -> bool:
+        """Whether a store ``doc`` serves may stay in the index although this run
+        deferred its recording: same commit, engine and biosigIO, and provenance
+        that matches or cannot be checked because the catalog was unreadable."""
+        return doc is not None and index_currency_problem(
+            doc, head, dataset_row, provenance_fetch_failed, biosigio_version,
+            provenance_unknown_ok=True,
+        ) is None
+
     # Every recording was deferred and the published index already says so: there is
     # nothing to publish, and republishing is the one way a --clean run could drop
     # stores it merely failed to rebuild. Report and stop (see
     # `deferral_leaves_index_as_is`).
     if deferral_leaves_index_as_is(
-        live_index,
-        live_index is not None
-        and index_currency_problem(
-            live_index, head, dataset_row, provenance_fetch_failed, biosigio_version
-        ) is None,
+        live_index, store_is_keepable(live_index),
         convert, deferred, remove, failures, args.wipe,
     ):
         assert live_index is not None
@@ -9310,10 +9327,7 @@ def main() -> int:
             dataset_row=dataset_row,
             deferred=deferred,
             seed=seed_doc,
-            seed_current=seed_doc is not None
-            and index_currency_problem(
-                seed_doc, head, dataset_row, provenance_fetch_failed, biosigio_version
-            ) is None,
+            seed_current=store_is_keepable(seed_doc),
         )
         check_index_invariant(merged)
         return merged

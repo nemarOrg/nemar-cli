@@ -835,6 +835,26 @@ class TestIndexCurrencyProblem(unittest.TestCase):
     def test_a_matching_index_is_current(self):
         self.assertIsNone(self.problem(self.index()))
 
+    def test_an_unreadable_catalog_keeps_a_store_but_never_licenses_a_retry_round(self):
+        index = self.index()
+        generate_zarr_problem = generate_zarr.index_currency_problem
+        self.assertIsNone(
+            generate_zarr_problem(
+                index, SHA_NEW, None, True, "1.2.10", provenance_unknown_ok=True
+            )
+        )
+        self.assertIn(
+            "catalog", generate_zarr_problem(index, SHA_NEW, None, True, "1.2.10")
+        )
+        # The other three comparisons still run when only provenance is unknowable.
+        self.assertIn(
+            "different commit",
+            generate_zarr_problem(
+                self.index(source_commit=SHA_OLD), SHA_NEW, None, True, "1.2.10",
+                provenance_unknown_ok=True,
+            ),
+        )
+
     def test_each_difference_is_named(self):
         self.assertIn("no published index", self.problem(None))
         self.assertIn("different commit", self.problem(self.index(source_commit=SHA_OLD)))
