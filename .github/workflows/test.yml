@@ -56,7 +56,7 @@ jobs:
       # whether they were due. It is the `scrub` filter alone: the toolchain, the scanner files
       # it imports from shared/, and nothing else. A change to the rest of shared/ (the wire
       # contract, account copy, the facet vocabulary) or to the Zarr converter does not start
-      # seven runners for tools it cannot affect.
+      # five runners for tools it cannot affect.
       scrub_suites: ${{ steps.filter.outputs.scrub }}
     steps:
       - uses: actions/checkout@v4
@@ -402,6 +402,11 @@ jobs:
   # durations in test/scrub/timings.json (`--timings`), because a few files take minutes and
   # most take seconds, so splitting by file count would leave one runner with all the slow ones.
   #
+  # FIVE IS THE CHOSEN COUNT (2026-10-07): the same 10.4 minute slowest slice as 6, two runners
+  # fewer than 7. The suites now run only when scrub files change (the `scrub` filter above),
+  # so the 3 minutes 7 would save are not worth two more VMs on every such run. Go to 7 if the
+  # wall time starts to matter more than the runner minutes.
+  #
   # THE SLOWEST SLICE SETS THE TIME. bun cuts the path-sorted file list into contiguous slices
   # of about equal duration, so a shard cannot finish before its slowest file does, and the
   # cut points follow file order, not an ideal packing. On the per-file durations averaged over
@@ -412,10 +417,10 @@ jobs:
   # dry run that imports the files and runs no test (it exits 1 with "matched 0 tests"; the
   # junit file names each shard's files). Run it from the repository root, and never add
   # --update-timings to it: that would overwrite the timings file with the files of one shard.
-  #   for i in 1 2 3 4 5 6 7; do
+  #   for i in 1 2 3 4 5; do
   #     bun test --preload ./test/scrub/helpers/temp-dirs-preload.ts \
   #       --path-ignore-patterns='__run_every_scrub_suite__' \
-  #       --timings test/scrub/timings.json --shard=$i/7 -t '^never$' \
+  #       --timings test/scrub/timings.json --shard=$i/5 -t '^never$' \
   #       --reporter=junit --reporter-outfile=/tmp/shard-$i.xml \
   #       test/scrub test/identifier-scan.test.ts test/identifier-scrub.test.ts \
   #       test/identifier-fleet.test.ts
@@ -458,7 +463,7 @@ jobs:
       # Every shard reports, so one red shard does not hide a second one.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7]
+        shard: [1, 2, 3, 4, 5]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -478,7 +483,7 @@ jobs:
 
       # git-annex comes from the Ubuntu mirror, which is sometimes slow for this one package for
       # minutes at a time: in two runs, 3 of 14 shards spent 5 to 7 minutes on a 16.6 MB download
-      # at 40 to 60 kB/s, and a retry hit the same stall. With seven runners that stall is likely
+      # at 40 to 60 kB/s, and a retry hit the same stall. With five runners that stall is still likely
       # in any one run and sets its wall time, so the three packages (the other dependencies are
       # on the runner image already) are cached and installed from the cache when it is there.
       # A cache is readable by the ref that wrote it and the refs it was cut from, so the first
