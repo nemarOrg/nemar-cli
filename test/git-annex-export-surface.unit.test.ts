@@ -94,6 +94,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "pushBranch",
     "pushToGitHub",
     "saveDataset",
+    "setAssumeUnchanged",
   ],
   transfer: [
     "MAX_UNAVAILABLE_SAMPLE",
@@ -107,6 +108,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "dropFiles",
     "dropUnusedAnnexObjects",
     "extractCopyError",
+    "extractCopyJsonError",
     "extractWhereisKeyUrl",
     "getAnnexKeysForPaths",
     "getAnnexWhereisAll",
@@ -115,6 +117,7 @@ const MODULE_EXPORTS: Record<string, string[]> = {
     "getKeyHashDirs",
     "getRemoteUuid",
     "listAnnexedKeys",
+    "parseCopyJson",
     "setKeyPresent",
   ],
   "repo-state": [
@@ -178,6 +181,11 @@ const INTERNAL_WIRING = [
   "copyPathsToAnnexRemote",
   "getAnnexKeysForPaths",
   "listAnnexedKeys",
+  // The upload S3 step's JSON copy accounting and its save-step helper: unit
+  // tested, consumed by sibling modules only.
+  "parseCopyJson",
+  "extractCopyJsonError",
+  "setAssumeUnchanged",
 ];
 
 /**

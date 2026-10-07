@@ -5,6 +5,8 @@
  * verbatim.
  */
 
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { getGitHubToken, resolveGitHubCloneAuth } from "./github.js";
 import { getCurrentBranch } from "./repo-state.js";
 import { runCommand } from "./run-command.js";
@@ -14,8 +16,66 @@ import { runCommand } from "./run-command.js";
  *
  * If author info is provided, sets GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL
  * to ensure commits are attributed to the correct NEMAR user.
+ *
+ * `skipContentCheckPaths` names annexed, already-staged paths whose working-tree
+ * content `git add -A` must NOT re-read. `git annex add` stages unlocked files
+ * through `git update-index --index-info`, which leaves their index entries
+ * with zero stat data; the next `git add -A` (and `git status`) then treats
+ * every one of them as possibly modified and streams its full content through
+ * `git-annex filter-process` to find out it is not. On nm000358 (165 files,
+ * 1.6 TB on Ceph) that was the hours-long "Saving dataset changes" step after
+ * the S3 copy had already finished (#1455). These paths are marked
+ * `assume-unchanged` for the duration of the add/status/commit and unmarked
+ * afterwards, so the commit records exactly the pointers that were staged --
+ * the ones whose content was just verified at the S3 remote. Paths that no
+ * longer exist on disk are left alone so a deletion is still staged.
  */
 export async function saveDataset(
+  path: string,
+  message: string,
+  author?: { name: string; email: string },
+  options: { skipContentCheckPaths?: string[] } = {},
+): Promise<{ success: boolean; error?: string }> {
+  const skipPaths = (options.skipContentCheckPaths ?? []).filter((p) => existsSync(join(path, p)));
+  if (skipPaths.length > 0) {
+    const mark = await setAssumeUnchanged(path, skipPaths, true);
+    if (!mark.success) return mark;
+  }
+  try {
+    return await stageAndCommit(path, message, author);
+  } finally {
+    if (skipPaths.length > 0) {
+      // Best effort: a stale flag only hides later edits from `git status`.
+      const unmark = await setAssumeUnchanged(path, skipPaths, false);
+      if (!unmark.success) {
+        console.warn(
+          `Warning: could not clear assume-unchanged on ${skipPaths.length} path(s): ${unmark.error}`,
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Set or clear git's assume-unchanged bit for `paths` (NUL-separated on stdin,
+ * so any filename and any count is safe). Exported for unit tests.
+ */
+export async function setAssumeUnchanged(
+  path: string,
+  paths: string[],
+  on: boolean,
+): Promise<{ success: boolean; error?: string }> {
+  const { stderr, exitCode } = await runCommand(
+    ["git", "update-index", on ? "--assume-unchanged" : "--no-assume-unchanged", "-z", "--stdin"],
+    { cwd: path, stdin: paths.map((p) => `${p}\0`).join("") },
+  );
+  if (exitCode !== 0) {
+    return { success: false, error: stderr.trim() || "git update-index failed" };
+  }
+  return { success: true };
+}
+
+async function stageAndCommit(
   path: string,
   message: string,
   author?: { name: string; email: string },
