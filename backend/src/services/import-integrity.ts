@@ -263,7 +263,12 @@ export function computeVersionIntegrity(
 export async function verifyDatasetVersionS3(
   env: Pick<
     Bindings,
-    "DB" | "S3_BUCKET" | "AWS_REGION" | "AWS_ACCESS_KEY_ID" | "AWS_SECRET_ACCESS_KEY"
+    | "DB"
+    | "S3_BUCKET"
+    | "AWS_REGION"
+    | "AWS_ACCESS_KEY_ID"
+    | "AWS_SECRET_ACCESS_KEY"
+    | "S3_ENDPOINT_URL"
   >,
   datasetId: string,
   version?: string,
@@ -273,6 +278,9 @@ export async function verifyDatasetVersionS3(
     region: env.AWS_REGION,
     accessKeyId: env.AWS_ACCESS_KEY_ID,
     secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+    // Unset in every deployment; a test points the LIST and manifest reads at a
+    // local server, the same idiom routes/admin/shared.ts already uses.
+    endpointUrl: env.S3_ENDPOINT_URL,
   };
 
   let resolvedVersion = version ?? null;
