@@ -171,12 +171,12 @@ describe("bindShadowedOptionValues on the real command tree", () => {
       bindShadowedOptionValues(program, [
         "dataset",
         "release",
-        "nm000104",
+        "nm099999",
         "--version",
         "2.0.0",
         "-y",
       ]),
-    ).toEqual(["dataset", "release", "nm000104", "--version=2.0.0", "-y"]);
+    ).toEqual(["dataset", "release", "nm099999", "--version=2.0.0", "-y"]);
   });
 
   test("works with global flags before and after the subcommand", () => {
@@ -370,21 +370,29 @@ describe("every shadowed value option in the real tree is bound", () => {
 // The real tree above must be the real program
 // ---------------------------------------------------------------------------
 
-// Nothing here may depend on the network. The CLI is pointed at a closed port
-// through config.json (the account's apiUrl) rather than an environment
-// variable: this file has to stay in the offline `unit-pure` CI tier, and a
-// test that names the live-backend variable or helper is routed to the soft
-// `integration-dev` tier instead (see the file-sorting grep in test.yml).
+// Nothing here may depend on the network. The CLI is pointed at a local
+// stand-in backend through config.json (the account's apiUrl) rather than an
+// environment variable: this file has to stay in the offline `unit-pure` CI
+// tier, and a test that names the live-backend variable or helper is routed to
+// the soft `integration-dev` tier instead (see the file-sorting grep in
+// test.yml).
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
-const UNREACHABLE_API = "http://127.0.0.1:9";
+const SPAWN_KILL_MS = 20_000;
+const SPAWN_TEST_TIMEOUT_MS = 30_000;
+// A proxy in the environment can send even a loopback request elsewhere (an
+// unroutable one made a spawn take a second), so none reaches the child.
+const PROXY_VARS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
 let configDir: string;
+let backendUrl: string;
 
 async function spawnCli(args: string[]) {
-  // Drop every TEST_* variable so an ambient live-backend setting cannot
-  // override the config.json URL above.
+  // Drop every TEST_* and proxy variable so nothing ambient can override the
+  // config.json URL or reroute the request to it.
   const env: Record<string, string | undefined> = Object.fromEntries(
-    Object.entries(process.env).filter(([key]) => !key.startsWith("TEST_")),
+    Object.entries(process.env).filter(
+      ([key]) => !key.startsWith("TEST_") && !PROXY_VARS.includes(key.toUpperCase()),
+    ),
   );
   env.NEMAR_CONFIG_DIR = configDir;
   env.NEMAR_NO_UPDATE_CHECK = "1";
@@ -399,22 +407,55 @@ async function spawnCli(args: string[]) {
     stdout: "pipe",
     stderr: "pipe",
   });
-  const stdout = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
-  return { stdout, stderr, exitCode: await proc.exited };
+  let killed = false;
+  const timer = setTimeout(() => {
+    killed = true;
+    proc.kill();
+  }, SPAWN_KILL_MS);
+  try {
+    const stdout = await new Response(proc.stdout).text();
+    const stderr = await new Response(proc.stderr).text();
+    const exitCode = await proc.exited;
+    if (killed) throw new Error(`nemar ${args.join(" ")} did not finish in ${SPAWN_KILL_MS}ms`);
+    return { stdout, stderr, exitCode };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 describe("spawned CLI", () => {
+  // The stand-in backend: answers the notices call every command makes and
+  // records each request, so a test can see which URL the CLI really used.
+  const hits: string[] = [];
+  let backend: ReturnType<typeof Bun.serve>;
+
+  beforeAll(() => {
+    backend = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const { pathname } = new URL(req.url);
+        hits.push(`${req.method} ${pathname}`);
+        if (pathname === "/notices") return Response.json({ notices: [] });
+        return Response.json({ error: "not found" }, { status: 404 });
+      },
+    });
+    backendUrl = `http://127.0.0.1:${backend.port}`;
+  });
+
+  afterAll(() => {
+    backend.stop(true);
+  });
+
   beforeEach(() => {
+    hits.length = 0;
     configDir = mkdtempSync(join(tmpdir(), "nemar-release-version-"));
-    // An account with an apiUrl and no key: the notices call fails fast
-    // against the closed port, and the release handler refuses with "Not
-    // authenticated".
+    // An account with an apiUrl and no key: the release handler refuses with
+    // "Not authenticated".
     writeFileSync(
       join(configDir, "config.json"),
       JSON.stringify({
         activeAccount: "argv-shadow",
-        accounts: { "argv-shadow": { apiUrl: UNREACHABLE_API } },
+        accounts: { "argv-shadow": { apiUrl: backendUrl } },
       }),
     );
   });
@@ -423,57 +464,75 @@ describe("spawned CLI", () => {
     rmSync(configDir, { recursive: true, force: true });
   });
 
-  describe("the tree under test matches src/index.ts", () => {
-    test("same global options and same top-level commands as `nemar --help`", async () => {
-      const help = (await spawnCli(["--help"])).stdout.split("\n");
-      const section = (title: string) =>
-        help
-          .slice(help.indexOf(`${title}:`) + 1)
-          .join("\n")
-          .split("\n\n")[0]
-          .split("\n")
-          // Wrapped descriptions are indented further than the entries.
-          .filter((line) => /^ {2}\S/.test(line));
-
-      // `-h, --help` is Commander's own and not part of options[].
-      const optionFlags = section("Options").map((line) => line.trim().split(/ {2,}/)[0]);
-      expect(optionFlags).toEqual([...program.options.map((o) => o.flags), "-h, --help"]);
-
-      const commandNames = section("Commands").map((line) => line.trim().split(/\s/)[0]);
-      expect([...commandNames].sort()).toEqual(
-        [...program.commands.map((c) => c.name()), ...INLINE_ROOT_COMMANDS, "help"].sort(),
-      );
-    });
-  });
-
   describe("nemar entry point", () => {
-    test("dataset release --version X.Y.Z reaches the release handler", async () => {
-      const r = await spawnCli(["dataset", "release", "nm000104", "--version", "2.0.0", "-y"]);
-      expect(r.stdout.trim()).not.toBe(version);
-      expect(r.stdout).toContain("Not authenticated");
-      expect(r.exitCode).toBe(1);
-    });
+    test(
+      "the tree under test matches the options and commands of `nemar --help`",
+      async () => {
+        const help = (await spawnCli(["--help"])).stdout.split("\n");
+        const section = (title: string) =>
+          help
+            .slice(help.indexOf(`${title}:`) + 1)
+            .join("\n")
+            .split("\n\n")[0]
+            .split("\n")
+            // Wrapped descriptions are indented further than the entries.
+            .filter((line) => /^ {2}\S/.test(line));
 
-    test("dataset release --version with no value fails like Commander", async () => {
-      for (const args of [
-        ["dataset", "release", "nm000104", "--version"],
-        ["dataset", "release", "nm000104", "--version", "-y"],
-      ]) {
-        const r = await spawnCli(args);
+        // `-h, --help` is Commander's own and not part of options[].
+        const optionFlags = section("Options").map((line) => line.trim().split(/ {2,}/)[0]);
+        expect(optionFlags).toEqual([...program.options.map((o) => o.flags), "-h, --help"]);
+
+        const commandNames = section("Commands").map((line) => line.trim().split(/\s/)[0]);
+        expect([...commandNames].sort()).toEqual(
+          [...program.commands.map((c) => c.name()), ...INLINE_ROOT_COMMANDS, "help"].sort(),
+        );
+      },
+      SPAWN_TEST_TIMEOUT_MS,
+    );
+
+    test(
+      "dataset release --version X.Y.Z reaches the release handler",
+      async () => {
+        const r = await spawnCli(["dataset", "release", "nm099999", "--version", "2.0.0", "-y"]);
         expect(r.stdout.trim()).not.toBe(version);
-        expect(r.stderr).toContain("error: option '--version <version>' argument missing");
-        // Reported by Commander as a usage error, so the exit handler does not
-        // add its "attach a debug log to a bug report" nudge, which an error
-        // thrown out of main() would get.
-        expect(r.stderr).not.toContain("Run again with --debug");
+        expect(r.stdout).toContain("Not authenticated");
         expect(r.exitCode).toBe(1);
-      }
-    });
+        // Tripwire: the notices call every command makes went to the stand-in,
+        // so config.json's apiUrl is honored. Without this, a config that
+        // stopped being read would send the call to the real API silently.
+        expect(hits).toContain("GET /notices");
+      },
+      SPAWN_TEST_TIMEOUT_MS,
+    );
 
-    test("the root --version still prints the CLI version", async () => {
-      const r = await spawnCli(["--version"]);
-      expect(r.exitCode).toBe(0);
-      expect(r.stdout.trim()).toBe(version);
-    });
+    test(
+      "dataset release --version with no value fails like Commander",
+      async () => {
+        for (const args of [
+          ["dataset", "release", "nm099999", "--version"],
+          ["dataset", "release", "nm099999", "--version", "-y"],
+        ]) {
+          const r = await spawnCli(args);
+          expect(r.stdout.trim()).not.toBe(version);
+          expect(r.stderr).toContain("error: option '--version <version>' argument missing");
+          // Reported by Commander as a usage error, so the exit handler does not
+          // add its "attach a debug log to a bug report" nudge, which an error
+          // thrown out of main() would get.
+          expect(r.stderr).not.toContain("Run again with --debug");
+          expect(r.exitCode).toBe(1);
+        }
+      },
+      SPAWN_TEST_TIMEOUT_MS,
+    );
+
+    test(
+      "the root --version still prints the CLI version",
+      async () => {
+        const r = await spawnCli(["--version"]);
+        expect(r.exitCode).toBe(0);
+        expect(r.stdout.trim()).toBe(version);
+      },
+      SPAWN_TEST_TIMEOUT_MS,
+    );
   });
 });
