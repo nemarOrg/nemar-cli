@@ -29,8 +29,9 @@ earlier releases are described only by their generated notes.
   not attempted so the queue advances no retry round, and a run that defers everything and
   finds the index unchanged writes nothing to S3. Each recording gets its own memmap
   directory; after a broken worker pool its scratch is deleted, its orphaned `aws s3 cp`
-  children are killed, and the free space before and after is logged. A full volume is now
-  named as such instead of being read as out of memory.
+  children are killed, and the free space before and after is logged. A killed worker's
+  verdict now lists a full scratch disk among its possible causes, and a pool break warns
+  about it, so a full volume is no longer read only as out of memory.
 - **`generate_zarr.py --check-env` and a single settings check per run (#1638).**
   `hallu-zarr.sh` validates the `ZARR_SCRATCH_*` settings once before it dispatches anything,
   so a typo stops the run with the queue and D1 untouched instead of posting `failed` and
@@ -42,9 +43,13 @@ earlier releases are described only by their generated notes.
   `No space left on device`; this narrows the risk, it does not remove it.
 - A recording that can never fit is still re-queued hourly (a metadata clone and the
   start-of-run signal, no publish), and its `ready` callback restamps `zarr_converted_at`.
-  An `unchanged` webhook status and a `scratch_deferred` field are the follow-up.
-- nm000276's largest recording needs about 532 GiB and stays deferred until that much scratch
-  is free, or `ZARR_SCRATCH_STREAM_FACTOR=2.9` is set.
+  The start-of-run signal sets the dataset pending again each hour, and each `ready` callback
+  clears its recording-stats stamp so that sweep picks it up again. An `unchanged` webhook
+  status and a `scratch_deferred` field are the follow-up.
+- nm000276's largest recording is charged about 532 GiB, and admission also keeps 10 GiB of
+  headroom, so it needs about 542 GiB free with nothing else running and stays deferred until
+  then. With `ZARR_SCRATCH_STREAM_FACTOR=2.9` it is charged about 514 GiB and needs about
+  524 GiB free.
 
 ### Migrations
 
