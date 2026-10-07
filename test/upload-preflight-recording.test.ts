@@ -8,7 +8,7 @@
  * Asserted on the WIRE: an argument that is accepted but never sent is the failure this guards.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -128,10 +128,11 @@ beforeEach(() => {
     JSON.stringify({ activeAccount: "wire", accounts: { wire: { apiKey: "test-key" } } }),
   );
   process.env.NEMAR_CONFIG_DIR = configDir;
-  return () => {
-    rmSync(configDir, { recursive: true, force: true });
-    rmSync(datasetDir, { recursive: true, force: true });
-  };
+});
+
+afterEach(() => {
+  rmSync(configDir, { recursive: true, force: true });
+  rmSync(datasetDir, { recursive: true, force: true });
 });
 
 const FILES = [{ path: "sub-01/eeg/sub-01_task-rest_eeg.edf", size: 4096, type: "data" as const }];
