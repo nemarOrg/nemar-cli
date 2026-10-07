@@ -30,8 +30,10 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+  DETERMINISTIC_SCRUB_REFUSALS,
   IMPORT_IDENTIFIER_SCRUB_MARKER_FOR_CLASSIFY,
   classifyImportFailure,
+  isDeterministicScrubRefusal,
 } from "../backend/src/services/import-failure-cause";
 import { isDead, locationLogs } from "../scripts/scrub/git/git-lib";
 import { readLedger } from "../scripts/scrub/ledger";
@@ -45,6 +47,7 @@ import { annexCopyUpload } from "../src/lib/import-normalize";
 import { buildManifestItems } from "../src/lib/import-openneuro";
 import {
   IMPORT_SCANNER_ID,
+  IMPORT_SCRUB_REFUSALS,
   ImportScrubRefused,
   httpUpstreamReader,
   prepareImportedTreeForCopy,
@@ -143,6 +146,10 @@ interface Served {
   total?: number;
   /** Serve these bytes for a full GET (a ranged read still gets `bytes`). */
   fullBody?: Uint8Array;
+  /** Answer a ranged read with only this many bytes, while claiming the whole range. */
+  shortRange?: number;
+  /** Answer a ranged read without a Content-Range header. */
+  noLength?: boolean;
 }
 
 const served = new Map<string, Served>();
@@ -165,9 +172,10 @@ beforeAll(() => {
       if (m) {
         const start = Number(m[1]);
         const end = Math.min(Number(m[2]), obj.bytes.length - 1);
-        return new Response(obj.bytes.slice(start, end + 1), {
+        const body = obj.bytes.slice(start, start + (obj.shortRange ?? end - start + 1));
+        return new Response(body, {
           status: 206,
-          headers: { "Content-Range": `bytes ${start}-${end}/${total}` },
+          headers: obj.noLength ? {} : { "Content-Range": `bytes ${start}-${end}/${total}` },
         });
       }
       return new Response(obj.fullBody ?? obj.bytes, { status: 200 });
@@ -244,11 +252,18 @@ async function identity(dir: string, description: string): Promise<void> {
  * registered at its public S3 URL (which is what OpenNeuro's whereis reports), the bytes served by
  * the local bucket, and the content dropped, as it is in a fresh clone.
  */
-async function buildUpstream(files: Fixture[]): Promise<string> {
+async function buildUpstream(
+  files: Fixture[],
+  opts: {
+    /** The public URL to register for a path; default its S3 URL. A test may name a plain web URL. */
+    urlFor?: (path: string) => string;
+    attributes?: string;
+  } = {},
+): Promise<string> {
   const dir = scratchDir("nemar-scrub-upstream-");
   await run(["git", "init", "-q", "--initial-branch", "main", "."], dir);
   await identity(dir, "upstream");
-  writeFileSync(join(dir, ".gitattributes"), UPSTREAM_GITATTRIBUTES);
+  writeFileSync(join(dir, ".gitattributes"), opts.attributes ?? UPSTREAM_GITATTRIBUTES);
   for (const f of files) {
     const abs = join(dir, f.path);
     mkdirSync(dirname(abs), { recursive: true });
@@ -258,10 +273,8 @@ async function buildUpstream(files: Fixture[]): Promise<string> {
   await run(["git", "annex", "add", "--quiet", "."], dir);
   await run(["git", "commit", "-qm", "upstream snapshot"], dir);
   for (const [path, key] of await listAnnexedKeys(dir)) {
-    await run(
-      ["git", "annex", "registerurl", key, `https://s3.amazonaws.com/${BUCKET_PATH}/${path}`],
-      dir,
-    );
+    const url = opts.urlFor?.(path) ?? `https://s3.amazonaws.com/${BUCKET_PATH}/${path}`;
+    await run(["git", "annex", "registerurl", key, url], dir);
   }
   await run(["git", "annex", "drop", "--force", "--quiet", "."], dir);
   return dir;
@@ -642,6 +655,138 @@ describe("what the scrub refuses, before anything is pushed or copied", () => {
     expect(requests.some((r) => r.range === null)).toBe(false);
   }, 120_000);
 
+  test("a recording whose only source is a plain web URL is read there and scrubbed", async () => {
+    // The copy phase's curl fallback copies an item whose whereis URL is not an S3 endpoint, so
+    // its header must be read at that URL too, never skipped as "no source".
+    const files = baseFixtures();
+    const webPath = (p: string) => `web/${UPSTREAM_ID}/${p}`;
+    const upstream = await buildUpstream(files, {
+      urlFor: (p) =>
+        p === FLAGGED_ANNEXED
+          ? `${baseUrl}/${webPath(p)}`
+          : `https://s3.amazonaws.com/${BUCKET_PATH}/${p}`,
+    });
+    const original = files.find((f) => f.path === FLAGGED_ANNEXED)?.bytes as Uint8Array;
+    served.set(webPath(FLAGGED_ANNEXED), { bytes: original });
+    const { clone, store } = await cloneForImport(upstream);
+    const view = await upstreamView(clone);
+    const oldKey = await keyAt(clone, FLAGGED_ANNEXED);
+    expect(view.upstreamItems.find((it) => it.key === oldKey)?.source).toBeNull();
+
+    const result = await prepare(clone, view);
+    const newKey = await keyAt(clone, FLAGGED_ANNEXED);
+    expect(newKey).not.toBe(oldKey);
+    expect(result.manifest.items.map((it) => it.key)).not.toContain(oldKey);
+    expectNoSecret(
+      Buffer.from(storedBytes(store, newKey).subarray(0, EDF_HEADER_BYTES)).toString("latin1"),
+    );
+    expect(requests.some((r) => r.path === webPath(FLAGGED_ANNEXED) && r.range === null)).toBe(
+      true,
+    );
+    expect(result.scrub.counts.headers_not_read_no_source).toBe(0);
+  }, 120_000);
+
+  test("a header read that ends early is a failure, never a short header", async () => {
+    // A short body would read as "not an EDF" and let the recording through unread.
+    const upstream = await buildUpstream(baseFixtures());
+    const { clone } = await cloneForImport(upstream);
+    const view = await upstreamView(clone);
+    (served.get(`${BUCKET_PATH}/${FLAGGED_ANNEXED}`) as Served).shortRange = 100;
+    const err = await refusal(prepare(clone, view));
+    expect(err.code).toBe("header-unreadable");
+    expect(err.message).toContain("short-read x1");
+  }, 120_000);
+
+  test("a header read that does not say the object's size is a failure", async () => {
+    const upstream = await buildUpstream(baseFixtures());
+    const { clone } = await cloneForImport(upstream);
+    const view = await upstreamView(clone);
+    (served.get(`${BUCKET_PATH}/${CLEAN_ANNEXED}`) as Served).noLength = true;
+    const err = await refusal(prepare(clone, view));
+    expect(err.code).toBe("header-unreadable");
+    expect(err.message).toContain("no-length x1");
+  }, 120_000);
+
+  test("a 403 beside a 500 is not OpenNeuro refusing its bytes: the scrub's marker only", async () => {
+    const upstream = await buildUpstream(baseFixtures());
+    const { clone } = await cloneForImport(upstream);
+    const view = await upstreamView(clone);
+    (served.get(`${BUCKET_PATH}/${CLEAN_ANNEXED}`) as Served).status = 403;
+    (served.get(`${BUCKET_PATH}/${FLAGGED_ANNEXED}`) as Served).status = 500;
+    const err = await refusal(prepare(clone, view));
+    expect(err.message.startsWith(IMPORT_SCRUB_MARKER)).toBe(true);
+    expect(err.message).not.toContain(OPENNEURO_UPSTREAM_MARKER);
+  }, 120_000);
+
+  test("a recording git holds that cannot be read refuses, with the scrub's marker only", async () => {
+    const small = edfBytes(FLAGGED_PATIENT, 500, 5);
+    const upstream = await buildUpstream([...baseFixtures(), { path: FLAGGED_GIT, bytes: small }]);
+    const { clone } = await cloneForImport(upstream);
+    const view = await upstreamView(clone);
+    chmodSync(join(clone, FLAGGED_GIT), 0o000);
+    const err = await refusal(prepare(clone, view));
+    expect(err.code).toBe("header-unreadable");
+    expect(err.message).toContain("local-unreadable x1");
+    expect(err.message).not.toContain(OPENNEURO_UPSTREAM_MARKER);
+  }, 120_000);
+
+  test("an empty recording is not read and does not refuse", async () => {
+    const files = [
+      ...baseFixtures(),
+      { path: "sub-05/eeg/sub-05_task-rest_eeg.edf", bytes: new Uint8Array() },
+    ];
+    // Annexed although empty, as an upstream rule of `anything` would annex it.
+    const upstream = await buildUpstream(files, {
+      attributes: UPSTREAM_GITATTRIBUTES.replace(
+        "*.edf annex.largefiles=largerthan=2kb",
+        "*.edf annex.largefiles=anything",
+      ),
+    });
+    const { clone } = await cloneForImport(upstream);
+    const result = await prepare(clone, await upstreamView(clone));
+    expect(result.scrub.counts.headers_not_edf).toBe(1);
+    expect(requests.some((r) => r.path.endsWith("sub-05_task-rest_eeg.edf"))).toBe(false);
+  }, 120_000);
+
+  test("a recording to replace whose key is not SHA256E refuses before any download", async () => {
+    const upstream = await buildUpstream(baseFixtures(), {
+      attributes: UPSTREAM_GITATTRIBUTES.replace("* annex.backend=SHA256E", "* annex.backend=MD5E"),
+    });
+    const { clone } = await cloneForImport(upstream);
+    expect(await keyAt(clone, FLAGGED_ANNEXED)).toMatch(/^MD5E-/);
+    const err = await refusal(prepare(clone, await upstreamView(clone)));
+    expect(err.code).toBe("unsupported-key-backend");
+    expect(requests.some((r) => r.range === null)).toBe(false);
+  }, 120_000);
+
+  test("an error with a path in it is reported by its class alone", async () => {
+    // A Node fs error's message embeds the absolute path, and a path can be the identifier.
+    const secretJson = `sub-01/eeg/${SURNAME}_notes.json`;
+    const upstream = await buildUpstream([
+      ...baseFixtures(),
+      { path: secretJson, bytes: text(`{"TaskName": "rest"}`) },
+    ]);
+    const { clone } = await cloneForImport(upstream);
+    chmodSync(join(clone, secretJson), 0o000);
+    const err = await refusal(prepare(clone, await upstreamView(clone)));
+    expect(err.code).toBe("scrub-failed");
+    expect(err.message).toContain("EACCES");
+    expectNoSecret(err.message);
+    expect(err.message).not.toContain(clone);
+  }, 120_000);
+
+  test("an upload that fails is reported without the paths git-annex names", async () => {
+    const upstream = await buildUpstream(baseFixtures());
+    const { clone, store } = await cloneForImport(upstream);
+    const view = await upstreamView(clone);
+    // The remote's directory is gone: git-annex's copy fails, and its stderr names the file.
+    rmSync(store, { recursive: true, force: true });
+    const err = await refusal(prepare(clone, view));
+    expect(err.code).toBe("upload-failed");
+    expectNoSecret(err.message);
+    expect(err.message).not.toContain(clone);
+  }, 120_000);
+
   test("the Worker's classifier reads each refusal the way it was meant", async () => {
     // The CLI's failure line becomes `import_jobs.last_error`; the classifier keeps its own copy
     // of the marker, so the two are pinned here, through a refusal the scrub really raised.
@@ -654,6 +799,11 @@ describe("what the scrub refuses, before anything is pushed or copied", () => {
     expect(classifyImportFailure({ stage: "prepare", lastError: bound.message }).cause).toBe(
       "identifier_scrub",
     );
+    // The retry engine parks the words a retry cannot clear; each must be one the scrub can say.
+    for (const word of DETERMINISTIC_SCRUB_REFUSALS) {
+      expect(IMPORT_SCRUB_REFUSALS as readonly string[]).toContain(word);
+    }
+    expect(isDeterministicScrubRefusal(bound.message)).toBe(true);
     (served.get(`${BUCKET_PATH}/${CLEAN_ANNEXED}`) as Served).status = 403;
     const denied = await refusal(prepare(clone, view));
     // OpenNeuro refusing its own bytes is the more specific claim, and it keeps the dataset
@@ -661,6 +811,7 @@ describe("what the scrub refuses, before anything is pushed or copied", () => {
     expect(classifyImportFailure({ stage: "prepare", lastError: denied.message }).cause).toBe(
       "upstream_inaccessible",
     );
+    expect(isDeterministicScrubRefusal(denied.message)).toBe(false);
   }, 120_000);
 
   test("a 500 that persists refuses with the scrub's marker only", async () => {
@@ -784,8 +935,51 @@ describe("a re-import never copies back what a correction replaced", () => {
     expect(result.scrub.committed).toBe(false);
     expect(result.scrub.counts.headers_not_read_nemar_held).toBe(1);
     expect(readLedger(join(clone, ".nemar/corrections.jsonl"))).toHaveLength(1);
+    // The first import blanked a sidecar, and the history this tree carries still holds the value:
+    // nothing was blanked THIS run, and the hold is carried from the ledger, not forgotten.
+    expect(result.scrub.counts.json_values_blanked).toBe(0);
+    expect(result.privacy).toEqual({ version: 1, historyHoldsOriginals: true });
     expect(requests.some((r) => r.range === null)).toBe(false);
   }, 180_000);
+
+  test("a later history rewrite clears the hold, and a ledger that cannot be read keeps it", async () => {
+    const upstream = await buildUpstream(baseFixtures());
+    const nemarRepo = await bareRepo();
+    const first = await cloneForImport(upstream);
+    await prepare(first.clone, await upstreamView(first.clone));
+    await run(["git", "remote", "add", "nemar", nemarRepo], first.clone);
+    const ledger = join(first.clone, ".nemar/corrections.jsonl");
+    // ADR 0085's history rewrite ran after the import: the originals are gone from history.
+    const rewritten = {
+      ...readLedger(ledger)[0],
+      action: "history-rewritten",
+      versions: [],
+      counts: { commits: 3 },
+      verification: "scanner-clean",
+    };
+    writeFileSync(ledger, `${readFileSync(ledger, "utf8")}${JSON.stringify(rewritten)}\n`);
+    await run(
+      ["git", "-c", "annex.largefiles=nothing", "add", ".nemar/corrections.jsonl"],
+      first.clone,
+    );
+    await run(["git", "commit", "-qm", "rewritten"], first.clone);
+    await run(["git", "push", "-q", "nemar", "main", "git-annex"], first.clone);
+    const cleared = await reimportClone(upstream, nemarRepo);
+    const after = await prepare(cleared.clone, cleared.view, { reimport: true });
+    expect(after.privacy.historyHoldsOriginals).toBe(false);
+
+    // A line the ledger's own guard refuses: whether history holds is unknown, so it holds.
+    writeFileSync(ledger, `${readFileSync(ledger, "utf8")}{"version": 1, "action": "free text"}\n`);
+    await run(
+      ["git", "-c", "annex.largefiles=nothing", "add", ".nemar/corrections.jsonl"],
+      first.clone,
+    );
+    await run(["git", "commit", "-qm", "bad line"], first.clone);
+    await run(["git", "push", "-q", "nemar", "main"], first.clone);
+    const corrupt = await reimportClone(upstream, nemarRepo);
+    const held = await prepare(corrupt.clone, corrupt.view, { reimport: true });
+    expect(held.privacy.historyHoldsOriginals).toBe(true);
+  }, 240_000);
 
   test("an upstream recording the dataset's own tree does not name is never copied", async () => {
     // Re-pull is not built (ADR 0006): a re-import keeps the dataset's own tree. A recording

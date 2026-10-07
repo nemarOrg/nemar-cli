@@ -27,9 +27,11 @@
  * **It fails closed.** Anything it cannot read, verify or move refuses with
  * {@link ImportScrubRefused}, before the caller pushes, so nothing it could not check is copied.
  *
- * **It prints nothing and returns counts.** The import runs in `nemarDatasets/.github`, whose
- * Actions logs are public: a path can be the identifier, so no path, file name, key or value leaves
- * this module, in a result, an error or a commit message.
+ * **It prints nothing, and nothing it writes or throws names a path, a key or a value.** The import
+ * runs in `nemarDatasets/.github`, whose Actions logs are public, and a path can be the identifier:
+ * refusals, the ledger line and the commit message carry counts and fixed words, and any other error
+ * is converted to a refusal that names only its class (`scrub-failed`, `upload-failed`). The result
+ * holds keys and paths for the caller's own use; the caller prints only its counts.
  */
 
 import { createHash } from "node:crypto";
@@ -37,7 +39,9 @@ import {
   closeSync,
   createReadStream,
   createWriteStream,
+  existsSync,
   lstatSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   readSync,
@@ -46,12 +50,13 @@ import {
   writeFileSync,
   writeSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { ANNEX_KEY } from "../../scripts/scrub/contract.js";
 import { annexRegistry, isDead, locationLogs } from "../../scripts/scrub/git/git-lib.js";
-import { LEDGER_REPO_PATH, appendLedger } from "../../scripts/scrub/ledger.js";
+import { LEDGER_REPO_PATH, appendLedger, readLedger } from "../../scripts/scrub/ledger.js";
 import { EDF_HEADER_BYTES, scanPaths } from "../../shared/identifier-scan.js";
 import {
   JsonBlankUnverified,
@@ -67,6 +72,7 @@ import {
   provenanceNote,
   provenanceReadmeNote,
 } from "../../shared/privacy-correction-text.js";
+import { chunkAddTargets } from "./git-annex/init.js";
 import { runCommand } from "./git-annex/run-command.js";
 import { listAnnexedKeys } from "./git-annex/transfer.js";
 import { IMPORT_SCRUB_MARKER, OPENNEURO_UPSTREAM_MARKER } from "./import-markers.js";
@@ -82,6 +88,7 @@ import {
   type ImportPrivacyRecord,
   type S3Ref,
   annexKeyDeclaredSize,
+  isLocallyUploaded,
   parseS3Url,
 } from "./s3-server-copy.js";
 import { scannerRulesDigest } from "./scanner-rules-digest.js" with { type: "macro" };
@@ -114,6 +121,10 @@ export const IMPORT_SCRUB_REFUSALS = [
   "retire-failed",
   /** A patched header or a blanked document could not be proven. */
   "scrub-unverified",
+  /** The scrubbed recordings could not be annexed or uploaded from the host. */
+  "upload-failed",
+  /** Anything else went wrong inside the scrub; the detail is the error's class, never its text. */
+  "scrub-failed",
 ] as const;
 export type ImportScrubRefusal = (typeof IMPORT_SCRUB_REFUSALS)[number];
 
@@ -126,10 +137,31 @@ export class ImportScrubRefused extends Error {
     upstreamInaccessible = false,
   ) {
     super(
-      `${upstreamInaccessible ? `${OPENNEURO_UPSTREAM_MARKER} ` : ""}${IMPORT_SCRUB_MARKER} refused: ${code} (${detail}). Nothing was copied or pushed.`,
+      `${upstreamInaccessible ? `${OPENNEURO_UPSTREAM_MARKER} ` : ""}${IMPORT_SCRUB_MARKER} refused: ${code} (${detail}). Nothing was pushed, and the copy phase did not run.`,
     );
     this.name = "ImportScrubRefused";
   }
+}
+
+/** Error classes whose messages are fixed words by construction (ADR 0085's scrub tools). */
+const FIXED_WORD_ERRORS = new Set(["GitScrubError", "ContractError", "LedgerRefused"]);
+/** An errno code: capital letters, digits and underscores. */
+const ERRNO = /^[A-Z][A-Z0-9_]{1,20}$/;
+
+/**
+ * What an unexpected error may say in a public line: its class, its errno code, and its message
+ * only when the class is one whose messages are fixed words. A Node fs error's message embeds the
+ * path, and git's stderr names files, so neither is ever repeated.
+ */
+export function describeError(err: unknown): string {
+  if (!(err instanceof Error)) return "non-error";
+  const code = (err as NodeJS.ErrnoException).code;
+  const parts = [/^[A-Za-z]{1,40}$/.test(err.name) ? err.name : "Error"];
+  if (typeof code === "string" && ERRNO.test(code)) parts.push(code);
+  if (FIXED_WORD_ERRORS.has(err.name) && /^[a-z0-9 :,-]{1,80}$/i.test(err.message)) {
+    parts.push(err.message);
+  }
+  return parts.join(" ");
 }
 
 /** The scanner revision an import's ledger line names (ADR 0087): a digest of the rule files. */
@@ -160,14 +192,21 @@ export type HeaderRead =
 export type Download = { ok: true; bytes: number } | { ok: false; failure: ReadFailure };
 
 /**
+ * Where an upstream object is read from: the S3 object the server-side copy copies (by path), or,
+ * for a whereis URL that is not an S3 endpoint, that URL itself, which is what the copy phase's
+ * curl fallback fetches (`copyOne` in `s3-server-copy.ts`).
+ */
+export type UpstreamSource = { kind: "s3"; ref: S3Ref } | { kind: "url"; url: string };
+
+/**
  * How the scrub reads the upstream objects the copy phase would copy. {@link httpUpstreamReader} is
  * the only implementation; a test points it at a local server.
  */
 export interface UpstreamReader {
   /** The first {@link EDF_HEADER_BYTES} bytes, and the object's whole size when the server says it. */
-  header(ref: S3Ref): Promise<HeaderRead>;
+  header(source: UpstreamSource): Promise<HeaderRead>;
   /** The whole object, streamed to `dest`. */
-  download(ref: S3Ref, dest: string): Promise<Download>;
+  download(source: UpstreamSource, dest: string): Promise<Download>;
 }
 
 const USER_AGENT = "nemar-cli-import-scrub";
@@ -183,12 +222,21 @@ export function upstreamObjectUrl(ref: S3Ref, baseUrl?: string): string {
   return `${host.replace(/\/+$/, "")}/${encodeURIComponent(ref.bucket)}/${path}`;
 }
 
-function failureOf(err: unknown): ReadFailure {
-  const name = err instanceof Error ? err.name : "";
-  return name === "TimeoutError" || name === "AbortError" ? "timeout" : "network";
+function urlOf(source: UpstreamSource, baseUrl?: string): string {
+  return source.kind === "s3" ? upstreamObjectUrl(source.ref, baseUrl) : source.url;
 }
 
-/** A 4xx other than 408 and 429 will answer the same way again. */
+/** Local errors that a retry cannot fix and that are not the network's. */
+const LOCAL_IO = new Set(["ENOSPC", "EACCES", "EPERM", "EROFS", "EIO", "EMFILE", "ENFILE"]);
+
+function failureOf(err: unknown): ReadFailure {
+  const name = err instanceof Error ? err.name : "";
+  if (name === "TimeoutError" || name === "AbortError") return "timeout";
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  return typeof code === "string" && LOCAL_IO.has(code) ? "local-io" : "network";
+}
+
+/** A 4xx other than 408 and 429 will answer the same way again; so will a local I/O error. */
 function isDeterministic(status: number): boolean {
   return status >= 400 && status < 500 && status !== 408 && status !== 429;
 }
@@ -226,13 +274,19 @@ async function readAtMost(res: Response, limit: number): Promise<Uint8Array> {
 }
 
 /**
- * Anonymous HTTPS reads of upstream objects, by path, which is what the copy phase copies (it drops
- * the whereis URL's version). Retried on a timeout, a network error, a 5xx, a 408 and a 429; a
- * failure is a fixed word (`http-403`, `timeout`, `network`).
+ * Anonymous HTTPS reads of upstream objects: an S3 source by path, which is what the server-side
+ * copy copies (it drops the whereis URL's version), and any other source at its own URL. Retried on
+ * a timeout, a network error, a short read, a 5xx, a 408 and a 429; a failure is a fixed word
+ * (`http-403`, `timeout`, `network`, `short-read`, `local-io`).
+ *
+ * A header read is accepted only when it holds every byte it should: the first
+ * {@link EDF_HEADER_BYTES}, or the whole object when the server says the object is smaller. A body
+ * that ends early is a failure, never a short header, because a short header reads as "not an
+ * EDF" and would let the recording through unread.
  */
 export function httpUpstreamReader(
   options: {
-    /** Only a test sets this; production reads `s3.amazonaws.com`. */
+    /** Only a test sets this; production reads `s3.amazonaws.com`. Applies to S3 sources only. */
     baseUrl?: string;
     attempts?: number;
     headerTimeoutMs?: number;
@@ -244,33 +298,38 @@ export function httpUpstreamReader(
   const delay = options.retryDelayMs ?? 1_000;
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   return {
-    async header(ref) {
+    async header(source) {
       let failure: ReadFailure = "network";
       for (let attempt = 1; attempt <= attempts; attempt++) {
         try {
-          const res = await fetch(upstreamObjectUrl(ref, options.baseUrl), {
+          const res = await fetch(urlOf(source, options.baseUrl), {
             headers: { Range: `bytes=0-${EDF_HEADER_BYTES - 1}`, "User-Agent": USER_AGENT },
             signal: AbortSignal.timeout(options.headerTimeoutMs ?? 30_000),
           });
           if (res.status === 206 || res.status === 200) {
             const total = totalOf(res);
-            return { ok: true, bytes: await readAtMost(res, EDF_HEADER_BYTES), total };
+            const bytes = await readAtMost(res, EDF_HEADER_BYTES);
+            const expected = total === null ? EDF_HEADER_BYTES : Math.min(EDF_HEADER_BYTES, total);
+            if (bytes.length === expected) return { ok: true, bytes, total };
+            failure = "short-read";
+          } else {
+            await res.body?.cancel().catch(() => undefined);
+            failure = `http-${res.status}`;
+            if (isDeterministic(res.status)) break;
           }
-          await res.body?.cancel().catch(() => undefined);
-          failure = `http-${res.status}`;
-          if (isDeterministic(res.status)) break;
         } catch (err) {
           failure = failureOf(err);
+          if (failure === "local-io") break;
         }
         if (attempt < attempts) await sleep(delay * attempt);
       }
       return { ok: false, failure };
     },
-    async download(ref, dest) {
+    async download(source, dest) {
       let failure: ReadFailure = "network";
       for (let attempt = 1; attempt <= attempts; attempt++) {
         try {
-          const res = await fetch(upstreamObjectUrl(ref, options.baseUrl), {
+          const res = await fetch(urlOf(source, options.baseUrl), {
             headers: { "User-Agent": USER_AGENT },
             signal: AbortSignal.timeout(options.downloadTimeoutMs ?? 60 * 60_000),
           });
@@ -284,9 +343,16 @@ export function httpUpstreamReader(
           }
           await res.body?.cancel().catch(() => undefined);
           failure = `http-${res.status}`;
-          if (isDeterministic(res.status)) break;
+          if (isDeterministic(res.status)) {
+            rmSync(dest, { force: true });
+            break;
+          }
         } catch (err) {
           failure = failureOf(err);
+          if (failure === "local-io") {
+            rmSync(dest, { force: true });
+            break;
+          }
         }
         rmSync(dest, { force: true });
         if (attempt < attempts) await sleep(delay * attempt);
@@ -338,6 +404,8 @@ export interface ImportScrubCounts {
   provenance_annotated: number;
   /** 1 when the provenance README got the note, else 0. */
   provenance_readme_annotated: number;
+  /** Provenance files tracked but not annotated (not a regular file, or not a JSON object). */
+  provenance_not_annotated: number;
 }
 
 function zeroCounts(): ImportScrubCounts {
@@ -360,6 +428,7 @@ function zeroCounts(): ImportScrubCounts {
     images_or_documents_held: 0,
     provenance_annotated: 0,
     provenance_readme_annotated: 0,
+    provenance_not_annotated: 0,
   };
 }
 
@@ -372,10 +441,13 @@ export interface ImportScrubResult {
   /** Paths git held that the scrub annexed and uploaded itself; the annex-policy leg skips them. */
   handledPaths: Set<string>;
   /**
-   * True when the scrub changed content git tracks (a JSON value, a recording git held): the history
-   * the push carries still holds the original, so the publication is never approved automatically.
+   * True when content git tracks was changed by a forward fix (a JSON value, a recording git held),
+   * by this run or, on a re-import, by an earlier import whose ledger line says so: the history the
+   * push carries still holds the original, so the publication is never approved automatically.
    */
   historyHoldsOriginals: boolean;
+  /** Recording keys whose header this run read from upstream (flagged or not). */
+  headerReadKeys: Set<string>;
   /** True when the scrub made a commit. */
   committed: boolean;
 }
@@ -586,13 +658,45 @@ function isRegularFile(abs: string): boolean {
 }
 
 async function stageAsGit(datasetPath: string, paths: string[]): Promise<void> {
-  if (paths.length === 0) return;
   // `annex.largefiles=nothing`: these are git content (JSON, text, the ledger), and a plain `git add`
   // in an annexed repository can turn a file into an annex pointer whose content nothing uploads.
-  const r = await runCommand(["git", "-c", "annex.largefiles=nothing", "add", "--", ...paths], {
-    cwd: datasetPath,
-  });
-  if (r.exitCode !== 0) throw new Error(`git add failed for ${paths.length} scrubbed file(s)`);
+  // It holds for these paths because the inherited `.gitattributes` OpenNeuro writes (ADR 0060) has
+  // no catch-all `annex.largefiles` rule and keeps JSON under 1 MB in git; an attribute outranks
+  // this config, so a tree that annexed JSON by attribute would annex these too, and the scrub
+  // commit would then fail to carry them, which `git commit` below reports.
+  for (const chunk of chunkAddTargets(paths)) {
+    const r = await runCommand(["git", "-c", "annex.largefiles=nothing", "add", "--", ...chunk], {
+      cwd: datasetPath,
+    });
+    if (r.exitCode !== 0) throw new Error(`git add failed for ${chunk.length} scrubbed file(s)`);
+  }
+}
+
+/**
+ * The history hold an earlier import left on this tree: true when the ledger has an
+ * `import-scrubbed` line that changed git-tracked content with no `history-rewritten` line after it
+ * (a rewrite by ADR 0085's tools removes the originals). A ledger that cannot be read holds.
+ */
+function earlierHistoryHold(datasetPath: string): boolean {
+  const path = join(datasetPath, LEDGER_REPO_PATH);
+  if (!existsSync(path)) return false;
+  let entries: ReturnType<typeof readLedger>;
+  try {
+    entries = readLedger(path);
+  } catch {
+    return true;
+  }
+  let hold = false;
+  for (const e of entries) {
+    if (e.action === "history-rewritten") hold = false;
+    if (
+      e.action === "import-scrubbed" &&
+      ((e.counts.json_values_blanked ?? 0) > 0 || (e.counts.git_held_recordings_scrubbed ?? 0) > 0)
+    ) {
+      hold = true;
+    }
+  }
+  return hold;
 }
 
 /**
@@ -601,6 +705,15 @@ async function stageAsGit(datasetPath: string, paths: string[]): Promise<void> {
  * commit (when anything changed), and the result says what the copy manifest must and must not hold.
  */
 export async function scrubImportedTree(input: ImportScrubInput): Promise<ImportScrubResult> {
+  try {
+    return await scrubTree(input);
+  } catch (err) {
+    if (err instanceof ImportScrubRefused) throw err;
+    throw new ImportScrubRefused("scrub-failed", describeError(err));
+  }
+}
+
+async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
   const { datasetPath } = input;
   const counts = zeroCounts();
   const tracked = [...(await listTrackedPaths(datasetPath))].sort();
@@ -610,7 +723,9 @@ export async function scrubImportedTree(input: ImportScrubInput): Promise<Import
 
   // 1. Read every header that can be read, and decide.
   const gitHeld: string[] = [];
-  const upstream: Array<{ path: string; key: string; ref: S3Ref }> = [];
+  const upstream: Array<{ path: string; key: string; source: UpstreamSource }> = [];
+  // Recording keys this run has seen the first bytes of (or that hold no bytes at all).
+  const headerReadKeys = new Set<string>();
   const localFailures: string[] = [];
   for (const path of recordings) {
     const key = annexedKeys.get(path);
@@ -622,17 +737,34 @@ export async function scrubImportedTree(input: ImportScrubInput): Promise<Import
       counts.headers_not_read_skip_data++;
       continue;
     }
+    if (annexKeyDeclaredSize(key) === 0) {
+      // An empty file is no EDF header, and a ranged read of it answers 416.
+      counts.headers_not_edf++;
+      headerReadKeys.add(key);
+      continue;
+    }
     const url = input.keyUrlMap.get(key);
-    const ref = url ? parseS3Url(url) : null;
-    if (!ref) {
-      // No upstream source: on a re-import this is NEMAR's own key (a scrubbed or normalized copy),
-      // which the screen reads from NEMAR's bucket; on a first import the copy cannot copy it either,
-      // and finalize's tree gate refuses the dataset.
+    if (url === undefined) {
+      // No URL at all: no manifest entry, so the copy never copies this key. On a re-import it is
+      // NEMAR's own key (a scrubbed or normalized copy), which the screen reads from NEMAR's bucket;
+      // on a first import nothing can copy it, and finalize's tree gate refuses the dataset.
       if (input.reimport) counts.headers_not_read_nemar_held++;
       else counts.headers_not_read_no_source++;
       continue;
     }
-    upstream.push({ path, key, ref });
+    // A URL that is not an S3 endpoint is still copied, by the copy phase's curl fallback, so its
+    // header is read at that same URL.
+    const ref = parseS3Url(url);
+    const source: UpstreamSource | null = ref
+      ? { kind: "s3", ref }
+      : /^https?:\/\//.test(url)
+        ? { kind: "url", url }
+        : null;
+    if (!source) {
+      localFailures.push("source-unsupported");
+      continue;
+    }
+    upstream.push({ path, key, source });
   }
 
   const flaggedGitHeld: string[] = [];
@@ -648,10 +780,17 @@ export async function scrubImportedTree(input: ImportScrubInput): Promise<Import
     else if (verdict) flaggedGitHeld.push(path);
   }
 
-  const reads = await mapPool(upstream, input.concurrency ?? 16, (u) => input.reader.header(u.ref));
+  const reads = await mapPool(upstream, input.concurrency ?? 16, (u) =>
+    input.reader.header(u.source),
+  );
   const failures: string[] = [...localFailures];
   const sizeMismatches: string[] = [];
-  const flaggedUpstream: Array<{ path: string; key: string; ref: S3Ref; size: number }> = [];
+  const flaggedUpstream: Array<{
+    path: string;
+    key: string;
+    source: UpstreamSource;
+    size: number;
+  }> = [];
   reads.forEach((read, i) => {
     const u = upstream[i] as (typeof upstream)[number];
     if (!read.ok) {
@@ -659,11 +798,17 @@ export async function scrubImportedTree(input: ImportScrubInput): Promise<Import
       return;
     }
     const size = annexKeyDeclaredSize(u.key);
-    if (size !== null && read.total !== null && read.total !== size) {
+    if (size !== null && read.total === null) {
+      // The server did not say how big the object is, so nothing shows these bytes are the key's.
+      failures.push("no-length");
+      return;
+    }
+    if (size !== null && read.total !== size) {
       sizeMismatches.push(u.key);
       return;
     }
     counts.headers_read++;
+    headerReadKeys.add(u.key);
     const verdict = needsScrub(read.bytes);
     if (verdict === null) counts.headers_not_edf++;
     else if (verdict) flaggedUpstream.push({ ...u, size: size ?? 0 });
@@ -712,7 +857,7 @@ export async function scrubImportedTree(input: ImportScrubInput): Promise<Import
   for (const f of flaggedUpstream) {
     const abs = join(datasetPath, f.path);
     const tmp = `${abs}.nemar-scrub-download`;
-    const got = await input.reader.download(f.ref, tmp);
+    const got = await input.reader.download(f.source, tmp);
     if (!got.ok) {
       throw new ImportScrubRefused(
         "header-unreadable",
@@ -751,16 +896,25 @@ export async function scrubImportedTree(input: ImportScrubInput): Promise<Import
   if (input.skipData) toStage.push(...flaggedGitHeld);
   if (annexTargets.length > 0) {
     if (!input.upload) throw new Error("scrubbed recordings need an upload strategy");
-    const data = await normalizeUnannexedData({
-      datasetPath,
-      files: annexTargets,
-      remoteName: input.remoteName,
-      bucket: input.bucket,
-      nemarId: input.nemarId,
-      maxBytes,
-      upload: input.upload,
-      backend: "SHA256E",
-    });
+    let data: Awaited<ReturnType<typeof normalizeUnannexedData>>;
+    try {
+      data = await normalizeUnannexedData({
+        datasetPath,
+        files: annexTargets,
+        remoteName: input.remoteName,
+        bucket: input.bucket,
+        nemarId: input.nemarId,
+        maxBytes,
+        upload: input.upload,
+        backend: "SHA256E",
+      });
+    } catch (err) {
+      // Its messages name up to three paths and quote git-annex's stderr: never repeated here.
+      throw new ImportScrubRefused(
+        "upload-failed",
+        `${annexTargets.length} scrubbed recording(s) could not be annexed or uploaded: ${describeError(err)}`,
+      );
+    }
     items.push(...data.items);
     for (const p of flaggedGitHeld) handledPaths.add(p);
     const newKeyOf = new Map(data.files.map((f) => [f.path, f.key]));
@@ -785,8 +939,11 @@ export async function scrubImportedTree(input: ImportScrubInput): Promise<Import
           remoteUuids: [],
           execute: true,
         });
-      } catch {
-        throw new ImportScrubRefused("retire-failed", "the git-annex branch could not be updated");
+      } catch (err) {
+        throw new ImportScrubRefused(
+          "retire-failed",
+          `the git-annex branch could not be updated: ${describeError(err)}`,
+        );
       }
       const newKeys = new Set(Object.values(keymap)).size;
       if (
@@ -861,7 +1018,11 @@ export async function scrubImportedTree(input: ImportScrubInput): Promise<Import
         writeFileSync(provenance, `${bom}${next}`);
         toStage.push(PROVENANCE_PATH);
         counts.provenance_annotated = 1;
+      } else {
+        counts.provenance_not_annotated++;
       }
+    } else if (tracked.includes(PROVENANCE_PATH)) {
+      counts.provenance_not_annotated++;
     }
     const readme = join(datasetPath, PROVENANCE_README_PATH);
     if (tracked.includes(PROVENANCE_README_PATH) && isRegularFile(readme)) {
@@ -872,6 +1033,8 @@ export async function scrubImportedTree(input: ImportScrubInput): Promise<Import
         toStage.push(PROVENANCE_README_PATH);
       }
       counts.provenance_readme_annotated = 1;
+    } else if (tracked.includes(PROVENANCE_README_PATH)) {
+      counts.provenance_not_annotated++;
     }
   }
 
@@ -900,24 +1063,33 @@ export async function scrubImportedTree(input: ImportScrubInput): Promise<Import
       `Recorded in ${LEDGER_REPO_PATH}.`,
     ].join("\n");
     // Only the scrub's own paths: prepare has staged other changes by now (root metadata it
-    // un-annexed), and they belong to the commits that describe them, not to this one.
+    // un-annexed), and they belong to the commits that describe them, not to this one. Passed in
+    // a file, NUL-separated, because there can be more than one command line holds; the file is
+    // private (a path can be the identifier) and removed at once.
     const paths = [...new Set([...toStage, ...annexTargets.map((t) => t.path)])];
-    const commit = await runCommand(
-      [
-        "git",
-        "-c",
-        "annex.largefiles=nothing",
-        "commit",
-        "-m",
-        "Privacy correction on import (ADR 0087)",
-        "-m",
-        body,
-        "--",
-        ...paths,
-      ],
-      { cwd: datasetPath },
-    );
-    if (commit.exitCode !== 0) throw new Error("could not commit the import scrub");
+    const specDir = mkdtempSync(join(tmpdir(), "nemar-scrub-pathspec-"));
+    const specFile = join(specDir, "paths");
+    writeFileSync(specFile, `${paths.join("\0")}\0`, { mode: 0o600 });
+    try {
+      const commit = await runCommand(
+        [
+          "git",
+          "-c",
+          "annex.largefiles=nothing",
+          "commit",
+          "-m",
+          "Privacy correction on import (ADR 0087)",
+          "-m",
+          body,
+          `--pathspec-from-file=${specFile}`,
+          "--pathspec-file-nul",
+        ],
+        { cwd: datasetPath },
+      );
+      if (commit.exitCode !== 0) throw new Error("could not commit the import scrub");
+    } finally {
+      rmSync(specDir, { recursive: true, force: true });
+    }
     committed = true;
   }
 
@@ -927,7 +1099,10 @@ export async function scrubImportedTree(input: ImportScrubInput): Promise<Import
     replacedKeys,
     handledPaths,
     historyHoldsOriginals:
-      counts.json_values_blanked > 0 || counts.git_held_recordings_scrubbed > 0,
+      counts.json_values_blanked > 0 ||
+      counts.git_held_recordings_scrubbed > 0 ||
+      (input.reimport && earlierHistoryHold(datasetPath)),
+    headerReadKeys,
     committed,
   };
 }
@@ -954,6 +1129,19 @@ export interface RestrictedManifest {
  * the tree refuses. Duplicate entries are kept once.
  */
 export async function restrictManifestToTree(
+  datasetPath: string,
+  items: ImportManifestItem[],
+  replacedKeys: ReadonlySet<string>,
+): Promise<RestrictedManifest> {
+  try {
+    return await restrictToTree(datasetPath, items, replacedKeys);
+  } catch (err) {
+    if (err instanceof ImportScrubRefused) throw err;
+    throw new ImportScrubRefused("scrub-failed", describeError(err));
+  }
+}
+
+async function restrictToTree(
   datasetPath: string,
   items: ImportManifestItem[],
   replacedKeys: ReadonlySet<string>,
@@ -1045,6 +1233,25 @@ export async function prepareImportedTreeForCopy(args: {
         [...args.upstreamItems, ...scrub.items, ...normalized.items],
         scrub.replacedKeys,
       );
+  // The closing check: every recording the copy phase will copy from upstream had its header read
+  // by this run. Nothing above should break it; if something does, refuse rather than copy unread.
+  let tree: Map<string, string>;
+  try {
+    tree = await listAnnexedKeys(args.datasetPath);
+  } catch (err) {
+    throw new ImportScrubRefused("scrub-failed", describeError(err));
+  }
+  const recordingKeys = new Set([...tree].filter(([p]) => RECORDING.test(p)).map(([, k]) => k));
+  const unread = manifest.items.filter(
+    (it) =>
+      !isLocallyUploaded(it) && recordingKeys.has(it.key) && !scrub.headerReadKeys.has(it.key),
+  ).length;
+  if (unread > 0) {
+    throw new ImportScrubRefused(
+      "header-unreadable",
+      `${unread} recording(s) in the copy manifest whose header this run did not read`,
+    );
+  }
   return {
     scrub,
     normalized,
