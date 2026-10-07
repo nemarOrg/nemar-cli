@@ -157,6 +157,20 @@ export const zarrStoreSchema = z
     power_line_frequency: z.number().nullable().optional(),
     event_description_count: z.number().int().nonnegative().optional(),
     n_events: z.number().int().nonnegative().optional(),
+    /** Counts per trial_type value. A key is the value itself up to 128 Unicode
+     *  code points (not bytes or UTF-16 units; the value is stripped first); a
+     *  longer value is keyed `<first 13 code points>~<14 hex digits of the
+     *  SHA-256 of its UTF-8 bytes>` (28 characters). Values that fit claim their
+     *  own key first, then long values sorted by code point (not JavaScript's
+     *  UTF-16 order); when a long value's key is already taken it is re-hashed
+     *  over the decimal salt n = 1, 2, ..., a NUL byte, and the value, until its
+     *  key is free. Distinct values keep distinct keys and no counts are
+     *  merged, so a dataset that stores a whole record in the column still has a
+     *  key per distinct value, about 33 bytes each instead of the record's
+     *  length. An index published before this rule carries the literal value for
+     *  a longer one: look it up first, then the digest form. The full value is
+     *  in events.parquet when `events_parquet` is listed. Consumers stay lenient
+     *  about key length for that reason. */
     trial_types: z.record(z.string(), z.number().int().nonnegative()).optional(),
     units_report: zarrUnitsReportSchema.optional(),
     channels_tsv_read_error: z.boolean().optional(),
