@@ -117,6 +117,10 @@ const SWEEP_WIRING: Record<
   // minutes, so it rides the 30-minute tick; it mails admins, so it is
   // production-only there and absent from DEV_CRON_ALLOWLIST.
   sweepIdentifierScreens: "tick-prod-only",
+  // Epic #1610 phase 5 (ADR 0087): the sweep's callback token pair, called by the tick
+  // and the callback route; not cron entry points.
+  signIdentifierSweepCallbackToken: "helper",
+  verifyIdentifierSweepCallbackToken: "helper",
   // #1440: the non-production scope clause for sweepBlockedBidsValidationRequests,
   // exported so the test imports the REAL clause rather than retyping it. Pure,
   // driven only by the sweep above, and never a cron entry point of its own.

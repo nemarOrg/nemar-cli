@@ -27,6 +27,7 @@ const EXPECTED_EXPORTS = [
   "CENTRAL_WORKFLOW_REPO",
   "EnrichmentCommitError",
   "IDENTIFIER_SCREEN_TOKEN_DOMAIN",
+  "IDENTIFIER_SWEEP_TOKEN_DOMAIN",
   "NEMAR_APP_ID",
   "ORG_NAME",
   "VERSION_COMPARE_SNIPPET",
@@ -88,6 +89,7 @@ const EXPECTED_EXPORTS = [
   "setRepoDescription",
   "setRepoVisibility",
   "signIdentifierScreenCallbackToken",
+  "signIdentifierSweepCallbackToken",
   "signManifestCallbackToken",
   "signPrescreenCallbackToken",
   "syncWorkflowTemplates",
@@ -104,6 +106,7 @@ const EXPECTED_EXPORTS = [
   "validateDeployedWorkflows",
   "validateGitHubUsername",
   "verifyIdentifierScreenCallbackToken",
+  "verifyIdentifierSweepCallbackToken",
   "verifyManifestCallbackToken",
   "verifyPrescreenCallbackToken",
 ];
