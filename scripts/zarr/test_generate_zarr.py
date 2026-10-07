@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import functools
 import hashlib
 import io
 import itertools
@@ -14822,6 +14823,22 @@ def _have_biosigio_strip() -> bool:
     return True
 
 
+def _requires_biosigio_strip(test):
+    """Skip `test` without biosigIO's `strip_subject_info`, decided when the test
+    RUNS, not when this module is imported. Importing biosigIO takes over a
+    second, and a pool worker started by spawn (the default on macOS) imports
+    this module to unpickle its worker function; paid at import, that second
+    lands inside the admission tests' timed spans and fails them."""
+
+    @functools.wraps(test)
+    def run(self, *args, **kwargs):
+        if not _have_biosigio_strip():
+            raise unittest.SkipTest("conversion deps unavailable: biosigio")
+        return test(self, *args, **kwargs)
+
+    return run
+
+
 class TestSubjectInfoProblems(unittest.TestCase):
     """The check `main` runs before converting anything, against stand-in
     writers that do or do not name the option. This tests the check itself:
@@ -14946,12 +14963,12 @@ class TestWriteStore(unittest.TestCase):
     def write(self, writer, **kwargs):
         return generate_zarr.write_store(writer, self.store, expected_path=self.store, **kwargs)
 
-    @unittest.skipUnless(_have_biosigio_strip(), "conversion deps unavailable: biosigio")
+    @_requires_biosigio_strip
     def test_the_option_is_passed_and_the_mark_read_back(self):
         self.assertEqual(self.write(self.honoring_writer, dtype="float32"), self.store)
         self.assertEqual(self.calls, [{"dtype": "float32", "exclude_subject_info": True}])
 
-    @unittest.skipUnless(_have_biosigio_strip(), "conversion deps unavailable: biosigio")
+    @_requires_biosigio_strip
     def test_a_path_like_return_is_accepted(self):
         def writer(filepath, *, exclude_subject_info=False):
             write_root(filepath, EXCLUDED_ROOT)
@@ -15008,7 +15025,7 @@ class TestWriteStore(unittest.TestCase):
                 with self.assertRaises(generate_zarr.SubjectInfoExclusionUnavailable):
                     self.write(writer)
 
-    @unittest.skipUnless(_have_biosigio_strip(), "conversion deps unavailable: biosigio")
+    @_requires_biosigio_strip
     def test_a_marked_store_that_still_carries_a_member_is_refused(self):
         # The mark is biosigIO's claim; the content check is biosigIO's own list
         # applied to what is actually there, at any depth.
@@ -15118,7 +15135,7 @@ class TestSyncStore(unittest.TestCase):
             generate_zarr.sync_store(self.store, "s3://nemar-test/nm000186/zarr/rec.zarr")
         self.assertEqual(self.calls(), [])
 
-    @unittest.skipUnless(_have_biosigio_strip(), "conversion deps unavailable: biosigio")
+    @_requires_biosigio_strip
     def test_a_store_that_gained_a_member_is_not_uploaded(self):
         write_root(self.store, {"subject_info_excluded": True,
                                 "recording_metadata": {"gender": "x"}})
@@ -15126,7 +15143,7 @@ class TestSyncStore(unittest.TestCase):
             generate_zarr.sync_store(self.store, "s3://nemar-test/nm000186/zarr/rec.zarr")
         self.assertEqual(self.calls(), [])
 
-    @unittest.skipUnless(_have_biosigio_strip(), "conversion deps unavailable: biosigio")
+    @_requires_biosigio_strip
     def test_a_clean_store_is_uploaded_with_the_full_sync_vector(self):
         # Every flag pinned: `--delete` is what makes the bucket copy exactly the
         # converted store (ADR 0023 relies on it), and the cache lifetime is what
