@@ -423,6 +423,25 @@ export async function triggerPrescreenRun(
 }
 
 /**
+ * GitHub ANSWERED an identifier-screen dispatch with a non-2xx. The message is
+ * the status only, the same words the plain error carried before. A thrown fetch
+ * or a timeout is not this class: GitHub may have accepted the event and lost
+ * only the answer (the reasoning {@link DispatchRejectedError} records for the
+ * approval dispatch).
+ */
+export class IdentifierScreenDispatchRejected extends Error {
+  constructor(readonly httpStatus: number) {
+    super(`Failed to trigger identifier screen run: HTTP ${httpStatus}`);
+    this.name = "IdentifierScreenDispatchRejected";
+  }
+
+  /** True only for a 4xx: GitHub refused the request before creating an event. A 5xx may follow one. */
+  get definitelyNotSent(): boolean {
+    return this.httpStatus < 500;
+  }
+}
+
+/**
  * Start the identifier screen of a publication request on `nemarDatasets/.github`
  * via `repository_dispatch[run-identifier-screen]` (epic #1610, phase 4). The
  * workflow screens the dataset's `ref` for identifying information and POSTs a
@@ -434,7 +453,9 @@ export async function triggerPrescreenRun(
  * `pending` with a dispatch time and a watchdog turns a screen that never
  * reports into `unreported`; this function only reports whether GitHub took
  * the request. Mirrors `triggerPrescreenRun`. `pat` must carry write access on
- * the central repo's dispatch endpoint -- use `getDatasetsToken()`.
+ * the central repo's dispatch endpoint -- use `getDatasetsToken()`. `timeoutMs`,
+ * when given, bounds the call (the scheduled sweep passes one; the publication
+ * request does not).
  */
 export async function triggerIdentifierScreenRun(
   datasetId: string,
@@ -443,6 +464,7 @@ export async function triggerIdentifierScreenRun(
   callbackToken: string,
   callbackUrl: string,
   pat: string,
+  timeoutMs?: number,
 ): Promise<void> {
   const response = await fetch(`${GITHUB_API()}/repos/${CENTRAL_WORKFLOW_REPO}/dispatches`, {
     method: "POST",
@@ -462,12 +484,13 @@ export async function triggerIdentifierScreenRun(
         callback_url: callbackUrl,
       },
     }),
+    ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
   });
 
   if (!response.ok) {
     // The status only. GitHub's body is not ours to forward, and this message is
     // logged by the caller.
-    throw new Error(`Failed to trigger identifier screen run: HTTP ${response.status}`);
+    throw new IdentifierScreenDispatchRejected(response.status);
   }
 }
 

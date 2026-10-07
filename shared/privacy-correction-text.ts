@@ -3,7 +3,7 @@
  * (ADR 0085, amendment of 2026-10-06 "A mirror's provenance file keeps the upstream checksums").
  *
  * Shared by the two writers: ADR 0085's git plan (`scripts/scrub/plan/build-git-plan.ts`), which
- * corrects every commit of a published dataset, and the importer's prepare step (ADR 0087), which
+ * corrects every commit of a published dataset, and the importer's prepare step (ADR 0089), which
  * scrubs a tree before its first push. One spelling, so a dataset corrected by either says the same
  * thing. Fixed words and a date only: no file name, no count, no value.
  */

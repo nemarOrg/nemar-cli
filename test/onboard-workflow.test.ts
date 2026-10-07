@@ -50,7 +50,7 @@ describe("onboard-openneuro workflow", () => {
     expect(copy.if).toContain("cancelled");
   });
 
-  test("finalize's wait for the identifier screen is cut to the job's own timeout (ADR 0087)", () => {
+  test("finalize's wait for the identifier screen is cut to the job's own timeout (ADR 0089)", () => {
     // The CLI cannot see the job's clock, so it carries the timeout as a constant and this pins
     // the two together: raise the timeout and the constant must follow, which lets the full wait
     // apply. A job killed by its timeout while it waits reports a failure for data in place.

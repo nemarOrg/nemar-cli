@@ -1,5 +1,5 @@
 /**
- * The importer's identifier scrub (ADR 0087), driven through `prepareImportedTreeForCopy`, the
+ * The importer's identifier scrub (ADR 0089), driven through `prepareImportedTreeForCopy`, the
  * one call `prepareImport` makes for its step 5b.
  *
  * Nothing here is a stand-in for business logic. The trees are real git-annex repositories built
@@ -453,7 +453,7 @@ describe("a first import of a tree with identifiers", () => {
 
     // The scrub is its own commit, with counts only, and the ledger is in it.
     const log = await run(["git", "log", "--format=%s%n%b", "-3"], clone);
-    expect(log).toContain("Privacy correction on import (ADR 0087)");
+    expect(log).toContain("Privacy correction on import (ADR 0089)");
     expectNoSecret(log);
     const committed = await run(["git", "show", "--name-only", "--format=", "HEAD~1"], clone);
     // HEAD is the annex-policy commit (it strips upstream's largefiles), HEAD~1 the scrub.

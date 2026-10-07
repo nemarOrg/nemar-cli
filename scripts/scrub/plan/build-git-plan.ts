@@ -68,7 +68,7 @@ import { VERSION_TAG, changeLogEntry } from "../ledger";
 const PROVENANCE_README = PROVENANCE_README_PATH;
 const MAX_JSON_BYTES = 1024 * 1024;
 
-// The provenance sentences are shared with the importer's scrub (ADR 0087), so both writers say the
+// The provenance sentences are shared with the importer's scrub (ADR 0089), so both writers say the
 // same thing; re-exported here for the callers and tests that import them from the plan.
 export { type ProvenanceChange, provenanceNote, provenanceReadmeNote };
 

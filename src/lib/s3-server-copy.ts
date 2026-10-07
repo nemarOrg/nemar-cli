@@ -634,7 +634,7 @@ export function selectShardCopyItems(
 }
 
 /**
- * What prepare's identifier scrub tells finalize (ADR 0087). Absent on a manifest an older prepare
+ * What prepare's identifier scrub tells finalize (ADR 0089). Absent on a manifest an older prepare
  * wrote, which finalize reads as "the scrub did not run" and never approves automatically.
  */
 export interface ImportPrivacyRecord {

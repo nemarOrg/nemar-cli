@@ -42,7 +42,7 @@ const UPSTREAM_MARKER = "[openneuro-upstream-inaccessible]";
  *  UPSTREAM_MARKER above: this module stays pure. */
 const DATA_UNAVAILABLE_MARKER = "[nemar-data-unavailable]";
 
-/** Marker the import's identifier scrub puts in front of a refusal (ADR 0087). Duplicated from
+/** Marker the import's identifier scrub puts in front of a refusal (ADR 0089). Duplicated from
  *  `src/lib/import-markers.ts` for the same reason, and pinned to it by a test. */
 const IDENTIFIER_SCRUB_MARKER = "[nemar-identifier-scrub]";
 
@@ -105,7 +105,7 @@ const RULES: {
     cause: "identifier_scrub",
     label: "identifier-scrub",
     summary:
-      "The import's identifier scrub refused before anything was copied or pushed (ADR 0087). The word after `refused:` says why: a recording header it could not read, an upstream object that is not the content its key names, recordings to scrub over the bound (re-run on a host that can move them, with --normalize-max-gb), or a dataset NEMAR already holds unscrubbed, which ADR 0085's procedure corrects rather than a re-import.",
+      "The import's identifier scrub refused before anything was copied or pushed (ADR 0089). The word after `refused:` says why: a recording header it could not read, an upstream object that is not the content its key names, recordings to scrub over the bound (re-run on a host that can move them, with --normalize-max-gb), or a dataset NEMAR already holds unscrubbed, which ADR 0085's procedure corrects rather than a re-import.",
     match: /\[nemar-identifier-scrub\]/,
   },
   {
@@ -213,11 +213,11 @@ export const IMPORT_UPSTREAM_MARKER_FOR_CLASSIFY = UPSTREAM_MARKER;
  */
 export const IMPORT_DATA_UNAVAILABLE_MARKER_FOR_CLASSIFY = DATA_UNAVAILABLE_MARKER;
 
-/** The scrub's marker, exposed for the same pin (ADR 0087). */
+/** The scrub's marker, exposed for the same pin (ADR 0089). */
 export const IMPORT_IDENTIFIER_SCRUB_MARKER_FOR_CLASSIFY = IDENTIFIER_SCRUB_MARKER;
 
 /**
- * The scrub's refusal words a retry cannot clear (ADR 0087): the bytes to move are over the bound,
+ * The scrub's refusal words a retry cannot clear (ADR 0089): the bytes to move are over the bound,
  * the dataset already holds an unscrubbed original, a key the tools cannot follow, or a scrub that
  * could not be proven. A person acts on each; re-dispatching the import only repeats the refusal.
  * The other words (a header that could not be read, an upload that failed, an upstream object that

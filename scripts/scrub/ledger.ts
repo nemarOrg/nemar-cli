@@ -16,7 +16,7 @@
 
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { LedgerEntry } from "./contract";
+import { type LedgerEntry, VERSION_TAG } from "./contract";
 
 /** Where the ledger lives in the dataset repository, after the rewrite. */
 export const LEDGER_REPO_PATH = ".nemar/corrections.jsonl";
@@ -43,7 +43,7 @@ const ACTIONS: ReadonlySet<LedgerEntry["action"]> = new Set([
   "old-versions-deleted",
   "published-again",
   // Written by the importer, not by an operator: the tree was scrubbed before its first push, so no
-  // version existed yet and `versions` is empty (ADR 0087).
+  // version existed yet and `versions` is empty (ADR 0089).
   "import-scrubbed",
 ]);
 
@@ -75,8 +75,8 @@ const SCANNER = /^identifier-scan@[0-9a-f]{7,40}$/;
 /** A GitHub handle: the operator, not a participant. */
 const ACTOR = /^[a-z0-9][a-z0-9-]{0,38}$/i;
 const DATASET = /^(nm|xx|on)\d{6}$/;
-/** A version tag the ledger and the change log take: `vX.Y.Z` with an optional pre-release. */
-export const VERSION_TAG = /^v\d+\.\d+\.\d+(-[A-Za-z0-9.]+)?$/;
+/** A version tag the ledger and the change log take (declared in the contract, which the proof's parser shares). */
+export { VERSION_TAG };
 const VERSION = VERSION_TAG;
 
 /** Refuse anything that could carry a value, then return the entry unchanged. */

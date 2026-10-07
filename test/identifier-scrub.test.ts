@@ -409,7 +409,7 @@ describe("a header written by an independent EDF+ tool", () => {
 });
 
 // ---------------------------------------------------------------------------------------
-// JSON: blankIdentifierJsonKeys (ADR 0087, the rule of ADR 0085's history rewrite)
+// JSON: blankIdentifierJsonKeys (ADR 0089, the rule of ADR 0085's history rewrite)
 // ---------------------------------------------------------------------------------------
 
 const utf8 = (s: string) => new TextEncoder().encode(s);

@@ -14,8 +14,14 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import chalk from "chalk";
 import ora, { type Ora } from "ora";
+import type { UploaderPreflight } from "../../../shared/identifier-screen-report.js";
 import { requestUploadCredentials } from "../api/data.js";
-import { createDataset, getDataset } from "../api/datasets.js";
+import {
+  type PreflightRecording,
+  createDataset,
+  getDataset,
+  recordDepositAttestation,
+} from "../api/datasets.js";
 import { ApiError, errorDetail } from "../api/errors.js";
 import type { DepositAttestation } from "../attestation.js";
 import { printStepFailure } from "../cli-output.js";
@@ -87,6 +93,44 @@ export function ensureGitignoreHasNemar(absolutePath: string): void {
   }
 }
 
+/**
+ * Say so when the identifier preflight did not reach the dataset (ADR 0087). It warns and never
+ * fails the upload: nothing gates on the record (the publication screen is the check that holds),
+ * so stopping an upload over it would invent a refusal. But it is never silent, because an
+ * absent record reads, correctly, as "no preflight on record", and the uploader should know.
+ */
+export function warnUnrecordedPreflight(
+  sent: UploaderPreflight | undefined,
+  outcome: PreflightRecording | { error: unknown },
+): boolean {
+  if (sent === undefined) return false;
+  if (
+    "identifier_preflight_recorded" in outcome &&
+    outcome.identifier_preflight_recorded === true
+  ) {
+    return false;
+  }
+  // Four different facts, each said as itself: the call failed; the record was refused at the
+  // door; the server took it and could not store it; or the server never mentioned it, which is
+  // what a backend that predates the preflight does (it drops the field without a word).
+  let why: string;
+  if ("error" in outcome) why = `the request failed: ${errorDetail(outcome.error)}`;
+  else if (outcome.identifier_preflight_refused) {
+    why = `the server refused it (${outcome.identifier_preflight_refused})`;
+  } else if (outcome.identifier_preflight_recorded === false) {
+    why = "the server could not store it; running the upload again records it";
+  } else why = "this NEMAR server does not record it";
+  console.log(
+    chalk.yellow(
+      `  Warning: the identifier preflight was not recorded with your attestation (${why}).`,
+    ),
+  );
+  console.log(
+    chalk.dim("  The upload continues; NEMAR screens the dataset again before publication."),
+  );
+  return true;
+}
+
 /** Step 6: Create a new dataset in the backend, or resume an existing one. */
 export async function createOrResumeDataset(
   absolutePath: string,
@@ -95,6 +139,7 @@ export async function createOrResumeDataset(
   dataFiles: UploadFileEntry[],
   existingConfig: LocalDatasetConfig | null,
   attestation?: DepositAttestation,
+  identifierPreflight?: UploaderPreflight,
 ): Promise<Step<DatasetInfo>> {
   let datasetInfo: DatasetInfo;
 
@@ -132,6 +177,32 @@ export async function createOrResumeDataset(
       }
       return FAIL;
     }
+
+    // A resume from a local config never reaches the create call, so the attestation answered
+    // at the prompt, and the preflight of the files about to be sent, are recorded here instead
+    // (ADR 0087). The server's own resume path (a dedup hit on create) records both the same way.
+    if (attestation) {
+      try {
+        const recorded = await recordDepositAttestation(datasetInfo.dataset_id, {
+          attestation,
+          identifier_preflight: identifierPreflight,
+        });
+        warnUnrecordedPreflight(identifierPreflight, recorded);
+      } catch (error) {
+        console.log(
+          chalk.yellow(
+            `  Warning: the deposit attestation could not be recorded on resume: ${errorDetail(error)}`,
+          ),
+        );
+        warnUnrecordedPreflight(identifierPreflight, { error });
+      }
+    } else {
+      // The preflight is recorded WITH the attestation; without one it has nowhere to go.
+      warnUnrecordedPreflight(identifierPreflight, {
+        identifier_preflight_recorded: false,
+        identifier_preflight_refused: "preflight-without-attestation",
+      });
+    }
   } else {
     // Step 6: Create new dataset in backend with file manifest
     spinner = ora("Creating dataset in NEMAR...").start();
@@ -142,6 +213,8 @@ export async function createOrResumeDataset(
         description: options.description,
         files: dataFiles.map((f) => ({ path: f.path, size: f.size, type: f.type })),
         attestation,
+        // Undefined on a call with no preflight, and `JSON.stringify` drops it then.
+        identifier_preflight: identifierPreflight,
         // Undefined unless `--dataset-id` was given, and `JSON.stringify` drops
         // an undefined value, so an ordinary upload's body is unchanged by this
         // option existing. Never defaulted: a dataset id is allocated, and the
@@ -169,11 +242,14 @@ export async function createOrResumeDataset(
       };
       writeLocalConfig(absolutePath, localConfig);
 
-      if (response.resumed) {
-        spinner.succeed(`Resumed existing dataset: ${datasetInfo.dataset_id}`);
-      } else {
-        spinner.succeed(`Dataset created: ${datasetInfo.dataset_id}`);
-
+      spinner.succeed(
+        response.resumed
+          ? `Resumed existing dataset: ${datasetInfo.dataset_id}`
+          : `Dataset created: ${datasetInfo.dataset_id}`,
+      );
+      // One call for both answers, so the warning cannot be dropped from either.
+      warnUnrecordedPreflight(identifierPreflight, response);
+      if (!response.resumed) {
         // Wait for IAM policy propagation (AWS is eventually consistent)
         // This initial wait helps reduce retry attempts during upload
         await new Promise((resolve) => setTimeout(resolve, 10000));

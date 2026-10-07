@@ -121,7 +121,7 @@ describe("the marker literal is duplicated, so pin the copies together", () => {
     expect(classified.summary).toContain("content-recovery");
   });
 
-  test("the identifier scrub's refusal classifies as identifier_scrub (ADR 0087)", () => {
+  test("the identifier scrub's refusal classifies as identifier_scrub (ADR 0089)", () => {
     // The marker is pinned to the CLI's copy in test/import-scrub.test.ts, through a refusal the
     // scrub really raised. Here: the literal, and that it is its own cause with its own label.
     expect(IMPORT_IDENTIFIER_SCRUB_MARKER_FOR_CLASSIFY).toBe("[nemar-identifier-scrub]");
@@ -131,7 +131,7 @@ describe("the marker literal is duplicated, so pin the copies together", () => {
     expect(classified.cause).toBe("identifier_scrub");
     expect(classified.label).toBe("identifier-scrub");
     expect(IMPORT_FAILURE_CAUSE_LABELS).toContain("identifier-scrub");
-    expect(classified.summary).toContain("ADR 0087");
+    expect(classified.summary).toContain("ADR 0089");
   });
 
   test("a scrub refusal that OpenNeuro caused classifies as upstream_inaccessible", () => {

@@ -17,7 +17,7 @@
 export const OPENNEURO_UPSTREAM_MARKER = "[openneuro-upstream-inaccessible]";
 
 /**
- * Marker for "the import's identifier scrub refused" (ADR 0087): it could not read, verify or
+ * Marker for "the import's identifier scrub refused" (ADR 0089): it could not read, verify or
  * scrub a recording header, or the bytes it must move exceed the bound. The word after
  * `refused:` says which, from a closed list (`IMPORT_SCRUB_REFUSALS` in `import-scrub.ts`).
  */

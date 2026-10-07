@@ -139,6 +139,12 @@ saying so.
 - **Fail open when the screen is down.**
   Unknown would then read as healthy, which is the failure ADR 0053 forbids.
 
+## Amendment 2026-10-06 (#1615): a second caller
+
+The scheduled identifier sweep (ADR 0088) dispatches this workflow too, unchanged, with its own callback route and token kind and a `request_id` of 0.
+Because a run's public log names the dataset it screens, the sweep's cadence never depends on what a screen found.
+Everything above about the workflow, the contract and the public log holds for those runs as written.
+
 ## Receipts
 
 - Report contract and its tests: `shared/identifier-screen-report.ts`, `test/identifier-screen-report.test.ts`.
@@ -147,5 +153,5 @@ saying so.
 
 ## Amendment 2026-10-06 (#1618): the importer waits for the screen
 
-The importer no longer requests and approves in one run: [ADR 0087](0087-an-import-scrubs-before-it-copies-and-waits-for-the-identifier-screen.md) scrubs the tree in prepare, and finalize waits for this screen's verdict and approves only a clear one, leaving any other for an admin.
+The importer no longer requests and approves in one run: [ADR 0089](0089-an-import-scrubs-before-it-copies-and-waits-for-the-identifier-screen.md) scrubs the tree in prepare, and finalize waits for this screen's verdict and approves only a clear one, leaving any other for an admin.
 Nothing in this ADR's gate changed; the importer is one more client of it.

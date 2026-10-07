@@ -1,4 +1,4 @@
-# ADR 0087: An import scrubs before it copies, never copies what it replaced, and waits for the identifier screen before it approves
+# ADR 0089: An import scrubs before it copies, never copies what it replaced, and waits for the identifier screen before it approves
 
 **Status:** accepted
 **Date:** 2026-10-06

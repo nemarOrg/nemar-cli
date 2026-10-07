@@ -1,5 +1,5 @@
 /**
- * The revision of the identifier rules an import ran under, for its ledger line (ADR 0087).
+ * The revision of the identifier rules an import ran under, for its ledger line (ADR 0089).
  *
  * A ledger line names the scanner that decided what was removed (`identifier-scan@<hex>`, ADR
  * 0085). The ledger CLI takes the last commit that touched the rule files, from a checkout; the

@@ -22,13 +22,14 @@ import { isValidDatasetId } from "../../services/datasetId.js";
 import { verifyIdentifierScreenCallbackToken } from "../../services/github.js";
 import { notifyAdminsOfScreen, storeScreenResult } from "../../services/identifier-screen.js";
 import type { WebhookRouter } from "../webhooks/shared.js";
+import { readBoundedJsonObject } from "./bounded-json.js";
 
 /**
- * The largest body this route reads. A real report is a few kilobytes (closed
- * vocabularies and counts); anything near this is not a report, and reading it
- * would only spend the Worker's memory on an attacker's payload.
+ * The largest body this route reads (shared with the sweep's callback in
+ * `bounded-json.ts`). A real report is a few kilobytes (closed vocabularies and
+ * counts); anything near this is not a report.
  */
-export const MAX_CALLBACK_BODY_BYTES = 256 * 1024;
+export { MAX_CALLBACK_BODY_BYTES } from "./bounded-json.js";
 
 /**
  * Every refusal of the token says the same bytes, whether no screen was in
@@ -46,24 +47,9 @@ export function registerIdentifierScreenRoutes(webhooks: WebhookRouter): void {
 
     // Bounded before parsing: by the declared length, and by the bytes that
     // actually arrived (a declared length can be absent or wrong).
-    const declared = Number(c.req.header("Content-Length") ?? "0");
-    if (Number.isFinite(declared) && declared > MAX_CALLBACK_BODY_BYTES) {
-      return c.json({ error: "Body too large" }, 413);
-    }
-    let body: unknown;
-    try {
-      const raw = new Uint8Array(await c.req.arrayBuffer());
-      if (raw.byteLength > MAX_CALLBACK_BODY_BYTES) {
-        return c.json({ error: "Body too large" }, 413);
-      }
-      body = JSON.parse(new TextDecoder().decode(raw));
-    } catch {
-      return c.json({ error: "Invalid JSON in request body" }, 400);
-    }
-    if (typeof body !== "object" || body === null || Array.isArray(body)) {
-      return c.json({ error: "Body must be a JSON object" }, 400);
-    }
-    const b = body as Record<string, unknown>;
+    const read = await readBoundedJsonObject(c);
+    if (!read.ok) return c.json({ error: read.error }, read.status);
+    const b = read.body;
     if (typeof b.dataset_id !== "string" || !isValidDatasetId(b.dataset_id)) {
       return c.json({ error: "dataset_id must be a dataset id" }, 400);
     }

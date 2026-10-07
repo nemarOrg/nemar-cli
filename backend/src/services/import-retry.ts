@@ -104,7 +104,7 @@ export function decideRetryAction(args: {
 }): RetryDecision {
   if (args.verified.complete) return { action: "recover" };
   if (!args.hasSourceId) return { action: "blocklist", reason: "no_source" };
-  // A refusal of the import's identifier scrub that a retry cannot clear (ADR 0087): parked for a
+  // A refusal of the import's identifier scrub that a retry cannot clear (ADR 0089): parked for a
   // person instead of re-dispatched to refuse again. The blocklist's slow re-check still recovers
   // the row if the import is completed another way (a host with a larger bound, say).
   if (isDeterministicScrubRefusal(args.lastError)) {

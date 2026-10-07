@@ -1,5 +1,5 @@
 /**
- * Finalize waits for the identifier screen and approves only a clear verdict (ADR 0087), driven
+ * Finalize waits for the identifier screen and approves only a clear verdict (ADR 0089), driven
  * through the real `finalizeImport`.
  *
  * `--skip-data` with an in-memory manifest keeps the run to the API alone, so the only thing

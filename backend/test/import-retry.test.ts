@@ -105,7 +105,7 @@ describe("decideRetryAction", () => {
     expect(atBoundary).toEqual({ action: "blocklist", reason: "upstream_403_after_window" });
   });
 
-  test("a scrub refusal a retry cannot clear is parked for a person, not re-dispatched (ADR 0087)", () => {
+  test("a scrub refusal a retry cannot clear is parked for a person, not re-dispatched (ADR 0089)", () => {
     // The CLI's own refusal line, as the prepare reporter posts it. The words are pinned to the
     // CLI's list in test/import-scrub.test.ts.
     for (const word of [

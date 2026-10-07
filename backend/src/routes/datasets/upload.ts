@@ -9,6 +9,7 @@
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import type { AccountKind } from "../../../../shared/contract/user.js";
+import type { UploaderPreflight } from "../../../../shared/identifier-screen-report.js";
 import { authMiddleware } from "../../middleware/auth";
 import { cliVersionGuard } from "../../middleware/cliVersion";
 import { generateDatasetId, isSandboxDatasetId, isValidDatasetId } from "../../services/datasetId";
@@ -23,6 +24,7 @@ import {
   reconcileCollaborators,
 } from "../../services/github";
 import { getDatasetsToken } from "../../services/github-auth";
+import { preflightRecording, takePreflight } from "../../services/identifier-preflight";
 import { mirrorReconcileRemovals, resolveRepoCollaborators } from "../../services/repo-spec";
 import { generateDatasetUploadUrls, markDatasetPrivate } from "../../services/s3";
 import {
@@ -136,6 +138,10 @@ const createDatasetSchema = z.object({
   files: z.array(fileSchema).optional(),
   sandbox: z.boolean().optional(), // If true, creates sandbox dataset (xx000XXX)
   attestation: attestationSchema.optional(),
+  // The uploader's identifier preflight (ADR 0087), recorded inside the attestation. Unknown here
+  // on purpose: the report contract's parser is the door (services/identifier-preflight.ts), and
+  // a record it refuses is not stored but never fails the create.
+  identifier_preflight: z.unknown().optional(),
   // Name the id instead of being allocated one. Non-production, admin, and the
   // reserved fixture band only -- see explicitDatasetIdGate. Exists because
   // ADR 0068 makes generateDatasetId structurally unable to return a reserved
@@ -154,7 +160,10 @@ const createDatasetSchema = z.object({
  * the schema requires literal true. The wire contract still serves the six
  * flat attestation_* fields; the detail route explodes this JSON back out.
  */
-function attestationJson(attestation: z.infer<typeof attestationSchema>): string {
+function attestationJson(
+  attestation: z.infer<typeof attestationSchema>,
+  preflight: UploaderPreflight | null = null,
+): string {
   return JSON.stringify({
     deposit_type: attestation.deposit_type,
     key_status: attestation.key_status,
@@ -162,6 +171,9 @@ function attestationJson(attestation: z.infer<typeof attestationSchema>): string
     no_duplicate: attestation.no_duplicate === undefined ? null : attestation.no_duplicate ? 1 : 0,
     upstream_source: attestation.upstream_source ?? null,
     accepted_at: new Date().toISOString().replace("T", " ").slice(0, 19),
+    // The identifier preflight of the files this attestation covers (ADR 0087), already parsed by
+    // the report contract. Absent when none was sent: absent is "no preflight on record".
+    ...(preflight ? { identifier_preflight: preflight } : {}),
   });
 }
 
@@ -245,10 +257,17 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         files,
         sandbox: requestedSandbox,
         attestation,
+        identifier_preflight: preflightField,
         dataset_id: requestedDatasetId,
       } = c.req.valid("json");
       const user = c.get("user");
       const db = c.env.DB;
+      const preflight = takePreflight(preflightField, attestation !== undefined);
+      // One serialization for both writes below (the resume branch's UPDATE and the claim
+      // INSERT), so the preflight cannot ride one and not the other.
+      const attestationColumn = attestation
+        ? attestationJson(attestation, preflight.preflight)
+        : null;
 
       // Non-production environments can only create sandbox (xx-prefix) datasets.
       // This prevents dev from minting real nm-prefix dataset IDs.
@@ -415,12 +434,14 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         // create predated attestation collection). Failure here must not
         // block the resume; the column stays NULL and the next attempt
         // records it.
-        if (attestation) {
+        let attestationStored = false;
+        if (attestationColumn) {
           try {
             await db
               .prepare("UPDATE datasets SET attestation = ? WHERE dataset_id = ?")
-              .bind(attestationJson(attestation), datasetId)
+              .bind(attestationColumn, datasetId)
               .run();
+            attestationStored = true;
           } catch (err) {
             console.error(`Failed to record attestation on resumed ${datasetId}:`, err);
           }
@@ -486,6 +507,7 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
           {
             message: "Resuming existing incomplete dataset",
             resumed: true,
+            ...preflightRecording(preflight, attestationStored),
             dataset: {
               id: datasetId,
               dataset_id: datasetId,
@@ -570,7 +592,7 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
               sandbox ? 1 : 0,
               seed.subjects,
               seed.bytes,
-              attestation ? attestationJson(attestation) : null,
+              attestationColumn,
             )
             .run();
           break; // ID claimed successfully
@@ -722,6 +744,8 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         {
           message: "Dataset created successfully",
           resumed: false,
+          // The claim INSERT above carried the attestation, and with it the preflight.
+          ...preflightRecording(preflight, true),
           dataset: {
             id: datasetId,
             dataset_id: datasetId,
@@ -741,6 +765,65 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         },
         201,
       );
+    },
+  );
+
+  /**
+   * PUT /datasets/:id/attestation - Record the deposit attestation, and the identifier preflight
+   * with it, on a dataset an upload is resuming (ADR 0087).
+   *
+   * A resume from the CLI's local config never calls POST /datasets, so the attestation answered
+   * at the prompt, and the preflight of the files about to be sent, would otherwise not reach the
+   * row at all. This records both exactly as the create call's own resume path does. Owner or
+   * admin only, and only while the dataset is private and has never been published: an upload's
+   * attestation is a statement about a deposit, and a published dataset's is settled. The
+   * preflight is parsed by the report contract and, if refused, not stored; the attestation is
+   * recorded either way, and the response says which.
+   */
+  const recordAttestationSchema = z.object({
+    attestation: attestationSchema,
+    identifier_preflight: z.unknown().optional(),
+  });
+
+  datasetRoutes.put(
+    "/:id/attestation",
+    authMiddleware,
+    cliVersionGuard,
+    zValidator("json", recordAttestationSchema),
+    async (c) => {
+      const datasetId = c.req.param("id");
+      const { attestation, identifier_preflight: preflightField } = c.req.valid("json");
+      const user = c.get("user");
+      const db = c.env.DB;
+
+      const dataset = await db
+        .prepare("SELECT owner_user_id FROM datasets WHERE dataset_id = ?")
+        .bind(datasetId)
+        .first<{ owner_user_id: number }>();
+      if (!dataset) return c.json({ error: "Dataset not found" }, 404);
+      if (dataset.owner_user_id !== user.id && !hasRole(user.role, "admin")) {
+        return c.json({ error: "Only the dataset owner can record its attestation" }, 403);
+      }
+      const preflight = takePreflight(preflightField, true);
+      // The publication guard lives in the statement alone, so a publication that lands between
+      // the read above and this write cannot be overwritten, and there is one guard to test.
+      const result = await db
+        .prepare(
+          "UPDATE datasets SET attestation = ? WHERE dataset_id = ? AND visibility = 'private' AND first_published_at IS NULL",
+        )
+        .bind(attestationJson(attestation, preflight.preflight), datasetId)
+        .run();
+      if ((result.meta?.changes ?? 0) !== 1) {
+        return c.json(
+          {
+            error: "Cannot record an attestation on a published dataset",
+            message:
+              "The attestation of a dataset that is public, or was ever published, is not re-recorded.",
+          },
+          409,
+        );
+      }
+      return c.json({ recorded: true, ...preflightRecording(preflight, true) }, 200);
     },
   );
 

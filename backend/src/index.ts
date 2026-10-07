@@ -65,6 +65,10 @@ import { isNonProductionEnv } from "./services/environment";
 import { resolveHostRoute } from "./services/host-routing";
 import { sweepIdentifierScreens } from "./services/identifier-screen";
 import {
+  runIdentifierSweepTick,
+  sendIdentifierSweepWeeklyReport,
+} from "./services/identifier-sweep";
+import {
   importCoverageSweepSummary,
   runImportCoverageSweepCron,
 } from "./services/import-coverage-sweep";
@@ -892,6 +896,71 @@ export default {
             .catch((err) =>
               console.error(
                 "[identifier-screen-sweep] sweep failed:",
+                err instanceof Error ? (err.stack ?? err.message) : err,
+              ),
+            ),
+        );
+        // Epic #1610 phase 5 (ADR 0088): the scheduled identifier sweep. Each tick
+        // marks an overdue screen unreported and dispatches at most three published
+        // datasets to the same screen workflow, so the fleet is covered over its
+        // 28-day cycle a few datasets at a time. PRODUCTION-ONLY and absent from
+        // DEV_CRON_ALLOWLIST: it dispatches against the shared nemarDatasets org. It
+        // also refuses outside production on its own. It writes only sweep_stamps.
+        ctx.waitUntil(
+          runIdentifierSweepTick(env)
+            .then((r) => {
+              const line = `[identifier-sweep] timedOut=${r.timedOut ?? "?"} inFlight=${r.inFlight ?? "?"} candidates=${r.candidates} dispatched=${r.dispatched} unconfirmed=${r.unconfirmed.length} failed=${r.failed.length} unclaimed=${r.unclaimed} blocked=${r.blocked ?? "no"} errors=${r.errors.length}`;
+              // Anything but a clean dispatch or an idle tick is logged where it is
+              // seen: a screen that did not report, a dispatch that could not be
+              // made or confirmed, a claim that matched nothing, a statement error.
+              const trouble =
+                r.failed.length + r.errors.length + r.unconfirmed.length + r.unclaimed > 0 ||
+                (r.timedOut ?? 1) > 0 ||
+                r.inFlight === null ||
+                r.blocked !== null;
+              if (trouble) {
+                console.error(line);
+                for (const f of r.failed)
+                  console.error(`[identifier-sweep] ${f.dataset_id}: ${f.error}`);
+                for (const e of r.errors) console.error(`[identifier-sweep] ${e}`);
+              } else if (r.dispatched > 0) {
+                console.log(line);
+              }
+            })
+            .catch((err) =>
+              console.error(
+                "[identifier-sweep] tick failed:",
+                err instanceof Error ? (err.stack ?? err.message) : err,
+              ),
+            ),
+        );
+        // ADR 0088: the sweep's weekly admin report, for the ISO week before this one.
+        // It arrives whether or not anything is wrong (ADR 0054). Evaluated on every
+        // tick and sent once, by an atomic claim in audit_log that fails closed; a
+        // send that reached nobody is retried on a later tick, up to a cap. Mail
+        // goes through getAdminEmailsForCategory's production fence as well.
+        ctx.waitUntil(
+          sendIdentifierSweepWeeklyReport(env)
+            .then((r) => {
+              if (!r) return;
+              if (!r.claimed) {
+                // Sent, or a claim is live: routine. Out of claims with nothing
+                // sent means this week's report will not arrive.
+                if (r.exhausted) {
+                  console.error(
+                    `[identifier-sweep] weekly ${r.week}: every claim is spent and nothing was delivered; this week's report will not arrive`,
+                  );
+                }
+                return;
+              }
+              const line = `[identifier-sweep] weekly ${r.week}: delivered=${r.delivered} of ${r.attempted} attention=${r.attention}`;
+              if (r.delivered < r.attempted || r.delivered === 0 || r.attention)
+                console.error(line);
+              else console.log(line);
+            })
+            .catch((err) =>
+              console.error(
+                "[identifier-sweep] weekly report failed:",
                 err instanceof Error ? (err.stack ?? err.message) : err,
               ),
             ),

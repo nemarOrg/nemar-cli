@@ -372,7 +372,7 @@ export async function normalizeUnannexedData(args: {
   upload: UploadStrategy;
   /**
    * The key backend, when it must not be the one the tree's attributes name. The
-   * identifier scrub passes `SHA256E` (ADR 0087); the annex-policy leg leaves it
+   * identifier scrub passes `SHA256E` (ADR 0089); the annex-policy leg leaves it
    * unset and keeps upstream's.
    */
   backend?: "SHA256E";

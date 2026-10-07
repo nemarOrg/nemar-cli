@@ -17,7 +17,7 @@
  * Pure functions over bytes, no I/O, no dependencies beyond the scanner it is proven against.
  *
  * {@link blankIdentifierJsonKeys} is the JSON half, for a caller that edits one document at a time
- * (the importer, ADR 0087): the rule ADR 0085's history rewrite applies to every commit
+ * (the importer, ADR 0089): the rule ADR 0085's history rewrite applies to every commit
  * (`scripts/scrub/git/rewrite_history.py`, `blank_json`), applied to one document.
  */
 

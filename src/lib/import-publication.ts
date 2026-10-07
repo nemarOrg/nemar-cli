@@ -1,6 +1,6 @@
 /**
  * How an import's finalize publishes: it waits for the identifier screen's verdict and approves
- * only a clear one (ADR 0087).
+ * only a clear one (ADR 0089).
  *
  * Requesting publication starts the screen (ADR 0086), and approval is refused until it reports.
  * The importer used to request and approve in one run, which the gate now refuses. So finalize
@@ -85,16 +85,16 @@ export interface PublicationDecision {
 }
 
 /**
- * What the importer writes on a request it holds itself (ADR 0087), through the deny route: fixed
+ * What the importer writes on a request it holds itself (ADR 0089), through the deny route: fixed
  * words a person reads in the denial mail and the request's record. The screen cannot see these
  * holds, so a request left open would show only its verdict, and a clean verdict would be approved.
  */
 export const IMPORTER_HOLD_REASONS: Record<"history-holds-originals" | "no-scrub-record", string> =
   {
     "history-holds-originals":
-      "Held by the importer (ADR 0087): its identifier scrub changed files git tracks, and the pushed history still holds their original content. Rewrite the history with ADR 0085's tools, or request publication again to publish the history as it is.",
+      "Held by the importer (ADR 0089): its identifier scrub changed files git tracks, and the pushed history still holds their original content. Rewrite the history with ADR 0085's tools, or request publication again to publish the history as it is.",
     "no-scrub-record":
-      "Held by the importer (ADR 0087): the import's staging manifest has no valid record of the identifier scrub, so whether it ran is unknown. Re-run the import's prepare phase, or check the dataset and request publication again.",
+      "Held by the importer (ADR 0089): the import's staging manifest has no valid record of the identifier scrub, so whether it ran is unknown. Re-run the import's prepare phase, or check the dataset and request publication again.",
   };
 
 /** Attempts at recording a hold before finalize gives up and fails loudly. */
@@ -107,7 +107,7 @@ export const SCREEN_WAIT_MS = 45 * 60_000;
  * The finalize job's `timeout-minutes` in `.github/dataset-workflows/onboard-openneuro.yml`, pinned
  * to the file by a test. A job killed by its timeout reports a failure for an import whose data is
  * in place, so the wait is cut to what the job has left; the file is deployed as a whole-file copy
- * to `nemarDatasets/.github`, and raising the timeout there lets the full wait apply (ADR 0087).
+ * to `nemarDatasets/.github`, and raising the timeout there lets the full wait apply (ADR 0089).
  */
 export const FINALIZE_JOB_TIMEOUT_MS = 90 * 60_000;
 /** What the job keeps after the wait: runner setup before this process, the approval's S3 lock pages, and the reindex. */

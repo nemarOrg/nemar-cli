@@ -1,5 +1,5 @@
 /**
- * The importer's identifier scrub (ADR 0087): the prepare phase scrubs a cloned OpenNeuro tree
+ * The importer's identifier scrub (ADR 0089): the prepare phase scrubs a cloned OpenNeuro tree
  * with ADR 0085's rules before anything is copied or pushed, and the copy manifest is then cut to
  * what the scrubbed tree names.
  *
@@ -164,7 +164,7 @@ export function describeError(err: unknown): string {
   return parts.join(" ");
 }
 
-/** The scanner revision an import's ledger line names (ADR 0087): a digest of the rule files. */
+/** The scanner revision an import's ledger line names (ADR 0089): a digest of the rule files. */
 export const IMPORT_SCANNER_ID = `identifier-scan@${scannerRulesDigest()}`;
 
 /** The actor a ledger line names when the run has no GitHub handle of its own. */
@@ -700,7 +700,7 @@ function earlierHistoryHold(datasetPath: string): boolean {
 }
 
 /**
- * Scrub a cloned tree before its first push (ADR 0087). See the module comment for what it changes.
+ * Scrub a cloned tree before its first push (ADR 0089). See the module comment for what it changes.
  * Throws {@link ImportScrubRefused} for anything it cannot do safely; on success the scrub is one
  * commit (when anything changed), and the result says what the copy manifest must and must not hold.
  */
@@ -1078,7 +1078,7 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
           "annex.largefiles=nothing",
           "commit",
           "-m",
-          "Privacy correction on import (ADR 0087)",
+          "Privacy correction on import (ADR 0089)",
           "-m",
           body,
           `--pathspec-from-file=${specFile}`,
@@ -1120,7 +1120,7 @@ export interface RestrictedManifest {
 }
 
 /**
- * Cut the copy manifest to what the committed tree names (ADR 0087).
+ * Cut the copy manifest to what the committed tree names (ADR 0089).
  *
  * The manifest is built from upstream's whereis, which describes upstream's tree, not the one this
  * prepare pushes: a re-import resets onto the dataset's own `main`, and the scrub replaces keys. An

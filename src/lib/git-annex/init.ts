@@ -262,7 +262,7 @@ export function chunkAddTargets(
  * Without it such a path is skipped silently and ends up in neither plane.
  *
  * `backend` passes `--backend`, which outranks an inherited `annex.backend`
- * attribute. The import's identifier scrub (ADR 0087) names `SHA256E` so the key
+ * attribute. The import's identifier scrub (ADR 0089) names `SHA256E` so the key
  * that replaces a scrubbed recording is one ADR 0085's tools can follow.
  */
 export async function gitAnnexAdd(

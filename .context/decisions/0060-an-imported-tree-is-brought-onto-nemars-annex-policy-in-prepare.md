@@ -210,5 +210,5 @@ The prepare step also scrubs identifying fields in place and then runs the ident
 
 ## Amendment 2026-10-06 (#1618): the prepare step's scrub is built
 
-The scrub named by the amendment above runs in prepare's step 5b, before this ADR's annex-policy commit, and is [ADR 0087](0087-an-import-scrubs-before-it-copies-and-waits-for-the-identifier-screen.md).
+The scrub named by the amendment above runs in prepare's step 5b, before this ADR's annex-policy commit, and is [ADR 0089](0089-an-import-scrubs-before-it-copies-and-waits-for-the-identifier-screen.md).
 Its downloads count against `NORMALIZE_MAX_BYTES` together with the data git holds, and `--normalize-max-gb` raises the one bound for both.

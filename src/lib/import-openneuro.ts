@@ -108,7 +108,7 @@ interface ImportOptions {
   persistStaging?: boolean;
   /**
    * How long finalize waits for the identifier screen's verdict, and how often it
-   * reads the request's status meanwhile (ADR 0087). Defaults: what the finalize
+   * reads the request's status meanwhile (ADR 0089). Defaults: what the finalize
    * job's timeout leaves, at most `SCREEN_WAIT_MS` (`screenWaitBudget`), and
    * `SCREEN_POLL_MS`.
    */
@@ -1147,7 +1147,7 @@ export async function prepareImport(
   }
   // else: origin has no `main` ref yet -- the normal first-import path, no-op.
   if (didResetMain && annexFetchResult.exitCode !== 0) {
-    // The dead marks a correction left (ADR 0085, ADR 0087) live in that branch; without them only
+    // The dead marks a correction left (ADR 0085, ADR 0089) live in that branch; without them only
     // the cut to the tree keeps a replaced key out of the copy. Said, not refused: the cut holds.
     console.log(
       chalk.yellow(
@@ -1229,7 +1229,7 @@ export async function prepareImport(
   }
 
   // Step 5b: the identifier scrub, then NEMAR's annex policy, then the copy manifest
-  // cut to the tree that will be pushed (ADR 0087, then #1159 / ADR 0060).
+  // cut to the tree that will be pushed (ADR 0089, then #1159 / ADR 0060).
   //
   // The scrub comes first because it is the last moment anything can be changed
   // before bytes reach the bucket: the copy phase copies upstream's bytes by key, and
@@ -1867,7 +1867,7 @@ export async function finalizeImport(
         break;
       }
       // An open request is the normal end state of an import an earlier run left for an admin
-      // (ADR 0087), so a re-run of finalize meets it. Its screen is waited on like a fresh one's;
+      // (ADR 0089), so a re-run of finalize meets it. Its screen is waited on like a fresh one's;
       // an approval already in progress is not started a second time.
       if (
         err instanceof ApiError &&
@@ -1900,7 +1900,7 @@ export async function finalizeImport(
   }
 
   // Step 11: wait for the identifier screen's verdict and approve only a clear one
-  // (ADR 0087). Requesting publication started the screen (ADR 0086); approving in
+  // (ADR 0089). Requesting publication started the screen (ADR 0086); approving in
   // the same breath is what the gate refuses. A verdict that is not clear leaves the
   // request open for an admin, whom Phase 4 mails, and is NOT an import failure: the
   // data is copied and registered, so this run still completes.

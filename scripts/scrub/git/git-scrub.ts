@@ -13,12 +13,15 @@
  *        [--proof-out git-verified.json]
  *   bun run scripts/scrub/git/git-scrub.ts verify --fresh-clone --repo FRESH_CLONE \
  *        --keymap keymap.json --plan git-plan.json --s3-plan plan.json [--proof-out F]
+ *        [--allow-tag vX.Y.Z ...]
  *   bun run scripts/scrub/git/git-scrub.ts annex-registry --repo ANNEX_CLONE \
  *        --keymap keymap.json [--remote-uuid UUID ...] [--execute]
  *
  * `verify` removes the proof file (default: `git-verified.json` beside the keymap) when it starts
  * and writes it again only when every check passed; `drop-archives` and `delete-old` require one
  * made by `--fresh-clone`. `annex-registry` with no `--remote-uuid` uses this clone's `nemar-s3` remote.
+ * `--allow-tag` (fresh-clone only) names a version tag the repository has and the S3 plan does not,
+ * because it was never a published version; it is recorded in the proof and covers the name only.
  *
  * Output is counts and fixed words only: a path, a key or a file name can be the identifier. A
  * failure names the command that failed from a closed list (`failed: <word> (git rev-list)`).
@@ -32,6 +35,7 @@ import { readFileSync, renameSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { ContractError, type GitVerifiedFile } from "../contract";
+import { VERSION_TAG } from "../ledger";
 import {
   GitScrubError,
   annexRegistry,
@@ -55,7 +59,7 @@ const USAGE = `usage: git-scrub <snapshot|rewrite|verify|annex-registry> --repo 
   verify          --keymap FILE --plan FILE --s3-plan FILE --before FILE
                   [--allow-unparseable-json] [--proof-out FILE]
   verify          --fresh-clone --keymap FILE --plan FILE --s3-plan FILE
-                  [--allow-unparseable-json] [--proof-out FILE]
+                  [--allow-unparseable-json] [--proof-out FILE] [--allow-tag vX.Y.Z ...]
   annex-registry  --keymap FILE [--remote-uuid UUID ...] [--execute]
 exit: 0 done, 1 failed, 2 usage, 3 refused, 4 checked and not clean`;
 
@@ -132,10 +136,19 @@ export async function main(argv: string[]): Promise<number> {
         const planPath = need(values.plan, "--plan");
         const s3PlanPath = need(values["s3-plan"], "--s3-plan");
         const fresh = values["fresh-clone"] === true;
-        if (fresh && values.before) throw new UsageError("--fresh-clone takes no --before");
         const proofPath = values["proof-out"] ?? join(dirname(keymapPath), "git-verified.json");
-        // A proof from an earlier run must not outlive a run that does not pass.
+        // A proof from an earlier run must not outlive a run that does not pass, a usage error
+        // included: nothing below may leave one behind.
         rmSync(proofPath, { force: true });
+        if (fresh && values.before) throw new UsageError("--fresh-clone takes no --before");
+        // The names are never echoed: a tag name is part of what the output keeps to counts.
+        const allowTags = [...new Set(values["allow-tag"] ?? [])].sort();
+        if (allowTags.length > 0 && !fresh) {
+          throw new UsageError("--allow-tag is for --fresh-clone only");
+        }
+        if (allowTags.some((t) => !VERSION_TAG.test(t))) {
+          throw new UsageError("--allow-tag takes a version tag, vX.Y.Z or vX.Y.Z-pre");
+        }
         const { keymap, plan } = readInputs(keymapPath, planPath);
         const s3Plan = readS3Plan(s3PlanPath);
         const result = await verifyRewrite({
@@ -146,8 +159,14 @@ export async function main(argv: string[]): Promise<number> {
           mode: fresh ? "fresh-clone" : "local",
           ...(fresh ? {} : { before: readSnapshot(need(values.before, "--before")) }),
           allowUnparseableJson: values["allow-unparseable-json"] === true,
+          allowTags,
         });
         const mode = fresh ? "fresh-clone" : "local";
+        // Printed only when there is one, so the line keeps its form for every other run.
+        const shown =
+          allowTags.length > 0
+            ? { ...result.counts, allowedTags: allowTags.length }
+            : result.counts;
         if (result.ok) {
           writeProof(proofPath, {
             version: 1,
@@ -158,13 +177,14 @@ export async function main(argv: string[]): Promise<number> {
             gitPlanSha256: fileSha256(planPath),
             s3PlanSha256: fileSha256(s3PlanPath),
             counts: result.counts,
+            ...(allowTags.length > 0 ? { allowedTags: allowTags } : {}),
           });
-          console.log(`verify: ok mode=${mode} ${fmt(result.counts)}`);
+          console.log(`verify: ok mode=${mode} ${fmt(shown)}`);
           return 0;
         }
         for (const f of result.failures)
           console.log(`verify: FAIL reason=${f.reason} count=${f.count}`);
-        console.log(`verify: failed mode=${mode} ${fmt(result.counts)}`);
+        console.log(`verify: failed mode=${mode} ${fmt(shown)}`);
         return EXIT.notClean;
       }
       case "annex-registry": {
@@ -241,6 +261,7 @@ function parse(args: string[]) {
       execute: { type: "boolean", default: false },
       "fresh-clone": { type: "boolean", default: false },
       "allow-unparseable-json": { type: "boolean", default: false },
+      "allow-tag": { type: "string", multiple: true },
     },
     // `--refs a b` lists several refs; the extras arrive as positionals.
     allowPositionals: true,

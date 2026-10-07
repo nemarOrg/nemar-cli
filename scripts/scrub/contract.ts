@@ -389,6 +389,13 @@ export interface GitVerifiedFile {
    * what it vouches for still holds.
    */
   counts: Record<string, number>;
+  /**
+   * The tag names the operator accepted with `--allow-tag` (a fresh-clone verify only), sorted by
+   * code unit and without duplicates, each a version tag the git plan accepts. Present only when
+   * there was at least one: a proof without it is still a proof, and says no tag was allowed. The
+   * allowance is for the NAME check only; the tag's tree was scanned like every other ref's.
+   */
+  allowedTags?: string[];
 }
 
 /**
@@ -473,7 +480,7 @@ export interface LedgerEntry {
     | "manifests-regenerated"
     | "old-versions-deleted"
     | "published-again"
-    // The importer's prepare step scrubbed the tree before its first push (ADR 0087).
+    // The importer's prepare step scrubbed the tree before its first push (ADR 0089).
     | "import-scrubbed";
   versions: string[];
   counts: Record<string, number>;
@@ -487,6 +494,13 @@ function isObject(x: unknown): x is Record<string, unknown> {
 }
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+/**
+ * A version tag the ledger, the change log, the git plan and `--allow-tag` take: `vX.Y.Z` with an
+ * optional pre-release. Declared here so the proof's parser needs nothing from the ledger module,
+ * which re-exports it.
+ */
+export const VERSION_TAG = /^v\d+\.\d+\.\d+(-[A-Za-z0-9.]+)?$/;
 
 /** A count: a non-negative whole number. */
 function isCount(x: unknown): x is number {
@@ -896,7 +910,11 @@ const GIT_VERIFIED_FIELDS = [
   "counts",
 ];
 
-/** Read git-verified.json, or refuse: every field checked, and no field the contract does not name. */
+/**
+ * Read git-verified.json, or refuse: every field checked, and no field the contract does not name.
+ * `allowedTags` is the one optional field, and when present (in a `fresh-clone` proof only, the one
+ * mode `--allow-tag` exists in) it is a non-empty, sorted, duplicate-free list of version tags.
+ */
 export function parseGitVerified(text: string): GitVerifiedFile {
   const x = JSON.parse(text) as unknown;
   const bad = (): never => {
@@ -904,8 +922,24 @@ export function parseGitVerified(text: string): GitVerifiedFile {
   };
   if (!isObject(x)) return bad();
   const keys = Object.keys(x);
-  if (keys.length !== GIT_VERIFIED_FIELDS.length || !GIT_VERIFIED_FIELDS.every((f) => f in x)) {
+  const hasAllowed = "allowedTags" in x;
+  if (
+    keys.length !== GIT_VERIFIED_FIELDS.length + (hasAllowed ? 1 : 0) ||
+    !GIT_VERIFIED_FIELDS.every((f) => f in x)
+  ) {
     bad();
+  }
+  if (hasAllowed) {
+    const tags = x.allowedTags;
+    if (
+      x.mode !== "fresh-clone" ||
+      !Array.isArray(tags) ||
+      tags.length === 0 ||
+      !tags.every((t) => typeof t === "string" && VERSION_TAG.test(t)) ||
+      tags.some((t, i) => i > 0 && (tags[i - 1] as string) >= (t as string))
+    ) {
+      bad();
+    }
   }
   if (
     x.version !== 1 ||
