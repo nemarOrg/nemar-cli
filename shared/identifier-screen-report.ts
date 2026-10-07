@@ -697,3 +697,109 @@ export function foldOddFailures<T extends { read_failures?: Record<string, numbe
   }
   return { ...record, read_failures: folded };
 }
+
+// ---------------------------------------------------------------------------------------
+// The uploader preflight (ADR 0087)
+// ---------------------------------------------------------------------------------------
+
+/**
+ * `nemar dataset upload` runs the same scan on the uploader's machine before anything is sent,
+ * and records the result with the deposit attestation. It is early feedback for the uploader and
+ * is NEVER trusted: a modified client can send anything, so nothing gates on it, and the
+ * publication screen above stays the check that holds (ADR 0086). It is parsed at the door like
+ * the publication report, so what is stored is counts and fixed words only.
+ */
+export const PREFLIGHT_VERSION = 1;
+
+/** A scan made before the dataset had an id: the scan fields that describe coverage and findings. */
+export interface PreflightScan {
+  scanned_at: string;
+  status: DatasetStatus;
+  incomplete: boolean;
+  incomplete_reasons: string[];
+  files: { total: number; edf_bdf: number; header_read: number; header_read_failed: number };
+  findings_by_kind: Partial<Record<FindingKind, number>>;
+  edf_bdf_files_flagged: number;
+  unscreened_formats: Record<string, number>;
+  read_failures: Record<string, number>;
+}
+
+/** Every field is required: a count that is missing is not a count of zero. */
+const PREFLIGHT_SCAN_KEYS = [
+  "scanned_at",
+  "status",
+  "incomplete",
+  "incomplete_reasons",
+  "files",
+  "findings_by_kind",
+  "edf_bdf_files_flagged",
+  "unscreened_formats",
+  "read_failures",
+] as const;
+
+/** How the uploader acknowledged a verdict the gate does not clear. No free text, by design. */
+export type AcknowledgedVia = "prompt" | "flag";
+
+export interface UploaderPreflight {
+  version: typeof PREFLIGHT_VERSION;
+  /** `nemar-cli@<version>`: the client that ran the scanner. */
+  scanner: string;
+  scan: PreflightScan;
+  /** Set exactly when {@link screenGate} says the verdict needs an acknowledgment; null otherwise. */
+  acknowledged_via: AcknowledgedVia | null;
+}
+
+/** The verdicts an uploader may acknowledge and upload anyway: the gate's `acknowledge` set. */
+export const PREFLIGHT_ACKNOWLEDGEABLE: readonly DatasetStatus[] = DATASET_STATUSES.filter(
+  (s) => screenGate(s) === "acknowledge",
+);
+
+const PREFLIGHT_SCANNER = /^nemar-cli@\d{1,4}\.\d{1,4}\.\d{1,6}(-[0-9a-z.]{1,24})?$/;
+
+/** Validate the scan half of a preflight. Throws {@link ReportError} with a fixed word. */
+export function parsePreflightScan(x: unknown): PreflightScan {
+  if (!isObject(x)) return bad("scan-shape");
+  onlyKeys(x, PREFLIGHT_SCAN_KEYS, "scan-key");
+  for (const key of PREFLIGHT_SCAN_KEYS) if (x[key] === undefined) bad("scan-missing");
+  const scan = parseScanBody(x) as unknown as PreflightScan;
+  checkStatus(scan);
+  return scan;
+}
+
+/**
+ * Validate a preflight from the wire or from storage. Throws {@link ReportError} with a fixed
+ * word, never the input. An acknowledgment is required exactly when the verdict needs one, so a
+ * stored record cannot say "acknowledged" about a clean scan, or leave a review unacknowledged.
+ */
+export function parseUploaderPreflight(x: unknown): UploaderPreflight {
+  if (!isObject(x)) return bad("preflight-shape");
+  onlyKeys(x, ["version", "scanner", "scan", "acknowledged_via"], "preflight-key");
+  if (x.version !== PREFLIGHT_VERSION) bad("preflight-version");
+  if (typeof x.scanner !== "string" || !PREFLIGHT_SCANNER.test(x.scanner)) {
+    bad("preflight-scanner");
+  }
+  const scan = parsePreflightScan(x.scan);
+  const via = x.acknowledged_via;
+  if (via !== null && via !== "prompt" && via !== "flag") bad("preflight-ack");
+  if ((screenGate(scan.status) === "acknowledge") !== (via !== null)) bad("preflight-ack");
+  return {
+    version: PREFLIGHT_VERSION,
+    scanner: x.scanner as string,
+    scan,
+    acknowledged_via: via as AcknowledgedVia | null,
+  };
+}
+
+/** The words for a preflight: the publication screen's verdicts and count lines, under its own name. */
+export function describePreflight(
+  scan: PreflightScan,
+  acknowledgedVia: AcknowledgedVia | null,
+): ScreenDescription {
+  const base = VERDICTS[scan.status];
+  const lines = scanLines(scan);
+  if (acknowledgedVia === "prompt") lines.push("Acknowledged by the uploader at the prompt.");
+  if (acknowledgedVia === "flag") {
+    lines.push("Acknowledged by the uploader with --acknowledge-identifier-preflight.");
+  }
+  return { headline: `Identifier preflight: ${base.verdict}`, tone: base.tone, lines };
+}

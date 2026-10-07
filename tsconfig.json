@@ -33,6 +33,7 @@
     "test/neurobagel-*.ts",
     "test/identifier-fleet.test.ts",
     "test/identifier-scan.test.ts",
+    "test/identifier-preflight-contract.test.ts",
     "test/identifier-screen-ci.test.ts",
     "test/identifier-scrub.test.ts",
     "scripts/scrub/**/*.ts",
