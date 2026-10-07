@@ -191,6 +191,23 @@ describe("bindShadowedOptionValues on the real command tree", () => {
     }
   });
 
+  // A BOOLEAN option that shadows an ancestor's (#1220: `dataset validate`
+  // declares `-v, --verbose`, the root declares `--verbose`) takes no value,
+  // so the token after it is a positional. Joining them would turn the path
+  // into `--verbose=./x` and silently validate the current directory instead.
+  test("a boolean collision followed by a positional is untouched", async () => {
+    for (const argv of [
+      ["dataset", "validate", "--verbose", "./x"],
+      ["dataset", "search", "--verbose", "covid"],
+      ["--verbose", "dataset", "validate", "./x"],
+    ]) {
+      expect(bindShadowedOptionValues(program, argv)).toEqual(argv);
+    }
+    const validate = await reach(["dataset", "validate", "--verbose", "./x"]);
+    expect(validate.name()).toBe("validate");
+    expect(validate.processedArgs).toEqual(["./x"]);
+  });
+
   test("Commander then hands the value to the subcommand", async () => {
     const release = await reach(["dataset", "release", "nm1", "--version", "2.0.0", "-y"]);
     expect(release.name()).toBe("release");
