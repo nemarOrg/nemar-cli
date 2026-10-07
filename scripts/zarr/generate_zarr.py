@@ -6360,8 +6360,10 @@ def publish_events_parquet(
     local: str | None = None
     try:
         if carried:
-            # Only an INCREMENTAL run reaches this: `--clean` (the Hallu path)
-            # rebuilds every store, so nothing is carried and nothing is fetched.
+            # An INCREMENTAL run carries the rows of every untouched store. A
+            # `--clean` run (the Hallu path) rebuilds every store, so it reaches
+            # this only when a deferred store was kept, and then carries just
+            # that store's rows.
             with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as fh:
                 prior_local = fh.name
             if s3_download_file(bucket, f"{dataset_id}/zarr/{EVENTS_PARQUET_NAME}", prior_local):
