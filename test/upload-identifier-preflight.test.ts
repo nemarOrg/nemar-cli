@@ -27,6 +27,7 @@ import {
   type DatasetStatus,
   PREFLIGHT_ACKNOWLEDGEABLE,
   type PreflightScan,
+  ReportError,
   type UploaderPreflight,
   parsePreflightScan,
   parseUploaderPreflight,
@@ -34,6 +35,7 @@ import {
 import {
   collectAcknowledgment,
   decidePreflight,
+  failureWord,
   identifierPreflightStep,
   preflightConditions,
   recheckIdentifierPreflight,
@@ -768,5 +770,33 @@ describe("the tree is screened again right before anything is sent", () => {
     const record = await first({ acknowledgeIdentifierPreflight: ["not-screened"] });
     write("sourcedata/figure.png", new Uint8Array(8));
     expect((await recheckIdentifierPreflight(root, record)).status).toBe("fail");
+  });
+});
+
+describe("a scan that threw is described by fixed words alone", () => {
+  // The line reaches a terminal that may be a public CI log, and a file system error's message
+  // carries the path it failed on (a path can be a participant's name).
+  const SECRET = "/Users/jsmith/data/sub-JohnSmith/eeg.edf";
+
+  test("an error is its class and system code, never its message", () => {
+    const error = Object.assign(new Error(`ENOENT: no such file or directory, open '${SECRET}'`), {
+      code: "ENOENT",
+    });
+    expect(failureWord(error)).toBe("Error ENOENT");
+    expect(failureWord(new RangeError(SECRET))).toBe("RangeError");
+  });
+
+  test("a class or a code that is not a plain word is not repeated", () => {
+    class Odd extends Error {}
+    const odd = new Odd(SECRET);
+    odd.name = SECRET;
+    expect(failureWord(odd)).toBe("unknown");
+    expect(failureWord(Object.assign(new Error("x"), { code: SECRET }))).toBe("Error");
+    expect(failureWord(SECRET)).toBe("unknown");
+    expect(failureWord(null)).toBe("unknown");
+  });
+
+  test("the contract's own word is kept, since it names the field and never a value", () => {
+    expect(failureWord(new ReportError("scan-status"))).toBe("report-scan-status");
   });
 });

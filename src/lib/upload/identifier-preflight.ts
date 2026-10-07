@@ -389,7 +389,7 @@ function printRefusal(): void {
  * Why a scan threw, as a fixed word: the contract's own word, or the error's class and system
  * code. Never the message, which can carry a path.
  */
-function failureWord(error: unknown): string {
+export function failureWord(error: unknown): string {
   if (error instanceof ReportError) return `report-${error.message}`;
   const name =
     error instanceof Error && /^[A-Za-z]{1,40}$/.test(error.name) ? error.name : "unknown";
