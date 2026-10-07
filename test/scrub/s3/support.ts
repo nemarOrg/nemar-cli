@@ -612,6 +612,7 @@ export function writeGitVerified(
     gitPlanSha256: string;
     s3PlanSha256: string;
     dataset: string;
+    allowedTags: string[];
   }> = {},
 ): void {
   const proof = {
