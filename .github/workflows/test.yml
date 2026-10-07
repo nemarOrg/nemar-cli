@@ -399,11 +399,20 @@ jobs:
   #
   # THE SLOWEST SLICE SETS THE TIME. bun cuts the path-sorted file list into contiguous slices
   # of about equal duration, so a shard cannot finish before its slowest file does, and the
-  # cut points follow file order, not an ideal packing: five shards left one slice at 11.4
-  # minutes, six at 11.7, seven at 8.9, measured on the timings when this was written. So
-  # CHECK A SHARD COUNT BEFORE CHANGING IT, with a dry run that imports the files and runs no
-  # test (it exits 1 on "matched 0 tests"; the junit file names each shard's files):
-  #   for i in 1 2 3 4 5 6 7; do bun test --preload ./test/scrub/helpers/temp-dirs-preload.ts   #     --path-ignore-patterns='__run_every_scrub_suite__' --timings test/scrub/timings.json   #     --shard=$i/7 -t '^never$' --reporter=junit --reporter-outfile=/tmp/shard-$i.xml   #     test/scrub test/identifier-scan.test.ts test/identifier-scrub.test.ts   #     test/identifier-fleet.test.ts; done
+  # cut points follow file order, not an ideal packing. On the durations measured in run
+  # 37652785302 the slowest slice is 17.1 minutes with 3 shards, 12.4 with 4, 9.3 with 5,
+  # 10.7 with 6, 9.0 with 7 and 7.7 with 8: more runners do not always help. So CHECK A SHARD
+  # COUNT BEFORE CHANGING IT, with a dry run that imports the files and runs no test (it exits
+  # 1 with "matched 0 tests"; the junit file names each shard's files). Never add
+  # --update-timings to it: that would overwrite the timings file with the files of one shard.
+  #   for i in 1 2 3 4 5; do
+  #     bun test --preload ./test/scrub/helpers/temp-dirs-preload.ts \
+  #       --path-ignore-patterns='__run_every_scrub_suite__' \
+  #       --timings test/scrub/timings.json --shard=$i/5 -t '^never$' \
+  #       --reporter=junit --reporter-outfile=/tmp/shard-$i.xml \
+  #       test/scrub test/identifier-scan.test.ts test/identifier-scrub.test.ts \
+  #       test/identifier-fleet.test.ts
+  #   done
   # delete.test.ts alone took 13.5 minutes, which no shard count beats, so its preconditions
   # describe block now lives in delete-preconditions.test.ts (the shared fixture is
   # delete-harness.ts). When a file grows past a third of the slice time again, split it the
@@ -430,7 +439,7 @@ jobs:
   scrub-tools-shard:
     name: scrub-tools shard ${{ matrix.shard }}/${{ strategy.job-total }}
     runs-on: ubuntu-latest
-    # A shard takes under 10 minutes. The limit is 30 because a cancelled check reads as neither
+    # A shard takes about 10 minutes. The limit is 30 because a cancelled check reads as neither
     # green nor red: the single 30 minute limit this job once had cancelled three runs that were
     # otherwise passing.
     timeout-minutes: 30
@@ -440,7 +449,7 @@ jobs:
       # Every shard reports, so one red shard does not hide a second one.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7]
+        shard: [1, 2, 3, 4, 5]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -458,10 +467,19 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
 
+      # Retried because the job is now N runners and any one failing to reach the package mirror
+      # turns the gate red; a missing git-annex is still a failure, after the last attempt.
       - name: Install git-annex
         run: |
-          sudo apt-get update
-          sudo apt-get install -y git-annex
+          for attempt in 1 2 3; do
+            if sudo apt-get update && sudo apt-get install -y git-annex; then
+              exit 0
+            fi
+            echo "::warning::apt attempt $attempt failed"
+            sleep $((attempt * 10))
+          done
+          echo "::error::git-annex could not be installed"
+          exit 1
 
       - name: Install dependencies
         run: bun install
@@ -515,14 +533,16 @@ jobs:
           plain=$(sed -E "s/${esc}\[[0-9;]*m//g" "$log")
           header=$(grep -E -m1 '^--shard=[0-9]+/[0-9]+: running [0-9]+/[0-9]+ test files' <<<"$plain" || true)
           summary=$(grep -E '^Ran [0-9]+ tests? across [0-9]+ files?' <<<"$plain" | tail -1 || true)
-          if [ -z "$header" ] || [ -z "$summary" ]; then
-            echo "::error::bun printed no shard header or no run summary, so what this shard ran is unknown"
+          passline=$(grep -E '^ *[0-9]+ pass$' <<<"$plain" | tail -1 || true)
+          if [ -z "$header" ] || [ -z "$summary" ] || [ -z "$passline" ]; then
+            echo "::error::bun printed no shard header, run summary or pass count, so what this shard ran is unknown"
             exit 1
           fi
           read -r planned discovered < <(sed -E 's#^--shard=[0-9]+/[0-9]+: running ([0-9]+)/([0-9]+) test files.*#\1 \2#' <<<"$header")
           read -r tests files < <(sed -E 's#^Ran ([0-9]+) tests? across ([0-9]+) files?.*#\1 \2#' <<<"$summary")
-          if [ "$files" -lt 1 ] || [ "$tests" -lt 1 ]; then
-            echo "::error::shard $shard/$SHARD_TOTAL ran $tests tests across $files files; an empty shard passes bun and asserts nothing"
+          passed=$(sed -E 's#^ *([0-9]+) pass$#\1#' <<<"$passline")
+          if [ "$files" -lt 1 ] || [ "$tests" -lt 1 ] || [ "$passed" -lt 1 ]; then
+            echo "::error::shard $shard/$SHARD_TOTAL ran $tests tests across $files files and $passed passed; an empty or all-skipped shard passes bun and asserts nothing"
             exit 1
           fi
           if [ "$files" != "$planned" ]; then
@@ -531,10 +551,11 @@ jobs:
           fi
 
           jq -n --argjson shard "$shard" --argjson total "$SHARD_TOTAL" \
-            --argjson files "$files" --argjson discovered "$discovered" --argjson tests "$tests" \
-            '{shard: $shard, total: $total, files: $files, discovered: $discovered, tests: $tests}' \
+            --argjson files "$files" --argjson discovered "$discovered" \
+            --argjson tests "$tests" --argjson passed "$passed" \
+            '{shard: $shard, total: $total, files: $files, discovered: $discovered, tests: $tests, passed: $passed}' \
             > "$out/shard.json"
-          echo "shard $shard/$SHARD_TOTAL: $tests tests across $files of $discovered files" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "shard $shard/$SHARD_TOTAL: $passed of $tests tests passed across $files of $discovered files" | tee -a "$GITHUB_STEP_SUMMARY"
 
       # The gate reads shard.json from every shard; timings.json is what a refresh of
       # test/scrub/timings.json collects (see the note above the job).
@@ -601,17 +622,17 @@ jobs:
                   then "the shard numbers are not exactly 1..\($total)" else empty end),
                 (if ([$all[].files] | add) != $discovered
                   then "the shards ran \([$all[].files] | add) test files and bun discovered \($discovered)" else empty end),
-                ($all[] | select(.files < 1 or .tests < 1)
-                  | "shard \(.shard) ran \(.tests) tests across \(.files) files")
+                ($all[] | select(.files < 1 or .tests < 1 or .passed < 1)
+                  | "shard \(.shard) ran \(.tests) tests across \(.files) files and \(.passed) passed")
               ] | .[]' "${reports[@]}")
           if [ -n "$problems" ]; then
             while IFS= read -r line; do echo "::error::$line"; done <<<"$problems"
             exit 1
           fi
           jq -r -s '
-            "| shard | files | tests |\n|---|---|---|\n"
-            + ([.[] | "| \(.shard)/\(.total) | \(.files) | \(.tests) |"] | join("\n"))
-            + "\n| all | \([.[].files] | add) of \(.[0].discovered) | \([.[].tests] | add) |"
+            "| shard | files | tests | passed |\n|---|---|---|---|\n"
+            + ([.[] | "| \(.shard)/\(.total) | \(.files) | \(.tests) | \(.passed) |"] | join("\n"))
+            + "\n| all | \([.[].files] | add) of \(.[0].discovered) | \([.[].tests] | add) | \([.[].passed] | add) |"
           ' "${reports[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
 
   # Type check and lint - always runs on code changes
