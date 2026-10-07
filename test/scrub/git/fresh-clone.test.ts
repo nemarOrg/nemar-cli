@@ -14,7 +14,14 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseGitVerified } from "../../../scripts/scrub/contract";
-import { hashDirLower } from "../../../scripts/scrub/git/git-lib";
+import {
+  GitScrubError,
+  hashDirLower,
+  readInputs,
+  readS3Plan,
+  readSnapshot,
+  verifyRewrite,
+} from "../../../scripts/scrub/git/git-lib";
 import {
   HAVE_ANNEX,
   HAVE_REWRITE_TOOLS,
@@ -68,7 +75,11 @@ SUITE("verify --fresh-clone: the pushed repository (I1, I11)", () => {
     cloneOf(bare, dir, datasetUrl(DATASET));
     return dir;
   };
-  const verifyFresh = (repo: string, proof = join(fx.root, `proof-${n}.json`)) =>
+  const verifyFresh = (
+    repo: string,
+    proof = join(fx.root, `proof-${n}.json`),
+    extra: string[] = [],
+  ) =>
     cli([
       "verify",
       "--fresh-clone",
@@ -83,7 +94,9 @@ SUITE("verify --fresh-clone: the pushed repository (I1, I11)", () => {
       "--allow-unparseable-json",
       "--proof-out",
       proof,
+      ...extra,
     ]);
+  const allow = (...tags: string[]): string[] => tags.flatMap((t) => ["--allow-tag", t]);
 
   beforeAll(async () => {
     fx = buildPointerFixture();
@@ -175,6 +188,9 @@ SUITE("verify --fresh-clone: the pushed repository (I1, I11)", () => {
     expect(r.code, r.out).toBe(0);
     expect(r.out).toContain("verify: ok mode=fresh-clone");
     expect(parseGitVerified(readFileSync(proof, "utf8")).mode).toBe("fresh-clone");
+    // No tag was allowed: the line and the proof keep the form they had before --allow-tag.
+    expect(r.out).not.toContain("allowedTags");
+    expect(readFileSync(proof, "utf8")).not.toContain("allowedTags");
     // There is no local git-annex branch in a fresh clone: the pushed one was read.
     expect(git(repo, "for-each-ref", "--format=%(refname)", "refs/heads/git-annex").trim()).toBe(
       "",
@@ -243,6 +259,167 @@ SUITE("verify --fresh-clone: the pushed repository (I1, I11)", () => {
     const r = await verifyFresh(repo);
     expect(r.code, r.out).toBe(4);
     expect(r.out).toContain("reason=tag-names-not-plan count=1");
+  }, 120_000);
+
+  test("--allow-tag accepts a tag the S3 plan lacks, by name, and the proof records it", async () => {
+    const repo = fresh();
+    git(repo, "tag", "v9.9.9");
+    const proof = join(fx.root, "allow-proof.json");
+    const without = await verifyFresh(repo, proof);
+    expect(without.code, without.out).toBe(4);
+    expect(without.out).toContain("reason=tag-names-not-plan count=1");
+    expect(existsSync(proof)).toBe(false);
+
+    const ok = await verifyFresh(repo, proof, allow("v9.9.9"));
+    expect(ok.code, ok.out).toBe(0);
+    expect(ok.out).toContain("verify: ok mode=fresh-clone allowedTags=1 ");
+    // The counts are the ones the plain run prints, plus the one.
+    expect(counts(ok.out, "verify: ok")).toMatchObject({
+      allowedTags: 1,
+      refs: expect.any(Number),
+    });
+    const parsed = parseGitVerified(readFileSync(proof, "utf8"));
+    expect(parsed.mode).toBe("fresh-clone");
+    expect(parsed.allowedTags).toEqual(["v9.9.9"]);
+    expect(parsed.counts).not.toHaveProperty("allowedTags");
+  }, 180_000);
+
+  test("--allow-tag is repeatable; the proof lists the names sorted, without duplicates", async () => {
+    const repo = fresh();
+    git(repo, "tag", "v9.9.9");
+    git(repo, "tag", "v9.10.0-rc1");
+    const proof = join(fx.root, "allow-two-proof.json");
+    const ok = await verifyFresh(repo, proof, allow("v9.9.9", "v9.10.0-rc1", "v9.9.9"));
+    expect(ok.code, ok.out).toBe(0);
+    expect(ok.out).toContain("allowedTags=2 ");
+    // Sorted by code unit, which is what the proof's parser requires, so the real file parses.
+    expect(parseGitVerified(readFileSync(proof, "utf8")).allowedTags).toEqual([
+      "v9.10.0-rc1",
+      "v9.9.9",
+    ]);
+    // One of the two alone leaves the other unplanned.
+    const one = await verifyFresh(repo, proof, allow("v9.9.9"));
+    expect(one.code, one.out).toBe(4);
+    expect(one.out).toContain("reason=tag-names-not-plan count=1");
+    expect(one.out).toContain("verify: failed mode=fresh-clone allowedTags=1 ");
+  }, 180_000);
+
+  test("an allowed name that is already one of the S3 plan's tags is accepted silently", async () => {
+    const repo = fresh();
+    const proof = join(fx.root, "allow-planned-proof.json");
+    const r = await verifyFresh(repo, proof, allow("v1.0.1"));
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).not.toContain("FAIL");
+    expect(parseGitVerified(readFileSync(proof, "utf8")).allowedTags).toEqual(["v1.0.1"]);
+  }, 120_000);
+
+  test("an allowed tag the repository does not have is allowed-tag-missing", async () => {
+    const proof = join(fx.root, "allow-missing-proof.json");
+    writeFileSync(proof, "{}");
+    const r = await verifyFresh(fresh(), proof, allow("v8.8.8"));
+    expect(r.code, r.out).toBe(4);
+    expect(r.out).toContain("reason=allowed-tag-missing count=1");
+    // It is the allowance that is wrong, not the repository's tag names.
+    expect(r.out).not.toContain("tag-names-not-plan");
+    expect(existsSync(proof)).toBe(false);
+
+    // A name the S3 plan lists is still a tag the repository must have.
+    const planned = fresh();
+    git(planned, "tag", "-d", "v1.0.1");
+    const gone = await verifyFresh(planned, proof, allow("v1.0.1"));
+    expect(gone.code, gone.out).toBe(4);
+    expect(gone.out).toContain("reason=allowed-tag-missing count=1");
+    expect(gone.out).toContain("reason=tag-names-not-plan count=1");
+
+    // A typo: the extra tag stays unplanned and the name that was typed is missing.
+    const typo = fresh();
+    git(typo, "tag", "v9.9.9");
+    const wrong = await verifyFresh(typo, proof, allow("v9.9.8"));
+    expect(wrong.code, wrong.out).toBe(4);
+    expect(wrong.out).toContain("reason=tag-names-not-plan count=1");
+    expect(wrong.out).toContain("reason=allowed-tag-missing count=1");
+    expect(existsSync(proof)).toBe(false);
+  }, 240_000);
+
+  test("the allowance is for the name: an allowed tag whose tree holds an old key still fails", async () => {
+    // The tag names the ORIGINAL history, as a release that was never rewritten would.
+    const repo = fresh();
+    git(repo, "fetch", "-q", fx.src, "main");
+    git(repo, "tag", "v9.9.9", "FETCH_HEAD");
+    const proof = join(fx.root, "allow-old-key-proof.json");
+    writeFileSync(proof, "{}");
+    const r = await verifyFresh(repo, proof, allow("v9.9.9"));
+    expect(r.code, r.out).toBe(4);
+    expect(r.out).toContain("reason=old-key-present");
+    expect(r.out).toContain("reason=edf-key-unaccounted");
+    // The name is accepted; only the tree is the problem.
+    expect(r.out).not.toContain("tag-names-not-plan");
+    expect(existsSync(proof)).toBe(false);
+  }, 120_000);
+
+  test("--allow-tag takes a version tag and is for --fresh-clone only (usage errors)", async () => {
+    const base = ["--repo", work, "--keymap", fx.keymapPath, "--plan", fx.planPath];
+    const proof = join(fx.root, "allow-usage-proof.json");
+    for (const name of ["main", "1.1.1", "v1.1", "v1.1.1/x", "v1.1.1 ", ""]) {
+      const r = await cli([
+        "verify",
+        "--fresh-clone",
+        ...base,
+        "--s3-plan",
+        s3Plan,
+        "--proof-out",
+        proof,
+        "--allow-tag",
+        name,
+      ]);
+      expect(r.code, `${JSON.stringify(name)}: ${r.out}`).toBe(2);
+      expect(r.out).toContain("--allow-tag takes a version tag");
+      // A name is never echoed back.
+      if (name !== "") expect(r.out).not.toContain(name);
+      expect(existsSync(proof)).toBe(false);
+    }
+    // A flag with no value is a usage error too.
+    const bare = await cli([
+      "verify",
+      "--fresh-clone",
+      ...base,
+      "--s3-plan",
+      s3Plan,
+      "--allow-tag",
+    ]);
+    expect(bare.code, bare.out).toBe(2);
+
+    // Local mode compares with the snapshot: the flag means nothing there, so it is refused.
+    const local = await cli([
+      "verify",
+      ...base,
+      "--s3-plan",
+      s3Plan,
+      "--before",
+      join(fx.root, "before.json"),
+      "--proof-out",
+      proof,
+      "--allow-tag",
+      "v1.0.1",
+    ]);
+    expect(local.code, local.out).toBe(2);
+    expect(local.out).toContain("--allow-tag is for --fresh-clone only");
+    expect(existsSync(proof)).toBe(false);
+  }, 120_000);
+
+  test("the library refuses an allowance in local mode and a name that is no version tag", async () => {
+    const { keymap, plan } = readInputs(fx.keymapPath, fx.planPath);
+    const base = { repo: work, keymap, plan, s3Plan: readS3Plan(s3Plan) };
+    const local = verifyRewrite({
+      ...base,
+      mode: "local",
+      before: readSnapshot(join(fx.root, "before.json")),
+      allowTags: ["v1.0.1"],
+    });
+    await expect(local).rejects.toBeInstanceOf(GitScrubError);
+    await expect(local).rejects.toThrow("refused: allow-tag-not-for-local");
+    const named = verifyRewrite({ ...base, mode: "fresh-clone", allowTags: ["main"] });
+    await expect(named).rejects.toThrow("bad-input: allow-tag-not-semver");
   }, 120_000);
 
   test("a git-annex branch that does not record the registration fails", async () => {
