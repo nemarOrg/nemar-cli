@@ -55,6 +55,15 @@ function optionFlags(option: Option): string[] {
   return [option.long, option.short].filter((f): f is string => typeof f === "string");
 }
 
+/**
+ * Whether `token` can stand as an option's value. A lone "-" can: Commander
+ * itself reads it as a value (it is the usual spelling of stdin). Any other
+ * token that starts with "-" reads as a flag, and so does an empty one.
+ */
+function isValue(token: string | undefined): token is string {
+  return token !== undefined && token !== "" && (token === "-" || !token.startsWith("-"));
+}
+
 function findSubcommand(cmd: Command, name: string): Command | undefined {
   return cmd.commands.find((c) => c.name() === name || c.aliases().includes(name));
 }
@@ -135,7 +144,7 @@ export function bindShadowedOptionValues(root: Command, argv: string[]): string[
       continue;
     }
     const next = argv[i + 1];
-    if (next !== undefined && next !== "" && !next.startsWith("-")) {
+    if (isValue(next)) {
       out.push(`${token}=${next}`);
       i++;
     } else if (helpRequested) {
