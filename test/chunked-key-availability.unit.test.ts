@@ -1,5 +1,9 @@
 /**
- * Chunk-aware key presence (CLI copy, src/lib/s3-server-copy.ts).
+ * Chunk-aware key presence, driven through the CLI entry points
+ * (`isKeyPresentAtDeclaredSize`, `keysWithoutObjects` in src/lib/s3-server-copy.ts).
+ * The logic lives in shared/annex-key.ts and is shared with the Worker; the Worker
+ * entry (`compareManifestToListing`) is covered in
+ * backend/test/import-integrity-chunked.test.ts.
  *
  * Datasets uploaded through a chunked special remote (nm000276, chunk=1GiB)
  * hold only `<key-with -S<size>-C<n>>` objects. Every presence check keyed on
@@ -9,12 +13,15 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import * as workerModule from "../backend/src/services/import-integrity";
 import {
   annexChunkKey,
   annexKeyDeclaredSize,
   annexKeyFieldSize,
   parseChunkKey,
 } from "../shared/annex-key";
+import * as sharedModule from "../shared/annex-key";
+import * as cliModule from "../src/lib/s3-server-copy";
 import { isKeyPresentAtDeclaredSize, keysWithoutObjects } from "../src/lib/s3-server-copy";
 
 const GiB = 1073741824;
@@ -202,12 +209,154 @@ describe("chunked annex keys (#1565, nm000276)", () => {
     ).toBe(true);
   });
 
-  test("the chunk-size scan follows a listing that grows after the first lookup", () => {
+  test("chunks added to a listing after the first lookup are seen", () => {
     const existing = new Map<string, number>([[chunk(1), GiB]]);
     expect(isKeyPresentAtDeclaredSize(BASE_EEG, existing)).toBe(false);
     existing.set(chunk(2), GiB);
     existing.set(chunk(3), LAST);
     expect(isKeyPresentAtDeclaredSize(BASE_EEG, existing)).toBe(true);
+  });
+
+  test("a chunk size first seen after the first lookup is tried too", () => {
+    // The cached scan holds only the 512 MiB size after the first lookup. Growing
+    // the listing with a complete 1 GiB set must invalidate it; a stale scan would
+    // never try 1 GiB and keep answering absent.
+    const MiB512 = 536870912;
+    const existing = new Map<string, number>([
+      [`SHA256E-s2500000000-S${MiB512}-C1--abc.eeg`, MiB512],
+    ]);
+    expect(isKeyPresentAtDeclaredSize(BASE_EEG, existing)).toBe(false);
+    existing.set(chunk(1), GiB);
+    existing.set(chunk(2), GiB);
+    existing.set(chunk(3), LAST);
+    expect(isKeyPresentAtDeclaredSize(BASE_EEG, existing)).toBe(true);
+  });
+});
+
+/** Chunk object name for `key`'s `abc.eeg` file at an arbitrary chunk size. */
+const chunkAt = (size: number, chunkSize: number, n: number) =>
+  `SHA256E-s${size}-S${chunkSize}-C${n}--abc.eeg`;
+
+describe("chunk geometry and edge cases", () => {
+  // nm000276: the issue lists C1..C94 and the key is s100969566208. At 1 GiB that
+  // is 94 full chunks and a 37,834,752-byte remainder, so 95 chunks: the listing in
+  // the issue is INCOMPLETE without C95.
+  const NM276 = 100969566208;
+  const NM276_KEY = `SHA256E-s${NM276}--abc.eeg`;
+  const NM276_TAIL = 37834752;
+  const nm276 = (n: number) => chunkAt(NM276, GiB, n);
+  const firstNinetyFour = () =>
+    new Map<string, number>(Array.from({ length: 94 }, (_, i) => [nm276(i + 1), GiB]));
+
+  test("the nm000276 vector: 94 full chunks plus a 37,834,752-byte tail", () => {
+    // Guard the constants, so the vector cannot drift from the issue's numbers.
+    expect(94 * GiB + NM276_TAIL).toBe(NM276);
+    const listing = firstNinetyFour();
+    expect(isKeyPresentAtDeclaredSize(NM276_KEY, listing)).toBe(false);
+    listing.set(nm276(95), NM276_TAIL);
+    expect(isKeyPresentAtDeclaredSize(NM276_KEY, listing)).toBe(true);
+  });
+
+  test("the last chunk must be the remainder, not a full chunk and not short", () => {
+    const full = firstNinetyFour().set(nm276(95), GiB);
+    expect(isKeyPresentAtDeclaredSize(NM276_KEY, full)).toBe(false);
+    const short = firstNinetyFour().set(nm276(95), NM276_TAIL - 1);
+    expect(isKeyPresentAtDeclaredSize(NM276_KEY, short)).toBe(false);
+  });
+
+  test("an oversized chunk makes the key absent", () => {
+    const middle = new Map([
+      [chunk(1), GiB],
+      [chunk(2), GiB + 1],
+      [chunk(3), LAST],
+    ]);
+    expect(isKeyPresentAtDeclaredSize(BASE_EEG, middle)).toBe(false);
+    const last = new Map([
+      [chunk(1), GiB],
+      [chunk(2), GiB],
+      [chunk(3), LAST + 1],
+    ]);
+    expect(isKeyPresentAtDeclaredSize(BASE_EEG, last)).toBe(false);
+  });
+
+  test("an empty file needs chunk 1 at 0 bytes, not just some chunk of the key", () => {
+    const key = "SHA256E-s0--e.edf";
+    const at = (n: number) => `SHA256E-s0-S1048576-C${n}--e.edf`;
+    // Only C2: there is no chunk 1, so the file cannot be reassembled.
+    expect(isKeyPresentAtDeclaredSize(key, new Map([[at(2), 0]]))).toBe(false);
+    // A C1 that is not empty is not an empty file's chunk.
+    expect(isKeyPresentAtDeclaredSize(key, new Map([[at(1), 1]]))).toBe(false);
+    // Nothing at all.
+    expect(isKeyPresentAtDeclaredSize(key, new Map([["SHA256E-s9-S4-C1--other.edf", 4]]))).toBe(
+      false,
+    );
+    expect(isKeyPresentAtDeclaredSize(key, new Map([[at(1), 0]]))).toBe(true);
+  });
+
+  test("a key with no declared size is never present through chunks", () => {
+    const unsized = "SHA256E--nosize.edf";
+    const listing = new Map([["SHA256E-S4-C1--nosize.edf", 4]]);
+    expect(isKeyPresentAtDeclaredSize(unsized, listing)).toBe(false);
+    // The plain-object contract for an unsized key is unchanged: present if listed.
+    expect(isKeyPresentAtDeclaredSize(unsized, new Map([[unsized, 5]]))).toBe(true);
+    // A non-annex key absent from the listing is absent, with chunk objects around.
+    expect(isKeyPresentAtDeclaredSize("git:abc", new Map([[chunk(1), GiB]]))).toBe(false);
+  });
+
+  test("another key's chunks do not make this key present", () => {
+    const listing = new Map([
+      [chunk(1), GiB],
+      [chunk(2), GiB],
+      [chunk(3), LAST],
+    ]);
+    expect(isKeyPresentAtDeclaredSize("SHA256E-s2500000000--other.eeg", listing)).toBe(false);
+    expect(isKeyPresentAtDeclaredSize("SHA256E-s2500000001--abc.eeg", listing)).toBe(false);
+  });
+
+  describe("two chunk sizes for one key in one listing", () => {
+    const SIZE = 2500000000;
+    const MiB512 = 536870912;
+    // 512 MiB chunking is 5 chunks: 4 full and a 352,516,352-byte tail.
+    const TAIL512 = SIZE - 4 * MiB512;
+    const key = `SHA256E-s${SIZE}--abc.eeg`;
+    const partial512: [string, number][] = [
+      [chunkAt(SIZE, MiB512, 1), MiB512],
+      [chunkAt(SIZE, MiB512, 2), MiB512],
+    ];
+    const complete1G: [string, number][] = [
+      [chunkAt(SIZE, GiB, 1), GiB],
+      [chunkAt(SIZE, GiB, 2), GiB],
+      [chunkAt(SIZE, GiB, 3), LAST],
+    ];
+    const complete512: [string, number][] = [
+      ...Array.from({ length: 4 }, (_, i): [string, number] => [
+        chunkAt(SIZE, MiB512, i + 1),
+        MiB512,
+      ]),
+      [chunkAt(SIZE, MiB512, 5), TAIL512],
+    ];
+    const partial1G: [string, number][] = [[chunkAt(SIZE, GiB, 1), GiB]];
+
+    test("a partial attempt and a complete set: present in either insertion order", () => {
+      expect(isKeyPresentAtDeclaredSize(key, new Map([...partial512, ...complete1G]))).toBe(true);
+      expect(isKeyPresentAtDeclaredSize(key, new Map([...complete1G, ...partial512]))).toBe(true);
+      expect(isKeyPresentAtDeclaredSize(key, new Map([...partial1G, ...complete512]))).toBe(true);
+      expect(isKeyPresentAtDeclaredSize(key, new Map([...complete512, ...partial1G]))).toBe(true);
+    });
+
+    test("two partial attempts: absent in either insertion order", () => {
+      expect(isKeyPresentAtDeclaredSize(key, new Map([...partial512, ...partial1G]))).toBe(false);
+      expect(isKeyPresentAtDeclaredSize(key, new Map([...partial1G, ...partial512]))).toBe(false);
+    });
+  });
+});
+
+describe("one definition shared by the CLI and the Worker", () => {
+  test("both modules re-export the shared functions, not copies", () => {
+    for (const name of ["annexKeyDeclaredSize", "isKeyPresentAtDeclaredSize"] as const) {
+      expect(cliModule[name]).toBe(sharedModule[name]);
+      expect(workerModule[name]).toBe(sharedModule[name]);
+    }
   });
 });
 

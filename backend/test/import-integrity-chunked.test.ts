@@ -101,7 +101,7 @@ describe("chunked annex keys (#1565, nm000276)", () => {
     expect(isKeyPresentAtDeclaredSize(BASE_EEG, new Map([[BASE_EEG, 7]]))).toBe(false);
   });
 
-  test("the chunk-size scan follows a listing that grows after the first lookup", () => {
+  test("chunks added to a listing after the first lookup are seen", () => {
     const existing = new Map<string, number>([[chunk(1), GiB]]);
     expect(isKeyPresentAtDeclaredSize(BASE_EEG, existing)).toBe(false);
     existing.set(chunk(2), GiB);
@@ -163,6 +163,44 @@ describe("compareManifestToListing with chunked content", () => {
     });
     const short = compareManifestToListing(manifest, new Map([[BASE_EEG, 7], ...chunks]));
     expect(short).toMatchObject({ complete: false, missingKeys: [BASE_EEG], zeroByteKeys: [] });
+  });
+
+  test("a partial attempt at one chunk size does not hide a complete set at another", () => {
+    const MiB512 = 536870912;
+    const manifest = { "sub-01/ieeg/a.eeg": { key: BASE_EEG, size: 2500000000 } };
+    const partial512: [string, number][] = [
+      [`SHA256E-s2500000000-S${MiB512}-C1--abc.eeg`, MiB512],
+      [`SHA256E-s2500000000-S${MiB512}-C2--abc.eeg`, MiB512],
+    ];
+    const complete1G: [string, number][] = [
+      [chunk(1), GiB],
+      [chunk(2), GiB],
+      [chunk(3), LAST],
+    ];
+    for (const entries of [
+      [...partial512, ...complete1G],
+      [...complete1G, ...partial512],
+    ]) {
+      expect(compareManifestToListing(manifest, new Map(entries))).toMatchObject({
+        complete: true,
+        missingKeys: [],
+      });
+    }
+    expect(compareManifestToListing(manifest, new Map(partial512)).missingKeys).toEqual([BASE_EEG]);
+  });
+
+  test("the nm000276 key is incomplete at C94 and complete with the C95 tail", () => {
+    // s100969566208 at 1 GiB: 94 full chunks plus a 37,834,752-byte remainder.
+    const key = "SHA256E-s100969566208--abc.eeg";
+    const manifest = { "sub-01/ieeg/big.eeg": { key, size: 100969566208 } };
+    const at = (n: number) => `SHA256E-s100969566208-S${GiB}-C${n}--abc.eeg`;
+    const listing = new Map<string, number>(Array.from({ length: 94 }, (_, i) => [at(i + 1), GiB]));
+    expect(compareManifestToListing(manifest, listing).missingKeys).toEqual([key]);
+    listing.set(at(95), 37834752);
+    expect(compareManifestToListing(manifest, listing)).toMatchObject({
+      complete: true,
+      missingKeys: [],
+    });
   });
 
   test("a dataset missing one chunk is still incomplete, naming the whole-file key", () => {
