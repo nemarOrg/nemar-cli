@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "bun";
 import { Command } from "commander";
-import { bindShadowedOptionValues } from "../src/lib/argv-shadowing";
+import { MissingShadowedValueError, bindShadowedOptionValues } from "../src/lib/argv-shadowing";
 import { version } from "../src/lib/version";
 
 function miniProgram(): Command {
@@ -56,8 +56,6 @@ describe("bindShadowedOptionValues", () => {
       ["--version"],
       ["-v"],
       ["dataset", "--version"],
-      ["dataset", "release", "nm1", "--version"],
-      ["dataset", "release", "nm1", "--version", "--yes"],
       ["dataset", "release", "nm1", "--version=2.0.0"],
       ["dataset", "release", "nm1", "--", "--version", "2.0.0"],
       ["dataset", "upload", "./x", "--jobs", "4", "--verbose"],
@@ -66,6 +64,33 @@ describe("bindShadowedOptionValues", () => {
     ];
     for (const argv of cases) {
       expect(bindShadowedOptionValues(p, argv)).toEqual(argv);
+    }
+  });
+
+  // Changed deliberately from "left alone" (#1493 review): a bare shadowed
+  // --version used to fall through to the root, which printed the CLI version
+  // and exited 0, the same silent no-op as the spaced form for a scripted -y
+  // release. It is now Commander's own "argument missing" error.
+  test("a shadowed value option with no value is an error", () => {
+    const cases = [
+      ["dataset", "release", "nm1", "--version"],
+      ["dataset", "release", "nm1", "--version", "-y"],
+      ["dataset", "release", "nm1", "--version", "--yes"],
+      ["dataset", "release", "--version", "-y", "nm1"],
+      ["--debug", "dataset", "release", "nm1", "--version"],
+    ];
+    for (const argv of cases) {
+      let caught: unknown;
+      try {
+        bindShadowedOptionValues(p, argv);
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(MissingShadowedValueError);
+      expect((caught as MissingShadowedValueError).message).toBe(
+        "error: option '--version <version>' argument missing",
+      );
+      expect((caught as MissingShadowedValueError).command.name()).toBe("release");
     }
   });
 
@@ -130,6 +155,18 @@ describe("nemar entry point", () => {
     expect(r.stdout.trim()).not.toBe(version);
     expect(r.stdout).toContain("Not authenticated");
     expect(r.exitCode).toBe(1);
+  });
+
+  test("dataset release --version with no value fails like Commander", async () => {
+    for (const args of [
+      ["dataset", "release", "nm000104", "--version"],
+      ["dataset", "release", "nm000104", "--version", "-y"],
+    ]) {
+      const r = await runCli(args);
+      expect(r.stdout.trim()).not.toBe(version);
+      expect(r.stderr).toContain("error: option '--version <version>' argument missing");
+      expect(r.exitCode).toBe(1);
+    }
   });
 
   test("the root --version still prints the CLI version", async () => {

@@ -32,7 +32,7 @@ import { doctorCommand } from "./commands/doctor.js";
 import { sandboxCommand } from "./commands/sandbox.js";
 import { IS_DEV_BUILD } from "./lib/api/client.js";
 import { MaintenanceError, errorDetail } from "./lib/api/errors.js";
-import { bindShadowedOptionValues } from "./lib/argv-shadowing.js";
+import { MissingShadowedValueError, bindShadowedOptionValues } from "./lib/argv-shadowing.js";
 import { runComplete } from "./lib/completion/run.js";
 import { NO_DESCRIPTION, NO_OPTION, YES_DESCRIPTION, YES_OPTION } from "./lib/confirm.js";
 import {
@@ -356,8 +356,20 @@ async function main() {
   }
 
   // `nemar dataset release <id> --version X.Y.Z` must reach `release`, not
-  // the root --version (#1493); see lib/argv-shadowing.ts.
-  await program.parseAsync(bindShadowedOptionValues(program, rawArgs), { from: "user" });
+  // the root --version (#1493); see lib/argv-shadowing.ts. A shadowed option
+  // written without a value is reported by the command that declares it, the
+  // way Commander reports any option missing its argument: the root would
+  // otherwise claim the bare flag and print the CLI version.
+  let argv: string[];
+  try {
+    argv = bindShadowedOptionValues(program, rawArgs);
+  } catch (err) {
+    if (err instanceof MissingShadowedValueError) {
+      err.command.error(err.message, { code: "commander.optionMissingArgument" });
+    }
+    throw err;
+  }
+  await program.parseAsync(argv, { from: "user" });
 }
 
 main().catch((err) => {
