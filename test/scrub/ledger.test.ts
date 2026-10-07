@@ -37,7 +37,7 @@ describe("a valid entry", () => {
   });
 
   test("lives at fixed locations", () => {
-    expect(LEDGER_REPO_PATH).toBe(".nemar/corrections.jsonl.MUTATED");
+    expect(LEDGER_REPO_PATH).toBe(".nemar/corrections.jsonl");
     expect(ledgerS3Key("nm000348")).toBe("nm000348/corrections/ledger.jsonl");
   });
 
