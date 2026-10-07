@@ -319,19 +319,6 @@ export async function getAdminEmailsForCategory(
 }
 
 /**
- * Send email via Resend API.
- *
- * `deliveryEnv` (issue #957) is the delivery-level fence: when set and not
- * production, a recipient not on DEV_EMAIL_ALLOWLIST is refused BEFORE the
- * Resend fetch ever fires -- see isEmailDeliveryAllowed's doc comment for
- * why an unset/unrecognized ENVIRONMENT fails toward refusing, not
- * allowing. `deliveryEnv` is optional only so this function's own type
- * signature doesn't force every caller to thread it through in one commit;
- * every exported wrapper below does pass it, and an OMITTED deliveryEnv
- * still fails closed (isEmailDeliveryAllowed treats undefined ENVIRONMENT
- * as non-production with an empty allow-list, i.e. refuses).
- */
-/**
  * Resend ANSWERED a send with a 4xx: it refused the message itself (a bad key,
  * a bad address, a malformed body) and delivered nothing. The message keeps the
  * plain error's words. A thrown fetch, a timeout or a 5xx is not this class:
@@ -347,6 +334,23 @@ export class EmailRejectedError extends Error {
   }
 }
 
+/**
+ * Send email via Resend API.
+ *
+ * `deliveryEnv` (issue #957) is the delivery-level fence: when set and not
+ * production, a recipient not on DEV_EMAIL_ALLOWLIST is refused BEFORE the
+ * Resend fetch ever fires -- see isEmailDeliveryAllowed's doc comment for
+ * why an unset/unrecognized ENVIRONMENT fails toward refusing, not
+ * allowing. `deliveryEnv` is optional only so this function's own type
+ * signature doesn't force every caller to thread it through in one commit;
+ * every exported wrapper below does pass it, and an OMITTED deliveryEnv
+ * still fails closed (isEmailDeliveryAllowed treats undefined ENVIRONMENT
+ * as non-production with an empty allow-list, i.e. refuses).
+ *
+ * `timeoutMs`, when given, bounds the Resend call (the identifier sweep's weekly
+ * report passes one). A 4xx answer throws {@link EmailRejectedError}: Resend
+ * refused the message, so nothing was delivered.
+ */
 async function sendEmail(
   to: string,
   subject: string,
