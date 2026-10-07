@@ -16,6 +16,7 @@ import {
   constants,
   accessSync,
   chmodSync,
+  chownSync,
   existsSync,
   linkSync,
   lstatSync,
@@ -282,6 +283,14 @@ describe("the plan reads and changes nothing", () => {
     expect(status.stdout).toBe("?? sub/\n");
   });
 
+  test("a `.git` that is a dangling link still marks a nested repository", async () => {
+    write("sourcedata/raw/a.edf", recording());
+    symlinkSync(join(dirname(root), "gone"), join(root, "sourcedata/raw/.git"));
+    const plan = await planUploadDates(root);
+    expect(plan.items).toEqual([]);
+    expect(plan.left["nested-repository"]).toBe(1);
+  });
+
   test("a recording git would ignore is left: the upload never sends it", async () => {
     write(".gitignore", "sub-02/\n");
     write(EDF, recording());
@@ -361,6 +370,30 @@ describe("applying the plan", () => {
     ]);
     // The work directory and the `.nemar/` it made are gone again.
     expect(existsSync(join(root, ".nemar"))).toBe(false);
+  });
+
+  // A group of this user's other than the one a new file would get, if there is one, on a
+  // filesystem that keeps owners (a volume mounted `noowners` ignores every chown).
+  const otherGroup = (process.getgroups?.() ?? []).find((g) => g !== process.getgid?.());
+  const keepsOwners = (() => {
+    if (otherGroup === undefined) return false;
+    const probe = join(mkdtempSync(join(tmpdir(), "nemar-owners-")), "probe");
+    try {
+      writeFileSync(probe, "");
+      chownSync(probe, -1, otherGroup);
+      return statSync(probe).gid === otherGroup;
+    } catch {
+      return false;
+    } finally {
+      rmSync(dirname(probe), { recursive: true, force: true });
+    }
+  })();
+  test.skipIf(!keepsOwners)("the file keeps its group", async () => {
+    const path = write(EDF, recording());
+    chownSync(path, -1, otherGroup as number);
+    applyUploadDates(root, await planUploadDates(root));
+    expect(differing(read(EDF), recording()).length).toBeGreaterThan(0);
+    expect(statSync(path).gid).toBe(otherGroup as number);
   });
 
   test("another hard link to the same file keeps the original bytes", async () => {
