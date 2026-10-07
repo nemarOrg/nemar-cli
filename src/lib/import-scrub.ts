@@ -16,10 +16,20 @@
  *   168 only, proven by `verifyScrub`, the new content annexed as SHA256E and uploaded with ADR 0060's
  *   location-log proof, the old key retired in the git-annex branch as ADR 0085's `annex-registry`
  *   retires one;
+ * - on a first import, the acquisition dates of an EDF or BDF header, set to 1 January of their
+ *   year by `normalizeEdfDates` (ADR 0091) and proven by `verifyDateNormalization`, in the same patch
+ *   as the scrub and through the same key replacement; a recording whose only change is its date is
+ *   downloaded only when every such recording fits in the bound, and is otherwise left as it is,
+ *   because a date never refuses an import;
+ * - on a first import, the dated `acq_time` values of an inline `_scans.tsv`
+ *   (`normalizeScansTableDates`);
  * - a value under an identifier key in an inline JSON file (`blankIdentifierJsonKeys`);
- * - when headers were scrubbed, the provenance file's `privacy_correction` sentence and the note in
+ * - when headers were changed, the provenance file's `privacy_correction` sentence and the note in
  *   its README (`shared/privacy-correction-text.ts`);
  * - one `import-scrubbed` ledger line, counts only, in `.nemar/corrections.jsonl`.
+ *
+ * A re-import changes no date: its tree is the dataset NEMAR already holds, which may be public, and
+ * ADR 0091 leaves that as it is.
  *
  * Images and documents are counted and left for the identifier screen, which holds them for a person;
  * nothing here removes a file.
@@ -57,18 +67,27 @@ import { pipeline } from "node:stream/promises";
 import { ANNEX_KEY } from "../../scripts/scrub/contract.js";
 import { annexRegistry, isDead, locationLogs } from "../../scripts/scrub/git/git-lib.js";
 import { LEDGER_REPO_PATH, appendLedger, readLedger } from "../../scripts/scrub/ledger.js";
-import { EDF_HEADER_BYTES, scanPaths } from "../../shared/identifier-scan.js";
+import {
+  DATE_KINDS,
+  EDF_HEADER_BYTES,
+  scanEdfHeader,
+  scanPaths,
+} from "../../shared/identifier-scan.js";
 import {
   JsonBlankUnverified,
   ScrubRefused,
   blankIdentifierJsonKeys,
+  normalizeEdfDates,
+  normalizeScansTableDates,
   scrubEdfHeader,
+  verifyDateNormalization,
   verifyScrub,
 } from "../../shared/identifier-scrub.js";
 import {
   PROVENANCE_NOTE_KEY,
   PROVENANCE_PATH,
   PROVENANCE_README_PATH,
+  type ProvenanceChange,
   provenanceNote,
   provenanceReadmeNote,
 } from "../../shared/privacy-correction-text.js";
@@ -176,8 +195,13 @@ const ACTOR = /^[a-z0-9][a-z0-9-]{0,38}$/i;
 /** Inline JSON over this is not read (the bound ADR 0085's git plan uses). */
 export const MAX_JSON_BYTES = 1024 * 1024;
 
+/** Inline scans tables over this are not edited, and keep their dates. */
+export const MAX_SCANS_TABLE_BYTES = 8 * 1024 * 1024;
+
 const RECORDING = /\.(edf|bdf)$/i;
 const JSON_FILE = /\.json$/i;
+/** The tables the screen reads `acq_time` from (`identifier-fleet-lib.ts`), spelled the same way. */
+const SCANS_TABLE = /_scans\.tsv$/;
 
 // ---------------------------------------------------------------------------------------
 // Reading upstream
@@ -380,10 +404,32 @@ export interface ImportScrubCounts {
   headers_not_read_nemar_held: number;
   /** Files named like a recording whose first bytes are not an EDF or BDF header. */
   headers_not_edf: number;
-  /** Headers rewritten. */
+  /** Headers whose identification fields were rewritten. */
   headers_scrubbed: number;
   /** Of those, recordings git held (their originals stay in the pushed history). */
   git_held_recordings_scrubbed: number;
+  /** Headers whose acquisition dates were set to 1 January (ADR 0091), scrubbed or not. */
+  headers_dates_normalized: number;
+  /** Of those, recordings git held: their original dates stay in the pushed history. */
+  git_held_recordings_dates_normalized: number;
+  /** Recordings whose only change would be the date, left because downloading them all is over the bound. */
+  headers_dates_over_bound: number;
+  /** Headers read that still hold an acquisition date after this run, for any reason. */
+  headers_dates_left: number;
+  /** Of those, headers whose date rule faulted or could not be proven. */
+  headers_dates_unproven: number;
+  /** Of those, recordings whose only change was the date and whose download, hash or patch failed. */
+  headers_dates_failed: number;
+  /** Inline scans tables read for dated `acq_time` values. */
+  scans_tables_read: number;
+  /** Scans tables not read: over the bound, not UTF-8, or not a regular file. */
+  scans_tables_unread: number;
+  /** Scans tables upstream annexed; their content is not in the clone. */
+  scans_tables_annexed: number;
+  /** Scans tables with a value set to 1 January. */
+  scans_tables_normalized: number;
+  /** `acq_time` values set to 1 January. */
+  scans_values_normalized: number;
   /** Upstream keys replaced by a scrubbed copy and retired. */
   upstream_keys_replaced: number;
   /** Bytes downloaded to scrub. */
@@ -418,6 +464,17 @@ function zeroCounts(): ImportScrubCounts {
     headers_not_edf: 0,
     headers_scrubbed: 0,
     git_held_recordings_scrubbed: 0,
+    headers_dates_normalized: 0,
+    git_held_recordings_dates_normalized: 0,
+    headers_dates_over_bound: 0,
+    headers_dates_left: 0,
+    headers_dates_unproven: 0,
+    headers_dates_failed: 0,
+    scans_tables_read: 0,
+    scans_tables_unread: 0,
+    scans_tables_annexed: 0,
+    scans_tables_normalized: 0,
+    scans_values_normalized: 0,
     upstream_keys_replaced: 0,
     bytes_downloaded: 0,
     json_files_read: 0,
@@ -520,38 +577,86 @@ function readLocalHeader(path: string): Uint8Array | null {
   }
 }
 
-/** Whether `scrubEdfHeader` would change this header; null when it is not an EDF or BDF header. */
-function needsScrub(header: Uint8Array): boolean | null {
+/** What the import's patch does to one header. */
+interface HeaderChange {
+  /** `scrubEdfHeader` rewrites an identification field. */
+  scrub: boolean;
+  /** `normalizeEdfDates` sets an acquisition date, after the scrub (first import only). */
+  dates: boolean;
+  /** The header as the patch would leave it still holds an acquisition date (a layout the rule leaves). */
+  datesLeft: boolean;
+  /** The date rule faulted or could not prove its result, so the dates were left (never a refusal). */
+  datesUnproven: boolean;
+}
+
+/**
+ * The import's patch of one header and its proof: the identifier scrub (ADR 0085's rule, proven by
+ * `verifyScrub`), then, when `dates` is set, the date rule on the scrubbed header (ADR 0091, proven
+ * by `verifyDateNormalization`). Null when it is not an EDF or BDF header. The scrub may rewrite all
+ * of bytes 8..168, and the slot date lies inside them, so the order matters: the date rule reads
+ * the scrubbed header, and each proof is of its own step, so the composite differs from the original
+ * only where one of them may write. A scrub that cannot be proven refuses; a date rule that faults
+ * or cannot be proven leaves the dates (ADR 0090: a date never gates).
+ */
+function patchHeader(
+  before: Uint8Array,
+  dates: boolean,
+): { header: Uint8Array; change: HeaderChange } | null {
+  let scrubbed: ReturnType<typeof scrubEdfHeader>;
   try {
-    return scrubEdfHeader(header).changed;
+    scrubbed = scrubEdfHeader(before);
   } catch (err) {
     if (err instanceof ScrubRefused) return null;
     throw err;
   }
+  if (scrubbed.changed && !verifyScrub(before, scrubbed.header).ok) {
+    throw new ImportScrubRefused("scrub-unverified", "a patched header failed its proof");
+  }
+  let header = scrubbed.header;
+  let datesChanged = false;
+  let datesUnproven = false;
+  if (dates) {
+    try {
+      const normalized = normalizeEdfDates(scrubbed.header);
+      if (normalized.changed && verifyDateNormalization(scrubbed.header, normalized.header).ok) {
+        header = normalized.header;
+        datesChanged = true;
+      } else if (normalized.changed) {
+        datesUnproven = true;
+      }
+    } catch {
+      datesUnproven = true;
+    }
+  }
+  const datesLeft = scanEdfHeader(header).some((f) => DATE_KINDS.has(f.kind));
+  return {
+    header,
+    change: { scrub: scrubbed.changed, dates: datesChanged, datesLeft, datesUnproven },
+  };
 }
 
 /**
- * Patch a recording on disk in place: only the first {@link EDF_HEADER_BYTES} bytes are written, and
- * the result is read back and proven against the original header. Throws a refusal when it is not.
+ * Patch a recording on disk in place: only the first {@link EDF_HEADER_BYTES} bytes are written, the
+ * patch is proven before it is written ({@link patchHeader}), and what is read back must be the proven
+ * header byte for byte. Throws a refusal otherwise, or when the patch would change nothing.
  */
-function patchInPlace(path: string): void {
+function patchInPlace(path: string, dates: boolean): void {
   const before = readLocalHeader(path);
   if (!before || before.length < EDF_HEADER_BYTES) {
     throw new ImportScrubRefused("scrub-unverified", "a header to patch could not be read back");
   }
-  const { header, changed } = scrubEdfHeader(before);
-  const proof = verifyScrub(before, header);
-  if (!changed || !proof.ok) {
+  const patched = patchHeader(before, dates);
+  if (!patched || (!patched.change.scrub && !patched.change.dates)) {
     throw new ImportScrubRefused("scrub-unverified", "a patched header failed its proof");
   }
   const fd = openSync(path, "r+");
   try {
-    writeSync(fd, header, 0, EDF_HEADER_BYTES, 0);
+    writeSync(fd, patched.header, 0, EDF_HEADER_BYTES, 0);
   } finally {
     closeSync(fd);
   }
   const after = readLocalHeader(path);
-  if (!after || !verifyScrub(before, after).ok) {
+  if (!after || Buffer.compare(Buffer.from(after), Buffer.from(patched.header)) !== 0) {
     throw new ImportScrubRefused("scrub-unverified", "a patched header failed its read-back");
   }
 }
@@ -721,6 +826,9 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
   const recordings = tracked.filter((p) => RECORDING.test(p));
   counts.recordings = recordings.length;
 
+  // A re-import's tree is the dataset NEMAR already holds, which may be public: no date is changed.
+  const normalizeDates = !input.reimport;
+
   // 1. Read every header that can be read, and decide.
   const gitHeld: string[] = [];
   const upstream: Array<{ path: string; key: string; source: UpstreamSource }> = [];
@@ -767,7 +875,7 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
     upstream.push({ path, key, source });
   }
 
-  const flaggedGitHeld: string[] = [];
+  const flaggedGitHeld: Array<{ path: string; change: HeaderChange }> = [];
   for (const path of gitHeld) {
     const header = readLocalHeader(join(datasetPath, path));
     if (header === null) {
@@ -775,9 +883,16 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
       continue;
     }
     counts.headers_read++;
-    const verdict = needsScrub(header);
-    if (verdict === null) counts.headers_not_edf++;
-    else if (verdict) flaggedGitHeld.push(path);
+    const patched = patchHeader(header, normalizeDates);
+    if (patched === null) {
+      counts.headers_not_edf++;
+      continue;
+    }
+    if (patched.change.datesLeft) counts.headers_dates_left++;
+    if (patched.change.datesUnproven) counts.headers_dates_unproven++;
+    if (patched.change.scrub || patched.change.dates) {
+      flaggedGitHeld.push({ path, change: patched.change });
+    }
   }
 
   const reads = await mapPool(upstream, input.concurrency ?? 16, (u) =>
@@ -790,6 +905,7 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
     key: string;
     source: UpstreamSource;
     size: number;
+    change: HeaderChange;
   }> = [];
   reads.forEach((read, i) => {
     const u = upstream[i] as (typeof upstream)[number];
@@ -809,9 +925,16 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
     }
     counts.headers_read++;
     headerReadKeys.add(u.key);
-    const verdict = needsScrub(read.bytes);
-    if (verdict === null) counts.headers_not_edf++;
-    else if (verdict) flaggedUpstream.push({ ...u, size: size ?? 0 });
+    const patched = patchHeader(read.bytes, normalizeDates);
+    if (patched === null) {
+      counts.headers_not_edf++;
+      return;
+    }
+    if (patched.change.datesLeft) counts.headers_dates_left++;
+    if (patched.change.datesUnproven) counts.headers_dates_unproven++;
+    if (patched.change.scrub || patched.change.dates) {
+      flaggedUpstream.push({ ...u, size: size ?? 0, change: patched.change });
+    }
   });
 
   // 2. Refuse what cannot be done safely, before a byte moves.
@@ -829,35 +952,80 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
       `${sizeMismatches.length} upstream object(s) are not the size their annex key declares`,
     );
   }
-  const flagged = flaggedUpstream.length + flaggedGitHeld.length;
+  // What the identifier scrub must do refuses when it cannot be done; what only the date rule would
+  // do is left undone instead, because a date never gates (ADR 0090, ADR 0091).
+  const scrubUpstream = flaggedUpstream.filter((f) => f.change.scrub);
+  const scrubGitHeld = flaggedGitHeld.filter((f) => f.change.scrub);
+  const flagged = scrubUpstream.length + scrubGitHeld.length;
   if (input.reimport && flagged > 0) {
     throw new ImportScrubRefused(
       "already-imported-unscrubbed",
       `${flagged} recording(s) in the dataset's own tree need a scrub; correct it with ADR 0085's procedure, not by re-importing`,
     );
   }
-  if (flaggedUpstream.some((f) => !ANNEX_KEY.test(f.key) || f.size <= 0)) {
-    const n = flaggedUpstream.filter((f) => !ANNEX_KEY.test(f.key) || f.size <= 0).length;
+  const replaceable = (f: { key: string; size: number }) => ANNEX_KEY.test(f.key) && f.size > 0;
+  if (scrubUpstream.some((f) => !replaceable(f))) {
+    const n = scrubUpstream.filter((f) => !replaceable(f)).length;
     throw new ImportScrubRefused(
       "unsupported-key-backend",
       `${n} recording key(s) to replace are not SHA256E with a declared size`,
     );
   }
   const maxBytes = input.maxBytes ?? NORMALIZE_MAX_BYTES;
-  const toDownload = flaggedUpstream.reduce((n, f) => n + f.size, 0);
+  const toDownload = scrubUpstream.reduce((n, f) => n + f.size, 0);
   const gitHeldData = input.unannexedData.reduce((n, f) => n + f.size, 0);
   if (toDownload + gitHeldData > maxBytes) {
     throw new ImportScrubRefused(
       "bound-exceeded",
-      `${flaggedUpstream.length} recording(s) to scrub, ${(toDownload / 1024 ** 3).toFixed(1)} GiB to download and ${(gitHeldData / 1024 ** 3).toFixed(1)} GiB of git-held data to upload, over the ${(maxBytes / 1024 ** 3).toFixed(1)} GiB bound; run on a host that can move them with --normalize-max-gb`,
+      `${scrubUpstream.length} recording(s) to scrub, ${(toDownload / 1024 ** 3).toFixed(1)} GiB to download and ${(gitHeldData / 1024 ** 3).toFixed(1)} GiB of git-held data to upload, over the ${(maxBytes / 1024 ** 3).toFixed(1)} GiB bound; run on a host that can move them with --normalize-max-gb`,
     );
   }
+  // A recording whose only change is its date: one whose key cannot be replaced keeps its date, and
+  // the rest are downloaded all together or not at all, so which of them is set does not depend on
+  // an order. (Git-held recordings move from this host whatever happens, so their dates are always
+  // set; the bound is about what would be downloaded for a date alone.)
+  const datesOnly = flaggedUpstream.filter((f) => !f.change.scrub);
+  const datesReplaceable = datesOnly.filter(replaceable);
+  counts.headers_dates_left += datesOnly.length - datesReplaceable.length;
+  const datesBytes = datesReplaceable.reduce((n, f) => n + f.size, 0);
+  const datesFit = toDownload + gitHeldData + datesBytes <= maxBytes;
+  if (!datesFit) {
+    counts.headers_dates_over_bound = datesReplaceable.length;
+    counts.headers_dates_left += datesReplaceable.length;
+  }
+  const datesKept = new Set(datesFit ? datesReplaceable : []);
+  const toFetch = flaggedUpstream.filter((f) => f.change.scrub || datesKept.has(f));
+  const toPatch: typeof toFetch = [];
 
-  // 3. Download, check, patch. Each download replaces the annex pointer at its path.
-  for (const f of flaggedUpstream) {
+  // 3. Download, check, patch. Each download replaces the annex pointer at its path. A recording
+  // the identifier scrub needs refuses on any failure; one whose only change is its date is left
+  // with its upstream key, its date and its pointer, and the copy phase copies it as before.
+  for (const f of toFetch) {
     const abs = join(datasetPath, f.path);
     const tmp = `${abs}.nemar-scrub-download`;
     const got = await input.reader.download(f.source, tmp);
+    if (!f.change.scrub) {
+      const digest = ANNEX_KEY.exec(f.key)?.[2];
+      let ok = got.ok && got.bytes === f.size && (await sha256OfFile(tmp)) === digest;
+      if (ok) {
+        try {
+          patchInPlace(tmp, normalizeDates);
+        } catch {
+          ok = false;
+        }
+      }
+      if (!ok) {
+        rmSync(tmp, { force: true });
+        counts.headers_dates_failed++;
+        counts.headers_dates_left++;
+        continue;
+      }
+      counts.bytes_downloaded += f.size;
+      rmSync(abs, { force: true });
+      renameSync(tmp, abs);
+      toPatch.push(f);
+      continue;
+    }
     if (!got.ok) {
       throw new ImportScrubRefused(
         "header-unreadable",
@@ -874,26 +1042,31 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
       );
     }
     counts.bytes_downloaded += got.bytes;
-    patchInPlace(tmp);
+    patchInPlace(tmp, normalizeDates);
     rmSync(abs, { force: true });
     renameSync(tmp, abs);
+    toPatch.push(f);
   }
-  for (const path of flaggedGitHeld) patchInPlace(join(datasetPath, path));
+  for (const f of flaggedGitHeld) patchInPlace(join(datasetPath, f.path), normalizeDates);
   counts.headers_scrubbed = flagged;
-  counts.git_held_recordings_scrubbed = flaggedGitHeld.length;
+  counts.git_held_recordings_scrubbed = scrubGitHeld.length;
+  const gitHeldDates = flaggedGitHeld.filter((f) => f.change.dates).length;
+  counts.headers_dates_normalized = toPatch.filter((f) => f.change.dates).length + gitHeldDates;
+  counts.git_held_recordings_dates_normalized = gitHeldDates;
 
-  // 4. Annex the scrubbed recordings as SHA256E and upload them, with the location-log proof.
+  // 4. Annex the patched recordings as SHA256E and upload them, with the location-log proof.
   const items: ImportManifestItem[] = [];
   const replacedKeys = new Set<string>();
   const handledPaths = new Set<string>();
   const toStage: string[] = [];
+  const gitHeldPaths = flaggedGitHeld.map((f) => f.path);
   const annexTargets: Array<{ path: string; size: number }> = [
-    ...flaggedUpstream.map((f) => ({ path: f.path, size: f.size })),
+    ...toPatch.map((f) => ({ path: f.path, size: f.size })),
     ...(input.skipData
       ? []
-      : flaggedGitHeld.map((p) => ({ path: p, size: lstatSync(join(datasetPath, p)).size }))),
+      : gitHeldPaths.map((p) => ({ path: p, size: lstatSync(join(datasetPath, p)).size }))),
   ];
-  if (input.skipData) toStage.push(...flaggedGitHeld);
+  if (input.skipData) toStage.push(...gitHeldPaths);
   if (annexTargets.length > 0) {
     if (!input.upload) throw new Error("scrubbed recordings need an upload strategy");
     let data: Awaited<ReturnType<typeof normalizeUnannexedData>>;
@@ -916,10 +1089,10 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
       );
     }
     items.push(...data.items);
-    for (const p of flaggedGitHeld) handledPaths.add(p);
+    for (const p of gitHeldPaths) handledPaths.add(p);
     const newKeyOf = new Map(data.files.map((f) => [f.path, f.key]));
     const keymap: Record<string, string> = {};
-    for (const f of flaggedUpstream) {
+    for (const f of toPatch) {
       const newKey = newKeyOf.get(f.path);
       if (!newKey || !ANNEX_KEY.test(newKey) || newKey === f.key) {
         throw new ImportScrubRefused("scrub-unverified", "a scrubbed recording has no new key");
@@ -994,17 +1167,66 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
     }
   }
 
+  // 6b. On a first import, set the dated `acq_time` values of inline scans tables to 1 January
+  // (ADR 0091), at the head of the tree, as the JSON above is blanked there.
+  if (normalizeDates) {
+    for (const path of tracked) {
+      if (!SCANS_TABLE.test(path)) continue;
+      if (annexedKeys.has(path)) {
+        counts.scans_tables_annexed++;
+        continue;
+      }
+      const abs = join(datasetPath, path);
+      if (!isRegularFile(abs) || lstatSync(abs).size > MAX_SCANS_TABLE_BYTES) {
+        counts.scans_tables_unread++;
+        continue;
+      }
+      // A table that cannot be read, or whose result cannot be proven, keeps its dates: a date
+      // never refuses an import. A failed write below does refuse, because it leaves the tree torn.
+      let result: ReturnType<typeof normalizeScansTableDates>;
+      try {
+        result = normalizeScansTableDates(readFileSync(abs));
+      } catch {
+        result = { status: "unreadable", values: 0 };
+      }
+      if (result.status === "unreadable") {
+        counts.scans_tables_unread++;
+        continue;
+      }
+      counts.scans_tables_read++;
+      if (result.status === "normalized" && result.bytes) {
+        writeFileSync(abs, result.bytes);
+        toStage.push(path);
+        counts.scans_tables_normalized++;
+        counts.scans_values_normalized += result.values;
+      }
+    }
+  }
+
   // 7. Images and documents: counted for the record, left for the screen and a person.
   counts.images_or_documents_held = scanPaths(tracked).filter(
     (f) => f.kind === "image-or-document-file",
   ).length;
 
-  const changed = counts.headers_scrubbed > 0 || counts.json_values_blanked > 0;
+  const changed =
+    counts.headers_scrubbed > 0 ||
+    counts.headers_dates_normalized > 0 ||
+    counts.json_values_blanked > 0 ||
+    counts.scans_values_normalized > 0;
   const now = input.now ?? new Date();
   const date = now.toISOString().slice(0, 10);
 
-  // 8. The provenance file and README say the headers changed (ADR 0085's sentences).
-  if (counts.headers_scrubbed > 0) {
+  // 8. The provenance file and README say the headers changed (ADR 0085's sentences, and ADR 0091's
+  // for a date), because their checksums describe the upstream files.
+  const headerChange: ProvenanceChange | null =
+    counts.headers_scrubbed > 0
+      ? counts.headers_dates_normalized > 0
+        ? "scrubbed-and-dates-set"
+        : "scrubbed-in-place"
+      : counts.headers_dates_normalized > 0
+        ? "dates-set"
+        : null;
+  if (headerChange !== null) {
     const provenance = join(datasetPath, PROVENANCE_PATH);
     if (tracked.includes(PROVENANCE_PATH) && isRegularFile(provenance)) {
       const text = readFileSync(provenance, "utf8");
@@ -1012,7 +1234,7 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
       const next = setTopLevelString(
         text.slice(bom.length),
         PROVENANCE_NOTE_KEY,
-        provenanceNote(date, "scrubbed-in-place"),
+        provenanceNote(date, headerChange),
       );
       if (next !== null) {
         writeFileSync(provenance, `${bom}${next}`);
@@ -1026,7 +1248,7 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
     }
     const readme = join(datasetPath, PROVENANCE_README_PATH);
     if (tracked.includes(PROVENANCE_README_PATH) && isRegularFile(readme)) {
-      const note = provenanceReadmeNote(date, "scrubbed-in-place");
+      const note = provenanceReadmeNote(date, headerChange);
       const text = readFileSync(readme, "utf8");
       if (!text.endsWith(note)) {
         writeFileSync(readme, `${text}${text === "" || text.endsWith("\n") ? "" : "\n"}${note}`);
@@ -1058,6 +1280,7 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
     await stageAsGit(datasetPath, toStage);
     const body = [
       `Recording headers scrubbed: ${counts.headers_scrubbed} (identification fields only; signal bytes unchanged).`,
+      `Acquisition dates set to 1 January of their year: ${counts.headers_dates_normalized} recording header(s), ${counts.scans_values_normalized} scans table value(s) in ${counts.scans_tables_normalized} file(s).`,
       `JSON values blanked: ${counts.json_values_blanked} in ${counts.json_files_blanked} file(s).`,
       `Images and documents left for review: ${counts.images_or_documents_held}.`,
       `Recorded in ${LEDGER_REPO_PATH}.`,

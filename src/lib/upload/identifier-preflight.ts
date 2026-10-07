@@ -76,6 +76,7 @@ import { CONTRIBUTOR_TERMS_URL } from "../attestation.js";
 import { markReportedExit } from "../debug-log.js";
 import { identifierScreenLines } from "../identifier-screen-display.js";
 import { version } from "../version.js";
+import type { DatePlan } from "./date-normalization.js";
 import { FAIL, type Step, ok } from "./types.js";
 
 /** The flag that acknowledges a verdict without a terminal. */
@@ -163,9 +164,13 @@ export function walkDatasetTree(root: string): LocalTree {
 /**
  * Read at most `n` bytes from the start of a local file. Fewer than `minBytes` is a failed read
  * (`short-body`), never a short header; an entry the walk did not find readable, or a file that
- * cannot be opened, is `unreadable-entry`. Local failures are final, so none is retryable.
+ * cannot be opened, is `unreadable-entry`. Local failures are final, so none is retryable. A file
+ * in `planned` (by absolute path) is read with its first bytes replaced by the planned header.
  */
-function createLocalReader(readable: ReadonlyMap<string, string>) {
+function createLocalReader(
+  readable: ReadonlyMap<string, string>,
+  planned: ReadonlyMap<string, Uint8Array> = new Map(),
+) {
   return async (
     entry: ManifestEntry,
     n: number,
@@ -173,6 +178,7 @@ function createLocalReader(readable: ReadonlyMap<string, string>) {
   ): Promise<Uint8Array> => {
     const absolute = readable.get(entry.url);
     if (absolute === undefined) throw new ReadFailure("unreadable-entry");
+    const header = planned.get(absolute);
     let handle: Awaited<ReturnType<typeof open>>;
     try {
       handle = await open(absolute, "r");
@@ -191,6 +197,8 @@ function createLocalReader(readable: ReadonlyMap<string, string>) {
         got += bytesRead;
       }
       if (got < options.minBytes) throw new ReadFailure("short-body");
+      // A header the upload will rewrite before anything is sent is read as it will be (ADR 0091).
+      if (header) out.set(header.subarray(0, Math.min(got, header.length)), 0);
       return out.subarray(0, got);
     } catch (error) {
       if (error instanceof ReadFailure) throw error;
@@ -204,14 +212,19 @@ function createLocalReader(readable: ReadonlyMap<string, string>) {
 /**
  * Screen a dataset directory and return the scan, in the contract's vocabulary. Throws when no
  * verdict could be produced (a bug, never a property of the dataset); the caller fails closed.
+ * `planned` holds headers the upload will write before it sends anything (ADR 0091), by absolute
+ * path: the scan is then of the tree as it will be sent.
  */
-export async function scanLocalDataset(root: string): Promise<PreflightScan> {
+export async function scanLocalDataset(
+  root: string,
+  planned?: ReadonlyMap<string, Uint8Array>,
+): Promise<PreflightScan> {
   const tree = walkDatasetTree(root);
   const ctx = createContext({
     fileConcurrency: PREFLIGHT_CONCURRENCY,
     workerConcurrency: 1,
     limits: { ...LOCAL_SCAN_LIMITS },
-    readEntryHead: createLocalReader(tree.readable),
+    readEntryHead: createLocalReader(tree.readable, planned),
     // A scan of given entries never fetches a manifest or a token. If it ever did, these make it
     // fail here rather than reach a network.
     githubToken: async () => null,
@@ -442,6 +455,7 @@ export async function identifierPreflightStep(
   absolutePath: string,
   options: { dryRun?: boolean; acknowledgeIdentifierPreflight?: string[]; no?: boolean },
   isTty: boolean = process.stdin.isTTY === true,
+  datePlan?: DatePlan,
 ): Promise<Step<UploaderPreflight | null>> {
   const spinner = ora("Screening for identifiers on this machine (nothing is sent)...").start();
   let isDirectory = false;
@@ -454,13 +468,16 @@ export async function identifierPreflightStep(
     spinner.fail("Identifier preflight: the dataset path is not a directory");
     return FAIL;
   }
+  const planned = new Map((datePlan?.items ?? []).map((item) => [item.path, item.after]));
   let scan: PreflightScan;
   try {
-    scan = await scanLocalDataset(absolutePath);
+    scan = await scanLocalDataset(absolutePath, planned);
   } catch (error) {
     printScanFailure(spinner, error);
     return FAIL;
   }
+  // ADR 0091: the dates the upload will set are neither warned about nor asked about; the one line
+  // that counts them is printed when they are set, after the final confirmation.
   printVerdict(spinner, scan);
 
   const conditions = preflightConditions(scan);

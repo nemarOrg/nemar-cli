@@ -201,6 +201,7 @@ import {
   readUploadProgress,
   writeUploadProgress,
 } from "../lib/upload-progress.js";
+import { applyUploadDates, planUploadDates } from "../lib/upload/date-normalization.js";
 import {
   analyzeDataset,
   collectAuthorOrcids,
@@ -674,7 +675,12 @@ Examples:
       // and BEFORE every step that sends dataset content: the co-author ORCID step (4b) reads
       // names out of dataset_description.json, and the create call (6) carries every data
       // file's path. A refusal, or a verdict nobody acknowledged, stops here with nothing sent.
-      const preflight = await identifierPreflightStep(absolutePath, options);
+      //
+      // The acquisition dates the upload will set to 1 January (ADR 0091) are planned first and
+      // only read, so the preflight screens the files as they will be sent; nothing changes until
+      // the final confirmation below.
+      const datePlan = await planUploadDates(absolutePath);
+      const preflight = await identifierPreflightStep(absolutePath, options, undefined, datePlan);
       if (preflight.status === "fail") process.exit(1);
       const identifierPreflight = preflight.value;
 
@@ -741,6 +747,13 @@ Examples:
       if (identifierPreflight === null) {
         console.log(chalk.red("Identifier preflight: no record to send. Nothing was sent."));
         process.exit(1);
+      }
+      // The planned dates are set now, after the confirmation and before the second screen, which
+      // reads the files as they are: a file left as it was keeps its date, and that screen warns.
+      const dates = applyUploadDates(absolutePath, datePlan);
+      for (const file of manifest.files) {
+        const mtimeMs = dates.mtimes.get(file.path);
+        if (mtimeMs !== undefined) file.mtimeMs = mtimeMs;
       }
       const rechecked = await recheckIdentifierPreflight(absolutePath, identifierPreflight);
       if (rechecked.status === "fail") process.exit(1);

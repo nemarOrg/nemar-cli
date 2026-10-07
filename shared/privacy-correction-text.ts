@@ -23,12 +23,29 @@ export const PROVENANCE_NOTE_KEY = "privacy_correction";
 
 /**
  * What the scrub changed in the files a provenance file describes. There is no value for
- * "nothing", so no sentence can be built that claims a change nobody made.
+ * "nothing", so no sentence can be built that claims a change nobody made. The two `dates`
+ * values are the importer's alone (ADR 0091): it sets a new recording's acquisition dates to
+ * 1 January, and ADR 0085's correction of published data never does.
  */
-export type ProvenanceChange = "scrubbed-in-place" | "files-removed" | "both";
+export type ProvenanceChange =
+  | "scrubbed-in-place"
+  | "files-removed"
+  | "both"
+  | "dates-set"
+  | "scrubbed-and-dates-set";
 
 const SCRUBBED_IN_PLACE =
   "identification fields in the headers of the recording files were scrubbed in place";
+const DATES_SET =
+  "the acquisition dates in the headers of the recording files were set to 1 January of their year";
+const ALSO_DATES_SET = "acquisition dates in the headers were set to 1 January of their year";
+
+/** What was done to the recordings' headers, for the two sentences that are not about removal. */
+function headerChange(change: Exclude<ProvenanceChange, "files-removed" | "both">): string {
+  if (change === "dates-set") return DATES_SET;
+  if (change === "scrubbed-and-dates-set") return `${SCRUBBED_IN_PLACE}, and ${ALSO_DATES_SET}`;
+  return SCRUBBED_IN_PLACE;
+}
 
 /**
  * The `privacy_correction` sentence of the provenance file: what the scrub changed, and what its
@@ -40,8 +57,9 @@ export function provenanceNote(date: string, change: ProvenanceChange): string {
   if (change === "files-removed") {
     return `${date}: ${removed}; the remaining checksums describe the original upstream files.`;
   }
-  const done = change === "both" ? `${removed}, and ${SCRUBBED_IN_PLACE}` : SCRUBBED_IN_PLACE;
-  return `${date}: ${done}; the checksums in this file describe the original upstream files, not the scrubbed copies in this dataset.`;
+  const done = change === "both" ? `${removed}, and ${SCRUBBED_IN_PLACE}` : headerChange(change);
+  const copies = change === "dates-set" ? "the copies" : "the scrubbed copies";
+  return `${date}: ${done}; the checksums in this file describe the original upstream files, not ${copies} in this dataset.`;
 }
 
 /** The note appended to the provenance README, on the same terms as {@link provenanceNote}. */
@@ -51,6 +69,7 @@ export function provenanceReadmeNote(date: string, change: ProvenanceChange): st
   if (change === "files-removed") {
     return `\nPrivacy correction ${date}: ${removed}. The remaining checksums in the provenance file describe the original upstream files.\n`;
   }
-  const done = change === "both" ? `${SCRUBBED_IN_PLACE}, and ${removed}` : SCRUBBED_IN_PLACE;
-  return `\nPrivacy correction ${date}: ${done}. The checksums in the provenance file describe the original upstream files, not the scrubbed copies.\n`;
+  const done = change === "both" ? `${SCRUBBED_IN_PLACE}, and ${removed}` : headerChange(change);
+  const copies = change === "dates-set" ? "the copies" : "the scrubbed copies";
+  return `\nPrivacy correction ${date}: ${done}. The checksums in the provenance file describe the original upstream files, not ${copies}.\n`;
 }

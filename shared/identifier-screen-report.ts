@@ -647,6 +647,16 @@ export function isDateWarningLine(line: string): boolean {
 }
 
 /**
+ * The one line `nemar dataset upload` prints about the dates it set itself (ADR 0091), once they
+ * are set: fixed words and the count, never a date, a value or a path. It is not a warning and asks
+ * nothing; the warning above covers only the dates that stay.
+ */
+export function dateNormalizationLine(count: number): string {
+  const headers = `${count} recording header${count === 1 ? "" : "s"}`;
+  return `Acquisition dates in ${headers} were set to 1 January of their year.`;
+}
+
+/**
  * What a person is told when a publication request has been ACCEPTED, one sentence per line (ADR
  * 0090, amendment 2026-10-07). The terminal and the route's `request_notice` both come from here,
  * and nothing else in the repository spells these sentences.

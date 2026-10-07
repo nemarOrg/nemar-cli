@@ -13,7 +13,18 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { spawn } from "bun";
@@ -52,10 +63,15 @@ let configDir: string;
 let dataset: string;
 /** An empty directory: the PATH of a run that must not get past the preflight. */
 let emptyPath: string;
+/** A PATH with git and nothing else: the date plan can ask git, and the run stops at git-annex. */
+let gitOnlyPath: string;
 
 beforeEach(() => {
   configDir = mkdtempSync(join(tmpdir(), "nemar-preflight-cli-cfg-"));
   emptyPath = mkdtempSync(join(tmpdir(), "nemar-preflight-cli-path-"));
+  gitOnlyPath = mkdtempSync(join(tmpdir(), "nemar-preflight-cli-git-"));
+  const git = Bun.which("git");
+  if (git) symlinkSync(git, join(gitOnlyPath, "git"));
   // A parent named after nobody, and a dataset directory whose own name must not be printed.
   dataset = join(mkdtempSync(join(tmpdir(), "nemar-preflight-cli-")), "Quillfeather-study");
   mkdirSync(dataset);
@@ -64,6 +80,7 @@ beforeEach(() => {
 afterEach(() => {
   rmSync(configDir, { recursive: true, force: true });
   rmSync(emptyPath, { recursive: true, force: true });
+  rmSync(gitOnlyPath, { recursive: true, force: true });
   rmSync(dirname(dataset), { recursive: true, force: true });
 });
 
@@ -87,7 +104,7 @@ function configure(apiUrl: string): void {
  * that gets past the preflight then stops at the required-tools check, before any step that
  * could reach GitHub or git-annex.
  */
-function childEnv(options: { noTools?: boolean } = {}): Record<string, string> {
+function childEnv(options: { noTools?: boolean; gitOnly?: boolean } = {}): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (value === undefined || key.startsWith("TEST_")) continue;
@@ -98,10 +115,15 @@ function childEnv(options: { noTools?: boolean } = {}): Record<string, string> {
   env.NEMAR_NO_UPDATE_CHECK = "1";
   env.NO_COLOR = "1";
   if (options.noTools) env.PATH = emptyPath;
+  if (options.gitOnly) env.PATH = gitOnlyPath;
   return env;
 }
 
-async function upload(args: string[], apiUrl: string, options: { noTools?: boolean } = {}) {
+async function upload(
+  args: string[],
+  apiUrl: string,
+  options: { noTools?: boolean; gitOnly?: boolean } = {},
+) {
   configure(apiUrl);
   const proc = spawn({
     // The absolute path of this bun, so the run does not need PATH to start.
@@ -257,7 +279,7 @@ function expectWarningCarriesOnlyItsCount(output: string, n: number): void {
     .map((line) => line.trim())
     .filter((line) => dateWarning(n).includes(line));
   expect(printed).toEqual(dateWarning(n));
-  const withoutCount = printed.join("\n").replace(`(${n} entries)`, "()");
+  const withoutCount = printed.join("\n").replace(`(${n} ${n === 1 ? "entry" : "entries"})`, "()");
   expect(withoutCount).not.toMatch(/\d/);
   // The whole output, not just the warning's lines: no date of the fixture, and no path or file
   // name, is printed anywhere (the lines above were filtered to the fixed text, so they could not
@@ -276,6 +298,32 @@ function expectWarningCarriesOnlyItsCount(output: string, n: number): void {
   ]) {
     expect(output).not.toContain(part);
   }
+}
+
+/**
+ * ADR 0091's line is printed when the dates are set, after the final confirmation, which no run here
+ * reaches: so no run here prints it, and none says anything about 1 January.
+ */
+function expectNoNormalizationLine(output: string): void {
+  expect(output).not.toContain("1 January");
+}
+
+/** Every file under the dataset with its bytes, so a test can say none changed. */
+function snapshot(): Record<string, string> {
+  const out: Record<string, string> = {};
+  const walk = (rel: string) => {
+    for (const name of readdirSync(join(dataset, rel))) {
+      const path = rel === "" ? name : `${rel}/${name}`;
+      const st = lstatSync(join(dataset, path));
+      if (st.isDirectory()) walk(path);
+      else
+        out[path] = st.isSymbolicLink()
+          ? "link"
+          : readFileSync(join(dataset, path)).toString("hex");
+    }
+  };
+  walk("");
+  return out;
 }
 
 /** Nothing a person could be named by: not the surname, not a path, not the directory. */
@@ -447,16 +495,21 @@ describe("nemar dataset upload: a verdict that needs an acknowledgment", () => {
   });
 });
 
-describe("nemar dataset upload: acquisition dates are warned about and gate nothing (ADR 0090)", () => {
-  test("dates only: clean, the warning with its count, no prompt, and the run goes on", async () => {
+describe("nemar dataset upload: acquisition dates (ADR 0090, ADR 0091)", () => {
+  test("header dates are set by the upload, unwarned; the scans-table date is warned about", async () => {
     datedDataset();
+    const before = snapshot();
     const server = startServer();
     try {
-      // No tools on PATH: past the preflight, the run stops at the required-tools check.
-      const r = await upload(["--yes"], server.url, { noTools: true });
+      // Only git on PATH: the date plan can ask it which files it would ignore, and past the
+      // preflight the run stops at the required-tools check (no git-annex).
+      const r = await upload(["--yes"], server.url, { gitOnly: true });
+      // The two header dates will be set before anything is sent, so the screen does not count
+      // them; the scans table is not edited by an upload, so its date is what stays.
       expect(r.output).toContain("Identifier preflight: clean (acquisition dates only)");
-      expect(r.output).toContain("Findings by kind: edf-startdate x2, acq-time-dated x1.");
-      expectWarningCarriesOnlyItsCount(r.output, 3);
+      expect(r.output).toContain("Findings by kind: acq-time-dated x1.");
+      expectWarningCarriesOnlyItsCount(r.output, 1);
+      expectNoNormalizationLine(r.output);
       // Nothing to acknowledge: no refusal, no prompt, no condition named, and it went on.
       expect(r.output).not.toContain("Upload refused");
       expect(r.output).not.toContain("Upload anyway?");
@@ -464,36 +517,97 @@ describe("nemar dataset upload: acquisition dates are warned about and gate noth
       expect(r.output).toContain("Missing required tools");
       expectNoValue(r.output);
       expectNothingSent(server.requests);
+      // The run stopped before the final confirmation: no file changed.
+      expect(snapshot()).toEqual(before);
     } finally {
       server.stop();
     }
   });
 
-  test("--dry-run shows the same warning", async () => {
+  test("--dry-run shows the same, and changes no file", async () => {
     datedDataset();
+    const before = snapshot();
     const server = startServer();
     try {
-      const r = await upload(["--dry-run", "--yes"], server.url, { noTools: true });
-      expectWarningCarriesOnlyItsCount(r.output, 3);
+      const r = await upload(["--dry-run", "--yes"], server.url, { gitOnly: true });
+      expectWarningCarriesOnlyItsCount(r.output, 1);
+      expectNoNormalizationLine(r.output);
       expect(r.output).not.toContain("Upload refused");
       expectNothingSent(server.requests);
+      expect(snapshot()).toEqual(before);
     } finally {
       server.stop();
     }
   });
 
-  test("no date finding, no warning", async () => {
+  test("header dates alone: clean, and no warning", async () => {
     write("dataset_description.json", JSON.stringify({ Name: "Fixture", BIDSVersion: "1.9.0" }));
-    // 1 January is a year-only date, which the scanner does not count.
-    write("sub-01/eeg/sub-01_task-rest_eeg.edf", recording("P01 F X X"));
+    write("sub-01/eeg/sub-01_task-rest_eeg.edf", recording("P01 F X X", "15.03.85"));
     const server = startServer();
     try {
-      const r = await upload(["--yes"], server.url, { noTools: true });
+      const r = await upload(["--yes"], server.url, { gitOnly: true });
       expect(r.output).toContain("Identifier preflight: clean");
       expect(r.output).not.toContain("clean (acquisition dates only)");
       expect(r.output).not.toContain("Warning: acquisition dates");
       expect(r.output).not.toContain("NEMAR does not change them");
+      expectNoNormalizationLine(r.output);
       expect(r.output).toContain("Missing required tools");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("no date finding: no warning and no line", async () => {
+    write("dataset_description.json", JSON.stringify({ Name: "Fixture", BIDSVersion: "1.9.0" }));
+    // 1 January is a year-only date, which the scanner does not count and the upload leaves.
+    write("sub-01/eeg/sub-01_task-rest_eeg.edf", recording("P01 F X X"));
+    const server = startServer();
+    try {
+      const r = await upload(["--yes"], server.url, { gitOnly: true });
+      expect(r.output).toContain("Identifier preflight: clean");
+      expect(r.output).not.toContain("clean (acquisition dates only)");
+      expect(r.output).not.toContain("Warning: acquisition dates");
+      expect(r.output).not.toContain("NEMAR does not change them");
+      expect(r.output).not.toContain("set to 1 January");
+      expect(r.output).toContain("Missing required tools");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a recording the upload must not touch keeps its date, and the warning counts it", async () => {
+    datedDataset();
+    // A link to a recording outside the dataset: the upload never writes through a link.
+    const outside = join(dirname(dataset), "raw-elsewhere.edf");
+    writeFileSync(outside, recording("P03 F X X", "07.07.97"));
+    mkdirSync(join(dataset, "sub-03/eeg"), { recursive: true });
+    symlinkSync(outside, join(dataset, "sub-03/eeg/sub-03_task-rest_eeg.edf"));
+    // A recording the uploader cannot write.
+    write("sub-04/eeg/sub-04_task-rest_eeg.edf", recording("P04 F X X", "08.08.98"));
+    chmodSync(join(dataset, "sub-04/eeg/sub-04_task-rest_eeg.edf"), 0o444);
+    const server = startServer();
+    try {
+      const r = await upload(["--dry-run", "--yes"], server.url, { gitOnly: true });
+      // The two left headers and the scans table are warned about; the two plain files are set.
+      expect(r.output).toContain("Findings by kind: edf-startdate x2, acq-time-dated x1.");
+      expectWarningCarriesOnlyItsCount(r.output, 3);
+      expectNoNormalizationLine(r.output);
+      expectNothingSent(server.requests);
+    } finally {
+      chmodSync(join(dataset, "sub-04/eeg/sub-04_task-rest_eeg.edf"), 0o644);
+      server.stop();
+    }
+  });
+
+  test("inside a repository with no git on PATH, nothing is planned and every date is warned about", async () => {
+    datedDataset();
+    // A `.git` above the dataset: which files git tracks cannot be told without git, so none is touched.
+    mkdirSync(join(dirname(dataset), ".git"));
+    const server = startServer();
+    try {
+      const r = await upload(["--dry-run", "--yes"], server.url, { noTools: true });
+      expectWarningCarriesOnlyItsCount(r.output, 3);
+      expect(r.output).not.toContain("set to 1 January");
     } finally {
       server.stop();
     }
@@ -510,7 +624,8 @@ describe("nemar dataset upload: acquisition dates are warned about and gate noth
       expect(stopped.output).toContain(
         "Identifier preflight: EDF/BDF clean, other recordings NOT screened",
       );
-      expectWarningCarriesOnlyItsCount(stopped.output, 3);
+      expectWarningCarriesOnlyItsCount(stopped.output, 1);
+      expectNoNormalizationLine(stopped.output);
       expect(stopped.output).toContain(
         "--acknowledge-identifier-preflight clean-edf-only-others-unscreened",
       );
@@ -521,12 +636,12 @@ describe("nemar dataset upload: acquisition dates are warned about and gate noth
       const named = await upload(
         ["--yes", "--acknowledge-identifier-preflight", "clean-edf-only-others-unscreened"],
         server.url,
-        { noTools: true },
+        { gitOnly: true },
       );
       expect(named.output).toContain(
         "Acknowledged with --acknowledge-identifier-preflight clean-edf-only-others-unscreened",
       );
-      expectWarningCarriesOnlyItsCount(named.output, 3);
+      expectWarningCarriesOnlyItsCount(named.output, 1);
       expect(named.output).toContain("Missing required tools");
       expectNothingSent(server.requests);
     } finally {
@@ -553,19 +668,22 @@ describe("nemar dataset upload: acquisition dates are warned about and gate noth
   test("a direct identifier beside dates is still refused, with the warning above the refusal", async () => {
     datedDataset();
     write("sub-04/eeg/sub-04_task-rest_eeg.edf", recording("P04 F X Quillfeather", "09.09.90"));
+    const before = snapshot();
     const server = startServer();
     try {
       const r = await upload(["--yes"], server.url);
       expect(r.exitCode).toBe(1);
       expect(r.output).toContain("Identifier preflight: FOUND IDENTIFIERS");
       expect(r.output).toContain("Upload refused");
-      // Three dated headers now, and the scans-table row.
-      expectWarningCarriesOnlyItsCount(r.output, 4);
+      // The three header dates are planned; the scans-table row is what is warned about.
+      expectWarningCarriesOnlyItsCount(r.output, 1);
       expect(r.output.indexOf("Warning: acquisition dates")).toBeLessThan(
         r.output.indexOf("Upload refused"),
       );
       expectNoValue(r.output);
       expectNothingSent(server.requests);
+      // A refused upload changes nothing.
+      expect(snapshot()).toEqual(before);
     } finally {
       server.stop();
     }
@@ -627,8 +745,12 @@ describe("the upload action hands the record to the create call (source-level su
   test("the step runs first, is screened again before create, and that record is sent", async () => {
     const source = await Bun.file(join(REPO_ROOT, "src", "commands", "dataset.ts")).text();
     const action = source.slice(source.indexOf("export function createUploadCommand"));
-    const step = action.indexOf("await identifierPreflightStep(absolutePath, options)");
-    expect(step).toBeGreaterThan(0);
+    const plan = action.indexOf("await planUploadDates(absolutePath)");
+    const step = action.indexOf(
+      "await identifierPreflightStep(absolutePath, options, undefined, datePlan)",
+    );
+    expect(plan).toBeGreaterThan(0);
+    expect(step).toBeGreaterThan(plan);
     for (const later of [
       'checkPrerequisitesForCommand("upload")',
       "collectAuthorOrcids(",
@@ -641,6 +763,15 @@ describe("the upload action hands the record to the create call (source-level su
     );
     expect(recheck).toBeGreaterThan(action.indexOf('"Proceed with upload?"'));
     expect(recheck).toBeLessThan(action.indexOf("createOrResumeDataset("));
+    // ADR 0091: the planned dates are set after the confirmation and before the second screen,
+    // which is the record that is sent.
+    const apply = action.indexOf("applyUploadDates(absolutePath, datePlan)");
+    expect(apply).toBeGreaterThan(action.indexOf('"Proceed with upload?"'));
+    expect(apply).toBeLessThan(recheck);
+    // ...and a changed file's new modification time reaches the progress record.
+    const refresh = action.indexOf("if (mtimeMs !== undefined) file.mtimeMs = mtimeMs;");
+    expect(refresh).toBeGreaterThan(apply);
+    expect(refresh).toBeLessThan(action.indexOf("prepareUploadProgress("));
     const call = action.slice(action.indexOf("createOrResumeDataset("));
     const args = call.slice(0, call.indexOf(");"));
     expect(args).toContain("rechecked.value");

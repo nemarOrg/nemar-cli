@@ -1312,6 +1312,12 @@ export async function prepareImport(
         `  Identifier scrub: ${c.recordings} EDF/BDF recording(s), ${c.headers_read} header(s) read, ${c.headers_scrubbed} scrubbed${notRead.length > 0 ? ` (${notRead.join(", ")})` : ""}; ${c.json_values_blanked} JSON value(s) blanked in ${c.json_files_blanked} file(s), ${c.json_files_unread + c.json_files_annexed} JSON file(s) not read; ${c.images_or_documents_held} image or document path(s) left for review`,
       ),
     );
+    // ADR 0091: counts only, as above.
+    console.log(
+      chalk.dim(
+        `  Acquisition dates set to 1 January: ${c.headers_dates_normalized} header(s), ${c.scans_values_normalized} scans table value(s) in ${c.scans_tables_normalized} table(s); ${c.headers_dates_left} header(s) read keep a date (${c.headers_dates_over_bound} over the --normalize-max-gb bound, ${c.headers_dates_failed} whose download failed, ${c.headers_dates_unproven} unproven); ${c.scans_tables_unread + c.scans_tables_annexed} scans table(s) not read`,
+      ),
+    );
     if (scrub.committed) {
       console.log(chalk.dim("  Committed the privacy correction and its ledger line"));
     }

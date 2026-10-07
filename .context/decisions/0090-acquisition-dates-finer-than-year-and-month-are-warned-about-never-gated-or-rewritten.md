@@ -134,3 +134,11 @@ The CLI prints the notice from the shared definition and does not read `request_
 Two consequences the maintainer chose by asking for one answer whatever the state.
 "If every check passes" is true and not complete: the admins are mailed for every reported result, including a request a direct finding blocks (the requester is mailed too), a review or incomplete result, and a screen that did not run.
 And in the two states where nothing is running, a screen that could not be started and an exempt sandbox exemplar, the notice sits beside the Phase 4 headline that says so ("DID NOT RUN", "not applicable (sandbox)") and the admins have already been mailed.
+
+## Amendment 2026-10-07 (Phase 9): new data has its dates set, and this warning covers what remains
+
+The maintainer decided on 2026-10-07 that the day-level acquisition date of NEW uploads and imports is removed automatically, with no warning or acknowledgment for what the tool fixes; ADR 0091 records the rule.
+For new data, "Nothing is rewritten" above no longer holds: a first import sets the dates the scanner reads in EDF and BDF headers and in inline scans tables to 1 January of their year, and `nemar dataset upload` does the same for headers it can change safely, printing one count line.
+Everything else in this decision stands.
+The gate, the verdicts and the acknowledgment rules are unchanged; the warning, its one definition and its surfaces are unchanged; and datasets already on NEMAR keep their dates and this warning.
+The warning now appears only for date findings that remain after ADR 0091's rule (a layout the rule leaves, a recording the upload could not change, an upload's scans table, a dataset published before), so "NEMAR does not change them" is said only of dates NEMAR did not change.

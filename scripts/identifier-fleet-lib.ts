@@ -26,11 +26,11 @@ import {
   countByKind,
   edfIdentificationText,
   formatCoverage,
-  scanAcqTime,
   scanEdfHeader,
   scanJsonKeys,
   scanParticipantIds,
   scanPaths,
+  scanScansTable,
   scanTableColumns,
   scanTextForLocalPaths,
 } from "../shared/identifier-scan";
@@ -1250,14 +1250,9 @@ export async function scanDatasetFromManifest(
     }
     try {
       const { text } = await readText(ctx, entry, ctx.limits.sideFileBytes);
-      // The decoder already drops a leading BOM; this keeps the header match independent of it.
-      const rows = text.replace(/^\uFEFF/, "").split("\n");
-      const col = (rows[0] ?? "").replace(/\r$/, "").split("\t").indexOf("acq_time");
-      const found: Finding[] = [];
-      if (col >= 0) {
-        for (const row of rows.slice(1)) found.push(...scanAcqTime(row.split("\t")[col] ?? ""));
-      }
-      findings.push(...found);
+      // The decoder already drops a leading BOM; `acqTimeCells` drops one more, so the header
+      // match is independent of it. The same reading is what the importer's date rule edits.
+      findings.push(...scanScansTable(text));
       scansScanned++;
     } catch (error) {
       fail("scans", error);
