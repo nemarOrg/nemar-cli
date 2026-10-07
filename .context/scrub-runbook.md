@@ -940,7 +940,7 @@ A --action locks-applied --counts objects=$(jq '.entries | length' $W/assembled.
 A --action manifests-regenerated --counts manifests=$(jq '.tags | length' $W/plan.json) --verification none
 ```
 
-A ledger line holds counts and a closed vocabulary only: an action (`plan`, `headers-scrubbed`, `files-removed`, `history-rewritten`, `locks-applied`, `manifests-regenerated`, `old-versions-deleted`, `published-again`), versions as tags, counts as `name=number` with lowercase names, a verification from the closed list (`none`, `plan-only`, `scanner-clean`, `scanner-clean+payload-identical`, `scanner-clean+payload-identical+rehash-ok`, `public-surface-clean`, `authoritative-listing-empty`), a scanner revision and an actor handle.
+A ledger line holds counts and a closed vocabulary only: an action (`plan`, `headers-scrubbed`, `files-removed`, `history-rewritten`, `locks-applied`, `manifests-regenerated`, `old-versions-deleted`, `published-again`, and `import-scrubbed`, which only the importer writes, ADR 0089), versions as tags, counts as `name=number` with lowercase names, a verification from the closed list (`none`, `plan-only`, `scanner-clean`, `scanner-clean+payload-identical`, `scanner-clean+payload-identical+rehash-ok`, `public-surface-clean`, `authoritative-listing-empty`), a scanner revision and an actor handle.
 The tool refuses any other text.
 The words chosen above are this runbook's convention: the closed list has no word for a lock or a manifest check, so those two lines say `none`, and the proof files named in steps 5 and 12 are what verified them.
 The scanner revision is the last commit that touched `shared/identifier-scan.ts`, `shared/identifier-scrub.ts` or `scripts/scrub/s3/zarr-json.ts`, unless `--scanner` is given.

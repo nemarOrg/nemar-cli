@@ -7,6 +7,13 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
+import {
+  FINALIZE_JOB_TIMEOUT_MS,
+  FINALIZE_RESERVE_MS,
+  MIN_SCREEN_WAIT_MS,
+  SCREEN_WAIT_MS,
+  screenWaitBudget,
+} from "../src/lib/import-publication";
 
 const wf = parse(
   readFileSync(
@@ -41,6 +48,28 @@ describe("onboard-openneuro workflow", () => {
     expect(copy.strategy?.["max-parallel"]).toBeGreaterThan(0);
     expect(copy.strategy?.["fail-fast"]).toBe(false);
     expect(copy.if).toContain("cancelled");
+  });
+
+  test("finalize's wait for the identifier screen is cut to the job's own timeout (ADR 0089)", () => {
+    // The CLI cannot see the job's clock, so it carries the timeout as a constant and this pins
+    // the two together: raise the timeout and the constant must follow, which lets the full wait
+    // apply. A job killed by its timeout while it waits reports a failure for data in place.
+    expect(wf.jobs.finalize["timeout-minutes"]).toBe(FINALIZE_JOB_TIMEOUT_MS / 60_000);
+    // Started at once, the whole wait fits only if the job has room for it and the reserve.
+    expect(screenWaitBudget(0)).toBe(
+      Math.min(SCREEN_WAIT_MS, FINALIZE_JOB_TIMEOUT_MS - FINALIZE_RESERVE_MS),
+    );
+    // A slow run gets a shorter wait, never a negative or zero one, and never past the reserve.
+    expect(screenWaitBudget(40 * 60_000)).toBe(
+      FINALIZE_JOB_TIMEOUT_MS - FINALIZE_RESERVE_MS - 40 * 60_000,
+    );
+    expect(screenWaitBudget(10 * 60 * 60_000)).toBe(MIN_SCREEN_WAIT_MS);
+    for (const elapsed of [0, 10, 20, 30, 40, 50, 60].map((m) => m * 60_000)) {
+      const total = elapsed + screenWaitBudget(elapsed) + FINALIZE_RESERVE_MS;
+      if (screenWaitBudget(elapsed) > MIN_SCREEN_WAIT_MS) {
+        expect(total).toBeLessThanOrEqual(FINALIZE_JOB_TIMEOUT_MS);
+      }
+    }
   });
 
   test("finalize runs per-dataset even if a copy shard failed", () => {

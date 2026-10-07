@@ -4192,7 +4192,11 @@ adminCommand
   )
   .option(
     "--normalize-max-gb <n>",
-    "Raise the ceiling on how much data the prepare phase will annex and upload from this host (default 5 GiB). Only needed for a dataset that keeps an unusual amount of data in git; the import aborts rather than silently spending hours uploading (ADR 0060).",
+    "Raise the ceiling on how much data the prepare phase will move from this host (default 5 GiB): data git holds, and recordings the identifier scrub downloads to rewrite their headers. The import aborts rather than silently spending hours on it (ADR 0060, ADR 0089).",
+  )
+  .option(
+    "--screen-wait-minutes <n>",
+    "How long finalize waits for the identifier screen's verdict before leaving the publication for an admin (default: what the finalize job's 90-minute timeout leaves, at most 45; ADR 0089).",
   )
   .action(
     async (
@@ -4205,6 +4209,7 @@ adminCommand
         phase?: string;
         shard?: string;
         normalizeMaxGb?: string;
+        screenWaitMinutes?: string;
       },
     ) => {
       if (!requireAuth()) return;
@@ -4243,6 +4248,20 @@ adminCommand
         normalizeMaxBytes = Math.floor(gb * 1024 ** 3);
       }
 
+      let screenWaitMs: number | undefined;
+      if (options.screenWaitMinutes !== undefined) {
+        const minutes = Number(options.screenWaitMinutes);
+        if (!Number.isFinite(minutes) || minutes <= 0) {
+          console.error(
+            chalk.red(
+              `Invalid --screen-wait-minutes "${options.screenWaitMinutes}". Expected a positive number of minutes.`,
+            ),
+          );
+          process.exit(1);
+        }
+        screenWaitMs = Math.floor(minutes * 60_000);
+      }
+
       // Single-phase execution for the sharded CI workflow (prepare/copy/finalize).
       if (options.phase) {
         const validPhases = ["prepare", "copy", "finalize"];
@@ -4275,6 +4294,7 @@ adminCommand
           trustUpstream: options.trustUpstream,
           persistStaging: true,
           normalizeMaxBytes,
+          screenWaitMs,
         };
         try {
           if (options.phase === "prepare") {
@@ -4305,6 +4325,7 @@ adminCommand
             skipData: options.skipData,
             trustUpstream: options.trustUpstream,
             normalizeMaxBytes,
+            screenWaitMs,
           });
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);

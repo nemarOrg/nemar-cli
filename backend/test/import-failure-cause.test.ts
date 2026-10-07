@@ -10,6 +10,7 @@ import { describe, expect, test } from "bun:test";
 import {
   IMPORT_DATA_UNAVAILABLE_MARKER_FOR_CLASSIFY,
   IMPORT_FAILURE_CAUSE_LABELS,
+  IMPORT_IDENTIFIER_SCRUB_MARKER_FOR_CLASSIFY,
   IMPORT_UPSTREAM_MARKER_FOR_CLASSIFY,
   classifyImportFailure,
 } from "../src/services/import-failure-cause";
@@ -118,6 +119,26 @@ describe("the marker literal is duplicated, so pin the copies together", () => {
     expect(classified.cause).toBe("data_unavailable");
     expect(classified.label).toBe("data-unavailable");
     expect(classified.summary).toContain("content-recovery");
+  });
+
+  test("the identifier scrub's refusal classifies as identifier_scrub (ADR 0089)", () => {
+    // The marker is pinned to the CLI's copy in test/import-scrub.test.ts, through a refusal the
+    // scrub really raised. Here: the literal, and that it is its own cause with its own label.
+    expect(IMPORT_IDENTIFIER_SCRUB_MARKER_FOR_CLASSIFY).toBe("[nemar-identifier-scrub]");
+    const refusal =
+      "[nemar-identifier-scrub] refused: bound-exceeded (1 recording(s) to scrub, 0.0 GiB to download and 0.0 GiB of git-held data to upload, over the 0.0 GiB bound; run on a host that can move them with --normalize-max-gb). Nothing was copied or pushed.";
+    const classified = classifyImportFailure({ stage: "prepare", lastError: refusal });
+    expect(classified.cause).toBe("identifier_scrub");
+    expect(classified.label).toBe("identifier-scrub");
+    expect(IMPORT_FAILURE_CAUSE_LABELS).toContain("identifier-scrub");
+    expect(classified.summary).toContain("ADR 0089");
+  });
+
+  test("a scrub refusal that OpenNeuro caused classifies as upstream_inaccessible", () => {
+    const both = `${OPENNEURO_UPSTREAM_MARKER} [nemar-identifier-scrub] refused: header-unreadable (1 of 2 recording header(s) could not be read: http-403 x1). Nothing was copied or pushed.`;
+    expect(classifyImportFailure({ stage: "prepare", lastError: both }).cause).toBe(
+      "upstream_inaccessible",
+    );
   });
 
   test("the classifier recognises a message built from the recovery module's copy", () => {

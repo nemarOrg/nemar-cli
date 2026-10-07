@@ -17,6 +17,7 @@
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { PROVENANCE_NOTE_KEY, PROVENANCE_PATH } from "../../../shared/privacy-correction-text";
 import {
   ANNEX_KEY,
   ContractError,
@@ -640,10 +641,10 @@ export const LEDGER_PATH = ".nemar/corrections.jsonl";
  * upstream file. Those checksums are kept as provenance (ADR 0085), so they are the one place an
  * old key's hash may remain, under the rule of {@link provenanceHashUse}.
  */
-export const PROVENANCE_PATH = "sourcedata/sourcedata_provenance.json";
+export { PROVENANCE_PATH };
 
 /** The top-level key whose sentence says the checksums describe the files before the correction. */
-export const PROVENANCE_NOTE_KEY = "privacy_correction";
+export { PROVENANCE_NOTE_KEY };
 
 /**
  * `local`: the clone the rewrite ran in, compared with the snapshot taken before it.
@@ -1530,8 +1531,11 @@ function newestStatuses(log: string): Map<string, string> {
   return new Map([...newest].map(([uuid, v]) => [uuid, v.status]));
 }
 
-/** Location-log text for each key, read from the git-annex branch; "" when there is none. */
-async function locationLogs(repo: string, keys: string[]): Promise<string[]> {
+/**
+ * Location-log text for each key, read from the git-annex branch; "" when there is none.
+ * Exported for the importer's purge-list read (ADR 0089): a key dead here is never copied.
+ */
+export async function locationLogs(repo: string, keys: string[]): Promise<string[]> {
   if (keys.length === 0) return [];
   const paths = await annex(
     repo,
@@ -1581,7 +1585,7 @@ function presentIn(log: string): Set<string> {
 }
 
 /** Dead: some repository's newest line is `X` and none is present. */
-function isDead(log: string): boolean {
+export function isDead(log: string): boolean {
   const statuses = [...newestStatuses(log).values()];
   return statuses.includes("X") && !statuses.includes("1");
 }

@@ -479,7 +479,9 @@ export interface LedgerEntry {
     | "locks-applied"
     | "manifests-regenerated"
     | "old-versions-deleted"
-    | "published-again";
+    | "published-again"
+    // The importer's prepare step scrubbed the tree before its first push (ADR 0089).
+    | "import-scrubbed";
   versions: string[];
   counts: Record<string, number>;
   scanner: string;

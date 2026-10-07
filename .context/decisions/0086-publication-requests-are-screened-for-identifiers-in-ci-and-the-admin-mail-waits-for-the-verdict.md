@@ -150,3 +150,8 @@ Everything above about the workflow, the contract and the public log holds for t
 - Report contract and its tests: `shared/identifier-screen-report.ts`, `test/identifier-screen-report.test.ts`.
 - Scanner and fleet scan: ADR 0085 context, PR #1617.
 - Epic #1610; this decision is Phase 4 (#1614).
+
+## Amendment 2026-10-06 (#1618): the importer waits for the screen
+
+The importer no longer requests and approves in one run: [ADR 0089](0089-an-import-scrubs-before-it-copies-and-waits-for-the-identifier-screen.md) scrubs the tree in prepare, and finalize waits for this screen's verdict and approves only a clear one, leaving any other for an admin.
+Nothing in this ADR's gate changed; the importer is one more client of it.

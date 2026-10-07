@@ -207,3 +207,8 @@ to claim as uploaded.
 
 The prepare step also scrubs identifying fields in place and then runs the identifier screen, so an import or re-pull cannot reintroduce what a privacy correction removed, and it refuses any key on the purge list ([ADR 0085](0085-a-privacy-correction-scrubs-every-version-in-place.md)).
 **Not built in Phase 2 of #1610:** the prepare step's scrub is Phase 7 (#1618), and the purge list it would read has no owner yet ([ADR 0085](0085-a-privacy-correction-scrubs-every-version-in-place.md), "Build status").
+
+## Amendment 2026-10-06 (#1618): the prepare step's scrub is built
+
+The scrub named by the amendment above runs in prepare's step 5b, before this ADR's annex-policy commit, and is [ADR 0089](0089-an-import-scrubs-before-it-copies-and-waits-for-the-identifier-screen.md).
+Its downloads count against `NORMALIZE_MAX_BYTES` together with the data git holds, and `--normalize-max-gb` raises the one bound for both.

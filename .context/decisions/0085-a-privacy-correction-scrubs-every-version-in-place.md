@@ -399,3 +399,8 @@ The maintainer's go is the one precondition of an irreversible step that no tool
 
 The stand-in is not S3, and the items only the real bucket and GitHub can prove are the real-bucket checklist of the runbook.
 An earlier canary, without the conditional-write steps, passed against the real bucket on 2026-10-04; the checklist has not run with the current tools, and it must run before the first real execute.
+
+## Amendment 2026-10-06 (#1618): the importer's scrub is built
+
+The row "The importer scrubs in place on every import and re-pull" of the build-status table is built by [ADR 0089](0089-an-import-scrubs-before-it-copies-and-waits-for-the-identifier-screen.md): prepare applies this ADR's header rule, the JSON rule of the history rewrite and the provenance sentences, retires each replaced key the way `annex-registry` does, and writes an `import-scrubbed` ledger line.
+The purge list itself is still not built. The importer reads the dead marks in the dataset's git-annex branch, which `annex-registry` and the importer write, and never copies a key marked dead; the list as a document with a catalog pointer, and its readers in recovery, registration and the availability count, keep the owner this table gives them: none.

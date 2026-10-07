@@ -13,11 +13,12 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EDF_HEADER_BYTES, scanEdfHeader } from "../shared/identifier-scan";
+import { EDF_HEADER_BYTES, scanEdfHeader, scanJsonKeys } from "../shared/identifier-scan";
 import {
   PATIENT_PLACEHOLDER,
   ScrubRefused,
   applyHeaderPatch,
+  blankIdentifierJsonKeys,
   scrubEdfHeader,
   verifyScrub,
 } from "../shared/identifier-scrub";
@@ -403,6 +404,151 @@ describe("a header written by an independent EDF+ tool", () => {
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------------------
+// JSON: blankIdentifierJsonKeys (ADR 0089, the rule of ADR 0085's history rewrite)
+// ---------------------------------------------------------------------------------------
+
+const utf8 = (s: string) => new TextEncoder().encode(s);
+const fromUtf8 = (b: Uint8Array | undefined) => new TextDecoder().decode(b);
+
+describe("blanking identifier-keyed JSON values", () => {
+  test("a nested PatientName is blanked and every other byte stays", () => {
+    const before = `{\n  "TaskName": "rest",\n  "Acq": {\n    "PatientName" : "alice smith",\n    "SamplingFrequency": 512\n  }\n}\n`;
+    const r = blankIdentifierJsonKeys(utf8(before));
+    expect(r.status).toBe("blanked");
+    expect(r.blanked).toBe(1);
+    expect(fromUtf8(r.bytes)).toBe(
+      `{\n  "TaskName": "rest",\n  "Acq": {\n    "PatientName" : "",\n    "SamplingFrequency": 512\n  }\n}\n`,
+    );
+  });
+
+  test("a document with nothing to blank is clean and no bytes are returned", () => {
+    const r = blankIdentifierJsonKeys(utf8(`{"TaskName": "rest", "Name": "a study"}`));
+    expect(r).toEqual({ status: "clean", blanked: 0 });
+  });
+
+  test("text that is not UTF-8 JSON is unreadable, never clean", () => {
+    expect(blankIdentifierJsonKeys(utf8(`{"PatientName": "x"`)).status).toBe("unreadable");
+    expect(blankIdentifierJsonKeys(new Uint8Array([0x7b, 0xff, 0x7d])).status).toBe("unreadable");
+  });
+
+  test("every value type that holds something is blanked, at any depth and inside arrays", () => {
+    const before = `[{"MRN": 12345}, {"x": [{"DateOfBirth": ["1990-02-03"]}]}, {"dob": {"y": 1}}]`;
+    const r = blankIdentifierJsonKeys(utf8(before));
+    expect(r.blanked).toBe(3);
+    expect(fromUtf8(r.bytes)).toBe(`[{"MRN": ""}, {"x": [{"DateOfBirth": ""}]}, {"dob": ""}]`);
+  });
+
+  test("an identifier key nested inside another is blanked once, with its parent", () => {
+    const r = blankIdentifierJsonKeys(utf8(`{"PatientName": {"dob": "1990-02-03"}}`));
+    expect(r.blanked).toBe(1);
+    expect(fromUtf8(r.bytes)).toBe(`{"PatientName": ""}`);
+  });
+
+  test("a value that holds nothing is left as it is", () => {
+    expect(blankIdentifierJsonKeys(utf8(`{"dob": null, "PatientName": ""}`)).status).toBe("clean");
+  });
+
+  test("a key the scanner reads at review severity (a contact) is a person's call, not blanked", () => {
+    expect(blankIdentifierJsonKeys(utf8(`{"email": "a@b.c", "phone": "1"}`)).status).toBe("clean");
+  });
+
+  test("both copies of a duplicated key are judged, so the one a parser hides is blanked", () => {
+    // JSON.parse keeps the LAST duplicate, which here is empty: a rule that asked the parsed
+    // document which keys hold content would see none and leave the first value in the file.
+    const r = blankIdentifierJsonKeys(utf8(`{"dob": "1990-02-03", "dob": ""}`));
+    expect(r.blanked).toBe(1);
+    expect(fromUtf8(r.bytes)).toBe(`{"dob": "", "dob": ""}`);
+  });
+
+  test("a key is matched by the scanner's own spelling, an escaped or tabbed key included", () => {
+    const r = blankIdentifierJsonKeys(utf8(`{"Patient\\u004eame": "x", "Patient\\tName": "y"}`));
+    expect(r.blanked).toBe(2);
+    expect(fromUtf8(r.bytes)).toBe(`{"Patient\\u004eame": "", "Patient\\tName": ""}`);
+  });
+
+  test("a byte-order mark is kept", () => {
+    const body = utf8(`{"PatientID": "p-77"}`);
+    const r = blankIdentifierJsonKeys(new Uint8Array([0xef, 0xbb, 0xbf, ...body]));
+    expect(r.status).toBe("blanked");
+    expect([...(r.bytes ?? new Uint8Array()).subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
+    expect(fromUtf8((r.bytes ?? new Uint8Array()).subarray(3))).toBe(`{"PatientID": ""}`);
+  });
+
+  test("a string holding braces, quotes and the key's own name does not confuse the walk", () => {
+    const before = `{"note": "PatientName: {\\"x\\"} ]", "PatientName": "z", "after": "dob"}`;
+    const r = blankIdentifierJsonKeys(utf8(before));
+    expect(r.blanked).toBe(1);
+    expect(fromUtf8(r.bytes)).toBe(
+      `{"note": "PatientName: {\\"x\\"} ]", "PatientName": "", "after": "dob"}`,
+    );
+  });
+
+  const uvForParity = toolOrFail("uv", spawnSync("uv", ["--version"]).status === 0);
+  test.skipIf(!uvForParity)(
+    "gives the same bytes as the history rewrite's blank_json on the documents it was built for",
+    () => {
+      // ADR 0085's rewrite blanks, in each JSON blob, the keys the git plan lists for its path: the
+      // identifier-severity keys `scanJsonKeys` finds in the parsed blob. Same inputs, same bytes.
+      const docs = [
+        `{\n  "PatientName": "alice smith",\n  "TaskName": "rest"\n}\n`,
+        `{"Acq":{"patient_id":"p-1","x":[{"DateOfBirth":"1990-02-03"}]},"MRN":12}`,
+        `﻿{"dob" : "1990-02-03" ,"n": 1}`,
+        `[{"examDoctor": "z"}, {"ok": true}]`,
+        `{"TaskName": "rest"}`,
+      ];
+      const cases = docs.map((d) => {
+        const doc = JSON.parse(d.replace(/^﻿/, ""));
+        const targets = [
+          ...new Set(
+            scanJsonKeys(doc)
+              .filter((f) => f.severity === "identifier")
+              .map((f) => f.field),
+          ),
+        ];
+        return { content: Buffer.from(d, "utf8").toString("base64"), targets };
+      });
+      const py = [
+        "import base64, json, sys",
+        "sys.path.insert(0, sys.argv[1])",
+        "from rewrite_history import blank_json",
+        "out = []",
+        "for c in json.load(sys.stdin):",
+        "    new, status = blank_json(base64.b64decode(c['content']), frozenset(c['targets']))",
+        "    out.append({'status': status, 'bytes': None if new is None else base64.b64encode(new).decode()})",
+        "print(json.dumps(out))",
+      ].join("\n");
+      const run = spawnSync(
+        "uv",
+        [
+          "run",
+          "--quiet",
+          "--with",
+          "git-filter-repo==2.47.0",
+          "python",
+          "-c",
+          py,
+          join(import.meta.dir, "..", "scripts", "scrub", "git"),
+        ],
+        { encoding: "utf8", input: JSON.stringify(cases), timeout: 120_000 },
+      );
+      expect(run.status, run.stderr).toBe(0);
+      const python = JSON.parse(run.stdout) as { status: string; bytes: string | null }[];
+      docs.forEach((d, i) => {
+        const ours = blankIdentifierJsonKeys(Buffer.from(d, "utf8"));
+        const theirs = python[i] as { status: string; bytes: string | null };
+        if (theirs.bytes === null) {
+          expect(theirs.status).toBe("already");
+          expect(ours.status).toBe("clean");
+        } else {
+          expect(ours.status).toBe("blanked");
+          expect(Buffer.from(ours.bytes ?? new Uint8Array()).toString("base64")).toBe(theirs.bytes);
+        }
+      });
     },
   );
 });

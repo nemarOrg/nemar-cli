@@ -42,6 +42,9 @@ const ACTIONS: ReadonlySet<LedgerEntry["action"]> = new Set([
   "manifests-regenerated",
   "old-versions-deleted",
   "published-again",
+  // Written by the importer, not by an operator: the tree was scrubbed before its first push, so no
+  // version existed yet and `versions` is empty (ADR 0089).
+  "import-scrubbed",
 ]);
 
 /**
