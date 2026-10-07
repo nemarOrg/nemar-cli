@@ -38,6 +38,9 @@ import { datasetRoutes } from "../backend/src/routes/datasets";
 const EXPECTED_ENTRIES: Record<string, number> = {
   // Create & upload lifecycle
   "POST /": 4,
+  // Epic #1610 phase 3 (ADR 0087): a resume from the CLI's local config records its attestation
+  // and identifier preflight here, since it never reaches POST /.
+  "PUT /:id/attestation": 4,
   "POST /:id/upload-urls": 3,
   "POST /:id/upload-credentials": 4,
   "POST /:id/download-credentials": 3,
@@ -85,6 +88,7 @@ const EXPECTED_ENTRIES: Record<string, number> = {
 // by the entry counts above).
 const EXPECTED_CHAINS: Record<string, string[]> = {
   "POST /": ["auth", "cliVersionGuard", "handler", "handler"],
+  "PUT /:id/attestation": ["auth", "cliVersionGuard", "handler", "handler"],
   "POST /:id/upload-urls": ["auth", "handler", "handler"],
   "POST /:id/upload-credentials": ["auth", "cliVersionGuard", "handler", "handler"],
   "POST /:id/download-credentials": ["auth", "handler", "handler"],
@@ -130,7 +134,7 @@ describe("datasets route inventory", () => {
   });
 
   test("entry total is pinned", () => {
-    expect(datasetRoutes.routes.length).toBe(58);
+    expect(datasetRoutes.routes.length).toBe(62);
   });
 
   test("middleware identity per chain slot is pinned", () => {
