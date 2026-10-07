@@ -205,6 +205,37 @@ describe("the plan reads and changes nothing", () => {
     await git(["annex", "fsck", "--quiet", EDF]);
   });
 
+  test("git pointed elsewhere by GIT_DIR, at nothing it can read, plans no file", async () => {
+    write(EDF, recording());
+    const saved = process.env.GIT_DIR;
+    process.env.GIT_DIR = join(dirname(root), "no-such-repository");
+    try {
+      const plan = await planUploadDates(root);
+      expect(plan.items).toEqual([]);
+      expect(plan.left["tracking-unknown"]).toBe(1);
+    } finally {
+      if (saved === undefined) Reflect.deleteProperty(process.env, "GIT_DIR");
+      else process.env.GIT_DIR = saved;
+    }
+  });
+
+  test("a file not named as a recording is never planned, whatever it holds", async () => {
+    write("sub-01/eeg/notes.txt", recording());
+    write("sub-01/eeg/sub-01_task-rest_eeg.edf.bak", recording());
+    expect((await planUploadDates(root)).items).toEqual([]);
+  });
+
+  test("a recording git tracks under a decomposed Unicode name is still left", async () => {
+    // macOS git precomposes names it reports; the name on disk stays decomposed. Folded to NFC on
+    // both sides, the two agree. (On Linux git reports the name as written and this agrees anyway.)
+    await git(["init", "-q", "-b", "main"]);
+    write("sub-01/eeg/Cafe\u0301_eeg.edf", recording());
+    await git(["add", "."]);
+    const plan = await planUploadDates(root);
+    expect(plan.items).toEqual([]);
+    expect(plan.left.tracked).toBe(1);
+  });
+
   test("inside a repository where git cannot run, no file is planned", async () => {
     // A `.git` above the dataset, and no git on PATH: which files git tracks cannot be told.
     mkdirSync(join(dirname(root), ".git"));
@@ -269,6 +300,40 @@ describe("applying the plan", () => {
     expect(statSync(path).mtimeMs).toBe(at.getTime());
     expect(applyUploadDates(root, plan)).toMatchObject({ set: 0, left: 1 });
     expect(Buffer.from(read(EDF))).toEqual(Buffer.from(edited));
+  });
+
+  test("a file replaced by another with the same bytes and times is left: the inode moved", async () => {
+    const path = write(EDF, recording());
+    const at = new Date(1_700_000_000_000);
+    utimesSync(path, at, at);
+    const plan = await planUploadDates(root);
+    rmSync(path);
+    writeFileSync(path, recording());
+    utimesSync(path, at, at);
+    expect(applyUploadDates(root, plan)).toMatchObject({ set: 0, left: 1 });
+    expect(Buffer.from(read(EDF))).toEqual(Buffer.from(recording()));
+  });
+
+  test("a file that grew after the plan, header and times as they were, is left", async () => {
+    const path = write(EDF, recording());
+    const at = new Date(1_700_000_000_000);
+    utimesSync(path, at, at);
+    const plan = await planUploadDates(root);
+    writeFileSync(path, new Uint8Array([...recording(), 1, 2, 3]));
+    utimesSync(path, at, at);
+    expect(applyUploadDates(root, plan)).toMatchObject({ set: 0, left: 1 });
+  });
+
+  test("a copy that fails part way is removed, and the work directory with it", async () => {
+    write(EDF, recording());
+    const plan = await planUploadDates(root);
+    // A plan whose new header cannot be written: the copy exists when the write fails.
+    const [item] = plan.items;
+    if (!item) throw new Error("expected a planned file");
+    item.after = new Uint8Array(10);
+    expect(applyUploadDates(root, plan)).toMatchObject({ set: 0, left: 1 });
+    expect(existsSync(join(root, ".nemar"))).toBe(false);
+    expect(Buffer.from(read(EDF))).toEqual(Buffer.from(recording()));
   });
 
   test("a file whose modification time moved after the plan is left", async () => {

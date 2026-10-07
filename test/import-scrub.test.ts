@@ -49,6 +49,7 @@ import {
   IMPORT_SCANNER_ID,
   IMPORT_SCRUB_REFUSALS,
   ImportScrubRefused,
+  MAX_SCANS_TABLE_BYTES,
   httpUpstreamReader,
   prepareImportedTreeForCopy,
   restrictManifestToTree,
@@ -1178,9 +1179,14 @@ describe("a first import sets acquisition dates to 1 January (ADR 0091)", () => 
     for (const log of await locationLogs(clone, oldKeys)) expect(isDead(log)).toBe(true);
     expect(result.manifest.items.map((it) => it.key)).not.toContain(oldKeys[0]);
 
-    // The scans table, at the head of the tree: the date set, every other byte kept.
+    // The scans table, at the head of the tree: the date set, every other byte kept, and committed
+    // by the scrub's own commit.
     const table = readFileSync(join(clone, SCANS), "utf8");
     expect(table).toBe(SCANS_TEXT.replace("2023-03-14T", "2023-01-01T"));
+    const scrubCommit = (
+      await run(["git", "log", "-1", "--format=%H", "--grep=Privacy correction on import"], clone)
+    ).trim();
+    expect(await run(["git", "show", `${scrubCommit}:${SCANS}`], clone)).toBe(table);
 
     expect(result.scrub.counts).toMatchObject({
       headers_scrubbed: 0,
@@ -1220,8 +1226,11 @@ describe("a first import sets acquisition dates to 1 January (ADR 0091)", () => 
 
   test("a slot date in another layout keeps every date of that header, and only that one", async () => {
     const odd = "sub-04/eeg/sub-04_task-rest_eeg.edf";
+    // No scans table: what is committed is the header dates alone.
     const files = [
-      ...datedFixtures().filter((f) => f.path !== DATED_BDF && f.path !== DATED_GIT),
+      ...datedFixtures().filter(
+        (f) => f.path !== DATED_BDF && f.path !== DATED_GIT && f.path !== SCANS,
+      ),
       {
         path: odd,
         bytes: edfBytes("X X X X", 4000, 14, {
@@ -1238,6 +1247,8 @@ describe("a first import sets acquisition dates to 1 January (ADR 0091)", () => 
     expect(result.manifest.items.find((it) => it.key === oddKey)?.origin).toBeUndefined();
     expect(result.scrub.counts.headers_dates_normalized).toBe(1);
     expect(result.scrub.counts.headers_dates_left).toBe(1);
+    expect(result.scrub.committed).toBe(true);
+    expect(readLedger(join(clone, ".nemar/corrections.jsonl"))).toHaveLength(1);
     expect(requests.filter((r) => r.range === null).map((r) => r.path)).toEqual([
       `${BUCKET_PATH}/${DATED_EDF}`,
     ]);
@@ -1293,19 +1304,25 @@ describe("a first import sets acquisition dates to 1 January (ADR 0091)", () => 
     expect(requests.some((r) => r.range === null)).toBe(false);
   }, 120_000);
 
-  test("with room for all of them, the same recordings are set", async () => {
+  test("the bound counts git-held data too: exactly enough sets them all, one byte less sets none", async () => {
     const files = datedFixtures();
     const upstream = await buildUpstream(files);
-    const { clone } = await cloneForImport(upstream);
     const small = fixtureBytes(files, DATED_GIT);
     const recording = fixtureBytes(files, DATED_EDF).length;
-    const result = await prepare(clone, await upstreamView(clone), {
-      unannexedData: [{ path: DATED_GIT, size: small.length }],
-      maxBytes: small.length + 2 * recording,
-    });
-    expect(result.scrub.counts.headers_dates_normalized).toBe(3);
-    expect(result.scrub.counts.headers_dates_over_bound).toBe(0);
-  }, 120_000);
+    const exact = small.length + 2 * recording;
+    for (const [maxBytes, set] of [
+      [exact - 1, 1],
+      [exact, 3],
+    ] as const) {
+      const { clone } = await cloneForImport(upstream);
+      const result = await prepare(clone, await upstreamView(clone), {
+        unannexedData: [{ path: DATED_GIT, size: small.length }],
+        maxBytes,
+      });
+      expect(result.scrub.counts.headers_dates_normalized, `${maxBytes}`).toBe(set);
+      expect(result.scrub.counts.headers_dates_over_bound, `${maxBytes}`).toBe(set === 3 ? 0 : 2);
+    }
+  }, 180_000);
 
   test("the scrub's own downloads come first: a date-only recording that does not fit is left", async () => {
     const flaggedPath = FLAGGED_ANNEXED.replace("sub-01", "sub-05");
@@ -1338,9 +1355,40 @@ describe("a first import sets acquisition dates to 1 January (ADR 0091)", () => 
     expect(result.scrub.counts.headers_dates_normalized).toBe(0);
     expect(result.scrub.counts.headers_dates_left).toBe(2);
     expect(requests.some((r) => r.range === null)).toBe(false);
-    // The scans table is git content and is still set.
+    // The scans table is git content and is still set, and committed: it alone makes a commit.
     expect(result.scrub.counts.scans_values_normalized).toBe(1);
+    expect(result.scrub.committed).toBe(true);
   }, 120_000);
+
+  test("scans tables that are annexed, not UTF-8 or over the bound keep their dates, and are counted", async () => {
+    const annexed = "sub-02/sub-02_scans.tsv";
+    const binary = "sub-03/sub-03_scans.tsv";
+    const large = "sub-04/sub-04_scans.tsv";
+    const row = "eeg/x_eeg.edf\t2023-03-14T10:11:12\n";
+    const big = `filename\tacq_time\n${row.repeat(Math.ceil(MAX_SCANS_TABLE_BYTES / row.length))}`;
+    const notUtf8 = new Uint8Array([...text("filename\tacq_time\nx\t2023-03-14\n"), 0xff, 0x0a]);
+    const files = [
+      ...datedFixtures().filter((f) => f.path !== DATED_BDF && f.path !== DATED_GIT),
+      { path: annexed, bytes: text(SCANS_TEXT) },
+      { path: binary, bytes: notUtf8 },
+      { path: large, bytes: text(big) },
+    ];
+    const upstream = await buildUpstream(files, {
+      attributes: `${UPSTREAM_GITATTRIBUTES}${annexed} annex.largefiles=anything\n`,
+    });
+    const { clone } = await cloneForImport(upstream);
+    expect((await listAnnexedKeys(clone)).has(annexed)).toBe(true);
+    const result = await prepare(clone, await upstreamView(clone));
+    expect(result.scrub.counts).toMatchObject({
+      scans_tables_read: 1,
+      scans_tables_unread: 2,
+      scans_tables_annexed: 1,
+      scans_tables_normalized: 1,
+      scans_values_normalized: 1,
+    });
+    expect(Buffer.from(readFileSync(join(clone, binary)))).toEqual(Buffer.from(notUtf8));
+    expect(readFileSync(join(clone, large), "utf8")).toBe(big);
+  }, 180_000);
 
   test("the provenance file says the dates were set, and nothing about a scrub", async () => {
     const provenance = `{\n  "files": [\n    {"file": "x.edf", "sha256": "${"b".repeat(64)}"}\n  ]\n}\n`;

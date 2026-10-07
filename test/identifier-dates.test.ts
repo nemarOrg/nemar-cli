@@ -231,6 +231,21 @@ describe("setting the acquisition dates of a header to 1 January", () => {
     }
   });
 
+  test("a slot with more after its date, or the EDF+ spelling in a free-text field, is unchanged", () => {
+    // The rule writes only into a slot that IS the date: `14-MAR-2023,ward` is a slot holding more,
+    // and a free-text field has no slot at all, whatever spelling its date has.
+    for (const recording of ["Startdate 14-MAR-2023,ward X X X", "Hospital 14-MAR-2023 room 3"]) {
+      const before = buildHeader({ recording });
+      expect(
+        dateFindings(before).some((f) => f.kind === "edf-recording-startdate"),
+        recording,
+      ).toBe(true);
+      const result = normalizeEdfDates(before);
+      expect(result.changed, recording).toBe(false);
+      expect(differing(before, result.header), recording).toEqual([]);
+    }
+  });
+
   test("a date in a free-text recording field leaves the whole header unchanged", () => {
     const before = buildHeader({ recording: "Hospital 14.03.2023 room 3" });
     expect(dateFindings(before).map((f) => f.kind)).toContain("edf-recording-startdate");
@@ -338,7 +353,7 @@ describe("the proof that only the dates changed", () => {
     ]);
     const family = good.slice();
     family[0] = 0xff;
-    expect(verifyDateNormalization(before, family).ok).toBe(false);
+    expect(verifyDateNormalization(before, family).reasons).toContain("file-family-changed");
     expect(verifyDateNormalization(before, new Uint8Array(10)).reasons).toEqual([
       "header-too-short",
     ]);
@@ -452,6 +467,15 @@ describe("scans tables", () => {
       status: "unreadable",
       values: 0,
     });
+  });
+
+  test("a byte-order mark in the text given is not part of the header row", () => {
+    // The screen decodes with a decoder that drops one mark, and the reading drops one more.
+    // The final newline leaves an empty row, whose one cell is empty, as `split` gave the screen.
+    expect(acqTimeCells("\uFEFFacq_time\tfilename\n2023-03-14\tx.edf\n")).toEqual([
+      { index: 19, value: "2023-03-14" },
+      { index: 36, value: "" },
+    ]);
   });
 
   test("the cells are the screen's own: the same cells the screen reports, no more", () => {

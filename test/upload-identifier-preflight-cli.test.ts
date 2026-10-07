@@ -760,6 +760,10 @@ describe("the upload action hands the record to the create call (source-level su
     const apply = action.indexOf("applyUploadDates(absolutePath, datePlan)");
     expect(apply).toBeGreaterThan(action.indexOf('"Proceed with upload?"'));
     expect(apply).toBeLessThan(recheck);
+    // ...and a changed file's new modification time reaches the progress record.
+    const refresh = action.indexOf("if (mtimeMs !== undefined) file.mtimeMs = mtimeMs;");
+    expect(refresh).toBeGreaterThan(apply);
+    expect(refresh).toBeLessThan(action.indexOf("prepareUploadProgress("));
     const call = action.slice(action.indexOf("createOrResumeDataset("));
     const args = call.slice(0, call.indexOf(");"));
     expect(args).toContain("rechecked.value");

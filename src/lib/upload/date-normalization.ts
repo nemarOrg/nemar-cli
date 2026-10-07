@@ -66,11 +66,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { EDF_HEADER_BYTES } from "../../../shared/identifier-scan.js";
-import {
-  DateNormalizationUnverified,
-  ScrubRefused,
-  normalizeEdfDates,
-} from "../../../shared/identifier-scrub.js";
+import { ScrubRefused, normalizeEdfDates } from "../../../shared/identifier-scrub.js";
 import { runCommand } from "../git-annex/run-command.js";
 import { walkDatasetTree } from "./identifier-preflight.js";
 
@@ -222,11 +218,10 @@ export async function planUploadDates(root: string): Promise<DatePlan> {
       after = result.header;
     } catch (error) {
       if (error instanceof ScrubRefused) continue;
-      if (error instanceof DateNormalizationUnverified) {
-        plan.left.unverified++;
-        continue;
-      }
-      throw error;
+      // An unproven result, or any fault in the rule: this file keeps its dates and is warned
+      // about, and the upload is not stopped over a change it was never asked to make.
+      plan.left.unverified++;
+      continue;
     }
     // Asked once, and only when some recording has a date to set.
     tracked ??= await trackedPaths(root);
@@ -338,9 +333,9 @@ function syncDirectory(dir: string): void {
 function applyOne(item: DatePlanItem, dir: string): number | null {
   let copy: string | null = null;
   try {
+    // `lstat` of a link is not a file, so a file replaced by a link fails the first term.
     const unchanged = (st: Stats) =>
       st.isFile() &&
-      !st.isSymbolicLink() &&
       st.dev === item.dev &&
       st.ino === item.ino &&
       st.size === item.size &&

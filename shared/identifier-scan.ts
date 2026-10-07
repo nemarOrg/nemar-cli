@@ -649,11 +649,11 @@ export function edfAcquisitionDates(bytes: Uint8Array): EdfAcquisitionDates | nu
     if (d) {
       // The field's text is trimmed; one character is one byte, so the offset is the trim plus the index.
       const start = 88 + (raw.length - raw.trimStart().length) + d.index;
-      const slot = reading.slot;
+      // An EDF+ acquisition date lies inside the slot, so one as long as the slot is the slot.
       found = {
         start,
         end: start + d.text.length,
-        wholeSlot: reading.keyword && slot?.index === d.index && slot.text === d.text,
+        wholeSlot: reading.slot !== undefined && reading.slot.text === d.text,
       };
     }
   }
