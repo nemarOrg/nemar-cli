@@ -6,7 +6,26 @@
  * Pure on purpose: no `node:` import, so the Workers bundle can take it. The two
  * callers used to hold hand-kept copies of this logic, which is the drift
  * AGENTS.md warns about; there is one definition now and both re-export it.
+ *
+ * KEY GRAMMAR. A key is `<fields>--<name>`, split at the FIRST `--`:
+ *
+ *   fields = BACKEND[-s<size>][-m<mtime>][-S<chunksize>-C<chunknumber>]
+ *
+ * A special remote configured with `chunk=<size>` stores each piece of a file as
+ * `<fields>-S<chunksize>-C<n>--<name>` (n counts from 1) and never the plain key.
+ * `scripts/zarr/generate_zarr.py` is the other implementation of this grammar
+ * (`annex_key_size`, `annex_chunk_key`, `annex_chunk_sizes`, `_complete_chunk_size`)
+ * and reads it the same way: everything is taken from the fields before the first
+ * `--`, because the name after it is free text for a WORM or URL key. Keep the
+ * two consistent.
  */
+
+/** The fields and name of a key, split at the first `--`; null when there is none. */
+function splitKey(key: string): { fields: string; name: string } | null {
+  const sep = key.indexOf("--");
+  if (sep < 0) return null;
+  return { fields: key.slice(0, sep), name: key.slice(sep + 2) };
+}
 
 /**
  * Declared size (bytes) encoded in a git-annex key, e.g.
@@ -16,10 +35,31 @@
  * match the pattern, so callers can tell "no declared size" apart from "0
  * bytes claimed" -- load-bearing for the copy-integrity checks, which must not
  * silently accept an empty object as correct.
+ *
+ * This is the historical contract for a PLAIN key and is deliberately unchanged:
+ * a key with an `-m<mtime>` field (`WORM-s5-m17--x`) returns null here, so a
+ * plain WORM object stays present-if-listed. The chunk path uses
+ * {@link annexKeyFieldSize}, which reads past `-m`.
  */
 export function annexKeyDeclaredSize(key: string): number | null {
   const match = key.match(/-s(\d+)--/);
   return match ? Number.parseInt(match[1], 10) : null;
+}
+
+/**
+ * The `-s<size>` field of a key, read from the fields before the first `--` and
+ * tolerant of a following `-m<mtime>` (`WORM-s5-m17--x` -> 5). The twin of
+ * `annex_key_size` in `scripts/zarr/generate_zarr.py`. Null when the key has no
+ * `--` or no size field. Used for chunk geometry, where the size has to be known
+ * to know how many chunks to expect.
+ */
+export function annexKeyFieldSize(key: string): number | null {
+  const parts = splitKey(key);
+  if (!parts) return null;
+  const match = parts.fields.match(/-s(\d+)(?=-|$)/);
+  if (!match) return null;
+  const size = Number.parseInt(match[1], 10);
+  return Number.isSafeInteger(size) ? size : null;
 }
 
 /**
@@ -43,23 +83,32 @@ export function isKeyPresentAtDeclaredSize(key: string, existing: Map<string, nu
   return isChunkedKeyPresent(key, existing);
 }
 
+/** A chunk object name split into the whole-file key it belongs to. */
+export interface ParsedChunkKey {
+  baseKey: string;
+  chunkSize: number;
+  chunkNumber: number;
+}
+
 /**
- * git-annex chunk object name -> its whole-file key, chunk size and chunk
- * number. A dataset uploaded with `chunk=1GiB` on its special remote stores
- * `SHA256E-s982-S1073741824-C1--<hash>.vhdr` (C1..Cn) and never the plain
- * `SHA256E-s982--<hash>.vhdr` (nm000276: 3055 of 3089 objects, #1565). The
- * whole-file key is the name with `-S<chunksize>-C<n>` removed. Returns null
- * for anything that is not a chunk name.
+ * Chunk object name -> its whole-file key, chunk size and chunk number.
+ * `SHA256E-s982-S1073741824-C1--ba3d.vhdr` -> base `SHA256E-s982--ba3d.vhdr`,
+ * chunk size 1073741824, chunk 1 (nm000276: 3055 of 3089 objects, #1565). The
+ * `-S<chunksize>-C<n>` pair must be the LAST thing in the fields, before the
+ * first `--`, as the special remote writes it; the same text inside the free-text
+ * name is not a chunk. Returns null for anything that is not a chunk name,
+ * including a zero or unsafe-integer size or number.
  */
-export function parseChunkKey(
-  name: string,
-): { baseKey: string; chunkSize: number; chunkNumber: number } | null {
-  const m = name.match(/^(.+?-s\d+(?:-m\d+)?)-S(\d+)-C(\d+)(--.*)$/);
-  if (!m) return null;
-  const chunkSize = Number.parseInt(m[2], 10);
-  const chunkNumber = Number.parseInt(m[3], 10);
-  if (!(chunkSize > 0) || !(chunkNumber > 0)) return null;
-  return { baseKey: `${m[1]}${m[4]}`, chunkSize, chunkNumber };
+export function parseChunkKey(name: string): ParsedChunkKey | null {
+  const parts = splitKey(name);
+  if (!parts) return null;
+  const match = parts.fields.match(/^(.+)-S(\d+)-C(\d+)$/);
+  if (!match) return null;
+  const chunkSize = Number.parseInt(match[2], 10);
+  const chunkNumber = Number.parseInt(match[3], 10);
+  if (!Number.isSafeInteger(chunkSize) || chunkSize < 1) return null;
+  if (!Number.isSafeInteger(chunkNumber) || chunkNumber < 1) return null;
+  return { baseKey: `${match[1]}--${parts.name}`, chunkSize, chunkNumber };
 }
 
 /** baseKey -> chunkSize -> chunkNumber -> object size, built once per listing. */
@@ -96,7 +145,7 @@ function chunkIndexFor(existing: Map<string, number>): ChunkIndex {
  * reassembled, so it counts as absent. Exported for unit tests.
  */
 export function isChunkedKeyPresent(key: string, existing: Map<string, number>): boolean {
-  const declared = annexKeyDeclaredSize(key);
+  const declared = annexKeyFieldSize(key);
   if (declared === null) return false;
   const bySize = chunkIndexFor(existing).get(key);
   if (!bySize) return false;
