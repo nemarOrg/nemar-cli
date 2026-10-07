@@ -27,6 +27,7 @@ import {
   type DatasetStatus,
   PREFLIGHT_ACKNOWLEDGEABLE,
   type PreflightScan,
+  type UploaderPreflight,
   parsePreflightScan,
   parseUploaderPreflight,
 } from "../shared/identifier-screen-report";
@@ -67,6 +68,15 @@ function edfHeader(patient = "P01 F X X", family: "edf" | "bdf" = "edf"): Uint8A
   put(out, "-1", 236, 8);
   put(out, "1", 244, 8);
   put(out, "0", 252, 4);
+  return out;
+}
+
+/** A recording whose start date is `startdate` (dd.mm.yy): 1 January is year-only, any other day is a date. */
+function datedRecording(startdate: string): Uint8Array {
+  const out = new Uint8Array(4096);
+  const header = edfHeader();
+  put(header, startdate, 168, 8);
+  out.set(header);
   return out;
 }
 
@@ -670,6 +680,57 @@ describe("the tree is screened again right before anything is sent", () => {
     const record = await first();
     write("sub-01/eeg/sub-01_task-two_eeg.vhdr", "Brain Vision Data Exchange Header File\n");
     expect((await recheckIdentifierPreflight(root, record)).status).toBe("fail");
+  });
+
+  describe("the date warning (ADR 0090)", () => {
+    /** What the step printed with console.log, for the duration of `body`. */
+    async function printed(body: () => Promise<void>): Promise<string[]> {
+      const lines: string[] = [];
+      const log = console.log;
+      console.log = (...args: unknown[]) => {
+        lines.push(args.join(" "));
+      };
+      try {
+        await body();
+      } finally {
+        console.log = log;
+      }
+      return lines;
+    }
+    const warned = (lines: string[]) =>
+      lines.some((line) => line.includes("Warning: acquisition dates"));
+
+    test("a date that appeared after the first scan is warned about before it is sent", async () => {
+      bidsWith(recording(CLEAN_PATIENT));
+      const record = await first();
+      expect(record.scan.status).toBe("clean");
+      write("sub-02/eeg/sub-02_task-rest_eeg.edf", datedRecording("15.03.85"));
+      let again: Awaited<ReturnType<typeof recheckIdentifierPreflight>> | undefined;
+      const lines = await printed(async () => {
+        again = await recheckIdentifierPreflight(root, record);
+      });
+      if (again?.status !== "ok") throw new Error("expected the recheck to pass");
+      // No new condition: dates acknowledge nothing, so the upload goes on with its record.
+      expect(again.value.scan.status).toBe("dates-only");
+      expect(again.value.acknowledged_via).toBeNull();
+      expect(lines.some((line) => line.includes("(1 entry)"))).toBe(true);
+    });
+
+    test("unchanged dates are not warned about twice", async () => {
+      bidsWith(datedRecording("15.03.85"));
+      let record: UploaderPreflight | undefined;
+      const firstLines = await printed(async () => {
+        record = await first();
+      });
+      expect(warned(firstLines)).toBe(true);
+      expect(record?.scan.status).toBe("dates-only");
+      let again: Awaited<ReturnType<typeof recheckIdentifierPreflight>> | undefined;
+      const lines = await printed(async () => {
+        again = await recheckIdentifierPreflight(root, record as UploaderPreflight);
+      });
+      expect(again?.status).toBe("ok");
+      expect(warned(lines)).toBe(false);
+    });
   });
 
   test("an acknowledged scan that gains a condition stops, though its record would parse", async () => {
