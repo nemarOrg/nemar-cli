@@ -1524,14 +1524,24 @@ export async function copyPathsToAnnexRemote(
   paths: string[],
   jobs = 4,
   credentials?: S3Credentials,
-): Promise<{ success: boolean; error?: string; filesCopied: number }> {
+  options: { deadlineMs?: number; now?: () => number } = {},
+): Promise<{ success: boolean; error?: string; filesCopied: number; timedOut?: boolean }> {
   if (paths.length === 0) return { success: true, filesCopied: 0 };
 
   const env = awsCredentialEnv(credentials);
+  const now = options.now ?? Date.now;
   let filesCopied = 0;
   try {
     for (const chunk of chunkAddTargets(paths)) {
-      const { stdout, stderr, exitCode } = await runCommand(
+      // `deadlineMs` is an absolute wall-clock bound (the credential expiry,
+      // less a margin): a copy still running then is killed rather than left
+      // to fail every remaining file with ExpiredToken. The caller refreshes
+      // and re-runs; the location log skips what already arrived.
+      const remaining = options.deadlineMs === undefined ? undefined : options.deadlineMs - now();
+      if (remaining !== undefined && remaining <= 0) {
+        return { success: false, error: "Copy deadline reached", filesCopied, timedOut: true };
+      }
+      const { stdout, stderr, exitCode, timedOut } = await runCommand(
         [
           "git",
           "annex",
@@ -1545,10 +1555,13 @@ export async function copyPathsToAnnexRemote(
           "--",
           ...chunk,
         ],
-        { cwd: datasetPath, env },
+        { cwd: datasetPath, env, ...(remaining !== undefined ? { timeout: remaining } : {}) },
       );
       const records = parseCopyJson(stdout);
       filesCopied += records.filter((r) => r.success).length;
+      if (timedOut) {
+        return { success: false, error: "Copy deadline reached", filesCopied, timedOut: true };
+      }
       if (exitCode !== 0) {
         return {
           success: false,

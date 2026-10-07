@@ -47,6 +47,7 @@ import {
   markStepCompleted,
   writeUploadProgress,
 } from "../upload-progress.js";
+import { copyWithCredentialRefresh, leaseFromResponse } from "./s3-copy-session.js";
 import { type DatasetInfo, FAIL, type Step, ok } from "./types.js";
 
 export interface UploadFileEntry {
@@ -537,7 +538,7 @@ export async function uploadDataToS3(
       let creds: Awaited<ReturnType<typeof requestUploadCredentials>>;
       try {
         creds = await requestUploadCredentials(datasetInfo.dataset_id);
-        spinner.succeed("Upload credentials received (2h expiry)");
+        spinner.succeed("Upload credentials received (renewed automatically during long copies)");
       } catch (credError) {
         spinner.fail(`Could not get upload credentials: ${errorDetail(credError)}`);
         console.log(chalk.red("  Upload credentials are required for S3 access."));
@@ -619,19 +620,50 @@ export async function uploadDataToS3(
           ? `Uploading ${pendingCopy.length} data files to S3...`
           : `Uploading ${pendingCopy.length} data files to S3 (${annexedBefore.size - pendingCopy.length} already there)...`,
       ).start();
-      const uploadResult = await copyPathsToAnnexRemote(
-        absolutePath,
-        "nemar-s3",
-        pendingCopy,
-        Number.parseInt(options.jobs, 10),
-        toS3Credentials(creds.credentials),
-      );
+      // Copy in bounded batches, renewing the 2 h STS lease before it runs
+      // out and retrying a batch that died of expiry (a TB-scale copy used to
+      // fail part-way and need a manual re-run).
+      const sizes = new Map(dataFiles.map((f) => [f.path, f.size] as const));
+      const jobs = Number.parseInt(options.jobs, 10);
+      const uploadResult = await copyWithCredentialRefresh({
+        paths: pendingCopy,
+        sizes,
+        initialLease: leaseFromResponse(
+          toS3Credentials(creds.credentials),
+          creds.credentials.expiration,
+          Date.now(),
+        ),
+        renewLease: async () => {
+          const fresh = await requestUploadCredentials(datasetInfo.dataset_id);
+          return leaseFromResponse(
+            toS3Credentials(fresh.credentials),
+            fresh.credentials.expiration,
+            Date.now(),
+          );
+        },
+        copyBatch: (paths, credentials, { deadlineMs }) =>
+          copyPathsToAnnexRemote(absolutePath, "nemar-s3", paths, jobs, credentials, {
+            deadlineMs,
+          }),
+        log: (line) => {
+          spinner.info(line);
+          spinner = ora("Uploading data files to S3...").start();
+        },
+        onBatchDone: (done, total) => {
+          if (total > 1) spinner.text = `Uploading data files to S3 (batch ${done}/${total})...`;
+        },
+      });
 
       // Always clear cached STS creds so downloads use publicurl
       await clearAnnexCredentials(absolutePath);
 
       if (!uploadResult.success) {
         spinner.fail(`S3 upload failed: ${uploadResult.error}`);
+        if (uploadResult.refreshes > 0) {
+          console.log(
+            chalk.dim(`  Upload credentials were renewed ${uploadResult.refreshes} time(s).`),
+          );
+        }
         console.log(chalk.yellow("Re-run the same command to resume uploading."));
         return FAIL;
       }
