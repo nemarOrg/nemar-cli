@@ -280,10 +280,11 @@ describe("the week's facts and words", () => {
     expect(renderIdentifierWeek(f).lines).toContain(
       "The sweep started no screen this week while 1 datasets were due: it is not running.",
     );
-    // Nothing due: silence is not evidence (ADR 0053).
-    expect(attentionReasons(facts([screenedRow("nm000751", "clean", 3)], 0))).not.toContain(
-      "the sweep started no screen while work was due",
-    );
+    // Nothing due and nothing started all week: silence is not evidence (ADR 0053).
+    // Screened ten days before NOW, so its attempt is outside the week reported.
+    const quiet = facts([screenedRow("nm000751", "clean", 10)], 0);
+    expect(quiet.startedInWindow).toBe(0);
+    expect(attentionReasons(quiet)).toEqual([]);
   });
 
   test("unknown is never zero: unreadable records make every figure unknown, and the week needs attention", () => {
@@ -614,6 +615,37 @@ describe("the weekly send", () => {
       expect(auditRows(IDENTIFIER_SWEEP_REPORT_CLAIM_ACTION)).toHaveLength(0);
     });
   }
+});
+
+describe("one bad row", () => {
+  test("a report stamp that is not an object is that dataset's unreadable, not the week's unknown", async () => {
+    seedDataset("nm000785");
+    seedDataset("nm000786");
+    await runIdentifierSweepTick(env());
+    await answer("nm000785", scanBody("nm000785", "clean"));
+    await answer("nm000786", scanBody("nm000786", "clean"));
+    db.run(
+      `UPDATE datasets SET sweep_stamps = json_set(sweep_stamps, '$.identifier_sweep_report', 'not json {')
+        WHERE dataset_id = 'nm000786'`,
+    );
+    const res = await app.request(
+      "/admin/identifier-sweep",
+      { headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+      env(),
+    );
+    const body = (await res.json()) as {
+      facts: {
+        scope: number;
+        screened: number;
+        errors: string[];
+        uncheckedByReason: Record<string, number>;
+      };
+    };
+    expect(body.facts.errors).toEqual([]);
+    expect(body.facts.scope).toBe(2);
+    expect(body.facts.screened).toBe(1);
+    expect(body.facts.uncheckedByReason.unreadable).toBe(1);
+  });
 });
 
 describe("GET /admin/identifier-sweep", () => {

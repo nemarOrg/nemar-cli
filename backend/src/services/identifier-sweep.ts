@@ -280,7 +280,10 @@ export const IDENTIFIER_SWEEP_ROWS_SQL = `SELECT d.dataset_id,
           ${stamp(IDENTIFIER_SWEEP_STATUS_PATH)} AS status,
           ${stamp(IDENTIFIER_SWEEP_CHECKED_AT_PATH)} AS checked_at,
           ${stamp(IDENTIFIER_SWEEP_VERSION_PATH)} AS version,
-          json(${stamp(IDENTIFIER_SWEEP_REPORT_PATH)}) AS report,
+          -- json_extract gives an object back as its JSON text, and anything else
+          -- as itself, which the reader refuses; json() here would make one bad
+          -- row an error for the whole query, and blind the week.
+          ${stamp(IDENTIFIER_SWEEP_REPORT_PATH)} AS report,
           ${stamp(IDENTIFIER_SWEEP_ATTEMPT_PATH)} AS attempt,
           ${stamp(IDENTIFIER_SWEEP_ATTEMPT_ERROR_PATH)} AS attempt_error,
           ${stamp(IDENTIFIER_SWEEP_ATTEMPTED_AT_PATH)} AS attempted_at,
