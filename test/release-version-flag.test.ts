@@ -751,10 +751,17 @@ describe("spawned CLI", () => {
   });
 
   describe("nemar entry point", () => {
+    // Compares flag strings and top-level command names only, as sets: not
+    // descriptions, defaults or arguments, and not the order index.ts happens
+    // to declare them in. A nested command or option added to a command group
+    // is not checked here; those groups are imported, not copied.
     test(
-      "the tree under test matches the options and commands of `nemar --help`",
+      "the tree under test has the options and top-level commands of `nemar --help`",
       async () => {
-        const help = (await spawnCli(["--help"])).stdout.split("\n");
+        const result = await spawnCli(["--help"]);
+        // A crashed spawn would otherwise read as drift.
+        expect(result.exitCode).toBe(0);
+        const help = result.stdout.split("\n");
         const section = (title: string) =>
           help
             .slice(help.indexOf(`${title}:`) + 1)
@@ -766,9 +773,12 @@ describe("spawned CLI", () => {
 
         // `-h, --help` is Commander's own and not part of options[].
         const optionFlags = section("Options").map((line) => line.trim().split(/ {2,}/)[0]);
-        expect(optionFlags).toEqual([...program.options.map((o) => o.flags), "-h, --help"]);
+        expect([...optionFlags].sort()).toEqual(
+          [...program.options.map((o) => o.flags), "-h, --help"].sort(),
+        );
 
-        const commandNames = section("Commands").map((line) => line.trim().split(/\s/)[0]);
+        // Help prints an aliased command as `name|alias`.
+        const commandNames = section("Commands").map((line) => line.trim().split(/[\s|]/)[0]);
         expect([...commandNames].sort()).toEqual(
           [...program.commands.map((c) => c.name()), ...INLINE_ROOT_COMMANDS, "help"].sort(),
         );
