@@ -139,7 +139,22 @@ vocabulary, a strict loader that fails closed, and a dataset with an entry is ne
 without it),
 0084 (federation eligibility is one predicate decided from the D1 row and re-checked at every read,
 with `anonymous: false` in the gathered metadata as a second independent guard; the writer is a hook
-that never fails or blocks a flow and is off unless `NEUROBAGEL_WRITER_ENABLED` is `1`).
+that never fails or blocks a flow and is off unless `NEUROBAGEL_WRITER_ENABLED` is `1`),
+0085 (a privacy correction scrubs every version in place: new annex keys, DOIs and version numbers
+kept, old versions deleted by version id, and a public ledger of counts and fixed words that never
+holds a value),
+0086 (a publication request is screened for identifiers by a CI workflow bound to a commit, the
+admin mail waits for the verdict, and `unchecked` is never treated as clean),
+0087 (`nemar dataset upload` screens locally before anything is sent and refuses direct
+identifiers with no override; what it records is a note, never a verdict the server trusts),
+0088 (published datasets are re-screened on a cycle that does not depend on the verdict, and the
+weekly report says what was not screened; it reports, never repairs, and files no issue),
+0089 (an import scrubs the clone before it copies or pushes and finalize waits for the screen; a
+held import is not a failure),
+0090 (an acquisition date finer than year and month is a review finding that warns and never
+gates, and nothing already published is rewritten),
+0091 (a new recording's day-level acquisition dates are set to 1 January of their year on upload
+and import, and nothing already published is changed).
 
 **Account copy and the profile-gap matrix are declared once, in
 [`shared/contract/account-copy.ts`](shared/contract/account-copy.ts) and
