@@ -9378,6 +9378,25 @@ def main() -> int:
         write_failed_callback(f"index refused: {exc}")
         return 1
 
+    def manifest_prior_for(index_doc: dict) -> dict | None:
+        """The manifest to carry entries from. ``--clean`` hands the merge no prior
+        (this run rebuilds everything), but a store the index KEPT because its
+        recording was deferred was not rebuilt, so its ``source_key`` and size exist
+        only in the published manifest. Seed exactly those entries; without them
+        the manifest would list fewer stores than the index serves."""
+        if not (clean and deferred and not args.wipe):
+            return prior_manifest
+        kept = {store_rel_for(p) for p in deferred} & {e["zarr"] for e in index_doc["stores"]}
+        if not kept:
+            return prior_manifest
+        live = s3_read_json(bucket, f"{dataset_id}/zarr/manifest.json") or {}
+        return {
+            "stores": [
+                e for e in live.get("stores") or []
+                if isinstance(e, dict) and e.get("zarr") in kept
+            ]
+        }
+
     def build_manifest(index_doc: dict) -> dict:
         """The producer manifest tracks EXACTLY the index's store set, so it is
         derived from the document that is actually published -- including the
@@ -9386,7 +9405,7 @@ def main() -> int:
         refuses the publish rather than being uploaded.
         """
         doc = merge_manifest(
-            prior_manifest,
+            manifest_prior_for(index_doc),
             dataset_id,
             manifest_entries,
             [e["zarr"] for e in index_doc["stores"]],
