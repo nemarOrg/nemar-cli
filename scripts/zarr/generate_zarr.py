@@ -4176,6 +4176,40 @@ def index_provenance(dataset_row: dict | None) -> dict:
     }
 
 
+def index_currency_problem(
+    index: dict | None,
+    head: str,
+    dataset_row: dict | None,
+    row_fetch_failed: bool,
+    biosigio_version: str | None,
+    engine_version: str = ZARR_ENGINE_VERSION,
+) -> str | None:
+    """Why a published index is NOT exactly what a full rebuild at ``head`` would
+    produce for the stores it already serves, or None when it is: same commit, same
+    engine, same biosigIO, same dataset provenance (which every store embeds).
+
+    One predicate for two decisions. A retry round may convert only the pending
+    recordings when this is None (`pending_retry_worklist`), and a recording the
+    scratch gate defers may keep serving its published store when this is None
+    (`merge_index`): in both cases the store on S3 is what this run would have
+    written. When it is not None that store is stale, so a deferred recording's
+    entry leaves the index and the recording is listed pending to be rebuilt."""
+    if not isinstance(index, dict):
+        return "no published index"
+    if index.get("source_commit") != head:
+        return "the index was built from a different commit"
+    if index.get("engine_version") != engine_version:
+        return "the index was built by a different engine"
+    if index.get("biosigio_version") != biosigio_version:
+        return "the index was built with a different biosigIO"
+    if row_fetch_failed:
+        return "the catalog could not be read to compare provenance"
+    current = index_provenance(dataset_row)
+    if any(index.get(k) != v for k, v in current.items()):
+        return "the dataset's provenance changed since the index was built"
+    return None
+
+
 def pending_retry_worklist(
     index: dict | None,
     head: str,
@@ -4199,19 +4233,12 @@ def pending_retry_worklist(
     reconverting stores that were already published at this commit, and could
     fail new recordings for memory while doing it.
     """
-    if not isinstance(index, dict):
-        return None, "no published index"
-    if index.get("source_commit") != head:
-        return None, "the index was built from a different commit"
-    if index.get("engine_version") != engine_version:
-        return None, "the index was built by a different engine"
-    if index.get("biosigio_version") != biosigio_version:
-        return None, "the index was built with a different biosigIO"
-    if row_fetch_failed:
-        return None, "the catalog could not be read to compare provenance"
-    current = index_provenance(dataset_row)
-    if any(index.get(k) != v for k, v in current.items()):
-        return None, "the dataset's provenance changed since the index was built"
+    problem = index_currency_problem(
+        index, head, dataset_row, row_fetch_failed, biosigio_version, engine_version
+    )
+    if problem:
+        return None, problem
+    assert isinstance(index, dict)  # narrowed by the check above
     at_head = set(discovered)
     pending = index.get("pending")
     paths = sorted(
@@ -4247,6 +4274,33 @@ def _heal_carried_units_report(entry: dict) -> dict:
     return {**entry, "units_report": bounded}
 
 
+def _entry_for_path(doc: dict | None, section: str, path: str) -> dict | None:
+    """The entry of ``doc[section]`` ("stores" or "failures") for a recording, or
+    None. Read off a PUBLISHED document, so nothing about its shape is assumed."""
+    entries = (doc or {}).get(section)
+    if not isinstance(entries, list):
+        return None
+    return next(
+        (e for e in entries if isinstance(e, dict) and e.get("path") == path), None
+    )
+
+
+_DEFERRED_PREFIX = "deferred:"
+_DEFERRED_JOIN = "; last error: "
+
+
+def _without_deferral(last_error: str | None) -> str | None:
+    """A pending entry's ``last_error`` with a deferral note stripped, so a recording
+    deferred tick after tick keeps the error it last FAILED with instead of a chain
+    of deferral notes. A note with nothing behind it leaves None."""
+    if not last_error:
+        return None
+    if not last_error.startswith(_DEFERRED_PREFIX):
+        return last_error
+    _, sep, tail = last_error.partition(_DEFERRED_JOIN)
+    return tail or None if sep else None
+
+
 def merge_index(
     prior: dict | None,
     dataset_id: str,
@@ -4273,6 +4327,9 @@ def merge_index(
     biosigio_version: str | None = None,
     prior_pending: list[dict] | None = None,
     dataset_row: dict | None = None,
+    deferred: dict[str, str] | None = None,
+    seed: dict | None = None,
+    seed_current: bool = False,
 ) -> dict:
     """Fold this run's results into the prior index and return the v3 document. Pure.
 
@@ -4300,6 +4357,24 @@ def merge_index(
     BY CONSTRUCTION rather than by hope: entries for paths that are not discovered
     are dropped, and discovered paths in none of the three lists become
     `not_attempted` pending entries. A partial run therefore still balances.
+
+    `deferred` maps recordings the scratch gate would not admit to the text that
+    explains it. A deferral is not an attempt and not a conversion, so it must
+    neither spend an attempt nor make the index serve less than it did (ADR 0005).
+    `seed` is the index as published (under ``--clean`` the merge is handed no
+    `prior`, so this is the only place the deferred recordings' old entries live),
+    and `seed_current` says whether the stores it serves are what this run would
+    have written (`index_currency_problem` is None). For each deferred path:
+
+    - a store in `seed` and `seed_current`: the store stays in the index, served
+      exactly as before; nothing is owed;
+    - a store that is stale (or any store carried by an incremental merge): the
+      entry leaves the index, as a failure's does, and the recording is listed
+      pending as `not_attempted` so the queue rebuilds it; its objects stay on S3;
+    - a typed failure already on record stays a failure;
+    - otherwise it is pending as `not_attempted`, `attempts` and `last_attempt_utc`
+      carried from its history (so an attempt-3 recording is still attempt 3), and
+      `last_error` says why it was deferred ahead of whatever it last failed with.
 
     A path is never in more than one of `stores`, `failures`, `pending`.
 
@@ -4405,6 +4480,31 @@ def merge_index(
             e.get("last_attempt_utc") or updated_utc,
         )
 
+    for path, message in (deferred or {}).items():
+        rel = store_rel_for(path)
+        seeded_store = _entry_for_path(seed, "stores", path)
+        if seed_current and seeded_store is not None and path not in converted_paths:
+            stores[rel] = _heal_carried_units_report(seeded_store)
+            pends.pop(path, None)
+            fails.pop(path, None)
+            continue
+        stores.pop(rel, None)
+        seeded_failure = fails.get(path) or _entry_for_path(seed, "failures", path)
+        if seeded_failure is not None:
+            fails[path] = seeded_failure
+            pends.pop(path, None)
+            continue
+        history = pends.get(path)
+        earlier = _without_deferral(history["last_error"] if history else None)
+        text = message if not earlier else f"{message}; last error: {earlier}"
+        pends[path] = _pending_entry(
+            path,
+            "not_attempted",
+            prior_attempts.get(path, 0),
+            text[:_DETAIL_MAX_CHARS],
+            history["last_attempt_utc"] if history else None,
+        )
+
     if discovered is not None:
         wanted = set(discovered)
         # A carried-over store whose path is EXCLUDED from discovery goes, and
@@ -4498,6 +4598,115 @@ def merge_index(
         "stores": ordered,
         "failures": ordered_fails,
         "pending": ordered_pending,
+    }
+
+
+def deferral_leaves_index_as_is(
+    live_index: dict | None,
+    seed_current: bool,
+    convert: list[str],
+    deferred,
+    remove: list[str],
+    failed: list[str],
+    wipe: bool,
+) -> bool:
+    """Whether a run in which the scratch gate deferred EVERYTHING it was asked to
+    convert has nothing to say that the published index does not already say.
+
+    Rewriting it anyway is not free: a metadata clone, a manifest and index PUT, and
+    (when stores are carried) an `events.parquet` download and upload, every
+    `PENDING_BACKOFF_SECONDS[0]` for a recording that can never fit. And for a
+    ``--clean`` run it is not harmless either, since the merge is handed no prior and
+    would republish the dataset with only what this run converted.
+
+    True when every deferred path is already accounted for as the run would leave
+    it: pending with the `not_attempted` reason and a deferral note (written by the
+    first run that deferred it), a typed failure, or a store the index may keep
+    (``seed_current``). Anything else (a stale store to turn into a pending entry,
+    an older ``infra_failure`` reason to correct) is a real change and publishes."""
+    if not isinstance(live_index, dict) or wipe or remove or failed or not deferred:
+        return False
+    if set(deferred) != set(convert):
+        return False
+    pending = {
+        e["path"]: e
+        for e in live_index.get("pending") or []
+        if isinstance(e, dict) and isinstance(e.get("path"), str)
+    }
+    stores = {
+        e.get("path") for e in live_index.get("stores") or [] if isinstance(e, dict)
+    }
+    failures = {
+        e.get("path") for e in live_index.get("failures") or [] if isinstance(e, dict)
+    }
+    for path in deferred:
+        entry = pending.get(path)
+        if entry is not None:
+            note = str(entry.get("last_error") or "")
+            if entry.get("reason") != "not_attempted" or not note.startswith(_DEFERRED_PREFIX):
+                return False
+        elif path in failures:
+            continue
+        elif not (seed_current and path in stores):
+            return False
+    return True
+
+
+def deferred_unchanged_callback(
+    dataset_id: str,
+    head: str,
+    live_index: dict,
+    live_etag: str | None,
+    deferred,
+    discovered_count: int,
+    non_raw_dropped: int,
+    provenance_fetch_failed: bool,
+) -> dict:
+    """The zarr-ready body for a run that deferred everything and published nothing.
+
+    It restates the published index's own numbers, because the backend overwrites
+    its row from this body: an empty ``data_failures`` would clear the failure
+    summary, and a ``pending_count`` of zero would stop the queue re-queueing
+    recordings that are still owed. ``not_attempted_count`` counts the deferred
+    recordings among the pending ones, so ``zarr_queue.mark_done`` neither advances
+    a retry round nor schedules a longer backoff for them."""
+    pending = [
+        e for e in live_index.get("pending") or []
+        if isinstance(e, dict) and isinstance(e.get("path"), str)
+    ]
+    failures = [
+        e for e in live_index.get("failures") or [] if isinstance(e, dict)
+    ]
+    deferred_paths = set(deferred)
+    deferred_pending = sum(1 for e in pending if e["path"] in deferred_paths)
+    errors = live_index.get("errors")
+    return {
+        "dataset_id": dataset_id,
+        "status": "ready",
+        "store_count": int(live_index.get("store_count") or 0),
+        "index_etag": (live_etag or "").strip().strip('"') or None,
+        "commit": head,
+        "converted": [],
+        "removed": [],
+        "errors": errors if isinstance(errors, int) else len(failures) + len(pending),
+        "failed": [],
+        "failure_count": int(live_index.get("failure_count") or len(failures)),
+        "data_failures": [{"path": f.get("path"), "code": f.get("code")} for f in failures],
+        "deterministic": False,
+        **annex_missing_summary([]),
+        "pool_breaks": 0,
+        "calibration": [],
+        "measured_count": 0,
+        "retryable_failures": len(pending),
+        "pending_count": len(pending),
+        "discovered_count": discovered_count,
+        "not_attempted_count": deferred_pending,
+        "non_raw_dropped": non_raw_dropped,
+        "provenance_fetch_failed": provenance_fetch_failed,
+        "manifest_upload_failed": False,
+        "events_row_count": live_index.get("events_row_count"),
+        "events_upload_failed": False,
+        "events_stores_without_rows": 0,
     }
 
 
@@ -7864,7 +8073,9 @@ def _next_admission(
     gated = pending_scratch is not None and scratch_budget is not None
 
     def fits_scratch(j: int) -> bool:
-        return not gated or running_scratch + pending_scratch[j] <= scratch_budget  # type: ignore[index,operator]
+        if not gated:
+            return True
+        return running_scratch + pending_scratch[j] <= scratch_budget  # type: ignore[index,operator]
 
     return next(
         (j for j, pk in enumerate(pending_peaks)
@@ -8773,9 +8984,9 @@ def main() -> int:
                     # NOT rewritten: the queue's pending-driven requeue needs to
                     # know a total failure left recordings outstanding, and
                     # `discovered_count` is what makes "2 of 43" sayable at all.
-                    "pending_count": len(pending_entries),
+                    "pending_count": len(pending_entries) + len(deferred),
                     "discovered_count": len(discovered),
-                    "not_attempted_count": sum(
+                    "not_attempted_count": len(deferred) + sum(
                         1 for e in pending_entries if e.get("reason") == "not_attempted"
                     ),
                     "provenance_fetch_failed": provenance_fetch_failed,
@@ -8811,8 +9022,39 @@ def main() -> int:
     # `failed` instead of backing off.
     deferred_set = set(deferred)
     attempted = [p for p in convert if p not in deferred_set]
+    # Every recording was deferred and the published index already says so: there is
+    # nothing to publish, and republishing is the one way a --clean run could drop
+    # stores it merely failed to rebuild. Report and stop (see
+    # `deferral_leaves_index_as_is`).
+    if deferral_leaves_index_as_is(
+        live_index,
+        live_index is not None
+        and index_currency_problem(
+            live_index, head, dataset_row, provenance_fetch_failed, biosigio_version
+        ) is None,
+        convert, deferred, remove, failures, args.wipe,
+    ):
+        assert live_index is not None
+        print(
+            f"[zarr] all {len(deferred)} recording(s) were deferred for scratch and the "
+            "published index already says so; index, manifest and events.parquet left "
+            "untouched",
+            flush=True,
+        )
+        with open(args.callback_out, "w") as fh:
+            json.dump(
+                deferred_unchanged_callback(
+                    dataset_id, head, live_index, live_index_etag, deferred,
+                    len(discovered), non_raw_dropped, provenance_fetch_failed,
+                ),
+                fh,
+            )
+        return 0
     if attempted and not converted_entries and not remove and retry_paths is None:
-        print(f"::error::all {len(attempted)} conversion(s) failed; index left untouched", flush=True)
+        print(
+            f"::error::all {len(attempted)} conversion(s) failed; index left untouched",
+            flush=True,
+        )
         if annex_missing and not deterministic:
             print(
                 f"::error::storage lacks the annex object(s) of {len(annex_missing)} "
@@ -8846,11 +9088,19 @@ def main() -> int:
     # published as the index's `source_commit`, where None would serialize as
     # JSON null -- the on008083 shape (#1197) that took an empty commit all the
     # way into a published document.
+    #
+    # A deferral holds the commit back for the same reason an infra failure does: on
+    # the incremental path a recording the gate would not admit is still owed, and
+    # the next run diffs from the commit the stores were really built from.
     index_commit = (
-        prior_commit if (infra_failures and is_commit_sha(prior_commit) and prior_commit) else head
+        prior_commit
+        if ((infra_failures or deferred) and is_commit_sha(prior_commit) and prior_commit)
+        else head
     )
 
-    def build_index(merge_prior: dict | None, merge_pending: list | None) -> dict:
+    def build_index(
+        merge_prior: dict | None, merge_pending: list | None, seed_doc: dict | None = None
+    ) -> dict:
         """Merge this run's results onto a prior document and check the coverage
         invariant. A function rather than a straight line because the publish
         below re-runs it against a NEWER live document when the conditional write
@@ -8873,12 +9123,18 @@ def main() -> int:
             biosigio_version=biosigio_version,
             prior_pending=merge_pending,
             dataset_row=dataset_row,
+            deferred=deferred,
+            seed=seed_doc,
+            seed_current=seed_doc is not None
+            and index_currency_problem(
+                seed_doc, head, dataset_row, provenance_fetch_failed, biosigio_version
+            ) is None,
         )
         check_index_invariant(merged)
         return merged
 
     try:
-        index = build_index(prior, prior_pending)
+        index = build_index(prior, prior_pending, None if args.wipe else prior_index_doc)
         # SCHEMA FIRST, UPLOADS SECOND. A refused index means this run publishes
         # nothing -- and "nothing" has to include events.parquet, which is a
         # destructive overwrite of a file the LIVE index still describes. So the
@@ -8987,7 +9243,10 @@ def main() -> int:
         # `--clean` hands the merge no prior (the document is rebuilt from this
         # run), exactly as the first attempt did; the pending attempt history
         # still comes from the published document, newer one included.
-        remerged = build_index(None if clean else newer, (newer or {}).get("pending"))
+        remerged = build_index(
+            None if clean else newer, (newer or {}).get("pending"),
+            None if args.wipe else newer,
+        )
         if events_file:
             remerged["events_parquet"] = f"{remerged['data_base']}{EVENTS_PARQUET_NAME}"
             remerged["events_row_count"] = events_file["row_count"]

@@ -658,6 +658,225 @@ class TestMergeIndex(unittest.TestCase):
         self.assertEqual([s["zarr"] for s in index["stores"]], ["a.zarr", "b.zarr"])
 
 
+class TestMergeIndexDeferredRecordings(unittest.TestCase):
+    """A recording the scratch gate deferred is neither an attempt nor a conversion:
+    it must not spend an attempt, and it must not make the index serve less than
+    it did. ``--clean`` hands the merge no prior, so every case below that matters
+    runs with prior=None and the published index as the seed."""
+
+    A = "sub-01/eeg/sub-01_task-a_eeg.edf"
+    B = "sub-02/eeg/sub-02_task-a_eeg.edf"
+    NOW = "2026-10-06T00:00:00Z"
+    NOTE = "deferred: needs 500.0 GiB of scratch, 100 GiB available"
+
+    def store(self, path):
+        return {"path": path, "zarr": store_rel_for(path)}
+
+    def merge(self, deferred, *, seed=None, seed_current=False, prior=None,
+              prior_pending=None, converted=(), failures=None, discovered=None):
+        index = merge_index(
+            prior, "nm000276", SHA_NEW, list(converted), [], self.NOW,
+            failures or [], [],
+            discovered=discovered or [self.A, self.B], prior_pending=prior_pending,
+            deferred=deferred, seed=seed, seed_current=seed_current,
+        )
+        check_index_invariant(index)
+        return index
+
+    def pending(self, index):
+        return {p["path"]: p for p in index["pending"]}
+
+    def test_a_current_store_stays_served_under_clean(self):
+        seed = {"stores": [self.store(self.A)], "pending": []}
+        index = self.merge({self.A: self.NOTE}, seed=seed, seed_current=True, discovered=[self.A])
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+        self.assertEqual(index["pending"], [])
+        self.assertEqual(index["store_count"], 1)
+
+    def test_a_stale_store_leaves_the_index_and_is_listed_pending(self):
+        seed = {"stores": [self.store(self.A)], "pending": []}
+        index = self.merge({self.A: self.NOTE}, seed=seed, seed_current=False, discovered=[self.A])
+        self.assertEqual(index["stores"], [])
+        entry = self.pending(index)[self.A]
+        self.assertEqual((entry["reason"], entry["attempts"]), ("not_attempted", 0))
+        self.assertEqual(entry["last_error"], self.NOTE)
+
+    def test_an_incremental_merge_drops_a_stale_carried_store_too(self):
+        prior = {"source_commit": SHA_OLD, "stores": [self.store(self.A)], "pending": []}
+        index = self.merge(
+            {self.A: self.NOTE}, prior=prior, seed=prior, seed_current=False, discovered=[self.A]
+        )
+        self.assertEqual(index["stores"], [])
+        self.assertEqual(list(self.pending(index)), [self.A])
+
+    def test_a_recording_with_no_store_is_pending_not_attempted(self):
+        index = self.merge({self.B: self.NOTE}, seed={"stores": []}, discovered=[self.B])
+        entry = self.pending(index)[self.B]
+        self.assertEqual((entry["reason"], entry["attempts"]), ("not_attempted", 0))
+        self.assertIsNone(entry["last_attempt_utc"])
+
+    def test_a_deferral_keeps_the_attempts_and_the_last_error_it_already_had(self):
+        history = [{
+            "path": self.B, "zarr": store_rel_for(self.B), "reason": "infra_failure",
+            "attempts": 3, "last_error": "RuntimeError: No space left on device",
+            "last_attempt_utc": "2026-10-05T00:00:00Z",
+        }]
+        index = self.merge(
+            {self.B: self.NOTE}, seed={"pending": history}, prior_pending=history,
+            discovered=[self.B],
+        )
+        entry = self.pending(index)[self.B]
+        self.assertEqual(entry["reason"], "not_attempted")
+        self.assertEqual(entry["attempts"], 3, "a deferral is not an attempt")
+        self.assertEqual(entry["last_attempt_utc"], "2026-10-05T00:00:00Z")
+        self.assertEqual(
+            entry["last_error"], f"{self.NOTE}; last error: RuntimeError: No space left on device"
+        )
+
+    def test_deferring_again_replaces_the_note_instead_of_chaining_it(self):
+        history = [{
+            "path": self.B, "zarr": store_rel_for(self.B), "reason": "not_attempted",
+            "attempts": 3,
+            "last_error": "deferred: needs 400 GiB of scratch, 90 GiB available; last error: boom",
+            "last_attempt_utc": None,
+        }]
+        index = self.merge(
+            {self.B: self.NOTE}, seed={"pending": history}, prior_pending=history,
+            discovered=[self.B],
+        )
+        self.assertEqual(
+            self.pending(index)[self.B]["last_error"], f"{self.NOTE}; last error: boom"
+        )
+        bare = [{
+            **history[0],
+            "last_error": "deferred: needs 400 GiB of scratch, 90 GiB available",
+        }]
+        index = self.merge(
+            {self.B: self.NOTE}, seed={"pending": bare}, prior_pending=bare, discovered=[self.B]
+        )
+        self.assertEqual(self.pending(index)[self.B]["last_error"], self.NOTE)
+
+    def test_a_deferred_recording_at_the_attempt_cap_is_not_promoted_to_exhausted(self):
+        # The cap exists so a recording that keeps failing stops consuming the queue.
+        # A disk-full node must not be able to trip it for a healthy recording.
+        history = [{
+            "path": self.B, "zarr": store_rel_for(self.B), "reason": "infra_failure",
+            "attempts": generate_zarr.PENDING_MAX_ATTEMPTS, "last_error": "x",
+            "last_attempt_utc": None,
+        }]
+        index = self.merge(
+            {self.B: self.NOTE}, seed={"pending": history}, prior_pending=history,
+            discovered=[self.B],
+        )
+        self.assertEqual(index["failures"], [])
+        self.assertEqual(
+            self.pending(index)[self.B]["attempts"], generate_zarr.PENDING_MAX_ATTEMPTS
+        )
+
+    def test_a_typed_failure_on_record_stays_a_failure(self):
+        failure = generate_zarr._failure_entry(self.B, "not_continuous", "epoched")
+        index = self.merge(
+            {self.B: self.NOTE}, seed={"failures": [failure]}, discovered=[self.B]
+        )
+        self.assertEqual([f["path"] for f in index["failures"]], [self.B])
+        self.assertEqual(index["pending"], [])
+
+    def test_the_note_is_bounded(self):
+        index = self.merge({self.B: "deferred: " + "x" * 1000}, seed={}, discovered=[self.B])
+        self.assertLessEqual(len(self.pending(index)[self.B]["last_error"]), 300)
+
+    def test_what_converted_this_run_is_untouched_by_a_neighbors_deferral(self):
+        converted = [{"path": self.A, "zarr": store_rel_for(self.A)}]
+        index = self.merge({self.B: self.NOTE}, seed={}, converted=converted)
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+        self.assertEqual(list(self.pending(index)), [self.B])
+
+    def test_without_a_deferral_nothing_changes(self):
+        index = self.merge(None, seed={"stores": [self.store(self.A)]}, discovered=[self.A])
+        self.assertEqual(index["stores"], [])
+        self.assertEqual(self.pending(index)[self.A]["reason"], "not_attempted")
+
+
+class TestIndexCurrencyProblem(unittest.TestCase):
+    ROW = {"concept_doi": "10.1/x", "license": "CC0"}
+
+    def index(self, **over):
+        base = {
+            "source_commit": SHA_NEW, "engine_version": ZARR_ENGINE_VERSION,
+            "biosigio_version": "1.2.10", **generate_zarr.index_provenance(self.ROW),
+        }
+        return {**base, **over}
+
+    def problem(self, index, **over):
+        args = {"head": SHA_NEW, "dataset_row": self.ROW, "row_fetch_failed": False,
+                "biosigio_version": "1.2.10", **over}
+        return generate_zarr.index_currency_problem(
+            index, args["head"], args["dataset_row"], args["row_fetch_failed"],
+            args["biosigio_version"],
+        )
+
+    def test_a_matching_index_is_current(self):
+        self.assertIsNone(self.problem(self.index()))
+
+    def test_each_difference_is_named(self):
+        self.assertIn("no published index", self.problem(None))
+        self.assertIn("different commit", self.problem(self.index(source_commit=SHA_OLD)))
+        self.assertIn("different engine", self.problem(self.index(engine_version="0")))
+        self.assertIn("different biosigIO", self.problem(self.index(biosigio_version="0")))
+        self.assertIn("provenance", self.problem(self.index(license="MIT")))
+        self.assertIn("catalog", self.problem(self.index(), row_fetch_failed=True))
+
+
+class TestDeferralLeavesIndexAsIs(unittest.TestCase):
+    A, B = "sub-01/eeg/a_eeg.edf", "sub-02/eeg/b_eeg.edf"
+    NOTE = "deferred: needs 500 GiB of scratch, 100 GiB available"
+
+    def live(self, **over):
+        base = {
+            "stores": [{"path": self.A, "zarr": "sub-01/eeg/a_eeg.zarr"}],
+            "pending": [{"path": self.B, "reason": "not_attempted", "last_error": self.NOTE}],
+            "failures": [],
+        }
+        return {**base, **over}
+
+    def check(
+        self, live, deferred=None, current=True, convert=None, remove=(), failed=(), wipe=False
+    ):
+        deferred = {self.A: self.NOTE, self.B: self.NOTE} if deferred is None else deferred
+        return generate_zarr.deferral_leaves_index_as_is(
+            live, current, convert if convert is not None else [self.A, self.B], deferred,
+            list(remove), list(failed), wipe,
+        )
+
+    def test_a_store_it_may_keep_and_a_pending_entry_with_a_note_change_nothing(self):
+        self.assertTrue(self.check(self.live()))
+
+    def test_a_stale_store_is_a_real_change(self):
+        self.assertFalse(self.check(self.live(), current=False))
+
+    def test_an_older_infra_failure_reason_is_a_change_the_first_time(self):
+        pending = [{"path": self.B, "reason": "infra_failure", "last_error": "No space"}]
+        self.assertFalse(self.check(self.live(pending=pending)))
+
+    def test_a_pending_entry_without_a_note_is_a_change(self):
+        pending = [{"path": self.B, "reason": "not_attempted", "last_error": None}]
+        self.assertFalse(self.check(self.live(pending=pending)))
+
+    def test_something_converted_or_removed_or_failed_is_not_all_deferred(self):
+        self.assertFalse(self.check(self.live(), convert=[self.A, self.B, "c_eeg.edf"]))
+        self.assertFalse(self.check(self.live(), remove=["x.zarr"]))
+        self.assertFalse(self.check(self.live(), failed=[self.A]))
+
+    def test_no_published_index_or_a_wipe_always_publishes(self):
+        self.assertFalse(self.check(None))
+        self.assertFalse(self.check(self.live(), wipe=True))
+        self.assertFalse(self.check(self.live(), deferred={}))
+
+    def test_a_typed_failure_on_record_changes_nothing(self):
+        live = self.live(pending=[], failures=[{"path": self.B, "code": "not_continuous"}])
+        self.assertTrue(self.check(live))
+
+
 class TestSafeStorePrefix(unittest.TestCase):
     def test_valid_store_path(self):
         self.assertEqual(
@@ -5215,9 +5434,9 @@ class TestScratchSettings(unittest.TestCase):
     def _import_in_fresh_interpreter(self, **env):
         base = {k: v for k, v in os.environ.items() if not k.startswith("ZARR_SCRATCH_")}
         code = (
-            "import sys; sys.path.insert(0, %r); import generate_zarr as g; "
+            f"import sys; sys.path.insert(0, {str(Path(__file__).resolve().parent)!r}); "
+            "import generate_zarr as g; "
             "print(g.SCRATCH_STREAM_FACTOR, g.SCRATCH_INMEM_FACTOR, g.SCRATCH_HEADROOM_BYTES)"
-            % str(Path(__file__).resolve().parent)
         )
         return subprocess.run(
             [sys.executable, "-I", "-c", code], env={**base, **env},
@@ -10120,7 +10339,9 @@ class TestConvertOneStreamsIntoItsOwnScratch(unittest.TestCase):
         self.assertTrue(seen, "the streaming path was not taken")
         self.assertEqual(seen["scratch_dir"], scratch)
         self.assertEqual(seen["scratch_dir"], store_local + generate_zarr.SCRATCH_DIR_SUFFIX)
-        self.assertTrue(seen["existed"], "the directory must exist before the exporter makes a temp dir in it")
+        self.assertTrue(
+            seen["existed"], "the directory must exist before the exporter makes a temp dir in it"
+        )
         self.assertEqual(os.path.dirname(seen["scratch_dir"]), os.path.dirname(seen["store"]))
         for path in (work, store_local, scratch):
             self.assertFalse(os.path.exists(path), f"{path} outlived convert_one")
@@ -11374,6 +11595,13 @@ class TestPendingRetryWorklist(unittest.TestCase):
         self.assertEqual(self.worklist(index)[0], [self.B])
 
 
+def generate_zarr_queue_shortest() -> int:
+    """The queue's shortest re-queue delay, from the queue module itself."""
+    import zarr_queue
+
+    return zarr_queue.PENDING_BACKOFF_SECONDS[0]
+
+
 class TestMainRetryPendingRound(unittest.TestCase):
     """`--retry-pending` through `main()` (#1483): real recordings converted by
     the real exporter, the real `aws` stand-in over local files, and a local
@@ -11480,11 +11708,11 @@ class TestMainRetryPendingRound(unittest.TestCase):
         os.makedirs(os.path.dirname(self.b_object), exist_ok=True)
         build_real_edf(os.path.dirname(self.b_object), "B", seconds=10)
 
-    def run_main(self, *extra) -> tuple[int, str, dict]:
+    def run_main(self, *extra, clean: bool = True) -> tuple[int, str, dict]:
         argv = [
             "generate_zarr.py", "--dataset-id", "on008083", "--repo-dir", self.repo,
             "--bucket", "nemar-test", "--callback-out", self.callback, "--local",
-            "--api-base", self.api, "--jobs", "2", "--clean", *extra,
+            "--api-base", self.api, "--jobs", "2", *(["--clean"] if clean else []), *extra,
         ]
         saved, sys.argv = sys.argv, argv
         try:
@@ -11562,15 +11790,36 @@ class TestMainRetryPendingRound(unittest.TestCase):
 
 
     def _no_scratch(self):
-        # Headroom larger than any volume leaves a budget of zero, so no recording
-        # fits and every one is deferred.
+        """Headroom larger than any volume leaves a budget of zero, so no recording
+        fits and every one is deferred. Returns a function that gives the room
+        back, for a test that goes on to a run with space."""
         saved = generate_zarr.SCRATCH_HEADROOM_BYTES
         generate_zarr.SCRATCH_HEADROOM_BYTES = 10**18
         self.addCleanup(setattr, generate_zarr, "SCRATCH_HEADROOM_BYTES", saved)
+        # The re-samples before a deferral are ADMISSION_RECHECK_SECONDS apart.
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.01
+        return lambda: setattr(generate_zarr, "SCRATCH_HEADROOM_BYTES", saved)
+
+    def _index_bytes(self) -> bytes:
+        with open(os.path.join(self.s3, "on008083_zarr_index.json"), "rb") as fh:
+            return fh.read()
+
+    def _body(self) -> dict:
+        with open(self.callback) as fh:
+            return json.load(fh)
+
+    def _git(self, *args) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=self.repo, check=True, capture_output=True, text=True
+        ).stdout.strip()
 
     def _assert_deferred_without_spending_attempts(self, rc, log, body):
         self.assertEqual(rc, 0, log)
-        self.assertIn("deferring", log)
+        self.assertIn("deferred ", log)
         self.assertNotIn("conversion(s) failed", log)
         self.assertNotIn(f"converted {self.A}", log)
         self.assertNotIn(f"converted {self.B}", log)
@@ -11599,11 +11848,184 @@ class TestMainRetryPendingRound(unittest.TestCase):
         self._no_scratch()
         rc, log, body = self.run_main("--retry-pending")
         self.assertEqual(rc, 0, log)
-        self.assertIn("deferring", log)
+        self.assertIn("deferred ", log)
         index = self.published_index()
         self.assertEqual([s["path"] for s in index["stores"]], [self.A])
         self.assertEqual([(p["path"], p["attempts"]) for p in index["pending"]], [(self.B, 1)])
         self.assertEqual(index["failures"], [])
+        (entry,) = index["pending"]
+        # Re-reasoned as not attempted, with the history kept behind the note.
+        self.assertEqual(entry["reason"], "not_attempted")
+        self.assertTrue(entry["last_error"].startswith("deferred: needs"), entry["last_error"])
+        self.assertIn("; last error:", entry["last_error"])
+        self.assertEqual(body["pending_count"], 1)
+        self.assertEqual(body["not_attempted_count"], 1)
+
+    def test_an_all_deferred_clean_run_keeps_the_served_store(self):
+        # The run hallu always makes: --clean, so the merge is handed no prior. A
+        # previously served store must not drop out of the index because this run
+        # could not rebuild it (ADR 0005), and a run with nothing to say must not
+        # rewrite the index at all.
+        self.first_round()
+        self._no_scratch()
+        rc, log, body = self.run_main()  # no --retry-pending: a full --clean rebuild
+        self.assertEqual(rc, 0, log)
+        self.assertIn("deferred ", log)
+        index = self.published_index()
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A], "A is still served")
+        self.assertEqual(index["store_count"], 1)
+        self.assertEqual(body["store_count"], 1)
+        (entry,) = index["pending"]
+        self.assertEqual(
+            (entry["path"], entry["reason"], entry["attempts"]), (self.B, "not_attempted", 1)
+        )
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+        # The same situation again: the index already says it, so it is left alone.
+        before = self._index_bytes()
+        rc, log, body = self.run_main()
+        self.assertEqual(rc, 0, log)
+        self.assertIn("left untouched", log)
+        self.assertEqual(self._index_bytes(), before)
+        self.assertEqual(body["status"], "ready")
+        self.assertEqual(body["store_count"], 1)
+        self.assertEqual((body["pending_count"], body["not_attempted_count"]), (1, 1))
+
+    def test_a_retry_round_that_defers_everything_leaves_the_index_alone(self):
+        self.first_round()
+        self._no_scratch()
+        self.run_main("--retry-pending")  # corrects B's reason and says why, once
+        before = self._index_bytes()
+        rc, log, body = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("left untouched", log)
+        self.assertEqual(self._index_bytes(), before)
+        self.assertEqual(body["store_count"], 1)
+
+    def _queue(self):
+        """The real queue, holding the dataset as a pending job."""
+        from zarr_queue import connect, reconcile
+
+        conn = connect(os.path.join(self.dir, "q.db"))
+        self.addCleanup(conn.close)
+        reconcile(conn, [("on008083", "v1.0.0")], 3600)
+        return conn
+
+    @staticmethod
+    def _round(conn, body):
+        """One run's callback numbers into the real `mark_done`; the row after."""
+        from zarr_queue import claim_next, mark_done
+
+        conn.execute("UPDATE jobs SET status='pending' WHERE dataset_id='on008083'")
+        conn.commit()
+        claim_next(conn)
+        mark_done(
+            conn, "on008083", "v1.0.0",
+            pending_count=body["pending_count"],
+            not_attempted_count=body["not_attempted_count"],
+        )
+        conn.commit()
+        return conn.execute(
+            "SELECT retry_round, next_retry_at, pending_count FROM jobs "
+            "WHERE dataset_id='on008083'"
+        ).fetchone()
+
+    def test_a_deferral_spends_no_queue_retry_round_end_to_end(self):
+        # B is pending as an attempted failure: two real rounds advance the queue
+        # to round 2 (a six-hour backoff). The deferred rounds that follow report
+        # the recording as not attempted, so the real `mark_done` leaves the round
+        # where it was and re-queues at the shortest delay.
+        self.first_round()
+        first = self._body()
+        rc, log, second = self.run_main("--retry-pending")  # B fails again: attempt 2
+        self.assertEqual(rc, 0, log)
+        self.assertEqual((second["pending_count"], second["not_attempted_count"]), (1, 0))
+        self._no_scratch()
+        rc, log, deferred_once = self.run_main("--retry-pending")  # publishes the correction
+        self.assertEqual(rc, 0, log)
+        rc, log, deferred_twice = self.run_main("--retry-pending")  # index left untouched
+        self.assertIn("left untouched", log)
+        for body in (deferred_once, deferred_twice):
+            self.assertEqual(
+                (body["pending_count"], body["not_attempted_count"]), (1, 1),
+                "the deferred recording must be counted as not attempted",
+            )
+        conn = self._queue()
+        self._round(conn, first)
+        row = self._round(conn, second)
+        self.assertEqual(row["retry_round"], 2)
+        shortest = generate_zarr_queue_shortest()
+        for deferral in (deferred_once, deferred_twice):
+            row = self._round(conn, deferral)
+            self.assertEqual(row["retry_round"], 2, "a deferral advanced the retry round")
+            self.assertLessEqual(row["next_retry_at"] - int(time.time()), shortest + 5)
+
+    def test_an_attempted_failure_still_advances_the_round_for_contrast(self):
+        self.first_round()
+        first = self._body()
+        rc, log, second = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        conn = self._queue()
+        self._round(conn, first)
+        self.assertEqual(self._round(conn, second)["retry_round"], 2)
+
+    def test_a_deferred_stale_store_is_listed_pending_and_rebuilt_later(self):
+        # The provenance changed (a new license), so A's published store is stale.
+        # A deferral must not leave it in the index claiming the new commit and a
+        # complete dataset: it is pending, and the next round rebuilds it.
+        self.first_round()
+        self.row = {**self.row, "license": "CC-BY-4.0"}
+        restore = self._no_scratch()
+        rc, log, body = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("provenance changed", log)
+        index = self.published_index()
+        self.assertEqual(index["stores"], [], "the stale store left the index")
+        self.assertEqual(
+            sorted((p["path"], p["reason"]) for p in index["pending"]),
+            [(self.A, "not_attempted"), (self.B, "not_attempted")],
+        )
+        self.assertEqual((body["pending_count"], body["not_attempted_count"]), (2, 2))
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+        restore()
+        self.materialize_b()
+        rc, log, _ = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("converting only 2 pending recording(s)", log)
+        index = self.published_index()
+        self.assertEqual(sorted(s["path"] for s in index["stores"]), [self.A, self.B])
+        self.assertEqual(index["license"], "CC-BY-4.0")
+        self.assertEqual(index["pending"], [])
+
+    def test_an_incremental_run_that_defers_holds_the_commit_back(self):
+        # Without --clean the worklist is a diff from the index's commit, so a
+        # deferred recording has to leave that commit where it was or the next run
+        # would diff from a commit the recording was never built at.
+        self.first_round()
+        first_commit = self._git("rev-parse", "HEAD")
+        build_real_edf(os.path.join(self.repo, "sub-01", "eeg"), "sub-01_task-rest_eeg", seconds=12)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "A changes")
+        second_commit = self._git("rev-parse", "HEAD")
+        restore = self._no_scratch()
+        rc, log, body = self.run_main(clean=False)
+        self.assertEqual(rc, 0, log)
+        self.assertIn("full=False", log)
+        index = self.published_index()
+        self.assertEqual(index["source_commit"], first_commit, "the commit is held back")
+        self.assertNotEqual(index["source_commit"], second_commit)
+        self.assertEqual(index["stores"], [], "A's store predates the change")
+        self.assertEqual(
+            sorted(p["path"] for p in index["pending"]), [self.A, self.B]
+        )
+        restore()
+        rc, log, _ = self.run_main(clean=False)
+        self.assertEqual(rc, 0, log)
+        self.assertIn(f"converted {self.A}", log)
+        index = self.published_index()
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+        self.assertEqual(index["source_commit"], second_commit)
 
     def test_a_serial_run_that_cannot_fit_scratch_defers_instead_of_failing(self):
         self._no_scratch()
