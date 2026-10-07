@@ -4932,6 +4932,37 @@ def check_index_invariant(index: dict) -> None:
         )
 
 
+def kept_manifest_seed(bucket: str, dataset_id: str, kept: set[str], read=None) -> dict:
+    """The published manifest's entries for the stores an index kept, as a prior for
+    `merge_manifest`. The manifest is producer bookkeeping, so a read that fails or
+    finds nothing does not fail the run, but it is never silent:
+    the kept stores then have no ``source_key`` in the manifest until a run rebuilds
+    them, and the warning says which read failed and how many are affected."""
+    reader = read or s3_read_json
+    try:
+        live = reader(bucket, f"{dataset_id}/zarr/manifest.json")
+    except Exception as exc:  # noqa: BLE001 - bookkeeping; reported, not fatal
+        print(
+            f"::warning::could not read the published manifest ({exc}); {len(kept)} kept "
+            "store(s) will have no source_key or size in the new manifest",
+            flush=True,
+        )
+        return {"stores": []}
+    if live is None:
+        print(
+            f"::warning::no published manifest to carry {len(kept)} kept store(s) from; "
+            "they will have no source_key or size in the new manifest",
+            flush=True,
+        )
+        return {"stores": []}
+    return {
+        "stores": [
+            e for e in live.get("stores") or []
+            if isinstance(e, dict) and e.get("zarr") in kept
+        ]
+    }
+
+
 def merge_manifest(
     prior: dict | None,
     dataset_id: str,
@@ -9426,13 +9457,7 @@ def main() -> int:
         kept = {store_rel_for(p) for p in deferred} & {e["zarr"] for e in index_doc["stores"]}
         if not kept:
             return prior_manifest
-        live = s3_read_json(bucket, f"{dataset_id}/zarr/manifest.json") or {}
-        return {
-            "stores": [
-                e for e in live.get("stores") or []
-                if isinstance(e, dict) and e.get("zarr") in kept
-            ]
-        }
+        return kept_manifest_seed(bucket, dataset_id, kept)
 
     def build_manifest(index_doc: dict) -> dict:
         """The producer manifest tracks EXACTLY the index's store set, so it is

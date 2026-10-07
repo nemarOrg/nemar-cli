@@ -658,6 +658,40 @@ class TestMergeIndex(unittest.TestCase):
         self.assertEqual([s["zarr"] for s in index["stores"]], ["a.zarr", "b.zarr"])
 
 
+class TestKeptManifestSeed(unittest.TestCase):
+    KEPT = {"sub-01/eeg/a_eeg.zarr"}
+
+    def seed(self, reader):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            seed = generate_zarr.kept_manifest_seed("b", "nm000276", self.KEPT, read=reader)
+        return seed, out.getvalue()
+
+    def test_it_carries_exactly_the_kept_stores_entries(self):
+        live = {"stores": [
+            {"zarr": "sub-01/eeg/a_eeg.zarr", "source_key": "K", "size_bytes": 5},
+            {"zarr": "sub-02/eeg/b_eeg.zarr", "source_key": "L", "size_bytes": 6},
+        ]}
+        seed, log = self.seed(lambda _b, _k: live)
+        self.assertEqual([e["zarr"] for e in seed["stores"]], ["sub-01/eeg/a_eeg.zarr"])
+        self.assertEqual(log, "")
+
+    def test_an_absent_manifest_is_a_warning_not_silence(self):
+        seed, log = self.seed(lambda _b, _k: None)
+        self.assertEqual(seed, {"stores": []})
+        self.assertIn("no published manifest to carry 1 kept store(s)", log)
+
+    def test_a_failed_read_is_a_warning_naming_the_error(self):
+        def broken(_bucket, _key):
+            raise RuntimeError("aws s3 cp exited 1: AccessDenied")
+
+        seed, log = self.seed(broken)
+        self.assertEqual(seed, {"stores": []})
+        self.assertIn(
+            "could not read the published manifest (aws s3 cp exited 1: AccessDenied)", log
+        )
+        self.assertIn("1 kept store(s) will have no source_key", log)
+
+
 class TestMergeIndexDeferredRecordings(unittest.TestCase):
     """A recording the scratch gate deferred is neither an attempt nor a conversion:
     it must not spend an attempt, and it must not make the index serve less than
@@ -12428,6 +12462,21 @@ class TestMainRetryPendingRound(unittest.TestCase):
         )
         self.assertEqual(by_rel[store_rel_for(self.A)], entry, "A's entry carried unchanged")
         validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+
+    def test_a_partial_deferral_with_no_published_manifest_warns(self):
+        build_real_edf(os.path.join(self.repo, "sub-01", "eeg"), "sub-01_task-rest_eeg", seconds=30)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "A is longer")
+        self.first_round()
+        os.remove(os.path.join(self.s3, "on008083_zarr_manifest.json"))
+        self.materialize_b()
+        self._bigger_a_streams_with_an_absurd_charge()
+        rc, log, _ = self.run_main()
+        self.assertEqual(rc, 0, log)
+        self.assertIn("::warning::no published manifest to carry 1 kept store(s)", log)
+        self.assertEqual(
+            sorted(s["path"] for s in self.published_index()["stores"]), [self.A, self.B]
+        )
 
     def test_the_callback_of_a_failed_run_counts_what_it_deferred(self):
         # B is attempted and fails (its content is absent); A is deferred. The
