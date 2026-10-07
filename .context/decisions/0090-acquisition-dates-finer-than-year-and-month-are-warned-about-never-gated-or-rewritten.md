@@ -116,3 +116,11 @@ The maintainer chose B on 2026-10-07 and asked that the warning be shown to the 
 - Surfaces: `test/upload-identifier-preflight-cli.test.ts`, `test/identifier-screen-cli.test.ts`, `backend/test/identifier-screen-flow.test.ts`, `backend/test/identifier-sweep-report.test.ts`.
 - The policy of 2026-10-04: the scanner header comment and `DATE_KINDS`; ADR 0085 ("What gates").
 - Epic #1610; this decision is Phase 6 (#1616).
+
+## Amendment 2026-10-07 (Phase 9): new data has its dates set, and this warning covers what remains
+
+The maintainer decided on 2026-10-07 that the day-level acquisition date of NEW uploads and imports is removed automatically, with no warning or acknowledgment for what the tool fixes; ADR 0091 records the rule.
+For new data, "Nothing is rewritten" above no longer holds: a first import sets the dates the scanner reads in EDF and BDF headers and in inline scans tables to 1 January of their year, and `nemar dataset upload` does the same for headers it can change safely, printing one count line.
+Everything else in this decision stands.
+The gate, the verdicts and the acknowledgment rules are unchanged; the warning, its one definition and its surfaces are unchanged; and datasets already on NEMAR keep their dates and this warning.
+The warning now appears only for date findings that remain after ADR 0091's rule (a layout the rule leaves, a recording the upload could not change, an upload's scans table, a dataset published before), so "NEMAR does not change them" is said only of dates NEMAR did not change.
