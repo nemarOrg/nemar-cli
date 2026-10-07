@@ -140,6 +140,31 @@ describe("POST /datasets stores the preflight inside the attestation", () => {
     expect(readRecordedPreflight(raw)).toEqual({ state: "recorded", preflight: preflight() });
   });
 
+  test("a fresh create's claim INSERT carries it too (no dedup row to resume)", async () => {
+    // No dataset to resume, so the route allocates an id and claims it with an INSERT that
+    // carries the attestation. With no GitHub credential bound, the next line (the token read)
+    // throws and the request fails with the claimed row still in place, which is what makes
+    // the INSERT observable here; if that path ever learns to clean up after itself, this test
+    // needs another window onto the INSERT, not deleting.
+    const res = await call("POST", "/datasets", OWNER_KEY, {
+      name: NAME,
+      sandbox: true,
+      attestation: ATTESTATION,
+      identifier_preflight: preflight(),
+    });
+    expect(res.status).toBe(500);
+    const row = db
+      .query<{ dataset_id: string; attestation: string | null }, []>(
+        "SELECT dataset_id, attestation FROM datasets",
+      )
+      .all();
+    expect(row).toHaveLength(1);
+    expect(readRecordedPreflight(row[0]?.attestation)).toEqual({
+      state: "recorded",
+      preflight: preflight(),
+    });
+  });
+
   test("a record the contract refuses is not stored, and the attestation still is", async () => {
     seedDataset("xx090102");
     const hostile = preflight({ note: HOSTILE });

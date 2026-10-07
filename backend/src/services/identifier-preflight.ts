@@ -48,7 +48,13 @@ export function takePreflight(raw: unknown, hasAttestation: boolean): PreflightI
     return { preflight: parseUploaderPreflight(raw), refused: null };
   } catch (error) {
     // The parser throws only its own fixed words; anything else is folded into one, so no
-    // message built from the input can reach the response.
+    // message built from the input can reach the response. That one is a bug in the parser, so
+    // it is logged, by class only (a message can quote the input).
+    if (!(error instanceof ReportError)) {
+      console.error(
+        `[identifier-preflight] the parser threw ${error instanceof Error ? error.name : "a non-error"}; refused as preflight-shape`,
+      );
+    }
     return {
       preflight: null,
       refused: error instanceof ReportError ? error.message : "preflight-shape",
