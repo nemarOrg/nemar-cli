@@ -30,11 +30,17 @@ import {
   verifyPrescreenCallbackToken,
 } from "../src/services/github";
 import {
+  IDENTIFIER_SWEEP_BACKOFF_HOURS,
   IDENTIFIER_SWEEP_CALLBACK_PATH,
   IDENTIFIER_SWEEP_CLAIM_SQL,
+  IDENTIFIER_SWEEP_CYCLE_DAYS,
+  IDENTIFIER_SWEEP_DEADLINE_MINUTES,
   IDENTIFIER_SWEEP_DISPATCH_TIMEOUT_MS,
   IDENTIFIER_SWEEP_LATE_REPORT_HOURS,
   IDENTIFIER_SWEEP_MAX_IN_FLIGHT,
+  IDENTIFIER_SWEEP_REFRESH_DAYS,
+  IDENTIFIER_SWEEP_REPORT_LEASE_MINUTES,
+  IDENTIFIER_SWEEP_REPORT_MAX_CLAIMS,
   IDENTIFIER_SWEEP_SLICE,
   runIdentifierSweepTick,
 } from "../src/services/identifier-sweep";
@@ -266,6 +272,23 @@ beforeEach(async () => {
   app.route("/admin", adminRoutes);
   ownerId = await seedUser("sweepowner", "member");
   adminId = await seedUser("sweepadmin", "admin", ADMIN_KEY);
+});
+
+describe("the numbers ADR 0088 states", () => {
+  // The rest of this file follows these constants (a cap test loops to the cap it imports), so a
+  // changed number would move every test with it. This is the one place the literal values are
+  // pinned, so a change to a published rule is a change to this test, in the open.
+  test("cadence, cycle, deadlines and caps are the ADR's", () => {
+    expect(IDENTIFIER_SWEEP_REFRESH_DAYS).toBe(21);
+    expect(IDENTIFIER_SWEEP_CYCLE_DAYS).toBe(28);
+    expect([...IDENTIFIER_SWEEP_BACKOFF_HOURS]).toEqual([6, 6, 12, 24, 48, 96]);
+    expect(IDENTIFIER_SWEEP_SLICE).toBe(3);
+    expect(IDENTIFIER_SWEEP_MAX_IN_FLIGHT).toBe(6);
+    expect(IDENTIFIER_SWEEP_DEADLINE_MINUTES).toBe(50);
+    expect(IDENTIFIER_SWEEP_LATE_REPORT_HOURS).toBe(24);
+    expect(IDENTIFIER_SWEEP_REPORT_LEASE_MINUTES).toBe(120);
+    expect(IDENTIFIER_SWEEP_REPORT_MAX_CLAIMS).toBe(12);
+  });
 });
 
 describe("the callback token", () => {
