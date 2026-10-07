@@ -19,6 +19,7 @@
 
 import type { Bindings } from "../types/bindings.js";
 import { resolveCurrentVersion } from "./archive-retry.js";
+import { testS3EndpointOverride } from "./environment.js";
 import { type PresignedUrlOptions, getManifest, listObjectSizes } from "./s3.js";
 
 /**
@@ -269,6 +270,7 @@ export async function verifyDatasetVersionS3(
     | "AWS_ACCESS_KEY_ID"
     | "AWS_SECRET_ACCESS_KEY"
     | "S3_ENDPOINT_URL"
+    | "ENVIRONMENT"
   >,
   datasetId: string,
   version?: string,
@@ -278,9 +280,9 @@ export async function verifyDatasetVersionS3(
     region: env.AWS_REGION,
     accessKeyId: env.AWS_ACCESS_KEY_ID,
     secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
-    // Unset in every deployment; a test points the LIST and manifest reads at a
-    // local server, the same idiom routes/admin/shared.ts already uses.
-    endpointUrl: env.S3_ENDPOINT_URL,
+    // A test points the LIST and manifest reads at a local server. Fenced to
+    // non-production: this verdict feeds data_complete and the withdrawal rule.
+    endpointUrl: testS3EndpointOverride(env),
   };
 
   let resolvedVersion = version ?? null;

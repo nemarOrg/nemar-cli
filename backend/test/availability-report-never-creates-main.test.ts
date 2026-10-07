@@ -88,6 +88,11 @@ beforeAll(() => {
           return Response.json({ content: { sha: "c".repeat(40) } }, { status: 201 });
         return Response.json({ message: "Not Found" }, { status: 404 });
       }
+      // The repository probe branchExists makes after a 404 on the ref: these
+      // repositories are all visible to NEMAR.
+      if (/^\/repos\/nemarDatasets\/[^/]+$/.test(url.pathname) && req.method === "GET") {
+        return Response.json({ full_name: "nemarDatasets/x" });
+      }
       return Response.json({ message: "unexpected request" }, { status: 500 });
     },
   });
@@ -195,7 +200,7 @@ const NO_MAIN_CASES: ReadonlyArray<{ label: string; state: MainState }> = [
 
 for (const { label, state } of NO_MAIN_CASES) {
   describe(`${label}: the report is refused, not written`, () => {
-    test("single-dataset route answers 409 with a message true for both causes, and sends no PUT", async () => {
+    test("single-dataset route answers 409 naming the missing branch, and sends no PUT", async () => {
       seedDataset("nm000358");
       mainState.set("nm000358", state);
 
@@ -204,10 +209,7 @@ for (const { label, state } of NO_MAIN_CASES) {
       expect(res.status).toBe(409);
       const { error } = (await res.json()) as { error: string };
       expect(error).toContain("nemarDatasets/nm000358");
-      // A 404 also means the repository is invisible to NEMAR, so the message
-      // must not claim only that nothing was pushed.
-      expect(error).toContain("nothing has been pushed yet");
-      expect(error).toContain("not visible to NEMAR");
+      expect(error).toContain("has no main branch");
       expect(error).toContain("Nothing was written");
       // The line under test: the Contents API is never asked to write, so it
       // cannot create `main` as a root commit.
@@ -240,7 +242,7 @@ for (const { label, state } of NO_MAIN_CASES) {
       expect(body.written).toBe(0);
       expect(body.errors).toHaveLength(1);
       expect(body.errors[0]?.dataset_id).toBe("nm000358");
-      expect(body.errors[0]?.error).toContain("No main branch found");
+      expect(body.errors[0]?.error).toContain("has no main branch");
       expect(puts()).toEqual([]);
       expect(s3Log).toEqual([]);
       // Unstamped: the row stays a candidate and is retried once main exists.

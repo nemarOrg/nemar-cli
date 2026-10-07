@@ -1155,9 +1155,21 @@ export interface AvailabilityReportSweepBatchResponse {
   processed: number;
   /** Successfully generated + committed this batch. */
   written: number;
-  errors: { dataset_id: string; error: string }[];
-  /** Datasets still unswept (no `$.availability_report_at` in sweep_stamps); 0 when done. */
+  errors: AvailabilityReportSweepError[];
+  /** Candidates still unstamped (no `$.availability_report_at` in sweep_stamps),
+   *  including rows this batch refused or failed; 0 means nothing is left to try. */
   remaining: number | null;
+}
+
+/** One candidate a batch could not complete. */
+export interface AvailabilityReportSweepError {
+  dataset_id: string;
+  error: string;
+  /** The status the single-dataset route answers for this failure: 409 = refused
+   *  because the repository has no `main`; 400/404 = the dataset's own
+   *  configuration; 500 = anything else (S3, GitHub or auth failure, a
+   *  repository not visible to NEMAR). */
+  status: number;
 }
 
 /** Response of `?reset=1`: count of stamped rows cleared back to unswept. */
