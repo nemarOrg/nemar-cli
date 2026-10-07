@@ -727,6 +727,24 @@ describe("direct identifiers block the request and tell the depositor", () => {
     });
   });
 
+  test("a re-request that is blocked up front clears the old screen result too", async () => {
+    const id = seedRequest({ status: "blocked", blockReason: "identifier_screen_findings" });
+    markScreen(db, id, DATASET, { status: "direct-identifiers" });
+    bidsConclusion = "failure";
+    const res = await app.request(
+      `/datasets/${DATASET}/publish/request`,
+      { method: "POST", headers: { Authorization: `Bearer ${OWNER_KEY}` } },
+      env(),
+    );
+    expect(res.status).toBe(422);
+    const row = requestRow(id);
+    expect(row?.status).toBe("blocked");
+    expect(row?.block_reason).toBe("bids_validation_failed");
+    // The old result was about the content before this push; nothing may read it as current.
+    expect(row?.identifier_screen_status).toBeNull();
+    expect(dispatches).toHaveLength(0);
+  });
+
   test("a finding that needs review does not block", async () => {
     await withFakeResend(async (calls) => {
       const id = await requestAndReport("review", { "edf-patient-freetext": 2 });
@@ -824,6 +842,33 @@ describe("direct identifiers block the request and tell the depositor", () => {
       expect(requestRow(id)?.identifier_screen_status).toBe("error");
       expect(sendsTo(calls, ADMIN_EMAIL)[0]?.subject).toEndWith("IDENTIFIER SCREEN: DID NOT RUN");
     });
+  });
+
+  test("the daily BIDS sweep never leaves an old result on a request it unblocks, even if the new screen cannot be recorded", async () => {
+    const OTHER = "nm000463";
+    seedDataset(OTHER);
+    const id = seedRequest({
+      status: "blocked",
+      blockReason: "bids_validation_pending",
+      dataset: OTHER,
+    });
+    // A result from earlier content. If it survived the unblock, the gate would read it as the
+    // screen of whatever the depositor pushed since.
+    markScreen(db, id, OTHER, { status: "clean" });
+    const failing = {
+      ...env(),
+      DB: interceptingD1(realD1(db), (sql) => {
+        if (sql.includes("identifier_screen_status = 'pending', identifier_screen_nonce = ?")) {
+          throw new Error("D1 unavailable");
+        }
+      }),
+    } as Bindings;
+    await withFakeResend(async () => {
+      await sweepBlockedBidsValidationRequests(failing);
+    });
+    const row = requestRow(id);
+    expect(row?.status).toBe("requested");
+    expect(row?.identifier_screen_status).toBeNull();
   });
 
   test("the daily BIDS sweep leaves an identifier block alone", async () => {
