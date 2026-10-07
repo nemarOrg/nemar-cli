@@ -1481,10 +1481,10 @@ describe("an accepted request answers with the neutral notice (ADR 0090, 2026-10
     expect(exempt.request_notice).toEqual(NOTICE(XX));
   });
 
-  test("re-requesting a blocked request is told the same, and nothing from the result it replaces", async () => {
-    // The open row is reused (an idempotent re-request). Its stale result held
-    // an acquisition-date finding, whose warning belongs to `publish status`
-    // and the mail, never to this answer.
+  test("re-requesting a blocked request reuses its row and is told the same", async () => {
+    // The open row is reused. It carries a stale dates-only result: the answer
+    // shows the screen as running again, and its date warning (which belongs
+    // to `publish status` and the mail) is not in the answer anywhere.
     db.run(
       `INSERT INTO publication_requests (dataset_id, requested_by, status, block_reason)
        VALUES (?, ?, 'blocked', 'bids_validation_failed')`,
@@ -1496,7 +1496,8 @@ describe("an accepted request answers with the neutral notice (ADR 0090, 2026-10
       expect(res.status).toBe(200);
       const body = (await res.json()) as RequestBody;
       expect(body.request_notice).toEqual(NOTICE(DATASET));
-      expect(JSON.stringify(body.request_notice)).not.toMatch(/date|warning|edf-startdate/i);
+      expect(body.identifier_screen?.state).toBe("pending");
+      expect(JSON.stringify(body)).not.toMatch(/edf-startdate|acquisition dates/);
       // Still the one row, now requested.
       const count = db
         .query<{ n: number }, [string]>(

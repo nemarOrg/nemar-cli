@@ -4014,8 +4014,7 @@ publishCommand
     `
 Description:
   Submit a publication request to make your private dataset publicly accessible.
-  NEMAR checks publication eligibility first; if every check passes, an
-  administrator is notified and can approve or deny your request.
+  NEMAR admins will be notified and can approve or deny your request.
 
   Once approved, your dataset will:
   - Become publicly visible on GitHub

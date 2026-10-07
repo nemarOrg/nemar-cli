@@ -176,8 +176,9 @@ describe("nemar dataset publish request", () => {
       );
       expect(flat(r.stdout)).toContain(NOTICE("nm000321"));
       expect(r.stdout).toContain("Identifier screen: running");
-      // The two sentences this replaces said the admins are mailed when the
-      // screen finishes, which a request blocked by a finding contradicts.
+      // The two lines this replaces depended on the screen's state ("Admins
+      // will be notified when the identifier screen finishes" / "Admins have
+      // been notified"). The notice is one answer whatever the state is.
       expect(r.stdout).not.toContain("Admins will be notified when the identifier screen");
       expect(r.stdout).not.toContain("Admins have been notified");
     } finally {
@@ -185,9 +186,11 @@ describe("nemar dataset publish request", () => {
     }
   });
 
-  test("it names no finding, verdict or date warning, whatever state the backend sent", async () => {
+  test("it is the same four lines whatever screen state the backend sent, and nothing follows it", async () => {
     // The screen runs after the request and its verdict is bound to a commit,
-    // so the sentence must not depend on, or hint at, what the screen holds.
+    // so the notice must not depend on what the screen holds. The block ABOVE
+    // it is the backend's own words for the state (the date warning cannot be
+    // in it: no count exists before the screen has reported).
     const states: Array<[string, unknown]> = [
       ["pending", PENDING],
       [
@@ -220,10 +223,13 @@ describe("nemar dataset publish request", () => {
         expect(r.exitCode, label).toBe(0);
         expect(flat(r.stdout), label).toContain(NOTICE(id));
         expect(r.stdout, label).not.toContain("Admins have been notified");
-        // Everything printed AFTER the screen block is the notice and nothing
-        // else: no verdict word, no count, no date warning.
+        // Everything from the notice on is the notice and nothing else, so a
+        // line added after it (a banner, an old "Admins have been notified")
+        // fails here; no verdict word, count or date warning is in it.
         const after = r.stdout.slice(r.stdout.indexOf("Your request was received."));
-        expect(after, label).not.toMatch(/clean|found|finding|warning|acquisition|date|review/i);
+        expect(after, label).not.toMatch(
+          /\b(clean|found|findings?|warning|acquisition|dates?|review)\b/i,
+        );
         expect(after.trim().split("\n"), label).toHaveLength(4);
       } finally {
         server.stop();

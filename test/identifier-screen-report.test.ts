@@ -745,10 +745,21 @@ describe("publicationRequestNotice: what an accepted request is told (ADR 0090, 
     for (const line of publicationRequestNotice("nm000321")) {
       expect(isDateWarningLine(line)).toBe(false);
     }
-    expect(text).not.toMatch(/warning|acquisition|date|finding|found|clean|review|blocked/i);
+    expect(text).not.toMatch(
+      /\b(warning|acquisition|dates?|findings?|found|clean|review|blocked)\b/i,
+    );
   });
 
   test("no other source file spells the sentences: they are declared once", () => {
+    // One distinctive phrase per sentence that makes a claim, so a copy that
+    // rewords one of them is still found. The status pointer is built from the
+    // command's name, which other files legitimately spell.
+    const phrases = [
+      /Your request was received/i,
+      /publication eligibility/i,
+      /If every check passes/i,
+      /to see where it stands/i,
+    ];
     const root = join(import.meta.dir, "..");
     const hits: string[] = [];
     const walk = (dir: string) => {
@@ -756,11 +767,9 @@ describe("publicationRequestNotice: what an accepted request is told (ADR 0090, 
         if (entry.name === "node_modules") continue;
         const full = join(dir, entry.name);
         if (entry.isDirectory()) walk(full);
-        else if (
-          entry.name.endsWith(".ts") &&
-          /checking publication eligibility/.test(readFileSync(full, "utf8"))
-        ) {
-          hits.push(relative(root, full));
+        else if (entry.name.endsWith(".ts")) {
+          const text = readFileSync(full, "utf8");
+          if (phrases.some((phrase) => phrase.test(text))) hits.push(relative(root, full));
         }
       }
     };
