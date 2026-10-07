@@ -294,14 +294,32 @@ describe("bindShadowedOptionValues on the real command tree", () => {
   });
 
   // `admin recover status` redeclares --recover-file from its parent group
-  // `admin recover`, which is also value-taking. The parent's parseOptions
-  // consumes the flag AND its value either way and `status` reads it back
-  // through optsWithGlobals() (src/commands/admin.ts), so the join must leave
-  // that design working.
-  test("a value option shared with a value-taking group still resolves", async () => {
-    const status = await reach(["admin", "recover", "status", "--recover-file", "recover-1.json"]);
-    expect(status.name).toBe("status");
-    expect(status.optsWithGlobals.recoverFile).toBe("recover-1.json");
+  // `admin recover`, which takes the value itself. The parent's parseOptions
+  // consumes the flag AND its value wherever they appear, and `status` reads
+  // it back through optsWithGlobals() (src/commands/admin.ts), so there is
+  // nothing for the pre-pass to rewrite, and no new way for it to fail.
+  test("an ancestor option that takes the value itself is left alone", async () => {
+    for (const argv of [
+      ["admin", "recover", "status", "--recover-file", "recover-1.json"],
+      ["admin", "recover", "status", "--recover-file", "recover-2.json", "--json"],
+      ["admin", "recover", "status", "--recover-file", "--json"],
+      ["admin", "recover", "status", "--recover-file"],
+    ]) {
+      expect(bindShadowedOptionValues(program, argv)).toEqual(argv);
+    }
+    const plain = await reach(["admin", "recover", "status", "--recover-file", "recover-3.json"]);
+    expect(plain.name).toBe("status");
+    expect(plain.optsWithGlobals.recoverFile).toBe("recover-3.json");
+    const withJson = await reach([
+      "admin",
+      "recover",
+      "status",
+      "--recover-file",
+      "recover-4.json",
+      "--json",
+    ]);
+    expect(withJson.optsWithGlobals.recoverFile).toBe("recover-4.json");
+    expect(withJson.optsWithGlobals.json).toBe(true);
   });
 });
 
@@ -309,28 +327,38 @@ describe("bindShadowedOptionValues on the real command tree", () => {
 // Invariant over the whole tree
 // ---------------------------------------------------------------------------
 
-interface ShadowedPair {
+/** A value-taking option and the ancestor option that declares the same long flag. */
+interface Collision {
   path: string[];
   option: Option;
+  claimant: Option;
 }
 
 function flagsOf(option: Option): string[] {
   return [option.long, option.short].filter((f): f is string => typeof f === "string");
 }
 
+const takesValue = (option: Option) => !!(option.required || option.optional);
+
 /**
  * Every command below the root with a value-taking option whose long flag an
- * ancestor also declares. Every command, not only tree leaves: the pre-pass
- * addresses the deepest command NAMED on the line, and `admin recover` is both
- * a group and a command with its own options.
+ * ancestor also declares, with the outermost such ancestor option (the one
+ * Commander parses the flag with). Every command, not only tree leaves: the
+ * pre-pass addresses the deepest command NAMED on the line, and `admin
+ * recover` is both a group and a command with its own options.
  */
-function shadowedValueOptions(root: Command): ShadowedPair[] {
-  const found: ShadowedPair[] = [];
+function collisions(root: Command): Collision[] {
+  const found: Collision[] = [];
   const visit = (cmd: Command, path: string[], ancestors: Command[]) => {
-    const ancestorFlags = new Set(ancestors.flatMap((a) => a.options.flatMap(flagsOf)));
+    const outermost = new Map<string, Option>();
+    for (const a of ancestors) {
+      for (const o of a.options) {
+        for (const f of flagsOf(o)) if (!outermost.has(f)) outermost.set(f, o);
+      }
+    }
     for (const option of cmd.options) {
-      if (!(option.required || option.optional)) continue;
-      if (option.long && ancestorFlags.has(option.long)) found.push({ path, option });
+      const claimant = option.long ? outermost.get(option.long) : undefined;
+      if (takesValue(option) && claimant) found.push({ path, option, claimant });
     }
     for (const sub of cmd.commands) visit(sub, [...path, sub.name()], [...ancestors, cmd]);
   };
@@ -338,14 +366,21 @@ function shadowedValueOptions(root: Command): ShadowedPair[] {
   return found;
 }
 
-describe("every shadowed value option in the real tree is bound", () => {
-  test("the walk finds the known collision, so it cannot pass vacuously", () => {
-    const names = shadowedValueOptions(program).map((p) => `${p.path.join(" ")} ${p.option.long}`);
+const describeCollision = (c: Collision) => `${c.path.join(" ")} ${c.option.long}`;
+
+describe("every same-named value option in the real tree", () => {
+  test("the walk finds both kinds of collision, so it cannot pass vacuously", () => {
+    const names = collisions(program).map(describeCollision);
+    // The root's boolean --version claims a flag `release` takes a value for.
     expect(names).toContain("dataset release --version");
+    // `admin recover` takes --recover-file itself, and `status` redeclares it.
+    expect(names).toContain("admin recover status --recover-file");
   });
 
-  test("--flag value is joined to --flag=value for each of them", () => {
-    for (const { path, option } of shadowedValueOptions(program)) {
+  test("past a BOOLEAN ancestor option, --flag value is joined to --flag=value", () => {
+    const boolean = collisions(program).filter((c) => !takesValue(c.claimant));
+    expect(boolean.map(describeCollision)).toContain("dataset release --version");
+    for (const { path, option } of boolean) {
       const flag = option.long as string;
       expect(bindShadowedOptionValues(program, [...path, flag, "some-value"])).toEqual([
         ...path,
@@ -354,14 +389,23 @@ describe("every shadowed value option in the real tree is bound", () => {
     }
   });
 
-  test("none takes an OPTIONAL value, which the pre-pass cannot deliver bare", () => {
+  test("past a VALUE-taking ancestor option, --flag value is left unchanged", () => {
+    const valued = collisions(program).filter((c) => takesValue(c.claimant));
+    expect(valued.map(describeCollision)).toContain("admin recover status --recover-file");
+    for (const { path, option } of valued) {
+      const argv = [...path, option.long as string, "some-value"];
+      expect(bindShadowedOptionValues(program, argv)).toEqual(argv);
+    }
+  });
+
+  test("none that a boolean claims takes an OPTIONAL value, which cannot be delivered bare", () => {
     // `--flag [value]` with no value has no spelling the shadowing ancestor
     // does not claim, so it would still be swallowed. If this fails, decide
     // how that flag is meant to work before adding it: the pre-pass can only
     // join a value, or fail a required one that is missing.
-    const optional = shadowedValueOptions(program)
-      .filter((p) => !p.option.required)
-      .map((p) => `${p.path.join(" ")} ${p.option.flags}`);
+    const optional = collisions(program)
+      .filter((c) => !takesValue(c.claimant) && !c.option.required)
+      .map((c) => `${c.path.join(" ")} ${c.option.flags}`);
     expect(optional).toEqual([]);
   });
 });
