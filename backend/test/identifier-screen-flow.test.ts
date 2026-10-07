@@ -34,7 +34,7 @@ import {
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, interceptingD1, realD1, yieldingD1 } from "./helpers/d1";
-import { SCREENED_HEAD, cleanScreenReportBody } from "./helpers/identifier-screen";
+import { SCREENED_HEAD, cleanScreenReportBody, markScreen } from "./helpers/identifier-screen";
 import { type CapturedEmail, type ResendSendBody, asSend, withFakeResend } from "./helpers/resend";
 
 const SECRET = "screen-test-secret";
@@ -1431,6 +1431,154 @@ describe("re-requesting a blocked request resets the screen", () => {
     expect(r.identifier_screen_ack_by).toBeNull();
     expect(r.identifier_screen_ack_at).toBeNull();
     expect(r.identifier_screen_emailed_at).toBeNull();
+  });
+});
+
+/** The notice of ADR 0090 (amendment 2026-10-07), spelled out so a change to the shared words fails here. */
+const NOTICE = (id: string) => [
+  "Your request was received.",
+  "NEMAR is checking publication eligibility.",
+  "If every check passes, an administrator is notified to approve it.",
+  `Run 'nemar dataset publish status ${id}' to see where it stands.`,
+];
+
+type RequestBody = {
+  request_notice?: string[];
+  identifier_screen?: { state: string };
+  error?: string;
+  message?: string;
+  status?: string;
+};
+
+describe("an accepted request answers with the neutral notice (ADR 0090, 2026-10-07)", () => {
+  test("a new request: the notice, for this dataset, beside a screen that is still running", async () => {
+    await withFakeResend(async () => {
+      const res = await requestPublication();
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as RequestBody;
+      expect(body.request_notice).toEqual(NOTICE(DATASET));
+      expect(body.identifier_screen?.state).toBe("pending");
+      // A second dataset gets its own id in the pointer, not a fixed one.
+      const other = (await (await requestPublication(OTHER)).json()) as RequestBody;
+      expect(other.request_notice).toEqual(NOTICE(OTHER));
+    });
+  });
+
+  test("it does not depend on the screen: one that could not start and an exempt sandbox get the same words", async () => {
+    // The screen runs after the request. Whatever state it is in when the
+    // answer is written, the requester is told the same thing.
+    await withFakeResend(async () => {
+      dispatchStatus = 500;
+      const failed = (await (await requestPublication()).json()) as RequestBody;
+      expect(failed.identifier_screen?.state).toBe("error");
+      expect(failed.request_notice).toEqual(NOTICE(DATASET));
+    });
+    const XX = "xx099952";
+    seedDataset(XX, { exemplar: true });
+    envOverrides = { ENVIRONMENT: "staging" } as Partial<Bindings>;
+    const exempt = (await (await requestPublication(XX)).json()) as RequestBody;
+    expect(exempt.identifier_screen?.state).toBe("exempt");
+    expect(exempt.request_notice).toEqual(NOTICE(XX));
+  });
+
+  test("re-requesting a blocked request is told the same, and nothing from the result it replaces", async () => {
+    // The open row is reused (an idempotent re-request). Its stale result held
+    // an acquisition-date finding, whose warning belongs to `publish status`
+    // and the mail, never to this answer.
+    db.run(
+      `INSERT INTO publication_requests (dataset_id, requested_by, status, block_reason)
+       VALUES (?, ?, 'blocked', 'bids_validation_failed')`,
+      [DATASET, ownerId],
+    );
+    markScreen(db, row().id, DATASET, { status: "dates-only", findings: { "edf-startdate": 3 } });
+    await withFakeResend(async () => {
+      const res = await requestPublication();
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as RequestBody;
+      expect(body.request_notice).toEqual(NOTICE(DATASET));
+      expect(JSON.stringify(body.request_notice)).not.toMatch(/date|warning|edf-startdate/i);
+      // Still the one row, now requested.
+      const count = db
+        .query<{ n: number }, [string]>(
+          "SELECT COUNT(*) AS n FROM publication_requests WHERE dataset_id = ?",
+        )
+        .get(DATASET)?.n;
+      expect(count).toBe(1);
+      expect(row().status).toBe("requested");
+    });
+  });
+});
+
+describe("a request refused up front keeps its own text and carries no notice", () => {
+  const STRANGER_KEY = "screen-stranger-key-0123456789abcdef0123456789abcdef";
+
+  /** Assert a refusal: its status, its own words, and no part of the notice. */
+  async function refused(
+    res: Response,
+    status: number,
+    expected: { error?: string; message?: string },
+  ) {
+    expect(res.status).toBe(status);
+    const text = await res.text();
+    const body = JSON.parse(text) as RequestBody;
+    if (expected.error !== undefined) expect(body.error).toBe(expected.error);
+    if (expected.message !== undefined) expect(body.message).toBe(expected.message);
+    expect(body.request_notice).toBeUndefined();
+    expect(text).not.toContain("checking publication eligibility");
+    expect(text).not.toContain("Your request was received");
+  }
+
+  test("a dataset that does not exist, a requester who does not own it, a malformed flag", async () => {
+    await seedUser("screenstranger", "member", "stranger@example.org", STRANGER_KEY);
+    await withFakeResend(async () => {
+      await refused(await requestPublication("nm000999"), 404, { error: "Dataset not found" });
+      const notOwner = await app.request(
+        `/datasets/${DATASET}/publish/request`,
+        { method: "POST", headers: { Authorization: `Bearer ${STRANGER_KEY}` } },
+        env(),
+      );
+      await refused(notOwner, 403, { error: "Only the dataset owner can request publication" });
+      const malformed = await app.request(
+        `/datasets/${DATASET}/publish/request`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${OWNER_KEY}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ anonymous: "true" }),
+        },
+        env(),
+      );
+      await refused(malformed, 400, { error: "invalid_anonymous" });
+      expect(dispatches).toHaveLength(0);
+    });
+  });
+
+  test("a dataset that is already published", async () => {
+    db.run("UPDATE datasets SET visibility = 'public' WHERE dataset_id = ?", [DATASET]);
+    await refused(await requestPublication(), 409, { error: "Dataset is already published" });
+  });
+
+  test("a request that is already open: 'requested' says resend, 'approving' says in progress", async () => {
+    db.run(
+      "INSERT INTO publication_requests (dataset_id, requested_by, status) VALUES (?, ?, 'requested')",
+      [DATASET, ownerId],
+    );
+    await refused(await requestPublication(), 409, {
+      error: "A publication request already exists",
+      message: "Use 'resend' to remind admins",
+    });
+    db.run("UPDATE publication_requests SET status = 'approving' WHERE dataset_id = ?", [DATASET]);
+    await refused(await requestPublication(), 409, {
+      error: "A publication request already exists",
+      message: "Publication is in progress",
+    });
+    expect(dispatches).toHaveLength(0);
+  });
+
+  test("a request blocked up front (the owner has no citable name)", async () => {
+    db.run("UPDATE users SET given_name = NULL, family_name = NULL WHERE id = ?", [ownerId]);
+    await refused(await requestPublication(), 422, {});
+    expect(row().status).toBe("blocked");
+    expect(dispatches).toHaveLength(0);
   });
 });
 
