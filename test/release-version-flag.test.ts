@@ -256,6 +256,29 @@ describe("bindShadowedOptionValues on the real command tree", () => {
     }
   });
 
+  // Asking for help is a request to read, not to run, so it wins over a
+  // missing value. The bare flag is dropped: left in, the root would claim it
+  // and print the CLI version instead of the help.
+  test("help wins over a missing value, but only before `--`", () => {
+    expect(
+      bindShadowedOptionValues(program, ["dataset", "release", "--help", "--version"]),
+    ).toEqual(["dataset", "release", "--help"]);
+    expect(
+      bindShadowedOptionValues(program, ["dataset", "release", "nm1", "--version", "--help"]),
+    ).toEqual(["dataset", "release", "nm1", "--help"]);
+    expect(
+      bindShadowedOptionValues(program, ["dataset", "release", "nm1", "--version", "-h"]),
+    ).toEqual(["dataset", "release", "nm1", "-h"]);
+    // A value that is present is still joined.
+    expect(
+      bindShadowedOptionValues(program, ["dataset", "release", "--help", "--version", "5.0.0"]),
+    ).toEqual(["dataset", "release", "--help", "--version=5.0.0"]);
+    // `--help` after `--` is an operand, not a request for help.
+    expect(() =>
+      bindShadowedOptionValues(program, ["dataset", "release", "nm1", "--version", "--", "--help"]),
+    ).toThrow(MissingShadowedValueError);
+  });
+
   // A BOOLEAN option that shadows an ancestor's (#1220: `dataset validate`
   // declares `-v, --verbose`, the root declares `--verbose`) takes no value,
   // so the token after it is a positional. Joining them would turn the path
@@ -594,6 +617,24 @@ describe("spawned CLI", () => {
           // thrown out of main() would get.
           expect(r.stderr).not.toContain("Run again with --debug");
           expect(r.exitCode).toBe(1);
+        }
+      },
+      SPAWN_TEST_TIMEOUT_MS,
+    );
+
+    test(
+      "release --help shows help even when --version has no value",
+      async () => {
+        for (const args of [
+          ["dataset", "release", "--help", "--version"],
+          ["dataset", "release", DATASET_ID, "--version", "--help"],
+          ["dataset", "release", DATASET_ID, "--version", "-h"],
+        ]) {
+          const r = await spawnCli(args);
+          expect(r.stdout).toContain("Usage: nemar dataset release");
+          expect(r.stdout.trim()).not.toBe(version);
+          expect(r.stderr).not.toContain("error:");
+          expect(r.exitCode).toBe(0);
         }
       },
       SPAWN_TEST_TIMEOUT_MS,
