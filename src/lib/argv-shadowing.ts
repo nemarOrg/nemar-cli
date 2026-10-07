@@ -12,8 +12,8 @@
  * the root option is a boolean and does not match `--flag=value`.
  *
  * This rewrites exactly that case before Commander sees it: for the leaf
- * command named on the line, every option that TAKES A VALUE and whose flag is
- * also declared by an ancestor command is joined to its value
+ * command named on the line, every option that TAKES A VALUE and whose long
+ * flag an ancestor declares as a BOOLEAN is joined to its value
  * (`--version 2.0.0` -> `--version=2.0.0`).
  *
  * A shadowed flag with NO value (last token, or followed by another flag) is
@@ -24,10 +24,9 @@
  *
  * Nothing else changes: anything after `--`, a flag spelled `--flag=value`,
  * and boolean collisions (#1220, `-v` vs `-v, --verbose`) are left alone.
- * When the ancestor's option takes a value too (`admin recover status
- * --recover-file`, read back through `optsWithGlobals()`), the ancestor
- * consumes the joined form exactly as it consumed the spaced one, so the join
- * changes nothing there.
+ * An ancestor option that takes a value too (`admin recover status
+ * --recover-file`, read back through `optsWithGlobals()`) consumes the flag and
+ * its value together, so nothing is rewritten there.
  * An OPTIONAL-value shadowed option (`--flag [value]`) is joined when it has a
  * value but cannot be made to work without one: a bare flag has no spelling
  * the root will not claim. None exists today; a test pins that.
@@ -61,6 +60,32 @@ function findSubcommand(cmd: Command, name: string): Command | undefined {
 }
 
 /**
+ * The value-taking options of `command` that an ancestor's BOOLEAN option of
+ * the same long flag would claim first, keyed by that long flag.
+ *
+ * The outermost ancestor declaring a flag is the one Commander parses it
+ * with. A boolean takes the flag and leaves the value behind as a stray
+ * argument, so those are the options that need a join. An ancestor that takes a
+ * value itself (`admin recover --recover-file`) consumes the flag and its value
+ * together, so nothing is shadowed.
+ */
+function shadowedOptions(command: Command, ancestors: readonly Command[]): Map<string, Option> {
+  const claimedBy = new Map<string, Option>();
+  for (const ancestor of ancestors) {
+    for (const o of ancestor.options as readonly Option[]) {
+      for (const f of optionFlags(o)) if (!claimedBy.has(f)) claimedBy.set(f, o);
+    }
+  }
+  const shadowed = new Map<string, Option>();
+  for (const o of command.options as readonly Option[]) {
+    if (!(o.required || o.optional) || !o.long) continue;
+    const claimant = claimedBy.get(o.long);
+    if (claimant && !(claimant.required || claimant.optional)) shadowed.set(o.long, o);
+  }
+  return shadowed;
+}
+
+/**
  * Return `argv` (user arguments, i.e. `process.argv.slice(2)`) with shadowed
  * value options of the addressed subcommand joined to their values.
  *
@@ -88,19 +113,7 @@ export function bindShadowedOptionValues(root: Command, argv: string[]): string[
   }
   if (leafIndex < 0) return argv;
 
-  const ancestorFlags = new Set<string>();
-  for (const a of ancestors) {
-    for (const o of a.options as readonly Option[]) {
-      for (const f of optionFlags(o)) ancestorFlags.add(f);
-    }
-  }
-  const shadowed = new Map<string, Option>();
-  for (const o of current.options as readonly Option[]) {
-    if (!(o.required || o.optional)) continue;
-    for (const f of optionFlags(o)) {
-      if (ancestorFlags.has(f) && f.startsWith("--")) shadowed.set(f, o);
-    }
-  }
+  const shadowed = shadowedOptions(current, ancestors);
   if (shadowed.size === 0) return argv;
 
   const out = argv.slice(0, leafIndex + 1);
