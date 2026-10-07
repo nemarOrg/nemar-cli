@@ -1917,10 +1917,11 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
 
     const errors: string[] = [];
     const removeAll = async (items: VersionRef[], bypass: boolean): Promise<void> => {
-      errors.push(
-        ...(await deleteVersions(ctx, items, bypass, o.concurrency, (p) =>
+      appendAll(
+        errors,
+        await deleteVersions(ctx, items, bypass, o.concurrency, (p) =>
           o.log(`delete-old: deleted ${p.done - p.failed} of ${p.total} in this group`),
-        )),
+        ),
       );
     };
     await removeAll(

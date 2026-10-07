@@ -564,8 +564,9 @@ export const DATASET_ID = /^[a-z]{2}\d{6}$/;
 /**
  * Append every item of `items` to `target` in order. `target.push(...items)` is not a substitute:
  * a call spreads its arguments onto the stack, and Bun throws a RangeError once there are somewhere
- * between 500,000 and 1,000,000 of them. A Zarr copy's history is larger than that (nm000246 held
- * 1.85 million versions and markers under `zarr/`), so a history is appended in a loop.
+ * between 500,000 and 1,000,000 of them. A Zarr copy's history can be larger than that (nm000246 held
+ * 1.85 million versions and markers under `zarr/`), and so can a list of failures from deleting it,
+ * so both are appended in a loop.
  */
 export function appendAll<T>(target: T[], items: readonly T[]): void {
   for (const item of items) target.push(item);
