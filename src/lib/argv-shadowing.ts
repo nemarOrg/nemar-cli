@@ -24,6 +24,10 @@
  *
  * Nothing else changes: anything after `--`, a flag spelled `--flag=value`,
  * and boolean collisions (#1220, `-v` vs `-v, --verbose`) are left alone.
+ * When the ancestor's option takes a value too (`admin recover status
+ * --recover-file`, read back through `optsWithGlobals()`), the ancestor
+ * consumes the joined form exactly as it consumed the spaced one, so the join
+ * changes nothing there.
  * An OPTIONAL-value shadowed option (`--flag [value]`) is joined when it has a
  * value but cannot be made to work without one: a bare flag has no spelling
  * the root will not claim. None exists today; a test pins that.
@@ -65,9 +69,10 @@ function findSubcommand(cmd: Command, name: string): Command | undefined {
  */
 export function bindShadowedOptionValues(root: Command, argv: string[]): string[] {
   // Walk to the leaf command: descend while a non-flag token names a
-  // subcommand of the current one. Ancestor flags seen on the way are
-  // booleans (every root and group option is), so skipping any token starting
-  // with "-" is enough here.
+  // subcommand of the current one. Every root option is a boolean, so skipping
+  // any token starting with "-" is enough here. The one value-taking option on
+  // a command that also has subcommands (`admin recover --recover-file`) could
+  // only mislead this walk if its value spelled a subcommand name.
   const ancestors: Command[] = [];
   let current = root;
   let leafIndex = -1;
