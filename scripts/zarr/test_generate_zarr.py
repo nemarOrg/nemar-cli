@@ -41,8 +41,11 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     _AWS_OP_TIMEOUT,
     _AWS_RM_TIMEOUT,
     _AWS_TIMEOUTS,
+    TRIAL_TYPE_DIGEST_KEY_LEN,
+    TRIAL_TYPE_KEY_MAX,
     RecordingTooLarge,
     _aws,
+    _normalize_store_entry,
     _s3_prefix_empty,
     _recording_size_bytes,
     affected_primaries,
@@ -160,6 +163,8 @@ from generate_zarr import (  # type: ignore[import-not-found]  # noqa: E402  (si
     events_summary_of,
     parse_events_tsv,
     sample_index_for,
+    shorten_trial_types,
+    trial_type_key,
     write_events_parquet,
     failure_detail,
     fetch_dataset_row,
@@ -7897,6 +7902,237 @@ class TestEventsSummary(unittest.TestCase):
         self.assertEqual(events_summary(text)["trial_types"], {"go": 1})
         self.assertEqual(events_summary(text)["n_events"], 3)
 
+    # nm000229 (MEG-MASC) writes the whole stringified row into `trial_type` for
+    # some recordings, so each of their events is a distinct value of about 280
+    # characters.
+    @staticmethod
+    def _record_value(start: float, phoneme: str = "l_B") -> str:
+        return (
+            "{'story': 'easy_money', 'story_uid': 2.0, 'sound_id': 2.0, "
+            f"'kind': 'phoneme', 'start': {start}, "
+            "'sound': 'stimuli/audio/easy_money_2.wav', "
+            f"'phoneme': '{phoneme}', 'sequence_id': 81.0, 'condition': 'sentence', "
+            "'word_index': 6.0, 'speech_rate': 190.0, 'voice': 'Samantha', "
+            "'pronounced': 1.0}"
+        )
+
+    # Two distinct values of 155 characters that share their first 13 characters
+    # and the first 14 hex digits of their SHA-256, so their digest keys collide.
+    # Found by a birthday search (Brent cycle detection over 14 hex digits, about
+    # 2**28 hashes). Both digests were checked with
+    #   printf '%s' "$VALUE" | shasum -a 256        -> 10544c804e6d2b...
+    # They sort in this order: COLLIDING_FIRST is the smaller string.
+    COLLIDING_FIRST = (
+        "{'story': 'ea0a86d8243e315d', 'kind': 'phoneme', "
+        "'sound': 'stimuli/audio/easy_money_2.wav', 'phoneme': 'l_B', "
+        "'sequence_id': 81.0, 'condition': 'sentence'}"
+    )
+    COLLIDING_SECOND = (
+        "{'story': 'ea955d4fad05eec6', 'kind': 'phoneme', "
+        "'sound': 'stimuli/audio/easy_money_2.wav', 'phoneme': 'l_B', "
+        "'sequence_id': 81.0, 'condition': 'sentence'}"
+    )
+
+    def test_the_published_limits_are_pinned(self):
+        # Clients hard-code these two numbers: they are part of the index contract.
+        self.assertEqual(TRIAL_TYPE_KEY_MAX, 128)
+        self.assertEqual(TRIAL_TYPE_DIGEST_KEY_LEN, 28)
+
+    def test_a_value_that_fits_is_its_own_key(self):
+        exact = "x" * 128
+        # The value is measured after stripping, so trailing spaces do not push it over.
+        text = (
+            f"onset\ttrial_type\n0.0\tgo\n1.0\t{exact}\n2.0\tgo\n3.0\t{exact}   \n"
+        )
+        self.assertEqual(events_summary(text)["trial_types"], {"go": 2, exact: 2})
+
+    def test_a_value_one_over_the_limit_gets_a_28_character_key(self):
+        value = "x" * 129
+        text = "onset\ttrial_type\n" + "".join(
+            f"{i}.0\t{value}\n" for i in range(4)
+        ) + "9.0\tgo\n"
+        summary = events_summary(text)
+        # printf 'x%.0s' $(seq 1 129) | shasum -a 256   -> 0ec9eb33e74510...
+        self.assertEqual(
+            summary["trial_types"], {"go": 1, "xxxxxxxxxxxxx~0ec9eb33e74510": 4}
+        )
+        self.assertEqual(summary["n_events"], 5)
+        self.assertEqual(len("xxxxxxxxxxxxx~0ec9eb33e74510"), TRIAL_TYPE_DIGEST_KEY_LEN)
+
+    def test_an_ordinary_label_stays_readable(self):
+        """The longest label key among the other published datasets is 104
+        characters (a slash-joined condition string). The limit is chosen so that
+        none of them becomes an opaque digest."""
+        label = (
+            "SequenceID_4/RunNumber_1/StimPosition_1/StimType_target/"
+            "Response_hit/Block_3/Trial_017/Cue_left/Fbk_none"
+        )
+        self.assertEqual(len(label), 104)
+        text = f"onset\ttrial_type\n0.0\t{label}\n1.0\t{label}\n"
+        self.assertEqual(events_summary(text)["trial_types"], {label: 2})
+
+    def test_the_limit_counts_code_points_not_bytes(self):
+        fits = "\u00e9" * 128  # 256 UTF-8 bytes, 128 code points
+        over = "\u00e9" * 129
+        text = f"onset\ttrial_type\n0.0\t{fits}\n1.0\t{over}\n"
+        # printf '\xc3\xa9%.0s' $(seq 1 129) | shasum -a 256   -> a62bf20794e9af...
+        self.assertEqual(
+            events_summary(text)["trial_types"],
+            {fits: 1, "\u00e9" * 13 + "~a62bf20794e9af": 1},
+        )
+
+    def test_the_prefix_counts_code_points_and_the_digest_is_over_utf8(self):
+        value = "a\U0001f600bcdefghijkl" + "z" * 120  # 133 code points, 4-byte emoji first
+        # { printf 'a\xf0\x9f\x98\x80bcdefghijkl'; printf 'z%.0s' $(seq 1 120); } \
+        #   | shasum -a 256   -> 1bac5ee4c59300...
+        self.assertEqual(trial_type_key(value), "a\U0001f600bcdefghijkl~1bac5ee4c59300")
+
+    def test_composed_and_decomposed_forms_are_not_normalized(self):
+        composed = "caf\u00e9" + "x" * 125  # 129 code points
+        decomposed = "cafe\u0301" + "x" * 125  # 130 code points
+        text = f"onset\ttrial_type\n0.0\t{composed}\n1.0\t{decomposed}\n"
+        # { printf 'caf\xc3\xa9'; printf 'x%.0s' $(seq 1 125); } | shasum -a 256 -> 228391f0830f3a
+        # { printf 'cafe\xcc\x81'; printf 'x%.0s' $(seq 1 125); } | shasum -a 256 -> 6c5a9fb1a4e1e6
+        self.assertEqual(
+            events_summary(text)["trial_types"],
+            {
+                composed[:13] + "~228391f0830f3a": 1,
+                decomposed[:13] + "~6c5a9fb1a4e1e6": 1,
+            },
+        )
+
+    def test_a_whole_record_value_gets_a_28_character_key_and_keeps_its_count(self):
+        value = self._record_value(93.72)
+        self.assertEqual(len(value), 281)
+        text = "onset\ttrial_type\n" + "".join(
+            f"{i}.0\t{value}\n" for i in range(4)
+        ) + "9.0\tgo\n"
+        summary = events_summary(text)
+        # sha256 of exactly these 281 bytes, from a file, with shasum -a 256
+        # -> 97ecccec881a7c... (the value has an uppercase letter, so a digest of
+        # the lowercased value would differ).
+        self.assertEqual(
+            summary["trial_types"], {"go": 1, "{'story': 'ea~97ecccec881a7c": 4}
+        )
+        self.assertEqual(summary["n_events"], 5)
+
+    def test_blank_and_na_values_are_not_counted_and_an_empty_key_is_kept_if_given(self):
+        text = "onset\ttrial_type\n0.0\t\n1.0\tn/a\n2.0\tgo\n"
+        self.assertEqual(
+            events_summary(text), {"n_events": 3, "trial_types": {"go": 1}}
+        )
+        # A direct call is not an events.tsv: an empty key is left as it is.
+        self.assertEqual(shorten_trial_types({"": 2}), {"": 2})
+
+    def test_records_that_share_a_prefix_stay_distinct(self):
+        """The nm000229 shape: about 280 characters, identical up to the onset
+        field, and different only by an onset or a phoneme. Every one keeps its
+        own key and every count survives."""
+        values = [self._record_value(93.0 + i / 100) for i in range(500)]
+        values += [self._record_value(10.0, ph) for ph in ("l_B", "ah_I", "t_E")]
+        text = "onset\ttrial_type\n" + "".join(f"{i}\t{v}\n" for i, v in enumerate(values))
+        summary = events_summary(text)
+        keys = list(summary["trial_types"])
+        self.assertEqual(len(keys), len(values))
+        self.assertTrue(
+            all(len(k) == TRIAL_TYPE_DIGEST_KEY_LEN for k in keys), set(map(len, keys))
+        )
+        self.assertEqual(sum(summary["trial_types"].values()), len(values))
+        self.assertEqual(summary["n_events"], len(values))
+        # The published entry costs a fraction of what the raw keys did.
+        raw = len(json.dumps(dict.fromkeys(values, 1)))
+        self.assertLess(len(json.dumps(summary["trial_types"])) * 5, raw)
+
+    def test_a_repeated_long_value_is_still_one_key(self):
+        value = self._record_value(1.5)
+        text = (
+            "onset\ttrial_type\n"
+            f"0.0\t{value}\n1.0\t{self._record_value(2.5)}\n2.0\t{value}\n"
+        )
+        counts = sorted(events_summary(text)["trial_types"].values())
+        self.assertEqual(counts, [1, 2])
+
+    def test_the_colliding_pair_really_collides(self):
+        first, second = self.COLLIDING_FIRST, self.COLLIDING_SECOND
+        self.assertLess(first, second)
+        self.assertNotEqual(first, second)
+        self.assertGreater(len(first), TRIAL_TYPE_KEY_MAX)
+        self.assertEqual(len(first), len(second))
+        self.assertEqual(trial_type_key(first), "{'story': 'ea~10544c804e6d2b")
+        self.assertEqual(trial_type_key(second), "{'story': 'ea~10544c804e6d2b")
+
+    def test_a_real_collision_is_resolved_the_same_way_in_either_arrival_order(self):
+        first, second = self.COLLIDING_FIRST, self.COLLIDING_SECOND
+        forward = shorten_trial_types({first: 3, second: 5})
+        backward = shorten_trial_types({second: 5, first: 3})
+        self.assertEqual(forward, backward)
+        # The value that sorts first keeps the digest key; the other is salted:
+        # printf '1\0%s' "$SECOND" | shasum -a 256   -> 4000e57045d764...
+        self.assertEqual(
+            forward, {"{'story': 'ea~10544c804e6d2b": 3, "{'story': 'ea~4000e57045d764": 5}
+        )
+        self.assertEqual(sum(forward.values()), 8)
+        self.assertEqual(list(forward), sorted(forward))
+
+    def test_shortening_is_idempotent(self):
+        once = shorten_trial_types(
+            {self._record_value(i): 1 for i in range(30)}
+            | {"go": 5, self.COLLIDING_FIRST: 2, self.COLLIDING_SECOND: 4}
+        )
+        self.assertEqual(shorten_trial_types(once), once)
+
+    def test_the_result_is_sorted_by_key_so_the_index_bytes_are_stable(self):
+        """Short values are added first and long ones after, so insertion order
+        is not key order: a short key that sorts after a long value's digest key
+        shows whether the result is sorted."""
+        result = shorten_trial_types({"zeta": 1, "a" * 200: 2, "go": 3})
+        self.assertEqual(
+            list(result), ["a" * 13 + "~" + trial_type_key("a" * 200)[14:], "go", "zeta"]
+        )
+        self.assertEqual(list(result), sorted(result))
+
+    def test_a_short_value_shaped_like_a_key_does_not_swallow_a_long_one(self):
+        """A value that fits claims its key first, so a long value whose digest
+        key equals it is re-hashed instead of being merged into its count."""
+        long_value = self._record_value(7.0)
+        taken = trial_type_key(long_value)
+        # sha256 of the 281 bytes of _record_value(7.0): 108c50fe64de81..., and of
+        # printf '1\0' followed by them: 50fbdf9ddd7954...
+        self.assertEqual(taken, "{'story': 'ea~108c50fe64de81")
+        counts = {taken: 3, long_value: 2}
+        shortened = shorten_trial_types(counts)
+        self.assertEqual(
+            shortened, {"{'story': 'ea~108c50fe64de81": 3, "{'story': 'ea~50fbdf9ddd7954": 2}
+        )
+        # And it is still stable when the short value arrives second.
+        self.assertEqual(shorten_trial_types({long_value: 2, taken: 3}), shortened)
+
+    def test_salts_keep_stepping_until_a_key_is_free(self):
+        long_value = self._record_value(8.0)
+        counts = {
+            trial_type_key(long_value, 0): 1,
+            trial_type_key(long_value, 1): 2,
+            long_value: 4,
+        }
+        shortened = shorten_trial_types(counts)
+        self.assertEqual(shortened[trial_type_key(long_value, 2)], 4)
+        self.assertEqual(sum(shortened.values()), 7)
+
+    def test_the_parquet_rows_keep_the_full_value(self):
+        """Only the index summary is keyed by the short form; events.parquet is
+        the lossless record, and its `trial_type` column is what a client hashes
+        to find a value's key."""
+        value = self._record_value(93.72)
+        parsed = parse_events_tsv(f"onset\tduration\ttrial_type\n0.0\t0.5\t{value}\n")
+        rows = event_rows_for_store(
+            "sub-01/eeg/a_eeg.zarr", "sub-01/eeg/sub-01_task-x_eeg.edf",
+            [{"name": "eeg_250hz", "rate": 250.0}], parsed,
+        )
+        self.assertEqual((rows or {})["trial_type"], [value])
+        self.assertEqual(
+            list(events_summary_of(parsed)["trial_types"]), ["{'story': 'ea~97ecccec881a7c"]
+        )
+
     def test_the_summary_and_the_rows_come_from_one_parse(self):
         """#1060's last acceptance criterion. `n_events` in index.json and the
         rows in events.parquet describe the same file, so they must not be able
@@ -9150,6 +9386,93 @@ class TestIndexSchemaSelfCheck(unittest.TestCase):
                          new_store["units_report"])
         # merge_index is pure: the prior document is left as it was read.
         self.assertEqual(prior, prior_before)
+
+    @staticmethod
+    def _events_tsv(counts: dict[str, int]) -> str:
+        """The events.tsv whose `trial_type` column holds each value `n` times."""
+        rows = [v for v, n in counts.items() for _ in range(n)]
+        return "onset\ttrial_type\n" + "".join(f"{i}\t{v}\n" for i, v in enumerate(rows))
+
+    def _merge_carrying(self, prior):
+        return merge_index(
+            prior, "on007763", "f" * 40, [], [], "2026-09-03T00:00:00Z", [], [],
+            discovered=["sub-01/eeg/a_eeg.edf"],
+            prior_pending=prior["pending"],
+        )
+
+    def test_a_carried_entry_with_long_keys_is_rekeyed_on_merge(self):
+        """Stores published with one very long `trial_types` key per event (the
+        whole-record shape) must be brought to the short form a fresh conversion
+        writes, without reconverting, and an entry already in it left alone."""
+        long_values = [TestEventsSummary._record_value(i / 100) for i in range(50)]
+        old = {**dict.fromkeys(long_values, 1), "word": 1}
+        prior = self.index()
+        prior["stores"][0]["n_events"] = 51
+        prior["stores"][0]["trial_types"] = old
+        before = json.loads(json.dumps(prior))
+
+        merged = self._merge_carrying(prior)
+        validate_document(merged, INDEX_SCHEMA_PATH, "index")
+        store = next(e for e in merged["stores"] if e["zarr"] == "sub-01/eeg/a_eeg.zarr")
+        # Parity: the healed entry is what a fresh conversion of the same events writes.
+        self.assertEqual(
+            store["trial_types"], events_summary(self._events_tsv(old))["trial_types"]
+        )
+        self.assertEqual(len(store["trial_types"]), 51)
+        self.assertTrue(all(len(k) <= TRIAL_TYPE_KEY_MAX for k in store["trial_types"]))
+        self.assertEqual(
+            sum(1 for k in store["trial_types"] if len(k) == TRIAL_TYPE_DIGEST_KEY_LEN), 50
+        )
+        self.assertEqual(store["n_events"], 51)
+        # Merging the merged index again changes nothing.
+        again = self._merge_carrying(merged)
+        self.assertEqual(
+            next(e for e in again["stores"] if e["zarr"] == "sub-01/eeg/a_eeg.zarr"),
+            store,
+        )
+        self.assertEqual(prior, before)
+
+    def test_a_merge_handles_every_trial_types_shape_in_one_index(self):
+        """An old-format store, a new-format store, a store with an empty
+        `trial_types`, and one with none at all: each is treated by itself."""
+        long_values = [TestEventsSummary._record_value(i / 10) for i in range(5)]
+        old = dict.fromkeys(long_values, 2)
+        new = shorten_trial_types(old)
+        self.assertNotEqual(old, new)
+        prior = self.index()
+        template = prior["stores"][0]
+        stores = []
+        for name, shape in (
+            ("a", {"trial_types": old}),
+            ("b", {"trial_types": new}),
+            ("c", {"trial_types": {}}),
+            ("d", {}),
+        ):
+            entry = json.loads(json.dumps(template))
+            entry["zarr"] = f"sub-01/eeg/{name}_eeg.zarr"
+            entry["path"] = f"sub-01/eeg/{name}_eeg.edf"
+            entry.pop("trial_types", None)
+            entry.update(shape)
+            stores.append(entry)
+        prior["stores"] = stores
+        merged = merge_index(
+            prior, "on007763", "f" * 40, [], [], "2026-09-03T00:00:00Z", [], [],
+            discovered=[e["path"] for e in stores] + ["sub-02/eeg/b_eeg.edf", "sub-03/eeg/c_eeg.edf"],
+            prior_pending=prior["pending"],
+        )
+        validate_document(merged, INDEX_SCHEMA_PATH, "index")
+        by_name = {e["zarr"].rsplit("/", 1)[1][0]: e for e in merged["stores"]}
+        self.assertEqual(by_name["a"]["trial_types"], new)
+        self.assertEqual(by_name["b"]["trial_types"], new)
+        self.assertEqual(by_name["c"]["trial_types"], {})
+        self.assertNotIn("trial_types", by_name["d"])
+
+    def test_a_trial_types_that_is_not_an_object_is_left_alone(self):
+        for odd in (None, ["go"], "go"):
+            entry = _normalize_store_entry(
+                {"zarr": "sub-01/eeg/a_eeg.zarr", "path": "sub-01/eeg/a_eeg.edf", "trial_types": odd}
+            )
+            self.assertEqual(entry["trial_types"], odd)
 
     def test_a_mutated_index_is_rejected(self):
         import jsonschema
