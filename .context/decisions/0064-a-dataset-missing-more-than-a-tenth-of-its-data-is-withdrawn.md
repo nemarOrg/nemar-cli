@@ -208,3 +208,23 @@ data nobody can supply, which is what withdrawal is for.
 
 A key on the purge list is not missing: it is excluded from both the numerator and the denominator of the availability ratio ([ADR 0085](0085-a-privacy-correction-scrubs-every-version-in-place.md)).
 **Not built in Phase 2 of #1610:** there is no purge list yet, and the availability count does not read one ([ADR 0085](0085-a-privacy-correction-scrubs-every-version-in-place.md), "Build status").
+
+## Amendment 2026-10-07 (#1565): a key stored as chunks is present
+
+The numerator above, "an object at its declared size", now also counts a key whose complete chunk set exists.
+A git-annex special remote configured with `chunk=1GiB` stores `<fields>-S<chunksize>-C<n>--<name>` objects and never the plain key, so every chunked file used to count as missing: `nm000276` reported `data_complete = 0` although every byte was in the bucket.
+`isKeyPresentAtDeclaredSize` (`shared/annex-key.ts`, one definition for the Worker and the CLI) answers present when the plain object exists at its declared size, or when the plain object is ABSENT and some chunking of the key is complete.
+A complete chunking is chunks C1..Cn, each at the chunk size except the last at the remainder, or a single empty chunk for an empty file.
+A plain object that exists at the wrong size stays missing even beside a complete chunk set: the data plane serves the plain key, so that listing is the #967 signature and is not rescued.
+
+**Present now means recoverable, not servable.**
+A complete chunk set can be reassembled, by git-annex or by the Zarr converter (`scripts/zarr/generate_zarr.py`).
+The data plane and `manifest.json` still emit the plain-key URL (`<id>/objects/<key>`) for a chunked key, and no such object exists, so a reader who follows it gets a 404.
+That half of #1565 is not fixed, and the issue stays open.
+
+**Consequence for the withdrawal rule.**
+A chunked key with a complete chunk set counts as available in the numerator and the denominator alike, so this ADR's threshold never fires on account of such a key, however many of them the data plane cannot yet serve.
+A dataset such as `nm000276` is therefore listed with `data_complete = 1` while the plain-key URLs of its chunked files do not resolve.
+"Advertises nothing it cannot deliver", above, is not met for those files until #1565 closes.
+`data_complete = 1` is a public filter, so it now means "every data key is in the bucket, whole or as a complete chunk set", not "every data key is servable".
+A chunked key with a missing, short or oversized chunk is still missing and still counts against the dataset.
