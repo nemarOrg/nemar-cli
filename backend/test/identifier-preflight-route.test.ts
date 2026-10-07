@@ -19,6 +19,7 @@ import { Hono } from "hono";
 import { datasetRoutes } from "../src/routes/datasets";
 import {
   PREFLIGHT_WITHOUT_ATTESTATION,
+  preflightRecording,
   readRecordedPreflight,
   takePreflight,
 } from "../src/services/identifier-preflight";
@@ -302,5 +303,19 @@ describe("takePreflight", () => {
       refused: "preflight-version",
     });
     expect(takePreflight(preflight(), true)).toEqual({ preflight: preflight(), refused: null });
+  });
+});
+
+describe("preflightRecording", () => {
+  test("recorded only when a parsed record was stored; a refusal is named", () => {
+    const accepted = takePreflight(preflight(), true);
+    expect(preflightRecording(accepted, true)).toEqual({ identifier_preflight_recorded: true });
+    // The write that would have carried it failed: not recorded, whatever parsed.
+    expect(preflightRecording(accepted, false)).toEqual({ identifier_preflight_recorded: false });
+    const refused = takePreflight(preflight({ version: 9 }), true);
+    expect(preflightRecording(refused, true)).toEqual({
+      identifier_preflight_recorded: false,
+      identifier_preflight_refused: "preflight-version",
+    });
   });
 });

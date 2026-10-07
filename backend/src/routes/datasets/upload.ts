@@ -263,6 +263,11 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
       const user = c.get("user");
       const db = c.env.DB;
       const preflight = takePreflight(preflightField, attestation !== undefined);
+      // One serialization for both writes below (the resume branch's UPDATE and the claim
+      // INSERT), so the preflight cannot ride one and not the other.
+      const attestationColumn = attestation
+        ? attestationJson(attestation, preflight.preflight)
+        : null;
 
       // Non-production environments can only create sandbox (xx-prefix) datasets.
       // This prevents dev from minting real nm-prefix dataset IDs.
@@ -430,11 +435,11 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         // block the resume; the column stays NULL and the next attempt
         // records it.
         let attestationStored = false;
-        if (attestation) {
+        if (attestationColumn) {
           try {
             await db
               .prepare("UPDATE datasets SET attestation = ? WHERE dataset_id = ?")
-              .bind(attestationJson(attestation, preflight.preflight), datasetId)
+              .bind(attestationColumn, datasetId)
               .run();
             attestationStored = true;
           } catch (err) {
@@ -587,7 +592,7 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
               sandbox ? 1 : 0,
               seed.subjects,
               seed.bytes,
-              attestation ? attestationJson(attestation, preflight.preflight) : null,
+              attestationColumn,
             )
             .run();
           break; // ID claimed successfully
@@ -792,28 +797,16 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
       const db = c.env.DB;
 
       const dataset = await db
-        .prepare(
-          "SELECT owner_user_id, visibility, first_published_at FROM datasets WHERE dataset_id = ?",
-        )
+        .prepare("SELECT owner_user_id FROM datasets WHERE dataset_id = ?")
         .bind(datasetId)
-        .first<{ owner_user_id: number; visibility: string; first_published_at: string | null }>();
+        .first<{ owner_user_id: number }>();
       if (!dataset) return c.json({ error: "Dataset not found" }, 404);
       if (dataset.owner_user_id !== user.id && !hasRole(user.role, "admin")) {
         return c.json({ error: "Only the dataset owner can record its attestation" }, 403);
       }
-      if (dataset.visibility !== "private" || dataset.first_published_at !== null) {
-        return c.json(
-          {
-            error: "Cannot record an attestation on a published dataset",
-            message: "The attestation of a dataset that has been published is not re-recorded.",
-          },
-          409,
-        );
-      }
-
       const preflight = takePreflight(preflightField, true);
-      // The same guard in the statement, so a publication that lands between the read and the
-      // write is not overwritten.
+      // The publication guard lives in the statement alone, so a publication that lands between
+      // the read above and this write cannot be overwritten, and there is one guard to test.
       const result = await db
         .prepare(
           "UPDATE datasets SET attestation = ? WHERE dataset_id = ? AND visibility = 'private' AND first_published_at IS NULL",
@@ -824,7 +817,8 @@ export function registerUploadRoutes(datasetRoutes: DatasetsRouter): void {
         return c.json(
           {
             error: "Cannot record an attestation on a published dataset",
-            message: "The dataset was published while the attestation was being recorded.",
+            message:
+              "The attestation of a dataset that is public, or was ever published, is not re-recorded.",
           },
           409,
         );
