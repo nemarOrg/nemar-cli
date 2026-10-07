@@ -9,7 +9,12 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { annexKeyDeclaredSize, annexKeyFieldSize, parseChunkKey } from "../shared/annex-key";
+import {
+  annexChunkKey,
+  annexKeyDeclaredSize,
+  annexKeyFieldSize,
+  parseChunkKey,
+} from "../shared/annex-key";
 import { isKeyPresentAtDeclaredSize, keysWithoutObjects } from "../src/lib/s3-server-copy";
 
 const GiB = 1073741824;
@@ -44,6 +49,18 @@ describe("chunked annex keys (#1565, nm000276)", () => {
     // A one-chunk file (the .vhdr case from the issue).
     const small = new Map([["SHA256E-s982-S1073741824-C1--ba3d.vhdr", 982]]);
     expect(isKeyPresentAtDeclaredSize("SHA256E-s982--ba3d.vhdr", small)).toBe(true);
+  });
+
+  test("annexChunkKey writes the name parseChunkKey reads", () => {
+    expect(annexChunkKey("SHA256E-s982--ba3d.vhdr", GiB, 1)).toBe(
+      "SHA256E-s982-S1073741824-C1--ba3d.vhdr",
+    );
+    expect(annexChunkKey("WORM-s10-m17--rec.edf", 4, 3)).toBe("WORM-s10-m17-S4-C3--rec.edf");
+    expect(annexChunkKey("git:abc", 4, 1)).toBeNull();
+    // Round trip, including a name that itself contains -- and chunk-shaped text.
+    const key = "SHA256E-s5--a--b-S2-C1--c.edf";
+    const name = annexChunkKey(key, 4, 2) as string;
+    expect(parseChunkKey(name)).toEqual({ baseKey: key, chunkSize: 4, chunkNumber: 2 });
   });
 
   test("parseChunkKey reads only the fields before the first --", () => {
@@ -185,7 +202,7 @@ describe("chunked annex keys (#1565, nm000276)", () => {
     ).toBe(true);
   });
 
-  test("the chunk index follows a listing that grows after the first lookup", () => {
+  test("the chunk-size scan follows a listing that grows after the first lookup", () => {
     const existing = new Map<string, number>([[chunk(1), GiB]]);
     expect(isKeyPresentAtDeclaredSize(BASE_EEG, existing)).toBe(false);
     existing.set(chunk(2), GiB);
