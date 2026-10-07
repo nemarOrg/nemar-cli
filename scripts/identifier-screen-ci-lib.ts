@@ -1186,11 +1186,14 @@ export async function screenDataset(
   const scannerId = scanner ? `identifier-scan@${scanner}` : null;
   const deadlineAt = startedAt + config.deadlineMs;
   let head: string | null = null;
-  const dir = mkdtempSync(join(tmpdir(), "identifier-screen-"));
+  // Made inside the try: a scratch directory that cannot be made throws an error whose message
+  // names its path, and an uncaught one would print that to the public log.
+  let dir: string | null = null;
   let blobs: GitBlobReader | null = null;
   try {
     if (!scannerId) return errorReport("workflow-failed", null, null);
 
+    dir = mkdtempSync(join(tmpdir(), "identifier-screen-"));
     const cloned = await cloneMetadata(config, join(dir, "repo"), deadlineAt - Date.now());
     if (!cloned.ok) {
       log(`screen: error=${cloned.error}`);
@@ -1307,7 +1310,7 @@ export async function screenDataset(
     return errorReport("workflow-failed", scannerId, head);
   } finally {
     await blobs?.close().catch(() => undefined);
-    rmSync(dir, { recursive: true, force: true });
+    if (dir) rmSync(dir, { recursive: true, force: true });
   }
 }
 
