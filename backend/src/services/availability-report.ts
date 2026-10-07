@@ -172,6 +172,62 @@ export class AvailabilityReportError extends Error {
   }
 }
 
+/**
+ * Where the report is committed, or the reason it must not be. Runs before any
+ * S3 work on the write path: it is a handful of cheap checks, and the S3 pass
+ * is the most expensive thing a sweep row does.
+ */
+async function resolveReportTarget(
+  env: Bindings,
+  githubRepo: string | null,
+  datasetId: string,
+): Promise<{ repoName: string; pat: string }> {
+  if (!githubRepo) {
+    throw new AvailabilityReportError(`Dataset has no GitHub repository: ${datasetId}`, 400);
+  }
+  const repoName = githubRepo.split("/")[1];
+  if (!repoName) {
+    throw new AvailabilityReportError(`Invalid github_repo format: ${githubRepo}`, 400);
+  }
+  let pat: string;
+  try {
+    pat = await getDatasetsToken(env);
+  } catch (err) {
+    throw new AvailabilityReportError(`Failed to resolve GitHub auth: ${errorMessage(err)}`, 500, {
+      cause: err,
+    });
+  }
+  // Never create `main` (#1643). On a repository nothing has been pushed to
+  // yet (a dataset created but still uploading) the Contents API PUT makes
+  // `main` an unrelated ROOT commit. The depositor's first push is then
+  // rejected as non-fast-forward, and the git-annex adjusted branch cannot be
+  // auto-rebased onto the unrelated root; the upload only recovered through a
+  // manual merge.
+  //
+  // `branchExists` answers false only for a branch that is absent from a
+  // repository NEMAR can see, so the 409 below can say exactly that. Every
+  // other outcome (a repository not visible to NEMAR, a rate limit, a 5xx, a
+  // body that is not a ref) throws, and is reported as a 500 because it is not
+  // a fact about the dataset.
+  let hasReportBranch: boolean;
+  try {
+    hasReportBranch = await branchExists(repoName, REPORT_BRANCH, pat);
+  } catch (err) {
+    throw new AvailabilityReportError(
+      `Could not check for ${REPORT_BRANCH} in ${githubRepo}: ${errorMessage(err)}. Nothing was written`,
+      500,
+      { cause: err },
+    );
+  }
+  if (!hasReportBranch) {
+    throw new AvailabilityReportError(
+      `${githubRepo} has no ${REPORT_BRANCH} branch (empty repository, or ${REPORT_BRANCH} was never pushed). Nothing was written; the availability report never creates ${REPORT_BRANCH}`,
+      409,
+    );
+  }
+  return { repoName, pat };
+}
+
 export interface WriteAvailabilityReportOptions {
   /** When true, compute and return the report without committing it. */
   dryRun?: boolean;
@@ -211,55 +267,9 @@ export async function writeAvailabilityReport(
   }
 
   // Write path only: resolve the target and refuse BEFORE the S3 work below.
-  let target: { repoName: string; pat: string } | null = null;
-  if (!opts?.dryRun) {
-    if (!dataset.github_repo) {
-      throw new AvailabilityReportError(`Dataset has no GitHub repository: ${datasetId}`, 400);
-    }
-    const repoName = dataset.github_repo.split("/")[1];
-    if (!repoName) {
-      throw new AvailabilityReportError(`Invalid github_repo format: ${dataset.github_repo}`, 400);
-    }
-    let pat: string;
-    try {
-      pat = await getDatasetsToken(env);
-    } catch (err) {
-      throw new AvailabilityReportError(
-        `Failed to resolve GitHub auth: ${errorMessage(err)}`,
-        500,
-        { cause: err },
-      );
-    }
-    // Never create `main` (#1643). On a repository nothing has been pushed to
-    // yet (a dataset created but still uploading) the Contents API PUT makes
-    // `main` an unrelated ROOT commit. The depositor's first push is then
-    // rejected as non-fast-forward, and the git-annex adjusted branch cannot be
-    // auto-rebased onto the unrelated root; the upload only recovered through a
-    // manual merge.
-    //
-    // `branchExists` answers false only for a branch that is absent from a
-    // repository NEMAR can see, so the 409 below can say exactly that. Every
-    // other outcome (a repository not visible to NEMAR, a rate limit, a 5xx, a
-    // body that is not a ref) throws, and is reported as a 500 because it is not
-    // a fact about the dataset.
-    let hasReportBranch: boolean;
-    try {
-      hasReportBranch = await branchExists(repoName, REPORT_BRANCH, pat);
-    } catch (err) {
-      throw new AvailabilityReportError(
-        `Could not check for ${REPORT_BRANCH} in ${dataset.github_repo}: ${errorMessage(err)}. Nothing was written`,
-        500,
-        { cause: err },
-      );
-    }
-    if (!hasReportBranch) {
-      throw new AvailabilityReportError(
-        `${dataset.github_repo} has no ${REPORT_BRANCH} branch (empty repository, or ${REPORT_BRANCH} was never pushed). Nothing was written; the availability report never creates ${REPORT_BRANCH}`,
-        409,
-      );
-    }
-    target = { repoName, pat };
-  }
+  const target = opts?.dryRun
+    ? null
+    : await resolveReportTarget(env, dataset.github_repo, datasetId);
 
   // import_jobs carries OpenNeuro provenance for imported (on*) datasets
   // only; a native NEMAR submission has no row here, so `source` stays null.
