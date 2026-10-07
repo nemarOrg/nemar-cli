@@ -50,43 +50,64 @@ function closedPort(): string {
 
 let configDir: string;
 let dataset: string;
+/** An empty directory: the PATH of a run that must not get past the preflight. */
+let emptyPath: string;
 
 beforeEach(() => {
   configDir = mkdtempSync(join(tmpdir(), "nemar-preflight-cli-cfg-"));
+  emptyPath = mkdtempSync(join(tmpdir(), "nemar-preflight-cli-path-"));
   // A parent named after nobody, and a dataset directory whose own name must not be printed.
   dataset = join(mkdtempSync(join(tmpdir(), "nemar-preflight-cli-")), "Quillfeather-study");
   mkdirSync(dataset);
+});
+
+afterEach(() => {
+  rmSync(configDir, { recursive: true, force: true });
+  rmSync(emptyPath, { recursive: true, force: true });
+  rmSync(dirname(dataset), { recursive: true, force: true });
+});
+
+/** The account the child signs in with, pointed at `apiUrl` through the config file. */
+function configure(apiUrl: string): void {
   writeFileSync(
     join(configDir, "config.json"),
     JSON.stringify({
       activeAccount: "preflight",
       // The sandbox flag is a cache the upload reads before asking the backend, so the run gets
       // to the preflight without one.
-      accounts: { preflight: { apiKey: "k", sandboxCompleted: true } },
+      accounts: { preflight: { apiKey: "k", apiUrl, sandboxCompleted: true } },
     }),
   );
-});
+}
 
-afterEach(() => {
-  rmSync(configDir, { recursive: true, force: true });
-  rmSync(dirname(dataset), { recursive: true, force: true });
-});
+/**
+ * The child's environment: this process's, with every `TEST_`-prefixed variable removed, so a
+ * run in CI's live tier cannot inherit that tier's backend or keys, and the config file above is
+ * the only place the API is named. `PATH` is replaced by an empty directory when asked: a run
+ * that gets past the preflight then stops at the required-tools check, before any step that
+ * could reach GitHub or git-annex.
+ */
+function childEnv(options: { noTools?: boolean } = {}): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined || key.startsWith("TEST_")) continue;
+    if (key === "FORCE_COLOR" || key === "CLICOLOR_FORCE") continue;
+    env[key] = value;
+  }
+  env.NEMAR_CONFIG_DIR = configDir;
+  env.NEMAR_NO_UPDATE_CHECK = "1";
+  env.NO_COLOR = "1";
+  if (options.noTools) env.PATH = emptyPath;
+  return env;
+}
 
-async function upload(args: string[], apiUrl: string) {
-  const env: Record<string, string | undefined> = {
-    ...process.env,
-    NEMAR_CONFIG_DIR: configDir,
-    TEST_API_URL: apiUrl,
-    NEMAR_NO_UPDATE_CHECK: "1",
-    NO_COLOR: "1",
-  };
-  // Removed from the CHILD's environment only; this process's own is untouched.
-  env.FORCE_COLOR = undefined;
-  env.CLICOLOR_FORCE = undefined;
+async function upload(args: string[], apiUrl: string, options: { noTools?: boolean } = {}) {
+  configure(apiUrl);
   const proc = spawn({
-    cmd: ["bun", "run", CLI_ENTRY, "dataset", "upload", dataset, ...args],
+    // The absolute path of this bun, so the run does not need PATH to start.
+    cmd: [process.execPath, "run", CLI_ENTRY, "dataset", "upload", dataset, ...args],
     cwd: REPO_ROOT,
-    env,
+    env: childEnv(options),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -94,6 +115,77 @@ async function upload(args: string[], apiUrl: string) {
   const stdout = await new Response(proc.stdout).text();
   const stderr = await new Response(proc.stderr).text();
   return { output: `${stdout}\n${stderr}`, exitCode: await proc.exited };
+}
+
+/**
+ * Drives the upload at a real terminal: a pseudo-terminal from Python's `pty`, the CLI's real
+ * prompt, and an answer typed when `Upload anyway?` appears. Nothing is replaced; the only stand-in
+ * is the person.
+ */
+const PTY_DRIVER = `
+import fcntl, os, pty, select, signal, struct, sys, termios, time
+answer = os.environ.pop("PREFLIGHT_ANSWER").encode().decode("unicode_escape").encode()
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv(sys.argv[1], sys.argv[1:])
+# A terminal with a size: a zero-column terminal makes a spinner redraw without end.
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 160, 0, 0))
+out, sent, deadline = b"", False, time.time() + 90
+while time.time() < deadline:
+    ready, _, _ = select.select([fd], [], [], 0.5)
+    if fd not in ready:
+        if os.waitpid(pid, os.WNOHANG) != (0, 0):
+            break
+        continue
+    try:
+        chunk = os.read(fd, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    out += chunk
+    if not sent and b"Upload anyway?" in out:
+        time.sleep(0.3)
+        os.write(fd, answer)
+        sent = True
+try:
+    os.kill(pid, signal.SIGKILL)
+except ProcessLookupError:
+    pass
+_, status = os.waitpid(pid, 0)
+sys.stdout.buffer.write(out)
+sys.exit(1 if not sent else (status >> 8) if os.WIFEXITED(status) else 128 + os.WTERMSIG(status))
+`;
+
+const PYTHON = Bun.which("python3");
+
+async function uploadAtTerminal(answer: string, apiUrl: string) {
+  configure(apiUrl);
+  const driver = join(configDir, "pty-driver.py");
+  writeFileSync(driver, PTY_DRIVER);
+  const proc = spawn({
+    cmd: [
+      PYTHON as string,
+      driver,
+      process.execPath,
+      "run",
+      CLI_ENTRY,
+      "dataset",
+      "upload",
+      dataset,
+    ],
+    cwd: REPO_ROOT,
+    // TERM=dumb: spinners print their result lines instead of animating; the prompt still runs.
+    env: { ...childEnv({ noTools: true }), TERM: "dumb", PREFLIGHT_ANSWER: answer },
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const raw = await new Response(proc.stdout).text();
+  await new Response(proc.stderr).text();
+  // Terminal control sequences out, so what is asserted is the text a person reads.
+  const output = raw.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+  return { output, exitCode: await proc.exited };
 }
 
 function put(out: Uint8Array, text: string, start: number, width: number): void {
@@ -161,6 +253,8 @@ describe("nemar dataset upload: direct identifiers", () => {
       expect(r.output).toContain("edf-patient-name x1");
       expect(r.output).toContain("Upload refused");
       expect(r.output).toContain("Nothing was sent");
+      // A refusal is the answer, not a bug: no invitation to attach a debug log.
+      expect(r.output).not.toContain("attach the log to a new issue");
       // It ran before the tool checks, the prerequisite check and validation.
       expect(r.output).not.toContain("Checking prerequisites");
       expect(r.output).not.toContain("Missing required tools");
@@ -201,7 +295,7 @@ describe("nemar dataset upload: direct identifiers", () => {
         server.url,
       );
       expect(direct.exitCode).not.toBe(0);
-      expect(direct.output).toContain("Allowed choices are");
+      expect(direct.output).toContain("Allowed verdicts are");
       expectNothingSent(server.requests);
     } finally {
       server.stop();
@@ -219,6 +313,45 @@ describe("nemar dataset upload: direct identifiers", () => {
 });
 
 describe("nemar dataset upload: a verdict that needs an acknowledgment", () => {
+  test("the flag naming it lets the run past the preflight, and nothing is sent by it", async () => {
+    brainVisionDataset();
+    const server = startServer();
+    try {
+      // No tools on PATH: past the preflight, the run stops at the required-tools check.
+      const r = await upload(
+        ["--yes", "--acknowledge-identifier-preflight", "not-screened"],
+        server.url,
+        { noTools: true },
+      );
+      expect(r.output).toContain(
+        "Acknowledged with --acknowledge-identifier-preflight not-screened",
+      );
+      expect(r.output).toContain("Missing required tools");
+      expect(r.exitCode).not.toBe(0);
+      expectNothingSent(server.requests);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a comma-separated flag naming more than was found is not an acknowledgment", async () => {
+    brainVisionDataset();
+    const server = startServer();
+    try {
+      const r = await upload(
+        ["--yes", "--acknowledge-identifier-preflight", "not-screened,review"],
+        server.url,
+        { noTools: true },
+      );
+      expect(r.exitCode).toBe(1);
+      expect(r.output).toContain("must name exactly what was found, which is: not-screened");
+      expect(r.output).not.toContain("Missing required tools");
+      expectNothingSent(server.requests);
+    } finally {
+      server.stop();
+    }
+  });
+
   test("--yes does not acknowledge it; without a terminal or the flag, the upload stops", async () => {
     brainVisionDataset();
     const server = startServer();
@@ -241,7 +374,7 @@ describe("nemar dataset upload: a verdict that needs an acknowledgment", () => {
     try {
       const r = await upload(["--yes", "--acknowledge-identifier-preflight", "review"], server.url);
       expect(r.exitCode).toBe(1);
-      expect(r.output).toContain("names a different verdict than the one found (not-screened)");
+      expect(r.output).toContain("must name exactly what was found, which is: not-screened");
       expectNothingSent(server.requests);
     } finally {
       server.stop();
@@ -262,12 +395,59 @@ describe("nemar dataset upload: a verdict that needs an acknowledgment", () => {
   });
 });
 
+describe.skipIf(PYTHON === null)("nemar dataset upload at a terminal: the prompt", () => {
+  test("Enter takes the default, which is no", async () => {
+    brainVisionDataset();
+    const server = startServer();
+    try {
+      const r = await uploadAtTerminal("\\r", server.url);
+      expect(r.output).toContain("Upload anyway?");
+      expect(r.output).toContain("Upload cancelled. Nothing was sent.");
+      expect(r.output).not.toContain("Acknowledged at the prompt");
+      expect(r.exitCode).toBe(1);
+      expectNothingSent(server.requests);
+    } finally {
+      server.stop();
+    }
+  }, 120_000);
+
+  test("y acknowledges, and the run goes past the preflight", async () => {
+    brainVisionDataset();
+    const server = startServer();
+    try {
+      const r = await uploadAtTerminal("y\\r", server.url);
+      expect(r.output).toContain("Acknowledged at the prompt.");
+      expect(r.output).toContain("Missing required tools");
+      expect(r.output).not.toContain("Upload cancelled");
+      expectNothingSent(server.requests);
+    } finally {
+      server.stop();
+    }
+  }, 120_000);
+
+  test("Ctrl+C is not an acknowledgment", async () => {
+    brainVisionDataset();
+    const server = startServer();
+    try {
+      const r = await uploadAtTerminal("\\x03", server.url);
+      expect(r.output).toContain("Upload anyway?");
+      expect(r.output).not.toContain("Acknowledged at the prompt");
+      expect(r.output).not.toContain("Missing required tools");
+      expect(r.output).toContain("Upload cancelled. Nothing was sent.");
+      expect(r.exitCode).toBe(130);
+      expectNothingSent(server.requests);
+    } finally {
+      server.stop();
+    }
+  }, 120_000);
+});
+
 describe("the upload action hands the record to the create call (source-level supplement)", () => {
   // Every subprocess test above ends at the preflight, because a run past it would reach GitHub
   // and git-annex with this machine's credentials. So nothing above can see whether the action
   // passes the record on to createOrResumeDataset; the wire is tested in
   // upload-preflight-recording.test.ts from that function down. This pins the one hop between.
-  test("the step runs before the tool checks and its value reaches createOrResumeDataset", async () => {
+  test("the step runs first, is screened again before create, and that record is sent", async () => {
     const source = await Bun.file(join(REPO_ROOT, "src", "commands", "dataset.ts")).text();
     const action = source.slice(source.indexOf("export function createUploadCommand"));
     const step = action.indexOf("await identifierPreflightStep(absolutePath, options)");
@@ -279,9 +459,13 @@ describe("the upload action hands the record to the create call (source-level su
     ]) {
       expect(action.indexOf(later)).toBeGreaterThan(step);
     }
+    const recheck = action.indexOf(
+      "await recheckIdentifierPreflight(absolutePath, identifierPreflight)",
+    );
+    expect(recheck).toBeGreaterThan(action.indexOf('"Proceed with upload?"'));
+    expect(recheck).toBeLessThan(action.indexOf("createOrResumeDataset("));
     const call = action.slice(action.indexOf("createOrResumeDataset("));
     const args = call.slice(0, call.indexOf(");"));
-    expect(args).toContain("identifierPreflight ?? undefined");
-    expect(action).toContain("const identifierPreflight = preflight.value;");
+    expect(args).toContain("rechecked.value");
   });
 });

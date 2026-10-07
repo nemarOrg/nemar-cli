@@ -22,13 +22,20 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { InvalidArgumentError } from "commander";
 import {
+  type DatasetStatus,
   PREFLIGHT_ACKNOWLEDGEABLE,
+  type PreflightScan,
+  parsePreflightScan,
   parseUploaderPreflight,
 } from "../shared/identifier-screen-report";
 import {
+  collectAcknowledgment,
   decidePreflight,
   identifierPreflightStep,
+  preflightConditions,
+  recheckIdentifierPreflight,
   scanLocalDataset,
   walkDatasetTree,
 } from "../src/lib/upload/identifier-preflight";
@@ -71,6 +78,7 @@ function recording(patient?: string, family: "edf" | "bdf" = "edf"): Uint8Array 
 }
 
 const CLEAN_PATIENT = "P01 F X X";
+const IS_ROOT = process.getuid?.() === 0;
 /** A made-up surname in the name slot of the EDF+ patient field: a direct identifier. */
 const NAMED_PATIENT = "P01 F X Quillfeather";
 
@@ -145,7 +153,7 @@ describe("direct identifiers refuse the upload, with no way around it", () => {
     expect((await run()).status).toBe("fail");
     expect((await run({ dryRun: true })).status).toBe("fail");
     for (const verdict of PREFLIGHT_ACKNOWLEDGEABLE) {
-      expect((await run({ acknowledgeIdentifierPreflight: verdict })).status).toBe("fail");
+      expect((await run({ acknowledgeIdentifierPreflight: [verdict] })).status).toBe("fail");
     }
   });
 
@@ -203,9 +211,9 @@ describe("a verdict that needs a person proceeds only on an acknowledgment that 
   test("the flag acknowledges only the verdict it names", async () => {
     brainVision();
     for (const other of PREFLIGHT_ACKNOWLEDGEABLE.filter((s) => s !== "not-screened")) {
-      expect((await run({ acknowledgeIdentifierPreflight: other })).status).toBe("fail");
+      expect((await run({ acknowledgeIdentifierPreflight: [other] })).status).toBe("fail");
     }
-    const step = await run({ acknowledgeIdentifierPreflight: "not-screened" });
+    const step = await run({ acknowledgeIdentifierPreflight: ["not-screened"] });
     if (step.status !== "ok" || step.value === null) throw new Error("expected a record");
     expect(step.value.acknowledged_via).toBe("flag");
     expect(step.value.scan.status).toBe("not-screened");
@@ -228,7 +236,7 @@ describe("a verdict that needs a person proceeds only on an acknowledgment that 
     expect(scan.read_failures).toEqual({ "edf/short-body": 1 });
     expect(scan.incomplete_reasons).toEqual(["edf-headers-unread"]);
     expect((await run()).status).toBe("fail");
-    expect((await run({ acknowledgeIdentifierPreflight: "unchecked" })).status).toBe("ok");
+    expect((await run({ acknowledgeIdentifierPreflight: ["unchecked"] })).status).toBe("ok");
   });
 
   test("a file named .edf whose header is not EDF is a finding, not a clean header", async () => {
@@ -303,8 +311,8 @@ describe("the walk screens what the upload sends, and counts what it cannot see"
     expect(scan.read_failures).toEqual({ "edf/unreadable-entry": 1 });
   }, 10_000);
 
-  test("a directory that cannot be listed makes the scan incomplete", async () => {
-    if (process.getuid?.() === 0) return; // root lists anything; nothing to prove
+  // Root reads anything, so there is nothing to prove as root: the test reports a skip.
+  test.skipIf(IS_ROOT)("a directory that cannot be listed makes the scan incomplete", async () => {
     bidsWith(recording(CLEAN_PATIENT));
     write("locked/sub-02_task-rest_eeg.edf", recording(NAMED_PATIENT));
     chmodSync(join(root, "locked"), 0o000);
@@ -375,10 +383,35 @@ describe("large datasets", () => {
 // ---------------------------------------------------------------------------------------
 
 describe("decidePreflight", () => {
+  /** A scan in the contract's shape whose counts agree with its status. */
+  const scan = (status: DatasetStatus, over: Partial<PreflightScan> = {}): PreflightScan =>
+    parsePreflightScan({
+      scanned_at: "2026-10-06T12:00:00.000Z",
+      status,
+      incomplete: status === "unchecked",
+      incomplete_reasons: status === "unchecked" ? ["edf-headers-unread"] : [],
+      files: {
+        total: 4,
+        edf_bdf: 2,
+        header_read: status === "unchecked" ? 1 : 2,
+        header_read_failed: status === "unchecked" ? 1 : 0,
+      },
+      findings_by_kind:
+        status === "direct-identifiers"
+          ? { "edf-patient-name": 1 }
+          : status === "review"
+            ? { "image-or-document-file": 1 }
+            : {},
+      edf_bdf_files_flagged: status === "direct-identifiers" ? 1 : 0,
+      unscreened_formats: status === "clean-edf-only-others-unscreened" ? { ".vhdr": 1 } : {},
+      read_failures: status === "unchecked" ? { "edf/short-body": 1 } : {},
+      ...over,
+    });
   const all = { isTty: true, dryRun: true, no: true };
+
   test("clear verdicts proceed with nothing to acknowledge, whatever was passed", () => {
-    for (const status of ["clean", "dates-only", "no-recordings"] as const) {
-      expect(decidePreflight(status, { ...all, acknowledge: "review" })).toEqual({
+    for (const status of ["clean", "dates-only"] as const) {
+      expect(decidePreflight(scan(status), { ...all, acknowledge: ["review"] })).toEqual({
         action: "proceed",
         acknowledgedVia: null,
       });
@@ -389,34 +422,223 @@ describe("decidePreflight", () => {
     for (const choices of [
       { isTty: true },
       { isTty: false, dryRun: true },
-      { isTty: true, acknowledge: "direct-identifiers" },
-      { isTty: true, acknowledge: "review" },
+      { isTty: true, acknowledge: ["direct-identifiers"] },
+      { isTty: true, acknowledge: [...PREFLIGHT_ACKNOWLEDGEABLE] },
     ]) {
-      expect(decidePreflight("direct-identifiers", choices)).toEqual({ action: "refuse" });
+      expect(decidePreflight(scan("direct-identifiers"), choices)).toEqual({ action: "refuse" });
     }
   });
 
   test("an acknowledgeable verdict: flag, preview, decline, prompt, or stop, in that order", () => {
-    for (const status of PREFLIGHT_ACKNOWLEDGEABLE) {
-      expect(decidePreflight(status, { ...all, acknowledge: status })).toEqual({
+    for (const status of ["review", "unchecked", "clean-edf-only-others-unscreened"] as const) {
+      const s = scan(status);
+      expect(decidePreflight(s, { ...all, acknowledge: [status] })).toEqual({
         action: "proceed",
         acknowledgedVia: "flag",
       });
-      const other = PREFLIGHT_ACKNOWLEDGEABLE.find((s) => s !== status);
-      expect(decidePreflight(status, { ...all, acknowledge: other })).toEqual({
+      const other = PREFLIGHT_ACKNOWLEDGEABLE.find((v) => v !== status);
+      expect(decidePreflight(s, { ...all, acknowledge: [other as string] })).toEqual({
         action: "stop",
         why: "acknowledgment-mismatch",
       });
-      expect(decidePreflight(status, all)).toEqual({ action: "preview" });
-      expect(decidePreflight(status, { isTty: true, no: true })).toEqual({
+      expect(decidePreflight(s, all)).toEqual({ action: "preview" });
+      expect(decidePreflight(s, { isTty: true, no: true })).toEqual({
         action: "stop",
         why: "declined",
       });
-      expect(decidePreflight(status, { isTty: true })).toEqual({ action: "prompt" });
-      expect(decidePreflight(status, { isTty: false })).toEqual({
+      expect(decidePreflight(s, { isTty: true })).toEqual({ action: "prompt" });
+      expect(decidePreflight(s, { isTty: false })).toEqual({
         action: "stop",
         why: "acknowledgment-required",
       });
     }
+  });
+
+  test("the flag must name every condition, and no more", () => {
+    // `review` outranks an incomplete read and an unscreened format in the verdict, so both ride
+    // under it unless the acknowledgment has to name them too.
+    const hidden = scan("review", {
+      incomplete: true,
+      incomplete_reasons: ["edf-headers-unread"],
+      files: { total: 4, edf_bdf: 2, header_read: 1, header_read_failed: 1 },
+      read_failures: { "edf/unreadable-entry": 1 },
+      unscreened_formats: { ".vhdr": 1 },
+    });
+    expect(preflightConditions(hidden)).toEqual(["not-screened", "review", "unchecked"]);
+    const flag = (acknowledge: string[]) => decidePreflight(hidden, { isTty: false, acknowledge });
+    expect(flag(["review"]).action).toBe("stop");
+    expect(flag(["review", "unchecked"]).action).toBe("stop");
+    expect(flag(["unchecked", "review", "not-screened"])).toEqual({
+      action: "proceed",
+      acknowledgedVia: "flag",
+    });
+    // Every word at once is not a standing waiver: a word for a condition not found stops it.
+    expect(flag([...PREFLIGHT_ACKNOWLEDGEABLE]).action).toBe("stop");
+    expect(preflightConditions(scan("clean"))).toEqual([]);
+    expect(preflightConditions(scan("direct-identifiers"))).toEqual([]);
+  });
+
+  test("the option takes repeated and comma-separated verdicts, and nothing else", () => {
+    expect(collectAcknowledgment("review,unchecked", undefined)).toEqual(["review", "unchecked"]);
+    expect(collectAcknowledgment("not-screened", ["review"])).toEqual(["review", "not-screened"]);
+    for (const bad of ["direct-identifiers", "clean", "review,Quillfeather", "", " , "]) {
+      expect(() => collectAcknowledgment(bad, undefined)).toThrow(InvalidArgumentError);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// Review findings (PR review of #1613): each case below was a rule with no test, or a hole
+// ---------------------------------------------------------------------------------------
+
+describe("the walk, the reader and the limits, at their edges", () => {
+  test("a DIRECTORY named .gitattributes is walked: the upload plan lists what is inside", async () => {
+    bidsWith(recording(CLEAN_PATIENT));
+    write(".gitattributes/sub-02_task-rest_eeg.edf", recording(NAMED_PATIENT));
+    write("sub-01/.gitattributes/sub-03_task-rest_eeg.edf", recording(NAMED_PATIENT));
+    const scan = await scanLocalDataset(root);
+    expect(scan.status).toBe("direct-identifiers");
+    expect(scan.files.edf_bdf).toBe(3);
+  });
+
+  test("a .git below the top is dataset content, as the upload plan lists it", async () => {
+    bidsWith(recording(CLEAN_PATIENT));
+    write("sub-01/.git/sub-01_task-x_eeg.edf", recording(NAMED_PATIENT));
+    expect((await scanLocalDataset(root)).status).toBe("direct-identifiers");
+  });
+
+  test.skipIf(IS_ROOT)(
+    "a file stat accepts and open refuses is a failed read, never empty",
+    async () => {
+      bidsWith(recording(CLEAN_PATIENT));
+      write("participants.tsv", "participant_id\tfull name\nsub-01\tQ\n");
+      write("sourcedata/export/session.json", JSON.stringify({ PatientName: "Q" }));
+      write("sub-01/eeg/sub-01_task-two_eeg.edf", recording(NAMED_PATIENT));
+      for (const rel of [
+        "participants.tsv",
+        "sourcedata/export/session.json",
+        "sub-01/eeg/sub-01_task-two_eeg.edf",
+      ]) {
+        chmodSync(join(root, rel), 0o000);
+      }
+      const scan = await scanLocalDataset(root);
+      // Each of the three holds a direct identifier, and none could be read: not clean, and not
+      // reported as a finding nobody saw. Every unread file is counted by what it is.
+      expect(scan.status).toBe("unchecked");
+      expect(scan.incomplete_reasons).toEqual([
+        "edf-headers-unread",
+        "json-unread",
+        "participants-unread",
+      ]);
+      expect(scan.read_failures).toEqual({
+        "edf/unreadable-entry": 1,
+        "json/unreadable-entry": 1,
+        "participants/unreadable-entry": 1,
+      });
+    },
+  );
+
+  test("a side file is read to the publication screen's limit, not the fleet default", async () => {
+    bidsWith(recording(CLEAN_PATIENT));
+    // 100 KiB, the identifying key past the first 64 KiB: the fleet scan's HTTP default would
+    // call it oversize; the local limit (2 MiB) reads it whole.
+    const padding = "x".repeat(100 * 1024);
+    write("sourcedata/export/big.json", JSON.stringify({ notes: padding, PatientName: "Q" }));
+    expect((await scanLocalDataset(root)).status).toBe("direct-identifiers");
+  });
+
+  test("every side file is read, none sampled: 301 exports, the key in the last", async () => {
+    bidsWith(recording(CLEAN_PATIENT));
+    for (let i = 0; i < 300; i++) {
+      write(`sourcedata/export/s${String(i).padStart(3, "0")}.json`, JSON.stringify({ i }));
+    }
+    write("sourcedata/export/s300.json", JSON.stringify({ PatientName: "Q" }));
+    const scan = await scanLocalDataset(root);
+    expect(scan.status).toBe("direct-identifiers");
+    expect(scan.incomplete_reasons).not.toContain("json-sampled");
+  });
+
+  test("an extension nobody listed is counted as .other, so a name in it is never printed", async () => {
+    bidsWith(recording(CLEAN_PATIENT));
+    write("sourcedata/raw/session.quillfeather", new Uint8Array(16));
+    write("sourcedata/raw/backup.dat_backup", new Uint8Array(16));
+    write("sub-01/eeg/sub-01_task-rest_eeg.vhdr", "Brain Vision Data Exchange Header File\n");
+    const scan = await scanLocalDataset(root);
+    expect(scan.status).toBe("clean-edf-only-others-unscreened");
+    expect(scan.unscreened_formats).toEqual({ ".other": 2, ".vhdr": 1 });
+  });
+
+  test("a dataset path that is not a directory is refused before anything else", async () => {
+    write("not-a-dataset.edf", recording(CLEAN_PATIENT));
+    const step = await identifierPreflightStep(join(root, "not-a-dataset.edf"), {}, false);
+    expect(step.status).toBe("fail");
+  });
+});
+
+describe("a verdict hides nothing an acknowledgment must name", () => {
+  test.skipIf(IS_ROOT)(
+    "an image beside an unreadable header needs review AND unchecked",
+    async () => {
+      bidsWith(recording(CLEAN_PATIENT));
+      write("sourcedata/figure.png", new Uint8Array(8));
+      write("sub-01/eeg/sub-01_task-two_eeg.edf", recording(NAMED_PATIENT));
+      chmodSync(join(root, "sub-01/eeg/sub-01_task-two_eeg.edf"), 0o000);
+      const scan = await scanLocalDataset(root);
+      expect(scan.status).toBe("review");
+      expect(preflightConditions(scan)).toEqual(["review", "unchecked"]);
+      expect((await run({ acknowledgeIdentifierPreflight: ["review"] })).status).toBe("fail");
+      // As the command line gives it: one comma-separated value, through the option's parser.
+      const step = await run({
+        acknowledgeIdentifierPreflight: collectAcknowledgment("review,unchecked", undefined),
+      });
+      expect(step.status).toBe("ok");
+    },
+  );
+
+  test("an image beside recordings it cannot parse needs review AND not-screened", async () => {
+    write("dataset_description.json", JSON.stringify({ Name: "Fixture" }));
+    write("sourcedata/figure.png", new Uint8Array(8));
+    write("sub-01/eeg/sub-01_task-rest_eeg.vhdr", "Brain Vision Data Exchange Header File\n");
+    const scan = await scanLocalDataset(root);
+    expect(scan.status).toBe("review");
+    expect(preflightConditions(scan)).toEqual(["not-screened", "review"]);
+    expect((await run({ acknowledgeIdentifierPreflight: ["review"] })).status).toBe("fail");
+    expect((await run({ acknowledgeIdentifierPreflight: ["review", "not-screened"] })).status).toBe(
+      "ok",
+    );
+  });
+});
+
+describe("the tree is screened again right before anything is sent", () => {
+  async function first(options: Parameters<typeof identifierPreflightStep>[1] = {}) {
+    const step = await run(options);
+    if (step.status !== "ok" || step.value === null) throw new Error("expected a record");
+    return step.value;
+  }
+
+  test("unchanged: the second scan is the record, with the same acknowledgment", async () => {
+    write("dataset_description.json", JSON.stringify({ Name: "Fixture" }));
+    write("sub-01/eeg/sub-01_task-rest_eeg.vhdr", "Brain Vision Data Exchange Header File\n");
+    const record = await first({ acknowledgeIdentifierPreflight: ["not-screened"] });
+    // The CLI writes files of its own between the two scans; a LICENSE changes nothing found.
+    write("LICENSE", "CC0\n");
+    const again = await recheckIdentifierPreflight(root, record);
+    if (again.status !== "ok") throw new Error("expected the recheck to pass");
+    expect(again.value.acknowledged_via).toBe("flag");
+    expect(again.value.scan.files.total).toBe(record.scan.files.total + 1);
+  });
+
+  test("a direct identifier that appeared after the first scan stops the upload", async () => {
+    bidsWith(recording(CLEAN_PATIENT));
+    const record = await first();
+    write("sub-01/eeg/sub-01_task-rest_eeg.edf", recording(NAMED_PATIENT));
+    expect((await recheckIdentifierPreflight(root, record)).status).toBe("fail");
+  });
+
+  test("a condition the acknowledgment did not name stops it too", async () => {
+    bidsWith(recording(CLEAN_PATIENT));
+    const record = await first();
+    write("sub-01/eeg/sub-01_task-two_eeg.vhdr", "Brain Vision Data Exchange Header File\n");
+    expect((await recheckIdentifierPreflight(root, record)).status).toBe("fail");
   });
 });

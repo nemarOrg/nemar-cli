@@ -211,7 +211,12 @@ import {
   saveDatasetStep,
   writeNemarMetadata,
 } from "../lib/upload/finalize.js";
-import { ACKNOWLEDGE_FLAG, identifierPreflightStep } from "../lib/upload/identifier-preflight.js";
+import {
+  ACKNOWLEDGE_FLAG,
+  collectAcknowledgment,
+  identifierPreflightStep,
+  recheckIdentifierPreflight,
+} from "../lib/upload/identifier-preflight.js";
 import {
   computeFilesToUpload,
   prepareUploadProgress,
@@ -565,9 +570,9 @@ export function createUploadCommand(): Command {
     )
     .addOption(
       new Option(
-        `${ACKNOWLEDGE_FLAG} <verdict>`,
-        "Upload despite this identifier-preflight verdict (non-interactive; recorded). Direct identifiers cannot be acknowledged",
-      ).choices([...PREFLIGHT_ACKNOWLEDGEABLE]),
+        `${ACKNOWLEDGE_FLAG} <verdicts>`,
+        `Upload despite what the identifier preflight found, naming every condition it reports (non-interactive; recorded; repeatable or comma-separated: ${PREFLIGHT_ACKNOWLEDGEABLE.join(", ")}). Direct identifiers cannot be acknowledged`,
+      ).argParser(collectAcknowledgment),
     )
     .addHelpText(
       "after",
@@ -596,8 +601,10 @@ Identifier preflight:
     refused. There is no override.
   - A lesser finding, an incomplete read, or recordings in a format the
     scanner cannot read: the upload needs your acknowledgment, at the prompt
-    or with ${ACKNOWLEDGE_FLAG} <verdict>. --yes does not count.
-  The verdict is recorded with your deposit attestation. NEMAR screens the
+    or with ${ACKNOWLEDGE_FLAG} naming every condition the
+    preflight reports (for example review,unchecked). --yes does not count.
+  The dataset is screened again right before anything is sent, and the
+  verdict is recorded with your deposit attestation. NEMAR screens the
   dataset again when you request publication.
 
 Note:
@@ -724,6 +731,17 @@ Examples:
 
       console.log();
 
+      // Identifier preflight, again, right before the first byte goes: the steps since the first
+      // screen take as long as a person likes and some write into the tree, so what is recorded
+      // and sent is the tree as it is now. Only a dry run gets no record, and it returned at the
+      // plan; a null here is a bug, and it stops the upload rather than sending unscreened files.
+      if (identifierPreflight === null) {
+        console.log(chalk.red("Identifier preflight: no record to send. Nothing was sent."));
+        process.exit(1);
+      }
+      const rechecked = await recheckIdentifierPreflight(absolutePath, identifierPreflight);
+      if (rechecked.status === "fail") process.exit(1);
+
       const { dataFiles, uploadProgress: loadedProgress } = prepareUploadProgress(
         absolutePath,
         manifest,
@@ -738,8 +756,7 @@ Examples:
         dataFiles,
         existingConfig,
         attestation,
-        // Null only on a dry run, which returned at the plan above.
-        identifierPreflight ?? undefined,
+        rechecked.value,
       );
       if (created.status === "fail") process.exit(1);
       const datasetInfo = created.value;
