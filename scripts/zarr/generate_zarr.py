@@ -1000,7 +1000,8 @@ def count_infra_failures(failures: list, failure_entries: list) -> int:
     ``retryable_coded`` term is normally zero. It stays because the term is what
     makes the rule TRUE rather than incidentally right: if a retryable code is
     ever surfaced as a typed failure again, the verdict must not silently flip to
-    terminal. This number equals ``len(pending)`` for a run, by construction.
+    terminal. This number is the infra failures of this run itself; recordings
+    deferred for scratch space are pending but are not counted.
     """
     retryable_coded = sum(1 for e in failure_entries if e.get("code") in RETRYABLE_CODES)
     return len(failures) - len(failure_entries) + retryable_coded

@@ -1117,7 +1117,7 @@ def test_a_run_with_retryable_failures_says_so_once(drain_one) -> None:
     go, _, _ = drain_one
     done = go({**UNCHANGED_BODY, "retryable_failures": 3})
     assert done.returncode == 0, done.stderr
-    assert "3 recording(s) failed for a RETRYABLE reason" in done.stderr
+    assert done.stderr.count("3 recording(s) failed for a RETRYABLE reason") == 1
 
 
 def test_a_pending_bump_is_re_raised_as_its_own_error_line(ack_run) -> None:

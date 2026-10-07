@@ -58,11 +58,12 @@ None.
 ### Deploy coupling
 
 Merging to `main` makes the Hallu converter (the Zarr conversion host, cron `ZARR_DRIVER_REF=main`)
-run this code on its next tick. The only other changes are the versions: `backend/package.json`
-moves, so the backend redeploys unchanged, and the root `package.json` moves from 0.10.13 to a
-`0.10.14-devN` pre-release, so the merge also triggers `auto-tag.yml`, which strips `-dev`, tags
-`v0.10.14` and publishes the identical CLI to npm as a new version. A dataset already stuck on scratch space
-converts again only when it is queued: `hallu-zarr.sh --dataset <id> --requeue done --execute`.
+run this code on its next tick. The only other deploy-relevant changes are the versions:
+`backend/package.json` moves, so the backend redeploys unchanged, and the root `package.json`
+moves from 0.10.13 to a `0.10.14-devN` pre-release, so the merge also triggers `auto-tag.yml`,
+which strips `-dev`, tags `v0.10.14` and publishes the identical CLI to npm as a new version.
+A dataset already stuck on scratch space converts again only when it is queued:
+`hallu-zarr.sh --dataset <id> --requeue done --execute`.
 
 ## 0.10.13 - 2026-10-05
 
