@@ -39,15 +39,33 @@ import type { Command, Option } from "commander";
  * command that declares it so the caller can fail the way Commander would.
  */
 export class MissingShadowedValueError extends Error {
-  readonly command: Command;
-  readonly option: Option;
+  readonly code = "commander.optionMissingArgument";
 
-  constructor(command: Command, option: Option) {
+  constructor(
+    readonly command: Command,
+    readonly option: Option,
+  ) {
     // Commander's own wording for a required option with no argument.
     super(`error: option '${option.flags}' argument missing`);
     this.name = "MissingShadowedValueError";
-    this.command = command;
-    this.option = option;
+  }
+}
+
+/**
+ * A shadowed option was typed before the command it belongs to
+ * (`dataset --version 2.0.0 release`). The parent command does not declare it,
+ * so Commander hands it to the root, and the equals spelling cannot reach the
+ * command either (the parent rejects it as an unknown option).
+ */
+export class MisplacedShadowedOptionError extends Error {
+  readonly code = "commander.unknownOption";
+
+  constructor(
+    readonly command: Command,
+    readonly option: Option,
+  ) {
+    super(`error: option '${option.flags}' must come after '${command.name()}'`);
+    this.name = "MisplacedShadowedOptionError";
   }
 }
 
@@ -94,12 +112,23 @@ function shadowedOptions(command: Command, ancestors: readonly Command[]): Map<s
   return shadowed;
 }
 
+/** Every long flag that some command below `command` takes a value for while an ancestor's boolean claims it. */
+function shadowedFlagsInTree(command: Command, ancestors: readonly Command[]): Set<string> {
+  const flags = new Set(shadowedOptions(command, ancestors).keys());
+  for (const sub of command.commands) {
+    for (const f of shadowedFlagsInTree(sub, [...ancestors, command])) flags.add(f);
+  }
+  return flags;
+}
+
 /**
  * Return `argv` (user arguments, i.e. `process.argv.slice(2)`) with shadowed
  * value options of the addressed subcommand joined to their values.
  *
  * @throws {MissingShadowedValueError} a shadowed option that requires a value
  *   appears with none.
+ * @throws {MisplacedShadowedOptionError} a shadowed option is typed before the
+ *   command that declares it.
  */
 export function bindShadowedOptionValues(root: Command, argv: string[]): string[] {
   // Walk to the leaf command: descend while a non-flag token names a
@@ -107,13 +136,26 @@ export function bindShadowedOptionValues(root: Command, argv: string[]): string[
   // any token starting with "-" is enough here. The one value-taking option on
   // a command that also has subcommands (`admin recover --recover-file`) could
   // only mislead this walk if its value spelled a subcommand name.
+  const treeFlags = shadowedFlagsInTree(root, []);
+  const early: { flag: string; index: number }[] = [];
   const ancestors: Command[] = [];
   let current = root;
   let leafIndex = -1;
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
     if (token === "--") break;
-    if (token.startsWith("-")) continue;
+    if (token.startsWith("-")) {
+      // A shadowed flag below the root, ahead of the command that takes it
+      // (`dataset --version 2.0.0 release`): remember it, and step over its
+      // value so the walk can still find that command. At the root it is the
+      // root's own flag (`nemar --version`).
+      const next = argv[i + 1];
+      if (current !== root && treeFlags.has(token)) {
+        early.push({ flag: token, index: i });
+        if (isValue(next) && !findSubcommand(current, next)) i++;
+      }
+      continue;
+    }
     const sub = findSubcommand(current, token);
     if (!sub) break;
     ancestors.push(current);
@@ -124,6 +166,10 @@ export function bindShadowedOptionValues(root: Command, argv: string[]): string[
 
   const shadowed = shadowedOptions(current, ancestors);
   if (shadowed.size === 0) return argv;
+  for (const { flag, index } of early) {
+    const option = shadowed.get(flag);
+    if (option && index < leafIndex) throw new MisplacedShadowedOptionError(current, option);
+  }
 
   // Help outranks a missing value: asking for it is a request to read, not run.
   const dashDash = argv.indexOf("--");

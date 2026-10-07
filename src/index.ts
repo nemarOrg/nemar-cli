@@ -32,7 +32,11 @@ import { doctorCommand } from "./commands/doctor.js";
 import { sandboxCommand } from "./commands/sandbox.js";
 import { IS_DEV_BUILD } from "./lib/api/client.js";
 import { MaintenanceError, errorDetail } from "./lib/api/errors.js";
-import { MissingShadowedValueError, bindShadowedOptionValues } from "./lib/argv-shadowing.js";
+import {
+  MisplacedShadowedOptionError,
+  MissingShadowedValueError,
+  bindShadowedOptionValues,
+} from "./lib/argv-shadowing.js";
 import { runComplete } from "./lib/completion/run.js";
 import { NO_DESCRIPTION, NO_OPTION, YES_DESCRIPTION, YES_OPTION } from "./lib/confirm.js";
 import {
@@ -364,8 +368,8 @@ async function main() {
   try {
     argv = bindShadowedOptionValues(program, rawArgs);
   } catch (err) {
-    if (err instanceof MissingShadowedValueError) {
-      err.command.error(err.message, { code: "commander.optionMissingArgument" });
+    if (err instanceof MissingShadowedValueError || err instanceof MisplacedShadowedOptionError) {
+      err.command.error(err.message, { code: err.code });
     }
     throw err;
   }
