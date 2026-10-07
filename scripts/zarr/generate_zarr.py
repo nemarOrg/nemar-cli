@@ -3108,7 +3108,7 @@ def parse_events_tsv(events_text: str | None) -> ParsedEvents | None:
 # `trial_type` column of events.parquet (when that file is published), which is
 # the lossless record. 128 keeps every ordinary label as itself: the longest label
 # key in the other published datasets is 104 characters, while a whole-record
-# value is over 120.
+# value is at least 120.
 TRIAL_TYPE_KEY_MAX = 128
 _TRIAL_TYPE_PREFIX_CHARS = 13
 _TRIAL_TYPE_DIGEST_CHARS = 14
@@ -3146,7 +3146,7 @@ def shorten_trial_types(counts: dict[str, int]) -> dict[str, int]:
 
     A value of TRIAL_TYPE_KEY_MAX code points or fewer is its own key. A longer one
     gets `trial_type_key(value)`, and keys are unique by construction: values that
-    fit claim their own key first, then the long values in sorted order, and one
+    fit claim their own key first, then the long values sorted by code point, and one
     whose key is taken (a hash collision, or a short value that happens to look
     like one) is re-hashed with the next salt. The result therefore depends only on
     the set of values, never on the order they arrived in, and the counts are never
