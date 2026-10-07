@@ -2918,7 +2918,9 @@ Examples:
 
       // Determine new version
       let newVersion: string;
-      if (options.version) {
+      // `!== undefined`, not truthiness: an empty --version= is a version the
+      // user gave and got wrong, not a flag they left out.
+      if (options.version !== undefined) {
         if (!isValidStableVersion(options.version)) {
           console.log(chalk.red(`Error: Invalid version: ${options.version}`));
           console.log("  Expected format: X.Y.Z (e.g., 2.0.0)");

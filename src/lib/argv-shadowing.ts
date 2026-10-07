@@ -16,8 +16,8 @@
  * flag an ancestor declares as a BOOLEAN is joined to its value
  * (`--version 2.0.0` -> `--version=2.0.0`).
  *
- * A shadowed flag with NO value (last token, or followed by another flag) is
- * an error, not a pass-through: left alone, the root would eat it and print
+ * A shadowed flag with NO value (last token, empty, or followed by another
+ * flag) is an error, not a pass-through: left alone, the root would eat it and print
  * the CLI version, which is the same silent no-op for a scripted `-y` release.
  * The function throws {@link MissingShadowedValueError}; the caller reports it
  * through Commander so the message and exit code are Commander's own.
@@ -129,7 +129,7 @@ export function bindShadowedOptionValues(root: Command, argv: string[]): string[
       continue;
     }
     const next = argv[i + 1];
-    if (next !== undefined && !next.startsWith("-")) {
+    if (next !== undefined && next !== "" && !next.startsWith("-")) {
       out.push(`${token}=${next}`);
       i++;
     } else if (option.required) {
