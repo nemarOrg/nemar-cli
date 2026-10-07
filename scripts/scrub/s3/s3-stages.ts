@@ -84,6 +84,7 @@ import {
   TempArea,
   type VersionRef,
   abortMultipart,
+  appendAll,
   bytesEqual,
   callsFor,
   completeMultipart,
@@ -1880,7 +1881,7 @@ export async function deleteOldStage(o: DeleteOptions): Promise<number> {
     for (const d of ["version", "zarr"] as const) {
       const prefix = `${dataset}/${d}/`;
       const history = historyOf(await listPrefixVersions(ctx, prefix));
-      if (prunePrefixes.includes(prefix)) prunes.push(...history);
+      if (prunePrefixes.includes(prefix)) appendAll(prunes, history);
       else if (history.length > 0) unpruned[d] = history.length;
     }
     const prunedVersions = prunes.filter((p) => p.kind === "version").length;
