@@ -8636,6 +8636,21 @@ def memory_retry_context(ctx: dict) -> tuple[dict, int]:
     return {**ctx, "mem_budget": budget}, budget
 
 
+def scratch_settings_message() -> str:
+    """The one line that names every invalid ``ZARR_SCRATCH_*`` setting."""
+    return "invalid scratch setting: " + "; ".join(SCRATCH_SETTING_ERRORS)
+
+
+def check_env() -> int:
+    """``--check-env``: 0 when the scratch settings are valid, else 1 with the message
+    printed. Takes no dataset, repository or callback, so it can run once ahead of the
+    whole drain."""
+    if SCRATCH_SETTING_ERRORS:
+        print(f"::error::{scratch_settings_message()}", flush=True)
+        return 1
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Generate NEMAR Zarr serving copies")
     ap.add_argument("--dataset-id", required=True)
@@ -8700,12 +8715,23 @@ def main() -> int:
         "Default 1 (serial). The Hallu cron raises it; cap to keep N concurrent "
         "multi-GB recordings within local scratch + RAM.",
     )
+    ap.add_argument(
+        "--check-env",
+        action="store_true",
+        help="validate the ZARR_SCRATCH_* settings and exit (0 valid, 1 invalid, with "
+        "the message). Needs no other argument; hallu-zarr.sh runs it once before "
+        "dispatching any dataset.",
+    )
+    if "--check-env" in sys.argv[1:]:
+        return check_env()
     args = ap.parse_args()
 
     if SCRATCH_SETTING_ERRORS:
         # Refused here, not at import, so the failure is REPORTED: the callback is
-        # how an operator learns why every dataset stopped converting.
-        message = "invalid scratch setting: " + "; ".join(SCRATCH_SETTING_ERRORS)
+        # how an operator learns why every dataset stopped converting. (The Hallu
+        # driver script checks once up front with --check-env, so in production this
+        # only fires for a run started by hand.)
+        message = scratch_settings_message()
         print(f"::error::{message}", flush=True)
         with open(args.callback_out, "w") as fh:
             json.dump(

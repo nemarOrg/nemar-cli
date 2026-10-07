@@ -5707,6 +5707,45 @@ class TestScratchSettings(unittest.TestCase):
         self.assertIn("::error::invalid scratch setting", done.stdout)
 
 
+class TestCheckEnv(unittest.TestCase):
+    """`--check-env`: the scratch settings, validated once, with no dataset."""
+
+    SCRIPT = Path(__file__).resolve().parent / "generate_zarr.py"
+
+    def run_check(self, **env):
+        base = {k: v for k, v in os.environ.items() if not k.startswith("ZARR_SCRATCH_")}
+        return subprocess.run(
+            [sys.executable, str(self.SCRIPT), "--check-env"], env={**base, **env},
+            capture_output=True, text=True, timeout=120,
+        )
+
+    def test_valid_settings_exit_zero_and_say_nothing(self):
+        done = self.run_check()
+        self.assertEqual((done.returncode, done.stdout), (0, ""), done.stderr)
+
+    def test_a_valid_override_is_accepted(self):
+        self.assertEqual(self.run_check(ZARR_SCRATCH_HEADROOM_BYTES="0").returncode, 0)
+
+    def test_a_bad_setting_exits_one_and_names_it(self):
+        done = self.run_check(ZARR_SCRATCH_HEADROOM_BYTES="10G")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("::error::invalid scratch setting", done.stdout)
+        self.assertIn("ZARR_SCRATCH_HEADROOM_BYTES='10G' is not a number", done.stdout)
+
+    def test_every_bad_setting_is_listed_in_one_message(self):
+        done = self.run_check(ZARR_SCRATCH_STREAM_FACTOR="0", ZARR_SCRATCH_INMEM_FACTOR="nan")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("ZARR_SCRATCH_STREAM_FACTOR", done.stdout)
+        self.assertIn("ZARR_SCRATCH_INMEM_FACTOR", done.stdout)
+
+    def test_it_needs_no_dataset_repository_or_callback(self):
+        # None of the arguments a conversion requires, and it must not write one.
+        with tempfile.TemporaryDirectory() as tmp:
+            before = os.listdir(tmp)
+            self.assertEqual(self.run_check().returncode, 0)
+            self.assertEqual(os.listdir(tmp), before)
+
+
 class TestUnreadableSizesAreCharged(unittest.TestCase):
     STREAMED = "sub-01/ieeg/sub-01_task-x_ieeg.vhdr"
 

@@ -729,6 +729,14 @@ if argv[:1] == ["-c"]:
 with open(os.environ["QPY_LOG"], "a") as fh:
     fh.write(" ".join(argv) + chr(10))
 
+if "--check-env" in argv:
+    # generate_zarr.py --check-env: the scratch-settings preflight. A test makes it
+    # fail by setting CHECK_ENV_RC (and CHECK_ENV_MSG, printed as the driver does).
+    rc = int(os.environ.get("CHECK_ENV_RC", "0"))
+    if rc:
+        print(os.environ.get("CHECK_ENV_MSG", "::error::invalid scratch setting"))
+    sys.exit(rc)
+
 if "reconcile" in argv:
     print(os.environ.get("QPY_RECONCILE_OUT", "queued=0 parked=0"))
 # `next` prints nothing: an empty line ends the drain immediately.
@@ -886,6 +894,50 @@ def test_ack_file_is_consumed_by_exactly_one_run(ack_run) -> None:
     reconciles = [c for c in qpy_calls() if "reconcile" in c]
     assert len(reconciles) == 2, qpy_calls()
     assert "--engine-requeue-ack" not in reconciles[1]
+
+
+# ---------------------------------------------------------------------------
+# The scratch-settings preflight runs once, before any dataset is dispatched
+# ---------------------------------------------------------------------------
+
+BAD_SETTING = "::error::invalid scratch setting: ZARR_SCRATCH_HEADROOM_BYTES='10G' is not a number"
+
+
+def test_a_bad_scratch_setting_stops_the_whole_run_before_the_queue_is_touched(ack_run) -> None:
+    """Checked per dataset, a typo in the crontab posts `failed` for every dataset
+    the drain visits and burns a queue attempt on each. Checked here, once, it stops
+    the run with the message and leaves the queue and D1 alone."""
+    run, qpy_calls, _, _ = ack_run
+    done = run(extra_env={"CHECK_ENV_RC": "1", "CHECK_ENV_MSG": BAD_SETTING})
+    assert done.returncode != 0
+    assert "ZARR_SCRATCH_HEADROOM_BYTES='10G' is not a number" in done.stderr
+    assert "refusing to dispatch any dataset" in done.stderr
+    calls = qpy_calls()
+    assert any("--check-env" in c for c in calls), calls
+    # No reconcile, no `next`, nothing that touches the queue.
+    assert [c for c in calls if "--check-env" not in c] == [], calls
+
+
+def test_a_bad_scratch_setting_also_stops_a_single_dataset_run(ack_run) -> None:
+    run, qpy_calls, _, _ = ack_run
+    done = run(
+        args=["--dataset", "nm000001"],
+        extra_env={"CHECK_ENV_RC": "1", "CHECK_ENV_MSG": BAD_SETTING},
+    )
+    assert done.returncode != 0
+    assert "is not a number" in done.stderr
+    assert [c for c in qpy_calls() if "--check-env" not in c] == []
+
+
+def test_valid_scratch_settings_let_the_run_proceed_to_the_queue(ack_run) -> None:
+    run, qpy_calls, _, _ = ack_run
+    done = run()
+    assert done.returncode == 0, done.stderr
+    calls = qpy_calls()
+    check = next(i for i, c in enumerate(calls) if "--check-env" in c)
+    reconcile = next(i for i, c in enumerate(calls) if "reconcile" in c)
+    assert check < reconcile, calls
+    assert sum("--check-env" in c for c in calls) == 1, "checked once per run, not per dataset"
 
 
 def test_a_pending_bump_is_re_raised_as_its_own_error_line(ack_run) -> None:
