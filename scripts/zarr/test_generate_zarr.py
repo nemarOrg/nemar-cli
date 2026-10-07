@@ -12027,6 +12027,52 @@ class TestMainRetryPendingRound(unittest.TestCase):
         self.assertEqual([s["path"] for s in index["stores"]], [self.A])
         self.assertEqual(index["source_commit"], second_commit)
 
+    def _make_b_enormous(self):
+        """B's pointer now declares 500 GB, so admission charges it more than any
+        volume holds while A (a real 10 s EDF) still fits: the first recording
+        fits and the second does not."""
+        link = os.path.join(self.repo, self.B)
+        os.remove(link)
+        key = "SHA256E-s500000000000--" + "b" * 32 + ".edf"
+        os.symlink(f"../../.git/annex/objects/bb/bb/{key}/{key}", link)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "B is enormous")
+
+    def _assert_a_converts_and_b_is_deferred(self, rc, log, body):
+        self.assertEqual(rc, 0, log)
+        self.assertIn(f"converted {self.A}", log)
+        self.assertNotIn(f"converted {self.B}", log)
+        self.assertIn(f"::error::{self.B} can never fit this volume", log)
+        index = self.published_index()
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+        (entry,) = index["pending"]
+        self.assertEqual(
+            (entry["path"], entry["reason"], entry["attempts"]), (self.B, "not_attempted", 0)
+        )
+        self.assertTrue(entry["last_error"].startswith("deferred: needs"), entry["last_error"])
+        self.assertEqual((body["pending_count"], body["not_attempted_count"]), (1, 1))
+        self.assertEqual(body["converted"], [store_rel_for(self.A)])
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_a_pool_run_converts_what_fits_and_defers_what_does_not(self):
+        self._make_b_enormous()
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.01
+        self._assert_a_converts_and_b_is_deferred(*self.run_main("--retry-pending"))
+
+    def test_a_serial_run_converts_what_fits_and_defers_what_does_not(self):
+        self._make_b_enormous()
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.01
+        self._assert_a_converts_and_b_is_deferred(*self.run_main("--retry-pending", "--jobs", "1"))
+
     def test_a_serial_run_that_cannot_fit_scratch_defers_instead_of_failing(self):
         self._no_scratch()
         self._assert_deferred_without_spending_attempts(
