@@ -423,7 +423,7 @@ jobs:
   #       --timings test/scrub/timings.json --shard=$i/5 -t '^never$' \
   #       --reporter=junit --reporter-outfile=/tmp/shard-$i.xml \
   #       test/scrub test/identifier-scan.test.ts test/identifier-scrub.test.ts \
-  #       test/identifier-fleet.test.ts
+  #       test/identifier-dates.test.ts test/identifier-fleet.test.ts
   #   done
   # delete.test.ts alone took 13.5 minutes, which no shard count beats, so its preconditions
   # describe block now lives in delete-preconditions.test.ts (the shared fixture is
