@@ -54,6 +54,11 @@ export interface FakeResendOptions {
    * still runs, the fence still applies, and the request is still captured.
    */
   status?: number;
+  /**
+   * When true the fake accepts the request and never answers: the lost-answer case a
+   * caller's timeout must end. The request is still captured.
+   */
+  hang?: boolean;
 }
 
 /**
@@ -73,6 +78,7 @@ export async function withFakeResend<T>(
       const url = new URL(req.url);
       const body = await req.json().catch(() => null);
       calls.push({ path: url.pathname, body });
+      if (options.hang) return new Promise<Response>(() => {});
       if (status >= 400) {
         // Resend's own error shape, which sendEmail reads for its message.
         return new Response(JSON.stringify({ message: "simulated Resend failure" }), {
