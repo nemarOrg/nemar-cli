@@ -8259,7 +8259,8 @@ def _next_admission(
     def fits_scratch(j: int) -> bool:
         if not gated:
             return True
-        return running_scratch + pending_scratch[j] <= scratch_budget  # type: ignore[index,operator]
+        needed = running_scratch + pending_scratch[j]  # type: ignore[index]
+        return needed <= scratch_budget  # type: ignore[operator]
 
     return next(
         (j for j, pk in enumerate(pending_peaks)

@@ -913,6 +913,12 @@ class TestDeferralLeavesIndexAsIs(unittest.TestCase):
         live = self.live(pending=[], failures=[{"path": self.B, "code": "not_continuous"}])
         self.assertTrue(self.check(live))
 
+    def test_a_typed_failure_under_a_stale_index_is_a_real_change(self):
+        live = self.live(pending=[], failures=[{"path": self.B, "code": "not_continuous"}])
+        self.assertFalse(
+            self.check(live, deferred={self.B: self.NOTE}, convert=[self.B], current=False)
+        )
+
 
 class TestSafeStorePrefix(unittest.TestCase):
     def test_valid_store_path(self):
@@ -933,12 +939,6 @@ class TestSafeStorePrefix(unittest.TestCase):
         for bad in ("../escape.zarr", "sub-01/../../x.zarr", "/abs/x.zarr", "a//b.zarr"):
             with self.assertRaises(ValueError):
                 safe_store_prefix("nemar", "nm000104", bad)
-
-    def test_a_typed_failure_under_a_stale_index_is_a_real_change(self):
-        live = self.live(pending=[], failures=[{"path": self.B, "code": "not_continuous"}])
-        self.assertFalse(
-            self.check(live, deferred={self.B: self.NOTE}, convert=[self.B], current=False)
-        )
 
 
 class TestMaterializeLocal(unittest.TestCase):
@@ -5109,6 +5109,7 @@ def _scratch_worker(primary, peak_bytes=None):
 
     `leftover` reports whether this recording's scratch already existed when it
     started: true means a previous attempt's debris was never reclaimed."""
+    started = time.monotonic()
     tmp = generate_zarr._CTX["tmp"]
     paths = generate_zarr.recording_scratch_paths(tmp, primary)
     leftover = any(os.path.exists(p) for p in paths)
@@ -5124,7 +5125,7 @@ def _scratch_worker(primary, peak_bytes=None):
         shutil.rmtree(path, ignore_errors=True)
     return {
         "ok": True, "primary": primary, "entry": {"zarr": primary + ".zarr"},
-        "leftover": leftover,
+        "leftover": leftover, "span": (started, time.monotonic()),
     }
 
 
@@ -5468,7 +5469,10 @@ class TestPoolBreakReportsWhatItCouldNotVerify(unittest.TestCase):
         return lambda: next(reads)
 
     def test_a_scan_that_cannot_run_is_a_warning_naming_the_reason(self):
-        with tempfile.TemporaryDirectory() as root, contextlib.redirect_stdout(io.StringIO()) as out:
+        with (
+            tempfile.TemporaryDirectory() as root,
+            contextlib.redirect_stdout(io.StringIO()) as out,
+        ):
             generate_zarr.reclaim_after_pool_break(
                 root, [self.PRIMARY], proc_root="/no/such/proc"
             )
@@ -5485,7 +5489,10 @@ class TestPoolBreakReportsWhatItCouldNotVerify(unittest.TestCase):
 
     def test_a_volume_that_gains_less_than_was_removed_says_a_process_may_hold_it(self):
         gib = 1024**3
-        with tempfile.TemporaryDirectory() as root, contextlib.redirect_stdout(io.StringIO()) as out:
+        with (
+            tempfile.TemporaryDirectory() as root,
+            contextlib.redirect_stdout(io.StringIO()) as out,
+        ):
             self._leave(root, 8)
             generate_zarr.reclaim_after_pool_break(
                 root, [self.PRIMARY],
@@ -5497,7 +5504,10 @@ class TestPoolBreakReportsWhatItCouldNotVerify(unittest.TestCase):
 
     def test_a_volume_that_gains_what_was_removed_is_not_suspected(self):
         gib = 1024**3
-        with tempfile.TemporaryDirectory() as root, contextlib.redirect_stdout(io.StringIO()) as out:
+        with (
+            tempfile.TemporaryDirectory() as root,
+            contextlib.redirect_stdout(io.StringIO()) as out,
+        ):
             self._leave(root, 8)
             generate_zarr.reclaim_after_pool_break(
                 root, [self.PRIMARY],
@@ -5507,7 +5517,10 @@ class TestPoolBreakReportsWhatItCouldNotVerify(unittest.TestCase):
         self.assertNotIn("may still hold deleted files open", out.getvalue())
 
     def test_the_removed_bytes_are_not_called_reclaimed(self):
-        with tempfile.TemporaryDirectory() as root, contextlib.redirect_stdout(io.StringIO()) as out:
+        with (
+            tempfile.TemporaryDirectory() as root,
+            contextlib.redirect_stdout(io.StringIO()) as out,
+        ):
             generate_zarr.reclaim_after_pool_break(root, [self.PRIMARY], proc_root="/no/such/proc")
         self.assertIn("removed 0.0 GiB of files", out.getvalue())
         self.assertNotIn("reclaimed", out.getvalue())
@@ -6166,6 +6179,49 @@ class TestDrainAdmitsAgainstScratch(unittest.TestCase):
         # The first runs 0.8 s; the budget rises at 0.2 s and the others start then.
         self.assertLess(spans[1][0], spans[0][1])
         self.assertLess(spans[2][0], spans[0][1])
+
+    def test_what_in_flight_recordings_hold_is_counted_in_the_pool_path(self):
+        # The budget is free + held - headroom, with `held` read from the recordings
+        # that are RUNNING. Here two admitted recordings write real scratch, and the
+        # third (which does not fit on the stated free space alone) must be admitted
+        # as soon as they have: a drain that handed the gate no in-flight recordings
+        # would hold it back until one finished.
+        primaries = list(self.PRIMARIES)
+        headroom = 10**9
+        free = headroom + 250
+
+        def usage(_path):
+            return type("U", (), {"free": free, "total": 10**12})()
+
+        seen: list[tuple[list[str], int]] = []
+        results = []
+        with tempfile.TemporaryDirectory() as tmp:
+            gate = generate_zarr.ScratchGate(tmp, headroom=headroom, usage=usage)
+
+            def spy(in_flight):
+                budget = gate(in_flight)
+                seen.append((list(in_flight), budget))
+                return budget
+
+            _drain_with_admission(
+                primaries, {p: 1024 for p in primaries}, 3, 10**12, {"tmp": tmp},
+                lambda r, i: results.append(r), worker=_scratch_worker,
+                scratch_peaks={p: 100 for p in primaries}, scratch_budget=spy,
+            )
+        self.assertEqual(len(results), 3)
+        # Three recordings of 100 against a stated 250: the third waited ...
+        starts = sorted(r["span"][0] for r in results)
+        first_end = min(r["span"][1] for r in results)
+        # ... and was admitted before either of the first two had finished, because
+        # their files were by then held scratch, not free space.
+        self.assertLess(starts[2], first_end)
+        two_in_flight = [(live, b) for live, b in seen if len(live) == 2]
+        self.assertTrue(two_in_flight, "the gate was never asked with two recordings running")
+        self.assertTrue(all(b >= 250 for _, b in two_in_flight))
+        self.assertTrue(
+            any(b > 250 for _, b in two_in_flight),
+            "what the two hold was not added to the budget",
+        )
 
     def test_an_unreadable_volume_admits_nothing_instead_of_everything(self):
         # The default gate fails closed: with no good read there is no budget, so
@@ -12258,6 +12314,112 @@ class TestMainRetryPendingRound(unittest.TestCase):
         index = self.published_index()
         self.assertEqual([s["path"] for s in index["stores"]], [self.A])
         self.assertEqual(index["source_commit"], second_commit)
+
+    def _manifest(self) -> dict:
+        with open(os.path.join(self.s3, "on008083_zarr_manifest.json")) as fh:
+            return json.load(fh)
+
+    def _bigger_a_streams_with_an_absurd_charge(self):
+        """A is re-recorded larger than B's pointer and made to stream, with a charge
+        no volume holds, so A is the recording the gate defers while B (30 bytes of
+        pointer, in memory) still fits. Applied AFTER the first round, which must
+        convert A normally."""
+        saved = (generate_zarr.STREAM_EDF_MIN_BYTES, generate_zarr.SCRATCH_STREAM_FACTOR)
+
+        def restore():
+            generate_zarr.STREAM_EDF_MIN_BYTES, generate_zarr.SCRATCH_STREAM_FACTOR = saved
+
+        self.addCleanup(restore)
+        generate_zarr.STREAM_EDF_MIN_BYTES = 1000
+        generate_zarr.SCRATCH_STREAM_FACTOR = 1e12
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.01
+
+    def test_an_unreadable_catalog_does_not_drop_a_served_store(self):
+        # With the catalog down, provenance cannot be compared. The store the index
+        # serves must stay: dropping it because the catalog blinked is worse than
+        # serving it, and a rebuild would have given A null provenance.
+        self.first_round()
+        self._no_scratch()
+        rc, log, body = self.run_main("--api-base", "http://127.0.0.1:9")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("deferred ", log)
+        index = self.published_index()
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A], "A is still served")
+        self.assertEqual((index["store_count"], body["store_count"]), (1, 1))
+        check_index_invariant(index)
+
+    def test_a_partial_deferral_under_clean_keeps_the_served_stores_manifest_entry(self):
+        # --clean hands the manifest no prior, so a store the index KEPT lost its
+        # source_key and size: the manifest listed [B] while the index served [A, B].
+        build_real_edf(os.path.join(self.repo, "sub-01", "eeg"), "sub-01_task-rest_eeg", seconds=30)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "A is longer")
+        self.first_round()
+        # Local mode has no annex key, so give A's published entry the content a real
+        # run records, to see it survive a run that does not rebuild A.
+        manifest = self._manifest()
+        marked = {
+            "zarr": store_rel_for(self.A),
+            "source_key": "SHA256E-s48000--" + "a" * 64 + ".edf",
+            "size_bytes": 48000,
+        }
+        manifest["stores"] = [
+            marked if e["zarr"] == marked["zarr"] else e for e in manifest["stores"]
+        ]
+        with open(os.path.join(self.s3, "on008083_zarr_manifest.json"), "w") as fh:
+            json.dump(manifest, fh)
+        entry = marked
+        self.materialize_b()
+        self._bigger_a_streams_with_an_absurd_charge()
+        rc, log, body = self.run_main()  # --clean, no --retry-pending
+        self.assertEqual(rc, 0, log)
+        self.assertIn(f"converted {self.B}", log)
+        self.assertNotIn(f"converted {self.A}", log)
+        index = self.published_index()
+        self.assertEqual(sorted(s["path"] for s in index["stores"]), [self.A, self.B])
+        manifest = self._manifest()
+        by_rel = {e["zarr"]: e for e in manifest["stores"]}
+        self.assertEqual(
+            sorted(by_rel), sorted(e["zarr"] for e in index["stores"]),
+            "the manifest and the index must list the same stores",
+        )
+        self.assertEqual(by_rel[store_rel_for(self.A)], entry, "A's entry carried unchanged")
+        validate_document(manifest, MANIFEST_SCHEMA_PATH, "manifest")
+
+    def test_the_callback_of_a_failed_run_counts_what_it_deferred(self):
+        # B is attempted and fails (its content is absent); A is deferred. The
+        # failure callback must report the deferred recording as not attempted.
+        self._bigger_a_streams_with_an_absurd_charge()
+        rc, log, body = self.run_main()
+        self.assertEqual(rc, 1, log)
+        self.assertEqual(body["status"], "failed")
+        self.assertEqual(body["not_attempted_count"], 1)
+        self.assertGreaterEqual(body["pending_count"], body["not_attempted_count"])
+
+    def test_an_unchanged_run_reports_the_commit_the_index_names_and_is_not_posted(self):
+        # Nothing was rebuilt, so the row must agree with the document it describes
+        # (the commit the index names, not this HEAD), and the webhook must not be
+        # told "ready" again: that would restamp zarr_converted_at.
+        self._no_scratch()
+        rc, log, first = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        self.assertNotIn("post", first, "a run that published is posted as usual")
+        index_commit = self.published_index()["source_commit"]
+        self._git("commit", "-q", "--allow-empty", "-m", "an unrelated commit")
+        head = self._git("rev-parse", "HEAD")
+        self.assertNotEqual(head, index_commit)
+        before = self._index_bytes()
+        rc, log, body = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("left untouched", log)
+        self.assertEqual(self._index_bytes(), before)
+        self.assertEqual(body["commit"], index_commit)
+        self.assertNotEqual(body["commit"], head)
+        self.assertIs(body["post"], False)
 
     def _make_b_enormous(self):
         """B's pointer now declares 500 GB, so admission charges it more than any
