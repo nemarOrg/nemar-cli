@@ -1,16 +1,18 @@
 /**
- * #1493: `nemar dataset release <id> --version X.Y.Z` was swallowed by the
- * root `-v, --version`: the CLI printed its own version and exited 0, so a
- * scripted release (`-y`) silently did nothing.
+ * #1493: the root declares `-v, --version`, and Commander recognizes that
+ * boolean anywhere on the command line, so `nemar dataset release <id>
+ * --version X.Y.Z` prints the CLI version and exits 0 unless the pre-pass in
+ * src/lib/argv-shadowing.ts hands the value to `release`. A scripted release
+ * (`-y`) would silently do nothing.
  *
  * The unit tests run bindShadowedOptionValues over the REAL command tree: the
- * command groups src/index.ts registers, under a root declared the way
- * src/index.ts declares it. A hand-kept copy of the tree would keep passing
- * after a flag was added or renamed in src/commands, which is exactly the
- * drift this guard exists to catch. The entry-point tests drive the real CLI
- * (`bun run src/index.ts`) with no account key configured, so reaching the
- * release handler shows up as its "Not authenticated" refusal, while a
- * swallowed flag prints the version.
+ * command groups src/index.ts registers, under a root with the same flags as
+ * the one in src/index.ts. A hand-kept copy of the tree would keep passing
+ * after a flag was added or renamed in src/commands, which is the drift this
+ * guard exists to catch. The entry-point tests drive the real CLI (`bun run
+ * src/index.ts`) against a local stand-in backend; with no account key
+ * configured, reaching the release handler shows up as its "Not authenticated"
+ * refusal, while a swallowed flag prints the version.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
@@ -53,13 +55,16 @@ const SHARED_GROUPS = [
   sandboxCommand,
 ];
 
-// Declared in src/index.ts itself rather than imported, so the tree below
-// cannot see them. None takes a flag an ancestor also declares. The drift test
-// at the bottom of the unit tests fails when src/index.ts gains or loses a
-// top-level command, so this list cannot go stale unnoticed.
+// Declared inline in src/index.ts rather than exported, so the tree below
+// cannot see them, and neither can the collision walk: when this was written
+// none takes a flag an ancestor also declares, and nothing re-checks that.
+// The drift test (it spawns the CLI, so it sits with the entry-point tests)
+// compares top-level names only, so it fails when index.ts gains or loses a
+// command, which is the cue to look. Extracting the program assembly from
+// index.ts would let the tree cover them.
 const INLINE_ROOT_COMMANDS = ["login", "logout", "register", "signup", "switch", "whoami"];
 
-/** The root exactly as src/index.ts declares it: `-v, --version` plus four booleans. */
+/** The root with the flags src/index.ts declares (descriptions shortened). */
 function declareRoot(): Command {
   return new Command("nemar")
     .version(version, "-v, --version", "Output the current version")
@@ -277,18 +282,24 @@ describe("bindShadowedOptionValues on the real command tree", () => {
 
   test("leaves everything else alone", () => {
     const cases = [
-      // The root's own flag, with no subcommand to hand it to.
+      // The root's own flag, with no command ahead of it.
       ["--version"],
       ["-v"],
+      // `dataset` is a command but declares no --version, so it is still the
+      // root's flag.
       ["dataset", "--version"],
       // Already the equals form.
       ["dataset", "release", "nm1", "--version=2.0.0"],
       // After `--` nothing is an option, valueless or not.
       ["dataset", "release", "nm1", "--", "--version", "2.0.0"],
       ["dataset", "release", "nm1", "--", "--version"],
-      // Options of the leaf that no ancestor declares.
+      // `--jobs` is the leaf's own option and `--verbose` is a root boolean
+      // typed after the command, which works anywhere.
       ["dataset", "upload", "./x", "--jobs", "4", "--verbose"],
+      // `validate -v, --verbose` collides with the root's `-v` (#1220): short
+      // flags are not handled.
       ["dataset", "validate", "./x", "-v"],
+      // A different flag that merely starts like --version.
       ["dataset", "validate", "./x", "--version-info"],
       // Not a command of this program.
       ["unknown", "--version", "1"],
@@ -298,10 +309,10 @@ describe("bindShadowedOptionValues on the real command tree", () => {
     }
   });
 
-  // Changed deliberately from "left alone" (#1493 review): a bare shadowed
-  // --version used to fall through to the root, which printed the CLI version
-  // and exited 0, the same silent no-op as the spaced form for a scripted -y
-  // release. It is now Commander's own "argument missing" error.
+  // Left alone, a bare shadowed --version is claimed by the root, which
+  // prints the CLI version and exits 0: the same silent no-op as the spaced
+  // form for a scripted -y release. So it fails like any option missing its
+  // argument.
   test("a shadowed value option with no value is an error", () => {
     const cases = [
       ["dataset", "release", "nm1", "--version"],
@@ -352,10 +363,11 @@ describe("bindShadowedOptionValues on the real command tree", () => {
     ).toThrow(MissingShadowedValueError);
   });
 
-  // A BOOLEAN option that shadows an ancestor's (#1220: `dataset validate`
-  // declares `-v, --verbose`, the root declares `--verbose`) takes no value,
-  // so the token after it is a positional. Joining them would turn the path
-  // into `--verbose=./x` and silently validate the current directory instead.
+  // A BOOLEAN option that collides with an ancestor's (#1220: `dataset
+  // validate` declares `-v, --verbose`, the root declares `--verbose`) takes no
+  // value, so the token after it is a positional. Joining them would make the
+  // path argument `--verbose=./x`: `validate` allows unknown options, so
+  // Commander passes that through as the path and validate checks a bogus one.
   test("a boolean collision followed by a positional is untouched", async () => {
     for (const argv of [
       ["dataset", "validate", "--verbose", "./x"],
@@ -627,15 +639,16 @@ describe("bindShadowedOptionValues on a minimal tree", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The real tree above must be the real program
+// The real CLI process
 // ---------------------------------------------------------------------------
 
-// Nothing here may depend on the network. The CLI is pointed at a local
-// stand-in backend through config.json (the account's apiUrl) rather than an
-// environment variable: this file has to stay in the offline `unit-pure` CI
-// tier, and a test that names the live-backend variable or helper is routed to
-// the soft `integration-dev` tier instead (see the file-sorting grep in
-// test.yml).
+// Nothing here may depend on the network or a live backend. The CLI is pointed
+// at a local stand-in through config.json (the account's apiUrl). test.yml
+// sorts a test file into the integration-dev tier (soft on dev, required at
+// the dev-to-main gate) when its TEXT matches a grep for the live-backend
+// environment variable, the request helper or the CLI-runner helper, and that
+// grep matches comments too, so none of those three names may appear anywhere
+// in this file. The file stays in the offline unit-pure tier.
 const CLI_ENTRY = join(import.meta.dir, "..", "src", "index.ts");
 const REPO_ROOT = join(import.meta.dir, "..");
 const DATASET_ID = "nm099999";
