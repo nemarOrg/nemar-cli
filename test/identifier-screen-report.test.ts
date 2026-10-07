@@ -6,6 +6,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync, readdirSync } from "node:fs";
+import { join, relative } from "node:path";
 import { DATE_KINDS, type FindingKind } from "../shared/identifier-scan";
 import {
   DATASET_STATUSES,
@@ -20,7 +22,9 @@ import {
   isDateWarningLine,
   isScreenState,
   parseScreenReport,
+  publicationRequestNotice,
   screenGate,
+  screenStateLabel,
   stateOf,
 } from "../shared/identifier-screen-report";
 
@@ -704,5 +708,72 @@ describe("describeScreen carries the warning and changes nothing else", () => {
     for (const key of ["date_warning", "warnings", "warning"]) {
       expect(refusal(report({ scan: scan({ [key]: ["Warning: SMITH"] }) }))).toBe("scan-key");
     }
+  });
+});
+
+describe("publicationRequestNotice: what an accepted request is told (ADR 0090, 2026-10-07)", () => {
+  test("the wording is pinned, one sentence per line, and names the real status command", () => {
+    expect(publicationRequestNotice("nm000321")).toEqual([
+      "Your request was received.",
+      "NEMAR is checking publication eligibility.",
+      "If every check passes, an administrator is notified to approve it.",
+      "Run 'nemar dataset publish status nm000321' to see where it stands.",
+    ]);
+    // The maintainer's paragraph, as one piece.
+    expect(publicationRequestNotice("nm000321").join(" ")).toBe(
+      "Your request was received. NEMAR is checking publication eligibility. If every check passes, an administrator is notified to approve it. Run 'nemar dataset publish status nm000321' to see where it stands.",
+    );
+  });
+
+  test("the dataset id is the only thing that varies", () => {
+    const a = publicationRequestNotice("nm000321");
+    const b = publicationRequestNotice("xx099901");
+    expect(b.slice(0, 3)).toEqual(a.slice(0, 3));
+    expect(b[3]).toBe("Run 'nemar dataset publish status xx099901' to see where it stands.");
+    expect(a.slice(0, 3).join(" ")).not.toMatch(/\d/);
+  });
+
+  test("it is neutral: no verdict, finding kind, count or date warning", () => {
+    // What it says shares nothing with the words a screen is described in:
+    // the screen has not reported when this is shown, and a verdict printed
+    // now could be stale by the time anyone acts on it.
+    const text = publicationRequestNotice("nm000321").join("\n");
+    for (const state of [...DATASET_STATUSES, "pending", "error", "unreported"] as ScreenState[]) {
+      expect(text).not.toContain(screenStateLabel(state));
+    }
+    for (const kind of FINDING_KINDS) expect(text).not.toContain(kind);
+    for (const line of publicationRequestNotice("nm000321")) {
+      expect(isDateWarningLine(line)).toBe(false);
+    }
+    expect(text).not.toMatch(
+      /\b(warning|acquisition|dates?|findings?|found|clean|review|blocked)\b/i,
+    );
+  });
+
+  test("no other source file spells the sentences: they are declared once", () => {
+    // One distinctive phrase per sentence that makes a claim, so a copy that
+    // rewords one of them is still found. The status pointer is built from the
+    // command's name, which other files legitimately spell.
+    const phrases = [
+      /Your request was received/i,
+      /publication eligibility/i,
+      /If every check passes/i,
+      /to see where it stands/i,
+    ];
+    const root = join(import.meta.dir, "..");
+    const hits: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === "node_modules") continue;
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name.endsWith(".ts")) {
+          const text = readFileSync(full, "utf8");
+          if (phrases.some((phrase) => phrase.test(text))) hits.push(relative(root, full));
+        }
+      }
+    };
+    for (const dir of ["src", "backend/src", "shared"]) walk(join(root, dir));
+    expect(hits).toEqual(["shared/identifier-screen-report.ts"]);
   });
 });

@@ -646,6 +646,27 @@ export function isDateWarningLine(line: string): boolean {
   return line.startsWith(DATE_WARNING_LEAD) || DATE_WARNING_FIXED_LINES.includes(line);
 }
 
+/**
+ * What a person is told when a publication request has been ACCEPTED, one sentence per line (ADR
+ * 0090, amendment 2026-10-07). The terminal and the route's `request_notice` both come from here,
+ * and nothing else in the repository spells these sentences.
+ *
+ * It is neutral on purpose and takes no screen as input: the identifier screen runs after the
+ * request is made and its verdict is bound to a commit, so a finding, a verdict, a count or the
+ * acquisition-date warning shown at this moment could be stale or wrong by the time anyone acts on
+ * it. The requester learns the outcome from `nemar dataset publish status` or from the mail, which
+ * is where the date warning is shown too. The only variable part is the dataset id, which the
+ * caller has just had accepted. A request refused up front gets its own refusal text and no notice.
+ */
+export function publicationRequestNotice(datasetId: string): string[] {
+  return [
+    "Your request was received.",
+    "NEMAR is checking publication eligibility.",
+    "If every check passes, an administrator is notified to approve it.",
+    `Run 'nemar dataset publish status ${datasetId}' to see where it stands.`,
+  ];
+}
+
 /** The counts of a scan as lines of fixed words, shared by the publication screen and the preflight. */
 function scanLines(
   scan: Pick<

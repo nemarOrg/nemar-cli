@@ -10,6 +10,7 @@
  */
 
 import type { PublicationBlockReason } from "../../../../shared/contract/publication.js";
+import { publicationRequestNotice } from "../../../../shared/identifier-screen-report.js";
 import { authMiddleware } from "../../middleware/auth";
 import {
   FIRST_PUBLICATION_STAMP_SQL,
@@ -631,12 +632,21 @@ export function registerPublicationRoutes(datasetRoutes: DatasetsRouter): void {
     // otherwise see a success message byte-identical to a correct request and
     // find out at approval, when the outcome is no longer theirs to change.
     // The CLI prints a different line for each value (`src/commands/dataset.ts`).
+    //
+    // `request_notice` is what an accepted request is told, from the one
+    // definition the CLI prints (ADR 0090, amendment 2026-10-07). It is the
+    // same neutral words for a new request and for a re-request of a blocked
+    // one, and it never depends on `screen`: the screen has not reported, and
+    // a result shown now could be stale by the time anyone acts on it. It is
+    // on this response only. A request refused above (403, 404, 409, 422)
+    // returned its own text and never reaches here.
     return c.json({
       message: anonymousRequested ? "Anonymous release requested" : "Publication request submitted",
       dataset_id: datasetId,
       status: "requested",
       anonymous: anonymousRequested,
       identifier_screen: screen,
+      request_notice: publicationRequestNotice(datasetId),
     });
   });
 

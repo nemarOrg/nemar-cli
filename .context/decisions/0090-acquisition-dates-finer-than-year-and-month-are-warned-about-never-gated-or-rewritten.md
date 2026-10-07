@@ -116,3 +116,21 @@ The maintainer chose B on 2026-10-07 and asked that the warning be shown to the 
 - Surfaces: `test/upload-identifier-preflight-cli.test.ts`, `test/identifier-screen-cli.test.ts`, `backend/test/identifier-screen-flow.test.ts`, `backend/test/identifier-sweep-report.test.ts`.
 - The policy of 2026-10-04: the scanner header comment and `DATE_KINDS`; ADR 0085 ("What gates").
 - Epic #1610; this decision is Phase 6 (#1616).
+
+## Amendment 2026-10-07 (#1616): what an accepted request is told
+
+The maintainer decided that a publication request, once accepted, is answered with a neutral notice that names no finding, no verdict and no date warning: "Your request was received. NEMAR is checking publication eligibility. If every check passes, an administrator is notified to approve it. Run 'nemar dataset publish status <id>' to see where it stands."
+It is `publicationRequestNotice` in `shared/identifier-screen-report.ts`, one sentence per line and the only place the sentences are spelled.
+`nemar dataset publish request` prints it, and `POST /datasets/:id/publish/request` returns the same lines as `request_notice`, for a new request and for the re-request of a blocked one (the open row is reused), whatever state the screen is in when the answer is written.
+A request refused up front (400, 403, 404, 409, 422) keeps its own text and carries no notice, and so does the 409 for a request that is already open: it is a refusal, and by then the screen may have reported, so the notice could be stale.
+
+This is not the "fixed notice at request time" rejected above, which would have been about dates.
+The date warning still stays out of the request: the screen runs after it, its verdict is bound to a commit, and a result shown now could mislead.
+The requester learns the outcome, with the warning if a date was counted, from `nemar dataset publish status` or the mail, as before.
+
+The notice replaces two CLI lines, "Admins will be notified when the identifier screen finishes" and "Admins have been notified", which depended on the screen's state.
+The CLI prints the notice from the shared definition and does not read `request_notice`, so any Worker that accepts the request gets the same words.
+
+Two consequences the maintainer chose by asking for one answer whatever the state.
+"If every check passes" is true and not complete: the admins are mailed for every reported result, including a request a direct finding blocks (the requester is mailed too), a review or incomplete result, and a screen that did not run.
+And in the two states where nothing is running, a screen that could not be started and an exempt sandbox exemplar, the notice sits beside the Phase 4 headline that says so ("DID NOT RUN", "not applicable (sandbox)") and the admins have already been mailed.

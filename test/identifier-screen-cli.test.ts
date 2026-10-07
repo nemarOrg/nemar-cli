@@ -137,32 +137,242 @@ describe("nemar dataset publish status", () => {
 });
 
 describe("nemar dataset publish request", () => {
-  test("a dispatched screen says the admins are mailed when it finishes", async () => {
-    const server = startServer({
-      "POST /datasets/nm000104/publish/request": {
-        body: {
-          message: "Publication request submitted",
-          dataset_id: "nm000104",
-          status: "requested",
-          anonymous: false,
-          identifier_screen: {
-            state: "pending",
-            headline: "Identifier screen: running",
-            tone: "note",
-            lines: [],
-          },
-        },
-      },
-    });
+  const PENDING = {
+    state: "pending",
+    headline: "Identifier screen: running",
+    tone: "note",
+    lines: [],
+  };
+  const accepted = (id: string, over: Record<string, unknown> = {}) => ({
+    message: "Publication request submitted",
+    dataset_id: id,
+    status: "requested",
+    anonymous: false,
+    identifier_screen: PENDING,
+    ...over,
+  });
+  const key = (id: string) => `POST /datasets/${id}/publish/request`;
+  const flat = (text: string) => text.replace(/\s+/g, " ");
+  // The maintainer's wording of 2026-10-07, spelled out here on purpose: the
+  // test must fail if the shared definition changes, so it cannot import it.
+  const NOTICE = (id: string) =>
+    `Your request was received. NEMAR is checking publication eligibility. If every check passes, an administrator is notified to approve it. Run 'nemar dataset publish status ${id}' to see where it stands.`;
+  const CHECKING = "NEMAR is checking publication eligibility";
+
+  test("an accepted request is told, in neutral words, what happens next", async () => {
+    const server = startServer({ [key("nm000321")]: { body: accepted("nm000321") } });
     try {
-      const r = await runCli(["dataset", "publish", "request", "nm000104"], server.url);
+      const r = await runCli(["dataset", "publish", "request", "nm000321"], server.url);
       expect(r.exitCode).toBe(0);
+      // One sentence per line, indented like the screen block above it.
+      expect(r.stdout).toContain(
+        [
+          "  Your request was received.",
+          "  NEMAR is checking publication eligibility.",
+          "  If every check passes, an administrator is notified to approve it.",
+          "  Run 'nemar dataset publish status nm000321' to see where it stands.",
+          "",
+        ].join("\n"),
+      );
+      expect(flat(r.stdout)).toContain(NOTICE("nm000321"));
       expect(r.stdout).toContain("Identifier screen: running");
-      expect(r.stdout).toContain("Admins will be notified when the identifier screen finishes");
+      // The two lines this replaces depended on the screen's state ("Admins
+      // will be notified when the identifier screen finishes" / "Admins have
+      // been notified"). The notice is one answer whatever the state is.
+      expect(r.stdout).not.toContain("Admins will be notified when the identifier screen");
       expect(r.stdout).not.toContain("Admins have been notified");
     } finally {
       server.stop();
     }
+  });
+
+  test("it is the same four lines whatever screen state the backend sent, and nothing follows it", async () => {
+    // The screen runs after the request and its verdict is bound to a commit,
+    // so the notice must not depend on what the screen holds. The block ABOVE
+    // it is the backend's own words for the state (the date warning cannot be
+    // in it: no count exists before the screen has reported).
+    const states: Array<[string, unknown]> = [
+      ["pending", PENDING],
+      [
+        "did not run",
+        {
+          state: "error",
+          headline: "Identifier screen: DID NOT RUN",
+          tone: "stop",
+          lines: ["Cause: GitHub refused to start the screen workflow."],
+        },
+      ],
+      [
+        "exempt",
+        {
+          state: "exempt",
+          headline: "Identifier screen: not applicable (sandbox)",
+          tone: "note",
+          lines: [],
+        },
+      ],
+      ["an older backend that sends no screen", undefined],
+    ];
+    for (const [label, screen] of states) {
+      const id = "xx099901";
+      const server = startServer({
+        [key(id)]: { body: accepted(id, { identifier_screen: screen }) },
+      });
+      try {
+        const r = await runCli(["dataset", "publish", "request", id], server.url);
+        expect(r.exitCode, label).toBe(0);
+        expect(flat(r.stdout), label).toContain(NOTICE(id));
+        expect(r.stdout, label).not.toContain("Admins have been notified");
+        // Everything from the notice on is the notice and nothing else, so a
+        // line added after it (a banner, an old "Admins have been notified")
+        // fails here; no verdict word, count or date warning is in it.
+        const after = r.stdout.slice(r.stdout.indexOf("Your request was received."));
+        expect(after, label).not.toMatch(
+          /\b(clean|found|findings?|warning|acquisition|dates?|review)\b/i,
+        );
+        expect(after.trim().split("\n"), label).toHaveLength(4);
+      } finally {
+        server.stop();
+      }
+    }
+  });
+
+  test("an anonymous release is told the same, beside the line about its identity", async () => {
+    const server = startServer({
+      [key("nm000321")]: {
+        body: accepted("nm000321", { message: "Anonymous release requested", anonymous: true }),
+      },
+    });
+    try {
+      const r = await runCli(
+        ["dataset", "publish", "request", "nm000321", "--anonymous"],
+        server.url,
+      );
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("Your identity will be withheld");
+      expect(flat(r.stdout)).toContain(NOTICE("nm000321"));
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("the command the sentence tells the requester to run is a real one", async () => {
+    // A pointer to a command that does not exist is the failure this catches:
+    // take the command from what was PRINTED and run it.
+    const id = "nm000321";
+    const server = startServer({
+      [key(id)]: { body: accepted(id) },
+      [`GET /datasets/${id}/publish/status`]: {
+        body: { dataset_id: id, status: "requested", anonymous: false },
+      },
+    });
+    try {
+      const r = await runCli(["dataset", "publish", "request", id], server.url);
+      const printed = r.stdout.match(/Run '(nemar dataset publish status [^']+)'/);
+      expect(printed).not.toBeNull();
+      const [bin, ...args] = (printed?.[1] ?? "").split(" ");
+      expect(bin).toBe("nemar");
+      const s = await runCli(args, server.url);
+      expect(s.exitCode).toBe(0);
+      expect(s.stdout).toContain(`Publication Status: ${id}`);
+    } finally {
+      server.stop();
+    }
+  });
+
+  describe("a request refused up front keeps its own text and gets no notice", () => {
+    const refusals: Array<{
+      label: string;
+      status: number;
+      body: Record<string, unknown>;
+      text: string[];
+    }> = [
+      {
+        label: "one is already open (409)",
+        status: 409,
+        body: {
+          error: "A publication request already exists",
+          status: "requested",
+          message: "Use 'resend' to remind admins",
+        },
+        text: ["A publication request already exists", "nemar dataset publish resend"],
+      },
+      {
+        label: "not the owner (403)",
+        status: 403,
+        body: { error: "Only the dataset owner can request publication" },
+        text: ["Only the dataset owner can request publication"],
+      },
+      {
+        label: "already published (409)",
+        status: 409,
+        body: { error: "Dataset is already published" },
+        text: ["Dataset is already published"],
+      },
+      {
+        label: "blocked by the submission minimums (422)",
+        status: 422,
+        body: {
+          status: "blocked",
+          block_reason: "min_requirements_failed",
+          message: "The dataset does not meet the minimum submission requirements.",
+          reasons: ["The README is missing."],
+          policy_url: "https://example.org/policy",
+          details: {
+            reasons: ["The README is missing."],
+            policy_url: "https://example.org/policy",
+          },
+        },
+        text: ["Not accepted for publication:", "The README is missing."],
+      },
+    ];
+    for (const refusal of refusals) {
+      test(refusal.label, async () => {
+        const server = startServer({
+          [key("nm000321")]: { status: refusal.status, body: refusal.body },
+        });
+        try {
+          const r = await runCli(["dataset", "publish", "request", "nm000321"], server.url);
+          expect(r.exitCode).toBe(1);
+          const out = r.stdout + r.stderr;
+          for (const text of refusal.text) expect(out).toContain(text);
+          expect(out).not.toContain(CHECKING);
+          expect(out).not.toContain("Your request was received");
+          expect(out).not.toContain("to see where it stands");
+        } finally {
+          server.stop();
+        }
+      });
+    }
+
+    test("a re-request that is then accepted is told, and the refusal before it was not", async () => {
+      // The depositor fixes what blocked the request and asks again: the
+      // backend reuses the open row and answers like any accepted request.
+      const id = "nm000321";
+      const routes: Record<string, { status?: number; body: unknown }> = {
+        [key(id)]: {
+          status: 422,
+          body: {
+            status: "blocked",
+            block_reason: "bids_validation_failed",
+            message: "BIDS validation is failing on your dataset.",
+          },
+        },
+      };
+      const server = startServer(routes);
+      try {
+        const first = await runCli(["dataset", "publish", "request", id], server.url);
+        expect(first.exitCode).toBe(1);
+        expect(first.stdout + first.stderr).not.toContain(CHECKING);
+
+        routes[key(id)] = { body: accepted(id) };
+        const second = await runCli(["dataset", "publish", "request", id], server.url);
+        expect(second.exitCode).toBe(0);
+        expect(flat(second.stdout)).toContain(NOTICE(id));
+      } finally {
+        server.stop();
+      }
+    });
   });
 });
 

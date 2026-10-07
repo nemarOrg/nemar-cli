@@ -86,6 +86,21 @@ export interface StepResult {
   error?: string;
 }
 
+/**
+ * The 200 answer of `POST /datasets/:id/publish/request`. `request_notice` is the
+ * Worker's copy of the neutral notice (ADR 0090, amendment 2026-10-07), for API
+ * clients; the CLI prints its own from the same shared definition, so it does not
+ * read this field and an older Worker cannot make it print less.
+ */
+export interface PublishRequestResponse {
+  message: string;
+  dataset_id: string;
+  status: string;
+  anonymous?: boolean;
+  identifier_screen?: IdentifierScreenView;
+  request_notice?: string[];
+}
+
 export interface PublishApproveResponse {
   message: string;
   dataset_id: string;
@@ -132,25 +147,13 @@ export interface PublishApproveResponse {
 export async function requestPublication(
   datasetId: string,
   options: { anonymous?: boolean } = {},
-): Promise<{
-  message: string;
-  dataset_id: string;
-  status: string;
-  anonymous?: boolean;
-  identifier_screen?: IdentifierScreenView;
-}> {
+): Promise<PublishRequestResponse> {
   // `anonymous` is echoed by the server (#1408). The caller must print from
   // the ECHO rather than from `options.anonymous`: what matters to a depositor
   // is what was recorded, not what was typed, and the two diverge exactly in
   // the cases worth catching -- a dropped body, a proxy that rewrites it, an
   // older backend that does not know the flag.
-  return request<{
-    message: string;
-    dataset_id: string;
-    status: string;
-    anonymous?: boolean;
-    identifier_screen?: IdentifierScreenView;
-  }>(
+  return request<PublishRequestResponse>(
     `/datasets/${datasetId}/publish/request`,
     options.anonymous
       ? {
