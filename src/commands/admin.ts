@@ -4192,7 +4192,7 @@ adminCommand
   )
   .option(
     "--normalize-max-gb <n>",
-    "Raise the ceiling on how much data the prepare phase will move from this host (default 5 GiB): data git holds, and recordings the identifier scrub downloads to rewrite their headers. The import aborts rather than silently spending hours on it (ADR 0060, ADR 0089).",
+    "Raise the ceiling on how much data the prepare phase will move from this host (default 5 GiB): data git holds, and recordings the identifier scrub downloads to rewrite their headers. The import aborts rather than silently spending hours on it (ADR 0060, ADR 0089). Recordings whose only change would be their acquisition date are downloaded only if they all fit, and otherwise keep the date (ADR 0091).",
   )
   .option(
     "--screen-wait-minutes <n>",
