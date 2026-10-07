@@ -4836,6 +4836,155 @@ class TestPoolBreakRecovery(unittest.TestCase):
         self.assertEqual(breaks, 0)
 
 
+def _scratch_worker(primary, peak_bytes=None):
+    """Fault-injection worker that leaves the same footprint `convert_one` does:
+    a raw copy under `work/` and a memmap under the recording's `.scratch`
+    sibling. A recording whose path contains `boom` dies the way a worker killed
+    by SIGKILL or SIGBUS does, WITHOUT running any cleanup, which is the case
+    `convert_one`'s `finally` cannot cover. Module-level so it pickles.
+
+    `leftover` reports whether this recording's scratch already existed when it
+    started: true means a previous attempt's debris was never reclaimed."""
+    tmp = generate_zarr._CTX["tmp"]
+    paths = generate_zarr.recording_scratch_paths(tmp, primary)
+    leftover = any(os.path.exists(p) for p in paths)
+    for path in (paths[0], paths[2]):
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, "blob"), "wb") as fh:
+            fh.write(b"x" * (1024 * 1024))
+    if "boom" in primary:
+        time.sleep(0.15)
+        os._exit(1)
+    time.sleep(0.45)
+    for path in paths:
+        shutil.rmtree(path, ignore_errors=True)
+    return {
+        "ok": True, "primary": primary, "entry": {"zarr": primary + ".zarr"},
+        "leftover": leftover,
+    }
+
+
+class TestRecordingScratchPaths(unittest.TestCase):
+    def test_every_path_is_keyed_to_one_recording(self):
+        a = "sub-01/ses-1/eeg/sub-01_ses-1_task-a_eeg.vhdr"
+        b = "sub-01/ses-1/eeg/sub-01_ses-1_task-b_eeg.vhdr"
+        pa = generate_zarr.recording_scratch_paths("/t", a)
+        pb = generate_zarr.recording_scratch_paths("/t", b)
+        self.assertEqual(len(set(pa) | set(pb)), 6, "two recordings never share a path")
+        work, store, memmap = pa
+        self.assertEqual(store, "/t/stores/sub-01/ses-1/eeg/sub-01_ses-1_task-a_eeg.zarr")
+        self.assertEqual(memmap, store + generate_zarr.SCRATCH_DIR_SUFFIX)
+        self.assertTrue(work.startswith("/t/work/"))
+
+    def test_the_memmap_directory_is_a_sibling_of_the_store_not_inside_it(self):
+        # `aws s3 sync <store>` uploads the store directory, so a memmap inside it
+        # would be published; a sibling is not.
+        with tempfile.TemporaryDirectory() as tmp:
+            store = os.path.join(tmp, "stores", "sub-01", "eeg", "sub-01_task-a_eeg.zarr")
+            os.makedirs(os.path.dirname(store))
+            scratch = generate_zarr._memmap_scratch_dir(store)
+            self.assertTrue(os.path.isdir(scratch))
+            self.assertEqual(os.path.dirname(scratch), os.path.dirname(store))
+            self.assertFalse(scratch.startswith(store + os.sep))
+
+
+class TestAllocatedBytes(unittest.TestCase):
+    def test_a_sparse_file_is_charged_for_blocks_not_for_its_length(self):
+        # A streaming memmap is created at its full length and filled as the
+        # windows arrive; st_size would charge it all up front.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "memmap.f32")
+            with open(path, "wb") as fh:
+                fh.truncate(8 * 1024**3)
+                fh.seek(0)
+                fh.write(b"x" * 4096)
+            if os.stat(path).st_blocks * 512 >= 1024**3:
+                self.skipTest("this filesystem does not support sparse files")
+            self.assertLess(generate_zarr.allocated_bytes(tmp), 64 * 1024**2)
+
+    def test_it_counts_nested_files_and_ignores_a_missing_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            nested = os.path.join(tmp, "a", "b")
+            os.makedirs(nested)
+            with open(os.path.join(nested, "data"), "wb") as fh:
+                fh.write(os.urandom(1024 * 1024))
+            self.assertGreaterEqual(generate_zarr.allocated_bytes(tmp), 1024 * 1024)
+            self.assertEqual(generate_zarr.allocated_bytes(os.path.join(tmp, "absent")), 0)
+
+
+class TestReclaimRecordingScratch(unittest.TestCase):
+    def test_removes_all_three_directories_and_reports_what_it_freed(self):
+        primary = "sub-01/eeg/sub-01_task-a_eeg.vhdr"
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = generate_zarr.recording_scratch_paths(tmp, primary)
+            for path in paths:
+                os.makedirs(path)
+                with open(os.path.join(path, "blob"), "wb") as fh:
+                    fh.write(os.urandom(1024 * 1024))
+            freed = generate_zarr.reclaim_recording_scratch(tmp, primary)
+            self.assertGreaterEqual(freed, 3 * 1024 * 1024)
+            for path in paths:
+                self.assertFalse(os.path.exists(path), path)
+
+    def test_leaves_another_recordings_scratch_alone(self):
+        keep = "sub-01/eeg/sub-01_task-a_eeg.vhdr"
+        drop = "sub-01/eeg/sub-01_task-b_eeg.vhdr"
+        with tempfile.TemporaryDirectory() as tmp:
+            for primary in (keep, drop):
+                for path in generate_zarr.recording_scratch_paths(tmp, primary):
+                    os.makedirs(path)
+            generate_zarr.reclaim_recording_scratch(tmp, drop)
+            for path in generate_zarr.recording_scratch_paths(tmp, keep):
+                self.assertTrue(os.path.isdir(path), path)
+
+    def test_a_recording_with_nothing_on_scratch_frees_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(generate_zarr.reclaim_recording_scratch(tmp, "sub-01/eeg/x_eeg.vhdr"), 0)
+
+
+class TestPoolBreakReclaimsScratch(unittest.TestCase):
+    """A worker killed outright never runs `convert_one`'s `finally`. On nm000276
+    two killed workers kept 535 GiB until the dataset run ended, and every
+    recording behind them failed with ENOSPC: the break must give the disk back
+    before the suspects re-run and the rebuilt pool drains the rest."""
+
+    def test_a_killed_workers_scratch_is_gone_before_anything_re_runs(self):
+        boom = "sub-boom/eeg/sub-boom_task-rest_eeg.vhdr"
+        primaries = [f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest_eeg.vhdr" for i in range(1, 7)]
+        primaries.insert(2, boom)
+        results = []
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as out:
+            breaks, _ = _drain_with_admission(
+                list(primaries), {p: 1024 for p in primaries}, 3, 10**9, {"tmp": tmp},
+                lambda r, i: results.append(r), worker=_scratch_worker,
+            )
+            leaked = [
+                path for p in primaries
+                for path in generate_zarr.recording_scratch_paths(tmp, p)
+                if os.path.exists(path)
+            ]
+        self.assertGreaterEqual(breaks, 1)
+        self.assertEqual(leaked, [], "nothing may outlive the run's drain")
+        self.assertEqual(len(results), len(primaries))
+        innocents = [r for r in results if r["primary"] != boom]
+        self.assertTrue(all(r["ok"] for r in innocents))
+        self.assertFalse(
+            any(r["leftover"] for r in innocents),
+            "an innocent re-ran on top of the debris its killed attempt left behind",
+        )
+        self.assertIn("reclaimed", out.getvalue())
+
+    def test_a_clean_run_reclaims_nothing_and_says_nothing(self):
+        primaries = [f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest_eeg.vhdr" for i in range(1, 4)]
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as out:
+            breaks, _ = _drain_with_admission(
+                list(primaries), {p: 1024 for p in primaries}, 2, 10**9, {"tmp": tmp},
+                lambda r, i: None, worker=_scratch_worker,
+            )
+        self.assertEqual(breaks, 0)
+        self.assertNotIn("reclaimed", out.getvalue())
+
+
 class TestSerialMemoryRetry(unittest.TestCase):
     """#1483: a recording that exceeds its memory reserve is retried ONCE, alone,
     at the end of the run, with the budget the node offers then. Before, it waited

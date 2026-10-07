@@ -1915,6 +1915,65 @@ def store_rel_for(primary_path: str) -> str:
     return root + ".zarr"
 
 
+# Sibling of a store's local directory that holds the streaming exporter's memmaps.
+# It sits NEXT to the store (same volume, never uploaded) but is unique to one
+# recording: the exporter's `TemporaryDirectory` used to land in the store's PARENT
+# directory, which sibling recordings of the same session share, so nothing could
+# reclaim one recording's memmaps without risking another's.
+SCRATCH_DIR_SUFFIX = ".scratch"
+
+
+def recording_scratch_paths(tmp: str, primary: str) -> tuple[str, str, str]:
+    """Where one recording keeps its local bytes under the run's temp root:
+    ``(work, store_local, memmap_scratch)``. One definition, shared by the worker
+    that creates them and by the drain that reclaims them after a pool break, so
+    the two cannot disagree about what a dead worker left behind."""
+    work = os.path.join(tmp, "work", primary.replace("/", "_"))
+    store_local = os.path.join(tmp, "stores", store_rel_for(primary))
+    return work, store_local, store_local + SCRATCH_DIR_SUFFIX
+
+
+def reclaim_recording_scratch(tmp: str, primary: str) -> int:
+    """Delete everything a recording left on scratch and return the bytes freed.
+
+    `convert_one`'s ``finally`` does this on every exit it gets to run. A worker
+    killed outright (SIGKILL, or SIGBUS from a memmap write to a full volume) never
+    reaches it, so its raw download and its multi-hundred-GiB memmaps stayed on
+    disk until the whole dataset run ended: on nm000276 two killed workers held 535
+    GiB and every recording behind them in the queue failed with ENOSPC. Called
+    only once the pool's workers are gone, when nothing can still be writing.
+    """
+    freed = 0
+    for path in recording_scratch_paths(tmp, primary):
+        freed += allocated_bytes(path)
+        shutil.rmtree(path, ignore_errors=True)
+    return freed
+
+
+def allocated_bytes(root: str) -> int:
+    """Disk blocks actually allocated under ``root``, in bytes. Not the apparent
+    size: a streaming memmap is a sparse file created at its full length, so
+    `st_size` would charge hundreds of GiB that were never written. Unreadable or
+    vanishing entries count as zero; a live scratch tree changes under the walk."""
+    total = 0
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        else:
+                            total += entry.stat(follow_symlinks=False).st_blocks * 512
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return total
+
+
 # --- Extension-keyed directory recordings (CTF `.ds`, MEF3 `.mefd`) -----------
 #
 # A CTF recording is a directory `..._meg.ds/` holding `.meg4` (data) + `.res4`/
@@ -6760,6 +6819,14 @@ def bids_channels_arg(channels_local: str | None) -> str:
     return channels_local if channels_local and os.path.exists(channels_local) else "off"
 
 
+def _memmap_scratch_dir(store_path: str) -> str:
+    """The recording's own memmap directory, created. `tempfile` needs the parent to
+    exist before it will make a `TemporaryDirectory` inside it."""
+    path = store_path + SCRATCH_DIR_SUFFIX
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
 def convert_recording(
     primary_local: str,
     events_local: str | None,
@@ -6881,8 +6948,10 @@ def convert_recording(
                 dtype="int16",
                 events_df=events_df,
                 # Keep the temp channel-major memmap on the same (fast) scratch volume as
-                # the store; it is a sibling temp dir, not synced to S3.
-                scratch_dir=os.path.dirname(store_path) or None,
+                # the store; it is a sibling directory, not synced to S3, and unique to
+                # this recording so a pool break can reclaim it (see
+                # `reclaim_recording_scratch`).
+                scratch_dir=_memmap_scratch_dir(store_path),
                 # The same explicit sidecar the in-memory path uses, so the two
                 # exporters cannot disagree about a recording's units -- the
                 # disagreement that held the engine bump back until biosigio#128
@@ -6962,7 +7031,7 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
     # escaped convert_one uncoded, retrying forever: exactly the failure the
     # limit call sits inside the try to prevent (#1110). Default to untrusted,
     # which is correct anyway when the reset never ran.
-    work = store_local = None
+    work = store_local = memmap_scratch = None
     rss_trusted = False
     try:
         # Backstop this recording before any allocation: exceeding the reservation
@@ -6987,8 +7056,7 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
                 flush=True,
             )
         rel_store = store_rel_for(primary)
-        work = os.path.join(c["tmp"], "work", primary.replace("/", "_"))
-        store_local = os.path.join(c["tmp"], "stores", rel_store)
+        work, store_local, memmap_scratch = recording_scratch_paths(c["tmp"], primary)
         os.makedirs(work, exist_ok=True)
         os.makedirs(os.path.dirname(store_local), exist_ok=True)
         if c["local"]:
@@ -7330,7 +7398,7 @@ def convert_one(primary: str, peak_bytes: int | None = None) -> dict:
     finally:
         # Parallel workers share the NVMe scratch; reclaim each recording's copy
         # right after upload so N concurrent stores don't accumulate on disk.
-        for d in (store_local, work):
+        for d in (store_local, memmap_scratch, work):
             if d:
                 shutil.rmtree(d, ignore_errors=True)
 
@@ -7520,9 +7588,25 @@ def _drain_with_admission(
             broke = True
         finally:
             shutil.rmtree(track_dir, ignore_errors=True)
+        suspects_now = broken + [p for p, _peak in in_flight.values()]
         if broke or broken:
             pool_breaks += 1
-        return broken + [p for p, _peak in in_flight.values()]
+            # The executor was shut down above, so every worker is gone and nothing
+            # can still be writing. A killed worker never ran `convert_one`'s
+            # `finally`, so its raw download and memmaps are still on scratch, and
+            # the rebuilt pool would inherit that disk. Reclaim them BEFORE the
+            # suspects re-run and the rest of the queue drains.
+            tmp_root = run_ctx.get("tmp")
+            if tmp_root and suspects_now:
+                freed = sum(reclaim_recording_scratch(tmp_root, p) for p in suspects_now)
+                if freed:
+                    print(
+                        f"::warning::reclaimed {freed / 1024**3:.1f} GiB of scratch left "
+                        f"by the {len(suspects_now)} recording(s) a broken worker pool "
+                        "was running",
+                        flush=True,
+                    )
+        return suspects_now
 
     pending = list(convert)
     suspects: list = []
