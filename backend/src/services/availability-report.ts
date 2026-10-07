@@ -211,6 +211,7 @@ export async function writeAvailabilityReport(
       region: env.AWS_REGION,
       accessKeyId: env.AWS_ACCESS_KEY_ID,
       secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+      endpointUrl: env.S3_ENDPOINT_URL,
     };
     const manifestJson = await getManifest(s3Options, datasetId, integrity.version);
     if (manifestJson) {
