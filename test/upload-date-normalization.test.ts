@@ -13,6 +13,8 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
+  constants,
+  accessSync,
   chmodSync,
   existsSync,
   linkSync,
@@ -27,14 +29,15 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { normalizeEdfDates } from "../shared/identifier-scrub";
 import { runCommand } from "../src/lib/git-annex/run-command";
 import {
   applyUploadDates,
+  emptyDatePlan,
+  gitView,
   planUploadDates,
-  trackedPaths,
 } from "../src/lib/upload/date-normalization";
 import {
   identifierPreflightStep,
@@ -108,6 +111,24 @@ async function git(args: string[], cwd = root): Promise<void> {
 }
 
 const EDF = "sub-01/eeg/sub-01_task-rest_eeg.edf";
+const AS_ROOT = typeof process.getuid === "function" && process.getuid() === 0;
+
+/** What a call printed with console.log, without color codes. */
+async function printed(body: () => unknown): Promise<string[]> {
+  const lines: string[] = [];
+  const log = console.log;
+  console.log = (...args: unknown[]) => {
+    lines.push(
+      args.join(" ").replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g"), ""),
+    );
+  };
+  try {
+    await body();
+  } finally {
+    console.log = log;
+  }
+  return lines;
+}
 
 describe("the plan reads and changes nothing", () => {
   test("a dated recording outside any repository is planned with the rule's own header", async () => {
@@ -129,7 +150,8 @@ describe("the plan reads and changes nothing", () => {
   test("a year-only recording, a file that is not EDF, and a short one are not planned", async () => {
     write(EDF, recording("01.01.85", "01-JAN-1985"));
     write("sub-02/eeg/sub-02_task-rest_eeg.edf", "not an EDF file at all, just text\n".repeat(20));
-    write("sub-03/eeg/sub-03_task-rest_eeg.edf", recording().subarray(0, 100));
+    // Short of a whole header, though its start date is there: never read as a header.
+    write("sub-03/eeg/sub-03_task-rest_eeg.edf", recording().subarray(0, 200));
     const plan = await planUploadDates(root);
     expect(plan.items).toEqual([]);
   });
@@ -152,18 +174,22 @@ describe("the plan reads and changes nothing", () => {
     expect(plan.left.link).toBe(1);
   });
 
-  test("a file the uploader cannot write, or in a directory it cannot write, is left", async () => {
-    const path = write(EDF, recording());
-    chmodSync(path, 0o444);
-    const readOnly = await planUploadDates(root);
-    expect(readOnly.items).toEqual([]);
-    expect(readOnly.left["not-writable"]).toBe(1);
-    chmodSync(path, 0o644);
-    chmodSync(dirname(path), 0o555);
-    const lockedDir = await planUploadDates(root);
-    expect(lockedDir.items).toEqual([]);
-    expect(lockedDir.left["not-writable"]).toBe(1);
-  });
+  // As root, every file is writable whatever its bits, so this says nothing there.
+  test.skipIf(AS_ROOT)(
+    "a file the uploader cannot write, or in a directory it cannot write, is left",
+    async () => {
+      const path = write(EDF, recording());
+      chmodSync(path, 0o444);
+      const readOnly = await planUploadDates(root);
+      expect(readOnly.items).toEqual([]);
+      expect(readOnly.left["not-writable"]).toBe(1);
+      chmodSync(path, 0o644);
+      chmodSync(dirname(path), 0o555);
+      const lockedDir = await planUploadDates(root);
+      expect(lockedDir.items).toEqual([]);
+      expect(lockedDir.left["not-writable"]).toBe(1);
+    },
+  );
 
   test("in a git repository, a tracked file is left and an untracked one is planned", async () => {
     await git(["init", "-q", "-b", "main"]);
@@ -185,9 +211,9 @@ describe("the plan reads and changes nothing", () => {
     await git(["init", "-q", "-b", "main"]);
     write("sub-01/eeg/Café_eeg.edf", recording());
     await git(["add", "."]);
-    const tracked = await trackedPaths(root);
+    const view = await gitView(root, ["sub-01/eeg/Caf\u00e9_eeg.edf"]);
     // Folded on both sides: NFC and lower case.
-    expect(tracked?.has("sub-01/eeg/café_eeg.edf")).toBe(true);
+    expect(view?.tracked.has("sub-01/eeg/caf\u00e9_eeg.edf")).toBe(true);
     expect((await planUploadDates(root)).items).toEqual([]);
   });
 
@@ -236,6 +262,63 @@ describe("the plan reads and changes nothing", () => {
     expect(plan.left.tracked).toBe(1);
   });
 
+  test("a recording inside a nested repository is left, tracked there or not", async () => {
+    // A DataLad subdataset under sourcedata/: its own index, which the dataset's does not include.
+    const nested = join(root, "sourcedata/raw");
+    mkdirSync(nested, { recursive: true });
+    await git(["init", "-q", "-b", "main"], nested);
+    await git(["config", "user.email", "test@nemar.test"], nested);
+    await git(["config", "user.name", "NEMAR Test"], nested);
+    write("sourcedata/raw/a.edf", recording());
+    await git(["add", "a.edf"], nested);
+    await git(["commit", "-qm", "raw"], nested);
+    write("sourcedata/raw/sub/b.edf", recording("02.11.91", "02-NOV-1991", 2));
+    write(EDF, recording("09.09.90", "09-SEP-1990", 3));
+    const plan = await planUploadDates(root);
+    expect(plan.items.map((i) => i.rel)).toEqual([EDF]);
+    expect(plan.left["nested-repository"]).toBe(2);
+    applyUploadDates(root, plan);
+    const status = await runCommand(["git", "status", "--porcelain"], { cwd: nested });
+    expect(status.stdout).toBe("?? sub/\n");
+  });
+
+  test("a recording git would ignore is left: the upload never sends it", async () => {
+    write(".gitignore", "sub-02/\n");
+    write(EDF, recording());
+    write("sub-02/eeg/sub-02_task-rest_eeg.edf", recording("02.11.91", "02-NOV-1991", 2));
+    // Outside any repository, the rules the upload's own repository will apply.
+    const fresh = await planUploadDates(root);
+    expect(fresh.items.map((i) => i.rel)).toEqual([EDF]);
+    expect(fresh.left.ignored).toBe(1);
+    // And inside one.
+    await git(["init", "-q", "-b", "main"]);
+    const inRepo = await planUploadDates(root);
+    expect(inRepo.items.map((i) => i.rel)).toEqual([EDF]);
+    expect(inRepo.left.ignored).toBe(1);
+  });
+
+  test.skipIf(process.platform !== "darwin" || AS_ROOT)(
+    "a read-only file is left even when an access control list lets its owner write it",
+    async () => {
+      const path = write(EDF, recording());
+      chmodSync(path, 0o444);
+      const acl = await runCommand(["chmod", "+a", `${userInfo().username} allow write`, path]);
+      expect(acl.exitCode, acl.stderr).toBe(0);
+      // The premise: the system says the file can be written.
+      let canWrite = true;
+      try {
+        accessSync(path, constants.W_OK);
+      } catch {
+        canWrite = false;
+      }
+      expect(canWrite).toBe(true);
+      const plan = await planUploadDates(root);
+      expect(plan.items).toEqual([]);
+      expect(plan.left["not-writable"]).toBe(1);
+      await runCommand(["chmod", "-N", path]);
+    },
+  );
+
   test("inside a repository where git cannot run, no file is planned", async () => {
     // A `.git` above the dataset, and no git on PATH: which files git tracks cannot be told.
     mkdirSync(join(dirname(root), ".git"));
@@ -258,7 +341,10 @@ describe("applying the plan", () => {
     chmodSync(path, 0o640);
     const before = read(EDF);
     const plan = await planUploadDates(root);
-    const result = applyUploadDates(root, plan);
+    let result = applyUploadDates(root, emptyDatePlan());
+    const lines = await printed(() => {
+      result = applyUploadDates(root, plan);
+    });
     expect(result).toMatchObject({ set: 1, left: 0 });
     const after = read(EDF);
     expect(after.length).toBe(before.length);
@@ -270,6 +356,9 @@ describe("applying the plan", () => {
     expect(header.slice(168, 184)).toBe("01.01.8510.11.12");
     expect(statSync(path).mode & 0o777).toBe(0o640);
     expect(result.mtimes.get(EDF)).toBe(statSync(path).mtimeMs);
+    expect(lines).toEqual([
+      "  Acquisition dates in 1 recording header were set to 1 January of their year.",
+    ]);
     // The work directory and the `.nemar/` it made are gone again.
     expect(existsSync(join(root, ".nemar"))).toBe(false);
   });
@@ -366,6 +455,14 @@ describe("applying the plan", () => {
     expect(Buffer.from(read(EDF))).toEqual(Buffer.from(recording()));
   });
 
+  test("a copy a crashed run left is removed by the next apply, even one with nothing to set", async () => {
+    write(".nemar/date-normalization/123-0123456789abcdef", "stray copy");
+    const lines = await printed(() => applyUploadDates(root, emptyDatePlan()));
+    expect(readdirSync(join(root, ".nemar/date-normalization"))).toEqual([]);
+    // Nothing set, nothing said.
+    expect(lines).toEqual([]);
+  });
+
   test("a copy a crashed run left in the work directory is removed; anything else there is kept", async () => {
     write(EDF, recording());
     write(".nemar/config.json", "{}");
@@ -386,23 +483,6 @@ describe("applying the plan", () => {
 });
 
 describe("the preflight screens the tree as it will be sent", () => {
-  async function printed(body: () => Promise<void>): Promise<string[]> {
-    const lines: string[] = [];
-    const log = console.log;
-    console.log = (...args: unknown[]) => {
-      // Without the terminal's color codes: the words a person reads.
-      lines.push(
-        args.join(" ").replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g"), ""),
-      );
-    };
-    try {
-      await body();
-    } finally {
-      console.log = log;
-    }
-    return lines;
-  }
-
   function dataset(): void {
     write("dataset_description.json", JSON.stringify({ Name: "Fixture", BIDSVersion: "1.9.0" }));
     write(EDF, recording());
@@ -424,13 +504,16 @@ describe("the preflight screens the tree as it will be sent", () => {
     if (first?.status !== "ok" || first.value === null) throw new Error("expected a record");
     expect(first.value.scan.findings_by_kind).toEqual({ "acq-time-dated": 1 });
     expect(firstLines.some((l) => l.includes("(1 entry)"))).toBe(true);
-    expect(firstLines.filter((l) => l.includes("set to 1 January"))).toEqual([
-      "  Acquisition dates in 2 recording headers are set to 1 January of their year before upload.",
-    ]);
-    // Nothing changed yet.
+    // Nothing is said about the dates before they are set, and nothing has changed yet.
+    expect(firstLines.filter((l) => l.includes("1 January"))).toEqual([]);
     expect(Buffer.from(read(EDF))).toEqual(Buffer.from(recording()));
 
-    expect(applyUploadDates(root, plan).set).toBe(2);
+    const applyLines = await printed(() => {
+      expect(applyUploadDates(root, plan).set).toBe(2);
+    });
+    expect(applyLines).toEqual([
+      "  Acquisition dates in 2 recording headers were set to 1 January of their year.",
+    ]);
     let again: Awaited<ReturnType<typeof recheckIdentifierPreflight>> | undefined;
     const lines = await printed(async () => {
       again = await recheckIdentifierPreflight(root, first?.value as never);

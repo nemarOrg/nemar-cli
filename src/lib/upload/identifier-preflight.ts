@@ -65,7 +65,6 @@ import {
   ReportError,
   type UploaderPreflight,
   dateFindingCount,
-  dateNormalizationLine,
   describePreflight,
   foldOddFailures,
   foldUnknownFormats,
@@ -477,9 +476,9 @@ export async function identifierPreflightStep(
     printScanFailure(spinner, error);
     return FAIL;
   }
+  // ADR 0091: the dates the upload will set are neither warned about nor asked about; the one line
+  // that counts them is printed when they are set, after the final confirmation.
   printVerdict(spinner, scan);
-  // ADR 0091: what the upload sets itself is one neutral line, not a warning and not a question.
-  if (planned.size > 0) console.log(chalk.dim(`  ${dateNormalizationLine(planned.size)}`));
 
   const conditions = preflightConditions(scan);
   const decision = decidePreflight(scan, {

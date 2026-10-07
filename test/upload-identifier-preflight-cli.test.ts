@@ -63,10 +63,15 @@ let configDir: string;
 let dataset: string;
 /** An empty directory: the PATH of a run that must not get past the preflight. */
 let emptyPath: string;
+/** A PATH with git and nothing else: the date plan can ask git, and the run stops at git-annex. */
+let gitOnlyPath: string;
 
 beforeEach(() => {
   configDir = mkdtempSync(join(tmpdir(), "nemar-preflight-cli-cfg-"));
   emptyPath = mkdtempSync(join(tmpdir(), "nemar-preflight-cli-path-"));
+  gitOnlyPath = mkdtempSync(join(tmpdir(), "nemar-preflight-cli-git-"));
+  const git = Bun.which("git");
+  if (git) symlinkSync(git, join(gitOnlyPath, "git"));
   // A parent named after nobody, and a dataset directory whose own name must not be printed.
   dataset = join(mkdtempSync(join(tmpdir(), "nemar-preflight-cli-")), "Quillfeather-study");
   mkdirSync(dataset);
@@ -75,6 +80,7 @@ beforeEach(() => {
 afterEach(() => {
   rmSync(configDir, { recursive: true, force: true });
   rmSync(emptyPath, { recursive: true, force: true });
+  rmSync(gitOnlyPath, { recursive: true, force: true });
   rmSync(dirname(dataset), { recursive: true, force: true });
 });
 
@@ -98,7 +104,7 @@ function configure(apiUrl: string): void {
  * that gets past the preflight then stops at the required-tools check, before any step that
  * could reach GitHub or git-annex.
  */
-function childEnv(options: { noTools?: boolean } = {}): Record<string, string> {
+function childEnv(options: { noTools?: boolean; gitOnly?: boolean } = {}): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (value === undefined || key.startsWith("TEST_")) continue;
@@ -109,10 +115,15 @@ function childEnv(options: { noTools?: boolean } = {}): Record<string, string> {
   env.NEMAR_NO_UPDATE_CHECK = "1";
   env.NO_COLOR = "1";
   if (options.noTools) env.PATH = emptyPath;
+  if (options.gitOnly) env.PATH = gitOnlyPath;
   return env;
 }
 
-async function upload(args: string[], apiUrl: string, options: { noTools?: boolean } = {}) {
+async function upload(
+  args: string[],
+  apiUrl: string,
+  options: { noTools?: boolean; gitOnly?: boolean } = {},
+) {
   configure(apiUrl);
   const proc = spawn({
     // The absolute path of this bun, so the run does not need PATH to start.
@@ -289,15 +300,12 @@ function expectWarningCarriesOnlyItsCount(output: string, n: number): void {
   }
 }
 
-/** ADR 0091's line, printed exactly once, with this count and no other digit. */
-function expectOneNormalizationLine(output: string, n: number): void {
-  const lines = output
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.includes("set to 1 January"));
-  expect(lines).toEqual([
-    `Acquisition dates in ${n} recording header${n === 1 ? "" : "s"} are set to 1 January of their year before upload.`,
-  ]);
+/**
+ * ADR 0091's line is printed when the dates are set, after the final confirmation, which no run here
+ * reaches: so no run here prints it, and none says anything about 1 January.
+ */
+function expectNoNormalizationLine(output: string): void {
+  expect(output).not.toContain("1 January");
 }
 
 /** Every file under the dataset with its bytes, so a test can say none changed. */
@@ -493,15 +501,15 @@ describe("nemar dataset upload: acquisition dates (ADR 0090, ADR 0091)", () => {
     const before = snapshot();
     const server = startServer();
     try {
-      // No tools on PATH: past the preflight, the run stops at the required-tools check. The
-      // dataset is in no repository, so nothing about it needs git to be planned.
-      const r = await upload(["--yes"], server.url, { noTools: true });
+      // Only git on PATH: the date plan can ask it which files it would ignore, and past the
+      // preflight the run stops at the required-tools check (no git-annex).
+      const r = await upload(["--yes"], server.url, { gitOnly: true });
       // The two header dates will be set before anything is sent, so the screen does not count
       // them; the scans table is not edited by an upload, so its date is what stays.
       expect(r.output).toContain("Identifier preflight: clean (acquisition dates only)");
       expect(r.output).toContain("Findings by kind: acq-time-dated x1.");
       expectWarningCarriesOnlyItsCount(r.output, 1);
-      expectOneNormalizationLine(r.output, 2);
+      expectNoNormalizationLine(r.output);
       // Nothing to acknowledge: no refusal, no prompt, no condition named, and it went on.
       expect(r.output).not.toContain("Upload refused");
       expect(r.output).not.toContain("Upload anyway?");
@@ -521,9 +529,9 @@ describe("nemar dataset upload: acquisition dates (ADR 0090, ADR 0091)", () => {
     const before = snapshot();
     const server = startServer();
     try {
-      const r = await upload(["--dry-run", "--yes"], server.url, { noTools: true });
+      const r = await upload(["--dry-run", "--yes"], server.url, { gitOnly: true });
       expectWarningCarriesOnlyItsCount(r.output, 1);
-      expectOneNormalizationLine(r.output, 2);
+      expectNoNormalizationLine(r.output);
       expect(r.output).not.toContain("Upload refused");
       expectNothingSent(server.requests);
       expect(snapshot()).toEqual(before);
@@ -532,17 +540,17 @@ describe("nemar dataset upload: acquisition dates (ADR 0090, ADR 0091)", () => {
     }
   });
 
-  test("header dates alone: clean, no warning, and one neutral line", async () => {
+  test("header dates alone: clean, and no warning", async () => {
     write("dataset_description.json", JSON.stringify({ Name: "Fixture", BIDSVersion: "1.9.0" }));
     write("sub-01/eeg/sub-01_task-rest_eeg.edf", recording("P01 F X X", "15.03.85"));
     const server = startServer();
     try {
-      const r = await upload(["--yes"], server.url, { noTools: true });
+      const r = await upload(["--yes"], server.url, { gitOnly: true });
       expect(r.output).toContain("Identifier preflight: clean");
       expect(r.output).not.toContain("clean (acquisition dates only)");
       expect(r.output).not.toContain("Warning: acquisition dates");
       expect(r.output).not.toContain("NEMAR does not change them");
-      expectOneNormalizationLine(r.output, 1);
+      expectNoNormalizationLine(r.output);
       expect(r.output).toContain("Missing required tools");
     } finally {
       server.stop();
@@ -555,7 +563,7 @@ describe("nemar dataset upload: acquisition dates (ADR 0090, ADR 0091)", () => {
     write("sub-01/eeg/sub-01_task-rest_eeg.edf", recording("P01 F X X"));
     const server = startServer();
     try {
-      const r = await upload(["--yes"], server.url, { noTools: true });
+      const r = await upload(["--yes"], server.url, { gitOnly: true });
       expect(r.output).toContain("Identifier preflight: clean");
       expect(r.output).not.toContain("clean (acquisition dates only)");
       expect(r.output).not.toContain("Warning: acquisition dates");
@@ -579,11 +587,11 @@ describe("nemar dataset upload: acquisition dates (ADR 0090, ADR 0091)", () => {
     chmodSync(join(dataset, "sub-04/eeg/sub-04_task-rest_eeg.edf"), 0o444);
     const server = startServer();
     try {
-      const r = await upload(["--dry-run", "--yes"], server.url, { noTools: true });
+      const r = await upload(["--dry-run", "--yes"], server.url, { gitOnly: true });
       // The two left headers and the scans table are warned about; the two plain files are set.
       expect(r.output).toContain("Findings by kind: edf-startdate x2, acq-time-dated x1.");
       expectWarningCarriesOnlyItsCount(r.output, 3);
-      expectOneNormalizationLine(r.output, 2);
+      expectNoNormalizationLine(r.output);
       expectNothingSent(server.requests);
     } finally {
       chmodSync(join(dataset, "sub-04/eeg/sub-04_task-rest_eeg.edf"), 0o644);
@@ -617,7 +625,7 @@ describe("nemar dataset upload: acquisition dates (ADR 0090, ADR 0091)", () => {
         "Identifier preflight: EDF/BDF clean, other recordings NOT screened",
       );
       expectWarningCarriesOnlyItsCount(stopped.output, 1);
-      expectOneNormalizationLine(stopped.output, 2);
+      expectNoNormalizationLine(stopped.output);
       expect(stopped.output).toContain(
         "--acknowledge-identifier-preflight clean-edf-only-others-unscreened",
       );
@@ -628,7 +636,7 @@ describe("nemar dataset upload: acquisition dates (ADR 0090, ADR 0091)", () => {
       const named = await upload(
         ["--yes", "--acknowledge-identifier-preflight", "clean-edf-only-others-unscreened"],
         server.url,
-        { noTools: true },
+        { gitOnly: true },
       );
       expect(named.output).toContain(
         "Acknowledged with --acknowledge-identifier-preflight clean-edf-only-others-unscreened",
