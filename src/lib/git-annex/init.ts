@@ -200,7 +200,7 @@ export async function initDataset(
     // Initialize git-annex
     const envOpts = Object.keys(env).length > 0 ? { env } : {};
     const { stderr: initStderr, exitCode: initExitCode } = await runCommand(
-      ["git", "annex", "init"],
+      ["git", "annex", "init", ANNEX_DEPOSIT_DESCRIPTION],
       {
         cwd: path,
         ...envOpts,
@@ -249,6 +249,54 @@ export async function initDataset(
 }
 
 /**
+ * The description `git annex init` records for a depositor's repository.
+ *
+ * With no description git-annex records `user@host:/absolute/path`, which is
+ * committed to the `git-annex` branch's uuid.log and is public once the
+ * dataset is (#1399; a cluster upload records the login name, the node
+ * name and the full scratch path). A fixed, non-identifying string removes it.
+ */
+export const ANNEX_DEPOSIT_DESCRIPTION = "nemar-deposit";
+/** Same, for clones made by NEMAR tooling (download, admin fleet, CI). */
+export const ANNEX_CLONE_DESCRIPTION = "nemar-clone";
+
+/**
+ * True for git-annex's default `user@host:/path` repository description (a
+ * path under $HOME is written `user@host:~/path`).
+ */
+export function isDefaultAnnexDescription(description: string): boolean {
+  return /^[^\s@]+@[^\s:]+:[/~]/.test(description.replace(/\s*\[here\]$/, "").trim());
+}
+
+/**
+ * Replace this repository's identifying default description with
+ * ANNEX_DEPOSIT_DESCRIPTION, for repositories initialized before the forward
+ * fix (a resumed upload). Only the default `user@host:/path` form is
+ * replaced; a description someone chose is left alone. The old value stays in
+ * the git-annex branch history: this stops it being the CURRENT value, it
+ * does not scrub a branch that was already pushed (see #1399).
+ * Returns true when it rewrote the description.
+ */
+export async function replaceDefaultAnnexDescription(path: string): Promise<boolean> {
+  const info = await runCommand(["git", "annex", "info", "here", "--json", "--fast"], {
+    cwd: path,
+  });
+  if (info.exitCode !== 0) return false;
+  let description = "";
+  try {
+    const parsed = JSON.parse(info.stdout) as { description?: unknown };
+    description = typeof parsed.description === "string" ? parsed.description : "";
+  } catch {
+    return false;
+  }
+  if (!isDefaultAnnexDescription(description)) return false;
+  const res = await runCommand(["git", "annex", "describe", "here", ANNEX_DEPOSIT_DESCRIPTION], {
+    cwd: path,
+  });
+  return res.exitCode === 0;
+}
+
+/**
  * Ensure git-annex is initialized in the dataset
  * Safe to call multiple times - will not fail if already initialized
  */
@@ -270,7 +318,7 @@ export async function ensureGitAnnexInitialized(
     // If info fails with "First run" error, need to initialize
     if (infoStderr.includes("First run: git-annex init")) {
       const { stderr: initStderr, exitCode: initExitCode } = await runCommand(
-        ["git", "annex", "init"],
+        ["git", "annex", "init", ANNEX_DEPOSIT_DESCRIPTION],
         { cwd: path },
       );
 

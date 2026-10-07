@@ -8,7 +8,7 @@ import { statSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { displayName, displayNames, isPrintableInCommand } from "../display-name.js";
 import { getGitHubToken, resolveGitHubCloneAuth } from "./github.js";
-import { chunkAddTargets } from "./init.js";
+import { ANNEX_CLONE_DESCRIPTION, chunkAddTargets } from "./init.js";
 import { getCurrentBranch } from "./repo-state.js";
 import { runCommand } from "./run-command.js";
 
@@ -862,8 +862,10 @@ export async function cloneDataset(
     }
 
     // Initialize git-annex in the cloned repo
+    // A fixed description, never git-annex's default user@host:/path: the
+    // clone's uuid.log entry is pushed by any later sync (#1399).
     const { stderr: initStderr, exitCode: initExitCode } = await runCommand(
-      ["git", "annex", "init"],
+      ["git", "annex", "init", ANNEX_CLONE_DESCRIPTION],
       { cwd: outputPath },
     );
 
