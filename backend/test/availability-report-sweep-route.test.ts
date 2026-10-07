@@ -6,14 +6,14 @@
  * (bun:sqlite behind realD1, the real auth/admin middleware with a seeded
  * admin token, real route dispatch via Hono app.request()).
  *
- * This file's env sets no S3_ENDPOINT_URL, so a candidate reaching
- * writeAvailabilityReport here would issue a real S3 LIST (the same
- * structural constraint data-integrity-sweep-route.test.ts documents) and,
- * on success, reach GitHub's Contents API. The write path against local S3
- * and GitHub stand-ins lives in availability-report-never-creates-main.test.ts.
+ * This file's env carries no GitHub token and no S3 settings, so a candidate
+ * reaching writeAvailabilityReport here would fail at GitHub auth, its first
+ * step on the write path, and surface as an error entry instead of exercising
+ * the sweep. The write path against local S3 and GitHub stand-ins lives in
+ * availability-report-never-creates-main.test.ts.
  * So every test in the first describe block below is scoped to a candidate
- * set that yields ZERO real candidates reaching the per-row loop -- seeded rows are either
- * excluded by the WHERE clause (no-repo / sandbox / already-stamped /
+ * set that yields ZERO candidates reaching the per-row loop -- seeded rows are
+ * either excluded by the WHERE clause (no-repo / sandbox / already-stamped /
  * missing-only's data_complete filter) or the table is empty. That proves
  * the EXCLUSION side of each filter dimension for real, through the actual
  * route, with zero network calls.
@@ -313,11 +313,9 @@ describe("availability-report-sweep candidate SQL (pinned, no route dispatch)", 
     expect(remainingCount()).toBe(2);
   });
 
-  // The has-a-version rule was hand-copied into this sweep from the archive
-  // retry sweep; both now build from the one exported predicate, so a change
-  // to what "has a version" means reaches both or neither. The behavior is
-  // pinned by the test above (and by archive-retry.test.ts for the other
-  // sweep); this pins that they still SHARE it.
+  // Both sweeps build from datasetHasVersionSql; this pins that they still
+  // share it. The behavior is pinned by the test above (and by
+  // archive-retry.test.ts for the other sweep).
   test("candidacy and the archive retry sweep share one has-a-version predicate", () => {
     expect(availabilityReportSweepWhere(false)).toContain(datasetHasVersionSql("datasets"));
     expect(availabilityReportSweepWhere(true)).toContain(datasetHasVersionSql("datasets"));
