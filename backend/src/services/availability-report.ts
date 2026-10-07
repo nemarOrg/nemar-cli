@@ -343,10 +343,14 @@ export async function writeAvailabilityReport(
  *  not a candidate: its report has nothing to compare against, and its
  *  repository may still be empty mid-upload. A never-versioned row would hold
  *  one of the LIMIT slots on every pass (ORDER BY dataset_id), as it would in
- *  ARCHIVE_RETRY_SWEEP_QUERY. This predicate removes only that case: a row the
- *  write refuses (no `main`, repository not visible to NEMAR) stays a
- *  candidate, stays unstamped, and still holds a slot. The version rule is
- *  `datasetHasVersionSql`, which that query also builds from. */
+ *  ARCHIVE_RETRY_SWEEP_QUERY. This predicate removes only that case.
+ *
+ *  KNOWN LIMITATION (tracked as a follow-up to #1643): a row the write REFUSES
+ *  (the repository has no `main`, or is not visible to NEMAR) stays a candidate
+ *  and unstamped, so it is retried on every pass and holds a LIMIT slot, and
+ *  because candidates are ordered by dataset_id it starves the valid rows behind
+ *  it. The version rule is `datasetHasVersionSql`, which that query also builds
+ *  from. */
 const AVAILABILITY_REPORT_SWEEP_BASE_WHERE = `github_repo IS NOT NULL
      AND (is_sandbox = 0 OR is_sandbox IS NULL OR ${exemplarOrFragment("")})
      AND json_extract(sweep_stamps, '$.availability_report_at') IS NULL
@@ -426,9 +430,9 @@ export interface AvailabilityReportSweepResult {
   processed: number;
   written: number;
   errors: AvailabilityReportSweepError[];
-  /** Candidates still unstamped after this run, including rows this run
-   *  refused or failed; 0 means nothing is left to try. Null if the count
-   *  query failed. */
+  /** Candidates still unstamped after this run, refused and failed rows
+   *  included (see AVAILABILITY_REPORT_SWEEP_BASE_WHERE); 0 means nothing is left
+   *  to try. Null if the count query failed. */
   remaining: number | null;
 }
 

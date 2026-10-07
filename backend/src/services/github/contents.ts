@@ -55,13 +55,8 @@ export function isContentsApiShaConflict(status: number, bodyText: string): bool
  * to ask for the repository default, because there is no reason to want one.
  *
  * **On a repository with no commits this CREATES `branch`, as an unrelated ROOT
- * commit.** A depositor's first push is then rejected as non-fast-forward and
- * the git-annex adjusted branch cannot be rebased onto it (#1643). Nothing here
- * refuses: only the availability report guards against it today, by asking
- * `branchExists` first. Every other caller (enrichment through
- * `commitEnrichmentWithBidsignore`, the publication orchestrator's DOI and
- * README writes) is still exposed if it can reach a repository nothing has been
- * pushed to. `commitFilesAsTree` cannot do this: it resolves the branch first.
+ * commit** (#1643). Nothing here refuses; only the availability report guards
+ * against it, by asking `branchExists` first.
  */
 export async function createOrUpdateFile(
   repo: string,
@@ -374,11 +369,8 @@ const LOOKUP_ONCE: FetchPolicy = { kind: "interactive", maxAttempts: 1 };
  * letting a branch name alter the request, not about making slash branches
  * resolvable. (`getMainBranchSha` used to send the branch raw.)
  *
- * `options` is the one way the two requests differ: `getMainBranchSha` is asked
- * about a branch the caller knows exists, so it retries a 404 as a propagation
- * delay; `branchExists` is asked whether it exists at all, so a 404 is its
- * answer and it uses {@link LOOKUP_ONCE}. They also differ in what they do with
- * the result (a 404 or an empty-repository 409 is an answer for one and an
+ * `options` is the retry policy, the one way the two requests differ; they also
+ * differ in what a 404 or an empty-repository 409 means (an answer for one, an
  * error for the other), which is why neither is written in terms of the other.
  */
 async function fetchBranchRef(
