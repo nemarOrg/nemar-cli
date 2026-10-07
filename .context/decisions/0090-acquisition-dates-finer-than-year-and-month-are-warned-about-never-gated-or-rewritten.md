@@ -1,0 +1,105 @@
+# ADR 0090: Acquisition dates finer than year and month are warned about, and never gated or rewritten (policy B)
+
+**Status:** accepted
+**Date:** 2026-10-07
+**Owner:** Seyed Yahya Shirazi
+
+Epic #1610, issue #1616 (Phase 6).
+Follows ADR 0085 (what gates and what a correction costs), ADR 0086 (the publication screen and its report contract) and ADR 0087 (the upload preflight), and records the maintainer's decision of 2026-10-07 on the policy those three state in one line each (the 2026-10-04 policy).
+
+## Context
+
+The scanner reports a recording's acquisition date at review severity and it never gates.
+The date kinds are `edf-startdate`, `edf-recording-startdate` and `acq-time-dated` (`DATE_KINDS`, `shared/identifier-scan.ts`).
+That was settled on 2026-10-04, in the Contributor Terms and in the scanner, and nothing about the gate changes here.
+
+What was missing is that nobody is told.
+The dataset owner of the platform states that an acquisition date finer than year and month can identify a participant when it is linked to other information, such as a clinic schedule or a diary.
+The people who put data on NEMAR are the ones who can coarsen a date before it is copied anywhere, and until now neither the upload nor the publication request said a word about dates.
+The verdict of a dataset with dates only is `dates-only`, which the gate treats as clear, so an uploader sees "clean" and an administrator is not asked anything.
+
+Two policies were on the table.
+Policy A coarsens every such date to year and month, in the scrub and in the importer.
+Policy B keeps the date as it is and tells people.
+The maintainer chose B on 2026-10-07 and asked that the warning be shown to the uploader, to the person who requests publication and to the administrator.
+
+## Decision
+
+**Policy B: a date finer than year and month stays a review-level finding that never gates and that nothing rewrites, and a fixed warning, produced from one definition, is shown wherever the finding's counts are shown.**
+
+- **Nothing about a verdict changes.**
+  `classifyDataset`, `screenGate`, the acknowledgment rules of ADR 0087 and the admin's recorded reason of ADR 0086 are untouched.
+  A dataset with dates only is still `dates-only`, still `clear`, and still needs no acknowledgment: the warning is printed and the upload goes on.
+  A dataset with dates and a finding of another kind is still `review` and needs the acknowledgment it needed.
+  The warning is words beside the counts and decides nothing.
+- **Nothing is rewritten.**
+  No scrub rule, importer rule or scanner rule changes, and no dataset is edited.
+  A rewrite of dates would change data content, and it would not be a privacy correction of a public record that anyone had asked for.
+  The Data Contributor Terms put the duty to keep identifying information out of a deposit on the depositor (ADR 0086), and the warning is how the depositor is told about a kind of date that can identify.
+- **One definition.**
+  `dateWarningLines` in `shared/identifier-screen-report.ts` returns the warning from a scan's `findings_by_kind`, and nothing else in the repository spells the sentences.
+  The first line states the count, the next four are fixed words:
+
+  > Warning: acquisition dates finer than year and month were found in recording headers or scans tables (N entries).
+  > NEMAR does not change them.
+  > A date can help identify a participant when it is combined with other information.
+  > Remove or coarsen any date that could identify someone before uploading or requesting publication.
+  > An administrator reviews these before a dataset is made public.
+
+  `N` is the sum of the counts of the date kinds, and `1 entry` in the singular.
+  It is the only number, and the only variable part.
+  The warning never carries a date, a value, a file name or a path, so it is as safe to print in a public CI log as the kind and count lines beside it (the report contract of ADR 0086).
+- **Only when there is one.**
+  The warning appears exactly when at least one date-kind finding is counted, whatever the verdict: `dates-only`, `review`, `direct-identifiers`, or `unchecked`.
+  A scan with no date finding prints no warning, and a count that is not a non-negative integer is ignored rather than added.
+- **Where it is shown.**
+  It is part of `describeScreen` and `describePreflight`, which are already the one place the screen's words are made, so it appears wherever those words do and nowhere else:
+  1. The uploader: the identifier preflight of `nemar dataset upload` (and `--dry-run`), printed under the verdict.
+  2. The person who requests publication: `nemar dataset publish status`, which prints the request's screen as stored, and the mail that tells a requester a direct identifier blocked the request.
+  3. The administrator: the publication-request email, including a resend, and `nemar admin publish list`.
+  The terminal prints the warning's lines in the warning color; which lines they are comes from `isDateWarningLine`, in the same module.
+  No mail category, table or column is added.
+- **The weekly report is unchanged.**
+  The sweep's report (ADR 0088) already names date findings by their fixed kind words and counts for every dataset it lists, and counts the datasets whose verdict is `dates-only`.
+  It is not a place a depositor reads, and a warning to administrators in a mail they get weekly adds nothing to what the kind words say.
+
+## Consequences
+
+- An uploader whose headers carry dates is told so every time, at no cost to the upload: no flag, no prompt.
+  A pipeline that printed nothing for dates now prints five more lines.
+- The requester learns of the finding when the screen has reported, not when the request is made: at request time the screen has not run, so there is no count and, by this decision, no warning.
+  The requester is mailed only when the request is blocked, so for a request that is not blocked the place to see the warning is `nemar dataset publish status`, as for every other result.
+  A mail to the requester for every result would be a new notification, and is left to the maintainer.
+- The count is of findings, so a recording whose recording-identification field also holds a date counts twice, and a scans-table row counts once.
+  It is a size, not a number of recordings.
+- The scanner's test for "year only" is "1 January", so a date on the first of another month is counted, though it may already be coarsened to a month.
+  The warning therefore errs toward saying more.
+  Changing the test is a scanner change, and is the maintainer's call.
+- What an administrator can list today:
+  the publication mail and `nemar admin publish list` name the date kinds and counts of each request;
+  the weekly report and `GET /admin/identifier-sweep` list every dataset whose last verdict is `review` with its kinds and counts, date kinds included (the first 50 by id in the mail, all in the route), and count the datasets that are `dates-only` without naming them.
+  Naming the `dates-only` datasets, for example in the route's facts, is a small addition when it is wanted; the triage of the sixteen scrubbed datasets is done outside the repository.
+- The wording lives on `docs.nemar.org` too, in pages that are in a private repository and are not edited here; the pull request lists them.
+- If the maintainer later chooses policy A, which coarsens dates to year and month, that is a new ADR: the scanner's date test, the scrub rules, the importer and the meaning of `dates-only` would change together, and this decision's warning would be reviewed with them.
+
+## Alternatives considered
+
+- **Policy A: coarsen dates to year and month.**
+  It changes data that depositors own and that analyses may depend on, in every version, and it needs the scrub's machinery for every dataset with a date.
+  The maintainer chose to inform first; A stays available.
+- **Make `dates-only` need an acknowledgment.**
+  An acknowledgment that ends in a flag in a pipeline is not a reading of the warning, and it would stop every pipeline for a finding that has never gated.
+  The warning is printed every time instead, and the administrator's decision on the publication request is where a person answers.
+- **A fixed notice at request time with no count.**
+  It would appear whether or not a date exists, and the request is made before the screen has looked.
+- **A new mail to the requester, or a new category for administrators.**
+  The warning travels in the mail and the views that already exist, and a new mail needs a sending policy that this does not have.
+- **Words in each surface.**
+  Five hand-written copies of a sentence about privacy drift apart, which is the failure ADR 0086 closed for the verdicts.
+
+## Receipts
+
+- Definition and tests: `shared/identifier-screen-report.ts` (`dateWarningLines`), `test/identifier-screen-report.test.ts`.
+- Surfaces: `test/upload-identifier-preflight-cli.test.ts`, `test/identifier-screen-cli.test.ts`, `backend/test/identifier-screen-flow.test.ts`, `backend/test/identifier-sweep-report.test.ts`.
+- The policy of 2026-10-04: the scanner header comment and `DATE_KINDS`; ADR 0085 ("What gates").
+- Epic #1610; this decision is Phase 6 (#1616).

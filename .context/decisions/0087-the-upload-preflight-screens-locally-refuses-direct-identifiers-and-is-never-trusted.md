@@ -135,3 +135,9 @@ and records the verdict inside the deposit attestation, where nothing reads it a
 - Contract: `shared/identifier-screen-report.ts` (`parseUploaderPreflight`, `describePreflight`), `test/identifier-preflight-contract.test.ts`.
 - Step: `src/lib/upload/identifier-preflight.ts`, `test/upload-identifier-preflight.test.ts`, `test/upload-identifier-preflight-cli.test.ts`.
 - Recording: `backend/src/services/identifier-preflight.ts`, `backend/src/routes/datasets/upload.ts`, `backend/test/identifier-preflight-route.test.ts`, `test/upload-preflight-recording.test.ts`.
+
+## Amendment 2026-10-07 (#1616): acquisition dates are warned about
+
+`dates-only` still proceeds with nothing to acknowledge, as above.
+[ADR 0090](0090-acquisition-dates-finer-than-year-and-month-are-warned-about-never-gated-or-rewritten.md) adds a fixed warning to the preflight's output whenever the scan counts a date kind, whatever the verdict, produced by `describePreflight`.
+It is words beside the counts: no verdict, acknowledgment condition or recorded field changed.
