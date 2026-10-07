@@ -17,6 +17,7 @@
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { PROVENANCE_NOTE_KEY, PROVENANCE_PATH } from "../../../shared/privacy-correction-text";
 import {
   ANNEX_KEY,
   ContractError,
@@ -639,10 +640,10 @@ export const LEDGER_PATH = ".nemar/corrections.jsonl";
  * upstream file. Those checksums are kept as provenance (ADR 0085), so they are the one place an
  * old key's hash may remain, under the rule of {@link provenanceHashUse}.
  */
-export const PROVENANCE_PATH = "sourcedata/sourcedata_provenance.json";
+export { PROVENANCE_PATH };
 
 /** The top-level key whose sentence says the checksums describe the files before the correction. */
-export const PROVENANCE_NOTE_KEY = "privacy_correction";
+export { PROVENANCE_NOTE_KEY };
 
 /**
  * `local`: the clone the rewrite ran in, compared with the snapshot taken before it.
