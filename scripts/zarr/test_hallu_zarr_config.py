@@ -1067,10 +1067,9 @@ WEBHOOK_URL = "https://hooks.example.test/webhooks/zarr-ready"
 @pytest.fixture
 def drain_one(ack_run, tmp_path: Path):
     """The queue drain handling one dataset: `next` serves it once, the conversion
-    driver writes the body a test chooses, and `curl` records every POST (the
-    metadata clone is `ack_run`'s `FAKE_NEMAR`). The
-    script's own handling of that body (what it posts, what it hands `qpy done`) is
-    the real code."""
+    driver writes the body a test chooses, `curl` records every POST, and the
+    metadata clone is `ack_run`'s `FAKE_NEMAR`. The script's own handling of that
+    body (what it posts, what it hands `qpy done`) is the real code."""
     run, qpy_calls, _, _ = ack_run
     stubs = tmp_path / "stubbin"
     stubs.mkdir()

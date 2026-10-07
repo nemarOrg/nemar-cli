@@ -1083,12 +1083,12 @@ def failed_callback_body(
     required and has no default, so a caller that leaves one out fails loudly
     instead of reporting a zero it never measured. The one failed body that
     does not come from here is the refusal of an invalid scratch setting at the
-    top of `main`: it runs before the dataset is cloned, so it has none of these
-    numbers to report and reports none.
+    top of `main`: it runs before the repository is read, so it has none of
+    these numbers to report and reports none.
 
     `deferred` maps each recording the scratch gate would not admit to the
     `last_error` the index carries for it. Those recordings are pending and
-    were never attempted, and they are not in `pending_entries` (the merge
+    were never attempted, and they are not in `pending_entries` (`merge_index`
     derives their entries from `deferred`), so both counts add them.
     """
     return {
@@ -9844,7 +9844,7 @@ def main() -> int:
 
         Every exit that returns 1 goes through here, and that is the point (the
         one exception, an invalid scratch setting, is refused before the
-        dataset is cloned and writes its own minimal body). The
+        repository is read and writes its own minimal body). The
         driver POSTs whatever this file contains; if a failure path writes NO
         file, `hallu-zarr.sh` posts nothing, the `converting` signal it sent at
         the start is never superseded, and D1 sits at `zarr_status='pending'`
