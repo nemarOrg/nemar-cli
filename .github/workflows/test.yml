@@ -471,23 +471,48 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
 
-      # Each attempt has a time limit because the job is now N runners and any one of them can
-      # draw a slow package mirror: one shard spent 7 minutes 22 seconds on this step (16.6 MB at
-      # 37 kB/s; it normally takes 10 seconds) and set the wall time of its run. A retry resumes
-      # the partial download, usually from a faster mirror. A missing git-annex is still a
-      # failure, after the last attempt.
+      # git-annex comes from the Ubuntu mirror, which is sometimes slow for this one package for
+      # minutes at a time: in two runs, 3 of 14 shards spent 5 to 7 minutes on a 16.6 MB download
+      # at 40 to 60 kB/s, and a retry hit the same stall. With seven runners that stall is likely
+      # in any one run and sets its wall time, so the three packages (the other dependencies are
+      # on the runner image already) are cached and installed from the cache when it is there.
+      # A cache is readable by the ref that wrote it and the refs it was cut from, so the first
+      # run on a new branch still uses the mirror. On a miss, or when the cached packages do not
+      # install, they come from the mirror: downloaded first with a limit per attempt so a stall
+      # is retried (a retry resumes the partial file), and the last attempt has none, so a slow
+      # mirror still ends in an install and not a failure. The download-only step also leaves the
+      # .deb files this job caches for the next run.
+      - name: Ubuntu release
+        id: ubuntu
+        run: echo "release=$(lsb_release -rs)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the git-annex packages
+        uses: actions/cache@v4
+        with:
+          path: ~/annex-debs
+          key: git-annex-debs-${{ runner.arch }}-${{ steps.ubuntu.outputs.release }}-v1
+
       - name: Install git-annex
         run: |
-          for attempt in 1 2 3; do
-            if sudo timeout $((attempt * 60)) apt-get update \
-              && sudo timeout $((attempt * 60)) apt-get install -y git-annex; then
-              exit 0
+          if compgen -G "$HOME/annex-debs/*.deb" > /dev/null \
+            && sudo dpkg -i "$HOME"/annex-debs/*.deb; then
+            echo "installed git-annex from the cached packages"
+            exit 0
+          fi
+          echo "no usable cached packages; installing from the mirror"
+          for attempt in 1 2 3 4 5; do
+            limit=60
+            [ "$attempt" -eq 5 ] && limit=1800
+            if sudo timeout "$limit" apt-get update \
+              && sudo timeout "$limit" apt-get install -y --download-only git-annex; then
+              break
             fi
             echo "::warning::apt attempt $attempt failed or timed out"
-            sudo dpkg --configure -a || true
           done
-          echo "::error::git-annex could not be installed"
-          exit 1
+          sudo apt-get install -y git-annex
+          mkdir -p "$HOME/annex-debs"
+          cp /var/cache/apt/archives/git-annex_*.deb /var/cache/apt/archives/git-remote-gcrypt_*.deb \
+            /var/cache/apt/archives/nocache_*.deb "$HOME/annex-debs/"
 
       - name: Install dependencies
         run: bun install
