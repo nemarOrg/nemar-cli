@@ -345,6 +345,13 @@ API_BASE="${API_BASE:-https://api.nemar.org}"
 # advertises the production host.
 CONTRACT_BASE="${ZARR_CONTRACT_BASE:-https://zarr.nemar.org}"
 CALLBACK_URL="${ZARR_CALLBACK_URL:-${API_BASE}/webhooks/zarr-ready}"
+# Whether the driver's callback body is POSTed. The driver sets `"post": false` for a
+# run that deferred everything for scratch and published nothing: the body still
+# carries the numbers the queue needs, but the webhook has no "unchanged" status and
+# a `ready` body restamps zarr_converted_at (and re-queues the recording-stats
+# sweep), which would make a stuck dataset look freshly converted. Anything but an
+# explicit false posts, so an older driver is unaffected.
+CALLBACK_POST_FILTER='if .post == false then "false" else "true" end'
 S3_BUCKET="${S3_BUCKET:-nemar}"
 AWS_REGION="${AWS_DEFAULT_REGION:-us-east-2}"
 # Scoped service profile (IAM user nemar-hallu-zarr; s3:Get/Put/Delete on
@@ -811,6 +818,7 @@ convert_dataset() {
   local id="$1" version="${2:-}" scope="${3:-}"
   local dir="$WORK_DIR/$id"
   local cb="$WORK_DIR/$id.callback.json"
+  local post_callback=true
   # Reset BEFORE any early return so the drain loop never reads an unbound (set -u
   # aborts) or stale value: a clone-failure early-return below must NOT inherit
   # the previous dataset's `deterministic` and get mis-marked terminal. Set from
@@ -897,12 +905,18 @@ convert_dataset() {
     LAST_ANNEX_MISSING_COUNT="$(jq -r '.annex_missing_count // 0' "$cb" 2>/dev/null || echo 0)"
     [[ "$LAST_ANNEX_MISSING_COUNT" =~ ^[0-9]+$ ]] || LAST_ANNEX_MISSING_COUNT=0
     LAST_ANNEX_MISSING_KEY="$(jq -r '.annex_missing_first_key // ""' "$cb" 2>/dev/null || echo "")"
+    post_callback="$(jq -r "$CALLBACK_POST_FILTER" "$cb" 2>/dev/null || echo true)"
     retryable="$(jq -r '.retryable_failures // 0' "$cb" 2>/dev/null || echo 0)"
     if [[ "$retryable" =~ ^[0-9]+$ && "$retryable" -gt 0 ]]; then
       err "[$id] $retryable recording(s) failed for a RETRYABLE reason; they are listed as pending in index.json and the dataset will be re-queued automatically after a backoff. To retry now: $0 --dataset $id --requeue done --execute"
     fi
-    # POST on every outcome (not just rc==0) so the backend records failures too.
-    if [[ -n "$NEMAR_WEBHOOK_TOKEN" ]]; then
+    # POST on every outcome (not just rc==0) so the backend records failures too,
+    # except a run that changed nothing (see CALLBACK_POST_FILTER): D1 then keeps the
+    # last conversion time, and zarr_status stays at the `pending` the start-of-run
+    # signal set, which is what a dataset still waiting for scratch is.
+    if [[ "$post_callback" == "false" ]]; then
+      log "[$id] nothing changed; callback not posted, so D1 keeps its last conversion time"
+    elif [[ -n "$NEMAR_WEBHOOK_TOKEN" ]]; then
       curl -sS --connect-timeout 10 --max-time 30 -X POST "$CALLBACK_URL" \
         -H "Content-Type: application/json" \
         -H "X-Webhook-Token: ${NEMAR_WEBHOOK_TOKEN}" \

@@ -4862,7 +4862,9 @@ def deferred_unchanged_callback(
         "status": "ready",
         "store_count": int(live_index.get("store_count") or 0),
         "index_etag": (live_etag or "").strip().strip('"') or None,
-        "commit": head,
+        # The commit the PUBLISHED index names, not this run's HEAD: nothing was
+        # rebuilt, so the row must keep agreeing with the document it describes.
+        "commit": live_index.get("source_commit") or head,
         "converted": [],
         "removed": [],
         "errors": errors if isinstance(errors, int) else len(failures) + len(pending),
@@ -4884,6 +4886,11 @@ def deferred_unchanged_callback(
         "events_row_count": live_index.get("events_row_count"),
         "events_upload_failed": False,
         "events_stores_without_rows": 0,
+        # For the driver script, not the webhook: this run changed nothing, so it
+        # reads the queue's numbers from this body and does not POST it. A `ready`
+        # POST restamps `zarr_converted_at`, which would hide how long ago the
+        # dataset was last converted.
+        "post": False,
     }
 
 
