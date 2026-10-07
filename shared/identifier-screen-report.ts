@@ -15,7 +15,12 @@
  * own state with its own answer, never "clean" and never "no findings".
  */
 
-import { DATE_KINDS, type FindingKind } from "./identifier-scan";
+import {
+  DATE_KINDS,
+  DIRECTORY_FORMATS,
+  type FindingKind,
+  OTHER_RECORDING_EXTENSIONS,
+} from "./identifier-scan";
 
 export const REPORT_VERSION = 1;
 
@@ -724,6 +729,46 @@ export interface PreflightScan {
   read_failures: Record<string, number>;
 }
 
+/**
+ * The format names a preflight may carry: the recording formats the scanner names itself, its
+ * directory formats, the extensions BIDS gives data files, and `(no extension)`. `formatCoverage`
+ * takes an extension from whatever a file is called, so `sourcedata/Smith.John` would yield
+ * `.john`: a pattern cannot keep a name out, a closed list can. The preflight's output can land in
+ * a public CI log, so anything else is folded into `.other` before it is printed or stored, and
+ * the door refuses it.
+ */
+export const KNOWN_FORMATS: ReadonlySet<string> = new Set([
+  ...OTHER_RECORDING_EXTENSIONS,
+  ...DIRECTORY_FORMATS.map((format) => `${format}/`),
+  // BIDS data and companion extensions not already in the scanner's list.
+  ".eeg",
+  ".vmrk",
+  ".mef",
+  ".kdf",
+  ".mrk",
+  ".elp",
+  ".hsp",
+  ".raw",
+  ".mhd",
+  ".tsv.gz",
+  "(no extension)",
+  OTHER_FORMAT,
+]);
+
+/** Fold every format name outside {@link KNOWN_FORMATS} into `.other`, keeping its count. */
+export function foldUnknownFormats<T extends { unscreened_formats?: Record<string, number> }>(
+  record: T,
+): T {
+  const formats = record?.unscreened_formats;
+  if (typeof formats !== "object" || formats === null) return record;
+  const folded: Record<string, number> = {};
+  for (const [key, count] of Object.entries(formats)) {
+    const name = KNOWN_FORMATS.has(key) ? key : OTHER_FORMAT;
+    folded[name] = (folded[name] ?? 0) + count;
+  }
+  return { ...record, unscreened_formats: folded };
+}
+
 /** Every field is required: a count that is missing is not a count of zero. */
 const PREFLIGHT_SCAN_KEYS = [
   "scanned_at",
@@ -762,6 +807,10 @@ export function parsePreflightScan(x: unknown): PreflightScan {
   onlyKeys(x, PREFLIGHT_SCAN_KEYS, "scan-key");
   for (const key of PREFLIGHT_SCAN_KEYS) if (x[key] === undefined) bad("scan-missing");
   const scan = parseScanBody(x) as unknown as PreflightScan;
+  // Narrower than the publication report's pattern: only names from the closed list.
+  for (const key of Object.keys(scan.unscreened_formats)) {
+    if (!KNOWN_FORMATS.has(key)) bad("scan-formats");
+  }
   checkStatus(scan);
   return scan;
 }

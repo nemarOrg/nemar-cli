@@ -13,6 +13,7 @@ import { describe, expect, test } from "bun:test";
 import {
   DATASET_STATUSES,
   type DatasetStatus,
+  KNOWN_FORMATS,
   OTHER_FORMAT,
   PREFLIGHT_ACKNOWLEDGEABLE,
   ReportError,
@@ -21,6 +22,7 @@ import {
   describeScreen,
   foldOddFailures,
   foldOddFormats,
+  foldUnknownFormats,
   parsePreflightScan,
   parseUploaderPreflight,
   screenGate,
@@ -253,6 +255,38 @@ describe("folding into the vocabulary works on a preflight scan", () => {
     const parsed = parsePreflightScan(folded);
     expect(parsed.unscreened_formats).toEqual({ [OTHER_FORMAT]: 1 });
     expect(parsed.read_failures).toEqual({ "json/error-rangeerror": 1 });
+  });
+});
+
+describe("a preflight names formats from a closed list only", () => {
+  test("an extension shaped like a name is refused at the door", () => {
+    // The publication report's pattern would take `.john`; the preflight's list does not.
+    const scan = { ...scanFor("not-screened"), unscreened_formats: { ".john": 1 } };
+    expect(refusal(record("not-screened", { scan }))).toBe("scan-formats");
+  });
+
+  test("folding keeps every count and names nothing outside the list", () => {
+    const formats: Record<string, number> = { ".vhdr": 2, ".john": 1, ".smith": 3, ".ds/": 1 };
+    const folded = foldUnknownFormats({ unscreened_formats: formats }).unscreened_formats ?? {};
+    const expected: Record<string, number> = { ".vhdr": 2, ".ds/": 1, [OTHER_FORMAT]: 4 };
+    expect(folded).toEqual(expected);
+    for (const key of Object.keys(folded)) expect(KNOWN_FORMATS.has(key)).toBe(true);
+  });
+
+  test("the formats the scanner itself names are all on the list", () => {
+    for (const format of [
+      ".set",
+      ".fdt",
+      ".vhdr",
+      ".eeg",
+      ".fif",
+      ".edf.gz",
+      ".mff/",
+      ".ds/",
+      "(no extension)",
+    ]) {
+      expect(KNOWN_FORMATS.has(format)).toBe(true);
+    }
   });
 });
 

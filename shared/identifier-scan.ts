@@ -991,11 +991,11 @@ export interface FormatCoverage {
 }
 
 /** Directory formats: the recording is a folder, and a manifest lists the files inside it. */
-const DIRECTORY_FORMATS = [".ds", ".mff", ".mefd", ".zarr"];
+export const DIRECTORY_FORMATS: readonly string[] = [".ds", ".mff", ".mefd", ".zarr"];
 /** A BIDS data file: `..._<suffix>.<extension>`, with a one- or two-part extension. */
 const BIDS_DATA_FILE = /_(eeg|ieeg|meg|emg|nirs|physio|motion)\.([a-z0-9+]+(?:\.[a-z0-9]+)?)$/;
 /** Formats counted as recording or signal data wherever they sit, named or not by BIDS. */
-const OTHER_RECORDING_EXTENSIONS = [
+export const OTHER_RECORDING_EXTENSIONS: readonly string[] = [
   ".vhdr",
   ".set",
   ".fdt",
