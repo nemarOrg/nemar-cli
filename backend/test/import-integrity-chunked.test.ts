@@ -124,6 +124,27 @@ describe("compareManifestToListing with chunked content", () => {
     expect(r).toMatchObject({ complete: true, missingKeys: [], expectedCount: 2, presentCount: 2 });
   });
 
+  test("a chunked key with an -m field counts, and a short last chunk does not", () => {
+    const key = "WORM-s10-m1700000000--rec.edf";
+    const c = (n: number) => `WORM-s10-m1700000000-S4-C${n}--rec.edf`;
+    const manifest = { "sub-01/eeg/rec.edf": { key, size: 10 } };
+    const whole = new Map([
+      [c(1), 4],
+      [c(2), 4],
+      [c(3), 2],
+    ]);
+    expect(compareManifestToListing(manifest, whole)).toMatchObject({
+      complete: true,
+      missingKeys: [],
+    });
+    const short = new Map([
+      [c(1), 4],
+      [c(2), 4],
+      [c(3), 1],
+    ]);
+    expect(compareManifestToListing(manifest, short).missingKeys).toEqual([key]);
+  });
+
   test("a dataset missing one chunk is still incomplete, naming the whole-file key", () => {
     const manifest = { "sub-01/ieeg/a.eeg": { key: BASE_EEG, size: 2500000000 } };
     const existing = new Map([

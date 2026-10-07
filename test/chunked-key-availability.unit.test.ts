@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { parseChunkKey } from "../shared/annex-key";
+import { annexKeyDeclaredSize, annexKeyFieldSize, parseChunkKey } from "../shared/annex-key";
 import { isKeyPresentAtDeclaredSize, keysWithoutObjects } from "../src/lib/s3-server-copy";
 
 const GiB = 1073741824;
@@ -44,6 +44,75 @@ describe("chunked annex keys (#1565, nm000276)", () => {
     // A one-chunk file (the .vhdr case from the issue).
     const small = new Map([["SHA256E-s982-S1073741824-C1--ba3d.vhdr", 982]]);
     expect(isKeyPresentAtDeclaredSize("SHA256E-s982--ba3d.vhdr", small)).toBe(true);
+  });
+
+  test("parseChunkKey reads only the fields before the first --", () => {
+    // The same text inside the free-text name is not a chunk.
+    expect(parseChunkKey("WORM-m17--x-s5-S4-C1--y")).toBeNull();
+    expect(parseChunkKey("SHA256E-s5--a-S4-C1--b.edf")).toBeNull();
+    // A zero chunk number or size is not a chunk.
+    expect(parseChunkKey("SHA256E-s5-S4-C0--a")).toBeNull();
+    expect(parseChunkKey("SHA256E-s5-S0-C1--a")).toBeNull();
+    // A pair that is not the last field is not a chunk.
+    expect(parseChunkKey("SHA256E-s5-S4-C1-m17--a")).toBeNull();
+  });
+
+  test("annexKeyFieldSize reads -s past -m, from the fields only", () => {
+    expect(annexKeyFieldSize("SHA256E-s982--ba3d.vhdr")).toBe(982);
+    expect(annexKeyFieldSize("WORM-s5-m17--x")).toBe(5);
+    expect(annexKeyFieldSize("SHA256E-s0--e.edf")).toBe(0);
+    // A -sN inside the free-text name is not a size.
+    expect(annexKeyFieldSize("WORM-m17--sub-01-s5--x.edf")).toBeNull();
+    expect(annexKeyFieldSize("git:abc")).toBeNull();
+    expect(annexKeyFieldSize("SHA256E-s5")).toBeNull();
+  });
+
+  test("a plain -m key keeps its present-if-listed contract", () => {
+    // annexKeyDeclaredSize is unchanged: it returns null for a -m key, so a
+    // listed plain object is present at any size. Only the chunk path reads -m.
+    expect(annexKeyDeclaredSize("WORM-s5-m17--x")).toBeNull();
+    expect(isKeyPresentAtDeclaredSize("WORM-s5-m17--x", new Map([["WORM-s5-m17--x", 99]]))).toBe(
+      true,
+    );
+  });
+
+  test("a chunked key with an -m field is present when its chunks are complete", () => {
+    const key = "WORM-s10-m1700000000--rec.edf";
+    const c = (n: number) => `WORM-s10-m1700000000-S4-C${n}--rec.edf`;
+    expect(
+      isKeyPresentAtDeclaredSize(
+        key,
+        new Map([
+          [c(1), 4],
+          [c(2), 4],
+          [c(3), 2],
+        ]),
+      ),
+    ).toBe(true);
+  });
+
+  test("a chunked key with an -m field and a missing or short chunk is absent", () => {
+    const key = "WORM-s10-m1700000000--rec.edf";
+    const c = (n: number) => `WORM-s10-m1700000000-S4-C${n}--rec.edf`;
+    expect(
+      isKeyPresentAtDeclaredSize(
+        key,
+        new Map([
+          [c(1), 4],
+          [c(3), 2],
+        ]),
+      ),
+    ).toBe(false);
+    expect(
+      isKeyPresentAtDeclaredSize(
+        key,
+        new Map([
+          [c(1), 4],
+          [c(2), 4],
+          [c(3), 1],
+        ]),
+      ),
+    ).toBe(false);
   });
 
   test("a missing or short chunk makes the key absent", () => {
