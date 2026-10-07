@@ -29,6 +29,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import {
+  IMPORT_IDENTIFIER_SCRUB_MARKER_FOR_CLASSIFY,
+  classifyImportFailure,
+} from "../backend/src/services/import-failure-cause";
 import { isDead, locationLogs } from "../scripts/scrub/git/git-lib";
 import { readLedger } from "../scripts/scrub/ledger";
 import { EDF_HEADER_BYTES, scanEdfHeader } from "../shared/identifier-scan";
@@ -606,6 +610,27 @@ describe("what the scrub refuses, before anything is pushed or copied", () => {
     expectNoSecret(err.message);
     expect((await run(["git", "rev-parse", "HEAD"], clone)).trim()).toBe(head);
     expect(requests.some((r) => r.range === null)).toBe(false);
+  }, 120_000);
+
+  test("the Worker's classifier reads each refusal the way it was meant", async () => {
+    // The CLI's failure line becomes `import_jobs.last_error`; the classifier keeps its own copy
+    // of the marker, so the two are pinned here, through a refusal the scrub really raised.
+    expect(IMPORT_IDENTIFIER_SCRUB_MARKER_FOR_CLASSIFY).toBe(IMPORT_SCRUB_MARKER);
+    expect(IMPORT_SCRUB_MARKER).toBe("[nemar-identifier-scrub]");
+    const upstream = await buildUpstream(baseFixtures());
+    const { clone } = await cloneForImport(upstream);
+    const view = await upstreamView(clone);
+    const bound = await refusal(prepare(clone, view, { maxBytes: 1 }));
+    expect(classifyImportFailure({ stage: "prepare", lastError: bound.message }).cause).toBe(
+      "identifier_scrub",
+    );
+    (served.get(`${BUCKET_PATH}/${CLEAN_ANNEXED}`) as Served).status = 403;
+    const denied = await refusal(prepare(clone, view));
+    // OpenNeuro refusing its own bytes is the more specific claim, and it keeps the dataset
+    // retryable by the upstream rule (#808).
+    expect(classifyImportFailure({ stage: "prepare", lastError: denied.message }).cause).toBe(
+      "upstream_inaccessible",
+    );
   }, 120_000);
 
   test("a 500 that persists refuses with the scrub's marker only", async () => {
