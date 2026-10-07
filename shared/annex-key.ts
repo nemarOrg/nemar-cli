@@ -64,22 +64,28 @@ export function annexKeyFieldSize(key: string): number | null {
 
 /**
  * True when `key` is present in `existing` (a key -> byte-size map from the S3
- * listing) at its correct size. An annex key's declared size must match exactly
- * -- a 0-byte or truncated object counts as absent even though the key exists
- * (the #967 bug: a failed curl fallback used to leave a valid-looking 0-byte PUT
- * behind). A non-annex `git:` key has no declared size, so presence alone is
- * sufficient (its bytes live in GitHub, not S3). A key whose content was
- * uploaded through a chunked special remote is present when all of its chunk
- * objects are (see isChunkedKeyPresent).
+ * listing) at its correct size.
+ *
+ * A plain object decides the answer whenever it exists: an annex key's declared
+ * size must match exactly, so a 0-byte or truncated object counts as absent even
+ * though the key exists (the #967 bug: a failed curl fallback used to leave a
+ * valid-looking 0-byte PUT behind). A non-annex `git:` key has no declared size,
+ * so presence alone is sufficient (its bytes live in GitHub, not S3).
+ *
+ * Chunks are consulted ONLY when the plain object is ABSENT, for content uploaded
+ * through a chunked special remote (nm000276, #1565): present when a chunking of
+ * it is complete (see isChunkedKeyPresent). A truncated plain object beside a
+ * complete chunk set stays missing. The data plane serves the plain key, so that
+ * combination is the #967 signature, and reading it as present would be worse
+ * than reading it as absent: the listing would say complete while the served
+ * object is short.
  */
 export function isKeyPresentAtDeclaredSize(key: string, existing: Map<string, number>): boolean {
   const actual = existing.get(key);
   if (actual !== undefined) {
     const declared = annexKeyDeclaredSize(key);
-    if (declared === null || actual === declared) return true;
+    return declared === null || actual === declared;
   }
-  // Content uploaded through a chunked special remote exists only as chunk
-  // objects; it is present when every chunk is (#1565).
   return isChunkedKeyPresent(key, existing);
 }
 

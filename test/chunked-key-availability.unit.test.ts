@@ -155,15 +155,34 @@ describe("chunked annex keys (#1565, nm000276)", () => {
     ).toBe(true);
   });
 
-  test("a truncated plain object is rescued by a complete chunk set, not the reverse", () => {
-    const existing = new Map([
-      [BASE_EEG, 0],
+  // FLIPPED from the contributor's version, deliberately. The first cut pinned
+  // "a truncated plain object is rescued by a complete chunk set" as present. The
+  // data plane serves the PLAIN key, so a short plain object beside complete
+  // chunks is the #967 signature (a listing that says complete over a served
+  // object that is short), which is worse than absent. Chunks are consulted only
+  // when the plain object is absent.
+  test("a truncated plain object is NOT rescued by a complete chunk set", () => {
+    const chunks = [
       [chunk(1), GiB],
       [chunk(2), GiB],
       [chunk(3), LAST],
-    ]);
-    expect(isKeyPresentAtDeclaredSize(BASE_EEG, existing)).toBe(true);
+    ] as [string, number][];
+    expect(isKeyPresentAtDeclaredSize(BASE_EEG, new Map([[BASE_EEG, 0], ...chunks]))).toBe(false);
+    expect(isKeyPresentAtDeclaredSize(BASE_EEG, new Map([[BASE_EEG, 7], ...chunks]))).toBe(false);
     expect(isKeyPresentAtDeclaredSize(BASE_EEG, new Map([[BASE_EEG, 7]]))).toBe(false);
+  });
+
+  test("a plain object at its declared size is present with or without chunks", () => {
+    expect(isKeyPresentAtDeclaredSize(BASE_EEG, new Map([[BASE_EEG, 2500000000]]))).toBe(true);
+    expect(
+      isKeyPresentAtDeclaredSize(
+        BASE_EEG,
+        new Map([
+          [BASE_EEG, 2500000000],
+          [chunk(1), GiB],
+        ]),
+      ),
+    ).toBe(true);
   });
 
   test("the chunk index follows a listing that grows after the first lookup", () => {

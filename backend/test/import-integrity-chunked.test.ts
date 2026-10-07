@@ -87,14 +87,17 @@ describe("chunked annex keys (#1565, nm000276)", () => {
     ).toBe(true);
   });
 
-  test("a truncated plain object is rescued by a complete chunk set, not the reverse", () => {
-    const existing = new Map([
-      [BASE_EEG, 0],
+  // FLIPPED from the contributor's version, deliberately: see the CLI twin of this
+  // test (test/chunked-key-availability.unit.test.ts). Chunks are consulted only
+  // when the plain object is absent.
+  test("a truncated plain object is NOT rescued by a complete chunk set", () => {
+    const chunks = [
       [chunk(1), GiB],
       [chunk(2), GiB],
       [chunk(3), LAST],
-    ]);
-    expect(isKeyPresentAtDeclaredSize(BASE_EEG, existing)).toBe(true);
+    ] as [string, number][];
+    expect(isKeyPresentAtDeclaredSize(BASE_EEG, new Map([[BASE_EEG, 0], ...chunks]))).toBe(false);
+    expect(isKeyPresentAtDeclaredSize(BASE_EEG, new Map([[BASE_EEG, 7], ...chunks]))).toBe(false);
     expect(isKeyPresentAtDeclaredSize(BASE_EEG, new Map([[BASE_EEG, 7]]))).toBe(false);
   });
 
@@ -143,6 +146,23 @@ describe("compareManifestToListing with chunked content", () => {
       [c(3), 1],
     ]);
     expect(compareManifestToListing(manifest, short).missingKeys).toEqual([key]);
+  });
+
+  test("a truncated plain object over complete chunks is missing, and zero-byte only at 0", () => {
+    const manifest = { "sub-01/ieeg/a.eeg": { key: BASE_EEG, size: 2500000000 } };
+    const chunks = [
+      [chunk(1), GiB],
+      [chunk(2), GiB],
+      [chunk(3), LAST],
+    ] as [string, number][];
+    const zero = compareManifestToListing(manifest, new Map([[BASE_EEG, 0], ...chunks]));
+    expect(zero).toMatchObject({
+      complete: false,
+      missingKeys: [BASE_EEG],
+      zeroByteKeys: [BASE_EEG],
+    });
+    const short = compareManifestToListing(manifest, new Map([[BASE_EEG, 7], ...chunks]));
+    expect(short).toMatchObject({ complete: false, missingKeys: [BASE_EEG], zeroByteKeys: [] });
   });
 
   test("a dataset missing one chunk is still incomplete, naming the whole-file key", () => {
