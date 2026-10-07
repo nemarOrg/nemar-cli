@@ -462,8 +462,12 @@ describe("applying the plan", () => {
     const path = write(EDF, recording());
     const plan = await planUploadDates(root);
     utimesSync(path, new Date(), new Date(Date.now() + 60_000));
-    expect(applyUploadDates(root, plan)).toMatchObject({ set: 0, left: 1 });
+    const lines = await printed(() => {
+      expect(applyUploadDates(root, plan)).toMatchObject({ set: 0, left: 1 });
+    });
     expect(Buffer.from(read(EDF))).toEqual(Buffer.from(recording()));
+    // None set: no line, and no claim that any was.
+    expect(lines).toEqual([]);
   });
 
   test("a file replaced by a link after the plan is left, and its target untouched", async () => {
