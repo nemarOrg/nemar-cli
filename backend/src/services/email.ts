@@ -175,6 +175,15 @@ export interface EmailPreferences {
    * by accident, and the finding is time-sensitive in a way a request is not.
    */
   dataset_anonymity: boolean;
+  /**
+   * The scheduled identifier sweep's weekly report (epic #1610 phase 5, ADR 0088).
+   *
+   * Its own category for the reason `dataset_anonymity` has one: an admin who
+   * stops watching publication requests has said nothing about wanting to stop
+   * hearing which published datasets carry identifiers. Opted in by default,
+   * like every category here, so a stored row from before it existed receives it.
+   */
+  identifier_sweep: boolean;
 }
 
 export type EmailCategory = keyof EmailPreferences;
@@ -184,6 +193,7 @@ export const DEFAULT_EMAIL_PREFERENCES: EmailPreferences = {
   publication_request: true,
   announcements: true,
   dataset_anonymity: true,
+  identifier_sweep: true,
 };
 
 interface ResendResponse {
@@ -212,6 +222,7 @@ export function parseEmailPreferences(raw: string | null): EmailPreferences {
       // IN rather than out. Defaulting a new alert to off would silently give
       // every current admin no anonymity mail at all.
       dataset_anonymity: parsed.dataset_anonymity !== false,
+      identifier_sweep: parsed.identifier_sweep !== false,
     };
   } catch (err) {
     console.error("Corrupt email_preferences JSON, defaulting to all enabled:", raw, err);
@@ -320,6 +331,22 @@ export async function getAdminEmailsForCategory(
  * still fails closed (isEmailDeliveryAllowed treats undefined ENVIRONMENT
  * as non-production with an empty allow-list, i.e. refuses).
  */
+/**
+ * Resend ANSWERED a send with a 4xx: it refused the message itself (a bad key,
+ * a bad address, a malformed body) and delivered nothing. The message keeps the
+ * plain error's words. A thrown fetch, a timeout or a 5xx is not this class:
+ * the mail may have been accepted and only the answer lost.
+ */
+export class EmailRejectedError extends Error {
+  constructor(
+    readonly httpStatus: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "EmailRejectedError";
+  }
+}
+
 async function sendEmail(
   to: string,
   subject: string,
@@ -329,6 +356,7 @@ async function sendEmail(
   replyTo?: string,
   isDev?: boolean,
   deliveryEnv?: EmailDeliveryEnv,
+  timeoutMs?: number,
 ): Promise<void> {
   if (!isEmailDeliveryAllowed(to, deliveryEnv)) {
     console.warn(
@@ -354,13 +382,16 @@ async function sendEmail(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
+    ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
   });
 
   if (!response.ok) {
-    const error: ResendResponse = await response.json();
-    throw new Error(
-      `Failed to send email from ${fromEmail} to ${to}: ${error.message || response.statusText}`,
-    );
+    const error = (await response.json().catch(() => ({}))) as ResendResponse;
+    const message = `Failed to send email from ${fromEmail} to ${to}: ${error.message || response.statusText}`;
+    if (response.status >= 400 && response.status < 500) {
+      throw new EmailRejectedError(response.status, message);
+    }
+    throw new Error(message);
   }
 }
 
@@ -2269,4 +2300,88 @@ export async function sendAnonymityFindingsEmail(
     }
   }
   return { delivered, failed };
+}
+
+/** How long one send of the identifier sweep's weekly report waits for Resend. */
+export const IDENTIFIER_SWEEP_EMAIL_TIMEOUT_MS = 15_000;
+
+/**
+ * What the identifier sweep's weekly report says (ADR 0088). Structurally the
+ * report `identifier-sweep-report.ts` renders, re-declared here so `email.ts`
+ * does not import a sweep; the dependency runs the other way.
+ */
+export interface IdentifierSweepReportForEmail {
+  subject: string;
+  headline: string;
+  attention: boolean;
+  lines: readonly string[];
+}
+
+/**
+ * Send the identifier sweep's weekly report to each admin, one message each.
+ *
+ * Every line is escaped: a line carries dataset ids, finding kinds, counts and
+ * fixed words, never a value, and escaping is what keeps it that way if a line
+ * ever carried anything else. Returns how many admins it reached, so the caller
+ * records the week as sent only when someone received it, and how many sends
+ * ended without a definite answer (a timeout, a dropped connection, a 5xx), so
+ * the caller never treats a send that may have landed as one that reached nobody.
+ */
+export async function sendIdentifierSweepReportEmail(
+  adminEmails: readonly string[],
+  report: IdentifierSweepReportForEmail,
+  resendApiKey: string,
+  fromEmail: string,
+  replyTo?: string,
+  isDev?: boolean,
+  deliveryEnv?: EmailDeliveryEnv,
+): Promise<{ delivered: number; ambiguous: number }> {
+  const color = report.attention ? "#d97706" : "#16a34a";
+  const body = report.lines.map((line) => escapeHtml(line)).join("\n");
+  const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 720px; margin: 0 auto; padding: 20px;">
+  <h1 style="color: #333; font-size: 20px;">Identifier sweep: weekly report</h1>
+  <p style="color: ${color}; font-weight: bold;">${escapeHtml(report.headline)}</p>
+  <pre style="white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; background: #f4f4f5; padding: 16px; border-radius: 8px;">${body}</pre>
+  <p style="color: #666; font-size: 14px;">This report arrives every week whether or not anything is wrong; a week without it means the reporter is not running. The sweep reports and never repairs. Read it on demand: <code>GET /admin/identifier-sweep</code>.</p>
+  <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+  <p style="color: #999; font-size: 12px;"><a href="https://nemar.org" style="color: #999;">NEMAR</a> - Neuroelectromagnetic Data Archive and Tools Resource</p>
+</body>
+</html>
+  `;
+  let delivered = 0;
+  let ambiguous = 0;
+  for (const adminEmail of adminEmails) {
+    try {
+      await sendEmail(
+        adminEmail,
+        report.subject,
+        html,
+        resendApiKey,
+        fromEmail,
+        replyTo,
+        isDev,
+        deliveryEnv,
+        IDENTIFIER_SWEEP_EMAIL_TIMEOUT_MS,
+      );
+      delivered++;
+    } catch (error) {
+      // Refused for certain: a 4xx from Resend, or the dev fence before any
+      // request. Anything else (a timeout, a dropped connection, a 5xx) may have
+      // been accepted, and the caller must not treat it as "reached nobody".
+      if (!(error instanceof EmailRejectedError || error instanceof DevEmailFenceError)) {
+        ambiguous++;
+      }
+      // `sendEmail`'s message names the recipient; redact it in the message too.
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(
+        `Failed to send the identifier sweep report to ${redactRecipient(adminEmail)}:`,
+        message.split(adminEmail).join(redactRecipient(adminEmail)),
+      );
+    }
+  }
+  return { delivered, ambiguous };
 }

@@ -7694,6 +7694,7 @@ emailPrefsCommand
         { key: "publication_request", label: "Publication request notifications" },
         { key: "announcements", label: "Announcement emails" },
         { key: "dataset_anonymity", label: "Anonymity sweep findings" },
+        { key: "identifier_sweep", label: "Identifier sweep weekly report" },
       ];
 
       for (const cat of categories) {
@@ -7717,6 +7718,7 @@ emailPrefsCommand
   .option("--publication-request <bool>", "Enable/disable publication request notifications")
   .option("--announcements <bool>", "Enable/disable announcement emails")
   .option("--dataset-anonymity <bool>", "Enable/disable anonymity sweep findings")
+  .option("--identifier-sweep <bool>", "Enable/disable the identifier sweep weekly report")
   .option("--all <bool>", "Enable/disable all notifications")
   .option("--user <username>", "(owner only) update another user's preferences")
   .action(
@@ -7725,6 +7727,7 @@ emailPrefsCommand
       publicationRequest?: string;
       announcements?: string;
       datasetAnonymity?: string;
+      identifierSweep?: string;
       all?: string;
       user?: string;
     }) => {
@@ -7752,18 +7755,27 @@ emailPrefsCommand
         updates.publication_request = val;
         updates.announcements = val;
         updates.dataset_anonymity = val;
+        updates.identifier_sweep = val;
       } else {
         const ua = parseBool(options.userApproval);
         const pr = parseBool(options.publicationRequest);
         const ann = parseBool(options.announcements);
         const anon = parseBool(options.datasetAnonymity);
+        const sweep = parseBool(options.identifierSweep);
 
-        if (ua === undefined && pr === undefined && ann === undefined && anon === undefined) {
+        if (
+          ua === undefined &&
+          pr === undefined &&
+          ann === undefined &&
+          anon === undefined &&
+          sweep === undefined
+        ) {
           console.error(chalk.red("No preferences specified."));
           console.log("  --user-approval <bool>        User approval notifications");
           console.log("  --publication-request <bool>   Publication request notifications");
           console.log("  --announcements <bool>         Announcement emails");
           console.log("  --dataset-anonymity <bool>     Anonymity sweep findings");
+          console.log("  --identifier-sweep <bool>      Identifier sweep weekly report");
           console.log("  --all <bool>                   All notifications");
           process.exit(1);
         }
@@ -7772,6 +7784,7 @@ emailPrefsCommand
         if (pr !== undefined) updates.publication_request = pr;
         if (ann !== undefined) updates.announcements = ann;
         if (anon !== undefined) updates.dataset_anonymity = anon;
+        if (sweep !== undefined) updates.identifier_sweep = sweep;
       }
 
       const spinner = ora("Updating email preferences...").start();
@@ -7788,6 +7801,12 @@ emailPrefsCommand
         );
         console.log(
           `  Announcements:         ${result.announcements ? chalk.green("enabled") : chalk.dim("disabled")}`,
+        );
+        console.log(
+          `  Anonymity findings:    ${result.dataset_anonymity ? chalk.green("enabled") : chalk.dim("disabled")}`,
+        );
+        console.log(
+          `  Identifier sweep:      ${result.identifier_sweep ? chalk.green("enabled") : chalk.dim("disabled")}`,
         );
       } catch (err) {
         spinner.fail("Failed to update preferences");

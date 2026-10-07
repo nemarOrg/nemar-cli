@@ -518,11 +518,16 @@ export interface ScreenDescription {
   lines: string[];
 }
 
+/**
+ * Why a screen produced no scan, as a person reads it. Exported through {@link screenErrorText}
+ * so the scheduled sweep's report (ADR 0088) states a cause in these words and no others.
+ */
 const ERROR_TEXT: Record<ScreenError, string> = {
   "dispatch-unconfigured":
-    "the Worker had no GitHub credential or callback secret, so the screen was never started",
+    "the screen could not be started: the Worker had no GitHub credential or callback secret, or the dataset has no repository",
   "dispatch-failed": "GitHub refused to start the screen workflow",
-  "no-report-in-time": "the screen workflow started but never reported back",
+  "no-report-in-time":
+    "no report arrived from the screen workflow in time (it may never have started)",
   "workflow-failed": "the screen workflow failed before it produced a result",
   "clone-failed": "the screen workflow could not read the dataset repository",
   "credentials-missing":
@@ -533,7 +538,8 @@ const ERROR_TEXT: Record<ScreenError, string> = {
 /**
  * What each state is called, without the surface's prefix. The publication screen says
  * "Identifier screen: <verdict>" and the uploader preflight "Identifier preflight: <verdict>", so
- * one state reads the same everywhere it is shown.
+ * one state reads the same everywhere it is shown. The scheduled sweep's report (ADR 0088) puts
+ * the verdict alone beside a count.
  */
 const VERDICTS: Record<ScreenState, { verdict: string; tone: ScreenDescription["tone"] }> = {
   pending: { verdict: "running", tone: "note" },
@@ -551,6 +557,26 @@ const VERDICTS: Record<ScreenState, { verdict: string; tone: ScreenDescription["
   error: { verdict: "DID NOT RUN", tone: "stop" },
   unreported: { verdict: "DID NOT REPORT", tone: "stop" },
 };
+
+/** The name of a state, without the `Identifier screen:` prefix. */
+export function screenStateLabel(state: ScreenState): string {
+  return VERDICTS[state].verdict;
+}
+
+/** The cause of a screen that produced no scan, as {@link describeScreen} states it. */
+export function screenErrorText(error: ScreenError): string {
+  return ERROR_TEXT[error];
+}
+
+/** Kinds and counts as every surface prints them: `edf-patient-name x12, edf-patient-birthdate x12`. */
+export function kindsPhrase(byKind: Partial<Record<FindingKind, number>> | undefined): string {
+  return Object.entries(byKind ?? {})
+    .map(([k, n]) => `${k} x${n}`)
+    .join(", ");
+}
+
+/** What the screen does not read, whatever it found. One sentence, shown by every surface. */
+export const SCREEN_NOT_READ = "Not read: the contents of sidecars and tables in earlier commits.";
 
 /** The counts of a scan as lines of fixed words, shared by the publication screen and the preflight. */
 function scanLines(
@@ -571,10 +597,8 @@ function scanLines(
       `Files: ${scan.files.total}; EDF/BDF headers read: ${scan.files.header_read} of ${scan.files.edf_bdf}${unreadable}.`,
     );
   }
-  const kinds = Object.entries(scan.findings_by_kind ?? {});
-  if (kinds.length > 0) {
-    lines.push(`Findings by kind: ${kinds.map(([k, n]) => `${k} x${n}`).join(", ")}.`);
-  }
+  const kinds = kindsPhrase(scan.findings_by_kind);
+  if (kinds) lines.push(`Findings by kind: ${kinds}.`);
   if (scan.edf_bdf_files_flagged) {
     lines.push(`EDF/BDF files with an identifier finding: ${scan.edf_bdf_files_flagged}.`);
   }
@@ -617,7 +641,7 @@ export function describeScreen(
   const scan = report?.scan;
   if (scan) {
     lines.push(...scanLines(scan));
-    lines.push("Not read: the contents of sidecars and tables in earlier commits.");
+    lines.push(SCREEN_NOT_READ);
     lines.push(`Scanner ${report.scanner}; commit ${report.head?.slice(0, 12)}.`);
   }
   return { headline: `Identifier screen: ${base.verdict}`, tone: base.tone, lines };

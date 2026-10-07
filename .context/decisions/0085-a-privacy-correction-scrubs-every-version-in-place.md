@@ -383,7 +383,8 @@ The maintainer's go is the one precondition of an irreversible step that no tool
 | The importer scrubs in place on every import and re-pull | not built | Phase 7 (#1618) |
 | `identifier_screen`, the publication gate | not built | Phase 4 (#1614) |
 | The converter never writes subject members, and a fleet-wide strip of existing stores | not built | Phase 8 (#1626) |
-| The uploader's preflight, the scheduled sweep, admin triage | not built | Phases 3 (#1613), 5 (#1615) and 6 (#1616) |
+| The uploader's preflight, admin triage | not built | Phases 3 (#1613) and 6 (#1616) |
+| The scheduled sweep | built in Phase 5 (#1615, ADR 0088): it reports and never repairs | Phase 5 (#1615) |
 
 **Deferred inside Phase 2, none a blocker for the first real run on nm000186:**
 

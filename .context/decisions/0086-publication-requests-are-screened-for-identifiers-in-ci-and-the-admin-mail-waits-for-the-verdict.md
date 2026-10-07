@@ -139,6 +139,12 @@ saying so.
 - **Fail open when the screen is down.**
   Unknown would then read as healthy, which is the failure ADR 0053 forbids.
 
+## Amendment 2026-10-06 (#1615): a second caller
+
+The scheduled identifier sweep (ADR 0088) dispatches this workflow too, unchanged, with its own callback route and token kind and a `request_id` of 0.
+Because a run's public log names the dataset it screens, the sweep's cadence never depends on what a screen found.
+Everything above about the workflow, the contract and the public log holds for those runs as written.
+
 ## Receipts
 
 - Report contract and its tests: `shared/identifier-screen-report.ts`, `test/identifier-screen-report.test.ts`.
