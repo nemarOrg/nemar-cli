@@ -2098,9 +2098,11 @@ def recording_scratch_paths(tmp: str, primary: str) -> tuple[str, str, str]:
     work = os.path.join(tmp, "work", primary.replace("/", "_"))
     store_local = os.path.join(tmp, "stores", store_rel_for(primary))
     paths = (work, store_local, store_local + SCRATCH_DIR_SUFFIX)
-    root = os.path.abspath(tmp)
+    # realpath, not abspath: a symlink inside the run's directory that points
+    # outside it would pass a lexical check and have a reclaim delete through it.
+    root = os.path.realpath(tmp)
     for path in paths:
-        resolved = os.path.abspath(path)
+        resolved = os.path.realpath(path)
         if resolved == root or os.path.commonpath([root, resolved]) != root:
             raise ValueError(f"scratch path {path!r} for {primary!r} is outside {tmp!r}")
     return paths

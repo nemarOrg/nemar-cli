@@ -5217,6 +5217,36 @@ class TestScratchPathsStayInsideTheRun(unittest.TestCase):
         self.assertEqual((result.freed, result.leaked), (0, 0))
         self.assertIn("::error::not reclaiming scratch", out.getvalue())
 
+    def test_a_symlink_inside_the_run_that_points_outside_is_refused(self):
+        # A lexical check passes `<run>/stores/...`; a reclaim would then delete
+        # through the link.
+        with tempfile.TemporaryDirectory() as outer:
+            run = os.path.join(outer, "run")
+            elsewhere = os.path.join(outer, "elsewhere")
+            os.makedirs(run)
+            os.makedirs(elsewhere)
+            os.symlink(elsewhere, os.path.join(run, "stores"))
+            primary = "sub-01/eeg/sub-01_task-a_eeg.vhdr"
+            with self.assertRaises(ValueError):
+                generate_zarr.recording_scratch_paths(run, primary)
+            victim = os.path.join(elsewhere, "sub-01", "eeg", "sub-01_task-a_eeg.zarr")
+            os.makedirs(victim)
+            with open(os.path.join(victim, "data"), "w") as fh:
+                fh.write("precious")
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = generate_zarr.reclaim_recording_scratch(run, primary)
+            self.assertTrue(os.path.exists(os.path.join(victim, "data")))
+        self.assertEqual((result.freed, result.leaked), (0, 0))
+
+    def test_a_run_root_that_is_itself_reached_through_a_symlink_is_fine(self):
+        with tempfile.TemporaryDirectory() as outer:
+            real = os.path.join(outer, "real")
+            link = os.path.join(outer, "link")
+            os.makedirs(real)
+            os.symlink(real, link)
+            paths = generate_zarr.recording_scratch_paths(link, "sub-01/eeg/x_eeg.vhdr")
+        self.assertTrue(all(p.startswith(link + os.sep) for p in paths))
+
     def test_held_bytes_skips_a_primary_that_cannot_be_ours(self):
         with tempfile.TemporaryDirectory() as run:
             self.assertEqual(generate_zarr.held_scratch_bytes(run, ["/etc/x_eeg.vhdr"]), 0)
