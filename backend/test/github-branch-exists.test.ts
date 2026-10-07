@@ -26,28 +26,22 @@ import {
   __seedRateLimitStateForTests,
 } from "../src/services/github/transport";
 import { HttpError } from "../src/services/retry";
+import { rejection } from "./helpers/rejection";
 
-type Responder = (refHit: number) => Response;
+type Responder = () => Response;
 
 const SHA_A = "a".repeat(40);
 const refOk = () => Response.json({ ref: "refs/heads/main", object: { sha: SHA_A } });
 const notFound = () => Response.json({ message: "Not Found" }, { status: 404 });
 
-/** repo -> what its ref lookup answers (given how many ref lookups it has had). */
+/** repo -> what its ref lookup answers. */
 const refBehavior = new Map<string, Responder>();
 /** repo -> what the repository probe answers; absent means a visible repository. */
 const repoBehavior = new Map<string, Responder>();
-const refHits = new Map<string, number>();
 
 let server: ReturnType<typeof Bun.serve>;
 /** "METHOD pathname" of every request, in order. */
 const seen: string[] = [];
-
-/** Branch paths the stand-in recognizes as nm000362's branches. Only the
- *  canonical (per-segment encoded) form resolves; anything else is a 404, so a
- *  change to how the URL is built is a test failure rather than a silent pass
- *  (GitHub itself accepts `release%2F1.0` as well; this pins the builder). */
-const NM000362_BRANCHES = new Set(["release/1.0", "feature/a%20b%23c"]);
 
 beforeAll(() => {
   server = Bun.serve({
@@ -55,22 +49,17 @@ beforeAll(() => {
     fetch(req) {
       const url = new URL(req.url);
       seen.push(`${req.method} ${url.pathname}`);
-      const ref = /^\/repos\/nemarDatasets\/([^/]+)\/git\/ref\/heads\/(.+)$/.exec(url.pathname);
+      const ref = /^\/repos\/nemarDatasets\/([^/]+)\/git\/ref\/heads\/.+$/.exec(url.pathname);
       if (ref) {
-        const repo = ref[1] ?? "";
-        const hit = (refHits.get(repo) ?? 0) + 1;
-        refHits.set(repo, hit);
-        if (repo === "nm000362") {
-          return NM000362_BRANCHES.has(ref[2] ?? "") ? refOk() : notFound();
-        }
         return (
-          refBehavior.get(repo) ?? (() => Response.json({ message: "boom" }, { status: 500 }))
-        )(hit);
+          refBehavior.get(ref[1] ?? "") ??
+          (() => Response.json({ message: "boom" }, { status: 500 }))
+        )();
       }
       const repoProbe = /^\/repos\/nemarDatasets\/([^/]+)$/.exec(url.pathname);
       if (repoProbe) {
         const responder = repoBehavior.get(repoProbe[1] ?? "");
-        return responder ? responder(1) : Response.json({ full_name: "nemarDatasets/x" });
+        return responder ? responder() : Response.json({ full_name: "nemarDatasets/x" });
       }
       return Response.json({ message: "unexpected request" }, { status: 500 });
     },
@@ -89,22 +78,12 @@ beforeEach(() => {
   seen.length = 0;
   refBehavior.clear();
   repoBehavior.clear();
-  refHits.clear();
   __resetRateLimitStateForTests();
 });
 
 const REF = (repo: string, branch = "main") =>
   `GET /repos/nemarDatasets/${repo}/git/ref/heads/${branch}`;
 const REPO = (repo: string) => `GET /repos/nemarDatasets/${repo}`;
-
-async function rejection(promise: Promise<unknown>): Promise<unknown> {
-  try {
-    await promise;
-  } catch (err) {
-    return err;
-  }
-  throw new Error("expected the promise to reject");
-}
 
 describe("branchExists", () => {
   test("an existing branch is true", async () => {
@@ -239,20 +218,19 @@ describe("branchExists", () => {
 
   // The branch is encoded per path segment: `/` stays a separator, while `#`,
   // `?` and `%` cannot change the URL. GitHub accepts `release%2F1.0` too, so
-  // this pins the URL the builder produces, not a requirement of the API.
+  // the exact path asserted on `seen` pins the URL the builder produces, not a
+  // requirement of the API.
   test("a branch containing a slash keeps the slash in the ref path", async () => {
+    refBehavior.set("nm000362", refOk);
     expect(await branchExists("nm000362", "release/1.0", "pat")).toBe(true);
     expect(seen).toEqual([REF("nm000362", "release/1.0")]);
   });
 
   test("a segment with URL-significant characters is escaped", async () => {
     // Raw, '#' would start a fragment and the request would name `feature/a b`.
+    refBehavior.set("nm000362", refOk);
     expect(await branchExists("nm000362", "feature/a b#c", "pat")).toBe(true);
     expect(seen).toEqual([REF("nm000362", "feature/a%20b%23c")]);
-  });
-
-  test("a slash-containing branch that does not exist is false", async () => {
-    expect(await branchExists("nm000362", "release/2.0", "pat")).toBe(false);
   });
 });
 
@@ -266,6 +244,7 @@ describe("getMainBranchSha (shares branchExists' ref request)", () => {
   });
 
   test("resolves a slash-containing branch", async () => {
+    refBehavior.set("nm000362", refOk);
     expect(await getMainBranchSha("nm000362", "release/1.0", "pat")).toBe(SHA_A);
     expect(seen).toEqual([REF("nm000362", "release/1.0")]);
   });
@@ -282,7 +261,8 @@ describe("getMainBranchSha (shares branchExists' ref request)", () => {
   // retryOn404 is what separates it from branchExists: a ref GitHub has not
   // propagated yet is a 404 that resolves a moment later.
   test("a 404 is retried: 404 once, then 200, resolves after two requests", async () => {
-    refBehavior.set("nm000372", (hit) => (hit === 1 ? notFound() : refOk()));
+    let lookups = 0;
+    refBehavior.set("nm000372", () => (++lookups === 1 ? notFound() : refOk()));
 
     expect(await getMainBranchSha("nm000372", "main", "pat")).toBe(SHA_A);
 

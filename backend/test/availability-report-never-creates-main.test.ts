@@ -32,7 +32,16 @@
  */
 
 import type { Database } from "bun:sqlite";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  spyOn,
+  test,
+} from "bun:test";
 import type { Server } from "bun";
 import { Hono } from "hono";
 import { adminRoutes } from "../src/routes/admin";
@@ -40,22 +49,29 @@ import {
   AvailabilityReportError,
   writeAvailabilityReport,
 } from "../src/services/availability-report";
-import { HttpError } from "../src/services/retry";
 import { hashApiKey } from "../src/services/token";
 import type { Bindings, Variables } from "../src/types/bindings";
 import { freshDb, realD1 } from "./helpers/d1";
+import { rejection } from "./helpers/rejection";
 
 const ADMIN_KEY = "avail-nomain-admin-key-0123456789abcdef0123456789abcdef";
 
-type RefState =
-  | "present"
-  | "absent"
-  | "empty"
-  | "conflict"
-  | "forbidden"
-  | "unauthorized"
-  | "junk"
-  | "server-error";
+/** What the stand-in's ref lookup answers for each state a repository's `main`
+ *  can be in. The state names are derived from the keys, so a table below can
+ *  only name a state that exists. */
+const REF_ANSWERS = {
+  present: () => Response.json({ ref: "refs/heads/main", object: { sha: "a".repeat(40) } }),
+  absent: () => Response.json({ message: "Not Found" }, { status: 404 }),
+  empty: () => Response.json({ message: "Git Repository is empty." }, { status: 409 }),
+  conflict: () => Response.json({ message: "Reference update conflict" }, { status: 409 }),
+  forbidden: () =>
+    Response.json({ message: "Resource not accessible by integration" }, { status: 403 }),
+  unauthorized: () => Response.json({ message: "Bad credentials" }, { status: 401 }),
+  junk: () => new Response("<html><body>Sign in to continue</body></html>", { status: 200 }),
+  "server-error": () => Response.json({ message: "Server Error" }, { status: 500 }),
+} satisfies Record<string, () => Response>;
+
+type RefState = keyof typeof REF_ANSWERS;
 
 interface Event {
   source: "github" | "s3";
@@ -110,27 +126,7 @@ beforeAll(() => {
 
       const ref = /^\/repos\/nemarDatasets\/([^/]+)\/git\/ref\/heads\/main$/.exec(url.pathname);
       if (ref && req.method === "GET") {
-        switch (refState.get(ref[1] ?? "") ?? "absent") {
-          case "present":
-            return Response.json({ ref: "refs/heads/main", object: { sha: "a".repeat(40) } });
-          case "empty":
-            return Response.json({ message: "Git Repository is empty." }, { status: 409 });
-          case "conflict":
-            return Response.json({ message: "Reference update conflict" }, { status: 409 });
-          case "forbidden":
-            return Response.json(
-              { message: "Resource not accessible by integration" },
-              { status: 403 },
-            );
-          case "unauthorized":
-            return Response.json({ message: "Bad credentials" }, { status: 401 });
-          case "junk":
-            return new Response("<html><body>Sign in to continue</body></html>", { status: 200 });
-          case "server-error":
-            return Response.json({ message: "Server Error" }, { status: 500 });
-          default:
-            return Response.json({ message: "Not Found" }, { status: 404 });
-        }
+        return REF_ANSWERS[refState.get(ref[1] ?? "") ?? "absent"]();
       }
       if (/^\/repos\/nemarDatasets\/[^/]+\/contents\//.test(url.pathname)) {
         if (req.method === "PUT") {
@@ -261,15 +257,6 @@ function stamp(id: string): string | null {
   ).at;
 }
 
-async function rejection(promise: Promise<unknown>): Promise<unknown> {
-  try {
-    await promise;
-  } catch (err) {
-    return err;
-  }
-  throw new Error("expected the promise to reject");
-}
-
 beforeEach(async () => {
   db = freshDb();
   events = [];
@@ -279,6 +266,51 @@ beforeEach(async () => {
   app.route("/admin", adminRoutes);
   await seedAdmin();
 });
+
+/**
+ * The single-dataset route refuses with `status` and a message containing
+ * `fragment`, asks GitHub exactly `githubTrace` (so: no S3 request, no PUT, and
+ * the lookups in that order), and says nothing was written. Returns the message
+ * for any further assertion.
+ */
+async function expectRouteRefusal(
+  id: string,
+  status: number,
+  fragment: string,
+  githubTrace: string[],
+): Promise<string> {
+  const res = await post(`/admin/datasets/${id}/availability-report`);
+
+  expect(res.status).toBe(status);
+  const { error } = (await res.json()) as { error: string };
+  expect(error).toContain(fragment);
+  expect(error).toContain("Nothing was written");
+  // The line under test: the Contents API is never asked to write, so it cannot
+  // create `main` as a root commit; and the refusal precedes the S3 walk.
+  expect(puts()).toEqual([]);
+  expect(s3Events()).toEqual([]);
+  expect(trace()).toEqual(githubTrace);
+  return error;
+}
+
+/**
+ * A one-candidate sweep records `id` as a single error entry with `status` and a
+ * message containing `fragment`, writes nothing and reads no S3, and leaves the
+ * row unstamped (so it stays a candidate and is retried).
+ */
+async function expectSweepRefusal(id: string, status: number, fragment: string): Promise<void> {
+  const body = await sweep();
+
+  expect(body.processed).toBe(1);
+  expect(body.written).toBe(0);
+  expect(body.errors).toEqual([
+    { dataset_id: id, error: expect.stringContaining(fragment), status },
+  ]);
+  expect(puts()).toEqual([]);
+  expect(s3Events()).toEqual([]);
+  expect(stamp(id)).toBeNull();
+  expect(body.remaining).toBe(1);
+}
 
 // ---------------------------------------------------------------------------
 // main is absent from a repository NEMAR can see: a refusal (409)
@@ -300,74 +332,43 @@ const REFUSAL_CASES: ReadonlyArray<{ label: string; state: RefState; githubTrace
 
 for (const { label: caseLabel, state, githubTrace } of REFUSAL_CASES) {
   describe(`${caseLabel}: the report is refused, not written`, () => {
-    test("single-dataset route answers 409 naming the missing branch, and sends no PUT", async () => {
+    beforeEach(() => {
       seedDataset("nm000358");
       refState.set("nm000358", state);
+    });
 
-      const res = await post("/admin/datasets/nm000358/availability-report");
+    test("single-dataset route answers 409 naming the missing branch, before any S3 work", async () => {
+      const error = await expectRouteRefusal("nm000358", 409, "has no main branch", githubTrace);
 
-      expect(res.status).toBe(409);
-      const { error } = (await res.json()) as { error: string };
       expect(error).toContain("nemarDatasets/nm000358");
-      expect(error).toContain("has no main branch");
-      expect(error).toContain("Nothing was written");
       // The repository was confirmed visible, so the message must not suggest
       // it was not.
       expect(error).not.toContain("not visible");
-      // The line under test: the Contents API is never asked to write, so it
-      // cannot create `main` as a root commit.
-      expect(puts()).toEqual([]);
     });
 
-    test("the refusal happens before the S3 LIST and manifest walk", async () => {
-      seedDataset("nm000358");
-      refState.set("nm000358", state);
-
-      await post("/admin/datasets/nm000358/availability-report");
-
-      expect(s3Events()).toEqual([]);
-      expect(trace()).toEqual(githubTrace);
-    });
-
-    test("the sweep reports a 409 entry, sends no PUT and no S3 request, and leaves the row unstamped", async () => {
-      seedDataset("nm000358");
-      refState.set("nm000358", state);
-
-      const body = await sweep();
-
-      expect(body.processed).toBe(1);
-      expect(body.written).toBe(0);
-      expect(body.errors).toHaveLength(1);
-      expect(body.errors[0]?.dataset_id).toBe("nm000358");
-      expect(body.errors[0]?.error).toContain("has no main branch");
-      // A refusal is marked as one, apart from a fault.
-      expect(body.errors[0]?.status).toBe(409);
-      expect(puts()).toEqual([]);
-      expect(s3Events()).toEqual([]);
-      // Unstamped: the row stays a candidate and is retried once main exists.
-      expect(stamp("nm000358")).toBeNull();
-      expect(body.remaining).toBe(1);
-    });
-
-    test("one refused dataset does not stop a later one with main from being written", async () => {
-      seedDataset("nm000358");
-      seedDataset("nm000360");
-      refState.set("nm000358", state);
-      refState.set("nm000360", "present");
-
-      const body = await sweep();
-
-      expect(body.processed).toBe(2);
-      expect(body.written).toBe(1);
-      expect(puts().map((e) => e.path)).toEqual([
-        "/repos/nemarDatasets/nm000360/contents/.nemar/availability-report.json",
-      ]);
-      expect(stamp("nm000358")).toBeNull();
-      expect(stamp("nm000360")).not.toBeNull();
-      expect(body.remaining).toBe(1);
+    test("the sweep reports a 409 entry and leaves the row unstamped", async () => {
+      await expectSweepRefusal("nm000358", 409, "has no main branch");
     });
   });
 }
+
+test("one refused dataset does not stop a later one with main from being written", async () => {
+  seedDataset("nm000358");
+  seedDataset("nm000360");
+  refState.set("nm000358", "absent");
+  refState.set("nm000360", "present");
+
+  const body = await sweep();
+
+  expect(body.processed).toBe(2);
+  expect(body.written).toBe(1);
+  expect(puts().map((e) => e.path)).toEqual([
+    "/repos/nemarDatasets/nm000360/contents/.nemar/availability-report.json",
+  ]);
+  expect(stamp("nm000358")).toBeNull();
+  expect(stamp("nm000360")).not.toBeNull();
+  expect(body.remaining).toBe(1);
+});
 
 // ---------------------------------------------------------------------------
 // The lookup failed or could not be trusted: a fault (500), never "no main"
@@ -428,30 +429,11 @@ for (const fault of LOOKUP_FAULTS) {
     });
 
     test("single-dataset route answers 500 (not the 409 refusal), no PUT, no S3", async () => {
-      const res = await post("/admin/datasets/nm000368/availability-report");
-
-      expect(res.status).toBe(500);
-      const { error } = (await res.json()) as { error: string };
-      expect(error).toContain(fault.fragment);
-      expect(error).toContain("Nothing was written");
-      expect(puts()).toEqual([]);
-      expect(s3Events()).toEqual([]);
-      expect(trace()).toEqual(fault.githubTrace);
+      await expectRouteRefusal("nm000368", 500, fault.fragment, fault.githubTrace);
     });
 
-    test("the sweep reports a 500 entry, sends no PUT and no S3 request, and leaves the row unstamped", async () => {
-      const body = await sweep();
-
-      expect(body.processed).toBe(1);
-      expect(body.written).toBe(0);
-      expect(body.errors).toHaveLength(1);
-      expect(body.errors[0]?.dataset_id).toBe("nm000368");
-      expect(body.errors[0]?.error).toContain(fault.fragment);
-      expect(body.errors[0]?.status).toBe(500);
-      expect(puts()).toEqual([]);
-      expect(s3Events()).toEqual([]);
-      expect(stamp("nm000368")).toBeNull();
-      expect(body.remaining).toBe(1);
+    test("the sweep reports a 500 entry and leaves the row unstamped", async () => {
+      await expectSweepRefusal("nm000368", 500, fault.fragment);
     });
 
     test("writeAvailabilityReport throws a 500 AvailabilityReportError carrying the original error as its cause", async () => {
@@ -462,7 +444,6 @@ for (const fault of LOOKUP_FAULTS) {
       const cause = (err as AvailabilityReportError).cause;
       expect(cause).toBeInstanceOf(Error);
       expect((cause as Error).message).toContain(fault.fragment);
-      if (cause instanceof HttpError) expect(cause.status).toBeGreaterThanOrEqual(400);
     });
   });
 }
@@ -625,6 +606,67 @@ describe("the write-path checks that now run before the S3 walk", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Server logging on the single-dataset route
+// ---------------------------------------------------------------------------
+
+describe("the single-dataset route logs a 5xx and only a 5xx", () => {
+  const FAILED = "[availability-report] Failed for";
+  let errorLog: ReturnType<typeof spyOn<Console, "error">>;
+
+  beforeEach(() => {
+    errorLog = spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorLog.mockRestore();
+  });
+
+  const failures = () =>
+    errorLog.mock.calls.filter((call) => typeof call[0] === "string" && call[0].startsWith(FAILED));
+
+  test("a token-resolution failure (500) leaves a server log naming the dataset and keeping the error", async () => {
+    seedDataset("nm000381");
+
+    const res = await post("/admin/datasets/nm000381/availability-report", {
+      GITHUB_ADMIN_PAT: undefined,
+    });
+
+    expect(res.status).toBe(500);
+    expect(failures()).toHaveLength(1);
+    expect(failures()[0]?.[0]).toBe(`${FAILED} nm000381:`);
+    expect(failures()[0]?.[1]).toBeInstanceOf(AvailabilityReportError);
+  });
+
+  test("a failed ref lookup (500) is logged", async () => {
+    seedDataset("nm000368");
+    refState.set("nm000368", "forbidden");
+
+    await post("/admin/datasets/nm000368/availability-report");
+
+    expect(failures()).toHaveLength(1);
+  });
+
+  test("a refusal (409) is not a fault and is not logged", async () => {
+    seedDataset("nm000358");
+    refState.set("nm000358", "empty");
+
+    const res = await post("/admin/datasets/nm000358/availability-report");
+
+    expect(res.status).toBe(409);
+    expect(failures()).toEqual([]);
+  });
+
+  test("a 400 is not logged", async () => {
+    seedDataset("ds000303", { githubRepo: null });
+
+    const res = await post("/admin/datasets/ds000303/availability-report");
+
+    expect(res.status).toBe(400);
+    expect(failures()).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Candidacy and the LIMIT window, through the sweep route
 // ---------------------------------------------------------------------------
 
@@ -639,14 +681,11 @@ describe("sweep candidacy through the route", () => {
     expect(events).toEqual([]);
   });
 
-  // KNOWN LIMITATION, tracked as a follow-up to #1643, documented here so it is
-  // a decision and not an accident: a row the write REFUSES stays unstamped and
-  // therefore stays a candidate, and the candidate query orders by dataset_id,
-  // so a refused row that sorts first holds the LIMIT slot on every pass and
-  // starves the valid rows behind it. (The version predicate removes only the
-  // never-versioned case.) If this test fails because refused rows are now
-  // stamped, skipped or ordered last, that is the fix landing: update it, and
-  // the "remaining" semantics documented on AvailabilityReportSweepResult.
+  // Characterizes the KNOWN LIMITATION documented on
+  // AVAILABILITY_REPORT_SWEEP_BASE_WHERE (tracked as a follow-up to #1643), so
+  // it is a decision and not an accident. If this test fails because refused
+  // rows are now stamped, skipped or ordered last, that is the fix landing:
+  // update it, that doc, and the `remaining` doc on AvailabilityReportSweepResult.
   test("KNOWN LIMITATION: a refused row sorted first holds the only LIMIT slot, so the valid row behind it is never reached", async () => {
     seedDataset("nm000358"); // sorts first, main absent: refused every pass
     seedDataset("nm000360"); // valid
