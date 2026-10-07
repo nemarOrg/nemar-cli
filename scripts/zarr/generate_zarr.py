@@ -1342,23 +1342,57 @@ def per_recording_ceiling_bytes() -> int:
 # in fewer bytes per sample (int16 BrainVision, EDF) expands more, so this factor is
 # the float32 figure plus margin, not a bound; a miss costs one retryable ENOSPC,
 # which `reclaim_recording_scratch` now keeps from cascading.
-SCRATCH_STREAM_FACTOR = float(os.environ.get("ZARR_SCRATCH_STREAM_FACTOR", "3.0"))
+def _scratch_setting(name: str, default: float, *, minimum: float) -> float:
+    """One scratch tunable from the environment, refused loudly when it cannot mean
+    what an operator intended. A factor of 0 or below would charge every recording
+    nothing and quietly switch the gate off, ``nan`` raised ValueError deep inside
+    ``main``, ``inf`` overflowed ``int()``, and a negative headroom inflated the
+    budget; each is a crontab typo that should stop the run at import, naming the
+    variable, not surface hours later as a full disk."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{name}={raw!r} is not a number") from None
+    if not math.isfinite(value) or value < minimum:
+        raise ValueError(f"{name}={raw!r} must be a finite number of at least {minimum:g}")
+    return value
+
+
+SCRATCH_STREAM_FACTOR = _scratch_setting("ZARR_SCRATCH_STREAM_FACTOR", 3.0, minimum=1.0)
 # In-memory path: the raw copy plus the store it writes. Those recordings are small
 # by construction (the streaming threshold is 256 MiB) or have no streaming reader.
-SCRATCH_INMEM_FACTOR = float(os.environ.get("ZARR_SCRATCH_INMEM_FACTOR", "2.0"))
+SCRATCH_INMEM_FACTOR = _scratch_setting("ZARR_SCRATCH_INMEM_FACTOR", 2.0, minimum=1.0)
 # Left unspoken for: other tenants share the volume and grow while a run lasts hours,
 # and `aws s3 cp` keeps partial files beside the chunks it is assembling.
 SCRATCH_HEADROOM_BYTES = int(
-    os.environ.get("ZARR_SCRATCH_HEADROOM_BYTES", str(10 * 1024**3))
+    _scratch_setting("ZARR_SCRATCH_HEADROOM_BYTES", 10 * 1024**3, minimum=0)
+)
+# What a recording whose size cannot be read is charged. Its pointer carries no
+# `-s` field (or there is no pointer), so the factor would multiply nothing and the
+# recording would be admitted for free, even at a budget of zero. A floor rather
+# than a refusal: most such recordings are small, and one that is not fails with a
+# retryable ENOSPC like any other miss.
+SCRATCH_UNKNOWN_SIZE_BYTES = int(
+    _scratch_setting("ZARR_SCRATCH_UNKNOWN_SIZE_BYTES", 16 * 1024**3, minimum=1)
 )
 
 
-def scratch_peak_bytes(primary: str, size_bytes: int) -> int:
+def scratch_peak_bytes(primary: str, size_bytes: int, size_known: bool = True) -> int:
     """Projected peak scratch for one recording: its on-disk bytes times the
     factor for the path it will take. Projected from git-annex pointers like the
-    RAM peak, so it costs no download."""
+    RAM peak, so it costs no download.
+
+    A size that could not be read (``size_known`` false, or not positive) is
+    charged at least ``SCRATCH_UNKNOWN_SIZE_BYTES``: a charge of zero is admitted
+    unconditionally, which is the one input that defeats the gate."""
     factor = SCRATCH_STREAM_FACTOR if should_stream(primary, size_bytes) else SCRATCH_INMEM_FACTOR
-    return int(size_bytes * factor)
+    charge = int(max(0, size_bytes) * factor)
+    if not size_known or size_bytes <= 0:
+        return max(charge, SCRATCH_UNKNOWN_SIZE_BYTES)
+    return charge
 
 
 def live_scratch_budget(run_root: str, headroom: int | None = None) -> int | None:
@@ -4959,15 +4993,19 @@ def _blob_key_and_size(repo_dir: str, path: str, head: str) -> tuple[str | None,
     return None, len(blob)
 
 
-def recording_size_from_pointers(
+def recording_size_info(
     repo_dir: str, primary_path: str, head_files: set[str], head: str
-) -> int:
-    """On-disk bytes of a recording's whole file set, read from git-annex pointers
-    at ``head`` WITHOUT downloading: primary + same-stem companions + FIF split
-    members, or every file under a directory recording (CTF ``.ds``/MEF3
-    ``.mefd``/4D-BTi). Mirrors ``materialize_recording``'s wanted set and
-    ``_recording_size_bytes`` so the parent's admission estimate (main) lines up
-    with the worker's #909 preflight."""
+) -> tuple[int, bool]:
+    """``(bytes, readable)``: on-disk bytes of a recording's whole file set, read
+    from git-annex pointers at ``head`` WITHOUT downloading: primary + same-stem
+    companions + FIF split members, or every file under a directory recording (CTF
+    ``.ds``/MEF3 ``.mefd``/4D-BTi). Mirrors ``materialize_recording``'s wanted set
+    and ``_recording_size_bytes`` so the parent's admission estimate (main) lines up
+    with the worker's #909 preflight.
+
+    ``readable`` is false when the number cannot be trusted as a size: a member's
+    annex key carries no ``-s`` field, or the total is zero (no pointer at HEAD).
+    An unreadable size used to read as 0 and so as free."""
     if is_dir_recording(primary_path):
         members: list[str] = [p for p in head_files if dir_recording_of(p) == primary_path]
     elif is_bti_dir(primary_path):
@@ -4985,10 +5023,20 @@ def recording_size_from_pointers(
             dict.fromkeys([primary_path, *siblings, *split_members_for(primary_path, head_files)])
         )
     total = 0
+    readable = True
     for path in members:
         key, blob_size = _blob_key_and_size(repo_dir, path, head)
+        if key and annex_key_size(key) is None:
+            readable = False
         total += (annex_key_size(key) or 0) if key else blob_size
-    return total
+    return total, readable and total > 0
+
+
+def recording_size_from_pointers(
+    repo_dir: str, primary_path: str, head_files: set[str], head: str
+) -> int:
+    """On-disk bytes of a recording's whole file set; see ``recording_size_info``."""
+    return recording_size_info(repo_dir, primary_path, head_files, head)[0]
 
 
 def download_blob(src: str, dst: str, expected_size: int | None) -> None:
@@ -7622,14 +7670,14 @@ def _drain_with_admission(
                     limit = ceiling(running_peak, track_dir)
                     budget = scratch_budget() if scratch_peaks is not None and scratch_budget else None
                 running_scratch = (
-                    sum(scratch_peaks.get(q, 0) for q, _ in in_flight.values())
+                    sum(scratch_peaks.get(q, SCRATCH_UNKNOWN_SIZE_BYTES) for q, _ in in_flight.values())
                     if budget is not None else 0
                 )
                 idx = _next_admission(
                     [run_peaks[p] for p in queue], len(in_flight), running_peak,
                     cap, limit,
                     pending_scratch=(
-                        [scratch_peaks.get(p, 0) for p in queue] if budget is not None else None
+                        [scratch_peaks.get(p, SCRATCH_UNKNOWN_SIZE_BYTES) for p in queue] if budget is not None else None
                     ),
                     running_scratch=running_scratch, scratch_budget=budget,
                 )
@@ -7789,6 +7837,27 @@ def _drain_with_admission(
     return pool_breaks, max_suspects_at_once
 
 
+def admission_size_info(
+    repo: str,
+    convert: list[str],
+    head_set: set[str],
+    head: str,
+    fdt_declarations: dict[str, FdtDeclaration],
+) -> dict[str, tuple[int, bool]]:
+    """``{recording: (bytes, readable)}`` admission projects from: its
+    pointer-walked file set, plus a declared `.fdt`'s size. The declared `.fdt`
+    lives outside the recording's directory, so the pointer walk cannot see it,
+    and without the addition a multi-GB in-memory `.set` read is projected as a few
+    tens of MB. One walk serves both the size and whether it can be trusted."""
+    info: dict[str, tuple[int, bool]] = {}
+    for p in convert:
+        size, readable = recording_size_info(repo, p, head_set, head)
+        if p in fdt_declarations:
+            size += fdt_declarations[p]["fdt_bytes"]
+        info[p] = (size, readable)
+    return info
+
+
 def admission_sizes(
     repo: str,
     convert: list[str],
@@ -7796,15 +7865,13 @@ def admission_sizes(
     head: str,
     fdt_declarations: dict[str, FdtDeclaration],
 ) -> dict[str, int]:
-    """On-disk bytes admission projects each recording from: its pointer-walked
-    file set, plus a declared `.fdt`'s size. The declared `.fdt` lives outside
-    the recording's directory, so the pointer walk cannot see it, and without
-    the addition a multi-GB in-memory `.set` read is projected as a few tens of
-    MB."""
+    """On-disk bytes admission projects each recording from; see
+    ``admission_size_info``."""
     return {
-        p: recording_size_from_pointers(repo, p, head_set, head)
-        + (fdt_declarations[p]["fdt_bytes"] if p in fdt_declarations else 0)
-        for p in convert
+        p: size
+        for p, (size, _readable) in admission_size_info(
+            repo, convert, head_set, head, fdt_declarations
+        ).items()
     }
 
 
@@ -8138,7 +8205,8 @@ def main() -> int:
     # malformed one fails every run, which is why the committed file is loaded
     # by a test in CI.
     fdt_declarations = load_fdt_declarations().get(dataset_id, {})
-    sizes = admission_sizes(repo, convert, head_set, head, fdt_declarations)
+    size_info = admission_size_info(repo, convert, head_set, head, fdt_declarations)
+    sizes = {p: size for p, (size, _readable) in size_info.items()}
     # channels.tsv is already the fidelity gate's ground truth; reuse it so the
     # streaming projection can account for its per-channel term (see
     # `streaming_peak_bytes`). Best-effort: an unreadable sidecar falls back to
@@ -8177,7 +8245,17 @@ def main() -> int:
     }
     # Projected scratch per recording, charged by admission like RAM (see
     # `scratch_peak_bytes`). Recordings admission cannot fit land in `deferred`.
-    scratch_peaks = {p: scratch_peak_bytes(p, sizes[p]) for p in convert}
+    scratch_peaks = {
+        p: scratch_peak_bytes(p, sizes[p], size_info[p][1]) for p in convert
+    }
+    unreadable = [p for p in convert if not size_info[p][1]]
+    if unreadable:
+        print(
+            f"::warning::the size of {len(unreadable)} recording(s) could not be read "
+            f"from their pointers; each is charged {SCRATCH_UNKNOWN_SIZE_BYTES / 1024**3:.0f} "
+            f"GiB of scratch at least (first: {', '.join(unreadable[:3])})",
+            flush=True,
+        )
     deferred: list[str] = []
     # Measured peak RSS per recording, so the factors above stop being guesses.
     measured: dict[str, int] = {}

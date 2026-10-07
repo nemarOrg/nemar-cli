@@ -4985,6 +4985,143 @@ class TestPoolBreakReclaimsScratch(unittest.TestCase):
         self.assertNotIn("reclaimed", out.getvalue())
 
 
+class TestScratchSettings(unittest.TestCase):
+    """The scratch tunables are validated when the module loads: a value that
+    cannot mean what the operator meant stops the run, naming the variable."""
+
+    NAME = "ZARR_SCRATCH_TEST_SETTING"
+
+    def setting(self, raw, default=3.0, minimum=1.0):
+        saved = os.environ.get(self.NAME)
+        self.addCleanup(
+            lambda: os.environ.pop(self.NAME, None)
+            if saved is None else os.environ.__setitem__(self.NAME, saved)
+        )
+        if raw is None:
+            os.environ.pop(self.NAME, None)
+        else:
+            os.environ[self.NAME] = raw
+        return generate_zarr._scratch_setting(self.NAME, default, minimum=minimum)
+
+    def test_unset_or_blank_takes_the_default(self):
+        self.assertEqual(self.setting(None), 3.0)
+        self.assertEqual(self.setting("  "), 3.0)
+
+    def test_a_valid_value_is_used(self):
+        self.assertEqual(self.setting("2.5"), 2.5)
+        self.assertEqual(self.setting("1"), 1.0)
+        self.assertEqual(self.setting("0", default=10.0, minimum=0), 0.0)
+
+    def test_values_that_would_silently_misbehave_are_refused_by_name(self):
+        for raw in ("0", "-1", "0.99", "nan", "inf", "-inf", "abc"):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ValueError) as caught:
+                    self.setting(raw)
+                self.assertIn(self.NAME, str(caught.exception))
+
+    def test_a_negative_or_infinite_headroom_is_refused(self):
+        for raw in ("-1", "inf", "nan"):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ValueError):
+                    self.setting(raw, default=10.0, minimum=0)
+
+    def _import_in_fresh_interpreter(self, **env):
+        base = {k: v for k, v in os.environ.items() if not k.startswith("ZARR_SCRATCH_")}
+        code = (
+            "import sys; sys.path.insert(0, %r); import generate_zarr as g; "
+            "print(g.SCRATCH_STREAM_FACTOR, g.SCRATCH_INMEM_FACTOR, g.SCRATCH_HEADROOM_BYTES)"
+            % str(Path(__file__).resolve().parent)
+        )
+        return subprocess.run(
+            [sys.executable, "-I", "-c", code], env={**base, **env},
+            capture_output=True, text=True, timeout=120,
+        )
+
+    def test_the_shipped_defaults_are_3_2_and_10_gib(self):
+        # The values the node runs with. A fresh interpreter, so another test's
+        # override of the module attributes cannot make this pass or fail.
+        out = self._import_in_fresh_interpreter()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.split(), ["3.0", "2.0", str(10 * 1024**3)])
+
+    def test_a_bad_setting_stops_the_import_and_names_the_variable(self):
+        for name, raw in (
+            ("ZARR_SCRATCH_STREAM_FACTOR", "0"),
+            ("ZARR_SCRATCH_INMEM_FACTOR", "nan"),
+            ("ZARR_SCRATCH_HEADROOM_BYTES", "-1"),
+        ):
+            with self.subTest(name=name):
+                out = self._import_in_fresh_interpreter(**{name: raw})
+                self.assertNotEqual(out.returncode, 0)
+                self.assertIn(name, out.stderr)
+
+
+class TestUnreadableSizesAreCharged(unittest.TestCase):
+    STREAMED = "sub-01/ieeg/sub-01_task-x_ieeg.vhdr"
+
+    def _git(self, repo, *args):
+        subprocess.run(["git", "-C", repo, *args], check=True, capture_output=True)
+
+    def _repo(self, repo, links):
+        self._git(repo, "init", "-q")
+        self._git(repo, "config", "user.email", "t@t")
+        self._git(repo, "config", "user.name", "t")
+        for path, key in links.items():
+            os.makedirs(os.path.dirname(os.path.join(repo, path)), exist_ok=True)
+            os.symlink(f"../../.git/annex/objects/aa/bb/{key}/{key}", os.path.join(repo, path))
+        self._git(repo, "add", "-A")
+        self._git(repo, "commit", "-qm", "fixture")
+        return subprocess.check_output(["git", "-C", repo, "rev-parse", "HEAD"], text=True).strip()
+
+    def test_a_zero_size_is_charged_the_floor_not_nothing(self):
+        floor = generate_zarr.SCRATCH_UNKNOWN_SIZE_BYTES
+        self.assertEqual(generate_zarr.scratch_peak_bytes(self.STREAMED, 0), floor)
+        self.assertGreater(floor, 0)
+
+    def test_a_key_without_a_size_field_is_charged_at_least_the_floor(self):
+        floor = generate_zarr.SCRATCH_UNKNOWN_SIZE_BYTES
+        tiny = 4096  # only the sidecars could be sized
+        self.assertEqual(generate_zarr.scratch_peak_bytes(self.STREAMED, tiny, False), floor)
+
+    def test_a_readable_size_is_charged_by_its_factor_even_when_small(self):
+        got = generate_zarr.scratch_peak_bytes(self.STREAMED, 4096, True)
+        self.assertEqual(got, int(4096 * generate_zarr.SCRATCH_INMEM_FACTOR))
+
+    def test_the_floor_never_lowers_a_larger_charge(self):
+        size = 100 * 1024**3
+        got = generate_zarr.scratch_peak_bytes(self.STREAMED, size, False)
+        self.assertEqual(got, int(size * generate_zarr.SCRATCH_STREAM_FACTOR))
+
+    def test_pointer_walk_reports_whether_the_size_could_be_read(self):
+        sized = "sub-01/eeg/sub-01_task-a_eeg.set"
+        sizeless = "sub-02/eeg/sub-02_task-a_eeg.set"
+        with tempfile.TemporaryDirectory() as repo:
+            head = self._repo(repo, {
+                sized: "SHA256E-s5000--aaaa.set",
+                # A WORM key's name after `--` is free text, never a size.
+                sizeless: "WORM-m1700000000--sub-02-s5.set",
+            })
+            files = {sized, sizeless}
+            self.assertEqual(
+                generate_zarr.recording_size_info(repo, sized, files, head), (5000, True)
+            )
+            size, readable = generate_zarr.recording_size_info(repo, sizeless, files, head)
+            self.assertEqual((size, readable), (0, False))
+            absent = "sub-03/eeg/sub-03_task-a_eeg.set"
+            self.assertEqual(
+                generate_zarr.recording_size_info(repo, absent, files | {absent}, head),
+                (0, False),
+            )
+
+    def test_admission_size_info_adds_a_declared_fdt_and_keeps_readability(self):
+        sized = "sub-01/eeg/sub-01_task-a_eeg.set"
+        with tempfile.TemporaryDirectory() as repo:
+            head = self._repo(repo, {sized: "SHA256E-s5000--aaaa.set"})
+            decl = {sized: {"fdt": "x.fdt", "fdt_bytes": 700}}
+            info = generate_zarr.admission_size_info(repo, [sized], {sized}, head, decl)
+        self.assertEqual(info, {sized: (5700, True)})
+
+
 class TestScratchAdmissionDecision(unittest.TestCase):
     GIB = 1024**3
 
