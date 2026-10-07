@@ -18,6 +18,7 @@ import type { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Server } from "bun";
 import { Hono } from "hono";
+import { parseScreenReport } from "../../shared/identifier-screen-report";
 import { adminRoutes } from "../src/routes/admin";
 import webhooks from "../src/routes/webhooks";
 import {
@@ -30,6 +31,7 @@ import {
 } from "../src/services/github";
 import {
   IDENTIFIER_SWEEP_CALLBACK_PATH,
+  IDENTIFIER_SWEEP_LATE_REPORT_HOURS,
   IDENTIFIER_SWEEP_MAX_IN_FLIGHT,
   IDENTIFIER_SWEEP_SLICE,
   runIdentifierSweepTick,
@@ -192,7 +194,8 @@ function age(id: string, key: string, modifier: string): void {
 }
 
 function scanBody(datasetId: string, status: string, extra: Record<string, unknown> = {}) {
-  const incomplete = status === "unchecked";
+  // `unchecked` is always incomplete; any status may be, when the caller says so.
+  const incomplete = status === "unchecked" || extra.incomplete === true;
   return {
     version: 1,
     scanner: "identifier-scan@abcdef1",
@@ -205,12 +208,11 @@ function scanBody(datasetId: string, status: string, extra: Record<string, unkno
       status,
       incomplete,
       incomplete_reasons: incomplete ? ["deadline"] : [],
-      files: {
-        total: 10,
-        edf_bdf: 4,
-        header_read: incomplete ? 3 : 4,
-        header_read_failed: 0,
-      },
+      // A dataset with no recordings has no EDF/BDF to read; the contract checks it.
+      files:
+        status === "no-recordings"
+          ? { total: 10, edf_bdf: 0, header_read: 0, header_read_failed: 0 }
+          : { total: 10, edf_bdf: 4, header_read: incomplete ? 3 : 4, header_read_failed: 0 },
       ...extra,
     },
   };
@@ -240,6 +242,16 @@ async function answer(datasetId: string, report: unknown, bindings: Bindings = e
 }
 
 const dispatchedIds = () => dispatches.map((d) => d.client_payload.dataset_id);
+
+/** Ask for a rescreen through the real admin route; the status code. */
+async function rescreenAs(id: string): Promise<number> {
+  const res = await app.request(
+    `/admin/identifier-sweep/${id}/rescreen`,
+    { method: "POST", headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+    env(),
+  );
+  return res.status;
+}
 
 beforeEach(async () => {
   db = freshDb();
@@ -591,7 +603,7 @@ describe("a screen that never reports", () => {
 });
 
 describe("a screen that cannot start", () => {
-  test("GitHub refusing the dispatch is dispatch-failed on the attempt, and the verdict is untouched", async () => {
+  test("GitHub refusing the dispatch (a 4xx) is dispatch-failed on the attempt, and the verdict is untouched", async () => {
     seedDataset("nm000620");
     await runIdentifierSweepTick(env());
     await answer("nm000620", scanBody("nm000620", "clean"));
@@ -602,25 +614,67 @@ describe("a screen that cannot start", () => {
     dispatchStatus = 422;
     const r = await runIdentifierSweepTick(env());
     expect(r.failed).toEqual([{ dataset_id: "nm000620", error: "dispatch-failed" }]);
+    expect(r.dispatched).toBe(0);
     const s = stamps("nm000620");
     expect(s.identifier_sweep_attempt).toBe("error");
     expect(s.identifier_sweep_attempt_error).toBe("dispatch-failed");
     expect(s.identifier_sweep_nonce).toBeUndefined();
+    expect(s.identifier_sweep_failures).toBe(1);
     expect(s.identifier_sweep_status).toBe(before.identifier_sweep_status);
     expect(s.identifier_sweep_checked_at).toBe(agedChecked);
   });
 
-  test("a Worker without the callback secret or the API base records dispatch-unconfigured, and calls nobody", async () => {
+  test("a lost answer (a 5xx) leaves the attempt pending with its nonce, so a run that did start still lands", async () => {
+    seedDataset("nm000626");
+    dispatchStatus = 502;
+    const r = await runIdentifierSweepTick(env());
+    expect(r.dispatched).toBe(0);
+    expect(r.unconfirmed).toEqual(["nm000626"]);
+    expect(r.failed).toEqual([]);
+    const s = stamps("nm000626");
+    expect(s.identifier_sweep_attempt).toBe("pending");
+    const token = await signIdentifierSweepCallbackToken(
+      { datasetId: "nm000626", nonce: s.identifier_sweep_nonce as string },
+      SECRET,
+    );
+    const res = await postCallback(
+      { dataset_id: "nm000626", request_id: 0, report: scanBody("nm000626", "clean") },
+      token,
+    );
+    expect(res.status).toBe(200);
+    expect(stamps("nm000626").identifier_sweep_status).toBe("clean");
+  });
+
+  test("a Worker without the callback secret or the API base claims nothing, stamps nothing and calls nobody", async () => {
     seedDataset("nm000621");
     seedDataset("nm000622");
     const r1 = await runIdentifierSweepTick(env({ PRESCREEN_CALLBACK_SECRET: undefined }));
     const r2 = await runIdentifierSweepTick(env({ API_BASE_URL: undefined }));
-    expect([...r1.failed, ...r2.failed].map((f) => f.error)).toEqual([
-      "dispatch-unconfigured",
-      "dispatch-unconfigured",
-    ]);
+    for (const r of [r1, r2]) {
+      expect(r.blocked).toBe("dispatch-unconfigured");
+      expect(r.candidates).toBe(2);
+      expect(r.dispatched).toBe(0);
+      expect(r.failed).toEqual([]);
+    }
     expect(githubRequests).toHaveLength(0);
-    expect(stamps("nm000621").identifier_sweep_attempt_error).toBe("dispatch-unconfigured");
+    // No dataset is held back by a fault that is not its own.
+    expect(rawStamps("nm000621")).toBeNull();
+    expect(rawStamps("nm000622")).toBeNull();
+  });
+
+  test("a GitHub App token that cannot be minted blocks the tick as dispatch-failed, before any claim", async () => {
+    seedDataset("nm000627");
+    const r = await runIdentifierSweepTick(
+      env({
+        GITHUB_ADMIN_PAT: undefined,
+        GITHUB_APP_ID: "12345",
+        GITHUB_APP_PRIVATE_KEY: "not a private key",
+        GITHUB_APP_INSTALLATION_ID_NEMAR_DATASETS: "42",
+      } as Partial<Bindings>),
+    );
+    expect(r.blocked).toBe("dispatch-failed");
+    expect(dispatches).toHaveLength(0);
+    expect(rawStamps("nm000627")).toBeNull();
   });
 
   test("a dataset with no repository is dispatch-unconfigured; the others in the tick still go", async () => {
@@ -628,22 +682,212 @@ describe("a screen that cannot start", () => {
     seedDataset("nm000624");
     const r = await runIdentifierSweepTick(env());
     expect(r.failed).toEqual([{ dataset_id: "nm000623", error: "dispatch-unconfigured" }]);
+    expect(r.dispatched).toBe(1);
     expect(dispatchedIds()).toEqual(["nm000624"]);
   });
 
-  test("a failed attempt waits out the backoff, then is tried again", async () => {
+  test("the backoff grows with failures in a row, and a verdict resets it", async () => {
+    // A dataset whose screen always fails is tried every 6 hours at first and then
+    // less and less often, never four times a day forever.
     seedDataset("nm000625");
-    dispatchStatus = 500;
-    await runIdentifierSweepTick(env());
+    dispatchStatus = 422;
+    const tickAfter = async (hoursAgo: number) => {
+      age("nm000625", "identifier_sweep_attempted_at", `-${hoursAgo} hours`);
+      dispatches = [];
+      githubRequests = [];
+      await runIdentifierSweepTick(env());
+      return githubRequests.length;
+    };
+    await runIdentifierSweepTick(env()); // failure 1
+    expect(stamps("nm000625").identifier_sweep_failures).toBe(1);
+    expect(await tickAfter(5)).toBe(0);
+    expect(await tickAfter(7)).toBe(1); // failure 2
+    expect(await tickAfter(11)).toBe(0);
+    expect(await tickAfter(13)).toBe(1); // failure 3
+    expect(await tickAfter(23)).toBe(0);
+    expect(await tickAfter(25)).toBe(1); // failure 4
+    expect(await tickAfter(47)).toBe(0);
+    expect(await tickAfter(49)).toBe(1); // failure 5
+    expect(await tickAfter(95)).toBe(0);
+    expect(await tickAfter(97)).toBe(1); // failure 6, and it stays at 96 hours
+    expect(await tickAfter(95)).toBe(0);
+    expect(stamps("nm000625").identifier_sweep_failures).toBe(6);
+    // GitHub accepts, the screen reports: the count is gone, and so is the long wait.
     dispatchStatus = 204;
+    expect(await tickAfter(97)).toBe(1);
+    await answer("nm000625", scanBody("nm000625", "clean"));
+    expect(stamps("nm000625").identifier_sweep_failures).toBeUndefined();
+  });
+
+  test("an unreported screen counts as a failure once, and a late error report does not count it again", async () => {
+    seedDataset("nm000628");
     await runIdentifierSweepTick(env());
+    const token = (dispatches[0] as Dispatch).client_payload.callback_token;
+    age("nm000628", "identifier_sweep_attempted_at", "-51 minutes");
+    await runIdentifierSweepTick(env());
+    expect(stamps("nm000628").identifier_sweep_failures).toBe(1);
+    await postCallback(
+      {
+        dataset_id: "nm000628",
+        request_id: 0,
+        report: { version: 1, scanner: null, head: null, error: "deadline" },
+      },
+      token,
+    );
+    const s = stamps("nm000628");
+    expect(s.identifier_sweep_attempt_error).toBe("deadline");
+    expect(s.identifier_sweep_failures).toBe(1);
+  });
+});
+
+describe("statement failures", () => {
+  test("a failed unreported pass is reported, and the tick still dispatches", async () => {
+    seedDataset("nm000690");
+    const failing = interceptingD1(realD1(db), (sql) => {
+      if (sql.includes("'no-report-in-time'") && sql.startsWith("UPDATE")) throw new Error("boom");
+    });
+    const r = await runIdentifierSweepTick({ ...env(), DB: failing });
+    expect(r.timedOut).toBeNull();
+    expect(r.errors[0]).toStartWith("unreported pass failed");
+    expect(r.dispatched).toBe(1);
+  });
+
+  test("a failed candidate query dispatches nothing and says so", async () => {
+    seedDataset("nm000691");
+    const failing = interceptingD1(realD1(db), (sql) => {
+      if (sql.includes("LIMIT ?") && sql.includes("d.github_repo")) throw new Error("boom");
+    });
+    const r = await runIdentifierSweepTick({ ...env(), DB: failing });
+    expect(r.errors[0]).toStartWith("candidate query failed");
     expect(dispatches).toHaveLength(0);
-    age("nm000625", "identifier_sweep_attempted_at", "-5 hours");
+    expect(rawStamps("nm000691")).toBeNull();
+  });
+
+  test("a failure that cannot be recorded leaves the attempt pending, for the unreported pass to close", async () => {
+    seedDataset("nm000692");
+    dispatchStatus = 422;
+    const failing = interceptingD1(realD1(db), (sql) => {
+      if (sql.includes("'error'") && sql.startsWith("UPDATE")) throw new Error("boom");
+    });
+    const r = await runIdentifierSweepTick({ ...env(), DB: failing });
+    expect(r.failed).toEqual([{ dataset_id: "nm000692", error: "dispatch-failed" }]);
+    expect(r.errors[0]).toStartWith("recording the failed dispatch of nm000692 failed");
+    expect(stamps("nm000692").identifier_sweep_attempt).toBe("pending");
+    age("nm000692", "identifier_sweep_attempted_at", "-51 minutes");
+    expect((await runIdentifierSweepTick(env())).timedOut).toBe(1);
+  });
+
+  test("a database error while storing answers 500 and keeps the nonce, so the workflow's retry lands", async () => {
+    seedDataset("nm000693");
     await runIdentifierSweepTick(env());
+    let fail = true;
+    const flaky = interceptingD1(realD1(db), (sql) => {
+      if (fail && sql.includes("'reported'")) throw new Error("D1 unavailable");
+    });
+    const first = await answer("nm000693", scanBody("nm000693", "clean"), { ...env(), DB: flaky });
+    expect(first.status).toBe(500);
+    expect(stamps("nm000693").identifier_sweep_attempt).toBe("pending");
+    fail = false;
+    const retry = await answer("nm000693", scanBody("nm000693", "clean"), { ...env(), DB: flaky });
+    expect(retry.status).toBe(200);
+    expect(stamps("nm000693").identifier_sweep_status).toBe("clean");
+  });
+});
+
+describe("the claim's own guard", () => {
+  test("a dataset that leaves scope between selection and claim is not dispatched", async () => {
+    seedDataset("nm000695");
+    const racing = interceptingD1(realD1(db), (sql) => {
+      if (
+        sql.includes("'pending'") &&
+        sql.includes("json_remove") &&
+        sql.includes("WHERE dataset_id = ?")
+      ) {
+        db.run("UPDATE datasets SET visibility = 'private' WHERE dataset_id = 'nm000695'");
+      }
+    });
+    const r = await runIdentifierSweepTick({ ...env(), DB: racing });
+    expect(r.candidates).toBe(1);
+    expect(r.unclaimed).toBe(1);
     expect(dispatches).toHaveLength(0);
-    age("nm000625", "identifier_sweep_attempted_at", "-7 hours");
+    expect(rawStamps("nm000695")).toBeNull();
+  });
+
+  test("stamps that turn into a non-object between selection and claim are not claimed", async () => {
+    seedDataset("nm000694");
+    const racing = interceptingD1(realD1(db), (sql) => {
+      if (
+        sql.includes("'pending'") &&
+        sql.includes("json_remove") &&
+        sql.includes("WHERE dataset_id = ?")
+      ) {
+        db.run("UPDATE datasets SET sweep_stamps = '[]' WHERE dataset_id = 'nm000694'");
+      }
+    });
+    const r = await runIdentifierSweepTick({ ...env(), DB: racing });
+    expect(r.unclaimed).toBe(1);
+    expect(dispatches).toHaveLength(0);
+  });
+
+  test("two ticks racing for the same datasets dispatch each one once", async () => {
+    seedDataset("nm000696");
+    seedDataset("nm000697");
+    let raced = false;
+    const racing = interceptingD1(realD1(db), async (sql) => {
+      // Between this tick's selection and its first claim, another tick runs whole.
+      if (!raced && sql.includes("json_remove") && sql.includes("WHERE dataset_id = ?")) {
+        raced = true;
+        await runIdentifierSweepTick(env());
+      }
+    });
+    const r = await runIdentifierSweepTick({ ...env(), DB: racing });
+    expect(r.unclaimed).toBe(2);
+    expect(dispatchedIds().sort()).toEqual(["nm000696", "nm000697"]);
+  });
+});
+
+describe("rows the sweep cannot write", () => {
+  test("stamps that are not an object are never claimed, and a rescreen says why", async () => {
+    // json_set on a JSON array changes nothing yet counts the row as changed, so a
+    // claim would report a write it never made and dispatch with a nonce it never stored.
+    seedDataset("nm000698", { stamps: null });
+    db.run("UPDATE datasets SET sweep_stamps = '[]' WHERE dataset_id = 'nm000698'");
+    const r = await runIdentifierSweepTick(env());
+    expect(r.candidates).toBe(0);
+    expect(dispatches).toHaveLength(0);
+    const res = await app.request(
+      "/admin/identifier-sweep/nm000698/rescreen",
+      { method: "POST", headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+      env(),
+    );
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain("not a JSON object");
+    expect(rawStamps("nm000698")).toBe("[]");
+  });
+
+  test("a verdict with no report object is no verdict: the dataset is due", async () => {
+    seedDataset("nm000689");
     await runIdentifierSweepTick(env());
-    expect(dispatchedIds()).toEqual(["nm000625"]);
+    await answer("nm000689", scanBody("nm000689", "clean"));
+    age("nm000689", "identifier_sweep_attempted_at", "-7 hours");
+    db.run(
+      `UPDATE datasets SET sweep_stamps = json_set(sweep_stamps, '$.identifier_sweep_report', 'gone')
+        WHERE dataset_id = 'nm000689'`,
+    );
+    dispatches = [];
+    await runIdentifierSweepTick(env());
+    expect(dispatchedIds()).toEqual(["nm000689"]);
+  });
+
+  test("a verdict time in the future is no verdict: the dataset is due", async () => {
+    seedDataset("nm000699");
+    await runIdentifierSweepTick(env());
+    await answer("nm000699", scanBody("nm000699", "clean"));
+    age("nm000699", "identifier_sweep_attempted_at", "-7 hours");
+    age("nm000699", "identifier_sweep_checked_at", "+30 days");
+    dispatches = [];
+    await runIdentifierSweepTick(env());
+    expect(dispatchedIds()).toEqual(["nm000699"]);
   });
 });
 
@@ -778,5 +1022,270 @@ describe("production only", () => {
     const r = await runIdentifierSweepTick(env({ ENVIRONMENT: undefined }));
     expect(r.skipped).toBe(false);
     expect(dispatchedIds()).toEqual(["nm000652"]);
+  });
+});
+
+describe("scope edges", () => {
+  test("only a well-formed xx id is exempt; a malformed one is screened", async () => {
+    // The GLOB is the publication screen's own rule. A `LIKE 'xx%'` would wave
+    // through a row that merely starts with the letters.
+    seedDataset("xx12345");
+    seedDataset("xxabc123");
+    seedDataset("xx000123");
+    await runIdentifierSweepTick(env());
+    expect(dispatchedIds().sort()).toEqual(["xx12345", "xxabc123"]);
+  });
+
+  test("an anonymous deposit (a public row over a private repository) is screened", async () => {
+    seedDataset("nm000700");
+    db.run("UPDATE datasets SET anonymous = 1 WHERE dataset_id = 'nm000700'");
+    await runIdentifierSweepTick(env());
+    expect(dispatchedIds()).toEqual(["nm000700"]);
+  });
+
+  test("a pending screen of a dataset made private still holds its in-flight slot", async () => {
+    for (let i = 0; i < 6; i++) seedDataset(`nm00071${i}`);
+    await runIdentifierSweepTick(env());
+    await runIdentifierSweepTick(env());
+    expect(dispatches).toHaveLength(6);
+    db.run("UPDATE datasets SET visibility = 'private' WHERE dataset_id = 'nm000710'");
+    seedDataset("nm000719");
+    const r = await runIdentifierSweepTick(env());
+    expect(r.inFlight).toBe(6);
+    expect(r.dispatched).toBe(0);
+  });
+});
+
+describe("late reports and the verdict", () => {
+  test("unreported leaves a standing verdict exactly as it was", async () => {
+    seedDataset("nm000720", { versions: ["1.0.0"] });
+    await runIdentifierSweepTick(env());
+    await answer(
+      "nm000720",
+      scanBody("nm000720", "direct-identifiers", { findings_by_kind: { "edf-patient-name": 1 } }),
+    );
+    const before = stamps("nm000720");
+    expect(await rescreenAs("nm000720")).toBe(200);
+    dispatches = [];
+    await runIdentifierSweepTick(env());
+    expect(dispatchedIds()).toEqual(["nm000720"]);
+    age("nm000720", "identifier_sweep_attempted_at", "-51 minutes");
+    expect((await runIdentifierSweepTick(env())).timedOut).toBe(1);
+    const after = stamps("nm000720");
+    expect(after.identifier_sweep_attempt).toBe("unreported");
+    for (const key of [
+      "identifier_sweep_status",
+      "identifier_sweep_report",
+      "identifier_sweep_checked_at",
+      "identifier_sweep_version",
+    ]) {
+      expect(after[key]).toEqual(before[key]);
+    }
+  });
+
+  test(`a report for an unreported screen is refused once it is older than ${IDENTIFIER_SWEEP_LATE_REPORT_HOURS} hours`, async () => {
+    seedDataset("nm000721");
+    await runIdentifierSweepTick(env());
+    const token = (dispatches[0] as Dispatch).client_payload.callback_token;
+    age("nm000721", "identifier_sweep_attempted_at", "-51 minutes");
+    await runIdentifierSweepTick(env());
+    expect(stamps("nm000721").identifier_sweep_attempt).toBe("unreported");
+    age(
+      "nm000721",
+      "identifier_sweep_attempted_at",
+      `-${IDENTIFIER_SWEEP_LATE_REPORT_HOURS + 1} hours`,
+    );
+    const body = { dataset_id: "nm000721", request_id: 0, report: scanBody("nm000721", "clean") };
+    expect((await postCallback(body, token)).status).toBe(401);
+    expect(stamps("nm000721").identifier_sweep_status).toBeUndefined();
+    age(
+      "nm000721",
+      "identifier_sweep_attempted_at",
+      `-${IDENTIFIER_SWEEP_LATE_REPORT_HOURS - 1} hours`,
+    );
+    expect((await postCallback(body, token)).status).toBe(200);
+  });
+
+  test("what is stored is a projection that still parses: no sampling, read failures or distinct counts", async () => {
+    seedDataset("nm000722");
+    await runIdentifierSweepTick(env());
+    await answer(
+      "nm000722",
+      scanBody("nm000722", "clean", {
+        sampling: {
+          edf_headers: { candidates: 4, oversize: 0, selected: 4, scanned: 4 },
+          scans_tables: { candidates: 0, oversize: 0, selected: 0, scanned: 0 },
+          json_files: { candidates: 1, oversize: 0, selected: 1, scanned: 1 },
+          text_files: { candidates: 0, oversize: 0, selected: 0, scanned: 0 },
+        },
+        distinct_patient_field_values: 3,
+        read_failures: { "json/timeout": 0 },
+      }),
+    );
+    const report = stamps("nm000722").identifier_sweep_report as { scan: Record<string, unknown> };
+    expect(Object.keys(report.scan).sort()).toEqual([
+      "files",
+      "id",
+      "incomplete",
+      "incomplete_reasons",
+      "manifest_source",
+      "scanned_at",
+      "status",
+      "version",
+    ]);
+    expect(parseScreenReport(report).scan?.status).toBe("clean");
+  });
+});
+
+describe("a finding is not retracted by a screen that read less", () => {
+  test("an incomplete re-screen keeps the finding; a complete one that finds nothing clears it", async () => {
+    seedDataset("nm000730");
+    await runIdentifierSweepTick(env());
+    await answer(
+      "nm000730",
+      scanBody("nm000730", "direct-identifiers", { findings_by_kind: { "edf-patient-name": 2 } }),
+    );
+    const found = stamps("nm000730");
+    // The next screen runs out of time and finds nothing.
+    expect(await rescreenAs("nm000730")).toBe(200);
+    dispatches = [];
+    await runIdentifierSweepTick(env());
+    await answer("nm000730", scanBody("nm000730", "unchecked"));
+    let s = stamps("nm000730");
+    expect(s.identifier_sweep_status).toBe("unchecked");
+    const kept = s.identifier_sweep_finding as {
+      status: string;
+      checked_at: string;
+      report: unknown;
+    };
+    expect(kept.status).toBe("direct-identifiers");
+    expect(kept.checked_at).toBe(found.identifier_sweep_checked_at as string);
+    expect(kept.report).toEqual(found.identifier_sweep_report);
+    // A second incomplete screen carries the same finding forward.
+    expect(await rescreenAs("nm000730")).toBe(200);
+    dispatches = [];
+    await runIdentifierSweepTick(env());
+    await answer("nm000730", scanBody("nm000730", "unchecked"));
+    s = stamps("nm000730");
+    expect((s.identifier_sweep_finding as { status: string }).status).toBe("direct-identifiers");
+    // A complete screen that finds nothing is the evidence the finding is gone.
+    expect(await rescreenAs("nm000730")).toBe(200);
+    dispatches = [];
+    await runIdentifierSweepTick(env());
+    await answer("nm000730", scanBody("nm000730", "clean"));
+    expect(stamps("nm000730").identifier_sweep_finding).toBeNull();
+  });
+});
+
+describe("the cadence never depends on the verdict", () => {
+  const ALL = [
+    "direct-identifiers",
+    "dates-only",
+    "review",
+    "clean",
+    "clean-edf-only-others-unscreened",
+    "not-screened",
+    "no-recordings",
+    "unchecked",
+  ] as const;
+
+  async function screenedAt(id: string, status: string, daysAgo: number) {
+    seedDataset(id, { versions: ["1.0.0"] });
+    await runIdentifierSweepTick(env());
+    await answer(id, scanBody(id, status));
+    age(id, "identifier_sweep_checked_at", `-${daysAgo} days`);
+    age(id, "identifier_sweep_attempted_at", `-${daysAgo} days`);
+    dispatches = [];
+  }
+
+  test("every verdict, at 3 and at 20 days, is not due; at 22 days every one is", async () => {
+    // A rule that re-screened a flagged dataset sooner would show up here as a
+    // dispatch at 3 or 20 days; one that held a flagged dataset back, as a missing
+    // dispatch at 22.
+    for (const [i, status] of ALL.entries()) await screenedAt(`nm00074${i}`, status, 3);
+    expect((await runIdentifierSweepTick(env())).candidates).toBe(0);
+    for (const [i] of ALL.entries()) {
+      age(`nm00074${i}`, "identifier_sweep_checked_at", "-20 days");
+    }
+    expect((await runIdentifierSweepTick(env())).candidates).toBe(0);
+    const due: string[] = [];
+    for (const [i] of ALL.entries()) {
+      age(`nm00074${i}`, "identifier_sweep_checked_at", "-22 days");
+    }
+    for (let t = 0; t < 3; t++) {
+      dispatches = [];
+      await runIdentifierSweepTick(env());
+      due.push(...dispatchedIds());
+      db.run(
+        `UPDATE datasets SET sweep_stamps = json_set(sweep_stamps, '$.identifier_sweep_attempt', 'reported')
+          WHERE json_extract(sweep_stamps, '$.identifier_sweep_attempt') = 'pending'`,
+      );
+    }
+    expect(due.sort()).toEqual(ALL.map((_, i) => `nm00074${i}`).sort());
+  });
+
+  test("a flagged and a clean dataset aged alike come out by attempt time and id only", async () => {
+    await screenedAt("nm000751", "direct-identifiers", 22);
+    await screenedAt("nm000750", "clean", 22);
+    db.run(
+      `UPDATE datasets SET sweep_stamps = json_set(sweep_stamps, '$.identifier_sweep_attempted_at', datetime('now', '-22 days'))
+        WHERE dataset_id IN ('nm000750', 'nm000751')`,
+    );
+    await runIdentifierSweepTick(env());
+    expect(dispatchedIds()).toEqual(["nm000750", "nm000751"]);
+  });
+});
+
+describe("the callback's size bound", () => {
+  test("a body over the bound is refused 413, by its declared length and by what arrived", async () => {
+    seedDataset("nm000760");
+    await runIdentifierSweepTick(env());
+    const token = (dispatches[0] as Dispatch).client_payload.callback_token;
+    const huge = JSON.stringify({
+      dataset_id: "nm000760",
+      request_id: 0,
+      pad: "x".repeat(300_000),
+    });
+    expect((await postCallback(huge, token)).status).toBe(413);
+    const lying = await app.request(
+      "/webhooks/identifier-sweep-result",
+      {
+        method: "POST",
+        headers: {
+          "X-Webhook-Token": token,
+          "Content-Type": "application/json",
+          "Content-Length": "10",
+        },
+        body: huge,
+      },
+      env(),
+    );
+    expect(lying.status).toBe(413);
+    expect(stamps("nm000760").identifier_sweep_attempt).toBe("pending");
+  });
+});
+
+describe("the mail category through the route", () => {
+  test("PUT identifier_sweep false persists and reads back; other keys are untouched", async () => {
+    const put = await app.request(
+      "/admin/email-preferences",
+      {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${ADMIN_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ identifier_sweep: false }),
+      },
+      env(),
+    );
+    expect(put.status).toBe(200);
+    const got = (await (
+      await app.request(
+        "/admin/email-preferences",
+        { headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+        env(),
+      )
+    ).json()) as Record<string, unknown>;
+    expect(got.identifier_sweep).toBe(false);
+    expect(got.publication_request).toBe(true);
+    expect(got.dataset_anonymity).toBe(true);
   });
 });

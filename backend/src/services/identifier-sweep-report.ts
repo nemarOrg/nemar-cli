@@ -10,6 +10,10 @@
  * through the one renderer, {@link count}; a fact that could not be read is
  * `unknown`, and an unknown counts as needing attention.
  *
+ * **A finding stays listed** until a complete screen, or a newer finding,
+ * replaces it: not when its screen ages out of the cycle, not when a later
+ * screen was incomplete, and not when its stored report stops reading back.
+ *
  * **The words are the screen's.** A verdict is named with `screenStateLabel`,
  * a cause with `screenErrorText`, kinds with `kindsPhrase`, all from
  * `shared/identifier-screen-report.ts`, so the publication email, the status
@@ -36,26 +40,41 @@ import { count, isoWeekLabel } from "./import-weekly-summary.js";
 export interface IdentifierSweepRow {
   dataset_id: string;
   latest_version: string | null;
+  /** `json_type(sweep_stamps)`: `object`, null for no stamps, anything else for a row that cannot hold them. */
+  stamps_type?: unknown;
   status: unknown;
   checked_at: unknown;
   version: unknown;
   report: unknown;
+  /** The finding an incomplete screen kept (`{ status, checked_at, report }` as JSON text). */
+  finding?: unknown;
   attempt: unknown;
   attempt_error: unknown;
   attempted_at: unknown;
   requested_at: unknown;
 }
 
+/** Verdicts that found something: the ones listed by id. */
+export const FINDING_STATUSES = ["direct-identifiers", "review"] as const;
+const FINDING_SET: ReadonlySet<string> = new Set(FINDING_STATUSES);
+
+/** Verdicts of a screen that ran but cannot parse some of the recordings' formats. */
+const PARTIAL_COVERAGE: ReadonlySet<string> = new Set([
+  "not-screened",
+  "clean-edf-only-others-unscreened",
+]);
+
 /**
  * Why a dataset is not screened this cycle.
  *
  * - `never-screened`: no verdict was ever stored.
  * - `unreadable`: a verdict is recorded but its report, status or time does not
- *   read back (a row edited by hand). Not clean, and not "never" either.
+ *   read back (a row edited by hand, a time in the future, or a report written
+ *   under an older contract). Not clean, and not "never" either.
  * - `expired`: the last verdict is older than the cycle.
  * - `new-version`: the last verdict is of an older version than the latest.
- * - `incomplete`: the last screen ran and could not read everything (the
- *   scanner's own `unchecked`).
+ * - `incomplete`: the last screen ran and could not read everything it can
+ *   parse (`scan.incomplete`, whatever it found).
  */
 export const UNCHECKED_REASONS = [
   "never-screened",
@@ -81,14 +100,20 @@ const UNCHECKED_WORDS: Record<UncheckedReason, string> = {
  */
 export type AttemptNote = "in-flight" | "queued" | "unknown" | ScreenError;
 
-/** A dataset whose last verdict found something, with its kinds and counts. */
+/** A dataset whose last finding is listed, with its kinds and counts. */
 export interface FlaggedDataset {
   dataset_id: string;
-  /** When that verdict was stored, `YYYY-MM-DD`. */
-  screened_on: string;
-  /** Whether that verdict still counts (`screened`) or has lapsed (an unchecked reason). */
-  standing: "current" | UncheckedReason;
-  findings_by_kind: Partial<Record<string, number>>;
+  /** When that finding's screen was stored, `YYYY-MM-DD`, or null when its time does not read back. */
+  screened_on: string | null;
+  /**
+   * Where the finding stands: `current` (the dataset's verdict, in the cycle),
+   * an unchecked reason (the verdict, lapsed or incomplete; `unreadable` when
+   * only its status reads back), or `earlier` (an earlier screen's finding,
+   * kept because every screen since was incomplete).
+   */
+  standing: "current" | UncheckedReason | "earlier";
+  /** Null when the finding's report does not read back. */
+  findings_by_kind: Partial<Record<string, number>> | null;
   edf_bdf_files_flagged: number | null;
 }
 
@@ -105,6 +130,8 @@ export interface IdentifierWeekFacts {
   scope: number | null;
   /** Datasets screened this cycle (a verdict at most `cycleDays` old, of the latest version, complete). */
   screened: number | null;
+  /** Of those, verdicts whose screen could not parse some recordings' formats. */
+  partialCoverage: number | null;
   /** Screened datasets by verdict. */
   byStatus: Partial<Record<DatasetStatus, number>> | null;
   unchecked: number | null;
@@ -113,15 +140,22 @@ export interface IdentifierWeekFacts {
   lastAttempt: Partial<Record<AttemptNote, number>> | null;
   /** Over every `incomplete` dataset: how many datasets carry each reason. */
   incompleteReasons: Record<string, number> | null;
-  /** Datasets whose most recent screen was started in the window. */
-  startedInWindow: number | null;
+  /**
+   * Datasets whose most recent screen was dispatched in the window: GitHub took
+   * it, or may have. A claim that never reached GitHub (no credential, no
+   * repository, a refusal) is not counted. Only the latest attempt per dataset
+   * is kept, so this counts datasets, not runs.
+   */
+  dispatchedInWindow: number | null;
   /** Datasets whose verdict was stored in the window. */
   storedInWindow: number | null;
+  /** The earliest most-recent attempt of any dataset, ISO; null when no attempt was ever made. */
+  firstAttemptAt: string | null;
   /** Datasets the queue would take now. */
   due: number | null;
-  /** Datasets whose last verdict found direct identifiers. */
+  /** Datasets whose last finding found direct identifiers. */
   flagged: FlaggedDataset[] | null;
-  /** Datasets whose last verdict needs review. */
+  /** Datasets whose last finding needs review. */
   review: FlaggedDataset[] | null;
   /** What could not be read, in fixed words. */
   errors: string[];
@@ -139,12 +173,15 @@ export function reportWindow(now: Date): { week: string; start: Date; end: Date 
 
 const STATUS_SET: ReadonlySet<string> = new Set(DATASET_STATUSES);
 const ERROR_SET: ReadonlySet<string> = new Set(SCREEN_ERRORS);
+/** A stored time this far past the report's own clock is not a time the sweep wrote. */
+const FUTURE_TOLERANCE_MS = 5 * 60_000;
 
 const asText = (x: unknown): string | null => (typeof x === "string" && x !== "" ? x : null);
 
 /**
  * A stored report, parsed again on the way out (the Worker only ever writes a
- * parsed one, so a failure means a row edited by hand, and reads as no report).
+ * parsed one, so a failure means a row edited by hand, or written under an
+ * older contract, and reads as no report).
  */
 function readReport(raw: unknown): ScreenReport | null {
   if (typeof raw !== "string") return null;
@@ -166,6 +203,8 @@ export type Standing =
       status: DatasetStatus | null;
       report: ScreenReport | null;
       checkedMs: number | null;
+      /** For `unreadable`: the stored status, when it is a finding, so the finding is still listed. */
+      claimedFinding?: DatasetStatus;
     };
 
 /** What the last attempt came to, read without trusting it. */
@@ -192,15 +231,25 @@ export function attemptNote(
 
 /**
  * A dataset counts as screened this cycle only when ALL of these hold: its
- * verdict, report and time read back and agree; the verdict is at most
- * `cycleDays` old; it was of the dataset's latest version; and the screen was
- * complete. Anything else is unchecked, with the first reason that applies.
+ * stamps, verdict, report and time read back and agree, and the time is not in
+ * the future; the verdict is at most `cycleDays` old; it was of the dataset's
+ * latest version; and the screen read everything it can parse. Anything else
+ * is unchecked, with the first reason that applies.
  */
 export function standingOf(row: IdentifierSweepRow, nowMs: number, cycleDays: number): Standing {
-  const rawStatus = asText(row.status);
-  const report = readReport(row.report);
-  const checkedMs = parseSqliteUtc(asText(row.checked_at));
   const attempt = attemptNote(row);
+  const stampsType = row.stamps_type ?? null;
+  const rawStatus = asText(row.status);
+  if (stampsType !== null && stampsType !== "object") {
+    return {
+      kind: "unchecked",
+      reason: "unreadable",
+      attempt,
+      status: null,
+      report: null,
+      checkedMs: null,
+    };
+  }
   if (rawStatus === null) {
     return {
       kind: "unchecked",
@@ -211,6 +260,9 @@ export function standingOf(row: IdentifierSweepRow, nowMs: number, cycleDays: nu
       checkedMs: null,
     };
   }
+  const report = readReport(row.report);
+  const parsedMs = parseSqliteUtc(asText(row.checked_at));
+  const checkedMs = parsedMs !== null && parsedMs <= nowMs + FUTURE_TOLERANCE_MS ? parsedMs : null;
   const status = STATUS_SET.has(rawStatus) ? (rawStatus as DatasetStatus) : null;
   if (status === null || report?.scan?.status !== status || checkedMs === null) {
     return {
@@ -220,6 +272,7 @@ export function standingOf(row: IdentifierSweepRow, nowMs: number, cycleDays: nu
       status: null,
       report: null,
       checkedMs,
+      ...(FINDING_SET.has(rawStatus) ? { claimedFinding: rawStatus as DatasetStatus } : {}),
     };
   }
   const lapsed = (reason: UncheckedReason): Standing => ({
@@ -232,25 +285,89 @@ export function standingOf(row: IdentifierSweepRow, nowMs: number, cycleDays: nu
   });
   if (nowMs - checkedMs > cycleDays * 86_400_000) return lapsed("expired");
   if ((asText(row.version) ?? "") !== (row.latest_version ?? "")) return lapsed("new-version");
-  if (status === "unchecked") return lapsed("incomplete");
+  if (report.scan?.incomplete) return lapsed("incomplete");
   return { kind: "screened", status, report, checkedMs };
 }
 
 const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 
-function flaggedEntry(row: IdentifierSweepRow, s: Standing): FlaggedDataset | null {
-  if (!s.report?.scan || s.checkedMs === null) return null;
-  return {
-    dataset_id: row.dataset_id,
-    screened_on: day(s.checkedMs),
-    standing: s.kind === "screened" ? "current" : s.reason,
-    findings_by_kind: { ...(s.report.scan.findings_by_kind ?? {}) },
-    edf_bdf_files_flagged: s.report.scan.edf_bdf_files_flagged ?? null,
-  };
+/** The finding an incomplete screen kept, when it reads back. */
+function retainedFinding(raw: unknown): {
+  status: DatasetStatus;
+  checkedMs: number | null;
+  report: ScreenReport;
+} | null {
+  if (typeof raw !== "string") return null;
+  try {
+    const f = JSON.parse(raw) as { status?: unknown; checked_at?: unknown; report?: unknown };
+    const report = parseScreenReport(f.report);
+    if (typeof f.status !== "string" || !FINDING_SET.has(f.status)) return null;
+    if (report.scan?.status !== f.status) return null;
+    return {
+      status: f.status as DatasetStatus,
+      checkedMs: parseSqliteUtc(asText(f.checked_at)),
+      report,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** The listed finding of a row, if it has one, and which list it goes in. */
+function findingOf(
+  row: IdentifierSweepRow,
+  s: Standing,
+): { list: "flagged" | "review"; entry: FlaggedDataset } | null {
+  const listOf = (status: DatasetStatus) => (status === "review" ? "review" : "flagged");
+  if (s.status && FINDING_SET.has(s.status) && s.report?.scan && s.checkedMs !== null) {
+    return {
+      list: listOf(s.status),
+      entry: {
+        dataset_id: row.dataset_id,
+        screened_on: day(s.checkedMs),
+        standing: s.kind === "screened" ? "current" : s.reason,
+        findings_by_kind: { ...(s.report.scan.findings_by_kind ?? {}) },
+        edf_bdf_files_flagged: s.report.scan.edf_bdf_files_flagged ?? null,
+      },
+    };
+  }
+  if (s.kind === "unchecked" && s.claimedFinding) {
+    return {
+      list: listOf(s.claimedFinding),
+      entry: {
+        dataset_id: row.dataset_id,
+        screened_on: s.checkedMs === null ? null : day(s.checkedMs),
+        standing: "unreadable",
+        findings_by_kind: null,
+        edf_bdf_files_flagged: null,
+      },
+    };
+  }
+  // A verdict that is not itself a finding may carry one forward, but only an
+  // incomplete one does (a complete screen that found nothing clears it).
+  const kept = retainedFinding(row.finding);
+  if (kept && s.report?.scan?.incomplete) {
+    return {
+      list: listOf(kept.status),
+      entry: {
+        dataset_id: row.dataset_id,
+        screened_on: kept.checkedMs === null ? null : day(kept.checkedMs),
+        standing: "earlier",
+        findings_by_kind: { ...(kept.report.scan?.findings_by_kind ?? {}) },
+        edf_bdf_files_flagged: kept.report.scan?.edf_bdf_files_flagged ?? null,
+      },
+    };
+  }
+  return null;
 }
 
 const inWindow = (ms: number | null, start: number, end: number) =>
   ms !== null && ms >= start && ms < end;
+
+/** An attempt that never reached GitHub: claimed, then refused or impossible. */
+const neverDispatched = (row: IdentifierSweepRow) =>
+  row.attempt === "error" &&
+  (row.attempt_error === "dispatch-unconfigured" || row.attempt_error === "dispatch-failed");
 
 /** The week's facts from the in-scope rows. */
 export function buildIdentifierWeek(
@@ -272,16 +389,23 @@ export function buildIdentifierWeek(
   const flagged: FlaggedDataset[] = [];
   const review: FlaggedDataset[] = [];
   let screened = 0;
+  let partial = 0;
   let unchecked = 0;
-  let started = 0;
+  let dispatched = 0;
   let stored = 0;
+  let firstAttemptMs: number | null = null;
 
   for (const row of rows) {
     const s = standingOf(row, nowMs, opts.cycleDays);
-    if (inWindow(parseSqliteUtc(asText(row.attempted_at)), start, end)) started++;
+    const attemptedMs = parseSqliteUtc(asText(row.attempted_at));
+    if (attemptedMs !== null && (firstAttemptMs === null || attemptedMs < firstAttemptMs)) {
+      firstAttemptMs = attemptedMs;
+    }
+    if (inWindow(attemptedMs, start, end) && !neverDispatched(row)) dispatched++;
     if (inWindow(s.checkedMs, start, end)) stored++;
     if (s.kind === "screened") {
       screened++;
+      if (PARTIAL_COVERAGE.has(s.status)) partial++;
       byStatus[s.status] = (byStatus[s.status] ?? 0) + 1;
     } else {
       unchecked++;
@@ -294,12 +418,8 @@ export function buildIdentifierWeek(
         lastAttempt[s.attempt] = (lastAttempt[s.attempt] ?? 0) + 1;
       }
     }
-    // Listed by the LAST verdict, whatever its standing: a finding does not stop
-    // being reported because its screen aged out of the cycle.
-    if (s.status === "direct-identifiers" || s.status === "review") {
-      const entry = flaggedEntry(row, s);
-      if (entry) (s.status === "review" ? review : flagged).push(entry);
-    }
+    const f = findingOf(row, s);
+    if (f) (f.list === "review" ? review : flagged).push(f.entry);
   }
 
   return {
@@ -310,13 +430,15 @@ export function buildIdentifierWeek(
     cycleDays: opts.cycleDays,
     scope: rows.length,
     screened,
+    partialCoverage: partial,
     byStatus,
     unchecked,
     uncheckedByReason,
     lastAttempt,
     incompleteReasons,
-    startedInWindow: started,
+    dispatchedInWindow: dispatched,
     storedInWindow: stored,
+    firstAttemptAt: firstAttemptMs === null ? null : new Date(firstAttemptMs).toISOString(),
     due: opts.due,
     flagged,
     review,
@@ -340,13 +462,15 @@ export function unknownIdentifierWeek(
     cycleDays,
     scope: null,
     screened: null,
+    partialCoverage: null,
     byStatus: null,
     unchecked: null,
     uncheckedByReason: null,
     lastAttempt: null,
     incompleteReasons: null,
-    startedInWindow: null,
+    dispatchedInWindow: null,
     storedInWindow: null,
+    firstAttemptAt: null,
     due,
     flagged: null,
     review: null,
@@ -378,16 +502,43 @@ const ATTEMPT_WORDS = (note: AttemptNote): string => {
 };
 
 function flaggedLine(f: FlaggedDataset): string {
+  const date = f.screened_on ?? "on a date that does not read back";
   const when =
     f.standing === "current"
-      ? `screened ${f.screened_on}`
-      : `screened ${f.screened_on}, ${UNCHECKED_WORDS[f.standing]}`;
-  const kinds = kindsPhrase(f.findings_by_kind);
+      ? `screened ${date}`
+      : f.standing === "earlier"
+        ? `screened ${date}; every screen since was INCOMPLETE`
+        : `screened ${date}, ${UNCHECKED_WORDS[f.standing]}`;
+  const kinds =
+    f.findings_by_kind === null
+      ? "kinds do not read back"
+      : kindsPhrase(f.findings_by_kind) || "no kinds recorded";
   const files =
     f.edf_bdf_files_flagged === null
       ? ""
-      : `; EDF/BDF files with an identifier finding: ${f.edf_bdf_files_flagged}`;
-  return `  ${f.dataset_id} (${when}): ${kinds || "no kinds recorded"}${files}`;
+      : `; EDF/BDF files with an identifier finding: ${count(f.edf_bdf_files_flagged)}`;
+  return `  ${f.dataset_id} (${when}): ${kinds}${files}`;
+}
+
+/**
+ * The sweep's liveness this week, from its own records (ADR 0053: silence is
+ * evidence only when there was work).
+ *
+ * - `idle`: work was due, the sweep had been running before the week ended,
+ *   and it dispatched nothing in the week.
+ * - `never`: work is due and no dataset has ever been attempted.
+ * - `not-yet`: the sweep's first attempt came after the week ended, so the
+ *   week says nothing about it (the first report after a deploy).
+ * - `ok`: none of those.
+ * - `unknown`: a figure it needs could not be read.
+ */
+export function identifierWeekLiveness(
+  f: IdentifierWeekFacts,
+): "ok" | "idle" | "never" | "not-yet" | "unknown" {
+  if (f.due === null || f.dispatchedInWindow === null || f.scope === null) return "unknown";
+  if (f.due === 0 || f.dispatchedInWindow > 0) return "ok";
+  if (f.firstAttemptAt === null) return "never";
+  return f.firstAttemptAt >= f.windowEnd ? "not-yet" : "idle";
 }
 
 /**
@@ -397,20 +548,21 @@ function flaggedLine(f: FlaggedDataset): string {
  * screen is running, is ordinary work in progress and needs nobody (a newly
  * published dataset, a new version, the first pass). Everything else does: a
  * figure that could not be read, a direct identifier in any dataset's last
- * screen, a sweep that started nothing while work was due, a screen that did
- * not run or did not report, one that was incomplete, a result that does not
- * read back, and a dataset that fell out of the cycle (the refresh comes a week
- * earlier, so lapsing means the sweep is not keeping up).
+ * finding, a sweep that dispatched nothing while work was due or never has, a
+ * screen that did not run or did not report, one that was incomplete, a result
+ * that does not read back, and a dataset that fell out of the cycle (the
+ * refresh comes a week earlier, so lapsing means the sweep is not keeping up).
  */
 export function attentionReasons(f: IdentifierWeekFacts): string[] {
+  if (f.scope === null) return ["some figures could not be read"];
   const out: string[] = [];
-  if (f.errors.length > 0 || f.scope === null || f.due === null) {
-    out.push("some figures could not be read");
-  }
+  if (f.errors.length > 0 || f.due === null) out.push("some figures could not be read");
   if (f.flagged === null || f.flagged.length > 0) {
     out.push(`${count(f.flagged?.length ?? null)} datasets with direct identifiers`);
   }
-  if (identifierWeekIdle(f) === true) out.push("the sweep started no screen while work was due");
+  const liveness = identifierWeekLiveness(f);
+  if (liveness === "idle") out.push("the sweep dispatched no screen while work was due");
+  if (liveness === "never") out.push("the sweep has never dispatched a screen");
   const failed =
     f.lastAttempt === null
       ? null
@@ -430,14 +582,7 @@ export function attentionReasons(f: IdentifierWeekFacts): string[] {
     const n = reason(r);
     if (n === null || n > 0) out.push(`${count(n)} ${phrase}`);
   }
-  // One "unknown" line is enough when the records could not be read at all.
-  return f.scope === null ? ["some figures could not be read"] : out;
-}
-
-/** True when datasets are due and no screen started in the week; null when that cannot be told. */
-export function identifierWeekIdle(f: IdentifierWeekFacts): boolean | null {
-  if (f.due === null || f.startedInWindow === null) return null;
-  return f.due > 0 && f.startedInWindow === 0;
+  return out;
 }
 
 /** The report, in the screen's words. */
@@ -460,6 +605,9 @@ export function renderIdentifierWeek(f: IdentifierWeekFacts): IdentifierWeekRepo
   lines.push("");
   lines.push(`Public datasets in scope: ${count(f.scope)}`);
   lines.push(`Screened this cycle: ${count(f.screened)}`);
+  lines.push(
+    `  of which some recordings are in formats the scanner does not parse: ${count(f.partialCoverage)}`,
+  );
   if (f.byStatus === null) {
     lines.push("  by result: unknown");
   } else {
@@ -493,32 +641,46 @@ export function renderIdentifierWeek(f: IdentifierWeekFacts): IdentifierWeekRepo
   } else {
     const entries = Object.entries(f.incompleteReasons).sort(([a], [b]) => a.localeCompare(b));
     if (entries.length > 0) {
-      lines.push(`  incomplete, by reason: ${entries.map(([r, n]) => `${r} x${n}`).join(", ")}`);
+      lines.push(
+        `  incomplete, by reason: ${entries.map(([r, n]) => `${r} x${count(n)}`).join(", ")}`,
+      );
     }
   }
   lines.push("");
   lines.push(
-    `This week: screens started for ${count(f.startedInWindow)} datasets; results stored for ${count(f.storedInWindow)}.`,
+    `This week: screens dispatched for ${count(f.dispatchedInWindow)} datasets; results stored for ${count(f.storedInWindow)}.`,
   );
   lines.push(`Due now: ${count(f.due)}`);
-  const idle = identifierWeekIdle(f);
-  if (idle === true) {
-    lines.push(
-      `The sweep started no screen this week while ${count(f.due)} datasets were due: it is not running.`,
-    );
-  } else if (idle === null) {
-    lines.push("Whether the sweep ran this week: unknown");
+  switch (identifierWeekLiveness(f)) {
+    case "idle":
+      lines.push(
+        `The sweep dispatched no screen this week while ${count(f.due)} datasets were due: it is not running.`,
+      );
+      break;
+    case "never":
+      lines.push(`The sweep has never dispatched a screen, and ${count(f.due)} datasets are due.`);
+      break;
+    case "not-yet":
+      lines.push("The sweep began after this week ended, so the week says nothing about it.");
+      break;
+    case "unknown":
+      lines.push("Whether the sweep ran this week: unknown");
+      break;
+    case "ok":
+      break;
   }
   lines.push("");
-  lines.push(`Datasets with direct identifiers (last screen, kinds and counts): ${count(withIds)}`);
+  lines.push(
+    `Datasets with direct identifiers (last finding, kinds and counts): ${count(withIds)}`,
+  );
   for (const d of f.flagged ?? []) lines.push(flaggedLine(d));
   const reviewCount = f.review === null ? null : f.review.length;
-  lines.push(`Datasets that need review (last screen, kinds and counts): ${count(reviewCount)}`);
+  lines.push(`Datasets that need review (last finding, kinds and counts): ${count(reviewCount)}`);
   const shown = (f.review ?? []).slice(0, SWEEP_REPORT_MAX_REVIEW_LISTED);
   for (const d of shown) lines.push(flaggedLine(d));
   if (reviewCount !== null && reviewCount > shown.length) {
     lines.push(
-      `  and ${reviewCount - shown.length} more (GET /admin/identifier-sweep lists them all)`,
+      `  and ${count(reviewCount - shown.length)} more (GET /admin/identifier-sweep lists them all)`,
     );
   }
   if (f.errors.length > 0) {

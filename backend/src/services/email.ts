@@ -2342,9 +2342,11 @@ export async function sendIdentifierSweepReportEmail(
       );
       delivered++;
     } catch (error) {
+      // `sendEmail`'s message names the recipient; redact it in the message too.
+      const message = error instanceof Error ? error.message : String(error);
       console.error(
         `Failed to send the identifier sweep report to ${redactRecipient(adminEmail)}:`,
-        error instanceof Error ? error.message : error,
+        message.split(adminEmail).join(redactRecipient(adminEmail)),
       );
     }
   }

@@ -35,6 +35,7 @@ import {
   type IdentifierSweepRow,
   attentionReasons,
   buildIdentifierWeek,
+  identifierWeekLiveness,
   renderIdentifierWeek,
   reportWindow,
   standingOf,
@@ -50,7 +51,8 @@ const LEAK = "SMITH";
 const DAY = 86_400_000;
 
 function scanBody(datasetId: string, status: string, extra: Record<string, unknown> = {}) {
-  const incomplete = status === "unchecked";
+  // `unchecked` is always incomplete; any status may be, when the caller says so.
+  const incomplete = status === "unchecked" || extra.incomplete === true;
   return {
     version: 1,
     scanner: "identifier-scan@abcdef1",
@@ -167,6 +169,93 @@ describe("a dataset's standing", () => {
   });
 });
 
+describe("findings stay listed", () => {
+  test("a finding from an incomplete screen is listed, and its incompleteness counts", () => {
+    const f = facts([
+      screenedRow("nm000770", "direct-identifiers", 1, {
+        incomplete: true,
+        findings_by_kind: { "edf-patient-name": 1 },
+      }),
+      screenedRow("nm000771", "review", 1, { incomplete: true }),
+    ]);
+    expect(f.screened).toBe(0);
+    expect(f.uncheckedByReason?.incomplete).toBe(2);
+    expect(f.flagged?.map((d) => [d.dataset_id, d.standing])).toEqual([["nm000770", "incomplete"]]);
+    expect(f.review?.map((d) => [d.dataset_id, d.standing])).toEqual([["nm000771", "incomplete"]]);
+  });
+
+  test("a screen that cannot parse every format counts as screened, and is counted as such", () => {
+    const f = facts([
+      screenedRow("nm000772", "not-screened"),
+      screenedRow("nm000773", "clean-edf-only-others-unscreened"),
+      screenedRow("nm000774", "clean"),
+    ]);
+    expect(f.screened).toBe(3);
+    expect(f.partialCoverage).toBe(2);
+    expect(renderIdentifierWeek(f).lines).toContain(
+      "  of which some recordings are in formats the scanner does not parse: 2",
+    );
+  });
+
+  test("a flagged dataset whose report no longer reads back is still named", () => {
+    // A later tightening of the contract makes every stored report unreadable at
+    // once; the ids must not drop out of the list with them.
+    const base = screenedRow("nm000775", "direct-identifiers", 2);
+    const f = facts([{ ...base, report: "{}" }]);
+    expect(f.uncheckedByReason?.unreadable).toBe(1);
+    expect(f.flagged).toEqual([
+      {
+        dataset_id: "nm000775",
+        screened_on: "2026-10-05",
+        standing: "unreadable",
+        findings_by_kind: null,
+        edf_bdf_files_flagged: null,
+      },
+    ]);
+    expect(renderIdentifierWeek(f).lines).toContain(
+      "  nm000775 (screened 2026-10-05, the stored result does not read back): kinds do not read back",
+    );
+  });
+
+  test("a finding an incomplete screen carried forward is listed as earlier; a complete verdict drops it", () => {
+    const earlier = screenedRow("nm000776", "direct-identifiers", 9, {
+      findings_by_kind: { "edf-patient-code": 4 },
+    });
+    const kept = JSON.stringify({
+      status: "direct-identifiers",
+      checked_at: earlier.checked_at,
+      report: JSON.parse(earlier.report as string),
+    });
+    const f = facts([{ ...screenedRow("nm000776", "unchecked", 1), finding: kept }]);
+    expect(f.flagged).toEqual([
+      {
+        dataset_id: "nm000776",
+        screened_on: "2026-09-28",
+        standing: "earlier",
+        findings_by_kind: { "edf-patient-code": 4 },
+        edf_bdf_files_flagged: null,
+      },
+    ]);
+    expect(renderIdentifierWeek(f).lines).toContain(
+      "  nm000776 (screened 2026-09-28; every screen since was INCOMPLETE): edf-patient-code x4",
+    );
+    // Beside a complete verdict, a stale finding stamp is not listed.
+    expect(facts([{ ...screenedRow("nm000776", "clean", 1), finding: kept }]).flagged).toEqual([]);
+  });
+
+  test("a time in the future and stamps that are not an object are unreadable, never screened", () => {
+    const reasonOf = (r: IdentifierSweepRow) => {
+      const st = standingOf(r, NOW_MS, 28);
+      return st.kind === "unchecked" ? st.reason : "screened";
+    };
+    const base = screenedRow("nm000777", "clean");
+    expect(reasonOf({ ...base, checked_at: sqlite(NOW_MS + 2 * DAY) })).toBe("unreadable");
+    expect(reasonOf({ ...base, checked_at: sqlite(NOW_MS + 60_000) })).toBe("screened");
+    expect(reasonOf({ ...base, stamps_type: "array" })).toBe("unreadable");
+    expect(reasonOf({ ...base, stamps_type: "object" })).toBe("screened");
+  });
+});
+
 describe("the week's facts and words", () => {
   test("counts screened by verdict and unchecked by reason and by last attempt", () => {
     const f = facts([
@@ -209,7 +298,9 @@ describe("the week's facts and words", () => {
     expect(text).toContain("  clean (acquisition dates only): 1");
     expect(text).toContain("  FOUND IDENTIFIERS: 1");
     expect(text).toContain("GitHub refused to start the screen workflow: 1");
-    expect(text).toContain("the screen workflow started but never reported back: 1");
+    expect(text).toContain(
+      "no report arrived from the screen workflow in time (it may never have started): 1",
+    );
     expect(text).toContain("the screen workflow could not read the dataset repository: 1");
     expect(text).toContain(
       "  nm000712 (screened 2026-10-05): edf-patient-name x12, edf-patient-birthdate x12; EDF/BDF files with an identifier finding: 12",
@@ -245,8 +336,8 @@ describe("the week's facts and words", () => {
       row("nm000731"), // a new dataset, queued
       row("nm000732", { attempt: "pending", attempted_at: sqlite(NOW_MS - 600_000) }),
     ]);
-    // A screen started in the window, so the sweep is alive.
-    quiet.startedInWindow = 1;
+    // A screen was dispatched in the window, so the sweep is alive.
+    quiet.dispatchedInWindow = 1;
     expect(attentionReasons(quiet)).toEqual([]);
     expect(renderIdentifierWeek(quiet).headline).toBe("Nothing needs attention this week.");
   });
@@ -267,24 +358,73 @@ describe("the week's facts and words", () => {
     ];
     for (const [r, phrase] of cases) {
       const f = facts([r]);
-      f.startedInWindow = 1;
+      f.dispatchedInWindow = 1;
       expect(attentionReasons(f)).toEqual([phrase]);
       expect(renderIdentifierWeek(f).headline).toBe(`Needs attention: ${phrase}.`);
     }
   });
 
-  test("a sweep that started nothing while work was due is reported as not running", () => {
-    const f = facts([row("nm000750")], 1);
-    expect(f.startedInWindow).toBe(0);
-    expect(attentionReasons(f)).toContain("the sweep started no screen while work was due");
-    expect(renderIdentifierWeek(f).lines).toContain(
-      "The sweep started no screen this week while 1 datasets were due: it is not running.",
+  test("liveness: idle only when the sweep had been running and dispatched nothing while work was due", () => {
+    // Attempted before the week reported (2026-09-28 to 2026-10-05) and not since.
+    const before = row("nm000750", {
+      attempt: "reported",
+      attempted_at: sqlite(Date.parse("2026-09-20T00:00:00Z")),
+    });
+    const idle = facts([before], 1);
+    expect(idle.dispatchedInWindow).toBe(0);
+    expect(identifierWeekLiveness(idle)).toBe("idle");
+    expect(attentionReasons(idle)).toContain("the sweep dispatched no screen while work was due");
+    expect(renderIdentifierWeek(idle).lines).toContain(
+      "The sweep dispatched no screen this week while 1 datasets were due: it is not running.",
     );
-    // Nothing due and nothing started all week: silence is not evidence (ADR 0053).
+    // Work due and nothing ever attempted: never, and that needs a person.
+    const never = facts([row("nm000751")], 1);
+    expect(identifierWeekLiveness(never)).toBe("never");
+    expect(attentionReasons(never)).toContain("the sweep has never dispatched a screen");
+    // The first report after a deploy: the sweep's first attempt is after the week.
+    const first = facts(
+      [row("nm000752", { attempt: "pending", attempted_at: sqlite(NOW_MS - 600_000) })],
+      5,
+    );
+    expect(identifierWeekLiveness(first)).toBe("not-yet");
+    expect(attentionReasons(first)).toEqual([]);
+    expect(renderIdentifierWeek(first).lines).toContain(
+      "The sweep began after this week ended, so the week says nothing about it.",
+    );
+    // Nothing due and nothing dispatched all week: silence is not evidence (ADR 0053).
     // Screened ten days before NOW, so its attempt is outside the week reported.
-    const quiet = facts([screenedRow("nm000751", "clean", 10)], 0);
-    expect(quiet.startedInWindow).toBe(0);
+    const quiet = facts([screenedRow("nm000753", "clean", 10)], 0);
+    expect(quiet.dispatchedInWindow).toBe(0);
+    expect(identifierWeekLiveness(quiet)).toBe("ok");
     expect(attentionReasons(quiet)).toEqual([]);
+  });
+
+  test("dispatched and stored this week are counted from the rows, and a refused dispatch is not a dispatch", () => {
+    const inWeek = sqlite(Date.parse("2026-10-01T12:00:00Z"));
+    const f = facts([
+      // Dispatched in the week and reported in the week.
+      { ...screenedRow("nm000754", "clean"), attempted_at: inWeek, checked_at: inWeek },
+      // Dispatched in the week, still running.
+      row("nm000755", { attempt: "pending", attempted_at: inWeek }),
+      // Dispatched in the week, never reported: GitHub may have taken it.
+      row("nm000756", {
+        attempt: "unreported",
+        attempt_error: "no-report-in-time",
+        attempted_at: inWeek,
+      }),
+      // Claimed in the week and refused before GitHub: not a dispatch.
+      row("nm000757", { attempt: "error", attempt_error: "dispatch-failed", attempted_at: inWeek }),
+      row("nm000758", {
+        attempt: "error",
+        attempt_error: "dispatch-unconfigured",
+        attempted_at: inWeek,
+      }),
+      // Dispatched after the week.
+      row("nm000759", { attempt: "pending", attempted_at: sqlite(NOW_MS - 600_000) }),
+    ]);
+    expect(f.dispatchedInWindow).toBe(3);
+    expect(f.storedInWindow).toBe(1);
+    expect(f.firstAttemptAt).toBe("2026-10-01T12:00:00.000Z");
   });
 
   test("unknown is never zero: unreadable records make every figure unknown, and the week needs attention", () => {
@@ -300,7 +440,7 @@ describe("the week's facts and words", () => {
       "Screened this cycle: unknown",
       "Unchecked: unknown",
       "Due now: unknown",
-      "Datasets with direct identifiers (last screen, kinds and counts): unknown",
+      "Datasets with direct identifiers (last finding, kinds and counts): unknown",
       "Whether the sweep ran this week: unknown",
       "Could not read: the sweep's records could not be read.",
     ]) {
@@ -318,7 +458,7 @@ describe("the week's facts and words", () => {
       }),
     );
     const r = renderIdentifierWeek(facts(rows));
-    expect(r.lines).toContain("Datasets that need review (last screen, kinds and counts): 53");
+    expect(r.lines).toContain("Datasets that need review (last finding, kinds and counts): 53");
     expect(r.lines.filter((l) => l.startsWith("  nm0008"))).toHaveLength(50);
     expect(r.lines).toContain("  and 3 more (GET /admin/identifier-sweep lists them all)");
   });
@@ -578,7 +718,10 @@ describe("the weekly send", () => {
       );
     }
     await withFakeResend(async (calls: CapturedEmail[]) => {
-      expect((await sendIdentifierSweepWeeklyReport(env(), when))?.claimed).toBe(false);
+      const out = await sendIdentifierSweepWeeklyReport(env(), when);
+      expect(out?.claimed).toBe(false);
+      // Out of claims with nothing sent: the week will not arrive, and it says so.
+      expect(out?.exhausted).toBe(true);
       expect(calls).toHaveLength(0);
     });
     // One fewer, and the week is claimed again.
@@ -596,6 +739,113 @@ describe("the weekly send", () => {
       await sendIdentifierSweepWeeklyReport(env(), nextWeek());
       const to = calls.filter((c) => c.path === "/emails").flatMap((c) => asSend(c).to);
       expect(to).toEqual(["reportadmin@example.org"]);
+    });
+  });
+
+  test("a send that reached nobody does not count toward the cap, so an outage does not burn the week", async () => {
+    seedDataset("nm000790");
+    const when = nextWeek();
+    for (let i = 0; i < IDENTIFIER_SWEEP_REPORT_MAX_CLAIMS + 2; i++) {
+      await withFakeResend(
+        async () => {
+          const out = await sendIdentifierSweepWeeklyReport(env(), when);
+          expect(out).toMatchObject({ claimed: true, delivered: 0 });
+        },
+        { status: 500 },
+      );
+      db.run("UPDATE audit_log SET timestamp = datetime('now', '-121 minutes') WHERE action = ?", [
+        IDENTIFIER_SWEEP_REPORT_CLAIM_ACTION,
+      ]);
+    }
+    await withFakeResend(async () => {
+      expect(await sendIdentifierSweepWeeklyReport(env(), when)).toMatchObject({
+        claimed: true,
+        delivered: 1,
+      });
+    });
+  });
+
+  test("a delivered report whose record cannot be written counts toward the cap, and may be sent again", async () => {
+    seedDataset("nm000791");
+    const when = nextWeek();
+    const failing = interceptingD1(realD1(db), (sql) => {
+      if (sql.startsWith("INSERT") && sql.includes("VALUES") && !sql.includes("SELECT NULL")) {
+        throw new Error("D1 unavailable");
+      }
+    });
+    await withFakeResend(async (calls: CapturedEmail[]) => {
+      const out = await sendIdentifierSweepWeeklyReport({ ...env(), DB: failing }, when);
+      expect(out).toMatchObject({ claimed: true, delivered: 1 });
+      expect(calls.filter((c) => c.path === "/emails")).toHaveLength(1);
+    });
+    expect(auditRows(IDENTIFIER_SWEEP_REPORT_SENT_ACTION)).toHaveLength(0);
+    const claims = auditRows(IDENTIFIER_SWEEP_REPORT_CLAIM_ACTION);
+    expect(claims).toHaveLength(1);
+    // Unmarked: it may have mailed someone, so it counts toward the cap.
+    expect(claims[0]?.details).toBeNull();
+  });
+
+  test("a failed send is logged without the admin's address", async () => {
+    seedDataset("nm000794");
+    const logged: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    };
+    try {
+      await withFakeResend(
+        async () => {
+          await sendIdentifierSweepWeeklyReport(env(), nextWeek());
+        },
+        { status: 500 },
+      );
+    } finally {
+      console.error = realError;
+    }
+    const line = logged.find((l) => l.startsWith("Failed to send the identifier sweep report"));
+    expect(line).toBeDefined();
+    expect(line).not.toContain("reportadmin@example.org");
+    expect(line).toContain("r***@example.org");
+  });
+
+  test("a report delivered to some admins and not others is recorded, with both counts", async () => {
+    await seedUser("secondadmin", "admin");
+    seedDataset("nm000792");
+    let n = 0;
+    const realFetch = globalThis.fetch;
+    await withFakeResend(async () => {
+      const resendFetch = globalThis.fetch;
+      globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (url.hostname === "api.resend.com" && ++n === 2) {
+          return Promise.resolve(Response.json({ message: "refused" }, { status: 422 }));
+        }
+        return resendFetch(input as RequestInfo, init);
+      }) as typeof fetch;
+      try {
+        const out = await sendIdentifierSweepWeeklyReport(env(), nextWeek());
+        expect(out).toMatchObject({ claimed: true, attempted: 2, delivered: 1 });
+      } finally {
+        globalThis.fetch = resendFetch;
+      }
+    });
+    expect(globalThis.fetch).toBe(realFetch);
+    const sent = auditRows(IDENTIFIER_SWEEP_REPORT_SENT_ACTION);
+    expect(JSON.parse(sent[0]?.details as string)).toMatchObject({ delivered: 1, attempted: 2 });
+  });
+
+  test("a queue that cannot be counted is unknown, and the week says it cannot tell whether the sweep ran", async () => {
+    seedDataset("nm000793");
+    const failing = interceptingD1(realD1(db), (sql) => {
+      if (sql.startsWith("SELECT COUNT(*) AS n") && sql.includes("GLOB")) throw new Error("boom");
+    });
+    await withFakeResend(async (calls: CapturedEmail[]) => {
+      const out = await sendIdentifierSweepWeeklyReport({ ...env(), DB: failing }, nextWeek());
+      expect(out).toMatchObject({ claimed: true, delivered: 1, attention: true });
+      const mail = asSend(calls.find((c) => c.path === "/emails") as CapturedEmail);
+      expect(mail.html).toContain("Due now: unknown");
+      expect(mail.html).toContain("Whether the sweep ran this week: unknown");
+      expect(mail.html).toContain("Could not read: the queue could not be counted.");
     });
   });
 
@@ -666,6 +916,11 @@ describe("GET /admin/identifier-sweep", () => {
       expect(body.facts.unchecked).toBe(1);
       expect(body.report.lines).toContain("  never screened: 1");
       expect(calls).toHaveLength(0);
+      expect((body as unknown as { weekly: unknown }).weekly).toMatchObject({
+        sent: false,
+        counted: 0,
+        exhausted: false,
+      });
     });
     expect(auditRows(IDENTIFIER_SWEEP_REPORT_CLAIM_ACTION)).toHaveLength(0);
   });

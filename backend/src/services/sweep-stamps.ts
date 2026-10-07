@@ -175,3 +175,21 @@ export const IDENTIFIER_SWEEP_NONCE_PATH = "$.identifier_sweep_nonce";
  * cleared by the dispatch that answers it.
  */
 export const IDENTIFIER_SWEEP_REQUESTED_AT_PATH = "$.identifier_sweep_requested_at";
+
+/**
+ * Consecutive attempts that produced no verdict (`error` or `unreported`),
+ * counted once per attempt and removed when a verdict lands. It lengthens the
+ * retry backoff, so a dataset whose screen always fails is tried less and less
+ * often instead of four times a day forever. A count of failed runs, which the
+ * public run list shows anyway, never a property of the verdict.
+ */
+export const IDENTIFIER_SWEEP_FAILURES_PATH = "$.identifier_sweep_failures";
+
+/**
+ * The last verdict that found something (`direct-identifiers` or `review`), as
+ * `{ status, checked_at, report }`, kept while every later screen was
+ * incomplete. An incomplete screen read less; it is not evidence that the
+ * finding is gone, so the finding stays listed until a complete screen, or a
+ * newer finding, replaces it.
+ */
+export const IDENTIFIER_SWEEP_FINDING_PATH = "$.identifier_sweep_finding";

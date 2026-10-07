@@ -909,13 +909,21 @@ export default {
         ctx.waitUntil(
           runIdentifierSweepTick(env)
             .then((r) => {
-              const line = `[identifier-sweep] timedOut=${r.timedOut ?? "?"} inFlight=${r.inFlight ?? "?"} dispatched=${r.dispatched} failed=${r.failed.length} errors=${r.errors.length}`;
-              if (r.failed.length + r.errors.length > 0 || r.inFlight === null) {
+              const line = `[identifier-sweep] timedOut=${r.timedOut ?? "?"} inFlight=${r.inFlight ?? "?"} candidates=${r.candidates} dispatched=${r.dispatched} unconfirmed=${r.unconfirmed.length} failed=${r.failed.length} unclaimed=${r.unclaimed} blocked=${r.blocked ?? "no"} errors=${r.errors.length}`;
+              // Anything but a clean dispatch or an idle tick is logged where it is
+              // seen: a screen that did not report, a dispatch that could not be
+              // made or confirmed, a claim that matched nothing, a statement error.
+              const trouble =
+                r.failed.length + r.errors.length + r.unconfirmed.length + r.unclaimed > 0 ||
+                (r.timedOut ?? 1) > 0 ||
+                r.inFlight === null ||
+                r.blocked !== null;
+              if (trouble) {
                 console.error(line);
                 for (const f of r.failed)
                   console.error(`[identifier-sweep] ${f.dataset_id}: ${f.error}`);
                 for (const e of r.errors) console.error(`[identifier-sweep] ${e}`);
-              } else if (r.dispatched + (r.timedOut ?? 0) > 0) {
+              } else if (r.dispatched > 0) {
                 console.log(line);
               }
             })
@@ -934,9 +942,20 @@ export default {
         ctx.waitUntil(
           sendIdentifierSweepWeeklyReport(env)
             .then((r) => {
-              if (!r?.claimed) return;
+              if (!r) return;
+              if (!r.claimed) {
+                // Sent, or a claim is live: routine. Out of claims with nothing
+                // sent means this week's report will not arrive.
+                if (r.exhausted) {
+                  console.error(
+                    `[identifier-sweep] weekly ${r.week}: every claim is spent and nothing was delivered; this week's report will not arrive`,
+                  );
+                }
+                return;
+              }
               const line = `[identifier-sweep] weekly ${r.week}: delivered=${r.delivered} of ${r.attempted} attention=${r.attention}`;
-              if (r.delivered === 0 || r.attention) console.error(line);
+              if (r.delivered < r.attempted || r.delivered === 0 || r.attention)
+                console.error(line);
               else console.log(line);
             })
             .catch((err) =>

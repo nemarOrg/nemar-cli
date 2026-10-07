@@ -11,24 +11,33 @@
  */
 
 import { isValidDatasetId } from "../../services/datasetId";
-import { gatherIdentifierWeek, requestRescreen } from "../../services/identifier-sweep";
+import {
+  gatherIdentifierWeek,
+  requestRescreen,
+  weeklyRecordState,
+} from "../../services/identifier-sweep";
 import { renderIdentifierWeek } from "../../services/identifier-sweep-report";
 import type { AdminRouter } from "./shared";
 
-export function registerIdentifierSweepRoutes(admin: AdminRouter): void {
+export function registerIdentifierSweepAdminRoutes(admin: AdminRouter): void {
   /**
    * The report the cycle would mail now, with its facts. 200 whenever it was
    * produced, unknown parts included: a week that needs attention is a
    * successful read, and the parts that could not be read say `unknown`.
    */
   admin.get("/identifier-sweep", async (c) => {
-    const facts = await gatherIdentifierWeek(c.env.DB, new Date());
-    return c.json({ ok: true, facts, report: renderIdentifierWeek(facts) });
+    const now = new Date();
+    const facts = await gatherIdentifierWeek(c.env.DB, now);
+    // Whether the week this report covers has been mailed, and how many of its
+    // claims are spent: `null` when that could not be read, never "not sent".
+    const weekly = await weeklyRecordState(c.env.DB, now);
+    return c.json({ ok: true, facts, report: renderIdentifierWeek(facts), weekly });
   });
 
   /**
    * Put one dataset at the front of the sweep's queue. 404 for no such dataset,
-   * 409 for one the sweep does not screen (not public, withdrawn, a sandbox id).
+   * 409 for one the sweep does not screen (not public, withdrawn, a sandbox id)
+   * or whose stamps it cannot write.
    */
   admin.post("/identifier-sweep/:id/rescreen", async (c) => {
     const datasetId = c.req.param("id");
@@ -36,6 +45,15 @@ export function registerIdentifierSweepRoutes(admin: AdminRouter): void {
     const user = c.get("user");
     const outcome = await requestRescreen(c.env, { datasetId, adminUserId: user.id });
     if (outcome === "not-found") return c.json({ error: "Dataset not found" }, 404);
+    if (outcome === "unwritable") {
+      return c.json(
+        {
+          error:
+            "This dataset's sweep stamps are not a JSON object, so the sweep cannot record a request or a screen for it; repair the row first.",
+        },
+        409,
+      );
+    }
     if (outcome === "out-of-scope") {
       return c.json(
         {

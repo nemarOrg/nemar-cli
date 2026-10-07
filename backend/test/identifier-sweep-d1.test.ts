@@ -21,6 +21,7 @@ import {
   runIdentifierSweepTick,
   sendIdentifierSweepWeeklyReport,
   storeSweepResult,
+  weeklyRecordState,
 } from "../src/services/identifier-sweep";
 import type { Bindings } from "../src/types/bindings";
 import { applyMigrations, migrationFiles } from "./helpers/miniflare-d1";
@@ -32,7 +33,7 @@ let counter = 0;
 let server: Server;
 let dispatched: string[] = [];
 
-function scanBody(id: string, status: string) {
+function scanBody(id: string, status: string, incomplete = false) {
   return {
     version: 1,
     scanner: "identifier-scan@abcdef1",
@@ -43,9 +44,9 @@ function scanBody(id: string, status: string) {
       scanned_at: "2026-10-05T12:00:00.000Z",
       manifest_source: "clone",
       status,
-      incomplete: false,
-      incomplete_reasons: [],
-      files: { total: 4, edf_bdf: 2, header_read: 2, header_read_failed: 0 },
+      incomplete,
+      incomplete_reasons: incomplete ? ["deadline"] : [],
+      files: { total: 4, edf_bdf: 2, header_read: incomplete ? 1 : 2, header_read_failed: 0 },
       ...(status === "direct-identifiers"
         ? { findings_by_kind: { "edf-patient-name": 2 }, edf_bdf_files_flagged: 2 }
         : {}),
@@ -113,7 +114,7 @@ beforeAll(() => {
     modules: true,
     script: "export default { fetch() { return new Response(null, { status: 204 }); } };",
     compatibilityDate: "2024-12-01",
-    d1Databases: ["DB1", "DB2", "DB3", "DB4"],
+    d1Databases: ["DB1", "DB2", "DB3", "DB4", "DB5", "DB6"],
   });
   server = Bun.serve({
     port: 0,
@@ -227,6 +228,116 @@ describe("the sweep's statements on D1", () => {
     expect(facts.scope).toBe(3);
     expect(facts.due).toBe(3);
     expect(facts.unchecked).toBe(3);
+  });
+
+  test("ordering and the slice, a kept finding, the growing backoff and the late bound, on D1", async () => {
+    const d1 = await seededD1();
+    // Two more in scope, so the slice of 3 leaves some for later and the order shows.
+    for (const id of ["nm000805", "nm000806"]) {
+      await d1
+        .prepare(
+          `INSERT INTO datasets (dataset_id, name, owner_user_id, status, visibility, github_repo)
+           VALUES (?, ?, 1, 'active', 'public', ?)`,
+        )
+        .bind(id, `Dataset ${id}`, `nemarDatasets/${id}`)
+        .run();
+    }
+    const first = await runIdentifierSweepTick(env(d1));
+    expect(first.candidates).toBe(3);
+    expect(dispatched).toEqual(["nm000800", "nm000801", "nm000802"]);
+
+    // A finding, then an incomplete screen: the finding is carried forward.
+    const n800 = (await stampsOf(d1, "nm000800")).identifier_sweep_nonce as string;
+    await storeSweepResult(env(d1), {
+      datasetId: "nm000800",
+      nonce: n800,
+      body: scanBody("nm000800", "direct-identifiers"),
+    });
+    await requestRescreen(env(d1), { datasetId: "nm000800", adminUserId: 2 });
+    dispatched = [];
+    const second = await runIdentifierSweepTick(env(d1));
+    // The request first, then the two never attempted, in id order.
+    expect(dispatched).toEqual(["nm000800", "nm000805", "nm000806"]);
+    expect(second.inFlight).toBe(2);
+    const n800b = (await stampsOf(d1, "nm000800")).identifier_sweep_nonce as string;
+    await storeSweepResult(env(d1), {
+      datasetId: "nm000800",
+      nonce: n800b,
+      body: scanBody("nm000800", "unchecked", true),
+    });
+    const kept = (await stampsOf(d1, "nm000800")).identifier_sweep_finding as { status: string };
+    expect(kept.status).toBe("direct-identifiers");
+    const facts = await gatherIdentifierWeek(d1, new Date());
+    expect(facts.errors).toEqual([]);
+    expect(facts.flagged?.map((f) => [f.dataset_id, f.standing])).toEqual([
+      ["nm000800", "earlier"],
+    ]);
+
+    // Two failures in a row: the second backoff is 12 hours, read through the CASE on D1.
+    const n801 = (await stampsOf(d1, "nm000801")).identifier_sweep_nonce as string;
+    await storeSweepResult(env(d1), {
+      datasetId: "nm000801",
+      nonce: n801,
+      body: { version: 1, scanner: null, head: null, error: "clone-failed" },
+    });
+    await d1
+      .prepare(
+        `UPDATE datasets SET sweep_stamps = json_set(sweep_stamps,
+            '$.identifier_sweep_failures', 2,
+            '$.identifier_sweep_attempted_at', datetime('now', '-11 hours'))
+          WHERE dataset_id = 'nm000801'`,
+      )
+      .run();
+    dispatched = [];
+    await runIdentifierSweepTick(env(d1));
+    expect(dispatched).not.toContain("nm000801");
+    await d1
+      .prepare(
+        `UPDATE datasets SET sweep_stamps = json_set(sweep_stamps, '$.identifier_sweep_attempted_at', datetime('now', '-13 hours'))
+          WHERE dataset_id = 'nm000801'`,
+      )
+      .run();
+    dispatched = [];
+    await runIdentifierSweepTick(env(d1));
+    expect(dispatched).toContain("nm000801");
+
+    // An unreported screen older than the late bound no longer answers on D1.
+    const n802 = (await stampsOf(d1, "nm000802")).identifier_sweep_nonce as string;
+    await d1
+      .prepare(
+        `UPDATE datasets SET sweep_stamps = json_set(sweep_stamps,
+            '$.identifier_sweep_attempt', 'unreported',
+            '$.identifier_sweep_attempted_at', datetime('now', '-25 hours'))
+          WHERE dataset_id = 'nm000802'`,
+      )
+      .run();
+    expect(
+      await storeSweepResult(env(d1), {
+        datasetId: "nm000802",
+        nonce: n802,
+        body: scanBody("nm000802", "clean"),
+      }),
+    ).toEqual({ stored: false });
+  });
+
+  test("a send that reached nobody marks its claim on D1, and the cap does not count it", async () => {
+    const d1 = await seededD1();
+    const when = new Date(Date.now() + 7 * 86_400_000);
+    await withFakeResend(
+      async () => {
+        expect(await sendIdentifierSweepWeeklyReport(env(d1), when)).toMatchObject({
+          claimed: true,
+          delivered: 0,
+        });
+      },
+      { status: 500 },
+    );
+    const claim = await d1
+      .prepare("SELECT details FROM audit_log WHERE action = 'identifier_sweep_report_claim'")
+      .first<{ details: string | null }>();
+    expect(claim?.details).toBe('{"delivered":0}');
+    const state = await weeklyRecordState(d1, when);
+    expect(state).toMatchObject({ sent: false, counted: 0, exhausted: false });
   });
 
   test("the weekly report's claim is atomic and once per week on D1", async () => {

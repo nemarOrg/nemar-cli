@@ -9,25 +9,27 @@
  * `parseScreenReport` accepted. The runner does the reading; the Worker only
  * dispatches, so the sweep never comes near a Worker's subrequest limit.
  *
- * **It reports and never repairs** (ADR 0067). It writes only `sweep_stamps`
- * (ADR 0035), and the weekly report's own `audit_log` rows. It edits no
- * dataset, files no GitHub issue (`nemarDatasets` is public-facing), and mails
- * no depositor; the weekly admin report is its one mail
- * (`identifier-sweep-report.ts` builds it, {@link sendIdentifierSweepWeeklyReport}
- * sends it).
+ * **It reports and never repairs** (ADR 0067). It writes `sweep_stamps`
+ * (ADR 0035) and its own `audit_log` rows (the weekly report's claims and
+ * sends, and an administrator's rescreen request). It edits no dataset, files
+ * no GitHub issue (`nemarDatasets` is public-facing), and mails no depositor;
+ * the weekly admin report is its one mail (`identifier-sweep-report.ts` builds
+ * it, {@link sendIdentifierSweepWeeklyReport} sends it).
  *
  * **A verdict comes only from a scan.** The stamps keep the last verdict apart
  * from the last attempt (see `sweep-stamps.ts`). A screen that could not start,
  * failed, never reported, or posted a body outside the contract moves the
  * attempt and never the verdict, so an infrastructure failure can neither stand
- * in for a screen nor make an old one look fresh (ADR 0053, ADR 0067).
+ * in for a screen nor make an old one look fresh (ADR 0053, ADR 0067). And a
+ * screen that read less than the one before it does not retract what the one
+ * before it found.
  *
  * **The cadence never depends on the verdict.** The Actions logs of
  * `nemarDatasets/.github` are public and name the dataset a run screens, so a
  * dataset re-screened more often because it was flagged would be pointed out to
  * anyone reading the run list. Only verdict-free facts move a dataset forward:
- * no verdict yet, the verdict's age, a newer version (already public), a failed
- * attempt (already visible in its own run), an administrator's request.
+ * no verdict yet, the verdict's age, a newer version (already public), failed
+ * attempts (already visible in their own runs), an administrator's request.
  *
  * **Production only.** It dispatches against the `nemarDatasets` org that the
  * dev worker shares, and its report mails admins, so the tick and the weekly
@@ -51,9 +53,14 @@ import {
 } from "./email.js";
 import { isNonProductionEnv } from "./environment.js";
 import { getDatasetsAuth } from "./github-auth.js";
-import { signIdentifierSweepCallbackToken, triggerIdentifierScreenRun } from "./github.js";
+import {
+  IdentifierScreenDispatchRejected,
+  signIdentifierSweepCallbackToken,
+  triggerIdentifierScreenRun,
+} from "./github.js";
 import { SCREEN_REPORT_DEADLINE_MINUTES, workerErrorReport } from "./identifier-screen.js";
 import {
+  FINDING_STATUSES,
   type IdentifierSweepRow,
   type IdentifierWeekFacts,
   buildIdentifierWeek,
@@ -67,6 +74,8 @@ import {
   IDENTIFIER_SWEEP_ATTEMPT_PATH,
   IDENTIFIER_SWEEP_ATTEMPT_VERSION_PATH,
   IDENTIFIER_SWEEP_CHECKED_AT_PATH,
+  IDENTIFIER_SWEEP_FAILURES_PATH,
+  IDENTIFIER_SWEEP_FINDING_PATH,
   IDENTIFIER_SWEEP_NONCE_PATH,
   IDENTIFIER_SWEEP_REPORT_PATH,
   IDENTIFIER_SWEEP_REQUESTED_AT_PATH,
@@ -92,11 +101,13 @@ export const IDENTIFIER_SWEEP_REFRESH_DAYS = 21;
 export const IDENTIFIER_SWEEP_CYCLE_DAYS = 28;
 
 /**
- * No dataset is dispatched again within this many hours of its last attempt,
- * whatever came of it. It is the retry backoff for a screen that failed, and it
- * also keeps a screen in flight from being dispatched twice.
+ * Hours a dataset waits after its last attempt before it is dispatched again,
+ * by how many attempts in a row produced no verdict (the last entry holds from
+ * there on). The first entry also keeps a screen in flight from being
+ * dispatched twice. A dataset whose screen always fails is tried every 6 hours
+ * at first and every 4 days in the end, never four times a day forever.
  */
-export const IDENTIFIER_SWEEP_RETRY_HOURS = 6;
+export const IDENTIFIER_SWEEP_BACKOFF_HOURS: readonly number[] = [6, 6, 12, 24, 48, 96];
 
 /** Dispatches per tick, at most (the tick is every 30 minutes). */
 export const IDENTIFIER_SWEEP_SLICE = 3;
@@ -110,6 +121,17 @@ export const IDENTIFIER_SWEEP_MAX_IN_FLIGHT = 6;
  */
 export const IDENTIFIER_SWEEP_DEADLINE_MINUTES = SCREEN_REPORT_DEADLINE_MINUTES;
 
+/**
+ * A report for an `unreported` attempt is still accepted for this long after
+ * its dispatch, and refused after. Far beyond the workflow's 45-minute job
+ * timeout and its callback retries, and short enough that a nonce does not stay
+ * good for the weeks a dataset with a fresh verdict may wait for its next screen.
+ */
+export const IDENTIFIER_SWEEP_LATE_REPORT_HOURS = 24;
+
+/** How long the tick waits for GitHub to answer a dispatch. */
+export const IDENTIFIER_SWEEP_DISPATCH_TIMEOUT_MS = 10_000;
+
 // ============================================================================
 // SQL
 // ============================================================================
@@ -122,12 +144,27 @@ const stamp = (path: string, alias = "d") =>
  * well-formed sandbox id. `xx` datasets never publish real data (ADR 0068) and
  * are exempt from the publication screen for the same reason (`isScreenExempt`);
  * the GLOB is that rule, so a malformed id that merely starts with the letters
- * is screened. `on` mirrors are screened like any deposit.
+ * is screened (the workflow refuses an `xx` id, so such a row ends
+ * `workflow-failed` and is reported, never skipped in silence). `on` mirrors
+ * are screened like any deposit, and so is an anonymous deposit, whose row is
+ * public over a private repository the workflow's App token can clone; the run
+ * log names its id, which the public catalog already shows.
  */
 function sweepScopeSql(alias = "d"): string {
   const a = alias ? `${alias}.` : "";
   return `${a}status = 'active' AND ${a}visibility = 'public' AND ${a}withdrawn_at IS NULL
      AND NOT (${a}dataset_id GLOB 'xx[0-9][0-9][0-9][0-9][0-9][0-9]')`;
+}
+
+/**
+ * The stamps are an object (or not there yet). `json_set` on a JSON array or
+ * scalar that passes the column's `json_valid` CHECK changes nothing and still
+ * counts the row as changed, so a claim or a request on such a row would report
+ * a write it never made.
+ */
+function stampsWritableSql(alias = "d"): string {
+  const a = alias ? `${alias}.` : "";
+  return `(${a}sweep_stamps IS NULL OR json_type(${a}sweep_stamps) = 'object')`;
 }
 
 /** The dataset's latest version, by the newest `dataset_versions` row (ties broken by id). */
@@ -137,29 +174,43 @@ const LATEST_VERSION_SQL = `(SELECT dv.version FROM dataset_versions dv
 
 const STATUS_LIST = DATASET_STATUSES.map((s) => `'${s}'`).join(", ");
 
+/** The backoff for this row's failure count, as a `datetime` modifier. */
+function backoffModifierSql(alias: string): string {
+  const failures = `COALESCE(${stamp(IDENTIFIER_SWEEP_FAILURES_PATH, alias)}, 0)`;
+  const last = IDENTIFIER_SWEEP_BACKOFF_HOURS.length - 1;
+  const arms = IDENTIFIER_SWEEP_BACKOFF_HOURS.slice(0, last)
+    .map((h, i) => `WHEN ${failures} <= ${i} THEN '-${h} hours'`)
+    .join(" ");
+  return `CASE ${arms} ELSE '-${IDENTIFIER_SWEEP_BACKOFF_HOURS[last]} hours' END`;
+}
+
 /**
- * When a dataset may be dispatched: never attempted, or not attempted within the
+ * When a dataset may be dispatched: never attempted, or not attempted within its
  * backoff, or asked for by an administrator and not in flight. NULL-safe: an
- * absent attempt time is "never".
+ * absent attempt time is "never", an absent failure count is zero.
  */
 function backoffClearSql(alias = "d"): string {
   return `(${stamp(IDENTIFIER_SWEEP_ATTEMPTED_AT_PATH, alias)} IS NULL
-       OR ${stamp(IDENTIFIER_SWEEP_ATTEMPTED_AT_PATH, alias)} < datetime('now', '-${IDENTIFIER_SWEEP_RETRY_HOURS} hours')
+       OR ${stamp(IDENTIFIER_SWEEP_ATTEMPTED_AT_PATH, alias)} < datetime('now', ${backoffModifierSql(alias)})
        OR (${stamp(IDENTIFIER_SWEEP_REQUESTED_AT_PATH, alias)} IS NOT NULL
            AND COALESCE(${stamp(IDENTIFIER_SWEEP_ATTEMPT_PATH, alias)}, '') != 'pending'))`;
 }
 
 /**
  * Why a dataset is due, verdict-free (see the module header): an administrator
- * asked; there is no readable verdict; the verdict is older than the refresh; or
- * it was of an older version than the latest. Never "because it was flagged".
- * NULL-safe throughout: a missing version on either side compares as ''.
+ * asked; there is no verdict on record (no status, a status that is not one, no
+ * report object, no time, or a time in the future); the verdict is older than
+ * the refresh; or it was of an older version than the latest. Never "because it
+ * was flagged". NULL-safe throughout: a missing version on either side
+ * compares as ''.
  */
 const DUE_SQL = `(${stamp(IDENTIFIER_SWEEP_REQUESTED_AT_PATH)} IS NOT NULL
        OR ${stamp(IDENTIFIER_SWEEP_STATUS_PATH)} IS NULL
        OR ${stamp(IDENTIFIER_SWEEP_STATUS_PATH)} NOT IN (${STATUS_LIST})
+       OR json_type(d.sweep_stamps, '${IDENTIFIER_SWEEP_REPORT_PATH}') IS NOT 'object'
        OR ${stamp(IDENTIFIER_SWEEP_CHECKED_AT_PATH)} IS NULL
        OR ${stamp(IDENTIFIER_SWEEP_CHECKED_AT_PATH)} < datetime('now', '-${IDENTIFIER_SWEEP_REFRESH_DAYS} days')
+       OR ${stamp(IDENTIFIER_SWEEP_CHECKED_AT_PATH)} > datetime('now', '+5 minutes')
        OR COALESCE(${stamp(IDENTIFIER_SWEEP_VERSION_PATH)}, '') != COALESCE(${LATEST_VERSION_SQL}, ''))`;
 
 /**
@@ -171,6 +222,7 @@ export const IDENTIFIER_SWEEP_CANDIDATES_SQL = `SELECT d.dataset_id, d.github_re
           ${LATEST_VERSION_SQL} AS latest_version
      FROM datasets d
     WHERE ${sweepScopeSql()}
+      AND ${stampsWritableSql()}
       AND ${backoffClearSql()}
       AND ${DUE_SQL}
     ORDER BY ${stamp(IDENTIFIER_SWEEP_REQUESTED_AT_PATH)} IS NULL,
@@ -184,6 +236,7 @@ export const IDENTIFIER_SWEEP_CANDIDATES_SQL = `SELECT d.dataset_id, d.github_re
 export const IDENTIFIER_SWEEP_DUE_COUNT_SQL = `SELECT COUNT(*) AS n
      FROM datasets d
     WHERE ${sweepScopeSql()}
+      AND ${stampsWritableSql()}
       AND ${backoffClearSql()}
       AND ${DUE_SQL}`;
 
@@ -191,13 +244,19 @@ export const IDENTIFIER_SWEEP_DUE_COUNT_SQL = `SELECT COUNT(*) AS n
 export const IDENTIFIER_SWEEP_IN_FLIGHT_SQL = `SELECT COUNT(*) AS n FROM datasets d
     WHERE ${stamp(IDENTIFIER_SWEEP_ATTEMPT_PATH)} = 'pending'`;
 
+/** One more failure for an attempt that was still pending; none for one already counted. */
+const COUNT_FAILURE_SQL = `COALESCE(${stamp(IDENTIFIER_SWEEP_FAILURES_PATH, "")}, 0)
+              + CASE WHEN ${stamp(IDENTIFIER_SWEEP_ATTEMPT_PATH, "")} = 'pending' THEN 1 ELSE 0 END`;
+
 /**
  * A screen pending past the deadline becomes `unreported`. NULL-safe: a pending
  * attempt with no dispatch time is overdue. The nonce is KEPT, so a report that
- * arrives later is still the run's own answer. The verdict is untouched.
+ * arrives later (within {@link IDENTIFIER_SWEEP_LATE_REPORT_HOURS}) is still the
+ * run's own answer. The verdict is untouched; the failure is counted.
  */
 export const IDENTIFIER_SWEEP_UNREPORTED_SQL = `UPDATE datasets
       SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'),
+            '${IDENTIFIER_SWEEP_FAILURES_PATH}', ${COUNT_FAILURE_SQL},
             '${IDENTIFIER_SWEEP_ATTEMPT_PATH}', 'unreported',
             '${IDENTIFIER_SWEEP_ATTEMPT_ERROR_PATH}', 'no-report-in-time')
     WHERE ${stamp(IDENTIFIER_SWEEP_ATTEMPT_PATH, "")} = 'pending'
@@ -207,9 +266,9 @@ export const IDENTIFIER_SWEEP_UNREPORTED_SQL = `UPDATE datasets
 /**
  * Claim one dataset for a dispatch: the attempt becomes `pending` with a fresh
  * nonce, the dispatch time and the version it is for, and a request it answers
- * is cleared. Conditional on the scope and the backoff, so a dataset that left
- * scope or was claimed by a concurrent tick is not dispatched. Bind order:
- * attempt version, nonce, dataset id.
+ * is cleared. Conditional on the scope, writable stamps and the backoff, so a
+ * dataset that left scope or was claimed by a concurrent tick is not dispatched.
+ * Bind order: attempt version, nonce, dataset id.
  */
 export const IDENTIFIER_SWEEP_CLAIM_SQL = `UPDATE datasets
       SET sweep_stamps = json_remove(
@@ -222,61 +281,85 @@ export const IDENTIFIER_SWEEP_CLAIM_SQL = `UPDATE datasets
             '${IDENTIFIER_SWEEP_REQUESTED_AT_PATH}')
     WHERE dataset_id = ?
       AND ${sweepScopeSql("")}
+      AND ${stampsWritableSql("")}
       AND ${backoffClearSql("")}`;
 
 /**
- * An attempt that produced no scan: the error word is recorded and the nonce
- * dropped; the verdict is untouched. Compare-and-set on the nonce and an
- * attempt still waiting, so it can only close the attempt it is about. Bind
- * order: error word, dataset id, nonce.
+ * The attempt still waits for its report: `pending`, or `unreported` and
+ * dispatched no longer ago than the late-report bound.
+ */
+function waitingSql(alias: string): string {
+  return `(${stamp(IDENTIFIER_SWEEP_ATTEMPT_PATH, alias)} = 'pending'
+         OR (${stamp(IDENTIFIER_SWEEP_ATTEMPT_PATH, alias)} = 'unreported'
+             AND ${stamp(IDENTIFIER_SWEEP_ATTEMPTED_AT_PATH, alias)} >= datetime('now', '-${IDENTIFIER_SWEEP_LATE_REPORT_HOURS} hours')))`;
+}
+
+/**
+ * An attempt that produced no scan: the error word is recorded, the failure
+ * counted (once per attempt) and the nonce dropped; the verdict is untouched.
+ * Compare-and-set on the nonce and an attempt still waiting, so it can only
+ * close the attempt it is about. Bind order: error word, dataset id, nonce.
  */
 export const IDENTIFIER_SWEEP_ATTEMPT_FAILED_SQL = `UPDATE datasets
       SET sweep_stamps = json_remove(
             json_set(COALESCE(sweep_stamps, '{}'),
+              '${IDENTIFIER_SWEEP_FAILURES_PATH}', ${COUNT_FAILURE_SQL},
               '${IDENTIFIER_SWEEP_ATTEMPT_PATH}', 'error',
               '${IDENTIFIER_SWEEP_ATTEMPT_ERROR_PATH}', ?),
             '${IDENTIFIER_SWEEP_NONCE_PATH}')
     WHERE dataset_id = ?
       AND ${stamp(IDENTIFIER_SWEEP_NONCE_PATH, "")} = ?
-      AND ${stamp(IDENTIFIER_SWEEP_ATTEMPT_PATH, "")} IN ('pending', 'unreported')`;
+      AND ${waitingSql("")}`;
 
 /**
  * A scan landed: it becomes the verdict, with the version its screen was
- * DISPATCHED for (read from the attempt, not from the catalog now), and the
- * attempt is closed. The one conditional UPDATE that stores, so of a callback,
- * a retry of it and a late duplicate exactly one writes. Bind order: status,
- * report JSON, dataset id, nonce.
+ * DISPATCHED for (read from the attempt, not from the catalog now), the
+ * finding it must keep listing (`$.identifier_sweep_finding`, computed by
+ * {@link storeSweepResult}), and the attempt is closed with its failure count
+ * cleared. The one conditional UPDATE that stores, so of a callback, a retry of
+ * it and a late duplicate exactly one writes. Bind order: status, report JSON,
+ * retained finding JSON (or null), dataset id, nonce.
  */
 export const IDENTIFIER_SWEEP_STORE_SQL = `UPDATE datasets
       SET sweep_stamps = json_remove(
             json_set(COALESCE(sweep_stamps, '{}'),
               '${IDENTIFIER_SWEEP_STATUS_PATH}', ?,
               '${IDENTIFIER_SWEEP_REPORT_PATH}', json(?),
+              '${IDENTIFIER_SWEEP_FINDING_PATH}', json(?),
               '${IDENTIFIER_SWEEP_CHECKED_AT_PATH}', datetime('now'),
               '${IDENTIFIER_SWEEP_VERSION_PATH}', ${stamp(IDENTIFIER_SWEEP_ATTEMPT_VERSION_PATH, "")},
               '${IDENTIFIER_SWEEP_ATTEMPT_PATH}', 'reported'),
             '${IDENTIFIER_SWEEP_NONCE_PATH}',
-            '${IDENTIFIER_SWEEP_ATTEMPT_ERROR_PATH}')
+            '${IDENTIFIER_SWEEP_ATTEMPT_ERROR_PATH}',
+            '${IDENTIFIER_SWEEP_FAILURES_PATH}')
     WHERE dataset_id = ?
       AND ${stamp(IDENTIFIER_SWEEP_NONCE_PATH, "")} = ?
-      AND ${stamp(IDENTIFIER_SWEEP_ATTEMPT_PATH, "")} IN ('pending', 'unreported')`;
+      AND ${waitingSql("")}`;
+
+/** The verdict a store replaces, and the finding it carries forward. */
+export const IDENTIFIER_SWEEP_PRIOR_SQL = `SELECT ${stamp(IDENTIFIER_SWEEP_STATUS_PATH)} AS status,
+          ${stamp(IDENTIFIER_SWEEP_CHECKED_AT_PATH)} AS checked_at,
+          ${stamp(IDENTIFIER_SWEEP_REPORT_PATH)} AS report,
+          ${stamp(IDENTIFIER_SWEEP_FINDING_PATH)} AS finding
+     FROM datasets d WHERE d.dataset_id = ?`;
 
 /** The nonce of an attempt still waiting for its report, for the callback to verify against. */
 export const IDENTIFIER_SWEEP_NONCE_SQL = `SELECT ${stamp(IDENTIFIER_SWEEP_NONCE_PATH)} AS nonce
      FROM datasets d
     WHERE d.dataset_id = ?
-      AND ${stamp(IDENTIFIER_SWEEP_ATTEMPT_PATH)} IN ('pending', 'unreported')
+      AND ${waitingSql("d")}
     LIMIT 1`;
 
 /** An administrator's request to screen one dataset again. */
 export const IDENTIFIER_SWEEP_REQUEST_SQL = `UPDATE datasets
       SET sweep_stamps = json_set(COALESCE(sweep_stamps, '{}'),
             '${IDENTIFIER_SWEEP_REQUESTED_AT_PATH}', datetime('now'))
-    WHERE dataset_id = ? AND ${sweepScopeSql("")}`;
+    WHERE dataset_id = ? AND ${sweepScopeSql("")} AND ${stampsWritableSql("")}`;
 
 /** Every dataset in scope with its stamps, for the weekly report. */
 export const IDENTIFIER_SWEEP_ROWS_SQL = `SELECT d.dataset_id,
           ${LATEST_VERSION_SQL} AS latest_version,
+          json_type(d.sweep_stamps) AS stamps_type,
           ${stamp(IDENTIFIER_SWEEP_STATUS_PATH)} AS status,
           ${stamp(IDENTIFIER_SWEEP_CHECKED_AT_PATH)} AS checked_at,
           ${stamp(IDENTIFIER_SWEEP_VERSION_PATH)} AS version,
@@ -284,6 +367,7 @@ export const IDENTIFIER_SWEEP_ROWS_SQL = `SELECT d.dataset_id,
           -- as itself, which the reader refuses; json() here would make one bad
           -- row an error for the whole query, and blind the week.
           ${stamp(IDENTIFIER_SWEEP_REPORT_PATH)} AS report,
+          ${stamp(IDENTIFIER_SWEEP_FINDING_PATH)} AS finding,
           ${stamp(IDENTIFIER_SWEEP_ATTEMPT_PATH)} AS attempt,
           ${stamp(IDENTIFIER_SWEEP_ATTEMPT_ERROR_PATH)} AS attempt_error,
           ${stamp(IDENTIFIER_SWEEP_ATTEMPTED_AT_PATH)} AS attempted_at,
@@ -296,6 +380,8 @@ export const IDENTIFIER_SWEEP_ROWS_SQL = `SELECT d.dataset_id,
 // The tick
 // ============================================================================
 
+export type DispatchBlock = "dispatch-unconfigured" | "dispatch-failed";
+
 export interface IdentifierSweepTickResult {
   /** True when the tick did nothing because this is not production. */
   skipped: boolean;
@@ -303,11 +389,27 @@ export interface IdentifierSweepTickResult {
   timedOut: number | null;
   /** Screens in flight before dispatching; null when they could not be counted (nothing is dispatched then). */
   inFlight: number | null;
+  /** Datasets the candidate query returned. */
+  candidates: number;
+  /** Candidates whose claim matched no row (they left scope, or another tick took them). */
+  unclaimed: number;
   /** Screens GitHub accepted this tick. */
   dispatched: number;
-  /** Claimed attempts that could not be started, with the word recorded on each. */
-  failed: { dataset_id: string; error: "dispatch-unconfigured" | "dispatch-failed" }[];
-  /** Statement-level failures, as fixed text. */
+  /**
+   * Dispatches whose answer was lost (a timeout, a dropped connection, a 5xx):
+   * GitHub may have started the run, so the attempt stays pending, its nonce
+   * good, and the unreported pass closes it if no report comes.
+   */
+  unconfirmed: string[];
+  /** Claimed attempts that GitHub refused, or that had no repository, with the word recorded on each. */
+  failed: { dataset_id: string; error: DispatchBlock }[];
+  /**
+   * The Worker could not dispatch at all this tick (no secret, API base or
+   * credential, or no token could be minted). Nothing was claimed, so no
+   * dataset is held back by a fault that is not its own.
+   */
+  blocked: DispatchBlock | null;
+  /** Statement-level failures, with the database's own message (Worker log only). */
   errors: string[];
 }
 
@@ -319,7 +421,7 @@ interface Candidate {
 
 type DispatchCredential =
   | { ok: true; token: string; secret: string; apiBase: string }
-  | { ok: false; error: "dispatch-unconfigured" | "dispatch-failed" };
+  | { ok: false; error: DispatchBlock };
 
 /**
  * What a dispatch needs from the Worker: the callback secret, the API base the
@@ -356,9 +458,13 @@ async function resolveDispatchCredential(env: Bindings): Promise<DispatchCredent
  * 2. Screens in flight are counted; if they cannot be, nothing is dispatched
  *    (fail closed: an unknown count is not room to spare).
  * 3. Up to {@link IDENTIFIER_SWEEP_SLICE} candidates, and never more than
- *    {@link IDENTIFIER_SWEEP_MAX_IN_FLIGHT} in flight, are claimed and
- *    dispatched. One token is minted for the tick, lazily; a claim that cannot
- *    be started records why on its own attempt.
+ *    {@link IDENTIFIER_SWEEP_MAX_IN_FLIGHT} in flight, are selected. The
+ *    credential is resolved once, BEFORE anything is claimed: a Worker that
+ *    cannot dispatch claims nothing and says so in `blocked`, rather than
+ *    stamping three datasets a tick with a fault that is not theirs.
+ * 4. Each candidate is claimed and dispatched. GitHub refusing it (a 4xx), or a
+ *    dataset with no repository, records why on its own attempt; a lost answer
+ *    leaves the attempt pending for the unreported pass.
  *
  * At most one token mint and {@link IDENTIFIER_SWEEP_SLICE} dispatch calls per
  * tick, and about twenty D1 statements. Never throws.
@@ -368,8 +474,12 @@ export async function runIdentifierSweepTick(env: Bindings): Promise<IdentifierS
     skipped: false,
     timedOut: null,
     inFlight: null,
+    candidates: 0,
+    unclaimed: 0,
     dispatched: 0,
+    unconfirmed: [],
     failed: [],
+    blocked: null,
     errors: [],
   };
   if (isNonProductionEnv(env)) {
@@ -404,10 +514,19 @@ export async function runIdentifierSweepTick(env: Bindings): Promise<IdentifierS
     result.errors.push(`candidate query failed: ${errorText(err)}`);
     return result;
   }
+  result.candidates = candidates.length;
+  if (candidates.length === 0) return result;
 
-  // One credential for the tick, resolved on first use and shared by every
-  // dispatch in it.
-  let credential: Promise<DispatchCredential> | null = null;
+  // One credential for the tick, resolved before any claim, and only when some
+  // candidate has a repository to screen.
+  let credential: DispatchCredential | null = null;
+  if (candidates.some((c) => c.github_repo)) {
+    credential = await resolveDispatchCredential(env);
+    if (!credential.ok) {
+      result.blocked = credential.error;
+      return result;
+    }
+  }
 
   for (const c of candidates) {
     const nonce = crypto.randomUUID();
@@ -422,36 +541,42 @@ export async function runIdentifierSweepTick(env: Bindings): Promise<IdentifierS
       result.errors.push(`claim of ${c.dataset_id} failed: ${errorText(err)}`);
       continue;
     }
-    if (!claimed) continue;
+    if (!claimed) {
+      result.unclaimed++;
+      continue;
+    }
 
-    let failure: "dispatch-unconfigured" | "dispatch-failed";
-    // The workflow addresses the repository by the dataset id, and a row with
-    // no repository has nothing to clone.
-    if (c.github_repo && credential === null) credential = resolveDispatchCredential(env);
-    const cred: DispatchCredential =
-      c.github_repo && credential !== null
-        ? await credential
-        : { ok: false, error: "dispatch-unconfigured" };
-    if (!cred.ok) {
-      failure = cred.error;
+    let failure: DispatchBlock;
+    if (!c.github_repo || !credential?.ok) {
+      // The workflow addresses the repository by the dataset id, and a row with
+      // no repository has nothing to clone.
+      failure = "dispatch-unconfigured";
     } else {
       try {
         const callbackToken = await signIdentifierSweepCallbackToken(
           { datasetId: c.dataset_id, nonce },
-          cred.secret,
+          credential.secret,
         );
         await triggerIdentifierScreenRun(
           c.dataset_id,
           "main",
           0,
           callbackToken,
-          `${cred.apiBase}${IDENTIFIER_SWEEP_CALLBACK_PATH}`,
-          cred.token,
+          `${credential.apiBase}${IDENTIFIER_SWEEP_CALLBACK_PATH}`,
+          credential.token,
+          IDENTIFIER_SWEEP_DISPATCH_TIMEOUT_MS,
         );
         result.dispatched++;
         continue;
       } catch (err) {
         console.error(`[identifier-sweep] dispatch of ${c.dataset_id} failed: ${errorText(err)}`);
+        if (!(err instanceof IdentifierScreenDispatchRejected && err.definitelyNotSent)) {
+          // GitHub may have accepted it and lost only the answer. Leave the
+          // attempt pending with its nonce, so a run that did start can still
+          // report; the unreported pass closes it if none does.
+          result.unconfirmed.push(c.dataset_id);
+          continue;
+        }
         failure = "dispatch-failed";
       }
     }
@@ -483,15 +608,107 @@ export type SweepStoreOutcome =
   | { stored: false };
 
 /**
+ * What a stored report keeps: the verdict, its counts and what it read, and
+ * nothing a reader does not use (sampling statistics, per-class read failures,
+ * distinct-value counts, per-kind file counts). The projection is parsed again
+ * before it is written, so what is stored is still a report the contract
+ * accepts; the row stays small (ADR 0034, and the restore limit of #1188).
+ */
+export function projectReport(report: ScreenReport): ScreenReport {
+  if (!report.scan) return report;
+  const s = report.scan;
+  const scan: Record<string, unknown> = {
+    id: s.id,
+    version: s.version,
+    scanned_at: s.scanned_at,
+    status: s.status,
+    incomplete: s.incomplete,
+    incomplete_reasons: s.incomplete_reasons,
+  };
+  if (s.manifest_source !== undefined) scan.manifest_source = s.manifest_source;
+  if (s.files !== undefined) scan.files = s.files;
+  if (s.findings_by_kind !== undefined) scan.findings_by_kind = s.findings_by_kind;
+  if (s.edf_bdf_files_flagged !== undefined) scan.edf_bdf_files_flagged = s.edf_bdf_files_flagged;
+  if (s.unscreened_formats !== undefined) scan.unscreened_formats = s.unscreened_formats;
+  return parseScreenReport({
+    version: report.version,
+    scanner: report.scanner,
+    head: report.head,
+    scan,
+  });
+}
+
+const FINDING_SET: ReadonlySet<string> = new Set(FINDING_STATUSES);
+
+/**
+ * The finding a new verdict must carry forward, as JSON text, or null.
+ *
+ * A new verdict that is itself a finding needs none (it is listed as the
+ * verdict). An INCOMPLETE verdict that found nothing has read less than the
+ * screen before it, so it keeps the last finding: the prior verdict if that
+ * was one, else whatever finding the prior verdict was already carrying. Any
+ * other verdict (complete, and nothing found) clears it.
+ */
+function findingToKeep(
+  status: DatasetStatus,
+  incomplete: boolean,
+  prior: { status: unknown; checked_at: unknown; report: unknown; finding: unknown } | null,
+): string | null {
+  if (FINDING_SET.has(status) || !incomplete || !prior) return null;
+  if (typeof prior.status === "string" && FINDING_SET.has(prior.status)) {
+    const report = readJsonReport(prior.report);
+    if (report?.scan?.status === prior.status && typeof prior.checked_at === "string") {
+      return JSON.stringify({ status: prior.status, checked_at: prior.checked_at, report });
+    }
+  }
+  if (typeof prior.finding === "string") {
+    try {
+      const f = JSON.parse(prior.finding) as {
+        status?: unknown;
+        checked_at?: unknown;
+        report?: unknown;
+      };
+      const report = parseScreenReport(f.report);
+      if (
+        typeof f.status === "string" &&
+        FINDING_SET.has(f.status) &&
+        report.scan?.status === f.status
+      ) {
+        return JSON.stringify({ status: f.status, checked_at: f.checked_at, report });
+      }
+    } catch {
+      // A finding that does not read back is not carried forward as one.
+    }
+  }
+  return null;
+}
+
+function readJsonReport(raw: unknown): ScreenReport | null {
+  if (typeof raw !== "string") return null;
+  try {
+    return parseScreenReport(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Store a verified callback's report on the dataset it was issued for.
  *
  * `body` is untrusted. It reaches the row only through `parseScreenReport`: a
  * body outside the contract, or a scan of another dataset, is recorded as the
  * attempt's `workflow-failed` and only the parser's fixed word is logged. A
- * scan becomes the verdict; an error report (the workflow's own word) closes
- * the attempt and leaves the verdict where it was.
+ * scan becomes the verdict (projected, see {@link projectReport}); an error
+ * report (the workflow's own word) closes the attempt and leaves the verdict
+ * where it was.
  *
- * Mails nobody. The weekly report is the sweep's only mail.
+ * The prior verdict is read first, for the finding an incomplete screen must
+ * keep; the write that follows is a compare-and-set on the nonce, and only a
+ * store holding the nonce writes a verdict, so the read cannot go stale under it.
+ *
+ * Mails nobody. The weekly report is the sweep's only mail. Throws on a
+ * database error, so the route answers 500 and the workflow retries with its
+ * nonce still good.
  */
 export async function storeSweepResult(
   env: Bindings,
@@ -516,10 +733,16 @@ export async function storeSweepResult(
 
   const db = env.DB;
   if (report.scan) {
+    const stored = projectReport(report);
     const status = report.scan.status;
+    const prior = await db
+      .prepare(IDENTIFIER_SWEEP_PRIOR_SQL)
+      .bind(args.datasetId)
+      .first<{ status: unknown; checked_at: unknown; report: unknown; finding: unknown }>();
+    const finding = findingToKeep(status, report.scan.incomplete, prior);
     const res = await db
       .prepare(IDENTIFIER_SWEEP_STORE_SQL)
-      .bind(status, JSON.stringify(report), args.datasetId, args.nonce)
+      .bind(status, JSON.stringify(stored), finding, args.datasetId, args.nonce)
       .run();
     if ((res.meta.changes ?? 0) !== 1) return { stored: false };
     return { stored: true, kind: "verdict", status };
@@ -537,7 +760,7 @@ export async function storeSweepResult(
 // An administrator's request
 // ============================================================================
 
-export type RescreenOutcome = "requested" | "not-found" | "out-of-scope";
+export type RescreenOutcome = "requested" | "not-found" | "out-of-scope" | "unwritable";
 
 /**
  * Ask for one dataset to be screened again: it goes to the front of the queue
@@ -552,11 +775,15 @@ export async function requestRescreen(
   const db = env.DB;
   const res = await db.prepare(IDENTIFIER_SWEEP_REQUEST_SQL).bind(args.datasetId).run();
   if ((res.meta.changes ?? 0) !== 1) {
-    const exists = await db
-      .prepare("SELECT 1 AS ok FROM datasets WHERE dataset_id = ?")
+    const row = await db
+      .prepare(
+        `SELECT ${sweepScopeSql()} AS in_scope, ${stampsWritableSql()} AS writable
+           FROM datasets d WHERE d.dataset_id = ?`,
+      )
       .bind(args.datasetId)
-      .first<{ ok: number }>();
-    return exists ? "out-of-scope" : "not-found";
+      .first<{ in_scope: number; writable: number }>();
+    if (!row) return "not-found";
+    return row.in_scope ? "unwritable" : "out-of-scope";
   }
   try {
     await auditLogStatement(db, {
@@ -582,6 +809,9 @@ export async function requestRescreen(
 export const IDENTIFIER_SWEEP_REPORT_CLAIM_ACTION = "identifier_sweep_report_claim";
 export const IDENTIFIER_SWEEP_REPORT_SENT_ACTION = "identifier_sweep_report_sent";
 
+/** What a claim whose send reached nobody is marked with, so it does not count toward the cap. */
+export const IDENTIFIER_SWEEP_REPORT_UNDELIVERED = '{"delivered":0}';
+
 /**
  * A claim on a week's report holds this long: a send in progress is not
  * started twice, and a send that reached nobody is tried again after it.
@@ -589,11 +819,18 @@ export const IDENTIFIER_SWEEP_REPORT_SENT_ACTION = "identifier_sweep_report_sent
 export const IDENTIFIER_SWEEP_REPORT_LEASE_MINUTES = 120;
 
 /**
- * Claims per week, at most. The cap is what keeps a broken record (a delivered
- * mail whose `sent` row could not be written) from becoming a mail every lease,
- * all week: the trade ADR 0054 makes, in the same direction.
+ * Claims per week that may have mailed someone, at most. A claim whose send
+ * reached nobody is marked and does not count, because retrying it cannot
+ * duplicate anything; one that delivered and then could not write its `sent`
+ * row, or whose Worker died mid-send, does. The cap keeps that broken record
+ * from becoming a mail every lease, all week: the trade ADR 0054 makes, in the
+ * same direction.
  */
 export const IDENTIFIER_SWEEP_REPORT_MAX_CLAIMS = 12;
+
+const CLAIM_ROWS_SQL = `FROM audit_log
+                       WHERE action = '${IDENTIFIER_SWEEP_REPORT_CLAIM_ACTION}'
+                         AND resource_type = 'identifier_sweep' AND resource_id = ?`;
 
 /**
  * Claim a week's report, atomically: one INSERT that lands only when the week
@@ -606,13 +843,56 @@ export const IDENTIFIER_SWEEP_REPORT_CLAIM_SQL = `INSERT INTO audit_log (user_id
     WHERE NOT EXISTS (SELECT 1 FROM audit_log
                        WHERE action = '${IDENTIFIER_SWEEP_REPORT_SENT_ACTION}'
                          AND resource_type = 'identifier_sweep' AND resource_id = ?)
-      AND NOT EXISTS (SELECT 1 FROM audit_log
-                       WHERE action = '${IDENTIFIER_SWEEP_REPORT_CLAIM_ACTION}'
-                         AND resource_type = 'identifier_sweep' AND resource_id = ?
+      AND NOT EXISTS (SELECT 1 ${CLAIM_ROWS_SQL}
                          AND timestamp >= datetime('now', '-${IDENTIFIER_SWEEP_REPORT_LEASE_MINUTES} minutes'))
-      AND (SELECT COUNT(*) FROM audit_log
-            WHERE action = '${IDENTIFIER_SWEEP_REPORT_CLAIM_ACTION}'
-              AND resource_type = 'identifier_sweep' AND resource_id = ?) < ${IDENTIFIER_SWEEP_REPORT_MAX_CLAIMS}`;
+      AND (SELECT COUNT(*) ${CLAIM_ROWS_SQL} AND details IS NULL) < ${IDENTIFIER_SWEEP_REPORT_MAX_CLAIMS}`;
+
+/** Mark a claim whose send reached nobody. By row id, so it can only touch that claim. */
+export const IDENTIFIER_SWEEP_REPORT_UNDELIVERED_SQL = `UPDATE audit_log SET details = ?
+    WHERE id = ? AND action = '${IDENTIFIER_SWEEP_REPORT_CLAIM_ACTION}' AND details IS NULL`;
+
+/** Where a week's report stands: sent or not, and how many claims count toward the cap. Bind: the week twice. */
+export const IDENTIFIER_SWEEP_REPORT_STATE_SQL = `SELECT
+      (SELECT COUNT(*) FROM audit_log
+        WHERE action = '${IDENTIFIER_SWEEP_REPORT_SENT_ACTION}'
+          AND resource_type = 'identifier_sweep' AND resource_id = ?) AS sent,
+      (SELECT COUNT(*) ${CLAIM_ROWS_SQL} AND details IS NULL) AS counted`;
+
+export interface WeeklyRecordState {
+  week: string;
+  sent: boolean;
+  /** Claims that count toward the cap. */
+  counted: number;
+  /** True when the week is not sent and no further claim is allowed. */
+  exhausted: boolean;
+}
+
+/** Where the weekly report for the week before `now` stands; null when it cannot be read. */
+export async function weeklyRecordState(
+  db: D1Database,
+  now: Date,
+): Promise<WeeklyRecordState | null> {
+  const { week } = reportWindow(now);
+  try {
+    const row = await db
+      .prepare(IDENTIFIER_SWEEP_REPORT_STATE_SQL)
+      .bind(week, week)
+      .first<{ sent: number; counted: number }>();
+    if (!row) return null;
+    const sent = row.sent > 0;
+    return {
+      week,
+      sent,
+      counted: row.counted,
+      exhausted: !sent && row.counted >= IDENTIFIER_SWEEP_REPORT_MAX_CLAIMS,
+    };
+  } catch (err) {
+    console.error(
+      `[identifier-sweep] weekly state for ${week} could not be read: ${errorText(err)}`,
+    );
+    return null;
+  }
+}
 
 /**
  * Gather the week's facts. Never throws: a read that fails makes what it
@@ -639,14 +919,28 @@ export async function gatherIdentifierWeek(
     errors.push("the queue could not be counted");
     console.error(`[identifier-sweep] due count failed: ${errorText(err)}`);
   }
-  if (rows === null) return unknownIdentifierWeek(now, due, errors, IDENTIFIER_SWEEP_CYCLE_DAYS);
-  return buildIdentifierWeek(rows, { now, due, errors, cycleDays: IDENTIFIER_SWEEP_CYCLE_DAYS });
+  if (rows !== null) {
+    try {
+      return buildIdentifierWeek(rows, {
+        now,
+        due,
+        errors,
+        cycleDays: IDENTIFIER_SWEEP_CYCLE_DAYS,
+      });
+    } catch (err) {
+      errors.push("the sweep's records could not be summarized");
+      console.error(`[identifier-sweep] building the week failed: ${errorText(err)}`);
+    }
+  }
+  return unknownIdentifierWeek(now, due, errors, IDENTIFIER_SWEEP_CYCLE_DAYS);
 }
 
 export interface SweepWeeklyOutcome {
   week: string;
-  /** False when another tick holds the claim or the week was already sent. */
+  /** False when another tick holds the claim, the week was already sent, or no claim is left. */
   claimed: boolean;
+  /** True when the week is not sent and its claims are used up: it will not arrive. */
+  exhausted: boolean;
   attempted: number;
   delivered: number;
   attention: boolean | null;
@@ -658,8 +952,8 @@ export interface SweepWeeklyOutcome {
  * It goes whether or not anything is wrong: a report that only arrives on
  * breakage cannot tell a healthy week from a broken reporter (ADR 0054). The
  * claim is reserved before the facts are gathered; a send that reached nobody
- * leaves no `sent` row, so a later tick tries again once the lease is up, up to
- * the cap. Returns null outside production (the mail fence in
+ * marks its claim and leaves no `sent` row, so a later tick tries again once
+ * the lease is up. Returns null outside production (the mail fence in
  * `getAdminEmailsForCategory` would also refuse; this refuses first, so not even
  * the claim is written).
  */
@@ -673,22 +967,31 @@ export async function sendIdentifierSweepWeeklyReport(
   const outcome: SweepWeeklyOutcome = {
     week,
     claimed: false,
+    exhausted: false,
     attempted: 0,
     delivered: 0,
     attention: null,
   };
 
+  let claimId: number | null = null;
   try {
     const res = await db
       .prepare(IDENTIFIER_SWEEP_REPORT_CLAIM_SQL)
       .bind(week, week, week, week)
       .run();
     outcome.claimed = (res.meta.changes ?? 0) === 1;
+    const id = res.meta.last_row_id;
+    claimId = outcome.claimed && typeof id === "number" && id > 0 ? id : null;
   } catch (err) {
     console.error(`[identifier-sweep] weekly claim for ${week} failed: ${errorText(err)}`);
     return outcome;
   }
-  if (!outcome.claimed) return outcome;
+  if (!outcome.claimed) {
+    // Sent, or a claim is live: routine. Out of claims with nothing sent is not.
+    const state = await weeklyRecordState(db, now);
+    outcome.exhausted = state?.exhausted ?? false;
+    return outcome;
+  }
 
   const facts = await gatherIdentifierWeek(db, now);
   const report = renderIdentifierWeek(facts);
@@ -723,6 +1026,7 @@ export async function sendIdentifierSweepWeeklyReport(
         resourceId: week,
         details: JSON.stringify({
           delivered: outcome.delivered,
+          attempted: outcome.attempted,
           attention: report.attention,
           scope: facts.scope,
           screened: facts.screened,
@@ -732,13 +1036,27 @@ export async function sendIdentifierSweepWeeklyReport(
         }),
       }).run();
     } catch (err) {
-      // The claim stays and expires; a later tick sends again, up to the cap.
+      // The claim stays unmarked and counts toward the cap; a later tick sends
+      // again once its lease is up, which can repeat a mail but never loses one.
       console.error(
         `[identifier-sweep] the weekly report for ${week} was delivered but could not be recorded: ${errorText(err)}`,
       );
     }
   } else {
     console.error(`[identifier-sweep] the weekly report for ${week} reached nobody`);
+    if (claimId !== null) {
+      try {
+        await db
+          .prepare(IDENTIFIER_SWEEP_REPORT_UNDELIVERED_SQL)
+          .bind(IDENTIFIER_SWEEP_REPORT_UNDELIVERED, claimId)
+          .run();
+      } catch (err) {
+        // Unmarked, the claim counts toward the cap: the safe direction.
+        console.error(
+          `[identifier-sweep] could not mark the undelivered claim for ${week}: ${errorText(err)}`,
+        );
+      }
+    }
   }
   return outcome;
 }
