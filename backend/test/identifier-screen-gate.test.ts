@@ -733,6 +733,32 @@ describe("direct identifiers block the request and tell the depositor", () => {
     });
   });
 
+  test("a failed notice is logged without the depositor's or an admin's address", async () => {
+    const logged: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    };
+    try {
+      // Resend refuses every send, so the admin mail and the depositor's notice both fail.
+      await withFakeResend(
+        async () => {
+          await requestAndReport("direct-identifiers", { "edf-patient-name": 4 });
+        },
+        { status: 500 },
+      );
+    } finally {
+      console.error = realError;
+    }
+    const text = logged.join("\n");
+    // Both failures were logged (the control: an empty log would prove nothing) ...
+    expect(text).toContain("Failed to send publication request email to g***@example.org");
+    expect(text).toContain("requester notice");
+    // ... and neither names an address in full.
+    expect(text).not.toContain(OWNER_EMAIL);
+    expect(text).not.toContain(ADMIN_EMAIL);
+  });
+
   test("outside production the depositor's notice obeys the delivery fence", async () => {
     envOverrides = { ENVIRONMENT: "staging" } as Partial<Bindings>;
     await withFakeResend(async (calls) => {

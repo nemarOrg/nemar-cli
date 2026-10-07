@@ -161,6 +161,16 @@ export function redactRecipient(to: string): string {
   return `${to[0]}***${to.slice(at)}`;
 }
 
+/**
+ * `message` with every occurrence of `address` redacted, for a log line or a
+ * stored failure. `sendEmail`'s error text names the recipient in full, so a
+ * caller that logs the text after redacting only the address it prints beside
+ * it would still log the address once.
+ */
+export function redactAddressIn(message: string, address: string): string {
+  return address === "" ? message : message.split(address).join(redactRecipient(address));
+}
+
 export interface EmailPreferences {
   user_approval: boolean;
   publication_request: boolean;
@@ -1326,7 +1336,10 @@ ${screenSection}
       );
       outcome.delivered++;
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
+      const detail = redactAddressIn(
+        error instanceof Error ? error.message : String(error),
+        adminEmail,
+      );
       console.error(
         `Failed to send publication request email to ${redactRecipient(adminEmail)}: ${detail}`,
       );
@@ -1401,16 +1414,22 @@ export async function sendIdentifierScreenBlockedEmail(
 </html>
   `;
 
-  await sendEmail(
-    to,
-    `Publication on hold: ${datasetId} - identifying information found`,
-    html,
-    resendApiKey,
-    fromEmail,
-    replyTo,
-    isDev,
-    deliveryEnv,
-  );
+  try {
+    await sendEmail(
+      to,
+      `Publication on hold: ${datasetId} - identifying information found`,
+      html,
+      resendApiKey,
+      fromEmail,
+      replyTo,
+      isDev,
+      deliveryEnv,
+    );
+  } catch (error) {
+    // The caller logs this message; the depositor's address is not for a log.
+    if (error instanceof Error) error.message = redactAddressIn(error.message, to);
+    throw error;
+  }
 }
 
 /**
@@ -2383,7 +2402,7 @@ export async function sendIdentifierSweepReportEmail(
       const message = error instanceof Error ? error.message : String(error);
       console.error(
         `Failed to send the identifier sweep report to ${redactRecipient(adminEmail)}:`,
-        message.split(adminEmail).join(redactRecipient(adminEmail)),
+        redactAddressIn(message, adminEmail),
       );
     }
   }
