@@ -31,7 +31,10 @@ import {
   describeUncheckedSandboxGap,
 } from "../../shared/contract/profile-gaps.js";
 import { datasetLandingUrl } from "../../shared/datacite-constants.js";
-import { PREFLIGHT_ACKNOWLEDGEABLE } from "../../shared/identifier-screen-report.js";
+import {
+  PREFLIGHT_ACKNOWLEDGEABLE,
+  publicationRequestNotice,
+} from "../../shared/identifier-screen-report.js";
 import { LICENSE_TIERS } from "../../shared/license-tiers.js";
 import { stepsForRelease } from "../../shared/publication-steps.js";
 import { RangeParseError } from "../../shared/range.js";
@@ -4011,7 +4014,8 @@ publishCommand
     `
 Description:
   Submit a publication request to make your private dataset publicly accessible.
-  NEMAR admins will be notified and can approve or deny your request.
+  NEMAR checks publication eligibility first; if every check passes, an
+  administrator is notified and can approve or deny your request.
 
   Once approved, your dataset will:
   - Become publicly visible on GitHub
@@ -4079,20 +4083,21 @@ Examples:
           ),
         );
       }
-      // Epic #1610 phase 4: the admins are mailed when the identifier screen
-      // finishes, not now, so say which of the two happened.
+      // Epic #1610 phase 4: the screen's state as the backend worded it.
       const screen = result.identifier_screen;
       if (screen) {
         console.log();
         for (const line of identifierScreenLines(screen)) console.log(line);
       }
-      console.log(
-        chalk.dim(
-          screen?.state === "pending"
-            ? "\n  Admins will be notified when the identifier screen finishes. Use 'nemar dataset publish status' to check progress."
-            : "\n  Admins have been notified. Use 'nemar dataset publish status' to check progress.",
-        ),
-      );
+      // What happens next, in neutral words that name no finding, verdict or
+      // date warning (ADR 0090, amendment 2026-10-07): the screen runs after
+      // this request and its verdict is bound to a commit, so the outcome is
+      // read from `publish status` or the mail, never guessed at here. Made
+      // from the shared definition rather than read off the response, so every
+      // accepted request prints it whatever the Worker's version; a refused
+      // one threw above and prints its own text.
+      console.log();
+      for (const line of publicationRequestNotice(datasetId)) console.log(`  ${line}`);
     } catch (error) {
       if (error instanceof ApiError) {
         spinner.fail(error.message);
