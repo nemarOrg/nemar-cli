@@ -658,4 +658,14 @@ describe("the tree is screened again right before anything is sent", () => {
     write("sub-01/eeg/sub-01_task-two_eeg.vhdr", "Brain Vision Data Exchange Header File\n");
     expect((await recheckIdentifierPreflight(root, record)).status).toBe("fail");
   });
+
+  test("an acknowledged scan that gains a condition stops, though its record would parse", async () => {
+    // The case the contract alone cannot catch: the first record carries an acknowledgment, so a
+    // second record with a new condition under the same acknowledgment is still well formed.
+    write("dataset_description.json", JSON.stringify({ Name: "Fixture" }));
+    write("sub-01/eeg/sub-01_task-rest_eeg.vhdr", "Brain Vision Data Exchange Header File\n");
+    const record = await first({ acknowledgeIdentifierPreflight: ["not-screened"] });
+    write("sourcedata/figure.png", new Uint8Array(8));
+    expect((await recheckIdentifierPreflight(root, record)).status).toBe("fail");
+  });
 });
