@@ -5294,21 +5294,150 @@ class TestKillOrphansUnder(unittest.TestCase):
         return proc
 
     def test_a_process_naming_a_path_under_the_run_root_is_killed(self):
+        # The real scan of this platform: /proc/<pid>/cmdline on Linux, ps elsewhere.
         with tempfile.TemporaryDirectory() as root:
             orphan = self._sleeper(os.path.join(root, "work", "sub-01_x", "part"))
             bystander = self._sleeper("unrelated")
             lookalike = self._sleeper(root + "-sibling/work/x")
-            time.sleep(0.3)  # let the interpreters start so ps shows their arguments
-            killed = generate_zarr.kill_orphans_under(root)
-            self.assertIn(orphan.pid, killed)
+            time.sleep(0.3)  # let the interpreters start so their arguments are readable
+            report = generate_zarr.kill_orphans_under(root)
+            self.assertIn(orphan.pid, report.killed)
             self.assertEqual(orphan.wait(timeout=10), -signal.SIGKILL)
             self.assertIsNone(bystander.poll(), "an unrelated process must survive")
             self.assertIsNone(lookalike.poll(), "a sibling directory sharing a prefix must survive")
-            self.assertNotIn(os.getpid(), killed)
+            self.assertNotIn(os.getpid(), report.killed)
+            self.assertEqual(report.survivors, [])
+            self.assertIsNone(report.error)
+            self.assertGreater(report.scanned, 0)
 
     def test_nothing_to_kill_returns_nothing(self):
         with tempfile.TemporaryDirectory() as root:
-            self.assertEqual(generate_zarr.kill_orphans_under(root), [])
+            report = generate_zarr.kill_orphans_under(root)
+        self.assertEqual((report.killed, report.survivors), ([], []))
+
+    def test_the_proc_reader_matches_exact_arguments_in_the_kernels_layout(self):
+        # A fixture in /proc's own layout, naming REAL pids of processes whose real
+        # command lines say nothing, so the match is the reader's and the kill lands
+        # on nothing but the sleepers this test started.
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as proc:
+            under = self._sleeper("a")
+            sibling = self._sleeper("b")
+            other = self._sleeper("c")
+
+            def entry(pid, *args):
+                os.makedirs(os.path.join(proc, str(pid)))
+                with open(os.path.join(proc, str(pid), "cmdline"), "wb") as fh:
+                    fh.write(b"\0".join(a.encode() for a in args) + b"\0")
+
+            entry(under.pid, "aws", "s3", "cp", "s3://b/k", os.path.join(root, "work", "x", "part"))
+            entry(sibling.pid, "aws", "s3", "cp", root + "-sibling/work/x")
+            entry(other.pid, "aws", "s3", "ls")
+            os.makedirs(os.path.join(proc, "not-a-pid"))
+            report = generate_zarr.kill_orphans_under(root, proc_root=proc)
+            self.assertEqual(report.killed, [under.pid])
+            self.assertEqual(under.wait(timeout=10), -signal.SIGKILL)
+            self.assertIsNone(sibling.poll())
+            self.assertIsNone(other.poll())
+            self.assertEqual(report.scanned, 3)
+
+    def test_a_scan_that_cannot_run_says_so_instead_of_returning_nothing(self):
+        report = generate_zarr.kill_orphans_under("/run/x", proc_root="/no/such/proc")
+        self.assertEqual(report.killed, [])
+        self.assertIn("cannot list", report.error)
+        self.assertEqual(report.scanned, 0)
+
+    def test_the_ps_fallback_sees_this_process_untruncated(self):
+        if shutil.which("ps") is None:
+            self.skipTest("no ps binary here")
+        # A command line far wider than any terminal: truncated `args` is what hid a
+        # live process from the first version of this scan on Ubuntu.
+        wide = "x" * 400
+        sleeper = self._sleeper(wide)
+        time.sleep(0.3)
+        table, error = generate_zarr._ps_process_table()
+        self.assertIsNone(error)
+        argv = dict(table).get(sleeper.pid)
+        self.assertIsNotNone(argv)
+        self.assertIn(wide, argv)
+
+    def test_a_missing_ps_is_reported_not_swallowed(self):
+        saved = os.environ["PATH"]
+        self.addCleanup(os.environ.__setitem__, "PATH", saved)
+        os.environ["PATH"] = "/nonexistent"
+        table, error = generate_zarr._ps_process_table()
+        self.assertEqual(table, [])
+        self.assertIn("ps could not run", error)
+
+    def test_a_killed_but_unreaped_process_counts_as_gone(self):
+        proc = self._sleeper("z")
+        time.sleep(0.2)
+        os.kill(proc.pid, signal.SIGKILL)  # a zombie until the test waits on it
+        self.assertEqual(generate_zarr._wait_until_gone([proc.pid], 5.0), [])
+
+    def test_a_process_that_stays_is_a_survivor(self):
+        self.assertEqual(generate_zarr._wait_until_gone([os.getpid()], 0.1), [os.getpid()])
+
+
+class TestPoolBreakReportsWhatItCouldNotVerify(unittest.TestCase):
+    PRIMARY = "sub-01/eeg/sub-01_task-a_eeg.vhdr"
+
+    def _leave(self, root, mib):
+        work = generate_zarr.recording_scratch_paths(root, self.PRIMARY)[0]
+        os.makedirs(work)
+        with open(os.path.join(work, "blob"), "wb") as fh:
+            fh.write(os.urandom(mib * 1024 * 1024))
+            fh.flush()
+            os.fsync(fh.fileno())
+
+    @staticmethod
+    def _volume(*readings):
+        reads = iter(readings)
+        return lambda: next(reads)
+
+    def test_a_scan_that_cannot_run_is_a_warning_naming_the_reason(self):
+        with tempfile.TemporaryDirectory() as root, contextlib.redirect_stdout(io.StringIO()) as out:
+            generate_zarr.reclaim_after_pool_break(
+                root, [self.PRIMARY], proc_root="/no/such/proc"
+            )
+        self.assertIn("could not look for orphaned child processes (cannot list", out.getvalue())
+
+    def test_a_scan_that_read_nothing_is_a_warning(self):
+        with (
+            tempfile.TemporaryDirectory() as root,
+            tempfile.TemporaryDirectory() as empty_proc,
+            contextlib.redirect_stdout(io.StringIO()) as out,
+        ):
+            generate_zarr.reclaim_after_pool_break(root, [self.PRIMARY], proc_root=empty_proc)
+        self.assertIn("no process command line was readable", out.getvalue())
+
+    def test_a_volume_that_gains_less_than_was_removed_says_a_process_may_hold_it(self):
+        gib = 1024**3
+        with tempfile.TemporaryDirectory() as root, contextlib.redirect_stdout(io.StringIO()) as out:
+            self._leave(root, 8)
+            generate_zarr.reclaim_after_pool_break(
+                root, [self.PRIMARY],
+                self._volume((100 * gib, 500 * gib), (100 * gib, 500 * gib)),
+                suspect_after=1024 * 1024,
+            )
+        self.assertIn("scratch free rose by 0.0 GiB although", out.getvalue())
+        self.assertIn("may still hold deleted files open", out.getvalue())
+
+    def test_a_volume_that_gains_what_was_removed_is_not_suspected(self):
+        gib = 1024**3
+        with tempfile.TemporaryDirectory() as root, contextlib.redirect_stdout(io.StringIO()) as out:
+            self._leave(root, 8)
+            generate_zarr.reclaim_after_pool_break(
+                root, [self.PRIMARY],
+                self._volume((100 * gib, 500 * gib), (100 * gib + 8 * 1024 * 1024, 500 * gib)),
+                suspect_after=1024 * 1024,
+            )
+        self.assertNotIn("may still hold deleted files open", out.getvalue())
+
+    def test_the_removed_bytes_are_not_called_reclaimed(self):
+        with tempfile.TemporaryDirectory() as root, contextlib.redirect_stdout(io.StringIO()) as out:
+            generate_zarr.reclaim_after_pool_break(root, [self.PRIMARY], proc_root="/no/such/proc")
+        self.assertIn("removed 0.0 GiB of files", out.getvalue())
+        self.assertNotIn("reclaimed", out.getvalue())
 
 
 class TestPoolBreakReclaimsScratch(unittest.TestCase):
@@ -5341,7 +5470,7 @@ class TestPoolBreakReclaimsScratch(unittest.TestCase):
             any(r["leftover"] for r in innocents),
             "an innocent re-ran on top of the debris its killed attempt left behind",
         )
-        self.assertIn("reclaimed", out.getvalue())
+        self.assertIn("worker pool broke with", out.getvalue())
 
     def test_the_break_says_how_full_the_disk_was(self):
         # The "killed its worker process" verdict reads as out of memory; the line
@@ -5388,7 +5517,7 @@ class TestPoolBreakReclaimsScratch(unittest.TestCase):
                 lambda r, i: None, worker=_scratch_worker,
             )
         self.assertEqual(breaks, 0)
-        self.assertNotIn("reclaimed", out.getvalue())
+        self.assertNotIn("worker pool broke with", out.getvalue())
 
 
 class TestScratchSettings(unittest.TestCase):

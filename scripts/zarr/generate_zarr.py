@@ -2173,53 +2173,162 @@ def reclaim_recording_scratch(tmp: str, primary: str) -> ReclaimResult:
     return ReclaimResult(freed, leaked, errors)
 
 
-def kill_orphans_under(root: str) -> list[int]:
-    """SIGKILL every process whose command line names a path under ``root``.
+class OrphanReport(NamedTuple):
+    killed: list[int]  # pids sent SIGKILL
+    survivors: list[int]  # killed pids still present after the wait
+    scanned: int  # processes whose command line could be read
+    error: str | None  # why the scan could not run at all, or None
+
+
+def _ps_process_table() -> tuple[list[tuple[int, list[str]]], str | None]:
+    """``(pid, argv)`` from `ps`, for a system without /proc. ``-ww`` and a huge
+    COLUMNS keep procps and BSD ps from truncating `args` to a terminal width,
+    which hid a live process from the first version of this scan on Ubuntu. argv
+    is the whitespace split of the command line, so it is only as exact as that."""
+    try:
+        done = subprocess.run(
+            ["ps", "-ww", "-Ao", "pid=,args="], capture_output=True, text=True, timeout=30,
+            env={**os.environ, "COLUMNS": "100000"},
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return [], f"ps could not run: {exc}"
+    if done.returncode != 0:
+        return [], f"ps exited {done.returncode}: {done.stderr.strip()[:200]}"
+    table: list[tuple[int, list[str]]] = []
+    for line in done.stdout.splitlines():
+        pid_text, _, args = line.strip().partition(" ")
+        if pid_text.isdigit():
+            table.append((int(pid_text), args.split()))
+    return table, None
+
+
+def process_table(proc_root: str | None = None) -> tuple[list[tuple[int, list[str]]], str | None]:
+    """``(pid, argv)`` for every process whose command line can be read, and the
+    reason when the table could not be built at all.
+
+    On Linux this reads ``/proc/<pid>/cmdline``: the kernel's own NUL-separated argv,
+    exact and never truncated, with no dependency on a `ps` binary being installed.
+    Without /proc it falls back to `ps`. ``proc_root`` points the /proc reader at a
+    fixture directory in the kernel's layout."""
+    if proc_root is None and not os.path.isdir("/proc/self"):
+        return _ps_process_table()
+    root = proc_root or "/proc"
+    try:
+        names = os.listdir(root)
+    except OSError as exc:
+        return [], f"cannot list {root}: {exc}"
+    table: list[tuple[int, list[str]]] = []
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(os.path.join(root, name, "cmdline"), "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            continue  # exited since the listing, or not readable
+        table.append((int(name), [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]))
+    return table, None
+
+
+def _pid_is_gone(pid: int) -> bool:
+    """Whether ``pid`` has exited. A process killed but not yet reaped is a zombie:
+    it has released its files and its blocks, so it counts as gone."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    if os.path.isdir("/proc/self"):
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as fh:
+                state = fh.read().rpartition(b")")[2].split()[0]
+            return state in (b"Z", b"X")
+        except FileNotFoundError:
+            return True  # /proc exists and has no such process
+        except (OSError, IndexError):
+            pass
+    try:
+        listing = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return listing.stdout.strip().startswith("Z")
+
+
+def _wait_until_gone(pids: list[int], seconds: float) -> list[int]:
+    """The pids among ``pids`` still present after up to ``seconds``."""
+    deadline = time.monotonic() + seconds
+    alive = list(pids)
+    while alive:
+        alive = [pid for pid in alive if not _pid_is_gone(pid)]
+        if not alive or time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    return alive
+
+
+def kill_orphans_under(
+    root: str, proc_root: str | None = None, wait_seconds: float = 5.0
+) -> OrphanReport:
+    """SIGKILL every process whose command line names a path under ``root``, wait
+    for each to exit, and say what could not be established.
 
     `aws s3 cp` children are started without a process group or a parent-death
     signal, so one can outlive the worker that started it and keep writing into
-    files `reclaim_recording_scratch` has just unlinked (the blocks stay allocated
+    files `reclaim_recording_scratch` is about to unlink (the blocks stay allocated
     until it exits). ``root`` is this run's own unique temp directory, so a process
     that names a path under it belongs to this run, and the caller only asks once
-    the pool's workers are gone: what is left is an orphan. Matched on whole
-    arguments, not substrings, and never this process. Returns the pids killed.
+    the pool's workers are gone: what is left is an orphan. An argument matches only
+    if it starts with ``root`` plus a separator, so a sibling directory sharing a
+    prefix survives, and this process is never touched.
+
+    The result is explicit about the two ways this can quietly do nothing: the scan
+    could not run (``error``), or it read no process at all (``scanned`` is 0). A
+    killed process that is still present after the wait is in ``survivors``.
     """
-    try:
-        listing = subprocess.run(
-            ["ps", "-Ao", "pid=,args="], capture_output=True, text=True, timeout=30
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return []
+    table, error = process_table(proc_root)
     prefix = os.path.join(root, "")
     me = os.getpid()
     killed: list[int] = []
-    for line in listing.splitlines():
-        pid_text, _, args = line.strip().partition(" ")
-        if not pid_text.isdigit() or int(pid_text) == me:
-            continue
-        if not any(arg.startswith(prefix) for arg in args.split()):
+    for pid, argv in table:
+        if pid == me or not any(arg.startswith(prefix) for arg in argv):
             continue
         try:
-            os.kill(int(pid_text), signal.SIGKILL)
-            killed.append(int(pid_text))
+            os.kill(pid, signal.SIGKILL)
+            killed.append(pid)
         except OSError:
             continue  # already gone, or not ours to signal
-    return killed
+    return OrphanReport(killed, _wait_until_gone(killed, wait_seconds), len(table), error)
 
 
-def reclaim_after_pool_break(tmp_root: str, primaries: list[str], volume=None) -> ReclaimResult:
+def reclaim_after_pool_break(
+    tmp_root: str,
+    primaries: list[str],
+    volume=None,
+    *,
+    proc_root: str | None = None,
+    suspect_after: int = 1024**3,
+) -> ReclaimResult:
     """What a pool break owes the disk, in one warning.
 
     Kills the orphaned children of the dead workers first (they would keep writing
     into what is about to be unlinked), reclaims each in-flight recording's scratch,
     and reports the volume before and after. The warning names the cause the
     "killed its worker process" verdict cannot: a full volume kills workers with
-    SIGBUS, which looks exactly like an out-of-memory kill. When the disk is still
-    short after the reclaim (a delete failed, or something outside the run holds it)
-    that is an ``::error::`` with the numbers, since the rebuilt pool is about to
-    inherit it. ``volume`` is a callable returning ``(free, total)`` or None."""
+    SIGBUS, which looks exactly like an out-of-memory kill.
+
+    The bytes it says were reclaimed are the ones removed from the recordings'
+    paths. They are only freed on the volume once nothing holds the deleted files
+    open, so the volume's own free space is compared with them: a gain under half of
+    what was removed (once it exceeds ``suspect_after``) says a process may still
+    hold the blocks. When the disk is still short after the reclaim, or the orphan
+    scan could not run, or a killed process survived, that is an ``::error::`` or a
+    ``::warning::`` with the numbers, since the rebuilt pool is about to inherit it.
+    ``volume`` is a callable returning ``(free, total)`` or None."""
     before = volume() if volume else None
-    killed = kill_orphans_under(tmp_root)
+    orphans = kill_orphans_under(tmp_root, proc_root)
     freed = leaked = 0
     errors: list[str] = []
     for primary in primaries:
@@ -2238,12 +2347,32 @@ def reclaim_after_pool_break(tmp_root: str, primaries: list[str], volume=None) -
         disk = "scratch free space unreadable"
     print(
         f"::warning::worker pool broke with {len(primaries)} recording(s) in flight; "
-        f"{disk}; reclaimed {freed / gib:.1f} GiB, {leaked / gib:.1f} GiB still on disk, "
-        f"{len(killed)} orphaned child process(es) killed. A full scratch volume kills "
-        "workers with SIGBUS, which the 'killed its worker process' verdict below "
-        "reports as out of memory",
+        f"{disk}; removed {freed / gib:.1f} GiB of files, {leaked / gib:.1f} GiB still on "
+        f"disk, {len(orphans.killed)} orphaned child process(es) killed. A full scratch "
+        "volume kills workers with SIGBUS, which the 'killed its worker process' "
+        "verdict below reports as out of memory",
         flush=True,
     )
+    if orphans.error or not orphans.scanned:
+        why = orphans.error or "no process command line was readable"
+        print(
+            f"::warning::could not look for orphaned child processes ({why}); one may "
+            "still be writing into files that were just deleted",
+            flush=True,
+        )
+    if orphans.survivors:
+        print(
+            f"::error::{len(orphans.survivors)} orphaned process(es) survived SIGKILL "
+            f"{orphans.survivors[:5]}; the blocks of the files they hold stay allocated",
+            flush=True,
+        )
+    if before and after and freed >= suspect_after and after[0] - before[0] < freed / 2:
+        print(
+            f"::warning::scratch free rose by {max(0, after[0] - before[0]) / gib:.1f} GiB "
+            f"although {freed / gib:.1f} GiB of files were removed: a process may still "
+            "hold deleted files open, or something else is writing to the volume",
+            flush=True,
+        )
     if leaked or (after and after[0] < SCRATCH_HEADROOM_BYTES):
         free_text = f"{after[0] / gib:.1f} GiB" if after else "unknown"
         print(
