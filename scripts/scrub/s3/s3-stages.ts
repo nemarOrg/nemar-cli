@@ -1689,7 +1689,10 @@ async function checkPrivate(
     return undefined;
   };
   const askAnonymously = async (key: string, which: string): Promise<void> => {
-    const url = `${o.publicBase.replace(/\/+$/, "")}/${objectKey(dataset, key)}`;
+    // Each segment encoded, as `zarr-public` does: S3 reads a bare `+` in a path as a space, so
+    // the object would look missing, answer 403, and pass as private.
+    const path = objectKey(dataset, key).split("/").map(encodeURIComponent).join("/");
+    const url = `${o.publicBase.replace(/\/+$/, "")}/${path}`;
     const status = await anonymousHeadStatus(url, o.timeoutMs);
     if (status === 403) return;
     if (status === 200) refusals.add("dataset-is-public", `${which} answered 200`);
