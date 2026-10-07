@@ -578,6 +578,58 @@ export function kindsPhrase(byKind: Partial<Record<FindingKind, number>> | undef
 /** What the screen does not read, whatever it found. One sentence, shown by every surface. */
 export const SCREEN_NOT_READ = "Not read: the contents of sidecars and tables in earlier commits.";
 
+/**
+ * How many findings of the acquisition-date kinds ({@link DATE_KINDS}) a scan's counts hold. A
+ * count that is not a non-negative integer is ignored rather than added, so a record that never
+ * went through the parser cannot turn the warning's number into text.
+ */
+export function dateFindingCount(byKind: Partial<Record<FindingKind, number>> | undefined): number {
+  let total = 0;
+  for (const [kind, n] of Object.entries(byKind ?? {})) {
+    if (DATE_KINDS.has(kind as FindingKind) && isCount(n)) total += n;
+  }
+  return total;
+}
+
+/** The first words of the warning's first line, which a terminal uses to find the warning's lines. */
+const DATE_WARNING_LEAD = "Warning: acquisition dates finer than year and month were found";
+
+/**
+ * The warning's sentences after the first, fixed words and no number. Together with the first
+ * line they are THE wording of the acquisition-date warning (ADR 0090): the admin email, the
+ * status views, the CLI's upload preflight and the terminal all show these lines and no others.
+ */
+const DATE_WARNING_FIXED_LINES: readonly string[] = [
+  "NEMAR does not change them.",
+  "A date can help identify a participant when it is combined with other information.",
+  "Remove or coarsen any date that could identify someone before uploading or requesting publication.",
+  "An administrator reviews these before a dataset is made public.",
+];
+
+/**
+ * The acquisition-date warning for a scan, as lines; empty when the scan holds no date finding.
+ *
+ * Policy B (ADR 0090): a date finer than year and month stays a review-level finding. It never
+ * gates and nothing rewrites it, so this changes no verdict and no acknowledgment, and it is
+ * only words. They carry one number, the count of date findings, and never a date, a value, a
+ * file name or a path, so they are as safe to print in a public CI log as the counts beside them.
+ */
+export function dateWarningLines(
+  byKind: Partial<Record<FindingKind, number>> | undefined,
+): string[] {
+  const n = dateFindingCount(byKind);
+  if (n === 0) return [];
+  return [
+    `${DATE_WARNING_LEAD} in recording headers or scans tables (${n} ${n === 1 ? "entry" : "entries"}).`,
+    ...DATE_WARNING_FIXED_LINES,
+  ];
+}
+
+/** Is this line one of the warning's? For a terminal that wants to set the warning apart. */
+export function isDateWarningLine(line: string): boolean {
+  return line.startsWith(DATE_WARNING_LEAD) || DATE_WARNING_FIXED_LINES.includes(line);
+}
+
 /** The counts of a scan as lines of fixed words, shared by the publication screen and the preflight. */
 function scanLines(
   scan: Pick<
@@ -641,6 +693,7 @@ export function describeScreen(
   const scan = report?.scan;
   if (scan) {
     lines.push(...scanLines(scan));
+    lines.push(...dateWarningLines(scan.findings_by_kind));
     lines.push(SCREEN_NOT_READ);
     lines.push(`Scanner ${report.scanner}; commit ${report.head?.slice(0, 12)}.`);
   }
@@ -870,6 +923,7 @@ export function describePreflight(
 ): ScreenDescription {
   const base = VERDICTS[scan.status];
   const lines = scanLines(scan);
+  lines.push(...dateWarningLines(scan.findings_by_kind));
   if (acknowledgedVia === "prompt") lines.push("Acknowledged by the uploader at the prompt.");
   if (acknowledgedVia === "flag") {
     lines.push("Acknowledged by the uploader with --acknowledge-identifier-preflight.");

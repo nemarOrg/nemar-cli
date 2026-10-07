@@ -1105,6 +1105,191 @@ describe("status surfaces show describeScreen's words and nothing stored", () =>
   });
 });
 
+// ============================================================================
+
+/** The warning ADR 0090 words, for a count of `n`: one definition, restated here to pin it. */
+const WARNING = (n: number) => [
+  `Warning: acquisition dates finer than year and month were found in recording headers or scans tables (${n} ${n === 1 ? "entry" : "entries"}).`,
+  "NEMAR does not change them.",
+  "A date can help identify a participant when it is combined with other information.",
+  "Remove or coarsen any date that could identify someone before uploading or requesting publication.",
+  "An administrator reviews these before a dataset is made public.",
+];
+
+/** A scan report with the given verdict and finding counts, as the workflow would post it. */
+function reportWith(status: string, kinds: Record<string, number>, flagged = 0) {
+  const report = cleanScreenReportBody(DATASET, SCREENED_HEAD, status);
+  Object.assign(report.scan as Record<string, unknown>, {
+    findings_by_kind: kinds,
+    edf_bdf_files_flagged: flagged,
+  });
+  return report;
+}
+
+describe("acquisition dates are warned about, in every place the screen's counts are shown (ADR 0090)", () => {
+  test("dates only: the admin mail, the owner's status and the admin list carry the warning; nothing else changes", async () => {
+    await withFakeResend(async (calls) => {
+      await requestPublication();
+      const r0 = row();
+      const cb = await postCallback(
+        {
+          dataset_id: DATASET,
+          request_id: r0.id,
+          report: reportWith("dates-only", { "edf-startdate": 3, "acq-time-dated": 1 }),
+        },
+        dispatches[0].client_payload.callback_token,
+      );
+      expect(cb.status).toBe(200);
+
+      // The verdict, the request and the next step are what they were for a dates-only screen.
+      expect(row().identifier_screen_status).toBe("dates-only");
+      expect(row().status).toBe("requested");
+      const mails = sendsTo(calls, ADMIN_EMAIL);
+      expect(mails).toHaveLength(1);
+      expect(mails[0].subject).toBe(
+        `[NEMAR] Publication request: ${DATASET} by screenowner - IDENTIFIER SCREEN: clean (acquisition dates only)`,
+      );
+      expect(mails[0].html).not.toContain("--acknowledge-identifier-screen");
+      expect(sendsTo(calls, OWNER_EMAIL)).toHaveLength(0);
+
+      // The admin is told, with the kinds and counts beside it.
+      for (const line of WARNING(4)) expect(mails[0].html).toContain(line);
+      expect(mails[0].html).toContain("edf-startdate x3, acq-time-dated x1");
+
+      // The person who requested sees it where the result is shown to them.
+      const status = await app.request(
+        `/datasets/${DATASET}/publish/status`,
+        { headers: { Authorization: `Bearer ${OWNER_KEY}` } },
+        env(),
+      );
+      const s = (await status.json()) as {
+        status: string;
+        identifier_screen: { state: string; headline: string; tone: string; lines: string[] };
+      };
+      expect(s.status).toBe("requested");
+      expect(s.identifier_screen.state).toBe("dates-only");
+      expect(s.identifier_screen.headline).toBe(
+        "Identifier screen: clean (acquisition dates only)",
+      );
+      expect(s.identifier_screen.tone).toBe("ok");
+      expect(s.identifier_screen.lines).toEqual(expect.arrayContaining(WARNING(4)));
+
+      // And the admin's list.
+      const list = await app.request(
+        "/admin/publish/requests",
+        { headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+        env(),
+      );
+      const l = (await list.json()) as {
+        requests: { identifier_screen: { lines: string[] } }[];
+      };
+      expect(l.requests[0].identifier_screen.lines).toEqual(expect.arrayContaining(WARNING(4)));
+    });
+  });
+
+  test("a resend carries the stored warning to the admins again", async () => {
+    await withFakeResend(async (calls) => {
+      await requestPublication();
+      const r0 = row();
+      await postCallback(
+        {
+          dataset_id: DATASET,
+          request_id: r0.id,
+          report: reportWith("dates-only", { "edf-recording-startdate": 2 }),
+        },
+        dispatches[0].client_payload.callback_token,
+      );
+      db.run(
+        "UPDATE publication_requests SET updated_at = datetime('now', '-2 hours') WHERE id = ?",
+        [r0.id],
+      );
+      const res = await app.request(
+        `/datasets/${DATASET}/publish/resend`,
+        { method: "POST", headers: { Authorization: `Bearer ${OWNER_KEY}` } },
+        env(),
+      );
+      expect(res.status).toBe(200);
+      const mails = sendsTo(calls, ADMIN_EMAIL);
+      expect(mails).toHaveLength(2);
+      for (const mail of mails) for (const line of WARNING(2)) expect(mail.html).toContain(line);
+    });
+  });
+
+  test("a direct identifier beside dates: the depositor's blocked-request mail carries the warning too", async () => {
+    await withFakeResend(async (calls) => {
+      await requestPublication();
+      const r0 = row();
+      await postCallback(
+        {
+          dataset_id: DATASET,
+          request_id: r0.id,
+          report: reportWith(
+            "direct-identifiers",
+            { "edf-patient-name": 4, "edf-startdate": 4 },
+            4,
+          ),
+        },
+        dispatches[0].client_payload.callback_token,
+      );
+      expect(row().status).toBe("blocked");
+      const owner = sendsTo(calls, OWNER_EMAIL);
+      expect(owner).toHaveLength(1);
+      expect(owner[0].subject).toBe(
+        `Publication on hold: ${DATASET} - identifying information found`,
+      );
+      for (const line of WARNING(4)) expect(owner[0].html).toContain(line);
+      const admin = sendsTo(calls, ADMIN_EMAIL);
+      expect(admin).toHaveLength(1);
+      for (const line of WARNING(4)) expect(admin[0].html).toContain(line);
+    });
+  });
+
+  test("a screen with no date finding warns nobody, and says nothing about dates", async () => {
+    await withFakeResend(async (calls) => {
+      await requestPublication();
+      const r0 = row();
+      await postCallback(
+        {
+          dataset_id: DATASET,
+          request_id: r0.id,
+          report: reportWith("review", { "tooling-debris": 1, "edf-startdate-unparsed": 2 }),
+        },
+        dispatches[0].client_payload.callback_token,
+      );
+      const mail = sendsTo(calls, ADMIN_EMAIL)[0];
+      expect(mail.html).toContain("tooling-debris x1");
+      expect(mail.html).not.toContain("Warning: acquisition dates");
+      expect(mail.html).not.toContain("NEMAR does not change them");
+      const status = await app.request(
+        `/datasets/${DATASET}/publish/status`,
+        { headers: { Authorization: `Bearer ${OWNER_KEY}` } },
+        env(),
+      );
+      expect(await status.text()).not.toContain("acquisition dates");
+    });
+  });
+
+  test("a hostile count never reaches the warning: the report is refused, and no date is mailed", async () => {
+    await withFakeResend(async (calls) => {
+      await requestPublication();
+      const r0 = row();
+      const report = reportWith("dates-only", {});
+      (report.scan as Record<string, unknown>).findings_by_kind = {
+        "edf-startdate": "SMITH 1985-03-15",
+      };
+      await postCallback(
+        { dataset_id: DATASET, request_id: r0.id, report },
+        dispatches[0].client_payload.callback_token,
+      );
+      expect(row().identifier_screen_status).toBe("error");
+      const mail = sendsTo(calls, ADMIN_EMAIL)[0];
+      expect(mail.html).not.toContain("1985");
+      expect(mail.html).not.toContain(LEAK);
+      expect(mail.html).not.toContain("Warning: acquisition dates");
+    });
+  });
+});
+
 describe("resend", () => {
   test("is refused while the screen runs, and carries the stored result after", async () => {
     await withFakeResend(async (calls) => {

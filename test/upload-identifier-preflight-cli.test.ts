@@ -193,12 +193,12 @@ function put(out: Uint8Array, text: string, start: number, width: number): void 
   out.set(new TextEncoder().encode(text).subarray(0, width), start);
 }
 
-function recording(patient: string): Uint8Array {
+function recording(patient: string, startdate = "01.01.85"): Uint8Array {
   const out = new Uint8Array(1024).fill(0x20);
   put(out, "0", 0, 8);
   put(out, patient, 8, 80);
   put(out, "Startdate X X X X", 88, 80);
-  put(out, "01.01.85", 168, 8);
+  put(out, startdate, 168, 8);
   return out;
 }
 
@@ -225,6 +225,43 @@ function brainVisionDataset(): void {
   write("dataset_description.json", JSON.stringify({ Name: "Fixture", BIDSVersion: "1.9.0" }));
   write("sub-01/eeg/sub-01_task-rest_eeg.vhdr", "Brain Vision Data Exchange Header File\n");
   write("sub-01/eeg/sub-01_task-rest_eeg.eeg", new Uint8Array(64));
+}
+
+/**
+ * Acquisition dates finer than year: two EDF headers and one scans-table row, so three entries.
+ * No name anywhere, so the verdict is dates-only and the gate clears it (ADR 0087, ADR 0090).
+ */
+function datedDataset(): void {
+  write("dataset_description.json", JSON.stringify({ Name: "Fixture", BIDSVersion: "1.9.0" }));
+  write("sub-01/eeg/sub-01_task-rest_eeg.edf", recording("P01 F X X", "15.03.85"));
+  write("sub-02/eeg/sub-02_task-rest_eeg.edf", recording("P02 M X X", "02.11.91"));
+  write(
+    "sub-01/sub-01_scans.tsv",
+    "filename\tacq_time\neeg/sub-01_task-rest_eeg.edf\t1985-03-15T10:00:00\n",
+  );
+}
+
+/** The warning ADR 0090 words, for a count of `n`. */
+const dateWarning = (n: number) => [
+  `Warning: acquisition dates finer than year and month were found in recording headers or scans tables (${n} ${n === 1 ? "entry" : "entries"}).`,
+  "NEMAR does not change them.",
+  "A date can help identify a participant when it is combined with other information.",
+  "Remove or coarsen any date that could identify someone before uploading or requesting publication.",
+  "An administrator reviews these before a dataset is made public.",
+];
+
+/** No date, no path and no file name in what the warning printed, and no digit but its count. */
+function expectWarningCarriesOnlyItsCount(output: string, n: number): void {
+  const printed = output
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => dateWarning(n).includes(line));
+  expect(printed).toEqual(dateWarning(n));
+  const withoutCount = printed.join("\n").replace(`(${n} entries)`, "()");
+  expect(withoutCount).not.toMatch(/\d/);
+  for (const part of ["1985", "1991", "15.03", "02.11", "03-15", "sub-01", "_scans", ".edf"]) {
+    expect(printed.join("\n")).not.toContain(part);
+  }
 }
 
 /** Nothing a person could be named by: not the surname, not a path, not the directory. */
@@ -389,6 +426,131 @@ describe("nemar dataset upload: a verdict that needs an acknowledgment", () => {
       const r = await upload(["--no"], server.url);
       expect(r.exitCode).toBe(1);
       expect(r.output).toContain("Declined (--no)");
+      expectNothingSent(server.requests);
+    } finally {
+      server.stop();
+    }
+  });
+});
+
+describe("nemar dataset upload: acquisition dates are warned about and gate nothing (ADR 0090)", () => {
+  test("dates only: clean, the warning with its count, no prompt, and the run goes on", async () => {
+    datedDataset();
+    const server = startServer();
+    try {
+      // No tools on PATH: past the preflight, the run stops at the required-tools check.
+      const r = await upload(["--yes"], server.url, { noTools: true });
+      expect(r.output).toContain("Identifier preflight: clean (acquisition dates only)");
+      expect(r.output).toContain("Findings by kind: edf-startdate x2, acq-time-dated x1.");
+      expectWarningCarriesOnlyItsCount(r.output, 3);
+      // Nothing to acknowledge: no refusal, no prompt, no condition named, and it went on.
+      expect(r.output).not.toContain("Upload refused");
+      expect(r.output).not.toContain("Upload anyway?");
+      expect(r.output).not.toContain("acknowledg");
+      expect(r.output).toContain("Missing required tools");
+      expectNoValue(r.output);
+      expectNothingSent(server.requests);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("--dry-run shows the same warning", async () => {
+    datedDataset();
+    const server = startServer();
+    try {
+      const r = await upload(["--dry-run", "--yes"], server.url, { noTools: true });
+      expectWarningCarriesOnlyItsCount(r.output, 3);
+      expect(r.output).not.toContain("Upload refused");
+      expectNothingSent(server.requests);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("no date finding, no warning", async () => {
+    write("dataset_description.json", JSON.stringify({ Name: "Fixture", BIDSVersion: "1.9.0" }));
+    // 1 January is a year-only date, which the scanner does not count.
+    write("sub-01/eeg/sub-01_task-rest_eeg.edf", recording("P01 F X X"));
+    const server = startServer();
+    try {
+      const r = await upload(["--yes"], server.url, { noTools: true });
+      expect(r.output).toContain("Identifier preflight: clean");
+      expect(r.output).not.toContain("clean (acquisition dates only)");
+      expect(r.output).not.toContain("Warning: acquisition dates");
+      expect(r.output).not.toContain("NEMAR does not change them");
+      expect(r.output).toContain("Missing required tools");
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("dates beside a condition that needs an acknowledgment add no condition to it", async () => {
+    datedDataset();
+    // A recording format the scanner cannot read: the verdict is its own, and dates are not part of it.
+    write("sub-03/eeg/sub-03_task-rest_eeg.vhdr", "Brain Vision Data Exchange Header File\n");
+    const server = startServer();
+    try {
+      const stopped = await upload(["--yes"], server.url);
+      expect(stopped.exitCode).toBe(1);
+      expect(stopped.output).toContain(
+        "Identifier preflight: EDF/BDF clean, other recordings NOT screened",
+      );
+      expectWarningCarriesOnlyItsCount(stopped.output, 3);
+      expect(stopped.output).toContain(
+        "--acknowledge-identifier-preflight clean-edf-only-others-unscreened",
+      );
+      expect(stopped.output).not.toContain("dates-only");
+      expectNothingSent(server.requests);
+
+      // The flag that names exactly that one condition is accepted, with the warning printed.
+      const named = await upload(
+        ["--yes", "--acknowledge-identifier-preflight", "clean-edf-only-others-unscreened"],
+        server.url,
+        { noTools: true },
+      );
+      expect(named.output).toContain(
+        "Acknowledged with --acknowledge-identifier-preflight clean-edf-only-others-unscreened",
+      );
+      expectWarningCarriesOnlyItsCount(named.output, 3);
+      expect(named.output).toContain("Missing required tools");
+      expectNothingSent(server.requests);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("dates-only is not a verdict a flag can name: there is nothing to acknowledge", async () => {
+    datedDataset();
+    const server = startServer();
+    try {
+      const r = await upload(
+        ["--yes", "--acknowledge-identifier-preflight", "dates-only"],
+        server.url,
+      );
+      expect(r.exitCode).not.toBe(0);
+      expect(r.output).toContain("Allowed verdicts are");
+      expectNothingSent(server.requests);
+    } finally {
+      server.stop();
+    }
+  });
+
+  test("a direct identifier beside dates is still refused, with the warning above the refusal", async () => {
+    datedDataset();
+    write("sub-04/eeg/sub-04_task-rest_eeg.edf", recording("P04 F X Quillfeather", "09.09.90"));
+    const server = startServer();
+    try {
+      const r = await upload(["--yes"], server.url);
+      expect(r.exitCode).toBe(1);
+      expect(r.output).toContain("Identifier preflight: FOUND IDENTIFIERS");
+      expect(r.output).toContain("Upload refused");
+      // Three dated headers now, and the scans-table row.
+      expectWarningCarriesOnlyItsCount(r.output, 4);
+      expect(r.output.indexOf("Warning: acquisition dates")).toBeLessThan(
+        r.output.indexOf("Upload refused"),
+      );
+      expectNoValue(r.output);
       expectNothingSent(server.requests);
     } finally {
       server.stop();

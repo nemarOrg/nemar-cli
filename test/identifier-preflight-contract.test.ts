@@ -10,6 +10,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { DATE_KINDS } from "../shared/identifier-scan";
 import {
   DATASET_STATUSES,
   type DatasetStatus,
@@ -18,11 +19,13 @@ import {
   PREFLIGHT_ACKNOWLEDGEABLE,
   ReportError,
   type UploaderPreflight,
+  dateWarningLines,
   describePreflight,
   describeScreen,
   foldOddFailures,
   foldOddFormats,
   foldUnknownFormats,
+  isDateWarningLine,
   parsePreflightScan,
   parseUploaderPreflight,
   screenGate,
@@ -314,6 +317,49 @@ describe("describePreflight", () => {
       "Acknowledged by the uploader at the prompt.",
     );
     expect(describePreflight(scan, null).lines).toHaveLength(2);
+  });
+
+  test("dates alone: the same clean headline and tone, the counts, then the date warning", () => {
+    const scan = parsePreflightScan(scanFor("dates-only"));
+    const d = describePreflight(scan, null);
+    expect(d.headline).toBe("Identifier preflight: clean (acquisition dates only)");
+    expect(d.tone).toBe("ok");
+    expect(d.lines).toEqual([
+      "Files: 12; EDF/BDF headers read: 4 of 4.",
+      "Findings by kind: edf-startdate x4.",
+      ...dateWarningLines({ "edf-startdate": 4 }),
+    ]);
+    expect(d.lines[2]).toBe(
+      "Warning: acquisition dates finer than year and month were found in recording headers or scans tables (4 entries).",
+    );
+    // Nothing the uploader must do changes: the gate still clears it with no acknowledgment.
+    expect(screenGate(scan.status)).toBe("clear");
+    expect(parseUploaderPreflight(record("dates-only")).acknowledged_via).toBeNull();
+  });
+
+  test("the warning comes before the acknowledgment lines, and only when a date was counted", () => {
+    const review = parsePreflightScan({
+      ...scanFor("review"),
+      findings_by_kind: { "image-or-document-file": 1, "acq-time-dated": 2 },
+    });
+    const warning = dateWarningLines({ "acq-time-dated": 2 });
+    expect(describePreflight(review, "flag").lines).toEqual([
+      "Files: 12; EDF/BDF headers read: 4 of 4.",
+      "Findings by kind: image-or-document-file x1, acq-time-dated x2.",
+      ...warning,
+      "Acknowledged by the uploader with --acknowledge-identifier-preflight.",
+    ]);
+    // Over every status the scanner can conclude, the warning is there exactly when the
+    // scan's counts include a date kind.
+    for (const status of DATASET_STATUSES) {
+      const scan = scanFor(status) as { findings_by_kind: Record<string, number> };
+      const warned = describePreflight(parsePreflightScan(scan), null).lines.some(
+        isDateWarningLine,
+      );
+      expect(warned).toBe(
+        Object.keys(scan.findings_by_kind).some((k) => DATE_KINDS.has(k as never)),
+      );
+    }
   });
 
   test("a direct finding is described by kind and count", () => {
