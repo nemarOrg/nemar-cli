@@ -147,6 +147,12 @@ export function annexChunkKey(key: string, chunkSize: number, chunkNumber: numbe
   return parts ? chunkObjectName(parts, chunkSize, chunkNumber) : null;
 }
 
+/** The index of one listing, keyed by the Map itself; see {@link firstChunksIn}. */
+const firstChunksCache = new WeakMap<
+  Map<string, number>,
+  { listingSize: number; chunkSizesByKey: ReadonlyMap<string, readonly number[]> }
+>();
+
 /**
  * The chunk sizes each chunked file in a listing was stored at, read off its C1
  * objects: whole-file key -> chunk sizes.
@@ -168,11 +174,6 @@ export function annexChunkKey(key: string, chunkSize: number, chunkNumber: numbe
  * the index only nominates chunk sizes to try, and every chunk is then looked up
  * in the live Map. No caller mutates a listing after its first lookup.
  */
-const firstChunksCache = new WeakMap<
-  Map<string, number>,
-  { listingSize: number; chunkSizesByKey: ReadonlyMap<string, readonly number[]> }
->();
-
 function firstChunksIn(existing: Map<string, number>): ReadonlyMap<string, readonly number[]> {
   const cached = firstChunksCache.get(existing);
   if (cached && cached.listingSize === existing.size) return cached.chunkSizesByKey;
