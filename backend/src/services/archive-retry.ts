@@ -118,6 +118,25 @@ export function resolveCurrentVersion(row: {
 }
 
 /**
+ * SQL predicate for "this dataset has a version": a version DOI, or a
+ * `dataset_versions` row. It is two columns because a released ANONYMOUS
+ * deposit leaves `latest_version_doi` NULL on purpose (#1447) while still
+ * carrying the version row; {@link resolveCurrentVersion} is the same rule
+ * in TypeScript.
+ *
+ * Exported so every sweep that must skip a dataset with nothing published
+ * shares one definition instead of a hand-copied one: ARCHIVE_RETRY_SWEEP_QUERY
+ * and the availability-report sweep's candidacy both build from it, so they
+ * cannot drift. `table` is the name or alias the enclosing query gives
+ * `datasets`; it is interpolated into SQL, so callers pass a literal, never
+ * input.
+ */
+export function datasetHasVersionSql(table: string): string {
+  return `(${table}.latest_version_doi IS NOT NULL
+         OR EXISTS (SELECT 1 FROM dataset_versions dv WHERE dv.dataset_id = ${table}.dataset_id))`;
+}
+
+/**
  * Candidate query for the daily sweep. Exported so the test asserts the exact
  * WHERE logic against a real SQLite db. Binds `MAX_ARCHIVE_RETRIES`.
  *
@@ -141,8 +160,7 @@ export const ARCHIVE_RETRY_SWEEP_QUERY = `SELECT d.dataset_id, d.latest_version_
           ORDER BY created_at DESC LIMIT 1) AS recorded_version
    FROM datasets d
   WHERE d.archive_status = 'failed'
-    AND (d.latest_version_doi IS NOT NULL
-         OR EXISTS (SELECT 1 FROM dataset_versions dv WHERE dv.dataset_id = d.dataset_id))
+    AND ${datasetHasVersionSql("d")}
     AND d.archive_retry_count < ?
     AND (json_extract(d.sweep_stamps, '$.archive_checked_at') IS NULL
          OR json_extract(d.sweep_stamps, '$.archive_checked_at') < datetime('now', '-6 hours'))
