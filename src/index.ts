@@ -32,6 +32,7 @@ import { doctorCommand } from "./commands/doctor.js";
 import { sandboxCommand } from "./commands/sandbox.js";
 import { IS_DEV_BUILD } from "./lib/api/client.js";
 import { MaintenanceError, errorDetail } from "./lib/api/errors.js";
+import { bindShadowedOptionValues } from "./lib/argv-shadowing.js";
 import { runComplete } from "./lib/completion/run.js";
 import { NO_DESCRIPTION, NO_OPTION, YES_DESCRIPTION, YES_OPTION } from "./lib/confirm.js";
 import {
@@ -354,7 +355,9 @@ async function main() {
     process.on("exit", () => printUpdateBanner(pendingUpdate));
   }
 
-  await program.parseAsync();
+  // `nemar dataset release <id> --version X.Y.Z` must reach `release`, not
+  // the root --version (#1493); see lib/argv-shadowing.ts.
+  await program.parseAsync(bindShadowedOptionValues(program, rawArgs), { from: "user" });
 }
 
 main().catch((err) => {
