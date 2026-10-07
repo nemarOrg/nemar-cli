@@ -18,6 +18,11 @@
  * and reads it the same way: everything is taken from the fields before the first
  * `--`, because the name after it is free text for a WORM or URL key. Keep the
  * two consistent.
+ *
+ * PRESENCE. A key is present when its plain object exists at the declared size,
+ * or, only when the plain object is ABSENT, when some chunking of it is complete
+ * (ADR 0064, amendment 2026-10-07). "Present" means recoverable by reassembling
+ * the chunks, not servable: the data plane still addresses the plain key (#1565).
  */
 
 /** The fields and name of a key, split at the first `--`; null when there is none. */
