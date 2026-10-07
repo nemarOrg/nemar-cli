@@ -14,7 +14,6 @@
  */
 
 import { createHash } from "node:crypto";
-import { VERSION_TAG } from "./ledger";
 
 /** `SHA256E-s<size>--<64 hex>[.ext]`, the only key shape the scrub handles. */
 export const ANNEX_KEY = /^SHA256E-s(\d+)--([0-9a-f]{64})(\.[A-Za-z0-9.+]*)?$/;
@@ -493,6 +492,13 @@ function isObject(x: unknown): x is Record<string, unknown> {
 }
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+/**
+ * A version tag the ledger, the change log, the git plan and `--allow-tag` take: `vX.Y.Z` with an
+ * optional pre-release. Declared here so the proof's parser needs nothing from the ledger module,
+ * which re-exports it.
+ */
+export const VERSION_TAG = /^v\d+\.\d+\.\d+(-[A-Za-z0-9.]+)?$/;
 
 /** A count: a non-negative whole number. */
 function isCount(x: unknown): x is number {
