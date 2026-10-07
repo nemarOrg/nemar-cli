@@ -1,114 +1,41 @@
 /**
- * Chunk-aware key presence (Workers copy, services/import-integrity.ts).
+ * Chunk-aware presence through the Worker entry points: compareManifestToListing
+ * and computeVersionIntegrity (services/import-integrity.ts), which feed
+ * `data_complete`, `bytes_present` and the availability report.
  *
- * verifyDatasetVersionS3 -> compareManifestToListing feeds `data_complete`,
- * which `nemar dataset status` prints. nm000276 (chunk=1GiB) showed
- * "incomplete" although every chunk object was in the bucket (#1565).
+ * nm000276 (chunk=1GiB) showed "incomplete" because its chunk objects never matched
+ * a plain key (#1565). The grammar and the presence rules are shared with the CLI
+ * and covered in test/annex-key.unit.test.ts; this file proves the Worker reaches
+ * them, and pins what the Worker adds: which keys are missing, which are zero-byte,
+ * and what the byte totals count.
  */
 
 import { describe, expect, test } from "bun:test";
-import { parseChunkKey } from "../../shared/annex-key";
 import {
   compareManifestToListing,
-  isKeyPresentAtDeclaredSize,
+  computeVersionIntegrity,
 } from "../src/services/import-integrity";
 
 const GiB = 1073741824;
+const MiB512 = 536870912;
 const BASE_EEG = "SHA256E-s2500000000--abc.eeg";
 const chunk = (n: number) => `SHA256E-s2500000000-S${GiB}-C${n}--abc.eeg`;
 const LAST = 2500000000 - 2 * GiB;
 
-describe("chunked annex keys (#1565, nm000276)", () => {
-  test("parseChunkKey recovers the whole-file key", () => {
-    expect(parseChunkKey(chunk(3))).toEqual({ baseKey: BASE_EEG, chunkSize: GiB, chunkNumber: 3 });
-    expect(parseChunkKey("SHA256E-s982-S1073741824-C1--ba3d.vhdr")).toEqual({
-      baseKey: "SHA256E-s982--ba3d.vhdr",
-      chunkSize: GiB,
-      chunkNumber: 1,
-    });
-    expect(parseChunkKey("WORM-s5-m1700000000-S4-C2--name.edf")).toEqual({
-      baseKey: "WORM-s5-m1700000000--name.edf",
-      chunkSize: 4,
-      chunkNumber: 2,
-    });
-    expect(parseChunkKey(BASE_EEG)).toBeNull();
-    expect(parseChunkKey("git:abc")).toBeNull();
-  });
+type Entries = [string, number][];
 
-  test("a key stored only as complete chunks is present", () => {
-    const existing = new Map([
-      [chunk(1), GiB],
-      [chunk(2), GiB],
-      [chunk(3), LAST],
-    ]);
-    expect(isKeyPresentAtDeclaredSize(BASE_EEG, existing)).toBe(true);
-    // A one-chunk file (the .vhdr case from the issue).
-    const small = new Map([["SHA256E-s982-S1073741824-C1--ba3d.vhdr", 982]]);
-    expect(isKeyPresentAtDeclaredSize("SHA256E-s982--ba3d.vhdr", small)).toBe(true);
-  });
+/** BASE_EEG at 1 GiB: two full chunks and a 352,516,352-byte remainder. */
+const complete1G = (): Entries => [
+  [chunk(1), GiB],
+  [chunk(2), GiB],
+  [chunk(3), LAST],
+];
 
-  test("a missing or short chunk makes the key absent", () => {
-    expect(
-      isKeyPresentAtDeclaredSize(
-        BASE_EEG,
-        new Map([
-          [chunk(1), GiB],
-          [chunk(3), LAST],
-        ]),
-      ),
-    ).toBe(false);
-    expect(
-      isKeyPresentAtDeclaredSize(
-        BASE_EEG,
-        new Map([
-          [chunk(1), GiB],
-          [chunk(2), GiB - 1],
-          [chunk(3), LAST],
-        ]),
-      ),
-    ).toBe(false);
-    expect(
-      isKeyPresentAtDeclaredSize(
-        BASE_EEG,
-        new Map([
-          [chunk(1), GiB],
-          [chunk(2), GiB],
-        ]),
-      ),
-    ).toBe(false);
-  });
-
-  test("an empty file stored as one empty chunk is present", () => {
-    expect(
-      isKeyPresentAtDeclaredSize(
-        "SHA256E-s0--e.edf",
-        new Map([["SHA256E-s0-S1048576-C1--e.edf", 0]]),
-      ),
-    ).toBe(true);
-  });
-
-  // FLIPPED from the contributor's version, deliberately: see the CLI twin of this
-  // test (test/chunked-key-availability.unit.test.ts). Chunks are consulted only
-  // when the plain object is absent.
-  test("a truncated plain object is NOT rescued by a complete chunk set", () => {
-    const chunks = [
-      [chunk(1), GiB],
-      [chunk(2), GiB],
-      [chunk(3), LAST],
-    ] as [string, number][];
-    expect(isKeyPresentAtDeclaredSize(BASE_EEG, new Map([[BASE_EEG, 0], ...chunks]))).toBe(false);
-    expect(isKeyPresentAtDeclaredSize(BASE_EEG, new Map([[BASE_EEG, 7], ...chunks]))).toBe(false);
-    expect(isKeyPresentAtDeclaredSize(BASE_EEG, new Map([[BASE_EEG, 7]]))).toBe(false);
-  });
-
-  test("chunks added to a listing after the first lookup are seen", () => {
-    const existing = new Map<string, number>([[chunk(1), GiB]]);
-    expect(isKeyPresentAtDeclaredSize(BASE_EEG, existing)).toBe(false);
-    existing.set(chunk(2), GiB);
-    existing.set(chunk(3), LAST);
-    expect(isKeyPresentAtDeclaredSize(BASE_EEG, existing)).toBe(true);
-  });
-});
+/** BASE_EEG at 512 MiB, first two of five chunks: an attempt that stopped. */
+const partial512 = (): Entries => [
+  [`SHA256E-s2500000000-S${MiB512}-C1--abc.eeg`, MiB512],
+  [`SHA256E-s2500000000-S${MiB512}-C2--abc.eeg`, MiB512],
+];
 
 describe("compareManifestToListing with chunked content", () => {
   test("a fully chunked dataset is complete", () => {
@@ -117,11 +44,9 @@ describe("compareManifestToListing with chunked content", () => {
       "sub-01/ieeg/a.eeg": { key: BASE_EEG, size: 2500000000 },
       README: { key: "git:0123", size: 10 },
     };
-    const existing = new Map([
+    const existing = new Map<string, number>([
       ["SHA256E-s982-S1073741824-C1--ba3d.vhdr", 982],
-      [chunk(1), GiB],
-      [chunk(2), GiB],
-      [chunk(3), LAST],
+      ...complete1G(),
     ]);
     const r = compareManifestToListing(manifest, existing);
     expect(r).toMatchObject({ complete: true, missingKeys: [], expectedCount: 2, presentCount: 2 });
@@ -149,44 +74,43 @@ describe("compareManifestToListing with chunked content", () => {
   });
 
   test("a truncated plain object over complete chunks is missing, and zero-byte only at 0", () => {
+    // A plain object that exists decides the answer, so the chunks beside it do not
+    // rescue it, and the #967 zero-byte distinction is the plain object's own.
     const manifest = { "sub-01/ieeg/a.eeg": { key: BASE_EEG, size: 2500000000 } };
-    const chunks = [
-      [chunk(1), GiB],
-      [chunk(2), GiB],
-      [chunk(3), LAST],
-    ] as [string, number][];
-    const zero = compareManifestToListing(manifest, new Map([[BASE_EEG, 0], ...chunks]));
+    const zero = compareManifestToListing(manifest, new Map([[BASE_EEG, 0], ...complete1G()]));
     expect(zero).toMatchObject({
       complete: false,
       missingKeys: [BASE_EEG],
       zeroByteKeys: [BASE_EEG],
     });
-    const short = compareManifestToListing(manifest, new Map([[BASE_EEG, 7], ...chunks]));
+    const short = compareManifestToListing(manifest, new Map([[BASE_EEG, 7], ...complete1G()]));
     expect(short).toMatchObject({ complete: false, missingKeys: [BASE_EEG], zeroByteKeys: [] });
   });
 
-  test("a partial attempt at one chunk size does not hide a complete set at another", () => {
-    const MiB512 = 536870912;
+  test("an oversized plain object over complete chunks is missing and not zero-byte", () => {
     const manifest = { "sub-01/ieeg/a.eeg": { key: BASE_EEG, size: 2500000000 } };
-    const partial512: [string, number][] = [
-      [`SHA256E-s2500000000-S${MiB512}-C1--abc.eeg`, MiB512],
-      [`SHA256E-s2500000000-S${MiB512}-C2--abc.eeg`, MiB512],
-    ];
-    const complete1G: [string, number][] = [
-      [chunk(1), GiB],
-      [chunk(2), GiB],
-      [chunk(3), LAST],
-    ];
+    const listing = new Map([[BASE_EEG, 2500000001], ...complete1G()]);
+    expect(compareManifestToListing(manifest, listing)).toMatchObject({
+      complete: false,
+      missingKeys: [BASE_EEG],
+      zeroByteKeys: [],
+    });
+  });
+
+  test("a partial attempt at one chunk size does not hide a complete set at another", () => {
+    const manifest = { "sub-01/ieeg/a.eeg": { key: BASE_EEG, size: 2500000000 } };
     for (const entries of [
-      [...partial512, ...complete1G],
-      [...complete1G, ...partial512],
+      [...partial512(), ...complete1G()],
+      [...complete1G(), ...partial512()],
     ]) {
       expect(compareManifestToListing(manifest, new Map(entries))).toMatchObject({
         complete: true,
         missingKeys: [],
       });
     }
-    expect(compareManifestToListing(manifest, new Map(partial512)).missingKeys).toEqual([BASE_EEG]);
+    expect(compareManifestToListing(manifest, new Map(partial512())).missingKeys).toEqual([
+      BASE_EEG,
+    ]);
   });
 
   test("the nm000276 key is incomplete at C94 and complete with the C95 tail", () => {
@@ -212,5 +136,52 @@ describe("compareManifestToListing with chunked content", () => {
     const r = compareManifestToListing(manifest, existing);
     expect(r.complete).toBe(false);
     expect(r.missingKeys).toEqual([BASE_EEG]);
+  });
+});
+
+describe("computeVersionIntegrity with a chunked listing", () => {
+  const files = {
+    "sub-01/ieeg/a.vhdr": { key: "SHA256E-s982--ba3d.vhdr", size: 982 },
+    "sub-01/ieeg/a.eeg": { key: BASE_EEG, size: 2500000000 },
+    README: { key: "git:0123", size: 10 },
+  };
+  const vhdrChunk: Entries = [["SHA256E-s982-S1073741824-C1--ba3d.vhdr", 982]];
+
+  test("a chunked dataset is complete, with every chunk byte counted as present", () => {
+    const listing = new Map<string, number>([...vhdrChunk, ...complete1G()]);
+    const r = computeVersionIntegrity({ version: "1.0.0", files }, listing);
+    expect(r).toMatchObject({
+      complete: true,
+      expectedCount: 2,
+      presentCount: 2,
+      missingKeys: [],
+      bytesPresent: 982 + 2500000000,
+      declaredBytes: 982 + 2500000000 + 10,
+      declaredFiles: 3,
+    });
+  });
+
+  test("a missing chunk makes it incomplete; the chunks that are there still count as bytes", () => {
+    const listing = new Map<string, number>([...vhdrChunk, ...complete1G().slice(0, 2)]);
+    const r = computeVersionIntegrity({ version: "1.0.0", files }, listing);
+    expect(r).toMatchObject({
+      complete: false,
+      expectedCount: 2,
+      presentCount: 1,
+      missingKeys: [BASE_EEG],
+      bytesPresent: 982 + 2 * GiB,
+    });
+  });
+
+  test("bytesPresent counts every stored byte, so two co-existing chunkings both count", () => {
+    // INTENDED. bytesPresent is the physical content under <id>/objects/ (what the
+    // bucket holds and bills), distinct from declaredBytes, the logical size. A
+    // finished 1 GiB chunking beside an abandoned 512 MiB attempt stores both, so
+    // both are counted. Completeness is a separate question and stays true.
+    const listing = new Map<string, number>([...vhdrChunk, ...partial512(), ...complete1G()]);
+    const r = computeVersionIntegrity({ version: "1.0.0", files }, listing);
+    expect(r.complete).toBe(true);
+    expect(r.bytesPresent).toBe(982 + 2 * MiB512 + 2500000000);
+    expect(r.declaredBytes).toBe(982 + 2500000000 + 10);
   });
 });
