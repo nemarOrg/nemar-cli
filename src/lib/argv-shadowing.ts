@@ -116,6 +116,12 @@ export function bindShadowedOptionValues(root: Command, argv: string[]): string[
   const shadowed = shadowedOptions(current, ancestors);
   if (shadowed.size === 0) return argv;
 
+  // Help outranks a missing value: asking for it is a request to read, not run.
+  const dashDash = argv.indexOf("--");
+  const helpRequested = argv
+    .slice(0, dashDash < 0 ? argv.length : dashDash)
+    .some((token) => token === "--help" || token === "-h");
+
   const out = argv.slice(0, leafIndex + 1);
   for (let i = leafIndex + 1; i < argv.length; i++) {
     const token = argv[i];
@@ -132,6 +138,9 @@ export function bindShadowedOptionValues(root: Command, argv: string[]): string[
     if (next !== undefined && next !== "" && !next.startsWith("-")) {
       out.push(`${token}=${next}`);
       i++;
+    } else if (helpRequested) {
+      // Drop the bare flag: left in, the root claims it and prints the CLI
+      // version instead of the help that was asked for.
     } else if (option.required) {
       throw new MissingShadowedValueError(current, option);
     } else {
