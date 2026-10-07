@@ -55,6 +55,15 @@ const CASE_MATCH_EXAMPLES_MAX = (() => {
   return Number(match[1]);
 })();
 
+/** One of the converter's integer constants for the `trial_types` key rule, read
+ *  from its source for the same reason as the bounds above. */
+function pythonConstant(name: string): number {
+  const source = readFileSync(new URL("../scripts/zarr/generate_zarr.py", import.meta.url), "utf8");
+  const match = new RegExp(`^${name} = (\\d+)$`, "m").exec(source);
+  if (!match) throw new Error(`${name} not found in generate_zarr.py`);
+  return Number(match[1]);
+}
+
 const examples = (n: number) => Array.from({ length: n }, (_, i) => `X${i}`);
 
 /** A fresh compiler per test: Ajv caches by `$id`, and the mutation tests
@@ -362,6 +371,23 @@ describe("zarr-index.schema.json and contract/zarr-index.ts agree on required fi
     expect(disagreements).toEqual([]);
   });
 
+  test("a trial_types key of any length is accepted by both, on purpose", () => {
+    // Neither the schema nor zod bounds a trial_types key. The converter keys a
+    // value over 128 code points by a 28-character digest form (see
+    // test_generate_zarr.py), but the live nm000229 index still carries long
+    // literal keys until it republishes, and the schema is served publicly at
+    // /schemas/zarr-index-v3.json, so tightening it would make that published
+    // document invalid. The bound is the converter's, not the contract's.
+    const doc = structuredClone(indexFixture) as { stores: Array<Record<string, unknown>> };
+    doc.stores[0].n_events = 4;
+    doc.stores[0].trial_types = {
+      ["{'story': 'easy_money', ".padEnd(300, "x")]: 2,
+      "{'story': 'ea~97ecccec881a7c": 1,
+      go: 1,
+    };
+    expect(bothAccept(doc)).toEqual({ ajv: true, zod: true });
+  });
+
   test("an unknown field is refused by the producer's gate and tolerated by consumers", () => {
     // The one asymmetry that is on purpose. If this test ever fails because
     // the two now agree, decide which way deliberately rather than "fixing"
@@ -371,5 +397,74 @@ describe("zarr-index.schema.json and contract/zarr-index.ts agree on required fi
     const doc = structuredClone(indexFixture) as Record<string, unknown>;
     doc.some_field_no_producer_declares = 1;
     expect(bothAccept(doc)).toEqual({ ajv: false, zod: true });
+  });
+});
+
+/**
+ * The `trial_types` key rule is stated in three places on this side (the
+ * schema's field description, its stability `$comment`, and the zod contract's
+ * comment) and implemented in `generate_zarr.py`. The numbers in the prose are
+ * checked against the converter's constants, as the bounds above are, so a
+ * change of limit or key shape that forgets one of them fails here.
+ */
+describe("the trial_types key rule in the contract text matches the converter", () => {
+  const limit = pythonConstant("TRIAL_TYPE_KEY_MAX");
+  const prefix = pythonConstant("_TRIAL_TYPE_PREFIX_CHARS");
+  const digest = pythonConstant("_TRIAL_TYPE_DIGEST_CHARS");
+  const keyLength = prefix + "~".length + digest;
+
+  const schemaDescription = (() => {
+    const found: string[] = [];
+    const walk = (node: unknown): void => {
+      if (Array.isArray(node)) {
+        for (const item of node) walk(item);
+        return;
+      }
+      if (node === null || typeof node !== "object") return;
+      const record = node as Record<string, unknown>;
+      const field = record.trial_types as { description?: string } | undefined;
+      if (field && typeof field.description === "string") found.push(field.description);
+      Object.values(record).forEach(walk);
+    };
+    walk(indexSchema);
+    if (found.length !== 1)
+      throw new Error(`expected one trial_types description, got ${found.length}`);
+    return found[0];
+  })();
+  const stability = (indexSchema as { $comment: string }).$comment;
+  const zodSource = readFileSync(
+    new URL("../shared/contract/zarr-index.ts", import.meta.url),
+    "utf8",
+  );
+  const zodComment = (() => {
+    const end = zodSource.indexOf("trial_types: z.record");
+    const start = zodSource.lastIndexOf("/**", end);
+    if (end < 0 || start < 0) throw new Error("trial_types comment not found in zarr-index.ts");
+    return zodSource.slice(start, end).replace(/\s*\*\s*/g, " ");
+  })();
+
+  test("the limit and the key shape are the published 128, 13, 14 and 28", () => {
+    // The numbers clients hard-code. If the converter changes them on purpose,
+    // this is the line to change with the contract text below.
+    expect([limit, prefix, digest, keyLength]).toEqual([128, 13, 14, 28]);
+  });
+
+  test("the schema description states them", () => {
+    expect(schemaDescription).toContain(`${limit} Unicode code points`);
+    expect(schemaDescription).toContain(`first ${prefix} code points`);
+    expect(schemaDescription).toContain(`first ${digest} hex digits`);
+    expect(schemaDescription).toContain(`${keyLength} characters`);
+  });
+
+  test("the stability note states the limit and the key length", () => {
+    expect(stability).toContain(`longer than ${limit} code points`);
+    expect(stability).toContain(`${keyLength}-character digest form`);
+  });
+
+  test("the zod contract comment states them", () => {
+    expect(zodComment).toContain(`${limit} Unicode code points`);
+    expect(zodComment).toContain(`first ${prefix} code points`);
+    expect(zodComment).toContain(`${digest} hex digits`);
+    expect(zodComment).toContain(`(${keyLength} characters)`);
   });
 });

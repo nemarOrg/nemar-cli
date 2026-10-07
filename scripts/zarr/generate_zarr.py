@@ -56,6 +56,7 @@ import argparse
 import contextlib
 import csv
 import errno
+import hashlib
 import io
 import json
 import math
@@ -3096,6 +3097,77 @@ def parse_events_tsv(events_text: str | None) -> ParsedEvents | None:
     }
 
 
+# A trial_type is a label, so the index keys its counts by the value itself. Some
+# datasets put a record there instead: nm000229 (MEG-MASC) writes the whole
+# stringified row ("{'story': 'easy_money', ..., 'start': 93.72, ...}", about 290
+# characters) into the column for some recordings, so no two of their events share
+# a value and the index holds a key of that length per event. A value longer than
+# TRIAL_TYPE_KEY_MAX Unicode code points is therefore keyed by a fixed
+# 28-character form, `<first 13 code points>~<first 14 hex digits of the SHA-256
+# of the value's UTF-8 bytes>`. Counts stay per DISTINCT value, so nothing is merged
+# and the sum of the counts is unchanged; the full value remains in the
+# `trial_type` column of events.parquet (when that file is published), which is
+# the lossless record. 128 keeps every ordinary label as itself: the longest label
+# key in the other published datasets is 104 characters, while a whole-record
+# value is at least 120.
+TRIAL_TYPE_KEY_MAX = 128
+_TRIAL_TYPE_PREFIX_CHARS = 13
+_TRIAL_TYPE_DIGEST_CHARS = 14
+_TRIAL_TYPE_SEPARATOR = "~"
+TRIAL_TYPE_DIGEST_KEY_LEN = (
+    _TRIAL_TYPE_PREFIX_CHARS + len(_TRIAL_TYPE_SEPARATOR) + _TRIAL_TYPE_DIGEST_CHARS
+)
+if TRIAL_TYPE_DIGEST_KEY_LEN > TRIAL_TYPE_KEY_MAX:
+    # Idempotence of shorten_trial_types rests on this: a digest key must itself
+    # count as a key that fits.
+    raise RuntimeError("a trial_type digest key must be no longer than TRIAL_TYPE_KEY_MAX")
+
+
+def trial_type_key(value: str, salt: int = 0) -> str:
+    """The key standing for a `trial_type` value longer than TRIAL_TYPE_KEY_MAX
+    (it is not defined for a shorter one, which is its own key): its first 13
+    code points, `~`, and 14 hex digits of a SHA-256, 28 characters in all.
+
+    The digest is over the value's UTF-8 bytes when `salt` is 0, which is the key a
+    reader computes from a value in events.parquet unless that key was already
+    taken. A key can be taken (a hash collision, or a short value shaped like a
+    key), and `shorten_trial_types` then steps `salt` to 1, 2, ... and hashes the
+    UTF-8 bytes of the decimal salt, one NUL byte, then the value, instead."""
+    material = value if salt == 0 else f"{salt}\0{value}"
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+    return (
+        f"{value[:_TRIAL_TYPE_PREFIX_CHARS]}{_TRIAL_TYPE_SEPARATOR}"
+        f"{digest[:_TRIAL_TYPE_DIGEST_CHARS]}"
+    )
+
+
+def shorten_trial_types(counts: dict[str, int]) -> dict[str, int]:
+    """`counts` re-keyed so that no key is longer than TRIAL_TYPE_KEY_MAX, sorted
+    by key.
+
+    A value of TRIAL_TYPE_KEY_MAX code points or fewer is its own key. A longer one
+    gets `trial_type_key(value)`, and keys are unique by construction: values that
+    fit claim their own key first, then the long values sorted by code point, and one
+    whose key is taken (a hash collision, or a short value that happens to look
+    like one) is re-hashed with the next salt. The result therefore depends only on
+    the set of values, never on the order they arrived in, and the counts are never
+    summed together.
+
+    Idempotent: every key it returns fits, so applying it to its own output (or
+    to an index entry written by this function) changes nothing. That is what
+    lets `_normalize_store_entry` re-key an entry carried over from an older run.
+    """
+    shortened = {v: n for v, n in counts.items() if len(v) <= TRIAL_TYPE_KEY_MAX}
+    for value in sorted(v for v in counts if len(v) > TRIAL_TYPE_KEY_MAX):
+        salt = 0
+        key = trial_type_key(value)
+        while key in shortened:
+            salt += 1
+            key = trial_type_key(value, salt)
+        shortened[key] = counts[value]
+    return dict(sorted(shortened.items()))
+
+
 def events_summary_of(parsed: ParsedEvents | None) -> dict:
     """`{n_events, trial_types}` for a parsed events.tsv, or `{}` when none
     applies.
@@ -3109,6 +3181,12 @@ def events_summary_of(parsed: ParsedEvents | None) -> dict:
     row is `n/a`); the absence of both keys means there was no events.tsv at all.
     The distinction matters to a consumer deciding whether "no trial types" is a
     property of the data or of the pipeline.
+
+    A `trial_types` key is the value itself when it has TRIAL_TYPE_KEY_MAX code
+    points or fewer, and `trial_type_key(value)` otherwise (see
+    `shorten_trial_types`), so a store's entry has at most one key per event and
+    no key is longer than TRIAL_TYPE_KEY_MAX. Values are measured after stripping,
+    and blank or `n/a` values are not counted at all.
     """
     if parsed is None:
         return {}
@@ -3125,7 +3203,7 @@ def events_summary_of(parsed: ParsedEvents | None) -> dict:
             if not value or value.lower() == EVENTS_NA:
                 continue
             counts[value] = counts.get(value, 0) + 1
-    return {"n_events": len(parsed["rows"]), "trial_types": dict(sorted(counts.items()))}
+    return {"n_events": len(parsed["rows"]), "trial_types": shorten_trial_types(counts)}
 
 
 def events_summary(events_text: str | None) -> dict:
@@ -4324,8 +4402,18 @@ def _normalize_store_entry(entry: dict) -> StoreEntry:
     Every entry this reaches is raw by construction: `merge_index` drops a
     carried-over store whose path is excluded from discovery (they are being
     purged, not served), so `source_tree` is the only value the schema allows.
+
+    `trial_types` is re-keyed through `shorten_trial_types`, which is not a change
+    of shape (format_version stays 3) but does drop the full text of a long value
+    from index.json. An entry written before that limit existed (a dataset whose
+    events carry a whole record, such as nm000229) is thereby brought to the same
+    form a fresh conversion produces, on the next merge and without reconverting
+    the store; an entry already in the new form is unchanged.
     """
     out: StoreEntry = {k: v for k, v in entry.items() if k != "source_key"}  # type: ignore[assignment]
+    trial_types = out.get("trial_types")
+    if isinstance(trial_types, dict):
+        out["trial_types"] = shorten_trial_types(trial_types)
     out.setdefault("source_tree", source_tree_for(str(out.get("path", ""))))
     out.setdefault("derived", bool(out.get("sss")))
     return out
@@ -4570,7 +4658,9 @@ def merge_index(
 
     `converted` is a list of store entries (each carries a `zarr` rel-path key);
     `removed_store_rels` are `*.zarr` rels to drop. Entries for unchanged stores
-    are carried over from `prior`, normalized to the v3 shape.
+    are carried over from `prior`, normalized to the v3 shape (which includes
+    re-keying a long `trial_types` value by its digest form, see
+    `_normalize_store_entry`).
 
     `failures` is this run's typed data failures ({path, zarr, code, reason,
     detail}) -- recordings that will not convert without a change to the data or
