@@ -75,6 +75,24 @@ there instead of as two opaque "Bad credentials (HTTP 401)" test failures.
 - **Secrets:** Never commit credentials
 - **Conditional:** Deploy only from protected branches
 
+## Docs-only commits: `[skip ci]`
+
+A commit that changes only documentation (`CHANGELOG.md`, Markdown under `.context/`,
+`AGENTS.md`, `.rules/`) may go straight to `dev`, without a pull request, with `[skip ci]` in
+its message.
+GitHub's marker is per commit: it skips every workflow for that push, including `Auto Bump Dev`
+and the dev deploy.
+
+Never use it:
+
+- on a commit that changes code, tests, workflows or configuration;
+- as the head commit of a release pull request (`dev` to `main`), or of any pull request with
+  required checks: the checks of a skipped head never run and the merge stays blocked, so push a
+  real commit on top;
+- on `main` or on a commit that gets a tag (`auto-tag.yml` explains why: a skipped push also
+  blocks `npm-publish.yml`);
+- in a pull request title or body.
+
 ## Pipeline Philosophy
 **Fast feedback:** Developers should know in <5 min
 **Clear failures:** Error messages should guide fixes
