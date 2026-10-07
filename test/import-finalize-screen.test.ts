@@ -8,8 +8,11 @@
  * Everything the importer decides runs for real, including the CLI's own API client and its error
  * parsing of a gate refusal.
  *
- * The account config is written to a scratch config directory and the API URL is checked before
- * every test, so a leaked environment cannot point this file at a live backend.
+ * The account config is written to a scratch config directory, and TEST_API_URL, which the API
+ * client prefers over any config, is pointed at this file's server for the file's duration and
+ * restored after: `test/setup.ts` sets it to a blocked address at import time when there is no live
+ * target, and in a single-process run that value reaches every later file. The URL is checked before
+ * every test, so nothing here can reach a live backend.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
@@ -176,6 +179,8 @@ beforeAll(() => {
   );
   savedEnv.NEMAR_CONFIG_DIR = process.env.NEMAR_CONFIG_DIR;
   process.env.NEMAR_CONFIG_DIR = configDir;
+  savedEnv.TEST_API_URL = process.env.TEST_API_URL;
+  process.env.TEST_API_URL = `http://localhost:${server.port}`;
 });
 
 afterAll(() => {
@@ -184,6 +189,9 @@ afterAll(() => {
   if (savedEnv.NEMAR_CONFIG_DIR === undefined)
     Reflect.deleteProperty(process.env, "NEMAR_CONFIG_DIR");
   else process.env.NEMAR_CONFIG_DIR = savedEnv.NEMAR_CONFIG_DIR;
+  // Reflect.deleteProperty, never `= undefined`, which stores the string "undefined".
+  if (savedEnv.TEST_API_URL === undefined) Reflect.deleteProperty(process.env, "TEST_API_URL");
+  else process.env.TEST_API_URL = savedEnv.TEST_API_URL;
 });
 
 beforeEach(() => {
