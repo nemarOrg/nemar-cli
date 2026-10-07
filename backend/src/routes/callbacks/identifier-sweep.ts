@@ -9,7 +9,8 @@
  * identifier-sweep kind (domain-tagged, over the dataset id and the attempt's
  * nonce) and its row is the dataset's. One-shot: the nonce is found only while
  * the attempt waits for its report (`pending`, or `unreported` so a late report
- * still lands), and storing a result clears it, so a replay gets 401.
+ * still lands, for a bounded time), and storing a result clears it, so a
+ * replay gets 401.
  *
  * Body: `{ dataset_id, request_id, workflow_run_id?, report }`; the sweep
  * dispatches `request_id` 0. Every field is untrusted: `dataset_id` and
@@ -25,34 +26,19 @@ import { isValidDatasetId } from "../../services/datasetId.js";
 import { verifyIdentifierSweepCallbackToken } from "../../services/github.js";
 import { IDENTIFIER_SWEEP_NONCE_SQL, storeSweepResult } from "../../services/identifier-sweep.js";
 import type { WebhookRouter } from "../webhooks/shared.js";
-import { MAX_CALLBACK_BODY_BYTES } from "./identifier-screen.js";
+import { readBoundedJsonObject } from "./bounded-json.js";
 
 /** One answer for every refusal of the token, so it does not say which datasets have a screen running. */
 const UNAUTHORIZED = { error: "Invalid or expired callback token" } as const;
 
-export function registerIdentifierSweepRoutes(webhooks: WebhookRouter): void {
+export function registerIdentifierSweepCallbackRoutes(webhooks: WebhookRouter): void {
   webhooks.post("/identifier-sweep-result", async (c) => {
     const token = c.req.header("X-Webhook-Token");
     if (!token) return c.json(UNAUTHORIZED, 401);
 
-    const declared = Number(c.req.header("Content-Length") ?? "0");
-    if (Number.isFinite(declared) && declared > MAX_CALLBACK_BODY_BYTES) {
-      return c.json({ error: "Body too large" }, 413);
-    }
-    let body: unknown;
-    try {
-      const raw = new Uint8Array(await c.req.arrayBuffer());
-      if (raw.byteLength > MAX_CALLBACK_BODY_BYTES) {
-        return c.json({ error: "Body too large" }, 413);
-      }
-      body = JSON.parse(new TextDecoder().decode(raw));
-    } catch {
-      return c.json({ error: "Invalid JSON in request body" }, 400);
-    }
-    if (typeof body !== "object" || body === null || Array.isArray(body)) {
-      return c.json({ error: "Body must be a JSON object" }, 400);
-    }
-    const b = body as Record<string, unknown>;
+    const read = await readBoundedJsonObject(c);
+    if (!read.ok) return c.json({ error: read.error }, read.status);
+    const b = read.body;
     if (typeof b.dataset_id !== "string" || !isValidDatasetId(b.dataset_id)) {
       return c.json({ error: "dataset_id must be a dataset id" }, 400);
     }
