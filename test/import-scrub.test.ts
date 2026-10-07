@@ -368,6 +368,10 @@ describe("a first import of a tree with identifiers", () => {
     const oldKey = await keyAt(clone, FLAGGED_ANNEXED);
     const cleanKey = await keyAt(clone, CLEAN_ANNEXED);
     expect(view.keyUrlMap.has(oldKey)).toBe(true);
+    // Prepare has staged root metadata of its own by step 5b (ensureRootMetadataUnannexed); it
+    // belongs to a later commit, not to the privacy correction.
+    writeFileSync(join(clone, "dataset_description.json"), `{"Name": "fixture, restaged"}\n`);
+    await run(["git", "-c", "annex.largefiles=nothing", "add", "dataset_description.json"], clone);
 
     const result = await prepare(clone, view);
 
@@ -445,7 +449,12 @@ describe("a first import of a tree with identifiers", () => {
     expect(committed).toContain(".nemar/corrections.jsonl");
     expect(committed).toContain(SIDECAR);
     expect(committed).toContain(FLAGGED_ANNEXED);
+    expect(committed).not.toContain("dataset_description.json");
     expect(await headCommit(clone)).toContain("Apply NEMAR annex policy");
+    // The staged metadata still landed, in the commit after the scrub.
+    expect(await run(["git", "show", "HEAD:dataset_description.json"], clone)).toContain(
+      "restaged",
+    );
 
     // Nothing the scrub returns carries a value.
     expectNoSecret(JSON.stringify(result.scrub.counts));

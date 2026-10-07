@@ -851,7 +851,7 @@ export async function scrubImportedTree(input: ImportScrubInput): Promise<Import
     const provenance = join(datasetPath, PROVENANCE_PATH);
     if (tracked.includes(PROVENANCE_PATH) && isRegularFile(provenance)) {
       const text = readFileSync(provenance, "utf8");
-      const bom = text.charCodeAt(0) === 0xfeff ? "﻿" : "";
+      const bom = text.charCodeAt(0) === 0xfeff ? String.fromCharCode(0xfeff) : "";
       const next = setTopLevelString(
         text.slice(bom.length),
         PROVENANCE_NOTE_KEY,
@@ -899,8 +899,22 @@ export async function scrubImportedTree(input: ImportScrubInput): Promise<Import
       `Images and documents left for review: ${counts.images_or_documents_held}.`,
       `Recorded in ${LEDGER_REPO_PATH}.`,
     ].join("\n");
+    // Only the scrub's own paths: prepare has staged other changes by now (root metadata it
+    // un-annexed), and they belong to the commits that describe them, not to this one.
+    const paths = [...new Set([...toStage, ...annexTargets.map((t) => t.path)])];
     const commit = await runCommand(
-      ["git", "commit", "-m", "Privacy correction on import (ADR 0087)", "-m", body],
+      [
+        "git",
+        "-c",
+        "annex.largefiles=nothing",
+        "commit",
+        "-m",
+        "Privacy correction on import (ADR 0087)",
+        "-m",
+        body,
+        "--",
+        ...paths,
+      ],
       { cwd: datasetPath },
     );
     if (commit.exitCode !== 0) throw new Error("could not commit the import scrub");
