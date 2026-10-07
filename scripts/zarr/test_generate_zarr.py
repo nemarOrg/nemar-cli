@@ -4985,6 +4985,150 @@ class TestPoolBreakReclaimsScratch(unittest.TestCase):
         self.assertNotIn("reclaimed", out.getvalue())
 
 
+class TestScratchAdmissionDecision(unittest.TestCase):
+    GIB = 1024**3
+
+    def test_a_recording_that_does_not_fit_scratch_waits_for_one_that_does(self):
+        # Running 100 of a 150 budget: the 80 behind the head cannot fit, the 40 can.
+        idx = _next_admission(
+            [1, 1], 1, 0, 4, 100,
+            pending_scratch=[80, 40], running_scratch=100, scratch_budget=150,
+        )
+        self.assertEqual(idx, 1)
+
+    def test_scratch_has_no_run_alone_exception(self):
+        # RAM lets an oversized head run alone because its own preflight skips it
+        # cleanly. A recording the DISK cannot hold would download for hours and
+        # then fail, so it is never admitted, even with nothing in flight.
+        self.assertIsNone(
+            _next_admission(
+                [1], 0, 0, 4, 100,
+                pending_scratch=[200], running_scratch=0, scratch_budget=150,
+            )
+        )
+
+    def test_ram_still_runs_an_oversized_head_alone_when_scratch_fits(self):
+        self.assertEqual(
+            _next_admission(
+                [10**12], 0, 0, 4, 100,
+                pending_scratch=[10], running_scratch=0, scratch_budget=150,
+            ),
+            0,
+        )
+
+    def test_without_a_scratch_budget_nothing_changes(self):
+        self.assertEqual(_next_admission([10**12], 0, 0, 4, 100), 0)
+        self.assertEqual(
+            _next_admission([30, 10], 1, 50, 4, 100, pending_scratch=[10**15, 10**15]), 0
+        )
+
+    def test_a_recording_exactly_at_the_budget_is_admitted(self):
+        self.assertEqual(
+            _next_admission(
+                [1], 1, 0, 4, 100, pending_scratch=[50], running_scratch=100, scratch_budget=150
+            ),
+            0,
+        )
+
+    def test_a_streamed_recording_is_charged_the_streaming_factor(self):
+        size = 10 * self.GIB
+        got = generate_zarr.scratch_peak_bytes("sub-01/ieeg/sub-01_task-x_ieeg.vhdr", size)
+        self.assertEqual(got, int(size * generate_zarr.SCRATCH_STREAM_FACTOR))
+
+    def test_a_small_or_unstreamable_recording_is_charged_the_in_memory_factor(self):
+        small = 100 * 1024**2  # under the 256 MiB streaming threshold
+        self.assertEqual(
+            generate_zarr.scratch_peak_bytes("sub-01/ieeg/sub-01_task-x_ieeg.vhdr", small),
+            int(small * generate_zarr.SCRATCH_INMEM_FACTOR),
+        )
+        # EEGLAB .set never streams (ADR 0030), whatever its size.
+        big = 5 * self.GIB
+        self.assertEqual(
+            generate_zarr.scratch_peak_bytes("sub-01/eeg/sub-01_task-x_eeg.set", big),
+            int(big * generate_zarr.SCRATCH_INMEM_FACTOR),
+        )
+
+    def test_the_default_factor_covers_the_measured_nm000276_peak(self):
+        # raw 1.00x + float32 memmap 1.00x + int16 memmap 0.50x + views 0.33x
+        # was observed at 2.83x on that dataset; the charge must not be below it.
+        self.assertGreaterEqual(generate_zarr.SCRATCH_STREAM_FACTOR, 2.83)
+
+
+class TestLiveScratchBudget(unittest.TestCase):
+    def test_what_the_run_already_holds_is_not_charged_twice(self):
+        # Writing a file lowers the volume's free space and raises what the run
+        # holds by the same amount, so the budget (their sum) must not move.
+        with tempfile.TemporaryDirectory() as root:
+            before = generate_zarr.live_scratch_budget(root, headroom=0)
+            with open(os.path.join(root, "blob"), "wb") as fh:
+                fh.write(os.urandom(32 * 1024**2))
+                fh.flush()
+                os.fsync(fh.fileno())
+            after = generate_zarr.live_scratch_budget(root, headroom=0)
+        self.assertIsNotNone(before)
+        self.assertIsNotNone(after)
+        self.assertLess(abs(after - before), 256 * 1024**2)
+
+    def test_headroom_is_subtracted_and_the_budget_is_never_negative(self):
+        with tempfile.TemporaryDirectory() as root:
+            plain = generate_zarr.live_scratch_budget(root, headroom=0)
+            self.assertEqual(generate_zarr.live_scratch_budget(root, headroom=10**18), 0)
+            self.assertIsNotNone(plain)
+
+    def test_an_unreadable_volume_turns_the_gate_off(self):
+        self.assertIsNone(generate_zarr.live_scratch_budget("/no/such/scratch/root"))
+
+
+class TestDrainAdmitsAgainstScratch(unittest.TestCase):
+    """The drain charges scratch like RAM: what fits runs, what waits is admitted
+    when something finishes, and what can never fit is handed back unreported."""
+
+    PRIMARIES = tuple(f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest_eeg.set" for i in range(1, 4))
+
+    def _drain(self, scratch_peaks, budget, cpu_cap=3, deferred=None):
+        results = []
+        _drain_with_admission(
+            list(scratch_peaks), {p: 1024 for p in scratch_peaks}, cpu_cap, 10**12, {},
+            lambda r, i: results.append(r), worker=_timed_worker,
+            scratch_peaks=scratch_peaks, scratch_budget=lambda: budget, deferred=deferred,
+        )
+        return results
+
+    def test_a_tight_budget_runs_recordings_one_at_a_time(self):
+        peaks = {p: 100 for p in self.PRIMARIES}
+        spans = sorted(r["span"] for r in self._drain(peaks, budget=150))
+        self.assertEqual(len(spans), 3)
+        for earlier, later in itertools.pairwise(spans):
+            self.assertGreaterEqual(later[0], earlier[1] - 0.01)
+
+    def test_a_roomy_budget_runs_them_together(self):
+        peaks = {p: 100 for p in self.PRIMARIES}
+        spans = sorted(r["span"] for r in self._drain(peaks, budget=1000))
+        self.assertLess(spans[1][0], spans[0][1], "the second started before the first ended")
+
+    def test_a_recording_that_can_never_fit_is_deferred_not_reported(self):
+        a, b, c = self.PRIMARIES
+        deferred: list[str] = []
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            results = self._drain({b: 500, a: 50, c: 50}, budget=150, cpu_cap=2, deferred=deferred)
+        self.assertEqual(sorted(r["primary"] for r in results), [a, c])
+        self.assertTrue(all(r["ok"] for r in results))
+        self.assertEqual(deferred, [b])
+        self.assertIn("deferring 1 recording(s)", out.getvalue())
+
+    def test_it_terminates_when_every_recording_is_too_large(self):
+        deferred: list[str] = []
+        with contextlib.redirect_stdout(io.StringIO()):
+            results = self._drain({p: 500 for p in self.PRIMARIES}, budget=150, deferred=deferred)
+        self.assertEqual(results, [])
+        self.assertEqual(sorted(deferred), sorted(self.PRIMARIES))
+
+    def test_an_unconsumed_deferral_does_not_crash_a_caller_that_ignores_it(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            results = self._drain({p: 500 for p in self.PRIMARIES}, budget=150)
+        self.assertEqual(results, [])
+
+
 class TestSerialMemoryRetry(unittest.TestCase):
     """#1483: a recording that exceeds its memory reserve is retried ONCE, alone,
     at the end of the run, with the budget the node offers then. Before, it waited
@@ -10610,6 +10754,57 @@ class TestMainRetryPendingRound(unittest.TestCase):
         self.assertEqual(rc, 0, log)
         self.assertNotIn("--retry-pending", log)
         self.assertIn(f"converted {self.A}", log)
+
+
+    def _no_scratch(self):
+        # Headroom larger than any volume leaves a budget of zero, so no recording
+        # fits and every one is deferred.
+        saved = generate_zarr.SCRATCH_HEADROOM_BYTES
+        generate_zarr.SCRATCH_HEADROOM_BYTES = 10**18
+        self.addCleanup(setattr, generate_zarr, "SCRATCH_HEADROOM_BYTES", saved)
+
+    def _assert_deferred_without_spending_attempts(self, rc, log, body):
+        self.assertEqual(rc, 0, log)
+        self.assertIn("deferring", log)
+        self.assertNotIn("conversion(s) failed", log)
+        self.assertNotIn(f"converted {self.A}", log)
+        self.assertNotIn(f"converted {self.B}", log)
+        index = self.published_index()
+        self.assertEqual(index["stores"], [])
+        self.assertEqual(
+            sorted((p["path"], p["reason"], p["attempts"]) for p in index["pending"]),
+            [(self.A, "not_attempted", 0), (self.B, "not_attempted", 0)],
+        )
+        self.assertEqual(body["not_attempted_count"], 2)
+        self.assertEqual(body["status"], "ready")
+        check_index_invariant(index)
+        validate_document(index, INDEX_SCHEMA_PATH, "index")
+
+    def test_a_pool_run_that_cannot_fit_scratch_defers_instead_of_failing(self):
+        self._no_scratch()
+        self._assert_deferred_without_spending_attempts(*self.run_main("--retry-pending"))
+
+    def test_a_deferred_retry_spends_no_attempt(self):
+        # The contrast with `test_a_round_that_converts_nothing_still_advances_the
+        # _attempts`: there B was tried and failed, so its count went to 2. Here the
+        # node had no room to try, so the count stays at 1 and nothing is closer to
+        # `retry_exhausted` than before. A disk-full node must not be able to
+        # promote healthy recordings into permanent failures.
+        self.first_round()
+        self._no_scratch()
+        rc, log, body = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("deferring", log)
+        index = self.published_index()
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+        self.assertEqual([(p["path"], p["attempts"]) for p in index["pending"]], [(self.B, 1)])
+        self.assertEqual(index["failures"], [])
+
+    def test_a_serial_run_that_cannot_fit_scratch_defers_instead_of_failing(self):
+        self._no_scratch()
+        self._assert_deferred_without_spending_attempts(
+            *self.run_main("--retry-pending", "--jobs", "1")
+        )
 
 
 class TestLiveAdmissionCeiling(unittest.TestCase):

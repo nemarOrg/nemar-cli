@@ -1327,6 +1327,60 @@ def per_recording_ceiling_bytes() -> int:
     return usable_ram_bytes()
 
 
+# --- Scratch-disk admission -----------------------------------------------------
+# RAM was the only resource admission charged, and the streaming path's scratch is
+# the one that ran out. A streaming recording first lands whole on scratch (the raw
+# blob), then becomes a channel-major float32 memmap, then an int16 memmap plus the
+# view pyramid; the memmap and the outputs coexist with the raw copy at the end of
+# pass 2, which is the recording's peak. Measured on nm000276 sub-03 (a float32
+# BrainVision recording of 114,458,234,880 bytes) just before the node filled up:
+#
+#     raw 1.00x + float32 memmap 1.00x + int16 memmap 0.50x + views 0.33x = 2.83x
+#
+# so a 177 GiB recording needs ~500 GiB at once against ~535 GiB of free scratch, and
+# 24 workers admitted by RAM alone (~4.7 GiB each) had no chance. A recording stored
+# in fewer bytes per sample (int16 BrainVision, EDF) expands more, so this factor is
+# the float32 figure plus margin, not a bound; a miss costs one retryable ENOSPC,
+# which `reclaim_recording_scratch` now keeps from cascading.
+SCRATCH_STREAM_FACTOR = float(os.environ.get("ZARR_SCRATCH_STREAM_FACTOR", "3.0"))
+# In-memory path: the raw copy plus the store it writes. Those recordings are small
+# by construction (the streaming threshold is 256 MiB) or have no streaming reader.
+SCRATCH_INMEM_FACTOR = float(os.environ.get("ZARR_SCRATCH_INMEM_FACTOR", "2.0"))
+# Left unspoken for: other tenants share the volume and grow while a run lasts hours,
+# and `aws s3 cp` keeps partial files beside the chunks it is assembling.
+SCRATCH_HEADROOM_BYTES = int(
+    os.environ.get("ZARR_SCRATCH_HEADROOM_BYTES", str(10 * 1024**3))
+)
+
+
+def scratch_peak_bytes(primary: str, size_bytes: int) -> int:
+    """Projected peak scratch for one recording: its on-disk bytes times the
+    factor for the path it will take. Projected from git-annex pointers like the
+    RAM peak, so it costs no download."""
+    factor = SCRATCH_STREAM_FACTOR if should_stream(primary, size_bytes) else SCRATCH_INMEM_FACTOR
+    return int(size_bytes * factor)
+
+
+def live_scratch_budget(run_root: str, headroom: int | None = None) -> int | None:
+    """Bytes this run may hold on scratch in total, right now, or None where the
+    volume cannot be read (the gate is then off, as RAM's is off-Linux).
+
+    What is free already excludes what the run's in-flight recordings have written,
+    so charging their whole projected peaks against it would count them twice.
+    Budget = free + what the run already holds - headroom: the total the run could
+    occupy if nothing of its own were on disk, to compare with the SUM of in-flight
+    projected peaks plus the candidate's. `run_root` holds only this run's files
+    (`work/`, `stores/`), so what is under it is the run's.
+    """
+    try:
+        free = shutil.disk_usage(run_root).free
+    except OSError:
+        return None
+    held = allocated_bytes(run_root)
+    reserve = SCRATCH_HEADROOM_BYTES if headroom is None else headroom
+    return max(0, free + held - reserve)
+
+
 # Fallback user-facing reasons, keyed by biosigIO error code. The authoritative
 # copy lives in biosigio.exceptions.REASONS (single source of truth); we prefer
 # that at runtime and use this only if the import is unavailable. Keep the codes
@@ -7420,25 +7474,39 @@ MEMORY_RETRY_MAX = int(os.environ.get("ZARR_MEMORY_RETRY_MAX", "64"))
 def _next_admission(
     pending_peaks: list[int], in_flight_count: int, running_peak: int,
     cpu_cap: int, ram_ceiling: int,
+    *, pending_scratch: list[int] | None = None, running_scratch: int = 0,
+    scratch_budget: int | None = None,
 ) -> int | None:
     """Index into ``pending_peaks`` of the next recording to dispatch, or ``None``
     to wait for a running one to finish. Admittable when a worker slot is free AND
     either nothing is in flight (it runs alone, guaranteeing progress) or it fits
-    the remaining RAM ceiling. Picks the first pending recording that fits, so a
-    head-of-line giant doesn't starve smaller ones behind it."""
+    the remaining RAM ceiling, AND (when scratch is gated) it fits the scratch
+    budget. Picks the first pending recording that fits, so a head-of-line giant
+    doesn't starve smaller ones behind it.
+
+    The run-alone exception is RAM's only. Memory a recording cannot fit is
+    reported by the worker's own preflight, but a recording that does not fit the
+    disk would spend hours downloading before it hit ENOSPC, so scratch is checked
+    even when nothing is in flight: a ``None`` with nothing running means what is
+    left cannot be admitted at all (see ``_drain_with_admission``)."""
     if in_flight_count >= cpu_cap:
         return None
     idle = in_flight_count == 0
+    gated = pending_scratch is not None and scratch_budget is not None
+
+    def fits_scratch(j: int) -> bool:
+        return not gated or running_scratch + pending_scratch[j] <= scratch_budget  # type: ignore[index,operator]
+
     return next(
         (j for j, pk in enumerate(pending_peaks)
-         if idle or running_peak + pk <= ram_ceiling),
+         if (idle or running_peak + pk <= ram_ceiling) and fits_scratch(j)),
         None,
     )
 
 
 def _drain_with_admission(
     convert, peaks, cpu_cap, ram_ceiling, ctx, record, worker=None, memory_retry=None,
-    ceiling=None,
+    ceiling=None, scratch_peaks=None, scratch_budget=None, deferred=None,
 ) -> tuple[int, int]:
     """Run ``convert_one`` over ``convert`` in a pool of up to ``cpu_cap`` workers,
     dispatching a recording only while the SUM of in-flight projected peaks stays
@@ -7481,6 +7549,15 @@ def _drain_with_admission(
     default `live_admission_ceiling` over this node's /proc with ``ram_ceiling``
     as its off-Linux fallback, whenever a recording finishes and at least every
     ``ADMISSION_RECHECK_SECONDS`` otherwise (#1483).
+
+    Scratch disk is admitted the same way when ``scratch_peaks`` (primary ->
+    projected peak bytes) is given: a recording is dispatched only while the sum
+    of in-flight scratch peaks plus its own fits ``scratch_budget()`` (default:
+    `live_scratch_budget` over ``ctx["tmp"]``). Unlike RAM there is no run-alone
+    exception: a recording that does not fit while nothing is in flight can never
+    be admitted this run, so it is handed back in ``deferred`` UNREPORTED, which
+    the index records as ``not_attempted`` (no attempt spent, no round advanced)
+    for a later run to take when scratch allows.
     """
     worker = worker or convert_one
     if ceiling is None:
@@ -7488,6 +7565,9 @@ def _drain_with_admission(
 
         def ceiling(running_peak: int, track_dir: str | None) -> int:
             return live_admission_ceiling(ram_ceiling, hard, running_peak, track_dir)
+    if scratch_peaks is not None and scratch_budget is None and ctx.get("tmp"):
+        def scratch_budget() -> int | None:
+            return live_scratch_budget(ctx["tmp"])
     done = 0
     pool_breaks = 0
     held: list[dict] = []  # memory failures awaiting the serial retry
@@ -7536,14 +7616,37 @@ def _drain_with_admission(
             # submits has not started, so it earns no credit and the ceiling
             # cannot move because of it. No slot, no read.
             limit: int | None = None
+            budget: int | None = None
             while queue and len(in_flight) < cap:
                 if limit is None:
                     limit = ceiling(running_peak, track_dir)
+                    budget = scratch_budget() if scratch_peaks is not None and scratch_budget else None
+                running_scratch = (
+                    sum(scratch_peaks.get(q, 0) for q, _ in in_flight.values())
+                    if budget is not None else 0
+                )
                 idx = _next_admission(
                     [run_peaks[p] for p in queue], len(in_flight), running_peak,
                     cap, limit,
+                    pending_scratch=(
+                        [scratch_peaks.get(p, 0) for p in queue] if budget is not None else None
+                    ),
+                    running_scratch=running_scratch, scratch_budget=budget,
                 )
                 if idx is None:
+                    if not in_flight and queue and budget is not None:
+                        # Nothing running will ever give scratch back, so what is
+                        # left cannot be admitted this run. Handed back, not
+                        # reported: see the docstring.
+                        print(
+                            f"::warning::deferring {len(queue)} recording(s) that do not "
+                            f"fit the scratch disk (~{budget / 1024**3:.0f} GiB usable "
+                            "for this run); they stay pending without spending an attempt",
+                            flush=True,
+                        )
+                        if deferred is not None:
+                            deferred.extend(queue)
+                        queue.clear()
                     break
                 # Submit BEFORE popping. `ex.submit` is exactly where a broken
                 # pool surfaces, and popping first would leave the recording in
@@ -8072,6 +8175,10 @@ def main() -> int:
         p: admission_reserve_bytes(proj, ram_ceiling, streamed=p in streamed_paths)
         for p, proj in projections.items()
     }
+    # Projected scratch per recording, charged by admission like RAM (see
+    # `scratch_peak_bytes`). Recordings admission cannot fit land in `deferred`.
+    scratch_peaks = {p: scratch_peak_bytes(p, sizes[p]) for p in convert}
+    deferred: list[str] = []
     # Measured peak RSS per recording, so the factors above stop being guesses.
     measured: dict[str, int] = {}
     # Every tunable here is env-overridable, and ADR 0030 expects one such
@@ -8088,18 +8195,18 @@ def main() -> int:
             flush=True,
         )
 
-    # Admission is RAM-only. Each streaming recording also writes a scratch memmap
-    # of `n_channels * n_samples * 4` bytes, and raising concurrency raises the
-    # CONCURRENT scratch peak proportionally -- the per-recording cleanup in
-    # convert_one's `finally` bounds accumulation over a run, not the peak at one
-    # instant. There is no disk admission control; report the headroom so a
-    # shortage is visible before it becomes a mid-run write failure. #1112
+    # Scratch is admitted like RAM: each streaming recording holds its raw blob plus
+    # a memmap of `n_channels * n_samples * 4` bytes plus the outputs, and nothing
+    # used to stop 24 of them being admitted into a few hundred GiB. #1112 recorded
+    # that as an open risk; nm000276 is what it cost.
     try:
         scratch_root = tempfile.gettempdir()
         scratch_free = shutil.disk_usage(scratch_root).free
         print(
             f"[zarr] scratch free: {scratch_free / 1024**3:.0f} GiB at {scratch_root} "
-            "(not admission-controlled; streaming writes a per-recording memmap)",
+            f"(admission charges each recording ~{SCRATCH_STREAM_FACTOR:g}x its bytes "
+            f"when streamed, {SCRATCH_INMEM_FACTOR:g}x otherwise, and keeps "
+            f"{SCRATCH_HEADROOM_BYTES / 1024**3:.0f} GiB free)",
             flush=True,
         )
     except OSError as exc:  # visibility only; never fail a run over a stat
@@ -8142,8 +8249,21 @@ def main() -> int:
         # where a large recording most often trips its reserve (#1483).
         if cpu_cap == 1 or not convert:
             _init_worker(ctx)
-            for i, p in enumerate(convert, 1):
-                record(convert_one(p, peaks[p]), i)
+            done_n = 0
+            for p in convert:
+                # One at a time still has to fit: a recording that cannot is
+                # deferred rather than downloaded for hours and failed at ENOSPC.
+                budget = live_scratch_budget(tmp)
+                if budget is not None and scratch_peaks[p] > budget:
+                    deferred.append(p)
+                    print(
+                        f"::warning::deferring {p}: needs ~{scratch_peaks[p] / 1024**3:.0f} "
+                        f"GiB of scratch, ~{budget / 1024**3:.0f} GiB usable for this run",
+                        flush=True,
+                    )
+                    continue
+                done_n += 1
+                record(convert_one(p, peaks[p]), done_n)
         else:
             def memory_retry() -> tuple[dict, int]:
                 return memory_retry_context(ctx)
@@ -8151,6 +8271,7 @@ def main() -> int:
             pool_breaks, _max_suspects = _drain_with_admission(
                 convert, peaks, cpu_cap, ram_ceiling, ctx, record,
                 memory_retry=memory_retry,
+                scratch_peaks=scratch_peaks, deferred=deferred,
             )
 
     calibration = calibration_summary(measured, projections, streamed_paths)
@@ -8267,8 +8388,9 @@ def main() -> int:
     # it has to be rewritten so the pending attempt counts advance, or those
     # recordings could never reach `retry_exhausted` and the queue row would go
     # `failed` instead of backing off.
-    if convert and not converted_entries and not remove and retry_paths is None:
-        print(f"::error::all {len(convert)} conversion(s) failed; index left untouched", flush=True)
+    attempted = [p for p in convert if p not in set(deferred)]
+    if attempted and not converted_entries and not remove and retry_paths is None:
+        print(f"::error::all {len(attempted)} conversion(s) failed; index left untouched", flush=True)
         if annex_missing and not deterministic:
             print(
                 f"::error::storage lacks the annex object(s) of {len(annex_missing)} "
