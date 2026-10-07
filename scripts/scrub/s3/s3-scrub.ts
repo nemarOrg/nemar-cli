@@ -213,12 +213,11 @@ function common(v: Values, log: (line: string) => void): CommonOptions {
     // Tests point the CLI at a local stand-in; the CLI itself honors the variable, so this
     // only makes the override explicit.
     endpointUrl: process.env.AWS_ENDPOINT_URL_S3 || undefined,
-    // Against real S3 with no key in the environment, every call shares one serialized
-    // credential export instead of each `aws` child refreshing the login session itself.
-    credentials:
-      process.env.AWS_ENDPOINT_URL_S3 || process.env.AWS_ACCESS_KEY_ID
-        ? undefined
-        : cliCredentialSource(),
+    // With no key in the environment, every call shares one serialized credential export
+    // instead of each `aws` child refreshing the login session itself, and that export accepts
+    // only a short-lived (`ASIA`) key. An endpoint override does not lift that: it can name a
+    // real S3 endpoint, and a profile with a long-lived key must not slip past the rule.
+    credentials: process.env.AWS_ACCESS_KEY_ID ? undefined : cliCredentialSource(),
     log,
   };
 }

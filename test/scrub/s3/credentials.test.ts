@@ -5,7 +5,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -14,7 +14,7 @@ import {
   createAwsRunner,
 } from "../../../scripts/scrub/s3/s3-lib";
 import { type S3Standin, startS3Standin } from "../helpers/s3-standin";
-import { BUCKET, SLOW } from "./support";
+import { BUCKET, SLOW, planArgs, runScrub } from "./support";
 
 let standin: S3Standin | undefined;
 const dirs: string[] = [];
@@ -170,6 +170,36 @@ describe("the runner with a credential source", () => {
       expect(c.runs()).toBe(1);
       const ids = new Set(standin.log.map((e) => e.keyId));
       expect([...ids]).toEqual(["ASIASOURCESOURCESOURC"]);
+    },
+    SLOW,
+  );
+});
+
+describe("the s3-scrub command with an endpoint override", () => {
+  test(
+    "a long-lived key in a profile is refused when the endpoint is overridden, and nothing is sent",
+    async () => {
+      standin = startS3Standin();
+      const dir = mkdtempSync(path.join(tmpdir(), "scrub-creds-cli-"));
+      dirs.push(dir);
+      const credentials = path.join(dir, "credentials");
+      writeFileSync(
+        credentials,
+        "[default]\naws_access_key_id = AKIATESTTESTTESTTEST\naws_secret_access_key = do-not-print-this-secret\n",
+      );
+      // No key in the environment, so the credential source decides; the endpoint override (the
+      // stand-in here, a real S3 endpoint in an operator's hands) must not skip its rule.
+      const run = await runScrub(standin, planArgs(path.join(dir, "plan")), {
+        AWS_ACCESS_KEY_ID: "",
+        AWS_SECRET_ACCESS_KEY: "",
+        AWS_SESSION_TOKEN: "",
+        AWS_SHARED_CREDENTIALS_FILE: credentials,
+      });
+      expect(run.exitCode).not.toBe(0);
+      expect(run.all).toContain("long-lived-credentials");
+      expect(run.all).not.toContain("do-not-print");
+      expect(run.all).not.toContain("AKIA");
+      expect(standin.log.length).toBe(0);
     },
     SLOW,
   );
