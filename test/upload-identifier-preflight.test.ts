@@ -492,6 +492,19 @@ describe("decidePreflight", () => {
 // ---------------------------------------------------------------------------------------
 
 describe("the walk, the reader and the limits, at their edges", () => {
+  test("the walk is in name order, whatever order the filesystem lists in", () => {
+    write("b/2.json", "{}");
+    write("a/z.json", "{}");
+    write("a/y/x.json", "{}");
+    write("c.json", "{}");
+    expect(walkDatasetTree(root).entries.map((e) => e.path)).toEqual([
+      "c.json",
+      "a/z.json",
+      "a/y/x.json",
+      "b/2.json",
+    ]);
+  });
+
   test("a DIRECTORY named .gitattributes is walked: the upload plan lists what is inside", async () => {
     bidsWith(recording(CLEAN_PATIENT));
     write(".gitattributes/sub-02_task-rest_eeg.edf", recording(NAMED_PATIENT));

@@ -359,7 +359,8 @@ describe("nemar dataset upload: a verdict that needs an acknowledgment", () => {
       const r = await upload(["--yes"], server.url);
       expect(r.exitCode).toBe(1);
       expect(r.output).toContain("Identifier preflight: recordings NOT screened");
-      expect(r.output).toContain("Not screened (format x files): .vhdr x1, .eeg x1.");
+      // The walk is sorted, so the order is the same on APFS and ext4.
+      expect(r.output).toContain("Not screened (format x files): .eeg x1, .vhdr x1.");
       expect(r.output).toContain("--yes does not acknowledge a finding");
       expect(r.output).toContain("--acknowledge-identifier-preflight not-screened");
       expectNothingSent(server.requests);

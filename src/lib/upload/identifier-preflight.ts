@@ -114,6 +114,11 @@ export function walkDatasetTree(root: string): LocalTree {
       unlisted++;
       continue;
     }
+    // Listing order is the filesystem's (APFS and ext4 differ), and it decides the order of the
+    // counts in the record and the words printed. Sorted, the same tree gives the same output on
+    // every machine; subdirectories are queued so that they are walked in that order too.
+    children.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    const subdirectories: string[] = [];
     for (const child of children) {
       const name = child.name;
       // The upload plan's own exclusions (collectFileManifest): git's and the CLI's state at the
@@ -122,7 +127,7 @@ export function walkDatasetTree(root: string): LocalTree {
       if (dir === "" && (name === ".git" || name === ".nemar")) continue;
       const path = dir === "" ? name : `${dir}/${name}`;
       if (child.isDirectory()) {
-        pending.push(path);
+        subdirectories.push(path);
         continue;
       }
       if (name === ".gitattributes") continue;
@@ -138,7 +143,7 @@ export function walkDatasetTree(root: string): LocalTree {
         } else if (stats.isDirectory() && !lstatSync(absolute).isSymbolicLink()) {
           // A directory the listing did not type as one (a filesystem that reports an unknown
           // entry type): walk it rather than list it as a file nobody opens.
-          pending.push(path);
+          subdirectories.push(path);
           continue;
         }
       } catch {
@@ -148,6 +153,8 @@ export function walkDatasetTree(root: string): LocalTree {
       }
       entries.push({ path, size, url });
     }
+    // A stack: pushed last-first, so the first subdirectory is walked next.
+    for (let i = subdirectories.length - 1; i >= 0; i--) pending.push(subdirectories[i] as string);
   }
   return { entries, readable, unlisted };
 }
