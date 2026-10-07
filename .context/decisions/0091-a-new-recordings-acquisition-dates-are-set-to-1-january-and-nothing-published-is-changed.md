@@ -58,7 +58,10 @@ The header patch of a recording is `scrubEdfHeader` and then `normalizeEdfDates`
 A recording whose only change is its date gets a new key the same way.
 The same upstream bytes give the same patch and the same key, so a second first import of the same upstream names the same keys.
 Dated `acq_time` values of inline `_scans.tsv` files are set at the head of the tree, in the same step as the JSON blanking.
-A date never refuses an import, because a date never gates (ADR 0090): a recording whose only change would be its date, and whose key is not SHA256E, keeps its date; and the recordings whose only change would be their date are downloaded only when all of them fit in the bound (`--normalize-max-gb`, 5 GiB by default) after what the identifier scrub must download, and otherwise none of them is, so a dataset is not left half set.
+A date by itself never refuses an import, because a date never gates (ADR 0090).
+A recording whose only change would be its date keeps its date, its upstream key and its pointer, and the copy phase copies it as before, when its key is not SHA256E, when its download fails or does not hash to its key, or when its patch cannot be proven (`headers_dates_failed`); a header whose date rule faults keeps its dates (`headers_dates_unproven`); a scans table that cannot be read or proven keeps its dates.
+The recordings whose only change would be their date are downloaded only when all of them fit in the bound (`--normalize-max-gb`, 5 GiB by default) after what the identifier scrub must download, and otherwise none of them is, so which are set does not depend on an order; recordings git holds move from the host anyway and are always set.
+Once a date-only recording is downloaded and patched, it is annexed, uploaded and its old key retired together with the scrub's, so a failure there (`upload-failed`, `retire-failed`) refuses the import as any such failure does; `upload-failed` is retried, and `retire-failed` is not.
 The ledger line (`import-scrubbed`) carries counts only: `headers_dates_normalized`, `git_held_recordings_dates_normalized`, `headers_dates_over_bound`, `headers_dates_left`, and five `scans_tables_*`/`scans_values_normalized` counts, beside the scrub's own.
 A tree's provenance file gets a sentence that says the dates were set (`dates-set`, or `scrubbed-and-dates-set`), because its checksums describe the upstream files.
 The commit body and the import log say how many dates were set, in counts.
@@ -69,9 +72,11 @@ The upload makes the uploader's directory the dataset's git-annex repository and
 The preflight screens the planned headers as they will be written, so a date the upload sets is not warned about and one it leaves is; a dry run plans, screens and stops, and changes no file.
 After the final confirmation and before the second screen, `applyUploadDates` copies each planned file into the dataset's own `.nemar/` directory (excluded from the upload and from git), writes the new header into the copy, syncs it, checks the copy's size and header and the original's device, inode, size and modification time again, and renames the copy over the original.
 The second screen then reads the files as they are and is the record that is sent.
-A file is never planned, or is left at apply time, when git tracks it (which includes every file git-annex tracks), when it cannot be told which files git tracks (a repository and no git), when it is a symbolic link, when the uploader cannot write it or its directory or does not own it, when it is on another filesystem than the dataset's directory, or when it changed after the plan or while it was copied.
+A file is never planned, or is left at apply time, when git tracks it (which includes every file git-annex tracks); when it is inside a nested repository (a directory below the dataset's that holds a `.git`, such as a DataLad subdataset); when git would ignore it (`git check-ignore`, through an empty repository made for the question when the dataset is not one yet), because the upload's `git annex add` skips it and so never sends it; when git cannot answer those questions (no git, or it fails), in which case no file is planned; when it is a symbolic link; when the uploader cannot write it or its directory, does not own it, or its read-only bit is set; when it is on another filesystem than the dataset's directory; or when it changed after the plan or while it was copied.
+The copy is given the original's group and permission bits, or the file is left; extended attributes and access control lists are whatever the copy gets.
+Planning and applying never stop an upload: a fault leaves the file with its dates, writes fixed words to the debug log, and the second screen warns about what stayed.
 The upload edits no scans table: its dates stay, and ADR 0090's warning names them.
-The one line printed is `Acquisition dates in N recording header(s) are set to 1 January of their year before upload.` (`dateNormalizationLine` in `shared/identifier-screen-report.ts`), dim, under the verdict.
+The one line printed is `Acquisition dates in N recording header(s) were set to 1 January of their year.` (`dateNormalizationLine` in `shared/identifier-screen-report.ts`), dim, after the dates are set, with the number actually set; a dry run, a refused upload and an unconfirmed one print nothing about dates they did not set.
 
 **Nothing else.**
 ADR 0085's scrub, the scheduled sweep (ADR 0088), a re-import (the tree is the dataset NEMAR already holds, which may be public), `nemar dataset commit`, `nemar dataset push` and `nemar dataset update` do not run the rule.
@@ -102,6 +107,11 @@ Setting both day and month also removes the month, which the maintainer's readin
   On an import, a recording git held and a scans table are changed at the head of the tree, and upstream's commits, which the push carries, still hold the dated originals; for a public mirror that history is public.
   Only ADR 0085's history rewrite removes them.
   Because a date never gates, this does not hold the publication: `historyHoldsOriginals` still counts only identifier fixes, and an annexed recording's original is never copied, so NEMAR's bucket does not hold it.
+- **What an upload costs.**
+  Every dated recording is copied once before its header is written; on a filesystem that clones (APFS, Btrfs, XFS) the copy is instant, and on others it needs the free space of the largest such file and the time to write it.
+  A run interrupted during a copy leaves that copy in `.nemar/date-normalization/`, which is never sent and is removed by the next upload's apply.
+  A recording the apply leaves (it changed after the plan) is warned about by the second screen, after the final confirmation, and the upload goes on, as for any date that screen finds (ADR 0090).
+- **A first import with `--skip-data`** reads no annexed header, so it sets no annexed recording's date; git-held recordings and scans tables are still set.
 - **Large imports keep their dates by default.**
   Setting the date of an annexed recording means downloading all of it, because its new key is the hash of its whole content.
   A dataset whose date-only recordings do not fit in the bound keeps all of their dates (`headers_dates_over_bound`), and the screen warns about them, unless an operator runs the import with a larger `--normalize-max-gb`.
