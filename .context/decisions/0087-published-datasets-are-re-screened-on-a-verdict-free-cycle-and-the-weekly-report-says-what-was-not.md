@@ -44,7 +44,7 @@ And `nemarDatasets` is the org the dev worker shares with production.
   This is derived from the stamps and the clock each time it is read; nothing stores "covered".
 - **Storage is `sweep_stamps` only**, twelve keys under `identifier_sweep_*` (`sweep-stamps.ts`), in two groups that never mix.
   The verdict (status, the report, when, the version its screen was dispatched for, and a finding carried forward) is written only from a scan the parser accepted.
-  The report stored is a projection (the verdict, its counts, what it read; no sampling statistics, read-failure classes or distinct-value counts), parsed again before it is written, so the row stays small (#1188) and still holds a report the contract accepts.
+  The report stored is a projection (the verdict, its counts, what it read; no sampling statistics, read-failure classes, distinct-value counts, manifest source, or unparsed-format map, whose keys are a pattern rather than a closed list), parsed again before it is written, so the row stays small (#1188), holds only closed words and counts, and is still a report the contract accepts.
   The attempt (state, error word, when, version, nonce, failures in a row, and an administrator's request) moves on every dispatch and outcome.
   The version recorded with a verdict is the one at dispatch, copied from the attempt, so a version published while a screen ran is not credited to it.
   No column (ADR 0034), every write through `COALESCE(sweep_stamps, '{}')` (ADR 0035).
@@ -52,30 +52,34 @@ And `nemarDatasets` is the org the dev worker shares with production.
 - **Failures move the attempt and never the verdict.**
   A Worker that cannot dispatch at all (no secret, API base or credential, or no token could be minted) claims nothing that tick and says so in the tick's result, logged at error level: no dataset is held back by a fault that is not its own, and the weekly report shows the sweep dispatching nothing.
   A dataset with no repository records `dispatch-unconfigured`; GitHub refusing a dispatch with a 4xx records `dispatch-failed`.
+  A 401, 403 or 404 says the credential cannot reach the central repository at all: that attempt is closed without counting against its dataset, nothing more is claimed that tick, and the tick reports itself blocked, so a broken credential does not run the queue's backoff up dataset by dataset.
   A lost answer (a timeout, a dropped connection, a 5xx) is not a failure yet: GitHub may have started the run, so the attempt stays pending with its nonce.
   One still pending 50 minutes after dispatch (the screen's own deadline) is `unreported`, NULL-safe on a missing dispatch time, and keeps its nonce so a report arriving within 24 hours of the dispatch still lands; after that the nonce answers nothing, and the next dispatch replaces it.
   Each attempt that ends without a verdict is counted once toward the backoff.
   A workflow error word is recorded as such; a body outside the contract, or a scan of another dataset, is `workflow-failed`.
   None of them writes or refreshes a verdict.
   A tick that cannot count the screens in flight dispatches nothing.
+  An attempt time in the future (a hand edit or a restore) holds nothing back and a pending attempt with one times out, so it cannot keep an in-flight slot forever.
   A claim is conditional on the scope, the backoff, and stamps that are an object (a JSON array or scalar passes the column's CHECK, and `json_set` on it changes nothing while counting the row as changed), so a dataset that left scope or was taken by a racing tick is not dispatched, and the tick counts it.
 - **A finding is not retracted by a screen that read less.**
-  A verdict that found something (`direct-identifiers`, `review`) is replaced only by a complete screen or a newer finding.
-  An incomplete screen that found nothing is stored as the verdict (its time drives the cadence, which stays verdict-free) and carries the last finding forward in its own key, so the report keeps listing it, as found on its own date and not confirmed since.
+  A verdict that found something (`direct-identifiers` above `review`) is replaced only by a complete screen or an incomplete one that found at least as much.
+  An incomplete screen is stored as the verdict (its time drives the cadence, which stays verdict-free) and carries forward, in its own key, the strongest finding among the verdict it replaced and the finding that verdict was carrying, so an incomplete `review` does not displace a `direct-identifiers`; the report lists the stronger of the two, as found on its own date and not confirmed since.
+  A finding whose report no longer reads back is carried as its status alone, and a carried stamp that does not read back at all is still named, with the direct identifiers, because what it held cannot be told.
 - **The weekly report is an admin email, not an issue,** under a mail category of its own, `identifier_sweep` (opted in by default, like every category), for the reason ADR 0067 gives `dataset_anonymity` one.
   It covers the ISO week before the one it is sent in and states the cycle as of the send: datasets in scope, screened by verdict (and how many of those have formats the scanner does not parse), unchecked by reason and by what their last attempt came to, incomplete scans by reason, screens dispatched and results stored in the week (a claim that never reached GitHub is not a dispatch), and the queue.
   It lists every dataset whose last finding found direct identifiers, by id with kinds and counts and the date of that screen, whatever its standing now: a finding does not drop out of the report because its screen aged out, a later screen was incomplete, or its stored report no longer reads back (the id is still named, with "kinds do not read back"); datasets needing review follow, the first 50 by id and the rest as a count.
   The words are the publication screen's (`screenStateLabel`, `screenErrorText`, `kindsPhrase`, `SCREEN_NOT_READ` in `shared/identifier-screen-report.ts`); every count goes through the one `count` renderer, and what could not be read is `unknown` and needs attention.
-  It needs attention when anything is unknown, when any dataset has direct identifiers, when the sweep dispatched nothing in a week while work was due and it had been running before the week ended (ADR 0053: only then is silence evidence), when work is due and nothing was ever dispatched, when a screen did not run or report, was incomplete, does not read back, or lapsed out of the cycle.
+  It needs attention when anything is unknown, when any dataset has direct identifiers, when the sweep dispatched nothing in a week while work was owed and it had been running before the week ended (ADR 0053: only then is silence evidence), when work is owed and nothing was ever dispatched, when any dataset's latest screen in the week did not run or did not report (whatever its verdict's age, so a refused workflow shows before verdicts lapse), and when a screen of an unchecked dataset did not run or report, was incomplete, does not read back, or lapsed out of the cycle.
+  Work owed is the due predicate without the backoff, so a sweep whose every dispatch is refused, leaving its datasets in backoff, is not read as one with nothing to do.
   The first report after a deploy covers a week before the sweep's first dispatch, and says so instead of calling the sweep idle.
   A dataset that is only waiting in the queue or being screened is work in progress and needs nobody.
 - **Once a week, failing closed.**
   One atomic `INSERT ... SELECT ... WHERE NOT EXISTS` in `audit_log` claims the week only when it has not been sent, no claim is younger than 120 minutes, and fewer than 12 claims that may have mailed someone exist for it.
   A statement that errors claims nothing and sends nothing.
   The `sent` row is written only when an admin received it, with how many were tried and how many received it.
-  A send that reached nobody marks its claim (by row id), which then does not count toward the cap, because retrying it cannot repeat a mail; a later tick retries after the lease, so a mail outage costs delay and not the week.
-  A claim that delivered and could not write its `sent` row, or whose Worker died mid-send, stays unmarked and counts, and the cap keeps that broken record from becoming a mail every lease all week.
-  A week out of claims with nothing sent is logged at error level on every tick, and `GET /admin/identifier-sweep` shows where the week stands.
+  A send refused outright (a 4xx from Resend, or the dev fence) marks its claim (by row id), which then does not count toward the cap, because retrying it cannot repeat a mail; a later tick retries after the lease, so a broken key costs delay and not the week.
+  A send that ended without a definite answer (a 15-second timeout, a dropped connection, a 5xx) may have been delivered, so its claim stays unmarked and counts, like one that delivered and could not write its `sent` row or whose Worker died mid-send; the cap keeps those from becoming a mail every lease all week.
+  A week out of claims with nothing sent, and no claim live, is logged at error level on every tick, and `GET /admin/identifier-sweep` shows where the week stands.
 - **It reports and never repairs.**
   It writes `sweep_stamps` and its own `audit_log` rows (the weekly claims and sends, an administrator's rescreen request).
   It edits no dataset, files no GitHub issue, and mails no depositor and no requester.
