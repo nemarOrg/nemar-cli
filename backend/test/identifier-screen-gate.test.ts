@@ -645,7 +645,11 @@ describe("the web dispatch's gate (POST /approve-dispatch)", () => {
 });
 
 describe("direct identifiers block the request and tell the depositor", () => {
-  async function requestAndReport(status: string, findings: Record<string, number>) {
+  async function requestAndReport(
+    status: string,
+    findings: Record<string, number>,
+    beforeReport?: (requestId: number) => void,
+  ) {
     const res = await app.request(
       `/datasets/${DATASET}/publish/request`,
       { method: "POST", headers: { Authorization: `Bearer ${OWNER_KEY}` } },
@@ -657,6 +661,7 @@ describe("direct identifiers block the request and tell the depositor", () => {
     const report = cleanScreenReportBody(DATASET, SCREENED_HEAD, status);
     (report.scan as Record<string, unknown>).findings_by_kind = findings;
     (report.scan as Record<string, unknown>).edf_bdf_files_flagged = 4;
+    beforeReport?.(id);
     const cb = await app.request(
       "/webhooks/identifier-screen-result",
       {
@@ -704,6 +709,21 @@ describe("direct identifiers block the request and tell the depositor", () => {
       };
       expect(s.message).toContain("identifier screen found");
       expect(s.identifier_screen.headline).toBe("Identifier screen: FOUND IDENTIFIERS");
+    });
+  });
+
+  test("a finding that lands after the request stopped being active blocks nothing and tells nobody", async () => {
+    await withFakeResend(async (calls) => {
+      const id = await requestAndReport("direct-identifiers", { "edf-patient-name": 4 }, (rid) =>
+        db.run("UPDATE publication_requests SET status = 'denied' WHERE id = ?", [rid]),
+      );
+      const row = requestRow(id);
+      // The result is stored (the gate would refuse it), but a denied request is not reopened as
+      // blocked and its depositor gets no notice about a request that no longer exists.
+      expect(row?.identifier_screen_status).toBe("direct-identifiers");
+      expect(row?.status).toBe("denied");
+      expect(row?.block_reason).toBeNull();
+      expect(sendsTo(calls, OWNER_EMAIL)).toHaveLength(0);
     });
   });
 
@@ -881,6 +901,19 @@ describe("the admin re-run (POST /admin/publish/:id/identifier-screen)", () => {
       expect(cb.status).toBe(200);
       expect(sendsTo(calls, ADMIN_EMAIL)[0].subject).toEndWith("IDENTIFIER SCREEN: clean");
     });
+  });
+
+  test("a screen pending with no dispatch time is overdue and can be re-run (NULL-safe)", async () => {
+    const id = seedRequest();
+    db.run(
+      `UPDATE publication_requests SET identifier_screen_status = 'pending', identifier_screen_nonce = 'n',
+              identifier_screen_dispatched_at = NULL WHERE id = ?`,
+      [id],
+    );
+    const res = await rerun();
+    expect(res.status).toBe(202);
+    expect(requestRow(id)?.identifier_screen_nonce).not.toBe("n");
+    expect(dispatches).toHaveLength(1);
   });
 
   test("refuses while a screen is running and recent, and allows it once that one is overdue", async () => {

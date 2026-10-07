@@ -761,6 +761,18 @@ describe("the email is sent at most once per result, and never lost", () => {
     });
   });
 
+  test("a screen that is running is never claimed for the admin mail", async () => {
+    await requestPublication();
+    const r0 = row();
+    expect(r0.identifier_screen_status).toBe("pending");
+    await withFakeResend(async (calls) => {
+      // The race this is for: a re-run replaces a stored result while its mail is on the way.
+      expect(await notifyAdminsOfScreen(env(), r0.id)).toBe("not-claimed");
+      expect(calls).toHaveLength(0);
+    });
+    expect(row().identifier_screen_mail_claimed_at).toBeNull();
+  });
+
   test("a result on a request that is no longer active is not mailed", async () => {
     await requestPublication();
     const r0 = row();
