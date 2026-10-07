@@ -13,6 +13,90 @@ what merged, and this file says what it meant.
 Newest first. Dates are the tag's publication date, UTC. Backfilled from 0.9.16 onward;
 earlier releases are described only by their generated notes.
 
+## 0.10.15 - 2026-10-07
+
+Epic #1610: identifier screening and an in-place scrub of published datasets. A third party
+reported that EDF and BDF headers in a published dataset carried name-like strings and a date.
+Sixteen datasets were corrected (old bytes deleted, DOIs and version numbers kept, a public
+ledger of counts and fixed words per dataset); this release makes sure it cannot start again.
+
+### Added
+
+- **A publication request is screened for identifiers before an administrator is asked
+  (#1628, ADR 0086).** The Worker dispatches the `run-identifier-screen` workflow of
+  `nemarDatasets/.github`, which reads the dataset and posts a verdict bound to the commit it
+  read; the administrator mail waits for it. A direct identifier blocks the request and tells
+  the requester; `unchecked` (the workflow did not run, or the scan could not read
+  everything) is never treated as clean. `nemar dataset publish status` and
+  `nemar admin publish list` show the verdict by its fixed words. The request answers with
+  one neutral sentence (checking eligibility; an administrator is notified if every check
+  passes, #1664).
+- **`nemar dataset upload` screens on the uploader's machine first (#1635, ADR 0087).** It
+  reads 256 bytes of every EDF and BDF header and the side files within limits, refuses
+  direct identifiers (also under `--dry-run`, no override), and asks for an acknowledgment
+  that names exactly what was found for anything lesser (`--acknowledge-identifier-preflight`;
+  `--yes` never counts). Output is fixed words and counts, never a value or a path. The
+  Worker re-screens at publication; what the CLI records is a note, not a verdict.
+- **A weekly sweep re-screens published datasets (#1636, ADR 0088).** Production only, three
+  dispatches per 30-minute tick, a cadence that does not depend on the verdict (the Actions
+  run list is public). It reports, never repairs, files no issue and mails no requester. The
+  weekly admin report (new `identifier_sweep` mail category) says what was not screened;
+  `GET /admin/identifier-sweep` shows it on demand.
+- **Imports from OpenNeuro are scrubbed in place before the push (#1639, ADR 0089).** Every
+  recording header the copy will copy is read first; a header with an identifying string is
+  patched in bytes 8 to 168 only, proven, annexed under a new SHA256E key, and the old key is
+  retired. Finalize waits for the screen and approves only a clear verdict; a held import is
+  not an import failure.
+- **Acquisition dates (#1657, #1667, ADR 0090 and 0091).** A day-level acquisition date is a
+  review finding that warns and never blocks, with one shared warning sentence shown to the
+  uploader, the requester and the administrator. For NEW uploads and imports the date is set to
+  1 January of its year in the stored copy (header start date and the EDF+ `Startdate` slot;
+  `acq_time` in scans tables on imports). Nothing already published is changed.
+- **Operator tooling for the scrub (#1625 to #1640, ADR 0085).** `scripts/scrub/` (plan,
+  assemble, verify, delete-old with batched `DeleteObjects`, Zarr stage, git rewrite and
+  verify, ledger) and the runbook `.context/scrub-runbook.md`. It runs from an operator's
+  machine only; nothing in the Worker or the CLI package calls it.
+- **A deterministic scanner and a fleet scan script (#1617).**
+
+### Changed
+
+- **The Zarr converter never writes subject information into a store (#1627).** It refuses to
+  convert on a biosigIO that cannot leave it out; `biosigio>=1.2.11` is required.
+- **`scrub-tools` CI is a 7-way shard with a gate job of the same name (#1665).** About ten
+  minutes instead of 46.
+
+### Fixed
+
+- **A `trial_type` longer than 128 code points is keyed by a digest form (#1660).** Counts
+  stay per distinct value; a carried-over index entry is re-keyed at the next merge, so no
+  store is reconverted.
+
+### Migrations
+
+None.
+
+### Deploy coupling
+
+- The Worker deploys with the merge to `main`; the npm package follows. The CLI calls routes
+  the old Worker does not have, so the Worker must be live before the package is installed.
+- `run-identifier-screen.yml` lives in `nemarDatasets/.github` and is pushed separately, after
+  this release (the workflow runs `scripts/identifier-screen-ci.ts` from `main`). A workflow
+  change there reaches every dataset repository at once (ADR 0020). Until it is pushed every
+  publication request ends `unchecked` and the administrators get a "did not run" mail.
+- Hallu's converter (cron `ZARR_DRIVER_REF=main`) picks up the new `generate_zarr.py` on its
+  next tick; its biosigIO must be at least 1.2.11 or every conversion ends `failed` with a
+  fixed error.
+- `nemarOrg/docs` pull request 64 describes all of the above and is merged with this release.
+
+### Known limitations
+
+- The screen reads EDF and BDF headers, JSON keys, tabular columns and file names. FIF,
+  BrainVision, EEGLAB `.set`, GDF and other formats are not parsed and are reported as not
+  screened, never as clean; images, video and documents are only flagged by file type.
+- Datasets that were already public keep their day-level acquisition dates.
+- The fleet strip of existing Zarr stores (#1626) and the scan of JSON-decoded strings in
+  the scrub verify (#1630) are not in this release.
+
 ## 0.10.14 - 2026-10-07
 
 ### Fixed
