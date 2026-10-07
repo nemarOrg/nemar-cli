@@ -74,7 +74,6 @@ import {
   scanPaths,
 } from "../../shared/identifier-scan.js";
 import {
-  DateNormalizationUnverified,
   JsonBlankUnverified,
   ScrubRefused,
   blankIdentifierJsonKeys,
@@ -417,6 +416,10 @@ export interface ImportScrubCounts {
   headers_dates_over_bound: number;
   /** Headers read that still hold an acquisition date after this run, for any reason. */
   headers_dates_left: number;
+  /** Of those, headers whose date rule faulted or could not be proven. */
+  headers_dates_unproven: number;
+  /** Of those, recordings whose only change was the date and whose download, hash or patch failed. */
+  headers_dates_failed: number;
   /** Inline scans tables read for dated `acq_time` values. */
   scans_tables_read: number;
   /** Scans tables not read: over the bound, not UTF-8, or not a regular file. */
@@ -465,6 +468,8 @@ function zeroCounts(): ImportScrubCounts {
     git_held_recordings_dates_normalized: 0,
     headers_dates_over_bound: 0,
     headers_dates_left: 0,
+    headers_dates_unproven: 0,
+    headers_dates_failed: 0,
     scans_tables_read: 0,
     scans_tables_unread: 0,
     scans_tables_annexed: 0,
@@ -580,14 +585,18 @@ interface HeaderChange {
   dates: boolean;
   /** The header as the patch would leave it still holds an acquisition date (a layout the rule leaves). */
   datesLeft: boolean;
+  /** The date rule faulted or could not prove its result, so the dates were left (never a refusal). */
+  datesUnproven: boolean;
 }
 
 /**
  * The import's patch of one header and its proof: the identifier scrub (ADR 0085's rule, proven by
  * `verifyScrub`), then, when `dates` is set, the date rule on the scrubbed header (ADR 0091, proven
- * by `verifyDateNormalization`). Null when it is not an EDF or BDF header. The two rules touch
- * disjoint bytes (8..168 for identification, the dates' day and month), and each proof is of its own
- * step, so the composite differs from the original only where one of them may write.
+ * by `verifyDateNormalization`). Null when it is not an EDF or BDF header. The scrub may rewrite all
+ * of bytes 8..168, and the slot date lies inside them, so the order matters: the date rule reads
+ * the scrubbed header, and each proof is of its own step, so the composite differs from the original
+ * only where one of them may write. A scrub that cannot be proven refuses; a date rule that faults
+ * or cannot be proven leaves the dates (ADR 0090: a date never gates).
  */
 function patchHeader(
   before: Uint8Array,
@@ -605,24 +614,25 @@ function patchHeader(
   }
   let header = scrubbed.header;
   let datesChanged = false;
+  let datesUnproven = false;
   if (dates) {
-    let normalized: ReturnType<typeof normalizeEdfDates>;
     try {
-      normalized = normalizeEdfDates(scrubbed.header);
-    } catch (err) {
-      if (err instanceof DateNormalizationUnverified) {
-        throw new ImportScrubRefused("scrub-unverified", "a header's dates failed their proof");
+      const normalized = normalizeEdfDates(scrubbed.header);
+      if (normalized.changed && verifyDateNormalization(scrubbed.header, normalized.header).ok) {
+        header = normalized.header;
+        datesChanged = true;
+      } else if (normalized.changed) {
+        datesUnproven = true;
       }
-      throw err;
+    } catch {
+      datesUnproven = true;
     }
-    if (normalized.changed && !verifyDateNormalization(scrubbed.header, normalized.header).ok) {
-      throw new ImportScrubRefused("scrub-unverified", "a header's dates failed their proof");
-    }
-    header = normalized.header;
-    datesChanged = normalized.changed;
   }
   const datesLeft = scanEdfHeader(header).some((f) => DATE_KINDS.has(f.kind));
-  return { header, change: { scrub: scrubbed.changed, dates: datesChanged, datesLeft } };
+  return {
+    header,
+    change: { scrub: scrubbed.changed, dates: datesChanged, datesLeft, datesUnproven },
+  };
 }
 
 /**
@@ -879,6 +889,7 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
       continue;
     }
     if (patched.change.datesLeft) counts.headers_dates_left++;
+    if (patched.change.datesUnproven) counts.headers_dates_unproven++;
     if (patched.change.scrub || patched.change.dates) {
       flaggedGitHeld.push({ path, change: patched.change });
     }
@@ -920,6 +931,7 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
       return;
     }
     if (patched.change.datesLeft) counts.headers_dates_left++;
+    if (patched.change.datesUnproven) counts.headers_dates_unproven++;
     if (patched.change.scrub || patched.change.dates) {
       flaggedUpstream.push({ ...u, size: size ?? 0, change: patched.change });
     }
@@ -969,7 +981,9 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
     );
   }
   // A recording whose only change is its date: one whose key cannot be replaced keeps its date, and
-  // the rest are downloaded all together or not at all, so a dataset is not left half set.
+  // the rest are downloaded all together or not at all, so which of them is set does not depend on
+  // an order. (Git-held recordings move from this host whatever happens, so their dates are always
+  // set; the bound is about what would be downloaded for a date alone.)
   const datesOnly = flaggedUpstream.filter((f) => !f.change.scrub);
   const datesReplaceable = datesOnly.filter(replaceable);
   counts.headers_dates_left += datesOnly.length - datesReplaceable.length;
@@ -980,13 +994,38 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
     counts.headers_dates_left += datesReplaceable.length;
   }
   const datesKept = new Set(datesFit ? datesReplaceable : []);
-  const toPatch = flaggedUpstream.filter((f) => f.change.scrub || datesKept.has(f));
+  const toFetch = flaggedUpstream.filter((f) => f.change.scrub || datesKept.has(f));
+  const toPatch: typeof toFetch = [];
 
-  // 3. Download, check, patch. Each download replaces the annex pointer at its path.
-  for (const f of toPatch) {
+  // 3. Download, check, patch. Each download replaces the annex pointer at its path. A recording
+  // the identifier scrub needs refuses on any failure; one whose only change is its date is left
+  // with its upstream key, its date and its pointer, and the copy phase copies it as before.
+  for (const f of toFetch) {
     const abs = join(datasetPath, f.path);
     const tmp = `${abs}.nemar-scrub-download`;
     const got = await input.reader.download(f.source, tmp);
+    if (!f.change.scrub) {
+      const digest = ANNEX_KEY.exec(f.key)?.[2];
+      let ok = got.ok && got.bytes === f.size && (await sha256OfFile(tmp)) === digest;
+      if (ok) {
+        try {
+          patchInPlace(tmp, normalizeDates);
+        } catch {
+          ok = false;
+        }
+      }
+      if (!ok) {
+        rmSync(tmp, { force: true });
+        counts.headers_dates_failed++;
+        counts.headers_dates_left++;
+        continue;
+      }
+      counts.bytes_downloaded += f.size;
+      rmSync(abs, { force: true });
+      renameSync(tmp, abs);
+      toPatch.push(f);
+      continue;
+    }
     if (!got.ok) {
       throw new ImportScrubRefused(
         "header-unreadable",
@@ -1006,6 +1045,7 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
     patchInPlace(tmp, normalizeDates);
     rmSync(abs, { force: true });
     renameSync(tmp, abs);
+    toPatch.push(f);
   }
   for (const f of flaggedGitHeld) patchInPlace(join(datasetPath, f.path), normalizeDates);
   counts.headers_scrubbed = flagged;
@@ -1141,17 +1181,13 @@ async function scrubTree(input: ImportScrubInput): Promise<ImportScrubResult> {
         counts.scans_tables_unread++;
         continue;
       }
+      // A table that cannot be read, or whose result cannot be proven, keeps its dates: a date
+      // never refuses an import. A failed write below does refuse, because it leaves the tree torn.
       let result: ReturnType<typeof normalizeScansTableDates>;
       try {
         result = normalizeScansTableDates(readFileSync(abs));
-      } catch (err) {
-        if (err instanceof DateNormalizationUnverified) {
-          throw new ImportScrubRefused(
-            "scrub-unverified",
-            "a scans table's dates failed their proof",
-          );
-        }
-        throw err;
+      } catch {
+        result = { status: "unreadable", values: 0 };
       }
       if (result.status === "unreadable") {
         counts.scans_tables_unread++;

@@ -1315,7 +1315,7 @@ export async function prepareImport(
     // ADR 0091: counts only, as above.
     console.log(
       chalk.dim(
-        `  Acquisition dates set to 1 January: ${c.headers_dates_normalized} header(s), ${c.scans_values_normalized} scans table value(s); ${c.headers_dates_left} header(s) keep a date${c.headers_dates_over_bound > 0 ? ` (${c.headers_dates_over_bound} over the --normalize-max-gb bound)` : ""}`,
+        `  Acquisition dates set to 1 January: ${c.headers_dates_normalized} header(s), ${c.scans_values_normalized} scans table value(s) in ${c.scans_tables_normalized} table(s); ${c.headers_dates_left} header(s) read keep a date (${c.headers_dates_over_bound} over the --normalize-max-gb bound, ${c.headers_dates_failed} whose download failed, ${c.headers_dates_unproven} unproven); ${c.scans_tables_unread + c.scans_tables_annexed} scans table(s) not read`,
       ),
     );
     if (scrub.committed) {

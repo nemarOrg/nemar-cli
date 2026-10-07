@@ -1390,6 +1390,41 @@ describe("a first import sets acquisition dates to 1 January (ADR 0091)", () => 
     expect(readFileSync(join(clone, large), "utf8")).toBe(big);
   }, 180_000);
 
+  test("a date-only recording whose download does not hash to its key is left, and nothing refuses", async () => {
+    // A date never refuses an import: the recording keeps its upstream key and its date, and the
+    // copy phase copies it as it did before dates were set. The other recording is still set.
+    const files = datedFixtures().filter((f) => f.path !== DATED_GIT);
+    const upstream = await buildUpstream(files);
+    const { clone } = await cloneForImport(upstream);
+    const oldKey = await keyAt(clone, DATED_EDF);
+    const obj = served.get(`${BUCKET_PATH}/${DATED_EDF}`) as Served;
+    const tampered = obj.bytes.slice();
+    tampered[tampered.length - 1] ^= 0xff;
+    obj.fullBody = tampered;
+    const result = await prepare(clone, await upstreamView(clone));
+    expect(await keyAt(clone, DATED_EDF)).toBe(oldKey);
+    expect(result.manifest.items.find((it) => it.key === oldKey)?.origin).toBeUndefined();
+    expect(result.scrub.counts).toMatchObject({
+      headers_dates_failed: 1,
+      headers_dates_left: 1,
+      headers_dates_normalized: 1,
+      upstream_keys_replaced: 1,
+    });
+    expect(existsSync(join(clone, `${DATED_EDF}.nemar-scrub-download`))).toBe(false);
+  }, 120_000);
+
+  test("a scans table that cannot be read keeps its dates, and nothing refuses", async () => {
+    const files = datedFixtures().filter((f) => f.path !== DATED_BDF && f.path !== DATED_GIT);
+    const upstream = await buildUpstream(files);
+    const { clone } = await cloneForImport(upstream);
+    chmodSync(join(clone, SCANS), 0o000);
+    const result = await prepare(clone, await upstreamView(clone));
+    expect(result.scrub.counts.scans_tables_unread).toBe(1);
+    expect(result.scrub.counts.scans_values_normalized).toBe(0);
+    chmodSync(join(clone, SCANS), 0o644);
+    expect(readFileSync(join(clone, SCANS), "utf8")).toBe(SCANS_TEXT);
+  }, 120_000);
+
   test("the provenance file says the dates were set, and nothing about a scrub", async () => {
     const provenance = `{\n  "files": [\n    {"file": "x.edf", "sha256": "${"b".repeat(64)}"}\n  ]\n}\n`;
     const files = [
