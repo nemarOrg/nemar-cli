@@ -436,10 +436,6 @@ async function assertRepositoryVisible(repo: string, pat: string): Promise<void>
     { headers: ghHeaders(pat) },
     LOOKUP_ONCE,
   );
-  if (response.ok) {
-    await response.body?.cancel();
-    return;
-  }
   if (response.status === 404) {
     await response.body?.cancel();
     throw new HttpError(
@@ -447,7 +443,10 @@ async function assertRepositoryVisible(repo: string, pat: string): Promise<void>
       404,
     );
   }
-  throw await githubHttpError(response, `look up repository ${ORG_NAME}/${repo}`);
+  if (!response.ok) {
+    throw await githubHttpError(response, `look up repository ${ORG_NAME}/${repo}`);
+  }
+  await response.body?.cancel();
 }
 
 /**
