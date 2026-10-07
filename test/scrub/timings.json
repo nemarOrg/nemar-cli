@@ -1,6 +1,39 @@
 {
-  "version": 1,
   "files": {
-    "test/scrub/s3/delete-preconditions.test.ts": 18
-  }
+    "test/identifier-fleet.test.ts": 9412,
+    "test/identifier-scan.test.ts": 28,
+    "test/identifier-scrub.test.ts": 1560,
+    "test/scrub/build-git-plan.test.ts": 1613,
+    "test/scrub/contract.test.ts": 19,
+    "test/scrub/git/annex-registry.test.ts": 5855,
+    "test/scrub/git/fresh-clone.test.ts": 3591,
+    "test/scrub/git/git-scrub.test.ts": 12667,
+    "test/scrub/git/provenance.test.ts": 5558,
+    "test/scrub/github-switch.test.ts": 6496,
+    "test/scrub/hash/hash-stage.test.ts": 19298,
+    "test/scrub/hash/raw-hash.test.ts": 6267,
+    "test/scrub/ledger-cli.test.ts": 23505,
+    "test/scrub/ledger.test.ts": 4,
+    "test/scrub/require-tools.test.ts": 5436,
+    "test/scrub/s3/archives.test.ts": 139352,
+    "test/scrub/s3/assemble.test.ts": 143120,
+    "test/scrub/s3/aws-version.test.ts": 73,
+    "test/scrub/s3/canary.test.ts": 173163,
+    "test/scrub/s3/credentials.test.ts": 5161,
+    "test/scrub/s3/delete-batch.test.ts": 20652,
+    "test/scrub/s3/delete-preconditions.test.ts": 443566,
+    "test/scrub/s3/delete.test.ts": 298933,
+    "test/scrub/s3/lib.test.ts": 47,
+    "test/scrub/s3/listing.test.ts": 15328,
+    "test/scrub/s3/pipeline.test.ts": 34171,
+    "test/scrub/s3/plan.test.ts": 78757,
+    "test/scrub/s3/raw-copies.test.ts": 463066,
+    "test/scrub/s3/signals.test.ts": 23059,
+    "test/scrub/s3/standin.test.ts": 29661,
+    "test/scrub/s3/timeout.test.ts": 11064,
+    "test/scrub/s3/verify.test.ts": 206172,
+    "test/scrub/s3/zarr-json.test.ts": 45,
+    "test/scrub/s3/zarr.test.ts": 350961
+  },
+  "version": 1
 }
