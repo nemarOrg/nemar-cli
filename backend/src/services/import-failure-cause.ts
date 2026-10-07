@@ -215,3 +215,25 @@ export const IMPORT_DATA_UNAVAILABLE_MARKER_FOR_CLASSIFY = DATA_UNAVAILABLE_MARK
 
 /** The scrub's marker, exposed for the same pin (ADR 0087). */
 export const IMPORT_IDENTIFIER_SCRUB_MARKER_FOR_CLASSIFY = IDENTIFIER_SCRUB_MARKER;
+
+/**
+ * The scrub's refusal words a retry cannot clear (ADR 0087): the bytes to move are over the bound,
+ * the dataset already holds an unscrubbed original, a key the tools cannot follow, or a scrub that
+ * could not be proven. A person acts on each; re-dispatching the import only repeats the refusal.
+ * The other words (a header that could not be read, an upload that failed, an upstream object that
+ * is not its key) can clear on their own. Pinned to the CLI's word list by a test.
+ */
+export const DETERMINISTIC_SCRUB_REFUSALS: readonly string[] = [
+  "bound-exceeded",
+  "already-imported-unscrubbed",
+  "unsupported-key-backend",
+  "old-key-still-named",
+  "scrub-unverified",
+  "retire-failed",
+];
+
+/** True when `last_error` is a scrub refusal whose word is one a retry cannot clear. */
+export function isDeterministicScrubRefusal(lastError: string | null | undefined): boolean {
+  const m = /\[nemar-identifier-scrub\] refused: ([a-z-]+)/.exec(lastError ?? "");
+  return m !== null && DETERMINISTIC_SCRUB_REFUSALS.includes(m[1] as string);
+}
