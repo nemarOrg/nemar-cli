@@ -29,7 +29,11 @@ import {
 } from "../src/commands/dataset";
 import { doctorCommand } from "../src/commands/doctor";
 import { sandboxCommand } from "../src/commands/sandbox";
-import { MissingShadowedValueError, bindShadowedOptionValues } from "../src/lib/argv-shadowing";
+import {
+  MisplacedShadowedOptionError,
+  MissingShadowedValueError,
+  bindShadowedOptionValues,
+} from "../src/lib/argv-shadowing";
 import { version } from "../src/lib/version";
 
 // ---------------------------------------------------------------------------
@@ -166,6 +170,58 @@ async function reach(argv: string[]): Promise<Reached> {
 }
 
 describe("bindShadowedOptionValues on the real command tree", () => {
+  // The flag belongs to `release`, but typed before that name it lands on
+  // `dataset`, which does not declare it, so the root claims it and prints the
+  // CLI version (the equals spelling is rejected by `dataset` as an unknown
+  // option, so it cannot be rewritten into place either). Fail instead.
+  test("a shadowed flag typed before its command is an error", () => {
+    const cases = [
+      ["dataset", "--version", "2.0.0", "release", "nm1", "-y"],
+      ["dataset", "--version", "release", "nm1", "-y"],
+      ["--debug", "dataset", "--verbose", "--version", "2.0.0", "release", "nm1"],
+    ];
+    for (const argv of cases) {
+      let caught: unknown;
+      try {
+        bindShadowedOptionValues(program, argv);
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(MisplacedShadowedOptionError);
+      expect((caught as MisplacedShadowedOptionError).message).toBe(
+        "error: option '--version <version>' must come after 'release'",
+      );
+      expect((caught as MisplacedShadowedOptionError).command.name()).toBe("release");
+    }
+  });
+
+  // Shapes that must keep meaning what they meant before the pre-pass existed.
+  test("root-level and out-of-position flags keep their meaning", () => {
+    const cases = [
+      // The root's own --version, ahead of any command.
+      ["--version", "dataset", "release", "nm1"],
+      ["--version", "2.0.0", "dataset", "release", "nm1", "-y"],
+      // Typed before a command that does not take a value for it: `dataset`
+      // and `list` just see the root's flag.
+      ["dataset", "--version", "list"],
+      ["dataset", "--version", "2.0.0", "list"],
+      // `--` ends option parsing for everything after it, including the
+      // command names.
+      ["dataset", "--", "release", "nm1", "--version"],
+      ["dataset", "--", "release", "nm1", "--version", "2.0.0"],
+      // The equals spelling typed early is `dataset`'s unknown option to
+      // report, not ours.
+      ["dataset", "--version=2.0.0", "release", "nm1", "-y"],
+    ];
+    for (const argv of cases) {
+      expect(bindShadowedOptionValues(program, argv)).toEqual(argv);
+    }
+    // After the command's own name it is that command's, whatever else follows.
+    expect(
+      bindShadowedOptionValues(program, ["dataset", "release", "--version", "6.0.0", "nm1"]),
+    ).toEqual(["dataset", "release", "--version=6.0.0", "nm1"]);
+  });
+
   // A value that starts with "-" has to be spelled --flag=value: the next
   // token is read as a flag, so `--version -1.0.0` is a missing value. A lone
   // "-" is the exception, because Commander reads it as a value too.
@@ -654,6 +710,34 @@ describe("spawned CLI", () => {
         const equals = await spawnCli(["dataset", "release", DATASET_ID, "--version=-1.0.0", "-y"]);
         expect(equals.stdout).toContain("Invalid version: -1.0.0");
         expect(equals.exitCode).toBe(1);
+      },
+      SPAWN_TEST_TIMEOUT_MS,
+    );
+
+    test(
+      "a shadowed flag typed before its command fails instead of printing the version",
+      async () => {
+        for (const args of [
+          ["dataset", "--version", "2.0.0", "release", DATASET_ID, "-y"],
+          ["dataset", "--version", "release", DATASET_ID, "-y"],
+        ]) {
+          const r = await spawnCli(args);
+          expect(r.stdout.trim()).not.toBe(version);
+          expect(r.stderr).toContain(
+            "error: option '--version <version>' must come after 'release'",
+          );
+          expect(r.stderr).not.toContain("Run again with --debug");
+          expect(r.exitCode).toBe(1);
+        }
+        // The equals spelling cannot reach `release` from there; `dataset`
+        // refuses it, which is also a failure and not the version.
+        const equals = await spawnCli(["dataset", "--version=2.0.0", "release", DATASET_ID, "-y"]);
+        expect(equals.stderr).toContain("unknown option '--version=2.0.0'");
+        expect(equals.exitCode).toBe(1);
+        // At the root the flag is the root's own, as documented.
+        const root = await spawnCli(["--version", "dataset", "release", DATASET_ID]);
+        expect(root.stdout.trim()).toBe(version);
+        expect(root.exitCode).toBe(0);
       },
       SPAWN_TEST_TIMEOUT_MS,
     );
