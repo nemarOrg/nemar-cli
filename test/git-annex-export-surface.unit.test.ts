@@ -46,12 +46,16 @@ const MODULE_EXPORTS: Record<string, string[]> = {
   init: [
     "ADD_CHUNK_MAX_BYTES",
     "ADD_CHUNK_MAX_PATHS",
+    "ADD_DEFAULT_JOBS",
+    "ADD_MAX_JOBS",
     "chunkAddTargets",
     "configureLargefiles",
     "ensureGitAnnexInitialized",
     "gitAnnexAdd",
     "initDataset",
     "isGitAnnexDataset",
+    "normalizeAddJobs",
+    "parseAddFailures",
   ],
   policy: [
     "ANNEX_DATA_EXTENSIONS",
@@ -162,6 +166,11 @@ const INTERNAL_WIRING = [
   "ADD_CHUNK_MAX_PATHS",
   "ADD_CHUNK_MAX_BYTES",
   "isVersionCompatible",
+  // Bounded local add workers and batch-mode failure parsing (#1455).
+  "ADD_DEFAULT_JOBS",
+  "ADD_MAX_JOBS",
+  "normalizeAddJobs",
+  "parseAddFailures",
   // policy.ts postdates the split (#1158). Its surface is consumed by sibling
   // git-annex modules and by import-openneuro, never by the CLI directly, so
   // none of it belongs to the pre-split monolith surface below.

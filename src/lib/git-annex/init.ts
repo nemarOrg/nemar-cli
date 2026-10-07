@@ -5,7 +5,7 @@
  * verbatim.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { buildLargefilesExpression } from "./policy.js";
 import { runCommand } from "./run-command.js";
@@ -260,37 +260,126 @@ export function chunkAddTargets(
  * already tracked (gitignore never applied to them) but are momentarily
  * untracked because the caller uncached them to make the add look again.
  * Without it such a path is skipped silently and ends up in neither plane.
+ *
+ * `jobs` is the number of local hashing workers, passed explicitly as `-J`
+ * (default 4, clamped to 1..32) so a machine-wide `annex.jobs` never decides
+ * it (#1455). A path list is fed through `--batch -z` on stdin rather than
+ * argv: on network filesystems the argv form stalled in filter-process while
+ * the batch form completed the same manifest (#1455 evidence on NFS and on
+ * Ceph), and stdin has no argument-length limit. Chunks are kept so each one
+ * still persists its annexed state before the next starts.
  */
 export async function gitAnnexAdd(
   path: string,
   targets: string | string[] = ".",
   chunking: { maxPaths?: number; maxBytes?: number } = {},
-  options: { forceLarge?: boolean; checkGitignore?: boolean } = {},
+  options: { forceLarge?: boolean; checkGitignore?: boolean; jobs?: number } = {},
 ): Promise<{ success: boolean; error?: string }> {
-  const chunks =
-    typeof targets === "string"
-      ? [[targets]]
-      : chunkAddTargets(
-          targets,
-          chunking.maxPaths ?? ADD_CHUNK_MAX_PATHS,
-          chunking.maxBytes ?? ADD_CHUNK_MAX_BYTES,
-        );
+  const jobs = normalizeAddJobs(options.jobs);
   const addFlags = [
     ...(options.forceLarge ? ["--force-large"] : []),
     ...(options.checkGitignore === false ? ["--no-check-gitignore"] : []),
+    `-J${jobs}`,
   ];
   try {
-    for (const chunk of chunks) {
+    if (typeof targets === "string") {
       const { stderr, exitCode } = await runCommand(
-        ["git", "annex", "add", ...addFlags, "--", ...chunk],
+        ["git", "annex", "add", ...addFlags, "--", targets],
         { cwd: path },
       );
       if (exitCode !== 0) {
         return { success: false, error: stderr.trim() || "Failed to add files to git-annex" };
+      }
+      return { success: true };
+    }
+
+    const chunks = chunkAddTargets(
+      targets,
+      chunking.maxPaths ?? ADD_CHUNK_MAX_PATHS,
+      chunking.maxBytes ?? ADD_CHUNK_MAX_BYTES,
+    );
+    for (const chunk of chunks) {
+      // A named path that does not exist would be skipped by --batch without
+      // a word (one empty output line); fail this chunk instead, as the argv
+      // form did. Checked per chunk so earlier chunks still persist.
+      const missing = chunk.filter((t) => !pathExists(join(path, t)));
+      if (missing.length > 0) {
+        const shown = missing.slice(0, 5).join(", ");
+        const more = missing.length > 5 ? ` and ${missing.length - 5} more` : "";
+        return { success: false, error: `File(s) to add not found: ${shown}${more}` };
+      }
+      const { stdout, stderr, exitCode } = await runCommand(
+        ["git", "annex", "add", ...addFlags, "--batch", "-z", "--json", "--json-error-messages"],
+        { cwd: path, stdin: chunk.map((p) => `${p}\0`).join("") },
+      );
+      const failed = parseAddFailures(stdout);
+      if (exitCode !== 0 || failed.length > 0) {
+        const detail = failed
+          .slice(0, 5)
+          .map((f) => `${f.file}: ${f.error}`)
+          .join("; ");
+        return {
+          success: false,
+          error: detail || stderr.trim() || "Failed to add files to git-annex",
+        };
       }
     }
     return { success: true };
   } catch (e) {
     return { success: false, error: (e as Error).message };
   }
+}
+
+/** lstat-based existence: a dangling annex symlink still counts as present. */
+function pathExists(p: string): boolean {
+  try {
+    lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Local git-annex add workers when the caller names none (#1455). */
+export const ADD_DEFAULT_JOBS = 4;
+/** Upper bound for the local add workers: hashing is disk-bound, not CPU-bound. */
+export const ADD_MAX_JOBS = 32;
+
+/**
+ * Clamp a requested add-worker count to 1..ADD_MAX_JOBS, defaulting to
+ * ADD_DEFAULT_JOBS. Always explicit, so a machine-wide `annex.jobs` (or
+ * `annex.jobs=cpus` on a 100-core node) never decides how many hashers hit a
+ * network filesystem at once. Exported for unit tests.
+ */
+export function normalizeAddJobs(jobs: number | undefined): number {
+  if (jobs === undefined || !Number.isFinite(jobs)) return ADD_DEFAULT_JOBS;
+  return Math.min(ADD_MAX_JOBS, Math.max(1, Math.trunc(jobs)));
+}
+
+/**
+ * Failed records from `git annex add --batch --json --json-error-messages`.
+ * Empty lines (paths add had nothing to do for, e.g. already annexed and
+ * unchanged) and non-JSON lines are ignored. Exported for unit tests.
+ */
+export function parseAddFailures(stdout: string): Array<{ file: string; error: string }> {
+  const failures: Array<{ file: string; error: string }> = [];
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    let rec: Record<string, unknown>;
+    try {
+      rec = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (rec.success !== false) continue;
+    const messages = Array.isArray(rec["error-messages"])
+      ? (rec["error-messages"] as unknown[]).filter((m): m is string => typeof m === "string")
+      : [];
+    failures.push({
+      file: typeof rec.file === "string" ? rec.file : "(unknown file)",
+      error: messages.join("; ").trim() || "failed",
+    });
+  }
+  return failures;
 }

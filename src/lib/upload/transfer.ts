@@ -27,6 +27,7 @@ import {
   gitAnnexAdd,
   initDataset,
   isGitAnnexDataset,
+  normalizeAddJobs,
 } from "../git-annex/init.js";
 import { ensureLocalMainBranch, getCurrentBranch } from "../git-annex/repo-state.js";
 import { runCommand } from "../git-annex/run-command.js";
@@ -372,7 +373,7 @@ export function computeAddTargets<T extends { path: string }>(
  */
 export async function uploadDataToS3(
   absolutePath: string,
-  options: { jobs: string },
+  options: { jobs: string; annexJobs?: string },
   dataFiles: UploadFileEntry[],
   filesToUpload: Array<{ path: string; size: number; mtimeMs?: number }>,
   uploadProgress: UploadProgress | null,
@@ -473,10 +474,17 @@ export async function uploadDataToS3(
       // above) are added -- already-copied files are annexed already, and a
       // whole-tree add re-reads every unlocked file's content (#884).
       if (!isStepCompleted(progress, "tracking")) {
-        spinner = ora(`Tracking ${addTargets.length} data files with git-annex...`).start();
+        const addJobs = normalizeAddJobs(
+          options.annexJobs === undefined ? undefined : Number.parseInt(options.annexJobs, 10),
+        );
+        spinner = ora(
+          `Tracking ${addTargets.length} data files with git-annex (${addJobs} local worker${addJobs === 1 ? "" : "s"})...`,
+        ).start();
         const addResult = await gitAnnexAdd(
           absolutePath,
           addTargets.map((f) => f.path),
+          {},
+          { jobs: addJobs },
         );
         if (!addResult.success) {
           spinner.fail(`Failed to track data files: ${addResult.error}`);

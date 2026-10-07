@@ -10,6 +10,7 @@
 import chalk from "chalk";
 import { formatBytesCli } from "../../../shared/bytes.js";
 import { type LocalDatasetConfig, readLocalConfig } from "../dataset-config.js";
+import { normalizeAddJobs } from "../git-annex/init.js";
 import {
   type UploadProgress,
   clearUploadProgress,
@@ -49,7 +50,7 @@ export function showUploadPlan(
   absolutePath: string,
   datasetName: string,
   manifest: DatasetAnalysis["manifest"],
-  options: { jobs: string; dryRun?: boolean },
+  options: { jobs: string; annexJobs?: string; dryRun?: boolean },
 ): StepOk<{ existingConfig: LocalDatasetConfig | null }> | StepStop {
   // Check for existing local config (resume scenario)
   const existingConfig = readLocalConfig(absolutePath);
@@ -68,7 +69,12 @@ export function showUploadPlan(
   console.log(`  Size: ${formatBytesCli(manifest.totalSize)}`);
   console.log(`  Data files: ${manifest.dataFiles} (will be uploaded to S3)`);
   console.log(`  Metadata files: ${manifest.metadataFiles} (will be stored in git)`);
-  console.log(`  Parallel jobs: ${options.jobs}`);
+  console.log(`  Parallel jobs: ${options.jobs} (S3 upload)`);
+  console.log(
+    `  Local git-annex workers: ${normalizeAddJobs(
+      options.annexJobs === undefined ? undefined : Number.parseInt(options.annexJobs, 10),
+    )} (tracking)`,
+  );
   console.log();
 
   // Dry run mode

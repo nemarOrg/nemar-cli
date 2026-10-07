@@ -539,6 +539,10 @@ export function createUploadCommand(): Command {
     .option("--skip-orcid", "Skip co-author ORCID collection")
     .option("--dry-run", "Show what would be uploaded without doing it")
     .option("-j, --jobs <number>", "Parallel upload streams (default: 4)", "4")
+    .option(
+      "--annex-jobs <number>",
+      "Local git-annex add (hashing) workers, separate from -j (default: 4, max 32)",
+    )
     .option(YES_OPTION, YES_DESCRIPTION)
     .option("--restart", "Clear upload progress and re-upload all files")
     .option("--no", NO_DESCRIPTION) // Long form only; -n conflicts with --name
