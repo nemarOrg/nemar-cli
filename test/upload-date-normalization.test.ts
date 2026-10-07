@@ -24,6 +24,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -429,9 +430,13 @@ describe("applying the plan", () => {
     const at = new Date(1_700_000_000_000);
     utimesSync(path, at, at);
     const plan = await planUploadDates(root);
-    rmSync(path);
-    writeFileSync(path, recording());
-    utimesSync(path, at, at);
+    // Written beside it and renamed over it, so the new file's inode is another one for certain:
+    // ext4 hands a freed inode number straight to the next file made.
+    const replacement = join(dirname(path), "replacement.tmp");
+    writeFileSync(replacement, recording());
+    utimesSync(replacement, at, at);
+    renameSync(replacement, path);
+    expect(statSync(path).ino).not.toBe(plan.items[0]?.ino);
     expect(applyUploadDates(root, plan)).toMatchObject({ set: 0, left: 1 });
     expect(Buffer.from(read(EDF))).toEqual(Buffer.from(recording()));
   });
