@@ -466,6 +466,20 @@ function collisions(root: Command): Collision[] {
   return found;
 }
 
+/** Every way to type `path`: each command by its name or by any of its aliases. */
+function pathSpellings(root: Command, path: string[]): string[][] {
+  let spellings: string[][] = [[]];
+  let current = root;
+  for (const name of path) {
+    const next = current.commands.find((c) => c.name() === name);
+    if (!next) throw new Error(`no command '${name}' under '${current.name()}'`);
+    const names = [name, ...next.aliases()];
+    spellings = spellings.flatMap((prefix) => names.map((n) => [...prefix, n]));
+    current = next;
+  }
+  return spellings;
+}
+
 const describeCollision = (c: Collision) => `${c.path.join(" ")} ${c.option.long}`;
 
 describe("every same-named value option in the real tree", () => {
@@ -482,10 +496,13 @@ describe("every same-named value option in the real tree", () => {
     expect(boolean.map(describeCollision)).toContain("dataset release --version");
     for (const { path, option } of boolean) {
       const flag = option.long as string;
-      expect(bindShadowedOptionValues(program, [...path, flag, "some-value"])).toEqual([
-        ...path,
-        `${flag}=some-value`,
-      ]);
+      // Every spelling of the path: a command can be named by its alias.
+      for (const spelled of pathSpellings(program, path)) {
+        expect(bindShadowedOptionValues(program, [...spelled, flag, "some-value"])).toEqual([
+          ...spelled,
+          `${flag}=some-value`,
+        ]);
+      }
     }
   });
 
@@ -507,6 +524,105 @@ describe("every same-named value option in the real tree", () => {
       .filter((c) => !takesValue(c.claimant) && !c.option.required)
       .map((c) => `${c.path.join(" ")} ${c.option.flags}`);
     expect(optional).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A minimal real Commander tree for what the real tree has no instance of
+// ---------------------------------------------------------------------------
+
+// The real tree has no aliased command that declares a shadowed option, no
+// shadowed option that takes an OPTIONAL value, and no value option whose
+// short flag collides with an ancestor's. Those branches of the pre-pass are
+// exercised here, on real Commander objects, so they do not go untested until
+// someone adds the first real one.
+function tinyProgram(): Command {
+  const tiny = new Command("tiny")
+    .option("--tag")
+    .option("-q, --quiet")
+    .option("--maybe")
+    .option("--lvl");
+  const grp = new Command("grp").alias("g").option("--lvl <n>");
+  grp
+    .command("go")
+    .alias("run")
+    .argument("[arg]")
+    .option("--tag <name>")
+    .option("-q, --quality <level>")
+    .option("--maybe [value]")
+    .option("--lvl <n>");
+  tiny.addCommand(grp);
+  return tiny;
+}
+
+describe("bindShadowedOptionValues on a minimal tree", () => {
+  const tiny = tinyProgram();
+
+  test("finds a command named by its alias, at every level", () => {
+    for (const path of [
+      ["grp", "go"],
+      ["g", "go"],
+      ["grp", "run"],
+      ["g", "run"],
+    ]) {
+      expect(bindShadowedOptionValues(tiny, [...path, "--tag", "t1"])).toEqual([
+        ...path,
+        "--tag=t1",
+      ]);
+    }
+  });
+
+  test("a flag typed before an aliased command is still caught", () => {
+    expect(() => bindShadowedOptionValues(tiny, ["g", "--tag", "t1", "run"])).toThrow(
+      MisplacedShadowedOptionError,
+    );
+  });
+
+  test("only the long flag is shadowed: a short flag is never joined", () => {
+    // `-q` is the root's boolean and the leaf's `-q, --quality <level>`.
+    // Joining would make `-q=5`, and Commander reads that as the root's `-q`
+    // combined with more short flags, so the root still claims it. A short
+    // flag cannot be rescued by rewriting; none exists in the real tree.
+    for (const argv of [
+      ["grp", "go", "-q", "5"],
+      ["grp", "go", "-q"],
+      ["grp", "go", "--quality", "5"],
+    ]) {
+      expect(bindShadowedOptionValues(tiny, argv)).toEqual(argv);
+    }
+  });
+
+  test("an optional value is joined when given, and cannot be delivered bare", () => {
+    expect(bindShadowedOptionValues(tiny, ["grp", "go", "--maybe", "m1"])).toEqual([
+      "grp",
+      "go",
+      "--maybe=m1",
+    ]);
+    // Never an error (a bare optional flag is legal), and never rewritten
+    // (nothing the root does not claim can spell it): the gap the real-tree
+    // test above keeps empty.
+    for (const argv of [
+      ["grp", "go", "--maybe"],
+      ["grp", "go", "--maybe", "-y"],
+    ]) {
+      expect(bindShadowedOptionValues(tiny, argv)).toEqual(argv);
+    }
+    // Help still wins: the bare flag would otherwise print the root's version.
+    expect(bindShadowedOptionValues(tiny, ["grp", "go", "--maybe", "--help"])).toEqual([
+      "grp",
+      "go",
+      "--help",
+    ]);
+  });
+
+  test("the OUTERMOST ancestor option of a flag decides, not the nearest", () => {
+    // The root's boolean --lvl parses the flag first, though `grp` also takes
+    // a value for it, so the leaf's value must be joined.
+    expect(bindShadowedOptionValues(tiny, ["grp", "go", "--lvl", "3"])).toEqual([
+      "grp",
+      "go",
+      "--lvl=3",
+    ]);
   });
 });
 
