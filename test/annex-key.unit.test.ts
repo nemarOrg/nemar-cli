@@ -516,6 +516,18 @@ describe("the listing scan", () => {
     expect(isKeyPresentAtDeclaredSize(BASE_EEG, listing)).toBe(false);
   });
 
+  test("an edit that keeps the size leaves a stale index, which never reads a key as present", () => {
+    // The cache is revalidated by listing size, so swapping one name for another is
+    // not noticed. The index only nominates chunk sizes; every chunk is then read
+    // from the live Map, so the stale error runs one way: absent, never present.
+    const listing = new Map(complete1G());
+    expect(isKeyPresentAtDeclaredSize(BASE_EEG, listing)).toBe(true);
+    listing.delete(chunk(3));
+    listing.set("SHA256E-s9--unrelated.edf", 9);
+    expect(listing.size).toBe(3);
+    expect(isKeyPresentAtDeclaredSize(BASE_EEG, listing)).toBe(false);
+  });
+
   test("a listing with odd names is scanned without losing the chunked key", () => {
     const listing = new Map<string, number>([
       ["SHA256E-s5--plain.edf", 5],
