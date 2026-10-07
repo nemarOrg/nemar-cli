@@ -59,14 +59,91 @@ export function annexKeyDeclaredSize(key: string): number | null {
  * even though the key exists (the #967 bug: a failed curl fallback used to
  * leave a valid-looking 0-byte PUT behind). A non-annex `git:` key has no
  * declared size, so presence alone is sufficient (its bytes live in GitHub,
- * not S3).
+ * not S3). A key whose content was uploaded through a chunked special remote
+ * is present when all of its chunk objects are (see isChunkedKeyPresent).
+ * Keep in sync with backend/src/services/import-integrity.ts.
  */
 export function isKeyPresentAtDeclaredSize(key: string, existing: Map<string, number>): boolean {
   const actual = existing.get(key);
-  if (actual === undefined) return false;
+  if (actual !== undefined) {
+    const declared = annexKeyDeclaredSize(key);
+    if (declared === null || actual === declared) return true;
+  }
+  // Content uploaded through a chunked special remote exists only as chunk
+  // objects; it is present when every chunk is (#1565).
+  return isChunkedKeyPresent(key, existing);
+}
+
+/**
+ * git-annex chunk object name -> its whole-file key, chunk size and chunk
+ * number. A dataset uploaded with `chunk=1GiB` on its special remote stores
+ * `SHA256E-s982-S1073741824-C1--<hash>.vhdr` (C1..Cn) and never the plain
+ * `SHA256E-s982--<hash>.vhdr` (nm000276: 3055 of 3089 objects, #1565). The
+ * whole-file key is the name with `-S<chunksize>-C<n>` removed. Returns null
+ * for anything that is not a chunk name.
+ */
+export function parseChunkKey(
+  name: string,
+): { baseKey: string; chunkSize: number; chunkNumber: number } | null {
+  const m = name.match(/^(.+?-s\d+(?:-m\d+)?)-S(\d+)-C(\d+)(--.*)$/);
+  if (!m) return null;
+  const chunkSize = Number.parseInt(m[2], 10);
+  const chunkNumber = Number.parseInt(m[3], 10);
+  if (!(chunkSize > 0) || !(chunkNumber > 0)) return null;
+  return { baseKey: `${m[1]}${m[4]}`, chunkSize, chunkNumber };
+}
+
+/** baseKey -> chunkSize -> chunkNumber -> object size, built once per listing. */
+type ChunkIndex = Map<string, Map<number, Map<number, number>>>;
+const chunkIndexCache = new WeakMap<Map<string, number>, { size: number; index: ChunkIndex }>();
+
+function chunkIndexFor(existing: Map<string, number>): ChunkIndex {
+  const cached = chunkIndexCache.get(existing);
+  if (cached && cached.size === existing.size) return cached.index;
+  const index: ChunkIndex = new Map();
+  for (const [name, size] of existing) {
+    const parsed = parseChunkKey(name);
+    if (!parsed) continue;
+    let bySize = index.get(parsed.baseKey);
+    if (!bySize) {
+      bySize = new Map();
+      index.set(parsed.baseKey, bySize);
+    }
+    let chunks = bySize.get(parsed.chunkSize);
+    if (!chunks) {
+      chunks = new Map();
+      bySize.set(parsed.chunkSize, chunks);
+    }
+    chunks.set(parsed.chunkNumber, size);
+  }
+  chunkIndexCache.set(existing, { size: existing.size, index });
+  return index;
+}
+
+/**
+ * True when every chunk of `key` is in `existing` at the size chunking gives
+ * it: chunks 1..n-1 at the chunk size, the last one at the remainder (one
+ * chunk for an empty file). A missing or short chunk means the file cannot be
+ * reassembled, so it counts as absent. Exported for unit tests.
+ */
+export function isChunkedKeyPresent(key: string, existing: Map<string, number>): boolean {
   const declared = annexKeyDeclaredSize(key);
-  if (declared === null) return true;
-  return actual === declared;
+  if (declared === null) return false;
+  const bySize = chunkIndexFor(existing).get(key);
+  if (!bySize) return false;
+  for (const [chunkSize, chunks] of bySize) {
+    const n = declared === 0 ? 1 : Math.ceil(declared / chunkSize);
+    let complete = true;
+    for (let i = 1; i <= n; i++) {
+      const expected = i < n ? chunkSize : declared - (n - 1) * chunkSize;
+      if (chunks.get(i) !== expected) {
+        complete = false;
+        break;
+      }
+    }
+    if (complete) return true;
+  }
+  return false;
 }
 
 /**
