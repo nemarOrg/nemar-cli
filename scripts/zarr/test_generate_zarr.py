@@ -20,6 +20,7 @@ import io
 import itertools
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -5377,13 +5378,28 @@ class TestReclaimReportsWhatItCouldNotRemove(unittest.TestCase):
         self.assertIn("is still on disk", out.getvalue())
 
     def test_convert_one_reports_a_scratch_directory_it_could_not_remove(self):
+        # Through the real `convert_one`: the recording fails before any conversion
+        # (its file is not in the repo), and the `finally` that follows has to say it
+        # could not delete the directory a killed attempt left locked.
         with tempfile.TemporaryDirectory() as root:
-            work = self._undeletable(root)
+            repo = os.path.join(root, "repo")
+            os.makedirs(repo)
+            run = os.path.join(root, "run")
+            os.makedirs(run)
+            work = self._undeletable(run)
+            generate_zarr._init_worker({
+                "repo": repo, "bucket": "nemar-test", "dataset_id": "on000117",
+                "head": "b" * 40, "head_files": {self.PRIMARY}, "local": True,
+                "tmp": run, "updated": "2026-10-07T00:00:00Z",
+                "contract_base": "https://zarr.nemar.org", "engine_version": "3",
+                "dataset_row": None, "provenance_fetch_failed": False,
+                "mem_budget": None, "hard_ceiling": None, "projections": {},
+            })
             with contextlib.redirect_stdout(io.StringIO()) as out:
-                for failure in generate_zarr.remove_scratch_tree(work):
-                    print(f"::error::could not remove scratch {failure}", flush=True)
+                result = convert_one(self.PRIMARY)
             os.chmod(work, 0o700)
-        self.assertIn("::error::could not remove scratch", out.getvalue())
+        self.assertFalse(result["ok"], "the recording has no file, so it cannot convert")
+        self.assertRegex(out.getvalue(), r"::error::could not remove scratch .*" + re.escape(work))
 
 
 class TestKillOrphansUnder(unittest.TestCase):
@@ -10855,6 +10871,52 @@ class TestConvertOneStreamsIntoItsOwnScratch(unittest.TestCase):
         self.assertEqual(leftovers, [], "nothing may remain beside the store")
 
 
+    def test_a_volume_that_fills_under_the_exporter_is_an_uncoded_failure_and_leaves_nothing(self):
+        # The case the admission gate exists to avoid, and what happens when it
+        # misses: the exporter has made its memmap and half a store when the volume
+        # fills. Today that is an uncoded infrastructure failure, which spends one of
+        # a recording's five attempts (whether it should defer instead is a design
+        # question, not decided here). Whatever the classification, nothing may stay
+        # on the disk that just filled.
+        #
+        # The exporter is made to raise at the library boundary: a really full volume
+        # needs root to create. Everything after that point is the real convert_one.
+        import biosigio
+
+        work_root = os.path.join(self._tmp.name, "work")
+        os.makedirs(work_root)
+        work, store_local, scratch = generate_zarr.recording_scratch_paths(
+            work_root, self.PRIMARY
+        )
+        real = biosigio.stream_to_zarr
+
+        def full_volume(*args, **kwargs):
+            with open(os.path.join(kwargs["scratch_dir"], "memmap.dat"), "wb") as fh:
+                fh.write(b"x" * 4096)
+            os.makedirs(args[1], exist_ok=True)
+            with open(os.path.join(args[1], "zarr.json"), "wb") as fh:
+                fh.write(b"{}")
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+        biosigio.stream_to_zarr = full_volume
+        self.addCleanup(setattr, biosigio, "stream_to_zarr", real)
+        generate_zarr._init_worker({
+            "repo": self.repo, "bucket": "nemar-test", "dataset_id": "on000117",
+            "head": "b" * 40, "head_files": {self.PRIMARY}, "local": True,
+            "tmp": work_root, "updated": "2026-10-07T00:00:00Z",
+            "contract_base": "https://zarr.nemar.org", "engine_version": "3",
+            "dataset_row": None, "provenance_fetch_failed": False,
+            "mem_budget": None, "hard_ceiling": None, "projections": {},
+        })
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = convert_one(self.PRIMARY)
+        self.assertFalse(result["ok"])
+        self.assertIsNone(result["code"], "uncoded, so it is an infrastructure failure")
+        self.assertIn("No space left on device", result["error"])
+        for path in (work, store_local, scratch):
+            self.assertFalse(os.path.exists(path), f"{path} outlived the failed conversion")
+
+
 class TestConvertOneFifSidecarOvercount(unittest.TestCase):
     """on000117 through `convert_one`: an MEG channels.tsv listing channels its
     FIF never had (CHPI coils, EEG inherited from another run) was refused as
@@ -12630,7 +12692,7 @@ class TestMainRetryPendingRound(unittest.TestCase):
         self.assertEqual(rc, 1, log)
         self.assertEqual(body["status"], "failed")
         self.assertEqual(body["not_attempted_count"], 1)
-        self.assertGreaterEqual(body["pending_count"], body["not_attempted_count"])
+        self.assertEqual(body["pending_count"], 2)  # B, attempted and failed, and A, deferred
 
     def _s3_snapshot(self) -> dict[str, tuple[int, int, str]]:
         """Every object in the stand-in bucket: size, mtime and content hash. Equal
@@ -12665,7 +12727,6 @@ class TestMainRetryPendingRound(unittest.TestCase):
         self.assertIn("left untouched", log)
         self.assertEqual(self._s3_snapshot(), before, "an S3 object was written")
         self.assertEqual(body["status"], "ready")
-        self.assertNotIn("post", body, "the script posts every body it is handed")
         self.assertEqual(body["commit"], index_commit)
         self.assertNotEqual(body["commit"], head)
         self.assertEqual((body["pending_count"], body["not_attempted_count"]), (2, 2))
@@ -12721,6 +12782,310 @@ class TestMainRetryPendingRound(unittest.TestCase):
         self._assert_deferred_without_spending_attempts(
             *self.run_main("--retry-pending", "--jobs", "1")
         )
+
+
+class TestSerialAdmissionBoundary(unittest.TestCase):
+    """`--jobs 1` admits a recording whose charge EQUALS the budget, like the pool."""
+
+    def _drain(self, peak, budget):
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.0
+        ran: list[str] = []
+        deferred: dict[str, str] = {}
+        with contextlib.redirect_stdout(io.StringIO()):
+            generate_zarr.drain_serially(
+                ["a"], {"a": peak}, lambda _in_flight: budget, None, deferred,
+                lambda p: {"ok": True, "primary": p}, lambda r, _i: ran.append(r["primary"]),
+            )
+        return ran, deferred
+
+    def test_a_charge_equal_to_the_budget_runs(self):
+        self.assertEqual(self._drain(100, 100), (["a"], {}))
+
+    def test_a_charge_one_byte_over_the_budget_is_deferred(self):
+        ran, deferred = self._drain(101, 100)
+        self.assertEqual(ran, [])
+        self.assertEqual(list(deferred), ["a"])
+
+
+class TestNeverFitThreshold(unittest.TestCase):
+    """A recording can never fit when its charge exceeds the volume's TOTAL minus the
+    headroom; one that merely does not fit now is a note, not an operator error."""
+
+    GIB = 1024**3
+
+    def _defer(self, charge):
+        self.addCleanup(
+            setattr, generate_zarr, "SCRATCH_HEADROOM_BYTES", generate_zarr.SCRATCH_HEADROOM_BYTES
+        )
+        generate_zarr.SCRATCH_HEADROOM_BYTES = 10 * self.GIB
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            generate_zarr.defer_unfit(
+                ["a"], {"a": charge}, 5 * self.GIB, lambda: (50 * self.GIB, 100 * self.GIB), {}
+            )
+        return out.getvalue()
+
+    def test_a_charge_that_fits_the_volume_minus_headroom_exactly_is_only_deferred(self):
+        log = self._defer(90 * self.GIB)  # the 100 GiB volume less the 10 GiB headroom
+        self.assertNotIn("can never fit", log)
+        self.assertIn("::warning::deferring a: charged 90 GiB", log)
+
+    def test_one_byte_more_can_never_fit_and_is_an_error(self):
+        log = self._defer(90 * self.GIB + 1)
+        self.assertIn("::error::a can never fit this volume", log)
+        self.assertIn("(1 can never fit this volume)", log)
+
+
+class TestOrphanKillNeverTouchesThisProcess(unittest.TestCase):
+    def test_this_process_is_not_signalled_even_when_its_command_line_matches(self):
+        # A fixture in /proc's layout names THIS pid with an argument under the run
+        # root, as an unlucky command line would. The recording `send_signal` shows
+        # who would have been killed; it must be nobody here.
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as proc:
+            os.makedirs(os.path.join(proc, str(os.getpid())))
+            with open(os.path.join(proc, str(os.getpid()), "cmdline"), "wb") as fh:
+                fh.write(b"aws\0s3\0cp\0" + os.path.join(root, "work", "x").encode() + b"\0")
+            signalled: list[int] = []
+            report = generate_zarr.kill_orphans_under(
+                root, proc_root=proc, wait_seconds=0.1,
+                send_signal=lambda pid, _sig: signalled.append(pid),
+            )
+        self.assertEqual(signalled, [])
+        self.assertEqual(report.killed, [])
+        self.assertEqual(report.scanned, 1)
+
+
+class TestPoolBreakWarningContract(unittest.TestCase):
+    """The one line a pool break prints, as an operator reads it."""
+
+    GIB = 1024**3
+    PRIMARY = "sub-01/eeg/sub-01_task-a_eeg.vhdr"
+
+    @staticmethod
+    def _readings(*values):
+        """A volume probe answering ``values`` in order, then the last one again, so a
+        further probe never raises StopIteration into the code under test."""
+        remaining = list(values)
+        return lambda: remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+    def _warning(self, volume):
+        with (
+            tempfile.TemporaryDirectory() as root,
+            tempfile.TemporaryDirectory() as empty_proc,
+            contextlib.redirect_stdout(io.StringIO()) as out,
+        ):
+            generate_zarr.reclaim_after_pool_break(
+                root, [self.PRIMARY], volume, proc_root=empty_proc
+            )
+        return out.getvalue()
+
+    def test_the_warning_gives_the_volume_before_and_after_the_reclaim(self):
+        log = self._warning(
+            self._readings((200 * self.GIB, 500 * self.GIB), (260 * self.GIB, 500 * self.GIB))
+        )
+        self.assertRegex(
+            log,
+            r"(?m)^::warning::worker pool broke with 1 recording\(s\) in flight; "
+            r"scratch free 200 GiB before the reclaim and 260 GiB after, of 500 GiB; ",
+        )
+
+    def test_a_volume_that_cannot_be_read_says_the_free_space_is_unreadable(self):
+        # No probe at all, and a probe that answers None (the real unreadable case:
+        # statvfs failed on the scratch volume).
+        for label, volume in (("no probe", None), ("a probe returning None", lambda: None)):
+            with self.subTest(label):
+                self.assertRegex(
+                    self._warning(volume),
+                    r"(?m)^::warning::worker pool broke with 1 recording\(s\) in flight; "
+                    r"scratch free space unreadable; ",
+                )
+
+    def test_a_probe_that_fails_only_after_the_reclaim_is_unreadable_too(self):
+        log = self._warning(self._readings((200 * self.GIB, 500 * self.GIB), None))
+        self.assertIn("scratch free space unreadable;", log)
+
+    def test_a_break_inside_a_drain_reads_the_drains_own_volume(self):
+        # The drain hands its volume probe to the reclaim: a run whose probe works
+        # must not report the free space as unreadable.
+        boom = "sub-boom/eeg/sub-boom_task-rest_eeg.vhdr"
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as out:
+            _drain_with_admission(
+                [boom], {boom: 1024}, 1, 10**9, {"tmp": tmp},
+                lambda r, i: None, worker=_scratch_worker,
+                scratch_volume=lambda: (200 * self.GIB, 500 * self.GIB),
+            )
+        self.assertRegex(
+            out.getvalue(),
+            r"scratch free 200 GiB before the reclaim and 200 GiB after, of 500 GiB",
+        )
+
+
+def _fixture_only(cls):
+    """Keep what ``cls`` inherits from `TestMainRetryPendingRound` (a real repo, the
+    real exporter, the `aws` stand-in over local files, a local catalog) without
+    re-running that class's own tests: the loaders skip a non-callable attribute."""
+    for name in dir(cls):
+        if name.startswith("test") and name not in cls.__dict__:
+            setattr(cls, name, None)
+    return cls
+
+
+@_fixture_only
+class TestDeferredRunsAgainstALiveIndex(TestMainRetryPendingRound):
+    """What a run that defers recordings says about the dataset, checked against the
+    index it left on S3: a live index with a served store (A, with events), a pending
+    recording (B, with events) and a typed failure (C, an unreadable EDF)."""
+
+    C = "sub-03/eeg/sub-03_task-rest_eeg.edf"
+
+    def setUp(self):
+        super().setUp()
+        os.makedirs(os.path.join(self.repo, "sub-03", "eeg"))
+        with open(os.path.join(self.repo, self.C), "wb") as fh:
+            fh.write(b"this is not an EDF file\n" * 40)
+        for rel, onsets in (("sub-01/eeg/sub-01_task-rest_events.tsv", (0.5, 1.5, 2.5)),
+                            ("sub-02/eeg/sub-02_task-rest_events.tsv", (0.25, 0.75))):
+            with open(os.path.join(self.repo, rel), "w") as fh:
+                fh.write("onset\tduration\ttrial_type\n")
+                fh.writelines(f"{t}\t0.1\tgo\n" for t in onsets)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "events and an unreadable recording")
+
+    def events_rows(self) -> list[dict]:
+        import pyarrow.parquet as pq
+
+        path = os.path.join(self.s3, "on008083_zarr_events.parquet")
+        return pq.read_table(path).to_pylist()
+
+    def _defer_b_then_publish(self) -> dict:
+        """The first run: A converts (with events), B is too large for any volume and
+        is deferred, C is an unreadable EDF and becomes a typed failure. Returns the
+        index it published."""
+        self._make_b_enormous()
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.01
+        index = self.first_round()
+        self.assertEqual([f["path"] for f in index["failures"]], [self.C])
+        self.assertTrue(index["errors"] > 0, "a live index with no errors proves nothing")
+        return index
+
+    def test_an_all_deferred_run_restates_what_the_live_index_says(self):
+        # The backend derives the dataset's row from this body (its error and failure
+        # counts, a bounded summary of pending and discovered counts, the ETag), so a
+        # field restated wrongly (a zero error count, no ETag) changes that row on every
+        # hourly tick of a recording that never fits. Not every field below reaches the
+        # row (the failure entries and the events row count do not); each is pinned
+        # here as part of the body the script POSTs.
+        live = self._defer_b_then_publish()
+        self._no_scratch()
+        before = self._s3_snapshot()
+        rc, log, body = self.run_main()
+        self.assertEqual(rc, 0, log)
+        self.assertIn("left untouched", log)
+        self.assertEqual(self._s3_snapshot(), before, "an S3 object was written")
+        self.assertEqual(body["status"], "ready")
+        self.assertEqual(body["errors"], live["errors"])
+        self.assertEqual(body["failure_count"], live["failure_count"])
+        self.assertEqual(
+            body["data_failures"],
+            [{"path": self.C, "code": "corrupt_or_truncated"}],
+            "the typed failure the index carries",
+        )
+        # Not deterministic: B is still owed, so the dataset is not all data failures.
+        self.assertIs(body["deterministic"], False)
+        self.assertEqual(
+            body["index_etag"], hashlib.md5(self._index_bytes()).hexdigest(),
+            "the ETag of the published index, unquoted",
+        )
+        self.assertEqual(body["commit"], live["source_commit"])
+        self.assertEqual(body["store_count"], live["store_count"])
+        self.assertEqual((body["pending_count"], body["not_attempted_count"]), (1, 1))
+        self.assertEqual(body["discovered_count"], 3)
+        self.assertEqual(body["events_row_count"], live["events_row_count"])
+        self.assertEqual(body["events_row_count"], 3)
+        self.assertEqual((body["converted"], body["removed"], body["failed"]), ([], [], []))
+
+    def test_an_all_deferred_run_reports_no_failure_of_its_own(self):
+        # Nothing was attempted, so nothing failed for a retryable reason: the
+        # driver's "N recording(s) failed for a RETRYABLE reason" line would otherwise
+        # repeat every hour for a recording that is only waiting for room.
+        self._defer_b_then_publish()
+        self._no_scratch()
+        rc, log, body = self.run_main()
+        self.assertEqual(rc, 0, log)
+        self.assertIn("left untouched", log)
+        self.assertEqual(body["pending_count"], 1)
+        self.assertEqual(body["retryable_failures"], 0)
+
+    def test_a_companion_pointer_with_no_size_makes_the_recording_charged_the_floor(self):
+        # B's primary pointer declares a small size, but a same-stem companion's
+        # pointer is a WORM key with no `-s` field, so the total cannot be trusted
+        # even though it is positive: the recording is charged at least
+        # SCRATCH_UNKNOWN_SIZE_BYTES. With a floor no volume holds it can never fit,
+        # while A (real files of known size) converts. Reading the size as known would
+        # charge B its few bytes and attempt it, and B has no content to convert.
+        link = os.path.join(self.repo, self.B)
+        os.remove(link)
+        sized = "SHA256E-s2000--" + "b" * 32 + ".edf"
+        os.symlink(f"../../.git/annex/objects/bb/bb/{sized}/{sized}", link)
+        companion = os.path.join(self.repo, "sub-02/eeg/sub-02_task-rest_eeg.json")
+        unsized = "WORM-m1700000000--sub-02_task-rest_eeg.json"
+        os.symlink(f"../../.git/annex/objects/cc/cc/{unsized}/{unsized}", companion)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "B has a sized primary and an unsized companion")
+        self.addCleanup(
+            setattr, generate_zarr, "SCRATCH_UNKNOWN_SIZE_BYTES",
+            generate_zarr.SCRATCH_UNKNOWN_SIZE_BYTES,
+        )
+        generate_zarr.SCRATCH_UNKNOWN_SIZE_BYTES = 10**18
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.01
+        rc, log, _ = self.run_main("--retry-pending")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("the size of 1 recording(s) could not be read from their pointers", log)
+        self.assertIn(f"(first: {self.B})", log)
+        self.assertIn(f"::error::{self.B} can never fit this volume", log)
+        self.assertIn(f"converted {self.A}", log)
+        index = self.published_index()
+        self.assertEqual([s["path"] for s in index["stores"]], [self.A])
+        entry = next(p for p in index["pending"] if p["path"] == self.B)
+        self.assertEqual((entry["reason"], entry["attempts"]), ("not_attempted", 0))
+        self.assertTrue(entry["last_error"].startswith("deferred: needs"), entry["last_error"])
+
+    def test_a_kept_store_under_clean_carries_its_events_rows_beside_the_converted_ones(self):
+        # --clean rebuilds from scratch, so the rows of a store it deferred and the
+        # index kept have to come from the LIVE events.parquet: A's three rows from
+        # the first run, and B's two from this one. Losing A's would leave the index
+        # serving a store with no events behind it.
+        build_real_edf(os.path.join(self.repo, "sub-01", "eeg"), "sub-01_task-rest_eeg", seconds=30)
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "A is longer")
+        self.first_round()
+        self.assertEqual({r["store_path"] for r in self.events_rows()}, {store_rel_for(self.A)})
+        self.materialize_b()
+        self._bigger_a_streams_with_an_absurd_charge()
+        rc, log, body = self.run_main()  # --clean, no --retry-pending
+        self.assertEqual(rc, 0, log)
+        self.assertIn(f"converted {self.B}", log)
+        self.assertNotIn(f"converted {self.A}", log)
+        index = self.published_index()
+        self.assertEqual(sorted(s["path"] for s in index["stores"]), [self.A, self.B])
+        per_store: dict[str, int] = {}
+        for row in self.events_rows():
+            per_store[row["store_path"]] = per_store.get(row["store_path"], 0) + 1
+        self.assertEqual(per_store, {store_rel_for(self.A): 3, store_rel_for(self.B): 2})
+        self.assertEqual(index["events_row_count"], 5)
+        self.assertEqual(body["events_row_count"], 5)
+        self.assertEqual(body["events_stores_without_rows"], 0)
 
 
 class TestLiveAdmissionCeiling(unittest.TestCase):

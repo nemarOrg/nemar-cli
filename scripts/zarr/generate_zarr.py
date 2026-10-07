@@ -1000,7 +1000,8 @@ def count_infra_failures(failures: list, failure_entries: list) -> int:
     ``retryable_coded`` term is normally zero. It stays because the term is what
     makes the rule TRUE rather than incidentally right: if a retryable code is
     ever surfaced as a typed failure again, the verdict must not silently flip to
-    terminal. This number equals ``len(pending)`` for a run, by construction.
+    terminal. This number is the infra failures of this run itself; recordings
+    deferred for scratch space are pending but are not counted.
     """
     retryable_coded = sum(1 for e in failure_entries if e.get("code") in RETRYABLE_CODES)
     return len(failures) - len(failure_entries) + retryable_coded
@@ -4954,7 +4955,11 @@ def deferred_unchanged_callback(
         "pool_breaks": 0,
         "calibration": [],
         "measured_count": 0,
-        "retryable_failures": len(pending),
+        # This run attempted nothing, so nothing in it failed for a retryable
+        # reason; the pending recordings are counted below. `hallu-zarr.sh` logs
+        # "N recording(s) failed for a RETRYABLE reason" from this field, which
+        # would otherwise repeat every hour for a recording that only waits for room.
+        "retryable_failures": 0,
         "pending_count": len(pending),
         "discovered_count": discovered_count,
         "not_attempted_count": deferred_pending,
