@@ -4525,7 +4525,8 @@ def merge_index(
     - a store that is stale (or any store carried by an incremental merge): the
       entry leaves the index, as a failure's does, and the recording is listed
       pending as `not_attempted` so the queue rebuilds it; its objects stay on S3;
-    - a typed failure already on record stays a failure;
+    - a typed failure already on record stays a failure when the index is current,
+      and is dropped for pending when it is stale (the verdict may no longer hold);
     - otherwise it is pending as `not_attempted`, `attempts` and `last_attempt_utc`
       carried from its history (so an attempt-3 recording is still attempt 3), and
       `last_error` says why it was deferred ahead of whatever it last failed with.
@@ -4643,7 +4644,16 @@ def merge_index(
             fails.pop(path, None)
             continue
         stores.pop(rel, None)
-        seeded_failure = fails.get(path) or _entry_for_path(seed, "failures", path)
+        # A typed failure is a verdict on the recording AS IT WAS read, by the engine
+        # that read it. Under a stale index (the data changed, or a newer engine may
+        # read it) it may no longer be true, and a failure is never retried, so
+        # keeping it would publish an obsolete verdict as final: the recording goes
+        # back to pending instead. Under a current index it is still the verdict.
+        if seed_current:
+            seeded_failure = fails.get(path) or _entry_for_path(seed, "failures", path)
+        else:
+            fails.pop(path, None)
+            seeded_failure = None
         if seeded_failure is not None:
             fails[path] = seeded_failure
             pends.pop(path, None)
@@ -4799,9 +4809,11 @@ def deferral_leaves_index_as_is(
             note = str(entry.get("last_error") or "")
             if entry.get("reason") != "not_attempted" or not note.startswith(_DEFERRED_PREFIX):
                 return False
-        elif path in failures:
+        elif not seed_current:
+            return False  # a stale store or verdict is a real change
+        elif path in failures or path in stores:
             continue
-        elif not (seed_current and path in stores):
+        else:
             return False
     return True
 

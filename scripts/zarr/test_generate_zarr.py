@@ -773,13 +773,30 @@ class TestMergeIndexDeferredRecordings(unittest.TestCase):
             self.pending(index)[self.B]["attempts"], generate_zarr.PENDING_MAX_ATTEMPTS
         )
 
-    def test_a_typed_failure_on_record_stays_a_failure(self):
+    def test_a_typed_failure_on_record_stays_a_failure_when_the_index_is_current(self):
         failure = generate_zarr._failure_entry(self.B, "not_continuous", "epoched")
         index = self.merge(
-            {self.B: self.NOTE}, seed={"failures": [failure]}, discovered=[self.B]
+            {self.B: self.NOTE}, seed={"failures": [failure]}, seed_current=True,
+            discovered=[self.B],
         )
         self.assertEqual([f["path"] for f in index["failures"]], [self.B])
         self.assertEqual(index["pending"], [])
+
+    def test_a_stale_typed_failure_is_not_published_as_final(self):
+        # The verdict was reached on older data or by an older engine, and a failure
+        # is never retried: it goes back to pending so a later round reads it again.
+        failure = generate_zarr._failure_entry(self.B, "not_continuous", "epoched")
+        for label, kwargs in (
+            ("clean", {"seed": {"failures": [failure]}}),
+            ("incremental", {"prior": {"failures": [failure]}, "seed": {"failures": [failure]}}),
+        ):
+            with self.subTest(label):
+                index = self.merge(
+                    {self.B: self.NOTE}, seed_current=False, discovered=[self.B], **kwargs
+                )
+                self.assertEqual(index["failures"], [])
+                entry = self.pending(index)[self.B]
+                self.assertEqual((entry["reason"], entry["attempts"]), ("not_attempted", 0))
 
     def test_the_note_is_bounded(self):
         index = self.merge({self.B: "deferred: " + "x" * 1000}, seed={}, discovered=[self.B])
@@ -872,7 +889,7 @@ class TestDeferralLeavesIndexAsIs(unittest.TestCase):
         self.assertFalse(self.check(self.live(), wipe=True))
         self.assertFalse(self.check(self.live(), deferred={}))
 
-    def test_a_typed_failure_on_record_changes_nothing(self):
+    def test_a_typed_failure_on_record_changes_nothing_when_the_index_is_current(self):
         live = self.live(pending=[], failures=[{"path": self.B, "code": "not_continuous"}])
         self.assertTrue(self.check(live))
 
@@ -896,6 +913,12 @@ class TestSafeStorePrefix(unittest.TestCase):
         for bad in ("../escape.zarr", "sub-01/../../x.zarr", "/abs/x.zarr", "a//b.zarr"):
             with self.assertRaises(ValueError):
                 safe_store_prefix("nemar", "nm000104", bad)
+
+    def test_a_typed_failure_under_a_stale_index_is_a_real_change(self):
+        live = self.live(pending=[], failures=[{"path": self.B, "code": "not_continuous"}])
+        self.assertFalse(
+            self.check(live, deferred={self.B: self.NOTE}, convert=[self.B], current=False)
+        )
 
 
 class TestMaterializeLocal(unittest.TestCase):
