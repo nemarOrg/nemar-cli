@@ -53,9 +53,11 @@ jobs:
       scrub: ${{ steps.filter.outputs.scrub }}
       # The ONE predicate for "the scrub suites must run", read by both `scrub-tools-shard` and
       # `scrub-tools` below so the shards and the check that gates on them cannot disagree about
-      # whether they were due. It is the same condition `scrub-tools` always had: the toolchain
-      # and the scanner (`scrub`), or the wire contract they import (`shared`).
-      scrub_suites: ${{ steps.filter.outputs.scrub == 'true' || steps.filter.outputs.shared == 'true' }}
+      # whether they were due. It is the `scrub` filter alone: the toolchain, the scanner files
+      # it imports from shared/, and nothing else. A change to the rest of shared/ (the wire
+      # contract, account copy, the facet vocabulary) or to the Zarr converter does not start
+      # seven runners for tools it cannot affect.
+      scrub_suites: ${{ steps.filter.outputs.scrub }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -98,12 +100,15 @@ jobs:
               - 'scripts/scrub/**'
               - 'test/scrub/**'
               - 'shared/identifier-*.ts'
+              # The four shared/ files scripts/scrub and test/scrub import (check with
+              # `grep -rh 'shared/' scripts/scrub test/scrub`); the rest of shared/ is not theirs.
+              - 'shared/privacy-correction-text.ts'
               - 'scripts/identifier-fleet-*.ts'
               - 'test/identifier-*.test.ts'
-              # The Zarr converter writes the store members the zarr stage removes and the
-              # members it accepts (KNOWN_BENIGN in scripts/scrub/s3/zarr-json.ts): a change to
-              # what it writes must run the scrub suites.
-              - 'scripts/zarr/**'
+              # Not listed on purpose: scripts/zarr/**. The zarr stage fails closed on a store
+              # member it does not know (KNOWN_BENIGN in scripts/scrub/s3/zarr-json.ts), so a
+              # converter change surfaces when an operator runs the stage, never as a silent
+              # pass, and the Hallu converter changes often.
               # Self-reference, mirroring the `email` filter below: the sharded job and its
               # aggregator are defined in this file, and editing only them left `scrub` false,
               # so the one change that could break the scrub CI never ran the scrub CI.
