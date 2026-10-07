@@ -399,16 +399,18 @@ jobs:
   #
   # THE SLOWEST SLICE SETS THE TIME. bun cuts the path-sorted file list into contiguous slices
   # of about equal duration, so a shard cannot finish before its slowest file does, and the
-  # cut points follow file order, not an ideal packing. On the durations measured in run
-  # 37652785302 the slowest slice is 17.1 minutes with 3 shards, 12.4 with 4, 9.3 with 5,
-  # 10.7 with 6, 9.0 with 7 and 7.7 with 8: more runners do not always help. So CHECK A SHARD
-  # COUNT BEFORE CHANGING IT, with a dry run that imports the files and runs no test (it exits
-  # 1 with "matched 0 tests"; the junit file names each shard's files). Never add
-  # --update-timings to it: that would overwrite the timings file with the files of one shard.
-  #   for i in 1 2 3 4 5; do
+  # cut points follow file order, not an ideal packing. On the per-file durations averaged over
+  # runs 37652785302 and 37655119691 the slowest slice is 10.8 minutes with 5 or 6 shards, 8.2
+  # with 7 (the knee: the first count that gives delete-preconditions.test.ts a runner of its
+  # own, 8 minutes) and 8.7 with 8, which also leaves a runner holding one 0-second file: more
+  # runners do not always help. So CHECK A SHARD COUNT BEFORE CHANGING IT, with a dry run that
+  # imports the files and runs no test (it exits 1 with "matched 0 tests"; the junit file names
+  # each shard's files). Never add --update-timings to it: that would overwrite the timings file
+  # with the files of one shard.
+  #   for i in 1 2 3 4 5 6 7; do
   #     bun test --preload ./test/scrub/helpers/temp-dirs-preload.ts \
   #       --path-ignore-patterns='__run_every_scrub_suite__' \
-  #       --timings test/scrub/timings.json --shard=$i/5 -t '^never$' \
+  #       --timings test/scrub/timings.json --shard=$i/7 -t '^never$' \
   #       --reporter=junit --reporter-outfile=/tmp/shard-$i.xml \
   #       test/scrub test/identifier-scan.test.ts test/identifier-scrub.test.ts \
   #       test/identifier-fleet.test.ts
@@ -435,7 +437,9 @@ jobs:
   #   gh run download <run-id> --pattern 'scrub-shard-*' --dir /tmp/scrub-shards
   #   jq -S -s '{version: 1, files: (map(.files) | add)}' /tmp/scrub-shards/*/timings.json \
   #     > test/scrub/timings.json
-  # A file missing from the timings file still runs; it is only balanced less well.
+  # A file missing from the timings file still runs; it is only balanced less well. A file's
+  # duration varies by up to a third between runs on the same code, so average two runs'
+  # artifacts rather than trusting one.
   scrub-tools-shard:
     name: scrub-tools shard ${{ matrix.shard }}/${{ strategy.job-total }}
     runs-on: ubuntu-latest
@@ -449,7 +453,7 @@ jobs:
       # Every shard reports, so one red shard does not hide a second one.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5]
+        shard: [1, 2, 3, 4, 5, 6, 7]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
