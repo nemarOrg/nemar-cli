@@ -1029,16 +1029,20 @@ exit 0
 """
 
 STAND_IN_CURL = """#!/bin/sh
-# Records the JSON each POST carries, one compact line per call. `--data @file` is
-# read, as curl does.
+# Records each call as one compact JSON line: the full argv and the JSON body the
+# call carries. `--data @file` is read, as curl does.
+argv_json="$(printf '%s\n' "$@" | jq -R . | jq -cs .)"
 payload=""
 while [ $# -gt 0 ]; do
   if [ "$1" = "--data" ]; then shift; payload="$1"; fi
   shift
 done
 case "$payload" in @*) payload="$(cat "${payload#@}")" ;; esac
-printf '%s\n' "$payload" | jq -c . >> "$CURL_LOG"
+jq -cn --argjson argv "$argv_json" --argjson payload "$payload" \
+  '{argv: $argv, payload: $payload}' >> "$CURL_LOG"
 """
+
+WEBHOOK_URL = "https://hooks.example.test/webhooks/zarr-ready"
 
 
 @pytest.fixture
@@ -1062,6 +1066,7 @@ def drain_one(ack_run, tmp_path: Path):
             extra_env={
                 "PATH": path,
                 "NEMAR_WEBHOOK_TOKEN": "test-token",
+                "ZARR_CALLBACK_URL": WEBHOOK_URL,
                 "CURL_LOG": str(curl_log),
                 "QPY_NEXT_OUT": "nm000276\tv1",
                 "DRIVER_CALLBACK_JSON": json.dumps(body),
@@ -1070,7 +1075,9 @@ def drain_one(ack_run, tmp_path: Path):
         )
 
     def posts() -> list[dict]:
-        return [json.loads(line) for line in curl_log.read_text().splitlines()] if curl_log.exists() else []
+        """Every curl call, in order: ``{"argv": [...], "payload": {...}}``."""
+        lines = curl_log.read_text().splitlines() if curl_log.exists() else []
+        return [json.loads(line) for line in lines]
 
     return go, posts, qpy_calls
 
@@ -1089,10 +1096,20 @@ UNCHANGED_BODY = {
     "data_failures": [],
     "deterministic": False,
     "retryable_failures": 0,
+    # Distinct, so a crossed read of the body or a crossed `qpy done` flag shows.
     "pending_count": 28,
     "discovered_count": 40,
-    "not_attempted_count": 28,
+    "not_attempted_count": 25,
 }
+
+
+def assert_webhook_post(call: dict) -> None:
+    """One call is a POST to the configured webhook with the token and JSON headers."""
+    argv = call["argv"]
+    assert argv[argv.index("-X") + 1 : argv.index("-X") + 3] == ["POST", WEBHOOK_URL], argv
+    headers = [argv[i + 1] for i, arg in enumerate(argv) if arg == "-H"]
+    assert headers == ["Content-Type: application/json", "X-Webhook-Token: test-token"], argv
+    assert "--data" in argv, argv
 
 
 def test_an_unchanged_run_is_posted_as_ready_and_its_counts_reach_the_queue(drain_one) -> None:
@@ -1103,13 +1120,17 @@ def test_an_unchanged_run_is_posted_as_ready_and_its_counts_reach_the_queue(drai
     go, posts, qpy_calls = drain_one
     done = go(UNCHANGED_BODY)
     assert done.returncode == 0, done.stderr
-    assert posts() == [
+    calls = posts()
+    assert [c["payload"] for c in calls] == [
         {"dataset_id": "nm000276", "status": "converting"},
         UNCHANGED_BODY,
     ]
-    assert "nm000276 v1 --pending-count 28 --not-attempted-count 28" in " ".join(
-        c for c in qpy_calls() if " done " in f" {c} "
-    ), qpy_calls()
+    for call in calls:
+        assert_webhook_post(call)
+    done_calls = [c for c in qpy_calls() if " done " in f" {c} "]
+    assert len(done_calls) == 1, qpy_calls()
+    # Each flag gets its own count: pending 28, of which 25 were never attempted.
+    assert done_calls[0].endswith("done nm000276 v1 --pending-count 28 --not-attempted-count 25")
     assert "RETRYABLE reason" not in done.stdout + done.stderr
 
 

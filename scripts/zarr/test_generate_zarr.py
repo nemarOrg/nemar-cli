@@ -10878,6 +10878,9 @@ class TestConvertOneStreamsIntoItsOwnScratch(unittest.TestCase):
         # a recording's five attempts (whether it should defer instead is a design
         # question, not decided here). Whatever the classification, nothing may stay
         # on the disk that just filled.
+        #
+        # The exporter is made to raise at the library boundary: a really full volume
+        # needs root to create. Everything after that point is the real convert_one.
         import biosigio
 
         work_root = os.path.join(self._tmp.name, "work")
@@ -10910,7 +10913,6 @@ class TestConvertOneStreamsIntoItsOwnScratch(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIsNone(result["code"], "uncoded, so it is an infrastructure failure")
         self.assertIn("No space left on device", result["error"])
-        self.assertNotEqual(result["code"], "recording_memory_exceeded")
         for path in (work, store_local, scratch):
             self.assertFalse(os.path.exists(path), f"{path} outlived the failed conversion")
 
@@ -12862,36 +12864,48 @@ class TestPoolBreakWarningContract(unittest.TestCase):
     GIB = 1024**3
     PRIMARY = "sub-01/eeg/sub-01_task-a_eeg.vhdr"
 
-    def test_the_warning_gives_the_volume_before_and_after_the_reclaim(self):
-        reads = iter([(200 * self.GIB, 500 * self.GIB), (260 * self.GIB, 500 * self.GIB)])
+    @staticmethod
+    def _readings(*values):
+        """A volume probe answering ``values`` in order, then the last one again, so a
+        further probe never raises StopIteration into the code under test."""
+        remaining = list(values)
+        return lambda: remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+    def _warning(self, volume):
         with (
             tempfile.TemporaryDirectory() as root,
             tempfile.TemporaryDirectory() as empty_proc,
             contextlib.redirect_stdout(io.StringIO()) as out,
         ):
             generate_zarr.reclaim_after_pool_break(
-                root, [self.PRIMARY], lambda: next(reads), proc_root=empty_proc
+                root, [self.PRIMARY], volume, proc_root=empty_proc
             )
+        return out.getvalue()
+
+    def test_the_warning_gives_the_volume_before_and_after_the_reclaim(self):
+        log = self._warning(
+            self._readings((200 * self.GIB, 500 * self.GIB), (260 * self.GIB, 500 * self.GIB))
+        )
         self.assertRegex(
-            out.getvalue(),
+            log,
             r"(?m)^::warning::worker pool broke with 1 recording\(s\) in flight; "
             r"scratch free 200 GiB before the reclaim and 260 GiB after, of 500 GiB; ",
         )
 
-    def test_without_a_volume_the_warning_says_the_free_space_is_unreadable(self):
-        with (
-            tempfile.TemporaryDirectory() as root,
-            tempfile.TemporaryDirectory() as empty_proc,
-            contextlib.redirect_stdout(io.StringIO()) as out,
-        ):
-            generate_zarr.reclaim_after_pool_break(
-                root, [self.PRIMARY], None, proc_root=empty_proc
-            )
-        self.assertRegex(
-            out.getvalue(),
-            r"(?m)^::warning::worker pool broke with 1 recording\(s\) in flight; "
-            r"scratch free space unreadable; ",
-        )
+    def test_a_volume_that_cannot_be_read_says_the_free_space_is_unreadable(self):
+        # No probe at all, and a probe that answers None (the real unreadable case:
+        # statvfs failed on the scratch volume).
+        for label, volume in (("no probe", None), ("a probe returning None", lambda: None)):
+            with self.subTest(label):
+                self.assertRegex(
+                    self._warning(volume),
+                    r"(?m)^::warning::worker pool broke with 1 recording\(s\) in flight; "
+                    r"scratch free space unreadable; ",
+                )
+
+    def test_a_probe_that_fails_only_after_the_reclaim_is_unreadable_too(self):
+        log = self._warning(self._readings((200 * self.GIB, 500 * self.GIB), None))
+        self.assertIn("scratch free space unreadable;", log)
 
     def test_a_break_inside_a_drain_reads_the_drains_own_volume(self):
         # The drain hands its volume probe to the reclaim: a run whose probe works
@@ -12962,9 +12976,12 @@ class TestDeferredRunsAgainstALiveIndex(TestMainRetryPendingRound):
         return index
 
     def test_an_all_deferred_run_restates_what_the_live_index_says(self):
-        # The backend overwrites the dataset's row from this body, so a field
-        # restated wrongly (an empty failure list, a zero error count, no ETag) is
-        # written over the truth on every hourly tick of a recording that never fits.
+        # The backend derives the dataset's row from this body (its error and failure
+        # counts, a bounded summary of pending and discovered counts, the ETag), so a
+        # field restated wrongly (a zero error count, no ETag) changes that row on every
+        # hourly tick of a recording that never fits. Not every field below reaches the
+        # row (the failure entries and the events row count do not); each is pinned
+        # here as part of the body the script POSTs.
         live = self._defer_b_then_publish()
         self._no_scratch()
         before = self._s3_snapshot()
