@@ -1,42 +1,60 @@
 /**
- * Keep a subcommand's value-taking option from being swallowed by a root
+ * Keep a subcommand's value-taking option from being claimed by an ancestor
  * option of the same name (#1493).
  *
- * Commander recognises a program-level option anywhere on the command line
- * unless positional options are enabled, and enabling them would break every
- * global flag typed after the subcommand (`nemar dataset upload ./x --verbose`).
- * So `nemar dataset release nm000104 --version 2.0.0`, the form the release
- * help documents, was eaten by the root `-v, --version`: the CLI printed its
- * own version and exited 0, and a scripted release (`-y`) silently did nothing.
- * The equals form (`--version=2.0.0`) already reached the subcommand, because
- * the root option is a boolean and does not match `--flag=value`.
+ * The hazard: Commander recognizes an ancestor's options anywhere on the
+ * command line unless positional options are enabled, and enabling them would
+ * break every global flag typed after the subcommand (`nemar dataset upload
+ * ./x --verbose`). The root declares `-v, --version` as a boolean, so in
+ * `nemar dataset release nm000104 --version 2.0.0`, the form the release help
+ * documents, the root claims `--version`, prints the CLI version and exits 0,
+ * and a scripted release (`-y`) silently does nothing. The equals spelling
+ * (`--version=2.0.0`) reaches the subcommand, because a boolean does not match
+ * `--flag=value`.
  *
- * This rewrites exactly that case before Commander sees it: for the leaf
- * command named on the line, every option that TAKES A VALUE and whose long
- * flag an ancestor declares as a BOOLEAN is joined to its value
- * (`--version 2.0.0` -> `--version=2.0.0`).
+ * The rewrite: for the command the line addresses, every option that takes a
+ * value and whose long flag an ancestor declares as a BOOLEAN is joined to its
+ * value (`--version 2.0.0` -> `--version=2.0.0`). Only the tokens after that
+ * command's name are its own. An ancestor option that takes a value itself
+ * (`admin recover --recover-file`) needs no join: the ancestor consumes the
+ * flag and its value together, and the leaf reads it back through
+ * `optsWithGlobals()`.
  *
- * A shadowed flag with NO value (last token, empty, or followed by another
- * flag) is an error, not a pass-through: left alone, the root would eat it and print
- * the CLI version, which is the same silent no-op for a scripted `-y` release.
- * The function throws {@link MissingShadowedValueError}; the caller reports it
- * through Commander so the message and exit code are Commander's own.
+ * Two shapes are errors, because passing them along lets the root claim the
+ * flag, which is the same silent no-op:
+ * - A shadowed flag with no value: last token, empty, or followed by a token
+ *   that reads as a flag. Commander itself would take ANY next token as the
+ *   value of a required option; this deliberately diverges, because a
+ *   flag-looking next token (`--version -y`) is far more likely a forgotten
+ *   value than a value. A value that really starts with "-" is spelled
+ *   `--flag=value`. A lone "-" counts as a value, as it does for Commander.
+ * - A shadowed flag typed before the command that declares it (`dataset
+ *   --version 2.0.0 release`). At the root it stays the root's own flag:
+ *   `nemar --version dataset release ...` still prints the version.
+ * Asking for help (`--help` or `-h` before `--`) outranks a missing value; the
+ * bare flag is dropped so the root does not print the version instead.
  *
- * Nothing else changes: anything after `--`, a flag spelled `--flag=value`,
- * and boolean collisions (#1220, `-v` vs `-v, --verbose`) are left alone.
- * An ancestor option that takes a value too (`admin recover status
- * --recover-file`, read back through `optsWithGlobals()`) consumes the flag and
- * its value together, so nothing is rewritten there.
- * An OPTIONAL-value shadowed option (`--flag [value]`) is joined when it has a
- * value but cannot be made to work without one: a bare flag has no spelling
- * the root will not claim. None exists today; a test pins that.
+ * The errors are thrown, not printed: the function stays free of output and
+ * process.exit so tests can assert on it, and src/index.ts reports them
+ * through the declaring command, which makes the stream and exit code
+ * Commander's own. The message is rebuilt here because Commander's
+ * optionMissingArgument is private and absent from its typings; the tests pin
+ * the literal, so an upgrade that changes the wording is noticed.
+ *
+ * Left alone: anything after `--`, a flag already spelled `--flag=value`, and
+ * boolean collisions (#1220, `-v` vs `-v, --verbose`). Not handled:
+ * - Short flags. Rewriting cannot rescue one: Commander's combined-short-flag
+ *   rule makes the root claim `-vVALUE`. None exists today.
+ * - An OPTIONAL-value option (`--flag [value]`) is joined when it has a
+ *   value, but without one a bare flag has no spelling the root will not
+ *   claim. None exists today; a test pins that.
  */
 
 import type { Command, Option } from "commander";
 
 /**
  * A shadowed value-taking option was written without a value. Carries the
- * command that declares it so the caller can fail the way Commander would.
+ * command that declares it so the caller can report it the way Commander does.
  */
 export class MissingShadowedValueError extends Error {
   readonly code = "commander.optionMissingArgument";
@@ -53,9 +71,10 @@ export class MissingShadowedValueError extends Error {
 
 /**
  * A shadowed option was typed before the command it belongs to
- * (`dataset --version 2.0.0 release`). The parent command does not declare it,
- * so Commander hands it to the root, and the equals spelling cannot reach the
- * command either (the parent rejects it as an unknown option).
+ * (`dataset --version 2.0.0 release`). The command ahead of it does not
+ * declare it, so the root claims it, and the equals spelling cannot reach the
+ * right command either (Commander has the command ahead reject it as an
+ * unknown option).
  */
 export class MisplacedShadowedOptionError extends Error {
   readonly code = "commander.unknownOption";
@@ -76,7 +95,9 @@ function optionFlags(option: Option): string[] {
 /**
  * Whether `token` can stand as an option's value. A lone "-" can: Commander
  * itself reads it as a value (it is the usual spelling of stdin). Any other
- * token that starts with "-" reads as a flag, and so does an empty one.
+ * token that starts with "-" reads as a flag, so a value that starts with "-"
+ * has to be spelled `--flag=value`. An empty token is a missing value, not an
+ * empty one: a caller testing the option for truthiness reads it as absent.
  */
 function isValue(token: string | undefined): token is string {
   return token !== undefined && token !== "" && (token === "-" || !token.startsWith("-"));
@@ -132,10 +153,11 @@ function shadowedFlagsInTree(command: Command, ancestors: readonly Command[]): S
  */
 export function bindShadowedOptionValues(root: Command, argv: string[]): string[] {
   // Walk to the leaf command: descend while a non-flag token names a
-  // subcommand of the current one. Every root option is a boolean, so skipping
-  // any token starting with "-" is enough here. The one value-taking option on
-  // a command that also has subcommands (`admin recover --recover-file`) could
-  // only mislead this walk if its value spelled a subcommand name.
+  // subcommand of the current one, skipping tokens that start with "-". That
+  // assumes no command with subcommands takes a value option, so no option
+  // value can be mistaken for a subcommand name. Only `admin recover
+  // --recover-file` does; its value ends the walk at `recover`, which shadows
+  // nothing. The one value the walk steps over is a shadowed flag's own.
   const treeFlags = shadowedFlagsInTree(root, []);
   const early: { flag: string; index: number }[] = [];
   const ancestors: Command[] = [];
@@ -177,6 +199,9 @@ export function bindShadowedOptionValues(root: Command, argv: string[]): string[
     .slice(0, dashDash < 0 ? argv.length : dashDash)
     .some((token) => token === "--help" || token === "-h");
 
+  // Only the tokens after the leaf's name belong to it. Whatever came before
+  // stays the ancestors' (`nemar --version dataset release ...` prints the
+  // version), apart from the misplaced flag rejected above.
   const out = argv.slice(0, leafIndex + 1);
   for (let i = leafIndex + 1; i < argv.length; i++) {
     const token = argv[i];
