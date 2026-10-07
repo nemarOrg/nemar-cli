@@ -476,10 +476,15 @@ function syncDirectory(dir: string): void {
 function applyOne(item: DatePlanItem, dir: string): number | null {
   let copy: string | null = null;
   try {
-    // `lstat` of a link is not a file, so a file replaced by a link fails the first term. A change of
-    // size is caught by the copy's own size check below.
+    // `lstat` of a link is not a file, so a file replaced by a link fails the first term. The size is
+    // compared too: a filesystem with coarse timestamps (FAT, exFAT, HFS+) can keep the same
+    // modification time across a write, and a recording still being written grows.
     const unchanged = (st: Stats) =>
-      st.isFile() && st.dev === item.dev && st.ino === item.ino && st.mtimeMs === item.mtimeMs;
+      st.isFile() &&
+      st.dev === item.dev &&
+      st.ino === item.ino &&
+      st.size === item.size &&
+      st.mtimeMs === item.mtimeMs;
     if (!unchanged(lstatSync(item.path)) || !sameBytes(readHead(item.path), item.before)) {
       return null;
     }
