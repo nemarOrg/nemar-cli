@@ -26,6 +26,7 @@ import {
   markStepCompleted,
   writeUploadProgress,
 } from "../upload-progress.js";
+import { listAnnexedPaths } from "./transfer.js";
 import { type DatasetInfo, FAIL, type Step, ok } from "./types.js";
 
 /** Step 10b: Write .nemar/metadata.json if missing and update .bidsignore (gated, warn-only). */
@@ -85,7 +86,23 @@ export async function saveDatasetStep(
   if (!isStepCompleted(progress, "dataset_save")) {
     const spinner = ora("Saving dataset changes...").start();
 
-    const saveResult = await saveDataset(absolutePath, "Initial NEMAR dataset upload", author);
+    // Annexed files are already staged (by the tracking step) and verified at
+    // the S3 remote; `git add -A` must not stream their content through
+    // git-annex filter-process again (#1455). A failure to list them only
+    // costs speed, so it falls back to the plain add.
+    let annexed: string[] = [];
+    try {
+      annexed = [...(await listAnnexedPaths(absolutePath))];
+    } catch (listError) {
+      console.log(
+        chalk.dim(
+          `  Could not list annexed files (${errorDetail(listError)}); staging will re-read them`,
+        ),
+      );
+    }
+    const saveResult = await saveDataset(absolutePath, "Initial NEMAR dataset upload", author, {
+      skipContentCheckPaths: annexed,
+    });
     if (!saveResult.success) {
       writeUploadProgress(absolutePath, progress);
       printStepFailure(spinner, "Failed to save dataset", saveResult.error);
