@@ -261,3 +261,27 @@ describe("nemar dataset upload: a verdict that needs an acknowledgment", () => {
     }
   });
 });
+
+describe("the upload action hands the record to the create call (source-level supplement)", () => {
+  // Every subprocess test above ends at the preflight, because a run past it would reach GitHub
+  // and git-annex with this machine's credentials. So nothing above can see whether the action
+  // passes the record on to createOrResumeDataset; the wire is tested in
+  // upload-preflight-recording.test.ts from that function down. This pins the one hop between.
+  test("the step runs before the tool checks and its value reaches createOrResumeDataset", async () => {
+    const source = await Bun.file(join(REPO_ROOT, "src", "commands", "dataset.ts")).text();
+    const action = source.slice(source.indexOf("export function createUploadCommand"));
+    const step = action.indexOf("await identifierPreflightStep(absolutePath, options)");
+    expect(step).toBeGreaterThan(0);
+    for (const later of [
+      'checkPrerequisitesForCommand("upload")',
+      "collectAuthorOrcids(",
+      "createOrResumeDataset(",
+    ]) {
+      expect(action.indexOf(later)).toBeGreaterThan(step);
+    }
+    const call = action.slice(action.indexOf("createOrResumeDataset("));
+    const args = call.slice(0, call.indexOf(");"));
+    expect(args).toContain("identifierPreflight ?? undefined");
+    expect(action).toContain("const identifierPreflight = preflight.value;");
+  });
+});
