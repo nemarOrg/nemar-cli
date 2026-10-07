@@ -5486,6 +5486,150 @@ class TestKillOrphansUnder(unittest.TestCase):
         self.assertEqual(generate_zarr._wait_until_gone([os.getpid()], 0.1), [os.getpid()])
 
 
+class TestKillOrphansGuards(unittest.TestCase):
+    """The scan's deadline, the re-read before each kill, the wait for killed
+    processes and the survivors report, against real processes."""
+
+    @staticmethod
+    def _script(body):
+        return ["-c", body]
+
+    def _start(self, body, *args):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", body, *args], start_new_session=True
+        )
+
+        def finish():
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+
+        self.addCleanup(finish)
+        return proc
+
+    def _fixture_proc(self, proc_dir, pid, *args):
+        os.makedirs(os.path.join(proc_dir, str(pid)))
+        with open(os.path.join(proc_dir, str(pid), "cmdline"), "wb") as fh:
+            fh.write(b"\0".join(a.encode() for a in args) + b"\0")
+
+    def test_a_pid_that_no_longer_matches_when_re_read_is_not_killed(self):
+        # Between the scan and the kill a pid can be freed and reused by an unrelated
+        # process. The fixture's command line is rewritten after the scan, as a
+        # reused pid's would read, and the process must survive.
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as proc:
+            victim = self._start("import time; time.sleep(300)", "innocent")
+            cmdline = os.path.join(proc, str(victim.pid), "cmdline")
+            self._fixture_proc(proc, victim.pid, "aws", "s3", "cp", os.path.join(root, "work", "x"))
+
+            def pid_is_reused():
+                with open(cmdline, "wb") as fh:
+                    fh.write(b"someone-else\0--unrelated\0")
+
+            report = generate_zarr.kill_orphans_under(
+                root, proc_root=proc, _after_scan=pid_is_reused
+            )
+            self.assertEqual(report.killed, [])
+            self.assertIsNone(victim.poll(), "an unrelated process was killed")
+
+    def test_a_pid_that_vanishes_between_scan_and_kill_is_skipped(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as proc:
+            victim = self._start("import time; time.sleep(300)", "x")
+            self._fixture_proc(proc, victim.pid, "aws", os.path.join(root, "work", "x"))
+            report = generate_zarr.kill_orphans_under(
+                root, proc_root=proc,
+                _after_scan=lambda: shutil.rmtree(os.path.join(proc, str(victim.pid))),
+            )
+            self.assertEqual(report.killed, [])
+            self.assertIsNone(victim.poll())
+
+    def test_a_scan_blocked_on_a_read_is_abandoned_at_the_deadline(self):
+        # A FIFO where a cmdline file should be blocks the reader forever: a real
+        # read that does not return. The run must not hang on it.
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("no FIFOs here")
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as proc:
+            os.makedirs(os.path.join(proc, "424242"))
+            fifo = os.path.join(proc, "424242", "cmdline")
+            os.mkfifo(fifo)
+
+            def release():
+                # Let the abandoned reader finish, so the test leaves no stuck thread.
+                with open(fifo, "wb"):
+                    pass
+
+            started = time.monotonic()
+            try:
+                report = generate_zarr.kill_orphans_under(
+                    root, proc_root=proc, scan_seconds=0.3
+                )
+            finally:
+                release()
+            self.assertLess(time.monotonic() - started, 5.0)
+            self.assertIn("did not finish", report.error)
+            self.assertEqual((report.killed, report.survivors, report.scanned), ([], [], 0))
+
+    def test_a_process_that_outlives_the_signal_is_a_survivor(self):
+        # SIGSTOP stands in for a process the kernel cannot reap (uninterruptible
+        # sleep): the signal is delivered and the process is still there.
+        with tempfile.TemporaryDirectory() as root:
+            orphan = self._start(
+                "import time; time.sleep(300)", os.path.join(root, "work", "x", "part")
+            )
+            time.sleep(0.3)
+            report = generate_zarr.kill_orphans_under(
+                root, wait_seconds=0.3,
+                send_signal=lambda pid, _sig: os.kill(pid, signal.SIGSTOP),
+            )
+            self.assertEqual(report.killed, [orphan.pid])
+            self.assertEqual(report.survivors, [orphan.pid])
+
+    def test_the_pool_break_names_a_survivor_as_an_error(self):
+        with (
+            tempfile.TemporaryDirectory() as root,
+            contextlib.redirect_stdout(io.StringIO()) as out,
+        ):
+            orphan = self._start(
+                "import time; time.sleep(300)", os.path.join(root, "work", "x", "part")
+            )
+            time.sleep(0.3)
+            generate_zarr.reclaim_after_pool_break(
+                root, [], wait_seconds=0.3,
+                send_signal=lambda pid, _sig: os.kill(pid, signal.SIGSTOP),
+            )
+        log = out.getvalue()
+        self.assertIn("::error::1 orphaned process(es) survived SIGKILL", log)
+        self.assertIn(str(orphan.pid), log)
+        self.assertIn("1 orphaned child process(es) killed", log)
+
+    def test_it_waits_for_a_slow_dying_process_before_reporting(self):
+        # SIGTERM with a handler that takes 0.6 s to exit: the report must not call
+        # it a survivor if it is given time, and must if it is not.
+        slow = (
+            "import os, signal, time\n"
+            "signal.signal(signal.SIGTERM, lambda *a: (time.sleep(0.6), os._exit(0)))\n"
+            "time.sleep(300)"
+        )
+        with tempfile.TemporaryDirectory() as root:
+            first = self._start(slow, os.path.join(root, "work", "a"))
+            time.sleep(0.4)
+            started = time.monotonic()
+            patient = generate_zarr.kill_orphans_under(
+                root, wait_seconds=10.0,
+                send_signal=lambda pid, _sig: os.kill(pid, signal.SIGTERM),
+            )
+            waited = time.monotonic() - started
+            self.assertEqual(patient.killed, [first.pid])
+            self.assertEqual(patient.survivors, [])
+            self.assertGreaterEqual(waited, 0.4, "returned before the process had gone")
+            second = self._start(slow, os.path.join(root, "work", "b"))
+            time.sleep(0.4)
+            impatient = generate_zarr.kill_orphans_under(
+                root, wait_seconds=0.1,
+                send_signal=lambda pid, _sig: os.kill(pid, signal.SIGTERM),
+            )
+            self.assertEqual(impatient.survivors, [second.pid])
+
+
 class TestPoolBreakReportsWhatItCouldNotVerify(unittest.TestCase):
     PRIMARY = "sub-01/eeg/sub-01_task-a_eeg.vhdr"
 

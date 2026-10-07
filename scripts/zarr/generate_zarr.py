@@ -69,6 +69,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 from collections.abc import MutableMapping
@@ -2254,6 +2255,49 @@ def process_table(proc_root: str | None = None) -> tuple[list[tuple[int, list[st
     return table, None
 
 
+def _with_deadline(fn, seconds: float):
+    """``(value, timed_out)``: run ``fn`` in a daemon thread and give up after
+    ``seconds``. A /proc read of a live process normally returns at once, but it
+    reaches into the target's memory and can wait on it; a scan run while a pool is
+    being cleaned up must not hang the run on one such read. The abandoned thread is
+    left behind (daemon), which is the price of not being able to cancel a read."""
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the caller's thread
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        return None, True
+    if "error" in box:
+        raise box["error"]
+    return box["value"], False
+
+
+def _cmdline_argv(pid: int, proc_root: str | None) -> list[str] | None:
+    """The argv of ``pid`` right now, or None if it cannot be read (it has exited)."""
+    if proc_root is not None or os.path.isdir("/proc/self"):
+        try:
+            with open(os.path.join(proc_root or "/proc", str(pid), "cmdline"), "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            return None
+        return [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
+    try:
+        done = subprocess.run(
+            ["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True,
+            timeout=10, env={**os.environ, "COLUMNS": "100000"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout.split() if done.returncode == 0 and done.stdout.strip() else None
+
+
 def _pid_is_gone(pid: int) -> bool:
     """Whether ``pid`` has exited. A process killed but not yet reaped is a zombie:
     it has released its files and its blocks, so it counts as gone."""
@@ -2294,7 +2338,13 @@ def _wait_until_gone(pids: list[int], seconds: float) -> list[int]:
 
 
 def kill_orphans_under(
-    root: str, proc_root: str | None = None, wait_seconds: float = 5.0
+    root: str,
+    proc_root: str | None = None,
+    wait_seconds: float = 5.0,
+    *,
+    scan_seconds: float = 30.0,
+    send_signal=os.kill,
+    _after_scan=None,
 ) -> OrphanReport:
     """SIGKILL every process whose command line names a path under ``root``, wait
     for each to exit, and say what could not be established.
@@ -2311,16 +2361,32 @@ def kill_orphans_under(
     The result is explicit about the two ways this can quietly do nothing: the scan
     could not run (``error``), or it read no process at all (``scanned`` is 0). A
     killed process that is still present after the wait is in ``survivors``.
+
+    The scan has a deadline (``scan_seconds``), and each candidate's command line is
+    read AGAIN immediately before the signal and must still match: between the scan
+    and the kill a pid can be freed and reused by an unrelated process, and the second
+    read is what stops that process being killed. ``send_signal`` is ``os.kill``; a
+    test passes another to produce a process that outlives the signal.
     """
-    table, error = process_table(proc_root)
+    scanned, timed_out = _with_deadline(lambda: process_table(proc_root), scan_seconds)
+    if timed_out:
+        return OrphanReport([], [], 0, f"the process scan did not finish in {scan_seconds:g}s")
+    table, error = scanned
     prefix = os.path.join(root, "")
     me = os.getpid()
+    candidates = [
+        pid for pid, argv in table
+        if pid != me and any(arg.startswith(prefix) for arg in argv)
+    ]
+    if _after_scan is not None:
+        _after_scan()
     killed: list[int] = []
-    for pid, argv in table:
-        if pid == me or not any(arg.startswith(prefix) for arg in argv):
-            continue
+    for pid in candidates:
+        again, _ = _with_deadline(lambda pid=pid: _cmdline_argv(pid, proc_root), 5.0)
+        if not again or not any(arg.startswith(prefix) for arg in again):
+            continue  # exited, or the pid now belongs to something else
         try:
-            os.kill(pid, signal.SIGKILL)
+            send_signal(pid, signal.SIGKILL)
             killed.append(pid)
         except OSError:
             continue  # already gone, or not ours to signal
@@ -2334,6 +2400,8 @@ def reclaim_after_pool_break(
     *,
     proc_root: str | None = None,
     suspect_after: int = 1024**3,
+    send_signal=os.kill,
+    wait_seconds: float = 5.0,
 ) -> ReclaimResult:
     """What a pool break owes the disk, in one warning.
 
@@ -2352,7 +2420,9 @@ def reclaim_after_pool_break(
     ``::warning::`` with the numbers, since the rebuilt pool is about to inherit it.
     ``volume`` is a callable returning ``(free, total)`` or None."""
     before = volume() if volume else None
-    orphans = kill_orphans_under(tmp_root, proc_root)
+    orphans = kill_orphans_under(
+        tmp_root, proc_root, wait_seconds, send_signal=send_signal
+    )
     freed = leaked = 0
     errors: list[str] = []
     for primary in primaries:
