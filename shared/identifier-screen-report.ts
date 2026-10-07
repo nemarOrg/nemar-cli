@@ -491,6 +491,10 @@ export interface ScreenDescription {
   lines: string[];
 }
 
+/**
+ * Why a screen produced no scan, as a person reads it. Exported through {@link screenErrorText}
+ * so the scheduled sweep's report (ADR 0087) states a cause in these words and no others.
+ */
 const ERROR_TEXT: Record<ScreenError, string> = {
   "dispatch-unconfigured":
     "the Worker had no GitHub credential or callback secret, so the screen was never started",
@@ -503,22 +507,47 @@ const ERROR_TEXT: Record<ScreenError, string> = {
   deadline: "the screen workflow ran out of time before it finished reading",
 };
 
-const HEADLINES: Record<ScreenState, { headline: string; tone: ScreenDescription["tone"] }> = {
-  pending: { headline: "Identifier screen: running", tone: "note" },
-  clean: { headline: "Identifier screen: clean", tone: "ok" },
-  "dates-only": { headline: "Identifier screen: clean (acquisition dates only)", tone: "ok" },
-  "no-recordings": { headline: "Identifier screen: clean (no recordings)", tone: "ok" },
-  review: { headline: "Identifier screen: needs review", tone: "warn" },
-  "direct-identifiers": { headline: "Identifier screen: FOUND IDENTIFIERS", tone: "stop" },
-  unchecked: { headline: "Identifier screen: INCOMPLETE", tone: "warn" },
-  "not-screened": { headline: "Identifier screen: recordings NOT screened", tone: "warn" },
+/**
+ * What each state is called, and how loudly. The headline every surface shows is
+ * `Identifier screen: <label>`; the label alone is what the scheduled sweep's report (ADR 0087)
+ * puts beside a count, so a state has one name everywhere.
+ */
+const STATE_WORDS: Record<ScreenState, { label: string; tone: ScreenDescription["tone"] }> = {
+  pending: { label: "running", tone: "note" },
+  clean: { label: "clean", tone: "ok" },
+  "dates-only": { label: "clean (acquisition dates only)", tone: "ok" },
+  "no-recordings": { label: "clean (no recordings)", tone: "ok" },
+  review: { label: "needs review", tone: "warn" },
+  "direct-identifiers": { label: "FOUND IDENTIFIERS", tone: "stop" },
+  unchecked: { label: "INCOMPLETE", tone: "warn" },
+  "not-screened": { label: "recordings NOT screened", tone: "warn" },
   "clean-edf-only-others-unscreened": {
-    headline: "Identifier screen: EDF/BDF clean, other recordings NOT screened",
+    label: "EDF/BDF clean, other recordings NOT screened",
     tone: "warn",
   },
-  error: { headline: "Identifier screen: DID NOT RUN", tone: "stop" },
-  unreported: { headline: "Identifier screen: DID NOT REPORT", tone: "stop" },
+  error: { label: "DID NOT RUN", tone: "stop" },
+  unreported: { label: "DID NOT REPORT", tone: "stop" },
 };
+
+/** The name of a state, without the `Identifier screen:` prefix. */
+export function screenStateLabel(state: ScreenState): string {
+  return STATE_WORDS[state].label;
+}
+
+/** The cause of a screen that produced no scan, as {@link describeScreen} states it. */
+export function screenErrorText(error: ScreenError): string {
+  return ERROR_TEXT[error];
+}
+
+/** Kinds and counts as every surface prints them: `edf-patient-name x12, edf-patient-birthdate x12`. */
+export function kindsPhrase(byKind: Partial<Record<FindingKind, number>> | undefined): string {
+  return Object.entries(byKind ?? {})
+    .map(([k, n]) => `${k} x${n}`)
+    .join(", ");
+}
+
+/** What the screen does not read, whatever it found. One sentence, shown by every surface. */
+export const SCREEN_NOT_READ = "Not read: the contents of sidecars and tables in earlier commits.";
 
 /**
  * The words that go in front of a person. One function for the admin email, the status view and
@@ -535,7 +564,10 @@ export function describeScreen(
       lines: ["This request predates the screen, or the screen was never started for it."],
     };
   }
-  const base = HEADLINES[state];
+  const base = {
+    headline: `Identifier screen: ${STATE_WORDS[state].label}`,
+    tone: STATE_WORDS[state].tone,
+  };
   const lines: string[] = [];
   // The Worker stores an 'unreported' screen WITH the error report that says so
   // (`no-report-in-time`), so the cause is stated once, from the report, when
@@ -553,10 +585,8 @@ export function describeScreen(
         `Files: ${scan.files.total}; EDF/BDF headers read: ${scan.files.header_read} of ${scan.files.edf_bdf}${unreadable}.`,
       );
     }
-    const kinds = Object.entries(scan.findings_by_kind ?? {});
-    if (kinds.length > 0) {
-      lines.push(`Findings by kind: ${kinds.map(([k, n]) => `${k} x${n}`).join(", ")}.`);
-    }
+    const kinds = kindsPhrase(scan.findings_by_kind);
+    if (kinds) lines.push(`Findings by kind: ${kinds}.`);
     if (scan.edf_bdf_files_flagged) {
       lines.push(`EDF/BDF files with an identifier finding: ${scan.edf_bdf_files_flagged}.`);
     }
@@ -569,7 +599,7 @@ export function describeScreen(
     if (scan.incomplete_reasons.length > 0) {
       lines.push(`Incomplete: ${scan.incomplete_reasons.join(", ")}.`);
     }
-    lines.push("Not read: the contents of sidecars and tables in earlier commits.");
+    lines.push(SCREEN_NOT_READ);
     lines.push(`Scanner ${report.scanner}; commit ${report.head?.slice(0, 12)}.`);
   }
   return { headline: base.headline, tone: base.tone, lines };
