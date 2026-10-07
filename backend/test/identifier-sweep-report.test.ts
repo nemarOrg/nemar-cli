@@ -30,6 +30,7 @@ import {
   IDENTIFIER_SWEEP_ROWS_SQL,
   runIdentifierSweepTick,
   sendIdentifierSweepWeeklyReport,
+  weeklyRecordState,
 } from "../src/services/identifier-sweep";
 import {
   type IdentifierSweepRow,
@@ -256,6 +257,80 @@ describe("findings stay listed", () => {
   });
 });
 
+describe("round two: findings and failures that must still show", () => {
+  test("a carried finding beside an unreadable verdict is listed; a stamp that does not read back is named", () => {
+    const earlier = screenedRow("nm000780", "direct-identifiers", 9);
+    const kept = JSON.stringify({
+      status: "direct-identifiers",
+      checked_at: earlier.checked_at,
+      report: JSON.parse(earlier.report as string),
+    });
+    const unreadable = {
+      ...screenedRow("nm000780", "clean", 1),
+      checked_at: "yesterday",
+      finding: kept,
+    };
+    expect(facts([unreadable]).flagged?.map((d) => [d.dataset_id, d.standing])).toEqual([
+      ["nm000780", "earlier"],
+    ]);
+    const garbage = { ...screenedRow("nm000781", "unchecked", 1), finding: "not json" };
+    expect(facts([garbage]).flagged).toEqual([
+      {
+        dataset_id: "nm000781",
+        screened_on: null,
+        standing: "unreadable",
+        findings_by_kind: null,
+        edf_bdf_files_flagged: null,
+      },
+    ]);
+  });
+
+  test("the stronger finding is listed: an earlier direct finding above a current incomplete review", () => {
+    const earlier = screenedRow("nm000782", "direct-identifiers", 9);
+    const kept = JSON.stringify({
+      status: "direct-identifiers",
+      checked_at: earlier.checked_at,
+      report: JSON.parse(earlier.report as string),
+    });
+    const f = facts([
+      { ...screenedRow("nm000782", "review", 1, { incomplete: true }), finding: kept },
+    ]);
+    expect(f.flagged?.map((d) => [d.dataset_id, d.standing])).toEqual([["nm000782", "earlier"]]);
+    expect(f.review).toEqual([]);
+  });
+
+  test("a refused or silent workflow shows this week even while every verdict is still fresh", () => {
+    // Screened 22 days before NOW (still inside the cycle), and every attempt in
+    // the week reported ended without a verdict: nothing is unchecked yet.
+    const inWeek = sqlite(Date.parse("2026-10-02T09:00:00Z"));
+    const rows = ["nm000783", "nm000784", "nm000785"].map((id) => ({
+      ...screenedRow(id, "clean", 22),
+      attempt: "error",
+      attempt_error: "workflow-failed",
+      attempted_at: inWeek,
+    }));
+    const f = facts(rows, 0);
+    f.owed = 3;
+    expect(f.unchecked).toBe(0);
+    expect(f.failedInWindow).toBe(3);
+    expect(attentionReasons(f)).toContain(
+      "3 datasets whose latest screen this week did not run or did not report",
+    );
+  });
+
+  test("liveness counts work owed, not only what the queue takes this minute", () => {
+    // Every dataset is waiting out a backoff after refused dispatches: nothing is
+    // due right now, three are owed, and nothing was dispatched in the week.
+    const before = sqlite(Date.parse("2026-09-20T00:00:00Z"));
+    const rows = ["nm000786", "nm000787", "nm000788"].map((id) =>
+      row(id, { attempt: "error", attempt_error: "dispatch-failed", attempted_at: before }),
+    );
+    const f = buildIdentifierWeek(rows, { now: NOW, due: 0, owed: 3, cycleDays: 28 });
+    expect(identifierWeekLiveness(f)).toBe("idle");
+    expect(attentionReasons(f)).toContain("the sweep dispatched no screen while work was owed");
+  });
+});
+
 describe("the week's facts and words", () => {
   test("counts screened by verdict and unchecked by reason and by last attempt", () => {
     const f = facts([
@@ -373,9 +448,9 @@ describe("the week's facts and words", () => {
     const idle = facts([before], 1);
     expect(idle.dispatchedInWindow).toBe(0);
     expect(identifierWeekLiveness(idle)).toBe("idle");
-    expect(attentionReasons(idle)).toContain("the sweep dispatched no screen while work was due");
+    expect(attentionReasons(idle)).toContain("the sweep dispatched no screen while work was owed");
     expect(renderIdentifierWeek(idle).lines).toContain(
-      "The sweep dispatched no screen this week while 1 datasets were due: it is not running.",
+      "The sweep dispatched no screen this week while 1 datasets were owed one: it is not running, or every dispatch is refused.",
     );
     // Work due and nothing ever attempted: never, and that needs a person.
     const never = facts([row("nm000751")], 1);
@@ -428,7 +503,7 @@ describe("the week's facts and words", () => {
   });
 
   test("unknown is never zero: unreadable records make every figure unknown, and the week needs attention", () => {
-    const f = unknownIdentifierWeek(NOW, null, ["the sweep's records could not be read"], 28);
+    const f = unknownIdentifierWeek(NOW, null, null, ["the sweep's records could not be read"], 28);
     const r = renderIdentifierWeek(f);
     expect(r.attention).toBe(true);
     expect(r.subject).toBe(
@@ -439,7 +514,8 @@ describe("the week's facts and words", () => {
       "Public datasets in scope: unknown",
       "Screened this cycle: unknown",
       "Unchecked: unknown",
-      "Due now: unknown",
+      "Owed a screen: unknown (due now: unknown; the rest wait out a retry backoff)",
+      "Latest screen this week did not run or did not report: unknown datasets",
       "Datasets with direct identifiers (last finding, kinds and counts): unknown",
       "Whether the sweep ran this week: unknown",
       "Could not read: the sweep's records could not be read.",
@@ -742,7 +818,7 @@ describe("the weekly send", () => {
     });
   });
 
-  test("a send that reached nobody does not count toward the cap, so an outage does not burn the week", async () => {
+  test("a send refused outright does not count toward the cap, so a broken key does not burn the week", async () => {
     seedDataset("nm000790");
     const when = nextWeek();
     for (let i = 0; i < IDENTIFIER_SWEEP_REPORT_MAX_CLAIMS + 2; i++) {
@@ -751,7 +827,7 @@ describe("the weekly send", () => {
           const out = await sendIdentifierSweepWeeklyReport(env(), when);
           expect(out).toMatchObject({ claimed: true, delivered: 0 });
         },
-        { status: 500 },
+        { status: 401 },
       );
       db.run("UPDATE audit_log SET timestamp = datetime('now', '-121 minutes') WHERE action = ?", [
         IDENTIFIER_SWEEP_REPORT_CLAIM_ACTION,
@@ -763,6 +839,21 @@ describe("the weekly send", () => {
         delivered: 1,
       });
     });
+  });
+
+  test("a send that ended without an answer counts toward the cap: it may have been delivered", async () => {
+    seedDataset("nm000795");
+    const when = nextWeek();
+    await withFakeResend(
+      async () => {
+        const out = await sendIdentifierSweepWeeklyReport(env(), when);
+        expect(out).toMatchObject({ claimed: true, delivered: 0, ambiguous: 1 });
+      },
+      { status: 503 },
+    );
+    const claims = auditRows(IDENTIFIER_SWEEP_REPORT_CLAIM_ACTION);
+    expect(claims).toHaveLength(1);
+    expect(claims[0]?.details).toBeNull();
   });
 
   test("a delivered report whose record cannot be written counts toward the cap, and may be sent again", async () => {
@@ -843,7 +934,7 @@ describe("the weekly send", () => {
       const out = await sendIdentifierSweepWeeklyReport({ ...env(), DB: failing }, nextWeek());
       expect(out).toMatchObject({ claimed: true, delivered: 1, attention: true });
       const mail = asSend(calls.find((c) => c.path === "/emails") as CapturedEmail);
-      expect(mail.html).toContain("Due now: unknown");
+      expect(mail.html).toContain("Owed a screen: unknown (due now: unknown;");
       expect(mail.html).toContain("Whether the sweep ran this week: unknown");
       expect(mail.html).toContain("Could not read: the queue could not be counted.");
     });
@@ -895,6 +986,53 @@ describe("one bad row", () => {
     expect(body.facts.scope).toBe(2);
     expect(body.facts.screened).toBe(1);
     expect(body.facts.uncheckedByReason.unreadable).toBe(1);
+  });
+});
+
+describe("round two: the weekly record", () => {
+  test("a week is not called exhausted while its last claim may still be sending", async () => {
+    const when = nextWeek();
+    const week = reportWindow(when).week;
+    for (let i = 0; i < IDENTIFIER_SWEEP_REPORT_MAX_CLAIMS; i++) {
+      db.run(
+        `INSERT INTO audit_log (user_id, action, resource_type, resource_id, timestamp)
+         VALUES (NULL, ?, 'identifier_sweep', ?, datetime('now', ?))`,
+        [IDENTIFIER_SWEEP_REPORT_CLAIM_ACTION, week, i === 0 ? "-10 minutes" : "-1 days"],
+      );
+    }
+    expect(await weeklyRecordState(realD1(db), when)).toMatchObject({
+      sent: false,
+      counted: IDENTIFIER_SWEEP_REPORT_MAX_CLAIMS,
+      exhausted: false,
+    });
+    db.run("UPDATE audit_log SET timestamp = datetime('now', '-1 days') WHERE action = ?", [
+      IDENTIFIER_SWEEP_REPORT_CLAIM_ACTION,
+    ]);
+    expect((await weeklyRecordState(realD1(db), when))?.exhausted).toBe(true);
+  });
+
+  test("a dataset waiting out its backoff is owed but not due", async () => {
+    seedDataset("nm000796");
+    const failing = env();
+    // A refused dispatch (422) leaves the dataset in its 6-hour backoff.
+    const github = (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL;
+    const refuse = Bun.serve({ port: 0, fetch: () => new Response("{}", { status: 422 }) });
+    (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL =
+      `http://127.0.0.1:${refuse.port}`;
+    try {
+      await runIdentifierSweepTick(failing);
+    } finally {
+      (globalThis as { NEMAR_GITHUB_API_URL?: string }).NEMAR_GITHUB_API_URL = github;
+      refuse.stop(true);
+    }
+    const res = await app.request(
+      "/admin/identifier-sweep",
+      { headers: { Authorization: `Bearer ${ADMIN_KEY}` } },
+      env(),
+    );
+    const body = (await res.json()) as { facts: { due: number; owed: number } };
+    expect(body.facts.due).toBe(0);
+    expect(body.facts.owed).toBe(1);
   });
 });
 

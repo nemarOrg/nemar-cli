@@ -320,7 +320,7 @@ describe("the sweep's statements on D1", () => {
     ).toEqual({ stored: false });
   });
 
-  test("a send that reached nobody marks its claim on D1, and the cap does not count it", async () => {
+  test("a send refused outright marks its claim on D1, and the cap does not count it", async () => {
     const d1 = await seededD1();
     const when = new Date(Date.now() + 7 * 86_400_000);
     await withFakeResend(
@@ -328,9 +328,10 @@ describe("the sweep's statements on D1", () => {
         expect(await sendIdentifierSweepWeeklyReport(env(d1), when)).toMatchObject({
           claimed: true,
           delivered: 0,
+          ambiguous: 0,
         });
       },
-      { status: 500 },
+      { status: 401 },
     );
     const claim = await d1
       .prepare("SELECT details FROM audit_log WHERE action = 'identifier_sweep_report_claim'")
