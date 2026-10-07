@@ -4846,7 +4846,15 @@ def deferred_unchanged_callback(
     summary, and a ``pending_count`` of zero would stop the queue re-queueing
     recordings that are still owed. ``not_attempted_count`` counts the deferred
     recordings among the pending ones, so ``zarr_queue.mark_done`` neither advances
-    a retry round nor schedules a longer backoff for them."""
+    a retry round nor schedules a longer backoff for them.
+
+    The body is POSTed like any other, and it has to be: the run began with a
+    `converting` signal that sets ``zarr_status`` to `pending`, and without a
+    terminal `ready` a dataset that serves stores would stay `pending`, lose its
+    ``zarr_index_url`` and drop out of every "has a Zarr copy" filter. The known
+    cost is that a `ready` body restamps ``zarr_converted_at`` and re-queues the
+    recording-stats sweep; the webhook has no status that says "nothing changed",
+    and adding one is a backend change that does not belong in this converter."""
     pending = [
         e for e in live_index.get("pending") or []
         if isinstance(e, dict) and isinstance(e.get("path"), str)
@@ -4886,11 +4894,6 @@ def deferred_unchanged_callback(
         "events_row_count": live_index.get("events_row_count"),
         "events_upload_failed": False,
         "events_stores_without_rows": 0,
-        # For the driver script, not the webhook: this run changed nothing, so it
-        # reads the queue's numbers from this body and does not POST it. A `ready`
-        # POST restamps `zarr_converted_at`, which would hide how long ago the
-        # dataset was last converted.
-        "post": False,
     }
 
 

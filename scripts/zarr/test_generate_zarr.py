@@ -12400,26 +12400,43 @@ class TestMainRetryPendingRound(unittest.TestCase):
         self.assertEqual(body["not_attempted_count"], 1)
         self.assertGreaterEqual(body["pending_count"], body["not_attempted_count"])
 
-    def test_an_unchanged_run_reports_the_commit_the_index_names_and_is_not_posted(self):
-        # Nothing was rebuilt, so the row must agree with the document it describes
-        # (the commit the index names, not this HEAD), and the webhook must not be
-        # told "ready" again: that would restamp zarr_converted_at.
+    def _s3_snapshot(self) -> dict[str, tuple[int, int, str]]:
+        """Every object in the stand-in bucket: size, mtime and content hash. Equal
+        before and after means no object was written, replaced or deleted."""
+        snapshot = {}
+        for name in sorted(os.listdir(self.s3)):
+            full = os.path.join(self.s3, name)
+            if os.path.isfile(full):
+                with open(full, "rb") as fh:
+                    digest = hashlib.sha256(fh.read()).hexdigest()
+                snapshot[name] = (os.path.getsize(full), os.stat(full).st_mtime_ns, digest)
+        return snapshot
+
+    def test_an_unchanged_run_posts_ready_with_the_commit_the_index_names_and_writes_nothing(self):
+        # Nothing was rebuilt, so no S3 object may be written and the row must agree
+        # with the document it describes (the commit the index names, not this HEAD).
+        # The run still ends with a normal `ready` body, which hallu-zarr.sh POSTs:
+        # it began with a `converting` signal that sets zarr_status to `pending`, and a
+        # dataset that serves stores must not be left there (it would lose its index
+        # URL and drop out of every "has a Zarr copy" filter).
         self._no_scratch()
         rc, log, first = self.run_main("--retry-pending")
         self.assertEqual(rc, 0, log)
-        self.assertNotIn("post", first, "a run that published is posted as usual")
         index_commit = self.published_index()["source_commit"]
         self._git("commit", "-q", "--allow-empty", "-m", "an unrelated commit")
         head = self._git("rev-parse", "HEAD")
         self.assertNotEqual(head, index_commit)
-        before = self._index_bytes()
+        before = self._s3_snapshot()
+        self.assertTrue(before, "the first run published something to compare against")
         rc, log, body = self.run_main("--retry-pending")
         self.assertEqual(rc, 0, log)
         self.assertIn("left untouched", log)
-        self.assertEqual(self._index_bytes(), before)
+        self.assertEqual(self._s3_snapshot(), before, "an S3 object was written")
+        self.assertEqual(body["status"], "ready")
+        self.assertNotIn("post", body, "the script posts every body it is handed")
         self.assertEqual(body["commit"], index_commit)
         self.assertNotEqual(body["commit"], head)
-        self.assertIs(body["post"], False)
+        self.assertEqual((body["pending_count"], body["not_attempted_count"]), (2, 2))
 
     def _make_b_enormous(self):
         """B's pointer now declares 500 GB, so admission charges it more than any
