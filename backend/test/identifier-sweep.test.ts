@@ -1307,19 +1307,24 @@ describe("round two: what a carried finding may hold", () => {
 });
 
 describe("round two: dispatch edges", () => {
-  test("a refused credential (401) closes one attempt without counting it and claims nobody else", async () => {
-    seedDataset("nm000734");
-    seedDataset("nm000735");
-    seedDataset("nm000736");
-    dispatchStatus = 401;
-    const r = await runIdentifierSweepTick(env());
-    expect(r.blocked).toBe("dispatch-failed");
-    expect(r.failed).toEqual([{ dataset_id: "nm000734", error: "dispatch-failed" }]);
-    expect(githubRequests).toHaveLength(1);
-    expect(stamps("nm000734").identifier_sweep_failures).toBe(0);
-    expect(rawStamps("nm000735")).toBeNull();
-    expect(rawStamps("nm000736")).toBeNull();
-  });
+  // Each of the three statuses that say the credential cannot reach the central repository, so
+  // dropping any one from SYSTEMIC_DISPATCH_STATUSES fails here (a 422 is the dataset's own
+  // failure and is counted: "GitHub refusing the dispatch" above).
+  for (const status of [401, 403, 404]) {
+    test(`a refused credential (${status}) closes one attempt without counting it and claims nobody else`, async () => {
+      seedDataset("nm000734");
+      seedDataset("nm000735");
+      seedDataset("nm000736");
+      dispatchStatus = status;
+      const r = await runIdentifierSweepTick(env());
+      expect(r.blocked).toBe("dispatch-failed");
+      expect(r.failed).toEqual([{ dataset_id: "nm000734", error: "dispatch-failed" }]);
+      expect(githubRequests).toHaveLength(1);
+      expect(stamps("nm000734").identifier_sweep_failures).toBe(0);
+      expect(rawStamps("nm000735")).toBeNull();
+      expect(rawStamps("nm000736")).toBeNull();
+    });
+  }
 
   test("no GitHub credential at all (no PAT, no App) blocks the tick as dispatch-unconfigured", async () => {
     seedDataset("nm000737");
