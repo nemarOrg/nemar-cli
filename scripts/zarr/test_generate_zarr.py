@@ -5191,29 +5191,158 @@ class TestScratchAdmissionDecision(unittest.TestCase):
         self.assertGreaterEqual(generate_zarr.SCRATCH_STREAM_FACTOR, 2.83)
 
 
-class TestLiveScratchBudget(unittest.TestCase):
-    def test_what_the_run_already_holds_is_not_charged_twice(self):
-        # Writing a file lowers the volume's free space and raises what the run
-        # holds by the same amount, so the budget (their sum) must not move.
-        with tempfile.TemporaryDirectory() as root:
-            before = generate_zarr.live_scratch_budget(root, headroom=0)
-            with open(os.path.join(root, "blob"), "wb") as fh:
-                fh.write(os.urandom(32 * 1024**2))
-                fh.flush()
-                os.fsync(fh.fileno())
-            after = generate_zarr.live_scratch_budget(root, headroom=0)
-        self.assertIsNotNone(before)
-        self.assertIsNotNone(after)
-        self.assertLess(abs(after - before), 256 * 1024**2)
+class TestScratchBudgetArithmetic(unittest.TestCase):
+    """The budget formula on integers, so a term dropped from it fails here
+    deterministically instead of hiding behind a volume's real free space."""
 
-    def test_headroom_is_subtracted_and_the_budget_is_never_negative(self):
-        with tempfile.TemporaryDirectory() as root:
-            plain = generate_zarr.live_scratch_budget(root, headroom=0)
-            self.assertEqual(generate_zarr.live_scratch_budget(root, headroom=10**18), 0)
-            self.assertIsNotNone(plain)
+    def test_free_plus_held_minus_headroom(self):
+        self.assertEqual(generate_zarr.scratch_budget_bytes(100, 30, 10), 120)
 
-    def test_an_unreadable_volume_turns_the_gate_off(self):
-        self.assertIsNone(generate_zarr.live_scratch_budget("/no/such/scratch/root"))
+    def test_what_the_run_holds_is_added_back(self):
+        # Without `held` the run would count its own in-flight writes against
+        # itself: free has already shrunk by exactly that much.
+        with_held = generate_zarr.scratch_budget_bytes(100, 50, 10)
+        without = generate_zarr.scratch_budget_bytes(100, 0, 10)
+        self.assertEqual(with_held - without, 50)
+
+    def test_headroom_is_subtracted(self):
+        self.assertEqual(generate_zarr.scratch_budget_bytes(100, 0, 40), 60)
+
+    def test_it_is_never_negative(self):
+        self.assertEqual(generate_zarr.scratch_budget_bytes(5, 0, 10), 0)
+        self.assertEqual(generate_zarr.scratch_budget_bytes(0, 0, 0), 0)
+
+
+class TestHeldScratchBytes(unittest.TestCase):
+    A = "sub-01/eeg/sub-01_task-a_eeg.vhdr"
+    B = "sub-01/eeg/sub-01_task-b_eeg.vhdr"
+    MIB = 1024 * 1024
+
+    def _write(self, root, primary, which, mib):
+        path = generate_zarr.recording_scratch_paths(root, primary)[which]
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, "blob"), "wb") as fh:
+            fh.write(os.urandom(mib * self.MIB))
+            fh.flush()
+            os.fsync(fh.fileno())
+
+    def test_it_counts_only_the_recordings_it_is_asked_about(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._write(root, self.A, 0, 4)
+            self._write(root, self.B, 0, 4)
+            held_a = generate_zarr.held_scratch_bytes(root, [self.A])
+            held_both = generate_zarr.held_scratch_bytes(root, [self.A, self.B])
+        self.assertGreaterEqual(held_a, 4 * self.MIB)
+        self.assertLess(held_a, 8 * self.MIB)
+        self.assertGreaterEqual(held_both, 8 * self.MIB)
+
+    def test_debris_nobody_is_running_is_not_counted_as_held(self):
+        # A killed worker's leftovers (or a failed delete's) are not scratch the
+        # run is about to give back, so they must not be added to its budget.
+        with tempfile.TemporaryDirectory() as root:
+            self._write(root, self.B, 0, 4)
+            self.assertEqual(generate_zarr.held_scratch_bytes(root, []), 0)
+            self.assertEqual(generate_zarr.held_scratch_bytes(root, [self.A]), 0)
+
+    def test_it_sums_the_work_store_and_memmap_directories(self):
+        with tempfile.TemporaryDirectory() as root:
+            for which in (0, 1, 2):
+                self._write(root, self.A, which, 2)
+            self.assertGreaterEqual(generate_zarr.held_scratch_bytes(root, [self.A]), 6 * self.MIB)
+
+
+class TestScratchGate(unittest.TestCase):
+    """The gate against a stated volume: the probe is injected, the files it
+    counts are real, so every number below is exact."""
+
+    A = "sub-01/eeg/sub-01_task-a_eeg.vhdr"
+
+    @staticmethod
+    def usage(free, total=10**12):
+        return lambda _path: type("Usage", (), {"free": free, "total": total})()
+
+    @staticmethod
+    def failing(exc):
+        def probe(_path):
+            raise exc
+        return probe
+
+    def test_the_budget_is_free_minus_headroom_with_nothing_in_flight(self):
+        with tempfile.TemporaryDirectory() as root:
+            gate = generate_zarr.ScratchGate(root, headroom=100, usage=self.usage(1000))
+            self.assertEqual(gate(()), 900)
+
+    def test_what_an_in_flight_recording_holds_is_added_back(self):
+        # The assertion a gate that forgot `held` would fail, with no volume noise.
+        with tempfile.TemporaryDirectory() as root:
+            path = generate_zarr.recording_scratch_paths(root, self.A)[0]
+            os.makedirs(path)
+            with open(os.path.join(path, "blob"), "wb") as fh:
+                fh.write(os.urandom(4 * 1024 * 1024))
+            held = generate_zarr.held_scratch_bytes(root, [self.A])
+            self.assertGreaterEqual(held, 4 * 1024 * 1024)
+            gate = generate_zarr.ScratchGate(root, headroom=100, usage=self.usage(1000))
+            self.assertEqual(gate([self.A]), 900 + held)
+            self.assertEqual(gate(()), 900, "not in flight, so not ours to hand back")
+
+    def test_the_volume_reports_free_and_total(self):
+        with tempfile.TemporaryDirectory() as root:
+            gate = generate_zarr.ScratchGate(root, usage=self.usage(7, 9))
+            self.assertEqual(gate.volume(), (7, 9))
+            free, total = generate_zarr.ScratchGate(root).volume()
+        self.assertGreater(total, 0)
+        self.assertLessEqual(free, total)
+
+    def test_an_unreadable_volume_from_the_start_admits_nothing_and_says_so_once(self):
+        gate = generate_zarr.ScratchGate(
+            "/r", usage=self.failing(OSError(errno.EIO, "Input/output error"))
+        )
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            first, second = gate(()), gate(())
+        self.assertEqual((first, second), (0, 0))
+        self.assertEqual(out.getvalue().count("cannot read the scratch volume"), 1)
+        self.assertIn("admitting nothing", out.getvalue())
+        self.assertIsNone(gate.volume())
+
+    def test_a_volume_that_fails_mid_run_keeps_the_last_good_budget(self):
+        state = {"fail": None, "free": 1000}
+
+        def probe(_path):
+            if state["fail"]:
+                raise state["fail"]
+            return type("Usage", (), {"free": state["free"], "total": 10**12})()
+
+        gate = generate_zarr.ScratchGate("/r", headroom=100, usage=probe)
+        self.assertEqual(gate(()), 900)
+        state["fail"] = OSError(errno.ESTALE, "Stale file handle")
+        state["free"] = 5  # what a successful read would now say; it must not be used
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            during = [gate(()), gate(()), gate(())]
+        self.assertEqual(during, [900, 900, 900], "fail closed on the last good budget")
+        self.assertEqual(
+            out.getvalue().count("cannot read the scratch volume"), 1, "warned once, not per round"
+        )
+        self.assertIn("holding the last good budget of", out.getvalue())
+
+    def test_it_recovers_and_warns_again_after_a_later_failure(self):
+        state = {"fail": None}
+
+        def probe(_path):
+            if state["fail"]:
+                raise state["fail"]
+            return type("Usage", (), {"free": 1000, "total": 10**12})()
+
+        gate = generate_zarr.ScratchGate("/r", headroom=0, usage=probe)
+        gate(())
+        state["fail"] = OSError(errno.EIO, "x")
+        with contextlib.redirect_stdout(io.StringIO()):
+            gate(())
+        state["fail"] = None
+        self.assertEqual(gate(()), 1000)
+        state["fail"] = OSError(errno.EIO, "x")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            gate(())
+        self.assertEqual(out.getvalue().count("cannot read the scratch volume"), 1)
 
 
 class TestDrainAdmitsAgainstScratch(unittest.TestCase):
@@ -5222,12 +5351,21 @@ class TestDrainAdmitsAgainstScratch(unittest.TestCase):
 
     PRIMARIES = tuple(f"sub-{i:02d}/eeg/sub-{i:02d}_task-rest_eeg.set" for i in range(1, 4))
 
+    def setUp(self):
+        # Short enough that the re-samples before a deferral cost milliseconds.
+        self.addCleanup(
+            setattr, generate_zarr, "ADMISSION_RECHECK_SECONDS",
+            generate_zarr.ADMISSION_RECHECK_SECONDS,
+        )
+        generate_zarr.ADMISSION_RECHECK_SECONDS = 0.05
+
     def _drain(self, scratch_peaks, budget, cpu_cap=3, deferred=None):
         results = []
         _drain_with_admission(
             list(scratch_peaks), {p: 1024 for p in scratch_peaks}, cpu_cap, 10**12, {},
             lambda r, i: results.append(r), worker=_timed_worker,
-            scratch_peaks=scratch_peaks, scratch_budget=lambda: budget, deferred=deferred,
+            scratch_peaks=scratch_peaks, scratch_budget=lambda _in_flight: budget,
+            deferred=deferred,
         )
         return results
 
@@ -5259,6 +5397,56 @@ class TestDrainAdmitsAgainstScratch(unittest.TestCase):
             results = self._drain({p: 500 for p in self.PRIMARIES}, budget=150, deferred=deferred)
         self.assertEqual(results, [])
         self.assertEqual(sorted(deferred), sorted(self.PRIMARIES))
+
+    def test_a_budget_that_changes_between_rounds_is_followed(self):
+        # Every other test here hands the drain a constant. This one rewrites the
+        # budget while recordings run, as another tenant freeing space would.
+        import threading
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "budget")
+
+        def set_budget(n):
+            with open(path + ".tmp", "w") as fh:
+                fh.write(str(n))
+            os.replace(path + ".tmp", path)
+
+        def read_budget(_in_flight):
+            with open(path) as fh:
+                return int(fh.read())
+
+        set_budget(150)  # room for one recording at a time
+        timer = threading.Timer(0.2, set_budget, args=(10**6,))
+        timer.start()
+        self.addCleanup(timer.cancel)
+        results = []
+        _drain_with_admission(
+            list(self.PRIMARIES), {p: 1024 for p in self.PRIMARIES}, 3, 10**12, {},
+            lambda r, i: results.append(r), worker=_timed_worker,
+            scratch_peaks={p: 100 for p in self.PRIMARIES}, scratch_budget=read_budget,
+        )
+        spans = sorted(r["span"] for r in results)
+        self.assertEqual(len(spans), 3)
+        # The first runs 0.8 s; the budget rises at 0.2 s and the others start then.
+        self.assertLess(spans[1][0], spans[0][1])
+        self.assertLess(spans[2][0], spans[0][1])
+
+    def test_an_unreadable_volume_admits_nothing_instead_of_everything(self):
+        # The default gate fails closed: with no good read there is no budget, so
+        # the whole queue is deferred rather than admitted blind.
+        deferred: list[str] = []
+        results = []
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            _drain_with_admission(
+                list(self.PRIMARIES), {p: 1024 for p in self.PRIMARIES}, 3, 10**12,
+                {"tmp": "/no/such/scratch/root"}, lambda r, i: results.append(r),
+                worker=_timed_worker, scratch_peaks={p: 1 for p in self.PRIMARIES},
+                deferred=deferred,
+            )
+        self.assertEqual(results, [])
+        self.assertEqual(sorted(deferred), sorted(self.PRIMARIES))
+        self.assertEqual(out.getvalue().count("cannot read the scratch volume"), 1)
 
     def test_an_unconsumed_deferral_does_not_crash_a_caller_that_ignores_it(self):
         with contextlib.redirect_stdout(io.StringIO()):

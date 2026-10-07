@@ -1395,24 +1395,88 @@ def scratch_peak_bytes(primary: str, size_bytes: int, size_known: bool = True) -
     return charge
 
 
-def live_scratch_budget(run_root: str, headroom: int | None = None) -> int | None:
-    """Bytes this run may hold on scratch in total, right now, or None where the
-    volume cannot be read (the gate is then off, as RAM's is off-Linux).
+def scratch_budget_bytes(free: int, held: int, headroom: int) -> int:
+    """Bytes this run may hold on scratch in total: what is free, plus what the run's
+    in-flight recordings already hold, minus headroom, never below zero.
 
-    What is free already excludes what the run's in-flight recordings have written,
-    so charging their whole projected peaks against it would count them twice.
-    Budget = free + what the run already holds - headroom: the total the run could
-    occupy if nothing of its own were on disk, to compare with the SUM of in-flight
-    projected peaks plus the candidate's. `run_root` holds only this run's files
-    (`work/`, `stores/`), so what is under it is the run's.
-    """
-    try:
-        free = shutil.disk_usage(run_root).free
-    except OSError:
-        return None
-    held = allocated_bytes(run_root)
-    reserve = SCRATCH_HEADROOM_BYTES if headroom is None else headroom
-    return max(0, free + held - reserve)
+    What is free already excludes what those recordings have written, so charging
+    their whole projected peaks against it would count them twice. Adding ``held``
+    back gives the total the run could occupy if none of its own were on disk,
+    which is what the SUM of in-flight projected peaks plus the candidate's is
+    compared with."""
+    return max(0, free + held - headroom)
+
+
+def held_scratch_bytes(run_root: str, primaries) -> int:
+    """Disk blocks the given in-flight recordings hold under ``run_root``.
+
+    Their own `work/`, store and memmap directories only, never the whole run tree:
+    debris a killed worker left (or a failed delete left behind) is not memory the
+    run can hand back, and counting it as held would add it to the budget as if it
+    were about to be freed."""
+    total = 0
+    for primary in primaries:
+        try:
+            paths = recording_scratch_paths(run_root, primary)
+        except ValueError:
+            continue  # a path that cannot be ours holds nothing of ours
+        total += sum(allocated_bytes(path) for path in paths)
+    return total
+
+
+class ScratchGate:
+    """What admission asks the scratch volume, and what it does when the volume
+    cannot answer.
+
+    ``gate(in_flight)`` is the budget right now (`scratch_budget_bytes`). A read
+    that fails (EIO, ESTALE or ENOENT on a volume under load) used to turn the gate
+    OFF and let a whole wave in, on the one occasion nothing was known about the
+    disk. It now fails closed: the last good budget stands, and with no good read
+    yet the budget is zero so nothing is admitted. Warned once, not every round."""
+
+    def __init__(
+        self, run_root: str, headroom: int | None = None, usage=shutil.disk_usage
+    ) -> None:
+        self.run_root = run_root
+        self.headroom = SCRATCH_HEADROOM_BYTES if headroom is None else headroom
+        # The probe of the volume, injectable the way `live_admission_ceiling` takes
+        # its /proc paths: a test can state the free space and make the read fail
+        # without waiting for a real disk to do either.
+        self._usage = usage
+        self._last_good: int | None = None
+        self._warned = False
+
+    def volume(self) -> tuple[int, int] | None:
+        """``(free, total)`` bytes of the volume right now, or None if unreadable."""
+        try:
+            usage = self._usage(self.run_root)
+        except OSError:
+            return None
+        return usage.free, usage.total
+
+    def __call__(self, in_flight=()) -> int:
+        try:
+            free = self._usage(self.run_root).free
+        except OSError as exc:
+            if not self._warned:
+                self._warned = True
+                kept = (
+                    f"holding the last good budget of {self._last_good / 1024**3:.0f} GiB"
+                    if self._last_good is not None
+                    else "admitting nothing until it can be read"
+                )
+                print(
+                    f"::warning::cannot read the scratch volume at {self.run_root} ({exc}); "
+                    f"{kept}",
+                    flush=True,
+                )
+            return self._last_good if self._last_good is not None else 0
+        budget = scratch_budget_bytes(
+            free, held_scratch_bytes(self.run_root, in_flight), self.headroom
+        )
+        self._last_good = budget
+        self._warned = False
+        return budget
 
 
 # Fallback user-facing reasons, keyed by biosigIO error code. The authoritative
@@ -7600,8 +7664,9 @@ def _drain_with_admission(
 
     Scratch disk is admitted the same way when ``scratch_peaks`` (primary ->
     projected peak bytes) is given: a recording is dispatched only while the sum
-    of in-flight scratch peaks plus its own fits ``scratch_budget()`` (default:
-    `live_scratch_budget` over ``ctx["tmp"]``). Unlike RAM there is no run-alone
+    of in-flight scratch peaks plus its own fits ``scratch_budget(in_flight)``
+    (default: a `ScratchGate` over ``ctx["tmp"]``, which is handed the in-flight
+    primaries so it can count what they hold). Unlike RAM there is no run-alone
     exception: a recording that does not fit while nothing is in flight can never
     be admitted this run, so it is handed back in ``deferred`` UNREPORTED, which
     the index records as ``not_attempted`` (no attempt spent, no round advanced)
@@ -7614,8 +7679,7 @@ def _drain_with_admission(
         def ceiling(running_peak: int, track_dir: str | None) -> int:
             return live_admission_ceiling(ram_ceiling, hard, running_peak, track_dir)
     if scratch_peaks is not None and scratch_budget is None and ctx.get("tmp"):
-        def scratch_budget() -> int | None:
-            return live_scratch_budget(ctx["tmp"])
+        scratch_budget = ScratchGate(ctx["tmp"])
     done = 0
     pool_breaks = 0
     held: list[dict] = []  # memory failures awaiting the serial retry
@@ -7668,7 +7732,10 @@ def _drain_with_admission(
             while queue and len(in_flight) < cap:
                 if limit is None:
                     limit = ceiling(running_peak, track_dir)
-                    budget = scratch_budget() if scratch_peaks is not None and scratch_budget else None
+                    budget = (
+                        scratch_budget([p for p, _ in in_flight.values()])
+                        if scratch_peaks is not None and scratch_budget else None
+                    )
                 running_scratch = (
                     sum(scratch_peaks.get(q, SCRATCH_UNKNOWN_SIZE_BYTES) for q, _ in in_flight.values())
                     if budget is not None else 0
@@ -8327,12 +8394,13 @@ def main() -> int:
         # where a large recording most often trips its reserve (#1483).
         if cpu_cap == 1 or not convert:
             _init_worker(ctx)
+            scratch_gate = ScratchGate(tmp)
             done_n = 0
             for p in convert:
                 # One at a time still has to fit: a recording that cannot is
                 # deferred rather than downloaded for hours and failed at ENOSPC.
-                budget = live_scratch_budget(tmp)
-                if budget is not None and scratch_peaks[p] > budget:
+                budget = scratch_gate(())
+                if scratch_peaks[p] > budget:
                     deferred.append(p)
                     print(
                         f"::warning::deferring {p}: needs ~{scratch_peaks[p] / 1024**3:.0f} "
