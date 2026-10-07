@@ -6,10 +6,10 @@ It is written to be posted as an issue (or a discussion) on MNE-BIDS and on MOAB
 
 ## Before sending: what the maintainer must check
 
-1. **Replace the counts with the re-run.**
-   The counts below are the first fleet pass of 2026-10-04.
-   The epic records that this pass is superseded (correction comment on #1610) and that no count is to be quoted again until the fleet scan is re-run.
-   Use the re-run's numbers, or send none.
+1. **Fill the counts from the re-run.**
+   The body leaves them as placeholders on purpose.
+   The first fleet pass of 2026-10-04 is superseded (correction comment on #1610), and the epic says no count is to be quoted again until the fleet scan is re-run.
+   Use the re-run's numbers, or send the request without numbers.
 2. **Confirm the mechanism for at least one dataset per project.**
    We have not established which tool wrote which file.
    The paragraphs on each project say what we believe the path is; confirm it, or soften it to a question, before sending.
@@ -30,12 +30,12 @@ It is written to be posted as an issue (or a discussion) on MNE-BIDS and on MOAB
 > Much of what it holds re-shares data that other groups released publicly, and much of that went through MNE-BIDS, MOABB, or both, on its way to BIDS.
 >
 > We recently read the fixed 256-byte header of every EDF and BDF file in every public NEMAR dataset.
-> Counts only, from our first pass (to be replaced by the re-run before this is posted):
+> Counts only (the placeholders are filled from the fleet re-run before this is posted):
 >
-> - public datasets read: 777
-> - datasets with a finding that names or dates a person (a name, a birth date finer than the year, a record number, or an identifying column or key): 68
-> - datasets whose EDF/BDF patient identification field holds name-like text that differs from participant to participant: 16
-> - of those 16, datasets that are re-shares of data first released elsewhere: 16
+> - public datasets read: [RE-RUN COUNT]
+> - datasets with a finding that names or dates a person (a name, a birth date finer than the year, a record number, or an identifying column or key): [RE-RUN COUNT]
+> - datasets whose EDF/BDF patient identification field holds name-like text that differs from participant to participant: [RE-RUN COUNT]
+> - of those, datasets that are re-shares of data first released elsewhere: [RE-RUN COUNT]
 >
 > For the dataset we traced back, a header read from inside the original release was byte-identical to ours.
 > So, there at least, the export or copy step did not add the names.

@@ -25,7 +25,8 @@ and before that at the co-author step, which reads author names out of `dataset_
 
 **The upload screens the dataset on the uploader's machine before anything is sent,
 refuses direct identifiers with no override,
-lets a lesser verdict through only on an explicit acknowledgment that names it,
+lets a lesser verdict through only on an explicit acknowledgment that names every condition found,
+screens again right before the create call,
 and records the verdict inside the deposit attestation, where nothing reads it as permission.**
 
 - **Where.**
@@ -38,24 +39,39 @@ and records the verdict inside the deposit attestation, where nothing reads it a
   The verdict is therefore `classifyDataset`'s.
   This is the first import of `scripts/` into the CLI bundle, and it is deliberate: one verdict function.
 - **What it screens.**
-  The files the upload plan lists (`.git` and `.nemar` at the top and `.gitattributes` excluded, as in `collectFileManifest`).
+  The files the upload plan lists (`.git` and `.nemar` at the top excluded, and a FILE named `.gitattributes`, as in `collectFileManifest`, whose `find` still descends into a directory of that name).
   It walks them itself so that what it cannot see is counted:
   a directory it cannot list makes the scan `tree-truncated`,
-  and a broken link, a special file or an unreadable file is a failed read that is never opened.
+  and a broken link, a special file or a file that cannot be opened is never opened,
+  and counts as a failed read when it is a file the scan reads (a recording, a table, a side file).
+  Any other such path is in the file count and the path rules only.
 - **What it decides** (`screenGate`'s three sets):
   `clean`, `dates-only` and `no-recordings` proceed.
   `direct-identifiers` refuses, also under `--dry-run`, and no flag changes that (as in ADR 0086).
   `review`, `unchecked`, `not-screened` and `clean-edf-only-others-unscreened` proceed only on an acknowledgment:
-  a prompt that defaults to no,
-  or `--acknowledge-identifier-preflight <verdict>`, which must name the verdict found.
+  a prompt that defaults to no (Ctrl+C cancels and exits 130),
+  or `--acknowledge-identifier-preflight`, repeatable or comma-separated, which must name exactly the conditions found.
+  The verdict alone is not enough to name, because `classifyDataset` ranks `review` above an incomplete read and both above unparsed recordings:
+  a scan that found one image and could not read a header says only `review`.
+  So the conditions are the verdict, plus `unchecked` when the scan is incomplete, plus `not-screened` when there are recordings it cannot parse (`preflightConditions`).
+  No fewer is accepted, so a new condition stops a pipeline;
+  and no more, so a list of every word is not a standing waiver.
+  The kinds inside `review` are not bound: a new kind of finding under an acknowledged `review` passes.
   `--yes` never acknowledges (as ADR 0024 rules for the attestation).
-  `--dry-run` never prompts; it says what a real upload would need.
+  `--dry-run` never prompts; it says what a real upload would need, and goes on to show the plan.
+- **Screened again before anything is sent.**
+  Between the preflight and the create call come validation, the license, provenance and attestation prompts and the final confirmation,
+  which take as long as a person likes, and some of them write into the tree.
+  So the tree is screened again right before the create call, and that scan is the record sent.
+  The upload stops if the second scan finds direct identifiers, or any condition the acknowledgment did not cover.
 - **No free text.**
   The acknowledgment records only how it was given (`prompt` or `flag`).
   This is stricter than the admin's recorded reason in ADR 0086: no text the uploader writes reaches D1 by this path.
 - **Words.**
   The report contract's own verdicts and count lines (`describePreflight`).
   No value is printed, and no path, because a path can be a name and an upload's output can land in a public CI log.
+  Format names come from file names (`sourcedata/Smith.John` yields `.john`), so the preflight keeps only names on a closed list (`KNOWN_FORMATS`) and folds the rest into `.other`; the door refuses any other.
+  The publication report still accepts any extension-shaped name.
 - **The record.**
   It is stored as `identifier_preflight` inside the `datasets.attestation` JSON, so no column is spent (ADR 0034).
   `parseUploaderPreflight` is the door: closed kinds, counts and fixed words,
@@ -77,7 +93,9 @@ and records the verdict inside the deposit attestation, where nothing reads it a
 - An upload of recordings the scanner cannot parse (BrainVision, EEGLAB, FIF and others) now asks once.
   Pipelines must pass `--acknowledge-identifier-preflight not-screened`.
   That is intended, as with the attestation flags: nobody acknowledges a finding they were not shown.
-- A pipeline flag is bound to one verdict, so a new kind of finding stops the pipeline instead of riding on an old acknowledgment.
+- A pipeline flag is bound to the conditions found, so a newly incomplete read or a new unparsed format stops the pipeline instead of riding on an old acknowledgment.
+  A new kind of finding inside `review` does not.
+- A deliberate refusal or cancel exits non-zero without the CLI's "attach the log to an issue" nudge; a scan that could not finish keeps it.
 - The uploader learns kinds and counts, not which files.
   Finding the file is the uploader's work, by design, because the output can be public.
 - A false positive on a direct identifier blocks the upload until the scanner is fixed, as at publication.
@@ -85,7 +103,10 @@ and records the verdict inside the deposit attestation, where nothing reads it a
   later pushes (`nemar dataset push`, `nemar dataset update`), the web upload and raw git-annex;
   formats other than EDF and BDF, which are counted and never read;
   the text of a symlink's target, which git stores;
+  files the CLI writes after the second scan (the `.nemar` metadata and the CI workflow);
   and files that `.gitignore` keeps out of the commit, which it screens anyway.
+- A dry run whose verdict needs an acknowledgment goes on past the preflight to the remaining local steps of the preview;
+  at a terminal that includes the co-author ORCID lookup, which reads author names (public by design) from `dataset_description.json`.
 - The record is readable today and read by nothing that decides.
   Showing it beside the publication screen, and comparing it in the sweep, are later work (Phase 5).
 
