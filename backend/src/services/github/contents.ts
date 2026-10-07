@@ -53,6 +53,15 @@ export function isContentsApiShaConflict(status: number, bodyText: string): bool
  *
  * Pass `branch` for a release branch or any other non-main ref; `""` is not a way
  * to ask for the repository default, because there is no reason to want one.
+ *
+ * **On a repository with no commits this CREATES `branch`, as an unrelated ROOT
+ * commit.** A depositor's first push is then rejected as non-fast-forward and
+ * the git-annex adjusted branch cannot be rebased onto it (#1643). Nothing here
+ * refuses: only the availability report guards against it today, by asking
+ * `branchExists` first. Every other caller (enrichment through
+ * `commitEnrichmentWithBidsignore`, the publication orchestrator's DOI and
+ * README writes) is still exposed if it can reach a repository nothing has been
+ * pushed to. `commitFilesAsTree` cannot do this: it resolves the branch first.
  */
 export async function createOrUpdateFile(
   repo: string,
@@ -341,60 +350,138 @@ export async function getFileContent(
   return data.content;
 }
 
+type FetchPolicy = NonNullable<Parameters<typeof githubFetchWithRetry>[2]>;
+
+/**
+ * How `branchExists` talks to GitHub: the interactive kind and ONE attempt, so
+ * it never sleeps. The default (background) kind sleeps up to a minute before a
+ * call when the cached rate-limit bucket is nearly drained, and again between
+ * retries; asked once per row of a sweep, that stalls a 30-row pass for the
+ * better part of an hour (measured: about 60 s per row). Interactive turns a
+ * drained bucket into an immediate HttpError(503), and a single attempt turns a
+ * 5xx, 429 or secondary rate limit into the response itself, so every one of
+ * them becomes a per-row error that leaves the row unstamped for the next pass.
+ */
+const LOOKUP_ONCE: FetchPolicy = { kind: "interactive", maxAttempts: 1 };
+
 /**
  * GET the ref of `branch`: the one request `branchExists` and
  * `getMainBranchSha` both make, so they cannot disagree about the URL.
  *
- * The branch is encoded per path segment, never as one component: the route is
- * `git/ref/heads/{ref}` and GitHub reads the rest of the path as the ref name,
- * so `release/1.0` has to keep its slash (`encodeURIComponent` alone sends
- * `release%2F1.0`, which names no ref), while a character that means something
- * in a URL is still escaped.
+ * The branch is encoded per path segment so that `#`, `?` and `%` in a name
+ * cannot change the URL, while `/` stays a separator. GitHub accepts
+ * `release/1.0` and `release%2F1.0` alike in a ref path, so this is about not
+ * letting a branch name alter the request, not about making slash branches
+ * resolvable. (`getMainBranchSha` used to send the branch raw.)
  *
- * `retryOn404` is the one thing the callers differ on, and it is why neither
- * is written in terms of the other: `getMainBranchSha` is asked about a branch
- * the caller knows exists, so a 404 is a propagation delay worth retrying;
- * `branchExists` is asked whether it exists at all, so a 404 is its answer.
+ * `options` is the one way the two requests differ: `getMainBranchSha` is asked
+ * about a branch the caller knows exists, so it retries a 404 as a propagation
+ * delay; `branchExists` is asked whether it exists at all, so a 404 is its
+ * answer and it uses {@link LOOKUP_ONCE}. They also differ in what they do with
+ * the result (a 404 or an empty-repository 409 is an answer for one and an
+ * error for the other), which is why neither is written in terms of the other.
  */
 async function fetchBranchRef(
   repo: string,
   branch: string,
   pat: string,
-  retryOn404: boolean,
+  options: FetchPolicy,
 ): Promise<Response> {
   const ref = branch.split("/").map(encodeURIComponent).join("/");
   return githubFetchWithRetry(
     `${GITHUB_API()}/repos/${ORG_NAME}/${repo}/git/ref/heads/${ref}`,
     { headers: ghHeaders(pat) },
-    { retryOn404 },
+    options,
   );
 }
 
-/** The `HttpError` both branch-ref readers throw for a response that is not
- *  an answer (`verb` completes "Failed to ... <branch> branch ref"). */
-async function branchRefHttpError(
+/** The `HttpError` for a GitHub response that is not an answer (`what`
+ *  completes "Failed to ..."). Pass `bodyText` when the body was already read. */
+async function githubHttpError(
   response: Response,
-  verb: string,
-  branch: string,
+  what: string,
+  bodyText?: string,
 ): Promise<HttpError> {
-  const error = await response.text().catch(() => "<failed to read body>");
+  const error = bodyText ?? (await response.text().catch(() => "<failed to read body>"));
   return new HttpError(
-    `Failed to ${verb} ${branch} branch ref: HTTP ${response.status}: ${error.slice(0, 300)}`,
+    `Failed to ${what}: HTTP ${response.status}: ${error.slice(0, 300)}`,
     response.status,
     error.slice(0, 300),
   );
 }
 
+/** The commit SHA in a 2xx ref response. A 2xx whose body is not a ref (a
+ *  proxy's HTML page, a captive portal) is an error, never an answer. */
+async function readRefSha(response: Response, branch: string): Promise<string> {
+  const refData = (await response.json().catch(() => null)) as {
+    object?: { sha?: string };
+  } | null;
+  const sha = refData?.object?.sha;
+  if (!sha) {
+    throw new Error(`Unexpected response format for ${branch} branch ref`);
+  }
+  return sha;
+}
+
 /**
- * Whether `branch` exists in the dataset repository. A 404 (no such ref, or a
- * repository the token cannot see) and a 409 (GitHub's "Git Repository is
- * empty") are the answer "no", not a propagation delay to retry; any other
- * failure throws.
+ * GitHub answers 404 for a ref that does not exist AND for a repository the
+ * token cannot see (lost installation access, the wrong installation, a PAT
+ * scope), so a 404 on the ref says nothing about the depositor's state until
+ * the repository itself is known to be visible. Resolves when it is; throws
+ * `HttpError(404)` when it is not.
+ */
+async function assertRepositoryVisible(repo: string, pat: string): Promise<void> {
+  const response = await githubFetchWithRetry(
+    `${GITHUB_API()}/repos/${ORG_NAME}/${repo}`,
+    { headers: ghHeaders(pat) },
+    LOOKUP_ONCE,
+  );
+  if (response.ok) {
+    await response.body?.cancel();
+    return;
+  }
+  if (response.status === 404) {
+    await response.body?.cancel();
+    throw new HttpError(
+      `${ORG_NAME}/${repo}: repository not visible to NEMAR (GitHub answers 404 for the repository itself)`,
+      404,
+    );
+  }
+  throw await githubHttpError(response, `look up repository ${ORG_NAME}/${repo}`);
+}
+
+/**
+ * Whether `branch` exists in the dataset repository.
+ *
+ * Two responses are answers, and everything else throws:
+ *   - 404 means "no such ref" ONLY if the repository is visible, so it is
+ *     followed by one probe of the repository itself; a repository that is not
+ *     visible throws `HttpError(404)` instead of reading as "no branch".
+ *   - 409 whose message says the repository is empty ("Git Repository is
+ *     empty.", observed from api.github.com for an empty repository on
+ *     2026-10-07; not in GitHub's reference) means "no". Any other 409 throws.
+ * A 2xx must carry a ref (`object.sha`); a 2xx that does not throws.
+ *
+ * The policy is {@link LOOKUP_ONCE}: interactive, a single attempt, never a
+ * sleep. A 404 is not retried as a propagation delay (that is
+ * `getMainBranchSha`'s question, not this one), and neither is a 5xx, a 429 or
+ * a secondary rate limit; each throws, and the caller decides what that costs.
  */
 export async function branchExists(repo: string, branch: string, pat: string): Promise<boolean> {
-  const response = await fetchBranchRef(repo, branch, pat, false);
-  if (response.status === 404 || response.status === 409) return false;
-  if (!response.ok) throw await branchRefHttpError(response, "look up", branch);
+  const what = `look up ${branch} branch ref`;
+  const response = await fetchBranchRef(repo, branch, pat, LOOKUP_ONCE);
+  if (response.status === 404) {
+    await response.body?.cancel();
+    await assertRepositoryVisible(repo, pat);
+    return false;
+  }
+  if (response.status === 409) {
+    const body = await response.text().catch(() => "");
+    if (/empty/i.test(body)) return false;
+    throw await githubHttpError(response, what, body);
+  }
+  if (!response.ok) throw await githubHttpError(response, what);
+  await readRefSha(response, branch);
   return true;
 }
 
@@ -410,14 +497,9 @@ export async function branchExists(repo: string, branch: string, pat: string): P
 export async function getMainBranchSha(repo: string, branch: string, pat: string): Promise<string> {
   // retryOn404: caller knows the branch exists (e.g., we just committed to it),
   // so 404 indicates GitHub hasn't propagated the ref yet.
-  const response = await fetchBranchRef(repo, branch, pat, true);
-  if (!response.ok) throw await branchRefHttpError(response, "get", branch);
-
-  const refData = (await response.json()) as { object: { sha: string } };
-  if (!refData.object?.sha) {
-    throw new Error(`Unexpected response format for ${branch} branch ref`);
-  }
-  return refData.object.sha;
+  const response = await fetchBranchRef(repo, branch, pat, { retryOn404: true });
+  if (!response.ok) throw await githubHttpError(response, `get ${branch} branch ref`);
+  return readRefSha(response, branch);
 }
 
 /** Input to `commitFilesAsTree`. `content` must be UTF-8 text; binary is not supported. */
