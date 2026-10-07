@@ -22,7 +22,7 @@
 import { readFile } from "node:fs/promises";
 import { isStorePath, parseZarrVerified } from "../contract";
 import { EXIT, StageError, countWords, formatWordCounts, runPool } from "./s3-lib";
-import { checkDataset, parseFile } from "./s3-stages";
+import { checkDataset, parseFile, publicObjectUrl } from "./s3-stages";
 import {
   MAX_ZARR_JSON_BYTES,
   ZarrJsonError,
@@ -84,8 +84,7 @@ export async function zarrPublicStage(o: ZarrPublicOptions): Promise<number> {
     throw new StageError("zarr-verified-wrong-dataset", EXIT.refused);
   }
   const allowed = new Set(proof.allowedMembers);
-  const base = o.publicBase.replace(/\/+$/, "");
-  const url = (key: string) => `${base}/${key.split("/").map(encodeURIComponent).join("/")}`;
+  const url = (key: string) => publicObjectUrl(o.publicBase, key);
 
   const index = await anonymousGet(
     url(`${o.dataset}/zarr/index.json`),

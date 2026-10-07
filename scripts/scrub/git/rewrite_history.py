@@ -13,11 +13,11 @@ dropped, so each ref keeps its commit count, and every tag keeps its name and me
      the new key. A symlink target carries the key twice and a hash directory derived from
      the key's md5, so all three change.
   b. A path in `dropPaths` is deleted from the commit.
-  c. For a path in `blankJsonKeys`, every key whose canonical spelling (lowercase, spaces,
-     underscores and hyphens removed) is listed has its value replaced by an empty string,
-     at any depth. The edit is made on the TEXT of the value, so key order, indentation,
-     spacing and every other byte are untouched. Content that is not UTF-8 or not JSON is
-     left alone and counted.
+  c. For a path in `blankJsonKeys`, every key whose canonical spelling (lowercase, whitespace,
+     underscores and hyphens removed, as the scanner spells it) is listed has its value replaced
+     by an empty string, at any depth. The edit is made on the TEXT of the value, so key order,
+     indentation, spacing and every other byte are untouched. Content that is not UTF-8 or not
+     JSON is left alone and counted.
   c2. For a path in `jsonOps`, the listed structural edits are applied in order to the JSON
      object: `drop-array-entries` removes the entries of a top-level array whose field equals
      one of the values, `recount` sets a count key and a sum key from that array, `set` sets a

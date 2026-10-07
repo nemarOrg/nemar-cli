@@ -162,13 +162,24 @@ export function redactRecipient(to: string): string {
 }
 
 /**
- * `message` with every occurrence of `address` redacted, for a log line or a
- * stored failure. `sendEmail`'s error text names the recipient in full, so a
- * caller that logs the text after redacting only the address it prints beside
- * it would still log the address once.
+ * `message` with every occurrence of `address` redacted (whatever its letter case), for a
+ * log line or a stored failure. `sendEmail`'s error text names the recipient in full, so a
+ * caller that logs the text after redacting only the address it prints beside it would
+ * still log the address once. It takes the text: `sendEmail` sets no `cause` on what it
+ * throws, and every caller below logs `message` and never the error object, whose `stack`
+ * repeats the message as it was built.
  */
 export function redactAddressIn(message: string, address: string): string {
-  return address === "" ? message : message.split(address).join(redactRecipient(address));
+  if (address === "") return message;
+  const literal = address.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const redacted = redactRecipient(address);
+  // A function, so a `$` in the replacement is never read as a pattern.
+  return message.replace(new RegExp(literal, "gi"), () => redacted);
+}
+
+/** A failed send as text for a log line or a stored failure: its message, the recipient redacted. */
+function sendFailureText(error: unknown, address: string): string {
+  return redactAddressIn(error instanceof Error ? error.message : String(error), address);
 }
 
 export interface EmailPreferences {
@@ -869,7 +880,9 @@ export async function sendAdminNotificationEmail(
         deliveryEnv,
       );
     } catch (error) {
-      console.error(`Failed to send admin notification to ${adminEmail}:`, error);
+      console.error(
+        `Failed to send admin notification to ${redactRecipient(adminEmail)}: ${sendFailureText(error, adminEmail)}`,
+      );
     }
   }
 }
@@ -1019,7 +1032,7 @@ export async function sendUploadAccessRequestEmail(
     } catch (error) {
       // Still per-recipient, so one bad address does not cost the others their
       // copy -- the failure is now REPORTED as well as logged.
-      const detail = error instanceof Error ? error.message : String(error);
+      const detail = sendFailureText(error, adminEmail);
       console.error(
         `Failed to send upload-access request to ${redactRecipient(adminEmail)}: ${detail}`,
       );
@@ -1083,7 +1096,9 @@ export async function sendImportQuarantineEmail(
         deliveryEnv,
       );
     } catch (error) {
-      console.error(`Failed to send import-quarantine alert to ${adminEmail}:`, error);
+      console.error(
+        `Failed to send import-quarantine alert to ${redactRecipient(adminEmail)}: ${sendFailureText(error, adminEmail)}`,
+      );
     }
   }
 }
@@ -1336,10 +1351,7 @@ ${screenSection}
       );
       outcome.delivered++;
     } catch (error) {
-      const detail = redactAddressIn(
-        error instanceof Error ? error.message : String(error),
-        adminEmail,
-      );
+      const detail = sendFailureText(error, adminEmail);
       console.error(
         `Failed to send publication request email to ${redactRecipient(adminEmail)}: ${detail}`,
       );
@@ -2111,7 +2123,9 @@ export async function sendStalenessAdminReviewEmail(
       );
       delivered++;
     } catch (error) {
-      console.error(`Failed to send staleness review email to ${adminEmail}:`, error);
+      console.error(
+        `Failed to send staleness review email to ${redactRecipient(adminEmail)}: ${sendFailureText(error, adminEmail)}`,
+      );
     }
   }
   return delivered;
@@ -2171,7 +2185,9 @@ export async function sendExemplarInvariantAlertEmail(
       );
       delivered++;
     } catch (error) {
-      console.error(`Failed to send exemplar-invariant alert to ${adminEmail}:`, error);
+      console.error(
+        `Failed to send exemplar-invariant alert to ${redactRecipient(adminEmail)}: ${sendFailureText(error, adminEmail)}`,
+      );
     }
   }
   return delivered;
@@ -2399,10 +2415,9 @@ export async function sendIdentifierSweepReportEmail(
         ambiguous++;
       }
       // `sendEmail`'s message names the recipient; redact it in the message too.
-      const message = error instanceof Error ? error.message : String(error);
       console.error(
         `Failed to send the identifier sweep report to ${redactRecipient(adminEmail)}:`,
-        redactAddressIn(message, adminEmail),
+        sendFailureText(error, adminEmail),
       );
     }
   }

@@ -41,6 +41,10 @@
  * - without `--s3-plan`, a history that has the provenance file or its README
  *   (`s3-plan-required`): the sentence would not know whether headers were scrubbed in place.
  *
+ * A plan (and a skipped-paths file) left at `--out` by an earlier run is removed before this one
+ * reads anything, so a run that writes no plan leaves none for the next step to pick up. A flag the
+ * tool does not know is a usage error before `--out` is known, and leaves an earlier plan alone.
+ *
  * Exit: 0 plan written, 1 failed, 2 usage, 3 refused.
  */
 

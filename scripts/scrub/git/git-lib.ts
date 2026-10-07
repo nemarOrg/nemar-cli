@@ -1346,6 +1346,11 @@ export async function verifyRewrite(opts: VerifyOptions): Promise<VerifyResult> 
  * line. The importer commits that line in the SAME commit as the files it scrubbed (ADR 0089), so a
  * dataset imported that way would otherwise fail `ledger-commit-not-alone` for good. Anything else
  * (a line that is not an append, one of another action, one that does not parse) is not that.
+ *
+ * What this does NOT prove: that the other files in the commit are the importer's. Nothing in the
+ * repository tells the importer's commit from one made by hand with the same line, so the bound is
+ * on what the commit may do to the LEDGER (append `import-scrubbed` lines, edit nothing before
+ * them); the lines themselves are validated for this dataset at every head tip (`ledger-invalid`).
  */
 async function addsOnlyImportLines(repo: string, sha: string): Promise<boolean> {
   const lines = async (rev: string): Promise<string[] | undefined> => {

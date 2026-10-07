@@ -24,7 +24,12 @@
  *   what the clone saw, reporting each ref as it lands, and restores whatever happens, verifying
  *   each ruleset reads back as it was. SIGINT, SIGTERM and SIGHUP restore too, for the whole window
  *   including the restore itself (a second signal is ignored), and any exit that may leave a
- *   ruleset lifted prints {@link RESTORE_ADVICE}.
+ *   ruleset lifted prints {@link RESTORE_ADVICE}. A switch that stopped part way is finished by
+ *   running it again: a ref the remote already holds at the rewrite's SHA is neither drift nor
+ *   pushed twice, and a run with nothing left to push lifts nothing.
+ * - The rulesets are listed page by page, and a ruleset the organization owns that would block the
+ *   push is refused at the snapshot (`ruleset-not-repository`): it cannot be lifted through the
+ *   repository's endpoint.
  * - `restore` re-applies a snapshot on its own, for the day the process died.
  *
  * It talks to the GitHub REST API with `fetch` (the base URL is a parameter, so tests point it
@@ -511,8 +516,10 @@ export async function switchRefs(opts: SwitchOptions): Promise<SwitchReport> {
       throw new SwitchRefused("a remote ref moved since the snapshot");
     }
   }
-  const toLift = live.filter(needsLifting);
   const refsToPush = Object.keys(local).filter((r) => local[r] !== remoteNow[r]);
+  // Nothing to push (an earlier run finished the job): the protection is not touched at all, not
+  // lifted and put back for a push that does not happen.
+  const toLift = refsToPush.length === 0 ? [] : live.filter(needsLifting);
   log(`plan: lift ${toLift.length} ruleset(s), push ${refsToPush.length} ref(s)`);
   if (!opts.execute)
     return { executed: false, lifted: toLift.map((r) => r.id), pushed: refsToPush, restored: [] };

@@ -15,7 +15,9 @@
  * ruleset that blocks the push is already off is refused (`ruleset-already-lifted`) unless
  * `--accept-disabled`.
  *
- * The API token comes from GITHUB_TOKEN or `gh auth token`; GITHUB_API_BASE overrides the host.
+ * The API token comes from GITHUB_TOKEN or `gh auth token`. GITHUB_API_BASE overrides the host for
+ * tests and is refused (exit 2) unless it is `https://api.github.com` or a loopback `http` URL,
+ * because the admin token is sent to it.
  * Exit codes: 0 done; 1 failed (a push failed part way: what was and was not pushed is printed);
  * 2 usage; 3 refused (nothing was changed); 5 a ruleset could NOT be restored (act on it now);
  * 129, 130, 143 ended by SIGHUP, SIGINT, SIGTERM after restoring.

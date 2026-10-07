@@ -70,8 +70,9 @@ ledger of counts and fixed words per dataset); this release makes sure it cannot
 
 - **The Zarr converter never writes subject information into a store (#1627).** It refuses to
   convert on a biosigIO that cannot leave it out; `biosigio>=1.2.11` is required.
-- **`scrub-tools` CI is a 7-way shard with a gate job of the same name (#1665).** About ten
-  minutes instead of 46.
+- **`scrub-tools` CI is a 5-way shard with a gate job of the same name (#1665).** About ten
+  minutes instead of 46. It runs only when the scrub toolchain, the scanner files it imports or
+  the scrub suites change.
 
 ### Fixed
 

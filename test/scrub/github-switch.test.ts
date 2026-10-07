@@ -614,10 +614,21 @@ describe("refusals before anything is touched", () => {
     const ok = await cliRun(world, args).exited;
     expect(ok.code, ok.stderr).toBe(0);
 
-    // A base that is neither GitHub nor a loopback address would receive the token.
-    const elsewhere = await cliRun(world, args, { GITHUB_API_BASE: "https://example.org" }).exited;
-    expect(elsewhere.code, elsewhere.stderr).toBe(2);
-    expect(elsewhere.stderr).toContain("GITHUB_API_BASE");
+    // A base that is neither GitHub nor a loopback address would receive the token: another
+    // host, the same host in plain http, a host that only starts like a loopback name, a loopback
+    // name that is only the user part of the URL, and text that is not a URL at all.
+    for (const base of [
+      "https://example.org",
+      "http://api.github.com",
+      "http://localhost.example.org",
+      "http://127.0.0.1@example.org",
+      "https://127.0.0.1",
+      "not a url",
+    ]) {
+      const elsewhere = await cliRun(world, args, { GITHUB_API_BASE: base }).exited;
+      expect(elsewhere.code, `${base}: ${elsewhere.stderr}`).toBe(2);
+      expect(elsewhere.stderr).toContain("GITHUB_API_BASE");
+    }
     expect(world.stand.calls).toEqual([]);
   });
 
@@ -941,6 +952,29 @@ describe("a failure leaves the protection on", () => {
     for (const ref of ["refs/heads/main", "refs/tags/v1.0.0", "refs/tags/v1.0.1"]) {
       expect(remoteRef(world, ref)).toBe(localSha(world, ref));
     }
+    expect(enforcement(world)).toEqual({ branch: "active", tag: "active" });
+  }, 60_000);
+
+  test("a switch that already finished, run again, pushes nothing and does not touch the protection", async () => {
+    world = build("never");
+    const snapshot = await snap(world);
+    const options = {
+      api: world.api,
+      repo: REPO,
+      cloneDir: world.work,
+      remote: "origin",
+      snapshot,
+      execute: true,
+    };
+    const first = await switchRefs(options);
+    expect(first.pushed.length).toBe(3);
+    expect(first.lifted.length).toBe(2);
+    world.stand.calls.length = 0;
+    // Every ref is at the rewrite: nothing is drift, nothing is left to push, so nothing is lifted
+    // (a lift for a push that does not happen is a window with the protection off for no reason).
+    const again = await switchRefs(options);
+    expect(again).toMatchObject({ executed: true, lifted: [], pushed: [], restored: [] });
+    expect(world.stand.calls).toEqual([]);
     expect(enforcement(world)).toEqual({ branch: "active", tag: "active" });
   }, 60_000);
 
